@@ -1,5 +1,3 @@
 # Pre-registration
 
-## Deviations
-
-- **todo**
+No deviation section here.

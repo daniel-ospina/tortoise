@@ -2,5 +2,16 @@
   "schema": "capstone-preregistration/v1",
   "written_before_any_scored_run": true,
   "written_before_any_scored_run_basis": "no SCORED run; UNPREREGISTERED",
-  "document": "PRE-REGISTRATION.md"
+  "document": "PRE-REGISTRATION.md",
+  "steps": {
+    "unconditional": [
+      "S0"
+    ],
+    "conditional": [
+      {
+        "step": "S2.3",
+        "condition": "c"
+      }
+    ]
+  }
 }
