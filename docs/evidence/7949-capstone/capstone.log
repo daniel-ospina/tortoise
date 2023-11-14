@@ -1,0 +1,26 @@
+# capstone
+=== CAPSTONE-VERDICT-BEGIN ===
+{
+  "prereg": {
+    "sha": "0000000000000000000000000000000000000000",
+    "status": "ABSENT"
+  },
+  "rows": [
+    {
+      "blocked_by": "#9075",
+      "criterion": "E1",
+      "denominator": null,
+      "numerator": null,
+      "verdict": "BLOCKED"
+    }
+  ],
+  "run": {
+    "status": "REFUSED",
+    "steps_observed": [],
+    "steps_required": [
+      "S0"
+    ]
+  },
+  "schema": "capstone-verdict-v1"
+}
+=== CAPSTONE-VERDICT-END ===

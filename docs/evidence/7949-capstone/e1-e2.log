@@ -1,0 +1,5 @@
+sha=deadbeef
+prereg=UNPREREGISTERED artifact=docs/evidence/7949-capstone/preregistration.json
+e1 before_share=0.6 after_share=0.6 threshold=n/a verdict=UNPREREGISTERED
+result=UNPREREGISTERED
+exit=3
