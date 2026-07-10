@@ -36,7 +36,7 @@ Two-step mutation: `addProjectV2ItemById` → `updateProjectV2ItemFieldValue`. C
 
 **In scope:** S1-S10 (see scope document)
 **Out of scope:** O1-O13
-**E2E tests:** 19 high-level test cases
+**E2E tests:** 25 (19 detailed, 6 summarized)
 
 ---
 
@@ -251,9 +251,9 @@ All coordinator state is persisted in a single JSON file (`coordinator-state.jso
     }
   },
   "dispatched_epics": ["6210", "6211"],
-  "pending_approvals": [
+  "initiative_registry": [
     {
-      "initiative_id": "epic-123",
+      "initiative_id": "123",
       "title": "Expand to new categories",
       "proposed_by": "strategist",
       "proposed_at": "2026-07-10T14:00:00Z",
@@ -281,7 +281,7 @@ All coordinator state is persisted in a single JSON file (`coordinator-state.jso
 }
 ```
 
-**First-run bootstrap:** If coordinator-state.json doesn't exist, initialize with empty schema: `{"issues": {}, "dispatched_epics": [], "pending_approvals": [], "orphaned_issues": [], "message_queue": {}, "config": {...}}`.
+**First-run bootstrap:** If coordinator-state.json doesn't exist, initialize with empty schema: `{"issues": {}, "dispatched_epics": [], "initiative_registry": [], "orphaned_issues": [], "message_queue": {}, "config": {...}}`.
 
 **Single source of truth:** Agent state lives in bridge `/status` ONLY. The `/status` response includes: `{agent_role, state, last_activity_iso, diagnostic{}, announced_epics: [123, 456]}`. The coordinator-state.json is the coordinator's persistence layer (issues, approvals, queues, config) — NOT a copy of agent state. Agents NEVER write to coordinator-state.json. Strategist writes `announced_epics` to `/status` (via bridge endpoint).
 
@@ -356,7 +356,7 @@ Target: <5 API calls per cycle regardless of issue count.
    - Add to `orphaned_issues` array with `issue_number`, `domain`, `orphaned_at: now`, `status: reassignment_failed` for human triage
    - Coordinator retries reassignment in subsequent cycles (if new implementer becomes available)
 9. Clear `message_queue[crashed_agent_role]` — reinject queued messages into replacement agent's queue
-9. Post crash notice: "⚡ @{agent} crashed — work reassigned to @{new_agent} (#{issues})"
+10. Post crash notice: "⚡ @{agent} crashed — work reassigned to @{new_agent} (#{issues})"
 
 ### WF-4: Strategist Activation
 
@@ -368,7 +368,7 @@ Target: <5 API calls per cycle regardless of issue count.
 3. Strategist researches market → **files epics on GitHub FIRST** (before coordinator dispatch), generates issues with domain labels
 4. **Strategist writes created issue numbers to bridge `/status` `announced_epics` field** (avoids API eventual consistency race — the coordinator reads /status, not GitHub API, to discover new epics)
 5. Strategist posts summary in thread with links to created issues
-6. Each initiative enters `pending_approval` in coordinator-state.json
+6. Each initiative is added to `initiative_registry` in coordinator-state.json with status=pending
 7. Coordinator's next cycle reads `announced_epics` from `/status` → filters against `dispatched_epics` in state file to skip already-dispatched epics → for each new epic number:
    a. For `domain:product`: posts "📋 New initiative: [name] (#{n}) — @pm scope this" AND "@strategist Initiative #{n} approved — epic filed"
    b. For `domain:growth`: posts "📋 New initiative: [name] (#{n}) — @cmo plan this" AND "@strategist Initiative #{n} approved — epic filed"
@@ -378,7 +378,7 @@ Target: <5 API calls per cycle regardless of issue count.
 
 **Batch protection:** If strategist files 10+ epics, coordinator posts ONE summary message with all initiatives in a bullet list. Individual dispatches follow in the same thread.
 
-**Gate exception:** If human gate is ACTIVE, coordinator sets status to `pending` in `pending_approvals` and waits (WF-7) instead of dispatching.
+**Gate exception:** If human gate is ACTIVE, coordinator sets status to `pending` in `initiative_registry` and waits (WF-7) instead of dispatching.
 
 ### WF-5: Agent @Mention Dispatch
 
@@ -508,7 +508,7 @@ roles:
     loop_type: continuous
     cron_interval_seconds: 300
     heartbeat_interval_seconds: 60
-    slack_bot_id: "U..."  # Per-agent Slack bot token (Phase 1; user has admin)
+    slack_bot_id: "U..."  # Single Slack app bot token — shared across all roles
     github_login: "coordinator-app"
     domains: []  # coordinator is domain-agnostic
     trigger_on: null  # coordinator is not mention-triggered
@@ -811,7 +811,7 @@ GitHub Projects ──tracks── (N) Issue (via GraphQL mutations)
 #### Slack Bridge (Extended)
 **Location:** `operations/slack-bridge/src/`
 **Current state:** Exists for manual-slack usage. Needs 3 additions:
-1. **Agent identity:** Per-agent Slack bots from Phase 1 (user has Slack admin). Each role gets a distinct bot identity.
+1. **Agent identity:** Single Slack app with one bot token. Each role gets a distinct `username` override — visually separate, non-spoofable.
 2. **@mention routing (SlackRouter):** Detect @agent mentions → query /status for agent_state → spawn or enqueue
 3. **Channel-level posting:** Ensure agents post in `#team-{slug}` channels (channel-map.ts already has channel routing)
 
@@ -1309,12 +1309,12 @@ GitHub Projects ──tracks── (N) Issue (via GraphQL mutations)
 
 | # | Test | Expected |
 |---|------|----------|
-| 14 | **PM Scopes → Plan Created:** PM spawns, reads #100, creates plan doc, exits | Plan doc exists, issue updated |
-| 15 | **Implementer Executes → Code Ships:** Implementer spawns, reads plan, executes, PR merged | Code deployed, issue closed |
-| 16 | **CMO Creates Growth Plan:** CMO spawns, reads #101, runs content-strategy-agent | Plan posted, issue updated |
-| 17 | **Growth Implementer Executes Content:** Implementer spawns, writes, passes reviewers | Content published |
-| 18 | **Concurrent Strategists (Idempotency):** Two @strategist mentions same cycle | Only one Pi session; second sees announced_epics already populated |
-| 19 | **Coordinator Restart Recovery:** Process restart → reads state file → no duplicate work | Flock acquired, incomplete dispatches completed |
+| 20 | **PM Scopes → Plan Created:** PM spawns, reads #100, creates plan doc, exits | Plan doc exists, issue updated |
+| 21 | **Implementer Executes → Code Ships:** Implementer spawns, reads plan, executes, PR merged | Code deployed, issue closed |
+| 22 | **CMO Creates Growth Plan:** CMO spawns, reads #101, runs content-strategy-agent | Plan posted, issue updated |
+| 23 | **Growth Implementer Executes Content:** Implementer spawns, writes, passes reviewers | Content published |
+| 24 | **Concurrent Strategists (Idempotency):** Two @strategist mentions same cycle | Only one Pi session; second sees announced_epics already populated |
+| 25 | **Coordinator Restart Recovery:** Process restart → reads state file → no duplicate work | Flock acquired, incomplete dispatches completed |
 
 ---
 
