@@ -16,7 +16,7 @@ Three-tier boundary system (Always/Never/Ask) is the industry standard for agent
 Hybrid detection (graph cycle + timeout) is the production pattern. Our approach mirrors this: stuck detection = timeout-based, deadlock breaker = graph-based "all stuck" detection. Industry standard: `lock_timeout` at 2-3× average execution time, escalation via log + notification.
 
 ### Slack Single-Bot Multi-Agent Identity
-`username` field in `chat.postMessage` API provides dynamic identity per message. Phase 1: per-agent Slack bot tokens (user has admin). Each agent role gets its own bot identity — no spoofable attribution headers.
+`username` field in `chat.postMessage` API provides dynamic identity per message. Phase 1: single Slack app with one bot token, routing all agents internally. Each agent role gets a distinct `username` override — non-spoofable, 1 app slot used.
 
 ### Health Endpoint Patterns
 Distinct `/health/live` (process liveness) and `/health/ready` (dependency check) prevent false crash detection. Bridge `/status` endpoint should follow this pattern. SIGTERM handling: keep returning healthy during graceful shutdown to avoid false positives.
@@ -32,7 +32,7 @@ Two-step mutation: `addProjectV2ItemById` → `updateProjectV2ItemFieldValue`. C
 
 ---
 
-## Scope Summary
+## 3. Scope
 
 **In scope:** S1-S10 (see scope document)
 **Out of scope:** O1-O13
@@ -68,12 +68,12 @@ Note: `paused` = agent is actively in a session, paused and awaiting human input
 | Persona | Role | Slack presence | Goals |
 |---------|------|---------------|-------|
 | **H1: Team Human (Overseer)** | Resp: watches team channel, receives escalations, approves plans, kills stuck projects | Watches `#team-*` channel, responds to @channel/@mentions | Know what agents are doing without micromanaging. Only intervene when necessary. |
-| **A1: Coordinator Agent** | Cron-based monitor. Reads GitHub + `/status`. Posts Slack messages. Escalates. Does NOT spawn agents — posts messages that trigger agents independently. | Posts in `#team-*` as `@coordinator` bot | Detect stuck work, crashed agents, and empty queues. Keep work flowing. |
-| **A2: Strategist Agent** | Trigger-based (trigger_on: mention). Spawns when @mentioned. Generates initiatives from market research. Single agent handles ALL domains. | Posts in `#team-*` as `@strategist` bot | When team is idle, generate fresh work aligned with strategy. |
-| **A3: Product Manager Agent** | Trigger-based (trigger_on: mention). Spawns when @mentioned. Scopes product initiatives. | Posts in `#team-*` as `@pm` bot | Turn product initiatives into scoped, ready-to-implement issues. |
-| **A4: CMO Agent** | Trigger-based (trigger_on: mention). Spawns when @mentioned. Creates growth plans. | Posts in `#team-*` as `@cmo` bot | Turn growth initiatives into growth plans and content briefs. |
-| **A5: Product Implementer Agent** | Trigger-based (trigger_on: mention). Spawns when @mentioned. Executes product issues. | Posts in `#team-*` as `@implementer` bot | Implement issues, pass code review, ship. |
-| **A6: Growth Implementer Agent** | Trigger-based (trigger_on: mention). Spawns when @mentioned. Executes growth tasks. | Posts in `#team-*` as `@growth` bot | Execute content pipeline, pass review, publish. |
+| **A1: Coordinator Agent** | Daemon. One per team. Reads GitHub + `/status`. Posts Slack, escalates. Does NOT spawn agents. | Posts as `@coordinator` via single Agent app | Detect stuck work, crashed agents, empty queues. |
+| **A2: Strategist Template** | Trigger-based. Reusable template — each team instantiates their own strategist. | Posts as `@strategist` via single Agent app | Generate initiatives aligned with team strategy. |
+| **A3: Product Manager Template** | Trigger-based. Reusable template. Team-specific instance. | Posts as `@pm` via single Agent app | Scope product initiatives into ready-to-implement issues. |
+| **A4: CMO Template** | Trigger-based. Reusable template. Team-specific instance. | Posts as `@cmo` via single Agent app | Create growth plans and content briefs. |
+| **A5: Product Implementer Template** | Trigger-based. Reusable template. Team-specific instance. | Posts as `@implementer` via single Agent app | Implement issues, pass review, ship. |
+| **A6: Growth Implementer Template** | Trigger-based. Reusable template. Team-specific instance. | Posts as `@growth` via single Agent app | Execute content pipeline, pass review, publish. |
 
 ### Journey Maps
 
@@ -250,6 +250,7 @@ All coordinator state is persisted in a single JSON file (`coordinator-state.jso
       "state": "stuck"
     }
   },
+  "dispatched_epics": ["6210", "6211"],
   "pending_approvals": [
     {
       "initiative_id": "epic-123",
@@ -280,7 +281,7 @@ All coordinator state is persisted in a single JSON file (`coordinator-state.jso
 }
 ```
 
-**First-run bootstrap:** If coordinator-state.json doesn't exist, initialize with empty schema: `{"issues": {}, "pending_approvals": [], "orphaned_issues": [], "message_queue": {}, "config": {...}}`.
+**First-run bootstrap:** If coordinator-state.json doesn't exist, initialize with empty schema: `{"issues": {}, "dispatched_epics": [], "pending_approvals": [], "orphaned_issues": [], "message_queue": {}, "config": {...}}`.
 
 **Single source of truth:** Agent state lives in bridge `/status` ONLY. The `/status` response includes: `{agent_role, state, last_activity_iso, diagnostic{}, announced_epics: [123, 456]}`. The coordinator-state.json is the coordinator's persistence layer (issues, approvals, queues, config) — NOT a copy of agent state. Agents NEVER write to coordinator-state.json. Strategist writes `announced_epics` to `/status` (via bridge endpoint).
 
@@ -368,7 +369,7 @@ Target: <5 API calls per cycle regardless of issue count.
 4. **Strategist writes created issue numbers to bridge `/status` `announced_epics` field** (avoids API eventual consistency race — the coordinator reads /status, not GitHub API, to discover new epics)
 5. Strategist posts summary in thread with links to created issues
 6. Each initiative enters `pending_approval` in coordinator-state.json
-7. Coordinator's next cycle reads `announced_epics` from state file → for each new epic number:
+7. Coordinator's next cycle reads `announced_epics` from `/status` → filters against `dispatched_epics` in state file to skip already-dispatched epics → for each new epic number:
    a. For `domain:product`: posts "📋 New initiative: [name] (#{n}) — @pm scope this" AND "@strategist Initiative #{n} approved — epic filed"
    b. For `domain:growth`: posts "📋 New initiative: [name] (#{n}) — @cmo plan this" AND "@strategist Initiative #{n} approved — epic filed"
    c. Marks epic as dispatched in state file
@@ -424,11 +425,11 @@ Target: <5 API calls per cycle regardless of issue count.
 
 ### WF-7: Human Gate (Approve/Reject Initiative)
 
-**Trigger:** Strategist posts initiative proposal → coordinator adds to `pending_approvals` in state file
+**Trigger:** Strategist posts initiative proposal → coordinator adds to `initiative_registry` in state file
 
 **Flow:**
 1. Strategist posts: "📋 Proposed initiative: [name] (#{n}) — awaiting human approval"
-2. Coordinator's next cycle detects new epic, adds to `pending_approvals` with `status: pending, proposed_at: now`
+2. Coordinator's next cycle detects new epic, adds to `initiative_registry` with `status: pending, proposed_at: now`
 3. If human gate is ACTIVE (configurable per team):
    a. Coordinator does NOT dispatch to PM/CMO
    b. Waits for human response in thread (checks on each cycle)
@@ -441,7 +442,7 @@ Target: <5 API calls per cycle regardless of issue count.
    - >72h → @channel escalation
    - >168h (1 week) → auto-close as stale, mark `status: stale_closed`
    - **Fast-forward on restart:** Load all pending items, apply any overdue escalations immediately
-6. After resolution, remove from `pending_approvals`
+6. After resolution, remove from `initiative_registry`
 
 **Gate deactivation:** If human gate is INACTIVE, skip step 2-5 — coordinator dispatches immediately.
 
@@ -474,7 +475,18 @@ Target: <5 API calls per cycle regardless of issue count.
 
 > **Schema drift note:** The canonical subjects registry (`operations/subjects/_schema.md`) defines the field contract. This plan extends it with coordinator-specific fields (`trigger_on`, `cron_interval_seconds`, `heartbeat_interval_seconds`, `slack_bot_id`, `github_login`, `skills`). These are additive — existing fields (`held_by`, `loop_type`, `delegation`, `status`, `reports_to`, `domains`, `boundary`, `diagnostic`, `belief`, `interactive`) conform to canonical. `loop_type: continuous` is canonical (see `_schema.md` §2 — `completion|cron|trigger|continuous`).
 > 
-> **Team registration note:** The `epistemic-team` is not yet registered in ONTOLOGY.md §1.1. Agent infrastructure is owned by Organisation Design Team per §1.4. Post-plan: either register epistemic-team as a standalone team or move this work under organisation-design-team.
+> **Team registration note:** The `epistemic-team` is not yet registered in ONTOLOGY.md §1.1. Agent infrastructure is owned by Organisation Design Team per §1.4. **Resolution:** #6210 (Slack Bridge) includes creating `docs/teams/epistemic-team/` directory structure. Team registration will be filed as a dependency pre-check before Phase 3 agent deployment.
+
+### Role Template Model
+
+**Roles are templates, not named agents.** One CMO template → instantiated per team: `epistemic-team-cmo`, `eldato-app-team-cmo`, `dmer-team-cmo`. All share the same skills, boundary, and role definition. Only team-specific config differs (Slack channel, GitHub project, human members).
+
+**Registry:**
+- `operations/subjects/templates/cmo.yaml` — canonical CMO definition (skills, boundary, domains, belief, interactive)
+- `operations/subjects/epistemic-team.yaml` — team instance: references CMO template, overrides team-specific fields
+
+**Phase 1:** Deploy templates for epistemic-team only. Validate the pattern.  
+**Phase 2+:** Instantiate for eldato-app-team, dmer-team, and future teams.
 
 **File:** `operations/subjects/{team-name}.yaml`
 
@@ -656,7 +668,7 @@ roles:
 | cron_interval_seconds | int | Conditional | Interval for cron/continuous loops |
 | heartbeat_interval_seconds | int | No | Separate heartbeat timer (continuous loops) |
 | slack_bot_id | string|null | No | Slack bot user ID (Phase 2; null for Phase 1) |
-| github_login | string | Yes | GitHub username for issue assignment |
+| `github_login` | string | Yes | GitHub username for issue assignment (Phase 1: placeholders — real machine accounts created in #6210; Kanban #6222 runs dry-run until accounts exist) |
 | domains | string[] | Yes | Canonical domain slugs (product, growth) |
 | skills | string[] | Yes | Agent skills (maps to /skill:name) |
 | boundary | string | Yes | Free text — what the role MUST NOT do |
@@ -972,7 +984,7 @@ GitHub Projects ──tracks── (N) Issue (via GraphQL mutations)
 
 ### 6.2 Slack Bridge (Extended)
 
-**Extension 1 — Agent identity:** Per-agent Slack bot tokens (not emoji prefix). Each role gets its own bot identity for authenticated, non-spoofable attribution. User has Slack admin to register bots.
+**Extension 1 — Agent identity:** Single Slack app with one bot token, routing all agents internally via SlackRouter. Each agent role gets a distinct `username` override in `chat.postMessage` — visually distinct, non-spoofable, 1 app slot.
 
 **Extension 2 — @mention routing (SlackRouter):**
 - Parse `@<agent_role>` from inbound message text
@@ -1058,12 +1070,12 @@ GitHub Projects ──tracks── (N) Issue (via GraphQL mutations)
 
 ### 6.7 Human Gate Contract
 
-**Trigger:** `interactive_control: active` in team YAML → coordinator holds initiatives in `pending_approvals`
+**Trigger:** `interactive_control: active` in team YAML → coordinator holds initiatives in `initiative_registry`
 
 **Detection mechanism:** Coordinator-cycle-driven — scans `conversations.replies` for emoji reactions on initiative proposal messages. No separate webhook endpoint (avoids Slack Events API subscription complexity for Phase 1).
 
 **Approval flow:**
-1. Strategist posts initiative → coordinator adds to `pending_approvals` with `status: pending`
+1. Strategist posts initiative → coordinator adds to `initiative_registry` with `status: pending`
 2. Coordinator's next cycle scans initiative message for emoji reactions:
    - ✅ present → `status: approved` → dispatches
    - ❌ present → `status: rejected` → posts "Initiative rejected"
@@ -1179,7 +1191,7 @@ GitHub Projects ──tracks── (N) Issue (via GraphQL mutations)
 | # | Actor | Action | Expected Result |
 |---|-------|--------|----------------|
 | 1 | Strategist | Posts proposal for #102 (interactive_control: active) | |
-| 2 | Coordinator | Adds #102 to pending_approvals: status=pending | Does NOT dispatch |
+| 2 | Coordinator | Adds #102 to initiative_registry: status=pending | Does NOT dispatch |
 | 3 | Human | Reacts ✅ on proposal message | |
 | 4 | Coordinator | Next cycle scans reactions → ✅ | status → approved |
 | 5 | Coordinator | Dispatches: "@pm scope #102" | |
@@ -1254,7 +1266,46 @@ GitHub Projects ──tracks── (N) Issue (via GraphQL mutations)
 | 1 | PM Agent | "@coordinator kill initiative #102" | |
 | 2 | Coordinator | Sender is agent → reject | Posts: "❌ Kill rejected — only humans can kill" |
 
-### 7.14-7.19: Additional Tests (Summarized)
+### 7.14 Routing: SlackRouter Parses @mention and Routes to Correct Agent
+
+| Step | Actor | Action | Expected |
+|------|-------|--------|----------|
+| 1 | Human | Posts `@pm scope this` in #team-epistemic | SlackRouter receives event |
+| 2 | SlackRouter | Parses `@pm` mention, maps to agent_role `pm` | Roles lookup matches subjects YAML |
+| 3 | SlackRouter | Calls GET /status, finds PM idle | Returns agent_role=pm, state=idle |
+| 4 | SlackRouter | Routes to PM agent spawn with issue context | PM spawns in #team-epistemic thread |
+| 5 | SlackRouter | Posts attribution via single Agent app with `username: "PM"` | Message displays as from @pm |
+| 6 | SlackRouter | Human posts `@nonexistent do something` | SlackRouter replies: "Unknown role: nonexistent" |
+
+### 7.15 Specialist Framework: Loads Subjects YAML and Enforces Boundaries
+
+| Step | Actor | Action | Expected |
+|------|-------|--------|----------|
+| 1 | Coordinator | Spawns PM agent | pi -p --role=pm --team=epistemic-team |
+| 2 | Specialist FW | Reads `operations/subjects/epistemic-team.yaml` | Parses YAML, finds `roles: - role_slug: pm` |
+| 3 | Specialist FW | Loads `templates/pm.yaml` | Skills, boundary, domains loaded |
+| 4 | PM Agent | Attempts code implementation (task type: coding) | FW blocks: "Boundary violation: pm MUST NOT implement code" |
+| 5 | PM Agent | Scopes an issue, writes plan doc | FW permits (in-scope: planning, issue-scoping) |
+| 6 | Specialist FW | Agent session ends, /status updated to idle | state: idle, diagnostic: {result: completed} |
+
+### 7.16 Channel Visibility: Messages Appear in Correct Team Channel
+
+| Step | Actor | Action | Expected |
+|------|-------|--------|----------|
+| 1 | Coordinator | Detects stuck issue #789, posted by `implementer-product` | Message appears in #team-epistemic (NOT DM) |
+| 2 | Human | Confirms message visible in #team-epistemic | Channel members see @implementer posted about #789 |
+| 3 | Strategist | Generates initiative, posts summary | Message in #team-epistemic thread under strategist topic |
+| 4 | Human | Checks DM history | No agent DM messages found (all in public channels) |
+
+### 7.17-7.19: Additional Tests (Summarized)
+
+**7.17 — Agent Spawn Error: YAML Not Found:** Agent spawn request with `team=no-such-team` → Specialist FW returns 404, SlackRouter posts "Team `no-such-team` has no subjects YAML." Agent never spawns.
+
+**7.18 — Agent Spawn Error: /status Unreachable:** PM fires on @mention, SlackRouter calls GET /status → times out. Fallback: posts to channel "PM queue is full — will dispatch when /status recovers (~5 min)." Coordinator picks up in next cycle.
+
+**7.19 — Coordinator Config Reload (SIGHUP):** Coordinator receives SIGHUP → re-reads subjects YAML, re-loads team config → new `interactive_control: active` flag takes effect without restart → next cycle holds initiatives in initiative_registry.
+
+### 7.20-7.25: Prior Tests (Summarized)
 
 | # | Test | Expected |
 |---|------|----------|
@@ -1268,6 +1319,51 @@ GitHub Projects ──tracks── (N) Issue (via GraphQL mutations)
 ---
 
 ## 8. Coherence Review
+
+### UX Design Decisions
+
+| # | Decision Type | User Choice | Rationale |
+|---|---------------|-------------|----------|
+| 1 | Message surface | New events top-level, follow-ups in-thread | Channel stays scannable; escalations visible; ongoing chatter collapsed |
+| 2 | Human review tagging | User @-tagged on human gates | Coordinator already posts in channel for gate events |
+| 3 | Agent attribution | Single Slack app with per-role `username` override | 1 app slot (not 6). Free plan compatible. Each agent role has distinct display name. |
+
+### 8.1 Cross-Substep Consistency
+
+| Check | Status |
+|-------|--------|
+| Data Model ↔ Architecture: /status schema matches component writers | ✅ §4.2 per-field writer table; §5.2 uses same |
+| User Journeys ↔ Workflows: Agent state model consistent | ✅ paused excluded from stuck detection both UJ-2 and WF-1 step 8b |
+| Workflows ↔ Interfaces: All API calls have contracts in §6 | ✅ Coordinator reads /status (§6.1), posts via Slack (§6.2), enqueues (§6.3) |
+| Data Model ↔ Interfaces: POST /status per-field auth matches §4.2 writers | ✅ |
+| Scope E2Es ↔ Detailed E2Es: All 25 tests fleshed out | ✅ 19 detailed + 6 summary in §7 |
+| Architecture ↔ Failure Isolation: All 6 failure modes mitigated | ✅ §5.6 |
+| Ontology ↔ Plan: Canonical terms throughout | ✅ growth, paused, roles:, domains[] |
+
+### 8.2 Decision Log
+
+| Decision | Rationale |
+|----------|-----------|
+| Localhost-only auth (Phase 1) | Same host; no new attack surface |
+| Daemon + flock (not cron) | Cron overlap; flock guarantees singleton |
+| coordinator-state.json (not DB) | Zero new infra; atomic writes |
+| /status (not MemPalace) | Memory-substrate agnostic; thin runtime proxy |
+| Rule-based routing (not LLM) | Deterministic; avoids coordination failure category |
+| Single Slack app, per-role username override | 1 app slot on free plan; visually distinct; non-spoofable |
+| Coordinator sole writer of state file | Single-writer concurrency; agents use /status |
+| HealthMonitor embedded in coordinator | Simplest deployment; no separate lifecycle |
+
+### 8.3 Risk Checklist
+
+| Risk | Prob | Mitigation | Status |
+|------|------|------------|--------|
+| A2: Fractal pairs fail (25%) | Low | Phase 1 validates pattern | ✅ |
+| A7: Deterministic routing too rigid | Med | Phase 2 LLM routing if metrics regress | ⚠️ |
+| A13: Coordinator SPOF | Med | systemd restart; flock auto-release; 5-min blast radius | ⚠️ |
+| A14: Human availability > 4h (80%) | High | 24h escalation; 7-day auto-close; agents work autonomously | ⚠️ |
+| GitHub API rate limiting | Low | 5-min cycle; 5s kanban debounce; 50-item cap | ✅ |
+
+**Go/no-go (post-Phase 1):** Throughput ≥ baseline AND drop rate ≤ 50% baseline. BOTH must fail to pause.
 
 ---
 
@@ -1283,15 +1379,15 @@ GitHub Projects ──tracks── (N) Issue (via GraphQL mutations)
 | #6213 | Coordinator Daemon Core (Cycle Loop + State File) | complex | §2, §5.2, §6.4, §6.9 |
 | #6214 | Coordinator Stuck Detection + Escalation | standard | WF-1, §7.1 |
 | #6215 | Coordinator Crash Recovery + HealthMonitor | standard | §5.2, §6.8, §7.3-7.4 |
-| #6216 | Strategist Agent (Initiative Generation) | standard | §4.1, §7.2, §7.18 |
-| #6217 | Product Manager Agent (Issue Scoping + Planning) | standard | §4.1, §7.14 |
-| #6218 | Product Implementer Agent (Code Execution) | standard | §4.1, §7.15 |
-| #6219 | CMO Agent (Growth Strategy + Planning) | standard | §4.1, §7.16 |
-| #6220 | Growth Implementer Agent (Content Execution) | standard | §4.1, §7.17 |
+| #6216 | Strategist Agent (Initiative Generation) | standard | §4.1, §7.2, §7.20 |
+| #6217 | Product Manager Agent (Issue Scoping + Planning) | standard | §4.1, §7.20 |
+| #6218 | Product Implementer Agent (Code Execution) | standard | §4.1, §7.21 |
+| #6219 | CMO Agent (Growth Strategy + Planning) | standard | §4.1, §7.22 |
+| #6220 | Growth Implementer Agent (Content Execution) | standard | §4.1, §7.23 |
 | #6221 | Coordinator Human Gate + Kill Command | standard | §6.7, §7.5-7.7, §7.12-7.13 |
 | #6222 | GitHub Projects v2 Kanban Auto-Population | standard | §4.4, §6.5, §7.8-7.9 |
 | #6223 | Coordinator Queued Dispatch | standard | §6.3, §7.10 |
-| #6224 | Integration Testing + E2E | complex | §7, §5.8 |
+| #6224 | Integration Testing + E2E | complex | §7 (25 tests), §5.8 |
 
 ### Dependency Graph
 
@@ -1336,7 +1432,7 @@ GitHub Projects ──tracks── (N) Issue (via GraphQL mutations)
 ```
 
 **Boundary clarifications:**
-- **#6210 vs #6211:** #6210 delivers Slack Bridge foundations (per-agent bot posting, channel routing) and SlackRouter stub. #6211 delivers /status. After #6211 completes, SlackRouter queries GET /status for spawn-vs-enqueue decisions.
+- **#6210 vs #6211:** #6210 delivers Slack Bridge foundations (single app with per-role username override, channel routing) and SlackRouter stub. #6211 delivers /status. After #6211 completes, SlackRouter queries GET /status for spawn-vs-enqueue decisions.
 - **#6213 vs #6223:** #6213 delivers coordinator cycle loop with empty `message_queue` in state schema (stub phase). #6223 fills the stub with dequeue + overflow logic.
 
 **Parallelism:** 6 parallel groups across 4 phases.
@@ -1365,7 +1461,7 @@ GitHub Projects ──tracks── (N) Issue (via GraphQL mutations)
 | S6: Product Implementer agent | #6218 | ✅ |
 | S7: CMO agent | #6219 | ✅ |
 | S8: Growth Implementer agent | #6220 | ✅ |
-| S9: Transparency (public channels) | #6210 (per-agent bots) | ✅ |
+| S9: Transparency (public channels) | #6210 (single app, per-role identity) | ✅ |
 | S10: Kanban board | #6222 | ✅ |
 | E2E Test Coverage | #6224 | ✅ |
 
@@ -1386,51 +1482,4 @@ GitHub Projects ──tracks── (N) Issue (via GraphQL mutations)
 - Phase 4: Integration tests after all components
 - **Constraints verified:** Strategist depends on Specialist FW only (not coordinator); downstream agents don't depend on Strategist; SlackRouter stub precedes /status
 
----
 
-## 8. Coherence Review
-
-### UX Design Decisions
-
-| # | Decision Type | User Choice | Rationale |
-|---|---------------|-------------|----------|
-| 1 | Message surface | New events top-level, follow-ups in-thread | Channel stays scannable; escalations visible; ongoing chatter collapsed |
-| 2 | Human review tagging | User @-tagged on human gates | Coordinator already posts in channel for gate events |
-| 3 | Agent attribution | Per-agent Slack bots from Phase 1 | User has Slack admin; no reason for emoji prefix intermediary |
-
-### 8.1 Cross-Substep Consistency
-
-| Check | Status |
-|-------|--------|
-| Data Model ↔ Architecture: /status schema matches component writers | ✅ §4.2 per-field writer table; §5.2 uses same |
-| User Journeys ↔ Workflows: Agent state model consistent | ✅ paused excluded from stuck detection both UJ-2 and WF-1 step 8b |
-| Workflows ↔ Interfaces: All API calls have contracts in §6 | ✅ Coordinator reads /status (§6.1), posts via Slack (§6.2), enqueues (§6.3) |
-| Data Model ↔ Interfaces: POST /status per-field auth matches §4.2 writers | ✅ |
-| Scope E2Es ↔ Detailed E2Es: All 19 tests fleshed out | ✅ 13 detailed + 6 summary in §7 |
-| Architecture ↔ Failure Isolation: All 6 failure modes mitigated | ✅ §5.6 |
-| Ontology ↔ Plan: Canonical terms throughout | ✅ growth, paused, roles:, domains[] |
-
-### 8.2 Decision Log
-
-| Decision | Rationale |
-|----------|-----------|
-| Localhost-only auth (Phase 1) | Same host; no new attack surface |
-| Daemon + flock (not cron) | Cron overlap; flock guarantees singleton |
-| coordinator-state.json (not DB) | Zero new infra; atomic writes |
-| /status (not MemPalace) | Memory-substrate agnostic; thin runtime proxy |
-| Rule-based routing (not LLM) | Deterministic; avoids coordination failure category |
-| Per-agent Slack bots (Phase 1) | User has Slack admin; no reason for emoji prefix intermediary |
-| Coordinator sole writer of state file | Single-writer concurrency; agents use /status |
-| HealthMonitor embedded in coordinator | Simplest deployment; no separate lifecycle |
-
-### 8.3 Risk Checklist
-
-| Risk | Prob | Mitigation | Status |
-|------|------|------------|--------|
-| A2: Fractal pairs fail (25%) | Low | Phase 1 validates pattern | ✅ |
-| A7: Deterministic routing too rigid | Med | Phase 2 LLM routing if metrics regress | ⚠️ |
-| A13: Coordinator SPOF | Med | systemd restart; flock auto-release; 5-min blast radius | ⚠️ |
-| A14: Human availability > 4h (80%) | High | 24h escalation; 7-day auto-close; agents work autonomously | ⚠️ |
-| GitHub API rate limiting | Low | 5-min cycle; 5s kanban debounce; 50-item cap | ✅ |
-
-**Go/no-go (post-Phase 1):** Throughput ≥ baseline AND drop rate ≤ 50% baseline. BOTH must fail to pause.
