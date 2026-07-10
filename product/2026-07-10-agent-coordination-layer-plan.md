@@ -386,13 +386,13 @@ Target: <5 API calls per cycle regardless of issue count.
 
 **Flow:**
 1. SlackRouter detects `@agent_role` mention in message text
-2. Look up agent config from subjects YAML: `trigger_on: mention`, `skills[]`, `boundary[]`, `domain`
+2. Look up agent config from subjects YAML: `trigger_on: mention`, `skills[]`, `boundary[]`, `domains[]`
 3. Query bridge `/status` for agent state:
    - `idle` → spawn new Pi session (step 4)
    - `working` or `blocked` → enqueue message in coordinator-state.json `message_queue[agent_role]`
    - `crashed` → post "@{agent} is unavailable (crashed)" — do NOT enqueue
    - `paused` → enqueue (agent handles after gate resolves)
-4. Spawned session receives: message context (thread, issue refs), agent config (skills[], boundary[], domain)
+4. Spawned session receives: message context (thread, issue refs), agent config (skills[], boundary[], `domains[]`)
 5. Agent writes `state: working` to /status at session start
 6. Agent executes task using skills from its template
 7. Agent posts progress + result in thread

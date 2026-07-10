@@ -1,0 +1,4235 @@
+{
+  "generated": "2026-07-10T16:38:43.073475",
+  "checks": [
+    {
+      "claim_id": "A1",
+      "doc": "D1-product-analytics-review",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A1",
+      "doc": "D10-ceo-strategic-options",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A1",
+      "doc": "D2-market-landscape",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A1",
+      "doc": "D3-financial-dashboard",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A1",
+      "doc": "D4-sales-pipeline",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A1",
+      "doc": "D5-cto-retrospective",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A1",
+      "doc": "D6-board-prep",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A1",
+      "doc": "D7-cs-health",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A1",
+      "doc": "D8-enterprise-readiness",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A1",
+      "doc": "D9-unit-economics",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A2",
+      "doc": "D1-product-analytics-review",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A2",
+      "doc": "D10-ceo-strategic-options",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A2",
+      "doc": "D2-market-landscape",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A2",
+      "doc": "D3-financial-dashboard",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A2",
+      "doc": "D4-sales-pipeline",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A2",
+      "doc": "D5-cto-retrospective",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A2",
+      "doc": "D6-board-prep",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A2",
+      "doc": "D7-cs-health",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A2",
+      "doc": "D8-enterprise-readiness",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A2",
+      "doc": "D9-unit-economics",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A3",
+      "doc": "D1-product-analytics-review",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A3",
+      "doc": "D10-ceo-strategic-options",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A3",
+      "doc": "D2-market-landscape",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A3",
+      "doc": "D3-financial-dashboard",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A3",
+      "doc": "D4-sales-pipeline",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A3",
+      "doc": "D5-cto-retrospective",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A3",
+      "doc": "D6-board-prep",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A3",
+      "doc": "D7-cs-health",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A3",
+      "doc": "D8-enterprise-readiness",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A3",
+      "doc": "D9-unit-economics",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A4",
+      "doc": "D1-product-analytics-review",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A4",
+      "doc": "D10-ceo-strategic-options",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A4",
+      "doc": "D2-market-landscape",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A4",
+      "doc": "D3-financial-dashboard",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A4",
+      "doc": "D4-sales-pipeline",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A4",
+      "doc": "D5-cto-retrospective",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A4",
+      "doc": "D6-board-prep",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A4",
+      "doc": "D7-cs-health",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A4",
+      "doc": "D8-enterprise-readiness",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A4",
+      "doc": "D9-unit-economics",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A5",
+      "doc": "D1-product-analytics-review",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A5",
+      "doc": "D10-ceo-strategic-options",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A5",
+      "doc": "D2-market-landscape",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A5",
+      "doc": "D3-financial-dashboard",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A5",
+      "doc": "D4-sales-pipeline",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A5",
+      "doc": "D5-cto-retrospective",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A5",
+      "doc": "D6-board-prep",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A5",
+      "doc": "D7-cs-health",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A5",
+      "doc": "D8-enterprise-readiness",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A5",
+      "doc": "D9-unit-economics",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A6",
+      "doc": "D1-product-analytics-review",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A6",
+      "doc": "D10-ceo-strategic-options",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A6",
+      "doc": "D2-market-landscape",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A6",
+      "doc": "D3-financial-dashboard",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A6",
+      "doc": "D4-sales-pipeline",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A6",
+      "doc": "D5-cto-retrospective",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A6",
+      "doc": "D6-board-prep",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A6",
+      "doc": "D7-cs-health",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A6",
+      "doc": "D8-enterprise-readiness",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A6",
+      "doc": "D9-unit-economics",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A7",
+      "doc": "D1-product-analytics-review",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A7",
+      "doc": "D10-ceo-strategic-options",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A7",
+      "doc": "D2-market-landscape",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A7",
+      "doc": "D3-financial-dashboard",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A7",
+      "doc": "D4-sales-pipeline",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A7",
+      "doc": "D5-cto-retrospective",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A7",
+      "doc": "D6-board-prep",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A7",
+      "doc": "D7-cs-health",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A7",
+      "doc": "D8-enterprise-readiness",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A7",
+      "doc": "D9-unit-economics",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A8",
+      "doc": "D1-product-analytics-review",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A8",
+      "doc": "D10-ceo-strategic-options",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A8",
+      "doc": "D2-market-landscape",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A8",
+      "doc": "D3-financial-dashboard",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A8",
+      "doc": "D4-sales-pipeline",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A8",
+      "doc": "D5-cto-retrospective",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A8",
+      "doc": "D6-board-prep",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A8",
+      "doc": "D7-cs-health",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A8",
+      "doc": "D8-enterprise-readiness",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A8",
+      "doc": "D9-unit-economics",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A_detail_1",
+      "doc": "D1-product-analytics-review",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A_detail_1",
+      "doc": "D10-ceo-strategic-options",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A_detail_1",
+      "doc": "D2-market-landscape",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A_detail_1",
+      "doc": "D3-financial-dashboard",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A_detail_1",
+      "doc": "D4-sales-pipeline",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A_detail_1",
+      "doc": "D5-cto-retrospective",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A_detail_1",
+      "doc": "D6-board-prep",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A_detail_1",
+      "doc": "D7-cs-health",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A_detail_1",
+      "doc": "D8-enterprise-readiness",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A_detail_1",
+      "doc": "D9-unit-economics",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A_detail_2",
+      "doc": "D1-product-analytics-review",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A_detail_2",
+      "doc": "D10-ceo-strategic-options",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A_detail_2",
+      "doc": "D2-market-landscape",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A_detail_2",
+      "doc": "D3-financial-dashboard",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A_detail_2",
+      "doc": "D4-sales-pipeline",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A_detail_2",
+      "doc": "D5-cto-retrospective",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A_detail_2",
+      "doc": "D6-board-prep",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A_detail_2",
+      "doc": "D7-cs-health",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A_detail_2",
+      "doc": "D8-enterprise-readiness",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A_detail_2",
+      "doc": "D9-unit-economics",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A_detail_3",
+      "doc": "D1-product-analytics-review",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A_detail_3",
+      "doc": "D10-ceo-strategic-options",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A_detail_3",
+      "doc": "D2-market-landscape",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A_detail_3",
+      "doc": "D3-financial-dashboard",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A_detail_3",
+      "doc": "D4-sales-pipeline",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A_detail_3",
+      "doc": "D5-cto-retrospective",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A_detail_3",
+      "doc": "D6-board-prep",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A_detail_3",
+      "doc": "D7-cs-health",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A_detail_3",
+      "doc": "D8-enterprise-readiness",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A_detail_3",
+      "doc": "D9-unit-economics",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A_detail_4",
+      "doc": "D1-product-analytics-review",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A_detail_4",
+      "doc": "D10-ceo-strategic-options",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A_detail_4",
+      "doc": "D2-market-landscape",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A_detail_4",
+      "doc": "D3-financial-dashboard",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A_detail_4",
+      "doc": "D4-sales-pipeline",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A_detail_4",
+      "doc": "D5-cto-retrospective",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A_detail_4",
+      "doc": "D6-board-prep",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A_detail_4",
+      "doc": "D7-cs-health",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A_detail_4",
+      "doc": "D8-enterprise-readiness",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "A_detail_4",
+      "doc": "D9-unit-economics",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B1",
+      "doc": "D1-product-analytics-review",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B1",
+      "doc": "D10-ceo-strategic-options",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B1",
+      "doc": "D2-market-landscape",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B1",
+      "doc": "D3-financial-dashboard",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B1",
+      "doc": "D4-sales-pipeline",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B1",
+      "doc": "D5-cto-retrospective",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B1",
+      "doc": "D6-board-prep",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B1",
+      "doc": "D7-cs-health",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B1",
+      "doc": "D8-enterprise-readiness",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B1",
+      "doc": "D9-unit-economics",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B2",
+      "doc": "D1-product-analytics-review",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B2",
+      "doc": "D10-ceo-strategic-options",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B2",
+      "doc": "D2-market-landscape",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B2",
+      "doc": "D3-financial-dashboard",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B2",
+      "doc": "D4-sales-pipeline",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B2",
+      "doc": "D5-cto-retrospective",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B2",
+      "doc": "D6-board-prep",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B2",
+      "doc": "D7-cs-health",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B2",
+      "doc": "D8-enterprise-readiness",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B2",
+      "doc": "D9-unit-economics",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B3",
+      "doc": "D1-product-analytics-review",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B3",
+      "doc": "D10-ceo-strategic-options",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B3",
+      "doc": "D2-market-landscape",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B3",
+      "doc": "D3-financial-dashboard",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B3",
+      "doc": "D4-sales-pipeline",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B3",
+      "doc": "D5-cto-retrospective",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B3",
+      "doc": "D6-board-prep",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B3",
+      "doc": "D7-cs-health",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B3",
+      "doc": "D8-enterprise-readiness",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B3",
+      "doc": "D9-unit-economics",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B4",
+      "doc": "D1-product-analytics-review",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B4",
+      "doc": "D10-ceo-strategic-options",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B4",
+      "doc": "D2-market-landscape",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B4",
+      "doc": "D3-financial-dashboard",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B4",
+      "doc": "D4-sales-pipeline",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B4",
+      "doc": "D5-cto-retrospective",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B4",
+      "doc": "D6-board-prep",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B4",
+      "doc": "D7-cs-health",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B4",
+      "doc": "D8-enterprise-readiness",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B4",
+      "doc": "D9-unit-economics",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B5",
+      "doc": "D1-product-analytics-review",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B5",
+      "doc": "D10-ceo-strategic-options",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B5",
+      "doc": "D2-market-landscape",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B5",
+      "doc": "D3-financial-dashboard",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B5",
+      "doc": "D4-sales-pipeline",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B5",
+      "doc": "D5-cto-retrospective",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B5",
+      "doc": "D6-board-prep",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B5",
+      "doc": "D7-cs-health",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B5",
+      "doc": "D8-enterprise-readiness",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B5",
+      "doc": "D9-unit-economics",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B6",
+      "doc": "D1-product-analytics-review",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B6",
+      "doc": "D10-ceo-strategic-options",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B6",
+      "doc": "D2-market-landscape",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B6",
+      "doc": "D3-financial-dashboard",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B6",
+      "doc": "D4-sales-pipeline",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B6",
+      "doc": "D5-cto-retrospective",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B6",
+      "doc": "D6-board-prep",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B6",
+      "doc": "D7-cs-health",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B6",
+      "doc": "D8-enterprise-readiness",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B6",
+      "doc": "D9-unit-economics",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B7",
+      "doc": "D1-product-analytics-review",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B7",
+      "doc": "D10-ceo-strategic-options",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B7",
+      "doc": "D2-market-landscape",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B7",
+      "doc": "D3-financial-dashboard",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B7",
+      "doc": "D4-sales-pipeline",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B7",
+      "doc": "D5-cto-retrospective",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B7",
+      "doc": "D6-board-prep",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B7",
+      "doc": "D7-cs-health",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B7",
+      "doc": "D8-enterprise-readiness",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B7",
+      "doc": "D9-unit-economics",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B8",
+      "doc": "D1-product-analytics-review",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B8",
+      "doc": "D10-ceo-strategic-options",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B8",
+      "doc": "D2-market-landscape",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B8",
+      "doc": "D3-financial-dashboard",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B8",
+      "doc": "D4-sales-pipeline",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B8",
+      "doc": "D5-cto-retrospective",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B8",
+      "doc": "D6-board-prep",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B8",
+      "doc": "D7-cs-health",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B8",
+      "doc": "D8-enterprise-readiness",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B8",
+      "doc": "D9-unit-economics",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B_detail_1",
+      "doc": "D1-product-analytics-review",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B_detail_1",
+      "doc": "D10-ceo-strategic-options",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B_detail_1",
+      "doc": "D2-market-landscape",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B_detail_1",
+      "doc": "D3-financial-dashboard",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B_detail_1",
+      "doc": "D4-sales-pipeline",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B_detail_1",
+      "doc": "D5-cto-retrospective",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B_detail_1",
+      "doc": "D6-board-prep",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B_detail_1",
+      "doc": "D7-cs-health",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B_detail_1",
+      "doc": "D8-enterprise-readiness",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B_detail_1",
+      "doc": "D9-unit-economics",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B_detail_2",
+      "doc": "D1-product-analytics-review",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B_detail_2",
+      "doc": "D10-ceo-strategic-options",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B_detail_2",
+      "doc": "D2-market-landscape",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B_detail_2",
+      "doc": "D3-financial-dashboard",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B_detail_2",
+      "doc": "D4-sales-pipeline",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B_detail_2",
+      "doc": "D5-cto-retrospective",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B_detail_2",
+      "doc": "D6-board-prep",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B_detail_2",
+      "doc": "D7-cs-health",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B_detail_2",
+      "doc": "D8-enterprise-readiness",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B_detail_2",
+      "doc": "D9-unit-economics",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B_detail_3",
+      "doc": "D1-product-analytics-review",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B_detail_3",
+      "doc": "D10-ceo-strategic-options",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B_detail_3",
+      "doc": "D2-market-landscape",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B_detail_3",
+      "doc": "D3-financial-dashboard",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B_detail_3",
+      "doc": "D4-sales-pipeline",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B_detail_3",
+      "doc": "D5-cto-retrospective",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B_detail_3",
+      "doc": "D6-board-prep",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B_detail_3",
+      "doc": "D7-cs-health",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B_detail_3",
+      "doc": "D8-enterprise-readiness",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B_detail_3",
+      "doc": "D9-unit-economics",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B_detail_4",
+      "doc": "D1-product-analytics-review",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B_detail_4",
+      "doc": "D10-ceo-strategic-options",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B_detail_4",
+      "doc": "D2-market-landscape",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B_detail_4",
+      "doc": "D3-financial-dashboard",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B_detail_4",
+      "doc": "D4-sales-pipeline",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B_detail_4",
+      "doc": "D5-cto-retrospective",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B_detail_4",
+      "doc": "D6-board-prep",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B_detail_4",
+      "doc": "D7-cs-health",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B_detail_4",
+      "doc": "D8-enterprise-readiness",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "B_detail_4",
+      "doc": "D9-unit-economics",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C1",
+      "doc": "D1-product-analytics-review",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C1",
+      "doc": "D10-ceo-strategic-options",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C1",
+      "doc": "D2-market-landscape",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C1",
+      "doc": "D3-financial-dashboard",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C1",
+      "doc": "D4-sales-pipeline",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C1",
+      "doc": "D5-cto-retrospective",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C1",
+      "doc": "D6-board-prep",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C1",
+      "doc": "D7-cs-health",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C1",
+      "doc": "D8-enterprise-readiness",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C1",
+      "doc": "D9-unit-economics",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C2",
+      "doc": "D1-product-analytics-review",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C2",
+      "doc": "D10-ceo-strategic-options",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C2",
+      "doc": "D2-market-landscape",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C2",
+      "doc": "D3-financial-dashboard",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C2",
+      "doc": "D4-sales-pipeline",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C2",
+      "doc": "D5-cto-retrospective",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C2",
+      "doc": "D6-board-prep",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C2",
+      "doc": "D7-cs-health",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C2",
+      "doc": "D8-enterprise-readiness",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C2",
+      "doc": "D9-unit-economics",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C3",
+      "doc": "D1-product-analytics-review",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C3",
+      "doc": "D10-ceo-strategic-options",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C3",
+      "doc": "D2-market-landscape",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C3",
+      "doc": "D3-financial-dashboard",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C3",
+      "doc": "D4-sales-pipeline",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C3",
+      "doc": "D5-cto-retrospective",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C3",
+      "doc": "D6-board-prep",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C3",
+      "doc": "D7-cs-health",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C3",
+      "doc": "D8-enterprise-readiness",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C3",
+      "doc": "D9-unit-economics",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C4",
+      "doc": "D1-product-analytics-review",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C4",
+      "doc": "D10-ceo-strategic-options",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C4",
+      "doc": "D2-market-landscape",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C4",
+      "doc": "D3-financial-dashboard",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C4",
+      "doc": "D4-sales-pipeline",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C4",
+      "doc": "D5-cto-retrospective",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C4",
+      "doc": "D6-board-prep",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C4",
+      "doc": "D7-cs-health",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C4",
+      "doc": "D8-enterprise-readiness",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C4",
+      "doc": "D9-unit-economics",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C5",
+      "doc": "D1-product-analytics-review",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C5",
+      "doc": "D10-ceo-strategic-options",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C5",
+      "doc": "D2-market-landscape",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C5",
+      "doc": "D3-financial-dashboard",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C5",
+      "doc": "D4-sales-pipeline",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C5",
+      "doc": "D5-cto-retrospective",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C5",
+      "doc": "D6-board-prep",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C5",
+      "doc": "D7-cs-health",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C5",
+      "doc": "D8-enterprise-readiness",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C5",
+      "doc": "D9-unit-economics",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C6",
+      "doc": "D1-product-analytics-review",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C6",
+      "doc": "D10-ceo-strategic-options",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C6",
+      "doc": "D2-market-landscape",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C6",
+      "doc": "D3-financial-dashboard",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C6",
+      "doc": "D4-sales-pipeline",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C6",
+      "doc": "D5-cto-retrospective",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C6",
+      "doc": "D6-board-prep",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C6",
+      "doc": "D7-cs-health",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C6",
+      "doc": "D8-enterprise-readiness",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C6",
+      "doc": "D9-unit-economics",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C_detail_1",
+      "doc": "D1-product-analytics-review",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C_detail_1",
+      "doc": "D10-ceo-strategic-options",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C_detail_1",
+      "doc": "D2-market-landscape",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C_detail_1",
+      "doc": "D3-financial-dashboard",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C_detail_1",
+      "doc": "D4-sales-pipeline",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C_detail_1",
+      "doc": "D5-cto-retrospective",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C_detail_1",
+      "doc": "D6-board-prep",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C_detail_1",
+      "doc": "D7-cs-health",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C_detail_1",
+      "doc": "D8-enterprise-readiness",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C_detail_1",
+      "doc": "D9-unit-economics",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C_detail_2",
+      "doc": "D1-product-analytics-review",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C_detail_2",
+      "doc": "D10-ceo-strategic-options",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C_detail_2",
+      "doc": "D2-market-landscape",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C_detail_2",
+      "doc": "D3-financial-dashboard",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C_detail_2",
+      "doc": "D4-sales-pipeline",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C_detail_2",
+      "doc": "D5-cto-retrospective",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C_detail_2",
+      "doc": "D6-board-prep",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C_detail_2",
+      "doc": "D7-cs-health",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C_detail_2",
+      "doc": "D8-enterprise-readiness",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C_detail_2",
+      "doc": "D9-unit-economics",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C_detail_3",
+      "doc": "D1-product-analytics-review",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C_detail_3",
+      "doc": "D10-ceo-strategic-options",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C_detail_3",
+      "doc": "D2-market-landscape",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C_detail_3",
+      "doc": "D3-financial-dashboard",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C_detail_3",
+      "doc": "D4-sales-pipeline",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C_detail_3",
+      "doc": "D5-cto-retrospective",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C_detail_3",
+      "doc": "D6-board-prep",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C_detail_3",
+      "doc": "D7-cs-health",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C_detail_3",
+      "doc": "D8-enterprise-readiness",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C_detail_3",
+      "doc": "D9-unit-economics",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C_detail_4",
+      "doc": "D1-product-analytics-review",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C_detail_4",
+      "doc": "D10-ceo-strategic-options",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C_detail_4",
+      "doc": "D2-market-landscape",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C_detail_4",
+      "doc": "D3-financial-dashboard",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C_detail_4",
+      "doc": "D4-sales-pipeline",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C_detail_4",
+      "doc": "D5-cto-retrospective",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C_detail_4",
+      "doc": "D6-board-prep",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C_detail_4",
+      "doc": "D7-cs-health",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C_detail_4",
+      "doc": "D8-enterprise-readiness",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "C_detail_4",
+      "doc": "D9-unit-economics",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D1",
+      "doc": "D1-product-analytics-review",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D1",
+      "doc": "D10-ceo-strategic-options",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D1",
+      "doc": "D2-market-landscape",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D1",
+      "doc": "D3-financial-dashboard",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D1",
+      "doc": "D4-sales-pipeline",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D1",
+      "doc": "D5-cto-retrospective",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D1",
+      "doc": "D6-board-prep",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D1",
+      "doc": "D7-cs-health",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D1",
+      "doc": "D8-enterprise-readiness",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D1",
+      "doc": "D9-unit-economics",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D2",
+      "doc": "D1-product-analytics-review",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D2",
+      "doc": "D10-ceo-strategic-options",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D2",
+      "doc": "D2-market-landscape",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D2",
+      "doc": "D3-financial-dashboard",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D2",
+      "doc": "D4-sales-pipeline",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D2",
+      "doc": "D5-cto-retrospective",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D2",
+      "doc": "D6-board-prep",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D2",
+      "doc": "D7-cs-health",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D2",
+      "doc": "D8-enterprise-readiness",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D2",
+      "doc": "D9-unit-economics",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D3",
+      "doc": "D1-product-analytics-review",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D3",
+      "doc": "D10-ceo-strategic-options",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D3",
+      "doc": "D2-market-landscape",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D3",
+      "doc": "D3-financial-dashboard",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D3",
+      "doc": "D4-sales-pipeline",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D3",
+      "doc": "D5-cto-retrospective",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D3",
+      "doc": "D6-board-prep",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D3",
+      "doc": "D7-cs-health",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D3",
+      "doc": "D8-enterprise-readiness",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D3",
+      "doc": "D9-unit-economics",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D4",
+      "doc": "D1-product-analytics-review",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D4",
+      "doc": "D10-ceo-strategic-options",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D4",
+      "doc": "D2-market-landscape",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D4",
+      "doc": "D3-financial-dashboard",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D4",
+      "doc": "D4-sales-pipeline",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D4",
+      "doc": "D5-cto-retrospective",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D4",
+      "doc": "D6-board-prep",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D4",
+      "doc": "D7-cs-health",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D4",
+      "doc": "D8-enterprise-readiness",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D4",
+      "doc": "D9-unit-economics",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D5",
+      "doc": "D1-product-analytics-review",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D5",
+      "doc": "D10-ceo-strategic-options",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D5",
+      "doc": "D2-market-landscape",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D5",
+      "doc": "D3-financial-dashboard",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D5",
+      "doc": "D4-sales-pipeline",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D5",
+      "doc": "D5-cto-retrospective",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D5",
+      "doc": "D6-board-prep",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D5",
+      "doc": "D7-cs-health",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D5",
+      "doc": "D8-enterprise-readiness",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D5",
+      "doc": "D9-unit-economics",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D_detail_1",
+      "doc": "D1-product-analytics-review",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D_detail_1",
+      "doc": "D10-ceo-strategic-options",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D_detail_1",
+      "doc": "D2-market-landscape",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D_detail_1",
+      "doc": "D3-financial-dashboard",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D_detail_1",
+      "doc": "D4-sales-pipeline",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D_detail_1",
+      "doc": "D5-cto-retrospective",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D_detail_1",
+      "doc": "D6-board-prep",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D_detail_1",
+      "doc": "D7-cs-health",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D_detail_1",
+      "doc": "D8-enterprise-readiness",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D_detail_1",
+      "doc": "D9-unit-economics",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D_detail_2",
+      "doc": "D1-product-analytics-review",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D_detail_2",
+      "doc": "D10-ceo-strategic-options",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D_detail_2",
+      "doc": "D2-market-landscape",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D_detail_2",
+      "doc": "D3-financial-dashboard",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D_detail_2",
+      "doc": "D4-sales-pipeline",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D_detail_2",
+      "doc": "D5-cto-retrospective",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D_detail_2",
+      "doc": "D6-board-prep",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D_detail_2",
+      "doc": "D7-cs-health",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D_detail_2",
+      "doc": "D8-enterprise-readiness",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "D_detail_2",
+      "doc": "D9-unit-economics",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E1",
+      "doc": "D1-product-analytics-review",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E1",
+      "doc": "D10-ceo-strategic-options",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E1",
+      "doc": "D2-market-landscape",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E1",
+      "doc": "D3-financial-dashboard",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E1",
+      "doc": "D4-sales-pipeline",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E1",
+      "doc": "D5-cto-retrospective",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E1",
+      "doc": "D6-board-prep",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E1",
+      "doc": "D7-cs-health",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E1",
+      "doc": "D8-enterprise-readiness",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E1",
+      "doc": "D9-unit-economics",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E2",
+      "doc": "D1-product-analytics-review",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E2",
+      "doc": "D10-ceo-strategic-options",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E2",
+      "doc": "D2-market-landscape",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E2",
+      "doc": "D3-financial-dashboard",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E2",
+      "doc": "D4-sales-pipeline",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E2",
+      "doc": "D5-cto-retrospective",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E2",
+      "doc": "D6-board-prep",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E2",
+      "doc": "D7-cs-health",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E2",
+      "doc": "D8-enterprise-readiness",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E2",
+      "doc": "D9-unit-economics",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E3",
+      "doc": "D1-product-analytics-review",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E3",
+      "doc": "D10-ceo-strategic-options",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E3",
+      "doc": "D2-market-landscape",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E3",
+      "doc": "D3-financial-dashboard",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E3",
+      "doc": "D4-sales-pipeline",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E3",
+      "doc": "D5-cto-retrospective",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E3",
+      "doc": "D6-board-prep",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E3",
+      "doc": "D7-cs-health",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E3",
+      "doc": "D8-enterprise-readiness",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E3",
+      "doc": "D9-unit-economics",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E4",
+      "doc": "D1-product-analytics-review",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E4",
+      "doc": "D10-ceo-strategic-options",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E4",
+      "doc": "D2-market-landscape",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E4",
+      "doc": "D3-financial-dashboard",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E4",
+      "doc": "D4-sales-pipeline",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E4",
+      "doc": "D5-cto-retrospective",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E4",
+      "doc": "D6-board-prep",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E4",
+      "doc": "D7-cs-health",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E4",
+      "doc": "D8-enterprise-readiness",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E4",
+      "doc": "D9-unit-economics",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E_detail_1",
+      "doc": "D1-product-analytics-review",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E_detail_1",
+      "doc": "D10-ceo-strategic-options",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E_detail_1",
+      "doc": "D2-market-landscape",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E_detail_1",
+      "doc": "D3-financial-dashboard",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E_detail_1",
+      "doc": "D4-sales-pipeline",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E_detail_1",
+      "doc": "D5-cto-retrospective",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E_detail_1",
+      "doc": "D6-board-prep",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E_detail_1",
+      "doc": "D7-cs-health",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E_detail_1",
+      "doc": "D8-enterprise-readiness",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E_detail_1",
+      "doc": "D9-unit-economics",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E_detail_2",
+      "doc": "D1-product-analytics-review",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E_detail_2",
+      "doc": "D10-ceo-strategic-options",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E_detail_2",
+      "doc": "D2-market-landscape",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E_detail_2",
+      "doc": "D3-financial-dashboard",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E_detail_2",
+      "doc": "D4-sales-pipeline",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E_detail_2",
+      "doc": "D5-cto-retrospective",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E_detail_2",
+      "doc": "D6-board-prep",
+      "expected": true,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E_detail_2",
+      "doc": "D7-cs-health",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E_detail_2",
+      "doc": "D8-enterprise-readiness",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    },
+    {
+      "claim_id": "E_detail_2",
+      "doc": "D9-unit-economics",
+      "expected": false,
+      "verified": null,
+      "reviewer": null,
+      "confidence": null,
+      "notes": null
+    }
+  ]
+}

@@ -147,4 +147,4 @@ This is cheap (regex + word list, no LLM) and prevents wasted extraction calls o
 *See `source-operator-event.md` for the entity classes (Source #28, Operator #29, Event #30) and the NAND/IMPL + PGMax decision.*
 *See `v1-strategy-2026-07-09.md` for product scope and competitive positioning.*
 *See `embedding-retrieval.md` for the 3-tier retrieval model and hybrid query patterns.*
-*See `../v2-planning/2026-07-09-v2-integration-map.md` for the V2 data source and application landscape.*
+*See `2026-07-09-v2-integration-map.md` for the V2 data source and application landscape.*
