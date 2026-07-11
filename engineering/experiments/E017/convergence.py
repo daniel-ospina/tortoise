@@ -321,6 +321,110 @@ ENRICHED_CLAIMS: dict[str, dict] = {
         "text": "Taking a bridge round signals weakness to future investors — it signals the company wasn't ready for a proper round. In the current fundraising environment, a bridge can make the next priced round harder.",
         "target_docs": ["D6"],
     },
+
+    # ═══ Domain F: Narrative & Context (5 detail) ═══
+    "F_detail_1": {
+        "domain": "narrative", "thesis": "PIVOT", "tier": "detail",
+        "label": "CEO Leaning",
+        "text": "As of October 9, six days before the board meeting, the CEO is personally leaning toward the enterprise pivot \u2014 not because investors want it but because the numbers support it.",
+        "target_docs": ["D10"],
+    },
+    "F_detail_2": {
+        "domain": "narrative", "thesis": "NEUTRAL", "tier": "detail",
+        "label": "NPS Seasonality",
+        "text": "Q3 is historically Nexus\u2019s lowest-scoring quarter for NPS due to summer seasonality in user engagement patterns, which partially explains but does not fully account for the 62-to-41 decline.",
+        "target_docs": ["D1"],
+    },
+    "F_detail_3": {
+        "domain": "narrative", "thesis": "NEUTRAL", "tier": "detail",
+        "label": "Board Meeting Date",
+        "text": "The next board meeting is scheduled for October 15, 2026. The CEO is preparing her position before facing the board.",
+        "target_docs": ["D6"],
+    },
+    "F_detail_4": {
+        "domain": "narrative", "thesis": "NEUTRAL", "tier": "detail",
+        "label": "Term Sheet Not Disclosed",
+        "text": "The CEO has not shared the StrategicCo term sheet with the full board yet. She wants to clarify her own thinking before presenting it.",
+        "target_docs": ["D6"],
+    },
+    "F_detail_5": {
+        "domain": "narrative", "thesis": "NEUTRAL", "tier": "detail",
+        "label": "VentureCo Unscheduled Call",
+        "text": "VentureCo\u2019s partner contacted the CEO directly via an unscheduled call to push for the enterprise pivot, citing competitive dynamics as evidence the mid-market window is closing.",
+        "target_docs": ["D6"],
+    },
+
+    # ═══ Domain G: Methodology (4 detail) ═══
+    "G_detail_1": {
+        "domain": "methodology", "thesis": "NEUTRAL", "tier": "detail",
+        "label": "NPS Survey Response Rate",
+        "text": "NPS is measured via an in-app popup survey with a response rate of approximately 12% of active users.",
+        "target_docs": ["D7"],
+    },
+    "G_detail_2": {
+        "domain": "methodology", "thesis": "NEUTRAL", "tier": "detail",
+        "label": "NPS Detractor Verbatim Counts",
+        "text": "NPS detractor verbatims cluster around: product has become too complex (18 respondents), hard to get started / steep learning curve (14), support takes too long to respond (11), mobile app is basically useless now (9), features I don\u2019t need keep getting added but features I need don\u2019t exist (7).",
+        "target_docs": ["D7"],
+    },
+    "G_detail_3": {
+        "domain": "methodology", "thesis": "NEUTRAL", "tier": "detail",
+        "label": "NPS Promoter Verbatim Counts",
+        "text": "NPS promoter verbatims cluster around: core analytics are solid and reliable (22 respondents), great value for the price (15), CSM has been incredibly helpful (12).",
+        "target_docs": ["D7"],
+    },
+    "G_detail_4": {
+        "domain": "methodology", "thesis": "NEUTRAL", "tier": "detail",
+        "label": "LTV Calculation Methodology",
+        "text": "LTV is calculated using a 36-month customer lifespan assumption with a 12% annual discount rate. CAC includes fully-loaded marketing and sales costs.",
+        "target_docs": ["D9"],
+    },
+
+    # ═══ Domain H: Projections & Derivations (6 detail) ═══
+    "H_detail_1": {
+        "domain": "projections", "thesis": "PIVOT", "tier": "detail",
+        "label": "Post-Hire Burn Rate",
+        "text": "After hiring 2 enterprise AEs and 1 security engineer, the monthly burn rate would increase from $300K to approximately $358K.",
+        "target_docs": ["D10"],
+    },
+    "H_detail_2": {
+        "domain": "projections", "thesis": "PIVOT", "tier": "detail",
+        "label": "First Enterprise Deal Timeline",
+        "text": "The first enterprise deal may not close until month 5-6 after the pivot begins, even though the average enterprise sales cycle is 3.8 months.",
+        "target_docs": ["D10"],
+    },
+    "H_detail_3": {
+        "domain": "projections", "thesis": "PIVOT", "tier": "detail",
+        "label": "Enterprise Hire Annual Cost",
+        "text": "The enterprise hires (2 AEs + 1 security engineer) would add approximately $700,000 per year in burn.",
+        "target_docs": ["D10"],
+    },
+    "H_detail_4": {
+        "domain": "projections", "thesis": "PIVOT", "tier": "detail",
+        "label": "Combined Runway with Extension",
+        "text": "With the $5M StrategicCo extension, total cash would be $4.2M + $5M = $9.2M. At the post-hire burn rate of approximately $358K/month, this provides approximately 25 months of runway.",
+        "target_docs": ["D10"],
+    },
+    "H_detail_5": {
+        "domain": "projections", "thesis": "PIVOT", "tier": "detail",
+        "label": "Cash-Exhaustion Breakeven Gap",
+        "text": "At current burn and growth rates, cash of $4.2M would be exhausted around month 14, while breakeven at approximately $300K MRR would occur around month 20-22. There is a 6-8 month gap between cash exhaustion and breakeven.",
+        "target_docs": ["D9"],
+    },
+    "H_detail_6": {
+        "domain": "projections", "thesis": "PIVOT", "tier": "detail",
+        "label": "Enterprise Pivot Hiring Plan",
+        "text": "The enterprise pivot plan requires hiring 2 enterprise account executives and 1 security engineer immediately.",
+        "target_docs": ["D10"],
+    },
+
+    # ═══ Domain I: Causal Claims (1 detail) ═══
+    "I_detail_1": {
+        "domain": "causal", "thesis": "PIVOT", "tier": "detail",
+        "label": "AI Module Causing Ticket Surge",
+        "text": "The support team has attributed roughly half of the 40% quarter-over-quarter ticket volume increase to the rollout of the new AI insights module.",
+        "target_docs": ["D1"],
+    },
 }
 
 # Operators unchanged from original — they're relationships, not claims
