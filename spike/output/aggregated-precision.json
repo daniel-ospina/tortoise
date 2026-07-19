@@ -1,0 +1,151 @@
+{
+  "precision": 0.3137,
+  "wilsonLowerBound": 0.2033,
+  "wilsonUpperBound": 0.4503,
+  "totalTP": 16,
+  "totalFP": 35,
+  "perDoc": [
+    {
+      "sourceFile": "docs/epics/2026-07-14-memory-system/02-research-brief.md",
+      "precision": 0.3846,
+      "wilsonLowerBound": 0.2243,
+      "wilsonUpperBound": 0.5747,
+      "recall": 0.2778,
+      "truePositives": 10,
+      "falsePositives": 16,
+      "totalGroundTruth": 36,
+      "falsePositiveExamples": [
+        {
+          "extracted": {
+            "name": "agent roles",
+            "kind": "document"
+          },
+          "reason": "not in ground truth"
+        },
+        {
+          "extracted": {
+            "name": "reflect.py",
+            "kind": "document"
+          },
+          "reason": "not in ground truth"
+        },
+        {
+          "extracted": {
+            "name": "2026-07-06-epistemic-graph-landscape-recap.md",
+            "kind": "document"
+          },
+          "reason": "not in ground truth"
+        },
+        {
+          "extracted": {
+            "name": "convergence (current state",
+            "kind": "document"
+          },
+          "reason": "not in ground truth"
+        },
+        {
+          "extracted": {
+            "name": "tortoise",
+            "kind": "document"
+          },
+          "reason": "not in ground truth"
+        }
+      ]
+    },
+    {
+      "sourceFile": "docs/teams/organisation-design-team/domains (S1)/data/ONTOLOGY.md",
+      "precision": 0.25,
+      "wilsonLowerBound": 0.1018,
+      "wilsonUpperBound": 0.495,
+      "recall": 0.16,
+      "truePositives": 4,
+      "falsePositives": 12,
+      "totalGroundTruth": 25,
+      "falsePositiveExamples": [
+        {
+          "extracted": {
+            "name": "wiki_schema",
+            "kind": "document"
+          },
+          "reason": "not in ground truth"
+        },
+        {
+          "extracted": {
+            "name": "agent roles",
+            "kind": "document"
+          },
+          "reason": "not in ground truth"
+        },
+        {
+          "extracted": {
+            "name": "memory types implementation v1",
+            "kind": "document"
+          },
+          "reason": "not in ground truth"
+        },
+        {
+          "extracted": {
+            "name": "memory architecture",
+            "kind": "document"
+          },
+          "reason": "not in ground truth"
+        },
+        {
+          "extracted": {
+            "name": "agents.md",
+            "kind": "document"
+          },
+          "reason": "not in ground truth"
+        }
+      ]
+    },
+    {
+      "sourceFile": "docs/epics/2026-07-14-memory-system/04-plan.md",
+      "precision": 0.2222,
+      "wilsonLowerBound": 0.0632,
+      "wilsonUpperBound": 0.5474,
+      "recall": 0.1,
+      "truePositives": 2,
+      "falsePositives": 7,
+      "totalGroundTruth": 20,
+      "falsePositiveExamples": [
+        {
+          "extracted": {
+            "name": "docker-compose.yml",
+            "kind": "document"
+          },
+          "reason": "not in ground truth"
+        },
+        {
+          "extracted": {
+            "name": "jsonl event log",
+            "kind": "document"
+          },
+          "reason": "not in ground truth"
+        },
+        {
+          "extracted": {
+            "name": "organisation design team",
+            "kind": "team"
+          },
+          "reason": "not in ground truth"
+        },
+        {
+          "extracted": {
+            "name": "extraction pipeline",
+            "kind": "software"
+          },
+          "reason": "not in ground truth"
+        },
+        {
+          "extracted": {
+            "name": "falkordb",
+            "kind": "database"
+          },
+          "reason": "not in ground truth"
+        }
+      ]
+    }
+  ],
+  "gatePassed": false
+}

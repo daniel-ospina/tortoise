@@ -1,0 +1,24 @@
+[
+  {
+    "model": "deepseek-flash",
+    "time": 7.6,
+    "tp": 23,
+    "fp": 0,
+    "fn": 0,
+    "tn": 7,
+    "precision": 1.0,
+    "recall": 1.0,
+    "f1": 1.0,
+    "tokens": "805p+154c"
+  },
+  {
+    "model": "deepseek-v4-pro",
+    "error": "Empty response",
+    "time": 6.280320882797241
+  },
+  {
+    "model": "deepseek-r1-xhigh",
+    "error": "Empty response",
+    "time": 15.842710018157959
+  }
+]

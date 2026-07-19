@@ -1,0 +1,64 @@
+{
+  "sourceFile": "docs/epics/2026-07-14-memory-system/04-plan.md",
+  "extractedAt": "2026-07-17T21:21:35.001333+00:00",
+  "modelUsed": "deepseek/deepseek-chat",
+  "entities": {
+    "subjects": [
+      {
+        "name": "Organisation Design Team",
+        "subjectKind": "team",
+        "evidence": "\"ownedBy: organisation-design-team\""
+      }
+    ],
+    "objects": [
+      {
+        "name": "Implementation Plan — Memory System Implementation Epic",
+        "objectKind": "document",
+        "evidence": "title: \"Implementation Plan — Memory System Implementation Epic\""
+      },
+      {
+        "name": "FalkorDB",
+        "objectKind": "database",
+        "evidence": "\"FalkorDB Docker deployment is trivial\""
+      },
+      {
+        "name": "Tortoise",
+        "objectKind": "software",
+        "evidence": "\"pip install tortoise\""
+      },
+      {
+        "name": "reflect.py",
+        "objectKind": "software",
+        "evidence": "\"reflect.py generates AAR → writes Events to JSONL\""
+      },
+      {
+        "name": "Memory Orchestrator",
+        "objectKind": "software",
+        "evidence": "\"Memory Orchestrator (S5, ~50 lines)\""
+      },
+      {
+        "name": "Extraction Pipeline",
+        "objectKind": "software",
+        "evidence": "\"Extraction Pipeline (S4, S7, S8)\""
+      },
+      {
+        "name": "JSONL Event Log",
+        "objectKind": "document",
+        "evidence": "\"JSONL Event Log (append-only, source of truth)\""
+      },
+      {
+        "name": "docker-compose.yml",
+        "objectKind": "document",
+        "evidence": "\"docker-compose.yml (S1)\""
+      }
+    ]
+  },
+  "validationWarnings": [
+    "invalid subjectKind 'agent' for 'pi-agent' — stripped",
+    "invalid subjectKind 'agent' for 'Claude Code' — stripped",
+    "invalid subjectKind 'agent' for 'Research agent' — stripped",
+    "invalid subjectKind 'agent' for 'Strategy agent' — stripped",
+    "invalid subjectKind 'agent' for 'Operations agent' — stripped",
+    "invalid subjectKind 'agent' for 'Onboarding agent' — stripped"
+  ]
+}

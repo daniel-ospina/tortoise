@@ -1,0 +1,92 @@
+{
+  "sourceFile": "docs/teams/organisation-design-team/domains (S1)/data/ONTOLOGY.md",
+  "extractedAt": "2026-07-17T21:21:19.147969+00:00",
+  "modelUsed": "deepseek/deepseek-chat",
+  "entities": {
+    "subjects": [
+      {
+        "name": "El Dato App Team",
+        "subjectKind": "team",
+        "evidence": "**El Dato App Team** | `app` | Consumer marketplace, business dashboard, deals, scanner, referrals+loyalty, eldato.com.mx, newsletter | active"
+      },
+      {
+        "name": "El Dato Outreach Team",
+        "subjectKind": "team",
+        "evidence": "**El Dato Outreach Team** | `outreach` | B2B sales, WhatsApp outreach, CRM, owner discovery | active"
+      },
+      {
+        "name": "DMer App Team",
+        "subjectKind": "team",
+        "evidence": "**DMer App Team** | `dmer-app` | IG daemon, desktop app, automation | active"
+      },
+      {
+        "name": "Organisation Design Team",
+        "subjectKind": "team",
+        "evidence": "**Organisation Design Team** | `org-design` | Memory architecture, ontology, agent infrastructure, domains, roles, skills, workflows — cross-domain governance | active"
+      }
+    ],
+    "objects": [
+      {
+        "name": "El Dato — Canonical Ontology v2.0",
+        "objectKind": "document",
+        "evidence": "title: \"El Dato — Canonical Ontology v2.0\""
+      },
+      {
+        "name": "ONTOLOGY.md",
+        "objectKind": "document",
+        "evidence": "`docs/teams/organisation-design-team/domains (S1)/data/ONTOLOGY.md` (v1.1, canonical contract) + `operations/subjects/` (registry)"
+      },
+      {
+        "name": "Memory Architecture",
+        "objectKind": "document",
+        "evidence": "**Memory Architecture** | `docs/teams/organisation-design-team/domains (S1)/operations/2026-06-28-memory-architecture.md` | M0–M2 design, filing contracts, MemPalace architecture"
+      },
+      {
+        "name": "WIKI_SCHEMA",
+        "objectKind": "document",
+        "evidence": "**WIKI_SCHEMA** | `docs/teams/organisation-design-team/domains (S1)/operations/WIKI_SCHEMA.md` | Wiki page structure, entity page templates"
+      },
+      {
+        "name": "ONTOLOGY_SPEC v4.0",
+        "objectKind": "document",
+        "evidence": "**ONTOLOGY_SPEC v4.0** | `docs/teams/eldato-app-team/domains (S1)/data/ONTOLOGY_SPEC_v4.0.md` | Product data model (app-level entities)"
+      },
+      {
+        "name": "AGENTS.md",
+        "objectKind": "document",
+        "evidence": "**AGENTS.md** | `AGENTS.md` | Memory Contracts, gate rules, skill compliance"
+      },
+      {
+        "name": "00_index.md",
+        "objectKind": "document",
+        "evidence": "**00_index.md** | `docs/00_index.md` | Documentation index, topic-to-file routing"
+      },
+      {
+        "name": "Controlled Vocabulary",
+        "objectKind": "document",
+        "evidence": "**Controlled Vocabulary** | `docs/teams/organisation-design-team/domains (S1)/data/controlled_vocabulary.md` | `docStatus`, action status values"
+      },
+      {
+        "name": "Filing Matrix",
+        "objectKind": "document",
+        "evidence": "**Filing Matrix** | `docs/teams/organisation-design-team/domains (S1)/operations/filing-matrix.md` | Physical filing destinations by Subject + Actionability"
+      },
+      {
+        "name": "Agent Swarm Architecture",
+        "objectKind": "document",
+        "evidence": "**Agent Swarm Architecture** | `docs/teams/organisation-design-team/management/future (S4)/agent-swarm-system-architecture.md` | Multi-agent system design — Actions, Events, tool associations"
+      },
+      {
+        "name": "Agent Roles",
+        "objectKind": "document",
+        "evidence": "**Agent Roles** | `docs/teams/organisation-design-team/domains (S1)/product/agent-roles.md` | Role definitions for AI agents — maps to Subject (`subjectKind: role`)"
+      },
+      {
+        "name": "Memory Types Implementation v1",
+        "objectKind": "document",
+        "evidence": "**Memory Types Implementation v1** | `docs/teams/organisation-design-team/domains (S1)/operations/2026-07-01-memory-types-implementation-v1.md` | M0–M2 implementation details, MemPalace integration"
+      }
+    ]
+  },
+  "validationWarnings": []
+}

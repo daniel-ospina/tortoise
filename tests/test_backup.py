@@ -1,0 +1,58 @@
+"""Tests for backup — backup/restore round-trip."""
+from __future__ import annotations
+
+import json
+import os
+import tempfile
+from pathlib import Path
+
+import pytest
+from tortoise.backup import backup, restore
+
+
+def test_backup_creates_timestamped_dir():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Create fake events.jsonl
+        events_path = os.path.join(tmpdir, "events.jsonl")
+        with open(events_path, "w") as f:
+            f.write(json.dumps({"type": "PointAdded", "point": {"id": "p1", "content": "hello"}}) + "\n")
+
+        db_path = os.path.join(tmpdir, "tortoise.db")
+        Path(db_path).write_text("fake db")
+
+        target = backup(db_path=db_path, events_path=events_path,
+                        target_dir=os.path.join(tmpdir, "backups", "manual"))
+
+        assert target.exists()
+        assert (target / "events.jsonl").exists()
+        assert (target / "tortoise.db").exists()
+        manifest = target / "manifest.json"
+        assert manifest.exists()
+        data = json.loads(manifest.read_text())
+        assert data["db"] == "tortoise.db"
+        assert data["events"] == "events.jsonl"
+        assert "backed_up_at" in data
+
+
+def test_restore_replays_events():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Create backup
+        src = Path(tmpdir) / "backup_src"
+        src.mkdir()
+        (src / "events.jsonl").write_text(
+            json.dumps({"type": "PointAdded", "point": {"id": "p1", "content": "test"}}) + "\n"
+        )
+        (src / "manifest.json").write_text('{"backed_up_at":"2026-01-01","db":"tortoise.db","events":"events.jsonl"}')
+
+        dst_events = os.path.join(tmpdir, "restored.jsonl")
+        dst_db = os.path.join(tmpdir, "restored.db")
+
+        result = restore(str(src), db_path=dst_db, events_path=dst_events)
+        assert result["status"] == "ok"
+        assert result["events"] == 1
+        assert os.path.exists(dst_events)
+
+
+def test_restore_missing_dir():
+    result = restore("/nonexistent/backup")
+    assert result["status"].startswith("error")

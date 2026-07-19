@@ -1,0 +1,31 @@
+{
+  "sourceFile": "docs/epics/2026-07-14-memory-system/04-plan.md",
+  "annotatedBy": "pi-agent",
+  "annotatedAt": "2026-07-17T10:00:00Z",
+  "entities": {
+    "subjects": [
+      {"name": "organisation-design-team", "subjectKind": "team", "evidence": "ownedBy: organisation-design-team"},
+      {"name": "pi-agent", "subjectKind": "naturalPerson", "evidence": "Persona: Any agent (pi, Claude Code, sub-agent)"},
+      {"name": "Claude Code", "subjectKind": "naturalPerson", "evidence": "Any agent (pi, Claude Code, sub-agent)"}
+    ],
+    "objects": [
+      {"name": "FalkorDB", "objectKind": "software", "evidence": "FalkorDB Docker deployment is trivial: 15-line docker-compose.yml"},
+      {"name": "Tortoise", "objectKind": "software", "evidence": "JSONL→graph projection is already built in Tortoise"},
+      {"name": "Docker", "objectKind": "software", "evidence": "FalkorDB Docker deployment"},
+      {"name": "reflect.py", "objectKind": "code", "evidence": "reflect.py fires → session context extracted → Events written to JSONL"},
+      {"name": "reflect-hook.ts", "objectKind": "code", "evidence": "Session quit → reflect-hook.ts captures session context"},
+      {"name": "Tortoise projection", "objectKind": "software", "evidence": "Tortoise projection → FalkorDB updated"},
+      {"name": "JSONL", "objectKind": "infrastructure", "evidence": "Events written to JSONL (append-only)"},
+      {"name": "FalkorDBLite", "objectKind": "software", "evidence": "FalkorDBLite→Docker is a constructor swap"},
+      {"name": "docker-compose.yml", "objectKind": "code", "evidence": "FalkorDB Docker deployment is trivial: 15-line docker-compose.yml"},
+      {"name": "FastGraphRAG", "objectKind": "software", "evidence": "Two-tier extraction validated by FastGraphRAG"},
+      {"name": "GraphPlanner", "objectKind": "software", "evidence": "cross-ontology routing state-of-the-art is LLM-dispatch (GraphPlanner, ROUTERHGC)"},
+      {"name": "ROUTERHGC", "objectKind": "software", "evidence": "LLM-dispatch (GraphPlanner, ROUTERHGC)"},
+      {"name": "ONTOLOGY.md", "objectKind": "document", "evidence": "camelCase throughout (matches ONTOLOGY §7.1-7.6)"},
+      {"name": "documentIndexer", "objectKind": "software", "evidence": "Document Indexer (S8) extracts metadata fields"},
+      {"name": "Semantic Extractor", "objectKind": "software", "evidence": "Semantic Extractor (S7): extract Subjects + Objects"},
+      {"name": "Memory Orchestrator", "objectKind": "software", "evidence": "Memory Orchestrator routes to semantic + doc index ontologies"},
+      {"name": "Epistemic Extractor", "objectKind": "software", "evidence": "Epistemic Extractor (S4): split into ## sections, extract Points"}
+    ]
+  }
+}

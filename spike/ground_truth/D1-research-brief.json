@@ -1,0 +1,47 @@
+{
+  "sourceFile": "docs/epics/2026-07-14-memory-system/02-research-brief.md",
+  "annotatedBy": "pi-agent",
+  "annotatedAt": "2026-07-17T10:00:00Z",
+  "entities": {
+    "subjects": [
+      {"name": "organisation-design-team", "subjectKind": "team", "evidence": "ownedBy: organisation-design-team"},
+      {"name": "pi-agent", "subjectKind": "naturalPerson", "evidence": "pi, Claude Code"},
+      {"name": "Claude Code", "subjectKind": "naturalPerson", "evidence": "pi, Claude Code"}
+    ],
+    "objects": [
+      {"name": "FalkorDB", "objectKind": "software", "evidence": "FalkorDB (Docker) is the primary graph database"},
+      {"name": "ONTOLOGY.md v2.0", "objectKind": "document", "evidence": "ONTOLOGY.md v2.0 — canonical entity model"},
+      {"name": "Tortoise", "objectKind": "software", "evidence": "Tortoise (1,140 lines) implements epistemic extractor"},
+      {"name": "MemPalace", "objectKind": "software", "evidence": "MemPalace (archive only)"},
+      {"name": "Graphiti", "objectKind": "software", "evidence": "Graphiti role now reduced to ingestion layer only"},
+      {"name": "Graphiti-core", "objectKind": "software", "evidence": "Graphiti-core was flagged as AGPL concern"},
+      {"name": "LightRAG", "objectKind": "software", "evidence": "LightRAG (semantic doc retrieval)"},
+      {"name": "FalkorDBLite", "objectKind": "software", "evidence": "FalkorDBLite (embedded)"},
+      {"name": "Docker", "objectKind": "software", "evidence": "FalkorDB (Docker) is the primary graph database"},
+      {"name": "SQLite", "objectKind": "software", "evidence": "MemPalace SQLite (degraded-mode read fallback)"},
+      {"name": "LanceDB", "objectKind": "software", "evidence": "LanceDB recommendation superseded by FalkorDB"},
+      {"name": "Obsidian", "objectKind": "software", "evidence": "DMer/consumer-focused (Obsidian vault)"},
+      {"name": "ADR-004", "objectKind": "document", "evidence": "ADR-004-graphiti-epistemic-storage.md"},
+      {"name": "agent-swarm-system-architecture.md", "objectKind": "document", "evidence": "agent-swarm-system-architecture.md — 3-layer VSM architecture"},
+      {"name": "agent-roles.md", "objectKind": "document", "evidence": "agent-roles.md — role definitions"},
+      {"name": "00-convergence.md", "objectKind": "document", "evidence": "00-convergence.md — current state of convergence"},
+      {"name": "reflect.py", "objectKind": "code", "evidence": "reflect.py — episodic collection (650 lines)"},
+      {"name": "PROV-O", "objectKind": "standard", "evidence": "PROV-O (Activity as temporal container)"},
+      {"name": "CIDOC-CRM", "objectKind": "standard", "evidence": "CIDOC-CRM (E5 Event hierarchy)"},
+      {"name": "schema.org", "objectKind": "standard", "evidence": "schema.org (Event as top-level type)"},
+      {"name": "Wikidata", "objectKind": "database", "evidence": "Wikidata (P31 multi-axial typing)"},
+      {"name": "Dublin Core", "objectKind": "standard", "evidence": "Dublin Core (general + domain-specific type)"},
+      {"name": "RDF/OWL", "objectKind": "standard", "evidence": "RDF/OWL (rdf:type + custom property)"},
+      {"name": "Apache-2.0", "objectKind": "agreement", "evidence": "Graphiti-core is Apache-2.0"},
+      {"name": "MIT", "objectKind": "agreement", "evidence": "MemPalace is MIT"},
+      {"name": "GraphBLAS", "objectKind": "software", "evidence": "FalkorDB GraphBLAS, unlimited hops"},
+      {"name": "HNSW", "objectKind": "software", "evidence": "FalkorDB HNSW"},
+      {"name": "entity_types.py", "objectKind": "code", "evidence": "entity_types.py blocks runtime"},
+      {"name": "memory-types-implementation-v1.md", "objectKind": "document", "evidence": "memory-types-implementation-v1.md — self-declared superseded"},
+      {"name": "convergence-audit.md", "objectKind": "document", "evidence": "convergence-audit.md — overlap analysis"},
+      {"name": "extraction-architecture.md", "objectKind": "document", "evidence": "extraction-architecture.md — absorbed into ONTOLOGY.md"},
+      {"name": "ontology-v2-migration-impact.md", "objectKind": "document", "evidence": "ontology-v2-migration-impact.md — affected files inventory"},
+      {"name": "02-research-brief.md", "objectKind": "document", "evidence": "02-research-brief.md — this document"}
+    ]
+  }
+}

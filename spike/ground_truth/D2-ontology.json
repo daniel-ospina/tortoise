@@ -1,0 +1,36 @@
+{
+  "sourceFile": "docs/teams/organisation-design-team/domains (S1)/data/ONTOLOGY.md",
+  "annotatedBy": "pi-agent",
+  "annotatedAt": "2026-07-17T10:00:00Z",
+  "entities": {
+    "subjects": [
+      {"name": "organisation-design-team", "subjectKind": "team", "evidence": "ownedBy: organisation-design-team"},
+      {"name": "El Dato App Team", "subjectKind": "team", "evidence": "El Dato App Team — Consumer marketplace"},
+      {"name": "El Dato Outreach Team", "subjectKind": "team", "evidence": "El Dato Outreach Team — B2B sales"},
+      {"name": "DMer App Team", "subjectKind": "team", "evidence": "DMer App Team — IG daemon"},
+      {"name": "Organisation Design Team", "subjectKind": "team", "evidence": "Organisation Design Team — Memory architecture"}
+    ],
+    "objects": [
+      {"name": "FalkorDB", "objectKind": "software", "evidence": "FalkorDB — canonical graph store"},
+      {"name": "Graphiti", "objectKind": "software", "evidence": "Graphiti role now reduced to ingestion layer only"},
+      {"name": "MemPalace", "objectKind": "software", "evidence": "MemPalace role: capture + verbatim archive"},
+      {"name": "Tortoise", "objectKind": "software", "evidence": "Tortoise — epistemic extractor"},
+      {"name": "SQLite", "objectKind": "software", "evidence": "Embedded SQLite"},
+      {"name": "PROV-O", "objectKind": "standard", "evidence": "PROV-O (Activity as first-class class)"},
+      {"name": "CIDOC-CRM", "objectKind": "standard", "evidence": "CIDOC-CRM (E5 Event hierarchy)"},
+      {"name": "schema.org", "objectKind": "standard", "evidence": "schema.org (Action subclass of Thing)"},
+      {"name": "Wikidata", "objectKind": "database", "evidence": "Wikidata (P31 multi-axial typing)"},
+      {"name": "Dublin Core", "objectKind": "standard", "evidence": "Dublin Core (general + domain-specific type)"},
+      {"name": "RDF/OWL", "objectKind": "standard", "evidence": "RDF/OWL (rdf:type + custom property)"},
+      {"name": "W3C ORG", "objectKind": "standard", "evidence": "W3C ORG — Organizational hierarchy"},
+      {"name": "PROV", "objectKind": "standard", "evidence": "PROV — wasGeneratedBy"},
+      {"name": "Dublin Core Terms", "objectKind": "standard", "evidence": "dcterms:created"},
+      {"name": "ISO 27001", "objectKind": "standard", "evidence": "classificationLevel: Data sensitivity — ISO 27001"},
+      {"name": "activity-strea.ms", "objectKind": "standard", "evidence": "activity-strea.ms"},
+      {"name": "GraphBLAS", "objectKind": "software", "evidence": "FalkorDB GraphBLAS, unlimited hops"},
+      {"name": "HNSW", "objectKind": "software", "evidence": "FalkorDB Built-in HNSW"},
+      {"name": "ONTOLOGY.md v2.0", "objectKind": "document", "evidence": "ONTOLOGY.md v2.0 — canonical ontology"},
+      {"name": "WIKI_SCHEMA.md", "objectKind": "document", "evidence": "WIKI_SCHEMA.md"}
+    ]
+  }
+}

@@ -1,0 +1,142 @@
+{
+  "sourceFile": "docs/epics/2026-07-14-memory-system/02-research-brief.md",
+  "extractedAt": "2026-07-17T21:20:51.620500+00:00",
+  "modelUsed": "deepseek/deepseek-chat",
+  "entities": {
+    "subjects": [
+      {
+        "name": "organisation-design-team",
+        "subjectKind": "team",
+        "evidence": "ownedBy: organisation-design-team"
+      }
+    ],
+    "objects": [
+      {
+        "name": "Research Brief — Memory System Implementation Epic",
+        "objectKind": "document",
+        "evidence": "title: \"Research Brief — Memory System Implementation Epic\""
+      },
+      {
+        "name": "ONTOLOGY.md",
+        "objectKind": "document",
+        "evidence": "`ONTOLOGY.md` v2.0 | ✅ KEEP | Ratified canonical ontology."
+      },
+      {
+        "name": "agent-swarm-system-architecture.md",
+        "objectKind": "document",
+        "evidence": "`agent-swarm-system-architecture.md` | ✅ KEEP | Three-layer VSM architecture"
+      },
+      {
+        "name": "agent-roles.md",
+        "objectKind": "document",
+        "evidence": "`agent-roles.md` | ✅ KEEP | Role definitions, autonomy levels, fractal viability."
+      },
+      {
+        "name": "memory-types-implementation-v1.md",
+        "objectKind": "document",
+        "evidence": "`memory-types-implementation-v1.md` | ⚠️ DEPRECATE | Self-declared superseded."
+      },
+      {
+        "name": "docs/epics/2026-07-06-memory-system/",
+        "objectKind": "document",
+        "evidence": "`docs/epics/2026-07-06-memory-system/` (3 files) | 🔴 DEPRECATE | Pre-unified ontology."
+      },
+      {
+        "name": "02-research-brief.md",
+        "objectKind": "document",
+        "evidence": "`02-research-brief.md` (old) | 🔴 DEPRECATE | LanceDB recommendation superseded by FalkorDB."
+      },
+      {
+        "name": "03-epic-doc.md",
+        "objectKind": "document",
+        "evidence": "`03-epic-doc.md` (old) | 🔴 DEPRECATE | Issue map (#6022–#6030) superseded."
+      },
+      {
+        "name": "00-convergence.md",
+        "objectKind": "document",
+        "evidence": "`00-convergence.md` (2026-07-13) | ✅ KEEP | Current state of convergence."
+      },
+      {
+        "name": "extraction-architecture.md",
+        "objectKind": "document",
+        "evidence": "`extraction-architecture.md` | ⚠️ DEPRECATE | Absorbed into ONTOLOGY.md §8 and this brief."
+      },
+      {
+        "name": "memory-implementation-convergence.md",
+        "objectKind": "document",
+        "evidence": "`memory-implementation-convergence.md` | ⚠️ DEPRECATE | Quick plan — now absorbed into this epic."
+      },
+      {
+        "name": "convergence-audit.md",
+        "objectKind": "document",
+        "evidence": "`convergence-audit.md` | ⚠️ DEPRECATE | Overlap analysis complete."
+      },
+      {
+        "name": "2026-07-05-epistemic-graph-phase1-implementation-plan.md",
+        "objectKind": "document",
+        "evidence": "`2026-07-05-epistemic-graph-phase1-implementation-plan.md` | 🔴 DEPRECATE | Designed for Graphiti + FalkorDB + custom epistemic_graph Python library."
+      },
+      {
+        "name": "2026-07-06-epistemic-graph-design-synthesis.md",
+        "objectKind": "document",
+        "evidence": "`2026-07-06-epistemic-graph-design-synthesis.md` | 🔴 DEPRECATE | Design synthesis extending Phase 1."
+      },
+      {
+        "name": "2026-07-06-epistemic-graph-landscape-recap.md",
+        "objectKind": "document",
+        "evidence": "`2026-07-06-epistemic-graph-landscape-recap.md` | 🔴 DEPRECATE | Competitive landscape analysis."
+      },
+      {
+        "name": "ADR-004-graphiti-epistemic-storage.md",
+        "objectKind": "document",
+        "evidence": "`ADR-004-graphiti-epistemic-storage.md` | ⚠️ UPDATE | Accepted FalkorDB (Docker) as canonical KG backend."
+      },
+      {
+        "name": "ONTOLOGY.md v2.0",
+        "objectKind": "document",
+        "evidence": "**ONTOLOGY.md v2.0:** `docs/teams/organisation-design-team/domains (S1)/data/ONTOLOGY.md` — canonical entity model"
+      },
+      {
+        "name": "Agent Swarm Architecture",
+        "objectKind": "document",
+        "evidence": "**Agent Swarm Architecture:** `docs/teams/organisation-design-team/management/future (S4)/agent-swarm-system-architecture.md` — 3-layer VSM architecture, 5 memory types"
+      },
+      {
+        "name": "Agent Roles",
+        "objectKind": "document",
+        "evidence": "**Agent Roles:** `docs/teams/organisation-design-team/domains (S1)/product/agent-roles.md` — role definitions"
+      },
+      {
+        "name": "ADR-004",
+        "objectKind": "document",
+        "evidence": "**ADR-004:** `docs/teams/organisation-design-team/decisions/ADR-004-graphiti-epistemic-storage.md` — FalkorDB decision (partially superseded)"
+      },
+      {
+        "name": "Convergence (current state)",
+        "objectKind": "document",
+        "evidence": "**Convergence (current state):** `docs/epics/2026-07-13-memory-implementation/00-convergence.md`"
+      },
+      {
+        "name": "Convergence Audit",
+        "objectKind": "document",
+        "evidence": "**Convergence Audit:** `docs/plans/2026-07-13-convergence-audit.md` — overlap analysis, priority actions"
+      },
+      {
+        "name": "Tortoise",
+        "objectKind": "document",
+        "evidence": "**Tortoise:** `negation-game-explorations/tortoise/` — epistemic extractor (1,140 lines, 12 modules)"
+      },
+      {
+        "name": "reflect.py",
+        "objectKind": "document",
+        "evidence": "**reflect.py:** `operations/memory/reflect.py` — episodic collection (650 lines)"
+      },
+      {
+        "name": "ONTOLOGY v2 Migration Impact",
+        "objectKind": "document",
+        "evidence": "**ONTOLOGY v2 Migration Impact:** `research/reflection-agentic-systems/ontology-v2-migration-impact.md` — affected files inventory"
+      }
+    ]
+  },
+  "validationWarnings": []
+}

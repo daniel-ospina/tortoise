@@ -1,0 +1,38 @@
+[project]
+name = "tortoise"
+version = "0.1.0"
+requires-python = ">=3.10"
+license = "MIT"
+readme = {file = "README.md", content-type = "text/markdown"}
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "falkordb>=1.0",
+    "redislite>=4.0",
+    "pyyaml>=6.0",
+    "fastmcp>=2.0",
+    "prometheus-client>=0.16",
+]
+
+[project.scripts]
+tortoise = "tortoise.__main__:main"
+tortoise-ingest = "tortoise.ingest:main"
+tortoise-serve = "tortoise.deployment:serve"
+
+[project.optional-dependencies]
+embeddings = ["sentence-transformers>=2.0", "scikit-learn>=1.0"]
+quadrature = ["jax>=0.4"]
+
+[tool.setuptools.packages.find]
+include = ["tortoise*"]
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"

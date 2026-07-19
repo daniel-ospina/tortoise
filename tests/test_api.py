@@ -1,0 +1,358 @@
+"""API coverage tests — remaining gaps in api.py.
+
+Runs standalone:  .venv/bin/python tests/test_api.py
+or via pytest if installed.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+import tempfile
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from tortoise.api import EventAPI, provenance          # noqa: E402
+from tortoise.idempotency import document_key          # noqa: E402
+from tortoise.log import EventLog                       # noqa: E402
+from tortoise.projection import fold                    # noqa: E402
+
+
+# ── helpers (same pattern as test_m1.py) ──────────────────────────────
+
+def _tmp(name: str) -> str:
+    return os.path.join(tempfile.mkdtemp(prefix="tortoise_"), name)
+
+
+def _api(projection=None):
+    log = EventLog(_tmp("events.jsonl"))
+    return EventAPI(log, initiated_by="extractor", agent_id="test",
+                    projection=projection), log
+
+
+def _build(api, source="doc.txt"):
+    prov = provenance(source, [0, 10], "quote", extracted_by="test@0")
+    a = api.add_point("we should raise B slowly", "ctx", prov)
+    b = api.add_point("fast raises wreck early buyers", "ctx", prov)
+    op = api.add_operator("IMPL", [b, a], "ctx", prov)
+    return a, b, op
+
+
+# ── coverage gap: lines 76-78 (retract superseded points) ────────────
+
+def test_reprocess_retracts_superseded_points():
+    """begin_ingest with new version emits PointRetracted for old-run points."""
+    api, log = _api()
+    text = "the quick brown fox"
+    prov = provenance("doc.txt", [0, 19], text, extracted_by="test@0")
+
+    # Run 1 (v1)
+    api.begin_ingest("doc.txt", "v1", document_key(text))
+    p1 = api.add_point("old extraction", "ctx", prov)
+
+    # Run 2 (v2) — should retract p1
+    r2 = api.begin_ingest("doc.txt", "v2", document_key(text))
+    assert not r2.skip
+
+    events = log.read_all()
+    retracted_ids = [
+        e["id"] for e in events if e["type"] == "PointRetracted"
+    ]
+    assert p1 in retracted_ids, (
+        f"retracted ids {retracted_ids} should contain {p1}"
+    )
+
+    # Verify fold: old point gone
+    points = fold(events)
+    assert p1 not in points, "superseded point must not survive fold"
+
+    print("PASS test_reprocess_retracts_superseded_points")
+
+
+def test_reprocess_retracts_only_old_run_points():
+    """Superseded retraction targets only the old run, not fresh points."""
+    api, log = _api()
+    text = "abc"
+    prov = provenance("doc.txt", [0, 3], text, extracted_by="test@0")
+
+    api.begin_ingest("doc.txt", "v1", document_key(text))
+    old_a = api.add_point("old A", "ctx", prov)
+    old_b = api.add_point("old B", "ctx", prov)
+
+    # Reprocess: old points retracted, new points in fresh run survive
+    api.begin_ingest("doc.txt", "v2", document_key(text))
+    new_c = api.add_point("new C", "ctx", prov)
+
+    events = log.read_all()
+    retracted = {e["id"] for e in events if e["type"] == "PointRetracted"}
+    assert old_a in retracted and old_b in retracted, \
+        "both old-run points must be retracted"
+    assert new_c not in retracted, \
+        "point from new run must NOT be among retracted"
+
+    points = fold(events)
+    assert new_c in points
+    assert old_a not in points and old_b not in points
+
+    print("PASS test_reprocess_retracts_only_old_run_points")
+
+
+# ── coverage gap: lines 115-116 (auto-compute grounding) ─────────────
+
+class _MockGroundingProjection:
+    """Projection stub with compute_grounding — for testing the auto-trigger."""
+
+    def __init__(self):
+        self.calls: list[dict] = []
+        self.points: dict[str, dict] = {}
+
+    def apply(self, event: dict) -> None:
+        from tortoise.projection import _apply_one
+        _apply_one(self.points, event)
+
+    def compute_grounding(self):
+        self.calls.append({"called": True})
+
+    def rebuild(self, log):
+        self.points = fold(log.read_all())
+
+
+def test_resolution_event_triggers_grounding():
+    """add_point with context='resolution-event' calls compute_grounding."""
+    proj = _MockGroundingProjection()
+    api, _log = _api(projection=proj)
+    prov = provenance("doc.txt", [0, 1], "x", extracted_by="test@0")
+
+    api.add_point("foo", "resolution-event", prov)
+    assert len(proj.calls) == 1, "compute_grounding must fire once"
+
+    print("PASS test_resolution_event_triggers_grounding")
+
+
+def test_normal_context_does_not_trigger_grounding():
+    """add_point with normal context must NOT call compute_grounding."""
+    proj = _MockGroundingProjection()
+    api, _log = _api(projection=proj)
+    prov = provenance("doc.txt", [0, 1], "x", extracted_by="test@0")
+
+    api.add_point("bar", "ctx", prov)
+    assert len(proj.calls) == 0, "normal context must not trigger grounding"
+
+    print("PASS test_normal_context_does_not_trigger_grounding")
+
+
+def test_resolution_event_no_projection_safe():
+    """resolution-event with no projection attached must not crash."""
+    api, log = _api(projection=None)
+    prov = provenance("doc.txt", [0, 1], "x", extracted_by="test@0")
+    pid = api.add_point("z", "resolution-event", prov)
+    assert pid and isinstance(pid, str)
+    print("PASS test_resolution_event_no_projection_safe")
+
+
+# ── add_operator edge cases ──────────────────────────────────────────
+
+def test_add_operator_normalizes_dict_inputs():
+    """Inputs as dicts with 'id' key → normalized to ULID strings."""
+    api, log = _api()
+    prov = provenance("doc.txt", [0, 1], "x", extracted_by="test@0")
+    pid = api.add_operator(
+        "NAND",
+        [{"id": "aaa", "x": 1}, {"id": "bbb", "y": 2}],
+        "ctx", prov,
+    )
+    points = fold(log.read_all())
+    assert points[pid]["operator"]["inputs"] == ["aaa", "bbb"]
+    print("PASS test_add_operator_normalizes_dict_inputs")
+
+
+class _FakeNode:
+    """Object with .id attribute — simulates a Point-like object."""
+    def __init__(self, id_: str):
+        self.id = id_
+
+
+def test_add_operator_normalizes_object_inputs():
+    """Inputs as objects with .id → normalized to ULID strings."""
+    api, log = _api()
+    prov = provenance("doc.txt", [0, 1], "x", extracted_by="test@0")
+    pid = api.add_operator(
+        "IMPL",
+        [_FakeNode("n1"), _FakeNode("n2")],
+        "ctx", prov,
+    )
+    points = fold(log.read_all())
+    assert points[pid]["operator"]["inputs"] == ["n1", "n2"]
+    print("PASS test_add_operator_normalizes_object_inputs")
+
+
+def test_add_operator_invalid_type():
+    """Invalid op_type raises AssertionError."""
+    api, _log = _api()
+    prov = provenance("doc.txt", [0, 1], "x", extracted_by="test@0")
+    try:
+        api.add_operator("XOR", ["a"], "ctx", prov)
+        assert False, "should have raised"
+    except AssertionError as e:
+        assert "XOR" in str(e)
+    print("PASS test_add_operator_invalid_type")
+
+
+def test_add_operator_fallback_inputs():
+    """Non-dict, non-.id inputs pass through as-is (raw strings)."""
+    api, log = _api()
+    prov = provenance("doc.txt", [0, 1], "x", extracted_by="test@0")
+    pid = api.add_operator("IMPL", ["raw_str_1", "raw_str_2"], "ctx", prov)
+    points = fold(log.read_all())
+    assert points[pid]["operator"]["inputs"] == ["raw_str_1", "raw_str_2"]
+    print("PASS test_add_operator_fallback_inputs")
+
+
+# ── _emit corrects passthrough ───────────────────────────────────────
+
+def test_emit_sets_corrects():
+    """_emit passes corrects to the event dict."""
+    api, log = _api()
+    api.current_run = "run-1"
+    ev = api._emit("TestEvent", corrects="ev-abc", key="val")
+    assert ev["corrects"] == "ev-abc"
+    assert ev["type"] == "TestEvent"
+    assert ev["initiated_by"] == "extractor"
+    assert ev["agent_id"] == "test"
+    assert ev["key"] == "val"
+    assert "event_id" in ev and "ts" in ev
+    # Verify in log
+    stored = [e for e in log.read_all() if e["event_id"] == ev["event_id"]]
+    assert len(stored) == 1 and stored[0]["corrects"] == "ev-abc"
+    print("PASS test_emit_sets_corrects")
+
+
+def test_emit_no_corrects():
+    """_emit with no corrects → corrects is None in the event."""
+    api, log = _api()
+    ev = api._emit("NoCorrectsEvent", payload=42)
+    assert ev["corrects"] is None
+    stored = [e for e in log.read_all() if e["event_id"] == ev["event_id"]]
+    assert stored[0]["corrects"] is None
+    print("PASS test_emit_no_corrects")
+
+
+# ── begin_ingest force ────────────────────────────────────────────────
+
+def test_begin_ingest_force():
+    """force=True skips the idempotency cache."""
+    api, log = _api()
+    text = "force me"
+    prov = provenance("doc.txt", [0, 3], text, extracted_by="test@0")
+
+    r1 = api.begin_ingest("doc.txt", "v1", document_key(text))
+    assert not r1.skip
+    old = api.add_point("old", "ctx", prov)
+
+    # Same key + version, but force → must reprocess
+    r2 = api.begin_ingest("doc.txt", "v1", document_key(text), force=True)
+    assert not r2.skip, "force=True must skip the idempotency gate"
+    assert r2.run_id != r1.run_id, "force=True must produce a new run_id"
+
+    points = fold(log.read_all())
+    assert old not in points, "forced reprocess must retract old points"
+    print("PASS test_begin_ingest_force")
+
+
+def test_begin_ingest_force_supersedes():
+    """force=True with no prior points doesn't crash (superseded=[])."""
+    api, _log = _api()
+    text = "clean slate"
+    r1 = api.begin_ingest("doc.txt", "v1", document_key(text), force=True)
+    assert not r1.skip
+    # No points added in v1 at all → superseded empty → retraction loop is no-op
+    r2 = api.begin_ingest("doc.txt", "v1", document_key(text), force=True)
+    assert not r2.skip
+    print("PASS test_begin_ingest_force_supersedes")
+
+
+# ── merge_points ─────────────────────────────────────────────────────
+
+def test_merge_points_emits_and_removes():
+    """merge_points emits PointsMerged and removes merge_ids from fold."""
+    api, log = _api()
+    a, b, op = _build(api)
+    ev = api.merge_points(keep_id=a, merge_ids=[b], corrects=op)
+    assert ev and isinstance(ev, str)
+
+    # Verify PointsMerged event in the log
+    merged_events = [e for e in log.read_all() if e["type"] == "PointsMerged"]
+    assert len(merged_events) == 1
+    me = merged_events[0]
+    assert me["keep_id"] == a
+    assert me["merge_ids"] == [b]
+    assert me["corrects"] == op
+
+    # Verify fold: b removed, a remains
+    points = fold(log.read_all())
+    assert a in points
+    assert b not in points, "merged-away point must be absent from fold"
+    print("PASS test_merge_points_emits_and_removes")
+
+
+def test_merge_points_no_corrects():
+    """merge_points with corrects=None works fine."""
+    api, log = _api()
+    a, b, _op = _build(api)
+    ev = api.merge_points(keep_id=a, merge_ids=[b])
+    merged = [e for e in log.read_all() if e["type"] == "PointsMerged"]
+    assert merged[0]["corrects"] is None
+    assert b not in fold(log.read_all())
+    print("PASS test_merge_points_no_corrects")
+
+
+def test_projection_matches_log_after_every_mutation():
+    """#12: projection state == fold(log) after every API mutation."""
+    from tortoise.projection import InMemoryProjection
+    proj = InMemoryProjection()
+    api, log = _api(projection=proj)
+
+    def _check():
+        assert proj.points == fold(log.read_all()), \
+            f"projection drifted from log after {log.read_all()[-1]['type']}"
+
+    prov = provenance("doc.txt", [0, 10], "quote", extracted_by="test@0")
+
+    # add_point
+    a = api.add_point("statement A", "ctx", prov)
+    _check()
+
+    b = api.add_point("statement B", "ctx", prov)
+    _check()
+
+    # add_operator
+    op = api.add_operator("IMPL", [b, a], "ctx", prov)
+    _check()
+
+    # revise_point
+    api.revise_point(a, new_content="revised A", corrects="fix-1")
+    _check()
+
+    # retract_point
+    api.retract_point(b, corrects="fix-2")
+    _check()
+
+    # merge_points
+    c = api.add_point("statement C", "ctx", prov)
+    api.merge_points(keep_id=op, merge_ids=[c])
+    _check()
+
+    print("PASS test_projection_matches_log_after_every_mutation")
+
+
+# ── runner ────────────────────────────────────────────────────────────
+
+def _run_all():
+    for name, fn in sorted(globals().items()):
+        if name.startswith("test_") and callable(fn):
+            fn()
+    print("\nall API coverage tests passed")
+
+
+if __name__ == "__main__":
+    _run_all()

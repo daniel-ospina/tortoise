@@ -1,0 +1,381 @@
+"""TORT-MCP-001: MCP server wrapping TortoiseSDK. Stdio transport, ~10 tools."""
+from __future__ import annotations
+
+from fastmcp import FastMCP
+from tortoise.auth import is_dev_mode
+from tortoise.sdk import TortoiseSDK
+from tortoise import monitoring
+
+
+# ── Safety annotations ───────────────────────────────────────────
+# readOnlyHint=true: agent auto-approves, no confirmation needed
+# destructiveHint=true: agent MUST get human confirmation
+# idempotentHint=true: repeated calls have no extra side effects
+
+mcp = FastMCP("tortoise")
+sdk = TortoiseSDK()
+
+# Announce auth mode at startup
+if is_dev_mode():
+    import logging
+    _log = logging.getLogger(__name__)
+    _log.warning("TORTOISE_API_KEY not set — running in dev mode (no auth)")
+
+
+def _safe(fn, *args, **kwargs):
+    """Call fn; return error dict on exception instead of raising.
+
+    Auth: In production mode (TORTOISE_API_KEY set), require_auth() is
+    enforced at the HTTP transport layer (health-server). The stdio MCP
+    transport cannot carry HTTP headers, so auth is deferred to the
+    health-server endpoint. Dev mode (no key) is always unlocked.
+    """
+    try:
+        return fn(*args, **kwargs)
+    except Exception as e:
+        monitoring.record_error()
+        return {"error": str(e)}
+
+
+@mcp.tool()
+def tortoise_create_point(kind: str, content: str, context: str | None = None,
+                          authoredBy: str | None = None,
+                          props: dict | None = None) -> dict:
+    """Create a Point node (statement, decision, vision, hypothesis, etc.)."""
+    merged = dict(props or {})
+    if context:
+        merged["context"] = context
+    if authoredBy:
+        merged["authoredBy"] = authoredBy
+    return _safe(sdk.create_point, kind, content, **merged)
+
+
+@mcp.tool()
+def tortoise_query(kind: str | None = None, context: str | None = None,
+                   filters: dict | None = None) -> list[dict]:
+    """Query points by pointKind, context, and/or property filters."""
+    return _safe(sdk.query, kind, context, **(filters or {}))
+
+
+@mcp.tool()
+def tortoise_paginated_query(kind: str | None = None, context: str | None = None,
+                             skip: int = 0, limit: int = 20,
+                             filters: dict | None = None) -> dict:
+    """Query points with SKIP/LIMIT pagination. Returns {results, total, hasMore}."""
+    return _safe(sdk.paginated_query, kind, context, skip=skip, limit=limit,
+                 **(filters or {}))
+
+
+@mcp.tool()
+def tortoise_check_structure() -> list[dict]:
+    """Check Gate 0→4 chain integrity (orphans, dangling refs)."""
+    return _safe(sdk.check_structure)
+
+
+@mcp.tool()
+def tortoise_summarize_structure() -> dict:
+    """Count points per Gate (by context). Returns {gateN_*, total}."""
+    return _safe(sdk.summarize_structure)
+
+
+@mcp.tool()
+def tortoise_get_point(id: str) -> dict:
+    """Get a single Point by ID. Returns all properties, or empty dict."""
+    return _safe(sdk.get_point, id)
+
+
+# ── Entity Resolution (GAP-01 #6987) ──────────────────────────
+
+@mcp.tool()
+def tortoise_suggest_entry_points(query: str, limit: int = 5,
+                                  kind_filter: str | None = None) -> list[dict]:
+    """Entity resolution — NL query → matching entities from the graph.
+
+    String match on content (Cypher CONTAINS) + embedding fallback.
+    kind_filter filters by n.context (namespace).
+    Returns [{id, name, kind, confidence}] sorted by confidence DESC.
+    """
+    return _safe(sdk.suggest_entry_points, query, limit=limit, kind_filter=kind_filter)
+
+
+# ── Semantic Search (#6990) ────────────────────────────────────
+
+@mcp.tool()
+def tortoise_search(query: str, kind: str | None = None,
+                    context: str | None = None,
+                    threshold: float = 0.3, limit: int = 10) -> list[dict]:
+    """Semantic/vector search over Points. Returns ranked [{id, content, similarity, snippet}, ...]."""
+    return _safe(sdk.search, query, kind=kind, context=context,
+                 threshold=threshold, limit=limit)
+
+
+# ── EP Belief Propagation (#6908) ────────────────────────────────
+
+@mcp.tool()
+def tortoise_compute_confidence(factors: list | None = None,
+                    evidence: dict | None = None) -> dict:
+    """Compute confidence via EP belief propagation. Returns {iterations, converged, confidences}."""
+    return _safe(sdk.compute_confidence, factors, evidence)
+
+
+@mcp.tool()
+def tortoise_set_point_baseline(claim_id: str, alpha: float, beta: float) -> dict:
+    """Set Beta prior evidence for a claim."""
+    return _safe(sdk.set_point_baseline, claim_id, alpha, beta)
+
+
+@mcp.tool()
+def tortoise_get_confidence(claim_id: str) -> dict:
+    """Get EP confidence for a claim: {mean, variance, alpha, beta}."""
+    return _safe(sdk.get_confidence, claim_id)
+
+
+
+@mcp.tool()
+def tortoise_update_point(id: str, props: dict) -> dict:
+    """Update properties on a Point. Safe — modifies one Point only."""
+    return _safe(sdk.update_point, id, **(props or {}))
+
+@mcp.tool()
+def tortoise_create_operator(op_type: str, source_id: str, target_ids: list[str]) -> dict:
+    """Create an operator connecting Points.
+    
+    op_type: 'IMPL' (A supports B), 'NAND' (A contradicts B),
+             'composedOf' (parent built from children).
+    source_id: source/parent Point ID.
+    target_ids: target/child Point IDs (1 for IMPL/NAND, N for composedOf).
+    """
+    return _safe(sdk.create_operator, op_type, source_id, target_ids)
+
+
+@mcp.tool()
+def tortoise_delete_point(id: str) -> dict:
+    """Delete a Point. DESTRUCTIVE — requires human confirmation. Cannot be undone."""
+    return _safe(sdk.delete_point_wrapped, id)
+
+
+@mcp.tool()
+def tortoise_invalidate(id: str, corrected_by_id: str) -> dict:
+    """Mark a Point outdated with a CORRECTS edge from the correcting Point.
+
+    The `corrected_by_id` point CORRECTS the invalidated point.
+    Returns {invalidated, id, corrected_by}.
+    """
+    return _safe(sdk.invalidate_point, id, corrected_by_id)
+
+
+@mcp.tool()
+def tortoise_supersede(old_id: str, new_id: str) -> dict:
+    """Atomically replace old Point with new — CORRECTS edge + outdated flag.
+
+    Equivalent to invalidate(old_id, new_id) — marks old outdated,
+    creates CORRECTS edge from new to old.
+    Returns {invalidated, id, corrected_by}.
+    """
+    return _safe(sdk.supersede_point, old_id, new_id)
+
+
+
+# ── Navigation (#6962, #6963, #6964) ─────────────────────────────
+
+@mcp.tool()
+def tortoise_entity_profile(entity_id: str, hops: int = 2,
+                             graph_name: str = "tortoise",
+                             pointKind: str | None = None,
+                             confidenceMin: float | None = None) -> dict:
+    """Entity-centric traversal — BFS from entity node, categorize connected nodes.
+
+    Returns {entity: {...}, connected: {points, documents, events, subjects, objects}}.
+    Optional filters: pointKind, confidenceMin.
+    """
+    from tortoise.navigation import entityProfile
+    proj = sdk._get_proj()
+    return _safe(entityProfile, proj.db, graph_name, entity_id,
+                  hops=hops, pointKind=pointKind, confidenceMin=confidenceMin)
+
+
+@mcp.tool()
+def tortoise_traverse(entity_id: str, max_hops: int = 2,
+                       graph_name: str = "tortoise") -> dict:
+    """Multi-hop graph traversal from entity following ALL relationship types.
+
+    Returns {entity: {...}, nodes: [{node, relationship, depth}, ...]}.
+    """
+    from tortoise.navigation import tortoise_traverse as _traverse
+    proj = sdk._get_proj()
+    return _safe(_traverse, proj.db, graph_name, entity_id, max_hops)
+
+
+def main():
+    monitoring.register(sdk)
+    mcp.run(transport="stdio")
+
+
+if __name__ == "__main__":
+    main()
+
+# ── P0 Group 3: Checkpoint, Diary, Status, Ingest ──────────────
+
+@mcp.tool()
+def tortoise_checkpoint(items: list[dict],
+                        agent_name: str = "checkpoint",
+                        threshold: float = 0.95) -> dict:
+    """Session batch save — two-tier dedup (content hash + embedding similarity).
+
+    items: [{wing, room, content}, ...]
+    agent_name: name for provenance events (default: "checkpoint")
+    threshold: cosine similarity for semantic dedup (0.0-1.0).
+               Set to 1.0 to disable semantic dedup (hash-only).
+    Returns {filed: N, duplicates: M}.
+    """
+    return _safe(sdk.checkpoint, items,
+                 agent_name=agent_name, threshold=threshold)
+
+
+@mcp.tool()
+def tortoise_diary_write(agent_name: str, entry: str,
+                         topic: str | None = None,
+                         wing: str | None = None) -> dict:
+    """Write an agent diary entry (AAAK format suggested).
+    Creates a Point with pointKind=diary, authoredBy=agent.
+    """
+    return _safe(sdk.diary_write, agent_name, entry, topic=topic, wing=wing)
+
+
+@mcp.tool()
+def tortoise_diary_read(agent_name: str, last_n: int = 10,
+                        wing: str | None = None) -> list[dict]:
+    """Read recent diary entries for an agent, newest first."""
+    return _safe(sdk.diary_read, agent_name, last_n, wing=wing)
+
+
+@mcp.tool()
+def tortoise_status() -> dict:
+    """Graph health + entity counts + FalkorDB connectivity.
+    Returns {connected, counts: {Point, Event, ...}, total_entities}.
+    """
+    return _safe(sdk.status)
+
+
+@mcp.tool()
+def tortoise_health() -> dict:
+    """Health check + basic metrics: graph_size, last_ingest, error_count, uptime."""
+    return monitoring.metrics()
+
+
+@mcp.tool()
+def tortoise_session_context() -> dict:
+    """Return 'what happened last session' — diary entries, recent Points, Events, confidence changes.
+    Returns {no_prior_sessions, diary_entries, recent_points, recent_events, confidence_changes}.
+    """
+    return _safe(sdk.session_context)
+
+
+@mcp.tool()
+def tortoise_ingest_corpus(directory: str) -> dict:
+    """Batch document ingestion — walk directory, parse YAML frontmatter
+    from .md files, create/update Document nodes.
+    Returns {ingested, updated, skipped}.
+    """
+    return _safe(sdk.ingest_corpus, directory)
+
+# ── Taxonomy ─────────────────────────────────────────────────
+
+@mcp.tool()
+def tortoise_taxonomy() -> dict[str, int]:
+    """Count entities by node label. Returns {Point: N, Event: N, Subject: N, Object: N, Document: N}."""
+    return _safe(sdk.taxonomy)
+
+
+@mcp.tool()
+def tortoise_list_domains() -> list[dict]:
+    """List active domains with entity counts. Returns [{context, count}] ordered by count DESC."""
+    return _safe(sdk.list_domains)
+
+
+@mcp.tool()
+def tortoise_list_topics(entity_id: str) -> dict:
+    """entityProfile lite for an entity. Returns {id, pointKind, context, neighbors, neighborCounts}."""
+    return _safe(sdk.list_topics, entity_id)
+
+
+# ── Graph Analysis ──────────────────────────────────────────────
+
+@mcp.tool()
+def tortoise_analyze(question: str, context: str | None = None,
+                    entityId: str | None = None) -> dict:
+    """Answer natural language questions about the Tortoise epistemic graph.
+
+    Ask things like: "where is the disagreement?" "what supports claim X?"
+    "what are we most uncertain about?" "show me the evidence chain for Y."
+
+    Optional entityId scopes the analysis to a specific entity's subgraph.
+    Returns {"answer": "...", "raw": [...], "pattern": "...", "query": "..."}
+    """
+    from tortoise.analyze import analyze
+    from tortoise.navigation import entityProfile
+
+    entity_subgraph_ids = None
+    if entityId:
+        try:
+            proj = sdk._get_proj()
+            profile = entityProfile(proj.db, "tortoise", entityId, hops=2)
+            ids = {entityId}
+            for category in profile.get("connected", {}).values():
+                for node in category:
+                    if node.get("id"):
+                        ids.add(node["id"])
+            entity_subgraph_ids = ids
+        except Exception:
+            pass  # fall back to full-graph analysis
+
+    return analyze(question, sdk._get_proj(), context=context,
+                   entity_subgraph_ids=entity_subgraph_ids)
+
+
+# ── P1-3: Staleness Detection ─────────────────────────────────
+
+@mcp.tool()
+def tortoise_stale(days: int = 30, limit: int = 50) -> dict:
+    """Find Points not updated in N days. Returns {stale, count, cutoff, limit}."""
+    return _safe(sdk.stale_points, days=days, limit=limit)
+
+
+# ── P1-4: Entity Linking ───────────────────────────────────────
+
+@mcp.tool()
+def tortoise_create_subject(name: str, subject_kind: str = "other") -> dict:
+    """Create or MERGE a Subject node. Deduplicates by name.
+
+    Returns {id, name, subjectKind}. If the subject already exists,
+    the existing node is returned (idempotent).
+    """
+    return _safe(sdk.create_subject, name, subject_kind)
+
+
+@mcp.tool()
+def tortoise_provenance(point_id: str) -> dict:
+    """Provenance chain — "Who decided this?" Follows authoredBy → Subject → delegation."""
+    return _safe(sdk.provenance, point_id)
+
+
+@mcp.tool()
+def tortoise_create_object(name: str, object_kind: str = "other") -> dict:
+    """Create or MERGE an Object node. Deduplicates by name.
+
+    Returns {id, name, objectKind}. If the object already exists,
+    the existing node is returned (idempotent).
+    """
+    return _safe(sdk.create_object, name, object_kind)
+
+
+# ── Multi-tenancy (#7001) ────────────────────────────────────
+
+@mcp.tool()
+def tortoise_team_create(name: str) -> dict:
+    """Create isolated team graph via FalkorDB select_graph.
+    Generates a per-team API key. Returns {name, graph_name, api_key, id}.
+    destructiveHint=true — creates persistent resources.
+    idempotentHint=false — duplicate team names raise an error.
+    """
+    return _safe(sdk.team_create, name)

@@ -1,33 +1,24 @@
----
-title: "Epistemic Team"
-type: team
-domain: product
-status: active
-summary: "Owns the epistemic graph — tortoise-based knowledge extraction, storage, and retrieval for organisational memory."
-subjects:
-  team: epistemic-team
-  domains: [product, data, engineering]
-actions:
-  produces: planning
----
+# Tortoise
 
-# Epistemic Team
+Epistemic knowledge graph engine. FalkorDB-backed.
 
-## What we own
+**Capabilities:**
+- Point extraction from transcripts/documents
+- Operator reasoning (NAND, IMPL) with BFS shock propagation
+- Provenance chains (Point → Subject → Team)
+- Entity extraction (Subjects, Objects, aboutEntities)
+- Multi-tenant via graph_name (10K+ isolated graphs)
+- Connector system (GitHub, Slack, Linear, custom)
 
-- **Epistemic graph** — tortoise points, operators, provenance, event log
-- **Knowledge retrieval** — embedding strategy, hybrid query patterns, FalkorDB backing
-- **Memory architecture** — consolidation of episodic, semantic, and epistemic layers into a single FalkorDB graph
-- **Integration** — connecting the graph to agent workflows, doc pipelines, and decision systems
+**Architecture:**
+```
+Source → Extractor → Event Log → Projection → FalkorDB Graph
+```
 
-## Domains
+**License:** AGPLv3 + CLA (Apache 2.0 re-license available)
 
-| Domain | Focus |
-|--------|-------|
-| **Product** | Tortoise design, ontology, retrieval UX |
-| **Data** | Embedding model, graph schema, storage |
-| **Engineering** | Extraction pipeline, FalkorDB projection, event API |
-
-## Current state
-
-**v1-planning** — Architecture ratified. Implementation starts with tortoise M0 spike.
+**Setup:**
+```bash
+pip install -r requirements.txt
+python -m tortoise rebuild  # Rebuild graph from events
+```

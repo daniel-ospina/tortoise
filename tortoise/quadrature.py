@@ -1,0 +1,71 @@
+"""Gauss-Jacobi quadrature on [0,1] for Beta-weighted integrals.
+
+Used by TortoiseEP for numerical moment projection of NAND/IMPL factors.
+
+scipy.special.roots_jacobi uses weight (1-x)^a * (1+x)^b on [-1,1].
+For Beta(α,β) weight x^(α-1)*(1-x)^(β-1) on [0,1]:
+  Transform: x_01 = (x_jac + 1) / 2, w_01 = w_jac / 2
+  Mapping: scipy a = β-1, scipy b = α-1 (swapped convention)
+"""
+import numpy as np
+from scipy.special import roots_jacobi
+
+
+def gauss_jacobi_01(n: int, alpha: float, beta: float):
+    """Gauss-Jacobi nodes and weights on [0,1] for weight x^(alpha-1)*(1-x)^(beta-1)."""
+    x_jac, w_jac = roots_jacobi(n, beta - 1, alpha - 1)
+    return (x_jac + 1) / 2, w_jac / 2
+
+
+def tilted_moments(alpha_a, beta_a, alpha_b, beta_b, w, phi_fn, n_quad=8):
+    """Compute E[c_a], E[c_a²], E[c_b], E[c_b²] under tilted distribution.
+    
+    P̃ ∝ Beta(c_a;α_a,β_a) × Beta(c_b;α_b,β_b) × φ(c_a, c_b)
+    
+    Returns ((m1_a, m2_a), (m1_b, m2_b)) where m1=E[c], m2=E[c²].
+    """
+    x_a, w_a = gauss_jacobi_01(n_quad, alpha_a, beta_a)
+    x_b, w_b = gauss_jacobi_01(n_quad, alpha_b, beta_b)
+
+    Z = m1_a = m2_a = m1_b = m2_b = 0.0
+    for i in range(n_quad):
+        ca = x_a[i]
+        for j in range(n_quad):
+            cb = x_b[j]
+            weight = w_a[i] * w_b[j]
+            phi = phi_fn(ca, cb, w)
+            Z += weight * phi
+            m1_a += weight * phi * ca
+            m2_a += weight * phi * ca * ca
+            m1_b += weight * phi * cb
+            m2_b += weight * phi * cb * cb
+
+    if Z < 1e-30:
+        m1_a = np.sum(w_a * x_a)
+        m2_a = np.sum(w_a * x_a * x_a)
+        m1_b = np.sum(w_b * x_b)
+        m2_b = np.sum(w_b * x_b * x_b)
+        return (m1_a, m2_a), (m1_b, m2_b)
+
+    return (m1_a / Z, m2_a / Z), (m1_b / Z, m2_b / Z)
+
+
+def moments_to_beta(m1, m2):
+    """Convert E[c] and E[c²] to Beta(α, β) parameters."""
+    var = max(m2 - m1 * m1, 1e-12)
+    if var >= m1 * (1 - m1) * 0.999:
+        return (1.0, 1.0)
+    total = m1 * (1 - m1) / var - 1
+    if total <= 0:
+        return (1.0, 1.0)
+    alpha = max(total * m1, 0.01)
+    beta = max(total * (1 - m1), 0.01)
+    return (alpha, beta)
+
+
+def phi_nand(ca, cb, w=1.0):
+    return np.exp(-w * ca * cb)
+
+
+def phi_impl(ca, cb, w=1.0):
+    return np.exp(-w * (ca - cb) ** 2)

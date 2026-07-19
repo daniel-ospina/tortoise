@@ -1,0 +1,31 @@
+# Connector Manifest — pluggable event source registry.
+#
+# Loaded by tortoise.connector_loader to discover and instantiate
+# connectors that ingest external events into the Tortoise event log.
+#
+# Schema:
+#   version: int
+#   connectors:
+#     <connector-key>:
+#       name: str
+#       module: str — Python module path (e.g. tortoise.connectors.github)
+#       class: str — connector class name
+#       active: bool
+#       config:
+#         <key>: <value> — connector-specific settings
+
+version: 1
+
+connectors:
+  github:
+    name: "GitHub Issues & PRs"
+    module: "tortoise.connectors.github"
+    class: "GitHubConnector"
+    active: true
+    config:
+      repo: ""  # org/repo, overridden by GITHUB_REPO env var
+      state: "closed"
+      limit: 100
+      # GAP-11: webhook (optional — polling is fallback)
+      webhook_port: 0  # 0 = disabled; set to e.g. 8080 to enable
+      webhook_secret: ""  # GitHub webhook secret for HMAC-SHA256 verification
