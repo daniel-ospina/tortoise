@@ -462,7 +462,7 @@ class FalkorProjection:
                             "now": _now_iso()},
                 )
             elif t == "PointRetracted":
-                self._delete(ev["id"])
+                self._delete(ev.get("id") or ev["event_id"])
             elif t == "PointsMerged":
                 for mid in ev.get("merge_ids", []):
                     self._delete(mid)
@@ -471,7 +471,8 @@ class FalkorProjection:
                     "MATCH (n:Point {id:$id}) "
                     "SET n.content = coalesce($c, n.content), "
                     "    n.context = coalesce($x, n.context)",
-                    params={"id": ev["id"], "c": ev.get("new_content"),
+                    params={"id": ev.get("id") or ev["event_id"],
+                            "c": ev.get("new_content"),
                             "x": ev.get("new_context")},
                 )
             elif t == "EventRecorded":
