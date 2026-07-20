@@ -62,9 +62,9 @@ class TortoiseSDK:
                 "MATCH (n:Point {id:$id}) SET n += $props",
                 params={"id": pid, "props": {key: val}},
             )
-        # P1-1: Provenance chain — link to Document if extractedFrom provided
+        # P1-1: Ontology v2.1 — link Point → Source via extractedFrom
         if props.get("extractedFrom"):
-            proj._link_extracted_from(pid, props["extractedFrom"])
+            proj._link_source(pid, props["extractedFrom"])
         return self.get_point(pid)
 
     def create_or_update_point(self, kind: str, content: str, **props) -> dict:
@@ -139,10 +139,11 @@ class TortoiseSDK:
 
     def create_operator(self, op_type: str, source_id: str, target_ids: list[str]) -> dict:
         """Create an operator Point. Edges follow projection convention:
-        operator -(op_type)-> inputs, inputs -[:INPUT]-> operator."""
-        if op_type not in ("IMPL", "NAND", "composedOf"):
+        operator -(op_type)-> inputs. Ontology v2.1: INPUT edges removed,
+        part/whole types (composedOf/decomposesInto/contains) → hasPart."""
+        if op_type not in ("IMPL", "NAND", "composedOf", "decomposesInto", "contains", "wraps"):
             raise ValueError(
-                f"op_type must be 'IMPL', 'NAND', or 'composedOf', got {op_type!r}"
+                f"op_type must be 'IMPL', 'NAND', or a part/whole type, got {op_type!r}"
             )
         pid = ulid()
         inputs = [source_id] + list(target_ids)
@@ -151,16 +152,13 @@ class TortoiseSDK:
             "CREATE (o:Point {id:$id, is_operator:true, op_type:$op})",
             params={"id": pid, "op": op_type},
         )
+        # Ontology v2.1: map part/whole ops to hasPart, remove INPUT edges
+        edge_type = "hasPart" if op_type not in ("IMPL", "NAND") else op_type
         for i, inp_id in enumerate(inputs):
             proj.g.query(
                 f"MATCH (o:Point {{id:$oid}}), (s:Point {{id:$sid}}) "
-                f"CREATE (o)-[:{op_type} {{idx:$i}}]->(s)",
+                f"CREATE (o)-[:{edge_type} {{idx:$i}}]->(s)",
                 params={"oid": pid, "sid": inp_id, "i": i},
-            )
-            proj.g.query(
-                "MATCH (s:Point {id:$sid}), (o:Point {id:$oid}) "
-                "CREATE (s)-[:INPUT {idx:$i}]->(o)",
-                params={"sid": inp_id, "oid": pid, "i": i},
             )
         return self.get_point(pid)
 
@@ -257,8 +255,8 @@ class TortoiseSDK:
         for uc_id, uc_ref in ucs:
             parents = proj.g.query(
                 "MATCH (op:Point {is_operator:true, op_type:'composedOf'})"
-                "-[:composedOf]->(uc:Point {id:$id}), "
-                "(op)-[:composedOf]->(jtbd:Point {pointKind:'jobToBeDone'}) "
+                "-[:hasPart]->(uc:Point {id:$id}), "
+                "(op)-[:hasPart]->(jtbd:Point {pointKind:'jobToBeDone'}) "
                 "RETURN jtbd.id",
                 params={"id": uc_id},
             ).result_set
@@ -442,6 +440,50 @@ class TortoiseSDK:
             params={"name": name},
         ).result_set
         return rows[0][0] if rows else {"id": oid, "name": name, "objectKind": object_kind}
+
+    # ── #7045: about edges backfill (Ontology v2.1) ──────────
+
+    def backfill_about_entities(self) -> dict:
+        """Keyword-match Points against Subject/Object names → about edges.
+
+        For each Point (non-operator), checks if its content contains any Subject
+        or Object name. If yes, creates aboutSubject or aboutObject edge.
+        Idempotent — MERGE prevents duplicates.
+
+        Returns {scanned, updated, entities_matched}.
+        """
+        proj = self._get_proj()
+        # Load all entity names → ids
+        entities: dict[str, str] = {}
+        for label, key in [("Subject", "subjectKind"), ("Object", "objectKind")]:
+            rows = proj.g.query(
+                f"MATCH (e:{label}) RETURN e.name, e.id"
+            ).result_set
+            for name, eid in rows:
+                if name:
+                    entities[name.lower()] = eid
+
+        # Ontology v2.1: use aboutSubject/aboutObject edges instead of property
+        rows = proj.g.query(
+            "MATCH (n:Point) "
+            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "RETURN n.id, n.content"
+        ).result_set
+
+        scanned, updated, matched = 0, 0, 0
+        for pid, content in rows:
+            scanned += 1
+            if not content:
+                continue
+            content_lower = content.lower()
+            for name, eid in entities.items():
+                if name in content_lower:
+                    proj._create_about_edges(pid, name)
+                    matched += 1
+            if matched > 0:
+                updated += 1
+
+        return {"scanned": scanned, "updated": updated, "entities_matched": matched}
 
     # ── P1-3: Staleness ─────────────────────────────────────────
 

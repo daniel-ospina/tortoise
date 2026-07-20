@@ -178,8 +178,7 @@ class FalkorProjection:
             "    n.pointKind=coalesce($pk, n.pointKind), "
             "    n.status=coalesce($st, n.status, 'live'), "
             "    n.authoredBy=coalesce($ab, n.authoredBy), "
-            "    n.aboutEntities=coalesce($ae, n.aboutEntities), "
-            "    n.extractedFrom=coalesce($ef, n.extractedFrom), "
+
             "    n.confidence=coalesce($cf, n.confidence), "
             "    n.createdAt=coalesce($ca, n.createdAt, $now), "
             "    n.validFrom=coalesce($vf, n.validFrom), "
@@ -190,17 +189,21 @@ class FalkorProjection:
                     "pk": p.get("pointKind"),
                     "st": p.get("status"),
                     "ab": p.get("authoredBy"),
-                    "ae": p.get("aboutEntities"),
-                    "ef": p.get("extractedFrom"),
+
                     "cf": p.get("confidence"),
                     "ca": p.get("createdAt") or p.get("created_at"),
                     "vf": p.get("validFrom"), "vt": p.get("validTo"),
                     "now": _now_iso()},
         )
-        # P1-1: Provenance chain — link Point → Document via EXTRACTED_FROM edge
-        extracted_from = p.get("extractedFrom")
-        if extracted_from:
-            self._link_extracted_from(p["id"], extracted_from)
+        # Ontology v2.1: link Point → Source via extractedFrom edge
+        source_ref = p.get("extractedFrom")
+        if source_ref:
+            self._link_source(p["id"], source_ref)
+        # aboutEntities → per-type about edges (Ontology v2.1 Phase 1)
+        about = p.get("aboutEntities")
+        if about and isinstance(about, list):
+            for entity_name in about:
+                self._create_about_edges(p["id"], str(entity_name))
         # P1-2: Temporal — also store provenance source_id
         if prov.get("source_id"):
             self.g.query(
@@ -214,9 +217,11 @@ class FalkorProjection:
         """Create typed edges for an operator Point. Auto-creates stub nodes
         for missing source Points referenced by short IDs (#6713)."""
         op = p["operator"]
-        rel_type = {"NAND": "NAND", "IMPL": "IMPL"}.get(
-            op["op_type"], "INPUT"
-        )
+        rel_type = {"NAND": "NAND", "IMPL": "IMPL",
+                     "composedOf": "hasPart", "decomposesInto": "hasPart",
+                     "contains": "hasPart", "wraps": "hasPart"}.get(op["op_type"])
+        if rel_type is None:
+            return  # unknown op_type — no edges to create
         for idx, src in enumerate(op["inputs"]):
             # ponytail: auto-create stub if source Point doesn't exist.
             # Short numeric IDs are orphan refs from cross-file wiring scripts.
@@ -238,32 +243,76 @@ class FalkorProjection:
                 f"MERGE (o)-[:{rel_type} {{idx:$idx}}]->(s)",
                 params={"oid": p["id"], "sid": src, "idx": idx},
             )
-            # ponytail: reverse :INPUT edge so statements gain outgoing
-            # paths for traversal queries (concern→op→resolution).
-            self.g.query(
-                f"MATCH (s:Point {{id:$sid}}) "
-                f"MATCH (o:Point {{id:$oid}}) "
-                f"MERGE (s)-[:INPUT {{idx:$idx}}]->(o)",
-                params={"oid": p["id"], "sid": src, "idx": idx},
-            )
+
 
     def _delete(self, pid: str) -> None:
         self.g.query("MATCH (n:Point {id:$id}) DETACH DELETE n", params={"id": pid})
 
     # ── P1-1: Provenance chain ────────────────────────────────────
 
-    def _link_extracted_from(self, point_id: str, doc_ref: str) -> None:
-        """Link Point → Document via EXTRACTED_FROM edge. Creates stub Document if missing."""
-        # ponytail: doc_ref is typically a filename, use it as document ID
+    def _link_source(self, point_id: str, source_ref: str) -> None:
+        """Link Point → Source via extractedFrom edge (Ontology v2.1).
+
+        Creates stub Source if missing, keyed on url. The references edge
+        (Source → Document/Event/Object) is set by DocumentCreated events.
+        """
         self.g.query(
-            "MERGE (d:Document {id:$did}) "
-            "ON CREATE SET d.title=$did, d.format='unknown'",
-            params={"did": doc_ref},
+            "MERGE (s:Source {url:$url}) "
+            "ON CREATE SET s.sourceType='document', s.title=$url, "
+            "    s.contentHash='', s.ingestedAt=$now",
+            params={"url": source_ref, "now": _now_iso()},
         )
         self.g.query(
-            "MATCH (n:Point {id:$pid}), (d:Document {id:$did}) "
-            "MERGE (n)-[:EXTRACTED_FROM]->(d)",
-            params={"pid": point_id, "did": doc_ref},
+            "MATCH (n:Point {id:$pid}), (s:Source {url:$url}) "
+            "MERGE (n)-[:extractedFrom]->(s)",
+            params={"pid": point_id, "url": source_ref},
+        )
+
+    # ponytail: SDK compat alias (Phase 1b will rename caller)
+    _link_extracted_from = _link_source
+
+    # ── Ontology v2.1: about edges ─────────────────────────────────
+
+    def _create_about_edges(self, point_id: str, entity_name: str) -> None:
+        """Link Point to named Subject or Object via aboutSubject/aboutObject edge.
+
+        Tries Subject first, then Object, to auto-detect entity type from
+        the legacy flat aboutEntities list. Creates stub if neither exists.
+        """
+        # Try Subject
+        subj = self.g.query(
+            "MATCH (s:Subject {name:$name}) RETURN s.name LIMIT 1",
+            params={"name": entity_name},
+        ).result_set
+        if subj:
+            self.g.query(
+                "MATCH (n:Point {id:$pid}), (s:Subject {name:$name}) "
+                "MERGE (n)-[:aboutSubject]->(s)",
+                params={"pid": point_id, "name": entity_name},
+            )
+            return
+        # Try Object
+        obj = self.g.query(
+            "MATCH (o:Object {name:$name}) RETURN o.name LIMIT 1",
+            params={"name": entity_name},
+        ).result_set
+        if obj:
+            self.g.query(
+                "MATCH (n:Point {id:$pid}), (o:Object {name:$name}) "
+                "MERGE (n)-[:aboutObject]->(o)",
+                params={"pid": point_id, "name": entity_name},
+            )
+            return
+        # Neither exists — default to Subject stub
+        self.g.query(
+            "MERGE (s:Subject {name:$name}) "
+            "ON CREATE SET s.id=$name, s.subjectKind='other'",
+            params={"name": entity_name},
+        )
+        self.g.query(
+            "MATCH (n:Point {id:$pid}), (s:Subject {name:$name}) "
+            "MERGE (n)-[:aboutSubject]->(s)",
+            params={"pid": point_id, "name": entity_name},
         )
 
     # ── P1-4: Entity linking (Subject / Object) ───────────────────
