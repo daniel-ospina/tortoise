@@ -1,0 +1,5 @@
+name: CI
+on: [push, pull_request]
+jobs:
+  ci:
+    uses: daniel-ospina/shared-workflows/.github/workflows/ci.yml@v1
