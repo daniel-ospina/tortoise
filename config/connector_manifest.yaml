@@ -29,3 +29,12 @@ connectors:
       # GAP-11: webhook (optional — polling is fallback)
       webhook_port: 0  # 0 = disabled; set to e.g. 8080 to enable
       webhook_secret: ""  # GitHub webhook secret for HMAC-SHA256 verification
+
+  supabase_org:
+    name: "Supabase Org Data → Tortoise"
+    module: "org_data.connectors.supabase_org"
+    class: "SupabaseOrgConnector"
+    active: true
+    config:
+      supabase_url: ""   # SUPABASE_URL_ORG_DATA env var
+      supabase_key: ""   # SUPABASE_SERVICE_ROLE_KEY_ORG_DATA env var
