@@ -141,9 +141,9 @@ def tortoise_create_operator(op_type: str, source_id: str, target_ids: list[str]
     """Create an operator connecting Points.
     
     op_type: 'IMPL' (A supports B), 'NAND' (A contradicts B),
-             'composedOf' (parent built from children).
+             'composedOf'/'decomposesInto'/'contains'/'wraps' → hasPart.
     source_id: source/parent Point ID.
-    target_ids: target/child Point IDs (1 for IMPL/NAND, N for composedOf).
+    target_ids: target/child Point IDs (1 for IMPL/NAND, N for part/whole).
     """
     return _safe(sdk.create_operator, op_type, source_id, target_ids)
 
