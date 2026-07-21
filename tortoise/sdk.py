@@ -162,6 +162,78 @@ class TortoiseSDK:
             )
         return self.get_point(pid)
 
+    def annotate_operator(self, id: str, bias: float, precision: float,
+                          consistency: float, directness: float) -> dict:
+        """Annotate an operator Point with structured epistemic dimensions.
+
+        Args:
+            id: Operator Point ID (must have is_operator=true).
+            bias: 0-1, how much hidden stake/additional interest beyond stated position.
+            precision: 0-1, how narrow/well-defined the relevance claim is.
+            consistency: 0-1, how stable this relevance is across contexts.
+            directness: 0-1, how directly the source bears on the target.
+
+        Raises ValueError if id not found, not an operator, or dims out of [0,1].
+        """
+        point = self.get_point(id)
+        if not point:
+            raise ValueError(f"Operator {id!r} not found")
+        if not point.get("is_operator"):
+            raise ValueError(f"Point {id!r} is not an operator")
+        for name, val in (("bias", bias), ("precision", precision),
+                          ("consistency", consistency), ("directness", directness)):
+            if not 0 <= val <= 1:
+                raise ValueError(f"{name} must be 0-1, got {val}")
+        return self.update_point(id,
+            annotator_bias=bias, annotator_precision=precision,
+            annotator_consistency=consistency, annotator_directness=directness)
+
+    def mitigate_operator(self, id: str, reason: str, strength: float = 0.5) -> dict:
+        """Create a mitigation Point that modulates an operator's edge strength.
+
+        Args:
+            id: Operator Point ID to mitigate.
+            reason: Why the edge is weaker than it appears.
+            strength: 0-1, 0=fully neutralized, 1=fully intact (default 0.5).
+
+        Raises ValueError if id not found or not an operator.
+        Idempotent: second call updates existing mitigation (reason + strength),
+        does not create a duplicate.
+        """
+        if not 0 <= strength <= 1:
+            raise ValueError(f"strength must be 0-1, got {strength}")
+        point = self.get_point(id)
+        if not point:
+            raise ValueError(f"Operator {id!r} not found")
+        if not point.get("is_operator"):
+            raise ValueError(f"Point {id!r} is not an operator")
+        # Idempotency: check for existing mitigation
+        proj = self._get_proj()
+        existing = proj.g.query(
+            "MATCH (op:Point {id:$id})-[r:mitigated_by]->(m:Point) RETURN m.id",
+            params={"id": id},
+        ).result_set
+        if existing:
+            mid = existing[0][0]
+            return self.update_point(mid, content=f"[MITIGATION] {reason}",
+                                     mitigation_strength=strength)
+        # Create new mitigation Point
+        mid = ulid()
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        proj.g.query(
+            "CREATE (m:Point {id:$id, content:$c, pointKind:'statement', "
+            "mitigation_strength:$s, is_operator:false, createdAt:$now, updatedAt:$now})",
+            params={"id": mid, "c": f"[MITIGATION] {reason}", "s": strength, "now": now},
+        )
+        # Bidirectional link: mitigation Point -[:IMPL]-> operator, operator <-[:mitigated_by]- mitigation
+        proj.g.query(
+            "MATCH (m:Point {id:$mid}), (op:Point {id:$oid}) "
+            "CREATE (m)-[:IMPL]->(op), (op)-[:mitigated_by]->(m)",
+            params={"mid": mid, "oid": id},
+        )
+        return self.get_point(mid)
+
     # ── Query ─────────────────────────────────────────────────────
 
     def query(self, kind: str | None = None, context: str | None = None, **filters) -> list[dict]:
@@ -402,44 +474,6 @@ class TortoiseSDK:
         ).result_set
         chain["delegation"] = [{"via": r[0], "node_type": r[1], "props": r[2]} for r in rels]
         return chain
-
-    def create_subject(self, name: str, subject_kind: str = "other") -> dict:
-        """Create or MERGE a Subject node. Deduplicates by name."""
-        from datetime import datetime, timezone
-        proj = self._get_proj()
-        sid = ulid()
-        now = datetime.now(timezone.utc).isoformat()
-        proj.g.query(
-            "MERGE (s:Subject {name:$name}) "
-            "ON CREATE SET s.id=$id, s.subjectKind=$sk, s.createdAt=$now "
-            "ON MATCH SET s.subjectKind=coalesce($sk, s.subjectKind) "
-            "RETURN s.id, s.name, s.subjectKind",
-            params={"id": sid, "name": name, "sk": subject_kind, "now": now},
-        )
-        rows = proj.g.query(
-            "MATCH (s:Subject {name:$name}) RETURN properties(s)",
-            params={"name": name},
-        ).result_set
-        return rows[0][0] if rows else {"id": sid, "name": name, "subjectKind": subject_kind}
-
-    def create_object(self, name: str, object_kind: str = "other") -> dict:
-        """Create or MERGE an Object node. Deduplicates by name."""
-        from datetime import datetime, timezone
-        proj = self._get_proj()
-        oid = ulid()
-        now = datetime.now(timezone.utc).isoformat()
-        proj.g.query(
-            "MERGE (o:Object {name:$name}) "
-            "ON CREATE SET o.id=$id, o.objectKind=$ok, o.createdAt=$now "
-            "ON MATCH SET o.objectKind=coalesce($ok, o.objectKind) "
-            "RETURN o.id, o.name, o.objectKind",
-            params={"id": oid, "name": name, "ok": object_kind, "now": now},
-        )
-        rows = proj.g.query(
-            "MATCH (o:Object {name:$name}) RETURN properties(o)",
-            params={"name": name},
-        ).result_set
-        return rows[0][0] if rows else {"id": oid, "name": name, "objectKind": object_kind}
 
     # ── #7045: about edges backfill (Ontology v2.1) ──────────
 
@@ -737,8 +771,8 @@ class TortoiseSDK:
                 "doc_status": frontmatter.get("doc_status", "draft"),
                 "format": "markdown",
                 "version": frontmatter.get("version", ""),
-                "created_at": frontmatter.get("created", now),
-                "updated_at": frontmatter.get("updated", now),
+                "createdAt": frontmatter.get("created", now),
+                "updatedAt": frontmatter.get("updated", now),
                 "eventKind": "DocumentCreated",
                 "classificationLevel": "internal",
             }
@@ -937,3 +971,184 @@ class TortoiseSDK:
                 "Use tortoise.domain_loader.register_kind(%r) to register it.",
                 kind, sorted(known_kinds()), kind,
             )
+
+
+    # ── Entity CRUD (ONTOLOGY v2.5 §3, all 7 types) ──────────────────
+
+    def _create_entity(self, label: str, id_val: str, props: dict, event_type: str) -> dict:
+        """Generic entity creation. Applies to graph via projection (event log + FalkorDB)."""
+        proj = self._get_proj()
+        # Build event dict
+        event = {"type": event_type, "id": id_val, **props}
+        # Normalize field names for projection compatibility
+        if label == "Subject" and "subjectKind" in props:
+            event["subject_kind"] = props["subjectKind"]
+        if label == "Object" and "objectKind" in props:
+            event["object_kind"] = props["objectKind"]
+        if label == "Document" and "documentKind" in props:
+            event["document_kind"] = props["documentKind"]
+        if label == "Event" and "eventKind" in props:
+            event["eventKind"] = event.get("eventKind", props.get("eventKind"))
+            if "eventId" not in event:
+                event["eventId"] = id_val
+        if label == "Source":
+            event["url"] = id_val
+        # Apply through projection (writes to JSONL + FalkorDB)
+        proj.apply(event)
+        # Wire edges after entity exists in graph
+        if props.get("authoredBy"):
+            proj.create_authored_by(id_val, props["authoredBy"])
+        if props.get("ownedBy"):
+            proj.create_owned_by(id_val, props["ownedBy"])
+        if props.get("managedBy"):
+            proj.create_managed_by(id_val, props["managedBy"])
+        return self._get_entity(id_val)
+
+    def _get_entity(self, id_val: str) -> dict:
+        proj = self._get_proj()
+        r = proj.g.query(
+            "MATCH (n) WHERE n.id = $id OR n.eventId = $id OR n.url = $id RETURN properties(n) LIMIT 1",
+            params={"id": id_val},
+        )
+        return dict(r.result_set[0][0]) if r.result_set else {}
+
+    def _update_entity(self, id_val: str, **props) -> dict:
+        proj = self._get_proj()
+        for key, val in props.items():
+            proj.g.query(
+                "MATCH (n) WHERE n.id = $id OR n.eventId = $id SET n += $p",
+                params={"id": id_val, "p": {key: val}},
+            )
+        return self._get_entity(id_val)
+
+    def _delete_entity(self, id_val: str) -> bool:
+        proj = self._get_proj()
+        r = proj.g.query(
+            "MATCH (n) WHERE n.id = $id OR n.eventId = $id DETACH DELETE n RETURN count(n)",
+            params={"id": id_val},
+        )
+        return bool(r.result_set[0][0]) if r.result_set else False
+
+    def create_subject(self, name: str, subjectKind: str = "other", **props) -> dict:
+        return self._create_entity("Subject", self.ulid(), {"name": name, "subjectKind": subjectKind, "status": "live", **props}, "SubjectAdded")
+
+    def create_object(self, name: str, objectKind: str = "other", **props) -> dict:
+        return self._create_entity("Object", self.ulid(), {"name": name, "objectKind": objectKind, "status": "live", **props}, "ObjectRegistered")
+
+    def create_action(self, name: str, actionKind: str, **props) -> dict:
+        return self._create_entity("Action", self.ulid(), {"name": name, "actionKind": actionKind, "actionStatus": "pending", **props}, "ActionCreated")
+
+    def create_event(self, name: str, eventKind: str, **props) -> dict:
+        eid = self.ulid()
+        return self._create_entity("Event", eid, {"eventId": eid, "name": name, "eventKind": eventKind, "eventStatus": "scheduled", **props}, "EventRecorded")
+
+    def create_document(self, title: str, documentKind: str, **props) -> dict:
+        did = self.ulid()
+        return self._create_entity("Document", did, {"title": title, "documentKind": documentKind, "objectKind": "document", "status": "draft", **props}, "DocumentCreated")
+
+    def create_source(self, url: str, sourceKind: str, **props) -> dict:
+        return self._create_entity("Source", url, {"url": url, "sourceKind": sourceKind, "ingestedAt": __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(), **props}, None)
+
+    def get_entity(self, id_val: str) -> dict:
+        return self._get_entity(id_val)
+
+    def update_entity(self, id_val: str, **props) -> dict:
+        return self._update_entity(id_val, **props)
+
+    def delete_entity(self, id_val: str) -> bool:
+        return self._delete_entity(id_val)
+
+    # ── Query Helpers ─────────────────────────────────────────────
+
+    def get_owned_entities(self, subject_id: str) -> list:
+        """Return all entities owned by a Subject (governance query)."""
+        proj = self._get_proj()
+        r = proj.g.query(
+            "MATCH (e)-[:ownedBy]->(s) WHERE s.id = $sid OR s.name = $sid RETURN properties(e) LIMIT 100",
+            params={"sid": subject_id},
+        )
+        return [dict(row[0]) for row in r.result_set]
+
+    def get_provenance_chain(self, point_id: str) -> list:
+        """Return full provenance chain for a Point."""
+        proj = self._get_proj()
+        r = proj.g.query(
+            "MATCH (p:Point {id:$pid})-[:extractedFrom]->(src:Source)-[:references]->(entity) "
+            "RETURN properties(src) as source, properties(entity) as entity, labels(entity) as labels LIMIT 1",
+            params={"pid": point_id},
+        )
+        return [{"source": dict(row[0]), "entity": dict(row[1]), "labels": list(row[2])} for row in r.result_set]
+
+    def get_org_structure(self, subject_id: str) -> dict:
+        """Return organisational structure: members, roles, sub-teams."""
+        proj = self._get_proj()
+        members = proj.g.query(
+            "MATCH (s)-[:hasMember]->(p:Subject) WHERE s.id = $sid OR s.name = $sid RETURN properties(p)",
+            params={"sid": subject_id},
+        )
+        roles = proj.g.query(
+            "MATCH (p:Subject)-[:holdsRole]->(r:Subject) WHERE p.id = $sid OR p.name = $sid RETURN properties(r)",
+            params={"sid": subject_id},
+        )
+        return {
+            "members": [dict(row[0]) for row in members.result_set],
+            "roles": [dict(row[0]) for row in roles.result_set],
+        }
+
+    def ulid(self) -> str:
+        from .ids import ulid as _ulid
+        return _ulid()
+
+    # ── Source Node Completion ────────────────────────────────────
+
+    def complete_source(self, url: str, content: str = None, external_id: str = None) -> dict:
+        """Populate Source node fields: contentHash, version, externalId."""
+        import hashlib
+        proj = self._get_proj()
+        updates = {}
+        if content is not None:
+            updates["contentHash"] = hashlib.sha256(content.encode()).hexdigest()
+        if external_id is not None:
+            updates["externalId"] = external_id
+        # Increment version
+        r = proj.g.query(
+            "MATCH (s:Source {url:$url}) "
+            "SET s.version = coalesce(s.version, 0) + 1, s.updatedAt = $now "
+            "SET s += $updates "
+            "RETURN properties(s)",
+            params={"url": url, "updates": updates, "now": __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat()},
+        )
+        return dict(r.result_set[0][0]) if r.result_set else {}
+
+    # ── Backfill Migration ────────────────────────────────────────
+
+    def backfill_v25(self, dry_run: bool = False) -> dict:
+        """Backfill existing tortoise.db to ONTOLOGY v2.5 schema."""
+        proj = self._get_proj()
+        report = {"dry_run": dry_run, "actions": []}
+
+        # 1. Backfill status on Points
+        r = proj.g.query("MATCH (n:Point) WHERE n.status IS NULL RETURN count(n)")
+        missing_status = r.result_set[0][0]
+        if missing_status > 0:
+            report["actions"].append(f"status_backfill: {missing_status} Points")
+            if not dry_run:
+                proj.g.query(f"MATCH (n:Point) WHERE n.status IS NULL SET n.status = 'live'")
+
+        # 2. Backfill pointKind
+        r = proj.g.query("MATCH (n:Point) WHERE n.pointKind IS NULL RETURN count(n)")
+        missing_kind = r.result_set[0][0]
+        if missing_kind > 0:
+            report["actions"].append(f"pointKind_backfill: {missing_kind} Points")
+            if not dry_run:
+                proj.g.query("MATCH (n:Point) WHERE n.pointKind IS NULL SET n.pointKind = 'statement'")
+
+        # 3. Count existing edges
+        r = proj.g.query("MATCH ()-[r]->() RETURN count(r)")
+        report["edge_count"] = r.result_set[0][0]
+
+        # 4. Verify Point count unchanged
+        r = proj.g.query("MATCH (n:Point) RETURN count(n)")
+        report["point_count"] = r.result_set[0][0]
+
+        return report

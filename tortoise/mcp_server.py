@@ -149,6 +149,40 @@ def tortoise_create_operator(op_type: str, source_id: str, target_ids: list[str]
 
 
 @mcp.tool()
+def tortoise_annotate_operator(id: str, bias: float, precision: float,
+                                consistency: float, directness: float) -> dict:
+    """Annotate an operator Point with structured epistemic dimensions.
+
+    bias: 0-1 — hidden stake beyond stated position.
+    precision: 0-1 — how narrow/well-defined the relevance claim is.
+    consistency: 0-1 — stability across contexts.
+    directness: 0-1 — how directly source bears on target.
+    """
+    return _safe(sdk.annotate_operator, id, bias, precision, consistency, directness)
+
+
+@mcp.tool()
+def tortoise_get_operator(id: str) -> dict:
+    """Get an operator Point by ID. Returns all properties including annotation dimensions.
+    Raises error if the Point is not an operator."""
+    point = _safe(sdk.get_point, id)
+    if isinstance(point, dict) and point and not point.get("is_operator"):
+        return {"error": f"Point {id!r} is not an operator"}
+    return point
+
+
+@mcp.tool()
+def tortoise_mitigate_operator(id: str, reason: str, strength: float = 0.5) -> dict:
+    """Create a mitigation Point that modulates an operator's edge strength.
+
+    reason: Why the edge is weaker than it appears.
+    strength: 0-1 — 0=fully neutralized, 1=fully intact (default 0.5).
+    Idempotent — second call updates existing mitigation.
+    """
+    return _safe(sdk.mitigate_operator, id, reason, strength)
+
+
+@mcp.tool()
 def tortoise_delete_point(id: str) -> dict:
     """Delete a Point. DESTRUCTIVE — requires human confirmation. Cannot be undone."""
     return _safe(sdk.delete_point_wrapped, id)
@@ -379,3 +413,61 @@ def tortoise_team_create(name: str) -> dict:
     idempotentHint=false — duplicate team names raise an error.
     """
     return _safe(sdk.team_create, name)
+
+
+# ── Entity CRUD (ONTOLOGY v2.5) ───────────────────────────────
+
+@mcp.tool()
+def tortoise_create_subject(name: str, subjectKind: str, props: dict | None = None) -> dict:
+    """Create a Subject node (team, role, organization, person)."""
+    return _safe(sdk.create_subject, name, subjectKind, **(props or {}))
+
+@mcp.tool()
+def tortoise_create_object(name: str, objectKind: str, props: dict | None = None) -> dict:
+    """Create an Object node (product, customer, skill, etc.)."""
+    return _safe(sdk.create_object, name, objectKind, **(props or {}))
+
+@mcp.tool()
+def tortoise_create_action(name: str, actionKind: str, props: dict | None = None) -> dict:
+    """Create an Action node (research, implement, deploy, etc.)."""
+    return _safe(sdk.create_action, name, actionKind, **(props or {}))
+
+@mcp.tool()
+def tortoise_create_event(name: str, eventKind: str, props: dict | None = None) -> dict:
+    """Create an Event node (meeting, decision, deployment, etc.)."""
+    return _safe(sdk.create_event, name, eventKind, **(props or {}))
+
+@mcp.tool()
+def tortoise_create_document(title: str, documentKind: str, props: dict | None = None) -> dict:
+    """Create a Document node (research, planDoc, meetingNotes, etc.)."""
+    return _safe(sdk.create_document, title, documentKind, **(props or {}))
+
+@mcp.tool()
+def tortoise_get_entity(id: str) -> dict:
+    """Get any entity by ID, eventId, or url."""
+    return _safe(sdk.get_entity, id)
+
+@mcp.tool()
+def tortoise_update_entity(id: str, props: dict | None = None) -> dict:
+    """Update any entity's properties."""
+    return _safe(sdk.update_entity, id, **(props or {}))
+
+@mcp.tool()
+def tortoise_delete_entity(id: str) -> bool:
+    """Delete any entity by ID."""
+    return _safe(sdk.delete_entity, id)
+
+@mcp.tool()
+def tortoise_create_edge(source_id: str, target_id: str, predicate: str) -> bool:
+    """Create an edge between two entities. Predicate: performs, produces, ownedBy, managedBy, etc."""
+    return _safe(sdk._get_proj().create_edge, source_id, target_id, predicate)
+
+@mcp.tool()
+def tortoise_get_governance(subject_id: str) -> list:
+    """Get all entities owned by a Subject."""
+    return _safe(sdk.get_owned_entities, subject_id)
+
+@mcp.tool()
+def tortoise_backfill_v25(dry_run: bool = True) -> dict:
+    """Backfill database to ONTOLOGY v2.5 schema."""
+    return _safe(sdk.backfill_v25, dry_run=dry_run)

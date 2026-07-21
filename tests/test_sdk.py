@@ -319,3 +319,91 @@ class TestClose:
         # methods re-init the projection on next call (lazy init)
         p = sdk.create_point("statement", "after close")
         assert "id" in p
+
+
+# ── annotate_operator ────────────────────────────────────────────────
+
+class TestAnnotateOperator:
+    def test_valid_operator(self, sdk):
+        a, b = _make_point(sdk, content="A"), _make_point(sdk, content="B")
+        op = sdk.create_operator("IMPL", a["id"], [b["id"]])
+        result = sdk.annotate_operator(op["id"], 0.1, 0.8, 0.7, 0.9)
+        assert result["annotator_bias"] == 0.1
+        assert result["annotator_precision"] == 0.8
+        assert result["annotator_consistency"] == 0.7
+        assert result["annotator_directness"] == 0.9
+
+    def test_nonexistent_id_raises(self, sdk):
+        with pytest.raises(ValueError, match="not found"):
+            sdk.annotate_operator("nonexistent-id", 0.5, 0.5, 0.5, 0.5)
+
+    def test_non_operator_raises(self, sdk):
+        p = _make_point(sdk, content="not an operator")
+        with pytest.raises(ValueError, match="not an operator"):
+            sdk.annotate_operator(p["id"], 0.5, 0.5, 0.5, 0.5)
+
+    def test_out_of_range_raises(self, sdk):
+        a, b = _make_point(sdk), _make_point(sdk)
+        op = sdk.create_operator("IMPL", a["id"], [b["id"]])
+        with pytest.raises(ValueError, match="bias must be 0-1"):
+            sdk.annotate_operator(op["id"], -0.1, 0.5, 0.5, 0.5)
+        with pytest.raises(ValueError, match="precision must be 0-1"):
+            sdk.annotate_operator(op["id"], 0.5, 1.5, 0.5, 0.5)
+
+    def test_boundary_values(self, sdk):
+        a, b = _make_point(sdk), _make_point(sdk)
+        op = sdk.create_operator("IMPL", a["id"], [b["id"]])
+        result = sdk.annotate_operator(op["id"], 0.0, 1.0, 0.0, 1.0)
+        assert result["annotator_bias"] == 0.0
+        assert result["annotator_precision"] == 1.0
+
+    def test_zombie_operator(self, sdk):
+        a, b = _make_point(sdk), _make_point(sdk)
+        op = sdk.create_operator("IMPL", a["id"], [b["id"]])
+        sdk.delete_point(a["id"])
+        sdk.delete_point(b["id"])
+        # annotating orphaned operator should still succeed
+        result = sdk.annotate_operator(op["id"], 0.5, 0.5, 0.5, 0.5)
+        assert result["annotator_bias"] == 0.5
+
+
+# ── mitigate_operator ────────────────────────────────────────────────
+
+class TestMitigateOperator:
+    def test_valid_mitigation(self, sdk):
+        a, b = _make_point(sdk), _make_point(sdk)
+        op = sdk.create_operator("IMPL", a["id"], [b["id"]])
+        result = sdk.mitigate_operator(op["id"], "sample too small", 0.3)
+        assert result["pointKind"] == "statement"
+        assert "[MITIGATION] sample too small" in result["content"]
+        assert result["mitigation_strength"] == 0.3
+
+    def test_non_operator_raises(self, sdk):
+        p = _make_point(sdk)
+        with pytest.raises(ValueError, match="not an operator"):
+            sdk.mitigate_operator(p["id"], "reason")
+
+    def test_nonexistent_operator_raises(self, sdk):
+        with pytest.raises(ValueError, match="not found"):
+            sdk.mitigate_operator("nonexistent", "reason")
+
+    def test_invalid_strength_raises(self, sdk):
+        a, b = _make_point(sdk), _make_point(sdk)
+        op = sdk.create_operator("IMPL", a["id"], [b["id"]])
+        with pytest.raises(ValueError, match="strength must be 0-1"):
+            sdk.mitigate_operator(op["id"], "reason", 1.5)
+
+    def test_idempotent(self, sdk):
+        a, b = _make_point(sdk), _make_point(sdk)
+        op = sdk.create_operator("IMPL", a["id"], [b["id"]])
+        first = sdk.mitigate_operator(op["id"], "reason v1", 0.3)
+        second = sdk.mitigate_operator(op["id"], "reason v2", 0.7)
+        assert first["id"] == second["id"]  # same mitigation Point
+        assert "reason v2" in second["content"]  # updated reason
+        assert second["mitigation_strength"] == 0.7  # updated strength
+
+    def test_strength_default(self, sdk):
+        a, b = _make_point(sdk), _make_point(sdk)
+        op = sdk.create_operator("IMPL", a["id"], [b["id"]])
+        result = sdk.mitigate_operator(op["id"], "reason")
+        assert result["mitigation_strength"] == 0.5
