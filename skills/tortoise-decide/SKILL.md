@@ -8,7 +8,7 @@ status: live
 doc_status: live
 subjects.team: epistemic-team
 created: 2026-07-18
-allowed-tools: read write edit bash grep find web_search web_fetch todo_write task, mcp__tortoise__tortoise_create_point, mcp__tortoise__tortoise_query, mcp__tortoise__tortoise_get_point, mcp__tortoise__tortoise_check_structure, mcp__tortoise__tortoise_compute_confidence, mcp__tortoise__tortoise_set_point_baseline, mcp__tortoise__tortoise_get_confidence
+allowed-tools: read write edit bash grep find web_search web_fetch todo_write task, mcp__tortoise__tortoise_create_point, mcp__tortoise__tortoise_create_operator, mcp__tortoise__tortoise_query, mcp__tortoise__tortoise_get_point, mcp__tortoise__tortoise_check_structure, mcp__tortoise__tortoise_compute_confidence, mcp__tortoise__tortoise_set_point_baseline, mcp__tortoise__tortoise_get_confidence
 ---
 
 # tortoise:decide
@@ -43,7 +43,7 @@ For each criterion and option, run multi-angle research following the research s
 - **practitioner** — real-world experience, not just theory
 - **contemporary** — last 12-24 months, what's changing now
 
-File all findings as Points with provenance (source URL, date, author). Connect findings to the options and criteria they support or contradict via IMPL/NAND edges.
+File all findings as Points with provenance (source URL, date, author). Connect findings to the options and criteria they support or contradict via IMPL/NAND edges. → Use /skill:tortoise-graph-reasoning for proper edge annotation and veracity assessment.
 
 ### 3. CHALLENGE — Find the weak spots
 

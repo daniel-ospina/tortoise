@@ -41,7 +41,11 @@ def _safe(fn, *args, **kwargs):
 def tortoise_create_point(kind: str, content: str, context: str | None = None,
                           authoredBy: str | None = None,
                           props: dict | None = None) -> dict:
-    """Create a Point node (statement, decision, vision, hypothesis, etc.)."""
+    """Create a Point node (statement, decision, vision, hypothesis, etc.).
+
+    → See /skill:tortoise-graph-reasoning for pointKind guidance:
+      evidence is a role (not a kind), use Source for provenance.
+    """
     merged = dict(props or {})
     if context:
         merged["context"] = context
@@ -144,6 +148,9 @@ def tortoise_create_operator(op_type: str, source_id: str, target_ids: list[str]
              'composedOf'/'decomposesInto'/'contains'/'wraps' → hasPart.
     source_id: source/parent Point ID.
     target_ids: target/child Point IDs (1 for IMPL/NAND, N for part/whole).
+
+    → See /skill:tortoise-graph-reasoning for proper usage:
+      annotation, mitigation, NAND constraints, veracity vs implication.
     """
     return _safe(sdk.create_operator, op_type, source_id, target_ids)
 

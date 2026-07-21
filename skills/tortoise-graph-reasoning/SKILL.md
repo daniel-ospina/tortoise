@@ -1,6 +1,6 @@
 ---
 name: tortoise-graph-reasoning
-description: Teaches agents proper Tortoise epistemic graph usage — veracity vs implication, mitigation operators, NAND constraints, and operator-as-point reasoning.
+description: Teaches proper Tortoise graph usage — creating operators (IMPL/NAND), annotating edges, evaluating veracity vs implication, mitigating edge strength, and using NAND constraints. Use when creating operators, evaluating claims, or reasoning about evidence.
 type: capability
 domain: capability
 status: live

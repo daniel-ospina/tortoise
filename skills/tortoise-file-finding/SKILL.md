@@ -22,6 +22,7 @@ Ingest a research finding into the epistemic graph.
 3. Call `tortoise_query(kind='statement', context=<source>)` to find existing Points from the same source.
 4. If existing Points found, surface them as potential connection candidates.
 5. Offer to create IMPL/NAND connections or flag for review.
+   → Use /skill:tortoise-graph-reasoning for proper edge annotation.
 
 ## Quality Gates
 
