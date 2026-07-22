@@ -38,11 +38,11 @@ Independent dimensions. Point confidence = truth. Operator weight = implication 
 Every IMPL/NAND edge is a Point with its own confidence. Can be attacked (NAND) or mitigated.
 
 ### Annotation: Source->Point only
-Annotate operators where external evidence supports a claim. Use source_type (T0-T4) and source_date.
+Annotate operators where external evidence supports a claim. Use sourceKind (T0-T4) and source_date.
 Skip annotation for Point->Point logical connections.
 
 ### Source Credibility Tiers
-Assign source_type to every evidence point. Default T4 if ungraded.
+Assign sourceKind to every evidence point. Default T4 if ungraded.
 
 | Tier | Weight | Examples |
 |------|--------|----------|
@@ -75,6 +75,6 @@ Logical tension, not a weighted vote. Before NAND: could mitigation work instead
 Liveness, grounding, signal vs price. Source credibility as foundation.
 
 ## Quality Gates
-- G1: Source->Point operators must have source_type set (default T4). Point->Point skip.
+- G1: Source->Point operators must have sourceKind set (default T4). Point->Point skip.
 - G2: At least one adversarial query before concluding.
 - G3: Superseded sources must have :SUPERSEDES edge to replacement. Lifecycle status must be superseded.
