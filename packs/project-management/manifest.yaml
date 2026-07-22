@@ -1,0 +1,81 @@
+# Project Management Domain Extension
+# GitHub Issues, Linear, Asana integration.
+# Registers: pm:issue, pm:sprint, pm:cardCreated, etc.
+
+namespace: pm
+name: "Project Management"
+version: "0.1.0"
+tier: free
+description: "GitHub Issues, Linear, Asana integration for project tracking"
+
+# ── Layer 1: Ontology Extension ──────────────────────────────────────────
+ontology:
+  extends: core
+
+  objectKinds:
+    - issue          # Tracked work item (GitHub Issue, Linear issue, Asana task)
+    - sprint         # Time-boxed work period
+    - kanbanBoard    # Board with columns for visual workflow
+    - card           # Generic work unit on a board (supertype of issue, task)
+    - milestone      # Grouping of issues/cards toward a goal
+
+  eventKinds:
+    - cardCreated    # Card/issue/task was created
+    - cardMoved      # Card moved between status columns
+    - sprintStarted  # Sprint began
+    - sprintCompleted # Sprint ended
+    - stepStarted    # Workflow step began on a card
+    - stepCompleted  # Workflow step ended on a card
+    - gatePassed     # Review gate passed for a card
+    - gateBlocked    # Review gate blocked a card
+
+  pointKinds:
+    - estimate       # Story points / time estimate
+    - retrospective  # Sprint retrospective observation
+
+  relations:
+    - { predicate: blocks, from: Object, to: Object, cardinality: many_to_many }
+    - { predicate: partOfSprint, from: Object, to: Object, cardinality: many_to_one }
+    - { predicate: assignedTo, from: Object, to: Subject, cardinality: many_to_one }
+    - { predicate: onBoard, from: Object, to: Object, cardinality: many_to_one }
+
+# ── Layer 2: Connectors ──────────────────────────────────────────────────
+connectors:
+  - source: github
+    sourceKind: github_issue
+    entrypoint: connector.py::GitHubConnector
+    config:
+      required: [GITHUB_TOKEN, GITHUB_REPO]
+      optional: [GITHUB_LABELS_FILTER]
+
+  - source: linear
+    sourceKind: linear_card
+    entrypoint: connector.py::LinearConnector
+    config:
+      required: [LINEAR_API_KEY]
+
+# ── Layer 3: Tools ───────────────────────────────────────────────────────
+tools:
+  - name: pm_list_issues
+    description: "List issues/cards from connected project sources with optional status filter"
+    entrypoint: tools.py::list_issues
+    params:
+      source: { type: string, enum: [github, linear, asana] }
+      status: { type: string, optional: true }
+      limit: { type: integer, optional: true, default: 50 }
+
+  - name: pm_get_sprint
+    description: "Get sprint details including assigned cards and status"
+    entrypoint: tools.py::get_sprint
+    params:
+      sprintId: { type: string }
+      source: { type: string, enum: [github, linear] }
+
+  - name: pm_board_status
+    description: "Get Kanban board overview — cards per column, stalled items, bottlenecks"
+    entrypoint: tools.py::board_status
+    params:
+      boardId: { type: string, optional: true }
+
+# ── Dependencies ──────────────────────────────────────────────────────────
+depends_on: []

@@ -1,7 +1,7 @@
-"""Coordination layer — S2 of the VSM three-layer platform (ARCH-001, EP 0.963).
+"""Coordination layer — S2 of the VSM three-layer platform .
 
-Covers REQ-COORD-001 through 006 and ONT-002 (card lifecycle with edge cases).
-Stores cards and boards as :Card and :KanbanBoard nodes in FalkorDB.
+Covers card lifecycle with edge cases. Cards stored as :Object nodes.
+Stores cards and boards as :Object nodes in FalkorDB (PM domain extension).
 
 ~150 LOC, 0 external dependencies. Uses existing FalkorProjection.
 """
@@ -17,7 +17,9 @@ if TYPE_CHECKING:
     from .projection import FalkorProjection
 
 
-# ── Card ontology (ONT-002) ──────────────────────────────────────────────
+# ── Card lifecycle (PM domain extension) ─────────────────────────────────
+# Cards are :Object nodes with objectKind: pm:card or pm:kanbanBoard.
+# CardStatus enum maps to canonical actionStatus field.
 
 class CardStatus(Enum):
     PROVIDED = "provided"
@@ -58,10 +60,10 @@ _RESURRECTABLE = {CardStatus.DONE, CardStatus.FAILED, CardStatus.CANCELLED}
 
 @dataclass
 class Card:
-    """Work unit on an agent's Kanban board. ONT-002.
+    """Work unit on an agent's Kanban board.
 
-    Wraps any work source: issue (GitHub), cron trigger (recurring),
-    handoff (cross-team), algedonic (emergency).
+    Stored as :Object with objectKind: pm:card in FalkorDB.
+    CardStatus maps to the canonical actionStatus field.
     """
     id: str = field(default_factory=ulid)
     source: str = "cron"         # issue | handoff | cron | algedonic
@@ -177,7 +179,7 @@ class Card:
         )
 
 
-# ── Kanban board (REQ-COORD-002) ────────────────────────────────────────
+# ── Kanban board ────────────────────────────────────────────────────────
 
 class KanbanBoard:
     """Per-role Kanban board backed by FalkorDB.
@@ -197,8 +199,9 @@ class KanbanBoard:
     def _ensure_board(self) -> str:
         """Idempotent board creation. Returns board node ID."""
         result = self._proj.g.query(
-            "MERGE (b:KanbanBoard {role:$role, team:$team}) "
+            "MERGE (b:Object {role:$role, team:$team}) "
             "ON CREATE SET b.id=$id, b.created_at=$ts "
+            "SET b.objectKind = 'pm:kanbanBoard' "
             "RETURN b.id",
             params={"role": self.role, "team": self.team,
                     "id": ulid(), "ts": now_iso()},
@@ -206,13 +209,13 @@ class KanbanBoard:
         return result[0][0] if result else ""
 
     def add_card(self, card: Card) -> None:
-        """Add a card to this board. REQ-COORD-002."""
+        """Add a card to this board."""
         d = card.to_dict()
         self._proj.g.query(
-            "MERGE (c:Card {id:$id}) "
-            "SET c = $props "
+            "MERGE (c:Object {id:$id}) "
+            "SET c.objectKind = 'pm:card', c += $props "
             "WITH c "
-            "MATCH (b:KanbanBoard {role:$role, team:$team}) "
+            "MATCH (b:Object {role:$role, team:$team}) "
             "MERGE (c)-[:ON_BOARD]->(b)",
             params={"id": card.id, "props": d,
                     "role": self.role, "team": self.team},
@@ -225,7 +228,7 @@ class KanbanBoard:
         callers can't double-dispatch the same card.
         """
         results = self._proj.g.query(
-            "MATCH (c:Card)-[:ON_BOARD]->(b:KanbanBoard {role:$role, team:$team}) "
+            "MATCH (c:Object)-[:ON_BOARD]->(b:Object {role:$role, team:$team}) "
             "WHERE c.status IN ['provided','ready'] "
             "WITH c ORDER BY c.priority ASC, c.created_at ASC LIMIT 1 "
             "SET c.status = 'running', c.updated_at = $ts "
@@ -244,12 +247,12 @@ class KanbanBoard:
         card.transition(new_status)
         d = card.to_dict()
         self._proj.g.query(
-            "MATCH (c:Card {id:$id}) SET c = $props",
+            "MATCH (c:Object {id:$id}) SET c.objectKind = 'pm:card', c += $props",
             params={"id": card_id, "props": d},
         )
 
     def redirect_card(self, card_id: str, target_role: str) -> None:
-        """Redirect a card to another role's board. REQ-COORD-003.
+        """Redirect a card to another role's board.
 
         Raises ValueError if the target board does not exist or card is
         in a non-redirectable status (done, expired, delegated, cancelled).
@@ -264,7 +267,7 @@ class KanbanBoard:
             )
         # Verify target board exists before deleting source edge
         target_check = self._proj.g.query(
-            "MATCH (b:KanbanBoard {role:$target, team:$team}) RETURN b.role",
+            "MATCH (b:Object {role:$target, team:$team}) RETURN b.role",
             params={"target": target_role, "team": self.team},
         ).result_set
         if not target_check:
@@ -272,10 +275,10 @@ class KanbanBoard:
                 f"Target board not found: role={target_role}, team={self.team}"
             )
         self._proj.g.query(
-            "MATCH (c:Card {id:$id})-[r:ON_BOARD]->(old:KanbanBoard) "
+            "MATCH (c:Object {id:$id})-[r:ON_BOARD]->(old:Object) "
             "DELETE r "
             "WITH c "
-            "MATCH (new:KanbanBoard {role:$target, team:$team}) "
+            "MATCH (new:Object {role:$target, team:$team}) "
             "MERGE (c)-[:ON_BOARD]->(new) "
             "SET c.assigned_to=$target",
             params={"id": card_id, "target": target_role, "team": self.team},
@@ -284,7 +287,7 @@ class KanbanBoard:
     def list_pending(self) -> list[Card]:
         """All pending cards on this board."""
         results = self._proj.g.query(
-            "MATCH (c:Card)-[:ON_BOARD]->(b:KanbanBoard {role:$role, team:$team}) "
+            "MATCH (c:Object)-[:ON_BOARD]->(b:Object {role:$role, team:$team}) "
             "WHERE c.status IN ['provided','ready'] "
             "RETURN c ORDER BY c.priority ASC",
             params={"role": self.role, "team": self.team},
@@ -293,7 +296,7 @@ class KanbanBoard:
 
     def _get_card(self, card_id: str) -> Card | None:
         results = self._proj.g.query(
-            "MATCH (c:Card {id:$id})-[:ON_BOARD]->(b:KanbanBoard {role:$role, team:$team}) "
+            "MATCH (c:Object {id:$id})-[:ON_BOARD]->(b:Object {role:$role, team:$team}) "
             "RETURN c",
             params={"id": card_id, "role": self.role, "team": self.team},
         ).result_set
@@ -302,7 +305,7 @@ class KanbanBoard:
         return Card.from_node(dict(results[0][0].properties))
 
 
-# ── Coordinator (REQ-COORD-001, ARCH-001 S2) ────────────────────────────
+# ── Coordinator ──────────────────────────────────────────────────────────
 
 class Coordinator:
     """S2 Coordination — reads Roadmap, dispatches cards to Kanban boards.
@@ -315,7 +318,7 @@ class Coordinator:
         self.stall_cycles = stall_cycles
 
     def dispatch(self, roadmap_items: list[dict]) -> list[Card]:
-        """Read Roadmap items → create cards → dispatch to boards. REQ-COORD-001.
+        """Read Roadmap items → create cards → dispatch to boards.
 
         Differentiates strategist-level (S3-S5) from implementer-level (S1) work.
         Returns list of created cards.
@@ -352,9 +355,9 @@ class Coordinator:
         return cards
 
     def detect_stalls(self, team: str) -> list[Card]:
-        """Find cards untouched for >N cycles. REQ-COORD-006."""
+        """Find cards untouched for >N cycles."""
         results = self._proj.g.query(
-            "MATCH (c:Card) WHERE c.team=$team "
+            "MATCH (c:Object) WHERE c.team=$team "
             "AND c.status IN ['ready','running','reviewing'] "
             "AND c.stall_cycles > $max "
             "RETURN c ORDER BY c.stall_cycles DESC",
@@ -366,27 +369,27 @@ class Coordinator:
         # Full transactional guard needs BEGIN/COMMIT (FalkorDB doesn't support).
         for card in stalled:
             self._proj.g.query(
-                "MATCH (c:Card {id:$id}) SET c.stall_cycles = c.stall_cycles + 1",
+                "MATCH (c:Object {id:$id}) SET c.stall_cycles = c.stall_cycles + 1",
                 params={"id": card.id},
             )
         return stalled
 
     def eisenhower_review(self, role: str, team: str = "") -> list[dict]:
-        """Score and rank cards on a role's board. REQ-COORD-005.
+        """Score and rank cards on a role's board.
 
         If team is provided, filters to that team; otherwise all teams.
         Returns recommendations: promote, deprioritize, archive.
         """
         if team:
             results = self._proj.g.query(
-                "MATCH (c:Card)-[:ON_BOARD]->(b:KanbanBoard {role:$role, team:$team}) "
+                "MATCH (c:Object)-[:ON_BOARD]->(b:Object {role:$role, team:$team}) "
                 "WHERE c.status IN ['ready','running','reviewing'] "
                 "RETURN c",
                 params={"role": role, "team": team},
             ).result_set
         else:
             results = self._proj.g.query(
-                "MATCH (c:Card)-[:ON_BOARD]->(b:KanbanBoard {role:$role}) "
+                "MATCH (c:Object)-[:ON_BOARD]->(b:Object {role:$role}) "
                 "WHERE c.status IN ['ready','running','reviewing'] "
                 "RETURN c",
                 params={"role": role},
@@ -412,7 +415,7 @@ class Coordinator:
         return recommendations
 
     def detect_conflicts(self, card: Card) -> list[dict]:
-        """Check for resource/goal/priority conflicts. REQ-COORD-004.
+        """Check for resource/goal/priority conflicts.
 
         Returns list of conflicts found. Empty list = no conflict.
         Anti-oscillation: tracks rapid toggling between assignees.
@@ -421,7 +424,7 @@ class Coordinator:
         # Resource conflict: same source_id in running/reviewing on any board
         if card.source_id:
             results = self._proj.g.query(
-                "MATCH (c:Card {source_id:$sid}) "
+                "MATCH (c:Object {source_id:$sid}) "
                 "WHERE c.status IN ['running','reviewing'] "
                 "AND c.id <> $cid "
                 "RETURN c.assigned_to, c.title",
@@ -438,18 +441,19 @@ class Coordinator:
         # Anti-oscillation: check for rapid reassignment pattern
         # ponytail: counter-based with status gate — ≥3 oscillations on active
         # cards suppresses dispatch; resolved cards don't gate new work forever
-        prev = self._proj.g.query(
-            "MATCH (c:Card {source_id:$sid}) "
-            "WHERE c.oscillation_count >= 3 "
-            "AND c.status IN ['provided','ready','running','reviewing','blocked'] "
-            "RETURN c.id",
-            params={"sid": card.source_id},
-        ).result_set
-        if prev:
-            conflicts.append({
-                "type": "oscillation",
-                "card_id": card.id,
-                "reason": "Anti-oscillation: ≥3 prior reassignments for this source",
-            })
+        if card.source_id:
+            prev = self._proj.g.query(
+                "MATCH (c:Object {source_id:$sid}) "
+                "WHERE c.oscillation_count >= 3 "
+                "AND c.status IN ['provided','ready','running','reviewing','blocked'] "
+                "RETURN c.id",
+                params={"sid": card.source_id},
+            ).result_set
+            if prev:
+                conflicts.append({
+                    "type": "oscillation",
+                    "card_id": card.id,
+                    "reason": "Anti-oscillation: ≥3 prior reassignments for this source",
+                })
 
         return conflicts

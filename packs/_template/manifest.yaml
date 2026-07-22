@@ -1,0 +1,53 @@
+# Expansion Pack Manifest — Template
+# Copy this file to start a new domain extension pack.
+# All fields marked REQUIRED must be filled. Optional fields have defaults shown.
+
+# REQUIRED: Short prefix for kind namespacing (e.g., "pm", "mkt", "fin")
+# All kind values registered by this pack are prefixed: {namespace}:{kind}
+namespace: ""
+
+# REQUIRED: Human-readable name
+name: ""
+
+# REQUIRED: Semantic version
+version: "0.1.0"
+
+# REQUIRED: Licensing tier
+#   free    — full source, no gating. Templates and common integrations.
+#   premium — runtime tool gating. Ontology + connector always accessible.
+tier: free
+
+# Optional: One-paragraph description
+description: ""
+
+# ── Layer 1: Ontology Extension ──────────────────────────────────────────
+ontology:
+  extends: core
+
+  # New objectKind values (camelCase, prefixed: {namespace}:{value})
+  objectKinds: []
+
+  # New eventKind values (camelCase)
+  eventKinds: []
+
+  # New pointKind values (camelCase)
+  pointKinds: []
+
+  # New documentKind values (camelCase)
+  documentKinds: []
+
+  # New actionKind values (camelCase)
+  actionKinds: []
+
+  # New predicates (edges between entities)
+  # { predicate, from, to, cardinality }
+  relations: []
+
+# ── Layer 2: Connectors ──────────────────────────────────────────────────
+connectors: []
+
+# ── Layer 3: Tools ───────────────────────────────────────────────────────
+tools: []
+
+# ── Dependencies ──────────────────────────────────────────────────────────
+depends_on: []

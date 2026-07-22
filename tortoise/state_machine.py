@@ -1,6 +1,5 @@
 """State Machine Core — FSM, DAG scheduler, gate enforcer.
 
-ARCH-004 (FSM + DAG + gates + event log) + ONT-004 (states).
 Composes with coordination.py (Card) and skill_declaration.py (Step).
 Zero dependencies beyond stdlib + graphlib.
 """
@@ -13,7 +12,8 @@ from graphlib import TopologicalSorter
 from typing import Any
 
 
-# ── Step states (ONT-004) ────────────────────────────────────
+# ── Step states ────────────────────────────────────────────
+# StepState maps to canonical actionStatus field on Actions (§6).
 
 class StepState(enum.Enum):
     PENDING = "pending"
