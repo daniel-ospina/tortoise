@@ -1,0 +1,33 @@
+version: 1
+pipelines:
+  github_issues:
+    enabled: true
+    source: github
+    sourceKind: github_issue
+    trigger: manual
+    entity_mapping:
+      repo_to_team: {}
+      label_to_team: {}
+      label_to_domain: {}
+      milestone_to_epic: {}
+      user_to_role: {}
+    entity_kinds:
+      issue_object: pm:issue
+      pr_object: pm:card
+      created_event: pm:cardCreated
+      completed_event: pm:cardCompleted
+    connector:
+      module: tortoise.connectors.github
+      class: GitHubConnector
+      config:
+        state: all
+        limit: 100
+  docs:
+    enabled: true
+    source: filesystem
+    trigger: manual
+    strategy:
+    - path-derive
+    entity_mapping:
+      path_to_team: {}
+      path_to_domain: {}
