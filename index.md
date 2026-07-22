@@ -36,3 +36,9 @@ updated: 2026-07-21
 
 ## License
 AGPLv3 + CLA — see [LICENSE](LICENSE)
+
+## Related Repositories
+- [eldato](https://github.com/daniel-ospina/eldato) — Main El Dato app + canonical ONTOLOGY v2.5
+- [eldato-outreach](https://github.com/daniel-ospina/eldato-outreach) — B2B WhatsApp outreach system
+- [dmer](https://github.com/daniel-ospina/dmer) — Instagram DM automation daemon
+- [org-data](https://github.com/daniel-ospina/org-data) — Multi-tenant org data (Supabase → Tortoise connector)

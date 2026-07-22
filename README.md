@@ -48,3 +48,9 @@ python -m tortoise rebuild
 ## License
 
 AGPLv3 + CLA (Apache 2.0 re-license available)
+
+## Related Repositories
+- [eldato](https://github.com/daniel-ospina/eldato) — Main app + canonical [ONTOLOGY v2.5](https://github.com/daniel-ospina/eldato/blob/main/docs/teams/organisation-design-team/domains%20(S1)/data/ONTOLOGY_v2.5.md)
+- [eldato-outreach](https://github.com/daniel-ospina/eldato-outreach) — B2B WhatsApp outreach
+- [dmer](https://github.com/daniel-ospina/dmer) — Instagram DM daemon
+- [org-data](https://github.com/daniel-ospina/org-data) — Org data (Supabase → Tortoise)
