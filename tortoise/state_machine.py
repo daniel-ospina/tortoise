@@ -177,11 +177,11 @@ class DAGScheduler:
         """Mark a step complete, unblocking its dependents.
 
         Automatically fetches eligible nodes if not yet surfaced.
-        Silently ignores non-ready nodes (deps not yet satisfied).
+        Raises ValueError if step_id not in ready cache (deps not yet satisfied).
         """
         if step_id not in self.steps:
             raise ValueError(f"Unknown step: {step_id!r}")
-        # Surface any newly ready nodes (one call — get_ready idempotent until done())
+        # Surface any newly ready nodes (get_ready returns only nodes freed since last call)
         batch = set(self._sorter.get_ready())
         self._ready_cache |= batch
         if step_id not in self._ready_cache:

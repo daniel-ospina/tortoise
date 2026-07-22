@@ -194,7 +194,6 @@ class KanbanBoard:
         self._proj = projection
         self.role = role
         self.team = team
-        self.board_id = self._ensure_board()
 
     def _ensure_board(self) -> str:
         """Idempotent board creation. Returns board node ID."""

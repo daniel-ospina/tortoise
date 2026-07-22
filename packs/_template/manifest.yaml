@@ -4,10 +4,10 @@
 
 # REQUIRED: Short prefix for kind namespacing (e.g., "pm", "mkt", "fin")
 # All kind values registered by this pack are prefixed: {namespace}:{kind}
-namespace: ""
+namespace:  # REQUIRED: set this (e.g., "myapp")
 
 # REQUIRED: Human-readable name
-name: ""
+name:  # REQUIRED: set this (e.g., "My Domain Pack")
 
 # REQUIRED: Semantic version
 version: "0.1.0"
@@ -47,6 +47,11 @@ ontology:
 connectors: []
 
 # ── Layer 3: Tools ───────────────────────────────────────────────────────
+# Tool params use JSON Schema conventions:
+#   - type: string|integer|number|boolean|array|object
+#   - Use a top-level 'required' array for required params (not per-param 'optional')
+#   - Example: params: { status: { type: string }, limit: { type: integer, default: 50 } }
+#     with: required: [status]
 tools: []
 
 # ── Dependencies ──────────────────────────────────────────────────────────

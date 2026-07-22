@@ -57,6 +57,10 @@ VALID_CARDINALITIES = frozenset({
     "one_to_one", "one_to_many", "many_to_one", "many_to_many",
 })
 
+VALID_PARAM_TYPES = frozenset({
+    "string", "integer", "number", "boolean", "array", "object",
+})
+
 CANONICAL_KINDS = {
     "objectKinds": CANONICAL_OBJECT_KINDS,
     "eventKinds": CANONICAL_EVENT_KINDS,
@@ -174,7 +178,7 @@ class PackRegistry:
         ns = raw.get("namespace", "")
 
         # Namespace format: no colons (would corrupt kind prefixing)
-        if ":" in ns:
+        if ns and ":" in ns:
             errors.append("namespace must not contain ':'")
 
         ont = raw.get("ontology", {})
@@ -230,6 +234,14 @@ class PackRegistry:
                 errors.append("tool missing 'name' field")
             if not tool.get("entrypoint"):
                 errors.append(f"tool '{tool.get('name', '?')}' missing 'entrypoint'")
+            for pname, pspec in tool.get("params", {}).items():
+                ptype = pspec.get("type", "") if isinstance(pspec, dict) else ""
+                if ptype and ptype not in VALID_PARAM_TYPES:
+                    errors.append(
+                        f"tool '{tool.get('name', '?')}' param '{pname}': "
+                        f"invalid type '{ptype}' (must be one of: "
+                        f"{', '.join(sorted(VALID_PARAM_TYPES))})"
+                    )
 
         # Validate tier
         tier = raw.get("tier", "free")
@@ -317,16 +329,18 @@ class PackRegistry:
         duplicate registrations are skipped.
         """
         counts = {"registered": 0, "skipped": 0}
+        seen: set[str] = set()
         for p in self.packs.values():
             ns = p.namespace
-            # Registration is currently in-memory (the registry IS the catalog).
-            # When FalkorDB-backed registration is needed, this method will
-            # create nodes/edges for each kind.
-            # For now, list_all_kinds() is the registration artifact.
-            counts["registered"] += (
-                len(p.object_kinds) + len(p.event_kinds) + len(p.point_kinds)
-                + len(p.document_kinds) + len(p.action_kinds)
-            )
+            for kind_list in [p.object_kinds, p.event_kinds, p.point_kinds,
+                               p.document_kinds, p.action_kinds]:
+                for k in kind_list:
+                    key = f"{ns}:{k}"
+                    if key in seen:
+                        counts["skipped"] += 1
+                    else:
+                        seen.add(key)
+                        counts["registered"] += 1
         return counts
 
 
@@ -358,3 +372,44 @@ if __name__ == "__main__":
         print(f"  {t['pack']}/{t['name']}: {t['description']}")
 
     print("\nOK")
+
+    # ── Error path tests ──
+    errors = registry._validate({"name": "MissingNamespace"})
+    assert errors, f"Expected errors for missing namespace, got none"
+    print("  ✓ missing namespace detected")
+
+    errors = registry._validate({"namespace": "bad:ns", "name": "X",
+                                 "ontology": {"extends": "core"}})
+    assert errors, f"Expected errors for colon in namespace"
+    print("  ✓ namespace colon rejected")
+
+    errors = registry._validate({"namespace": "x", "name": "X",
+                                 "ontology": {"extends": "core",
+                                              "eventKinds": ["BadCase"]}})
+    assert any("camelCase" in e for e in errors), f"Expected camelCase error: {errors}"
+    print("  ✓ camelCase enforced")
+
+    errors = registry._validate({"namespace": "x", "name": "X",
+                                 "ontology": {"extends": "core",
+                                              "objectKinds": ["document"]}})
+    assert any("canonical" in e for e in errors), f"Expected canonical error: {errors}"
+    print("  ✓ canonical conflict detected")
+
+    errors = registry._validate({"namespace": "x", "name": "X",
+                                 "ontology": {"extends": "core"},
+                                 "tools": [{"name": "t", "entrypoint": "f",
+                                             "params": {"p": {"type": "badtype"}}}]})
+    assert any("invalid type" in e for e in errors), f"Expected param type error: {errors}"
+    print("  ✓ invalid tool param type detected")
+
+    errors = registry._validate({"namespace": "x", "name": "X",
+                                 "ontology": {"extends": "core"},
+                                 "connectors": [{"source": "gh"}]})
+    assert any("entrypoint" in e for e in errors), f"Expected entrypoint error: {errors}"
+    print("  ✓ missing connector entrypoint detected")
+
+    errors = registry._validate({"namespace": "x", "name": "X", "tier": "enterprise"})
+    assert any("tier" in e for e in errors), f"Expected tier error: {errors}"
+    print("  ✓ invalid tier rejected")
+
+    print("\nAll validation checks passed")
