@@ -1,22 +1,38 @@
 ---
-title: "Epistemic Team — Canonical Index"
+title: "Tortoise — Canonical Index"
 type: index
-domain: product
-status: canonical
-summary: "Canonical documents for the epistemic core product."
+domain: data
+status: live
 created: 2026-07-09
+updated: 2026-07-21
 ---
 
-# Epistemic Team — Canonical Documents
+# Tortoise — Canonical Documents
+
+## Architecture
+- [Projection layer](tortoise/projection/) — JSONL → FalkorDB projection, grounding, belief propagation
+- [SDK](tortoise/sdk.py) — Python API for entity CRUD, edge creation, query helpers
+- [MCP Server](tortoise/mcp_server.py) — Agent-facing tools via FastMCP
+- [Connectors](tortoise/connectors/) — GitHub, Linear, Slack data ingestion
+- [Extractor](tortoise/extractor.py) — Semantic extraction from documents/transcripts
+
+## Data
+- [ONTOLOGY v2.5](https://github.com/daniel-ospina/eldato/blob/main/docs/teams/organisation-design-team/domains%20(S1)/data/ONTOLOGY_v2.5.md) — Canonical entity & edge spec (external, in eldato/docs)
+- [Embedding & Retrieval](data/embedding-retrieval.md) — 3-tier model + query patterns
+- [Memory Types Taxonomy](data/MEMORY_TYPES.md) — Canonical 5-type taxonomy
+
+## Operations
+- [Backup & Restore](tortoise/backup.py)
+- [Migration Guide](scripts/) — Backfill, schema migration
+- [Multi-Tenancy](tortoise/projection/__init__.py) — graph_name isolation
 
 ## Product
 - [V1 Strategy](product/strategy/v1-strategy-2026-07-09.md)
-- [Source, Operator, Event proposal](product/v1-planning/2026-07-07-source-operator-event.md) (→ ONTOLOGY.md when ratified)
+- [Competition](product/competition/_index.md)
 
-## Data
-- [ONTOLOGY.md](data/ONTOLOGY.md) — forked from org-design, product entities only
-- [Embedding & Retrieval](data/embedding-retrieval.md) — 3-tier model + query patterns
-- [Memory Types Taxonomy](data/MEMORY_TYPES.md) — canonical 5-type taxonomy
+## Testing
+- [Test suite](tests/) — 950 tests, 788 passing
+- [Deprecated SVBP tests](tests/deprecated_svbp/) — Replaced by EP (ep.py)
 
-## Competition
-- [Competition index](product/competition/_index.md)
+## License
+AGPLv3 + CLA — see [LICENSE](LICENSE)
