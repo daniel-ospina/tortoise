@@ -1,7 +1,10 @@
 """P1-7 #6976 / GAP-11 #6998: GitHub connector — poll + webhook.
 
 Zero Python deps. Uses `gh` CLI for polling + stdlib http.server for webhook.
-Maps issue opened/closed, PR opened/merged → Event nodes in flat EventRecorded format.
+Maps issues/PRs → 4-entity chain per ONTOLOGY_v2.5 §1.1:
+  Source (github_issue) → Object (pm:issue) → Event (pm:cardCreated)
+  + Subject (naturalPerson for author/assignees)
+PM domain extension kinds: pm:issue, pm:card, pm:cardCreated, pm:cardCompleted.
 """
 from __future__ import annotations
 
@@ -44,6 +47,25 @@ class GitHubConnector:
         events.extend(self._poll_prs())
         return events
 
+    def poll_raw_issues(self) -> list[dict]:
+        """Fetch raw issue dicts from GitHub API (for entity extraction)."""
+        if not self.repo:
+            return []
+        result = subprocess.run(
+            [
+                "gh", "issue", "list",
+                "--repo", self.repo,
+                "--state", self.state,
+                "--limit", str(self.limit),
+                "--json", "number,title,state,createdAt,closedAt,url,"
+                          "labels,assignees,author,milestone",
+            ],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0:
+            return []
+        return json.loads(result.stdout)
+
     def _poll_issues(self) -> list[dict]:
         result = subprocess.run(
             [
@@ -76,13 +98,125 @@ class GitHubConnector:
         return [ev for pr in json.loads(result.stdout)
                 if (ev := self._pr_to_event(pr))]
 
+    # ── Entity extraction (ONTOLOGY_v2.5 §1.1, PM domain extension) ────
+
+    def _issue_to_entities(self, issue: dict) -> dict | None:
+        """Map GitHub issue → 4-entity chain.
+
+        Returns dict with keys: source, object, event, subjects, about_edges.
+        Per ONTOLOGY_v2.5 §1.1: Source (github_issue), Object (pm:issue),
+        Event (pm:cardCreated/pm:cardCompleted).
+        PM domain extension: packs/project-management/manifest.yaml.
+        """
+        number = issue.get("number")
+        title = issue.get("title", "")
+        if not title or not number:
+            return None
+
+        state = issue.get("state", "")
+        created_at = issue.get("createdAt", "")
+        closed_at = issue.get("closedAt", "")
+        url = issue.get("url", "")
+        labels = [l.get("name", "") for l in issue.get("labels", [])]
+        assignees = [a.get("login", "") for a in issue.get("assignees", [])]
+        author = issue.get("author", {}).get("login", "")
+
+        source_id = f"github-issue-{self.repo}-{number}"
+
+        # Source — provenance anchor (ONTOLOGY_v2.5 §3)
+        source = {
+            "type": "SourceCreated",
+            "sourceId": source_id,
+            "sourceKind": "github_issue",
+            "externalId": str(number),
+            "url": url,
+            "label": f"{self.repo}#{number}: {title}",
+        }
+
+        # Object — persisted entity (PM domain extension)
+        obj = {
+            "type": "ObjectCreated",
+            "objectId": source_id,
+            "objectKind": "pm:issue",
+            "name": f"{self.repo}#{number}",
+            "title": title,
+            "authoredBy": author,
+            "url": url,
+        }
+
+        # Event — temporal occurrence (PM domain extension)
+        event_kind = "pm:cardCompleted" if state == "closed" else "pm:cardCreated"
+        event = {
+            "type": "EventRecorded",
+            "eventId": f"{source_id}-created",
+            "eventKind": event_kind,
+            "subject": f"github-user:{author}" if author else f"repo:{self.repo}",
+            "object": source_id,
+            "startedAt": created_at,
+            "endedAt": closed_at if state == "closed" else None,
+        }
+
+        # Subjects — people involved (ONTOLOGY_v2.5 §1.1)
+        subjects = []
+        if author:
+            subjects.append({
+                "subjectId": f"github-user:{author}",
+                "subjectKind": "naturalPerson",
+                "name": author,
+            })
+        for a in assignees:
+            if a != author:
+                subjects.append({
+                    "subjectId": f"github-user:{a}",
+                    "subjectKind": "naturalPerson",
+                    "name": a,
+                })
+
+        # aboutSubject edges — who this issue is about (ONTOLOGY_v2.5 §2.2)
+        about_subjects = [s["subjectId"] for s in subjects]
+        about_objects = [source_id]
+
+        return {
+            "source": source,
+            "object": obj,
+            "event": event,
+            "subjects": subjects,
+            "aboutSubjects": about_subjects,
+            "aboutObjects": about_objects,
+        }
+
     def ingest(self, proj) -> int:
-        """Poll + apply to projection. Returns count of applied events."""
+        """Poll + apply to projection. Returns count of applied events.
+        Issues get full 4-entity chain (Source → Object → Event → Subjects).
+        PRs get event-only (existing behavior).
+        """
         events = self.poll()
         count = 0
         for ev in events:
             proj.apply(ev)
             count += 1
+
+        # Entity extraction for issues (ONTOLOGY_v2.5 §1.1, PM domain extension)
+        raw_issues = self.poll_raw_issues()
+        for issue in raw_issues:
+            entities = self._issue_to_entities(issue)
+            if entities:
+                if entities.get("source"):
+                    proj.apply(entities["source"])
+                if entities.get("object"):
+                    proj.apply(entities["object"])
+                for subj in entities.get("subjects", []):
+                    proj.apply(subj)
+                # aboutSubject edges — who this issue relates to (ONTOLOGY_v2.5 §2.2)
+                obj_id = entities.get("object", {}).get("objectId", "")
+                for sid in entities.get("aboutSubjects", []):
+                    proj.g.query(
+                        "MERGE (s:Subject {id: $sid}) "
+                        "MERGE (o:Object {id: $oid}) "
+                        "MERGE (s)-[:aboutSubject]->(o)",
+                        params={"sid": sid, "oid": obj_id},
+                    )
+                count += 1  # count the entity chain as one applied unit
         return count
 
     # ── Webhook (GAP-11) ───────────────────────────────────────────
@@ -161,6 +295,7 @@ class GitHubConnector:
             "startedAt": created_at,
             "endedAt": closed_at if state == "closed" else None,
             "source": f"github:{self.repo}",
+            "sourceKind": "github_issue", "sourceKind": "github_issue",
             "participants": [],
         }
 
@@ -186,6 +321,7 @@ class GitHubConnector:
             "startedAt": created_at,
             "endedAt": merged_at or (closed_at if state == "closed" else None),
             "source": f"github:{self.repo}",
+            "sourceKind": "github_issue", "sourceKind": "github_issue",
             "participants": [],
         }
 
