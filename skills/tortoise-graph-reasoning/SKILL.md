@@ -38,7 +38,7 @@ Independent dimensions. Point confidence = truth. Operator weight = implication 
 Every IMPL/NAND edge is a Point with its own confidence. Can be attacked (NAND) or mitigated.
 
 ### Annotation: Source->Point only
-Annotate operators where external evidence supports a claim. Use sourceKind (T0-T4) and source_date.
+Annotate operators where external evidence supports a claim. Use sourceKind (T0-T4) and sourceDate.
 Skip annotation for Point->Point logical connections.
 
 ### Source Credibility Tiers
@@ -52,7 +52,7 @@ Assign sourceKind to every evidence point. Default T4 if ungraded.
 | T3 Low | 0.4 | Anecdotal, single observations |
 | T4 Unverified | 0.2 | Blog, social media, **ungraded default** |
 
-Time decay is computed automatically by the EP engine from source_date. Set source_date on evidence points.
+Time decay is computed automatically by the EP engine from sourceDate. Set sourceDate on evidence points.
 EP weights sources by: tier_weight × time_decay (logarithmic, 0.5 at 15 years).
 
 ### Mitigation — Weaken Without Denying
