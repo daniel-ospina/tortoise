@@ -17,7 +17,7 @@ from pathlib import Path
 from datetime import datetime
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
-_ELDATO_ROOT = _PROJECT_ROOT.parent.parent  # /Users/home/eldato when run from eldato-epistemic
+_ELDATO_ROOT = _PROJECT_ROOT.parent  # eldato-epistemic lives inside eldato repo
 _SUBJECTS_DIR = _ELDATO_ROOT / "operations" / "subjects"
 
 if str(_PROJECT_ROOT) not in sys.path:
