@@ -33,7 +33,7 @@ def _wrap(text: str, width: int = 26, max_lines: int = 4) -> list[str]:
 
 
 def render(points: dict[str, dict], *, title: str = "Tortoise graph") -> str:
-    ordered = sorted(points.values(), key=lambda p: p["created_at"])
+    ordered = sorted(points.values(), key=lambda p: p.get("createdAt") or p.get("created_at", ""))
     n = len(ordered)
     cols = max(1, math.ceil(math.sqrt(n * 1.6)))
     rows = max(1, math.ceil(n / cols))

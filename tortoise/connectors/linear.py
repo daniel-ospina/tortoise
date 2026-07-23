@@ -164,6 +164,7 @@ class LinearConnector:
             "startedAt": created,
             "endedAt": ended,
             "source": f"linear:{team_key}",
+            "sourceKind": "linear_card",
             "participants": participants,
         }
 
@@ -189,5 +190,6 @@ class LinearConnector:
             "startedAt": starts,
             "endedAt": completed or None,
             "source": f"linear:{team_key}",
+            "sourceKind": "linear_card",
             "participants": [],
         }

@@ -1,4 +1,8 @@
-"""GAP-09b #6996: Health checks + Prometheus metrics + cost tracking."""
+"""GAP-09b #6996: Health checks + Prometheus metrics + cost tracking.
+
+#7395: Auth-gated — requires Bearer token when TORTOISE_API_KEY is set.
+Binds 127.0.0.1 by default (not 0.0.0.0).
+"""
 from __future__ import annotations
 
 import time
@@ -6,6 +10,8 @@ import json
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from prometheus_client import Counter, Histogram, generate_latest
+
+from tortoise.auth import require_auth, is_dev_mode
 
 _start = time.monotonic()
 _last_ingest: float | None = None
@@ -80,6 +86,16 @@ def metrics() -> dict:
 
 class _Handler(BaseHTTPRequestHandler):
     def do_GET(self):
+        # Auth gate (#7395): require valid Bearer token in prod mode
+        if not is_dev_mode():
+            headers = {k.lower(): v for k, v in self.headers.items()}
+            if not require_auth(headers):
+                self.send_response(401)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": "unauthorized"}).encode())
+                return
+
         if self.path == "/health":
             self._handle_endpoint("health", lambda: json.dumps(metrics()).encode(),
                                   "application/json")
@@ -110,6 +126,6 @@ class _Handler(BaseHTTPRequestHandler):
         pass  # silence logs
 
 
-def serve_health(port: int = 9090) -> None:
-    """Standalone /health + /metrics HTTP server."""
-    HTTPServer(("", port), _Handler).serve_forever()
+def serve_health(port: int = 9090, bind: str = "127.0.0.1") -> None:
+    """Standalone /health + /metrics HTTP server. Auth-gated in prod mode (#7395)."""
+    HTTPServer((bind, port), _Handler).serve_forever()

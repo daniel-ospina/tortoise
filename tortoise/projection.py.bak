@@ -115,7 +115,6 @@ class FalkorProjection:
             raise ValueError("Either path or host must be provided")
 
         self.g = self.db.select_graph(graph_name)
-        self._ensure_indexes()
 
     @classmethod
     def from_uri(cls, uri: str) -> "FalkorProjection":
@@ -168,8 +167,6 @@ class FalkorProjection:
             self._upsert_object(ev)
         elif t == "DocumentCreated":
             self._upsert_document(ev)
-        elif t == "SourceCreated":
-            self._upsert_source(ev)
 
     def _upsert(self, p: dict) -> None:
         op = p.get("operator")
@@ -181,8 +178,7 @@ class FalkorProjection:
             "    n.pointKind=coalesce($pk, n.pointKind), "
             "    n.status=coalesce($st, n.status, 'live'), "
             "    n.authoredBy=coalesce($ab, n.authoredBy), "
-            "    n.aboutEntities=coalesce($ae, n.aboutEntities), "
-            "    n.extractedFrom=coalesce($ef, n.extractedFrom), "
+
             "    n.confidence=coalesce($cf, n.confidence), "
             "    n.createdAt=coalesce($ca, n.createdAt, $now), "
             "    n.validFrom=coalesce($vf, n.validFrom), "
@@ -193,17 +189,21 @@ class FalkorProjection:
                     "pk": p.get("pointKind"),
                     "st": p.get("status"),
                     "ab": p.get("authoredBy"),
-                    "ae": p.get("aboutEntities"),
-                    "ef": p.get("extractedFrom"),
+
                     "cf": p.get("confidence"),
                     "ca": p.get("createdAt") or p.get("created_at"),
                     "vf": p.get("validFrom"), "vt": p.get("validTo"),
                     "now": _now_iso()},
         )
-        # P1-1: Provenance chain — link Point → Document via EXTRACTED_FROM edge
-        extracted_from = p.get("extractedFrom")
-        if extracted_from:
-            self._link_extracted_from(p["id"], extracted_from)
+        # Ontology v2.1: link Point → Source via extractedFrom edge
+        source_ref = p.get("extractedFrom")
+        if source_ref:
+            self._link_source(p["id"], source_ref)
+        # aboutEntities → per-type about edges (Ontology v2.1 Phase 1)
+        about = p.get("aboutEntities")
+        if about and isinstance(about, list):
+            for entity_name in about:
+                self._create_about_edges(p["id"], str(entity_name))
         # P1-2: Temporal — also store provenance source_id
         if prov.get("source_id"):
             self.g.query(
@@ -212,17 +212,16 @@ class FalkorProjection:
             )
         if op:
             self._create_edges(p)
-        # Ontology v2.1: about edges from aboutEntities property (per-type)
-        if p.get("aboutEntities"):
-            self._link_about_entities(p["id"], p["aboutEntities"])
 
     def _create_edges(self, p: dict) -> None:
         """Create typed edges for an operator Point. Auto-creates stub nodes
         for missing source Points referenced by short IDs (#6713)."""
         op = p["operator"]
-        rel_type = {"NAND": "NAND", "IMPL": "IMPL"}.get(op["op_type"])
-        if not rel_type:
-            return  # skip unknown operator types (was: INPUT)
+        rel_type = {"NAND": "NAND", "IMPL": "IMPL",
+                     "composedOf": "hasPart", "decomposesInto": "hasPart",
+                     "contains": "hasPart", "wraps": "hasPart"}.get(op["op_type"])
+        if rel_type is None:
+            return  # unknown op_type — no edges to create
         for idx, src in enumerate(op["inputs"]):
             # ponytail: auto-create stub if source Point doesn't exist.
             # Short numeric IDs are orphan refs from cross-file wiring scripts.
@@ -245,89 +244,78 @@ class FalkorProjection:
                 params={"oid": p["id"], "sid": src, "idx": idx},
             )
 
+
     def _delete(self, pid: str) -> None:
         self.g.query("MATCH (n:Point {id:$id}) DETACH DELETE n", params={"id": pid})
 
     # ── P1-1: Provenance chain ────────────────────────────────────
 
-    def _link_extracted_from(self, point_id: str, doc_ref: str) -> None:
-        """Link Point → Document via EXTRACTED_FROM edge. Creates stub Document if missing."""
-        # ponytail: doc_ref is typically a filename, use it as document ID
+    def _link_source(self, point_id: str, source_ref: str) -> None:
+        """Link Point → Source via extractedFrom edge (Ontology v2.1).
+
+        Creates stub Source if missing, keyed on url. The references edge
+        (Source → Document/Event/Object) is set by DocumentCreated events.
+        """
         self.g.query(
-            "MERGE (d:Document {id:$did}) "
-            "ON CREATE SET d.title=$did, d.format='unknown'",
-            params={"did": doc_ref},
+            "MERGE (s:Source {url:$url}) "
+            "ON CREATE SET s.sourceType='document', s.title=$url, "
+            "    s.contentHash='', s.ingestedAt=$now",
+            params={"url": source_ref, "now": _now_iso()},
         )
         self.g.query(
-            "MATCH (n:Point {id:$pid}), (d:Document {id:$did}) "
-            "MERGE (n)-[:EXTRACTED_FROM]->(d)",
-            params={"pid": point_id, "did": doc_ref},
+            "MATCH (n:Point {id:$pid}), (s:Source {url:$url}) "
+            "MERGE (n)-[:extractedFrom]->(s)",
+            params={"pid": point_id, "url": source_ref},
         )
 
-    def _link_about_entities(self, point_id: str, entities: list[str]) -> None:
-        """Create per-type about edges from aboutEntities property list.
+    # ponytail: SDK compat alias (Phase 1b will rename caller)
+    _link_extracted_from = _link_source
 
-        Entity format: "Subject:name" → aboutSubject edge to Subject node.
-        Supports Subject, Object, Action, Event prefixes.
+    # ── Ontology v2.1: about edges ─────────────────────────────────
+
+    def _create_about_edges(self, point_id: str, entity_name: str) -> None:
+        """Link Point to named Subject or Object via aboutSubject/aboutObject edge.
+
+        Tries Subject first, then Object, to auto-detect entity type from
+        the legacy flat aboutEntities list. Creates stub if neither exists.
         """
-        kind_map = {
-            "Subject": ("aboutSubject", "Subject", "subjectKind"),
-            "Object": ("aboutObject", "Object", "objectKind"),
-            "Action": ("aboutAction", "Action", "actionKind"),
-            "Event": ("aboutEvent", "Event", "eventKind"),
-        }
-        for entity_ref in entities:
-            if ":" not in entity_ref:
-                continue
-            prefix, name = entity_ref.split(":", 1)
-            if prefix not in kind_map:
-                continue
-            edge_type, label, kind_prop = kind_map[prefix]
-            # MERGE stub entity if it doesn't exist
+        # Try Subject
+        subj = self.g.query(
+            "MATCH (s:Subject {name:$name}) RETURN s.name LIMIT 1",
+            params={"name": entity_name},
+        ).result_set
+        if subj:
             self.g.query(
-                f"MERGE (e:{label} {{name: $name}}) "
-                f"ON CREATE SET e.{kind_prop} = 'other', e.createdAt = $now",
-                params={"name": name.strip(), "now": _now_iso()},
+                "MATCH (n:Point {id:$pid}), (s:Subject {name:$name}) "
+                "MERGE (n)-[:aboutSubject]->(s)",
+                params={"pid": point_id, "name": entity_name},
             )
-            # Create about edge
-            self.g.query(
-                f"MATCH (p:Point {{id: $pid}}) "
-                f"MATCH (e:{label} {{name: $name}}) "
-                f"MERGE (p)-[:{edge_type}]->(e)",
-                params={"pid": point_id, "name": name.strip()},
-            )
-
-    def _upsert_source(self, ev: dict) -> None:
-        """MERGE Source node for layered provenance (Ontology v2.1).
-
-        Source properties: url (permalink), sourceType, contentHash, title,
-        ingestedAt, version, externalId. Creates stub if missing.
-        """
-        sid = ev.get("id")
-        url = ev.get("url", "")
-        if not sid and not url:
             return
+        # Try Object
+        obj = self.g.query(
+            "MATCH (o:Object {name:$name}) RETURN o.name LIMIT 1",
+            params={"name": entity_name},
+        ).result_set
+        if obj:
+            self.g.query(
+                "MATCH (n:Point {id:$pid}), (o:Object {name:$name}) "
+                "MERGE (n)-[:aboutObject]->(o)",
+                params={"pid": point_id, "name": entity_name},
+            )
+            return
+        # Neither exists — default to Subject stub
         self.g.query(
-            "MERGE (s:Source {url: $url}) "
-            "ON CREATE SET s.id = coalesce($id, $url), "
-            "              s.sourceType = $st, "
-            "              s.contentHash = $hash, "
-            "              s.title = $title, "
-            "              s.ingestedAt = $now, "
-            "              s.version = 1, "
-            "              s.externalId = $ext "
-            "ON MATCH SET s.contentHash = $hash, "
-            "           s.version = s.version + 1, "
-            "           s.updatedAt = $now",
-            params={
-                "url": url, "id": sid or url,
-                "st": ev.get("sourceType", "document"),
-                "hash": ev.get("contentHash", ""),
-                "title": ev.get("title", url),
-                "now": _now_iso(),
-                "ext": ev.get("externalId", ""),
-            },
+            "MERGE (s:Subject {name:$name}) "
+            "ON CREATE SET s.id=$name, s.subjectKind='other'",
+            params={"name": entity_name},
         )
+        self.g.query(
+            "MATCH (n:Point {id:$pid}), (s:Subject {name:$name}) "
+            "MERGE (n)-[:aboutSubject]->(s)",
+            params={"pid": point_id, "name": entity_name},
+        )
+
+    # ── P1-4: Entity linking (Subject / Object) ───────────────────
 
     def _upsert_subject(self, ev: dict) -> None:
         """MERGE Subject by name (content-hash dedup)."""
@@ -474,7 +462,7 @@ class FalkorProjection:
                             "now": _now_iso()},
                 )
             elif t == "PointRetracted":
-                self._delete(ev["id"])
+                self._delete(ev.get("id") or ev["event_id"])
             elif t == "PointsMerged":
                 for mid in ev.get("merge_ids", []):
                     self._delete(mid)
@@ -483,7 +471,8 @@ class FalkorProjection:
                     "MATCH (n:Point {id:$id}) "
                     "SET n.content = coalesce($c, n.content), "
                     "    n.context = coalesce($x, n.context)",
-                    params={"id": ev["id"], "c": ev.get("new_content"),
+                    params={"id": ev.get("id") or ev["event_id"],
+                            "c": ev.get("new_content"),
                             "x": ev.get("new_context")},
                 )
             elif t == "EventRecorded":
@@ -510,7 +499,7 @@ class FalkorProjection:
         return {"events": len(events), "nodes": node_count, "edges": edge_count}
 
     def edge_stats(self) -> dict:
-        """Return {operators, impl_edges, nand_edges} for diagnostics."""
+        """Return {operators, impl_edges, nand_edges, input_edges} for diagnostics."""
         ops = self.g.query(
             "MATCH (n:Point) WHERE n.is_operator = true RETURN count(n)"
         ).result_set[0][0]
@@ -520,7 +509,11 @@ class FalkorProjection:
         nand = self.g.query(
             "MATCH ()-[r:NAND]->() RETURN count(r)"
         ).result_set[0][0]
-        return {"operators": ops, "impl_edges": impl, "nand_edges": nand}
+        inp = self.g.query(
+            "MATCH ()-[r:INPUT]->() RETURN count(r)"
+        ).result_set[0][0]
+        return {"operators": ops, "impl_edges": impl, "nand_edges": nand,
+                "input_edges": inp}
 
     def query(self, cypher: str, **params):
         return self.g.query(cypher, params=params or None)
@@ -679,6 +672,14 @@ class FalkorProjection:
         ).result_set
         return float(r[0][0]) if r else 0.5
 
+    def _node_status(self, node_id: str) -> str | None:
+        """Return the status of a Point node, or None if not found."""
+        r = self.g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.status",
+            params={"id": node_id},
+        ).result_set
+        return r[0][0] if r else None
+
     def _neighbors(self, node_id: str) -> list[str]:
         """All Points reachable via IMPL or NAND edges (both directions)."""
         rows = self.g.query(
@@ -692,18 +693,6 @@ class FalkorProjection:
         ).result_set
         neighbors.update(r[0] for r in rows)
         return list(neighbors)
-
-    def _ensure_indexes(self) -> None:
-        """Create range indexes on frequently-filtered Point properties.
-
-        Wraps CREATE INDEX in try/except because FalkorDB raises
-        "Attribute 'X' is already indexed" rather than silently no-opping.
-        """
-        for prop in ("id", "pointKind", "context", "content_hash", "is_operator"):
-            try:
-                self.g.query(f"CREATE INDEX FOR (n:Point) ON (n.{prop})")
-            except Exception:
-                pass  # index already exists
 
     def close(self) -> None:
         self.db.close()

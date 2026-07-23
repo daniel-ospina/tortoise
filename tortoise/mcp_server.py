@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from fastmcp import FastMCP
-from tortoise.auth import is_dev_mode
+from tortoise.auth import is_dev_mode as _is_dev_mode
 from tortoise.sdk import TortoiseSDK
 from tortoise import monitoring
 
@@ -16,7 +16,7 @@ mcp = FastMCP("tortoise")
 sdk = TortoiseSDK()
 
 # Announce auth mode at startup
-if is_dev_mode():
+if _is_dev_mode():
     import logging
     _log = logging.getLogger(__name__)
     _log.warning("TORTOISE_API_KEY not set — running in dev mode (no auth)")
@@ -25,11 +25,21 @@ if is_dev_mode():
 def _safe(fn, *args, **kwargs):
     """Call fn; return error dict on exception instead of raising.
 
-    Auth: In production mode (TORTOISE_API_KEY set), require_auth() is
-    enforced at the HTTP transport layer (health-server). The stdio MCP
-    transport cannot carry HTTP headers, so auth is deferred to the
-    health-server endpoint. Dev mode (no key) is always unlocked.
+    Auth (#7395): In production mode (TORTOISE_API_KEY set), stdio MCP
+    transport cannot carry HTTP Bearer tokens — all operations are
+    rejected. Use the authenticated HTTP endpoint instead.
+    Dev mode (no key) is always unlocked.
     """
+    if not _is_dev_mode():
+        monitoring.record_error()
+        return {
+            "error": (
+                "Authentication required. The MCP stdio transport cannot "
+                "carry auth tokens. Use an authenticated HTTP endpoint "
+                "(tortoise health-server) with Authorization: Bearer <key> "
+                "header, or unset TORTOISE_API_KEY for dev mode."
+            )
+        }
     try:
         return fn(*args, **kwargs)
     except Exception as e:

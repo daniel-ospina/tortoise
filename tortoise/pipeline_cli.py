@@ -13,13 +13,13 @@ from __future__ import annotations
 
 import argparse
 import sys
-import time
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "pipelines.yaml"
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _load() -> dict:
@@ -114,6 +114,10 @@ def cmd_run(name: str) -> None:
     print(f"Running {name} pipeline...")
     try:
         import importlib
+        import sys as _sys
+        if str(_PROJECT_ROOT) not in _sys.path:
+            _sys.path.insert(0, str(_PROJECT_ROOT))
+
         mod = importlib.import_module(module_path)
         conn_cls = getattr(mod, class_name)
         connector = conn_cls(config=cfg.get("connector", {}).get("config"))
@@ -123,7 +127,7 @@ def cmd_run(name: str) -> None:
             if hasattr(connector, "ingest"):
                 # Create projection and ingest
                 from tortoise.projection import FalkorProjection
-                proj = FalkorProjection("tortoise.db")
+                proj = FalkorProjection(str(_PROJECT_ROOT / "tortoise.db"))
                 count = connector.ingest(proj)
                 print(f"  Ingested {count} entities into FalkorDB")
             else:
@@ -133,6 +137,9 @@ def cmd_run(name: str) -> None:
     except ImportError as e:
         print(f"  Error: {e}")
         print(f"  Is the connector installed? Module: {module_path}")
+        print(f"  Check that {_PROJECT_ROOT} is on PYTHONPATH")
+    except Exception as e:
+        print(f"  Error running {name}: {e}")
 
 
 # ── CLI ───────────────────────────────────────────────────────

@@ -144,7 +144,7 @@ class SlackConnector:
             def log_message(self, format, *args):
                 pass
 
-        self._server = HTTPServer(("0.0.0.0", self.webhook_port), Handler)
+        self._server = HTTPServer(("127.0.0.1", self.webhook_port), Handler)
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
         return self.webhook_port
@@ -177,6 +177,7 @@ class SlackConnector:
             "startedAt": _ts_to_iso(ts),
             "endedAt": None,
             "source": f"slack:{channel}",
+            "sourceKind": "slack_message",
             "participants": [user],
             "parentEvent": f"slack-msg-{channel}-{thread_ts.replace('.', '-')}" if parent_ts else None,
         }

@@ -213,8 +213,8 @@ class EventAPI:
                      doc_status: str = "draft",
                      format: str = "markdown",
                      version: str = "",
-                     created_at: str | None = None,
-                     updated_at: str | None = None,
+                     createdAt: str | None = None,
+                     updatedAt: str | None = None,
                      corrects: str | None = None) -> str:
         """Emit DocumentCreated event. Returns the document id (same as input).
 
@@ -235,8 +235,8 @@ class EventAPI:
                    doc_status=doc_status,
                    format=format,
                    version=version,
-                   created_at=created_at or now_iso(),
-                   updated_at=updated_at or now_iso())
+                   createdAt=createdAt or now_iso(),
+                   updatedAt=updatedAt or now_iso())
         return doc_id
 
     # ── Cleanup ───────────────────────────────────────────────────

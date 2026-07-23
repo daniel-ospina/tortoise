@@ -112,8 +112,8 @@ TEMPLATES: dict[str, dict] = {
             WHERE c.content CONTAINS $entity
               AND c.ep_alpha IS NOT NULL
             RETURN c.id, c.content, coalesce(c.confidence,0.5) as conf,
-                   c.ep_alpha, c.ep_beta, c.created_at
-            ORDER BY c.created_at DESC LIMIT $limit
+                   c.ep_alpha, c.ep_beta, c.createdAt
+            ORDER BY c.createdAt DESC LIMIT $limit
         """,
         "format": lambda rows: _format_timeline(rows),
     },

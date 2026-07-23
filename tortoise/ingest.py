@@ -146,8 +146,8 @@ def main(argv=None):
                     doc_status=fm.get("doc_status", "draft"),
                     format=_infer_format(args.transcript),
                     version=fm.get("version", ""),
-                    created_at=fm.get("created", None),
-                    updated_at=fm.get("updated", None),
+                    createdAt=fm.get("created", None),
+                    updatedAt=fm.get("updated", None),
                 )
 
             if is_doc:

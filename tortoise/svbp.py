@@ -1,3 +1,4 @@
+# DEPRECATED: SVBP algorithm replaced by Expectation Propagation (ep.py). Kept for reference only.
 """SVBP (Stein Variational Belief Propagation) for Tortoise.
 
 Per-factor Stein updates with cavity messages. Like EP but with

@@ -919,6 +919,9 @@ class TortoiseSDK:
             )
 
         api_key = f"tt_{uuid.uuid4().hex}"
+        # #7395: hash before storing — graph dump won't reveal plaintext keys
+        from tortoise.auth import hash_api_key
+        key_hash = hash_api_key(api_key)
         graph_name = f"team_{name}"
         proj = self._get_proj()
         now = datetime.now(timezone.utc).isoformat()
@@ -937,7 +940,7 @@ class TortoiseSDK:
         proj.g.query(
             "CREATE (t:Team {id:$id, name:$name, api_key:$key, "
             "graph_name:$gn, createdAt:$now})",
-            params={"id": tid, "name": name, "key": api_key,
+            params={"id": tid, "name": name, "key": key_hash,
                     "gn": graph_name, "now": now},
         )
         try:
