@@ -728,6 +728,277 @@ def step10() -> None:
         _fail("Smoke test failed — check output above.")
 
 
+# ── step 11: entity population (ONTOLOGY_v2.5 §1.1) ─────────────────────
+
+_GIT_USER = ""
+_GIT_EMAIL = ""
+_PRODUCT_NAME = ""
+_REPO_URL = ""
+_PIPELINES: list[str] = []
+
+
+def _scan_git() -> tuple[str, str, str]:
+    """Derive Person + DataSource from git config. Returns (name, email, repo_url)."""
+    name = _run_output(["git", "config", "user.name"])
+    email = _run_output(["git", "config", "user.email"])
+    url = ""
+    try:
+        remotes = _run_output(["git", "remote", "-v"])
+        for line in remotes.split("\n"):
+            if "origin" in line and "(fetch)" in line:
+                url = line.split()[1]
+                # Normalize to https://github.com/org/repo format
+                if url.endswith(".git"):
+                    url = url[:-4]
+                if url.startswith("git@github.com:"):
+                    url = "https://github.com/" + url.split(":")[1]
+                break
+    except Exception:
+        pass
+    return name, email, url
+
+
+def _scan_readme() -> str:
+    """Extract product name from README."""
+    for readme in ["README.md", "readme.md", "Readme.md"]:
+        path = PROJECT / readme
+        if path.exists():
+            first = path.read_text().split("\n")[0]
+            # Strip markdown heading markers
+            for prefix in ["# ", "## "]:
+                if first.startswith(prefix):
+                    return first[len(prefix):].strip()
+            return first.strip()
+    return ""
+
+
+def _scan_package() -> str:
+    """Extract product name from package.json or pyproject.toml."""
+    import json
+    for pkg in ["package.json", "pyproject.toml"]:
+        path = PROJECT / pkg
+        if not path.exists():
+            continue
+        try:
+            if pkg.endswith(".json"):
+                data = json.loads(path.read_text())
+                return data.get("name", "")
+            else:
+                for line in path.read_text().split("\n"):
+                    if line.startswith("name "):
+                        return line.split("=")[1].strip().strip('"').strip("'")
+        except Exception:
+            pass
+    return ""
+
+
+def _scan_repo_structure() -> dict:
+    """Detect monorepo structure (apps/, packages/, services/)."""
+    subdirs = {}
+    for d in ["apps", "packages", "services", "libs"]:
+        path = PROJECT / d
+        if path.is_dir():
+            children = [c.name for c in path.iterdir() if c.is_dir() and not c.name.startswith(".")]
+            if children:
+                subdirs[d] = children[:5]  # first 5
+    return subdirs
+
+
+def step11a() -> None:
+    """Scan repo — auto-detect Person, Product, DataSource."""
+    global _GIT_USER, _GIT_EMAIL, _PRODUCT_NAME, _REPO_URL
+
+    name, email, url = _scan_git()
+    _GIT_USER = name
+    _GIT_EMAIL = email
+    _REPO_URL = url
+
+    # Product: package.json name → README title → repo directory name
+    _PRODUCT_NAME = _scan_package() or _scan_readme()
+    if not _PRODUCT_NAME:
+        _PRODUCT_NAME = PROJECT.name
+
+    subdirs = _scan_repo_structure()
+
+    print(f"\n  {GREEN}Detected:{RESET}")
+    print(f"    Person:  {name or '(not set — run git config user.name)'}")
+    if email:
+        print(f"    Email:   {email}")
+    print(f"    Product: {_PRODUCT_NAME}")
+    if url:
+        short_url = url.replace("https://github.com/", "")
+        print(f"    Repo:    {short_url}")
+    if subdirs:
+        for d, children in subdirs.items():
+            print(f"    {d}/: {', '.join(children)}")
+
+
+def step11b() -> None:
+    """Confirm or refine Product name."""
+    global _PRODUCT_NAME
+
+    print(f"\n  Product name: {BOLD}{_PRODUCT_NAME}{RESET}")
+    resp = input(f"  Press enter to confirm, or type a new name, or 'skip': ").strip()
+    if resp.lower() == "skip":
+        _PRODUCT_NAME = ""
+        print(f"  {YELLOW}Skipped — organize later with 'tortoise pipeline config'{RESET}")
+    elif resp:
+        _PRODUCT_NAME = resp
+        print(f"  Product set to: {_PRODUCT_NAME}")
+    else:
+        print(f"  Confirmed: {_PRODUCT_NAME}")
+
+
+def step11c() -> None:
+    """Pipeline activation — pre-selected defaults."""
+    global _PIPELINES
+
+    print(f"\n  Keep your knowledge graph updated automatically:")
+    print(f"    [1] GitHub issues/PRs pipeline (recommended)")
+    print(f"    [2] Docs pipeline (auto-tags new docs)")
+    print(f"    [3] Both")
+    print(f"    [4] Skip — I'll set up later")
+
+    resp = input(f"  Choose [1-4] (default 3): ").strip()
+    if resp == "1":
+        _PIPELINES = ["github_issues"]
+    elif resp == "2":
+        _PIPELINES = ["docs"]
+    elif resp == "4" or resp.lower() == "skip":
+        _PIPELINES = []
+    else:
+        _PIPELINES = ["github_issues", "docs"]  # default
+
+    if _PIPELINES:
+        print(f"  Enabled: {', '.join(_PIPELINES)}")
+    else:
+        print(f"  {YELLOW}No pipelines enabled — set up later with 'tortoise pipeline config'{RESET}")
+
+
+def step11d() -> None:
+    """Review and confirm."""
+    print(f"\n  {BOLD}Summary:{RESET}")
+    if _GIT_USER:
+        print(f"    {GREEN}✓{RESET} Person: {_GIT_USER}")
+    if _PRODUCT_NAME:
+        print(f"    {GREEN}✓{RESET} Product: {_PRODUCT_NAME}")
+    if _REPO_URL:
+        print(f"    {GREEN}✓{RESET} DataSource: {_REPO_URL}")
+    if _PIPELINES:
+        print(f"    {GREEN}✓{RESET} Pipelines: {', '.join(_PIPELINES)}")
+    else:
+        print(f"    {YELLOW}⚠{RESET}  No pipelines enabled")
+    print(f"    {YELLOW}⚠{RESET}  No teams declared — working in solo mode")
+
+    resp = input(f"\n  Press enter to confirm, or 'back' to redo: ").strip()
+    if resp.lower() == "back":
+        print("  Re-running pipeline setup...")
+        step11c()
+        step11d()
+
+
+def step11e() -> None:
+    """Write pipelines.yaml and seed FalkorDB with initial entities."""
+    global _GIT_USER, _PRODUCT_NAME, _REPO_URL, _PIPELINES
+
+    # ── Write pipelines.yaml ──
+    import yaml
+    config_path = PROJECT / "config" / "pipelines.yaml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+
+    config = {
+        "version": 1,
+        "pipelines": {},
+    }
+
+    if "github_issues" in _PIPELINES and _REPO_URL:
+        repo_path = _REPO_URL.replace("https://github.com/", "")
+        config["pipelines"]["github_issues"] = {
+            "enabled": True,
+            "source": "github",
+            "sourceKind": "github_issue",
+            "trigger": "manual",
+            "entity_mapping": {
+                "repo_to_team": {},
+                "user_to_role": {},
+            },
+            "entity_kinds": {
+                "issue_object": "pm:issue",
+                "pr_object": "pm:card",
+                "created_event": "pm:cardCreated",
+                "completed_event": "pm:cardCompleted",
+            },
+            "connector": {
+                "module": "tortoise.connectors.github",
+                "class": "GitHubConnector",
+                "config": {"repo": repo_path, "state": "all", "limit": 100},
+            },
+        }
+
+    if "docs" in _PIPELINES:
+        config["pipelines"]["docs"] = {
+            "enabled": True,
+            "source": "filesystem",
+            "trigger": "manual",
+            "strategy": ["path-derive"],
+            "entity_mapping": {
+                "path_to_team": {},
+                "path_to_domain": {},
+            },
+        }
+
+    config_path.write_text(
+        yaml.dump(config, default_flow_style=False, sort_keys=False)
+    )
+    print(f"\n  Wrote {config_path}")
+
+    # ── Seed FalkorDB ──
+    try:
+        from tortoise.projection import FalkorProjection
+        db_path = str(PROJECT / "tortoise.db")
+        proj = FalkorProjection(db_path)
+
+        # Person — Subject (ONTOLOGY_v2.5 §1.1)
+        if _GIT_USER:
+            person_id = f"person:{_GIT_USER.lower().replace(' ', '-')}"
+            proj.apply({
+                "type": "SubjectAdded",
+                "id": person_id,
+                "name": _GIT_USER,
+                "subject_kind": "naturalPerson",
+            })
+            print(f"  Seeded Person: {_GIT_USER}")
+
+        # Product — Object (ONTOLOGY_v2.5 §1.1)
+        if _PRODUCT_NAME:
+            product_id = f"product:{_PRODUCT_NAME.lower().replace(' ', '-')}"
+            proj.apply({
+                "type": "ObjectRegistered",
+                "id": product_id,
+                "name": _PRODUCT_NAME,
+                "object_kind": "software",
+            })
+            # aboutSubject edge: Product → Person (ONTOLOGY_v2.5 §2.2)
+            if _GIT_USER:
+                proj.g.query(
+                    "MATCH (o:Object {id: $oid}) "
+                    "MATCH (s:Subject {id: $sid}) "
+                    "MERGE (o)-[:aboutSubject]->(s)",
+                    params={"oid": product_id, "sid": person_id},
+                )
+            print(f"  Seeded Product: {_PRODUCT_NAME}")
+
+        print(f"  {GREEN}Graph seeded ✓{RESET}")
+    except Exception as e:
+        print(f"  {YELLOW}⚠ Graph seeding skipped: {e}{RESET}")
+        print(f"    Run 'tortoise pipeline run' to populate the graph later.")
+
+
+def step11() -> None:
+    """Wrapper — dispatches to sub-steps in main loop."""
+    pass  # handled inline in main()
+
+
 # ── main ────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -757,12 +1028,20 @@ def main() -> None:
             (8, "FalkorDB container", step8),
             (9, ".env configuration", step9),
             (10, "Smoke test", step10),
+            (11, "Entity setup — auto-detect your project", step11),
         ]
 
         for num, label, fn in steps:
             _progress(num, label)
             t0 = time.time()
-            fn()
+            if fn == step11:
+                step11a()
+                step11b()
+                step11c()
+                step11d()
+                step11e()
+            else:
+                fn()
             _done(time.time() - t0)
 
         print(f"\n{BOLD}{'=' * 60}{RESET}")
