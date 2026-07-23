@@ -35,8 +35,41 @@ class GitHubConnector:
         self.api = api
         self._server: HTTPServer | None = None
         self._thread: threading.Thread | None = None
+        self._routing = self._load_routing()
 
-    # ── Polling (existing) ─────────────────────────────────────────
+    def _load_routing(self) -> dict:
+        """Load entity routing config (config/routing.yaml)."""
+        try:
+            import yaml
+            path = Path(__file__).resolve().parent.parent.parent / "config" / "routing.yaml"
+            if path.exists():
+                return yaml.safe_load(path.read_text()) or {}
+        except Exception:
+            pass
+        return {}
+
+    def _route_issue(self, labels: list[str]) -> dict:
+        """Determine team + role for an issue based on routing config."""
+        routing = self._routing
+        label_map = routing.get("label_routing", {})
+        repo_routing = routing.get("repo_routing", {}).get(self.repo, {})
+        default_team = repo_routing.get("default_team", "")
+        product = repo_routing.get("product", "")
+        fallback = routing.get("attribution_fallback", "default_team")
+        team = ""
+        role = "product-implementer"
+        for label in labels:
+            if label in label_map:
+                cfg = label_map[label]
+                if cfg.get("team"): team = cfg["team"]
+                if cfg.get("role"): role = cfg["role"]
+        if not team:
+            team = default_team
+        if not team and fallback != "skip":
+            team = "default" if fallback == "default_team" else ""
+        return {"team": team, "role": role, "product": product}
+
+    # ── Polling ─────────────────────────────────────────────────
 
     def poll(self) -> list[dict]:
         """Fetch issues + PRs via `gh` CLI → EventRecorded dicts."""
@@ -101,11 +134,11 @@ class GitHubConnector:
     # ── Entity extraction (ONTOLOGY_v2.5 §1.1, PM domain extension) ────
 
     def _issue_to_entities(self, issue: dict) -> dict | None:
-        """Map GitHub issue → 4-entity chain.
+        """Map GitHub issue → entity chain.
 
-        Returns dict with keys: source, object, event, subjects, about_edges.
-        Per ONTOLOGY_v2.5 §1.1: Source (github_issue), Object (pm:issue),
-        Event (pm:cardCreated/pm:cardCompleted).
+        Returns dict with: object (ObjectRegistered), event (EventRecorded),
+        subjects (SubjectAdded list), about_edges.
+        Per ONTOLOGY_v2.5 §1.1: Object (pm:issue), Subject (naturalPerson).
         PM domain extension: packs/project-management/manifest.yaml.
         """
         number = issue.get("number")
@@ -117,77 +150,62 @@ class GitHubConnector:
         created_at = issue.get("createdAt", "")
         closed_at = issue.get("closedAt", "")
         url = issue.get("url", "")
-        labels = [l.get("name", "") for l in issue.get("labels", [])]
-        assignees = [a.get("login", "") for a in issue.get("assignees", [])]
-        author = issue.get("author", {}).get("login", "")
+        labels = [l.get("name", "") for l in (issue.get("labels") or [])]
+        assignees = [a.get("login", "") for a in (issue.get("assignees") or [])]
+        author = (issue.get("author") or {}).get("login", "")  # P0: handle null author
+        milestone = (issue.get("milestone") or {}).get("title", "")
 
-        source_id = f"github-issue-{self.repo}-{number}"
+        entity_id = f"github-issue-{self.repo}-{number}"
 
-        # Source — provenance anchor (ONTOLOGY_v2.5 §3)
-        source = {
-            "type": "SourceCreated",
-            "sourceId": source_id,
-            "sourceKind": "github_issue",
-            "externalId": str(number),
-            "url": url,
-            "label": f"{self.repo}#{number}: {title}",
-        }
-
-        # Object — persisted entity (PM domain extension)
+        # Object — persisted entity (PM domain extension, ONTOLOGY_v2.5 §1.1)
         obj = {
-            "type": "ObjectCreated",
-            "objectId": source_id,
-            "objectKind": "pm:issue",
+            "type": "ObjectRegistered",
+            "id": entity_id,
             "name": f"{self.repo}#{number}",
+            "object_kind": "pm:issue",
             "title": title,
-            "authoredBy": author,
             "url": url,
+            "createdAt": created_at,
         }
 
         # Event — temporal occurrence (PM domain extension)
         event_kind = "pm:cardCompleted" if state == "closed" else "pm:cardCreated"
         event = {
             "type": "EventRecorded",
-            "eventId": f"{source_id}-created",
+            "eventId": f"{entity_id}-created",
             "eventKind": event_kind,
             "subject": f"github-user:{author}" if author else f"repo:{self.repo}",
-            "object": source_id,
+            "object": entity_id,
             "startedAt": created_at,
             "endedAt": closed_at if state == "closed" else None,
         }
 
-        # Subjects — people involved (ONTOLOGY_v2.5 §1.1)
+        # Subjects — people involved (ONTOLOGY_v2.5 §1.1 subjectKind)
         subjects = []
-        if author:
-            subjects.append({
-                "subjectId": f"github-user:{author}",
-                "subjectKind": "naturalPerson",
-                "name": author,
-            })
-        for a in assignees:
-            if a != author:
+        seen = set()
+        for login in [author] + assignees:
+            if login and login not in seen:
+                seen.add(login)
                 subjects.append({
-                    "subjectId": f"github-user:{a}",
-                    "subjectKind": "naturalPerson",
-                    "name": a,
+                    "type": "SubjectAdded",
+                    "id": f"github-user:{login}",
+                    "name": login,
+                    "subject_kind": "naturalPerson",
                 })
 
-        # aboutSubject edges — who this issue is about (ONTOLOGY_v2.5 §2.2)
-        about_subjects = [s["subjectId"] for s in subjects]
-        about_objects = [source_id]
+        # aboutSubject edges — Object → Subject (ONTOLOGY_v2.5 §2.2)
+        about_subjects = [s["id"] for s in subjects]
 
         return {
-            "source": source,
             "object": obj,
             "event": event,
             "subjects": subjects,
             "aboutSubjects": about_subjects,
-            "aboutObjects": about_objects,
         }
 
     def ingest(self, proj) -> int:
         """Poll + apply to projection. Returns count of applied events.
-        Issues get full 4-entity chain (Source → Object → Event → Subjects).
+        Issues get entity chain: Object (pm:issue) + Event + Subjects + aboutSubject edges.
         PRs get event-only (existing behavior).
         """
         events = self.poll()
@@ -197,26 +215,40 @@ class GitHubConnector:
             count += 1
 
         # Entity extraction for issues (ONTOLOGY_v2.5 §1.1, PM domain extension)
-        raw_issues = self.poll_raw_issues()
+        try:
+            raw_issues = self.poll_raw_issues()
+        except Exception:
+            raw_issues = []  # ponytail: gh CLI may fail, skip entity extraction
+
         for issue in raw_issues:
             entities = self._issue_to_entities(issue)
-            if entities:
-                if entities.get("source"):
-                    proj.apply(entities["source"])
-                if entities.get("object"):
-                    proj.apply(entities["object"])
-                for subj in entities.get("subjects", []):
-                    proj.apply(subj)
-                # aboutSubject edges — who this issue relates to (ONTOLOGY_v2.5 §2.2)
-                obj_id = entities.get("object", {}).get("objectId", "")
-                for sid in entities.get("aboutSubjects", []):
+            if not entities:
+                continue
+
+            # Apply Object (ObjectRegistered → FalkorDB)
+            if entities.get("object"):
+                proj.apply(entities["object"])
+
+            # Apply Event (EventRecorded → FalkorDB)
+            if entities.get("event"):
+                proj.apply(entities["event"])
+
+            # Apply Subjects (SubjectAdded → FalkorDB)
+            for subj in entities.get("subjects", []):
+                proj.apply(subj)
+
+            # aboutSubject edges — Object → Subject (ONTOLOGY_v2.5 §2.2)
+            obj_id = entities.get("object", {}).get("id", "")
+            for sid in entities.get("aboutSubjects", []):
+                if obj_id and sid:
                     proj.g.query(
-                        "MERGE (s:Subject {id: $sid}) "
-                        "MERGE (o:Object {id: $oid}) "
-                        "MERGE (s)-[:aboutSubject]->(o)",
-                        params={"sid": sid, "oid": obj_id},
+                        "MATCH (o:Object {id: $oid}) "
+                        "MATCH (s:Subject {id: $sid}) "
+                        "MERGE (o)-[:aboutSubject]->(s)",
+                        params={"oid": obj_id, "sid": sid},
                     )
-                count += 1  # count the entity chain as one applied unit
+
+            count += 1
         return count
 
     # ── Webhook (GAP-11) ───────────────────────────────────────────
@@ -263,7 +295,7 @@ class GitHubConnector:
             def log_message(self, format, *args):
                 pass  # ponytail: suppress HTTP log noise
 
-        self._server = HTTPServer(("0.0.0.0", self.webhook_port), Handler)
+        self._server = HTTPServer(("127.0.0.1", self.webhook_port), Handler)
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
         return self.webhook_port

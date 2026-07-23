@@ -1,0 +1,54 @@
+# Entity Routing — maps data sources to Products and Teams.
+#
+# Every issue/card/doc must be assigned to exactly one Product and one Team.
+# Resolution order: label → repo → default → ask human.
+#
+# Our first deployment: Organisation Design Team.
+
+version: 1
+
+# ── Products (what we're building) ──
+products:
+  vsm-infra:
+    name: "VSM Infrastructure"
+    description: "Agent swarm coordination, shared state, memory system, pipelines"
+    teams: [organisation-design-team, epistemic-team]
+
+# ── Repos → Product mapping (deterministic) ──
+repo_routing:
+  "daniel-ospina/eldato":
+    product: vsm-infra
+    default_team: organisation-design-team
+  "daniel-ospina/eldato-epistemic":
+    product: vsm-infra
+    default_team: epistemic-team
+
+# ── Label → Team/Role classification (for repos with multiple teams) ──
+# When an issue has one of these labels, route to the specified team+role.
+# If no matching label, use default_team from repo_routing.
+label_routing:
+  # Org-design team labels
+  "team/org-design":
+    team: organisation-design-team
+    role: product-implementer
+  "team/epistemic":
+    team: epistemic-team
+    role: product-implementer
+  # Role-specific labels
+  "role/strategist":
+    role: product-strategist
+  "role/implementer":
+    role: product-implementer
+  # Work type labels
+  "type/strategy":
+    role: product-strategist
+  "type/build":
+    role: product-implementer
+  "type/bug":
+    role: product-implementer
+  "type/review":
+    role: product-strategist
+
+# ── Attribution fallback ──
+# When no label matches and no repo default, what to do?
+attribution_fallback: ask_human  # ask_human | default_team | skip
