@@ -6,9 +6,17 @@ Multi-ontology graph engine for agent memory. FalkorDB-backed, multi-tenant, wit
 - Extracts claims (Points) from documents and conversations
 - Models belief relationships (IMPL/NAND) with shock propagation
 - Tracks provenance chains (Point → Source → Entity) across connectors
+- Ingests external data (GitHub, Linear, Slack) as Events per ONTOLOGY_v2.5
 - Governs entity ownership (spin-off, access control, audit)
 - Exposes graph operations via SDK, MCP server, and agent tools
 - Multi-tenant: 10K+ isolated graphs via `graph_name`
+
+**What lives elsewhere:**
+- Coordination infrastructure (cards, Kanban boards, agent workflows, dashboards)
+  lives in `eldato/operations/coordination/` — owned by the Organisation Design Team.
+- Canonical ontology (`ONTOLOGY_v2.5.md`) lives in `eldato/docs/teams/`.
+- Tortoise is the memory engine — it stores and queries knowledge. It does not
+  coordinate agents.
 
 **Four ontologies in one graph:**
 | Layer | What it models | Examples |
