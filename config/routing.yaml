@@ -1,45 +1,104 @@
-# Entity Routing — maps data sources to Products and Teams.
+# Entity Routing — repos → products → teams.
 #
-# Every issue/card/doc must be assigned to exactly one Product and one Team.
-# Resolution order: label → repo → default → ask human.
+# Resolution: issue label → repo default → ask human.
+# Shared repos (multiple products/teams) use labels for disambiguation.
 #
-# Our first deployment: Organisation Design Team.
+# Updated 2026-07-22 — actual repo/product/team inventory.
 
 version: 1
 
-# ── Products (what we're building) ──
+# ── Products ──
 products:
+  dmer:
+    name: "DMer"
+    description: "Instagram automation daemon with Electron tray app"
+    teams: [dmer-app-team]
+  eldato-app:
+    name: "El Dato App"
+    description: "Consumer app — deals, subscriptions, onboarding"
+    teams: [eldato-app-team]
+  tortoise:
+    name: "Tortoise"
+    description: "Epistemic knowledge graph engine — FalkorDB-backed"
+    teams: [epistemic-team]
+  outreach:
+    name: "Outreach"
+    description: "SMB cold outreach — scraping, enrichment, WhatsApp sequences"
+    teams: [eldato-outreach-team]
   vsm-infra:
     name: "VSM Infrastructure"
-    description: "Agent swarm coordination, shared state, memory system, pipelines"
-    teams: [organisation-design-team, epistemic-team]
+    description: "Agent swarm coordination, shared state, memory, pipelines, self-healing"
+    teams: [organisation-design-team]
+  org-data:
+    name: "Org Data"
+    description: "Multi-tenant organizational data — teams, products, roles"
+    teams: [organisation-design-team]
 
-# ── Repos → Product mapping (deterministic) ──
+# ── Repo → Product mapping ──
 repo_routing:
+  "daniel-ospina/dmer":
+    product: dmer
+    default_team: dmer-app-team
+  "daniel-ospina/eldato-dmer":
+    product: dmer
+    default_team: dmer-app-team
+
   "daniel-ospina/eldato":
-    product: vsm-infra
-    default_team: organisation-design-team
+    product: eldato-app                    # default: El Dato App
+    default_team: eldato-app-team
+    # NOTE: This repo ALSO hosts vsm-infra code (operations/coordination/,
+    # operations/memory/) and shared workflows (operations/skills/, CI/CD).
+    # Issues for vsm-infra use label: team/org-design
+    # Issues for shared infra use label: team/org-design + product/vsm-infra
+
   "daniel-ospina/eldato-epistemic":
-    product: vsm-infra
+    product: tortoise
     default_team: epistemic-team
 
-# ── Label → Team/Role classification (for repos with multiple teams) ──
-# When an issue has one of these labels, route to the specified team+role.
-# If no matching label, use default_team from repo_routing.
+  "daniel-ospina/eldato-outreach":
+    product: outreach
+    default_team: eldato-outreach-team
+
+  "daniel-ospina/org-data":
+    product: org-data
+    default_team: organisation-design-team
+
+  "daniel-ospina/shared-workflows":
+    product: vsm-infra                     # shared infra, not a standalone product
+    default_team: organisation-design-team
+
+# ── Label → Team + Role routing ──
 label_routing:
-  # Org-design team labels
+  # Team assignment
   "team/org-design":
     team: organisation-design-team
-    role: product-implementer
   "team/epistemic":
     team: epistemic-team
-    role: product-implementer
-  # Role-specific labels
+  "team/eldato-app":
+    team: eldato-app-team
+  "team/dmer":
+    team: dmer-app-team
+  "team/outreach":
+    team: eldato-outreach-team
+
+  # Product override (for shared repos)
+  "product/vsm-infra":
+    product: vsm-infra
+    team: organisation-design-team
+  "product/tortoise":
+    product: tortoise
+    team: epistemic-team
+  "product/eldato-app":
+    product: eldato-app
+    team: eldato-app-team
+
+  # Role assignment
   "role/strategist":
     role: product-strategist
   "role/implementer":
     role: product-implementer
-  # Work type labels
+
+  # Work type
   "type/strategy":
     role: product-strategist
   "type/build":
@@ -50,5 +109,4 @@ label_routing:
     role: product-strategist
 
 # ── Attribution fallback ──
-# When no label matches and no repo default, what to do?
-attribution_fallback: ask_human  # ask_human | default_team | skip
+attribution_fallback: ask_human
