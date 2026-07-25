@@ -39,13 +39,11 @@ class GitHubConnector:
 
     def _load_routing(self) -> dict:
         """Load entity routing config (config/routing.yaml)."""
-        try:
-            import yaml
-            path = Path(__file__).resolve().parent.parent.parent / "config" / "routing.yaml"
-            if path.exists():
-                return yaml.safe_load(path.read_text()) or {}
-        except Exception:
-            pass
+        import yaml
+        from pathlib import Path
+        path = Path(__file__).resolve().parent.parent.parent / "config" / "routing.yaml"
+        if path.exists():
+            return yaml.safe_load(path.read_text()) or {}
         return {}
 
     def _route_issue(self, labels: list[str]) -> dict:
@@ -157,6 +155,9 @@ class GitHubConnector:
 
         entity_id = f"github-issue-{self.repo}-{number}"
 
+        # Route to team + role based on labels + repo config
+        route = self._route_issue(labels)
+
         # Object — persisted entity (PM domain extension, ONTOLOGY_v2.5 §1.1)
         obj = {
             "type": "ObjectRegistered",
@@ -166,6 +167,9 @@ class GitHubConnector:
             "title": title,
             "url": url,
             "createdAt": created_at,
+            "routed_team": route["team"],
+            "routed_role": route["role"],
+            "routed_product": route["product"],
         }
 
         # Event — temporal occurrence (PM domain extension)
