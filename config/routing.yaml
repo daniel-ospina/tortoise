@@ -9,8 +9,8 @@ version: 1
 
 # ── Products ──
 products:
-  dmer:
-    name: "DMer"
+  dmeer:
+    name: "DMeer"
     description: "Instagram automation daemon with Electron tray app"
     teams: [dmer-app-team]
   eldato-app:
@@ -37,10 +37,10 @@ products:
 # ── Repo → Product mapping ──
 repo_routing:
   "daniel-ospina/dmer":
-    product: dmer
+    product: dmeer
     default_team: dmer-app-team
   "daniel-ospina/eldato-dmer":
-    product: dmer
+    product: dmeer
     default_team: dmer-app-team
 
   "daniel-ospina/eldato":
