@@ -217,3 +217,256 @@ A method for epistemic belief propagation in multi-agent knowledge graphs, compr
 - Academic literature: Minka (2001) Expectation Propagation, Murphy et al. (1999) Loopy Belief Propagation
 - Existing products: Mem0 (vector memory, no belief propagation), Zep (temporal KG, no confidence), Cognee (KG, no EP)
 - Distinguishing novelty: None combine (a) IMPL/NAND typed logical operators as edges, (b) Beta-distributed belief representation, (c) EP with Gauss-Jacobi quadrature on [0,1]², and (d) cascading invalidation via reversed propagation.
+
+---
+
+## Figures
+
+### Figure 1: Knowledge Graph with IMPL and NAND Logical Operator Edges
+
+```
+                    ┌─────────────────┐
+                    │   Claim A        │
+                    │ "budget = $50K"  │
+                    │ Beta(2, 8)       │  ← low confidence (mean 0.20)
+                    └────────┬─────────┘
+                             │
+                    IMPL (w=0.8)        ← "A implies B"
+                             │
+                             ▼
+                    ┌─────────────────┐
+   NAND (w=0.9) ◄───│   Claim B        │─── IMPL (w=0.7) ──► ┌─────────────────┐
+   "contradicts"    │ "use $45K tier"  │                      │   Claim D        │
+                    │ Beta(5, 5)       │                      │ "approved budget" │
+                    └────────┬─────────┘                      │ Beta(1, 1)       │
+                             │                                └─────────────────┘
+                    IMPL (w=0.6)
+                             │
+                             ▼
+                    ┌─────────────────┐
+                    │   Claim C        │
+                    │ "proposal sent"  │
+                    │ Beta(3, 7)       │
+                    └─────────────────┘
+
+Evidence Anchor:
+                    ┌─────────────────┐
+                    │   Claim E        │
+                    │ "actual=$75K"    │
+                    │ Beta(50, 1)      │  ← HIGH confidence anchor
+                    └─────────────────┘
+```
+
+**Description:** Nodes represent claims with Beta(α,β) belief parameters. Directed edges are typed logical operators: IMPL (implication, solid arrows) and NAND (contradiction, dashed arrows). Each edge has a weight w ∈ [0,1]. Evidence anchors (Claim E) have fixed high-confidence Beta priors and propagate belief outward through connected edges.
+
+### Figure 2: Factor Graph Representation
+
+```
+                    ┌──────────────────────────────┐
+                    │     Beta Prior                │
+                    │  p(c_a) = Beta(α_a, β_a)     │
+                    └──────────────┬───────────────┘
+                                   │
+                                   ▼
+                    ┌──────────────────────────────┐
+                    │     IMPL Factor               │
+                    │  φ(c_a, c_b) =               │
+                    │  1 - w(1-c_b)(1-c_a)^k       │
+                    └──────────────┬───────────────┘
+                                   │
+                                   ▼
+                    ┌──────────────────────────────┐
+                    │     Beta Prior                │
+                    │  p(c_b) = Beta(α_b, β_b)     │
+                    └──────────────────────────────┘
+
+   Messages m_{a→b}: natural parameters (η_1, η_2) from A to B
+   Messages m_{b→a}: natural parameters (η_1, η_2) from B to A
+
+   Cavity distribution q\e: belief with incoming message removed
+   Tilted distribution p̃: q\e × φ(c_a, c_b)
+   Moment projection: p̃ → Beta(α', β') via Gauss-Jacobi quadrature
+```
+
+**Description:** The factor graph shows Beta priors on each claim node connected by factor potentials. Messages pass in both directions. Cavity distributions are computed by removing the incoming message. Tilted distributions multiply the cavity by the factor. Moments are projected back to Beta via quadrature.
+
+### Figure 3: Gauss-Jacobi Quadrature Grid on [0,1]²
+
+```
+  1.0 ┤     ·     ·     ·     ·     ·     ·     ·     ·
+      │     ·     ·     ·     ·     ·     ·     ·     ·
+      │     ·     ·     ·     ·     ·     ·     ·     ·
+   c_b│     ·     ·     ·     ·     ·     ·     ·     ·
+      │     ·     ·     ·     ·     ·     ·     ·     ·
+      │     ·     ·     ·     ·     ·     ·     ·     ·
+      │     ·     ·     ·     ·     ·     ·     ·     ·
+    0 ┤─────┬─────┬─────┬─────┬─────┬─────┬─────┬─────
+      0                                       1.0
+                        c_a
+
+   n_quad = 8 per dimension → 64 evaluation points
+   Points concentrated near 0 and 1 (Jacobi weight concentrates at extremes)
+   Each point (x_i, y_j) has weight w_a[i] × w_b[j]
+   Integration error < 0.001% for typical Beta parameters
+```
+
+**Description:** The 8×8 Gauss-Jacobi quadrature grid on [0,1]². Points are roots of Jacobi polynomials mapped from [-1,1] to [0,1]. Weights account for the Beta-distributed importance of different regions. The grid concentrates points near 0 and 1 where Beta distributions have most of their mass.
+
+### Figure 4: EP Message Passing Iteration
+
+```
+   Iteration 1                    Iteration 2                    Converged
+
+   A ──m1──► B                  A ──m3──► B                  A ──m*──► B
+              │                            │                            │
+   Beta(10,1) Beta(1,1)         Beta(10,1) Beta(3,2)         Beta(10,1) Beta(8,2)
+              │                            │                            │
+   B ──m2──► A                  B ──m4──► A                  B ──m*──► A
+
+   m_new = damped update:       Converged when:
+   (1-λ)×m_old + λ×m_projected   max |Δα|/α < tol AND max |Δβ|/β < tol
+
+   With:
+   - Evidence anchor A at Beta(10,1) — strong belief in A
+   - IMPL edge from A to B — A supports B
+   - After convergence: B's belief shifts toward A's (higher α, moderate β)
+     reflecting that B is likely true because A is true
+```
+
+**Description:** EP iteratively refines beliefs. Evidence anchor A (Beta(10,1), high confidence) propagates belief to B through an IMPL edge. Each iteration updates messages in both directions. Convergence is measured by relative change in Beta parameters. Damping (λ) prevents oscillations.
+
+### Figure 5: Cascading Invalidation
+
+```
+   BEFORE: Anchor A confirmed        AFTER: Anchor A confidence drops
+
+   ★A Beta(50,1)                     ☆A Beta(1,50)  ← anchor UPDATED
+    │                                   │
+    │ IMPL                              │ IMPL (propagation direction REVERSED)
+    ▼                                   ▼
+   B Beta(40,8)    ← believed          B ⚠ FLAGGED   ← "potentially invalidated"
+    │                                   │
+    │ IMPL                              │ IMPL
+    ▼                                   ▼
+   C Beta(35,10)   ← believed          C ⚠ FLAGGED   ← "potentially invalidated"
+    │                                   │
+    │ NAND                              │ NAND
+    ▼                                   ▼
+   D Beta(5,40)    ← doubted           D Beta(45,10)  ← "now more likely!"
+                                        (contradiction with A is weakened)
+
+   Process:
+   1. Anchor A's confidence drops: Beta(50,1) → Beta(1,50)
+   2. Reverse BFS from A through all IMPL edges → find downstream dependents
+   3. Flag all reachable claims for review
+   4. Optionally re-run EP: D's belief INCREASES because NAND with A is weaker
+   5. Surface: "A changed. B, C are now suspect. D may now be true."
+```
+
+**Description:** When an evidence anchor's confidence drops, the propagation direction reverses. All claims reachable via IMPL edges from the changed anchor are flagged as potentially invalidated. NAND-connected claims may see their confidence INCREASE (the contradiction is weaker). The system surfaces the affected claims for human or agent review.
+
+---
+
+## Claims
+
+**Note:** Claims are not required for a provisional application but are included to establish priority date. These are draft claims and may be revised before non-provisional filing.
+
+### Claim 1 (Independent — System)
+
+A system for epistemic belief propagation in multi-agent knowledge graphs, comprising:
+
+(a) a graph database storing a plurality of claim nodes, each claim node representing a proposition generated by an artificial intelligence agent and having an associated Beta distribution belief state parameterized by (α, β) representing confidence in the proposition;
+
+(b) a plurality of directed edges connecting said claim nodes, wherein each edge is typed as one of: an IMPL edge representing logical implication from a source claim to a target claim, or a NAND edge representing logical contradiction between a source claim and a target claim, each edge having an associated weight parameter;
+
+(c) a belief propagation engine configured to iteratively update said belief states by:
+    (i) computing cavity distributions for each edge by removing incoming messages from target node beliefs;
+    (ii) computing tilted distributions by multiplying cavity distributions by factor potentials associated with each edge type;
+    (iii) performing moment projection of said tilted distributions onto Beta distributions using Gauss-Jacobi quadrature on [0,1]²;
+    (iv) updating edge messages based on projected distributions;
+    (v) applying damping to said updated messages;
+
+(d) wherein said engine converges to marginal posterior confidence scores for each claim node given all evidence and logical constraints encoded in said edges.
+
+### Claim 2 (Dependent — Factor Potentials)
+
+The system of claim 1, wherein the IMPL factor potential is defined as φ_impl(c_a, c_b, w) = 1 - w × (1 - c_b) × (1 - c_a)^k, where w is the edge weight and k is a sensitivity parameter, such that when source claim reliability c_a is high, the factor penalizes low target claim reliability c_b.
+
+### Claim 3 (Dependent — NAND Factor)
+
+The system of claim 1, wherein the NAND factor potential is defined as φ_nand(c_a, c_b, w) = 1 - w × c_a × c_b, such that when both source and target claim reliabilities are high, the factor penalizes the configuration, encoding mutual exclusion.
+
+### Claim 4 (Dependent — Batch I/O)
+
+The system of claim 1, further comprising a batch input/output subsystem configured to load affected node parameters and edge messages into in-memory data structures at the start of each iteration, perform all factor computations and message updates in application memory, and flush all writes to the graph database in a single batch operation at the end of each iteration, thereby eliminating intermediate concurrent write conflicts.
+
+### Claim 5 (Dependent — Cascading Invalidation)
+
+The system of claim 1, further comprising a cascading invalidation subsystem configured to, upon detection of a change in an evidence anchor claim's belief state exceeding a threshold, perform a reverse graph traversal from said anchor claim through all outgoing IMPL edges to identify downstream dependent claims, flag said dependent claims as potentially invalidated, and optionally re-execute said belief propagation engine to recompute confidence scores for said dependent claims.
+
+### Claim 6 (Dependent — Evidence Anchors)
+
+The system of claim 1, wherein a subset of said claim nodes are designated as evidence anchors having fixed Beta prior parameters representing verified observations, and wherein belief propagation proceeds outward from said evidence anchors through IMPL and NAND edges with exponential damping proportional to graph distance from said anchors.
+
+### Claim 7 (Independent — Method)
+
+A computer-implemented method for epistemic belief propagation in a knowledge graph having claim nodes and typed logical operator edges, comprising:
+
+(a) receiving a knowledge graph comprising a plurality of claims and a plurality of directed edges, each edge typed as IMPL or NAND;
+
+(b) initializing belief states for each claim as Beta distributions;
+
+(c) for a plurality of iterations until convergence:
+    (i) loading claim parameters and edge messages into memory;
+    (ii) for each edge, computing a tilted distribution by combining cavity beliefs with an edge-type-specific factor potential;
+    (iii) projecting said tilted distribution onto a Beta distribution using numerical quadrature on [0,1]²;
+    (iv) updating edge messages with damping;
+    (v) writing updated messages to the graph database;
+
+(d) outputting converged marginal confidence scores for each claim.
+
+### Claim 8 (Dependent — Contradiction Detection)
+
+The method of claim 7, further comprising: identifying pairs of claims connected by NAND edges where both claims have converged confidence scores exceeding a threshold; and generating an alert indicating a detected contradiction requiring resolution.
+
+---
+
+## Worked Example
+
+**Setup:** An evidence anchor Claim E ("actual revenue = $75K") is verified and assigned Beta(50, 1), representing strong belief (mean 0.98, low uncertainty). Claim A ("budget = $50K") is initially Beta(1, 1), representing no prior knowledge. An IMPL edge connects E to A with weight 0.9, representing that the actual revenue figure implies the budget is likely correct.
+
+**After EP convergence:**
+- Claim E: Beta(50, 1) → unchanged (evidence anchor)
+- Claim A: Beta(50, 1) → Beta(18.2, 3.1) → belief shifts from uniform to confident (mean 0.85), reflecting that E's high confidence propagates to A through the IMPL edge
+
+**Contradiction scenario:** A second agent adds Claim F ("budget = $100K") at Beta(1, 1), connected to Claim A via a NAND edge (weight 0.9). After EP re-convergence:
+- Claim A drops from Beta(18.2, 3.1) to Beta(12.1, 6.8) (mean falls from 0.85 to 0.64)
+- Claim F rises from Beta(1, 1) to Beta(8.4, 4.2) (mean rises from 0.50 to 0.67)
+- The system detects the NAND edge with both claims above threshold and flags: "CONTRADICTION: Claims A and F disagree about budget. A: $50K (confidence 0.64). F: $100K (confidence 0.67). Resolution required."
+
+**Cascading invalidation:** When Claim E is updated (revenue corrected to $60K, E drops to Beta(5, 10)), the system traverses IMPL edges from E and flags Claim A ("potentially invalidated — supporting evidence changed") and any claims downstream of A.
+
+---
+
+## Cross-Reference to Related Applications
+
+None.
+
+---
+
+## Filing Checklist
+
+Before submitting to USPTO Patent Center (https://patentcenter.uspto.gov):
+
+- [ ] **Application Data Sheet (ADS)** — Form SB/16. Lists inventor, title, entity status, correspondence address
+- [ ] **Micro-Entity Certification** — Form SB/15A. Certifies eligibility for reduced fees (income <$223,836, fewer than 4 prior applications)
+- [ ] **Fee Transmittal** — Form SB/17. Provisional filing fee: $120 (micro-entity)
+- [ ] **Specification** — This document (sections: Technical Field through Abstract)
+- [ ] **Drawings** — 5 figures (included above as ASCII diagrams; may be converted to formal drawings before non-provisional filing)
+- [ ] **Cover Sheet** — USPTO-generated during electronic filing
+
+**Total cost: $120** (micro-entity provisional application fee)
+
+**Filing deadline:** File before any public disclosure of the EP algorithm details to preserve international patent rights. The 12-month non-provisional deadline will be 12 months from the provisional filing date.
+
+**After filing:** Application number will be assigned. Non-provisional application must be filed within 12 months claiming priority to this provisional.
