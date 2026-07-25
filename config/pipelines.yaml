@@ -20,10 +20,12 @@ pipelines:
       module: tortoise.connectors.github
       class: GitHubConnector
       config:
+        repo: "daniel-ospina/eldato"
         state: all
         limit: 100
+        limit: 100
   docs:
-    enabled: true
+    enabled: false
     source: filesystem
     trigger: manual
     strategy:

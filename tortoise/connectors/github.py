@@ -232,6 +232,18 @@ class GitHubConnector:
             # Apply Object (ObjectRegistered → FalkorDB)
             if entities.get("object"):
                 proj.apply(entities["object"])
+                # Set routing properties (not handled by projection's _upsert_object)
+                obj = entities["object"]
+                proj.g.query(
+                    "MATCH (o:Object {id: $id}) "
+                    "SET o.routed_team = $team, o.routed_role = $role, o.routed_product = $product",
+                    params={
+                        "id": obj.get("id"),
+                        "team": obj.get("routed_team", ""),
+                        "role": obj.get("routed_role", ""),
+                        "product": obj.get("routed_product", ""),
+                    },
+                )
 
             # Apply Event (EventRecorded → FalkorDB)
             if entities.get("event"):
