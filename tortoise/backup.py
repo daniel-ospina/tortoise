@@ -75,7 +75,8 @@ def restore(backup_dir: str, db_path: str,
         shutil.copy2(db_file, db_path)
 
     # Count events
-    count = sum(1 for _ in open(events_file))
+    with open(events_file) as f:
+        count = sum(1 for _ in f)
 
     # Replay into FalkorDB if requested
     if into_falkor:
@@ -95,7 +96,7 @@ def _bgsave() -> None:
     """Trigger FalkorDB BGSAVE if connected."""
     try:
         from falkordb import FalkorDB
-        db = FalkorDB(host="localhost", port=int(os.environ.get("FALKORDB_PORT", "6379")))
+        db = FalkorDB(host=os.environ.get("FALKORDB_HOST", "localhost"), port=int(os.environ.get("FALKORDB_PORT", "6379")))
         db.connection.execute_command("BGSAVE")
     except Exception:
         pass  # ponytail: embedded/redislite doesn't support BGSAVE, skip

@@ -30,14 +30,15 @@ class GitHubDocIndexer:
     """
 
     def __init__(self, sdk: Optional[TortoiseSDK] = None):
-        import os, sys
+        import os
         if sdk:
             self.sdk = sdk
         elif os.environ.get("TORTOISE_DB_URI"):
             self.sdk = TortoiseSDK()
         else:
-            print("github_docs: Set TORTOISE_DB_URI or pass an SDK instance.", file=sys.stderr)
-            sys.exit(1)
+            raise ValueError(
+                "GitHubDocIndexer requires TORTOISE_DB_URI env var or an explicit SDK instance"
+            )
         self._hashes: dict[str, str] = {}  # path → sha256 for dedup
 
     def index_repo(self, url_or_path: str, branch: str = "main",

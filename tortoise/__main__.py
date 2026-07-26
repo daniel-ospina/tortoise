@@ -213,7 +213,8 @@ def _cmd_reconcile(args):
 
 def _cmd_init(args):
     """Auto-detect FalkorDB and create default graph — onboarding."""
-    import os
+    import os, tempfile
+    from pathlib import Path
     print("Tortoise init — auto-detecting FalkorDB…")
 
     # 1. Try Docker FalkorDB
@@ -312,9 +313,10 @@ def _cmd_init(args):
         if md_count > 0:
             if auto_index:
                 print(f"\nFound {md_count} markdown files in this repo. Auto-indexing…")
+                log_f = open(str(Path(tempfile.gettempdir()) / "tortoise-init-index.log"), 'w')
                 _sp.Popen(
                     [_sys.executable, "-m", "tortoise", "index", "github", repo_root],
-                    stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+                    stdout=log_f, stderr=_sp.STDOUT,
                     start_new_session=True,
                 )
                 print("Indexing in background. Tortoise is ready to use immediately.")
@@ -323,9 +325,10 @@ def _cmd_init(args):
                 yn = input(f"Found {md_count} markdown files in this repo. Index them into Tortoise? [Y/n]: ").strip().lower()
                 if yn != "n":
                     print("Launching indexer in background…")
+                    log_f = open(str(Path(tempfile.gettempdir()) / "tortoise-init-index.log"), 'a')
                     _sp.Popen(
                         [_sys.executable, "-m", "tortoise", "index", "github", repo_root],
-                        stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+                        stdout=log_f, stderr=_sp.STDOUT,
                         start_new_session=True,
                     )
                     print("Indexing in background. Tortoise is ready to use immediately.")
@@ -740,10 +743,12 @@ def _cmd_index_github(args):
         if branch != "main":
             cmd.extend(["--branch", branch])
         pid_file = Path(tempfile.gettempdir()) / f"tortoise-index-{Path(url).stem}.pid"
-        proc = subprocess.Popen(
-            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
+        log_file = pid_file.with_suffix('.log')
+        with open(log_file, 'w') as lf:
+            proc = subprocess.Popen(
+                cmd, stdout=lf, stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
         pid_file.write_text(str(proc.pid))
         print(f"Indexing {url} in background (pid {proc.pid})")
         print(f"  Progress: tail -f {pid_file.with_suffix('.log')}")

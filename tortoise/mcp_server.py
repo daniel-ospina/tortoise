@@ -61,7 +61,6 @@ def _safe(fn, *args, **kwargs):
     Dev mode (no key) is always unlocked.
     """
     if not _is_dev_mode():
-        monitoring.record_error()
         return {
             "error": (
                 "Authentication required. The MCP stdio transport cannot "
@@ -74,7 +73,12 @@ def _safe(fn, *args, **kwargs):
         return fn(*args, **kwargs)
     except Exception as e:
         monitoring.record_error()
-        return {"error": str(e)}
+        msg = str(e)
+        # Sanitize: strip hostnames, ports, passwords from error messages (#43)
+        import re
+        msg = re.sub(r'://[^@]*@', '://***@', msg)  # password in URI
+        msg = re.sub(r'(host=|at |to )[\w.-]+(:\d+)?', r'\1***', msg)  # host:port
+        return {"error": msg}
 
 
 def _parse(v: Any) -> Any:
