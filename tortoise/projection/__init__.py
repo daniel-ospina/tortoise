@@ -126,7 +126,7 @@ class FalkorProjection(
         elif host is not None:
             # Docker FalkorDB
             from falkordb import FalkorDB  # ponytail: lazy import, only needed for Docker mode
-            self.db = FalkorDB(host=host, port=port, password=password)
+            self.db = FalkorDB(host=host, port=port, password=password, socket_connect_timeout=5)
         else:
             raise ValueError("Either path or host must be provided")
 
@@ -291,6 +291,10 @@ class FalkorProjection(
 
     def close(self) -> None:
         self.db.close()
+
+    def list_graphs(self) -> list[str]:
+        """List all graph names in the database."""
+        return self.db.list_graphs()
 
     # ── SVBP integration (Gate 4) ─────────────────────────────────
 
