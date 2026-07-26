@@ -110,11 +110,24 @@ def main(argv=None):
                              build_model(args.relation_model, reasoning=True))
 
     log = EventLog(args.log)
-    # ponytail: docker:// URI or file path
+    # Check DB accessibility before trying to connect
     if args.db.startswith("docker://"):
         proj = FalkorProjection.from_uri(args.db)
-    else:
+    elif Path(args.db).exists():
         proj = FalkorProjection(args.db)
+    else:
+        # DB file doesn't exist — try Docker default as fallback
+        # (Docker mode doesn't use a file, data lives in the container)
+        import os
+        docker_host = os.environ.get("FALKORDB_HOST", "localhost")
+        docker_port = int(os.environ.get("FALKORDB_PORT", "6379"))
+        docker_pass = os.environ.get("FALKORDB_PASSWORD") or None
+        try:
+            proj = FalkorProjection(host=docker_host, port=docker_port, password=docker_pass)
+        except Exception:
+            print(f"tortoise.ingest: No DB found at {args.db} and Docker unreachable. Run tortoise init first.")
+            import sys
+            sys.exit(0)
     api = EventAPI(log, initiated_by="extractor", agent_id=extractor.version,
                    projection=proj)
     try:
@@ -166,25 +179,30 @@ def main(argv=None):
                     print(f"warning: {len(stats['failed_sections'])} sections failed extraction")
                 # Post-extraction: propagate confidence using factor-graph EP
                 # (replaces BFS propagate_shock — bidirectional, quadrature-based)
-                op_ids = [r[0] for r in proj.g.query(
-                    "MATCH (o:Point) WHERE o.is_operator = true RETURN o.id"
-                ).result_set]
-                if op_ids:
-                    from tortoise.ep import TortoiseEP
-                    # Build evidence priors from extractor confidence values
-                    claim_rows = proj.g.query(
-                        "MATCH (n:Point) "
-                        "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
-                        "RETURN n.id, coalesce(n.confidence, 0.5)"
-                    ).result_set
-                    evidence = {}
-                    for cid, conf_raw in claim_rows:
-                        conf = float(conf_raw)
-                        evidence[cid] = TortoiseEP.confidence_to_prior(conf)
-                    ep = proj.get_ep() if hasattr(proj, 'get_ep') else TortoiseEP(proj)
-                    n_iter, converged = ep.run(op_ids, max_hops=3, evidence=evidence)
-                    print(f"EP: {'converged' if converged else 'max iter'} in {n_iter} iterations"
-                          f" ({len(evidence)} priors from extractor confidence)")
+                try:
+                    op_ids = [r[0] for r in proj.g.query(
+                        "MATCH (o:Point) WHERE o.is_operator = true RETURN o.id"
+                    ).result_set]
+                    if op_ids:
+                        from tortoise.ep import TortoiseEP
+                        # Build evidence priors from extractor confidence values
+                        claim_rows = proj.g.query(
+                            "MATCH (n:Point) "
+                            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+                            "RETURN n.id, coalesce(n.confidence, 0.5)"
+                        ).result_set
+                        evidence = {}
+                        for cid, conf_raw in claim_rows:
+                            conf = float(conf_raw)
+                            evidence[cid] = TortoiseEP.confidence_to_prior(conf)
+                        ep = proj.get_ep() if hasattr(proj, 'get_ep') else TortoiseEP(proj)
+                        n_iter, converged = ep.run(op_ids, max_hops=3, evidence=evidence)
+                        print(f"EP: {'converged' if converged else 'max iter'} in {n_iter} iterations"
+                              f" ({len(evidence)} priors from extractor confidence)")
+                except Exception as e:
+                    # ponytail: DB may be unavailable (concurrent ingest, stale socket).
+                    # Ingest is idempotent — retry next cycle. Log and exit cleanly.
+                    print(f"tortoise.ingest: EP propagation skipped (DB unavailable: {e})")
 
                 # S7: Semantic extraction (Subjects + Objects + aboutEntities)
                 if args.semantic_extract and is_doc:
