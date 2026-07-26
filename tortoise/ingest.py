@@ -203,10 +203,11 @@ def main(argv=None):
                     # Only suppress DB-availability errors; let logic errors propagate.
                     msg = str(e).lower()
                     if any(kw in msg for kw in ("connection refused", "connection reset",
-                          "connectionerror", "timeout", "socket", "unavailable",
-                          "errno 61", "cannot connect")):
+                          "timeout", "socket", "unavailable",
+                          "errno 61", "errno 111", "cannot connect")):
                         print(f"tortoise.ingest: EP propagation skipped (DB unavailable: {e})")
                     else:
+                        print(f"tortoise.ingest: EP propagation failed: {e}")
                         raise
 
                 # S7: Semantic extraction (Subjects + Objects + aboutEntities)
