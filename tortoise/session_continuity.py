@@ -66,7 +66,10 @@ class SessionContinuity:
 
 # Demo script
 if __name__ == "__main__":
-    sc = SessionContinuity()
+    # Demo — requires TORTOISE_DB_URI or pass db_path explicitly
+    import os
+    db_path = os.environ.get("TORTOISE_DB_URI") or "tortoise.db"
+    sc = SessionContinuity(db_path=db_path)
     session_id = sc.start("Researching React auth libraries")
     
     # Simulate findings during session

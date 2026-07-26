@@ -270,7 +270,7 @@ def _cmd_init(args):
     # Write welcome Point to the graph
     try:
         from tortoise.sdk import TortoiseSDK
-        sdk = TortoiseSDK()
+        sdk = TortoiseSDK(db_path=args.path)
         sdk.create_point(
             kind="observation",
             content="Tortoise graph initialized — file decisions and observations here so your agents remember across sessions.",
@@ -911,7 +911,7 @@ def _cmd_doctor(args):
     # 3. Graph health
     try:
         from tortoise.sdk import TortoiseSDK
-        sdk = TortoiseSDK()
+        sdk = TortoiseSDK(db_path=args.path)
         status = sdk.status()
         points = status.get("counts", {}).get("Point", 0)
         total = status.get("total_entities", 0)
