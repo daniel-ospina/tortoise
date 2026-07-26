@@ -227,6 +227,7 @@ def _cmd_init(args):
         return 1
 
     graph_ready = False
+    docker_detected = False
 
     try:
         from falkordb import FalkorDB
@@ -995,7 +996,6 @@ def main(argv: list[str] | None = None) -> int:
     cc = sp.add_parser("check-consistency", help="Verify event log matches graph state")
     cc.add_argument("--db", required=True, help="Docker URI or file path")
     cc.add_argument("--log", required=True, help="Path to events.jsonl")
-    cc.add_argument("--db", required=True, help="FalkorDB docker:// URI")
     rc = sp.add_parser("reconcile", help="Replay unprojected EventRecorded entries from JSONL into FalkorDB")
     rc.add_argument("--db", required=True, help="FalkorDB docker:// URI")
     rc.add_argument("--log", required=True, help="Path to events.jsonl")
@@ -1032,7 +1032,6 @@ def main(argv: list[str] | None = None) -> int:
     ig.add_argument("--db", required=True, help="Docker URI or file path for target database")
     ig.add_argument("--branch", default="main", help="Git branch to index")
     ig.add_argument("--background", action="store_true", help="Run in background")
-    ig.add_argument("--branch", default="main", help="Branch to clone (default: main)")
     try:
         args = p.parse_args(argv)
     except (argparse.ArgumentError, SystemExit) as e:
