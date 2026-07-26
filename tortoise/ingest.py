@@ -200,9 +200,12 @@ def main(argv=None):
                         print(f"EP: {'converged' if converged else 'max iter'} in {n_iter} iterations"
                               f" ({len(evidence)} priors from extractor confidence)")
                 except Exception as e:
-                    # ponytail: DB may be unavailable (concurrent ingest, stale socket).
-                    # Ingest is idempotent — retry next cycle. Log and exit cleanly.
-                    print(f"tortoise.ingest: EP propagation skipped (DB unavailable: {e})")
+                    # Only suppress DB-availability errors; let logic errors propagate.
+                    msg = str(e).lower()
+                    if any(kw in msg for kw in ("connection", "timeout", "refused", "socket", "unavailable")):
+                        print(f"tortoise.ingest: EP propagation skipped (DB unavailable: {e})")
+                    else:
+                        raise
 
                 # S7: Semantic extraction (Subjects + Objects + aboutEntities)
                 if args.semantic_extract and is_doc:
