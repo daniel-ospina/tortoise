@@ -235,6 +235,7 @@ def _cmd_init(args):
         db.select_graph("tortoise").query("RETURN 1")
         print(f"  ✅ Docker FalkorDB detected at {docker_host}:{docker_port}")
         graph_ready = True
+        docker_detected = True
     except ImportError:
         pass
     except (ConnectionError, ConnectionRefusedError, OSError) as e:
@@ -270,7 +271,12 @@ def _cmd_init(args):
     # Write welcome Point to the graph
     try:
         from tortoise.sdk import TortoiseSDK
-        sdk = TortoiseSDK(db_path=args.path)
+        if docker_detected:
+            os.environ.setdefault("TORTOISE_DB_URI",
+                f"docker://:{docker_pass}@{docker_host}:{docker_port}/tortoise")
+            sdk = TortoiseSDK()
+        else:
+            sdk = TortoiseSDK(db_path=args.path)
         sdk.create_point(
             kind="observation",
             content="Tortoise graph initialized — file decisions and observations here so your agents remember across sessions.",
@@ -983,10 +989,11 @@ def main(argv: list[str] | None = None) -> int:
     rb.add_argument("--db", required=True)
     rb.add_argument("--dir", default=".")
     sp.add_parser("demo", help="Run mock extractor on sample transcript")
-    sp.add_parser("backfill", help="Backfill missing Point properties (status, createdAt)")
+    sp.add_parser("backfill", help="Backfill missing Point properties (status, createdAt)").add_argument("--db", required=True, help="Docker URI or file path")
     vf = sp.add_parser("verify", help="Write/read/delete test Point — health check")
     vf.add_argument("--db", required=True, help="FalkorDB docker:// URI")
     cc = sp.add_parser("check-consistency", help="Verify event log matches graph state")
+    cc.add_argument("--db", required=True, help="Docker URI or file path")
     cc.add_argument("--log", required=True, help="Path to events.jsonl")
     cc.add_argument("--db", required=True, help="FalkorDB docker:// URI")
     rc = sp.add_parser("reconcile", help="Replay unprojected EventRecorded entries from JSONL into FalkorDB")
