@@ -126,7 +126,7 @@ class FalkorProjection(
         elif host is not None:
             # Docker FalkorDB
             from falkordb import FalkorDB  # ponytail: lazy import, only needed for Docker mode
-            self.db = FalkorDB(host=host, port=port, password=password, socket_connect_timeout=5)
+            self.db = FalkorDB(host=host, port=port, password=password, socket_connect_timeout=5, socket_timeout=30)
         else:
             raise ValueError("Either path or host must be provided")
 
@@ -280,10 +280,17 @@ class FalkorProjection(
     def _ensure_indexes(self) -> None:
         """Create range indexes on frequently-filtered Point properties.
 
-        Wraps CREATE INDEX in try/except because FalkorDB raises
-        "Attribute 'X' is already indexed" rather than silently no-opping.
+        Checks db.indexes() first to skip existing indexes — avoids
+        blocking CREATE INDEX on large graphs during startup (P1 #25).
+        Falls back to try/except for FalkorDB versions without db.indexes().
         """
+        try:
+            existing = {idx[0] for idx in self.db.indexes()}
+        except Exception:
+            existing = set()
         for prop in ("id", "pointKind", "context", "content_hash", "is_operator"):
+            if prop in existing:
+                continue
             try:
                 self.g.query(f"CREATE INDEX FOR (n:Point) ON (n.{prop})")
             except Exception:

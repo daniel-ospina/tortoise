@@ -1,6 +1,10 @@
 """TORT-MCP-001: MCP server wrapping TortoiseSDK. Stdio transport, ~10 tools."""
 from __future__ import annotations
 
+import json
+import os
+from typing import Any
+
 from fastmcp import FastMCP
 from tortoise.auth import is_dev_mode as _is_dev_mode
 from tortoise.sdk import TortoiseSDK
@@ -13,7 +17,34 @@ from tortoise import monitoring
 # idempotentHint=true: repeated calls have no extra side effects
 
 mcp = FastMCP("tortoise")
-sdk = TortoiseSDK()
+
+# Resolve SDK connection from TORTOISE_DB_URI env var or fall back to default
+_db_uri = os.environ.get("TORTOISE_DB_URI", "")
+if _db_uri.startswith("docker://"):
+    from tortoise.projection import FalkorProjection
+    import urllib.parse, time, logging
+    _log = logging.getLogger(__name__)
+    sdk = TortoiseSDK()
+    # Retry Docker connection 3x with backoff; fall back to embedded on exhaustion (#25 P3a)
+    _embedded_path = os.path.expanduser("~/.tortoise/tortoise.db")
+    for attempt in range(3):
+        try:
+            sdk._proj = FalkorProjection.from_uri(_db_uri)
+            if attempt > 0:
+                _log.warning("Docker connection succeeded on attempt %d", attempt + 1)
+            break
+        except Exception as e:
+            if attempt < 2:
+                _log.warning("Docker connection attempt %d failed: %s — retrying in 2s", attempt + 1, e)
+                time.sleep(2)
+            else:
+                _log.warning("Docker connection failed after 3 attempts — falling back to embedded DB at %s", _embedded_path)
+                sdk = TortoiseSDK(db_path=_embedded_path)
+elif _db_uri:
+    # File path — use Lite mode
+    sdk = TortoiseSDK(db_path=_db_uri)
+else:
+    sdk = TortoiseSDK()
 
 # Announce auth mode at startup
 if _is_dev_mode():
@@ -47,35 +78,57 @@ def _safe(fn, *args, **kwargs):
         return {"error": str(e)}
 
 
+def _parse(v: Any) -> Any:
+    """Parse JSON string inputs from LLM agents into native Python types.
+
+    FastMCP strict-typed schemas reject JSON strings for list/dict params.
+    LLM agents naturally emit JSON strings. This bridges the gap.
+    """
+    if isinstance(v, str):
+        try:
+            return json.loads(v)
+        except (json.JSONDecodeError, TypeError):
+            return v
+    return v
+
+
 @mcp.tool()
 def tortoise_create_point(kind: str, content: str, context: str | None = None,
                           authoredBy: str | None = None,
-                          props: dict | None = None) -> dict:
+                          props: Any = None,
+                          dedup: bool = True) -> dict:
     """Create a Point node (statement, decision, vision, hypothesis, etc.).
+
+    dedup=True (default): idempotent — returns existing Point if content matches.
+    dedup=False: force-create even if content is identical.
 
     → See /skill:tortoise-graph-reasoning for pointKind guidance:
       evidence is a role (not a kind), use Source for provenance.
     """
+    props = _parse(props)
     merged = dict(props or {})
     if context:
         merged["context"] = context
     if authoredBy:
         merged["authoredBy"] = authoredBy
+    merged["dedup"] = dedup
     return _safe(sdk.create_point, kind, content, **merged)
 
 
 @mcp.tool()
 def tortoise_query(kind: str | None = None, context: str | None = None,
-                   filters: dict | None = None) -> list[dict]:
+                   filters: Any = None) -> list[dict]:
     """Query points by pointKind, context, and/or property filters."""
+    filters = _parse(filters)
     return _safe(sdk.query, kind, context, **(filters or {}))
 
 
 @mcp.tool()
 def tortoise_paginated_query(kind: str | None = None, context: str | None = None,
                              skip: int = 0, limit: int = 20,
-                             filters: dict | None = None) -> dict:
+                             filters: Any = None) -> dict:
     """Query points with SKIP/LIMIT pagination. Returns {results, total, hasMore}."""
+    filters = _parse(filters)
     return _safe(sdk.paginated_query, kind, context, skip=skip, limit=limit,
                  **(filters or {}))
 
@@ -126,10 +179,16 @@ def tortoise_search(query: str, kind: str | None = None,
 # ── EP Belief Propagation (#6908) ────────────────────────────────
 
 @mcp.tool()
-def tortoise_compute_confidence(factors: list | None = None,
-                    evidence: dict | None = None) -> dict:
-    """Compute confidence via EP belief propagation. Returns {iterations, converged, confidences}."""
-    return _safe(sdk.compute_confidence, factors, evidence)
+def tortoise_compute_confidence(factors: Any = None,
+                    evidence: Any = None,
+                    context: str | None = None) -> dict:
+    """Compute confidence via EP belief propagation. Returns {iterations, converged, confidences}.
+
+    Pass context='licensing-decision' to scope to a specific subgraph.
+    """
+    factors = _parse(factors)
+    evidence = _parse(evidence)
+    return _safe(sdk.compute_confidence, factors, evidence, context=context)
 
 
 @mcp.tool()
@@ -146,12 +205,13 @@ def tortoise_get_confidence(claim_id: str) -> dict:
 
 
 @mcp.tool()
-def tortoise_update_point(id: str, props: dict) -> dict:
+def tortoise_update_point(id: str, props: Any) -> dict:
     """Update properties on a Point. Safe — modifies one Point only."""
+    props = _parse(props)
     return _safe(sdk.update_point, id, **(props or {}))
 
 @mcp.tool()
-def tortoise_create_operator(op_type: str, source_id: str, target_ids: list[str]) -> dict:
+def tortoise_create_operator(op_type: str, source_id: str, target_ids: Any) -> dict:
     """Create an operator connecting Points.
     
     op_type: 'IMPL' (A supports B), 'NAND' (A contradicts B),
@@ -162,6 +222,7 @@ def tortoise_create_operator(op_type: str, source_id: str, target_ids: list[str]
     → See /skill:tortoise-graph-reasoning for proper usage:
       annotation, mitigation, NAND constraints, veracity vs implication.
     """
+    target_ids = _parse(target_ids)
     return _safe(sdk.create_operator, op_type, source_id, target_ids)
 
 
@@ -268,7 +329,7 @@ if __name__ == "__main__":
 # ── P0 Group 3: Checkpoint, Diary, Status, Ingest ──────────────
 
 @mcp.tool()
-def tortoise_checkpoint(items: list[dict],
+def tortoise_checkpoint(items: Any,
                         agent_name: str = "checkpoint",
                         threshold: float = 0.95) -> dict:
     """Session batch save — two-tier dedup (content hash + embedding similarity).
@@ -279,6 +340,7 @@ def tortoise_checkpoint(items: list[dict],
                Set to 1.0 to disable semantic dedup (hash-only).
     Returns {filed: N, duplicates: M}.
     """
+    items = _parse(items)
     return _safe(sdk.checkpoint, items,
                  agent_name=agent_name, threshold=threshold)
 
@@ -298,6 +360,12 @@ def tortoise_diary_read(agent_name: str, last_n: int = 10,
                         wing: str | None = None) -> list[dict]:
     """Read recent diary entries for an agent, newest first."""
     return _safe(sdk.diary_read, agent_name, last_n, wing=wing)
+
+
+@mcp.tool()
+def tortoise_list_graphs() -> list[str]:
+    """List all graph names in the database. Useful for namespace discovery."""
+    return _safe(sdk.list_graphs)
 
 
 @mcp.tool()
@@ -435,28 +503,33 @@ def tortoise_team_create(name: str) -> dict:
 # ── Entity CRUD (ONTOLOGY v2.5) ───────────────────────────────
 
 @mcp.tool()
-def tortoise_create_subject(name: str, subjectKind: str, props: dict | None = None) -> dict:
+def tortoise_create_subject(name: str, subjectKind: str, props: Any = None) -> dict:
     """Create a Subject node (team, role, organization, person)."""
+    props = _parse(props)
     return _safe(sdk.create_subject, name, subjectKind, **(props or {}))
 
 @mcp.tool()
-def tortoise_create_object(name: str, objectKind: str, props: dict | None = None) -> dict:
+def tortoise_create_object(name: str, objectKind: str, props: Any = None) -> dict:
     """Create an Object node (product, customer, skill, etc.)."""
+    props = _parse(props)
     return _safe(sdk.create_object, name, objectKind, **(props or {}))
 
 @mcp.tool()
-def tortoise_create_action(name: str, actionKind: str, props: dict | None = None) -> dict:
+def tortoise_create_action(name: str, actionKind: str, props: Any = None) -> dict:
     """Create an Action node (research, implement, deploy, etc.)."""
+    props = _parse(props)
     return _safe(sdk.create_action, name, actionKind, **(props or {}))
 
 @mcp.tool()
-def tortoise_create_event(name: str, eventKind: str, props: dict | None = None) -> dict:
+def tortoise_create_event(name: str, eventKind: str, props: Any = None) -> dict:
     """Create an Event node (meeting, decision, deployment, etc.)."""
+    props = _parse(props)
     return _safe(sdk.create_event, name, eventKind, **(props or {}))
 
 @mcp.tool()
-def tortoise_create_document(title: str, documentKind: str, props: dict | None = None) -> dict:
+def tortoise_create_document(title: str, documentKind: str, props: Any = None) -> dict:
     """Create a Document node (research, planDoc, meetingNotes, etc.)."""
+    props = _parse(props)
     return _safe(sdk.create_document, title, documentKind, **(props or {}))
 
 @mcp.tool()
@@ -465,8 +538,9 @@ def tortoise_get_entity(id: str) -> dict:
     return _safe(sdk.get_entity, id)
 
 @mcp.tool()
-def tortoise_update_entity(id: str, props: dict | None = None) -> dict:
+def tortoise_update_entity(id: str, props: Any = None) -> dict:
     """Update any entity's properties."""
+    props = _parse(props)
     return _safe(sdk.update_entity, id, **(props or {}))
 
 @mcp.tool()
