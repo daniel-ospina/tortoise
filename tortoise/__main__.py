@@ -797,8 +797,10 @@ def _cmd_index_github(args):
         # Fallback: FalkorDBLite (embedded SQLite)
         try:
             proj = FalkorProjection(path=args.db)
-        except Exception:
-            pass  # ponytail: log-only mode
+        except Exception as e:
+            print(f"tortoise index: Cannot connect to database: {e}", file=sys.stderr)
+            print("Set --db to a Docker URI or ensure FalkorDB is running.", file=sys.stderr)
+            return 1
 
     log_path = Path(tempfile.gettempdir()) / f"tortoise-index-{repo_name}.jsonl"
     log = EventLog(str(log_path))
@@ -1020,6 +1022,8 @@ def main(argv: list[str] | None = None) -> int:
     idx_sp = idx.add_subparsers(dest="index_cmd")
     ig = idx_sp.add_parser("github", help="Index a GitHub repo's markdown files")
     ig.add_argument("url", help="GitHub repo URL (https://github.com/user/repo)")
+    ig.add_argument("--db", required=True, help="Docker URI or file path for target database")
+    ig.add_argument("--branch", default="main", help="Git branch to index")
     ig.add_argument("--background", action="store_true", help="Run in background")
     ig.add_argument("--branch", default="main", help="Branch to clone (default: main)")
     try:
