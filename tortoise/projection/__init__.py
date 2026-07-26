@@ -280,17 +280,12 @@ class FalkorProjection(
     def _ensure_indexes(self) -> None:
         """Create range indexes on frequently-filtered Point properties.
 
-        Checks db.indexes() first to skip existing indexes — avoids
-        blocking CREATE INDEX on large graphs during startup (P1 #25).
-        Falls back to try/except for FalkorDB versions without db.indexes().
+        Wraps CREATE INDEX in try/except because FalkorDB raises
+        "Attribute 'X' is already indexed" rather than silently no-opping.
+        On subsequent startups, each CREATE INDEX errors immediately
+        (O(1) check), so there is no startup penalty on large graphs.
         """
-        try:
-            existing = {idx[0] for idx in self.db.indexes()}
-        except Exception:
-            existing = set()
         for prop in ("id", "pointKind", "context", "content_hash", "is_operator"):
-            if prop in existing:
-                continue
             try:
                 self.g.query(f"CREATE INDEX FOR (n:Point) ON (n.{prop})")
             except Exception:

@@ -202,7 +202,9 @@ def main(argv=None):
                 except Exception as e:
                     # Only suppress DB-availability errors; let logic errors propagate.
                     msg = str(e).lower()
-                    if any(kw in msg for kw in ("connection", "timeout", "refused", "socket", "unavailable")):
+                    if any(kw in msg for kw in ("connection refused", "connection reset",
+                          "connectionerror", "timeout", "socket", "unavailable",
+                          "errno 61", "cannot connect")):
                         print(f"tortoise.ingest: EP propagation skipped (DB unavailable: {e})")
                     else:
                         raise
