@@ -1,7 +1,7 @@
 """Tortoise SDK — Layer 1 facade for Tortoise epistemic graph interaction.
 
-Wraps FalkorProjection (FalkorDBLite/redislite). Lazy-opens on first call.
-Returns structured dicts, never raw FalkorDB result sets.
+Wraps FalkorProjection (Docker/server FalkorDB by default, embedded via path argument).
+Lazy-opens on first call. Returns structured dicts, never raw FalkorDB result sets.
 """
 from __future__ import annotations
 

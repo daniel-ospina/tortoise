@@ -7,8 +7,8 @@ The log is the source of truth; a projection is a derived, rebuildable view.
 
 Backends behind the `Projection` protocol:
   - InMemoryProjection — dict of points (statements AND operators).
-  - FalkorProjection   — FalkorDBLite (embedded); same openCypher graph as server
-                         FalkorDB, so it's portable to a server later.
+  - FalkorProjection   — FalkorDB (Docker/server by default, embedded via path=);
+                         same openCypher graph so portable between modes
 """
 from __future__ import annotations
 
@@ -104,7 +104,7 @@ class FalkorProjection(
     _GroundingMixin,
     _PropagationMixin,
 ):
-    """FalkorDB-backed projection. Supports embedded (FalkorDBLite) and Docker modes.
+    """FalkorDB-backed projection. Supports Docker/server (default) and embedded modes.
 
     Embedded:  FalkorProjection(path='/tmp/tortoise.db')
     Docker:    FalkorProjection(host='localhost', port=6379, password='...')
@@ -120,7 +120,7 @@ class FalkorProjection(
                  graph_name: str = "tortoise"):
 
         if path is not None:
-            # Embedded FalkorDBLite (backward compatible)
+            # Embedded mode (opt-in via path=)
             from redislite.falkordb_client import FalkorDB  # lazy: keep import optional
             self.db = FalkorDB(path)
         elif host is not None:

@@ -249,14 +249,14 @@ def _cmd_init(args):
         else:
             print(f"  ⚠️  Docker FalkorDB unreachable ({e})")
 
-    # 2. Fallback: FalkorDBLite (SQLite-backed)
+    # 2. Fallback: embedded mode (SQLite-backed)
     if not graph_ready:
         db_path = args.path
         try:
             from redislite.falkordb_client import FalkorDB
             db = FalkorDB(db_path)
             db.select_graph("tortoise").query("RETURN 1")
-            print(f"  ✅ FalkorDBLite initialized at {db_path}")
+            print(f"  ✅ Embedded mode initialized at {db_path}")
             graph_ready = True
         except ImportError:
             print(f"  ❌ Neither falkordb nor redislite installed.")
@@ -264,7 +264,7 @@ def _cmd_init(args):
             print(f"     pip install redislite      # for embedded mode")
             return 1
         except Exception as e:
-            print(f"  ❌ FalkorDBLite init failed: {e}")
+            print(f"  ❌ Embedded mode init failed: {e}")
             return 1
 
     if not graph_ready:
@@ -806,7 +806,7 @@ def _cmd_index_github(args):
         db.select_graph("tortoise").query("RETURN 1")
         proj = FalkorProjection(host=host, port=port, password=password or None)
     except Exception:
-        # Fallback: FalkorDBLite (embedded SQLite)
+        # Fallback: embedded mode (SQLite-backed)
         try:
             proj = FalkorProjection(path=args.db)
         except Exception as e:
@@ -1017,7 +1017,7 @@ def main(argv: list[str] | None = None) -> int:
     mc.add_argument("--db", default=None, help="FalkorDB docker:// URI for projection")
     sr = sp.add_parser("serve", help="Start Tortoise MCP server (stdio)")
     init = sp.add_parser("init", help="Auto-detect FalkorDB and create default graph")
-    init.add_argument("--path", required=True, help="Path for FalkorDBLite ")
+    init.add_argument("--path", required=True, help="Path for embedded mode (opt-in)")
     init.add_argument("--yes", "-y", action="store_true", help="Skip prompts, auto-index repo")
     setup = sp.add_parser("setup", help="Configure memory_filter per role (interactive)")
     setup.add_argument("--role", default=None, help="Role name (non-interactive, outputs YAML)")
@@ -1025,7 +1025,7 @@ def main(argv: list[str] | None = None) -> int:
     setup.add_argument("--output", default=None, help="Save config to file instead of stdout")
     doctor = sp.add_parser("doctor", help="Health check — verify Tortoise setup")
     onboard = sp.add_parser("onboard", help="Guided onboarding: init → index → demo → doctor")
-    onboard.add_argument("--path", required=True, help="Path for FalkorDBLite ")
+    onboard.add_argument("--path", required=True, help="Path for embedded mode (opt-in)")
     hs = sp.add_parser("health-server", help="Start standalone /health HTTP server")
     hs.add_argument("--port", type=int, default=9090, help="HTTP port (default: 9090)")
     hs.add_argument("--bind", default="127.0.0.1", help="Bind address (default: 127.0.0.1)")

@@ -47,7 +47,7 @@ def _get_sdk() -> "TortoiseSDK":
     """Lazy-import TortoiseSDK. Returns None if unavailable."""
     try:
         from tortoise.sdk import TortoiseSDK
-        return TortoiseSDK(str(_TORTOISE_ROOT / "tortoise.db"))
+        return TortoiseSDK()  # uses TORTOISE_DB_URI from env
     except ImportError:
         return None
 
@@ -154,7 +154,7 @@ def status() -> dict:
         chain = {"error": "query failed"}
     return {
         "available": True,
-        "db_path": str(_TORTOISE_ROOT / "tortoise.db"),
+        "db_uri": os.environ.get("TORTOISE_DB_URI", "not set"),
         "chain_status": chain,
     }
 

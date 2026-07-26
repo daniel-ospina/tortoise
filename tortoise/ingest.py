@@ -1,4 +1,4 @@
-"""Live ingest CLI — two-tier extractor → log → FalkorDBLite → grid render.
+"""Live ingest CLI — two-tier extractor → log → FalkorDB → grid render.
 
     python -m tortoise.ingest <transcript.txt> \
         --point-model    ollama:llama3.2:3b \
