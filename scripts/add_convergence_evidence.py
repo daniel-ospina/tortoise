@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Historical — uses embedded tortoise.db. Do not run against production Docker.
 """Add convergence architecture research evidence to the Tortoise graph.
 
 Fires 4 architectural questions, maps trade-offs, tags confidence,

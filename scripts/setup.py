@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Historical — uses embedded tortoise.db. Do not run against production Docker.
 """Tortoise setup orchestrator — 10-step guided setup.
 
     python3 scripts/setup.py

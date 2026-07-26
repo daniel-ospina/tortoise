@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Historical — uses embedded tortoise.db. Do not run against production Docker.
 """Auto-resolution: map recently closed GitHub issues → resolution-event Points.
 
     python scripts/resolve-github.py --db tortoise.db --log events.jsonl

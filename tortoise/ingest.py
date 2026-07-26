@@ -89,8 +89,8 @@ def main(argv=None):
     ap.add_argument("transcript", type=Path)
     ap.add_argument("--point-model", default="mock:cheap")
     ap.add_argument("--relation-model", default="mock:reason")
-    ap.add_argument("--db", type=str, default="tortoise.db",
-                    help="database path or docker:// URI (e.g. docker://:pass@host:6379)")
+    ap.add_argument("--db", type=str, required=True,
+                    help="Docker URI (docker://:pass@host:port/graph) or file path")
     ap.add_argument("--log", type=Path, default=Path("events.jsonl"))
     ap.add_argument("--out", type=Path, default=Path("graph.html"))
     ap.add_argument("--resolution", action="store_true",

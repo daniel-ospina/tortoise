@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Historical — uses embedded tortoise.db. Do not run against production Docker.
 """(#6709) Wire IMPL edges from stream-d comparison Points to the approach Points they compare.
 
 The stream-d context has comparison Points (e.g. "[COMPARISON] Stream D: BFS vs Tortoise")

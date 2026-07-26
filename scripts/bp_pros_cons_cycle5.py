@@ -1,4 +1,5 @@
 """Issue #6703 — Pros/cons of belief propagation approaches: BFS vs PageRank vs Embedding vs LLM."""
+# Historical — uses embedded tortoise.db. Do not run against production Docker.
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 

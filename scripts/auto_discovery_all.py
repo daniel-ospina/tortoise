@@ -1,4 +1,5 @@
 """Fixed: all 4 cycles in one script with none of the same bugs."""
+# Historical — uses embedded tortoise.db. Do not run against production Docker.
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 

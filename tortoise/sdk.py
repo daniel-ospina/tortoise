@@ -29,29 +29,72 @@ class TortoiseSDK:
     """Layer 1 facade for Tortoise epistemic graph interaction.
 
     Args:
-        db_path: Path to the FalkorDBLite database file (default: 'tortoise.db').
+        db_path: Optional path to FalkorDBLite database file (None = must use TORTOISE_DB_URI env var).
     """
 
-    def __init__(self, db_path: str = "tortoise.db"):
-        self._db_path = db_path
+    def __init__(self, db_path: str | None = None, *, namespace: str | None = None):
+        import os, re
+        db_uri = os.environ.get("TORTOISE_DB_URI")
+        if db_uri:
+            self._db_path = None
+            self._db_uri = db_uri
+        else:
+            self._db_path = db_path
+            self._db_uri = None
+        # Namespace isolation: prefix graph name to segregate data
+        if namespace is not None:
+            if not re.match(r'^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$', namespace):
+                raise ValueError(
+                    f"Invalid namespace {namespace!r}. "
+                    "Use alphanumeric, hyphens, underscores; max 64 chars."
+                )
+        self._namespace = namespace
         self._proj: FalkorProjection | None = None
         self._ep = None  # lazy-init TortoiseEP
         self._evidence: dict[str, tuple[float, float]] = {}
 
     def _get_proj(self) -> FalkorProjection:
         if self._proj is None:
-            self._proj = FalkorProjection(self._db_path)
+            graph_name = "tortoise"
+            if self._namespace:
+                graph_name = f"{self._namespace}_{graph_name}"
+            if self._db_uri is not None:
+                self._proj = FalkorProjection.from_uri(self._db_uri)
+            else:
+                self._proj = FalkorProjection(self._db_path, graph_name=graph_name)
         return self._proj
 
     # ── Core CRUD ─────────────────────────────────────────────────
 
     def create_point(self, kind: str, content: str, **props) -> dict:
-        """Create a new Point node. Raises ValueError if kind is invalid."""
+        """Create a new Point node. Raises ValueError if kind is invalid.
+
+        Set dedup=True for idempotent creation (matches by content hash).
+        """
         self._validate_kind(kind)
         from datetime import datetime, timezone
-        pid = ulid()
         now = datetime.now(timezone.utc).isoformat()
         proj = self._get_proj()
+
+        # Idempotency guard: dedup by content hash when requested
+        dedup = props.pop("dedup", False)
+        if dedup:
+            ch = _content_hash(content)
+            existing = proj.g.query(
+                "MATCH (n:Point {content_hash:$ch}) "
+                "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+                "RETURN n.id",
+                params={"ch": ch},
+            ).result_set
+            if existing:
+                pid = existing[0][0]
+                props["updatedAt"] = now
+                if props:
+                    self.update_point(pid, **props)
+                return self.get_point(pid)
+            props["content_hash"] = ch
+
+        pid = ulid()
         proj.g.query(
             "CREATE (n:Point {id:$id, content:$c, pointKind:$k, "
             "is_operator:false, createdAt:$now, updatedAt:$now})",
@@ -69,22 +112,7 @@ class TortoiseSDK:
 
     def create_or_update_point(self, kind: str, content: str, **props) -> dict:
         """Idempotent create/update — matches by content hash."""
-        self._validate_kind(kind)
-        from datetime import datetime, timezone
-        ch = _content_hash(content)
-        proj = self._get_proj()
-        existing = proj.g.query(
-            "MATCH (n:Point {content_hash:$ch}) "
-            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
-            "RETURN n.id",
-            params={"ch": ch},
-        ).result_set
-        if existing:
-            pid = existing[0][0]
-            props["updatedAt"] = datetime.now(timezone.utc).isoformat()
-            self.update_point(pid, **props)
-            return self.get_point(pid)
-        return self.create_point(kind, content, content_hash=ch, **props)
+        return self.create_point(kind, content, dedup=True, **props)
 
     def update_point(self, id: str, **props) -> dict:
         """Update properties on an existing Point. Returns updated point dict."""
@@ -439,6 +467,10 @@ class TortoiseSDK:
 
     # ── Lifecycle ─────────────────────────────────────────────────
 
+    def list_graphs(self) -> list[str]:
+        """List all graph names in the database."""
+        return self._get_proj().list_graphs()
+
     def close(self) -> None:
         """Close the underlying database connection."""
         if self._proj is not None:
@@ -536,14 +568,28 @@ class TortoiseSDK:
             self._ep = TortoiseEP(self._get_proj())
         return self._ep
 
-    def compute_confidence(self, factors=None, evidence=None) -> dict:
-        """Compute confidence via EP belief propagation. Returns {iterations, converged, confidences}."""
+    def compute_confidence(self, factors=None, evidence=None, context=None) -> dict:
+        """Compute confidence via EP belief propagation. Returns {iterations, converged, confidences}.
+
+        Args:
+            factors: operator IDs (list[str]) or factor tuples. If None, auto-extracts.
+            evidence: optional {claim_id: (alpha, beta)} priors.
+            context: if set, scopes auto-extraction to operators connecting Points in this context.
+        """
         proj = self._get_proj()
         ep = self._get_ep()
         if evidence:
             self._evidence.update(evidence)
         if factors is not None:
-            operator_ids = [f[0] for f in factors]
+            operator_ids = [f if isinstance(f, str) else f[0] for f in factors]
+        elif context is not None:
+            # Scoped extraction: only operators connecting nodes in this context
+            rows = proj.g.query(
+                "MATCH (op:Point {is_operator:true})-[r:IMPL|NAND]->(c:Point {context:$ctx}) "
+                "RETURN distinct op.id",
+                params={"ctx": context},
+            ).result_set
+            operator_ids = [r[0] for r in rows]
         else:
             factors_data, _ = proj.extract_svbp_factors()
             operator_ids = [f[0] for f in factors_data]
@@ -722,7 +768,10 @@ class TortoiseSDK:
             pass
         counts = self.taxonomy()
         total = sum(counts.values())
-        return {"connected": connected, "counts": counts, "total_entities": total}
+        result = {"connected": connected, "counts": counts, "total_entities": total}
+        if self._namespace:
+            result["namespace"] = self._namespace
+        return result
 
     def ingest_corpus(self, directory: str) -> dict:
         """Batch document ingestion — walk directory, parse YAML frontmatter,

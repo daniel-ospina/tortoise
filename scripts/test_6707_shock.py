@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Historical — uses embedded tortoise.db. Do not run against production Docker.
 """(#6707) Verification script for shock propagation on FalkorDB."""
 from __future__ import annotations
 

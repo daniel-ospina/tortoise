@@ -7,7 +7,7 @@ from datetime import datetime
 class SessionContinuity:
     """Wraps a session with auto-capture and auto-retrieve."""
     
-    def __init__(self, db_path="tortoise.db"):
+    def __init__(self, db_path: str | None = None):
         self.sdk = TortoiseSDK(db_path)
         self.session_id = None
         self.findings = []

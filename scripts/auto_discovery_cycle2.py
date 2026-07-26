@@ -1,4 +1,5 @@
 """Cycle 2 — Gap Analysis: query the graph for weak points."""
+# Historical — uses embedded tortoise.db. Do not run against production Docker.
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 

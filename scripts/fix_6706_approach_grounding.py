@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Historical — uses embedded tortoise.db. Do not run against production Docker.
 """(#6706) Wire evidence-to-approach IMPL edges so grounding reaches approaches.
 
 Resolution events (g≈1.27) exist but approaches (g=0) are disconnected.

@@ -18,15 +18,14 @@ from tortoise import monitoring
 
 mcp = FastMCP("tortoise")
 
-# Resolve SDK connection from TORTOISE_DB_URI env var or fall back to default
+# Resolve SDK connection from TORTOISE_DB_URI env var
 _db_uri = os.environ.get("TORTOISE_DB_URI", "")
 if _db_uri.startswith("docker://"):
     from tortoise.projection import FalkorProjection
-    import time, logging
+    import time, logging, sys
     _log = logging.getLogger(__name__)
     sdk = TortoiseSDK()
-    # Retry Docker connection 3x with backoff; fall back to embedded on exhaustion (#25 P3a)
-    _embedded_path = os.path.expanduser("~/.tortoise/tortoise.db")
+    # Retry Docker connection 3x with backoff; exit on exhaustion (#25 P3a, #32)
     for attempt in range(3):
         try:
             sdk._proj = FalkorProjection.from_uri(_db_uri)
@@ -38,11 +37,8 @@ if _db_uri.startswith("docker://"):
                 _log.warning("Docker connection attempt %d failed: %s — retrying in 2s", attempt + 1, e)
                 time.sleep(2)
             else:
-                _log.warning("Docker connection failed after 3 attempts — falling back to embedded DB at %s", _embedded_path)
-                # ponytail: TORTOISE_DB_URI takes precedence over db_path in TortoiseSDK.__init__.
-                # Pop it so the fallback SDK actually uses the embedded path.
-                os.environ.pop("TORTOISE_DB_URI", None)
-                sdk = TortoiseSDK(db_path=_embedded_path)
+                _log.error("Docker connection failed after 3 attempts. Set TORTOISE_DB_URI or ensure FalkorDB is running.")
+                sys.exit(1)
 elif _db_uri:
     # File path — use Lite mode
     sdk = TortoiseSDK(db_path=_db_uri)

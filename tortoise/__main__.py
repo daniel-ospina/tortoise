@@ -248,7 +248,7 @@ def _cmd_init(args):
 
     # 2. Fallback: FalkorDBLite (SQLite-backed)
     if not graph_ready:
-        db_path = args.path or "tortoise.db"
+        db_path = args.path
         try:
             from redislite.falkordb_client import FalkorDB
             db = FalkorDB(db_path)
@@ -290,6 +290,119 @@ def _cmd_init(args):
     print("  tortoise setup              — configure per-role memory (~2 min, optional)")
     print("  tortoise doctor             — verify everything is healthy")
     print("  tortoise serve              — start MCP server for agents")
+
+    # Onboarding: detect git repo and offer indexing
+    import subprocess as _sp
+    import sys as _sys
+    result = _sp.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        capture_output=True, text=True, timeout=5,
+    )
+    if result.returncode == 0:
+        repo_root = result.stdout.strip()
+        md_count = len(list(__import__("pathlib").Path(repo_root).rglob("*.md")))
+        auto_index = getattr(args, 'yes', False)
+        if md_count > 0:
+            if auto_index:
+                print(f"\nFound {md_count} markdown files in this repo. Auto-indexing…")
+                _sp.Popen(
+                    [_sys.executable, "-m", "tortoise", "index", "github", repo_root],
+                    stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+                    start_new_session=True,
+                )
+                print("Indexing in background. Tortoise is ready to use immediately.")
+            else:
+                print()
+                yn = input(f"Found {md_count} markdown files in this repo. Index them into Tortoise? [Y/n]: ").strip().lower()
+                if yn != "n":
+                    print("Launching indexer in background…")
+                    _sp.Popen(
+                        [_sys.executable, "-m", "tortoise", "index", "github", repo_root],
+                        stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+                        start_new_session=True,
+                    )
+                    print("Indexing in background. Tortoise is ready to use immediately.")
+    return 0
+
+
+def _cmd_onboard(args) -> int:
+    """Guided onboarding: init → index → demo → doctor.
+
+    Chains existing commands into a cohesive flow.
+    Non-interactive — skips prompts, just runs.
+    Idempotent — re-running skips already-done steps.
+    """
+    import os
+    import subprocess as _sp
+    import sys as _sys
+    from pathlib import Path
+
+    step = 0
+    total = 5
+
+    def banner(title: str):
+        nonlocal step
+        step += 1
+        print(f"\n{'─'*50}")
+        print(f"Step {step}/{total}: {title}")
+        print(f"{'─'*50}")
+
+    # Step 1: Ensure SDK installed
+    banner("Ensure Tortoise SDK is installed")
+    try:
+        import tortoise
+        print(f"  ✅ Tortoise {tortoise.__version__ if hasattr(tortoise, '__version__') else 'installed'}")
+    except ImportError:
+        print("  ❌ Tortoise not installed. Run: pip install -e .")
+        return 1
+
+    # Step 2: Init — auto-detect FalkorDB, create graph
+    banner("Initialize graph")
+    rc = _cmd_init(argparse.Namespace(path=getattr(args, 'path', None), yes=True))
+    if rc != 0:
+        print("  ❌ Init failed")
+        return rc
+
+    # Step 3: Index current repo
+    banner("Index repository")
+    result = _sp.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        capture_output=True, text=True, timeout=5,
+        cwd=Path.cwd(),
+    )
+    if result.returncode == 0:
+        repo_root = result.stdout.strip()
+        md_count = len(list(Path(repo_root).rglob("*.md")))
+        if md_count > 0:
+            print(f"  Found {md_count} markdown files. Indexing…")
+            idx_args = argparse.Namespace(
+                url=repo_root, background=False, branch="main",
+                index_cmd="github", cmd="index",
+            )
+            _cmd_index_github(idx_args)
+        else:
+            print("  ⊙ No markdown files found — skipping index.")
+    else:
+        print("  ⊙ Not a git repo — skipping index.")
+
+    # Step 4: First demo — create first memory
+    banner("First memory demo")
+    _cmd_demo(argparse.Namespace(cmd="demo"))
+
+    # Step 5: Doctor — health check (informational, don't fail on warnings)
+    banner("Health check")
+    _cmd_doctor(argparse.Namespace(cmd="doctor"))
+
+    print(f"\n{'='*50}")
+    print("Onboarding complete.")
+    print()
+    print("Tortoise is ready. Agents can now:")
+    print("  • Query the graph via tortoise_suggest_entry_points()")
+    print("  • File decisions with tortoise_create_point()")
+    print("  • Auto-capture via tortoise-context extension")
+    print()
+    print("Next: tortoise serve    — start MCP server for agents")
+    print("      tortoise setup    — configure per-role memory")
     return 0
 
 
@@ -315,7 +428,7 @@ def _cmd_verify(args):
 def _cmd_backfill(args):
     """Backfill missing properties on existing Points."""
     from .projection import FalkorProjection, _now_iso
-    proj = FalkorProjection(args.db) if hasattr(args, 'db') else FalkorProjection("tortoise.db")
+    proj = FalkorProjection(args.db) if hasattr(args, 'db') else FalkorProjection(args.db)
     try:
         r = proj.g.query("MATCH (p:Point) WHERE p.status IS NULL SET p.status = 'live' RETURN count(p)").result_set
         status_count = r[0][0] if r else 0
@@ -591,6 +704,173 @@ def _default_memory_filter(role: str) -> dict:
     return defaults.get(role, defaults["developer"])
 
 
+def _cmd_index_github(args):
+    """Clone a GitHub repo, walk .md files, extract into FalkorDB.
+
+    tortoise index github <url> [--background]
+
+    Idempotent: re-running the same repo skips already-indexed files
+    (keyed by content hash via idempotency.document_key).
+    """
+    import atexit
+    import os
+    import subprocess
+    import sys
+    import tempfile
+    from pathlib import Path
+
+    from tortoise.api import EventAPI
+    from tortoise.extraction_pipeline import ExtractionPipeline
+    from tortoise.log import EventLog
+    from tortoise.projection import FalkorProjection
+
+    url = args.url
+    branch = args.branch or "main"
+
+    # Background mode: detach and return immediately
+    if args.background:
+        cmd = [sys.executable, "-m", "tortoise", "index", "github", url]
+        if branch != "main":
+            cmd.extend(["--branch", branch])
+        pid_file = Path(tempfile.gettempdir()) / f"tortoise-index-{Path(url).stem}.pid"
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        pid_file.write_text(str(proc.pid))
+        print(f"Indexing {url} in background (pid {proc.pid})")
+        print(f"  Progress: tail -f {pid_file.with_suffix('.log')}")
+        return 0
+
+    # Determine if local path or remote URL
+    url_path = Path(url).expanduser().resolve()
+    is_local = url_path.is_dir()
+
+    if is_local:
+        repo_path = url_path
+        repo_name = repo_path.name
+        tmpdir = None  # no cleanup needed
+        print(f"Indexing local repo: {repo_path}")
+    else:
+        # Clone repo
+        tmpdir = tempfile.mkdtemp(prefix="tortoise-index-")
+        atexit.register(lambda: __import__("shutil").rmtree(tmpdir, ignore_errors=True))
+
+        repo_name = url.rstrip("/").split("/")[-1].replace(".git", "")
+        repo_path = Path(tmpdir) / repo_name
+
+        print(f"Cloning {url} (branch: {branch})…")
+        result = subprocess.run(
+            ["git", "clone", "--depth", "1", "--branch", branch, url, str(repo_path)],
+            capture_output=True, text=True, timeout=120,
+        )
+        if result.returncode != 0:
+            print(f"Clone failed: {result.stderr}", file=sys.stderr)
+            return 1
+
+    # Walk .md files
+    md_files = sorted(repo_path.rglob("*.md"))
+    # ponytail: skip node_modules, .git, venv
+    md_files = [f for f in md_files if ".git/" not in str(f)
+                and "node_modules/" not in str(f)
+                and "venv/" not in str(f)
+                and "__pycache__" not in str(f)]
+    total = len(md_files)
+    if total == 0:
+        print("No markdown files found.")
+        return 0
+
+    print(f"Found {total} markdown files. Indexing…")
+
+    # Set up projection + API (same detection as _cmd_init)
+    proj = None
+    # Try Docker FalkorDB first
+    try:
+        host = os.environ.get("FALKORDB_HOST", "localhost")
+        port = int(os.environ.get("FALKORDB_PORT", "6379"))
+        password = os.environ.get("FALKORDB_PASSWORD", "")
+        from falkordb import FalkorDB as FDB
+        db = FDB(host=host, port=port, password=password or None)
+        db.select_graph("tortoise").query("RETURN 1")
+        proj = FalkorProjection(host=host, port=port, password=password or None)
+    except Exception:
+        # Fallback: FalkorDBLite (embedded SQLite)
+        try:
+            proj = FalkorProjection(path=args.db)
+        except Exception:
+            pass  # ponytail: log-only mode
+
+    log_path = Path(tempfile.gettempdir()) / f"tortoise-index-{repo_name}.jsonl"
+    log = EventLog(str(log_path))
+    api = EventAPI(log, initiated_by="extractor", agent_id="github-indexer", projection=proj)
+
+    # Idempotency: track content hashes to avoid re-indexing
+    # ponytail: simple JSON file — no DB, no config. Add FalkorDB-backed
+    # dedup if per-file tracking across repos becomes necessary.
+    from tortoise.idempotency import document_key as doc_key_fn
+    import json as _json
+    hash_file = Path.home() / ".tortoise" / "indexed_hashes.json"
+    hash_file.parent.mkdir(parents=True, exist_ok=True)
+    indexed_hashes: set[str] = set()
+    if hash_file.exists():
+        try:
+            indexed_hashes = set(_json.loads(hash_file.read_text()))
+        except Exception:
+            pass
+
+    pipeline = ExtractionPipeline(enrich=False)
+    indexed, skipped, errors = 0, 0, 0
+
+    for i, fp in enumerate(md_files, 1):
+        rel = fp.relative_to(repo_path)
+        raw_text = fp.read_text(encoding="utf-8")
+        # ponytail: strip frontmatter before hashing — pipeline may add
+        # frontmatter, which would change the hash on the next run.
+        text_for_hash = raw_text
+        if raw_text.startswith('---'):
+            end = raw_text.find('---', 3)
+            if end > 0:
+                text_for_hash = raw_text[end + 3:].lstrip('\n')
+        content_hash = doc_key_fn(text_for_hash).value
+        if content_hash in indexed_hashes:
+            print(f"  [{i}/{total}] {rel}… ⊙ (already indexed)")
+            skipped += 1
+            continue
+        print(f"  [{i}/{total}] {rel}…", end=" ", flush=True)
+        try:
+            stats = pipeline.process_file(fp, api)
+            if stats.get("points", 0) > 0:
+                indexed += 1
+                indexed_hashes.add(content_hash)
+                print(f"✓ ({stats['points']} pts, {stats['operators']} ops, kind={stats['documentKind']})")
+            else:
+                skipped += 1
+                print("⊙ (skipped — no claims found)")
+        except Exception as e:
+            errors += 1
+            print(f"✗ ({e})")
+
+    if proj:
+        proj.close()
+
+    # Persist indexed hashes for cross-run idempotency
+    try:
+        hash_file.write_text(_json.dumps(sorted(indexed_hashes)))
+    except Exception:
+        pass
+
+    print()
+    print(f"Done: {indexed} indexed, {skipped} skipped, {errors} errors")
+    if indexed > 0:
+        print(f"  Log: {log_path}")
+        print(f"  Graph: query with tortoise_suggest_entry_points()")
+
+    # Cleanup (only if we cloned)
+    if tmpdir:
+        __import__("shutil").rmtree(tmpdir, ignore_errors=True)
+    return 0 if errors == 0 else 1
+
+
 def _cmd_doctor(args):
     """Health check — verify Tortoise setup is healthy."""
     import importlib
@@ -698,7 +978,7 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="tortoise", exit_on_error=False)
     sp = p.add_subparsers(dest="cmd")
     rb = sp.add_parser("rebuild", help="Rebuild FalkorDB from all .jsonl files")
-    rb.add_argument("--db", default="tortoise.db")
+    rb.add_argument("--db", required=True)
     rb.add_argument("--dir", default=".")
     sp.add_parser("demo", help="Run mock extractor on sample transcript")
     sp.add_parser("backfill", help="Backfill missing Point properties (status, createdAt)")
@@ -711,11 +991,11 @@ def main(argv: list[str] | None = None) -> int:
     rc.add_argument("--db", required=True, help="FalkorDB docker:// URI")
     rc.add_argument("--log", required=True, help="Path to events.jsonl")
     bk = sp.add_parser("backup", help="Backup events.jsonl + FalkorDB to timestamped dir")
-    bk.add_argument("--db", default="tortoise.db", help="Path to database file")
+    bk.add_argument("--db", required=True, help="Path to database file")
     bk.add_argument("--events", default="events.jsonl", help="Path to event log")
     rs = sp.add_parser("restore", help="Restore from backup directory")
     rs.add_argument("backup_dir", help="Path to backup directory")
-    rs.add_argument("--db", default="tortoise.db", help="Target database path")
+    rs.add_argument("--db", required=True, help="Target database path")
     rs.add_argument("--events", default="events.jsonl", help="Target event log path")
     mc = sp.add_parser("mine-conversation", help="Mine conversation transcript → Events + Points (GAP-15)")
     mc.add_argument("transcript", help="Path to transcript file (Speaker: text format)")
@@ -723,15 +1003,25 @@ def main(argv: list[str] | None = None) -> int:
     mc.add_argument("--db", default=None, help="FalkorDB docker:// URI for projection")
     sr = sp.add_parser("serve", help="Start Tortoise MCP server (stdio)")
     init = sp.add_parser("init", help="Auto-detect FalkorDB and create default graph")
-    init.add_argument("--path", default="tortoise.db", help="Path for FalkorDBLite (default: tortoise.db)")
+    init.add_argument("--path", required=True, help="Path for FalkorDBLite ")
+    init.add_argument("--yes", "-y", action="store_true", help="Skip prompts, auto-index repo")
     setup = sp.add_parser("setup", help="Configure memory_filter per role (interactive)")
     setup.add_argument("--role", default=None, help="Role name (non-interactive, outputs YAML)")
     setup.add_argument("--team", default=None, help="Team name (used with --role)")
     setup.add_argument("--output", default=None, help="Save config to file instead of stdout")
     doctor = sp.add_parser("doctor", help="Health check — verify Tortoise setup")
+    onboard = sp.add_parser("onboard", help="Guided onboarding: init → index → demo → doctor")
+    onboard.add_argument("--path", required=True, help="Path for FalkorDBLite ")
     hs = sp.add_parser("health-server", help="Start standalone /health HTTP server")
     hs.add_argument("--port", type=int, default=9090, help="HTTP port (default: 9090)")
     hs.add_argument("--bind", default="127.0.0.1", help="Bind address (default: 127.0.0.1)")
+    # tortoise index github <url>
+    idx = sp.add_parser("index", help="Index content into the graph")
+    idx_sp = idx.add_subparsers(dest="index_cmd")
+    ig = idx_sp.add_parser("github", help="Index a GitHub repo's markdown files")
+    ig.add_argument("url", help="GitHub repo URL (https://github.com/user/repo)")
+    ig.add_argument("--background", action="store_true", help="Run in background")
+    ig.add_argument("--branch", default="main", help="Branch to clone (default: main)")
     try:
         args = p.parse_args(argv)
     except (argparse.ArgumentError, SystemExit) as e:
@@ -794,11 +1084,18 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_setup(args)
     elif args.cmd == "doctor":
         return _cmd_doctor(args)
+    elif args.cmd == "onboard":
+        return _cmd_onboard(args)
     elif args.cmd == "health-server":
         from tortoise.monitoring import serve_health
         print(f"Health server on http://{args.bind}:{args.port}/health")
         serve_health(args.port, bind=args.bind)
         return 0
+    elif args.cmd == "index":
+        if args.index_cmd == "github":
+            return _cmd_index_github(args)
+        idx.print_help()
+        return 1
     else:
         p.print_help()
         return 1

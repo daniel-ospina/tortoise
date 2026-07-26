@@ -15,7 +15,7 @@ def _timestamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
-def backup(db_path: str = "tortoise.db", events_path: str = "events.jsonl",
+def backup(db_path: str, events_path: str = "events.jsonl",
            target_dir: str | None = None) -> Path:
     """Copy database + event log to a timestamped backup directory.
 
@@ -52,7 +52,7 @@ def backup(db_path: str = "tortoise.db", events_path: str = "events.jsonl",
     return target
 
 
-def restore(backup_dir: str, db_path: str = "tortoise.db",
+def restore(backup_dir: str, db_path: str,
             events_path: str = "events.jsonl", into_falkor: bool = False) -> dict:
     """Restore from backup directory. Replays events into a fresh projection.
 

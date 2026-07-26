@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Historical — uses embedded tortoise.db. Do not run against production Docker.
 """(#6704) Make Tortoise graph operational for comparing approaches.
 
 Three fixes:
