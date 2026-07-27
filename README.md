@@ -1,3 +1,14 @@
+---
+title: "Tortoise — Semantic + Epistemic + Episodic + Procedural Graph Engine"
+type: readme
+domain: 
+status: seedling
+tags: []
+summary: ""
+created: 2026-07-24
+updated: 2026-07-24
+---
+
 # Tortoise — Semantic + Epistemic + Episodic + Procedural Graph Engine
 
 Multi-ontology graph engine for agent memory. FalkorDB-backed, multi-tenant, with connector system (GitHub, Linear, Slack), and belief propagation via Expectation Propagation (EP).
@@ -49,9 +60,20 @@ See [index.md](index.md) for architecture, API, connectors, and operations.
 ## Quick Start
 
 ```bash
+# 1. Set up environment
+cp .env.example .env
+# Edit .env if your FalkorDB password/host differs
+
+# 2. Start FalkorDB (Docker required)
+docker compose -f ../eldato/operations/memory/docker-compose.yml up -d
+
+# 3. Install and initialize
 pip install -e .
-python -m tortoise rebuild
+export $(cat .env | xargs)  # load env vars
+python -m tortoise init     # auto-detects Docker, creates welcome Point
 ```
+
+See [.env.example](.env.example) for all available environment variables.
 
 ## License
 
