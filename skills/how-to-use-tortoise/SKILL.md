@@ -1,18 +1,18 @@
 ---
-name: tortoise-graph-reasoning
-description: Teaches proper Tortoise epistemic graph usage — veracity vs implication, mitigation operators, NAND constraints, and source credibility. Progressive disclosure in 3 tiers by graph complexity. Use when creating operators, evaluating claims, or reasoning about evidence.
-type: capability
+title: "how-to-use-tortoise"
+type: skill
 domain: capability
-status: live
-doc_status: live
-subjects.team: epistemic-team
-created: 2026-07-21
-allowed-tools: read write edit bash grep find web_search web_fetch todo_write task, mcp__tortoise__tortoise_create_point, mcp__tortoise__tortoise_create_operator, mcp__tortoise__tortoise_query, mcp__tortoise__tortoise_get_point, mcp__tortoise__tortoise_check_structure, mcp__tortoise__tortoise_compute_confidence, mcp__tortoise__tortoise_get_confidence, mcp__tortoise__tortoise_annotate_operator, mcp__tortoise__tortoise_get_operator, mcp__tortoise__tortoise_mitigate_operator, mcp__tortoise__tortoise_analyze
+status: seedling
+tags: []
+summary: ""
+created: 2026-07-24
+updated: 2026-07-24
 ---
+
 
 > This skill MUST be read in full — not skimmed.
 
-# tortoise:graph-reasoning
+# how-to-use-tortoise
 
 Teaches agents how to use the Tortoise epistemic graph properly — veracity vs implication, mitigation, NAND constraints, source credibility.
 
