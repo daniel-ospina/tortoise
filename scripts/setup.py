@@ -641,10 +641,13 @@ def step8() -> None:
     _run([
         "docker", "run", "-d",
         "--name", _FALKORDB_CONTAINER,
-        "-p", f"{_FALKORDB_PORT}:6379",
+        "--restart", "unless-stopped",
+        "-p", f"127.0.0.1:{_FALKORDB_PORT}:6379",
         "-v", f"{data_dir}:/var/lib/falkordb/data",
+        "-e", "REDIS_ARGS=--appendonly yes --save 60 1000 --maxmemory 512mb --maxmemory-policy noeviction",
         "falkordb/falkordb:latest",
     ])
+    ENV_VARS["FALKORDB_PORT"] = _FALKORDB_PORT
 
     # Wait for readiness (up to 30 s)
     print("  Waiting for FalkorDB...", end="", flush=True)
