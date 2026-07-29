@@ -12,10 +12,10 @@ def compute_operator_weight(proj, op_id: str, use_dynamic: bool = False) -> floa
     rows = g.query(
         "MATCH (o:Point {id:$id}) "
         "RETURN o.op_type, o.context, "
-        "coalesce(o.annotator_bias, 0.5) AS bias, "
-        "coalesce(o.annotator_precision, 0.5) AS precision, "
-        "coalesce(o.annotator_consistency, 0.5) AS consistency, "
-        "coalesce(o.annotator_directness, 0.5) AS directness",
+        "coalesce(o.annotator_bias, 0.0) AS bias, "
+        "coalesce(o.annotator_precision, 1.0) AS precision, "
+        "coalesce(o.annotator_consistency, 1.0) AS consistency, "
+        "coalesce(o.annotator_directness, 1.0) AS directness",
         params={"id": op_id},
     ).result_set
     if not rows:
@@ -58,10 +58,9 @@ def compute_operator_weight(proj, op_id: str, use_dynamic: bool = False) -> floa
     if context in context_multipliers:
         w *= context_multipliers[context]
 
-    # Annotation dimensions: attenuate by bias, boost by precision/consistency/directness
-    # High bias = lower weight (source has hidden stake)
-    # High precision/consistency/directness = higher weight (claim is well-defined)
-    annotation_factor = (1.0 - bias * 0.5) * precision * consistency * directness
+    # Annotation dimensions (ARCHIVED — identity defaults, no active effect)
+    # Kept as pass-through for future reactivation. Set to identity (1.0).
+    annotation_factor = (1.0 - bias * 0.0) * precision * consistency * directness
     w *= annotation_factor
 
     # Dynamic: post-convergence message strength

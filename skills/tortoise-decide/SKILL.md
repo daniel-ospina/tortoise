@@ -8,7 +8,7 @@ status: live
 doc_status: live
 subjects.team: epistemic-team
 created: 2026-07-18
-allowed-tools: read write edit bash grep find web_search web_fetch todo_write task, mcp__tortoise__tortoise_create_point, mcp__tortoise__tortoise_create_operator, mcp__tortoise__tortoise_query, mcp__tortoise__tortoise_get_point, mcp__tortoise__tortoise_check_structure, mcp__tortoise__tortoise_compute_confidence, mcp__tortoise__tortoise_set_point_baseline, mcp__tortoise__tortoise_get_confidence, mcp__tortoise__tortoise_annotate_operator, mcp__tortoise__tortoise_mitigate_operator, mcp__tortoise__tortoise_calibrate_summary
+allowed-tools: read write edit bash grep find web_search web_fetch todo_write task, mcp__tortoise__tortoise_create_point, mcp__tortoise__tortoise_create_operator, mcp__tortoise__tortoise_query, mcp__tortoise__tortoise_get_point, mcp__tortoise__tortoise_check_structure, mcp__tortoise__tortoise_compute_confidence, mcp__tortoise__tortoise_set_point_baseline, mcp__tortoise__tortoise_get_confidence, mcp__tortoise__tortoise_mitigate_operator, mcp__tortoise__tortoise_calibrate_summary
 ---
 
 # tortoise:decide
@@ -21,13 +21,12 @@ Decision engine. Takes "I want to decide X" and runs the full decision workflow 
 
 EP calibration is MANDATORY before CONVERGE. Three primitives:
 - `tortoise_set_point_baseline` — encode source credibility as Beta prior
-- `tortoise_annotate_operator` — set bias/precision/consistency/directness on edges
 - `tortoise_mitigate_operator` — weaken edges without full contradiction
 
 Default T4 applies if unset. The CALIBRATE gate blocks CONVERGE if >50% of evidence points are uncalibrated.
-→ Read `/skill:how-to-use-tortoise` for tier tables and annotation semantics.
+→ Read `/skill:how-to-use-tortoise` for tier tables.
 
-Note: T0-T4 tier names are shared between two systems — operator annotation weights (how-to-use-tortoise: 0.2-1.0 multipliers) and Point Beta priors (credibility kwarg: Beta distributions). The CALIBRATE gate operates on Point priors; operator annotation is separate.
+Note: T0-T4 tier names use source credibility for Beta priors on Points. Set via `credibility` kwarg on `tortoise_create_point` (e.g., `credibility="high"`). See `/skill:how-to-use-tortoise` for tier tables.
 
 ## When to Use
 
@@ -57,7 +56,7 @@ For each criterion and option, run multi-angle research following the research s
 - **practitioner** — real-world experience, not just theory
 - **contemporary** — last 12-24 months, what's changing now
 
-File all findings as Points with provenance (source URL, date, author). Connect findings to the options and criteria they support or contradict via IMPL/NAND edges. → Use /skill:how-to-use-tortoise for proper edge annotation and veracity assessment.
+File all findings as Points with provenance (source URL, date, author). Connect findings to the options and criteria they support or contradict via IMPL/NAND edges.
 
 For every evidence Point, set credibility via `tortoise_create_point` with `credibility` kwarg:
 - T0 "gold" (meta-analysis): credibility="gold"
@@ -65,12 +64,7 @@ For every evidence Point, set credibility via `tortoise_create_point` with `cred
 - T2 "medium" (expert): credibility="medium"
 - T3 "low" (anecdotal): credibility="low"
 - T4 "unverified" (blog/default): credibility="unverified"
-For every IMPL/NAND edge, annotate with `tortoise_annotate_operator`.
-
-**Mitigation is the first pass, always.** For every IMPL edge created, ask "what
-weakens this connection?" File at least one mitigation. Only after mitigations
-are filed do you check if NAND is needed for logical contradictions. See
-`/skill:how-to-use-tortoise` for the full mitigation process and decision table.
+For every IMPL edge, file at least one mitigation — see `/skill:how-to-use-tortoise` for the mitigation process and decision table.
 
 ### 3. CHALLENGE — Find the weak spots
 
@@ -123,7 +117,7 @@ Before converging, run the calibration gate:
 
 **Gate rule:** CONVERGE is blocked until `calibrate_summary` shows ≤50% of evidence-type points are uncalibrated AND all IMPL edges have at least one mitigation filed.
 
-→ See `/skill:how-to-use-tortoise` for tier tables. Note: T0-T4 tier names refer to two different systems — operator annotation weights (how-to-use-tortoise, 0.2-1.0 multipliers) and Point Beta priors (credibility kwarg, Beta distributions). The CALIBRATE gate checks Point priors; operator annotation is separate.
+→ See `/skill:how-to-use-tortoise` for tier tables.
 
 ### 7. CONVERGE — The decision becomes clear
 
@@ -133,7 +127,7 @@ Present the decision with:
 - **What contradicts it** — counter-arguments considered and why they were rejected
 - **What we still do not know** — remaining uncertainties with confidence levels
 - **Alternatives considered** — options explored and why not chosen
-- **Calibration** — source quality distribution (T0/T1/T2/T3/T4 counts), edge annotation coverage, inherited vs explicit baselines
+- **Calibration** — source quality distribution (T0/T1/T2/T3/T4 counts), inherited vs explicit baselines
 
 The graph now holds the full reasoning chain, queryable forever.
 

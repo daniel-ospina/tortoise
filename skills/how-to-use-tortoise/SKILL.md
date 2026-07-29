@@ -37,10 +37,6 @@ Independent dimensions. Point confidence = truth. Operator weight = implication 
 ### Operators Are Points
 Every IMPL/NAND edge is a Point with its own confidence. Can be attacked (NAND) or mitigated.
 
-### Annotation: Source->Point only
-Annotate operators where external evidence supports a claim. Use sourceKind (T0-T4) and sourceDate.
-Skip annotation for Point->Point logical connections.
-
 ### Source Credibility Tiers
 Assign sourceKind to every evidence point. Default T4 if ungraded.
 
@@ -77,7 +73,7 @@ exists but it's weaker than it appears."
    a signal, just a weaker one. A NAND edge removes the signal entirely. Mitigation
    preserves nuance; NAND erases it. Default to preserve.
 
-### Decision Table: Mitigate vs NAND vs Annotate
+### Decision Table: Mitigate vs NAND
 
 | Situation | Use | Why |
 |-----------|-----|-----|
@@ -85,7 +81,6 @@ exists but it's weaker than it appears."
 | Both endpoints are valid but the link is overstated | Mitigate | Weakens without denying |
 | Source is credible but old | Mitigate | Time decay is a form of mitigation |
 | Claim is logically false (contradiction, not just weak) | NAND | Only when mitigation can't capture the issue |
-| Source is credible but has known bias | Annotate + Mitigate | Bias is annotation; strength reduction is mitigation |
 
 ### Examples
 
