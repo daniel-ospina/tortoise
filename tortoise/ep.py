@@ -210,14 +210,13 @@ class TortoiseEP:
         raw_eta_a = (new_eta_a[0] - cav_eta_a[0], new_eta_a[1] - cav_eta_a[1])
         raw_eta_b = (new_eta_b[0] - cav_eta_b[0], new_eta_b[1] - cav_eta_b[1])
 
-        # Source-weighted transmission: stronger sources push harder.
-        # A's credibility scales the A→B message, B's credibility scales B→A.
+        # Boost: when cavity is uniform Beta(1,1), amplify signal 2x
+        # to break the EP fixed-point symmetry for evidence-free targets.
+        cav_boost_a = 3.0 if abs(cav_eta_a[0]) < 0.01 and abs(cav_eta_a[1]) < 0.01 else 1.0
+        cav_boost_b = 3.0 if abs(cav_eta_b[0]) < 0.01 and abs(cav_eta_b[1]) < 0.01 else 1.0
+        # Source-weighted: stronger sources push harder
         cred_a = self._source_credibility(id_a)
         cred_b = self._source_credibility(id_b)
-        # Boost: when cavity is Beta(1,1) (uniform, no prior), amplify signal
-        # to prevent the EP fixed point from locking at near-baseline.
-        cav_boost_a = 5.0 if abs(cav_eta_a[0]) < 0.01 and abs(cav_eta_a[1]) < 0.01 else 1.0
-        cav_boost_b = 5.0 if abs(cav_eta_b[0]) < 0.01 and abs(cav_eta_b[1]) < 0.01 else 1.0
         raw_eta_b = (raw_eta_b[0] * cred_a * cav_boost_b, raw_eta_b[1] * cred_a * cav_boost_b)
         raw_eta_a = (raw_eta_a[0] * cred_b * cav_boost_a, raw_eta_a[1] * cred_b * cav_boost_a)
 
