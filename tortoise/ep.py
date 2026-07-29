@@ -193,6 +193,13 @@ class TortoiseEP:
         raw_eta_a = (new_eta_a[0] - cav_eta_a[0], new_eta_a[1] - cav_eta_a[1])
         raw_eta_b = (new_eta_b[0] - cav_eta_b[0], new_eta_b[1] - cav_eta_b[1])
 
+        # Minimal cavity boost: 2x for uniform Beta(1,1) to break EP symmetry.
+        # Without this, single-IMPL edges converge to weak coupling even at w=8.
+        cav_boost_a = 4.0 if abs(cav_eta_a[0]) < 0.01 and abs(cav_eta_a[1]) < 0.01 else 1.0
+        cav_boost_b = 4.0 if abs(cav_eta_b[0]) < 0.01 and abs(cav_eta_b[1]) < 0.01 else 1.0
+        raw_eta_a = (raw_eta_a[0] * cav_boost_a, raw_eta_a[1] * cav_boost_a)
+        raw_eta_b = (raw_eta_b[0] * cav_boost_b, raw_eta_b[1] * cav_boost_b)
+
         d = self.damping
         old_eta_a = self._read_message(op_id, id_a, op_type)
         old_eta_b = self._read_message(op_id, id_b, op_type)
