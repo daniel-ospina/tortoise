@@ -58,9 +58,9 @@ def compute_operator_weight(proj, op_id: str, use_dynamic: bool = False) -> floa
     if context in context_multipliers:
         w *= context_multipliers[context]
 
-    # Annotation dimensions (ARCHIVED — identity defaults, no active effect)
-    # Kept as pass-through for future reactivation. Set to identity (1.0).
-    annotation_factor = (1.0 - bias * 0.0) * precision * consistency * directness
+    # Annotation dimensions (ARCHIVED — no active effect)
+    # Restore to (1.0 - bias * 0.5) * precision * consistency * directness when reactivated.
+    annotation_factor = 1.0
     w *= annotation_factor
 
     # Dynamic: post-convergence message strength
