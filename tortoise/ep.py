@@ -375,8 +375,13 @@ class TortoiseEP:
         if not factors:
             return 0, True
 
+        # Load once from graph, then run entirely in memory.
+        # Only flush final results at the end — eliminates per-iteration I/O.
+        self._load_cache(affected)
+
         for iteration in range(self.max_iter):
-            self._load_cache(affected)
+            # Re-load only on iteration 0 (already loaded above)
+            # Subsequent iterations use in-memory cache updated by _write_node/_write_message
 
             prev = {cid: self._node_cache.get(cid, (1.0, 1.0))
                     for cid in affected}
@@ -387,8 +392,6 @@ class TortoiseEP:
 
             for cid in affected:
                 self._update_claim_posterior(cid)
-
-            self._flush_cache()
 
             max_change = 0.0
             for cid in affected:
@@ -401,6 +404,8 @@ class TortoiseEP:
                 max_change = max(max_change, change)
 
             if max_change < self.tol:
+                self._flush_cache()
                 return iteration + 1, True
 
+        self._flush_cache()
         return self.max_iter, False
