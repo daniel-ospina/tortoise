@@ -27,18 +27,13 @@ def tilted_moments(alpha_a, beta_a, alpha_b, beta_b, w, phi_fn, n_quad=8):
     x_a, w_a = gauss_jacobi_01(n_quad, alpha_a, beta_a)
     x_b, w_b = gauss_jacobi_01(n_quad, alpha_b, beta_b)
 
-    Z = m1_a = m2_a = m1_b = m2_b = 0.0
-    for i in range(n_quad):
-        ca = x_a[i]
-        for j in range(n_quad):
-            cb = x_b[j]
-            weight = w_a[i] * w_b[j]
-            phi = phi_fn(ca, cb, w)
-            Z += weight * phi
-            m1_a += weight * phi * ca
-            m2_a += weight * phi * ca * ca
-            m1_b += weight * phi * cb
-            m2_b += weight * phi * cb * cb
+    # Vectorized: compute phi matrix via numpy broadcasting (n_quad × n_quad)
+    ca_grid = x_a.reshape(-1, 1)  # (n_quad, 1)
+    cb_grid = x_b.reshape(1, -1)  # (1, n_quad)
+    weight_grid = w_a.reshape(-1, 1) * w_b.reshape(1, -1)
+    phi_grid = phi_fn(ca_grid, cb_grid, w)
+    weighted = weight_grid * phi_grid
+    Z = np.sum(weighted)
 
     if Z < 1e-30:
         tw_a = np.sum(w_a)
@@ -49,7 +44,12 @@ def tilted_moments(alpha_a, beta_a, alpha_b, beta_b, w, phi_fn, n_quad=8):
         m2_b = np.sum(w_b * x_b * x_b) / tw_b
         return (m1_a, m2_a), (m1_b, m2_b)
 
-    return (m1_a / Z, m2_a / Z), (m1_b / Z, m2_b / Z)
+    # Vectorized moments: sum over both dimensions
+    m1_a = np.sum(weighted * ca_grid) / Z
+    m2_a = np.sum(weighted * ca_grid * ca_grid) / Z
+    m1_b = np.sum(weighted * cb_grid) / Z
+    m2_b = np.sum(weighted * cb_grid * cb_grid) / Z
+    return (m1_a, m2_a), (m1_b, m2_b)
 
 
 def moments_to_beta(m1, m2):
