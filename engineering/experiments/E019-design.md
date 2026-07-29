@@ -140,8 +140,21 @@ Key insight: the gradient from isolated → low → med → high-anchor
 shows that even 1-2 T4 anchors significantly reduce the cascade.
 The cascade is proportional to B's share of C2's total IMPL support.
 
-## 8. Success Criteria
-- H1: Bidirectional C2 drop > 0.05 for T4 B (false cascade confirmed)
-- H2: Directed C2 drop < 0.01 (cascade eliminated)
-- H3: 3-shared drop > 1-shared drop (density effect)
-- H4: T0 B drop < T4 B drop (anchoring effect)
+## 8. Actual Results (2026-07-29)
+
+**Finding: No false cascade.** Bidirectional EP correctly isolates C2.
+
+| Scenario | A(T4) → NAND(T0) | B(T4) feedback | C1 drop | C2 drop |
+|----------|-------------------|-----------------|---------|---------|
+| B=T0, A=T4 | 52.6% → 48.6% (-4.0%) | 90.4% → 89.8% (-0.6%) | 54.1% → 53.7% (-0.4%) | 54.0% → 54.0% (0%) |
+| B=T4, A=T4 | 52.3% → 47.9% (-4.4%) | 52.2% → 52.0% (-0.2%) | 50.4% → 50.0% (-0.4%) | 50.2% → 50.2% (0%) |
+
+Key insight: EP damping (0.5) and evidence anchoring prevent the
+B→C1→B→C2 feedback loop from having measurable effect. Each hop
+attenuates the signal. A's 4% drop becomes 0.4% at C1, 0.2% at B,
+and undetectable at C2.
+
+**Verdict: No EP change needed.** Bidirectional messaging on directed
+IMPL edges is safe. The cascade dies before reaching unrelated
+sub-arguments. Your original fear was valid to investigate, but the
+math handles it.

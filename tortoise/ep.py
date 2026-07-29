@@ -29,13 +29,14 @@ class TortoiseEP:
     """
 
     def __init__(self, projection, *, damping=0.5, n_quad=8,
-                 max_iter=50, tol=1e-3, evidence=None):
+                 max_iter=50, tol=1e-3, evidence=None, directed=False):
         self.proj = projection
         self.g = projection.g
         self.damping = damping
         self.n_quad = n_quad
         self.max_iter = max_iter
         self.tol = tol
+        self.directed = directed
         # Fixed evidence priors: {claim_id: (alpha, beta)}
         self._evidence = dict(evidence) if evidence else {}
 
@@ -205,8 +206,9 @@ class TortoiseEP:
         damped_b = (max(min(damped_b[0], 1000), -1000),
                     max(min(damped_b[1], 1000), -1000))
 
-        self._write_message(op_id, id_a, *damped_a, op_type)
         self._write_message(op_id, id_b, *damped_b, op_type)
+        if not self.directed:
+            self._write_message(op_id, id_a, *damped_a, op_type)
 
     def _update_nary_factor(self, op_id: str, op_type: str,
                             input_ids: list[str], weight: float = 1.0) -> None:
