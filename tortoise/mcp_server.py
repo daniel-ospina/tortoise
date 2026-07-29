@@ -184,14 +184,17 @@ def tortoise_search(query: str, kind: str | None = None,
 @mcp.tool()
 def tortoise_compute_confidence(factors: Any = None,
                     evidence: Any = None,
-                    context: str | None = None) -> dict:
+                    context: str | None = None,
+                    require_calibration: bool = False) -> dict:
     """Compute confidence via EP belief propagation. Returns {iterations, converged, confidences}.
 
     Pass context='licensing-decision' to scope to a specific subgraph.
+    Pass require_calibration=True to gate on calibration state.
     """
     factors = _parse(factors)
     evidence = _parse(evidence)
-    return _safe(sdk.compute_confidence, factors, evidence, context=context)
+    return _safe(sdk.compute_confidence, factors, evidence,
+                 context=context, require_calibration=require_calibration)
 
 
 @mcp.tool()
@@ -205,6 +208,11 @@ def tortoise_get_confidence(claim_id: str) -> dict:
     """Get EP confidence for a claim: {mean, variance, alpha, beta}."""
     return _safe(sdk.get_confidence, claim_id)
 
+
+@mcp.tool()
+def tortoise_calibrate_summary(context: str | None = None) -> list[dict]:
+    """Audit graph calibration state. Returns per-point guidance."""
+    return _safe(sdk.calibrate_summary, context)
 
 
 @mcp.tool()
@@ -463,32 +471,10 @@ def tortoise_stale(days: int = 30, limit: int = 50) -> dict:
     return _safe(sdk.stale_points, days=days, limit=limit)
 
 
-# ── P1-4: Entity Linking ───────────────────────────────────────
-
-@mcp.tool()
-def tortoise_create_subject(name: str, subject_kind: str = "other") -> dict:
-    """Create or MERGE a Subject node. Deduplicates by name.
-
-    Returns {id, name, subjectKind}. If the subject already exists,
-    the existing node is returned (idempotent).
-    """
-    return _safe(sdk.create_subject, name, subject_kind)
-
-
 @mcp.tool()
 def tortoise_provenance(point_id: str) -> dict:
     """Provenance chain — "Who decided this?" Follows authoredBy → Subject → delegation."""
     return _safe(sdk.provenance, point_id)
-
-
-@mcp.tool()
-def tortoise_create_object(name: str, object_kind: str = "other") -> dict:
-    """Create or MERGE an Object node. Deduplicates by name.
-
-    Returns {id, name, objectKind}. If the object already exists,
-    the existing node is returned (idempotent).
-    """
-    return _safe(sdk.create_object, name, object_kind)
 
 
 # ── Multi-tenancy (#7001) ────────────────────────────────────

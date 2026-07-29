@@ -76,6 +76,8 @@ class TortoiseSDK:
         now = datetime.now(timezone.utc).isoformat()
         proj = self._get_proj()
 
+        # Calibration: pop credibility before storing as node property
+        credibility = props.pop("credibility", None)
         # Idempotency guard: dedup by content hash when requested
         dedup = props.pop("dedup", False)
         if dedup:
@@ -89,6 +91,10 @@ class TortoiseSDK:
             if existing:
                 pid = existing[0][0]
                 props["updatedAt"] = now
+                if credibility is not None:
+                    _logger.warning(
+                        "credibility=%r ignored — point %s already exists and dedup=True",
+                        credibility, pid)
                 if props:
                     self.update_point(pid, **props)
                 return self.get_point(pid)
@@ -108,6 +114,17 @@ class TortoiseSDK:
         # P1-1: Ontology v2.1 — link Point → Source via extractedFrom
         if props.get("extractedFrom"):
             proj._link_source(pid, props["extractedFrom"])
+        # Apply credibility baseline (only on new creation, not dedup)
+        if credibility is not None:
+            tier_map = {
+                "gold": (10, 1), "T0": (10, 1), 0: (10, 1),
+                "high": (8, 2), "T1": (8, 2), 1: (8, 2),
+                "medium": (6, 3), "T2": (6, 3), 2: (6, 3),
+                "low": (4, 4), "T3": (4, 4), 3: (4, 4),
+                "unverified": (2, 4), "T4": (2, 4), 4: (2, 4),
+            }
+            alpha, beta = tier_map.get(credibility, (1, 1))
+            self.set_point_baseline(pid, alpha, beta)
         return self.get_point(pid)
 
     def create_or_update_point(self, kind: str, content: str, **props) -> dict:
@@ -568,18 +585,46 @@ class TortoiseSDK:
             self._ep = TortoiseEP(self._get_proj())
         return self._ep
 
-    def compute_confidence(self, factors=None, evidence=None, context=None) -> dict:
+    def compute_confidence(self, factors=None, evidence=None, context=None,
+                           require_calibration: bool = False) -> dict:
         """Compute confidence via EP belief propagation. Returns {iterations, converged, confidences}.
 
         Args:
             factors: operator IDs (list[str]) or factor tuples. If None, auto-extracts.
             evidence: optional {claim_id: (alpha, beta)} priors.
             context: if set, scopes auto-extraction to operators connecting Points in this context.
+            require_calibration: if True, raises CalibrationError when evidence points are uncalibrated.
         """
         proj = self._get_proj()
         ep = self._get_ep()
+        # Hydrate evidence from graph-persisted baselines (survives SDK restarts)
+        rows = proj.g.query(
+            "MATCH (n:Point) WHERE n.baseline_set = true AND n.ep_alpha IS NOT NULL "
+            "RETURN n.id, n.ep_alpha, n.ep_beta"
+        ).result_set
+        for pid, alpha, beta in rows:
+            if pid not in self._evidence:
+                self._evidence[pid] = (alpha, beta)
+        # Apply source-based credibility inheritance
+        self._apply_source_inheritance(context=context)
         if evidence:
             self._evidence.update(evidence)
+        # Calibration gate
+        if require_calibration:
+            from .exceptions import CalibrationError
+            summary = self.calibrate_summary(context=context)
+            evidence_kinds = {"statement", "observation", "hypothesis"}
+            uncalibrated = [
+                s for s in summary
+                if not s["calibrated"] and s.get("pointKind") in evidence_kinds
+            ]
+            if uncalibrated:
+                ids = [s["id"] for s in uncalibrated[:10]]
+                msg = (
+                    f"{len(uncalibrated)} uncalibrated evidence points. "
+                    f"First 10: {ids}. Run calibrate_summary() for full guidance."
+                )
+                raise CalibrationError(msg)
         if factors is not None:
             operator_ids = [f if isinstance(f, str) else f[0] for f in factors]
         elif context is not None:
@@ -611,13 +656,112 @@ class TortoiseSDK:
         return {"iterations": iterations, "converged": converged, "confidences": confidences}
 
     def set_point_baseline(self, claim_id: str, alpha: float, beta: float) -> dict:
-        """Set Beta prior evidence for a claim."""
+        """Set Beta prior evidence for a claim. Persists to graph immediately."""
         self._evidence[claim_id] = (alpha, beta)
+        # Persist to graph so baselines survive SDK restarts
+        proj = self._get_proj()
+        proj.g.query(
+            "MATCH (n:Point {id: $id}) SET n.ep_alpha = $a, n.ep_beta = $b, n.baseline_set = true",
+            params={"id": claim_id, "a": alpha, "b": beta},
+        )
         return {"claim_id": claim_id, "alpha": alpha, "beta": beta}
 
     def get_confidence(self, claim_id: str) -> dict:
         """Get EP confidence for a claim: {mean, variance, alpha, beta}."""
         return self._get_ep().compute_confidence(claim_id)
+
+    def _apply_source_inheritance(self, context: str | None = None):
+        """Apply credibilityTier from Source nodes to Points via extractedFrom edge.
+        
+        Only activates when credibilityTier is explicitly set on the Source (NOT NULL).
+        Sources without credibilityTier = no inheritance = neutral Beta(1,1).
+        If a Point has multiple Sources, the highest tier (lowest number: T0 > T1 > ...) wins.
+        """
+        proj = self._get_proj()
+        tier_map = {"T0": (10, 1), "T1": (8, 2), "T2": (6, 3), "T3": (4, 4), "T4": (2, 4)}
+        tier_order = {"T0": 0, "T1": 1, "T2": 2, "T3": 3, "T4": 4}
+        
+        where = "WHERE s.credibilityTier IS NOT NULL AND (n.baseline_set IS NULL OR n.baseline_set = false)"
+        params = {}
+        if context:
+            where += " AND n.context = $ctx"
+            params["ctx"] = context
+        
+        rows = proj.g.query(
+            f"MATCH (n:Point)-[:extractedFrom]->(s:Source) {where} "
+            "RETURN n.id, s.credibilityTier",
+            params=params,
+        ).result_set
+        
+        # Group by Point ID, select highest tier (lowest number) for each Point
+        from collections import defaultdict
+        point_tiers = defaultdict(list)
+        for pid, tier in rows:
+            point_tiers[pid].append(tier)
+        
+        for pid, tiers in point_tiers.items():
+            best_tier = min(tiers, key=lambda t: tier_order.get(t, 99))
+            alpha, beta = tier_map.get(best_tier, (1, 1))
+            self.set_point_baseline(pid, alpha, beta)
+
+    def calibrate_summary(self, context: str | None = None) -> list[dict]:
+        """Audit graph calibration state. Returns per-point guidance.
+        
+        Checks baseline_set flag on non-operator Points. For uncalibrated
+        points, traverses extractedFrom→Source to check for inherited credibilityTier.
+        """
+        proj = self._get_proj()
+        where = "WHERE (n.is_operator IS NULL OR n.is_operator = false)"
+        params = {}
+        if context:
+            where += " AND n.context = $ctx"
+            params["ctx"] = context
+        
+        rows = proj.g.query(
+            f"MATCH (n:Point) {where} "
+            "OPTIONAL MATCH (n)-[:extractedFrom]->(s:Source) "
+            "RETURN n.id, n.content, n.pointKind, "
+            "coalesce(n.baseline_set, false) AS calibrated, "
+            "s.credibilityTier, s.url AS src_url",
+            params=params,
+        ).result_set
+        
+        results = []
+        for row in rows:
+            pid, content, pk, calibrated, tier, src_url = row
+            item = {"id": pid, "content": content, "pointKind": pk, "calibrated": calibrated}
+            
+            if not calibrated:
+                if src_url and tier:
+                    item["suggestion"] = f"Inherited {tier} from Source {src_url}"
+                elif src_url and not tier:
+                    item["suggestion"] = (
+                        f"Set credibilityTier on Source {src_url} "
+                        f"(covers all points from this source)"
+                    )
+                else:
+                    item["suggestion"] = (
+                        f"Call set_point_baseline('{pid}', alpha, beta) "
+                        f"or recreate with credibility kwarg"
+                    )
+            results.append(item)
+        
+        # Deduplicate: keep one entry per Point ID, prefer Source-based suggestions
+        seen = {}
+        deduped = []
+        for item in results:
+            pid = item["id"]
+            if pid not in seen:
+                seen[pid] = item
+                deduped.append(item)
+            elif "Source" in str(item.get("suggestion", "")) and "Source" not in str(seen[pid].get("suggestion", "")):
+                # Replace in deduped list with the better Source-aware suggestion
+                for i, d in enumerate(deduped):
+                    if d["id"] == pid:
+                        deduped[i] = item
+                        break
+                seen[pid] = item
+        return deduped
 
 
     # ── P0 Group 3: Checkpoint, Diary, Status, Analyze, Ingest ────

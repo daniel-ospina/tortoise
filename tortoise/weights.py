@@ -10,12 +10,17 @@ def compute_operator_weight(proj, op_id: str, use_dynamic: bool = False) -> floa
     """Compute EP factor weight w in [0.1, 10.0] from graph structure."""
     g = proj.g
     rows = g.query(
-        "MATCH (o:Point {id:$id}) RETURN o.op_type, o.context",
+        "MATCH (o:Point {id:$id}) "
+        "RETURN o.op_type, o.context, "
+        "coalesce(o.annotator_bias, 0.5) AS bias, "
+        "coalesce(o.annotator_precision, 0.5) AS precision, "
+        "coalesce(o.annotator_consistency, 0.5) AS consistency, "
+        "coalesce(o.annotator_directness, 0.5) AS directness",
         params={"id": op_id},
     ).result_set
     if not rows:
         return 1.0
-    op_type, context = rows[0]
+    op_type, context, bias, precision, consistency, directness = rows[0]
     w = 1.0
 
     # Mitigation: operator targets another operator
@@ -52,6 +57,12 @@ def compute_operator_weight(proj, op_id: str, use_dynamic: bool = False) -> floa
     }
     if context in context_multipliers:
         w *= context_multipliers[context]
+
+    # Annotation dimensions: attenuate by bias, boost by precision/consistency/directness
+    # High bias = lower weight (source has hidden stake)
+    # High precision/consistency/directness = higher weight (claim is well-defined)
+    annotation_factor = (1.0 - bias * 0.5) * precision * consistency * directness
+    w *= annotation_factor
 
     # Dynamic: post-convergence message strength
     if use_dynamic:
