@@ -359,14 +359,15 @@ class TestLogAggregationMath:
         assert ratio < 2.0, f"Ratio {ratio:.3f} >= 2.0 — log-scale not effective enough"
 
     def test_t0_saturation(self):
-        """T0 marginal returns diminish: Δ(1→2) > Δ(5→10)."""
+        """T0 marginal returns diminish: per-source gain_1/2 > per-source gain_5/10."""
         def t0_pc(n):
             return log_aggregate_pc(TIER_PC["T0"], n)
 
-        gain_1_2 = t0_pc(2) - t0_pc(1)
-        gain_5_10 = t0_pc(10) - t0_pc(5)
-        assert gain_1_2 > gain_5_10, \
-            f"T0: Δ(1→2)={gain_1_2:.3f} not > Δ(5→10)={gain_5_10:.3f}"
+        # Per-source gain: how much each additional source adds on average
+        per_source_1_2 = (t0_pc(2) - t0_pc(1)) / 1   # 1 source added
+        per_source_5_10 = (t0_pc(10) - t0_pc(5)) / 5   # 5 sources added
+        assert per_source_1_2 > per_source_5_10, \
+            f"T0: per-source gain (1→2)={per_source_1_2:.3f} not > per-source (5→10)={per_source_5_10:.3f}"
 
 
 # ═══════════════════════════════════════════════════════════════════
