@@ -102,13 +102,15 @@ def mean_from_beta(alpha: float, beta: float) -> float:
 
 
 @contextmanager
-def fresh_sdk():
-    """Yield a TortoiseSDK with a fresh temp database.
+def fresh_sdk(graph_name: str | None = None):
+    """Yield a TortoiseSDK connected to Docker FalkorDB with an isolated graph.
 
-    Ensures test isolation — each test gets a clean FalkorDBLite instance.
+    Uses the running FalkorDB via TORTOISE_DB_URI. Each test gets a unique
+    graph name for isolation — no cross-test contamination.
     """
-    db_path = os.path.join(tempfile.mkdtemp(prefix="tortoise_ep_src_"), "test.db")
-    sdk = TortoiseSDK(db_path)
+    import uuid
+    ns = graph_name or f"test_ep_src_{uuid.uuid4().hex[:8]}"
+    sdk = TortoiseSDK(db_path=None, namespace=ns)
     try:
         yield sdk
     finally:
