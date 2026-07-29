@@ -65,7 +65,7 @@ def moments_to_beta(m1, m2):
     return (alpha, beta)
 
 
-def phi_nand(ca, cb, w=5.5):
+def phi_nand(ca, cb, w=8.0):
     """Symmetric NAND: equal-quality contradiction returns to ~50%.
 
     Uses averaged mirrored product coupling:
@@ -80,7 +80,7 @@ def phi_nand(ca, cb, w=5.5):
     return np.exp(-w * (ca * (1 - cb) + cb * (1 - ca)) / 2)
 
 
-def phi_impl(ca, cb, w=5.5):
+def phi_impl(ca, cb, w=8.0):
     """IMPL coupling factor: promotes agreement between connected claims.
 
     Product coupling exp(w * ca * cb) transmits confidence from strong to weak.
