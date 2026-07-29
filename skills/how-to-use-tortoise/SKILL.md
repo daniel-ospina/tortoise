@@ -40,13 +40,18 @@ Every IMPL/NAND edge is a Point with its own confidence. Can be attacked (NAND) 
 ### Source Credibility Tiers
 Assign sourceKind to every evidence point. Default T4 if ungraded.
 
-| Tier | Weight | Examples |
-|------|--------|----------|
-| T0 Gold | 1.0 | Meta-analyses, systematic reviews |
-| T1 High | 0.8 | Peer-reviewed, multiple independent sources |
-| T2 Medium | 0.6 | Case studies, expert consensus |
-| T3 Low | 0.4 | Anecdotal, single observations |
-| T4 Unverified | 0.2 | Blog, social media, **ungraded default** |
+| Tier | Weight | Beta Prior | Mean | Examples |
+|------|--------|-----------|------|----------|
+| T0 Gold | 1.0 | (10, 1) | 91% | Meta-analyses, systematic reviews |
+| T1 High | 0.8 | (5, 1) | 83% | Peer-reviewed, multiple independent sources |
+| T2 Medium | 0.6 | (3, 1) | 75% | Case studies, expert consensus |
+| T3 Low | 0.4 | (2, 1) | 67% | Anecdotal, single observations |
+| T4 Unverified | 0.2 | (1.1, 1) | 52% | Blog, social media, **ungraded default** |
+
+All tiers are positive (mean > 50%) — a source is evidence FOR a claim. Higher
+tiers have more pseudo-observations (stronger anchor). Lower tiers have fewer
+(weaker anchor). Multiple weak sources accumulate: 10 T4 sources can approximate
+1 T2 source through EP propagation.
 
 Time decay is computed automatically by the EP engine from sourceDate. Set sourceDate on evidence points.
 EP weights sources by: tier_weight × time_decay (logarithmic, 0.5 at 15 years).

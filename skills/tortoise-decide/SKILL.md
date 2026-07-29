@@ -26,7 +26,9 @@ EP calibration is MANDATORY before CONVERGE. Three primitives:
 Default T4 applies if unset. The CALIBRATE gate blocks CONVERGE if >50% of evidence points are uncalibrated.
 → Read `/skill:how-to-use-tortoise` for tier tables.
 
-Note: T0-T4 tier names use source credibility for Beta priors on Points. Set via `credibility` kwarg on `tortoise_create_point` (e.g., `credibility="high"`). See `/skill:how-to-use-tortoise` for tier tables.
+T0-T4 tiers set source credibility via `credibility` kwarg on create_point.
+All positive (above 50%): T0=gold(10,1)→91%, T1=high(5,1)→83%, T2=medium(3,1)→75%, T3=low(2,1)→67%, T4=unverified(1.1,1)→52%
+Multiple weak sources accumulate through EP propagation.
 
 ## When to Use
 

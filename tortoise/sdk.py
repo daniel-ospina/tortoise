@@ -118,10 +118,10 @@ class TortoiseSDK:
         if credibility is not None:
             tier_map = {
                 "gold": (10, 1), "T0": (10, 1), 0: (10, 1),
-                "high": (8, 2), "T1": (8, 2), 1: (8, 2),
-                "medium": (6, 3), "T2": (6, 3), 2: (6, 3),
-                "low": (4, 4), "T3": (4, 4), 3: (4, 4),
-                "unverified": (2, 4), "T4": (2, 4), 4: (2, 4),
+                "high": (5, 1), "T1": (5, 1), 1: (5, 1),
+                "medium": (3, 1), "T2": (3, 1), 2: (3, 1),
+                "low": (2, 1), "T3": (2, 1), 3: (2, 1),
+                "unverified": (1.1, 1), "T4": (1.1, 1), 4: (1.1, 1),
             }
             alpha, beta = tier_map.get(credibility, (1, 1))
             self.set_point_baseline(pid, alpha, beta)
@@ -678,7 +678,7 @@ class TortoiseSDK:
         If a Point has multiple Sources, the highest tier (lowest number: T0 > T1 > ...) wins.
         """
         proj = self._get_proj()
-        tier_map = {"T0": (10, 1), "T1": (8, 2), "T2": (6, 3), "T3": (4, 4), "T4": (2, 4)}
+        tier_map = {"T0": (10, 1), "T1": (5, 1), "T2": (3, 1), "T3": (2, 1), "T4": (1.1, 1)}
         tier_order = {"T0": 0, "T1": 1, "T2": 2, "T3": 3, "T4": 4}
         
         where = "WHERE s.credibilityTier IS NOT NULL AND (n.baseline_set IS NULL OR n.baseline_set = false)"
