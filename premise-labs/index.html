@@ -56,6 +56,19 @@
     /* Specific beats get pointer events for interactive elements */
     #beat-cta { pointer-events: auto; }
 
+    #beat-hero { opacity: 1; }
+
+    /* Scroll indicator */
+    #scroll-hint {
+      position: fixed; bottom: 3.5rem; left: 50%; transform: translateX(-50%);
+      z-index: 3; pointer-events: none;
+      width: 0; height: 0;
+      border-left: 12px solid transparent;
+      border-right: 12px solid transparent;
+      border-top: 16px solid var(--accent);
+      opacity: 1;
+    }
+
     /* Hero headline */
     #beat-hero h1 {
       font-family: var(--serif);
@@ -95,7 +108,7 @@
     /* Lab name */
     #beat-lab h3 {
       font-family: var(--mono);
-      font-size: clamp(0.9rem, 1.6vw, 1.1rem);
+      font-size: clamp(1.35rem, 2.4vw, 1.65rem);
       color: var(--text-dim);
       text-align: center;
       font-weight: 400;
@@ -111,7 +124,7 @@
     }
     #beat-cta input[type="email"] {
       flex: 1;
-      background: transparent;
+      background: var(--bg);
       border: 1px solid var(--text-dim);
       color: var(--text);
       padding: 0.7rem 1rem;
@@ -124,7 +137,7 @@
       border-color: var(--accent);
     }
     #beat-cta button {
-      background: transparent;
+      background: var(--bg);
       color: var(--accent);
       border: 1px solid var(--accent);
       padding: 0.7rem 1.25rem;
@@ -174,26 +187,23 @@
 <body>
   <canvas id="graph-canvas"></canvas>
   <div id="vignette"></div>
+  <div id="scroll-hint"></div>
 
   <div id="scroll-wrapper">
     <section id="beat-hero" class="beat">
       <h1>The primary function of memory is not <span>recall</span>, but <span>learning</span>.</h1>
     </section>
     <section id="beat-origin" class="beat">
-      <p>From kitchens to cybernetics.<br>From team cognition to agent infrastructure.</p>
-    </section>
-    <section id="beat-problem" class="beat">
-      <p><strong>Agents forget everything.</strong><br>We found that annoying too.</p>
+      <p style="color: var(--text); font-size: clamp(1.15rem, 2.2vw, 1.5rem); line-height: 1.5;">Humans update their <span style="color: var(--accent);">world models</span> too slowly.<br>Agents forget them halfway through a session.<br><br>We made them persistent — unlocking better decisions, learning, and collaboration.</p>
     </section>
     <section id="beat-tortoise" class="beat">
       <h2><span>Tortoise</span> — a memory system where agents learn.</h2>
     </section>
     <section id="beat-lab" class="beat">
       <h3><strong>Premise Labs</strong></h3>
-      <p>We build the premises intelligence stands on.</p>
     </section>
     <section id="beat-cta" class="beat">
-      <form id="waitlist-form" action="https://formspree.io/f/REPLACE_ME" method="POST">
+      <form id="waitlist-form" action="https://ybetwichurajbfswfeqa.supabase.co/functions/v1/waitlist-subscribe" method="POST">
         <input type="email" name="email" placeholder="your@email.com" required autocomplete="email">
         <button type="submit">Stay in touch</button>
       </form>
@@ -235,7 +245,7 @@
       const margin = 120;
       const cw = w(); const ch = h();
       const cx = cw / 2; const cy = ch / 2;
-      const radius = Math.min(cw, ch) * 0.28;
+      const spread = Math.min(cw, ch) * 0.20;
 
       // Mutate existing nodes in-place so GSAP's tween references stay alive
       if (nodes.length === 0) {
@@ -245,13 +255,16 @@
       }
 
       for (let i = 0; i < nodes.length; i++) {
-        const angle = (i / nodes.length) * Math.PI * 2 + (Math.random() - 0.5) * 0.4;
-        const r = radius * (0.5 + Math.random() * 0.5);
-        nodes[i]._x = margin + Math.random() * (cw - margin * 2);
-        nodes[i]._y = margin + Math.random() * (ch - margin * 2);
+        const angle = (i / nodes.length) * Math.PI * 2 + (Math.random() - 0.5) * 0.3;
+        const r = spread * (0.4 + Math.random() * 0.6);
+        nodes[i]._x = 30 + Math.random() * 50;
+        nodes[i]._y = 40 + Math.random() * 50;
+        nodes[i].sx = cx + (Math.random() - 0.5) * spread * 1.8;
+        nodes[i].sy = cy + (Math.random() - 0.5) * spread * 1.8;
         nodes[i].tx = cx + Math.cos(angle) * r;
         nodes[i].ty = cy + Math.sin(angle) * r;
-        nodes[i].r = 2 + Math.random() * 2.5;
+        nodes[i].r = 1.2 + Math.random() * 1.3;
+        nodes[i].tr = 1.8 + Math.random() * 2.2;
         nodes[i].accent = Math.random() > 0.7;
       }
 
@@ -270,12 +283,6 @@
     resize();
     distributeNodes();
 
-    /* ── GSAP tween nodes from scattered → connected (scrubbed) ── */
-    nodes.forEach(node => {
-      node._x = node.x;
-      node._y = node.y;
-    });
-
     const tl = gsap.timeline({
       scrollTrigger: {
         trigger: '#scroll-wrapper',
@@ -285,23 +292,20 @@
       }
     });
 
-    // Phase 1 (0–40% scroll): nodes remain scattered but a few start drifting
-    // Phase 2 (40–80%): nodes converge to connected positions
-    // Phase 3 (80–100%): settled
-
     nodes.forEach((node, i) => {
-      const stagger = i * 0.03;
-      // Start drifting at 20%, converge at 40-80%
-      tl.to(node, { _x: node.tx, _y: node.ty, duration: 0.5 }, 0.3 + stagger);
+      const stagger = i * 0.02;
+      tl.to(node, { _x: node.sx, _y: node.sy, r: node.r, duration: 0.12 }, 0.10 + stagger);
+      tl.to(node, { _x: node.tx, _y: node.ty, r: node.tr, duration: 0.5 }, 0.22 + stagger);
     });
 
     /* ── Render loop ── */
     function draw() {
       ctx.clearRect(0, 0, w(), h());
 
-      // Edge glow
       const progress = tl.totalProgress();
-      const edgeAlpha = 0.08 + progress * 0.18;
+      const visible = progress < 0.08 ? 0 : Math.min(1, (progress - 0.08) / 0.10);
+      const edgeAlpha = visible * (0.05 + progress * 0.20);
+      const nodeAlpha = visible * (0.30 + progress * 0.40);
 
       nodes.forEach(node => {
         node.connections.forEach(targetIdx => {
@@ -317,10 +321,9 @@
 
       // Nodes
       nodes.forEach(node => {
-        const alpha = 0.3 + progress * 0.4;
         const color = node.accent
-          ? `rgba(74, 222, 128, ${alpha})`
-          : `rgba(6, 182, 212, ${alpha})`;
+          ? `rgba(74, 222, 128, ${nodeAlpha})`
+          : `rgba(6, 182, 212, ${nodeAlpha})`;
         ctx.fillStyle = color;
         ctx.beginPath();
         ctx.arc(node._x, node._y, node.r, 0, Math.PI * 2);
@@ -328,7 +331,7 @@
 
         // Subtle glow on connected nodes
         if (progress > 0.4) {
-          ctx.fillStyle = `rgba(6, 182, 212, ${alpha * 0.3})`;
+          ctx.fillStyle = `rgba(6, 182, 212, ${nodeAlpha * 0.3})`;
           ctx.beginPath();
           ctx.arc(node._x, node._y, node.r * 2.5, 0, Math.PI * 2);
           ctx.fill();
@@ -340,12 +343,46 @@
     draw();
 
     /* ── Content beats (opacity scrubbed to scroll) ── */
-    const beats = ['beat-hero', 'beat-origin', 'beat-problem', 'beat-tortoise', 'beat-lab', 'beat-cta'];
+    const beats = ['beat-hero', 'beat-origin', 'beat-tortoise', 'beat-lab', 'beat-cta'];
+
+    const beatSpan = 0.11;
+    const gapSpan = 0.015;
+    const step = beatSpan + gapSpan;
 
     beats.forEach((id, i) => {
       const el = document.getElementById(id);
-      const start = i * 0.16;
-      const end = Math.min((i + 1) * 0.16 + 0.04, 1.0);
+      const start = i * step;
+      const peak = start + beatSpan;
+
+      if (i === 0) {
+        // Pulse independently, kill on scroll
+        const pulse = gsap.to('#scroll-hint', {
+          opacity: 0.4, y: 6, duration: 1.5, yoyo: true, repeat: -1, ease: 'power1.inOut'
+        });
+        gsap.to('#scroll-hint', {
+          opacity: 0,
+          scrollTrigger: {
+            trigger: '#scroll-wrapper',
+            start: '10% top',
+            end: '14% top',
+            scrub: 1,
+            onEnter: () => pulse.kill(),
+          }
+        });
+        gsap.to(el, {
+          opacity: 0, y: -20,
+          scrollTrigger: {
+            trigger: '#scroll-wrapper',
+            start: '1% top',
+            end: '6% top',
+            scrub: 0.5,
+          }
+        });
+        return;
+      }
+
+      const fadeInDur  = i === 1 ? 0.085 : 0.03;
+      const fadeInStart = i === 1 ? 0.045 : start;
 
       gsap.fromTo(el,
         { opacity: 0, y: 20 },
@@ -353,21 +390,21 @@
           opacity: 1, y: 0,
           scrollTrigger: {
             trigger: '#scroll-wrapper',
-            start: `${start * 100}% top`,
-            end: `${end * 100}% top`,
+            start: `${fadeInStart * 100}% top`,
+            end: `${(fadeInStart + fadeInDur) * 100}% top`,
             scrub: 0.5,
           }
         }
       );
 
-      // Fade out after peak (except last beat)
       if (i < beats.length - 1) {
+        const fadeOutStart = i === 1 ? 0.20 : peak;
         gsap.to(el, {
           opacity: 0, y: -20,
           scrollTrigger: {
             trigger: '#scroll-wrapper',
-            start: `${(end + 0.02) * 100}% top`,
-            end: `${(end + 0.08) * 100}% top`,
+            start: `${fadeOutStart * 100}% top`,
+            end: `${(fadeOutStart + 0.04) * 100}% top`,
             scrub: 0.5,
           }
         });
@@ -383,20 +420,14 @@
       const success = document.getElementById('form-success');
 
       // Skip if placeholder action
-      if (form.action.includes('REPLACE_ME')) {
-        success.textContent = 'Form not yet configured. Replace REPLACE_ME with your Formspree ID.';
-        success.style.display = 'block';
-        return;
-      }
-
       btn.disabled = true;
       btn.textContent = '...';
 
       try {
         const res = await fetch(form.action, {
           method: 'POST',
-          body: new FormData(form),
-          headers: { 'Accept': 'application/json' },
+          body: JSON.stringify({ email: input.value }),
+          headers: { 'Content-Type': 'application/json' },
         });
         if (res.ok) {
           input.style.display = 'none';
