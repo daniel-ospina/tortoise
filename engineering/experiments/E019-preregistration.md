@@ -39,15 +39,21 @@ In directed-only EP (messages only flow forward along IMPL edges), C2's confiden
 
 **Prediction:** |conf_directed(C2_after) - conf_directed(C2_before)| < 0.01
 
-### H3: The cascade magnitude depends on graph density
-As more shared conclusions are added between A and B, the bidirectional cascade grows. With one shared conclusion (C1), B drops 3-8%. With three shared conclusions, B drops 15-25%.
+### H3: Cascade magnitude depends on shared conclusion count
+As more shared conclusions are added between A and B, the bidirectional cascade grows.
 
-**Prediction:** cascade_magnitude grows with shared_conclusion_count
+**Prediction:** cascade(3_shared) > cascade(1_shared)
 
-### H4: B's intrinsic evidence anchors it against feedback
-Increasing B's source credibility (T4→T0) reduces the magnitude of the bidirectional cascade. A strongly-anchored B resists C1's feedback.
+### H4: B's intrinsic evidence anchors B against feedback
+Increasing B's source credibility (T4→T0) reduces the magnitude of the bidirectional cascade.
 
 **Prediction:** cascade(T0_B) < cascade(T4_B)
+
+### H5: C2's own connections anchor C2 against the cascade
+When C2 has 5 independent T2 IMPL sources (anchored), the bidirectional cascade is
+invisible (< 0.03). When C2 has only B (isolated), the full cascade propagates.
+
+**Prediction:** cascade(anchored_C2) < cascade(isolated_C2)
 
 ## Falsification Criteria
 - H1 is falsified if bidirectional C2 drop < 0.02 (no measurable cascade)
