@@ -157,23 +157,6 @@ class TortoiseEP:
         alpha, beta = self._read_node(claim_id)
         return self._natural_from_beta(alpha, beta)
 
-    def _source_credibility(self, claim_id: str) -> float:
-        """Compute source credibility multiplier from claim's confidence.
-
-        Returns value in [0.1, 1.0]. Uses posterior mean (α/(α+β))
-        and effective sample size (α+β) to determine how much weight
-        this claim's outgoing messages carry.
-
-        High confidence + many observations = strong transmission.
-        Low confidence or few observations = weak transmission.
-        """
-        alpha, beta = self._read_node(claim_id)
-        confidence = alpha / (alpha + beta) if (alpha + beta) > 0 else 0.5
-        n_eff = alpha + beta
-        # Blend: confidence primary, effective-n as certainty factor
-        n_factor = min(n_eff / 10.0, 1.0)  # 0→1 as n goes 0→10
-        credibility = confidence * n_factor + 0.5 * (1.0 - n_factor)
-        return max(credibility, 0.1)
 
     def _cavity_natural(self, claim_id: str, op_id: str,
                         rel_type: str) -> tuple[float, float]:

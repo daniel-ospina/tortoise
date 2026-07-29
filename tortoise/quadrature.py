@@ -41,10 +41,12 @@ def tilted_moments(alpha_a, beta_a, alpha_b, beta_b, w, phi_fn, n_quad=8):
             m2_b += weight * phi * cb * cb
 
     if Z < 1e-30:
-        m1_a = np.sum(w_a * x_a)
-        m2_a = np.sum(w_a * x_a * x_a)
-        m1_b = np.sum(w_b * x_b)
-        m2_b = np.sum(w_b * x_b * x_b)
+        tw_a = np.sum(w_a)
+        tw_b = np.sum(w_b)
+        m1_a = np.sum(w_a * x_a) / tw_a
+        m2_a = np.sum(w_a * x_a * x_a) / tw_a
+        m1_b = np.sum(w_b * x_b) / tw_b
+        m2_b = np.sum(w_b * x_b * x_b) / tw_b
         return (m1_a, m2_a), (m1_b, m2_b)
 
     return (m1_a / Z, m2_a / Z), (m1_b / Z, m2_b / Z)
@@ -66,13 +68,16 @@ def moments_to_beta(m1, m2):
 def phi_nand(ca, cb, w=5.5):
     """Symmetric NAND: equal-quality contradiction returns to ~50%.
 
-    Uses mirrored product coupling: exp(-w * ca * (1-cb)).
-    When ca=0.91 and cb=0.91: phi ≈ exp(-0.45) ≈ 0.64 — moderate dampening.
-    When ca=0.91 and cb=0.1: phi ≈ exp(-4.5) ≈ 0.011 — strong contradiction.
-    Previously exp(-w * ca * cb) was asymmetric with IMPL, causing 120×
-    overshoot that dropped T0 claims from 91% to 12% on equal-quality NAND.
+    Uses averaged mirrored product coupling:
+    exp(-w * (ca*(1-cb) + cb*(1-ca)) / 2)
+
+    Symmetric in (ca, cb) — result is independent of argument order.
+    When both T0(0.91): phi ≈ 0.637 — moderate dampening per message.
+    When both baseline(0.5): phi ≈ 0.064 — strong contradiction push.
+    Previously exp(-w * ca * (1-cb)) was asymmetric, causing 3-8× difference
+    depending on which claim was assigned to argument position ca.
     """
-    return np.exp(-w * ca * (1 - cb))
+    return np.exp(-w * (ca * (1 - cb) + cb * (1 - ca)) / 2)
 
 
 def phi_impl(ca, cb, w=5.5):
