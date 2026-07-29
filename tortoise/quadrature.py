@@ -67,5 +67,15 @@ def phi_nand(ca, cb, w=1.0):
     return np.exp(-w * ca * cb)
 
 
-def phi_impl(ca, cb, w=1.0):
-    return np.exp(-w * (ca - cb) ** 2)
+def phi_impl(ca, cb, w=3.0):
+    """IMPL coupling factor: promotes agreement between connected claims.
+
+    Product coupling exp(w * ca * cb) transmits confidence from strong to weak.
+    When ca=9 (T0) and cb=0 (baseline): phi=1.0 (full transmission).
+    When both strong: phi amplifies (mutual reinforcement).
+    When both weak: phi≈1.0 (neutral — no false signal).
+
+    Previously used exp(-w*(ca-cb)²) — a Gaussian similarity kernel that
+    prevented transmission when claims differed. Fixed in E020 (#64).
+    """
+    return np.exp(w * ca * cb)
