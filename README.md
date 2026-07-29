@@ -84,3 +84,4 @@ AGPLv3 + CLA (Apache 2.0 re-license available)
 - [eldato-outreach](https://github.com/daniel-ospina/eldato-outreach) — B2B WhatsApp outreach
 - [dmer](https://github.com/daniel-ospina/dmer) — Instagram DM daemon
 - [org-data](https://github.com/daniel-ospina/org-data) — Org data (Supabase → Tortoise)
+- [premiselabs.co](https://premiselabs.co) — Landing page ([source](premise-labs/index.html))
