@@ -128,7 +128,68 @@ use mitigation. NAND is for when the connection is fundamentally wrong, not just
 
 **Process:** Mitigations → then NAND if still needed. Never NAND-first.
 
-## Tier 3 — Advanced
+## Argument Patterns — Encoding Common Reasoning Structures
+
+All patterns use only existing primitives (IMPL, NAND, Mitigation).
+No new operators needed — the graph structure encodes the logic.
+
+### Chain of Implication
+```
+A ──IMPL──→ B ──IMPL──→ C
+```
+A supports B, B supports C. Each hop attenuates. If A is invalidated,
+B drops → C drops. Add mitigations at each hop where the inference is
+weak (e.g., "correlation, not causation").
+
+### Convergent Arguments (Independent Lines)
+```
+A ──IMPL──→ C ←──IMPL── B
+```
+A and B independently support C. If A is invalidated, B still holds.
+Use this when multiple unrelated sources reach the same conclusion.
+
+### Undercutter (Attack the Evidence)
+```
+Evidence ──IMPL──→ Claim
+   ↑
+   NAND
+   │
+Critique
+```
+The critique attacks the EVIDENCE, not the claim. "Study has flawed
+methodology" → NAND on the evidence point, not the claim. The claim
+loses that evidence's support but isn't directly contradicted.
+
+Alternatively: mitigate the evidence→claim edge with the critique as reason.
+
+### Defeater (Conditional Support)
+```
+A ──IMPL──→ C ←──NAND── Condition
+```
+"A supports C, BUT only when condition X is absent." A IMPL C,
+Condition NAND C. Both edges exist. C's confidence reflects both the
+support and the conditional counter.
+
+### Linked Premises (AND-Gate)
+```
+A ──IMPL──→ "A,B are linked" ←──IMPL── B
+                                ←──IMPL── C
+                                    │
+                                    └──IMPL──→ D
+```
+A, B, C must ALL hold for D to be supported. Create a bottleneck claim
+("A,B,C are linked"). Only that claim supports D. If any premise is
+invalidated, the bottleneck drops → D loses support.
+
+This pattern is a **critical dependency:** D depends on the bottleneck,
+which depends on all three premises. No new primitives — just an
+intermediate node that acts as an AND-gate.
+
+### Critical Dependency (General Pattern)
+When claim X depends on claim Y — not just supports, but REQUIRES —
+make Y a bottleneck: all paths to X go through Y. If Y is invalidated,
+X has no support. Use this for "X cannot be true unless Y is true"
+relationships.
 Liveness, grounding, signal vs price. Source credibility as foundation.
 
 ## Quality Gates
