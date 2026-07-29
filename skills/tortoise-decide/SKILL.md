@@ -66,14 +66,26 @@ For every evidence Point, set credibility via `tortoise_create_point` with `cred
 - T3 "low" (anecdotal): credibility="low"
 - T4 "unverified" (blog/default): credibility="unverified"
 For every IMPL/NAND edge, annotate with `tortoise_annotate_operator`.
-Prefer `tortoise_mitigate_operator` over NAND for counter-arguments that weaken but don't fully contradict.
+
+**Mitigation is the first pass, always.** For every IMPL edge created, ask "what
+weakens this connection?" File at least one mitigation. Only after mitigations
+are filed do you check if NAND is needed for logical contradictions. See
+`/skill:how-to-use-tortoise` for the full mitigation process and decision table.
 
 ### 3. CHALLENGE — Find the weak spots
 
 After the first research pass, identify gaps:
-- Which claims have no counter-arguments? File counter-arguments:
-  - **Mitigation** if the counter-claim weakens but doesn't fully contradict
-  - **NAND** only if the counter-claim logically contradicts
+
+**Step 1: Mitigation check (MANDATORY).** For every IMPL edge created:
+- What weakens this connection?
+- File at least one mitigation per edge. Common mitigations: source bias, small
+  sample, outdated data, conflicting context, indirect relevance, single-source risk.
+- Use `tortoise_mitigate_operator` — this preserves the signal while weakening it.
+
+**Step 2: Counter-argument check.** After mitigations:
+- Which claims are logically contradicted (not just weakened)?
+- File NAND edges ONLY where the contradiction is logical (claim A says X, claim B
+  says not-X), not just probabilistic ("this might not hold").
 - Which assumptions are untested? Flag as needing evidence.
 - Which criteria have no data? Flag as needing research.
 - Which options have fewer than 3 supporting claims? They are weakly grounded.
@@ -107,8 +119,9 @@ Before converging, run the calibration gate:
 2. Fix uncalibrated evidence points (statement/observation/hypothesis): use `tortoise_set_point_baseline` or recreate with `credibility` kwarg
 3. For Source-based points: set `credibilityTier` on the Source node once, all Points inherit
 4. Run `tortoise_check_structure` — no orphans or dangling refs
+5. **Mitigation coverage audit:** count IMPL edges with vs without mitigations. Flag any IMPL edge with zero mitigations.
 
-**Gate rule:** CONVERGE is blocked until `calibrate_summary` shows ≤50% of evidence-type points are uncalibrated.
+**Gate rule:** CONVERGE is blocked until `calibrate_summary` shows ≤50% of evidence-type points are uncalibrated AND all IMPL edges have at least one mitigation filed.
 
 → See `/skill:how-to-use-tortoise` for tier tables. Note: T0-T4 tier names refer to two different systems — operator annotation weights (how-to-use-tortoise, 0.2-1.0 multipliers) and Point Beta priors (credibility kwarg, Beta distributions). The CALIBRATE gate checks Point priors; operator annotation is separate.
 
@@ -133,7 +146,8 @@ Run `tortoise_compute_confidence` with `require_calibration=True` to propagate b
 - Running fewer than 3 cycles — the first pass finds obvious things, the third pass finds what you would miss
 - Skipping adversarial queries — confirming what you already believe is not research
 - Making the decision before the third cycle — convergence means the graph tells you the answer
-- Not filing counter-arguments — the NAND edges are what make this different from a research doc
-- Running EP on an uncalibrated graph — converging on topology produces confident-looking but untrustworthy results
-- Using NAND where mitigation applies — blanket contradiction loses nuance
-- Leaving sources at T4 (default ungraded) — a graph of ungraded sources is a connectedness counter
+- Not filing mitigations — every IMPL edge without a mitigation claims false certainty about the connection
+- Filing NAND without first checking for mitigation — mitigation preserves signal, NAND erases it. Mitigation-first, always.
+- Not filing counter-arguments — unresolved logical contradictions leave the graph one-sided
+- Running EP on an uncalibrated graph — converging on topology produces confident-looking but untrustworthy results. Calibration is blocked if any IMPL edge lacks mitigations.
+- Leaving sources at T4 (default ungraded) — a graph of ungraded sources is a connectedness counter, not a reasoning tool
