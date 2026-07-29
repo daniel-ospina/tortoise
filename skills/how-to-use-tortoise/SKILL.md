@@ -133,6 +133,24 @@ use mitigation. NAND is for when the connection is fundamentally wrong, not just
 All patterns use only existing primitives (IMPL, NAND, Mitigation).
 No new operators needed — the graph structure encodes the logic.
 
+**IMPL means "provides positive epistemic support for" — not logical implication.**
+A IMPL B says "A being true makes B more likely." For logical necessity ("X requires Y"),
+see Critical Dependency below.
+
+**Always apply mitigation before NAND.** See Tier 2's decision table.
+If you're about to use NAND, first ask: could mitigation capture this instead?
+
+### Pattern Selection Guide
+
+| Argument Structure | Use Pattern |
+|-------------------|-------------|
+| A single claim directly supports another | Chain |
+| Multiple independent sources support same claim | Convergent |
+| Evidence has a methodological weakness | Undercutter |
+| A claim has an exception or counter-condition | Defeater |
+| Multiple premises must ALL hold for conclusion | Linked Premises |
+| One claim is a prerequisite for another | Critical Dependency |
+
 ### Chain of Implication
 ```
 A ──IMPL──→ B ──IMPL──→ C
@@ -146,50 +164,63 @@ weak (e.g., "correlation, not causation").
 A ──IMPL──→ C ←──IMPL── B
 ```
 A and B independently support C. If A is invalidated, B still holds.
-Use this when multiple unrelated sources reach the same conclusion.
+EP accumulates evidence additively: C's confidence drops from (A+B)
+to (B alone) but doesn't collapse. Use this when multiple unrelated
+sources reach the same conclusion.
 
-### Undercutter (Attack the Evidence)
+### Undercutter (Attack the Inference, Not the Evidence)
 ```
 Evidence ──IMPL──→ Claim
-   ↑
-   NAND
-   │
-Critique
+             ↑
+          MITIGATION (reason: "no control group")
 ```
-The critique attacks the EVIDENCE, not the claim. "Study has flawed
-methodology" → NAND on the evidence point, not the claim. The claim
-loses that evidence's support but isn't directly contradicted.
+**Primary encoding: mitigation on the edge.** The critique weakens the
+inferential link — "the evidence is true, but it supports the claim
+less strongly than it appears." Common mitigations: small sample, no
+control group, confounding variables, indirect relevance.
 
-Alternatively: mitigate the evidence→claim edge with the critique as reason.
+**Only use NAND on evidence if the evidence itself is false** (retracted,
+fabricated, contradicted by a stronger source). Do NOT NAND evidence
+for methodological weaknesses — those are mitigations.
 
-### Defeater (Conditional Support)
+### Defeater (Conditional Counter-Evidence)
 ```
 A ──IMPL──→ C ←──NAND── Condition
 ```
-"A supports C, BUT only when condition X is absent." A IMPL C,
-Condition NAND C. Both edges exist. C's confidence reflects both the
-support and the conditional counter.
+"A supports C, BUT Condition X contradicts it." EP balances both signals.
 
-### Linked Premises (AND-Gate)
+**This is an approximation.** A true conditional ("only when X is absent")
+is flattened into a weighted balance. The resulting confidence reflects
+strength-of-evidence across all contexts, not conditional truth. For
+precise conditional reasoning, create separate claims per context.
+
+### Linked Premises (Joint Support — NOT strict AND)
 ```
-A ──IMPL──→ "A,B are linked" ←──IMPL── B
-                                ←──IMPL── C
-                                    │
-                                    └──IMPL──→ D
+A ──IMPL──→ "A,B,C jointly support D" ←──IMPL── B
+                                        ←──IMPL── C
+                                              │
+                                              └──IMPL──→ D
 ```
-A, B, C must ALL hold for D to be supported. Create a bottleneck claim
-("A,B,C are linked"). Only that claim supports D. If any premise is
-invalidated, the bottleneck drops → D loses support.
+Each premise provides partial support for the joint-support claim.
+Only that claim supports D. If any premise is invalidated, the joint
+claim weakens → D weakens.
 
-This pattern is a **critical dependency:** D depends on the bottleneck,
-which depends on all three premises. No new primitives — just an
-intermediate node that acts as an AND-gate.
+**This is a soft conjunction** — IMPL is additive evidence, not logical
+AND. If A is invalidated, D still has support from B and C (proportional,
+not collapsed). For strict AND (any false premise ⇒ D false), add NAND
+edges: `¬A NAND D`, `¬B NAND D`, `¬C NAND D` alongside the joint-support claim.
 
-### Critical Dependency (General Pattern)
-When claim X depends on claim Y — not just supports, but REQUIRES —
-make Y a bottleneck: all paths to X go through Y. If Y is invalidated,
-X has no support. Use this for "X cannot be true unless Y is true"
-relationships.
+### Critical Dependency (Bottleneck)
+```
+Y ──IMPL──→ X
+(no other edges point to X)
+```
+"X cannot be true unless Y is true." Make Y the sole IMPL path to X.
+If Y is invalidated, X has zero support.
+
+**This is a graph convention, not an enforced constraint.** Verify
+before adding any edge to X: run `tortoise_traverse` on X to confirm
+Y is on every path. Re-check the invariant periodically.
 Liveness, grounding, signal vs price. Source credibility as foundation.
 
 ## Quality Gates
