@@ -82,6 +82,27 @@ Sources_B → B ──IMPL─────┤
 C2 has 5 independent T2 source points plus B. B's feedback must compete
 with 5 other IMPL signals. Test: does the cascade break through anchoring?
 
+### Anchoring gradient (low → medium → high)
+```
+Sources_A → A ──IMPL──→ C1
+                         ↑
+Sources_B → B ──IMPL─────┤
+              │
+              └──IMPL──→ C2 ←──IMPL── S1(T4)      ← low-anchor
+                               (1 T4 source)
+
+              └──IMPL──→ C2 ←──IMPL── S1(T4)      ← med-anchor
+                               ←──IMPL── S2(T4)      (2 T4 sources)
+
+              └──IMPL──→ C2 ←──IMPL── S1(T2)      ← high-anchor
+                               ←──IMPL── S2(T2)      (5 T2 sources)
+                               ←──IMPL── S3(T2)
+                               ←──IMPL── S4(T2)
+                               ←──IMPL── S5(T2)
+```
+Tests the gradient: how many anchor points does C2 need before the
+bidirectional cascade from A's invalidation becomes undetectable?
+
 ## 6. Test Cases
 
 | # | Topology | B Tier | C2 Type | Mode | What we measure |
@@ -92,9 +113,13 @@ with 5 other IMPL signals. Test: does the cascade break through anchoring?
 | 4 | 1 shared | T0 | isolated | bidirectional | Anchoring reduces cascade |
 | 5 | 3 shared | T4 | isolated | bidirectional | Cascade grows with density |
 | 6 | 3 shared | T4 | isolated | directed | Directed still clean |
-| 7 | 1 shared | T4 | anchored | bidirectional | C2 with 5 other IMPL sources |
-| 8 | 1 shared | T4 | anchored | directed | Anchored C2 baseline |
-| 9 | 3 shared | T4 | anchored | bidirectional | Worst case: dense + anchored |
+| 7 | 1 shared | T4 | low-anchor (1×T4) | bidirectional | One weak anchor — partial cascade |
+| 8 | 1 shared | T4 | med-anchor (2×T4) | bidirectional | Two weak anchors — reduced cascade |
+| 9 | 1 shared | T4 | high-anchor (5×T2) | bidirectional | 5 T2 anchors — minimal cascade |
+| 10 | 1 shared | T4 | high-anchor (5×T2) | directed | Anchored baseline |
+| 11 | 3 shared | T4 | low-anchor (1×T4) | bidirectional | Dense + weak anchor |
+| 12 | 3 shared | T4 | med-anchor (2×T4) | bidirectional | Dense + medium anchor |
+| 13 | 3 shared | T4 | high-anchor (5×T2) | bidirectional | Worst case: dense + anchored |
 
 ## 7. Expected Results
 
@@ -105,12 +130,15 @@ with 5 other IMPL signals. Test: does the cascade break through anchoring?
 | 1 shared, T0 B, isolated | ~0.01-0.03 | <0.01 |
 | 3 shared, T4 B, isolated | ~0.15-0.25 | <0.01 |
 | 3 shared, T0 B, isolated | ~0.05-0.10 | <0.01 |
-| 1 shared, T4 B, anchored | ~0.01-0.03 | <0.01 |
-| 3 shared, T4 B, anchored | ~0.03-0.08 | <0.01 |
+| 1 shared, T4 B, low-anchor (1×T4) | ~0.03-0.06 | <0.01 |
+| 1 shared, T4 B, med-anchor (2×T4) | ~0.01-0.04 | <0.01 |
+| 1 shared, T4 B, high-anchor (5×T2) | ~0.01-0.02 | <0.01 |
+| 3 shared, T4 B, low-anchor | ~0.08-0.15 | <0.01 |
+| 3 shared, T4 B, high-anchor | ~0.02-0.05 | <0.01 |
 
-Key insight: anchoring C2 (5 T2 sources) drops the cascade from
-0.05-0.10 to 0.01-0.03. The bidirectional feedback path B→C1→B→C2
-competes with C2's 5 other IMPL signals.
+Key insight: the gradient from isolated → low → med → high-anchor
+shows that even 1-2 T4 anchors significantly reduce the cascade.
+The cascade is proportional to B's share of C2's total IMPL support.
 
 ## 8. Success Criteria
 - H1: Bidirectional C2 drop > 0.05 for T4 B (false cascade confirmed)
