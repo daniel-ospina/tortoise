@@ -5,7 +5,7 @@ import removeOverlaps from 'remove-overlaps';
 import { API, C, wrapLines } from '../constants';
 import DetailPanel from './DetailPanel';
 
-export default function ForceGraphView() {
+export default function ForceGraphView({ onViewArguments }) {
   const [graph,setGraph]=useState({nodes:[],edges:[]});
   const [search,setSearch]=useState('');
   const [results,setResults]=useState([]);
@@ -45,15 +45,16 @@ export default function ForceGraphView() {
   const deg=useMemo(()=>{const d={};for(const e of graph.edges){d[e.source]=(d[e.source]||0)+1;d[e.target]=(d[e.target]||0)+1;}return d;},[graph.edges]);
 
   useEffect(()=>{
-    fetch(`${API}/api/graph?limit=${nodeCount}`).then(r=>r.json()).then(d=>{
+    const ac = new AbortController();
+    fetch(`${API}/api/graph?limit=${nodeCount}`,{signal:ac.signal}).then(r=>r.json()).then(d=>{
       setGraph(d);setStats({tn:d.total_nodes,te:d.total_edges,mit:d.total_mitigations});setFirst(false);
-    });
-    fetch(`${API}/api/sources`).then(r=>r.json()).then(d=>setSources(d.sources||[]));
+    }).catch(e=>{if(e.name!=='AbortError')console.error('graph fetch failed',e);});
+    fetch(`${API}/api/sources`,{signal:ac.signal}).then(r=>r.json()).then(d=>setSources(d.sources||[])).catch(e=>{if(e.name!=='AbortError')console.error('sources fetch failed',e);});
     let id;const loop=(t)=>{time.current=t;id=requestAnimationFrame(loop);};id=requestAnimationFrame(loop);
-    return ()=>cancelAnimationFrame(id);
+    return ()=>{ac.abort();cancelAnimationFrame(id);};
   },[nodeCount]);
 
-  const doSearch=useCallback(q=>{if(!q.trim()){setResults([]);return;}fetch(`${API}/api/search?q=${encodeURIComponent(q)}&limit=10`).then(r=>r.json()).then(d=>setResults(d.results));},[]);
+  const doSearch=useCallback(q=>{if(!q.trim()){setResults([]);return;}fetch(`${API}/api/search?q=${encodeURIComponent(q)}&limit=10`).then(r=>r.json()).then(d=>setResults(d.results)).catch(()=>{});},[]);
 
   const displayGraph=useMemo(()=>{
     let {nodes,edges}=graph;
@@ -234,9 +235,9 @@ export default function ForceGraphView() {
   },[displayGraph.nodes]);
 
   const onNodeClick=useCallback(node=>{
-    if(mode==='add-edge'){if(!edgeSrc)setEdgeSrc(node);else if(edgeSrc.id!==node.id){const t=confirm('IMPL (OK) or NAND (Cancel)?')?'IMPL':'NAND';fetch(`${API}/api/edges`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source:edgeSrc.id,target:node.id,type:t})}).then(r=>r.json()).then(d=>setGraph(g=>({...g,edges:[...g.edges,{id:d.id,source:edgeSrc.id,target:node.id,type:t,__user:true}]})));setMode(null);setEdgeSrc(null);}return;}
+    if(mode==='add-edge'){if(!edgeSrc)setEdgeSrc(node);else if(edgeSrc.id!==node.id){const t=confirm('IMPL (OK) or NAND (Cancel)?')?'IMPL':'NAND';fetch(`${API}/api/edges`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source:edgeSrc.id,target:node.id,type:t})}).then(r=>r.json()).then(d=>setGraph(g=>({...g,edges:[...g.edges,{id:d.id,source:edgeSrc.id,target:node.id,type:t,__user:true}]}))).catch(()=>{});setMode(null);setEdgeSrc(null);}return;}
     setSel(node);setShowDet(true);
-    fetch(`${API}/api/graph/neighborhood/${node.id}?depth=1`).then(res=>res.json()).then(d=>{setGraph(d);setSel(d.nodes.find(n=>n.id===node.id)||node);});
+    fetch(`${API}/api/graph/neighborhood/${node.id}?depth=1`).then(res=>res.json()).then(d=>{setGraph(d);setSel(d.nodes.find(n=>n.id===node.id)||node);}).catch(()=>{});
   },[mode,edgeSrc]);
 
   const onNodeDragEnd=useCallback(node=>{
@@ -256,13 +257,13 @@ export default function ForceGraphView() {
       userNodes.current.push(newNode);
       setNewPointText('');setRightClickPos(null);
       setOverlayTick(t=>t+1);
-    });
+    }).catch(()=>{});
   };
 
-  const doAdd=()=>{if(!content.trim())return;fetch(`${API}/api/points`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({content})}).then(r=>r.json()).then(d=>{setGraph(g=>({...g,nodes:[...g.nodes,{id:d.id,content,confidence:.3,__user:true}]}));setContent('');setMode(null);});};
-  const doDel=()=>{if(!sel)return;fetch(`${API}/api/points/${sel.id}`,{method:'DELETE'}).then(()=>{setGraph(g=>({...g,nodes:g.nodes.filter(n=>n.id!==sel.id),edges:g.edges.filter(e=>e.source!==sel.id&&e.target!==sel.id)}));setSel(null);});};
-  const doDelEdge=eid=>{fetch(`${API}/api/edges/${eid}`,{method:'DELETE'}).then(()=>setGraph(g=>({...g,edges:g.edges.filter(e=>e.id!==eid)})));};
-  const doReset=()=>{fetch(`${API}/api/graph?limit=${nodeCount}`).then(r=>r.json()).then(d=>{d.nodes.forEach(n=>{delete n.fx;delete n.fy;});setGraph(d);setSel(null);setHiddenSrc(new Set());setSrcActive(false);setCMin(0);setCMax(100);setEFilt('all');});};
+  const doAdd=()=>{if(!content.trim())return;fetch(`${API}/api/points`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({content})}).then(r=>r.json()).then(d=>{setGraph(g=>({...g,nodes:[...g.nodes,{id:d.id,content,confidence:.3,__user:true}]}));setContent('');setMode(null);}).catch(()=>{});};
+  const doDel=()=>{if(!sel)return;fetch(`${API}/api/points/${sel.id}`,{method:'DELETE'}).then(()=>{setGraph(g=>({...g,nodes:g.nodes.filter(n=>n.id!==sel.id),edges:g.edges.filter(e=>e.source!==sel.id&&e.target!==sel.id)}));setSel(null);}).catch(()=>{});};
+  const doDelEdge=eid=>{fetch(`${API}/api/edges/${eid}`,{method:'DELETE'}).then(()=>setGraph(g=>({...g,edges:g.edges.filter(e=>e.id!==eid)})).catch(()=>{}));};
+  const doReset=()=>{fetch(`${API}/api/graph?limit=${nodeCount}`).then(r=>r.json()).then(d=>{d.nodes.forEach(n=>{delete n.fx;delete n.fy;});setGraph(d);setSel(null);setHiddenSrc(new Set());setSrcActive(false);setCMin(0);setCMax(100);setEFilt('all');}).catch(()=>{});};
   const toggleSrc=name=>{setSrcActive(true);setHiddenSrc(p=>{const n=new Set(p);if(n.has(name))n.delete(name);else n.add(name);if(!n.size)setSrcActive(false);return n;});};
 
   const B={background:'#1a1f2e',border:'1px solid #1a2030',color:'#c0caf5',padding:'4px 12px',borderRadius:6,cursor:'pointer',fontSize:13,whiteSpace:'nowrap'};
@@ -314,7 +315,7 @@ export default function ForceGraphView() {
     </div>)}
 
     {/* Search results */}
-    {results.length>0&&(<div style={{position:'absolute',top:48,right:16,zIndex:30,background:C.panel,border:`1px solid ${C.border}`,borderRadius:8,maxHeight:340,overflow:'auto',width:380,boxShadow:'0 12px 40px rgba(0,0,0,0.6)'}}>{results.map(r=><div key={r.id} onClick={()=>{fetch(`${API}/api/graph/neighborhood/${r.id}?depth=1`).then(res=>res.json()).then(d=>{setGraph(d);setSel(d.nodes.find(n=>n.id===r.id)||null);});setResults([]);setSearch('');}} style={{padding:'8px 12px',cursor:'pointer',color:C.text,fontSize:12,borderBottom:`1px solid ${C.border}`}} onMouseEnter={e=>e.target.style.background=C.surface} onMouseLeave={e=>e.target.style.background='transparent'}>{(r.content||'').slice(0,120)}</div>)}</div>)}
+    {results.length>0&&(<div style={{position:'absolute',top:48,right:16,zIndex:30,background:C.panel,border:`1px solid ${C.border}`,borderRadius:8,maxHeight:340,overflow:'auto',width:380,boxShadow:'0 12px 40px rgba(0,0,0,0.6)'}}>{results.map(r=><div key={r.id} onClick={()=>{fetch(`${API}/api/graph/neighborhood/${r.id}?depth=1`).then(res=>res.json()).then(d=>{setGraph(d);setSel(d.nodes.find(n=>n.id===r.id)||null);}).catch(()=>{});setResults([]);setSearch('');}} style={{padding:'8px 12px',cursor:'pointer',color:C.text,fontSize:12,borderBottom:`1px solid ${C.border}`}} onMouseEnter={e=>e.target.style.background=C.surface} onMouseLeave={e=>e.target.style.background='transparent'}>{(r.content||'').slice(0,120)}</div>)}</div>)}
 
     {/* Edge mode */}
     {mode==='add-edge'&&<div style={{position:'absolute',top:48,left:'50%',transform:'translateX(-50%)',zIndex:30,background:C.panel,border:`1px solid ${C.accent}`,borderRadius:8,padding:'10px 18px',color:C.text,fontSize:13}}>{edgeSrc?`Source: "${(edgeSrc.content||'').slice(0,35)}" → click target`:'Click source node'}<button onClick={()=>{setMode(null);setEdgeSrc(null);}} style={{...B,marginLeft:12}}>Cancel</button></div>}
@@ -338,7 +339,7 @@ export default function ForceGraphView() {
             fetch(`${API}/api/edges`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source:edgeSrc.id,target:n.id,type:t})}).then(r=>r.json()).then(d=>{
               setGraph(g=>({...g,edges:[...g.edges,{id:d.id,source:edgeSrc.id,target:n.id,type:t,__user:true}]}));
               setMode(null);setEdgeSrc(null);
-            });
+            }).catch(()=>{});
           }
           return;
         }
@@ -370,6 +371,7 @@ export default function ForceGraphView() {
       onDelete={doDel}
       onDeleteEdge={doDelEdge}
       onDismiss={() => setSel(null)}
+      onViewArguments={onViewArguments}
     />
 
     {/* Sources */}
