@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { C } from '../../constants';
-import TreeView from './TreeView';
+import HierarchyChart from './HierarchyChart';
 import ArgumentView from './ArgumentView';
 import OntologyCrud, { type CrudAction } from './OntologyCrud';
 
@@ -219,7 +219,7 @@ export default function OntologyView({ onNavigateToNode, initialFocusId }: { onN
         )}
 
         {!loading && !error && tree.length > 0 && view === 'tree' && (
-          <TreeView
+          <HierarchyChart
             tree={tree}
             selectedId={selectedNode?.id || null}
             onSelect={handleSelect}
