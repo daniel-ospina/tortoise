@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Premise Labs</title>
+  <meta name="description" content="An AI lab building the premises intelligence stands on.">
+  <meta property="og:title" content="Premise Labs">
+  <meta property="og:description" content="An AI lab building the premises intelligence stands on.">
+  <meta property="og:type" content="website">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Premise Labs">
+  <meta name="twitter:description" content="An AI lab building the premises intelligence stands on.">
+  <meta name="theme-color" content="#060b14">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #060b14;
+      --text: #cbd5e1;
+      --text-dim: #64748b;
+      --accent: #06b6d4;
+      --accent-glow: rgba(6, 182, 212, 0.35);
+      --green: #4ade80;
+      --green-dim: rgba(74, 222, 128, 0.25);
+      --gold: #f59e0b;
+      --gold-dim: rgba(245, 158, 11, 0.2);
+      --serif: 'Georgia', 'Times New Roman', serif;
+      --mono: 'SF Mono', 'Cascadia Code', 'Fira Code', 'JetBrains Mono', monospace;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 14px;
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    #scroll-wrapper { height: 600vh; position: relative; }
+
+    canvas {
+      position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+      z-index: 0; pointer-events: none;
+    }
+
+    /* Beat: fixed overlay, z-index above canvas */
+    .beat {
+      position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      z-index: 1; pointer-events: none; opacity: 0;
+      padding: 2rem;
+    }
+
+    /* Specific beats get pointer events for interactive elements */
+    #beat-cta { pointer-events: auto; }
+
+    #beat-hero { opacity: 1; }
+
+    /* Scroll indicator */
+    #scroll-hint {
+      position: fixed; bottom: 3.5rem; left: 50%; transform: translateX(-50%);
+      z-index: 3; pointer-events: none;
+      width: 0; height: 0;
+      border-left: 12px solid transparent;
+      border-right: 12px solid transparent;
+      border-top: 16px solid var(--accent);
+      opacity: 1;
+    }
+
+    /* Hero headline */
+    #beat-hero h1 {
+      font-family: var(--serif);
+      font-size: clamp(1.8rem, 4vw, 3.2rem);
+      font-weight: 400;
+      color: var(--text);
+      text-align: center;
+      max-width: 720px;
+      line-height: 1.3;
+      letter-spacing: -0.01em;
+    }
+    #beat-hero h1 span { color: var(--accent); }
+
+    /* Sub-beats */
+    .beat p {
+      font-family: var(--mono);
+      font-size: clamp(0.85rem, 1.5vw, 1.05rem);
+      color: var(--text-dim);
+      text-align: center;
+      max-width: 560px;
+      line-height: 1.7;
+    }
+    .beat p strong { color: var(--text); font-weight: 400; }
+    .beat p em { color: var(--accent); font-style: normal; }
+
+    /* Tortoise reveal */
+    #beat-tortoise h2 {
+      font-family: var(--serif);
+      font-size: clamp(1.4rem, 3vw, 2rem);
+      color: var(--text);
+      text-align: center;
+      font-weight: 400;
+      line-height: 1.4;
+    }
+    #beat-tortoise h2 span { color: var(--accent); }
+
+    /* Lab name */
+    #beat-lab h3 {
+      font-family: var(--mono);
+      font-size: clamp(1.35rem, 2.4vw, 1.65rem);
+      color: var(--text-dim);
+      text-align: center;
+      font-weight: 400;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    #beat-lab h3 strong { color: var(--text); font-weight: 400; }
+    #beat-lab p { margin-top: 1.25rem; }
+
+    /* CTA */
+    #beat-cta form {
+      display: flex; gap: 0.75rem; max-width: 400px; width: 100%;
+    }
+    #beat-cta input[type="email"] {
+      flex: 1;
+      background: var(--bg);
+      border: 1px solid var(--text-dim);
+      color: var(--text);
+      padding: 0.7rem 1rem;
+      font-family: var(--mono);
+      font-size: 0.85rem;
+      border-radius: 0;
+    }
+    #beat-cta input[type="email"]:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+    #beat-cta button {
+      background: var(--bg);
+      color: var(--accent);
+      border: 1px solid var(--accent);
+      padding: 0.7rem 1.25rem;
+      font-family: var(--mono);
+      font-size: 0.85rem;
+      cursor: pointer;
+      transition: background 0.2s, color 0.2s;
+    }
+    #beat-cta button:hover {
+      background: var(--accent);
+      color: var(--bg);
+    }
+    #beat-cta .twitter-link {
+      margin-top: 1.5rem;
+      color: var(--text-dim);
+      text-decoration: none;
+      font-size: 0.8rem;
+      transition: color 0.2s;
+    }
+    #beat-cta .twitter-link:hover { color: var(--accent); }
+
+    /* Success state */
+    #beat-cta .success-msg {
+      display: none;
+      color: var(--green);
+      font-size: 0.85rem;
+      text-align: center;
+      margin-top: 0.5rem;
+    }
+
+    /* Mobile */
+    @media (max-width: 640px) {
+      #beat-cta form { flex-direction: column; }
+      #beat-cta input[type="email"],
+      #beat-cta button { width: 100%; text-align: center; }
+      #scroll-wrapper { height: 800vh; }
+    }
+
+    /* Subtle fade at bottom edges */
+    #vignette {
+      position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+      pointer-events: none; z-index: 2;
+      background: radial-gradient(ellipse at center, transparent 55%, var(--bg) 85%);
+    }
+  </style>
+</head>
+<body>
+  <canvas id="graph-canvas"></canvas>
+  <div id="vignette"></div>
+  <div id="scroll-hint"></div>
+
+  <div id="scroll-wrapper">
+    <section id="beat-hero" class="beat">
+      <h1>The primary function of memory is not <span>recall</span>, but <span>learning</span>.</h1>
+    </section>
+    <section id="beat-origin" class="beat">
+      <p style="color: var(--text); font-size: clamp(1.15rem, 2.2vw, 1.5rem); line-height: 1.5;">Humans update their <span style="color: var(--accent);">world models</span> too slowly.<br>Agents forget them halfway through a session.<br><br>We made them persistent — unlocking better decisions, learning, and collaboration.</p>
+    </section>
+    <section id="beat-tortoise" class="beat">
+      <h2><span>Tortoise</span> — a memory system where agents learn.</h2>
+    </section>
+    <section id="beat-lab" class="beat">
+      <h3><strong>Premise Labs</strong></h3>
+    </section>
+    <section id="beat-cta" class="beat">
+      <form id="waitlist-form" action="https://ybetwichurajbfswfeqa.supabase.co/functions/v1/waitlist-subscribe" method="POST">
+        <input type="email" name="email" placeholder="your@email.com" required autocomplete="email">
+        <button type="submit">Stay in touch</button>
+      </form>
+      <p class="success-msg" id="form-success">Thanks — we'll be in touch.</p>
+      <a class="twitter-link" href="https://x.com/permiselabs" target="_blank" rel="noopener">@permiselabs</a>
+    </section>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/ScrollTrigger.min.js"></script>
+  <script>
+    gsap.registerPlugin(ScrollTrigger);
+
+    /* ── Canvas + graph ── */
+    const canvas = document.getElementById('graph-canvas');
+    const ctx = canvas.getContext('2d');
+
+    function resize() {
+      canvas.width = window.innerWidth * devicePixelRatio;
+      canvas.height = window.innerHeight * devicePixelRatio;
+      canvas.style.width = window.innerWidth + 'px';
+      canvas.style.height = window.innerHeight + 'px';
+      ctx.scale(devicePixelRatio, devicePixelRatio);
+    }
+    window.addEventListener('resize', () => {
+      resize();
+      // Redistribute nodes to new viewport
+      distributeNodes();
+    });
+
+    const w = () => window.innerWidth;
+    const h = () => window.innerHeight;
+
+    // ponytail: ~18 nodes, scattered → connected graph
+    const NODE_COUNT = 18;
+    const nodes = [];
+
+    function distributeNodes() {
+      const margin = 120;
+      const cw = w(); const ch = h();
+      const cx = cw / 2; const cy = ch / 2;
+      const spread = Math.min(cw, ch) * 0.20;
+
+      // Mutate existing nodes in-place so GSAP's tween references stay alive
+      if (nodes.length === 0) {
+        for (let i = 0; i < NODE_COUNT; i++) {
+          nodes.push({ _x: 0, _y: 0, r: 0, connections: [], accent: false });
+        }
+      }
+
+      for (let i = 0; i < nodes.length; i++) {
+        const angle = (i / nodes.length) * Math.PI * 2 + (Math.random() - 0.5) * 0.3;
+        const r = spread * (0.4 + Math.random() * 0.6);
+        nodes[i]._x = 30 + Math.random() * 50;
+        nodes[i]._y = 40 + Math.random() * 50;
+        nodes[i].sx = cx + (Math.random() - 0.5) * spread * 1.8;
+        nodes[i].sy = cy + (Math.random() - 0.5) * spread * 1.8;
+        nodes[i].tx = cx + Math.cos(angle) * r;
+        nodes[i].ty = cy + Math.sin(angle) * r;
+        nodes[i].r = 1.2 + Math.random() * 1.3;
+        nodes[i].tr = 1.8 + Math.random() * 2.2;
+        nodes[i].accent = Math.random() > 0.7;
+      }
+
+      // Build connections
+      nodes.forEach((a, i) => {
+        a.connections = [];
+        const dists = nodes.map((b, j) => j === i ? Infinity : Math.hypot(b.tx - a.tx, b.ty - a.ty));
+        const sorted = dists.map((d, j) => ({ d, j })).sort((x, y) => x.d - y.d);
+        const count = 2 + Math.floor(Math.random() * 2);
+        for (let k = 0; k < count && k < sorted.length; k++) {
+          if (!a.connections.includes(sorted[k].j)) a.connections.push(sorted[k].j);
+        }
+      });
+    }
+
+    resize();
+    distributeNodes();
+
+    const tl = gsap.timeline({
+      scrollTrigger: {
+        trigger: '#scroll-wrapper',
+        start: 'top top',
+        end: 'bottom bottom',
+        scrub: 0.8,
+      }
+    });
+
+    nodes.forEach((node, i) => {
+      const stagger = i * 0.02;
+      tl.to(node, { _x: node.sx, _y: node.sy, r: node.r, duration: 0.12 }, 0.10 + stagger);
+      tl.to(node, { _x: node.tx, _y: node.ty, r: node.tr, duration: 0.5 }, 0.22 + stagger);
+    });
+
+    /* ── Render loop ── */
+    function draw() {
+      ctx.clearRect(0, 0, w(), h());
+
+      const progress = tl.totalProgress();
+      const visible = progress < 0.08 ? 0 : Math.min(1, (progress - 0.08) / 0.10);
+      const edgeAlpha = visible * (0.05 + progress * 0.20);
+      const nodeAlpha = visible * (0.30 + progress * 0.40);
+
+      nodes.forEach(node => {
+        node.connections.forEach(targetIdx => {
+          const target = nodes[targetIdx];
+          ctx.beginPath();
+          ctx.moveTo(node._x, node._y);
+          ctx.lineTo(target._x, target._y);
+          ctx.strokeStyle = `rgba(6, 182, 212, ${edgeAlpha})`;
+          ctx.lineWidth = 0.5 + progress * 0.6;
+          ctx.stroke();
+        });
+      });
+
+      // Nodes
+      nodes.forEach(node => {
+        const color = node.accent
+          ? `rgba(74, 222, 128, ${nodeAlpha})`
+          : `rgba(6, 182, 212, ${nodeAlpha})`;
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        ctx.arc(node._x, node._y, node.r, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Subtle glow on connected nodes
+        if (progress > 0.4) {
+          ctx.fillStyle = `rgba(6, 182, 212, ${nodeAlpha * 0.3})`;
+          ctx.beginPath();
+          ctx.arc(node._x, node._y, node.r * 2.5, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      });
+
+      requestAnimationFrame(draw);
+    }
+    draw();
+
+    /* ── Content beats (opacity scrubbed to scroll) ── */
+    const beats = ['beat-hero', 'beat-origin', 'beat-tortoise', 'beat-lab', 'beat-cta'];
+
+    const beatSpan = 0.11;
+    const gapSpan = 0.015;
+    const step = beatSpan + gapSpan;
+
+    beats.forEach((id, i) => {
+      const el = document.getElementById(id);
+      const start = i * step;
+      const peak = start + beatSpan;
+
+      if (i === 0) {
+        // Pulse independently, kill on scroll
+        const pulse = gsap.to('#scroll-hint', {
+          opacity: 0.4, y: 6, duration: 1.5, yoyo: true, repeat: -1, ease: 'power1.inOut'
+        });
+        gsap.to('#scroll-hint', {
+          opacity: 0,
+          scrollTrigger: {
+            trigger: '#scroll-wrapper',
+            start: '10% top',
+            end: '14% top',
+            scrub: 1,
+            onEnter: () => pulse.kill(),
+          }
+        });
+        gsap.to(el, {
+          opacity: 0, y: -20,
+          scrollTrigger: {
+            trigger: '#scroll-wrapper',
+            start: '1% top',
+            end: '6% top',
+            scrub: 0.5,
+          }
+        });
+        return;
+      }
+
+      const fadeInDur  = i === 1 ? 0.085 : 0.03;
+      const fadeInStart = i === 1 ? 0.045 : start;
+
+      gsap.fromTo(el,
+        { opacity: 0, y: 20 },
+        {
+          opacity: 1, y: 0,
+          scrollTrigger: {
+            trigger: '#scroll-wrapper',
+            start: `${fadeInStart * 100}% top`,
+            end: `${(fadeInStart + fadeInDur) * 100}% top`,
+            scrub: 0.5,
+          }
+        }
+      );
+
+      if (i < beats.length - 1) {
+        const fadeOutStart = i === 1 ? 0.20 : peak;
+        gsap.to(el, {
+          opacity: 0, y: -20,
+          scrollTrigger: {
+            trigger: '#scroll-wrapper',
+            start: `${fadeOutStart * 100}% top`,
+            end: `${(fadeOutStart + 0.04) * 100}% top`,
+            scrub: 0.5,
+          }
+        });
+      }
+    });
+
+    /* ── Form: AJAX submit to avoid page nav ── */
+    document.getElementById('waitlist-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const form = e.target;
+      const btn = form.querySelector('button');
+      const input = form.querySelector('input');
+      const success = document.getElementById('form-success');
+
+      // Skip if placeholder action
+      btn.disabled = true;
+      btn.textContent = '...';
+
+      try {
+        const res = await fetch(form.action, {
+          method: 'POST',
+          body: JSON.stringify({ email: input.value }),
+          headers: { 'Content-Type': 'application/json' },
+        });
+        if (res.ok) {
+          input.style.display = 'none';
+          btn.style.display = 'none';
+          success.style.display = 'block';
+        } else {
+          btn.textContent = 'Try again';
+          btn.disabled = false;
+        }
+      } catch {
+        btn.textContent = 'Try again';
+        btn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

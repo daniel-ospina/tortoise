@@ -1,0 +1,21 @@
+{
+  "prompt": "CLEAN-P6-domain (tax-law examples)",
+  "model": "deepseek-flash",
+  "tp": 19,
+  "fp": 1,
+  "fn": 4,
+  "tn": 6,
+  "precision": 0.95,
+  "recall": 0.8261,
+  "f1": 0.8837,
+  "time": 7.8,
+  "tokens": "793p+154c",
+  "errors": [
+    "[2] FN: No single universally-agreed framework exists.",
+    "[17] FN: D5 (Funding) determines D6 (Team) which determines D7 (Execu",
+    "[18] FP: Each is a node in the causal graph below.",
+    "[25] FN: Use the Canvas to design, Lean Startup to test, Disciplined ",
+    "[29] FN: Waterfall \u2192 Agile \u2192 Lean Startup \u2192 Blitzscaling \u2192 AI-native "
+  ],
+  "raw_response": "{\"claims\": {\"0\": true, \"1\": true, \"2\": false, \"3\": false, \"4\": false, \"5\": true, \"6\": true, \"7\": false, \"8\": true, \"9\": true, \"10\": true, \"11\": true, \"12\": true, \"13\": false, \"14\": false, \"15\": true, \"16\": true, \"17\": false, \"18\": true, \"19\": true, \"20\": true, \"21\": false, \"22\": true, \"23\": true, \"24\": true, \"25\": false, \"26\": true, \"27\": true, \"28\": true, \"29\": false}}"
+}

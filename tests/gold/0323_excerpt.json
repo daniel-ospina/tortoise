@@ -1,0 +1,76 @@
+{
+  "source": "meeting-transcript-2026-03-23.txt (segments 10-31)",
+  "annotator": "claude-first-pass-NEEDS-REVIEW",
+  "utterances": [
+    "We have these programmable edges called negations.",
+    "We want to use an edge type that when a goes up, it means r When a and b go up, it means r goes down, right?",
+    "So there's this zero sum kind of competition with a negation.",
+    "we never actually talked about why we want that with negations.",
+    "and maybe that's worth mentioning.",
+    "but higher level the underlining reason for this data structure is we're trying to create a governance surface where people who are known for their ability to be falsified end up having more quote unquote political power.",
+    "or in this system we call it signal than people who don't.",
+    "So that's our kind of terminal goal that we're trying to engineer for.",
+    "And all of these data structures that are sitting underneath it are just ways to encode that.",
+    "Maybe the only other constraint that we have is we want money to be able to have an influence in this game.",
+    "so it's people's speech coupled with money.",
+    "that's exactly right.",
+    "And the desire there is less of a baseline desire for money to be involved and…",
+    "more just like a recognition that it's going to be involved in some way no matter what we do.",
+    "So, we might as well design for it in game.",
+    "Is that right?",
+    "Yeah.",
+    "Yeah.",
+    "Is that we treat it it's like gravity.",
+    "we might not like gravity affecting our planes and our rocket ships taking off but if we were engineers that tried to ignore it then we definitely wouldn't be successful in the design of an airplane or of a rocket ship.",
+    "so money we're accepting this law that money influences politics and then we're saying okay can we accept that and nonetheless get a system where falsifiability grants additional power or I think we have it stated here where power necessitates some degree of falsifiability.",
+    "And if we teleport briefly in our mind's eye to a world where we have that property, then what that looks like is just naturally the decisions that end up with lots of influence in this political game, this political environment are the ones where there are lots of people that support it who have also said how they could change their mind."
+  ],
+  "points_keep": [
+    0,
+    1,
+    2,
+    5,
+    8,
+    9,
+    10,
+    13,
+    14,
+    18,
+    19,
+    20,
+    21
+  ],
+  "drop": [
+    3,
+    4,
+    6,
+    7,
+    11,
+    12,
+    15,
+    16,
+    17
+  ],
+  "operators": [
+    {
+      "src": 1,
+      "dst": 2,
+      "gate": "IMPL"
+    },
+    {
+      "src": 9,
+      "dst": 10,
+      "gate": "IMPL"
+    },
+    {
+      "src": 13,
+      "dst": 14,
+      "gate": "IMPL"
+    },
+    {
+      "src": 19,
+      "dst": 18,
+      "gate": "IMPL"
+    }
+  ]
+}

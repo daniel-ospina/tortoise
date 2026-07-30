@@ -1,0 +1,7 @@
+numpy>=1.24
+scipy>=1.10
+falkordb>=1.0
+redislite>=4.0
+pyyaml>=6.0
+fastmcp>=2.0
+prometheus-client>=0.16
