@@ -58,6 +58,7 @@ type LayoutNode = TreeNode & {
   children: LayoutNode[];
 };
 
+/** Flatten tree into a single array — ALL nodes at ALL depths. */
 function flattenTree(
   nodes: TreeNode[],
   depth: number,
@@ -79,7 +80,8 @@ function flattenTree(
     };
     result.push(layoutNode);
     if (node.children?.length) {
-      flattenTree(node.children, depth + 1, node.id, layoutNode.children);
+      // Push ALL descendants into result — children relationship rebuilt post-flatten
+      flattenTree(node.children, depth + 1, node.id, result);
     }
   });
 }
@@ -113,9 +115,19 @@ export default function HierarchyChart({
 
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; node: TreeNode } | null>(null);
 
-  const { levels, totalHeight } = useMemo(() => {
+  const { levels, totalHeight, flat, maxDepth, byDepth } = useMemo(() => {
     const flat: LayoutNode[] = [];
     flattenTree(tree, 0, null, flat);
+
+    // Rebuild parent→children relationships (flattenTree pushes all nodes into flat,
+    // so children arrays are empty — rebuild via parentId lookup)
+    const nodeMap = new Map<string, LayoutNode>();
+    flat.forEach((n) => nodeMap.set(n.id, n));
+    flat.forEach((n) => {
+      if (n.parentId && nodeMap.has(n.parentId)) {
+        nodeMap.get(n.parentId)!.children.push(n);
+      }
+    });
 
     // Group by depth
     const byDepth: Record<number, LayoutNode[]> = {};
@@ -144,7 +156,7 @@ export default function HierarchyChart({
     }
 
     const totalHeight = (maxDepth + 1) * (BOX_HEIGHT + LEVEL_GAP) - LEVEL_GAP + 40;
-    return { levels, totalHeight, flat };
+    return { levels, totalHeight, flat, maxDepth, byDepth };
   }, [tree, containerWidth]);
 
   const handleContextMenu = useCallback((e: React.MouseEvent, node: TreeNode) => {
@@ -319,6 +331,31 @@ export default function HierarchyChart({
             );
           }),
         )}
+      </div>
+
+      {/* Debug footer — level counts */}
+      <div style={{
+        position: 'absolute',
+        left: 0,
+        bottom: 0,
+        width: '100%',
+        padding: '8px 16px',
+        background: `${C.panel}dd`,
+        backdropFilter: 'blur(6px)',
+        borderTop: `1px solid ${C.border}`,
+        fontSize: 11,
+        fontFamily: 'monospace',
+        color: C.muted,
+        display: 'flex',
+        gap: 16,
+        zIndex: 10,
+      }}>
+        {Array.from({ length: maxDepth + 1 }, (_, d) => (
+          <span key={d}>
+            Level {d}: {(byDepth[d] || []).length} nodes
+          </span>
+        ))}
+        <span style={{ marginLeft: 'auto' }}>Total: {flat.length} nodes</span>
       </div>
 
       {/* Context menu */}

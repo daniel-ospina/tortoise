@@ -1,5 +1,72 @@
 name: CI
-on: [push, pull_request]
+# premise-labs (eldato-epistemic): doc checks — markdown lint, link check, frontmatter
+# Budget: PR-only (shared Actions budget under daniel-ospina account)
+
+on:
+  pull_request:
+
 jobs:
-  ci:
-    uses: daniel-ospina/shared-workflows/.github/workflows/ci.yml@v1
+  markdown-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install -g markdownlint-cli2
+      - run: |
+          cat > .markdownlintignore <<'EOF'
+          node_modules
+          .worktrees
+          .git
+          EOF
+          markdownlint-cli2 "**/*.md"
+
+  link-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: lycheeverse/lychee-action@v2
+        with:
+          args: >
+            --no-progress
+            --include-verbatim
+            --exclude-path .worktrees
+            --exclude-path node_modules
+            --exclude-path .git
+            '**/*.md'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  frontmatter:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate doc frontmatter
+        run: |
+          errors=0
+          echo "Checking docs/**/*.md for required YAML frontmatter fields..."
+          for f in docs/**/*.md; do
+            [ -f "$f" ] || continue
+            name=$(basename "$f")
+            # Check YAML frontmatter exists (starts with ---)
+            head -1 "$f" | grep -q "^---$" || {
+              echo "❌ $f: missing YAML frontmatter"
+              errors=$((errors+1))
+              continue
+            }
+            # Extract YAML frontmatter (between first and second ---)
+            frontmatter=$(sed -n '2,/^---$/p' "$f" | sed '$d')
+            # Check required fields
+            for field in "subjects.team" "type" "domain" "doc_status" "created"; do
+              echo "$frontmatter" | grep -Fq "$field:" || {
+                echo "❌ $f: missing required field '$field'"
+                errors=$((errors+1))
+              }
+            done
+          done
+          if [ $errors -gt 0 ]; then
+            echo "❌ $errors frontmatter issue(s) found"
+            exit 1
+          fi
+          echo "✅ All docs frontmatter validated"
