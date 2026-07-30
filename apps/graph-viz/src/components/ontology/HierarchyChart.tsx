@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef, useMemo, useEffect } from 'react';
 import { C } from '../../constants';
+import { useOntologyTypes } from '../../hooks/useOntologyTypes';
 
 interface TreeNode {
   id: string;
@@ -23,28 +24,6 @@ interface Props {
   onDelete: (node: TreeNode) => void;
   onNavigateToNode?: (id: string) => void;
 }
-
-const KIND_COLORS: Record<string, string> = {
-  customerSegment: '#7aa2f7',
-  jobToBeDone: '#9ece6a',
-  valueProposition: '#bb9af7',
-  useCase: '#e0af68',
-  feature: '#ff9e64',
-  userJourney: '#7dcfff',
-  workflow: '#c0caf5',
-  requirement: '#f7768e',
-};
-
-const KIND_LABELS: Record<string, string> = {
-  customerSegment: 'Segment',
-  jobToBeDone: 'JTBD',
-  valueProposition: 'Value Prop',
-  useCase: 'Use Case',
-  feature: 'Feature',
-  userJourney: 'Journey',
-  workflow: 'Workflow',
-  requirement: 'Requirement',
-};
 
 type LayoutNode = TreeNode & {
   depth: number;
@@ -114,6 +93,9 @@ export default function HierarchyChart({
   }, []);
 
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; node: TreeNode } | null>(null);
+
+  // Fetch dynamic ontology types from backend (labels + colors)
+  const { labels: kindLabels, colors: kindColors } = useOntologyTypes();
 
   const { levels, totalHeight, flat, maxDepth, byDepth } = useMemo(() => {
     const flat: LayoutNode[] = [];
@@ -239,7 +221,7 @@ export default function HierarchyChart({
         {levels.map((levelNodes, depth) =>
           levelNodes.map((node) => {
             const isSelected = node.id === selectedId;
-            const kindColor = KIND_COLORS[node.objectKind] || C.muted;
+            const kindColor = kindColors[node.objectKind] || C.muted;
             const confPct = node.confidence != null ? Math.round(node.confidence * 100) : null;
             const isDraft = node.status === 'draft';
 
@@ -279,7 +261,7 @@ export default function HierarchyChart({
                     textTransform: 'uppercase',
                     letterSpacing: 0.5,
                   }}>
-                    {KIND_LABELS[node.objectKind] || node.objectKind}
+                    {kindLabels[node.objectKind] || node.objectKind}
                   </span>
                 </div>
 
