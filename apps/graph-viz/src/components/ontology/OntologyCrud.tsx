@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { C } from '../../constants';
+import { useOntologyTypes, type OntologyType } from '../../hooks/useOntologyTypes';
 
 export interface CrudAction {
   type: 'create' | 'edit' | 'delete';
@@ -12,25 +13,11 @@ interface Props {
   onClose: (refresh?: boolean) => void;
 }
 
-const VALID_OBJECT_KINDS = [
-  'customerSegment', 'jobToBeDone', 'feature',
-  'userJourney', 'workflow', 'requirement',
-];
-
-const KIND_LABELS: Record<string, string> = {
-  customerSegment: 'Customer Segment',
-  jobToBeDone: 'Job to Be Done',
-  feature: 'Feature',
-  userJourney: 'User Journey',
-  workflow: 'Workflow',
-  requirement: 'Requirement',
-};
-
 // ─────────────────── CreateDialog ──────────────────
 
-function CreateDialog({ context, onClose }: { context: string; onClose: (refresh?: boolean) => void }) {
+function CreateDialog({ context, onClose, ontologyTypes }: { context: string; onClose: (refresh?: boolean) => void; ontologyTypes: OntologyType[] }) {
   const [name, setName] = useState('');
-  const [objectKind, setObjectKind] = useState('customerSegment');
+  const [objectKind, setObjectKind] = useState(ontologyTypes[0]?.objectKind || '');
   const [content, setContent] = useState('');
   const [parentId, setParentId] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -87,8 +74,8 @@ function CreateDialog({ context, onClose }: { context: string; onClose: (refresh
           onChange={e => setObjectKind(e.target.value)}
           style={inputStyle}
         >
-          {VALID_OBJECT_KINDS.map(k => (
-            <option key={k} value={k}>{KIND_LABELS[k] || k}</option>
+          {ontologyTypes.map(k => (
+            <option key={k.objectKind} value={k.objectKind}>{k.label}</option>
           ))}
         </select>
       </Field>
@@ -122,7 +109,7 @@ function CreateDialog({ context, onClose }: { context: string; onClose: (refresh
 
 // ─────────────────── EditDialog ───────────────────
 
-function EditDialog({ node, context, onClose }: { node: any; context: string; onClose: (refresh?: boolean) => void }) {
+function EditDialog({ node, onClose }: { node: any; onClose: (refresh?: boolean) => void }) {
   const [name, setName] = useState(node.name || '');
   const [content, setContent] = useState(node.content || '');
   const [submitting, setSubmitting] = useState(false);
@@ -217,7 +204,7 @@ interface Descendant {
   depth: number;
 }
 
-function DeleteDialog({ node, onClose }: { node: any; onClose: (refresh?: boolean) => void }) {
+function DeleteDialog({ node, onClose, kindColors, kindLabels }: { node: any; onClose: (refresh?: boolean) => void; kindColors: Record<string, string>; kindLabels: Record<string, string> }) {
   const [descendants, setDescendants] = useState<Descendant[] | null>(null);
   const [loadingDesc, setLoadingDesc] = useState(true);
   const [descError, setDescError] = useState<string | null>(null);
@@ -317,8 +304,8 @@ function DeleteDialog({ node, onClose }: { node: any; onClose: (refresh?: boolea
                 paddingLeft: d.depth * 12,
               }}>
                 {d.depth > 0 && '↳ '}{d.name || d.id?.slice(0, 8)}
-                <span style={{ color: KIND_COLORS[d.objectKind] || C.muted, marginLeft: 6, fontSize: 10 }}>
-                  {KIND_LABELS[d.objectKind] || d.objectKind}
+                <span style={{ color: kindColors[d.objectKind] || C.muted, marginLeft: 6, fontSize: 10 }}>
+                  {kindLabels[d.objectKind] || d.objectKind}
                 </span>
               </div>
             ))}
@@ -373,15 +360,6 @@ function DeleteDialog({ node, onClose }: { node: any; onClose: (refresh?: boolea
 }
 
 // ─────────────────── Shared Components ────────────
-
-const KIND_COLORS: Record<string, string> = {
-  customerSegment: '#7aa2f7',
-  jobToBeDone: '#9ece6a',
-  feature: '#bb9af7',
-  userJourney: '#e0af68',
-  workflow: '#7dcfff',
-  requirement: '#f7768e',
-};
 
 function DialogBase({ title, children, onClose }: { title: string; children: React.ReactNode; onClose: () => void }) {
   return (
@@ -448,14 +426,25 @@ const btnStyle: React.CSSProperties = {
 // ─────────────────── Export ───────────────────────
 
 export default function OntologyCrud({ action, context, onClose }: Props) {
+  const { types: ontologyTypes, labels: kindLabels, colors: kindColors, loading: typesLoading } = useOntologyTypes();
+
   if (action.type === 'create') {
-    return <CreateDialog context={context} onClose={onClose} />;
+    if (typesLoading) {
+      return (
+        <DialogBase title="New Ontology Object" onClose={() => onClose()}>
+          <div style={{ color: C.muted, fontSize: 13, padding: '16px 0', textAlign: 'center' }}>
+            Loading ontology types…
+          </div>
+        </DialogBase>
+      );
+    }
+    return <CreateDialog context={context} onClose={onClose} ontologyTypes={ontologyTypes} />;
   }
   if (action.type === 'edit' && action.node) {
-    return <EditDialog node={action.node} context={context} onClose={onClose} />;
+    return <EditDialog node={action.node} onClose={onClose} />;
   }
   if (action.type === 'delete' && action.node) {
-    return <DeleteDialog node={action.node} onClose={onClose} />;
+    return <DeleteDialog node={action.node} onClose={onClose} kindColors={kindColors} kindLabels={kindLabels} />;
   }
   return null;
 }

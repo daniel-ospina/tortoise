@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef, useMemo, useEffect } from 'react';
 import { TransformWrapper, TransformComponent } from 'react-zoom-pan-pinch';
 import { C } from '../../constants';
+import { useOntologyTypes } from '../../hooks/useOntologyTypes';
 
 interface TreeNode {
   id: string;
@@ -24,42 +25,6 @@ interface Props {
   onDelete: (node: TreeNode) => void;
   onNavigateToNode?: (id: string) => void;
 }
-
-const KIND_COLORS: Record<string, string> = {
-  customerSegment: '#7aa2f7',
-  jobToBeDone: '#9ece6a',
-  valueProposition: '#bb9af7',
-  useCase: '#e0af68',
-  feature: '#ff9e64',
-  userJourney: '#7dcfff',
-  workflow: '#c0caf5',
-  requirement: '#f7768e',
-};
-
-const KIND_LABELS: Record<string, string> = {
-  customerSegment: 'Segment',
-  jobToBeDone: 'JTBD',
-  valueProposition: 'Value Prop',
-  useCase: 'Use Case',
-  feature: 'Feature',
-  userJourney: 'Journey',
-  workflow: 'Workflow',
-  requirement: 'Requirement',
-};
-
-const VALID_OBJECT_KINDS = [
-  'customerSegment', 'jobToBeDone', 'feature',
-  'userJourney', 'workflow', 'requirement',
-];
-
-const OBJECT_KIND_LABELS: Record<string, string> = {
-  customerSegment: 'Customer Segment',
-  jobToBeDone: 'Job to Be Done',
-  feature: 'Feature',
-  userJourney: 'User Journey',
-  workflow: 'Workflow',
-  requirement: 'Requirement',
-};
 
 type LayoutNode = TreeNode & {
   depth: number;
@@ -95,6 +60,7 @@ function flattenTree(
     };
     result.push(layoutNode);
     if (node.children?.length) {
+      // Push ALL descendants into result — children relationship rebuilt post-flatten
       flattenTree(node.children, depth + 1, node.id, result);
     }
   });
@@ -135,6 +101,8 @@ function ChartContent({
   selectedId,
   connection,
   hoveredNodeId,
+  kindColors,
+  kindLabels,
   onSelect,
   onContextMenu,
   onStartConnection,
@@ -148,6 +116,8 @@ function ChartContent({
   selectedId: string | null;
   connection: ConnectionState | null;
   hoveredNodeId: string | null;
+  kindColors: Record<string, string>;
+  kindLabels: Record<string, string>;
   onSelect: (node: TreeNode) => void;
   onContextMenu: (e: React.MouseEvent, node: TreeNode) => void;
   onStartConnection: (e: React.MouseEvent, nodeId: string, direction: 'top' | 'bottom') => void;
@@ -187,7 +157,7 @@ function ChartContent({
         levelNodes.map((node) => {
           const isSelected = node.id === selectedId;
           const isHovered = node.id === hoveredNodeId;
-          const kindColor = KIND_COLORS[node.objectKind] || C.muted;
+          const kindColor = kindColors[node.objectKind] || C.muted;
           const confPct = node.confidence != null ? Math.round(node.confidence * 100) : null;
           const isDraft = node.status === 'draft';
           const isConnectionTarget = connection !== null && connection.sourceId !== node.id;
@@ -312,7 +282,7 @@ function ChartContent({
                   textTransform: 'uppercase',
                   letterSpacing: 0.5,
                 }}>
-                  {KIND_LABELS[node.objectKind] || node.objectKind}
+                  {kindLabels[node.objectKind] || node.objectKind}
                 </span>
               </div>
 
@@ -392,8 +362,10 @@ export default function HierarchyChart({
     return () => obs.disconnect();
   }, []);
 
-  // Context menu state
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; node: TreeNode } | null>(null);
+
+  // Fetch dynamic ontology types from backend (labels + colors)
+  const { labels: kindLabels, colors: kindColors, types } = useOntologyTypes();
 
   // Connection mode state (Miro-like)
   const [connection, setConnection] = useState<ConnectionState | null>(null);
@@ -432,6 +404,8 @@ export default function HierarchyChart({
     const flat: LayoutNode[] = [];
     flattenTree(tree, 0, null, flat);
 
+    // Rebuild parent→children relationships (flattenTree pushes all nodes into flat,
+    // so children arrays are empty — rebuild via parentId lookup)
     const nodeMap = new Map<string, LayoutNode>();
     flat.forEach((n) => nodeMap.set(n.id, n));
     flat.forEach((n) => {
@@ -440,6 +414,7 @@ export default function HierarchyChart({
       }
     });
 
+    // Group by depth
     const byDepth: Record<number, LayoutNode[]> = {};
     let maxDepth = 0;
     flat.forEach((n) => {
@@ -448,6 +423,7 @@ export default function HierarchyChart({
       maxDepth = Math.max(maxDepth, n.depth);
     });
 
+    // Compute positions
     const levels: LayoutNode[][] = [];
     for (let d = 0; d <= maxDepth; d++) {
       const nodes = byDepth[d] || [];
@@ -510,17 +486,7 @@ export default function HierarchyChart({
         return;
       }
 
-      // Create hasPart edge via API: create with parentId
       try {
-        const targetNode = nodeMap.get(targetId);
-        if (!targetNode) return;
-
-        // The connection source is the parent, target is the child
-        // We need to re-parent the target node: update it to have the source as parent
-        // Create a new ontology-object with parentId = source
-        // Actually, we need to create an edge from source to target
-        // The API: POST /api/ontology-object with parentId creates a hasPart edge
-        // But for re-parenting existing nodes, we should use the /api/edges endpoint
         const res = await fetch('/api/edges', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -534,13 +500,12 @@ export default function HierarchyChart({
           const detail = await res.json().catch(() => ({}));
           console.error('Edge creation failed:', detail);
         }
-        // Refresh handled by parent — we rely on tree re-fetch
       } catch (err) {
         console.error('Edge creation error:', err);
       }
       setConnection(null);
     },
-    [connection, nodeMap],
+    [connection],
   );
 
   // Lines connecting parents to children
@@ -556,6 +521,7 @@ export default function HierarchyChart({
           const cy2 = child.y;
           svgLines.push({ x1: cx, y1: cy, x2: cx2, y2: cy2, key: `${parent.id}-${child.id}` });
 
+          // If multiple children, draw a horizontal connector at sibling level
           if (parent.children.length > 1) {
             const firstChild = parent.children[0];
             const lastChild = parent.children[parent.children.length - 1];
@@ -572,16 +538,17 @@ export default function HierarchyChart({
     return svgLines;
   }, [levels]);
 
-  // Filtered object kinds for submenu
+  // Filtered object kinds for submenu (from dynamic types)
   const filteredKinds = useMemo(() => {
-    if (!kindSearch.trim()) return VALID_OBJECT_KINDS;
+    if (!kindSearch.trim()) return types.map(t => t.objectKind);
     const q = kindSearch.toLowerCase();
-    return VALID_OBJECT_KINDS.filter(
-      (k) =>
-        k.toLowerCase().includes(q) ||
-        (OBJECT_KIND_LABELS[k] || '').toLowerCase().includes(q),
-    );
-  }, [kindSearch]);
+    return types
+      .filter(t =>
+        t.objectKind.toLowerCase().includes(q) ||
+        t.label.toLowerCase().includes(q),
+      )
+      .map(t => t.objectKind);
+  }, [kindSearch, types]);
 
   const openCreateModal = (kind: string) => {
     setCreateModal({
@@ -636,6 +603,8 @@ export default function HierarchyChart({
             selectedId={selectedId}
             connection={connection}
             hoveredNodeId={hoveredNodeId}
+            kindColors={kindColors}
+            kindLabels={kindLabels}
             onSelect={onSelect}
             onContextMenu={handleContextMenu}
             onStartConnection={startConnection}
@@ -807,10 +776,10 @@ export default function HierarchyChart({
                           width: 8,
                           height: 8,
                           borderRadius: '50%',
-                          background: KIND_COLORS[kind] || C.muted,
+                          background: kindColors[kind] || C.muted,
                           flexShrink: 0,
                         }} />
-                        {OBJECT_KIND_LABELS[kind] || kind}
+                        {kindLabels[kind] || kind}
                       </div>
                     ))
                   )}
@@ -834,6 +803,8 @@ export default function HierarchyChart({
           parentId={createModal.parentId}
           parentName={createModal.parentName}
           defaultKind={createModal.kind}
+          kindLabels={kindLabels}
+          types={types}
           onClose={() => setCreateModal(null)}
         />
       )}
@@ -879,11 +850,15 @@ function CreateDialog({
   parentId,
   parentName,
   defaultKind,
+  kindLabels,
+  types,
   onClose,
 }: {
   parentId: string | null;
   parentName: string;
   defaultKind: string;
+  kindLabels: Record<string, string>;
+  types: { objectKind: string; label: string }[];
   onClose: () => void;
 }) {
   const [name, setName] = useState('');
@@ -982,9 +957,9 @@ function CreateDialog({
             onChange={(e) => setObjectKind(e.target.value)}
             style={inputStyle}
           >
-            {VALID_OBJECT_KINDS.map((k) => (
-              <option key={k} value={k}>
-                {OBJECT_KIND_LABELS[k] || k}
+            {types.map((t) => (
+              <option key={t.objectKind} value={t.objectKind}>
+                {kindLabels[t.objectKind] || t.objectKind}
               </option>
             ))}
           </select>

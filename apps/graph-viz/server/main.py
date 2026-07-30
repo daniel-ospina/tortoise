@@ -14,6 +14,7 @@ Endpoints:
 
   Ontology:
     GET  /api/health                          — health with ontology_status
+    GET  /api/ontology-types?context=          — dynamic objectKind types (labels, colors)
     GET  /api/ontology-tree?context=&root_only= — hierarchical tree JSON
     GET  /api/ontology-object/{id}/descendants — cascade delete preview
     POST /api/ontology-object                  — create dual-label :Point:Object node
@@ -54,10 +55,68 @@ DB_PORT = int(os.environ.get("FALKORDB_PORT", "16379"))
 DB_PASSWORD = os.environ.get("FALKORDB_PASSWORD", None)
 DB_GRAPH = os.environ.get("FALKORDB_GRAPH", "tortoise")
 
-VALID_OBJECT_KINDS = frozenset([
-    "customerSegment", "jobToBeDone", "feature",
-    "userJourney", "workflow", "requirement",
-])
+# ── Ontology Types Config (dynamic, supports expansion packs) ──
+# Each context (expansion pack) defines its available objectKinds with
+# human-readable labels, display colors, and optional metadata.
+# New contexts/packs can be added here without code changes.
+ONTOLOGY_TYPES: dict[str, dict[str, dict]] = {
+    "product-strategy": {
+        "customerSegment": {
+            "label": "Customer Segment",
+            "color": "#7aa2f7",
+            "description": "Target customer group with shared needs and behaviors",
+            "icon": "users",
+        },
+        "jobToBeDone": {
+            "label": "Job to Be Done",
+            "color": "#9ece6a",
+            "description": "Functional, social, or emotional job customers hire a product for",
+            "icon": "briefcase",
+        },
+        "valueProposition": {
+            "label": "Value Proposition",
+            "color": "#bb9af7",
+            "description": "Promise of value to be delivered to the customer",
+            "icon": "gem",
+        },
+        "useCase": {
+            "label": "Use Case",
+            "color": "#e0af68",
+            "description": "Specific scenario where a product or service delivers value",
+            "icon": "play-circle",
+        },
+        "feature": {
+            "label": "Feature",
+            "color": "#ff9e64",
+            "description": "Product capability or functionality that persists after being built",
+            "icon": "puzzle-piece",
+        },
+        "userJourney": {
+            "label": "User Journey",
+            "color": "#7dcfff",
+            "description": "End-to-end path a user takes through the product or service",
+            "icon": "map",
+        },
+        "workflow": {
+            "label": "Workflow",
+            "color": "#c0caf5",
+            "description": "Orchestrated sequence of actions or skills to achieve a goal",
+            "icon": "git-branch",
+        },
+        "requirement": {
+            "label": "Requirement",
+            "color": "#f7768e",
+            "description": "Constraint or condition that must be satisfied",
+            "icon": "clipboard-check",
+        },
+    },
+}
+
+VALID_OBJECT_KINDS = frozenset(
+    kind
+    for ctx_types in ONTOLOGY_TYPES.values()
+    for kind in ctx_types
+)
 
 CONTEXT_DEFAULT = "product-strategy"
 NODE_CAP_ALL_CONTEXT = 200
@@ -515,6 +574,83 @@ def health():
         "status": "ok" if falkordb_connected else "error",
         "ontology_status": ontology_status,
         "falkordb_connected": falkordb_connected,
+    }
+
+
+# ── Ontology Types ─────────────────────────────────────────────────
+
+@app.get("/api/ontology-types")
+def ontology_types(
+    context: str = Query(default="all", description="Context/expansion pack. 'all' returns all types across all contexts."),
+):
+    """
+    Return available objectKind values with labels, colors, and metadata.
+
+    Supports expansion packs: each context (product-strategy, marketing, etc.)
+    defines its own set of objectKinds. Use context=all to get the union.
+
+    Response:
+      {
+        "context": "all",
+        "contexts": ["product-strategy"],
+        "types": [
+          {
+            "objectKind": "customerSegment",
+            "label": "Customer Segment",
+            "color": "#7aa2f7",
+            "description": "...",
+            "icon": "users",
+            "context": "product-strategy"
+          },
+          ...
+        ],
+        "total": 8
+      }
+    """
+    if context == "all":
+        all_types = []
+        for ctx_name, ctx_types in ONTOLOGY_TYPES.items():
+            for kind, meta in ctx_types.items():
+                all_types.append({
+                    "objectKind": kind,
+                    "label": meta.get("label", kind),
+                    "color": meta.get("color", "#888888"),
+                    "description": meta.get("description", ""),
+                    "icon": meta.get("icon"),
+                    "context": ctx_name,
+                })
+        return {
+            "context": "all",
+            "contexts": sorted(ONTOLOGY_TYPES.keys()),
+            "types": sorted(all_types, key=lambda t: (t["context"], t["objectKind"])),
+            "total": len(all_types),
+        }
+
+    ctx_types = ONTOLOGY_TYPES.get(context)
+    if ctx_types is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": f"Unknown context '{context}'. Available: {', '.join(sorted(ONTOLOGY_TYPES.keys()))}",
+            },
+        )
+
+    types = [
+        {
+            "objectKind": kind,
+            "label": meta.get("label", kind),
+            "color": meta.get("color", "#888888"),
+            "description": meta.get("description", ""),
+            "icon": meta.get("icon"),
+            "context": context,
+        }
+        for kind, meta in ctx_types.items()
+    ]
+    return {
+        "context": context,
+        "contexts": sorted(ONTOLOGY_TYPES.keys()),
+        "types": sorted(types, key=lambda t: t["objectKind"]),
+        "total": len(types),
     }
 
 
