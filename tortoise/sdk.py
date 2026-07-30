@@ -18,6 +18,9 @@ from .projection import FalkorProjection
 register_kind("diary")
 register_kind("checkpoint-item")
 
+# Valid status values for Point nodes (used by update_point status validation)
+POINT_STATUS_VALUES = frozenset({'live', 'draft', 'outdated', 'archived'})
+
 _logger = logging.getLogger(__name__)
 
 
@@ -132,13 +135,40 @@ class TortoiseSDK:
         return self.create_point(kind, content, dedup=True, **props)
 
     def update_point(self, id: str, **props) -> dict:
-        """Update properties on an existing Point. Returns updated point dict."""
+        """Update properties on an existing Point. Returns updated point dict.
+        
+        For :Object-labeled nodes, version is auto-incremented on every update.
+        Status changes are validated against POINT_STATUS_VALUES.
+        """
         proj = self._get_proj()
-        for key, val in props.items():
-            proj.g.query(
-                "MATCH (n:Point {id:$id}) SET n += $props",
-                params={"id": id, "props": {key: val}},
+
+        # Validate status if present
+        if 'status' in props and props['status'] not in POINT_STATUS_VALUES:
+            raise ValueError(
+                f"Invalid status {props['status']!r}. "
+                f"Must be one of: {', '.join(sorted(POINT_STATUS_VALUES))}"
             )
+
+        # Check if node carries :Object label (entity node with version tracking)
+        has_object = proj.g.query(
+            "MATCH (n:Point:Object {id:$id}) RETURN count(n) > 0",
+            params={"id": id},
+        ).result_set[0][0]
+
+        if has_object:
+            from datetime import datetime, timezone
+            now = datetime.now(timezone.utc).isoformat()
+            proj.g.query(
+                "MATCH (n:Point:Object {id:$id}) "
+                "SET n += $props, n.version = coalesce(n.version, 0) + 1, n.updatedAt = $now",
+                params={"id": id, "props": props, "now": now},
+            )
+        else:
+            for key, val in props.items():
+                proj.g.query(
+                    "MATCH (n:Point {id:$id}) SET n += $props",
+                    params={"id": id, "props": {key: val}},
+                )
         return self.get_point(id)
 
     def delete_point(self, id: str) -> bool:
