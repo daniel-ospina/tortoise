@@ -36,18 +36,15 @@ When choosing between two approaches, prefer the one that produces the better ou
 
 ---
 
-<!-- REPO-SPECIFIC: Add your skill compliance table here. Map trigger → skill → consequence of skipping. -->
-
 ## ⛔ HARD RULE: Skill Compliance
 
 **Skills are NON-NEGOTIABLE. No shortcuts, no "I know this one," no skipping because you're in a hurry.**
 
-<!--
 | Trigger | Must invoke | Consequence of skipping |
 |---|---|---|
-| Any git operation | `skills/commit-workflow/SKILL.md` | ... |
-| ... | ... | ... |
--->
+| Any Tortoise graph write (create point/operator, mitigation, NAND, supersede, delete, annotate, invalidate) | `skills/how-to-use-tortoise/SKILL.md` | EP weights nuked by batch-connected mitigations, orphaned NANDs, label-based content, superseded operators with active edges |
+| Tortoise graph audit | `skills/tortoise-audit/SKILL.md` | Stale structure, uncaught integrity violations |
+| Any git operation (commit, push, merge, PR) | `skills/commit-workflow/SKILL.md` | Pre-flight checks skipped, no review gate, unreviewed code in production |
 
 **Review gates are mandatory, not suggestions.** When a skill describes a review cycle, you MUST run it to convergence. Skipping a review cycle is equivalent to skipping a test suite. Fixing issues without re-dispatching the reviewer is not a review — it's a bypass. No review = no ship.
 
@@ -110,13 +107,7 @@ Every review cycle MUST dispatch a FRESH `task` sub-agent. The reviewer has no m
 
 ## Research Discipline
 
-**⛔ DO NOT call `web_search` directly. Route through the `research` skill instead.**
-
-`research` is non-optional for any investigation that involves comparing, evaluating, deciding, or understanding something new. It provides problem reframing, adversarial queries, domain detection, and — critically — the cost gate. `web_search` has `sonar-deep-research` and `sonar-reasoning-pro` which cost $5–40+/call. The `research` skill defaults to $0.005 tools. Calling `web_search` directly bypasses this gate.
-
-**Only exception — trivial single-fact lookup:** "What version is X?" "What port does Y use?" One answer, no analysis needed. For everything else: `research`.
-
-**Sub-agents inherit this rule.** When dispatching sub-agents, instruct them to use the `research` skill — never let a sub-agent call `web_search` directly.
+**Prefer `web_search` for quick factual lookups. For multi-angle investigation, use `tortoise-decide` or your agent's research workflow.** Avoid `sonar-deep-research` and `sonar-reasoning-pro` unless explicitly approved — they cost $5–40+/call.
 
 ---
 
@@ -124,11 +115,11 @@ Every review cycle MUST dispatch a FRESH `task` sub-agent. The reviewer has no m
 
 When encountering any bug, test failure, or unexpected behavior:
 
-1. **Stop.** Do not attempt to fix it. Do not run commands to "investigate." Invoke the `debug-workflow` skill first — this applies systematic root-cause methodology. Guessing at a fix without structured diagnosis is the #1 source of regressions.
+1. **Stop.** Do not attempt to fix it. Read the test output and trace the failure to its root cause.
 2. Present the diagnosed root cause and proposed fix for explicit approval **before writing any code.**
 3. Do not proceed to implementation until the user confirms the diagnosis and approach.
 
-This applies even for "obvious" fixes — the cost of a wrong diagnosis is higher than the cost of verification. Apparent symptoms routinely mislead; the skill enforces the methodology that finds what actually broke.
+This applies even for "obvious" fixes — the cost of a wrong diagnosis is higher than the cost of verification.
 
 ---
 
@@ -165,7 +156,7 @@ When issue B depends on issue A's scoping/plan but not its implementation:
 2. As soon as issue A's scoping returns → immediately launch issue B
 3. Don't wait for C/D/E to finish — B's blocker is gone, B starts now
 
-Implement issues directly inline where practical. Group related micro-issues into a single batch PR. For cross-session epic batches, use `epic-executor/SKILL.md`.
+Implement issues directly inline where practical. Group related micro-issues into a single batch PR.
 
 ---
 

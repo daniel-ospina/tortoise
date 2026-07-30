@@ -37,4 +37,7 @@ check_version() {
 
 check_version
 
-npx lint-staged
+# Skip if no Node.js tooling (repo is Python — lint-staged requires package.json)
+if [ -f package.json ] && command -v npx >/dev/null 2>&1; then
+  npx lint-staged
+fi
