@@ -17,6 +17,7 @@
     "react-arborist": "^3.16.0",
     "react-dom": "^19.2.7",
     "react-force-graph-2d": "^1.29.1",
+    "react-zoom-pan-pinch": "^4.0.3",
     "remove-overlaps": "^2.1.0"
   },
   "devDependencies": {
