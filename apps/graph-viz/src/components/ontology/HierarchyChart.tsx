@@ -616,19 +616,18 @@ export default function HierarchyChart({
         centerOnInit
         wheel={{ step: 0.1 }}
         panning={{ velocityDisabled: true }}
+        onTransform={(_ref, state) => {
+          setTransformState({
+            positionX: state.positionX,
+            positionY: state.positionY,
+            scale: state.scale,
+          });
+        }}
       >
         <TransformComponent
           wrapperStyle={{ width: '100%', height: '100%' }}
           contentStyle={{ position: 'relative', width: containerWidth, height: totalHeight }}
-          onTransformed={(ref) => {
-            const state = ref.instance.transformState;
-            setTransformState({
-              positionX: state.positionX,
-              positionY: state.positionY,
-              scale: state.scale,
-            });
-          }}
-          wrapperRef={(el) => { wrapperElRef.current = el; }}
+          wrapperProps={{ ref: (el: HTMLDivElement | null) => { wrapperElRef.current = el; } }}
         >
           <ChartContent
             levels={levels}
@@ -648,45 +647,47 @@ export default function HierarchyChart({
       </TransformWrapper>
 
       {/* Connection SVG overlay — viewport space, outside transform */}
-      {connection && (
-        <svg
-          style={{
-            position: 'absolute',
-            inset: 0,
-            pointerEvents: 'none',
-            zIndex: 50,
-          }}
-        >
-          {(() => {
-            const wrapperRect = wrapperElRef.current?.getBoundingClientRect();
-            if (!wrapperRect) return null;
-            // Convert content-space source coords to viewport coords
-            const sx = wrapperRect.left + connection.sourceX * transformState.scale + transformState.positionX;
-            const sy = wrapperRect.top + connection.sourceY * transformState.scale + transformState.positionY;
-            return (
-              <>
-                <line
-                  x1={sx}
-                  y1={sy}
-                  x2={connection.mouseX}
-                  y2={connection.mouseY}
-                  stroke="#e0af68"
-                  strokeWidth={2 / transformState.scale + 1}
-                  strokeDasharray={`${6 / transformState.scale} ${4 / transformState.scale}`}
-                  opacity={0.8}
-                />
-                <circle
-                  cx={connection.mouseX}
-                  cy={connection.mouseY}
-                  r={6}
-                  fill="#e0af68"
-                  opacity={0.6}
-                />
-              </>
-            );
-          })()}
-        </svg>
-      )}
+      {connection && (() => {
+        const wrapperRect = wrapperElRef.current?.getBoundingClientRect();
+        const containerRect = containerRef.current?.getBoundingClientRect();
+        if (!wrapperRect || !containerRect) return null;
+        const offsetX = wrapperRect.left - containerRect.left;
+        const offsetY = wrapperRect.top - containerRect.top;
+        // Convert content-space source coords to container-relative SVG coords
+        const sx = offsetX + connection.sourceX * transformState.scale + transformState.positionX;
+        const sy = offsetY + connection.sourceY * transformState.scale + transformState.positionY;
+        // Convert page-relative mouse coords to container-relative
+        const mx = connection.mouseX - containerRect.left;
+        const my = connection.mouseY - containerRect.top;
+        return (
+          <svg
+            style={{
+              position: 'absolute',
+              inset: 0,
+              pointerEvents: 'none',
+              zIndex: 50,
+            }}
+          >
+            <line
+              x1={sx}
+              y1={sy}
+              x2={mx}
+              y2={my}
+              stroke="#e0af68"
+              strokeWidth={2 / transformState.scale + 1}
+              strokeDasharray={`${6 / transformState.scale} ${4 / transformState.scale}`}
+              opacity={0.8}
+            />
+            <circle
+              cx={mx}
+              cy={my}
+              r={6}
+              fill="#e0af68"
+              opacity={0.6}
+            />
+          </svg>
+        );
+      })()}
 
       {/* Debug footer — level counts */}
       <div style={{
