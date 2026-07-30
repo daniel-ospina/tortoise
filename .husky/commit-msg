@@ -1,0 +1,7 @@
+#!/usr/bin/env sh
+. "$(dirname -- "$0")/_/husky.sh"
+
+# Skip if no Node.js tooling (repo is Python — commitlint requires package.json)
+if [ -f package.json ] && command -v npx >/dev/null 2>&1; then
+  npx --no-install -- commitlint --edit "$1"
+fi
