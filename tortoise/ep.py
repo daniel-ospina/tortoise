@@ -215,7 +215,10 @@ class TortoiseEP:
                     max(min(damped_b[1], 1000), -1000))
 
         self._write_message(op_id, id_b, *damped_b, op_type)
-        if not self.directed:
+        # NAND is bidirectional (mutual contradiction). IMPL is directional
+        # (source→target only) — prevents back-messages from canceling
+        # convergent evidence and eliminates need for edge density penalty.
+        if op_type == "NAND" or not self.directed:
             self._write_message(op_id, id_a, *damped_a, op_type)
 
     def _update_nary_factor(self, op_id: str, op_type: str,

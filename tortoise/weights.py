@@ -32,22 +32,10 @@ def compute_operator_weight(proj, op_id: str, use_dynamic: bool = False) -> floa
     if input_ops > 0:
         w *= 2.0
 
-    # Edge density: diminishing returns on most-connected input
-    max_density = 1.0
-    for rel in ("IMPL", "NAND"):
-        rows = g.query(
-            f"MATCH (o:Point {{id:$id}})-[:{rel}]->(c:Point) RETURN c.id",
-            params={"id": op_id},
-        ).result_set
-        for (claim_id,) in rows:
-            edge_count = g.query(
-                "MATCH (c:Point {id:$cid})-[r:IMPL|NAND]-() RETURN count(r)",
-                params={"cid": claim_id},
-            ).result_set[0][0]
-            if edge_count > 0:
-                factor = 1.0 / max(math.log2(edge_count + 1), 1.0)
-                max_density = min(max_density, factor)
-    w *= max_density
+    # Edge density penalty removed — unnecessary with directional IMPL.
+    # Directional messages eliminate bidirectional amplification loops,
+    # so hub nodes no longer need manual dampening.
+    w *= 1.0  # no-op, preserved for reference
 
     # Context tags
     context_multipliers = {
