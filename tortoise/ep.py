@@ -29,14 +29,13 @@ class TortoiseEP:
     """
 
     def __init__(self, projection, *, damping=0.5, n_quad=8,
-                 max_iter=50, tol=1e-3, evidence=None, directed=False):
+                 max_iter=50, tol=1e-3, evidence=None):
         self.proj = projection
         self.g = projection.g
         self.damping = damping
         self.n_quad = n_quad
         self.max_iter = max_iter
         self.tol = tol
-        self.directed = directed
         # Fixed evidence priors: {claim_id: (alpha, beta)}
         self._evidence = dict(evidence) if evidence else {}
 
@@ -219,9 +218,8 @@ class TortoiseEP:
 
         self._write_message(op_id, id_b, *damped_b, op_type)
         # NAND is bidirectional (mutual contradiction). IMPL is directional
-        # (source→target only) — prevents back-messages from canceling
-        # convergent evidence and eliminates need for edge density penalty.
-        if op_type == "NAND" or not self.directed:
+        # (source→target only) — back-message only for NAND.
+        if op_type == "NAND":
             self._write_message(op_id, id_a, *damped_a, op_type)
 
     def _update_nary_factor(self, op_id: str, op_type: str,
