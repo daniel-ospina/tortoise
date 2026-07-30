@@ -193,12 +193,15 @@ class TortoiseEP:
         raw_eta_a = (new_eta_a[0] - cav_eta_a[0], new_eta_a[1] - cav_eta_a[1])
         raw_eta_b = (new_eta_b[0] - cav_eta_b[0], new_eta_b[1] - cav_eta_b[1])
 
-        # Minimal cavity boost: 2x for uniform Beta(1,1) to break EP symmetry.
-        # Without this, single-IMPL edges converge to weak coupling even at w=8.
-        cav_boost_a = 4.0 if abs(cav_eta_a[0]) < 0.01 and abs(cav_eta_a[1]) < 0.01 else 1.0
-        cav_boost_b = 4.0 if abs(cav_eta_b[0]) < 0.01 and abs(cav_eta_b[1]) < 0.01 else 1.0
-        raw_eta_a = (raw_eta_a[0] * cav_boost_a, raw_eta_a[1] * cav_boost_a)
-        raw_eta_b = (raw_eta_b[0] * cav_boost_b, raw_eta_b[1] * cav_boost_b)
+        # Proportional boost: breaks EP fixed-point symmetry that forces
+        # messages to near-zero for unevidenced targets. Fades as evidence
+        # accumulates: Beta(1,1)=7× boost, Beta(4,4)=1.5×, Beta(10,10)=1×.
+        alpha_a, beta_a = self._beta_from_natural(*cav_eta_a)
+        alpha_b, beta_b = self._beta_from_natural(*cav_eta_b)
+        boost_a = 1.0 + 2.0 / max(alpha_a + beta_a - 1.0, 1.0)
+        boost_b = 1.0 + 2.0 / max(alpha_b + beta_b - 1.0, 1.0)
+        raw_eta_a = (raw_eta_a[0] * boost_a, raw_eta_a[1] * boost_a)
+        raw_eta_b = (raw_eta_b[0] * boost_b, raw_eta_b[1] * boost_b)
 
         d = self.damping
         old_eta_a = self._read_message(op_id, id_a, op_type)
@@ -223,10 +226,19 @@ class TortoiseEP:
 
     def _update_nary_factor(self, op_id: str, op_type: str,
                             input_ids: list[str], weight: float = 1.0) -> None:
-        for i in range(len(input_ids)):
-            for j in range(i + 1, len(input_ids)):
+        # input_ids are sorted by idx (source=0, targets=1..N).
+        # For IMPL: only create source→target pairs (skip target↔target).
+        # For NAND: create all pairwise combinations (full mutual contradiction).
+        if op_type == "IMPL" and len(input_ids) >= 2:
+            # Source is input_ids[0] (idx=0). Targets are input_ids[1:].
+            for j in range(1, len(input_ids)):
                 self._update_factor(op_id, op_type,
-                                    [input_ids[i], input_ids[j]], weight)
+                                    [input_ids[0], input_ids[j]], weight)
+        else:
+            for i in range(len(input_ids)):
+                for j in range(i + 1, len(input_ids)):
+                    self._update_factor(op_id, op_type,
+                                        [input_ids[i], input_ids[j]], weight)
 
     def _update_claim_posterior(self, claim_id: str) -> None:
         # Start from evidence prior in natural parameter space
@@ -294,9 +306,13 @@ class TortoiseEP:
                 for op_id, op_type in rows:
                     if op_id not in seen:
                         seen.add(op_id)
+                        # ORDER BY r.idx ensures source (idx=0) comes first.
+                        # This is required for directional IMPL: id_a = source,
+                        # id_b = target so that back-messages are correctly skipped.
                         input_rows = self.g.query(
                             "MATCH (o:Point {id:$oid})-[r:IMPL|NAND]->(c:Point) "
-                            "RETURN c.id",
+                            "RETURN c.id "
+                            "ORDER BY coalesce(r.idx, 0)",
                             params={"oid": op_id},
                         ).result_set
                         input_ids = [r[0] for r in input_rows]
