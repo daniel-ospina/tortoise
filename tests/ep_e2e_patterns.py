@@ -13,9 +13,10 @@ Each test uses an isolated namespace to avoid cross-contamination.
 
 import os
 import sys
+from pathlib import Path
 
 # Ensure we can import tortoise
-sys.path.insert(0, "/Users/home/eldato/eldato-epistemic")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 os.environ["TORTOISE_DB_URI"] = "docker://:falkordb@localhost:6379/tortoise"
 

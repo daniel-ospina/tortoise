@@ -35,6 +35,18 @@
       "env": {
         "GEMINI_API_KEY": "${GEMINI_API_KEY}"
       }
+    },
+    "tortoise": {
+      "command": "python3",
+      "args": [
+        "-m",
+        "tortoise.mcp_server"
+      ],
+      "cwd": "/Users/home/tortoise",
+      "env": {
+        "PYTHONPATH": "/Users/home/tortoise",
+        "TORTOISE_DB_URI": "docker://:falkordb@localhost:6379/tortoise"
+      }
     }
   }
 }
