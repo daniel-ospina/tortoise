@@ -51,7 +51,7 @@ repo_routing:
     # Issues for vsm-infra use label: team/org-design
     # Issues for shared infra use label: team/org-design + product/vsm-infra
 
-  "daniel-ospina/eldato-epistemic":
+  "daniel-ospina/premise-labs":
     product: tortoise
     default_team: epistemic-team
 
