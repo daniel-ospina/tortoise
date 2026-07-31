@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef, useMemo, useEffect } from 'react';
 import { TransformWrapper, TransformComponent } from 'react-zoom-pan-pinch';
+import type { ReactZoomPanPinchRef } from 'react-zoom-pan-pinch';
 import { C } from '../../constants';
 import { useOntologyTypes } from '../../hooks/useOntologyTypes';
 
@@ -60,9 +61,38 @@ function flattenTree(
     };
     result.push(layoutNode);
     if (node.children?.length) {
-      // Push ALL descendants into result — children relationship rebuilt post-flatten
       flattenTree(node.children, depth + 1, node.id, result);
     }
+  });
+}
+
+/** Reorder children within a node, or reorder root-level nodes. Returns new tree array. */
+function reorderChildrenInTree(
+  nodes: TreeNode[],
+  movedNodeId: string,
+  toIndex: number,
+): TreeNode[] {
+  // Check root level first — the moved node might be a direct child of nodes[]
+  const rootIdx = nodes.findIndex((n) => n.id === movedNodeId);
+  if (rootIdx !== -1) {
+    const reordered = [...nodes];
+    const [moved] = reordered.splice(rootIdx, 1);
+    reordered.splice(toIndex, 0, moved);
+    return reordered;
+  }
+  // Recurse into children
+  return nodes.map((node) => {
+    const childIdx = node.children.findIndex((c) => c.id === movedNodeId);
+    if (childIdx !== -1) {
+      const children = [...node.children];
+      const [moved] = children.splice(childIdx, 1);
+      children.splice(toIndex, 0, moved);
+      return { ...node, children };
+    }
+    if (node.children.length > 0) {
+      return { ...node, children: reorderChildrenInTree(node.children, movedNodeId, toIndex) };
+    }
+    return node;
   });
 }
 
@@ -93,7 +123,17 @@ interface TransformState {
   scale: number;
 }
 
-/** Inner content component */
+interface ReorderState {
+  nodeId: string;
+  levelIndex: number;
+  fromIndex: number;
+  offsetX: number;
+}
+
+// ──────────────── Drag threshold ────────────────
+const DRAG_THRESHOLD = 5;
+
+/** Inner content component — renders boxes + lines */
 function ChartContent({
   levels,
   totalHeight,
@@ -103,11 +143,13 @@ function ChartContent({
   hoveredNodeId,
   kindColors,
   kindLabels,
+  reorder,
   onSelect,
   onContextMenu,
   onStartConnection,
   onCanvasClickForConnection,
   onHoverNode,
+  onBoxMouseDown,
   lines,
 }: {
   levels: LayoutNode[][];
@@ -118,45 +160,23 @@ function ChartContent({
   hoveredNodeId: string | null;
   kindColors: Record<string, string>;
   kindLabels: Record<string, string>;
+  reorder: ReorderState | null;
   onSelect: (node: TreeNode) => void;
   onContextMenu: (e: React.MouseEvent, node: TreeNode) => void;
   onStartConnection: (e: React.MouseEvent, nodeId: string, direction: 'top' | 'bottom') => void;
   onCanvasClickForConnection: (targetId: string) => void;
   onHoverNode: (id: string | null) => void;
+  onBoxMouseDown: (e: React.MouseEvent, node: LayoutNode, levelIdx: number, nodeIdx: number) => void;
   lines: { x1: number; y1: number; x2: number; y2: number; key: string }[];
 }) {
   return (
     <div style={{ width: containerWidth, height: totalHeight, position: 'relative', minWidth: '100%' }}>
-      {/* SVG lines layer */}
-      <svg
-        style={{
-          position: 'absolute',
-          top: 0,
-          left: 0,
-          width: '100%',
-          height: '100%',
-          pointerEvents: 'none',
-          zIndex: 0,
-        }}
-      >
-        {lines.map((l) => (
-          <line
-            key={l.key}
-            x1={l.x1}
-            y1={l.y1}
-            x2={l.x2}
-            y2={l.y2}
-            stroke={C.border}
-            strokeWidth={1.5}
-          />
-        ))}
-      </svg>
-
-      {/* Boxes layer */}
-      {levels.map((levelNodes) =>
-        levelNodes.map((node) => {
+      {/* Boxes layer — render below SVG so lines are on top */}
+      {levels.map((levelNodes, levelIdx) =>
+        levelNodes.map((node, nodeIdx) => {
           const isSelected = node.id === selectedId;
           const isHovered = node.id === hoveredNodeId;
+          const isDragging = reorder?.nodeId === node.id;
           const kindColor = kindColors[node.objectKind] || C.muted;
           const confPct = node.confidence != null ? Math.round(node.confidence * 100) : null;
           const isDraft = node.status === 'draft';
@@ -166,13 +186,13 @@ function ChartContent({
             <div
               key={node.id}
               onClick={(e) => {
-                e.stopPropagation();
                 if (connection && connection.sourceId !== node.id) {
                   onCanvasClickForConnection(node.id);
-                } else {
+                } else if (!reorder) {
                   onSelect(node);
                 }
               }}
+              onMouseDown={(e) => onBoxMouseDown(e, node, levelIdx, nodeIdx)}
               onContextMenu={(e) => onContextMenu(e, node)}
               onMouseEnter={() => onHoverNode(node.id)}
               onMouseLeave={() => onHoverNode(null)}
@@ -183,7 +203,7 @@ function ChartContent({
                 width: BOX_WIDTH,
                 height: BOX_HEIGHT,
                 background: isSelected ? C.surface : C.panel,
-                border: `${isSelected ? 3 : 1.5}px solid ${
+                border: `${isSelected ? 2.5 : 1.5}px solid ${
                   connection && connection.sourceId === node.id
                     ? '#e0af68'
                     : isSelected
@@ -194,28 +214,40 @@ function ChartContent({
                 }`,
                 borderRadius: 10,
                 padding: '8px 12px',
-                cursor: connection
-                  ? connection.sourceId === node.id
-                    ? 'default'
-                    : 'crosshair'
-                  : 'pointer',
-                zIndex: connection && connection.sourceId === node.id ? 3 : 1,
+                cursor: isDragging
+                  ? 'grabbing'
+                  : connection
+                    ? connection.sourceId === node.id
+                      ? 'default'
+                      : 'crosshair'
+                    : 'grab',
+                zIndex: isDragging ? 5 : isHovered ? 2 : 1,
                 display: 'flex',
                 flexDirection: 'column',
                 gap: 4,
-                transition: 'border 0.15s, background 0.15s',
+                transition: isDragging
+                  ? 'none'
+                  : 'border 0.15s, background 0.15s, transform 0.15s, box-shadow 0.15s',
                 opacity: isDraft ? 0.6 : 1,
-                boxShadow: connection && connection.sourceId === node.id
-                  ? '0 0 16px rgba(224, 175, 104, 0.4)'
-                  : undefined,
+                transform: isHovered && !isDragging && !connection ? 'scale(1.03)' : 'scale(1)',
+                boxShadow: isSelected
+                  ? `0 0 20px ${kindColor}44, 0 0 8px ${kindColor}22`
+                  : isDragging
+                    ? '0 8px 32px rgba(0,0,0,0.5), 0 0 16px rgba(224,175,104,0.3)'
+                    : connection && connection.sourceId === node.id
+                      ? '0 0 16px rgba(224, 175, 104, 0.4)'
+                      : undefined,
+                userSelect: 'none',
               }}
             >
               {/* + Connection buttons — top and bottom */}
-              {isHovered && !connection && (
+              {isHovered && !connection && !isDragging && (
                 <>
                   <div
-                    onClick={(e) => onStartConnection(e, node.id, 'top')}
-                    onMouseDown={(e) => e.stopPropagation()}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onStartConnection(e, node.id, 'top');
+                    }}
                     style={{
                       position: 'absolute',
                       left: '50%',
@@ -233,7 +265,7 @@ function ChartContent({
                       fontSize: 14,
                       fontWeight: 700,
                       cursor: 'pointer',
-                      zIndex: 5,
+                      zIndex: 6,
                       lineHeight: 1,
                       boxShadow: '0 2px 8px rgba(0,0,0,0.4)',
                     }}
@@ -241,8 +273,10 @@ function ChartContent({
                     +
                   </div>
                   <div
-                    onClick={(e) => onStartConnection(e, node.id, 'bottom')}
-                    onMouseDown={(e) => e.stopPropagation()}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onStartConnection(e, node.id, 'bottom');
+                    }}
                     style={{
                       position: 'absolute',
                       left: '50%',
@@ -260,7 +294,7 @@ function ChartContent({
                       fontSize: 14,
                       fontWeight: 700,
                       cursor: 'pointer',
-                      zIndex: 5,
+                      zIndex: 6,
                       lineHeight: 1,
                       boxShadow: '0 2px 8px rgba(0,0,0,0.4)',
                     }}
@@ -281,6 +315,10 @@ function ChartContent({
                   padding: '1px 6px',
                   textTransform: 'uppercase',
                   letterSpacing: 0.5,
+                  whiteSpace: 'nowrap',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  maxWidth: 180,
                 }}>
                   {kindLabels[node.objectKind] || node.objectKind}
                 </span>
@@ -327,7 +365,7 @@ function ChartContent({
                   minWidth: 32,
                   textAlign: 'right',
                 }}>
-                  {confPct != null ? `${confPct}%` : '—'}
+                  {confPct != null ? `${confPct}%` : '\u2014'}
                 </span>
               </div>
             </div>
@@ -335,6 +373,30 @@ function ChartContent({
         }),
       )}
 
+      {/* SVG lines layer — rendered ON TOP of boxes */}
+      <svg
+        style={{
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          width: '100%',
+          height: '100%',
+          pointerEvents: 'none',
+          zIndex: 3,
+        }}
+      >
+        {lines.map((l) => (
+          <line
+            key={l.key}
+            x1={l.x1}
+            y1={l.y1}
+            x2={l.x2}
+            y2={l.y2}
+            stroke={C.border}
+            strokeWidth={1.5}
+          />
+        ))}
+      </svg>
     </div>
   );
 }
@@ -350,6 +412,7 @@ export default function HierarchyChart({
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const wrapperElRef = useRef<HTMLDivElement | null>(null);
+  const transformRef = useRef<ReactZoomPanPinchRef>(null);
   const [containerWidth, setContainerWidth] = useState(1200);
 
   useEffect(() => {
@@ -365,7 +428,7 @@ export default function HierarchyChart({
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; node: TreeNode } | null>(null);
 
   // Fetch dynamic ontology types from backend (labels + colors)
-  const { labels: kindLabels, colors: kindColors, types } = useOntologyTypes();
+  const { labels: kindLabels, colors: kindColors, types, loading: typesLoading } = useOntologyTypes();
 
   // Connection mode state (Miro-like)
   const [connection, setConnection] = useState<ConnectionState | null>(null);
@@ -387,6 +450,26 @@ export default function HierarchyChart({
     scale: 1,
   });
 
+  // Local tree state for reorder (synced from prop)
+  const [localTree, setLocalTree] = useState<TreeNode[]>(tree);
+  useEffect(() => { setLocalTree(tree); }, [tree]);
+
+  // Reorder drag state
+  const [reorder, setReorder] = useState<ReorderState | null>(null);
+
+  // Ref to track drag initiation (for distinguishing click vs drag vs reorder)
+  const dragStartRef = useRef<{
+    nodeId: string;
+    levelIdx: number;
+    nodeIdx: number;
+    startX: number;
+    startY: number;
+    transformAtStart: { positionX: number; positionY: number; scale: number };
+  } | null>(null);
+
+  // Ref to keep byDepth current in the drag mouseup handler (avoids stale closure)
+  const byDepthRef = useRef<Record<number, LayoutNode[]>>({});
+
   // Track mouse position globally for connection line
   useEffect(() => {
     if (!connection) return;
@@ -400,12 +483,88 @@ export default function HierarchyChart({
     return () => window.removeEventListener('mousemove', handler);
   }, [connection]);
 
+  // Global mousemove / mouseup for drag-to-reorder
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!dragStartRef.current) return;
+      const dx = e.clientX - dragStartRef.current.startX;
+      const dy = e.clientY - dragStartRef.current.startY;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+
+      // Only enter reorder mode after exceeding threshold AND horizontal bias
+      if (dist > DRAG_THRESHOLD && Math.abs(dx) > Math.abs(dy) * 1.2) {
+        if (!reorder) {
+          // Cancel any pan that started by resetting to pre-drag transform
+          transformRef.current?.resetTransform();
+          setReorder({
+            nodeId: dragStartRef.current.nodeId,
+            levelIndex: dragStartRef.current.levelIdx,
+            fromIndex: dragStartRef.current.nodeIdx,
+            offsetX: dx,
+          });
+        } else {
+          setReorder((prev) => (prev ? { ...prev, offsetX: dx } : null));
+        }
+      }
+    };
+
+    const handleMouseUp = (e: MouseEvent) => {
+      const drag = dragStartRef.current;
+      if (!drag) return;
+
+      if (reorder) {
+        // Finalize reorder
+        const finalDx = e.clientX - drag.startX;
+        const levelNodes = byDepthRef.current[drag.levelIdx] || [];
+        if (levelNodes.length > 1) {
+          const slotWidth = BOX_WIDTH + NODE_GAP;
+          const delta = Math.round(finalDx / slotWidth);
+          const newIdx = Math.max(0, Math.min(drag.nodeIdx + delta, levelNodes.length - 1));
+          if (newIdx !== drag.nodeIdx) {
+            setLocalTree((prev) => reorderChildrenInTree(prev, drag.nodeId, newIdx));
+          }
+        }
+        setReorder(null);
+      }
+
+      dragStartRef.current = null;
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+      dragStartRef.current = null;
+    };
+  }, [reorder]);
+
+  const handleBoxMouseDown = useCallback(
+    (e: React.MouseEvent, node: LayoutNode, levelIdx: number, nodeIdx: number) => {
+      // Right-click: don't track for drag
+      if (e.button !== 0) return;
+
+      // Only track if left mouse button and not in connection mode
+      if (connection) return;
+
+      dragStartRef.current = {
+        nodeId: node.id,
+        levelIdx,
+        nodeIdx,
+        startX: e.clientX,
+        startY: e.clientY,
+        transformAtStart: { ...transformState },
+      };
+      // Do NOT stopPropagation — let pan also get mousedown
+    },
+    [connection, transformState],
+  );
+
   const { levels, totalHeight, flat, maxDepth, byDepth, nodeMap } = useMemo(() => {
     const flat: LayoutNode[] = [];
-    flattenTree(tree, 0, null, flat);
+    flattenTree(localTree, 0, null, flat);
 
-    // Rebuild parent→children relationships (flattenTree pushes all nodes into flat,
-    // so children arrays are empty — rebuild via parentId lookup)
+    // Rebuild parent→children relationships
     const nodeMap = new Map<string, LayoutNode>();
     flat.forEach((n) => nodeMap.set(n.id, n));
     flat.forEach((n) => {
@@ -423,15 +582,40 @@ export default function HierarchyChart({
       maxDepth = Math.max(maxDepth, n.depth);
     });
 
-    // Compute positions
+    // Compute positions with reorder offset
     const levels: LayoutNode[][] = [];
     for (let d = 0; d <= maxDepth; d++) {
       const nodes = byDepth[d] || [];
+      const isReorderLevel = reorder && d === reorder.levelIndex;
       const totalWidth = nodes.length * BOX_WIDTH + (nodes.length - 1) * NODE_GAP;
       const startX = Math.max(0, (containerWidth - totalWidth) / 2);
 
       nodes.forEach((n, i) => {
-        n.x = startX + i * (BOX_WIDTH + NODE_GAP);
+        let baseX = startX + i * (BOX_WIDTH + NODE_GAP);
+
+        if (isReorderLevel && reorder) {
+          // Shift nodes based on reorder offset
+          const slotWidth = BOX_WIDTH + NODE_GAP;
+          const targetDelta = Math.round(reorder.offsetX / slotWidth);
+          const targetIdx = Math.max(0, Math.min(reorder.fromIndex + targetDelta, nodes.length - 1));
+
+          if (i === reorder.fromIndex) {
+            // Dragged node: move by offset
+            baseX += reorder.offsetX;
+          } else if (targetIdx > reorder.fromIndex) {
+            // Nodes between fromIndex+1 and targetIdx shift left
+            if (i > reorder.fromIndex && i <= targetIdx) {
+              baseX -= BOX_WIDTH + NODE_GAP;
+            }
+          } else if (targetIdx < reorder.fromIndex) {
+            // Nodes between targetIdx and fromIndex-1 shift right
+            if (i >= targetIdx && i < reorder.fromIndex) {
+              baseX += BOX_WIDTH + NODE_GAP;
+            }
+          }
+        }
+
+        n.x = baseX;
         n.y = d * (BOX_HEIGHT + LEVEL_GAP);
         n.width = BOX_WIDTH;
         n.height = BOX_HEIGHT;
@@ -442,7 +626,10 @@ export default function HierarchyChart({
 
     const totalHeight = (maxDepth + 1) * (BOX_HEIGHT + LEVEL_GAP) - LEVEL_GAP + 120;
     return { levels, totalHeight, flat, maxDepth, byDepth, nodeMap };
-  }, [tree, containerWidth]);
+  }, [localTree, containerWidth, reorder]);
+
+  // Keep byDepth ref in sync for the drag mouseup handler
+  useEffect(() => { byDepthRef.current = byDepth; }, [byDepth]);
 
   const handleContextMenu = useCallback((e: React.MouseEvent, node: TreeNode) => {
     e.preventDefault();
@@ -461,8 +648,6 @@ export default function HierarchyChart({
   // Connection handlers
   const startConnection = useCallback(
     (e: React.MouseEvent, nodeId: string, direction: 'top' | 'bottom') => {
-      e.stopPropagation();
-      e.preventDefault();
       const node = nodeMap.get(nodeId);
       if (!node) return;
       closeContextMenu();
@@ -500,7 +685,7 @@ export default function HierarchyChart({
           const detail = await res.json().catch(() => ({}));
           console.error('Edge creation failed:', detail);
         }
-      } catch (err) {
+      } catch (err: unknown) {
         console.error('Edge creation error:', err);
       }
       setConnection(null);
@@ -540,14 +725,15 @@ export default function HierarchyChart({
 
   // Filtered object kinds for submenu (from dynamic types)
   const filteredKinds = useMemo(() => {
-    if (!kindSearch.trim()) return types.map(t => t.objectKind);
+    if (!kindSearch.trim()) return types.map((t) => t.objectKind);
     const q = kindSearch.toLowerCase();
     return types
-      .filter(t =>
-        t.objectKind.toLowerCase().includes(q) ||
-        t.label.toLowerCase().includes(q),
+      .filter(
+        (t) =>
+          t.objectKind.toLowerCase().includes(q) ||
+          t.label.toLowerCase().includes(q),
       )
-      .map(t => t.objectKind);
+      .map((t) => t.objectKind);
   }, [kindSearch, types]);
 
   const openCreateModal = (kind: string) => {
@@ -558,6 +744,50 @@ export default function HierarchyChart({
     });
     closeContextMenu();
   };
+
+  // ──────── Loading / Empty states ────────
+  if (typesLoading) {
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', background: C.bg }}>
+        <div style={{ color: C.muted, fontSize: 14, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8 }}>
+          <div style={{
+            width: 24, height: 24,
+            border: `2px solid ${C.border}`,
+            borderTopColor: C.accent,
+            borderRadius: '50%',
+            animation: 'spin 0.8s linear infinite',
+          }} />
+          <span>Loading ontology types...</span>
+        </div>
+        <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+      </div>
+    );
+  }
+
+  if (tree.length === 0) {
+    return (
+      <div
+        ref={containerRef}
+        style={{
+          width: '100%',
+          height: '100%',
+          background: C.bg,
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: 12,
+        }}
+      >
+        <div style={{ color: C.muted, fontSize: 14 }}>
+          No objects to display. Right-click on the canvas to create one.
+        </div>
+        <div style={{ color: C.muted, fontSize: 12, opacity: 0.6 }}>
+          Use the context menu or the <strong style={{ color: C.accent }}>+ New</strong> button in the header.
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div
@@ -577,6 +807,7 @@ export default function HierarchyChart({
       }}
     >
       <TransformWrapper
+        ref={transformRef}
         initialScale={1}
         minScale={0.15}
         maxScale={3}
@@ -605,11 +836,13 @@ export default function HierarchyChart({
             hoveredNodeId={hoveredNodeId}
             kindColors={kindColors}
             kindLabels={kindLabels}
+            reorder={reorder}
             onSelect={onSelect}
             onContextMenu={handleContextMenu}
             onStartConnection={startConnection}
             onCanvasClickForConnection={handleCanvasClickForConnection}
             onHoverNode={setHoveredNodeId}
+            onBoxMouseDown={handleBoxMouseDown}
             lines={lines}
           />
         </TransformComponent>
@@ -746,7 +979,7 @@ export default function HierarchyChart({
                   {/* Object types list */}
                   {filteredKinds.length === 0 ? (
                     <div style={{ padding: '8px 14px', color: C.muted, fontSize: 11 }}>
-                      No types match "{kindSearch}"
+                      No types match &quot;{kindSearch}&quot;
                     </div>
                   ) : (
                     filteredKinds.map((kind) => (
@@ -893,7 +1126,7 @@ function CreateDialog({
         throw new Error(detail?.detail?.error || detail?.error || `HTTP ${res.status}`);
       }
       onClose();
-    } catch (err: any) {
+    } catch (err: unknown) {
       setError(err.message || 'Create failed');
     } finally {
       setSubmitting(false);
