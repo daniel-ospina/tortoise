@@ -16,7 +16,7 @@ import tempfile
 from pathlib import Path
 
 # Ensure Tortoise + client are importable
-_TORTOISE_ROOT = Path(__file__).resolve().parent.parent.parent / "eldato-epistemic" / "tortoise"
+_TORTOISE_ROOT = Path(__file__).resolve().parent
 if str(_TORTOISE_ROOT) not in sys.path:
     sys.path.insert(0, str(_TORTOISE_ROOT))
 
