@@ -237,8 +237,10 @@ function ChartContent({
                 <>
                   <div
                     onClick={(e) => {
-                      e.stopPropagation();
-                      onStartConnection(e, node.id, 'top');
+                      if (!connection) {
+                        e.stopPropagation();
+                        onStartConnection(e, node.id, 'top');
+                      }
                     }}
                     style={{
                       position: 'absolute',
@@ -266,8 +268,10 @@ function ChartContent({
                   </div>
                   <div
                     onClick={(e) => {
-                      e.stopPropagation();
-                      onStartConnection(e, node.id, 'bottom');
+                      if (!connection) {
+                        e.stopPropagation();
+                        onStartConnection(e, node.id, 'bottom');
+                      }
                     }}
                     style={{
                       position: 'absolute',
@@ -450,9 +454,8 @@ export default function HierarchyChart({
       const dx = e.clientX - dragStartRef.current.startX;
       const dy = e.clientY - dragStartRef.current.startY;
       const dist = Math.sqrt(dx * dx + dy * dy);
-      if (dist > DRAG_THRESHOLD && Math.abs(dx) > Math.abs(dy) * 1.2) {
+      if (dist > DRAG_THRESHOLD && Math.abs(dx) > Math.abs(dy) * 1.5) {
         if (!reorder) {
-          transformRef.current?.resetTransform();
           setReorder({ nodeId: dragStartRef.current.nodeId, levelIndex: dragStartRef.current.levelIdx, fromIndex: dragStartRef.current.nodeIdx, offsetX: dx });
         } else {
           setReorder((prev) => (prev ? { ...prev, offsetX: dx } : null));
@@ -640,7 +643,7 @@ export default function HierarchyChart({
         maxScale={3}
         centerOnInit
         wheel={{ step: 0.1 }}
-        panning={{ velocityDisabled: true }}
+        panning={{ disabled: reorder !== null, velocityDisabled: true }}
         onTransform={(_ref, state) => { setTransformState({ positionX: state.positionX, positionY: state.positionY, scale: state.scale }); }}
       >
         <TransformComponent
