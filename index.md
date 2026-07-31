@@ -23,7 +23,7 @@ updated: 2026-07-21
 
 ## Operations
 - [Backup & Restore](tortoise/backup.py)
-- [Migration Guide](scripts/) — Backfill, schema migration
+- [Graph Scripts](graph-scripts/) — Historical graph operations (pricing, migrations, audit)
 - [Multi-Tenancy](tortoise/projection/__init__.py) — graph_name isolation
 
 ## Product

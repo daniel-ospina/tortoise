@@ -31,7 +31,7 @@ def _grep(pattern: str, *dirs: str) -> list[str]:
 def test_no_propagate_shock_callers():
     """Assert: propagate_shock.calls only in deprecated definition + tests + scripts."""
     # All references to propagate_shock (the word)
-    all_refs = _grep("propagate_shock", "tortoise/", "scripts/", "validation/", "tests/")
+    all_refs = _grep("propagate_shock", "tortoise/", "graph-scripts/", "validation/", "tests/")
     filtered = [
         l for l in all_refs
         if "__pycache__" not in l and "test_bfs_audit.py" not in l and "test_e2e_extraction_ep.py" not in l
@@ -53,9 +53,9 @@ def test_no_propagate_shock_callers():
             callers["definition (deprecated)"].append(line)
         elif "/tests/" in path_part:
             callers["test_files"].append(line)
-        elif "scripts/fix_" in path_part:
+        elif "graph-scripts/fix_" in path_part:
             callers["fixup_scripts (historical)"].append(line)
-        elif "/scripts/" in path_part:
+        elif "/graph-scripts/" in path_part:
             callers["test_files"].append(line)  # test_6707_shock.py
         elif "/tortoise/" in path_part and "#" in line and "replaces" in line.lower():
             callers["comment/reference only"].append(line)
@@ -82,7 +82,7 @@ def test_no_propagate_shock_callers():
 
 def test_no_confidence_readers():
     """Assert: only EP writes n.confidence; SDK reads it (field read, not BFS-dependent)."""
-    all_refs = _grep("n\\.confidence", "tortoise/", "scripts/", "validation/", "tests/")
+    all_refs = _grep("n\\.confidence", "tortoise/", "graph-scripts/", "validation/", "tests/")
     filtered = [l for l in all_refs if "__pycache__" not in l and "test_bfs_audit.py" not in l and "test_e2e_extraction_ep.py" not in l]
 
     writers: list[str] = []       # SET n.confidence = ...
@@ -99,7 +99,7 @@ def test_no_confidence_readers():
             readers.append(line)
         elif "validation/" in path_part:
             readers.append(line)  # validation/test_docker_ep.py — EP test, not BFS
-        elif "/scripts/" in path_part:
+        elif "/graph-scripts/" in path_part:
             readers.append(line)
         elif "/tests/" in path_part:
             readers.append(line)
