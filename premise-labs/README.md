@@ -1,6 +1,6 @@
 # Premise Labs — Landing Page
 
-Single-scroll landing page for **Premise Labs**, the AI lab behind [Tortoise](https://github.com/daniel-ospina/eldato-epistemic).
+Single-scroll landing page for **Premise Labs**, the AI lab behind [Tortoise](https://github.com/daniel-ospina/premise-labs).
 
 **Live:** [premiselabs.co](https://premiselabs.co)
 
