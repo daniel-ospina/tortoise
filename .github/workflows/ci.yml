@@ -1,37 +1,13 @@
 name: CI
-# tortoise: Python CI — tests, lint, typecheck
+# Thin caller — delegates to reusable workflow in agent-infra
 # Budget: PR-only (shared Actions budget under daniel-ospina account)
 
 on:
   pull_request:
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - run: pip install -e ".[embeddings]" pytest-timeout
-      - run: python -m pytest tests/ -x --timeout=30 -q
-
-  lint:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - run: pip install ruff
-      - run: ruff check .
-
-  typecheck:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - run: pip install -e ".[embeddings]" mypy
-      - run: mypy tortoise/ --ignore-missing-imports --check-untyped-defs
+  ci:
+    uses: daniel-ospina/agent-infra/.github/workflows/python-ci.yml@main
+    with:
+      python-version: '3.11'
+    secrets: inherit
