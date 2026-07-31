@@ -128,9 +128,10 @@ def cmd_run(name: str) -> None:
             if hasattr(connector, "ingest"):
                 # Create projection and ingest
                 from tortoise.projection import FalkorProjection
-                proj = FalkorProjection(str(_PROJECT_ROOT / "tortoise.db"))
+                proj = FalkorProjection.from_uri(os.environ.get("TORTOISE_DB_URI", "docker://localhost:6379/tortoise"))
                 count = connector.ingest(proj)
                 print(f"  Ingested {count} entities into FalkorDB")
+                # Auto-dispatch: create missions + cards from ingested Objects
                 try:
                     import sys as _s
                     _s.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "operations" / "coordination"))
@@ -140,9 +141,9 @@ def cmd_run(name: str) -> None:
                     d = CoordinatorDaemon(reg)
                     missions = d.ingest_from_graph()
                     if missions:
-                        print(f"  Auto-dispatched {missions} missions")
+                        print(f"  Auto-dispatched {missions} missions into cards")
                 except Exception:
-                    pass
+                    pass  # coordinator not available — ingestion-only mode
             else:
                 print("  Connector has no ingest method — events logged only")
         else:
