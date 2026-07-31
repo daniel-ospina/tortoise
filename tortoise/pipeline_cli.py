@@ -130,6 +130,18 @@ def cmd_run(name: str) -> None:
                 proj = FalkorProjection.from_uri(os.environ.get("TORTOISE_DB_URI", "docker://localhost:6379/tortoise"))
                 count = connector.ingest(proj)
                 print(f"  Ingested {count} entities into FalkorDB")
+                # Auto-dispatch: create missions + cards from ingested Objects
+                try:
+                    import sys as _s
+                    _s.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "operations" / "coordination"))
+                    _s.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+                    from coordinator import CoordinatorDaemon
+                    from mission_registry import MissionRegistry
+                    reg = MissionRegistry()
+                    d = CoordinatorDaemon(reg)
+                    missions = d.ingest_from_graph()
+                    if missions:
+                        print(f"  Auto-dispatched {missions} missions")
             else:
                 print("  Connector has no ingest method — events logged only")
         else:
