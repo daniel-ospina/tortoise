@@ -6,7 +6,9 @@
 
 ## Overview
 
-Tortoise is not just an argumentation engine. It is an organization's **memory system** with three distinct layers that work together. Expansion packs are not "optional schemas" — they are the **primary interface** for customers. They define what state the customer tracks, and everything else connects to that state.
+Tortoise is not just an argumentation engine. It is an organization's **memory system** with five layers that work together. Expansion packs are not "optional schemas" — they are the **primary interface** for customers. They define what state the customer tracks, and everything else connects to that state.
+
+Of the five layers, Tortoise directly owns and builds three: State, Episodic, and Epistemic. The Procedural layer is acknowledged and will receive metadata support later. The Working Memory layer is explicitly out of scope — it belongs to the organization's agent orchestration layer.
 
 ## The Layers
 
@@ -52,22 +54,77 @@ The epistemic layer is **probabilistic** — these are beliefs backed by evidenc
 
 **How it connects to state:** Epistemic claims connect to state entities. "Customer segment X is declining" connects to the segment entity in the marketing pack. The CONFIDENCE from the epistemic layer enriches the state — the state says "this segment exists," and the epistemic layer says "and we are 75% confident it's declining."
 
+### 4. Procedural Layer (Processes & Workflows) — Acknowledged, Not Built Yet
+
+**Tortoise ownership:** Acknowledged. Metadata and indexing planned for later. Not built now.
+
+This is where business processes, workflows, and standard operating procedures live. It answers: "How do we do things?"
+
+**Examples:**
+- Sales pipeline stages and transitions
+- Content publishing workflow
+- Bug triage process
+- Hiring pipeline steps
+- Customer onboarding checklist
+
+**How it connects to state:** A process connects to the state entities it operates on. The "Content Publishing Workflow" connects to Content objects in the marketing pack. The "Bug Triage Process" connects to Product objects in the development pack. When an episodic event fires ("task moved to Done"), it triggers a state transition defined by the procedural layer.
+
+**What Tortoise does now:** The procedural layer exists as a concept. Processes can be documented as objects with `objectKind: workflow` or `objectKind: process`. They connect to state entities via `aboutObject` edges. No workflow engine, no automation, no process enforcement — just the knowledge that processes exist and relate to state.
+
+**What Tortoise will do later:** Metadata indexing so processes are searchable. Lifecycle tracking so the state layer can reference "this entity is currently in step 3 of the Bug Triage Process." Not a workflow engine — just enough structure to connect process knowledge to organizational state.
+
+### 5. Working Memory Layer (Agent Context & In-Progress Work) — Explicitly Out of Scope
+
+**Tortoise ownership:** None. This layer belongs to the organization's agent orchestration and data teams.
+
+This is where agents operate. It answers: "What is being worked on right now?"
+
+**Examples:**
+- Which agent is executing which workflow step?
+- What's in the agent's current context window?
+- Which tasks are in progress vs queued?
+- Session state, conversation history, immediate priorities
+
+**How it connects to Tortoise:** Agents in the working memory layer reference Tortoise entities. An agent executing a customer support workflow queries the state layer for the customer's segment, the epistemic layer for confidence about churn risk, and the procedural layer for the next step in the resolution process. Tortoise provides the memory — the agent provides the action.
+
+**Why it's out of scope:** Working memory is fast, ephemeral, and agent-specific. It's about "right now" — not about persistent organizational knowledge. The organization's data team handles this layer. Tortoise's role is to be the persistent memory that agents query and update, not to track which agent is doing what.
+
+**What Tortoise does:** Tortoise entities can be referenced from the working memory layer via their IDs. Agents can point to state objects, epistemic claims, or episodic events. But Tortoise itself does not index, store, or manage working memory state.
+
 ## How They Work Together
 
 ```
-EPISODIC LAYER                  STATE LAYER                   EPISTEMIC LAYER
-(deterministic)                 (deterministic)               (probabilistic)
-                                                              
+LAYER 5: WORKING MEMORY (agent context, in-progress work)
+         │ references Tortoise entities via ID
+         │ OUTSIDE TORTOISE DOMAIN — org data team handles this
+         ▼
+LAYER 4: PROCEDURAL (processes, workflows)
+         │ defines how state transitions happen
+         │ acknowledged now, metadata/indexing later
+         ▼
+LAYER 2: EPISODIC ──updates──→ LAYER 1: STATE ←──enriched by── LAYER 3: EPISTEMIC
+(deterministic events)         (deterministic objects)         (probabilistic beliefs)
+
 GitHub issue → updates →    Product state              ← enriched by →  Arguments, evidence
 Task complete → updates →   Team state                 ← enriched by →  Confidence scores
 Meta campaign → updates →   Marketing state            ← enriched by →  Belief about segments
 Calendar event → updates →  Event log                  ← enriched by →  Decision rationale
-                                                              
+
 OBSERVED FACTS                ORGANIZATIONAL REALITY         REASONED BELIEFS
 "this happened"               "this is our state"            "we think this is true"
 ```
 
-The state layer is the **anchor.** Episodic events update it with facts. Epistemic reasoning enriches it with beliefs. The customer's primary interface is the state — they customize their ontology (expansion packs), populate it with their organizational reality, and then the epistemic layer adds reasoning on top.
+The state layer is the **anchor.** Episodic events update it with facts. Epistemic reasoning enriches it with beliefs. Procedural knowledge defines how it changes. Working memory acts on it. The customer's primary interface is the state — they customize their ontology (expansion packs), populate it with their organizational reality, and then the epistemic layer adds reasoning on top.
+
+## Tortoise Scope Summary
+
+| Layer | Built by Tortoise? | When |
+|-------|-------------------|------|
+| 1. State | ✅ Yes | Now |
+| 2. Episodic | ✅ Yes | Now (extraction pipeline #70) |
+| 3. Epistemic | ✅ Yes | Now (EP engine, tortoise-decide) |
+| 4. Procedural | ⏳ Acknowledged | Metadata/indexing later. Connect to state now. |
+| 5. Working Memory | ❌ Out of scope | Org data team. Tortoise entities referenced by ID. |
 
 ## What This Means for Expansion Packs
 
