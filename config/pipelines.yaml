@@ -21,7 +21,7 @@ pipelines:
       class: GitHubConnector
       config:
         repo: "daniel-ospina/eldato"
-        state: all
+        state: open
         limit: 100
         limit: 100
   docs:
