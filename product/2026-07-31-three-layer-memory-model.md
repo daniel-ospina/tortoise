@@ -10,7 +10,7 @@ Tortoise is not just an argumentation engine. It is an organization's **memory s
 
 ## The Three Layers
 
-### 1. State Layer (Deterministic — Facts)
+### 1. State Layer (Deterministic — Objects)
 
 This is the customer's organizational reality. Defined by the core ontology + expansion packs. It answers: "What is the current state of the organization?"
 
@@ -30,7 +30,7 @@ External data sources that connect to the state layer and update it. This is the
 
 **Examples:**
 - GitHub issues: "Bug #452 was closed" → updates product state
-- Task management: "Sprint 14 completed" → updates team state
+- Project management: "Sprint 14 completed" → updates sprint state
 - Meta Ads: "Campaign #7 finished its run" → updates campaign lifecycle
 - Calendar: "Q3 planning meeting happened" → updates event log
 
@@ -96,8 +96,8 @@ The core ontology provides cross-domain primitives (Subject, Object, Action, Poi
 
 1. **Extraction MUST support custom ontologies.** Without it, customers can't define their own state. The extraction pipeline (#70) is blocked on expansion pack architecture (#123).
 
-2. **The state layer is the moat.** Every custom kind a customer creates is data that lives in Tortoise. Switching costs grow with state depth.
+2. **Ontology is the moat.** Every custom kind a customer creates is data that lives in Tortoise. Switching costs grow with ontology customization and data depth.
 
-3. **The epistemic layer is the differentiator.** Competitors can store state. Only Tortoise can REASON about state — confidence, contradiction, evidence quality, belief propagation through the graph.
+3. **The epistemic layer is the differentiator.** Competitors can store state and events. Only Tortoise can REASON about state — confidence, contradiction, evidence quality, belief propagation through the graph.
 
-4. **Governance becomes critical at Team tier.** When multiple people share state, you need RBAC (who can modify the schema?), kind lifecycle (who approves new kinds?), and audit (who changed what?).
+4. **Governance becomes critical at Team tier.** When multiple people share state, you need authorization (who can modify the schema?), kind lifecycle (who approves new kinds?), and audit (who changed what?). This means having a flexible system (RBAC, ReBAC, and ABAC compatible and other frameworks if needed) that can be slotted into enterprise customers too.
