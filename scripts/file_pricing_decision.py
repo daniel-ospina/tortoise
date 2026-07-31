@@ -1,7 +1,7 @@
 """File the Pro + Team pricing decision to the Tortoise graph.
 
 Run after verifying FalkorDB is up and TORTOISE_DB_URI is set:
-  cd /Users/home/eldato/eldato-epistemic
+  cd "$(dirname "$0")/.."
   python3 scripts/file_pricing_decision.py
 """
 import os, sys
