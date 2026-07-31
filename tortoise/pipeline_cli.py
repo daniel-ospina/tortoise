@@ -12,6 +12,7 @@ Config: config/pipelines.yaml (ONTOLOGY_v2.5 §1.1 entity kinds, PM domain exten
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -130,6 +131,18 @@ def cmd_run(name: str) -> None:
                 proj = FalkorProjection.from_uri(os.environ.get("TORTOISE_DB_URI", "docker://localhost:6379/tortoise"))
                 count = connector.ingest(proj)
                 print(f"  Ingested {count} entities into FalkorDB")
+                try:
+                    import sys as _s
+                    _s.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "operations" / "coordination"))
+                    from mission_registry import MissionRegistry
+                    from coordinator import CoordinatorDaemon
+                    reg = MissionRegistry()
+                    d = CoordinatorDaemon(reg)
+                    missions = d.ingest_from_graph()
+                    if missions:
+                        print(f"  Auto-dispatched {missions} missions")
+                except Exception:
+                    pass
             else:
                 print("  Connector has no ingest method — events logged only")
         else:
