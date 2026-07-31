@@ -33,6 +33,38 @@ quadrature = ["jax>=0.4"]
 [tool.setuptools.packages.find]
 include = ["tortoise*"]
 
+[tool.ruff]
+# Target Python 3.10+ — matches requires-python
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # isort
+    "N",   # pep8-naming
+    "W",   # pycodestyle warnings
+]
+ignore = [
+    "E501",  # line-too-long — handled by formatter
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+python_version = "3.10"
+strict = false
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+timeout = 30
+
 [build-system]
 requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
