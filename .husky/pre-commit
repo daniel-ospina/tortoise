@@ -1,0 +1,43 @@
+#!/usr/bin/env sh
+. "$(dirname -- "$0")/_/husky.sh"
+
+# agent-infra version gate — block commits if .agent-infra-version is behind
+AGENT_INFRA_MANIFEST="${AGENT_INFRA_PATH:-}/manifest.json"
+VERSION_FILE=".agent-infra-version"
+
+check_version() {
+  if [ -z "${AGENT_INFRA_PATH:-}" ]; then
+    echo "[agent-infra] AGENT_INFRA_PATH not set — skipping version gate"
+    return 0
+  fi
+  if [ ! -f "$AGENT_INFRA_MANIFEST" ]; then
+    echo "[agent-infra] manifest.json not found at $AGENT_INFRA_MANIFEST — skipping version gate"
+    return 0
+  fi
+  if [ ! -f "$VERSION_FILE" ]; then
+    echo "[agent-infra] .agent-infra-version not found — skipping version gate (first time?)"
+    return 0
+  fi
+
+  PINNED=$(cat "$VERSION_FILE" | tr -d '[:space:]')
+  CURRENT=$(node -e "console.log(require('$AGENT_INFRA_MANIFEST').version)" | tr -d '[:space:]')
+
+  if [ "$PINNED" != "$CURRENT" ]; then
+    echo ""
+    echo "⛔ [agent-infra] Version mismatch!"
+    echo "   Pinned (.agent-infra-version): $PINNED"
+    echo "   Current (manifest.json):       $CURRENT"
+    echo "   Run: cd $AGENT_INFRA_PATH && node bin/agent-infra.js update"
+    echo "   Or update .agent-infra-version to match."
+    echo ""
+    exit 1
+  fi
+  echo "[agent-infra] Version gate: $CURRENT ✓"
+}
+
+check_version
+
+# Only run lint-staged if this is a Node.js project (has package.json)
+if [ -f package.json ] && command -v npx >/dev/null 2>&1; then
+  npx lint-staged
+fi
