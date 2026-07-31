@@ -1,25 +1,17 @@
 import { useMemo, useState, useEffect } from 'react';
 import { C, API } from '../constants';
+import { useOntologyTypes } from '../hooks/useOntologyTypes';
 
 const BS = {background:'transparent',border:'1px solid #1a2030',color:'#c0caf5',padding:'2px 8px',borderRadius:4,cursor:'pointer',fontSize:11};
 
-const KIND_COLORS = {
-  customerSegment: '#7aa2f7',
-  jobToBeDone: '#9ece6a',
-  feature: '#bb9af7',
-  userJourney: '#e0af68',
-  workflow: '#7dcfff',
-  requirement: '#f7768e',
-};
-
 export default function DetailPanel({ sel, graph, deg, onDelete, onDeleteEdge, onClose, onDismiss, showDet, onToggleShowDet, onViewArguments }) {
+  const { colors: kindColors } = useOntologyTypes();
   const ec = useMemo(() => {
     if (!sel) return { impl:0, nand:0 };
     const r = graph.edges.filter(e => e.source===sel.id||e.target===sel.id);
     return { impl:r.filter(e=>e.type==='IMPL').length, nand:r.filter(e=>e.type==='NAND').length };
   }, [sel, graph.edges]);
 
-  const [parent, setParent] = useState(null);
   const [children, setChildren] = useState([]);
   const [loadingRel, setLoadingRel] = useState(false);
 
@@ -40,7 +32,7 @@ export default function DetailPanel({ sel, graph, deg, onDelete, onDeleteEdge, o
 
   const isObject = sel.objectKind || sel.pointKind;
   const objectKind = sel.objectKind || sel.pointKind;
-  const kindColor = KIND_COLORS[objectKind] || C.muted;
+  const kindColor = kindColors[objectKind] || C.muted;
 
   if (!showDet) {
     return (
@@ -126,7 +118,7 @@ export default function DetailPanel({ sel, graph, deg, onDelete, onDeleteEdge, o
                   display:'inline-block',margin:'2px 4px 2px 0',padding:'1px 6px',
                   background:C.surface,borderRadius:3,color:C.text,fontSize:10,
                 }}>
-                  {(c.name||c.id?.slice(0,8))} {c.objectKind && <span style={{color:KIND_COLORS[c.objectKind]||C.muted}}>[{c.objectKind}]</span>}
+                  {(c.name||c.id?.slice(0,8))} {c.objectKind && <span style={{color:kindColors[c.objectKind]||C.muted}}>[{c.objectKind}]</span>}
                 </span>
               ))}
               {children.length > 5 && <span style={{color:C.muted}}>+{children.length-5} more</span>}

@@ -25,6 +25,8 @@ interface Props {
   onEdit: (node: TreeNode) => void;
   onDelete: (node: TreeNode) => void;
   onNavigateToNode?: (id: string) => void;
+  context?: string;
+  onRefresh?: () => void;
 }
 
 type LayoutNode = TreeNode & {
@@ -401,6 +403,8 @@ export default function HierarchyChart({
   onEdit,
   onDelete,
   onNavigateToNode,
+  context = 'product-strategy',
+  onRefresh,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const wrapperElRef = useRef<HTMLDivElement | null>(null);
@@ -804,7 +808,7 @@ export default function HierarchyChart({
       )}
 
       {createModal && (
-        <CreateDialog parentId={createModal.parentId} parentName={createModal.parentName} defaultKind={createModal.kind} kindLabels={kindLabels} types={types} onClose={() => setCreateModal(null)} />
+        <CreateDialog parentId={createModal.parentId} parentName={createModal.parentName} defaultKind={createModal.kind} kindLabels={kindLabels} types={types} context={context} onRefresh={onRefresh} onClose={() => setCreateModal(null)} />
       )}
     </div>
   );
@@ -819,7 +823,7 @@ function MenuItem({ label, onClick, danger, noHover }: { label: string; onClick:
   );
 }
 
-function CreateDialog({ parentId, parentName, defaultKind, kindLabels, types, onClose }: { parentId: string | null; parentName: string; defaultKind: string; kindLabels: Record<string, string>; types: { objectKind: string; label: string }[]; onClose: () => void }) {
+function CreateDialog({ parentId, parentName, defaultKind, kindLabels, types, context, onClose, onRefresh }: { parentId: string | null; parentName: string; defaultKind: string; kindLabels: Record<string, string>; types: { objectKind: string; label: string }[]; context: string; onClose: () => void; onRefresh?: () => void; }) {
   const [name, setName] = useState('');
   const [objectKind, setObjectKind] = useState(defaultKind);
   const [content, setContent] = useState('');
@@ -831,10 +835,11 @@ function CreateDialog({ parentId, parentName, defaultKind, kindLabels, types, on
     setSubmitting(true);
     setError(null);
     try {
-      const body: Record<string, string> = { name: name.trim(), objectKind, context: 'product-strategy', content: content.trim() || name.trim() };
+      const body: Record<string, string> = { name: name.trim(), objectKind, context, content: content.trim() || name.trim() };
       if (parentId) body.parentId = parentId;
       const res = await fetch('/api/ontology-object', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       if (!res.ok) { const detail = await res.json().catch(() => ({})); throw new Error(detail?.detail?.error || detail?.error || `HTTP ${res.status}`); }
+      onRefresh?.();
       onClose();
     } catch (err: unknown) { setError(err instanceof Error ? err.message : 'Create failed'); } finally { setSubmitting(false); }
   };

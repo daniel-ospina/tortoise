@@ -1,6 +1,7 @@
 import { useState, useCallback } from 'react';
 import { Tree } from 'react-arborist';
 import { C } from '../../constants';
+import { useOntologyTypes } from '../../hooks/useOntologyTypes';
 
 interface TreeNode {
   id: string;
@@ -25,24 +26,6 @@ interface Props {
   onNavigateToNode?: (id: string) => void;
 }
 
-const KIND_COLORS: Record<string, string> = {
-  customerSegment: '#7aa2f7',
-  jobToBeDone: '#9ece6a',
-  feature: '#bb9af7',
-  userJourney: '#e0af68',
-  workflow: '#7dcfff',
-  requirement: '#f7768e',
-};
-
-const KIND_LABELS: Record<string, string> = {
-  customerSegment: 'Segment',
-  jobToBeDone: 'JTBD',
-  feature: 'Feature',
-  userJourney: 'Journey',
-  workflow: 'Workflow',
-  requirement: 'Req',
-};
-
 function confidenceTier(conf: number | null): number {
   if (conf === null || conf === undefined) return 2;
   if (conf < 0.2) return 0;
@@ -64,6 +47,8 @@ export default function TreeView({
   onDelete,
   onNavigateToNode,
 }: Props) {
+  const { colors: kindColors, labels: kindLabels } = useOntologyTypes();
+  
   const [contextMenu, setContextMenu] = useState<{
     x: number;
     y: number;
@@ -86,7 +71,7 @@ export default function TreeView({
   const NodeRenderer = useCallback(({ node, style, dragHandle }: any) => {
     const data = node.data as TreeNode;
     const tier = confidenceTier(data.confidence);
-    const kindColor = KIND_COLORS[data.objectKind] || '#565f89';
+    const kindColor = kindColors[data.objectKind] || '#565f89';
     const fontSize = FONT_SIZES[tier];
     const isDraft = data.status === 'draft';
 
@@ -120,7 +105,7 @@ export default function TreeView({
           padding: '1px 5px',
           whiteSpace: 'nowrap',
         }}>
-          {KIND_LABELS[data.objectKind] || data.objectKind || '?'}
+          {kindLabels[data.objectKind] || data.objectKind || '?'}
         </span>
         <span style={{
           flex: 1,
@@ -143,7 +128,7 @@ export default function TreeView({
         </span>
       </div>
     );
-  }, []);
+  }, [kindColors, kindLabels]);
 
   return (
     <div

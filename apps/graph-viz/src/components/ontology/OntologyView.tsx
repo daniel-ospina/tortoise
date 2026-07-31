@@ -1,8 +1,9 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { C } from '../../constants';
 import HierarchyChart from './HierarchyChart';
 import ArgumentView from './ArgumentView';
 import OntologyCrud, { type CrudAction } from './OntologyCrud';
+import { useOntologyTypes } from '../../hooks/useOntologyTypes';
 
 const CONTEXTS = ['product-strategy', 'licensing-decision', 'all'];
 
@@ -37,6 +38,7 @@ export default function OntologyView({ onNavigateToNode, initialFocusId }: { onN
   const [view, setView] = useState<'tree' | 'arguments'>('tree');
   const [argumentsNodeId, setArgumentsNodeId] = useState<string | null>(initialFocusId || null);
   const [crud, setCrud] = useState<CrudAction | null>(null);
+  const { colors: kindColors, labels: kindLabels } = useOntologyTypes();
 
   const fetchTree = useCallback(async (ctx: string) => {
     setLoading(true);
@@ -106,6 +108,23 @@ export default function OntologyView({ onNavigateToNode, initialFocusId }: { onN
       onNavigateToNode(id);
     }
   };
+
+  // Find selected node's children from the tree
+  const selectedNodeChildren = useMemo(() => {
+    if (!selectedNode) return [];
+    const findNode = (nodes: TreeNode[], targetId: string): TreeNode | null => {
+      for (const n of nodes) {
+        if (n.id === targetId) return n;
+        if (n.children?.length) {
+          const found = findNode(n.children, targetId);
+          if (found) return found;
+        }
+      }
+      return null;
+    };
+    const found = findNode(tree, selectedNode.id);
+    return found?.children || [];
+  }, [tree, selectedNode]);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: C.bg }}>
@@ -219,15 +238,219 @@ export default function OntologyView({ onNavigateToNode, initialFocusId }: { onN
         )}
 
         {!loading && !error && tree.length > 0 && view === 'tree' && (
-          <HierarchyChart
-            tree={tree}
-            selectedId={selectedNode?.id || null}
-            onSelect={handleSelect}
-            onViewArguments={handleViewArguments}
-            onEdit={handleEdit}
-            onDelete={handleDelete}
-            onNavigateToNode={navigateToNode}
-          />
+          <div style={{ display: 'flex', height: '100%' }}>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <HierarchyChart
+                tree={tree}
+                selectedId={selectedNode?.id || null}
+                onSelect={handleSelect}
+                onViewArguments={handleViewArguments}
+                onEdit={handleEdit}
+                onDelete={handleDelete}
+                onNavigateToNode={navigateToNode}
+                context={context}
+                onRefresh={() => fetchTree(context)}
+              />
+            </div>
+            {selectedNode && (
+              <div style={{
+                width: 320, minWidth: 280, maxWidth: 380,
+                borderLeft: `1px solid ${C.border}`,
+                background: C.panel,
+                overflow: 'auto',
+                display: 'flex', flexDirection: 'column',
+              }}>
+                {(() => {
+                  const sn = selectedNode;
+                  const kColor = kindColors[sn.objectKind] || C.muted;
+                  const confPct = sn.confidence != null ? Math.round(sn.confidence * 100) : null;
+                  return (
+                    <div style={{ padding: '16px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+                      {/* Header */}
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 }}>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{
+                            fontSize: 15, fontWeight: 700, color: C.text,
+                            lineHeight: 1.3, wordBreak: 'break-word', marginBottom: 6,
+                          }}>
+                            {sn.name || '(unnamed)'}
+                          </div>
+                          <span style={{
+                            fontSize: 10, fontWeight: 600, color: kColor,
+                            background: `${kColor}22`, borderRadius: 4,
+                            padding: '2px 8px', textTransform: 'uppercase',
+                            letterSpacing: 0.5,
+                          }}>
+                            {kindLabels[sn.objectKind] || sn.objectKind}
+                          </span>
+                        </div>
+                        <button
+                          onClick={() => setSelectedNode(null)}
+                          style={{
+                            background: 'transparent', border: `1px solid ${C.border}`,
+                            color: C.muted, borderRadius: 4, padding: '2px 8px',
+                            cursor: 'pointer', fontSize: 14, lineHeight: 1,
+                          }}
+                        >
+                          ×
+                        </button>
+                      </div>
+
+                      {/* Content */}
+                      {sn.content && sn.content !== sn.name && (
+                        <div style={{
+                          fontSize: 12, color: C.muted, lineHeight: 1.5,
+                          padding: '8px 10px', background: C.surface,
+                          borderRadius: 6, wordBreak: 'break-word',
+                        }}>
+                          {sn.content}
+                        </div>
+                      )}
+
+                      {/* Confidence */}
+                      <div>
+                        <div style={{ fontSize: 10, color: C.muted, marginBottom: 4, fontWeight: 500 }}>
+                          Confidence
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                          <div style={{
+                            flex: 1, height: 6, background: C.surface,
+                            borderRadius: 3, overflow: 'hidden',
+                          }}>
+                            <div style={{
+                              width: `${confPct || 0}%`, height: '100%',
+                              background: confPct != null
+                                ? confPct >= 70 ? C.impl : confPct >= 40 ? C.mit : C.nand
+                                : 'transparent',
+                              borderRadius: 3, transition: 'width 0.3s',
+                            }} />
+                          </div>
+                          <span style={{ fontSize: 12, fontWeight: 600, color: C.text, minWidth: 36, textAlign: 'right' }}>
+                            {confPct != null ? `${confPct}%` : '—'}
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Status */}
+                      <div>
+                        <div style={{ fontSize: 10, color: C.muted, marginBottom: 2, fontWeight: 500 }}>
+                          Status
+                        </div>
+                        <span style={{
+                          fontSize: 11, color: sn.status === 'draft' ? C.mit : C.impl,
+                          fontStyle: sn.status === 'draft' ? 'italic' : 'normal',
+                        }}>
+                          {sn.status || 'active'}
+                        </span>
+                      </div>
+
+                      {/* Calibrated */}
+                      {sn.lastCalibratedAt && (
+                        <div>
+                          <div style={{ fontSize: 10, color: C.muted, marginBottom: 2, fontWeight: 500 }}>
+                            Last Calibrated
+                          </div>
+                          <span style={{ fontSize: 11, color: C.text }}>
+                            {new Date(sn.lastCalibratedAt).toLocaleString()}
+                          </span>
+                        </div>
+                      )}
+
+                      {/* ID */}
+                      <div>
+                        <div style={{ fontSize: 10, color: C.muted, marginBottom: 2, fontWeight: 500 }}>
+                          ID
+                        </div>
+                        <code style={{
+                          fontSize: 10, color: C.muted, background: C.surface,
+                          padding: '2px 6px', borderRadius: 3, wordBreak: 'break-all',
+                        }}>
+                          {sn.id}
+                        </code>
+                      </div>
+
+                      {/* Children */}
+                      {selectedNodeChildren.length > 0 && (
+                        <div>
+                          <div style={{ fontSize: 10, color: C.muted, marginBottom: 4, fontWeight: 500 }}>
+                            Children ({selectedNodeChildren.length})
+                          </div>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+                            {selectedNodeChildren.map((child) => {
+                              const childColor = kindColors[child.objectKind] || C.muted;
+                              return (
+                                <div
+                                  key={child.id}
+                                  onClick={() => setSelectedNode(child)}
+                                  style={{
+                                    display: 'flex', alignItems: 'center', gap: 6,
+                                    padding: '4px 8px', background: C.surface,
+                                    borderRadius: 4, cursor: 'pointer',
+                                    fontSize: 11, color: C.text,
+                                  }}
+                                  title={child.content || child.name}
+                                >
+                                  <span style={{
+                                    width: 6, height: 6, borderRadius: '50%',
+                                    background: childColor, flexShrink: 0,
+                                  }} />
+                                  <span style={{
+                                    flex: 1, overflow: 'hidden',
+                                    textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                                  }}>
+                                    {child.name || '(unnamed)'}
+                                  </span>
+                                  <span style={{ fontSize: 9, color: childColor, fontWeight: 600 }}>
+                                    {kindLabels[child.objectKind] || child.objectKind}
+                                  </span>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Action buttons */}
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 'auto', paddingTop: 8, borderTop: `1px solid ${C.border}` }}>
+                        <button
+                          onClick={() => handleViewArguments(sn.id)}
+                          style={{
+                            width: '100%', background: C.accent, border: 'none',
+                            color: '#fff', borderRadius: 6, padding: '8px 12px',
+                            cursor: 'pointer', fontSize: 12, fontWeight: 600,
+                          }}
+                        >
+                          View Arguments
+                        </button>
+                        <button
+                          onClick={() => handleEdit(sn)}
+                          style={{
+                            width: '100%', background: 'transparent',
+                            border: `1px solid ${C.border}`, color: C.text,
+                            borderRadius: 6, padding: '8px 12px',
+                            cursor: 'pointer', fontSize: 12, fontWeight: 500,
+                          }}
+                        >
+                          Edit
+                        </button>
+                        <button
+                          onClick={() => handleDelete(sn)}
+                          style={{
+                            width: '100%', background: 'transparent',
+                            border: `1px solid ${C.nand}`, color: C.nand,
+                            borderRadius: 6, padding: '8px 12px',
+                            cursor: 'pointer', fontSize: 12, fontWeight: 500,
+                          }}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
+            )}
+          </div>
         )}
 
         {!loading && !error && view === 'arguments' && argumentsNodeId && (
