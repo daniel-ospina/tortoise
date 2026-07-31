@@ -1,6 +1,6 @@
 # Premise Labs — Landing Page
 
-Single-scroll landing page for **Premise Labs**, the AI lab behind [Tortoise](https://github.com/daniel-ospina/premise-labs).
+Single-scroll landing page for **Premise Labs**, the AI lab behind [Tortoise](https://github.com/daniel-ospina/tortoise).
 
 **Live:** [premiselabs.co](https://premiselabs.co)
 

@@ -1,87 +1,55 @@
 ---
-title: "Tortoise — Semantic + Epistemic + Episodic + Procedural Graph Engine"
+title: "Premise Labs — AI Lab"
 type: readme
-domain: 
+domain:
 status: seedling
 tags: []
 summary: ""
 created: 2026-07-24
-updated: 2026-07-24
+updated: 2026-07-30
 ---
 
-# Tortoise — Semantic + Epistemic + Episodic + Procedural Graph Engine
+# Premise Labs
 
-Multi-ontology graph engine for agent memory. FalkorDB-backed, multi-tenant, with connector system (GitHub, Linear, Slack), and belief propagation via Expectation Propagation (EP).
+An AI lab building the premises intelligence stands on.
 
-**What Tortoise does:**
-- Extracts claims (Points) from documents and conversations
-- Models belief relationships (IMPL/NAND) with shock propagation
-- Tracks provenance chains (Point → Source → Entity) across connectors
-- Ingests external data (GitHub, Linear, Slack) as Events per ONTOLOGY_v2.5
-- Governs entity ownership (spin-off, access control, audit)
-- Exposes graph operations via SDK, MCP server, and agent tools
-- Multi-tenant: 10K+ isolated graphs via `graph_name`
+**What's here:**
+- Strategy docs, internal processes, research, and financial models
+- The [premise-labs landing page](premise-labs/index.html) (deployed at [premiselabs.co](https://premiselabs.co))
+- Tortoise knowledge graph engine lives in the [tortoise](https://github.com/daniel-ospina/tortoise) repo (public, BSL 1.1)
 
 **What lives elsewhere:**
-- Coordination infrastructure (cards, Kanban boards, agent workflows, dashboards)
-  lives in `eldato/operations/coordination/` — owned by the Organisation Design Team.
-- Canonical ontology (`ONTOLOGY_v2.5.md`) lives in `eldato/docs/teams/`.
-- Tortoise is the memory engine — it stores and queries knowledge. It does not
-  coordinate agents.
+- **Tortoise SDK & MCP server** → [tortoise](https://github.com/daniel-ospina/tortoise) repo (Business Source License 1.1)
+- **Canonical ontology** (`ONTOLOGY_v2.5.md`) → [eldato/docs/teams/](https://github.com/daniel-ospina/eldato/blob/main/docs/teams/organisation-design-team/domains%20(S1)/data/ONTOLOGY_v2.5.md)
+- **Coordination infrastructure** → `eldato/operations/coordination/` (Organisation Design Team)
+- **Agent infrastructure** → [agent-infra](https://github.com/daniel-ospina/agent-infra) — Pi extensions, skills, scripts
 
-**Four ontologies in one graph:**
-| Layer | What it models | Examples |
-|-------|---------------|---------|
-| Semantic | What exists | Subject, Object, Document |
-| Epistemic | What we believe | Point, IMPL, NAND, confidence |
-| Episodic | What happened | Event, instantiates, participatesIn |
-| Procedural | How work flows | Action, performs, produces, dependsOn |
-
-## Architecture
+## Structure
 
 ```
-Connectors (GitHub/Linear/Slack)
-  → JSONL Event Log (append-only source of truth)
-    → Projection (rebuildable current state)
-      → FalkorDB Graph
-        → SDK (Python API)
-          → MCP Server (agent tools)
+premise-labs/
+├── premise-labs/     → Landing page (single-scroll HTML, deploys to Cloudflare Pages)
+├── docs/             → Internal strategy, research, legal docs
+├── data/             → Data index and entity catalog
+├── LICENSE           → Business Source License 1.1
+├── AGENTS.md         → Agent instructions for this repo
+└── CLAUDE.md         → Claude Code project instructions
 ```
 
-## Ontology
+## Quick Links
 
-Canonical entity model: [ONTOLOGY v2.5](https://github.com/daniel-ospina/eldato/blob/main/docs/teams/organisation-design-team/domains%20(S1)/data/ONTOLOGY_v2.5.md)
-— 7 entity types, 22 edge types, full PROV-O/DC/schema.org alignment.
-
-## Documentation
-
-See [index.md](index.md) for architecture, API, connectors, and operations.
-
-## Quick Start
-
-```bash
-# 1. Set up environment
-cp .env.example .env
-# Edit .env if your FalkorDB password/host differs
-
-# 2. Start FalkorDB (Docker required)
-docker compose -f ../eldato/operations/memory/docker-compose.yml up -d
-
-# 3. Install and initialize
-pip install -e .
-export $(cat .env | xargs)  # load env vars
-python -m tortoise init     # auto-detects Docker, creates welcome Point
-```
-
-See [.env.example](.env.example) for all available environment variables.
+- [premiselabs.co](https://premiselabs.co) — Public landing page
+- [Tortoise](https://github.com/daniel-ospina/tortoise) — Knowledge graph engine (public repo)
+- [Agent Infrastructure](https://github.com/daniel-ospina/agent-infra) — Shared agent tooling
+- [ONTOLOGY v2.5](https://github.com/daniel-ospina/eldato/blob/main/docs/teams/organisation-design-team/domains%20(S1)/data/ONTOLOGY_v2.5.md) — Canonical entity model
 
 ## License
 
-AGPLv3 + CLA (Apache 2.0 re-license available)
+Business Source License 1.1 — see [LICENSE](LICENSE)
 
 ## Related Repositories
-- [eldato](https://github.com/daniel-ospina/eldato) — Main app + canonical [ONTOLOGY v2.5](https://github.com/daniel-ospina/eldato/blob/main/docs/teams/organisation-design-team/domains%20(S1)/data/ONTOLOGY_v2.5.md)
+- [tortoise](https://github.com/daniel-ospina/tortoise) — Knowledge graph engine (public, BSL 1.1)
+- [agent-infra](https://github.com/daniel-ospina/agent-infra) — Shared agent infrastructure
+- [eldato](https://github.com/daniel-ospina/eldato) — El Dato main app + canonical ontology
 - [eldato-outreach](https://github.com/daniel-ospina/eldato-outreach) — B2B WhatsApp outreach
-- [dmer](https://github.com/daniel-ospina/dmer) — Instagram DM daemon
 - [org-data](https://github.com/daniel-ospina/org-data) — Org data (Supabase → Tortoise)
-- [premiselabs.co](https://premiselabs.co) — Landing page ([source](premise-labs/index.html))

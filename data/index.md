@@ -1,11 +1,11 @@
 ---
-title: "eldato-epistemic — data"
+title: "premise-labs — data"
 type: index
 domain: data
 status: placeholder
 created: 2026-07-22
 ---
 
-# eldato-epistemic — data
+# premise-labs — data
 
 > This is a placeholder index. Add domain-specific documentation here.
