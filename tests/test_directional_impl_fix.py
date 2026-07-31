@@ -15,8 +15,9 @@ from __future__ import annotations
 import os
 import sys
 import uuid
+from pathlib import Path
 
-sys.path.insert(0, "/Users/home/eldato/eldato-epistemic")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ["TORTOISE_DB_URI"] = "docker://:falkordb@localhost:6379/tortoise"
 
 from tortoise.sdk import TortoiseSDK

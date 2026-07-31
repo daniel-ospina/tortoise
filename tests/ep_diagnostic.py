@@ -8,7 +8,8 @@ so aggressively that 2 × 0.631 < 1 × 1.0 effective coupling.
 
 import os
 import sys
-sys.path.insert(0, "/Users/home/eldato/eldato-epistemic")
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ["TORTOISE_DB_URI"] = "docker://:falkordb@localhost:6379/tortoise"
 
 from tortoise.sdk import TortoiseSDK
