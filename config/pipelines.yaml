@@ -20,9 +20,8 @@ pipelines:
       module: tortoise.connectors.github
       class: GitHubConnector
       config:
-        repo: "daniel-ospina/eldato"
+        repo: daniel-ospina/eldato
         state: open
-        limit: 100
         limit: 100
   docs:
     enabled: false
@@ -33,3 +32,24 @@ pipelines:
     entity_mapping:
       path_to_team: {}
       path_to_domain: {}
+  org_data_issues:
+    enabled: true
+    source: github
+    sourceKind: github_issue
+    trigger: manual
+    entity_mapping:
+      repo_to_team: {}
+      label_to_team: {}
+      user_to_role: {}
+    entity_kinds:
+      issue_object: pm:issue
+      pr_object: pm:card
+      created_event: pm:cardCreated
+      completed_event: pm:cardCompleted
+    connector:
+      module: tortoise.connectors.github
+      class: GitHubConnector
+      config:
+        repo: daniel-ospina/org-data
+        state: open
+        limit: 100

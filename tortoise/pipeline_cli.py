@@ -128,7 +128,7 @@ def cmd_run(name: str) -> None:
             if hasattr(connector, "ingest"):
                 # Create projection and ingest
                 from tortoise.projection import FalkorProjection
-                proj = FalkorProjection.from_uri(os.environ.get("TORTOISE_DB_URI", "docker://localhost:6379/tortoise"))
+                proj = FalkorProjection(str(_PROJECT_ROOT / "tortoise.db"))
                 count = connector.ingest(proj)
                 print(f"  Ingested {count} entities into FalkorDB")
                 # Auto-dispatch: create missions + cards from ingested Objects
