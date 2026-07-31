@@ -1,3 +1,12 @@
+---
+title: "Backend: 7 Ontology Endpoints + Cypher Security Hardening — Implementation Plan"
+type: plan
+domain: capability
+doc_status: draft
+created: 2026-07-30
+subjects.team: organisation-design-team
+---
+
 <!-- research-path: none — zero new deps -->
 
 # Backend: 7 Ontology Endpoints + Cypher Security Hardening — Implementation Plan

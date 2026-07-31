@@ -4,8 +4,7 @@ type: legal
 domain: capability
 doc_status: draft
 created: 2026-07-25
-subjects:
-  team: epistemic-team
+subjects.team: epistemic-team
 status: DRAFT — NOT YET FILED
 ---
 

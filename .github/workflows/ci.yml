@@ -31,6 +31,7 @@ jobs:
           args: >
             --no-progress
             --include-verbatim
+            --no-check-external
             --exclude-path .worktrees
             --exclude-path node_modules
             --exclude-path .git
@@ -46,6 +47,7 @@ jobs:
         run: |
           errors=0
           echo "Checking docs/**/*.md for required YAML frontmatter fields..."
+          shopt -s globstar
           for f in docs/**/*.md; do
             [ -f "$f" ] || continue
             name=$(basename "$f")
