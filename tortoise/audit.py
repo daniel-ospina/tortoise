@@ -50,21 +50,38 @@ def audit_graph(proj, context: str | list[str]) -> AuditResult:
         clauses = " OR ".join(f'{alias}.context CONTAINS "{c}"' for c in contexts)
         return f"({clauses})" if clauses else "TRUE"
 
+    def _op_in_context(alias: str = "op", tgt_alias: str = "tgt") -> str:
+        """Context WHERE for operators — matches by own context (post-#130)
+        OR by target point's context (pre-#130 compat).
+
+        Caller MUST have a MATCH for the target: (op)-[:IMPL|NAND]->(tgt:Point).
+        The target alias must match tgt_alias.
+        """
+        own = _ctx_w(alias)
+        clauses = " OR ".join(f'{tgt_alias}.context CONTAINS "{c}"' for c in contexts)
+        target = f"({clauses})" if clauses else "FALSE"
+        return f"({own} OR {target})" if own != "TRUE" else "TRUE"
+
     issues: list[AuditIssue] = []
 
     # ── 0. Count nodes/edges in scope ──────────────────────────────
     r = proj.g.query(f"MATCH (n:Point) WHERE {_ctx_w('n')} RETURN count(n)")
     node_count = r.result_set[0][0] if r.result_set else 0
 
-    r = proj.g.query(f"MATCH (n:Point) WHERE {_ctx_w('n')} OPTIONAL MATCH (n)-[e]->() RETURN count(e)")
+    # Count edges TO context-scoped points (correct traversal: operator -> point)
+    r = proj.g.query(
+        f"MATCH (n:Point) WHERE {_ctx_w('n')} "
+        f"OPTIONAL MATCH (op:Point)-[e:IMPL|NAND]->(n) RETURN count(e)"
+    )
     edge_count = r.result_set[0][0] if r.result_set else 0
 
     # ── 1a. missing_sourceKind via operators (medium) ──────────────
-    # Operators in scope connecting to evidence without source tier
+    # Operators in scope connecting to evidence without source tier.
+    # Match operators by own context (post-#130) OR target context (pre-#130 compat).
     r = proj.g.query(
-        f"MATCH (op:Point {{is_operator: true}}) WHERE {_ctx_w('op')}\n"
-        "MATCH (op)-[:IMPL|NAND]->(ev:Point)\n"
-        "WHERE ev.sourceKind IS NULL AND (ev.is_operator IS NULL OR ev.is_operator = false)\n"
+        f"MATCH (op:Point {{is_operator: true}})-[:IMPL|NAND]->(ev:Point)\n"
+        f"WHERE {_op_in_context('op', 'ev')}\n"
+        "AND ev.sourceKind IS NULL AND (ev.is_operator IS NULL OR ev.is_operator = false)\n"
         "RETURN DISTINCT op.id, ev.id, ev.content LIMIT 50"
     )
     for row in r.result_set:
@@ -131,10 +148,11 @@ def audit_graph(proj, context: str | list[str]) -> AuditResult:
     contradiction_keywords = ["not ", "fail", "cannot", "no ", "never", "impossible", "contradict"]
     seen_impl_nand = set()
     for kw in contradiction_keywords:
+        # Match by source context OR by target context (operators may lack context pre-#130)
         r = proj.g.query(
-            f"MATCH (src:Point) WHERE {_ctx_w('src')}\n"
-            f"MATCH (src)-[e:IMPL]->(tgt:Point)\n"
-            f"WHERE toLower(tgt.content) CONTAINS '{kw}' AND tgt.is_operator IS NULL\n"
+            f"MATCH (src:Point)-[e:IMPL]->(tgt:Point)\n"
+            f"WHERE {_op_in_context('src', 'tgt')}\n"
+            f"AND toLower(tgt.content) CONTAINS '{kw}' AND tgt.is_operator IS NULL\n"
             "RETURN src.id, tgt.id, tgt.content LIMIT 20"
         )
         for row in r.result_set:
@@ -152,8 +170,8 @@ def audit_graph(proj, context: str | list[str]) -> AuditResult:
 
     # ── 6. mitigation_recommended (medium) ──────────────────────
     r = proj.g.query(
-        f"MATCH (op:Point {{is_operator: true}}) WHERE {_ctx_w('op')} AND op.confidence <= 0.35\n"
-        "MATCH (op)-[:IMPL|NAND]->(tgt:Point)\n"
+        f"MATCH (op:Point {{is_operator: true}})-[:IMPL|NAND]->(tgt:Point)\n"
+        f"WHERE {_op_in_context('op', 'tgt')} AND op.confidence <= 0.35\n"
         "OPTIONAL MATCH (tgt)<-[mit:mitigates]-(:Point)\n"
         "WITH op, tgt, mit WHERE mit IS NULL\n"
         "RETURN DISTINCT op.id, op.confidence, tgt.content LIMIT 50"

@@ -222,19 +222,21 @@ def tortoise_update_point(id: str, props: Any) -> dict:
     return _safe(sdk.update_point, id, **(props or {}))
 
 @mcp.tool()
-def tortoise_create_operator(op_type: str, source_id: str, target_ids: Any) -> dict:
+def tortoise_create_operator(op_type: str, source_id: str, target_ids: Any,
+                              context: str = "sdk") -> dict:
     """Create an operator connecting Points.
     
     op_type: 'IMPL' (A supports B), 'NAND' (A contradicts B),
              'composedOf'/'decomposesInto'/'contains'/'wraps' → hasPart.
     source_id: source/parent Point ID.
     target_ids: target/child Point IDs (1 for IMPL/NAND, N for part/whole).
+    context: domain context for the operator (default: 'sdk').
 
     → See /skill:tortoise-graph-reasoning for proper usage:
       annotation, mitigation, NAND constraints, veracity vs implication.
     """
     target_ids = _parse(target_ids)
-    return _safe(sdk.create_operator, op_type, source_id, target_ids)
+    return _safe(sdk.create_operator, op_type, source_id, target_ids, context=context)
 
 
 @mcp.tool()
@@ -269,6 +271,27 @@ def tortoise_mitigate_operator(id: str, reason: str, strength: float = 0.5) -> d
     Idempotent — second call updates existing mitigation.
     """
     return _safe(sdk.mitigate_operator, id, reason, strength)
+
+
+@mcp.tool()
+def tortoise_file_decision(options: Any, evidence: Any,
+                           choice: int, context: str) -> dict:
+    """File a simple decision directly to the graph.
+
+    Creates decision + options + evidence + IMPL edges atomically.
+    For low-stakes decisions where the answer is clear — no EP,
+    no calibration, no research cycles. Under 5 graph operations.
+
+    options: list of option descriptions (e.g. ["JSON", "YAML", "TOML"])
+    evidence: list of evidence statements supporting the choice
+    choice: 0-indexed option index (e.g. 0 = JSON)
+    context: domain context for the decision
+
+    Returns {decision_id, option_ids: [...], evidence_ids: [...]}.
+    """
+    options = _parse(options)
+    evidence = _parse(evidence)
+    return _safe(sdk.file_decision, options, evidence, choice, context)
 
 
 @mcp.tool()

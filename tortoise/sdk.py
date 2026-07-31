@@ -17,6 +17,8 @@ from .projection import FalkorProjection
 # P0 Group 3: register custom kinds for diary + checkpoint
 register_kind("diary")
 register_kind("checkpoint-item")
+register_kind("option")    # used by file_decision (#133)
+register_kind("evidence")  # used by file_decision (#133)
 
 # Valid status values for Point nodes (used by update_point status validation)
 POINT_STATUS_VALUES = frozenset({'live', 'draft', 'outdated', 'archived'})
@@ -104,10 +106,12 @@ class TortoiseSDK:
             props["content_hash"] = ch
 
         pid = ulid()
+        # Points enter as draft, go live when first edge is created (#131)
+        status = props.pop("status", "draft")
         proj.g.query(
             "CREATE (n:Point {id:$id, content:$c, pointKind:$k, "
-            "is_operator:false, createdAt:$now, updatedAt:$now})",
-            params={"id": pid, "c": content, "k": kind, "now": now},
+            "is_operator:false, status:$st, createdAt:$now, updatedAt:$now})",
+            params={"id": pid, "c": content, "k": kind, "st": status, "now": now},
         )
         for key, val in props.items():
             proj.g.query(
@@ -212,29 +216,50 @@ class TortoiseSDK:
 
     # ── Operators ─────────────────────────────────────────────────
 
-    def create_operator(self, op_type: str, source_id: str, target_ids: list[str]) -> dict:
-        """Create an operator Point. Edges follow projection convention:
-        operator -(op_type)-> inputs. Ontology v2.1: INPUT edges removed,
-        part/whole types (composedOf/decomposesInto/contains) → hasPart."""
+    def create_operator(self, op_type: str, source_id: str, target_ids: list[str],
+                        *, context: str = "sdk") -> dict:
+        """Create an operator Point via the projection's event-sourced path.
+
+        Routes through projection.apply() so operators get the full schema
+        (context, createdAt, content, etc.) — not just id/is_operator/op_type.
+        Uses MERGE for edges (not CREATE) so source/target stubs are
+        auto-created rather than silently failing (#130).
+
+        Ontology v2.1: part/whole types (composedOf/decomposesInto/contains)
+        → hasPart edge. Edge creation is handled by projection._create_edges.
+        """
         if op_type not in ("IMPL", "NAND", "composedOf", "decomposesInto", "contains", "wraps"):
             raise ValueError(
                 f"op_type must be 'IMPL', 'NAND', or a part/whole type, got {op_type!r}"
             )
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
         pid = ulid()
         inputs = [source_id] + list(target_ids)
         proj = self._get_proj()
+
+        # Build event dict and route through projection for full schema (#130)
+        event = {
+            "type": "OperatorAdded",
+            "point": {
+                "id": pid,
+                "content": f"{op_type}: {source_id} -> {target_ids}",
+                "context": context,
+                "pointKind": "operator",
+                "operator": {"op_type": op_type, "inputs": inputs},
+                "status": "live",
+                "createdAt": now,
+                "updatedAt": now,
+            },
+        }
+        proj.apply(event)
+        # Create edges — MERGE avoids silent failures on missing source/target
+        proj._create_edges(event["point"])
+        # Mark source point as live now that it has its first edge (#131)
         proj.g.query(
-            "CREATE (o:Point {id:$id, is_operator:true, op_type:$op})",
-            params={"id": pid, "op": op_type},
+            "MATCH (s:Point {id:$sid}) SET s.status = 'live'",
+            params={"sid": source_id},
         )
-        # Ontology v2.1: map part/whole ops to hasPart, remove INPUT edges
-        edge_type = "hasPart" if op_type not in ("IMPL", "NAND") else op_type
-        for i, inp_id in enumerate(inputs):
-            proj.g.query(
-                f"MATCH (o:Point {{id:$oid}}), (s:Point {{id:$sid}}) "
-                f"CREATE (o)-[:{edge_type} {{idx:$i}}]->(s)",
-                params={"oid": pid, "sid": inp_id, "i": i},
-            )
         return self.get_point(pid)
 
     def annotate_operator(self, id: str, bias: float, precision: float,
@@ -466,6 +491,24 @@ class TortoiseSDK:
                     "message": f"requirement {req_id} refs non-existent workflow {wf_ref}",
                 })
 
+        # Orphaned draft points — created but never wired (#131)
+        for row in proj.g.query(
+            "MATCH (n:Point {status:'draft'}) "
+            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "AND NOT (n)--() "
+            "RETURN n.id, n.content, n.context, n.createdAt "
+            "ORDER BY n.createdAt"
+        ).result_set:
+            violations.append({
+                "type": "orphaned_draft",
+                "id": row[0],
+                "message": (
+                    f"Draft point '{row[1][:80] if row[1] else ''}' "
+                    f"in context '{row[2] or 'none'}' has no edges "
+                    f"(created {row[3] or 'unknown'})"
+                ),
+            })
+
         return violations
 
     def summarize_structure(self) -> dict:
@@ -511,6 +554,66 @@ class TortoiseSDK:
     def batch_create_points(self, points_list: list[dict]) -> list[dict]:
         """Create multiple points. Each dict needs {kind, content, **props}."""
         return [self.create_point(**p) for p in points_list]
+
+    def file_decision(self, options: list[str], evidence: list[str],
+                      choice: int, context: str) -> dict:
+        """File a simple decision directly to the graph — no EP, no calibration,
+        no research cycles. Creates decision + options + evidence + IMPL edges
+        atomically. For low-stakes decisions where the answer is clear (#133).
+
+        Args:
+            options: list of option descriptions (e.g. ["JSON", "YAML"])
+            evidence: list of evidence statements supporting the choice
+            choice: 0-indexed index into options (the chosen option)
+            context: domain context for the decision
+
+        Returns {decision_id, option_ids: [...], evidence_ids: [...]}.
+        """
+        if not options:
+            raise ValueError("At least one option required")
+        if choice < 0 or choice >= len(options):
+            raise ValueError(f"choice={choice} out of range [0, {len(options)-1}]")
+
+        # 1. Create decision point
+        decision = self.create_point(
+            "decision",
+            f"Decision: {options[choice]}",
+            context=context,
+            status="live",
+        )
+        decision_id = decision["id"]
+
+        # 2. Create option points + IMPL edges from decision
+        option_ids = []
+        for i, opt in enumerate(options):
+            opt_point = self.create_point(
+                "option",
+                f"Option {i+1}: {opt}",
+                context=context,
+                status="live",  # options are targets, not sources — explicit live
+            )
+            option_ids.append(opt_point["id"])
+            # IMPL edge: decision -> option ("decision considers option")
+            self.create_operator("IMPL", decision_id, [opt_point["id"]], context=context)
+
+        # 3. Create evidence points + IMPL edges to the chosen option
+        evidence_ids = []
+        chosen_id = option_ids[choice]
+        for ev in evidence:
+            ev_point = self.create_point(
+                "evidence",
+                ev,
+                context=context,
+            )
+            evidence_ids.append(ev_point["id"])
+            # IMPL edge: evidence -> chosen option ("evidence supports choice")
+            self.create_operator("IMPL", ev_point["id"], [chosen_id], context=context)
+
+        return {
+            "decision_id": decision_id,
+            "option_ids": option_ids,
+            "evidence_ids": evidence_ids,
+        }
 
     # ── Lifecycle ─────────────────────────────────────────────────
 
