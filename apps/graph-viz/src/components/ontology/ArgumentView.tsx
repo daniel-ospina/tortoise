@@ -112,7 +112,7 @@ export default function ArgumentView({ nodeId, nodeName, onBack }: Props) {
         const targetId = edge.target.id;
         // Link center → evidence node
         links.push({
-          source: edge.type === 'IMPL' ? edge.target.id : edge.target.id,
+          source: edge.target.id,
           target: nodeId,
           type,
         });
@@ -174,6 +174,9 @@ export default function ArgumentView({ nodeId, nodeName, onBack }: Props) {
     const { type } = link as GraphLink;
     const color = type === 'IMPL' ? C.impl : C.nand;
     const lw = type === 'IMPL' ? 1.5 : 2.5;
+
+    // Guard: skip rendering until source/target are positioned objects
+    if (typeof link.source !== 'object' || typeof link.target !== 'object') return;
 
     ctx.strokeStyle = color;
     ctx.lineWidth = lw;

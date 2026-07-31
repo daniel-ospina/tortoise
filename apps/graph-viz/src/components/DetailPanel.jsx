@@ -41,7 +41,7 @@ export default function DetailPanel({ sel, graph, deg, onDelete, onDeleteEdge, o
         background:C.panel,border:`1px solid ${C.border}`,borderRadius:8,
         padding:'6px 12px',color:C.accent,fontSize:12,cursor:'pointer'
       }}>
-        {(sel.content||'').slice(0,40)} · EP {(sel.confidence*100).toFixed(0)}% <span style={{color:C.muted}}>+</span>
+        {(sel.content||'').slice(0,40)} · EP {sel.confidence != null ? (sel.confidence*100).toFixed(0) : '—'}% <span style={{color:C.muted}}>+</span>
       </div>
     );
   }
@@ -86,10 +86,10 @@ export default function DetailPanel({ sel, graph, deg, onDelete, onDeleteEdge, o
           {sel.context}
         </span>
         <span style={{color:C.accent,fontSize:11,fontWeight:600}}>
-          {(sel.confidence*100).toFixed(0)}%
+          {sel.confidence != null ? (sel.confidence*100).toFixed(0) : '—'}%
         </span>
         <div style={{width:60,height:6,background:C.surface,borderRadius:3,overflow:'hidden'}}>
-          <div style={{width:`${sel.confidence*100}%`,height:'100%',background:C.accent,borderRadius:3}}/>
+          <div style={{width:`${(sel.confidence ?? 0) * 100}%`,height:'100%',background:C.accent,borderRadius:3}}/>
         </div>
       </div>
 

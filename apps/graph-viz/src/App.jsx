@@ -28,7 +28,7 @@ export default function App() {
       <ViewSwitcher view={view} onViewChange={setView} />
       <ErrorBoundary name="Force Graph">
         {view === 'force-graph' && (
-          <ForceGraphView onViewArguments={handleViewArguments} />
+          <ForceGraphView onViewArguments={handleViewArguments} initialFocusId={ontologyNodeId} />
         )}
       </ErrorBoundary>
       {view === 'ontology' && (

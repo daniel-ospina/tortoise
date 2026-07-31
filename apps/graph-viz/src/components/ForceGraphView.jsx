@@ -5,7 +5,7 @@ import removeOverlaps from 'remove-overlaps';
 import { API, C, wrapLines } from '../constants';
 import DetailPanel from './DetailPanel';
 
-export default function ForceGraphView({ onViewArguments }) {
+export default function ForceGraphView({ onViewArguments, initialFocusId }) {
   const [graph,setGraph]=useState({nodes:[],edges:[]});
   const [search,setSearch]=useState('');
   const [results,setResults]=useState([]);
@@ -35,6 +35,15 @@ export default function ForceGraphView({ onViewArguments }) {
   const [nodeCount,setNodeCount]=useState(500);
   const [cooldown]=useState(300);
   const initialSettle=useRef(true);
+
+  useEffect(()=>{
+    if(!initialFocusId)return;
+    fetch(`${API}/api/graph/neighborhood/${initialFocusId}?depth=1`).then(res=>res.json()).then(d=>{
+      setGraph(d);
+      const node=d.nodes.find(n=>n.id===initialFocusId);
+      if(node)setSel(node);
+    }).catch(()=>{});
+  },[initialFocusId]);
   const [spacing,setSpacing]=useState(50);
   const fg=useRef();
   const spacingRef=useRef(50);
@@ -254,9 +263,8 @@ export default function ForceGraphView({ onViewArguments }) {
     if(!newPointText.trim()||!rightClickPos)return;
     fetch(`${API}/api/points`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({content:newPointText})}).then(r=>r.json()).then(d=>{
       const newNode={id:d.id,content:newPointText,confidence:.3,x:rightClickPos.x,y:rightClickPos.y,fx:rightClickPos.x,fy:rightClickPos.y,__user:true,_screenX:rightClickPos.screenX,_screenY:rightClickPos.screenY};
-      userNodes.current.push(newNode);
+      setGraph(g=>({...g,nodes:[...g.nodes,newNode]}));
       setNewPointText('');setRightClickPos(null);
-      setOverlayTick(t=>t+1);
     }).catch(()=>{});
   };
 
@@ -321,7 +329,7 @@ export default function ForceGraphView({ onViewArguments }) {
     {mode==='add-edge'&&<div style={{position:'absolute',top:48,left:'50%',transform:'translateX(-50%)',zIndex:30,background:C.panel,border:`1px solid ${C.accent}`,borderRadius:8,padding:'10px 18px',color:C.text,fontSize:13}}>{edgeSrc?`Source: "${(edgeSrc.content||'').slice(0,35)}" → click target`:'Click source node'}<button onClick={()=>{setMode(null);setEdgeSrc(null);}} style={{...B,marginLeft:12}}>Cancel</button></div>}
 
     {/* User-added nodes overlay */}
-    {userNodes.current.length>0&&userNodes.current.map(n=>{
+    {userNodes.current.length>0&&userNodes.current.filter(n=>!graph.nodes.some(gn=>gn.id===n.id)).map(n=>{
       let sx=n._screenX,sy=n._screenY;
       if((sx===undefined||sy===undefined)&&fg.current?.graph2ScreenCoords){
         try{
@@ -390,7 +398,7 @@ export default function ForceGraphView({ onViewArguments }) {
     {first&&<div style={{position:'absolute',top:'50%',left:'50%',transform:'translate(-50%,-50%)',color:C.muted,textAlign:'center',zIndex:10,pointerEvents:'none'}}><div style={{fontSize:56,marginBottom:16,opacity:.6}}>◈</div><div style={{fontSize:18,color:C.text,marginBottom:8}}>Tortoise Knowledge Graph</div></div>}
 
     {/* Graph */}
-    <div style={{flex:1}}>
+    <div style={{flex:1,position:'relative'}}>
       <ForceGraph2D
         ref={fg}
         graphData={mergedGraph}
