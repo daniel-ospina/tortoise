@@ -422,6 +422,9 @@ export default function HierarchyChart({
   const [connection, setConnection] = useState<ConnectionState | null>(null);
   const [addSubmenu, setAddSubmenu] = useState(false);
   const [kindSearch, setKindSearch] = useState('');
+  const [selectedKindIndex, setSelectedKindIndex] = useState(0);
+  const [hoveredKindIdx, setHoveredKindIdx] = useState<number | null>(null);
+  const selectedTypeRef = useRef<HTMLDivElement | null>(null);
   const [createModal, setCreateModal] = useState<CreateModalState | null>(null);
   const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
   const [transformState, setTransformState] = useState<TransformState>({ positionX: 0, positionY: 0, scale: 1 });
@@ -548,7 +551,18 @@ export default function HierarchyChart({
     setContextMenu(null);
     setAddSubmenu(false);
     setKindSearch('');
+    setSelectedKindIndex(0);
   }, []);
+
+  // Global Escape handler — close context menu from anywhere
+  useEffect(() => {
+    if (!contextMenu) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') closeContextMenu();
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [contextMenu, closeContextMenu]);
 
   const startConnection = useCallback(
     (e: React.MouseEvent, nodeId: string, direction: 'top' | 'bottom') => {
@@ -597,6 +611,14 @@ export default function HierarchyChart({
     });
     return svgLines;
   }, [levels]);
+
+  // Reset keyboard cursor when search query changes
+  useEffect(() => { setSelectedKindIndex(0); }, [kindSearch]);
+
+  // Scroll selected type into view when navigating with keyboard
+  useEffect(() => {
+    selectedTypeRef.current?.scrollIntoView({ block: 'nearest' });
+  }, [selectedKindIndex]);
 
   const filteredKinds = useMemo(() => {
     if (!kindSearch.trim()) return types.map((t) => t.objectKind);
@@ -704,18 +726,72 @@ export default function HierarchyChart({
               {addSubmenu && (
                 <div onMouseEnter={() => setAddSubmenu(true)} style={{ position: 'absolute', left: '100%', top: 0, background: C.panel, border: `1px solid ${C.border}`, borderRadius: 8, padding: '6px 0', minWidth: 220, boxShadow: '0 8px 32px rgba(0,0,0,0.6)', zIndex: 102 }}>
                   <div style={{ padding: '0 10px 6px' }}>
-                    <input autoFocus value={kindSearch} onChange={(e) => setKindSearch(e.target.value)} placeholder="Search object types..." onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()} style={{ width: '100%', boxSizing: 'border-box', background: C.surface, border: `1px solid ${C.border}`, color: C.text, borderRadius: 4, padding: '5px 8px', fontSize: 11, outline: 'none', fontFamily: 'inherit' }} />
+                    <input
+                      autoFocus
+                      value={kindSearch}
+                      onChange={(e) => setKindSearch(e.target.value)}
+                      placeholder="Search object types..."
+                      onClick={(e) => e.stopPropagation()}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Escape') {
+                          e.stopPropagation();
+                          closeContextMenu();
+                          return;
+                        }
+                        if (e.key === 'ArrowDown') {
+                          e.preventDefault();
+                          if (filteredKinds.length === 0) return;
+                          setSelectedKindIndex((prev) => Math.min(prev + 1, filteredKinds.length - 1));
+                          return;
+                        }
+                        if (e.key === 'ArrowUp') {
+                          e.preventDefault();
+                          if (filteredKinds.length === 0) return;
+                          setSelectedKindIndex((prev) => Math.max(prev - 1, 0));
+                          return;
+                        }
+                        if (e.key === 'Enter' && filteredKinds.length > 0) {
+                          e.preventDefault();
+                          const kind = filteredKinds[Math.max(0, Math.min(selectedKindIndex, filteredKinds.length - 1))];
+                          if (kind) openCreateModal(kind);
+                          return;
+                        }
+                      }}
+                      style={{ width: '100%', boxSizing: 'border-box', background: C.surface, border: `1px solid ${C.border}`, color: C.text, borderRadius: 4, padding: '5px 8px', fontSize: 11, outline: 'none', fontFamily: 'inherit' }}
+                    />
                   </div>
+                  <div style={{ maxHeight: 260, overflowY: 'auto' }}>
                   {filteredKinds.length === 0 ? (
                     <div style={{ padding: '8px 14px', color: C.muted, fontSize: 11 }}>No types match &quot;{kindSearch}&quot;</div>
                   ) : (
-                    filteredKinds.map((kind) => (
-                      <div key={kind} onClick={(e) => { e.stopPropagation(); openCreateModal(kind); }} style={{ padding: '6px 14px', cursor: 'pointer', fontSize: 12, color: C.text, display: 'flex', alignItems: 'center', gap: 8 }} onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = C.surface; }} onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = 'transparent'; }}>
-                        <span style={{ width: 8, height: 8, borderRadius: '50%', background: kindColors[kind] || C.muted, flexShrink: 0 }} />
-                        {kindLabels[kind] || kind}
-                      </div>
-                    ))
+                    filteredKinds.map((kind, idx) => {
+                      const isKbSelected = idx === selectedKindIndex;
+                      const isHovered = idx === hoveredKindIdx;
+                      return (
+                        <div
+                          key={kind}
+                          ref={isKbSelected ? selectedTypeRef : undefined}
+                          onClick={(e) => { e.stopPropagation(); openCreateModal(kind); }}
+                          onMouseEnter={() => { setHoveredKindIdx(idx); setSelectedKindIndex(idx); }}
+                          onMouseLeave={() => setHoveredKindIdx(null)}
+                          style={{
+                            padding: '6px 14px',
+                            cursor: 'pointer',
+                            fontSize: 12,
+                            color: C.text,
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: 8,
+                            background: isKbSelected || isHovered ? C.surface : 'transparent',
+                          }}
+                        >
+                          <span style={{ width: 8, height: 8, borderRadius: '50%', background: kindColors[kind] || C.muted, flexShrink: 0 }} />
+                          {kindLabels[kind] || kind}
+                        </div>
+                      );
+                    })
                   )}
+                  </div>
                 </div>
               )}
             </div>
