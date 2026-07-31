@@ -58,6 +58,7 @@ python -m tortoise init
 
 - [Architecture Index](index.md) — Architecture, API, connectors, and operations
 - [Skills Guide](skills/how-to-use-tortoise/SKILL.md) — Agent skill reference for graph operations
+- [Agent Infrastructure](../agent-infra) — Pi extensions, skills, and scripts for this repo
 
 ## License
 
