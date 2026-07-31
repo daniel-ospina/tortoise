@@ -1,4 +1,4 @@
-# Tortoise Architecture: Three-Layer Memory Model
+# Tortoise Architecture: 5-Layer Memory Model
 
 **Date:** 2026-07-31
 **Status:** Vision
@@ -8,7 +8,7 @@
 
 Tortoise is not just an argumentation engine. It is an organization's **memory system** with three distinct layers that work together. Expansion packs are not "optional schemas" — they are the **primary interface** for customers. They define what state the customer tracks, and everything else connects to that state.
 
-## The Three Layers
+## The Layers
 
 ### 1. State Layer (Deterministic — Objects)
 
