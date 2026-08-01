@@ -15,9 +15,9 @@
       "name": "Minutes MCP",
       "icon": "🎙️",
       "description": "Meeting recorder — local transcription + diarization",
-      "check": {"type": "process", "name": "minutes-mcp"},
-      "launch": {"type": "shell", "command": "nohup npx minutes-mcp > /tmp/minutes-mcp.log 2>&1 &"},
-      "stop": {"type": "shell", "command": "pkill -f minutes-mcp"}
+      "check": {"type": "launchctl", "name": "com.premise.minutes-mcp"},
+      "launch": {"type": "shell", "command": "launchctl load ~/Library/LaunchAgents/com.premise.minutes-mcp.plist"},
+      "stop": {"type": "shell", "command": "launchctl unload ~/Library/LaunchAgents/com.premise.minutes-mcp.plist"}
     },
     {
       "id": "cal-trigger",
