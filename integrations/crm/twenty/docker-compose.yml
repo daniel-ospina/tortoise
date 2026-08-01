@@ -1,0 +1,63 @@
+services:
+  twenty-server:
+    image: twentycrm/twenty:latest
+    ports:
+      - "127.0.0.1:3001:3000"
+    environment:
+      - PORT=3000
+      - NODE_ENV=production
+      - PG_DATABASE_URL=postgres://twenty:twenty@twenty-db:5432/twenty
+      - REDIS_URL=redis://twenty-redis:6379
+      - SERVER_URL=http://localhost:3001
+      - STORAGE_TYPE=local
+      - STORAGE_LOCAL_PATH=/app/storage
+      - APP_SECRET=dev-secret-change-in-production
+    volumes:
+      - twenty-storage:/app/storage
+    depends_on:
+      twenty-db:
+        condition: service_healthy
+      twenty-redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+    restart: unless-stopped
+
+  twenty-db:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_USER=twenty
+      - POSTGRES_PASSWORD=twenty
+      - POSTGRES_DB=twenty
+    volumes:
+      - twenty-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U twenty"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  twenty-redis:
+    image: redis:7-alpine
+    volumes:
+      - twenty-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  twenty-storage:
+  twenty-db-data:
+  twenty-redis-data:
