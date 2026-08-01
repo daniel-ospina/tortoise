@@ -7,7 +7,7 @@ Click to launch, stop, or restart. Reads service registry from JSON config.
 
 Install:
   pip3 install --break-system-packages rumps
-  python3 premise-bar.py
+  python3 premise_bar.py
 
 Config:
   ~/.config/premise/services.json
