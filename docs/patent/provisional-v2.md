@@ -307,39 +307,42 @@ Methods and systems for epistemic belief propagation in multi-agent knowledge en
 ### Figure 1: Knowledge Graph with IMPL and NAND Operator Entities
 
 ```
-                    ┌─────────────────┐
-                    │   Proposition A  │
-                    │ "budget = $50K"  │
-                    │ Beta(2, 8)       │  ← low confidence (mean 0.20)
-                    └────────┬─────────┘
-                             │
-                    IMPL (w=8.0)        ← "A implies B"
-                             │
-                             ▼
-                    ┌─────────────────┐
-   NAND (w=9.0) ◄───│   Proposition B        │─── IMPL (w=7.0) ──► ┌─────────────────┐
-   "contradicts"    │ "use $45K tier"  │                      │   Proposition D        │
-                    │ Beta(5, 5)       │                      │ "approved budget" │
-                    └────────┬─────────┘                      │ Beta(1, 1)       │
-                             │                                └─────────────────┘
-                    IMPL (w=6.0)
-                             │
-                             ▼
-                    ┌─────────────────┐
-                    │   Proposition C        │
-                    │ "proposal sent"  │
-                    │ Beta(3, 7)       │
-                    └─────────────────┘
+                         ┌──────────────────┐
+                         │   Proposition A   │
+                         │ "budget = $50K"   │
+                         │ Beta(2,8) mean=0.20│
+                         └────────┬─────────┘
+                                  │
+                         IMPL (w=8.0)
+                                  │
+                                  ▼
+              ┌───────────────────┴───────────────────┐
+              │            Proposition B              │
+NAND(w=9.0)◄──│         "use $45K tier"              │──►IMPL(w=7.0)
+(contradicts) │          Beta(5,5) mean=0.50          │
+              └───────────────────┬───────────────────┘
+                                  │
+                         IMPL (w=6.0)
+                                  │
+                                  ▼
+                         ┌──────────────────┐
+                         │   Proposition C  │
+                         │ "proposal sent"  │
+                         │ Beta(3,7) mean=0.30│
+                         └──────────────────┘
 
 Evidence Anchor:
-                    ┌─────────────────┐
-                    │   Proposition E        │
-                    │ "actual=$75K"    │
-                    │ Beta(50, 1)      │  ← HIGH confidence anchor
-                    └─────────────────┘
+                         ┌──────────────────┐
+                         │   Proposition E  │
+                         │ "actual=$75K"    │
+                         │ Beta(50,1) mean=0.98│
+                         │  ★ anchor        │
+                         └──────────────────┘
+
+Legend:  ──► IMPL (implication)    - - -► NAND (contradiction)
 ```
 
-**Description:** Proposition nodes carry Beta(α,β) belief parameters. Operator entities (IMPL — solid, NAND — dashed) are first-class graph nodes, each with weight w ∈ [0.1, 10.0] (default 8.0). For visual clarity, operator entity nodes are shown as labeled arrows connecting propositions; in the actual graph structure, each operator is a separate node with a first directed edge from the source proposition to the operator, and a second directed edge from the operator to the target proposition — consistent with the bipartite factor graph model used by the Expectation Propagation algorithm. Evidence anchors (Proposition E) have fixed high-confidence Beta priors and propagate belief outward through connected operator entities.
+**Description:** Proposition nodes carry Beta(α,β) belief parameters. Operator entities (IMPL — solid, NAND — dashed) are first-class graph nodes. For clarity, operators are shown as labeled arrows; in the actual bipartite factor graph, each operator is a separate node with edges proposition→operator and operator→proposition. Evidence anchors (Proposition E, ★) have fixed high-confidence Beta priors and propagate belief outward through connected operator entities.
 
 ### Figure 2: Factor Graph Representation
 
