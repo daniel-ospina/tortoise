@@ -32,7 +32,7 @@ pipelines:
     entity_mapping:
       path_to_team: {}
       path_to_domain: {}
-  org_data_issues:
+  swarm_issues:
     enabled: true
     source: github
     sourceKind: github_issue
@@ -50,6 +50,6 @@ pipelines:
       module: tortoise.connectors.github
       class: GitHubConnector
       config:
-        repo: daniel-ospina/org-data
+        repo: daniel-ospina/swarm
         state: open
         limit: 100
