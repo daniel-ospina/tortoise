@@ -51,11 +51,11 @@
       "id": "swarm",
       "name": "Swarm",
       "icon": "🐝",
-      "description": "Multi-tenant org data — teams, products, roles",
-      "check": {"type": "http", "url": "https://swarm.eldato.co/api/health"},
+      "description": "Multi-tenant org data — Supabase migrations + config",
+      "check": {"type": "file", "path": "~/swarm/supabase/config.toml"},
       "launch": null,
       "stop": null,
-      "url": "https://swarm.eldato.co"
+      "url": null
     }
   ]
 }

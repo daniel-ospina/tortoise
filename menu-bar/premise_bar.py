@@ -99,6 +99,8 @@ def is_running(service):
             pid = int(Path(check["path"]).read_text().strip())
             os.kill(pid, 0)
             return True
+        elif ctype == "file":
+            return Path(os.path.expanduser(check["path"])).exists()
     except Exception:
         pass
     return False
