@@ -209,15 +209,25 @@ class PremiseBar(rumps.App):
             
             if running:
                 # Show submenu with actions
-                response = rumps.alert(
-                    f"{svc['icon']} {svc['name']} — Running",
-                    svc.get("description", ""),
-                    "Open", "Restart", "Stop"
-                )
-                if response == 1:  # Open
-                    url = svc.get("url")
-                    if url:
-                        subprocess.Popen(["open", url])
+                url = svc.get("url")
+                if url:
+                    response = rumps.alert(
+                        f"{svc['icon']} {svc['name']} — Running",
+                        svc.get("description", ""),
+                        "Open", "Restart", "Stop"
+                    )
+                else:
+                    response = rumps.alert(
+                        f"{svc['icon']} {svc['name']} — Running",
+                        svc.get("description", ""),
+                        "Restart", "Stop"
+                    )
+                    if response == 1:
+                        response = 2  # remap to Restart
+                    elif response == 2:
+                        response = 3  # remap to Stop
+                if response == 1 and url:  # Open
+                    subprocess.Popen(["open", url])
                 elif response == 2:  # Restart
                     stop_service(svc)
                     time.sleep(1)

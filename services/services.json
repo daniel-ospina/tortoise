@@ -45,7 +45,7 @@
       "check": {"type": "tcp", "host": "localhost", "port": 6379},
       "launch": {"type": "docker-compose", "dir": "~/eldato-epistemic"},
       "stop": {"type": "docker-compose-down", "dir": "~/eldato-epistemic"},
-      "url": "redis://localhost:6379"
+      "url": "http://localhost:5173"
     }
   ]
 }
