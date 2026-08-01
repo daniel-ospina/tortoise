@@ -1,112 +1,80 @@
-# Entity Routing — repos → products → teams.
-#
-# Resolution: issue label → repo default → ask human.
-# Shared repos (multiple products/teams) use labels for disambiguation.
-#
-# Updated 2026-07-22 — actual repo/product/team inventory.
-
 version: 1
-
-# ── Products ──
-products:
-  dmeer:
-    name: "DMeer"
-    description: "Instagram automation daemon with Electron tray app"
-    teams: [dmer-app-team]
-  eldato-app:
-    name: "El Dato App"
-    description: "Consumer app — deals, subscriptions, onboarding"
-    teams: [eldato-app-team]
-  tortoise:
-    name: "Tortoise"
-    description: "Epistemic knowledge graph engine — FalkorDB-backed"
-    teams: [epistemic-team]
-  outreach:
-    name: "Outreach"
-    description: "SMB cold outreach — scraping, enrichment, WhatsApp sequences"
-    teams: [eldato-outreach-team]
-  vsm-infra:
-    name: "VSM Infrastructure"
-    description: "Agent swarm coordination, shared state, memory, pipelines, self-healing"
-    teams: [organisation-design-team]
-  org-data:
-    name: "Org Data"
-    description: "Multi-tenant organizational data — teams, products, roles"
-    teams: [organisation-design-team]
-
-# ── Repo → Product mapping ──
 repo_routing:
-  "daniel-ospina/dmer":
-    product: dmeer
-    default_team: dmer-app-team
-  "daniel-ospina/eldato-dmer":
-    product: dmeer
-    default_team: dmer-app-team
-
-  "daniel-ospina/eldato":
-    product: eldato-app                    # default: El Dato App
-    default_team: eldato-app-team
-    # NOTE: This repo ALSO hosts vsm-infra code (operations/coordination/,
-    # operations/memory/) and shared workflows (operations/skills/, CI/CD).
-    # Issues for vsm-infra use label: team/org-design
-    # Issues for shared infra use label: team/org-design + product/vsm-infra
-
-  "daniel-ospina/premise-labs":
+  daniel-ospina/premise-labs:
+    product: premise-labs
+    default_team: epistemic-team
+  daniel-ospina/tortoise:
     product: tortoise
     default_team: epistemic-team
-
-  "daniel-ospina/eldato-outreach":
+  daniel-ospina/DMeer:
+    product: dmeer
+    default_team: dmer-app-team
+  daniel-ospina/eldato:
+    product: eldato-app
+    default_team: eldato-app-team
+  daniel-ospina/agent-infra:
+    product: agent-infra
+    default_team: organisation-design-team
+  daniel-ospina/eldato-outreach:
     product: outreach
     default_team: eldato-outreach-team
-
-  "daniel-ospina/org-data":
+  daniel-ospina/swarm:
+    product: vsm-infra
+    default_team: organisation-design-team
+  daniel-ospina/org-data:
     product: org-data
     default_team: organisation-design-team
-
-  "daniel-ospina/shared-workflows":
-    product: vsm-infra                     # shared infra, not a standalone product
-    default_team: organisation-design-team
-
-# ── Label → Team + Role routing ──
-label_routing:
-  # Team assignment
-  "team/org-design":
-    team: organisation-design-team
-  "team/epistemic":
-    team: epistemic-team
-  "team/eldato-app":
-    team: eldato-app-team
-  "team/dmer":
-    team: dmer-app-team
-  "team/outreach":
-    team: eldato-outreach-team
-
-  # Product override (for shared repos)
-  "product/vsm-infra":
+  daniel-ospina/shared-workflows:
     product: vsm-infra
+    default_team: organisation-design-team
+products:
+  premise-labs:
+    name: Premise Labs
+    teams:
+    - epistemic-team
+  tortoise:
+    name: Tortoise
+    teams:
+    - epistemic-team
+  dmeer:
+    name: DMeer
+    teams:
+    - dmer-app-team
+  eldato-app:
+    name: El Dato App
+    teams:
+    - eldato-app-team
+  agent-infra:
+    name: Agent Infra
+    teams:
+    - organisation-design-team
+  outreach:
+    name: Outreach
+    teams:
+    - eldato-outreach-team
+  vsm-infra:
+    name: VSM Infrastructure
+    teams:
+    - organisation-design-team
+  org-data:
+    name: Org Data
+    teams:
+    - organisation-design-team
+label_routing:
+  team/org-design:
     team: organisation-design-team
-  "product/tortoise":
-    product: tortoise
+  team/epistemic:
     team: epistemic-team
-  "product/eldato-app":
-    product: eldato-app
+  team/eldato-app:
     team: eldato-app-team
-
-  # Role assignment
-  "role/strategist":
+  team/dmer:
+    team: dmer-app-team
+  role/strategist:
     role: product-strategist
-  "role/implementer":
+  role/implementer:
     role: product-implementer
-
-  # Work type
-  "type/strategy":
+  type/strategy:
     role: product-strategist
-  "type/build":
+  type/build:
     role: product-implementer
-  "type/bug":
-    role: product-implementer
-  "type/review":
-    role: product-strategist
-
-# ── Attribution fallback ──
 attribution_fallback: ask_human
