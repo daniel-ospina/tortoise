@@ -139,6 +139,22 @@ def stop_service(service):
         rumps.notification("Premise", f"Failed to stop {service['name']}", str(e))
 
 
+
+import os, sys, signal
+
+# Dedup: only allow one instance
+PID_FILE = os.path.expanduser("~/.premise-bar.pid")
+if os.path.exists(PID_FILE):
+    try:
+        old_pid = int(open(PID_FILE).read().strip())
+        os.kill(old_pid, signal.SIGTERM)
+        import time; time.sleep(0.5)
+    except (OSError, ValueError):
+        pass
+with open(PID_FILE, "w") as f:
+    f.write(str(os.getpid()))
+
+
 class PremiseBar(rumps.App):
     def __init__(self):
         super().__init__("⬡", title="⬡")
