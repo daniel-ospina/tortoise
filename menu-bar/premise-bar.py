@@ -159,9 +159,9 @@ class PremiseBar(rumps.App):
             if running:
                 running_count += 1
             
-            label = f"{svc['icon']}  {svc['name']}"
+            label = f"⚫ {svc['icon']}  {svc['name']}"
             if running:
-                label = f"{svc['icon']}  {svc['name']} ●"
+                label = f"🟢 {svc['icon']}  {svc['name']}"
             
             # Remove old menu item if exists
             if sid in self.menu_items:
@@ -188,6 +188,13 @@ class PremiseBar(rumps.App):
             sid = svc["id"]
             if sid in self.menu_items:
                 self.menu.add(self.menu_items[sid])
+        
+        self.menu.add(rumps.separator)
+        
+        # Recording controls
+        recording = self._check_recording()
+        rec_label = "🔴 Stop Recording" if recording else "🎙️  Start Recording"
+        self.menu.add(rumps.MenuItem(rec_label, callback=self.toggle_recording))
         
         self.menu.add(rumps.separator)
         self.menu.add(rumps.MenuItem("🔄  Refresh", callback=self.refresh))
@@ -253,6 +260,25 @@ class PremiseBar(rumps.App):
         """Open config file in default editor."""
         path = os.path.expanduser(CONFIG_PATH)
         subprocess.Popen(["open", "-t", path])
+
+    def _check_recording(self):
+        """Check if currently recording via minutes."""
+        try:
+            r = subprocess.run(["pgrep", "-f", "minutes record"], capture_output=True)
+            return r.returncode == 0
+        except Exception:
+            return False
+
+    def toggle_recording(self, _):
+        """Start or stop recording."""
+        if self._check_recording():
+            subprocess.run(["minutes", "stop"], capture_output=True, timeout=10)
+            rumps.notification("Minutes", "Recording stopped", "")
+        else:
+            subprocess.Popen(["minutes", "record"],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             start_new_session=True)
+            rumps.notification("Minutes", "Recording started", "")
 
 
 if __name__ == "__main__":
