@@ -45,7 +45,17 @@
       "check": {"type": "tcp", "host": "localhost", "port": 6379},
       "launch": {"type": "docker-compose", "dir": "~/eldato-epistemic"},
       "stop": {"type": "docker-compose-down", "dir": "~/eldato-epistemic"},
-      "url": "http://localhost:5173"
+      "url": null
+    },
+    {
+      "id": "swarm",
+      "name": "Swarm",
+      "icon": "🐝",
+      "description": "Multi-tenant org data — teams, products, roles",
+      "check": {"type": "http", "url": "https://swarm.eldato.co/api/health"},
+      "launch": null,
+      "stop": null,
+      "url": "https://swarm.eldato.co"
     }
   ]
 }

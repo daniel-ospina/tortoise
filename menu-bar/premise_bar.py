@@ -233,39 +233,70 @@ class PremiseBar(rumps.App):
             if running:
                 # Show submenu with actions
                 url = svc.get("url")
-                if url:
+                stop = svc.get("stop")
+                launch = svc.get("launch")
+                
+                if url and stop:
                     response = rumps.alert(
                         f"{svc['icon']} {svc['name']} — Running",
                         svc.get("description", ""),
                         "Open", "Restart", "Stop"
                     )
-                else:
+                elif url:
+                    response = rumps.alert(
+                        f"{svc['icon']} {svc['name']} — Running",
+                        svc.get("description", ""),
+                        "Open", "OK"
+                    )
+                elif stop:
                     response = rumps.alert(
                         f"{svc['icon']} {svc['name']} — Running",
                         svc.get("description", ""),
                         "Restart", "Stop"
                     )
-                    if response == 1:
-                        response = 2  # remap to Restart
-                    elif response == 2:
-                        response = 3  # remap to Stop
+                    if response == 1: response = 2
+                    elif response == 2: response = 3
+                else:
+                    # External, no local control
+                    rumps.alert(
+                        f"{svc['icon']} {svc['name']} — Running",
+                        svc.get("description", ""),
+                        "OK"
+                    )
+                    return
                 if response == 1 and url:  # Open
                     subprocess.Popen(["open", url])
                 elif response == 2:  # Restart
-                    stop_service(svc)
-                    time.sleep(1)
+                    stop = svc.get("stop")
+                    if stop:
+                        stop_service(svc)
+                        time.sleep(1)
                     launch_service(svc)
                     rumps.notification("Premise", f"Restarted {svc['name']}", "")
                 elif response == 3:  # Stop
-                    stop_service(svc)
-                    rumps.notification("Premise", f"Stopped {svc['name']}", "")
-            else:
+                    stop = svc.get("stop")
+                    if stop:
+                        stop_service(svc)
+                        rumps.notification("Premise", f"Stopped {svc['name']}", "")
+            if not running:
                 # Launch
-                response = rumps.alert(
-                    f"{svc['icon']} {svc['name']} — Stopped",
-                    svc.get("description", ""),
-                    "Launch", "Cancel"
-                )
+                launch = svc.get("launch")
+                if launch:
+                    response = rumps.alert(
+                        f"{svc['icon']} {svc['name']} — Stopped",
+                        svc.get("description", ""),
+                        "Launch", "Cancel"
+                    )
+                else:
+                    response = rumps.alert(
+                        f"{svc['icon']} {svc['name']} — External",
+                        svc.get("description", ""),
+                        "Open", "Cancel"
+                    )
+                    if response == 1:
+                        url = svc.get("url")
+                        if url: subprocess.Popen(["open", url])
+                        return
                 if response == 1:
                     launch_service(svc)
                     rumps.notification("Premise", f"Launching {svc['name']}...", "")
