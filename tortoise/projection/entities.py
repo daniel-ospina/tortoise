@@ -84,13 +84,17 @@ class _EntityHandlers:
         name = ev.get("name", "")
         if not oid or not name:
             return
+        title = ev.get("title")  # None default — coalesce needs NULL, not ""
+        ok = ev.get("object_kind")  # None default — same issue
         self.g.query(
             "MERGE (o:Object {name:$name}) "
-            "ON CREATE SET o.id=$id, o.objectKind=$ok, o.createdAt=coalesce($ca, $now) "
-            "ON MATCH SET o.objectKind=coalesce($ok, o.objectKind)",
+            "ON CREATE SET o.id=$id, o.objectKind=coalesce($ok, 'other'), o.createdAt=coalesce($ca, $now), o.title=coalesce($title, '') "
+            "ON MATCH SET o.objectKind=coalesce($ok, o.objectKind), "
+            "            o.title=coalesce($title, o.title)",
             params={"id": oid, "name": name,
-                    "ok": ev.get("object_kind", "other"),
-                    "ca": ev.get("createdAt"), "now": _now_iso()},
+                    "ok": ok,
+                    "ca": ev.get("createdAt"), "now": _now_iso(),
+                    "title": title},
         )
 
     def _upsert_document(self, ev: dict) -> None:
