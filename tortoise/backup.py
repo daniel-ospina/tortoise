@@ -96,7 +96,7 @@ def _bgsave() -> None:
     """Trigger FalkorDB BGSAVE if connected."""
     try:
         from falkordb import FalkorDB
-        db = FalkorDB(host=os.environ.get("FALKORDB_HOST", "localhost"), port=int(os.environ.get("FALKORDB_PORT", "6379")))
+        db = FalkorDB(host=os.environ.get("FALKORDB_HOST", "localhost"), port=int(os.environ.get("FALKORDB_PORT", "16379")))
         db.connection.execute_command("BGSAVE")
     except Exception:
         pass  # ponytail: embedded/redislite doesn't support BGSAVE, skip

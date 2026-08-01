@@ -80,7 +80,7 @@ class _SmokeProj:
 # ── Connection ─────────────────────────────────────────────────────
 
 def _connect(graph_name: str, embedded_path: str | None = None) -> tuple[str, object, object]:
-    """Try FalkorDB server (localhost:6380), fall back to FalkorDBLite.
+    """Try FalkorDB server (localhost:16379), fall back to FalkorDBLite.
 
     Returns (mode, db, graph) where mode is 'server' or 'embedded'.
     embedded_path is required for embedded mode (caller manages lifecycle).
@@ -88,7 +88,7 @@ def _connect(graph_name: str, embedded_path: str | None = None) -> tuple[str, ob
     # Try server first
     try:
         from falkordb import FalkorDB as ServerDB
-        db = ServerDB(host='localhost', port=6380)
+        db = ServerDB(host='localhost', port=16379)
         g = db.select_graph(graph_name)
         g.query("MATCH (n) RETURN count(n) LIMIT 1")  # liveness check
         return 'server', db, g
@@ -122,7 +122,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="tortoise_smoke_") as tmpdir:
         # ── Step 1: Connect ──────────────────────────────────────────
         mode, db, g = _connect(graph_name, os.path.join(tmpdir, "falkor.db"))
-        label = 'localhost:6380' if mode == 'server' else 'FalkorDBLite'
+        label = 'localhost:16379' if mode == 'server' else 'FalkorDBLite'
         print(f"[1/8] Connected: {mode} ({label})", file=sys.stderr)
 
         # ── Step 2: Clear graph ──────────────────────────────────────

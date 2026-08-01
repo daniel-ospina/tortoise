@@ -581,7 +581,7 @@ def step7() -> None:
 
 # ── step 8: FalkorDB container ──────────────────────────────────────────
 
-_FALKORDB_PORT = "6380"
+_FALKORDB_PORT = "16379"
 _FALKORDB_CONTAINER = "falkordb-tortoise"
 
 
@@ -627,7 +627,7 @@ def step8() -> None:
     if culprit:
         choice = _pick(
             f"Port {_FALKORDB_PORT} already in use by container {culprit[:12]}.",
-            ["Kill it and use 6380", "Quit"],
+            ["Kill it and use 16379", "Quit"],
         )
         if "Kill" in choice:
             _run(["docker", "kill", culprit])

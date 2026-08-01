@@ -107,7 +107,7 @@ class FalkorProjection(
     """FalkorDB-backed projection. Supports Docker/server (default) and embedded modes.
 
     Embedded:  FalkorProjection(path='/tmp/tortoise.db')
-    Docker:    FalkorProjection(host='localhost', port=6379, password='...')
+    Docker:    FalkorProjection(host='localhost', port=16379, password='...')
     URI:       FalkorProjection.from_uri('docker://:pass@host:6379/graph')
 
     Same API regardless of backend — constructor swap is the only difference.
@@ -115,7 +115,7 @@ class FalkorProjection(
 
     def __init__(self, path: str | None = None, *,
                  host: str | None = None,
-                 port: int = 6379,
+                 port: int = 16379,
                  password: str | None = None,
                  graph_name: str = "tortoise"):
 
@@ -146,7 +146,7 @@ class FalkorProjection(
         password = parsed.password or None
         graph_name = parsed.path.lstrip('/') or "tortoise"
         return cls(host=parsed.hostname or "localhost",
-                   port=parsed.port or 6379,
+                   port=parsed.port or 16379,
                    password=password,
                    graph_name=graph_name)
 

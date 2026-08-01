@@ -15,9 +15,9 @@ Interactive force-directed visualization of the Tortoise epistemic knowledge gra
 
 | Name | Location | Port | Auth | Size |
 |---|---|---|---|---|
-| **Work graph** (default) | `falkordb-personal` Docker | `100.123.148.23:6380` | none | ~8.7k claims, ~13k edges |
+| **Work graph** (default) | `falkordb-personal` Docker | `localhost:16379` | none | ~8.7k claims, ~13k edges |
 | Test/dev | `falkordb` Docker | `127.0.0.1:6379` | `falkordb` | 481 claims |
-| Medical research | `falkordb-personal` Docker | `100.123.148.23:6380` | none | `endometriosis_melasma` |
+| Medical research | `falkordb-personal` Docker | `localhost:16379` | none | `endometriosis_melasma` |
 
 **Agents:** Call `GET /api/health` to discover the active graph and all available graphs.
 
@@ -39,15 +39,18 @@ npx vite --host --port 5173
 # → Health check: http://localhost:8000/api/health
 ```
 
-No config needed — defaults to `localhost:6380` which is what `docker compose up` starts. Agents discover the graph by calling `GET localhost:8000/api/health`.
+No config needed — defaults to `localhost:16379` which is what `docker compose up` starts. Agents discover the graph by calling `GET localhost:8000/api/health`.
 
 ## Switching Graphs
 
 Set env vars or edit `server/main.py`:
 
 ```bash
-# Work graph (default)
-FALKORDB_HOST=100.123.148.23 FALKORDB_PORT=6380 python3 server/main.py
+# Work graph (default — docker compose up)
+FALKORDB_HOST=localhost FALKORDB_PORT=16379 python3 server/main.py
+
+# Legacy remote instance (100.123.148.23 still uses old container)
+# FALKORDB_HOST=100.123.148.23 FALKORDB_PORT=6380 python3 server/main.py
 
 # Test instance
 FALKORDB_HOST=127.0.0.1 FALKORDB_PORT=6379 FALKORDB_PASSWORD=falkordb python3 server/main.py

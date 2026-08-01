@@ -2,7 +2,7 @@
 """Merge endometriosis_melasma → endometriosis_melasma_ep, then delete source graph."""
 from falkordb import FalkorDB
 
-db = FalkorDB(host="localhost", port=6380)
+db = FalkorDB(host="localhost", port=16379)
 src = db.select_graph("endometriosis_melasma")
 dst = db.select_graph("endometriosis_melasma_ep")
 

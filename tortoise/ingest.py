@@ -120,7 +120,7 @@ def main(argv=None):
         # (Docker mode doesn't use a file, data lives in the container)
         import os
         docker_host = os.environ.get("FALKORDB_HOST", "localhost")
-        docker_port = int(os.environ.get("FALKORDB_PORT", "6379"))
+        docker_port = int(os.environ.get("FALKORDB_PORT", "16379"))
         docker_pass = os.environ.get("FALKORDB_PASSWORD") or None
         try:
             proj = FalkorProjection(host=docker_host, port=docker_port, password=docker_pass)

@@ -1,4 +1,4 @@
-"""End-to-end: EP on Docker FalkorDB personal instance (port 6380)."""
+"""End-to-end: EP on Docker FalkorDB personal instance (port 16379)."""
 import sys, os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
@@ -8,7 +8,7 @@ from tortoise.ep import TortoiseEP
 
 def test_docker_connection():
     """Can we connect to the Docker FalkorDB instance?"""
-    proj = FalkorProjection(host="localhost", port=6380, graph_name="endometriosis_melasma")
+    proj = FalkorProjection(host="localhost", port=16379, graph_name="endometriosis_melasma")
     try:
         # Verify connection works
         rows = proj.g.query("MATCH (n) RETURN count(n)").result_set
@@ -21,7 +21,7 @@ def test_docker_connection():
 
 def test_docker_ep_run():
     """Run TortoiseEP on the Docker personal graph."""
-    proj = FalkorProjection(host="localhost", port=6380, graph_name="endometriosis_melasma")
+    proj = FalkorProjection(host="localhost", port=16379, graph_name="endometriosis_melasma")
     try:
         # Get all operator IDs
         op_rows = proj.g.query(
@@ -54,7 +54,7 @@ def test_docker_ep_run():
 
 def test_docker_ep_vs_bfs():
     """Compare EP posteriors against existing BFS confidence values."""
-    proj = FalkorProjection(host="localhost", port=6380, graph_name="endometriosis_melasma")
+    proj = FalkorProjection(host="localhost", port=16379, graph_name="endometriosis_melasma")
     try:
         op_rows = proj.g.query(
             "MATCH (o:Point) WHERE o.is_operator = true RETURN o.id"
