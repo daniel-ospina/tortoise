@@ -55,7 +55,7 @@
       "check": {"type": "file", "path": "~/swarm/supabase/config.toml"},
       "launch": null,
       "stop": null,
-      "url": null
+      "url": "file:///Users/home/swarm"
     }
   ]
 }

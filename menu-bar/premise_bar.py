@@ -267,7 +267,10 @@ class PremiseBar(rumps.App):
                     )
                     return
                 if response == 1 and url:  # Open
-                    subprocess.Popen(["open", url])
+                    if url.startswith("file://"):
+                        subprocess.Popen(["open", url.replace("file://", "")])
+                    else:
+                        subprocess.Popen(["open", url])
                 elif response == 2:  # Restart
                     stop = svc.get("stop")
                     if stop:
