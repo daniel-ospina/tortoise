@@ -5,10 +5,10 @@ Validates that _template.md matches AGENTS.md frontmatter contract before
 expensive operations like enrich_frontmatter.py batch mode.
 
 Usage:
-  python3 eldato-epistemic/tortoise/verify_ontology.py                 # exit 0 = good
-  python3 eldato-epistemic/tortoise/verify_ontology.py --quiet         # only exit code
-  python3 eldato-epistemic/tortoise/verify_ontology.py --sample 10     # check 10 docs
-  python3 eldato-epistemic/tortoise/verify_ontology.py --sample 0      # skip doc check
+  python3 premise-labs/tortoise/verify_ontology.py                 # exit 0 = good
+  python3 premise-labs/tortoise/verify_ontology.py --quiet         # only exit code
+  python3 premise-labs/tortoise/verify_ontology.py --sample 10     # check 10 docs
+  python3 premise-labs/tortoise/verify_ontology.py --sample 0      # skip doc check
 
 Exit codes: 0 = pass, 1 = contract mismatch, 2 = missing infrastructure, 3 = doc failures
 """

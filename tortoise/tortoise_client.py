@@ -37,7 +37,7 @@ import os
 import sys
 from pathlib import Path
 
-# Ensure eldato-epistemic is on path (sibling project)
+# Ensure premise-labs is on path (sibling project)
 _TORTOISE_ROOT = Path(__file__).resolve().parent
 if str(_TORTOISE_ROOT) not in sys.path:
     sys.path.insert(0, str(_TORTOISE_ROOT))
@@ -147,7 +147,7 @@ def status() -> dict:
     """Report whether Tortoise is available and basic graph stats."""
     sdk = _get_sdk()
     if sdk is None:
-        return {"available": False, "message": "Tortoise SDK not installed. PYTHONPATH missing eldato-epistemic/tortoise."}
+        return {"available": False, "message": "Tortoise SDK not installed. PYTHONPATH missing premise-labs/tortoise."}
     try:
         chain = sdk.summarize_structure()
     except Exception:
