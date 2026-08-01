@@ -341,8 +341,6 @@ Evidence Anchor:
 
 **Description:** Proposition nodes carry Beta(α,β) belief parameters. Operator entities (IMPL — solid, NAND — dashed) are first-class graph nodes, each with weight w ∈ [0.1, 10.0] (default 8.0). For visual clarity, operator entity nodes are shown as labeled arrows connecting propositions; in the actual graph structure, each operator is a separate node with a first directed edge from the source proposition to the operator, and a second directed edge from the operator to the target proposition — consistent with the bipartite factor graph model used by the Expectation Propagation algorithm. Evidence anchors (Proposition E) have fixed high-confidence Beta priors and propagate belief outward through connected operator entities.
 
-> **Rendered PNG:** ![FIG. 1](fig1.png)
-
 ### Figure 2: Factor Graph Representation
 
 ```
@@ -374,31 +372,27 @@ Evidence Anchor:
 
 **Description:** Beta priors on each proposition node are connected by exponential factor potentials. Messages pass in both directions. Cavity distributions remove the incoming message; tilted distributions multiply the cavity by the factor; moments are projected back to Beta via quadrature.
 
-> **Rendered PNG:** ![FIG. 2](fig2.png)
-
 ### Figure 3: Gauss-Jacobi Quadrature Grid on [0,1]²
 
 ```
-  1.0 ┤     ·     ·     ·     ·     ·     ·     ·     ·
-      │     ·     ·     ·     ·     ·     ·     ·     ·
-      │     ·     ·     ·     ·     ·     ·     ·     ·
-   c_b│     ·     ·     ·     ·     ·     ·     ·     ·
-      │     ·     ·     ·     ·     ·     ·     ·     ·
-      │     ·     ·     ·     ·     ·     ·     ·     ·
-      │     ·     ·     ·     ·     ·     ·     ·     ·
-    0 ┤─────┬─────┬─────┬─────┬─────┬─────┬─────┬─────
+  1.0 ┤  ··  ·          ·            ·          ·  ··
+      │ ·  · ·                            · ·  ·
+      │ ·   · ·                          · ·   ·
+   c_b│ ·    ·                            ·    ·
+      │  ·  · ·                          · ·  ·
+      │   ·   ·                          ·   ·
+      │    · · ·          ·            · · ·
+    0 ┤─────┬─────┬─────┬─────┬─────┬─────┬─────
       0                                       1.0
                         c_a
 
    n_quad = 8 per dimension → 64 evaluation points
-   Points concentrated near 0 and 1 (Jacobi weight concentrates at extremes)
+   Points cluster near 0 and 1 (Jacobi weight concentrates at extremes)
    Each point (x_i, y_j) has weight w_a[i] × w_b[j]
    Integration error < 0.001% for typical Beta parameters
 ```
 
-**Description:** 8×8 Gauss-Jacobi quadrature grid on [0,1]². Points are roots of Jacobi polynomials mapped from [-1,1] to [0,1]. Weights account for Beta-distributed importance of different regions, concentrating points near 0 and 1.
-
-> **Rendered PNG:** ![FIG. 3](fig3.png)
+**Description:** 8×8 Gauss-Jacobi quadrature grid on [0,1]². Points are roots of Jacobi polynomials mapped from [-1,1] to [0,1]. Points cluster near 0 and 1, not evenly spaced — the Jacobi weight function concentrates quadrature nodes near the domain extremes where Beta distributions have most of their probability mass.
 
 ### Figure 4: EP Message Passing Iteration
 
@@ -420,8 +414,6 @@ Evidence Anchor:
 ```
 
 **Description:** EP iteratively refines beliefs. Evidence anchor A propagates belief to B through an IMPL operator entity. Each iteration updates messages in both directions. Damping (λ) prevents oscillations. Convergence is measured by relative change in Beta parameters.
-
-> **Rendered PNG:** ![FIG. 4](fig4.png)
 
 ### Figure 5: Cascading Invalidation
 
@@ -452,8 +444,6 @@ Evidence Anchor:
 ```
 
 **Description:** When an evidence anchor's confidence drops, reverse traversal through IMPL operator entities identifies all downstream dependents. NAND-connected propositions may see confidence *increase* as the contradiction weakens — a behavior unique to the Beta + exponential NAND factor combination.
-
-> **Rendered PNG:** ![FIG. 5](fig5.png)
 
 ---
 
