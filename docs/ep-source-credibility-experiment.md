@@ -598,7 +598,7 @@ assert ep_result["converged"] == True
 
 ## 6. Test Implementation Structure
 
-### File: `eldato-epistemic/tests/test_ep_sources.py`
+### File: `premise-labs/tests/test_ep_sources.py`
 
 ```python
 """EP source credibility validation — log-scale aggregation experiments.

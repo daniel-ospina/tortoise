@@ -86,7 +86,7 @@ Skipped — plan touches zero third-party dependencies. FalkorDB and Pydantic ar
 
 ### Task 2: Port 7 Ontology Endpoints
 
-**Intent:** Add ontology-tree, object CRUD, descendants, and object-arguments endpoints. Port from reference implementation, adapting to eldato-epistemic FalkorDB defaults (port 16379, graph "tortoise").
+**Intent:** Add ontology-tree, object CRUD, descendants, and object-arguments endpoints. Port from reference implementation, adapting to premise-labs FalkorDB defaults (port 16379, graph "tortoise").
 
 **Acceptance:** 7 endpoints return documented shapes. 409 Conflict on version mismatch and cascade delete guard. Edge cap at 50 for arguments.
 

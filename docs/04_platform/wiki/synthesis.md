@@ -1,0 +1,34 @@
+---
+subjects:
+  team: organisation-design-team
+type: synthesis
+domain: engineering
+doc_status: draft
+created: 2026-07-29
+---
+
+# Engineering Wiki — Synthesis
+
+## Core Thesis
+
+El Dato's engineering platform provides the infrastructure for the epistemic graph (Tortoise), Supabase backend, and agent/SDK operations. The platform must be correct, performant, and debuggable — inference accuracy bugs are P0.
+
+## Key Entities
+
+- **Tortoise EP (Expectation Propagation):** Beta-distributed belief propagation engine for the epistemic graph. Uses natural parameter space messages with Gauss-Jacobi quadrature moment projection.
+- **SVBP (Stein Variational Belief Propagation):** Particle-based alternative to EP using SVGD. Handles multi-modal distributions but at 10-50× EP's computational cost.
+- **Operator weights:** Graph-derived edge weights for EP factors — source tier, time decay, mitigation status, edge density, context tags.
+
+## Key Concepts
+
+- **Directed vs Bidirectional IMPL:** IMPL edges (A supports B) are semantically directed. Standard EP treats all edges as undirected factor graph edges, sending back-messages that cause false cascades. Making IMPL directional in TortoiseEP fixes the convergent argument bug.
+- **Convergent argument bug:** Multiple T0 sources supporting a claim produce LOWER confidence than fewer sources. Root causes: bidirectional IMPL back-messages + edge density penalty using `min()` across all outputs.
+
+## Active Debates
+
+- Should directional IMPL be the default at the cost of losing backward information through IMPL chains? (Resolved: yes — the information loss is semantically correct.)
+- Is SVBP a viable refinement for Beta beliefs, or should it be reserved for multi-modal NAND camp detection? (Deferred — revisit when needed.)
+
+## Recent Research
+
+- 2026-07-29: EP convergent argument fix evaluation (see log.md INGEST entry)
