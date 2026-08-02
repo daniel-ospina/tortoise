@@ -1,4 +1,4 @@
-# Tortoise — Semantic + Epistemic + Episodic + Procedural Graph Engine
+# Tortoise — Semantic + Episodic + Epistemic + Procedural Graph Engine
 
 A product of [Premise Labs](https://premiselabs.co). Tortoise is a multi-ontology graph engine for agent memory. FalkorDB-backed, multi-tenant, with expansion packs, hybrid search, and belief propagation via Expectation Propagation (EP).
 
@@ -90,19 +90,50 @@ A Feature exists (semantic). A meeting discussed it (episodic). An argument was 
 - **Connects the layers.** A decision in a meeting (episodic) connects to the argument that supported it (epistemic), which connects to the feature it's about (semantic).
 - **Evolves state.** Confidence changes → semantic entities get superseded, deprecated, or strengthened.
 - **Ingests from everywhere.** GitHub, Linear, Slack, agent sessions, meeting transcripts, call recordings.
-- **Expands with packs.** Domain-specific ontologies (project management, product strategy, marketing) via [expansion packs](https://github.com/daniel-ospina/eldato/issues/7618).
-- **Searches across layers.** Hybrid search (full-text + vector + structural) with [RRF fusion](https://github.com/daniel-ospina/eldato/issues/7697).
+- **Expands with packs.** Domain-specific ontologies (project management, product strategy, marketing) via expansion packs.
+- **Searches across layers.** Hybrid search (full-text + vector + structural) with RRF fusion.
 - **Exposes via SDK + MCP.** Agents query, create, and traverse the graph through Python SDK and MCP tools.
+
+## Domain-Specific Business Logic (Expansion Packs)
+
+Expansion packs aren't just more kinds — they embed domain-specific business logic into the graph. Each pack pre-defines how its concepts relate, following established frameworks and best practices for that domain.
+
+### Example: Product Strategy Pack
+
+```
+Customer Segments (who we serve)
+        │
+   Job To Be Done (what they need)
+        │
+   Features (what we build)
+        │
+   User Journeys (how they use it)
+        │
+   Workflows (step-by-step flows)
+        │
+   Requirements (what enables them)
+```
+
+The relationships are pre-mandated — not arbitrary. A feature doesn't just "exist" in the graph; it connects upstream to the Jobs To Be Done it satisfies and the Customer Segments it serves, and downstream to the User Journeys, Workflows, and Requirements that implement it. Confidence about market needs flows through EP propagation to confidence about features. Evidence from user research strengthens Jobs To Be Done. Deployment events trigger state changes in Requirements.
+
+This is fundamentally different from a generic semantic graph that just says "here is some data with labels." The expansion pack encodes the relationship logic that comes from product management methodology — so the graph can explain not just *what* exists, but *why* it exists and *how* it connects.
+
+The same principle applies to every pack:
+- **Project Management**: Issues → Sprints → Milestones, with estimation and retrospective loops
+- **Marketing**: Campaigns → Audiences → Assets → Ad Creatives, with targeting and measurement hooks
+- **CRM**: Contacts → Deals → Companies, with pipeline stages and activity tracking
+
+Expansion packs are free at all pricing tiers. You can create your own. They make the graph usable in the language of your domain, not just generic types.
 
 ## Pricing
 
 | Tier | Price | Features |
 |------|-------|----------|
-| **Free (Community)** | $0 | Full CRUD, single-user, single-instance. Core ontology + [expansion packs](https://github.com/daniel-ospina/eldato/issues/7618). Community support. |
+| **Free (Community)** | $0 | Full CRUD, single-user, single-instance. Core ontology + expansion packs. Community support. |
 | **Pro (Team)** | $20–50/user/mo | Multi-user, team workspaces, basic RBAC, increased API limits, priority support |
 | **Enterprise** | Contact | SSO/SAML, SCIM, audit logs, custom governance, air-gapped deployment, 99.9% SLA, dedicated support |
 
-Custom ontology packs are **free at all tiers**. Governance features (kind lifecycle, schema versioning) are Team+. See [pricing research](https://github.com/daniel-ospina/eldato/blob/main/docs/01_product/wiki/research/2026-07-30-tortoise-adoption-pricing-governance.md).
+Custom ontology packs are **free at all tiers**. Governance features (kind lifecycle, schema versioning) are Team+. See pricing research (internal).
 
 ## Architecture
 
@@ -139,8 +170,8 @@ tortoise serve --dashboard    # start MCP server + web dashboard
 
 - [Architecture Index](index.md) — Architecture, API, connectors, and operations
 - [Skills Guide](skills/how-to-use-tortoise/SKILL.md) — Agent skill reference for graph operations
-- [Expansion Pack Architecture](https://github.com/daniel-ospina/eldato/issues/7618) — Domain-specific ontology packs
-- [Hybrid Search Epic](https://github.com/daniel-ospina/eldato/issues/7697) — FTS + vector + RRF retrieval
+- Expansion Pack Architecture (Epic #7618) — Domain-specific ontology packs
+- Hybrid Search Epic (#7697) — FTS + vector + RRF retrieval
 
 ## License
 
