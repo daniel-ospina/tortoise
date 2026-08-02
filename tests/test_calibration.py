@@ -10,7 +10,7 @@ from tortoise.exceptions import CalibrationError
 def sdk():
     """Create a TortoiseSDK connected to the local FalkorDB Docker container."""
     import os
-    os.environ.setdefault("TORTOISE_DB_URI", "docker://:falkordb@localhost:6379/tortoise")
+    os.environ.setdefault("TORTOISE_DB_URI", "docker://:falkordb@localhost:16379/tortoise")
     s = TortoiseSDK()
     yield s
     # Cleanup: delete ALL nodes (Points + Sources + operators)

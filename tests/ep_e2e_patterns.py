@@ -18,7 +18,7 @@ from pathlib import Path
 # Ensure we can import tortoise
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-os.environ["TORTOISE_DB_URI"] = "docker://:falkordb@localhost:6379/tortoise"
+os.environ["TORTOISE_DB_URI"] = "docker://:falkordb@localhost:16379/tortoise"
 
 from tortoise.sdk import TortoiseSDK
 

@@ -164,7 +164,7 @@ def _cmd_reconcile(args):
     from pathlib import Path
 
     if not args.db.startswith("docker://"):
-        print("Error: reconcile requires docker:// URI (e.g. docker://:pass@localhost:6379)", file=sys.stderr)
+        print("Error: reconcile requires docker:// URI (e.g. docker://:pass@localhost:16379)", file=sys.stderr)
         return 1
 
     log_path = Path(args.log)
@@ -222,7 +222,7 @@ def _cmd_init(args):
     docker_pass = os.environ.get("FALKORDB_PASSWORD", "")
 
     try:
-        docker_port = int(os.environ.get("FALKORDB_PORT", "6379"))
+        docker_port = int(os.environ.get("FALKORDB_PORT", "16379"))
     except (ValueError, TypeError):
         print(f"  ❌ Invalid FALKORDB_PORT: {os.environ.get('FALKORDB_PORT')!r}. Must be an integer.")
         return 1
@@ -799,7 +799,7 @@ def _cmd_index_github(args):
     # Try Docker FalkorDB first
     try:
         host = os.environ.get("FALKORDB_HOST", "localhost")
-        port = int(os.environ.get("FALKORDB_PORT", "6379"))
+        port = int(os.environ.get("FALKORDB_PORT", "16379"))
         password = os.environ.get("FALKORDB_PASSWORD", "")
         from falkordb import FalkorDB as FDB
         db = FDB(host=host, port=port, password=password or None)
@@ -906,10 +906,10 @@ def _cmd_doctor(args):
     # 2. Docker / FalkorDB
     docker_host = os.environ.get("FALKORDB_HOST", "localhost")
     try:
-        docker_port = int(os.environ.get("FALKORDB_PORT", "6379"))
+        docker_port = int(os.environ.get("FALKORDB_PORT", "16379"))
     except (ValueError, TypeError):
         results.append(("Graph: FalkorDB", "❌", f"Invalid FALKORDB_PORT: {os.environ.get('FALKORDB_PORT')!r}"))
-        docker_port = 6379
+        docker_port = 16379
     try:
         from falkordb import FalkorDB
         docker_pass = os.environ.get("FALKORDB_PASSWORD", "")
