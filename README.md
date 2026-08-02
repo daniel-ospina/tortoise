@@ -1,63 +1,146 @@
-# Tortoise
+# Tortoise — Semantic + Epistemic + Episodic + Procedural Graph Engine
 
-**Semantic + Epistemic + Episodic + Procedural Graph Engine**
-
-A product of [Premise Labs](https://premiselabs.co).
-
-Tortoise is a multi-ontology graph engine for agent memory. FalkorDB-backed, multi-tenant, with a connector system (GitHub, Linear, Slack) and belief propagation via Expectation Propagation (EP).
-
-## What Tortoise Does
-
-- Extracts claims (Points) from documents and conversations
-- Models belief relationships (IMPL/NAND) with shock propagation
-- Tracks provenance chains (Point → Source → Entity) across connectors
-- Ingests external data (GitHub, Linear, Slack) as Events
-- Governs entity ownership (spin-off, access control, audit)
-- Exposes graph operations via SDK, MCP server, and agent tools
-- Multi-tenant: 10K+ isolated graphs via `graph_name`
+A product of [Premise Labs](https://premiselabs.co). Tortoise is a multi-ontology graph engine for agent memory. FalkorDB-backed, multi-tenant, with expansion packs, hybrid search, and belief propagation via Expectation Propagation (EP).
 
 ## Four Ontologies in One Graph
 
-| Layer | What it models | Examples |
-|-------|---------------|---------|
-| Semantic | What exists | Subject, Object, Document |
-| Epistemic | What we believe | Point, IMPL, NAND, confidence |
-| Episodic | What happened | Event, instantiates, participatesIn |
-| Procedural | How work flows | Action, performs, produces, dependsOn |
+Tortoise models reality in four interconnected layers. The **semantic** layer is the foundation — it captures *what exists*. The **episodic** and **epistemic** layers provide context around it — *what happened* and *why*. Together they let the semantic layer evolve as new evidence arrives and events unfold.
+
+### Semantic — What exists
+
+The base layer. Teams, features, documents, products, customers, code, agreements — anything that *is*. This is the ground truth that episodic and epistemic layers reference.
+
+| Concept | Examples |
+|---------|---------|
+| Entities | Subject, Object, Document, Feature, Team, Agreement |
+| State | `active`, `deprecated`, `superseded`, `in_progress` |
+| Relationships | `owns`, `dependsOn`, `partOf`, `assignedTo` |
+
+When something changes — a feature is shipped, a team is reorganized, a contract is signed — the semantic layer updates. **Confidence flows from epistemic evidence; state changes from episodic events.**
+
+### Episodic — What happened
+
+Events that occur over time. Agent conversations, meetings, call recordings, GitHub commits, Slack threads, CI/CD runs — all ingested as timestamped Events. Every event connects to the semantic entities it involves.
+
+| Concept | Examples |
+|---------|---------|
+| Events | Meeting, Conversation, Deployment, Review, Extraction |
+| Connections | Event `involves` Feature, Agent `participatedIn` Meeting |
+| Ingestion | GitHub webhooks, Linear sync, Slack connectors, agent session capture |
+
+> **Current pipelines:** Agent conversations → tortoise-capture → extraction → Points. Meetings → transcript → extraction. Call recordings → transcript → extraction. All flow into the episodic layer and link to semantic entities.
+
+### Epistemic — What we believe
+
+Claims, arguments, decisions — *why* we think something is true. Every Point has a confidence score. IMPL edges say "this supports that." NAND edges say "this contradicts that." EP propagation updates belief across the graph when new evidence arrives.
+
+| Concept | Examples |
+|---------|---------|
+| Claims | Point (statement, decision, observation, hypothesis) |
+| Support | IMPL — "A provides positive epistemic support for B" |
+| Contradiction | NAND — "A logically contradicts B" |
+| Confidence | Beta distribution (α, β) — updated via EP propagation |
+| Evolution | Supersession, deprecation, confidence drift over time |
+
+When new evidence arrives (an experiment result, a user interview, a code review), EP propagates confidence through the graph. High-confidence claims survive. Contradicted claims weaken. Superseded claims are replaced.
+
+### Procedural — How work flows
+
+Actions, workflows, tools — *how* things get done. Connects agents to their work and skills to their outputs.
+
+| Concept | Examples |
+|---------|---------|
+| Actions | Research, Scope, Plan, Implement, Verify, Reflect |
+| Connections | Agent `performs` Action, Action `produces` Point |
+
+### How the layers connect
+
+```
+┌──────────────────────────────────────┐
+│              SEMANTIC                │
+│         (what exists)                │
+│  Feature, Team, Document, Agreement  │
+│                                      │
+│  ┌──────────┐      ┌──────────┐      │
+│  │ EPISODIC │      │EPISTEMIC │      │
+│  │(when)    │      │(why)     │      │
+│  │Meeting   │      │Argument  │      │
+│  │Commit    │      │Decision  │      │
+│  │Call      │      │Evidence  │      │
+│  └────┬─────┘      └────┬─────┘      │
+│       │                 │            │
+│       └────────┬────────┘            │
+│                │                     │
+│   Context flows into the semantic    │
+│   layer. Confidence changes state.   │
+│   Events trigger updates.            │
+│                                      │
+│            PROCEDURAL                │
+│         (how it happens)             │
+│   Action, Workflow, Tool, Skill      │
+└──────────────────────────────────────┘
+```
+
+A Feature exists (semantic). A meeting discussed it (episodic). An argument was made that it should be deprioritized (epistemic). EP propagation reduces confidence. The feature's state changes to `deprecated`. All connected.
+
+## What Tortoise Does
+
+- **Indexes everything.** Semantic entities, episodic events, epistemic claims — all connected in one FalkorDB graph.
+- **Propagates belief.** EP engine updates confidence across the graph when new evidence arrives.
+- **Connects the layers.** A decision in a meeting (episodic) connects to the argument that supported it (epistemic), which connects to the feature it's about (semantic).
+- **Evolves state.** Confidence changes → semantic entities get superseded, deprecated, or strengthened.
+- **Ingests from everywhere.** GitHub, Linear, Slack, agent sessions, meeting transcripts, call recordings.
+- **Expands with packs.** Domain-specific ontologies (project management, product strategy, marketing) via [expansion packs](https://github.com/daniel-ospina/eldato/issues/7618).
+- **Searches across layers.** Hybrid search (full-text + vector + structural) with [RRF fusion](https://github.com/daniel-ospina/eldato/issues/7697).
+- **Exposes via SDK + MCP.** Agents query, create, and traverse the graph through Python SDK and MCP tools.
+
+## Pricing
+
+| Tier | Price | Features |
+|------|-------|----------|
+| **Free (Community)** | $0 | Full CRUD, single-user, single-instance. Core ontology + [expansion packs](https://github.com/daniel-ospina/eldato/issues/7618). Community support. |
+| **Pro (Team)** | $20–50/user/mo | Multi-user, team workspaces, basic RBAC, increased API limits, priority support |
+| **Enterprise** | Contact | SSO/SAML, SCIM, audit logs, custom governance, air-gapped deployment, 99.9% SLA, dedicated support |
+
+Custom ontology packs are **free at all tiers**. Governance features (kind lifecycle, schema versioning) are Team+. See [pricing research](https://github.com/daniel-ospina/eldato/blob/main/docs/01_product/wiki/research/2026-07-30-tortoise-adoption-pricing-governance.md).
 
 ## Architecture
 
 ```
-Connectors (GitHub/Linear/Slack)
-  → JSONL Event Log (append-only source of truth)
-    → Projection (rebuildable current state)
-      → FalkorDB Graph
-        → SDK (Python API)
-          → MCP Server (agent tools)
+Data Pipelines (GitHub, Linear, Slack, agent sessions, call recordings)
+        ↓
+JSONL Event Log (append-only source of truth)
+        ↓
+Projection (rebuildable current state)
+        ↓
+FalkorDB Graph (semantic + episodic + epistemic + procedural)
+        ↓
+SDK (Python API) + Pack Registry (expansion packs)
+        ↓
+MCP Server (agent tools) + CLI (tortoise pack, tortoise query)
+        ↓
+Hybrid Search (FTS + vector + RRF fusion)
 ```
 
 ## Quick Start
 
 ```bash
-# 1. Set up environment
-cp .env.example .env
-# Edit .env with your FalkorDB credentials
+# Start FalkorDB (Docker required)
+docker run -d -p 6379:6379 --name falkordb falkordb/falkordb:latest
 
-# 2. Start FalkorDB (Docker required)
-docker compose up -d
-
-# 3. Install
-pip install -e .
-
-# 4. Initialize
-export $(cat .env | xargs)
-python -m tortoise init
+pip install tortoise
+tortoise init                 # creates DB, installs starter expansion packs
+tortoise pack list            # see loaded packs and available kinds
+tortoise connect github       # connect your repos
+tortoise serve --dashboard    # start MCP server + web dashboard
 ```
 
 ## Documentation
 
 - [Architecture Index](index.md) — Architecture, API, connectors, and operations
 - [Skills Guide](skills/how-to-use-tortoise/SKILL.md) — Agent skill reference for graph operations
+- [Expansion Pack Architecture](https://github.com/daniel-ospina/eldato/issues/7618) — Domain-specific ontology packs
+- [Hybrid Search Epic](https://github.com/daniel-ospina/eldato/issues/7697) — FTS + vector + RRF retrieval
 
 ## License
 
