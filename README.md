@@ -90,8 +90,8 @@ A Feature exists (semantic). A meeting discussed it (episodic). An argument was 
 - **Connects the layers.** A decision in a meeting (episodic) connects to the argument that supported it (epistemic), which connects to the feature it's about (semantic).
 - **Evolves state.** Confidence changes → semantic entities get superseded, deprecated, or strengthened.
 - **Ingests from everywhere.** GitHub, Linear, Slack, agent sessions, meeting transcripts, call recordings.
-- **Expands with packs.** Domain-specific ontologies (project management, product strategy, marketing) via expansion packs.
-- **Searches across layers.** Hybrid search (full-text + vector + structural) with RRF fusion.
+- **Expands with packs.** Domain-specific ontologies (project management, product strategy, marketing) via [expansion packs](https://github.com/daniel-ospina/eldato/issues/7618).
+- **Searches across layers.** Hybrid search (full-text + vector + structural) with [RRF fusion](https://github.com/daniel-ospina/eldato/issues/7697).
 - **Exposes via SDK + MCP.** Agents query, create, and traverse the graph through Python SDK and MCP tools.
 
 ## Domain-Specific Business Logic (Expansion Packs)
@@ -124,16 +124,15 @@ The same principle applies to every pack:
 - **CRM**: Contacts → Deals → Companies, with pipeline stages and activity tracking
 
 Expansion packs are free at all pricing tiers. You can create your own. They make the graph usable in the language of your domain, not just generic types.
-
 ## Pricing
 
 | Tier | Price | Features |
 |------|-------|----------|
-| **Free (Community)** | $0 | Full CRUD, single-user, single-instance. Core ontology + expansion packs. Community support. |
+| **Free (Community)** | $0 | Full CRUD, single-user, single-instance. Core ontology + [expansion packs](https://github.com/daniel-ospina/eldato/issues/7618). Community support. |
 | **Pro (Team)** | $20–50/user/mo | Multi-user, team workspaces, basic RBAC, increased API limits, priority support |
 | **Enterprise** | Contact | SSO/SAML, SCIM, audit logs, custom governance, air-gapped deployment, 99.9% SLA, dedicated support |
 
-Custom ontology packs are **free at all tiers**. Governance features (kind lifecycle, schema versioning) are Team+. See pricing research (internal).
+Custom ontology packs are **free at all tiers**. Governance features (kind lifecycle, schema versioning) are Team+. See [pricing research](https://github.com/daniel-ospina/eldato/blob/main/docs/01_product/wiki/research/2026-07-30-tortoise-adoption-pricing-governance.md).
 
 ## Architecture
 
@@ -170,8 +169,8 @@ tortoise serve --dashboard    # start MCP server + web dashboard
 
 - [Architecture Index](index.md) — Architecture, API, connectors, and operations
 - [Skills Guide](skills/how-to-use-tortoise/SKILL.md) — Agent skill reference for graph operations
-- Expansion Pack Architecture (Epic #7618) — Domain-specific ontology packs
-- Hybrid Search Epic (#7697) — FTS + vector + RRF retrieval
+- [Expansion Pack Architecture](https://github.com/daniel-ospina/eldato/issues/7618) — Domain-specific ontology packs
+- [Hybrid Search Epic](https://github.com/daniel-ospina/eldato/issues/7697) — FTS + vector + RRF retrieval
 
 ## License
 
