@@ -113,7 +113,7 @@ def test_sdk_fts_query_context_filter(sdk=None):
     sdk.create_point("statement", "quantum of solace", context="movies")
 
     results = sdk.tortoise_fts_query("quantum", context="movies")
-    assert len(results) >= 1
+    assert len(results) == 1, f"Expected 1 movie result, got {len(results)}"
     assert results[0]["content"] == "quantum of solace"
 
 

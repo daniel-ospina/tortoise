@@ -1305,10 +1305,9 @@ class TortoiseSDK:
                 fused = {pid: score for pid, score in fused.items() if score >= threshold}
             match_source = "rrf"
 
-        # 5. Fetch EP breakdowns (batch — single Cypher query)
-        result_ids = list(fused.keys())[:limit]
+        # 5. Apply kind filter BEFORE truncating (so kind='hypothesis' isn't starved by top-N statements)
+        result_ids = list(fused.keys())
 
-        # Apply kind filter post-retrieval (FTS/vector don't filter by kind natively)
         if kind:
             kind_ids = set()
             try:
@@ -1320,6 +1319,9 @@ class TortoiseSDK:
             except Exception:
                 pass
             result_ids = [pid for pid in result_ids if pid in kind_ids]
+
+        # Truncate AFTER filtering
+        result_ids = result_ids[:limit]
 
         ep_breakdowns = annotate_ep_batch(graph, result_ids)
 
