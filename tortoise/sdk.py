@@ -1226,6 +1226,8 @@ class TortoiseSDK:
                         params={"eid": event_id, "props": props},
                     )
                     ingested += 1
+                    # Connect issue/PR references to Objects
+                    self._connect_issue_objects(event_id, metadata)
             else:
                 # Original DocumentCreated logic
                 doc_kind = frontmatter.get("type", frontmatter.get("document_kind", ""))
@@ -1661,3 +1663,38 @@ class TortoiseSDK:
         report["point_count"] = r.result_set[0][0]
 
         return report
+
+    def _connect_issue_objects(self, event_id: str, metadata: dict) -> int:
+        """Extract issue/PR references from metadata and create INSTANTIATES edges.
+        Returns number of edges created."""
+        proj = self._get_proj()
+        issues = metadata.get("issues", [])
+        prs = metadata.get("prs", [])
+        count = 0
+        
+        for ref in list(issues) + list(prs):
+            if not ref or "#" not in str(ref):
+                continue
+            parts = str(ref).split("#")
+            if len(parts) != 2:
+                continue
+            repo, num = parts[0].strip(), parts[1].strip()
+            if not repo or not num:
+                continue
+            obj_name = f"{repo}#{num}"
+            obj_id = f"issue_{repo}_{num}"
+            
+            # Create Object if doesn't exist
+            proj.g.query(
+                "MERGE (o:Object {name: $name}) "
+                "ON CREATE SET o.objectKind = 'issue', o.id = $oid, o.status = 'live'",
+                params={"name": obj_name, "oid": obj_id}
+            )
+            # Create INSTANTIATES edge
+            proj.g.query(
+                "MATCH (e:Event {eventId: $eid}), (o:Object {name: $name}) "
+                "MERGE (e)-[:INSTANTIATES]->(o)",
+                params={"eid": event_id, "name": obj_name}
+            )
+            count += 1
+        return count
