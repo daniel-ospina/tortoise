@@ -115,28 +115,30 @@ class _EntityHandlers:
         )
 
     def _upsert_event(self, event: dict) -> None:
-        """MERGE Event node with all ONTOLOGY §3.1 properties.
-
-        Handles both nested ({type:EventRecorded, event:{eventId:...}}) and
-        flat (eventId at top level) formats transparently.
-        """
-        inner = event.get("event", event)  # unwrap nested format
+        """MERGE Event node with all properties passed through."""
+        inner = event.get("event", event)
         eid = inner.get("id") or inner.get("eventId")
         if not eid:
             return
+        # Start with canonical Event schema, overlay all caller-provided properties
+        props = {
+            "eventKind": inner.get("eventKind", ""),
+            "subject": inner.get("subject", ""),
+            "object": inner.get("object", ""),
+            "startedAt": inner.get("startedAt", ""),
+            "endedAt": inner.get("endedAt"),
+            "parentEvent": inner.get("parentEvent"),
+            "participants": inner.get("participants", []),
+            "classificationLevel": inner.get("classificationLevel", "internal"),
+            "format": inner.get("format", "jsonl"),
+        }
+        # Pass through all additional properties (session_id, agent, keywords, etc.)
+        passthrough = {k: v for k, v in inner.items()
+                       if k not in props and k not in ('id', 'eventId', 'type') and v is not None}
+        props.update(passthrough)
         self.g.query(
             "MERGE (e:Event {eventId: $eid}) "
             "ON CREATE SET e += $props "
             "ON MATCH SET e += $props",
-            params={"eid": eid, "props": {
-                "eventKind": inner.get("eventKind", ""),
-                "subject": inner.get("subject", ""),
-                "object": inner.get("object", ""),
-                "startedAt": inner.get("startedAt", ""),
-                "endedAt": inner.get("endedAt"),
-                "parentEvent": inner.get("parentEvent"),
-                "participants": inner.get("participants", []),
-                "classificationLevel": inner.get("classificationLevel", "internal"),
-                "format": inner.get("format", "jsonl"),
-            }}
+            params={"eid": eid, "props": props}
         )

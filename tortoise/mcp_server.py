@@ -539,6 +539,16 @@ def tortoise_create_event(name: str, eventKind: str, props: Any = None) -> dict:
     return _safe(sdk.create_event, name, eventKind, **(props or {}))
 
 @mcp.tool()
+def tortoise_get_events(eventKind: str | None = None, limit: int = 20) -> list[dict]:
+    """Get recent Events, optionally filtered by eventKind (e.g. 'AgentSession')."""
+    return _safe(sdk.get_events, eventKind=eventKind, limit=limit)
+
+@mcp.tool()
+def tortoise_get_session(session_id: str) -> dict:
+    """Get a single agent session Event by session_id."""
+    return _safe(sdk.get_session, session_id)
+
+@mcp.tool()
 def tortoise_create_document(title: str, documentKind: str, props: Any = None) -> dict:
     """Create a Document node (research, planDoc, meetingNotes, etc.)."""
     props = _parse(props)

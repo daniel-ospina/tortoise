@@ -1371,6 +1371,23 @@ class TortoiseSDK:
         eid = self.ulid()
         return self._create_entity("Event", eid, {"eventId": eid, "name": name, "eventKind": eventKind, "eventStatus": "scheduled", **props}, "EventRecorded")
 
+    def get_events(self, eventKind: str | None = None, limit: int = 20) -> list[dict]:
+        """Get recent Events, optionally filtered by eventKind."""
+        proj = self._get_proj()
+        kind_clause = f"WHERE e.eventKind = '{eventKind}'" if eventKind else ""
+        return [r[0] for r in proj.g.query(
+            f"MATCH (e:Event) {kind_clause} RETURN properties(e) ORDER BY e.startedAt DESC LIMIT {limit}"
+        ).result_set]
+
+    def get_session(self, session_id: str) -> dict | None:
+        """Get a single session Event by session_id."""
+        proj = self._get_proj()
+        rows = proj.g.query(
+            "MATCH (e:Event {eventKind: 'AgentSession', session_id: $sid}) RETURN properties(e)",
+            params={"sid": session_id}
+        ).result_set
+        return rows[0][0] if rows else None
+
     def create_document(self, title: str, documentKind: str, **props) -> dict:
         did = self.ulid()
         return self._create_entity("Document", did, {"title": title, "documentKind": documentKind, "objectKind": "document", "status": "draft", **props}, "DocumentCreated")
