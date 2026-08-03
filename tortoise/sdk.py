@@ -108,10 +108,21 @@ class TortoiseSDK:
         pid = ulid()
         # Points enter as draft, go live when first edge is created (#131)
         status = props.pop("status", "draft")
+
+        # Compute embedding (Phase 1A, #7698) — stored as Point property
+        embedding = None
+        try:
+            from .embeddings import compute_embedding
+            embedding = compute_embedding(content)
+        except Exception:
+            pass  # Graceful — embedding is optional
+
         proj.g.query(
             "CREATE (n:Point {id:$id, content:$c, pointKind:$k, "
-            "is_operator:false, status:$st, createdAt:$now, updatedAt:$now})",
-            params={"id": pid, "c": content, "k": kind, "st": status, "now": now},
+            "is_operator:false, status:$st, createdAt:$now, updatedAt:$now}) "
+            "SET n.embedding = $embedding",
+            params={"id": pid, "c": content, "k": kind, "st": status, "now": now,
+                    "embedding": embedding},
         )
         for key, val in props.items():
             proj.g.query(
@@ -336,8 +347,13 @@ class TortoiseSDK:
 
     # ── Query ─────────────────────────────────────────────────────
 
-    def query(self, kind: str | None = None, context: str | None = None, **filters) -> list[dict]:
-        """Query points by pointKind, context, and/or custom property filters."""
+    def query(self, kind: str | None = None, context: str | None = None,
+              **filters) -> list[dict]:
+        """Query points by pointKind, context, and/or custom property filters.
+
+        For confidence-aware queries, use tortoise_fts_query() with query=None
+        for full-scan mode with EP annotation.
+        """
         proj = self._get_proj()
         clauses = ["(n.is_operator IS NULL OR n.is_operator = false)"]
         params: dict[str, Any] = {}
@@ -1162,11 +1178,12 @@ class TortoiseSDK:
         results.sort(key=lambda r: r["confidence"], reverse=True)
         results = results[:limit]
 
-        # Embedding fallback if no string matches (respects kind_filter as context)
+        # Hybrid fallback if no string matches (Phase 0, #7748)
         if not results:
-            semantic = self.search(q, context=kind_filter, threshold=0.3, limit=limit)
-            results = [{"id": r["id"], "name": r["content"], "kind": "",
-                        "confidence": round(r["similarity"] * 0.5, 4)} for r in semantic]
+            fts_results = self.tortoise_fts_query(q, kind=kind_filter, limit=limit)
+            results = [{"id": r["id"], "name": r.get("content", ""), "kind": r.get("point_kind", ""),
+                        "confidence": round(r.get("scores", {}).get("rrf", 0.0) * 0.5, 4)}
+                       for r in fts_results]
 
         return results
 
@@ -1208,19 +1225,163 @@ class TortoiseSDK:
             "confidence_changes": confidence_changes,
         }
 
-    # ── Semantic Search (#6990) ─────────────────────────────────
+    # ── Hybrid Search (Phase 0, #7748) ───────────────────────────
 
-    def search(self, query: str, kind: str | None = None,
-               context: str | None = None, *,
-               threshold: float = 0.3, limit: int = 10) -> list[dict]:
-        """Semantic/vector search over Points. Returns ranked [{id, content, similarity, snippet}, ...]."""
+    def tortoise_fts_query(
+        self,
+        query: str | None = None,
+        kind: str | None = None,
+        context: str | None = None,
+        *,
+        min_confidence: float = 0.0,
+        order_by: str = "relevance",
+        limit: int = 10,
+        threshold: float = 0.0,
+    ) -> list[dict]:
+        """Hybrid search with RRF fusion + EP annotation.
+
+        Full-scan mode: omit query, set context → all Points in context.
+        Best-match mode: provide query → RRF fusion of FTS + vector + structural.
+
+        All results annotated with EP breakdown (confidence_mean + evidence + contention).
+        min_confidence defaults to 0.0 (no filter).
+        """
+        from .search_engine import (
+            classify_query, degradation_chain, rrf_fusion,
+            annotate_ep_batch, fallback_tfidf, SearchResult, SearchScores,
+        )
+
         if limit < 1:
             raise ValueError(f"limit must be >= 1, got {limit}")
         if not (0.0 <= threshold <= 1.0):
             raise ValueError(f"threshold must be 0.0-1.0, got {threshold}")
-        from .embeddings import search_points
-        points = self.query(kind=kind, context=context)
-        return search_points(query, points, threshold=threshold, limit=limit)
+        if not (0.0 <= min_confidence <= 1.0):
+            raise ValueError(f"min_confidence must be 0.0-1.0, got {min_confidence}")
+        if order_by not in ("relevance", "confidence"):
+            raise ValueError(f"order_by must be 'relevance' or 'confidence', got {order_by!r}")
+
+        proj = self._get_proj()
+        graph = proj.g
+
+        # 1. Classify query → determine active strategies
+        strategies = classify_query(query, kind, context)
+        is_full_scan = (query is None and context is not None and not kind)
+
+        # 2. Get query vector if needed
+        query_vec = None
+        if strategies.get("vector") and query:
+            try:
+                from .embeddings import EmbeddingModel
+                model = EmbeddingModel.get()
+                if model:
+                    query_vec = model.encode([query])[0].tolist()
+            except Exception:
+                pass  # Graceful — vector strategy will degrade
+
+        # 3. Run retrieval with degradation
+        raw_results = degradation_chain(
+            graph, query, kind, context, query_vec, strategies,
+            limit=limit * 2,
+        )
+
+        if not raw_results:
+            # All strategies failed — fallback to in-memory TF-IDF
+            if query:
+                points = self.query(kind=kind, context=context)
+                return fallback_tfidf(query, points, limit=limit)
+            return []
+
+        # 4. Fuse via RRF (skip if single strategy or full-scan)
+        if is_full_scan or len(raw_results) == 1:
+            strat_name, ranked = next(iter(raw_results.items()))
+            # Apply threshold filter (score floor)
+            fused = {pid: score for pid, score in ranked if score >= threshold}
+            match_source = strat_name
+        else:
+            ranked_lists = list(raw_results.values())
+            fused = rrf_fusion(ranked_lists)
+            # Apply threshold filter to RRF scores
+            if threshold > 0:
+                fused = {pid: score for pid, score in fused.items() if score >= threshold}
+            match_source = "rrf"
+
+        # 5. Fetch EP breakdowns (batch — single Cypher query)
+        result_ids = list(fused.keys())[:limit]
+
+        # Apply kind filter post-retrieval (FTS/vector don't filter by kind natively)
+        if kind:
+            kind_ids = set()
+            try:
+                kind_rows = graph.query(
+                    "MATCH (n:Point) WHERE n.pointKind = $kind AND n.id IN $ids RETURN n.id",
+                    params={"kind": kind, "ids": result_ids},
+                ).result_set
+                kind_ids = {row[0] for row in kind_rows}
+            except Exception:
+                pass
+            result_ids = [pid for pid in result_ids if pid in kind_ids]
+
+        ep_breakdowns = annotate_ep_batch(graph, result_ids)
+
+        # 6. Build SearchResult objects, filter, and order
+        results = []
+        for pid in result_ids[:limit]:
+            # Fetch Point content
+            try:
+                rows = graph.query(
+                    "MATCH (n:Point {id: $id}) RETURN n.content, n.pointKind, n.context",
+                    params={"id": pid},
+                ).result_set
+                if not rows:
+                    continue
+                content, pt_kind, pt_context = rows[0][0], rows[0][1], rows[0][2] if len(rows[0]) > 2 else None
+            except Exception:
+                continue
+
+            ep = ep_breakdowns.get(pid)
+
+            # Apply min_confidence filter (default 0.0 = no filter)
+            if ep and ep.confidence_mean < min_confidence:
+                continue
+
+            # Build scores
+            scores = SearchScores(rrf=fused.get(pid, 0.0))
+            if "fts" in raw_results:
+                for fid, fscore in raw_results["fts"]:
+                    if fid == pid:
+                        scores.fts = fscore
+                        break
+            if "vector" in raw_results:
+                for vid, vscore in raw_results["vector"]:
+                    if vid == pid:
+                        scores.vector = vscore
+                        break
+            if "structural" in raw_results:
+                for sid, sscore in raw_results["structural"]:
+                    if sid == pid:
+                        scores.structural = sscore
+                        break
+
+            result = SearchResult(
+                id=pid,
+                content=content,
+                point_kind=pt_kind,
+                context=pt_context,
+                scores=scores,
+                match_source=match_source,
+                ep=ep,
+            )
+            results.append(result)
+
+        # 7. Order results
+        if order_by == "confidence":
+            results.sort(
+                key=lambda r: r.ep.confidence_mean if r.ep else 0.0,
+                reverse=True,
+            )
+        # Default: RRF relevance order (already in fused order)
+
+        return [r.to_dict() for r in results[:limit]]
 
     # ── Multi-tenancy (#7001) ─────────────────────────────────
 

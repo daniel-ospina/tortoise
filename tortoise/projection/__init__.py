@@ -174,14 +174,40 @@ class FalkorProjection(
         if t in ("PointAdded", "OperatorAdded"):
             self._upsert(ev["point"])
         elif t == "PointRevised":
-            self.g.query(
-                "MATCH (n:Point {id:$id}) "
-                "SET n.content = coalesce($c, n.content), "
-                "    n.context = coalesce($x, n.context), "
-                "    n.updatedAt = $now",
-                params={"id": ev["id"], "c": ev.get("new_content"),
-                        "x": ev.get("new_context"), "now": _now_iso()},
-            )
+            new_content = ev.get("new_content")
+            params = {"id": ev["id"], "c": new_content,
+                      "x": ev.get("new_context"), "now": _now_iso()}
+
+            # Re-compute embedding if content changed (Phase 1A, #7698)
+            if new_content:
+                try:
+                    from tortoise.embeddings import compute_embedding
+                    embedding = compute_embedding(new_content)
+                    params["embedding"] = embedding
+                    self.g.query(
+                        "MATCH (n:Point {id:$id}) "
+                        "SET n.content = coalesce($c, n.content), "
+                        "    n.context = coalesce($x, n.context), "
+                        "    n.updatedAt = $now, "
+                        "    n.embedding = $embedding",
+                        params=params,
+                    )
+                except Exception:
+                    self.g.query(
+                        "MATCH (n:Point {id:$id}) "
+                        "SET n.content = coalesce($c, n.content), "
+                        "    n.context = coalesce($x, n.context), "
+                        "    n.updatedAt = $now",
+                        params=params,
+                    )
+            else:
+                self.g.query(
+                    "MATCH (n:Point {id:$id}) "
+                    "SET n.content = coalesce($c, n.content), "
+                    "    n.context = coalesce($x, n.context), "
+                    "    n.updatedAt = $now",
+                    params=params,
+                )
         elif t == "PointRetracted":
             self._delete(ev["id"])
         elif t == "PointsMerged":
@@ -254,14 +280,34 @@ class FalkorProjection(
                 for mid in ev.get("merge_ids", []):
                     self._delete(mid)
             elif t == "PointRevised":
-                self.g.query(
-                    "MATCH (n:Point {id:$id}) "
-                    "SET n.content = coalesce($c, n.content), "
-                    "    n.context = coalesce($x, n.context)",
-                    params={"id": ev.get("id") or ev["event_id"],
-                            "c": ev.get("new_content"),
-                            "x": ev.get("new_context")},
-                )
+                new_content = ev.get("new_content")
+                params = {"id": ev.get("id") or ev["event_id"],
+                          "c": new_content, "x": ev.get("new_context")}
+                if new_content:
+                    try:
+                        from tortoise.embeddings import compute_embedding
+                        params["embedding"] = compute_embedding(new_content)
+                        self.g.query(
+                            "MATCH (n:Point {id:$id}) "
+                            "SET n.content = coalesce($c, n.content), "
+                            "    n.context = coalesce($x, n.context), "
+                            "    n.embedding = $embedding",
+                            params=params,
+                        )
+                    except Exception:
+                        self.g.query(
+                            "MATCH (n:Point {id:$id}) "
+                            "SET n.content = coalesce($c, n.content), "
+                            "    n.context = coalesce($x, n.context)",
+                            params=params,
+                        )
+                else:
+                    self.g.query(
+                        "MATCH (n:Point {id:$id}) "
+                        "SET n.content = coalesce($c, n.content), "
+                        "    n.context = coalesce($x, n.context)",
+                        params=params,
+                    )
             elif t == "EventRecorded":
                 self._upsert_event(ev)
             elif t == "SubjectAdded":
@@ -289,13 +335,14 @@ class FalkorProjection(
         return self.g.query(cypher, params=params or None)
 
     def _ensure_indexes(self) -> None:
-        """Create range indexes on frequently-filtered Point properties.
+        """Create indexes on frequently-filtered Point properties.
 
         Wraps CREATE INDEX in try/except because FalkorDB raises
         "Attribute 'X' is already indexed" rather than silently no-opping.
         On subsequent startups, each CREATE INDEX errors immediately
         (O(1) check), so there is no startup penalty on large graphs.
         """
+        # ── Range indexes (existing) ──
         for prop in ("id", "pointKind", "context", "content_hash", "is_operator"):
             try:
                 self.g.query(f"CREATE INDEX FOR (n:Point) ON (n.{prop})")
@@ -307,6 +354,32 @@ class FalkorProjection(
                     import logging
                     logging.getLogger(__name__).warning(
                         "Failed to create index on n.%s: %s", prop, e)
+
+        # ── Full-text index (Phase 0, #7748) ──
+        try:
+            self.g.query("CALL db.idx.fulltext.createNodeIndex('Point', 'content')")
+        except Exception as e:
+            msg = str(e).lower()
+            if "already" in msg:
+                pass
+            else:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "Failed to create fulltext index on Point.content: %s", e)
+
+        # ── Vector index (Phase 0, #7748) ──
+        try:
+            self.g.query(
+                "CALL db.idx.vector.createNodeIndex('Point', 'embedding', 384, 'HNSW')"
+            )
+        except Exception as e:
+            msg = str(e).lower()
+            if "already" in msg:
+                pass
+            else:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "Failed to create vector index on Point.embedding: %s", e)
 
     def close(self) -> None:
         self.db.close()

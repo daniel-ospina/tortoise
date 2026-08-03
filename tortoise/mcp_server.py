@@ -120,9 +120,21 @@ def tortoise_create_point(kind: str, content: str, context: str | None = None,
 
 @mcp.tool()
 def tortoise_query(kind: str | None = None, context: str | None = None,
-                   filters: Any = None) -> list[dict]:
-    """Query points by pointKind, context, and/or property filters."""
+                   filters: Any = None,
+                   text: str | None = None,
+                   order_by: str | None = None,
+                   min_confidence: float | None = None,
+                   limit: int = 100) -> list[dict]:
+    """Query points by pointKind, context, and/or property filters.
+
+    When text is provided, routes through tortoise_fts_query() for hybrid search.
+    When text is None, uses existing structural query (full-scan for context).
+    """
     filters = _parse(filters)
+    if text:
+        return _safe(sdk.tortoise_fts_query, text, kind=kind, context=context,
+                     limit=limit, min_confidence=min_confidence or 0.0,
+                     order_by=order_by or "relevance")
     return _safe(sdk.query, kind, context, **(filters or {}))
 
 
@@ -161,10 +173,19 @@ def tortoise_suggest_entry_points(query: str, limit: int = 5,
                                   kind_filter: str | None = None) -> list[dict]:
     """Entity resolution — NL query → matching entities from the graph.
 
-    String match on content (Cypher CONTAINS) + embedding fallback.
-    kind_filter filters by n.context (namespace).
+    Uses hybrid search (tortoise_fts_query) for semantic entity resolution.
+    Falls back to string match (CONTAINS) if hybrid search unavailable.
     Returns [{id, name, kind, confidence}] sorted by confidence DESC.
     """
+    try:
+        results = _safe(sdk.tortoise_fts_query, query, kind=kind_filter, limit=limit)
+        if results:
+            return [{"id": r["id"], "name": r.get("content", ""),
+                     "kind": r.get("point_kind", ""),
+                     "confidence": r.get("ep", {}).get("confidence_mean", 0.0)}
+                    for r in results]
+    except Exception:
+        pass
     return _safe(sdk.suggest_entry_points, query, limit=limit, kind_filter=kind_filter)
 
 
@@ -173,10 +194,20 @@ def tortoise_suggest_entry_points(query: str, limit: int = 5,
 @mcp.tool()
 def tortoise_search(query: str, kind: str | None = None,
                     context: str | None = None,
-                    threshold: float = 0.3, limit: int = 10) -> list[dict]:
-    """Semantic/vector search over Points. Returns ranked [{id, content, similarity, snippet}, ...]."""
-    return _safe(sdk.search, query, kind=kind, context=context,
-                 threshold=threshold, limit=limit)
+                    threshold: float = 0.0, limit: int = 10,
+                    min_confidence: float = 0.0,
+                    order_by: str = "relevance") -> list[dict]:
+    """Hybrid search with RRF fusion + EP annotation.
+
+    Full-scan mode: omit query, set context → all Points in context.
+    Best-match mode: provide query → RRF fusion of FTS + vector + structural.
+
+    All results annotated with EP breakdown (confidence_mean + evidence + contention).
+    min_confidence defaults to 0.0 (no filter).
+    """
+    return _safe(sdk.tortoise_fts_query, query, kind=kind, context=context,
+                 threshold=threshold, limit=limit,
+                 min_confidence=min_confidence, order_by=order_by)
 
 
 # ── EP Belief Propagation (#6908) ────────────────────────────────

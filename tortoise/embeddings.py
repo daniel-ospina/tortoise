@@ -5,7 +5,60 @@ finds 0 cross-lens connections; embeddings bridge that gap.
 """
 from __future__ import annotations
 
+import logging
 import numpy as np
+
+logger = logging.getLogger(__name__)
+
+
+class EmbeddingModel:
+    """Lazy-loaded embedding model singleton.
+
+    Phase 0 stub (#7748): returns None until Phase 1A (#7698) loads all-MiniLM-L6-v2.
+    """
+    _instance: "EmbeddingModel | None" = None
+    _model = None
+
+    @classmethod
+    def get(cls) -> "EmbeddingModel | None":
+        """Get or create the singleton. Returns None if model unavailable."""
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance if cls._instance._model else None
+
+    def __init__(self):
+        try:
+            from sentence_transformers import SentenceTransformer
+            self._model = SentenceTransformer("all-MiniLM-L6-v2")
+        except Exception:
+            logger.info("sentence-transformers not available — embeddings disabled")
+            self._model = None
+
+    def encode(self, texts: list[str], batch_size: int = 32):
+        """Encode texts to embeddings. Returns numpy array or None."""
+        if self._model is None:
+            return None
+        return self._model.encode(texts, batch_size=batch_size, show_progress_bar=False)
+
+
+def compute_embedding(content: str, max_tokens: int = 512) -> list[float] | None:
+    """Compute embedding for a single text. Returns 384-dim list or None.
+
+    Truncates to max_tokens before encoding to prevent OOM.
+    Returns None if model unavailable or encoding fails.
+    """
+    model = EmbeddingModel.get()
+    if model is None:
+        return None
+    try:
+        words = content.split()[:max_tokens]
+        truncated = " ".join(words)
+        vec = model.encode([truncated])
+        if vec is None or len(vec) == 0:
+            return None
+        return vec[0].tolist()
+    except Exception:
+        return None
 
 
 def find_cross_source_matches(

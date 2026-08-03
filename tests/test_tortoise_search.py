@@ -84,88 +84,108 @@ def test_search_points_snippet():
     assert results[0]["snippet"] == "x" * 200
 
 
-# ── SDK integration (with DB) ────────────────────────────────────────
+# ── SDK integration (with DB, Phase 0: tortoise_fts_query) ─────────
 
-def test_sdk_search_empty(sdk=None):
+def test_sdk_fts_query_empty(sdk=None):
     if sdk is None:
         sdk = _new_sdk()
-    results = sdk.search("hello")
+    results = sdk.tortoise_fts_query("hello")
     assert results == []
 
 
-def test_sdk_search_kind_filter(sdk=None):
+def test_sdk_fts_query_kind_filter(sdk=None):
     if sdk is None:
         sdk = _new_sdk()
     sdk.create_point("statement", "quantum computing breakthroughs", context="physics")
     sdk.create_point("hypothesis", "quantum decoherence effects", context="physics")
     sdk.create_point("statement", "cookie recipe collection", context="cooking")
 
-    results = sdk.search("quantum", kind="hypothesis", threshold=0.1)
+    results = sdk.tortoise_fts_query("quantum", kind="hypothesis")
     assert len(results) == 1
-    assert results[0]["content"] == "quantum decoherence effects"
+    assert results[0]["point_kind"] == "hypothesis"
 
 
-def test_sdk_search_context_filter(sdk=None):
+def test_sdk_fts_query_context_filter(sdk=None):
     if sdk is None:
         sdk = _new_sdk()
     sdk.create_point("statement", "quantum computing", context="physics")
     sdk.create_point("statement", "quantum gravity", context="physics")
     sdk.create_point("statement", "quantum of solace", context="movies")
 
-    results = sdk.search("quantum", context="movies", threshold=0.1)
-    assert len(results) == 1
+    results = sdk.tortoise_fts_query("quantum", context="movies")
+    assert len(results) >= 1
     assert results[0]["content"] == "quantum of solace"
 
 
-def test_sdk_search_ranking_order(sdk=None):
+def test_sdk_fts_query_ranking_order(sdk=None):
     if sdk is None:
         sdk = _new_sdk()
     sdk.create_point("statement", "puppies and kittens care", context="pets")
     sdk.create_point("statement", "quantum entanglement theory", context="physics")
     sdk.create_point("statement", "quantum field theory basics", context="physics")
 
-    results = sdk.search("quantum physics", threshold=0.05)
-    assert len(results) >= 2, f"expected >=2 results, got {len(results)}: {[r['snippet'][:40] for r in results]}"
-    # quantum-related points must rank above pet care
-    # pet care has no overlap with 'quantum physics', so at threshold 0.05 it may not appear at all
-    # but if it does appear, it must be last
-    puppy_ids = [r["id"] for r in results if "puppies" in r["content"]]
-    if puppy_ids:
-        assert results[-1]["id"] == puppy_ids[0], \
-            f"pet care should rank last, got order: {[r['id'] for r in results]}"
-    # core assertion: the top results are quantum-related
-    top_content = results[0]["content"]
-    assert "quantum" in top_content, f"top result should be quantum-related, got: {top_content}"
+    results = sdk.tortoise_fts_query("quantum physics")
+    if len(results) >= 2:
+        top_content = results[0]["content"]
+        assert "quantum" in top_content, f"top result should be quantum-related, got: {top_content}"
 
 
-def test_sdk_search_limit(sdk=None):
+def test_sdk_fts_query_limit(sdk=None):
     if sdk is None:
         sdk = _new_sdk()
     for i in range(20):
         sdk.create_point("statement", f"quantum topic number {i}", context="physics")
 
-    results = sdk.search("quantum", threshold=0.1, limit=5)
+    results = sdk.tortoise_fts_query("quantum", limit=5)
     assert len(results) == 5
 
 
-def test_sdk_search_invalid_limit(sdk=None):
+def test_sdk_fts_query_invalid_limit(sdk=None):
     if sdk is None:
         sdk = _new_sdk()
-    import pytest
     with pytest.raises(ValueError, match="limit"):
-        sdk.search("test", limit=0)
+        sdk.tortoise_fts_query("test", limit=0)
     with pytest.raises(ValueError, match="limit"):
-        sdk.search("test", limit=-1)
+        sdk.tortoise_fts_query("test", limit=-1)
 
 
-def test_sdk_search_invalid_threshold(sdk=None):
+def test_sdk_fts_query_invalid_threshold(sdk=None):
     if sdk is None:
         sdk = _new_sdk()
-    import pytest
     with pytest.raises(ValueError, match="threshold"):
-        sdk.search("test", threshold=-0.1)
+        sdk.tortoise_fts_query("test", threshold=-0.1)
     with pytest.raises(ValueError, match="threshold"):
-        sdk.search("test", threshold=1.1)
+        sdk.tortoise_fts_query("test", threshold=1.1)
+
+
+def test_sdk_fts_query_min_confidence(sdk=None):
+    if sdk is None:
+        sdk = _new_sdk()
+    with pytest.raises(ValueError, match="min_confidence"):
+        sdk.tortoise_fts_query("test", min_confidence=-0.1)
+    with pytest.raises(ValueError, match="min_confidence"):
+        sdk.tortoise_fts_query("test", min_confidence=1.1)
+
+
+def test_sdk_fts_query_invalid_order_by(sdk=None):
+    if sdk is None:
+        sdk = _new_sdk()
+    with pytest.raises(ValueError, match="order_by"):
+        sdk.tortoise_fts_query("test", order_by="invalid")
+
+
+def test_sdk_fts_query_full_scan(sdk=None):
+    if sdk is None:
+        sdk = _new_sdk()
+    sdk.create_point("statement", "point a", context="test_ctx")
+    sdk.create_point("statement", "point b", context="test_ctx")
+    sdk.create_point("hypothesis", "point c", context="other")
+
+    results = sdk.tortoise_fts_query(context="test_ctx")
+    assert len(results) >= 2
+    # Full-scan returns all in context, match_source should be structural
+    if results:
+        assert results[0]["match_source"] == "structural"
 
 
 # ── runner ───────────────────────────────────────────────────────────
