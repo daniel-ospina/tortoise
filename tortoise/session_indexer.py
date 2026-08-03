@@ -32,10 +32,121 @@ def _parse_frontmatter(content: str) -> dict:
     except Exception:
         return {}
 
-# ── Keyword extraction (fallback, no LLM) ─────────────────────────
+# ── Keyword extraction (TF-IDF + graph entities, no LLM) ──────────
+
+# Stopwords filtered before TF-IDF scoring
+_STOPWORDS = frozenset({
+    'the','a','an','is','was','are','were','be','been','has','have','had',
+    'do','does','did','will','would','could','should','can','may','might',
+    'i','you','he','she','it','we','they','me','him','her','us','them',
+    'my','your','his','its','our','their','this','that','these','those',
+    'and','or','but','not','no','yes','if','then','else','when','where',
+    'what','why','how','in','on','at','to','of','for','with','from','by',
+    'as','so','just','also','very','really','too','only','about','like',
+    'all','some','any','each','every','more','most','here','there','now',
+    'up','out','one','two','go','get','see','know','think','say','make',
+    'use','take','come','look','need','let','find','want','work','well',
+    'ok','okay','yeah','yes','right','good','great','done','got','going',
+    'new','old','first','last','next','still','even','way','thing','much',
+    'many','back','into','over','after','before','between','through',
+    'user','assistant','agent','session','file','data','time','run',
+    'code','error','fix','change','add','set','try','call','return',
+})
+
+# Cached IDF model — built once across the corpus
+_idf_model: dict[str, float] | None = None
+_corpus_size: int = 0
+
+
+def _tokenize(text: str) -> list[str]:
+    """Lowercase, extract alphanumeric tokens, filter stopwords and short terms."""
+    import re as _re
+    tokens = _re.findall(r'[a-z0-9][a-z0-9_./-]*[a-z0-9]', text.lower())
+    return [t for t in tokens if len(t) > 2 and t not in _STOPWORDS]
+
+
+def _build_idf(corpus_paths: list[str] | None = None) -> dict[str, float]:
+    """Build IDF model from session files. Cached globally, built once."""
+    global _idf_model, _corpus_size
+    if _idf_model is not None:
+        return _idf_model
+    
+    import math
+    from pathlib import Path
+    
+    if corpus_paths is None:
+        docs_dir = Path.home() / '.tortoise' / 'docs' / 'conversations'
+        corpus_paths = [str(p) for p in docs_dir.glob('*.md')]
+    
+    df = {}  # document frequency: term → how many docs contain it
+    doc_count = 0
+    
+    for path in corpus_paths:
+        try:
+            with open(path) as f:
+                text = f.read()
+        except Exception:
+            continue
+        doc_count += 1
+        unique_terms = set(_tokenize(text))
+        for term in unique_terms:
+            df[term] = df.get(term, 0) + 1
+    
+    _corpus_size = max(doc_count, 1)
+    _idf_model = {term: math.log(_corpus_size / (count + 1)) + 1 for term, count in df.items()}
+    return _idf_model
+
+
+def _tfidf_keywords(content: str, top_n: int = 8) -> list[str]:
+    """Extract top TF-IDF keywords from a single document."""
+    idf = _build_idf()
+    tokens = _tokenize(content)
+    if not tokens:
+        return []
+    
+    from collections import Counter
+    tf = Counter(tokens)
+    max_tf = max(tf.values()) if tf else 1
+    
+    scores = {}
+    for term, count in tf.items():
+        tf_norm = count / max_tf
+        scores[term] = tf_norm * idf.get(term, 1.0)
+    
+    return [t for t, _ in sorted(scores.items(), key=lambda x: -x[1])[:top_n]]
+
+
+def _graph_entity_keywords(content: str) -> list[str]:
+    """Find Object and Subject names from the graph mentioned in content."""
+    content_lower = content.lower()
+    matches = []
+    try:
+        import os as _os
+        uri = _os.environ.get('TORTOISE_DB_URI', '')
+        if not uri:
+            return []
+        from falkordb import FalkorDB
+        from urllib.parse import urlparse
+        parsed = urlparse(uri)
+        host = parsed.hostname or 'localhost'
+        port = parsed.port or 16379
+        db = FalkorDB(host=host, port=port)
+        g = db.select_graph(parsed.path.lstrip('/') or 'tortoise')
+        rows = g.query('MATCH (n) WHERE (n:Object OR n:Subject) AND n.name IS NOT NULL RETURN DISTINCT n.name').result_set
+        for row in rows:
+            name = str(row[0])
+            if len(name) > 3 and name.lower() in content_lower:
+                matches.append(name)
+    except Exception:
+        pass
+    return matches
+
 
 def extract_keywords_from_frontmatter(content: str) -> dict:
-    """Fallback: extract metadata from YAML frontmatter + basic heuristics.
+    """Extract metadata from session content — no LLM required.
+    
+    Uses TF-IDF over the full corpus to find distinctive terms, plus
+    graph entity matching for high-precision Object/Subject references.
     
     Returns dict with keys: summary, narrative_arc, keywords, topics, issues, prs.
     """
@@ -44,7 +155,6 @@ def extract_keywords_from_frontmatter(content: str) -> dict:
     # Summary from title or first substantive line
     summary = fm.get("title", "")
     if not summary:
-        # Try first non-empty, non-header, non-frontmatter line
         body = content.split("---", 2)[-1] if "---" in content else content
         for line in body.split("\n"):
             stripped = line.strip()
@@ -52,43 +162,22 @@ def extract_keywords_from_frontmatter(content: str) -> dict:
                 summary = stripped[:200]
                 break
     
-    # Keywords from frontmatter tags
+    # Keywords: frontmatter tags + TF-IDF terms + graph entity matches
     keywords = fm.get("tags", [])
     if isinstance(keywords, str):
         keywords = [k.strip() for k in keywords.split(",")]
     
-    # Extract keywords from content using TF-IDF on bigrams + technical terms
-    import re as _re
-    content_lower = content.lower()
-    # Tokenize: lowercase, strip punctuation, split on whitespace
-    tokens = _re.findall(r'[a-z0-9][a-z0-9_./-]*[a-z0-9]', content_lower)
-    # Filter noise tokens
-    noise = {'the','a','an','is','was','are','were','be','been','has','have','had',
-             'do','does','did','will','would','could','should','can','may','might',
-             'i','you','he','she','it','we','they','me','him','her','us','them',
-             'my','your','his','its','our','their','this','that','these','those',
-             'and','or','but','not','no','yes','if','then','else','when','where',
-             'what','why','how','in','on','at','to','of','for','with','from','by',
-             'as','so','just','also','very','really','too','only','about','like',
-             'all','some','any','each','every','more','most','here','there','now',
-             'up','out','one','two','go','get','see','know','think','say','make',
-             'use','take','come','look','need','let','find','want','work','well',
-             'ok','okay','yeah','yes','right','good','great','done','got','going',
-             'new','old','first','last','next','still','even','way','thing','much',
-             'many','back','into','over','after','before','between','through'}
-    # Count term frequency
-    from collections import Counter
-    term_freq = Counter(t for t in tokens if len(t) > 2 and t not in noise)
-    # Take top terms by frequency (minimum 2 occurrences)
-    top_terms = [t for t, c in term_freq.most_common(15) if c >= 2]
-    keywords = list(dict.fromkeys(keywords + top_terms))[:8]
+    tfidf_terms = _tfidf_keywords(content)
+    graph_terms = _graph_entity_keywords(content)
     
-    # Topics from frontmatter domain or inferred from keywords
+    # Combine: tags first (explicit), then graph entities (high precision), then TF-IDF (fill)
+    keywords = list(dict.fromkeys(keywords + graph_terms + tfidf_terms))[:10]
+    
+    # Topics from frontmatter domain or inferred from keyword clusters
     topics = []
     domain = fm.get("domain", "")
     if domain:
         topics.append(domain)
-    # Infer topics from keyword clusters (simple heuristic)
     infra_terms = {"docker","container","volume","port","deploy","config","server","host","network"}
     data_terms = {"graph","database","index","search","query","falkordb","tortoise","redis","sql"}
     eng_terms = {"api","sdk","mcp","extension","test","e2e","typecheck","pipeline","workflow",
