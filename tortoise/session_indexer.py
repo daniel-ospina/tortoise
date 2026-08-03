@@ -381,32 +381,53 @@ def main():
     parser.add_argument("--batch", action="store_true", help="Batch process (with --dir)")
     parser.add_argument("--no-llm", action="store_true", help="Skip LLM, use keyword-only")
     parser.add_argument("--model", default="gpt-5-mini", help="LLM model name")
+    parser.add_argument("--db", default=None, help="Tortoise DB URI (docker://host:port/graph). When set, indexes into FalkorDB instead of printing to stdout.")
     args = parser.parse_args()
     
     model = None if args.no_llm else args.model
     
     if args.dir:
-        dir_path = Path(args.path)
+        dir_path = Path(args.path).resolve()
         if not dir_path.is_dir():
             print(f"Error: {args.path} is not a directory", file=sys.stderr)
             sys.exit(1)
         
-        files = sorted(dir_path.glob("*.md"))
-        print(f"Processing {len(files)} files...")
-        
-        for i, f in enumerate(files):
-            try:
-                content = f.read_text()
-                metadata = extract_metadata(content, model)
-                print(f"[{i+1}/{len(files)}] {f.name}: {len(metadata.get('keywords',[]))} keywords, "
-                      f"{len(metadata.get('narrative_arc',[]))} phases")
-            except Exception as e:
-                print(f"[{i+1}/{len(files)}] {f.name}: ERROR - {e}", file=sys.stderr)
+        if args.db:
+            # Index via SDK
+            import os as _os
+            _os.environ['TORTOISE_DB_URI'] = args.db
+            from tortoise.sdk import TortoiseSDK
+            sdk = TortoiseSDK()
+            llm = None if args.no_llm else args.model
+            result = sdk.index_sessions(str(dir_path), extract_metadata=True, llm_model=llm)
+            print(json.dumps(result, indent=2))
+        else:
+            files = sorted(dir_path.glob("*.md"))
+            print(f"Processing {len(files)} files...")
+            model = None if args.no_llm else args.model
+            for i, f in enumerate(files):
+                try:
+                    content = f.read_text()
+                    metadata = extract_metadata(content, model)
+                    print(f"[{i+1}/{len(files)}] {f.name}: {len(metadata.get('keywords',[]))} keywords, "
+                          f"{len(metadata.get('narrative_arc',[]))} phases")
+                except Exception as e:
+                    print(f"[{i+1}/{len(files)}] {f.name}: ERROR - {e}", file=sys.stderr)
     else:
-        file_path = args.path
-        content = Path(file_path).read_text()
-        metadata = extract_metadata(content, model)
-        print(json.dumps(metadata, indent=2))
+        file_path = Path(args.path).resolve()
+        if args.db:
+            # Index single file via SDK
+            import os as _os
+            _os.environ['TORTOISE_DB_URI'] = args.db
+            from tortoise.sdk import TortoiseSDK
+            sdk = TortoiseSDK()
+            llm = None if args.no_llm else args.model
+            result = sdk.index_sessions(str(file_path.parent), extract_metadata=True, llm_model=llm)
+            print(json.dumps(result, indent=2))
+        else:
+            content = file_path.read_text()
+            metadata = extract_metadata(content, args.model if not args.no_llm else None)
+            print(json.dumps(metadata, indent=2))
 
 
 if __name__ == "__main__":
