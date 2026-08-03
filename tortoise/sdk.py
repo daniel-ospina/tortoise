@@ -1154,12 +1154,16 @@ class TortoiseSDK:
                     if existing_props.get("file_hash") == file_hash:
                         skipped += 1
                         continue
-                    # Append-only update — merge keywords, extend arc
+                    # Always extract keywords (even without LLM)
+                    from .session_indexer import extract_keywords_from_frontmatter as _kw_fallback
                     if extract_metadata:
                         from .session_indexer import extract_metadata as _extract
-                        metadata = _extract(text, llm_model)
+                        try:
+                            metadata = _extract(text, llm_model)
+                        except Exception:
+                            metadata = _kw_fallback(text)
                     else:
-                        metadata = {}
+                        metadata = _kw_fallback(text)
                     
                     merged_keywords = list(set(
                         existing_props.get("keywords", []) + metadata.get("keywords", [])
@@ -1192,12 +1196,16 @@ class TortoiseSDK:
                     )
                     updated += 1
                 else:
-                    # New session Event
+                    # New session Event — always extract keywords
+                    from .session_indexer import extract_keywords_from_frontmatter as _kw_fallback
                     if extract_metadata:
                         from .session_indexer import extract_metadata as _extract
-                        metadata = _extract(text, llm_model)
+                        try:
+                            metadata = _extract(text, llm_model)
+                        except Exception:
+                            metadata = _kw_fallback(text)
                     else:
-                        metadata = {}
+                        metadata = _kw_fallback(text)
                     
                     props = {
                         "name": metadata.get("summary", name),
@@ -1367,15 +1375,87 @@ class TortoiseSDK:
 
     def search(self, query: str, kind: str | None = None,
                context: str | None = None, *,
-               threshold: float = 0.3, limit: int = 10) -> list[dict]:
-        """Semantic/vector search over Points. Returns ranked [{id, content, similarity, snippet}, ...]."""
+               threshold: float = 0.3, limit: int = 10,
+               include_events: bool = False) -> list[dict]:
+        """Semantic/vector search over Points (and optionally Events)."""
         if limit < 1:
             raise ValueError(f"limit must be >= 1, got {limit}")
         if not (0.0 <= threshold <= 1.0):
             raise ValueError(f"threshold must be 0.0-1.0, got {threshold}")
         from .embeddings import search_points
         points = self.query(kind=kind, context=context)
-        return search_points(query, points, threshold=threshold, limit=limit)
+        results = search_points(query, points, threshold=threshold, limit=limit)
+        
+        if include_events:
+            events = self.search_sessions(query, limit=limit)
+            results.extend(events)
+            results.sort(key=lambda r: r.get("similarity", 0), reverse=True)
+            results = results[:limit]
+        
+        return results
+
+    def search_sessions(self, query: str, *, agent: str | None = None,
+                        topics: list[str] | None = None,
+                        limit: int = 10, offset: int = 0) -> list[dict]:
+        """Search indexed agent sessions. Returns Events with metadata snippets."""
+        proj = self._get_proj()
+        
+        # Build Cypher query for Event search
+        clauses = ["e.eventKind = 'AgentSession'"]
+        if agent:
+            clauses.append(f"e.agent = '{agent}'")
+        
+        where = " AND ".join(clauses)
+        
+        # Search by name/content match + keyword overlap
+        query_lower = query.lower()
+        rows = proj.g.query(
+            f"MATCH (e:Event) WHERE {where} "
+            "RETURN properties(e) ORDER BY e.startedAt DESC SKIP $offset LIMIT $limit",
+            params={"offset": offset, "limit": max(limit * 3, 30)}
+        ).result_set
+        
+        results = []
+        for row in rows:
+            props = row[0]
+            name = str(props.get("name", ""))
+            keywords = props.get("keywords", [])
+            
+            # Simple relevance: name match + keyword overlap
+            name_match = query_lower in name.lower() if name else False
+            kw_match = sum(1 for kw in keywords if kw and query_lower in str(kw).lower())
+            
+            if name_match or kw_match > 0 or not query:
+                # Extract narrative arc snippet
+                content_metadata = props.get("content_metadata", "{}")
+                try:
+                    meta = __import__('json').loads(content_metadata) if isinstance(content_metadata, str) else content_metadata
+                    arc = meta.get("narrative_arc", [])
+                except Exception:
+                    meta = {}
+                    arc = []
+                
+                similarity = 0.5 if name_match else (0.3 * min(kw_match, 3) / 3)
+                
+                results.append({
+                    "id": props.get("eventId", ""),
+                    "content": name,
+                    "similarity": round(similarity, 4),
+                    "snippet": name[:200] if name else "",
+                    "type": "Event",
+                    "eventKind": "AgentSession",
+                    "session_id": props.get("session_id", ""),
+                    "agent": props.get("agent", ""),
+                    "keywords": keywords,
+                    "topics": props.get("topics", []),
+                    "narrative_arc": arc,
+                    "source_file": props.get("source_file", ""),
+                    "source_file_available": __import__('os').path.exists(props.get("source_file", "")),
+                    "timestamp": props.get("startedAt", ""),
+                })
+        
+        results.sort(key=lambda r: r["similarity"], reverse=True)
+        return results[offset:offset + limit]
 
     # ── Multi-tenancy (#7001) ─────────────────────────────────
 

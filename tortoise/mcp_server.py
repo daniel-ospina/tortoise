@@ -554,6 +554,12 @@ def tortoise_index_sessions(directory: str, extract_metadata: bool = True, llm_m
     return _safe(sdk.index_sessions, directory, extract_metadata=extract_metadata, llm_model=llm_model)
 
 @mcp.tool()
+def tortoise_search_sessions(query: str, agent: str | None = None, topics: Any = None, limit: int = 10, offset: int = 0) -> list[dict]:
+    """Search indexed agent sessions. Returns Events with narrative_arc snippets."""
+    topics_list = topics if isinstance(topics, list) else ([topics] if topics else None)
+    return _safe(sdk.search_sessions, query, agent=agent, topics=topics_list, limit=limit, offset=offset)
+
+@mcp.tool()
 def tortoise_create_document(title: str, documentKind: str, props: Any = None) -> dict:
     """Create a Document node (research, planDoc, meetingNotes, etc.)."""
     props = _parse(props)
