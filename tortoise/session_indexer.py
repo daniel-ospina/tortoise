@@ -52,38 +52,55 @@ def extract_keywords_from_frontmatter(content: str) -> dict:
                 summary = stripped[:200]
                 break
     
-    # Keywords from frontmatter tags + basic extraction
+    # Keywords from frontmatter tags
     keywords = fm.get("tags", [])
     if isinstance(keywords, str):
         keywords = [k.strip() for k in keywords.split(",")]
     
-    # Add keywords from common patterns in content
+    # Extract keywords from content using TF-IDF on bigrams + technical terms
+    import re as _re
     content_lower = content.lower()
-    tech_terms = {
-        "docker", "falkordb", "tortoise", "redis", "port", "migration",
-        "graph", "api", "mcp", "sdk", "extension", "symlink", "python",
-        "typescript", "github", "issue", "pr", "commit", "deploy",
-        "config", "volume", "container", "database", "index", "search",
-        "test", "e2e", "typecheck", "pipeline", "workflow"
-    }
-    found_terms = {t for t in tech_terms if t in content_lower}
-    keywords = list(set(keywords) | found_terms)[:8]
+    # Tokenize: lowercase, strip punctuation, split on whitespace
+    tokens = _re.findall(r'[a-z0-9][a-z0-9_./-]*[a-z0-9]', content_lower)
+    # Filter noise tokens
+    noise = {'the','a','an','is','was','are','were','be','been','has','have','had',
+             'do','does','did','will','would','could','should','can','may','might',
+             'i','you','he','she','it','we','they','me','him','her','us','them',
+             'my','your','his','its','our','their','this','that','these','those',
+             'and','or','but','not','no','yes','if','then','else','when','where',
+             'what','why','how','in','on','at','to','of','for','with','from','by',
+             'as','so','just','also','very','really','too','only','about','like',
+             'all','some','any','each','every','more','most','here','there','now',
+             'up','out','one','two','go','get','see','know','think','say','make',
+             'use','take','come','look','need','let','find','want','work','well',
+             'ok','okay','yeah','yes','right','good','great','done','got','going',
+             'new','old','first','last','next','still','even','way','thing','much',
+             'many','back','into','over','after','before','between','through'}
+    # Count term frequency
+    from collections import Counter
+    term_freq = Counter(t for t in tokens if len(t) > 2 and t not in noise)
+    # Take top terms by frequency (minimum 2 occurrences)
+    top_terms = [t for t, c in term_freq.most_common(15) if c >= 2]
+    keywords = list(dict.fromkeys(keywords + top_terms))[:8]
     
-    # Topics from frontmatter domain or inference
+    # Topics from frontmatter domain or inferred from keywords
     topics = []
     domain = fm.get("domain", "")
     if domain:
         topics.append(domain)
-    topic_map = {
-        "docker": "infrastructure", "falkordb": "data",
-        "port": "infrastructure", "volume": "infrastructure",
-        "tortoise": "data", "api": "engineering", "mcp": "engineering",
-        "extension": "engineering", "test": "engineering",
-        "issue": "engineering", "pr": "engineering"
-    }
-    for kw in keywords:
-        if kw in topic_map and topic_map[kw] not in topics:
-            topics.append(topic_map[kw])
+    # Infer topics from keyword clusters (simple heuristic)
+    infra_terms = {"docker","container","volume","port","deploy","config","server","host","network"}
+    data_terms = {"graph","database","index","search","query","falkordb","tortoise","redis","sql"}
+    eng_terms = {"api","sdk","mcp","extension","test","e2e","typecheck","pipeline","workflow",
+                  "commit","pr","github","issue","python","typescript"}
+    kw_set = set(keywords)
+    if kw_set & infra_terms:
+        topics.append("infrastructure")
+    if kw_set & data_terms:
+        topics.append("data")
+    if kw_set & eng_terms:
+        topics.append("engineering")
+    topics = list(dict.fromkeys(topics))[:3]
     
     # Issues from frontmatter or content regex
     issues = fm.get("issues", [])
