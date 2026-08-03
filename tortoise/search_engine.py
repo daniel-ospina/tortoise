@@ -69,22 +69,14 @@ def classify_query(
     kind: str | None,
     context: str | None,
 ) -> dict[str, bool]:
-    """3-tier classifier: determines which retrieval strategies to activate.
+    """Determine which retrieval strategies to activate.
 
-    Returns:
-        dict with keys 'fts', 'vector', 'structural' → bool
+    - No text query → structural only (full-scan if context set, kind-filtered otherwise)
+    - Text query present → all available strategies (FTS + vector + structural)
     """
-    if query is None and context is not None:
-        # Full-scan mode: no text query, context set → structural only, return all
+    if query is None:
         return {"fts": False, "vector": False, "structural": True}
-    if kind is not None and query is None:
-        # Kind-only filter, no text → structural only
-        return {"fts": False, "vector": False, "structural": True}
-    if query is not None:
-        # Text query present → all available strategies
-        return {"fts": True, "vector": True, "structural": True}
-    # Fallback: no query, no kind, no context → structural
-    return {"fts": False, "vector": False, "structural": True}
+    return {"fts": True, "vector": True, "structural": True}
 
 
 # ── FalkorDB query runners ──────────────────────────────────────────────────
@@ -108,6 +100,8 @@ def run_fts_query(
         rows = graph.query(
             cypher, params={"query": query, "limit": limit}
         ).result_set
+        # NOTE: Timeout is checked AFTER query completes (post-hoc filter).
+        # A slow query still consumes DB resources. Future: connection-level timeout.
         elapsed = (time.monotonic() - start) * 1000
         if elapsed > timeout_ms:
             logger.warning("FTS query exceeded timeout: %.0fms > %dms", elapsed, timeout_ms)
@@ -177,7 +171,7 @@ def run_structural_query(
             conditions.append("n.pointKind = $kind")
             params["kind"] = kind
         if context:
-            conditions.append("n.context CONTAINS $context")
+            conditions.append("n.context = $context")
             params["context"] = context
 
         if not conditions:

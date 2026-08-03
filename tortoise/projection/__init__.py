@@ -174,40 +174,7 @@ class FalkorProjection(
         if t in ("PointAdded", "OperatorAdded"):
             self._upsert(ev["point"])
         elif t == "PointRevised":
-            new_content = ev.get("new_content")
-            params = {"id": ev["id"], "c": new_content,
-                      "x": ev.get("new_context"), "now": _now_iso()}
-
-            # Re-compute embedding if content changed (Phase 1A, #7698)
-            if new_content:
-                try:
-                    from tortoise.embeddings import compute_embedding
-                    embedding = compute_embedding(new_content)
-                    params["embedding"] = embedding
-                    self.g.query(
-                        "MATCH (n:Point {id:$id}) "
-                        "SET n.content = coalesce($c, n.content), "
-                        "    n.context = coalesce($x, n.context), "
-                        "    n.updatedAt = $now, "
-                        "    n.embedding = $embedding",
-                        params=params,
-                    )
-                except Exception:
-                    self.g.query(
-                        "MATCH (n:Point {id:$id}) "
-                        "SET n.content = coalesce($c, n.content), "
-                        "    n.context = coalesce($x, n.context), "
-                        "    n.updatedAt = $now",
-                        params=params,
-                    )
-            else:
-                self.g.query(
-                    "MATCH (n:Point {id:$id}) "
-                    "SET n.content = coalesce($c, n.content), "
-                    "    n.context = coalesce($x, n.context), "
-                    "    n.updatedAt = $now",
-                    params=params,
-                )
+            self._revise_point(ev, set_updated_at=True)
         elif t == "PointRetracted":
             self._delete(ev["id"])
         elif t == "PointsMerged":
@@ -280,34 +247,7 @@ class FalkorProjection(
                 for mid in ev.get("merge_ids", []):
                     self._delete(mid)
             elif t == "PointRevised":
-                new_content = ev.get("new_content")
-                params = {"id": ev.get("id") or ev["event_id"],
-                          "c": new_content, "x": ev.get("new_context")}
-                if new_content:
-                    try:
-                        from tortoise.embeddings import compute_embedding
-                        params["embedding"] = compute_embedding(new_content)
-                        self.g.query(
-                            "MATCH (n:Point {id:$id}) "
-                            "SET n.content = coalesce($c, n.content), "
-                            "    n.context = coalesce($x, n.context), "
-                            "    n.embedding = $embedding",
-                            params=params,
-                        )
-                    except Exception:
-                        self.g.query(
-                            "MATCH (n:Point {id:$id}) "
-                            "SET n.content = coalesce($c, n.content), "
-                            "    n.context = coalesce($x, n.context)",
-                            params=params,
-                        )
-                else:
-                    self.g.query(
-                        "MATCH (n:Point {id:$id}) "
-                        "SET n.content = coalesce($c, n.content), "
-                        "    n.context = coalesce($x, n.context)",
-                        params=params,
-                    )
+                self._revise_point(ev)
             elif t == "EventRecorded":
                 self._upsert_event(ev)
             elif t == "SubjectAdded":
@@ -383,6 +323,32 @@ class FalkorProjection(
 
     def close(self) -> None:
         self.db.close()
+
+    def _revise_point(self, ev: dict, set_updated_at: bool = False) -> None:
+        """Apply PointRevised event — update content, context, and re-compute embedding."""
+        new_content = ev.get("new_content")
+        pid = ev.get("id") or ev["event_id"]
+        params: dict = {"id": pid, "c": new_content, "x": ev.get("new_context")}
+
+        if new_content:
+            try:
+                from tortoise.embeddings import compute_embedding
+                params["embedding"] = compute_embedding(new_content)
+            except Exception:
+                pass
+
+        set_clauses = ["n.content = coalesce($c, n.content)",
+                       "n.context = coalesce($x, n.context)"]
+        if "embedding" in params:
+            set_clauses.append("n.embedding = $embedding")
+        if set_updated_at:
+            set_clauses.append("n.updatedAt = $now")
+            params["now"] = _now_iso()
+
+        self.g.query(
+            f"MATCH (n:Point {{id:$id}}) SET {', '.join(set_clauses)}",
+            params=params,
+        )
 
     def list_graphs(self) -> list[str]:
         """List all graph names in the database."""

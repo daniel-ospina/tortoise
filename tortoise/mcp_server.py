@@ -179,7 +179,7 @@ def tortoise_suggest_entry_points(query: str, limit: int = 5,
     """
     try:
         results = _safe(sdk.tortoise_fts_query, query, kind=kind_filter, limit=limit)
-        if results:
+        if isinstance(results, list) and results and "error" not in results[0]:
             return [{"id": r["id"], "name": r.get("content", ""),
                      "kind": r.get("point_kind", ""),
                      "confidence": r.get("ep", {}).get("confidence_mean", 0.0)}
