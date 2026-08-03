@@ -6,7 +6,9 @@ Lazy-opens on first call. Returns structured dicts, never raw FalkorDB result se
 from __future__ import annotations
 
 import hashlib
+import json as _json
 import logging
+import os
 from typing import Any
 
 from .domain_loader import known_kinds, register_kind
@@ -32,9 +34,9 @@ def _content_hash(text: str) -> str:
 
 def _save_progress(progress_file: str, directory: str, total: int, processed: int,
                    ingested: int, updated: int, skipped: int, failed: int,
-                   errors: list[dict]) -> None:
+                   errors: list[dict],
+                   completed_files: list[str] | None = None) -> None:
     """Save batch indexing progress for resumability."""
-    import json as _json
     from datetime import datetime, timezone
     try:
         with open(progress_file, 'w') as f:
@@ -47,6 +49,7 @@ def _save_progress(progress_file: str, directory: str, total: int, processed: in
                 "updated": updated,
                 "skipped": skipped,
                 "failed": failed,
+                "completed_files": completed_files or [],
                 "errors": errors[-20:],  # keep last 20 errors
             }, f, indent=2)
     except Exception:
@@ -1096,18 +1099,19 @@ class TortoiseSDK:
         files = sorted(Path(directory).rglob("*.md"))
         
         # Resume from progress file
-        processed_files: set[str] = set()
+        completed_files: list[str] = []
         if progress_file:
             try:
                 with open(progress_file) as pf:
                     progress = _json.load(pf)
-                    processed_files = set(progress.get("completed_files", []))
+                    completed_files = progress.get("completed_files", [])
             except Exception:
                 pass
+        processed_set = set(completed_files)
 
         for i, filepath in enumerate(files):
             rel_path = str(filepath)
-            if rel_path in processed_files:
+            if rel_path in processed_set:
                 skipped += 1
                 continue
             
@@ -1151,7 +1155,9 @@ class TortoiseSDK:
                 
                 if exists:
                     existing_props = exists[0][0]
-                    if existing_props.get("file_hash") == file_hash:
+                    # Skip if identical hash AND existing metadata is populated
+                    has_keywords = existing_props.get("keywords") and len(existing_props.get("keywords", [])) > 0
+                    if existing_props.get("file_hash") == file_hash and has_keywords:
                         skipped += 1
                         continue
                     # Always extract keywords (even without LLM)
@@ -1165,7 +1171,7 @@ class TortoiseSDK:
                     else:
                         metadata = _kw_fallback(text)
                     
-                    merged_keywords = list(set(
+                    merged_keywords = list(dict.fromkeys(
                         existing_props.get("keywords", []) + metadata.get("keywords", [])
                     ))[:20]
                     existing_arc = existing_props.get("content_metadata", "{}")
@@ -1195,6 +1201,9 @@ class TortoiseSDK:
                         params={"eid": event_id, "props": update_props},
                     )
                     updated += 1
+                    completed_files.append(rel_path)
+                    # Connect issue/PR references to Objects
+                    self._connect_issue_objects(event_id, metadata)
                 else:
                     # New session Event — always extract keywords
                     from .session_indexer import extract_keywords_from_frontmatter as _kw_fallback
@@ -1217,6 +1226,7 @@ class TortoiseSDK:
                         "keywords": metadata.get("keywords", []),
                         "topics": metadata.get("topics", []),
                         "message_count": frontmatter.get("message_count", 0),
+                        "startedAt": now,
                         "content_metadata": _json.dumps({
                             "schema_version": 1,
                             "summary": metadata.get("summary", ""),
@@ -1230,10 +1240,11 @@ class TortoiseSDK:
                         "format": "markdown",
                     }
                     proj.g.query(
-                        "CREATE (e:Event {eventId:$eid}) SET e += $props",
+                        "MERGE (e:Event {eventId:$eid}) SET e += $props",
                         params={"eid": event_id, "props": props},
                     )
                     ingested += 1
+                    completed_files.append(rel_path)
                     # Connect issue/PR references to Objects
                     self._connect_issue_objects(event_id, metadata)
             else:
@@ -1270,14 +1281,16 @@ class TortoiseSDK:
             if progress_file and (ingested + updated + skipped) % 100 == 0:
                 _save_progress(progress_file, str(directory), len(files),
                               ingested + updated + skipped + failed,
-                              ingested, updated, skipped, failed, errors)
+                              ingested, updated, skipped, failed, errors,
+                              completed_files=completed_files)
 
         monitoring.record_ingest()
         
         if progress_file:
             _save_progress(progress_file, str(directory), len(files),
                           ingested + updated + skipped + failed,
-                          ingested, updated, skipped, failed, errors)
+                          ingested, updated, skipped, failed, errors,
+                          completed_files=completed_files)
         
         return {"ingested": ingested, "updated": updated, "skipped": skipped,
                 "failed": failed, "errors": errors}
@@ -1402,8 +1415,17 @@ class TortoiseSDK:
         
         # Build Cypher query for Event search
         clauses = ["e.eventKind = 'AgentSession'"]
+        params = {"offset": offset, "limit": max(limit * 3, 30)}
         if agent:
-            clauses.append(f"e.agent = '{agent}'")
+            clauses.append("e.agent = $agent")
+            params["agent"] = agent
+        if topics:
+            topic_clauses = []
+            for i, t in enumerate(topics):
+                param_key = f"topic{i}"
+                topic_clauses.append(f"${param_key} IN e.topics")
+                params[param_key] = t
+            clauses.append(f"({' OR '.join(topic_clauses)})")
         
         where = " AND ".join(clauses)
         
@@ -1412,7 +1434,7 @@ class TortoiseSDK:
         rows = proj.g.query(
             f"MATCH (e:Event) WHERE {where} "
             "RETURN properties(e) ORDER BY e.startedAt DESC SKIP $offset LIMIT $limit",
-            params={"offset": offset, "limit": max(limit * 3, 30)}
+            params=params
         ).result_set
         
         results = []
@@ -1609,9 +1631,14 @@ class TortoiseSDK:
     def get_events(self, eventKind: str | None = None, limit: int = 20) -> list[dict]:
         """Get recent Events, optionally filtered by eventKind."""
         proj = self._get_proj()
-        kind_clause = f"WHERE e.eventKind = '{eventKind}'" if eventKind else ""
+        if eventKind:
+            return [r[0] for r in proj.g.query(
+                "MATCH (e:Event {eventKind: $ek}) RETURN properties(e) ORDER BY e.startedAt DESC LIMIT $lim",
+                params={"ek": eventKind, "lim": limit}
+            ).result_set]
         return [r[0] for r in proj.g.query(
-            f"MATCH (e:Event) {kind_clause} RETURN properties(e) ORDER BY e.startedAt DESC LIMIT {limit}"
+            "MATCH (e:Event) RETURN properties(e) ORDER BY e.startedAt DESC LIMIT $lim",
+            params={"lim": limit}
         ).result_set]
 
     def get_session(self, session_id: str) -> dict | None:
