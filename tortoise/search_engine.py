@@ -35,6 +35,10 @@ class EpBreakdown:
     evidence: EpEvidence | None = None
     contention: float = 0.0
 
+    def __post_init__(self):
+        if self.evidence is None:
+            self.evidence = EpEvidence()
+
 
 @dataclass
 class SearchResult:
@@ -54,10 +58,13 @@ class SearchResult:
             "point_kind": self.point_kind,
             "context": self.context,
             "match_source": self.match_source,
+            # Backward-compat aliases (Phase 0 migration from old search() API)
+            "similarity": self.scores.rrf if self.scores else 0.0,
+            "snippet": self.content[:200] if len(self.content) > 200 else self.content,
         }
         if self.scores:
             d["scores"] = asdict(self.scores)
-        if self.ep:
+        if self.ep and self.ep.evidence is not None:
             d["ep"] = asdict(self.ep)
         return d
 
@@ -167,7 +174,8 @@ def run_structural_query(
     try:
         conditions = []
         params = {}
-        if kind:
+        # Skip redundant kind filter when structural-only already did it
+        if kind and query is not None:
             conditions.append("n.pointKind = $kind")
             params["kind"] = kind
         if context:
@@ -334,19 +342,18 @@ def fallback_tfidf(query: str, points: list[dict], limit: int = 10) -> list[dict
     """
     try:
         from tortoise.embeddings import search_points
-        # Build lookup for metadata (pointKind, context) from points dicts
         meta = {p["id"]: p for p in points}
         results = search_points(query, points, threshold=0.0, limit=limit)
         return [
-            {
-                "id": r["id"],
-                "content": r["content"],
-                "point_kind": meta.get(r["id"], {}).get("pointKind", ""),
-                "context": meta.get(r["id"], {}).get("context"),
-                "scores": {"fts": None, "vector": None, "structural": None, "rrf": r["similarity"]},
-                "match_source": "tfidf",
-                "ep": None,
-            }
+            SearchResult(
+                id=r["id"],
+                content=r["content"],
+                point_kind=meta.get(r["id"], {}).get("pointKind", ""),
+                context=meta.get(r["id"], {}).get("context"),
+                scores=SearchScores(fts=None, vector=None, structural=None, rrf=r["similarity"]),
+                match_source="tfidf",
+                ep=None,
+            ).to_dict()
             for r in results
         ]
     except Exception as e:

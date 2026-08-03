@@ -182,7 +182,9 @@ def tortoise_suggest_entry_points(query: str, limit: int = 5,
         if isinstance(results, list) and results and "error" not in results[0]:
             return [{"id": r["id"], "name": r.get("content", ""),
                      "kind": r.get("point_kind", ""),
-                     "confidence": r.get("ep", {}).get("confidence_mean", 0.0)}
+                     "confidence": round(
+                         0.5 * r.get("scores", {}).get("rrf", 0.0) +
+                         0.5 * r.get("ep", {}).get("confidence_mean", 0.0), 4)}
                     for r in results]
     except Exception:
         pass
@@ -192,7 +194,7 @@ def tortoise_suggest_entry_points(query: str, limit: int = 5,
 # ── Semantic Search (#6990) ────────────────────────────────────
 
 @mcp.tool()
-def tortoise_search(query: str, kind: str | None = None,
+def tortoise_search(query: str | None = None, kind: str | None = None,
                     context: str | None = None,
                     threshold: float = 0.0, limit: int = 10,
                     min_confidence: float = 0.0,

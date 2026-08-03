@@ -1269,7 +1269,7 @@ class TortoiseSDK:
 
         # 2. Get query vector if needed
         query_vec = None
-        if strategies.get("vector") and query:
+        if strategies.get("vector") and query and query.strip():
             try:
                 from .embeddings import EmbeddingModel
                 model = EmbeddingModel.get()
@@ -1305,10 +1305,11 @@ class TortoiseSDK:
                 fused = {pid: score for pid, score in fused.items() if score >= threshold}
             match_source = "rrf"
 
-        # 5. Apply kind filter BEFORE truncating (so kind='hypothesis' isn't starved by top-N statements)
+        # 5. Apply kind filter BEFORE truncating. Skip when structural-only
+        # already filtered (query is None → structural already did kind match).
         result_ids = list(fused.keys())
 
-        if kind:
+        if kind and query is not None:
             kind_ids = set()
             try:
                 kind_rows = graph.query(
