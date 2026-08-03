@@ -174,8 +174,7 @@ def run_structural_query(
     try:
         conditions = []
         params = {}
-        # Skip redundant kind filter when structural-only already did it
-        if kind and query is not None:
+        if kind:
             conditions.append("n.pointKind = $kind")
             params["kind"] = kind
         if context:
