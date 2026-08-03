@@ -549,6 +549,11 @@ def tortoise_get_session(session_id: str) -> dict:
     return _safe(sdk.get_session, session_id)
 
 @mcp.tool()
+def tortoise_index_sessions(directory: str, extract_metadata: bool = True, llm_model: str | None = None) -> dict:
+    """Index session .md files as AgentSession Events. Returns {ingested, updated, skipped, failed, errors}."""
+    return _safe(sdk.index_sessions, directory, extract_metadata=extract_metadata, llm_model=llm_model)
+
+@mcp.tool()
 def tortoise_create_document(title: str, documentKind: str, props: Any = None) -> dict:
     """Create a Document node (research, planDoc, meetingNotes, etc.)."""
     props = _parse(props)
