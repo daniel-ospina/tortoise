@@ -28,7 +28,7 @@ class GitHubConnector:
     def __init__(self, config: dict[str, Any] | None = None, api=None):
         cfg = config or {}
         self.repo = cfg.get("repo", "")
-        self.state = cfg.get("state", "closed")
+        self.state = cfg.get("state", "open")
         self.limit = int(cfg.get("limit", 100))
         self.webhook_port = int(cfg.get("webhook_port", 0))
         self.webhook_secret = cfg.get("webhook_secret", "")
