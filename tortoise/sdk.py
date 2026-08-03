@@ -1123,15 +1123,15 @@ class TortoiseSDK:
                 continue
             
             m = _FM_RE.match(text)
-            frontmatter: dict[str, str] = {}
+            frontmatter: dict = {}
             if m:
-                for line in m.group(1).split('\n'):
-                    kv = line.split(':', 1)
-                    if len(kv) != 2:
-                        continue
-                    k, v = kv[0].strip(), kv[1].strip().strip('"').strip("'")
-                    if k and v:
-                        frontmatter[k] = v
+                try:
+                    import yaml as _yaml
+                    parsed = _yaml.safe_load(m.group(1))
+                    if isinstance(parsed, dict):
+                        frontmatter = parsed
+                except Exception:
+                    pass  # fallback to empty dict
 
             # Determine entity ID based on event kind
             if eventKind == "AgentSession":
@@ -1411,6 +1411,8 @@ class TortoiseSDK:
                         topics: list[str] | None = None,
                         limit: int = 10, offset: int = 0) -> list[dict]:
         """Search indexed agent sessions. Returns Events with metadata snippets."""
+        if not query or not query.strip():
+            return []
         proj = self._get_proj()
         
         # Build Cypher query for Event search
@@ -1477,7 +1479,7 @@ class TortoiseSDK:
                 })
         
         results.sort(key=lambda r: r["similarity"], reverse=True)
-        return results[offset:offset + limit]
+        return results[:limit]
 
     # ── Multi-tenancy (#7001) ─────────────────────────────────
 

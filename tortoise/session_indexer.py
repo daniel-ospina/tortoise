@@ -65,10 +65,10 @@ def _tokenize(text: str) -> list[str]:
     return [t for t in tokens if len(t) > 2 and t not in _STOPWORDS]
 
 
-def _build_idf(corpus_paths: list[str] | None = None) -> dict[str, float]:
-    """Build IDF model from session files. Cached globally, built once."""
+def _build_idf(corpus_paths: list[str] | None = None, force: bool = False) -> dict[str, float]:
+    """Build IDF model from session files. Cached globally, rebuilt when force=True."""
     global _idf_model, _corpus_size
-    if _idf_model is not None:
+    if _idf_model is not None and not force:
         return _idf_model
     
     import math
@@ -422,7 +422,10 @@ def main():
             from tortoise.sdk import TortoiseSDK
             sdk = TortoiseSDK()
             llm = None if args.no_llm else args.model
-            result = sdk.index_sessions(str(file_path.parent), extract_metadata=True, llm_model=llm)
+            # Pass directory containing the file — ingest_corpus will only process this one
+            # via rglob when no directory flag is set
+            result = sdk.ingest_corpus(str(file_path.parent), eventKind="AgentSession",
+                                       extract_metadata=True, llm_model=llm)
             print(json.dumps(result, indent=2))
         else:
             content = file_path.read_text()

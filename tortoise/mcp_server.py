@@ -551,12 +551,20 @@ def tortoise_get_session(session_id: str) -> dict:
 @mcp.tool()
 def tortoise_index_sessions(directory: str, extract_metadata: bool = True, llm_model: str | None = None) -> dict:
     """Index session .md files as AgentSession Events. Returns {ingested, updated, skipped, failed, errors}."""
+    if not os.path.isdir(directory):
+        return {"error": f"Directory not found: {directory!r}. Provide a valid path to a directory containing .md session files."}
     return _safe(sdk.index_sessions, directory, extract_metadata=extract_metadata, llm_model=llm_model)
 
 @mcp.tool()
 def tortoise_search_sessions(query: str, agent: str | None = None, topics: Any = None, limit: int = 10, offset: int = 0) -> list[dict]:
     """Search indexed agent sessions. Returns Events with narrative_arc snippets."""
-    topics_list = topics if isinstance(topics, list) else ([topics] if topics else None)
+    topics = _parse(topics)
+    if isinstance(topics, str):
+        topics_list = [t.strip() for t in topics.split(",") if t.strip()]
+    elif isinstance(topics, list):
+        topics_list = topics
+    else:
+        topics_list = None
     return _safe(sdk.search_sessions, query, agent=agent, topics=topics_list, limit=limit, offset=offset)
 
 @mcp.tool()
