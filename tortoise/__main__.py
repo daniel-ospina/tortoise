@@ -228,7 +228,7 @@ def _cmd_init(args):
             print(f"⚠️  Existing .tortoise config found — overwriting.")
         config = {
             "api_key": args.api_key,
-            "api_url": "https://api.premiselabs.co",
+            "api_url": os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co"),
         }
         config_path.write_text(_json.dumps(config, indent=2) + "\n")
         print("Connected to Tortoise Cloud (team will be resolved from API key)")
@@ -375,7 +375,7 @@ def _cmd_team_info(args) -> int:
         return 1
 
     api_key = config.get("api_key")
-    api_url = config.get("api_url", "https://api.premiselabs.co")
+    api_url = config.get("api_url") or os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co")
     if not api_key:
         print("No api_key in .tortoise config.", file=sys.stderr)
         return 1
@@ -510,11 +510,14 @@ def _cmd_verify(args):
 def _cmd_backfill(args):
     """Backfill missing properties on existing Points."""
     from .projection import FalkorProjection, _now_iso
-    proj = FalkorProjection(args.db) if hasattr(args, 'db') else FalkorProjection(args.db)
+    proj = FalkorProjection(args.db)
     try:
         r = proj.g.query("MATCH (p:Point) WHERE p.status IS NULL SET p.status = 'live' RETURN count(p)").result_set
         status_count = r[0][0] if r else 0
-        r = proj.g.query(f"MATCH (p:Point) WHERE p.createdAt IS NULL SET p.createdAt = '{_now_iso()}' RETURN count(p)").result_set
+        r = proj.g.query(
+            "MATCH (p:Point) WHERE p.createdAt IS NULL SET p.createdAt = $now RETURN count(p)",
+            params={"now": _now_iso()},
+        ).result_set
         created_count = r[0][0] if r else 0
         print(f"Backfilled: {status_count} status + {created_count} createdAt")
     finally:
@@ -878,9 +881,12 @@ def _cmd_index_github(args):
         db.select_graph("tortoise").query("RETURN 1")
         proj = FalkorProjection(host=host, port=port, password=password or None)
     except Exception:
-        # Fallback: embedded mode (SQLite-backed)
+        # Fallback: embedded mode (SQLite-backed) or docker:// URI
         try:
-            proj = FalkorProjection(path=args.db)
+            if args.db.startswith("docker://"):
+                proj = FalkorProjection.from_uri(args.db)
+            else:
+                proj = FalkorProjection(path=args.db)
         except Exception as e:
             print(f"tortoise index: Cannot connect to database: {e}", file=sys.stderr)
             print("Set --db to a Docker URI or ensure FalkorDB is running.", file=sys.stderr)
@@ -1098,7 +1104,7 @@ def main(argv: list[str] | None = None) -> int:
     setup.add_argument("--output", default=None, help="Save config to file instead of stdout")
     doctor = sp.add_parser("doctor", help="Health check — verify Tortoise setup")
     onboard = sp.add_parser("onboard", help="Guided onboarding: init → index → demo → doctor")
-    onboard.add_argument("--path", required=True, help="Path for embedded mode (opt-in)")
+    onboard.add_argument("--path", required=True, help="Path for embedded mode")
     hs = sp.add_parser("health-server", help="Start standalone /health HTTP server")
     hs.add_argument("--port", type=int, default=9090, help="HTTP port (default: 9090)")
     hs.add_argument("--bind", default="127.0.0.1", help="Bind address (default: 127.0.0.1)")
