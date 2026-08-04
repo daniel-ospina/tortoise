@@ -21,6 +21,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from tortoise.audit_events import AuditLogger
 from tortoise.auth import hash_api_key
+import hmac
+
 from tortoise.sdk import TortoiseSDK
 
 _logger = logging.getLogger(__name__)
@@ -29,7 +31,7 @@ app = FastAPI(title="Tortoise Hosted API", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://premiselabs.co", "https://app.premiselabs.co"],
+    allow_origins=["https://premiselabs.co", "https://app.premiselabs.co", "https://tortoise-y4mjjq.fly.dev"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -47,6 +49,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         self.max_per_minute = max_per_minute
         self._buckets: dict[str, list[float]] = defaultdict(list)
         self._last_cleanup = time.time()
+        self._lock = asyncio.Lock()
 
     async def dispatch(self, request: Request, call_next):
         if request.url.path in self.SKIP or request.url.path.startswith("/internal"):
@@ -60,24 +63,29 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         key_id = auth[7:]
         now = time.time()
 
-        # Periodic cleanup: prune all buckets every 5 minutes
-        if now - self._last_cleanup > 300:
-            stale = [k for k, v in self._buckets.items() if not v]
-            for k in stale:
-                del self._buckets[k]
-            self._last_cleanup = now
+        async with self._lock:
+            # Periodic cleanup: prune empty buckets and buckets older than 60s
+            if now - self._last_cleanup > 60:
+                stale = []
+                for k, v in list(self._buckets.items()):
+                    v[:] = [t for t in v if now - t < 60]
+                    if not v:
+                        stale.append(k)
+                for k in stale:
+                    del self._buckets[k]
+                self._last_cleanup = now
 
-        bucket = self._buckets[key_id]
-        bucket[:] = [t for t in bucket if now - t < 60]
+            bucket = self._buckets[key_id]
+            bucket[:] = [t for t in bucket if now - t < 60]
 
-        if len(bucket) >= self.max_per_minute:
-            raise HTTPException(
-                status_code=429,
-                detail="Rate limit exceeded. 100 points/minute per API key.",
-                headers={"Retry-After": "60"},
-            )
+            if len(bucket) >= self.max_per_minute:
+                raise HTTPException(
+                    status_code=429,
+                    detail="Rate limit exceeded. 100 points/minute per API key.",
+                    headers={"Retry-After": "60"},
+                )
 
-        bucket.append(now)
+            bucket.append(now)
         return await call_next(request)
 
 
@@ -131,9 +139,9 @@ async def _async_audit(
 def _check_internal(request: Request) -> None:
     """Verify internal auth — only Edge Functions call this."""
     if not _INTERNAL_KEY:
-        return  # Dev mode — no auth
+        raise HTTPException(status_code=503, detail="Internal API not configured")
     auth = request.headers.get("authorization", "")
-    if not auth.startswith("Bearer ") or auth[7:] != _INTERNAL_KEY:
+    if not auth.startswith("Bearer ") or not hmac.compare_digest(auth[7:], _INTERNAL_KEY):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
@@ -156,77 +164,86 @@ async def provision_tenant(request: Request):
 
     sdk = TortoiseSDK(namespace="registry")
     now = datetime.now(timezone.utc).isoformat()
+    graph_name = f"team_{team_id}"
 
-    # Create Team node in registry graph
-    sdk._get_proj().g.query(
-        """
-        CREATE (t:Team {
-            id: $id, name: $name, tier: 'free',
-            created_at: $now, backup_enabled: false,
-            max_users: 1, max_teams: 1, max_graphs: 1
-        })
-        """,
-        params={"id": team_id, "name": team_name, "now": now},
-    )
-
-    # Create APIKey node
-    sdk._get_proj().g.query(
-        """
-        CREATE (k:APIKey {
-            id: $id, team_id: $team_id, key_hash: $hash,
-            key_prefix: $prefix, created_by: $created_by,
-            created_at: $now
-        })
-        """,
-        params={
-            "id": _ulid(),
-            "team_id": team_id,
-            "hash": api_key_hash,
-            "prefix": team_id[:8],
-            "created_by": created_by,
-            "now": now,
-        },
-    )
-
-    # Provision FalkorDB namespace for the team
-    graph_name = f"team_{team_name}"
     try:
+        # Create Team node in registry graph
+        sdk._get_proj().g.query(
+            """
+            CREATE (t:Team {
+                id: $id, name: $name, tier: 'free',
+                created_at: $now, backup_enabled: false,
+                max_users: 1, max_teams: 1, max_graphs: 1
+            })
+            """,
+            params={"id": team_id, "name": team_name, "now": now},
+        )
+
+        # Create APIKey node
+        api_key_id = _ulid()
+        sdk._get_proj().g.query(
+            """
+            CREATE (k:APIKey {
+                id: $id, team_id: $team_id, key_hash: $hash,
+                key_prefix: $prefix, created_by: $created_by,
+                created_at: $now
+            })
+            """,
+            params={
+                "id": api_key_id,
+                "team_id": team_id,
+                "hash": api_key_hash,
+                "prefix": team_id[:8],
+                "created_by": created_by,
+                "now": now,
+            },
+        )
+
+        # Provision FalkorDB namespace for the team
         team_graph = sdk.db.select_graph(graph_name)
         team_graph.query(
             "CREATE (:TeamMeta {name: $name, created: $now})",
             params={"name": team_name, "now": now},
         )
+
+        # Create Membership (creator is Owner)
+        sdk._get_proj().g.query(
+            """
+            CREATE (m:Membership {
+                id: $id, user_id: $user_id, team_id: $team_id,
+                role: 'owner', joined_at: $now
+            })
+            """,
+            params={
+                "id": _ulid(),
+                "user_id": created_by,
+                "team_id": team_id,
+                "now": now,
+            },
+        )
+
+        # Log audit event
+        await _async_audit(
+            request, team_id, "tenant_provision",
+            resource_type="team", resource_id=team_id,
+        )
+
+        return {"status": "provisioned", "team_id": team_id, "graph_name": graph_name}
     except Exception:
-        # Roll back registry entry on namespace failure
+        # Full rollback on any failure
         sdk._get_proj().g.query("MATCH (t:Team {id: $id}) DETACH DELETE t", params={"id": team_id})
         sdk._get_proj().g.query(
             "MATCH (k:APIKey {team_id: $id}) DETACH DELETE k", params={"id": team_id}
         )
-        raise HTTPException(status_code=500, detail="Namespace provisioning failed")
-
-    # Create Membership (creator is Owner)
-    sdk._get_proj().g.query(
-        """
-        CREATE (m:Membership {
-            id: $id, user_id: $user_id, team_id: $team_id,
-            role: 'owner', joined_at: $now
-        })
-        """,
-        params={
-            "id": _ulid(),
-            "user_id": created_by,
-            "team_id": team_id,
-            "now": now,
-        },
-    )
-
-    # Log audit event
-    await _async_audit(
-        request, team_id, "tenant_provision",
-        resource_type="team", resource_id=team_id,
-    )
-
-    return {"status": "provisioned", "team_id": team_id, "graph_name": graph_name}
+        sdk._get_proj().g.query(
+            "MATCH (m:Membership {team_id: $id}) DETACH DELETE m", params={"id": team_id}
+        )
+        try:
+            team_graph = sdk.db.select_graph(graph_name)
+            team_graph.delete()
+        except Exception:
+            pass
+        raise HTTPException(status_code=500, detail="Tenant provisioning failed")
 
 
 def _ulid() -> str:
@@ -355,12 +372,17 @@ class ErrorResponse(BaseModel):
 async def create_point(body: CreatePointRequest, request: Request, team: dict = Depends(get_current_team)):
     """Create a Point in the team's graph."""
     sdk = TortoiseSDK(namespace=team["team_id"])
-    result = sdk.create_point(
-        content=body.content,
-        kind=body.kind,
-        context=body.context,
-        tags=body.tags,
-    )
+    try:
+        result = sdk.create_point(
+            content=body.content,
+            kind=body.kind,
+            context=body.context,
+            tags=body.tags,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create point: {str(e)}")
     # Log audit event
     await _async_audit(
         request, team["team_id"], "point_create",
@@ -386,10 +408,16 @@ async def list_points(
     """Query Points in the team's graph."""
     sdk = TortoiseSDK(namespace=team["team_id"])
     proj = sdk._get_proj()
-    rows = proj.g.query(
-        "MATCH (n:Point) WHERE (n.is_operator IS NULL OR n.is_operator = false) RETURN properties(n) ORDER BY n.createdAt DESC LIMIT $limit",
-        params={"limit": limit},
-    ).result_set
+    conditions = ["(n.is_operator IS NULL OR n.is_operator = false)"]
+    params: dict = {"limit": limit}
+    if kind:
+        conditions.append("n.pointKind = $kind")
+        params["kind"] = kind
+    if context:
+        conditions.append("n.context = $context")
+        params["context"] = context
+    query = "MATCH (n:Point) WHERE " + " AND ".join(conditions) + " RETURN properties(n) ORDER BY n.createdAt DESC LIMIT $limit"
+    rows = proj.g.query(query, params=params).result_set
     results = [r[0] for r in rows]
     return {"points": results, "count": len(results)}
 
@@ -399,9 +427,12 @@ async def team_info(team: dict = Depends(get_current_team)):
     """Get current team info: tier, usage, limits."""
     sdk = TortoiseSDK(namespace=team["team_id"])
     # Count Points in default graph
-    point_count = sdk._get_proj().g.query(
-        "MATCH (n:Point) RETURN count(n)"
-    ).result_set[0][0]
+    try:
+        point_count = sdk._get_proj().g.query(
+            "MATCH (n:Point) RETURN count(n)"
+        ).result_set[0][0]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch team info: {str(e)}")
 
     return TeamInfoResponse(
         team_id=team["team_id"],
@@ -603,7 +634,7 @@ async def create_api_key(request: Request, team: dict = Depends(get_current_team
     key_hash = hash_api_key(api_key)
     key_prefix = api_key[:10]
     kid = str(uuid.uuid4())[:26]
-    now = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     proj.g.query(
         "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, key_prefix:$kp, created_by:$cb, created_at:$now})",
         params={"id": kid, "tid": team["team_id"], "kh": key_hash, "kp": key_prefix, "cb": team.get("key_id", "system"), "now": now},
@@ -626,12 +657,15 @@ async def create_api_key(request: Request, team: dict = Depends(get_current_team
 async def list_api_keys(team: dict = Depends(get_current_team)):
     """List API keys for the team (hashes only — no plaintext)."""
     sdk = TortoiseSDK(namespace="registry")
-    keys = sdk._get_proj().g.query(
-        "MATCH (k:APIKey {team_id: $tid}) "
-        "RETURN k.id, k.key_prefix, k.created_at, k.last_used_at, k.revoked_at "
-        "ORDER BY k.created_at DESC",
-        params={"tid": team["team_id"]},
-    )
+    try:
+        keys = sdk._get_proj().g.query(
+            "MATCH (k:APIKey {team_id: $tid}) "
+            "RETURN k.id, k.key_prefix, k.created_at, k.last_used_at, k.revoked_at "
+            "ORDER BY k.created_at DESC",
+            params={"tid": team["team_id"]},
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to list API keys: {str(e)}")
     return {
         "keys": [
             {
@@ -652,7 +686,7 @@ from pydantic import BaseModel
 from typing import Optional
 
 class SessionRequest(BaseModel):
-    conversation: list[dict]
+    conversation: list[dict] = Field(..., max_length=1000)
     session_id: Optional[str] = None
     metadata: Optional[dict] = None
 
