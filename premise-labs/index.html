@@ -3,10 +3,10 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Premise Labs</title>
-  <meta name="description" content="An AI lab building the premises intelligence stands on.">
+  <title>Tortoise — Memory Graph for AI Agents</title>
+  <meta name="description" content="Tortoise gives your AI agents persistent memory. Capture sessions, persist decisions, and let future agents recall them via MCP.">
   <meta property="og:title" content="Premise Labs">
-  <meta property="og:description" content="An AI lab building the premises intelligence stands on.">
+  <meta property="og:description" content="Tortoise gives your AI agents persistent memory.">
   <meta property="og:type" content="website">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Premise Labs">
@@ -81,6 +81,13 @@
       letter-spacing: -0.01em;
     }
     #beat-hero h1 span { color: var(--accent); }
+    #beat-hero .hero-sub {
+      margin-top: 1.25rem;
+      max-width: 560px;
+      color: var(--text-dim);
+      font-size: clamp(0.95rem, 1.6vw, 1.1rem);
+      line-height: 1.6;
+    }
 
     /* Sub-beats */
     .beat p {
@@ -262,24 +269,41 @@
 
   <div id="scroll-wrapper">
     <section id="beat-hero" class="beat">
-      <h1>The primary function of memory is not <span>recall</span>, but <span>learning</span>.</h1>
+      <h1>Your agents <span>remember</span> every decision, every session, every time.</h1>
+      <p class="hero-sub">Tortoise is the memory graph for AI agents. Sessions stream in, decisions persist, and future agents recall them — over MCP.</p>
     </section>
-    <section id="beat-origin" class="beat">
-      <p style="color: var(--text); font-size: clamp(1.15rem, 2.2vw, 1.5rem); line-height: 1.5;">Humans update their <span style="color: var(--accent);">world models</span> too slowly.<br>Agents forget them halfway through a session.<br><br>We made them persistent — unlocking better decisions, learning, and collaboration.</p>
+    <section id="beat-capture" class="beat">
+      <h2>Capture</h2>
+      <p>Agent sessions flow into a semantic graph automatically.</p>
+      <div class="cli-snippet">
+        <code>$ tortoise session capture --file chat.json</code>
+        <code>✓ 47 turns → 12 decisions, 8 claims, 3 hypotheses</code>
+      </div>
     </section>
-    <section id="beat-tortoise" class="beat">
-      <h2><span>Tortoise</span> — a memory system where agents learn.</h2>
+    <section id="beat-recall" class="beat">
+      <h2>Recall</h2>
+      <p>Future agents query the past — and answer from what you decided.</p>
+      <div class="cli-snippet">
+        <code>$ tortoise_suggest_entry_points("database architecture")</code>
+        <code>→ "Last session you decided FalkorDB Cloud (confidence 0.9)"</code>
+      </div>
     </section>
-    <section id="beat-lab" class="beat">
-      <h3><strong>Premise Labs</strong></h3>
+    <section id="beat-reason" class="beat">
+      <h2>Reason</h2>
+      <p>Belief propagation surfaces what's true — and what's been contradicted.</p>
+      <div class="cli-snippet">
+        <code>IMPL  a → b    confidence: 0.87</code>
+        <code>NAND  c → a    confidence: 0.72</code>
+      </div>
     </section>
     <section id="beat-cta" class="beat">
-      <a href="/signup" class="cta-start">Start free →</a>
-      <p class="cta-subtle">No credit card. 5,000 Points free. 5 minutes to your first graph.</p>
-      <div class="cf-turnstile" data-sitekey="TURNSTILE_SITE_KEY_PLACEHOLDER" style="margin-bottom: 1.25rem;"></div>
+      <a href="/signup" class="cta-start">Connect your agent →</a>
+      <p class="cta-subtle">No credit card. 5,000 Points free. First session in 5 minutes.</p>
       <div class="cli-snippet">
+        <code>$ pip install tortoise</code>
         <code>$ tortoise init --api-key &lt;key&gt;</code>
-        <code>$ tortoise create-point "Hello world"</code>
+        <code>$ tortoise create-point "Hello world" --kind statement</code>
+        <code>$ tortoise session capture --file chat.json</code>
       </div>
       <a class="selfhost-link" href="https://github.com/daniel-ospina/tortoise" target="_blank" rel="noopener">Self-hosting docs →</a>
       <a class="twitter-link" href="https://x.com/permiselabs" target="_blank" rel="noopener">@permiselabs</a>
@@ -418,7 +442,7 @@
     draw();
 
     /* ── Content beats (opacity scrubbed to scroll) ── */
-    const beats = ['beat-hero', 'beat-origin', 'beat-tortoise', 'beat-lab', 'beat-cta'];
+    const beats = ['beat-hero', 'beat-capture', 'beat-recall', 'beat-reason', 'beat-cta'];
 
     const beatSpan = 0.11;
     const gapSpan = 0.015;
