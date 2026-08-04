@@ -1324,7 +1324,8 @@ class TortoiseSDK:
         """
         from .search_engine import (
             classify_query, degradation_chain, rrf_fusion,
-            annotate_ep_batch, fallback_tfidf, SearchResult, SearchScores,
+            annotate_ep_batch, get_relationships, fallback_tfidf,
+            SearchResult, SearchScores,
             filter_by_relationship, filter_by_traversal_predicate,
         )
 
@@ -1504,6 +1505,9 @@ class TortoiseSDK:
             for pid in result_ids:
                 entity_data[pid] = {"content": "", "kind": "", "context": None}
 
+        # 7.5. Fetch relationships for result Points (Point only)
+        point_relationships = get_relationships(graph, result_ids) if entity_type == "point" else {}
+
         # 8. Build SearchResult objects, filter, and order
         results = []
         for pid in result_ids:
@@ -1543,6 +1547,7 @@ class TortoiseSDK:
                 scores=scores,
                 match_source=match_source,
                 ep=ep,
+                relationships=point_relationships.get(pid, []),
             )
             results.append(result)
 
