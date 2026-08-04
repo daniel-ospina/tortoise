@@ -1,0 +1,68 @@
+# Product Strategy Domain Extension
+# Product, Feature, Customer, Competitor, Market concepts.
+
+namespace: product-strategy
+name: "Product Strategy"
+version: "0.1.0"
+tier: free
+description: "Product strategy concepts — products, features, customers, competitors, markets"
+
+ontology:
+  extends: core
+
+  objectKinds:
+    - product
+    - feature
+    - customer
+    - competitor
+    - customerSegment
+    - market
+
+  subclassOf:
+    feature: WorkItem
+
+  pointKinds:
+    - jobToBeDone
+    - useCase
+    - userJourney
+    - valueProposition
+
+  documentKinds:
+    - competitiveAnalysis
+    - marketResearch
+    - productSpec
+    - featureSpec
+
+  relations:
+    - predicate: contains
+      mechanism: IMPL
+      semantics: hasPart
+      fromKind: product-strategy:product
+      toKind: product-strategy:feature
+      cardinality: one_to_many
+
+    - predicate: addresses
+      mechanism: IMPL
+      semantics: addresses
+      fromKind: product-strategy:feature
+      toKind: product-strategy:customerSegment
+
+    - predicate: competesWith
+      mechanism: NAND
+      semantics: opposes
+      fromKind: product-strategy:feature
+      toKind: product-strategy:competitor
+
+    - predicate: targets
+      mechanism: IMPL
+      semantics: addresses
+      fromKind: product-strategy:product
+      toKind: product-strategy:customerSegment
+
+  hierarchies:
+    - path: "Product → Feature"
+      type: hasPart
+
+connectors: []
+tools: []
+depends_on: []
