@@ -126,17 +126,54 @@ def run_fts_query(
 
 
 def run_vector_query(
-    graph, query_vec: list[float], limit: int = 20, timeout_ms: int = 500
+    graph, query_vec: list[float], limit: int = 20, timeout_ms: int = 500,
+    is_embedded: bool = True,
 ) -> list[tuple[str, float]]:
     """Run vector similarity search via FalkorDB vector index.
 
     query_vec must be a 384-dim embedding matching the index dimension.
+
+    In Docker/server mode (is_embedded=False), uses the HNSW vector index
+    via CALL db.idx.vector.queryNodes. Falls back to brute-force
+    vec.euclideanDistance if the index is unavailable (embedded mode,
+    old FalkorDB, or index creation failed).
     """
     if not query_vec:
         return []
+
+    # Docker/server mode → try index-accelerated vector search (#7777)
+    if not is_embedded:
+        try:
+            start = time.monotonic()
+            cypher = (
+                "CALL db.idx.vector.queryNodes('Point', 'embedding', $query_vec, $limit) "
+                "YIELD node "
+                "RETURN node.id "
+                "LIMIT $limit"
+            )
+            rows = graph.query(
+                cypher, params={"query_vec": query_vec, "limit": limit}
+            ).result_set
+            elapsed = (time.monotonic() - start) * 1000
+            if elapsed > timeout_ms:
+                logger.warning("Vector query exceeded timeout: %.0fms > %dms", elapsed, timeout_ms)
+                return []
+            # Index results are ranked by similarity; assign rank-based scores.
+            # RRF fusion uses rank not absolute scores; single-strategy mode
+            # gets reasonable descending ordering.
+            total = len(rows)
+            return [(row[0], 1.0 - (i / max(total, 1))) for i, row in enumerate(rows)]
+        except Exception as e:
+            msg = str(e).lower()
+            if "index" in msg or "not found" in msg or "does not exist" in msg:
+                logger.info("Vector index not available — falling back to brute-force")
+            else:
+                logger.warning("Vector index query failed, falling back to brute-force: %s", e)
+            # Fall through to brute-force below
+
+    # Brute-force (embedded mode or index query failed)
     try:
         start = time.monotonic()
-        # Use vector similarity search via Cypher
         cypher = (
             "MATCH (n:Point) "
             "WHERE n.embedding IS NOT NULL "
@@ -250,40 +287,62 @@ def degradation_chain(
     strategies: dict[str, bool],
     entity_type: str = "point",
     limit: int = 20,
+    is_embedded: bool = True,
 ) -> dict[str, list[tuple[str, float]]]:
-    """Run retrieval strategies with per-strategy degradation.
+    """Run retrieval strategies in parallel with per-strategy degradation.
 
     Each strategy wraps in try/except → on failure, skip and log.
     Supports partial failure: one strategy down, others continue.
+    Strategies run in parallel via ThreadPoolExecutor (P0 fix: #7780).
+
+    is_embedded: True for embedded/redislite mode (brute-force vector),
+                 False for Docker/server mode (HNSW index-accelerated).
 
     Returns:
         {strategy_name: [(id, score), ...]} — only strategies that succeeded
     """
+    import concurrent.futures
+
     results: dict[str, list[tuple[str, float]]] = {}
+    futures: dict[concurrent.futures.Future, str] = {}
 
-    # FTS strategy
-    if strategies.get("fts") and query:
-        fts_results = run_fts_query(graph, query, entity_type=entity_type, limit=limit)
-        if fts_results:
-            results["fts"] = fts_results
-        else:
-            logger.info("FTS strategy returned no results — degraded")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+        # Submit all enabled strategies in parallel
+        if strategies.get("fts") and query:
+            futures[executor.submit(
+                run_fts_query, graph, query, entity_type=entity_type, limit=limit
+            )] = "fts"
 
-    # Vector strategy
-    if strategies.get("vector") and query_vec:
-        vec_results = run_vector_query(graph, query_vec, limit=limit)
-        if vec_results:
-            results["vector"] = vec_results
-        else:
-            logger.info("Vector strategy returned no results — degraded")
+        if strategies.get("vector") and query_vec:
+            futures[executor.submit(
+                run_vector_query, graph, query_vec, limit=limit, is_embedded=is_embedded
+            )] = "vector"
 
-    # Structural strategy
-    if strategies.get("structural"):
-        struct_results = run_structural_query(graph, kind, context, entity_type=entity_type, limit=limit)
-        if struct_results:
-            results["structural"] = struct_results
-        else:
-            logger.info("Structural strategy returned no results — degraded")
+        if strategies.get("structural"):
+            futures[executor.submit(
+                run_structural_query, graph, kind, context, entity_type=entity_type, limit=limit
+            )] = "structural"
+
+        # Collect results with 500ms total timeout across all strategies.
+        # as_completed(timeout=0.5) raises TimeoutError if any future
+        # hasn't completed within 500ms from the start of iteration.
+        try:
+            for future in concurrent.futures.as_completed(futures, timeout=0.5):
+                strategy_name = futures[future]
+                strategy_results = future.result()  # already done — no timeout needed
+                if strategy_results:
+                    results[strategy_name] = strategy_results
+                else:
+                    logger.info("%s strategy returned no results — degraded", strategy_name)
+        except concurrent.futures.TimeoutError:
+            logger.warning(
+                "Strategies timed out (500ms) — collected %d/%d, cancelling remaining",
+                len(results), len(futures),
+            )
+            for f in futures:
+                f.cancel()
+        except Exception as e:
+            logger.warning("Strategy execution failed: %s — degraded", e)
 
     return results
 
