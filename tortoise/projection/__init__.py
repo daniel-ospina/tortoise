@@ -330,12 +330,12 @@ class FalkorProjection(
         pid = ev.get("id") or ev["event_id"]
         params: dict = {"id": pid, "c": new_content, "x": ev.get("new_context")}
 
-        if new_content:
+        # Re-compute embedding when content changes (even to empty — wipe stale)
+        if new_content is not None:
             try:
                 from tortoise.embeddings import compute_embedding
-                emb = compute_embedding(new_content)
-                if emb is not None:
-                    params["embedding"] = emb
+                emb = compute_embedding(new_content) if new_content else None
+                params["embedding"] = emb  # None = wipe stale embedding for empty content
             except Exception:
                 pass
 

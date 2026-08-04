@@ -1326,21 +1326,30 @@ class TortoiseSDK:
 
         ep_breakdowns = annotate_ep_batch(graph, result_ids)
 
-        # 6. Build SearchResult objects, filter, and order
+        # 6. Fetch Point content in BATCH (not N+1)
+        point_data = {}
+        try:
+            rows = graph.query(
+                "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, n.content, n.pointKind, n.context",
+                params={"ids": result_ids},
+            ).result_set
+            for row in rows:
+                pid = row[0]
+                point_data[pid] = {
+                    "content": row[1],
+                    "point_kind": row[2],
+                    "context": row[3] if len(row) > 3 else None,
+                }
+        except Exception:
+            pass
+
+        # 7. Build SearchResult objects, filter, and order
         results = []
         for pid in result_ids:
-            # Fetch Point content
-            try:
-                rows = graph.query(
-                    "MATCH (n:Point {id: $id}) RETURN n.content, n.pointKind, n.context",
-                    params={"id": pid},
-                ).result_set
-                if not rows:
-                    continue
-                content, pt_kind, pt_context = rows[0][0], rows[0][1], rows[0][2] if len(rows[0]) > 2 else None
-            except Exception:
+            pt = point_data.get(pid)
+            if not pt:
                 continue
-
+            content, pt_kind, pt_context = pt["content"], pt["point_kind"], pt["context"]
             ep = ep_breakdowns.get(pid)
 
             # Apply min_confidence filter (default 0.0 = no filter)
