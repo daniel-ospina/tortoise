@@ -270,7 +270,12 @@ async def list_points(
 ):
     """Query Points in the team's graph."""
     sdk = TortoiseSDK(namespace=team["team_id"])
-    results = sdk.query(kind=kind, context=context, limit=limit)
+    proj = sdk._get_proj()
+    rows = proj.g.query(
+        "MATCH (n:Point) WHERE (n.is_operator IS NULL OR n.is_operator = false) RETURN properties(n) ORDER BY n.createdAt DESC LIMIT $limit",
+        params={"limit": limit},
+    ).result_set
+    results = [r[0] for r in rows]
     return {"points": results, "count": len(results)}
 
 
