@@ -130,7 +130,7 @@ def tortoise_query(kind: str | None = None, context: str | None = None,
 
     When text is provided, routes through tortoise_fts_query() for hybrid search.
     When text is None, uses existing structural query (full-scan for context).
-    entity_type: 'point' (default), 'event', or 'subject'.
+    entity_type: 'point' (default), 'event', 'subject', 'document', or 'object'.
     """
     filters = _parse(filters)
     if text:
@@ -229,7 +229,7 @@ def tortoise_search(query: str | None = None, kind: str | None = None,
                     traversal_path: str | None = None) -> list[dict]:
     """Hybrid search with RRF fusion + EP annotation.
 
-    entity_type: 'point' (default), 'event', or 'subject'.
+    entity_type: 'point' (default), 'event', 'subject', 'document', or 'object'.
     Full-scan mode: omit query, set context → all Points in context.
     Best-match mode: provide query → RRF fusion of FTS + vector + structural.
 

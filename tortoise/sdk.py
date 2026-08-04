@@ -1309,7 +1309,7 @@ class TortoiseSDK:
     ) -> list[dict]:
         """Hybrid search with RRF fusion + EP annotation.
 
-        entity_type: 'point' (default), 'event', or 'subject'.
+        entity_type: 'point' (default), 'event', 'subject', 'document', or 'object'.
         Full-scan mode: omit query, set context → all Points in context.
         Best-match mode: provide query → RRF fusion of FTS + vector + structural.
 
@@ -1329,8 +1329,8 @@ class TortoiseSDK:
             filter_by_relationship, filter_by_traversal_predicate,
         )
 
-        if entity_type not in ("point", "event", "subject"):
-            raise ValueError(f"entity_type must be 'point', 'event', or 'subject', got {entity_type!r}")
+        if entity_type not in ("point", "event", "subject", "document", "object"):
+            raise ValueError(f"entity_type must be 'point', 'event', 'subject', 'document', or 'object', got {entity_type!r}")
         if limit < 1:
             raise ValueError(f"limit must be >= 1, got {limit}")
         if not (0.0 <= threshold <= 1.0):
@@ -1343,7 +1343,7 @@ class TortoiseSDK:
         proj = self._get_proj()
         graph = proj.g
         label = entity_type.capitalize()  # point→Point, event→Event, subject→Subject
-        kind_field = {"point": "pointKind", "event": "eventKind", "subject": "subjectKind"}[entity_type]
+        kind_field = {"point": "pointKind", "event": "eventKind", "subject": "subjectKind", "document": "documentKind", "object": "objectKind"}[entity_type]
 
         # 1. Classify query → determine active strategies
         strategies = classify_query(query, kind, context)
@@ -1352,9 +1352,9 @@ class TortoiseSDK:
         # Expand kind early for pack-aware structural query + kind filter
         expanded_kinds = self._expand_kind(kind) if kind else None
 
-        # 2. Get query vector if needed (Point only — no embeddings for Event/Subject)
+        # 2. Get query vector if needed (all core entity types now have embeddings #7845)
         query_vec = None
-        if entity_type == "point" and strategies.get("vector") and query and query.strip():
+        if strategies.get("vector") and query and query.strip():
             try:
                 from .embeddings import EmbeddingModel
                 model = EmbeddingModel.get()
@@ -1496,6 +1496,30 @@ class TortoiseSDK:
                 for row in rows:
                     sid = row[0]
                     entity_data[sid] = {
+                        "content": row[1] or "",
+                        "kind": row[2] or "",
+                        "context": None,
+                    }
+            elif entity_type == "document":
+                rows = graph.query(
+                    "MATCH (n:Document) WHERE n.id IN $ids RETURN n.id, n.title, n.documentKind",
+                    params={"ids": result_ids},
+                ).result_set
+                for row in rows:
+                    did = row[0]
+                    entity_data[did] = {
+                        "content": row[1] or "",
+                        "kind": row[2] or "",
+                        "context": None,
+                    }
+            elif entity_type == "object":
+                rows = graph.query(
+                    "MATCH (n:Object) WHERE n.id IN $ids RETURN n.id, n.name, n.objectKind",
+                    params={"ids": result_ids},
+                ).result_set
+                for row in rows:
+                    oid = row[0]
+                    entity_data[oid] = {
                         "content": row[1] or "",
                         "kind": row[2] or "",
                         "context": None,

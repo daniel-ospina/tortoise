@@ -81,32 +81,57 @@ class _EntityHandlers:
         name = ev.get("name", "")
         if not sid or not name:
             return
+        # Compute embedding for Subject name (#7845)
+        embedding = None
+        try:
+            from tortoise.embeddings import compute_embedding
+            embedding = compute_embedding(name)
+        except Exception:
+            pass
         self.g.query(
             "MERGE (s:Subject {name:$name}) "
-            "ON CREATE SET s.id=$id, s.subjectKind=$sk, s.createdAt=coalesce($ca, $now) "
-            "ON MATCH SET s.subjectKind=coalesce($sk, s.subjectKind)",
+            "ON CREATE SET s.id=$id, s.subjectKind=$sk, s.createdAt=coalesce($ca, $now), "
+            "            s.embedding=coalesce($embedding, s.embedding) "
+            "ON MATCH SET s.subjectKind=coalesce($sk, s.subjectKind), "
+            "            s.embedding=coalesce($embedding, s.embedding)",
             params={"id": sid, "name": name,
                     "sk": ev.get("subject_kind", "other"),
-                    "ca": ev.get("createdAt"), "now": _now_iso()},
+                    "ca": ev.get("createdAt"), "now": _now_iso(),
+                    "embedding": embedding},
         )
 
     def _upsert_object(self, ev: dict) -> None:
-        """MERGE Object by name (content-hash dedup)."""
+        """MERGE Object by name (content-hash dedup).
+
+        Objects are encoded via the Source→references→Object chain —
+        embedding from name provides direct vector search capability
+        while the provenance chain traces back to source content (#7845).
+        """
         oid = ev.get("id")
         name = ev.get("name", "")
         if not oid or not name:
             return
         title = ev.get("title")  # None default — coalesce needs NULL, not ""
         ok = ev.get("object_kind")  # None default — same issue
+        # Compute embedding from name (#7845)
+        embedding = None
+        try:
+            from tortoise.embeddings import compute_embedding
+            embedding = compute_embedding(name)
+        except Exception:
+            pass
         self.g.query(
             "MERGE (o:Object {name:$name}) "
-            "ON CREATE SET o.id=$id, o.objectKind=coalesce($ok, 'other'), o.createdAt=coalesce($ca, $now), o.title=coalesce($title, '') "
+            "ON CREATE SET o.id=$id, o.objectKind=coalesce($ok, 'other'), o.createdAt=coalesce($ca, $now), o.title=coalesce($title, ''), "
+            "            o.embedding=coalesce($embedding, o.embedding) "
             "ON MATCH SET o.objectKind=coalesce($ok, o.objectKind), "
-            "            o.title=coalesce($title, o.title)",
+            "            o.title=coalesce($title, o.title), "
+            "            o.embedding=coalesce($embedding, o.embedding)",
             params={"id": oid, "name": name,
                     "ok": ok,
                     "ca": ev.get("createdAt"), "now": _now_iso(),
-                    "title": title},
+                    "title": title,
+                    "embedding": embedding},
         )
 
     def _upsert_document(self, ev: dict) -> None:
@@ -114,15 +139,31 @@ class _EntityHandlers:
         did = ev.get("id")
         if not did:
             return
+        # Compute embedding from title+content for semantic search (#7845)
+        embedding = None
+        doc_content = " ".join(filter(None, [
+            ev.get("title", ""),
+            ev.get("content", ""),
+        ]))
+        if doc_content.strip():
+            try:
+                from tortoise.embeddings import compute_embedding
+                embedding = compute_embedding(doc_content)
+            except Exception:
+                pass
         self.g.query(
             "MERGE (d:Document {id:$id}) "
             "SET d.title=coalesce($title, d.title), "
             "    d.documentKind=coalesce($dk, d.documentKind), "
             "    d.format=coalesce($fmt, d.format), "
+            "    d.content=coalesce($content, d.content), "
+            "    d.embedding=coalesce($embedding, d.embedding), "
             "    d.updatedAt=$now",
             params={"id": did, "title": ev.get("title", did),
                     "dk": ev.get("document_kind", ""),
                     "fmt": ev.get("format", "markdown"),
+                    "content": ev.get("content"),
+                    "embedding": embedding,
                     "now": _now_iso()},
         )
 
@@ -136,19 +177,35 @@ class _EntityHandlers:
         eid = inner.get("id") or inner.get("eventId")
         if not eid:
             return
+        # Compute embedding from event content/description (#7845)
+        embedding = None
+        event_content = " ".join(filter(None, [
+            inner.get("subject", ""),
+            inner.get("eventKind", ""),
+            inner.get("object", ""),
+        ]))
+        if event_content.strip():
+            try:
+                from tortoise.embeddings import compute_embedding
+                embedding = compute_embedding(event_content)
+            except Exception:
+                pass
+        props = {
+            "eventKind": inner.get("eventKind", ""),
+            "subject": inner.get("subject", ""),
+            "object": inner.get("object", ""),
+            "startedAt": inner.get("startedAt", ""),
+            "endedAt": inner.get("endedAt"),
+            "parentEvent": inner.get("parentEvent"),
+            "participants": inner.get("participants", []),
+            "classificationLevel": inner.get("classificationLevel", "internal"),
+            "format": inner.get("format", "jsonl"),
+        }
+        if embedding is not None:
+            props["embedding"] = embedding
         self.g.query(
             "MERGE (e:Event {eventId: $eid}) "
             "ON CREATE SET e += $props "
             "ON MATCH SET e += $props",
-            params={"eid": eid, "props": {
-                "eventKind": inner.get("eventKind", ""),
-                "subject": inner.get("subject", ""),
-                "object": inner.get("object", ""),
-                "startedAt": inner.get("startedAt", ""),
-                "endedAt": inner.get("endedAt"),
-                "parentEvent": inner.get("parentEvent"),
-                "participants": inner.get("participants", []),
-                "classificationLevel": inner.get("classificationLevel", "internal"),
-                "format": inner.get("format", "jsonl"),
-            }}
+            params={"eid": eid, "props": props},
         )
