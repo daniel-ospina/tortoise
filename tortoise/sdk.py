@@ -1480,8 +1480,7 @@ class TortoiseSDK:
                     "narrative_arc": arc,
                     "source_file": props.get("source_file", ""),
                     "source_file_available": __import__('os').path.exists(props.get("source_file", "")),
-                    "timestamp": props.get("startedAt", ""),
-                })
+                    "message_count": int(props.get("message_count", 0)),
         
         results.sort(key=lambda r: r["similarity"], reverse=True)
         return results[:limit]
@@ -1650,6 +1649,8 @@ class TortoiseSDK:
 
     def get_session(self, session_id: str) -> dict | None:
         """Get a single session Event by session_id."""
+        if not session_id:
+            return None
         proj = self._get_proj()
         rows = proj.g.query(
             "MATCH (e:Event {eventKind: 'AgentSession', session_id: $sid}) RETURN properties(e)",
