@@ -252,13 +252,13 @@ async def create_point(body: CreatePointRequest, team: dict = Depends(get_curren
         context=body.context,
         tags=body.tags,
     )
-    return PointResponse(
-        id=result["id"],
-        content=result["content"],
-        kind=result["kind"],
-        context=result.get("context"),
-        created_at=result.get("created_at"),
-    )
+    return {
+        "id": result["id"],
+        "content": result["content"],
+        "kind": result.get("pointKind", result.get("kind", "")),
+        "context": result.get("context"),
+        "created_at": result.get("createdAt", result.get("created_at", "")),
+    }
 
 
 @app.get("/v1/points")
