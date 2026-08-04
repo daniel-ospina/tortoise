@@ -41,15 +41,15 @@ class AuthMiddleware(BaseHTTPMiddleware):
             if not token.startswith('tt_'):
                 raise HTTPException(status_code=401, detail='Invalid API key format')
             sdk = TortoiseSDK(namespace='registry')
-            key_result = sdk.g.query(
-                'MATCH (k:APIKey {{key_hash: }}) WHERE k.revoked_at IS NULL RETURN k.team_id, k.id',
+            key_result = sdk._get_proj().g.query(
+                'MATCH (k:APIKey {key_hash: $hash}) WHERE k.revoked_at IS NULL RETURN k.team_id, k.id',
                 params={'hash': hash_api_key(token)},
             )
             if not key_result.result_set:
                 raise HTTPException(status_code=401, detail='Invalid API key')
             team_id, key_id = key_result.result_set[0]
-            team = sdk.g.query(
-                'MATCH (t:Team {{id: }}) RETURN t.tier, t.max_users, t.max_graphs, t.max_teams',
+            team = sdk._get_proj().g.query(
+                'MATCH (t:Team {id: $id}) RETURN t.tier, t.max_users, t.max_graphs, t.max_teams',
                 params={'id': team_id},
             )
             if not team.result_set:
@@ -61,8 +61,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
             request.state.max_users = max_users or 1
             request.state.max_graphs = max_graphs or 1
             request.state.max_teams = max_teams or 1
-            sdk.g.query(
-                'MATCH (k:APIKey {{id: }}) SET k.last_used_at = datetime()',
+            sdk._get_proj().g.query(
+                'MATCH (k:APIKey {id: $id}) SET k.last_used_at = datetime()',
                 params={'id': key_id},
             )
         except HTTPException:
