@@ -1318,7 +1318,7 @@ class TortoiseSDK:
                 ).result_set
                 kind_ids = {row[0] for row in kind_rows}
             except Exception:
-                pass
+                kind_ids = set(result_ids)  # Pass-through on error
             result_ids = [pid for pid in result_ids if pid in kind_ids]
 
         # Truncate AFTER filtering
@@ -1341,7 +1341,9 @@ class TortoiseSDK:
                     "context": row[3] if len(row) > 3 else None,
                 }
         except Exception:
-            pass
+            logger.warning("Batch content fetch failed — returning results with minimal metadata")
+            for pid in result_ids:
+                point_data[pid] = {"content": "", "point_kind": "", "context": None}
 
         # 7. Build SearchResult objects, filter, and order
         results = []
