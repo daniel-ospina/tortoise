@@ -299,7 +299,7 @@ def tortoise_create_operator(op_type: str, source_id: str, target_ids: Any,
       annotation, mitigation, NAND constraints, veracity vs implication.
     """
     target_ids = _parse(target_ids)
-    return _safe(sdk.create_operator, op_type, source_id, target_ids, label=label)
+    return _safe(sdk.create_operator, op_type, source_id, target_ids, context=context, label=label)
 
 
 @mcp.tool()
