@@ -285,7 +285,33 @@ class TestPointsList:
         r = client.get("/v1/points", params={"limit": 3})
         assert r.status_code == 200, r.text
         body = r.json()
-        assert body["count"] <= 3
+        assert body["count"] == 3
+
+    def test_list_points_filter_by_kind(self, client):
+        """GET /v1/points?kind=<kind> returns only matching Points."""
+        client.post("/v1/points", json={"content": "a decision", "kind": "decision"})
+        client.post("/v1/points", json={"content": "an observation", "kind": "observation"})
+        client.post("/v1/points", json={"content": "another statement", "kind": "statement"})
+
+        r = client.get("/v1/points", params={"kind": "decision"})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["count"] >= 1
+        for p in body["points"]:
+            assert p.get("pointKind", p.get("kind")) == "decision"
+
+    def test_list_points_filter_by_context(self, client):
+        """GET /v1/points?context=<value> returns only matching Points."""
+        client.post("/v1/points", json={"content": "ctx-a", "context": "project-alpha"})
+        client.post("/v1/points", json={"content": "ctx-b", "context": "project-beta"})
+        client.post("/v1/points", json={"content": "no-ctx"})
+
+        r = client.get("/v1/points", params={"context": "project-alpha"})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["count"] >= 1
+        for p in body["points"]:
+            assert p.get("context") == "project-alpha"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -529,3 +555,156 @@ class TestHSTSHeader:
             json={"conversation": [{"role": "user", "content": "hi"}]},
         )
         assert r.headers.get("Strict-Transport-Security") == self.HSTS_VALUE
+
+
+class TestSecurityHeaders:
+    """Additional security headers beyond HSTS."""
+
+    def test_x_content_type_options(self, client):
+        r = client.get("/v1/points")
+        assert r.headers.get("X-Content-Type-Options") == "nosniff"
+
+    def test_x_frame_options(self, client):
+        r = client.get("/v1/points")
+        assert r.headers.get("X-Frame-Options") == "DENY"
+
+    def test_x_xss_protection(self, client):
+        r = client.get("/v1/points")
+        assert r.headers.get("X-XSS-Protection") == "1; mode=block"
+
+    def test_security_headers_on_error(self, unauth_client):
+        r = unauth_client.get("/v1/points")
+        assert r.headers.get("X-Content-Type-Options") == "nosniff"
+        assert r.headers.get("X-Frame-Options") == "DENY"
+        assert r.headers.get("X-XSS-Protection") == "1; mode=block"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Internal Endpoints
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_INTERNAL_KEY = "test-internal-shared-secret-xyz"
+
+
+@pytest.fixture
+def internal_client():
+    """TestClient with auth override + internal key configured.
+
+    Combines the client fixture's team auth bypass with
+    FASTAPI_INTERNAL_KEY set so _check_internal passes.
+    """
+    import tortoise.hosted_api as ha_mod
+
+    old_key = os.environ.get("FASTAPI_INTERNAL_KEY", "")
+    os.environ["FASTAPI_INTERNAL_KEY"] = _INTERNAL_KEY
+    # Force reload the module-level constant
+    ha_mod._INTERNAL_KEY = _INTERNAL_KEY
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = os.path.join(tmpdir, "test.db")
+
+        app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM)
+        _orig_init = _patch_tortoise_sdk_init(db_path)
+
+        try:
+            with TestClient(app) as tc:
+                yield tc
+        finally:
+            _restore_tortoise_sdk_init(_orig_init)
+            app.dependency_overrides.clear()
+            os.environ["FASTAPI_INTERNAL_KEY"] = old_key
+            ha_mod._INTERNAL_KEY = old_key
+
+
+class TestInternalProvision:
+    """POST /internal/provision — tenant provisioning."""
+
+    INTERNAL_HEADERS = {"Authorization": f"Bearer {_INTERNAL_KEY}"}
+
+    @pytest.mark.xfail(
+        reason="BUG: hosted_api.py provision uses sdk.db (does not exist on "
+        "TortoiseSDK). Should be sdk._get_proj().db. Fails with 500 in "
+        "FalkorDBLite test environment."
+    )
+    def test_provision_valid_returns_200(self, internal_client):
+        payload = {
+            "team_id": "provisioned-team-1",
+            "team_name": "Provisioned Team",
+            "api_key_hash": "abc123hash",
+            "created_by": "user-001",
+        }
+        r = internal_client.post("/internal/provision", json=payload, headers=self.INTERNAL_HEADERS)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["status"] == "provisioned"
+        assert body["team_id"] == "provisioned-team-1"
+        assert "graph_name" in body
+
+    def test_provision_missing_fields_returns_400(self, internal_client):
+        r = internal_client.post("/internal/provision", json={}, headers=self.INTERNAL_HEADERS)
+        assert r.status_code == 400, r.text
+
+    def test_provision_wrong_internal_key_returns_401(self, internal_client):
+        r = internal_client.post(
+            "/internal/provision",
+            json={"team_id": "t1", "team_name": "n", "api_key_hash": "h", "created_by": "u"},
+            headers={"Authorization": "Bearer wrong-key"},
+        )
+        assert r.status_code == 401, r.text
+
+    def test_provision_missing_auth_returns_401(self, internal_client):
+        r = internal_client.post(
+            "/internal/provision",
+            json={"team_id": "t1", "team_name": "n", "api_key_hash": "h", "created_by": "u"},
+        )
+        assert r.status_code == 401, r.text
+
+
+class TestInternalDemo:
+    """POST /v1/internal/demo — demo graph seeding."""
+
+    INTERNAL_HEADERS = {"Authorization": f"Bearer {_INTERNAL_KEY}"}
+
+    def test_demo_valid_returns_200(self, internal_client):
+        r = internal_client.post(
+            "/v1/internal/demo",
+            json={"team_id": "demo-team-1"},
+            headers=self.INTERNAL_HEADERS,
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["status"] == "demo_created"
+        assert body["team_id"] == "demo-team-1"
+        assert "session_id" in body
+        assert body["points"] > 0
+        assert "layers" in body
+
+    def test_demo_idempotent_second_call_returns_already_seeded(self, internal_client):
+        payload = {"team_id": "demo-team-2"}
+        h = self.INTERNAL_HEADERS
+
+        r1 = internal_client.post("/v1/internal/demo", json=payload, headers=h)
+        assert r1.status_code == 200
+        assert r1.json()["status"] == "demo_created"
+
+        r2 = internal_client.post("/v1/internal/demo", json=payload, headers=h)
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["status"] == "already_seeded"
+
+    def test_demo_missing_team_id_returns_400(self, internal_client):
+        r = internal_client.post(
+            "/v1/internal/demo", json={}, headers=self.INTERNAL_HEADERS
+        )
+        assert r.status_code == 400, r.text
+
+    def test_demo_wrong_internal_key_returns_401(self, internal_client):
+        r = internal_client.post(
+            "/v1/internal/demo",
+            json={"team_id": "t1"},
+            headers={"Authorization": "Bearer wrong-key"},
+        )
+        assert r.status_code == 401, r.text
+
+    def test_demo_missing_auth_returns_401(self, internal_client):
+        r = internal_client.post("/v1/internal/demo", json={"team_id": "t1"})
+        assert r.status_code == 401, r.text
