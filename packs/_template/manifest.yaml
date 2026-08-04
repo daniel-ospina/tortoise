@@ -40,7 +40,12 @@ ontology:
   actionKinds: []
 
   # New predicates (edges between entities)
-  # { predicate, from, to, cardinality }
+  # New format: { predicate, fromKind, toKind, mechanism, cardinality? }
+  #   - predicate: domain verb — "addresses", "competesWith", "implements"
+  #   - fromKind/toKind: specific pack kinds — "myapp:concept"
+  #   - mechanism: IMPL or NAND — epistemic mechanism
+  #   - cardinality: optional (one_to_one, one_to_many, many_to_one, many_to_many)
+  # Old format (compat): { predicate, from, to, cardinality? }
   relations: []
 
 # ── Layer 2: Connectors ──────────────────────────────────────────────────

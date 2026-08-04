@@ -142,6 +142,17 @@ class FalkorProjection(
             raise ValueError("Either path or host must be provided")
 
         self.g = self.db.select_graph(graph_name)
+        self._is_embedded = (path is not None)
+        self._falkordb_version = self._get_falkordb_version()
+        if self._falkordb_version is not None and self._falkordb_version[0] < 4:
+            import logging
+            logging.getLogger(__name__).warning(
+                "FalkorDB version %s is below minimum 4.x. FTS and vector indexes will be skipped.",
+                '.'.join(map(str, self._falkordb_version)))
+        elif self._falkordb_version is None:
+            import logging
+            logging.getLogger(__name__).warning(
+                "Could not determine FalkorDB version. FTS and vector indexes may fail.")
         self._ensure_indexes()
 
     @classmethod
@@ -174,14 +185,7 @@ class FalkorProjection(
         if t in ("PointAdded", "OperatorAdded"):
             self._upsert(ev["point"])
         elif t == "PointRevised":
-            self.g.query(
-                "MATCH (n:Point {id:$id}) "
-                "SET n.content = coalesce($c, n.content), "
-                "    n.context = coalesce($x, n.context), "
-                "    n.updatedAt = $now",
-                params={"id": ev["id"], "c": ev.get("new_content"),
-                        "x": ev.get("new_context"), "now": _now_iso()},
-            )
+            self._revise_point(ev, set_updated_at=True)
         elif t == "PointRetracted":
             self._delete(ev["id"])
         elif t == "PointsMerged":
@@ -254,14 +258,7 @@ class FalkorProjection(
                 for mid in ev.get("merge_ids", []):
                     self._delete(mid)
             elif t == "PointRevised":
-                self.g.query(
-                    "MATCH (n:Point {id:$id}) "
-                    "SET n.content = coalesce($c, n.content), "
-                    "    n.context = coalesce($x, n.context)",
-                    params={"id": ev.get("id") or ev["event_id"],
-                            "c": ev.get("new_content"),
-                            "x": ev.get("new_context")},
-                )
+                self._revise_point(ev)
             elif t == "EventRecorded":
                 self._upsert_event(ev)
             elif t == "SubjectAdded":
@@ -288,14 +285,48 @@ class FalkorProjection(
     def query(self, cypher: str, **params):
         return self.g.query(cypher, params=params or None)
 
+    def _get_falkordb_version(self):
+        """Parse FalkorDB version from db.info().
+
+        Returns (major, minor, patch) tuple or None if undetermined.
+        """
+        import re
+        try:
+            info = self.db.info()
+        except Exception:
+            return None
+
+        info_str = info if isinstance(info, str) else str(info)
+
+        # Module format: module:name=falkordb,ver=40000 (4.0.0)
+        m = re.search(r'module:name=(?:falkordb|graph),ver=(\d+)', info_str, re.IGNORECASE)
+        if m:
+            v = int(m.group(1))
+            return (v // 10000, (v // 100) % 100, v % 100)
+
+        # Server section: falkordb_version:4.0
+        try:
+            server = self.db.info('server')
+            server_str = server if isinstance(server, str) else str(server)
+            m = re.search(r'falkordb_version:(\d+)\.(\d+)', server_str)
+            if m:
+                return (int(m.group(1)), int(m.group(2)), 0)
+        except Exception:
+            pass
+
+        return None
+
     def _ensure_indexes(self) -> None:
-        """Create range indexes on frequently-filtered Point properties.
+        """Create indexes on frequently-filtered Point properties.
 
         Wraps CREATE INDEX in try/except because FalkorDB raises
         "Attribute 'X' is already indexed" rather than silently no-opping.
         On subsequent startups, each CREATE INDEX errors immediately
         (O(1) check), so there is no startup penalty on large graphs.
+
+        FTS and vector indexes are gated on FalkorDB >= 4.x.
         """
+        # ── Range indexes (always safe, pre-4.x compatible) ──
         for prop in ("id", "pointKind", "context", "content_hash", "is_operator"):
             try:
                 self.g.query(f"CREATE INDEX FOR (n:Point) ON (n.{prop})")
@@ -308,8 +339,74 @@ class FalkorProjection(
                     logging.getLogger(__name__).warning(
                         "Failed to create index on n.%s: %s", prop, e)
 
+        # ── Full-text & vector indexes require FalkorDB 4.x+ (#7779) ──
+        _ver = getattr(self, '_falkordb_version', None)
+        if _ver is None or _ver[0] >= 4:
+            # ── Full-text indexes ──
+            for label, field in [("Point", "content"), ("Event", "subject"), ("Subject", "name")]:
+                try:
+                    self.g.query(f"CALL db.idx.fulltext.createNodeIndex('{label}', '{field}')")
+                except Exception as e:
+                    msg = str(e).lower()
+                    if "already" in msg:
+                        pass
+                    else:
+                        import logging
+                        logging.getLogger(__name__).warning(
+                            "Failed to create fulltext index on %s.%s: %s", label, field, e)
+
+            # ── Vector index (HNSW) — Docker/server FalkorDB only (#7764) ──
+            # Embedded mode (redislite) uses brute-force vec.euclideanDistance instead.
+            # HNSW requires RediSearch module, not bundled with redislite.
+            if not getattr(self, '_is_embedded', False):
+                try:
+                    self.g.query(
+                        "CALL db.idx.vector.createNodeIndex('Point', 'embedding', 384, 'HNSW')"
+                    )
+                except Exception as e:
+                    msg = str(e).lower()
+                    if "already" in msg:
+                        pass
+                    else:
+                        import logging
+                        logging.getLogger(__name__).warning(
+                            "Failed to create vector index on Point.embedding: %s", e)
+        else:
+            import logging
+            logging.getLogger(__name__).info(
+                "Skipping FTS and vector indexes: FalkorDB %s < 4.x",
+                '.'.join(map(str, _ver)))
+
     def close(self) -> None:
         self.db.close()
+
+    def _revise_point(self, ev: dict, set_updated_at: bool = False) -> None:
+        """Apply PointRevised event — update content, context, and re-compute embedding."""
+        new_content = ev.get("new_content")
+        pid = ev.get("id") or ev["event_id"]
+        params: dict = {"id": pid, "c": new_content, "x": ev.get("new_context")}
+
+        # Re-compute embedding when content changes (even to empty — wipe stale)
+        if new_content is not None:
+            try:
+                from tortoise.embeddings import compute_embedding
+                emb = compute_embedding(new_content) if new_content else None
+                params["embedding"] = emb  # None = wipe stale embedding for empty content
+            except Exception:
+                pass
+
+        set_clauses = ["n.content = coalesce($c, n.content)",
+                       "n.context = coalesce($x, n.context)"]
+        if "embedding" in params:
+            set_clauses.append("n.embedding = $embedding")
+        if set_updated_at:
+            set_clauses.append("n.updatedAt = $now")
+            params["now"] = _now_iso()
+
+        self.g.query(
+            f"MATCH (n:Point {{id:$id}}) SET {', '.join(set_clauses)}",
+            params=params,
+        )
 
     def list_graphs(self) -> list[str]:
         """List all graph names in the database."""

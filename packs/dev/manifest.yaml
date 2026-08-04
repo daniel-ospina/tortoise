@@ -1,0 +1,73 @@
+# Development Domain Extension
+# Software development concepts — epics, issues, code, APIs, infrastructure.
+
+namespace: dev
+name: "Development"
+version: "0.1.0"
+tier: free
+description: "Software development concepts — epics, issues, code, APIs, databases, deployments"
+
+ontology:
+  extends: core
+
+  objectKinds:
+    - epic
+    - issue
+    - code
+    - api
+    - database
+    - software
+    - infrastructure
+    - deployment
+    - indicator
+
+  subclassOf:
+    epic: Project
+    issue: WorkItem
+
+  equivalentTo:
+    issue: [pm:task]
+
+  pointKinds:
+    - requirement
+    - bug
+    - technicalDebt
+
+  documentKinds:
+    - architectureDoc
+    - apiSpec
+    - deployRunbook
+
+  relations:
+    - predicate: decomposesInto
+      mechanism: IMPL
+      semantics: hasPart
+      fromKind: dev:epic
+      toKind: dev:issue
+      cardinality: one_to_many
+
+    - predicate: implements
+      mechanism: IMPL
+      semantics: addresses
+      fromKind: dev:issue
+      toKind: product-strategy:feature
+
+    - predicate: deploysTo
+      mechanism: IMPL
+      semantics: addresses
+      fromKind: dev:code
+      toKind: dev:deployment
+
+    - predicate: dependsOn
+      mechanism: IMPL
+      semantics: addresses
+      fromKind: dev:api
+      toKind: dev:database
+
+  hierarchies:
+    - path: "Epic → Issue"
+      type: hasPart
+
+connectors: []
+tools: []
+depends_on: []

@@ -120,9 +120,43 @@ def tortoise_create_point(kind: str, content: str, context: str | None = None,
 
 @mcp.tool()
 def tortoise_query(kind: str | None = None, context: str | None = None,
-                   filters: Any = None) -> list[dict]:
-    """Query points by pointKind, context, and/or property filters."""
+                   filters: Any = None,
+                   text: str | None = None,
+                   order_by: str | None = None,
+                   min_confidence: float | None = None,
+                   entity_type: str = "point",
+                   limit: int = 100) -> list[dict]:
+    """Query points by pointKind, context, and/or property filters.
+
+    When text is provided, routes through tortoise_fts_query() for hybrid search.
+    When text is None, uses existing structural query (full-scan for context).
+    entity_type: 'point' (default), 'event', or 'subject'.
+    """
     filters = _parse(filters)
+    if text:
+        # Merge kind/context from filters if not explicitly provided
+        if filters:
+            if not kind and "kind" in filters:
+                kind = filters.pop("kind")
+            if not context and "context" in filters:
+                context = filters.pop("context")
+        results = _safe(sdk.tortoise_fts_query, text, kind=kind, context=context,
+                     entity_type=entity_type, limit=limit,
+                     min_confidence=min_confidence or 0.0,
+                     order_by=order_by or "relevance")
+        # Apply remaining property filters as post-filter
+        if filters and isinstance(results, list) and results and "error" not in results[0]:
+            filtered = []
+            for r in results:
+                match = True
+                for key, val in filters.items():
+                    if r.get(key) != val:
+                        match = False
+                        break
+                if match:
+                    filtered.append(r)
+            return filtered[:limit]
+        return results
     return _safe(sdk.query, kind, context, **(filters or {}))
 
 
@@ -161,22 +195,49 @@ def tortoise_suggest_entry_points(query: str, limit: int = 5,
                                   kind_filter: str | None = None) -> list[dict]:
     """Entity resolution — NL query → matching entities from the graph.
 
-    String match on content (Cypher CONTAINS) + embedding fallback.
-    kind_filter filters by n.context (namespace).
+    Uses hybrid search (tortoise_fts_query) for semantic entity resolution.
+    Falls back to string match (CONTAINS) if hybrid search unavailable.
     Returns [{id, name, kind, confidence}] sorted by confidence DESC.
     """
+    try:
+        results = _safe(sdk.tortoise_fts_query, query, kind=kind_filter, limit=limit)
+        if isinstance(results, list) and results and "error" not in results[0]:
+            return [{"id": r["id"], "name": r.get("content", ""),
+                     "kind": r.get("point_kind", ""),
+                     # Confidence merge: 50% RRF relevance + 50% EP confidence mean.
+                     # Simple unweighted average — both components are [0,1] bounded.
+                     # Future: weight by result count or calibrate against human judgments.
+                     "confidence": round(
+                         0.5 * r.get("scores", {}).get("rrf", 0.0) +
+                         0.5 * r.get("ep", {}).get("confidence_mean", 0.0), 4)}
+                    for r in results]
+    except Exception:
+        pass
     return _safe(sdk.suggest_entry_points, query, limit=limit, kind_filter=kind_filter)
 
 
 # ── Semantic Search (#6990) ────────────────────────────────────
 
 @mcp.tool()
-def tortoise_search(query: str, kind: str | None = None,
+def tortoise_search(query: str | None = None, kind: str | None = None,
                     context: str | None = None,
-                    threshold: float = 0.3, limit: int = 10) -> list[dict]:
-    """Semantic/vector search over Points. Returns ranked [{id, content, similarity, snippet}, ...]."""
-    return _safe(sdk.search, query, kind=kind, context=context,
-                 threshold=threshold, limit=limit)
+                    threshold: float = 0.0, limit: int = 10,
+                    min_confidence: float = 0.0,
+                    order_by: str = "relevance",
+                    entity_type: str = "point") -> list[dict]:
+    """Hybrid search with RRF fusion + EP annotation.
+
+    entity_type: 'point' (default), 'event', or 'subject'.
+    Full-scan mode: omit query, set context → all Points in context.
+    Best-match mode: provide query → RRF fusion of FTS + vector + structural.
+
+    Point results annotated with EP breakdown (confidence_mean + evidence + contention).
+    min_confidence defaults to 0.0 (no filter).
+    """
+    return _safe(sdk.tortoise_fts_query, query, kind=kind, context=context,
+                 threshold=threshold, limit=limit,
+                 entity_type=entity_type,
+                 min_confidence=min_confidence, order_by=order_by)
 
 
 # ── EP Belief Propagation (#6908) ────────────────────────────────
@@ -223,7 +284,8 @@ def tortoise_update_point(id: str, props: Any) -> dict:
 
 @mcp.tool()
 def tortoise_create_operator(op_type: str, source_id: str, target_ids: Any,
-                              context: str = "sdk") -> dict:
+                              context: str = "sdk",
+                              label: str | None = None) -> dict:
     """Create an operator connecting Points.
     
     op_type: 'IMPL' (A supports B), 'NAND' (A contradicts B),
@@ -231,12 +293,13 @@ def tortoise_create_operator(op_type: str, source_id: str, target_ids: Any,
     source_id: source/parent Point ID.
     target_ids: target/child Point IDs (1 for IMPL/NAND, N for part/whole).
     context: domain context for the operator (default: 'sdk').
+    label: optional semantic label — "addresses", "hasPart", "opposes".
 
     → See /skill:tortoise-graph-reasoning for proper usage:
       annotation, mitigation, NAND constraints, veracity vs implication.
     """
     target_ids = _parse(target_ids)
-    return _safe(sdk.create_operator, op_type, source_id, target_ids, context=context)
+    return _safe(sdk.create_operator, op_type, source_id, target_ids, context=context, label=label)
 
 
 @mcp.tool()
@@ -394,6 +457,16 @@ def tortoise_diary_read(agent_name: str, last_n: int = 10,
                         wing: str | None = None) -> list[dict]:
     """Read recent diary entries for an agent, newest first."""
     return _safe(sdk.diary_read, agent_name, last_n, wing=wing)
+
+
+@mcp.tool()
+def tortoise_list_relations() -> list[dict]:
+    """List all relation declarations across installed packs.
+
+    Returns [{"pack": ..., "predicate": ..., "fromKind": ..., "toKind": ..., "mechanism": ...}].
+    Pack relations describe valid edge types between entity kinds — use for schema discovery.
+    """
+    return _safe(sdk.list_relations)
 
 
 @mcp.tool()

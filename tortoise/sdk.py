@@ -13,6 +13,7 @@ from .domain_loader import known_kinds, register_kind
 from .ids import ulid
 from . import monitoring
 from .projection import FalkorProjection
+import threading
 
 # P0 Group 3: register custom kinds for diary + checkpoint
 register_kind("diary")
@@ -28,6 +29,25 @@ _logger = logging.getLogger(__name__)
 
 def _content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+# Module-level cached registry for kind expansion
+_registry_cache: "PackRegistry | None" = None
+_registry_lock = threading.Lock()
+
+
+def _get_kind_expander():
+    """Return cached PackRegistry with pre-computed expansion table."""
+    global _registry_cache
+    if _registry_cache is None:
+        with _registry_lock:
+            if _registry_cache is None:
+                from .pack_registry import PackRegistry
+                from pathlib import Path as _Path
+                packs_dir = _Path(__file__).resolve().parent.parent / "packs"
+                _registry_cache = PackRegistry(packs_dir)
+                _registry_cache.load_all()
+    return _registry_cache
 
 
 class TortoiseSDK:
@@ -108,10 +128,21 @@ class TortoiseSDK:
         pid = ulid()
         # Points enter as draft, go live when first edge is created (#131)
         status = props.pop("status", "draft")
+
+        # Compute embedding (Phase 1A, #7698) — stored as Point property
+        embedding = None
+        try:
+            from .embeddings import compute_embedding
+            embedding = compute_embedding(content)
+        except Exception:
+            pass  # Graceful — embedding is optional
+
         proj.g.query(
             "CREATE (n:Point {id:$id, content:$c, pointKind:$k, "
-            "is_operator:false, status:$st, createdAt:$now, updatedAt:$now})",
-            params={"id": pid, "c": content, "k": kind, "st": status, "now": now},
+            "is_operator:false, status:$st, createdAt:$now, updatedAt:$now}) "
+            "SET n.embedding = $embedding",
+            params={"id": pid, "c": content, "k": kind, "st": status, "now": now,
+                    "embedding": embedding},
         )
         for key, val in props.items():
             proj.g.query(
@@ -217,45 +248,56 @@ class TortoiseSDK:
     # ── Operators ─────────────────────────────────────────────────
 
     def create_operator(self, op_type: str, source_id: str, target_ids: list[str],
-                        *, context: str = "sdk") -> dict:
-        """Create an operator Point via the projection's event-sourced path.
+                        label: str | None = None, context: str | None = None) -> dict:
+        """Create an operator Point with optional semantic label.
 
-        Routes through projection.apply() so operators get the full schema
-        (context, createdAt, content, etc.) — not just id/is_operator/op_type.
-        Uses MERGE for edges (not CREATE) so source/target stubs are
-        auto-created rather than silently failing (#130).
-
-        Ontology v2.1: part/whole types (composedOf/decomposesInto/contains)
-        → hasPart edge. Edge creation is handled by projection._create_edges.
+        Semantic-epistemic edge model (#7801):
+          - op_type: IMPL or NAND (epistemic mechanism)
+          - label: domain verb — "addresses", "hasPart", "opposes" (semantic layer)
+          - context: namespace context stored on the operator
+          - Operator carries the label; IMPL/NAND edges carry confidence via EP.
         """
         if op_type not in ("IMPL", "NAND", "composedOf", "decomposesInto", "contains", "wraps"):
             raise ValueError(
                 f"op_type must be 'IMPL', 'NAND', or a part/whole type, got {op_type!r}"
             )
-        from datetime import datetime, timezone
-        now = datetime.now(timezone.utc).isoformat()
         pid = ulid()
         inputs = [source_id] + list(target_ids)
         proj = self._get_proj()
 
-        # Build event dict and route through projection for full schema (#130)
-        event = {
-            "type": "OperatorAdded",
-            "point": {
-                "id": pid,
-                "content": f"{op_type}: {source_id} -> {target_ids}",
-                "context": context,
-                "pointKind": "operator",
-                "operator": {"op_type": op_type, "inputs": inputs},
-                "status": "live",
-                "createdAt": now,
-                "updatedAt": now,
-            },
-        }
-        proj.apply(event)
-        # Create edges — MERGE avoids silent failures on missing source/target
-        proj._create_edges(event["point"])
-        # Mark source point as live now that it has its first edge (#131)
+        # Validate all source/target Points exist (fail loudly, not silently)
+        existing = proj.g.query(
+            "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id",
+            params={"ids": inputs},
+        ).result_set
+        existing_ids = {row[0] for row in existing}
+        missing = [i for i in inputs if i not in existing_ids]
+        if missing:
+            raise ValueError(f"Cannot create operator: Points {missing} do not exist")
+
+        # Build operator node with label/context properties
+        extra_props = []
+        params = {"id": pid, "op": op_type}
+        if label:
+            extra_props.append("label:$label")
+            params["label"] = label
+        if context:
+            extra_props.append("context:$context")
+            params["context"] = context
+        props_clause = ", " + ", ".join(extra_props) if extra_props else ""
+        proj.g.query(
+            f"CREATE (o:Point {{id:$id, is_operator:true, op_type:$op{props_clause}}})",
+            params=params,
+        )
+        # Ontology v2.1: map part/whole ops to hasPart, remove INPUT edges
+        edge_type = "hasPart" if op_type not in ("IMPL", "NAND") else op_type
+        for i, inp_id in enumerate(inputs):
+            proj.g.query(
+                f"MATCH (o:Point {{id:$oid}}), (s:Point {{id:$sid}}) "
+                f"CREATE (o)-[:{edge_type} {{idx:$i}}]->(s)",
+                params={"oid": pid, "sid": inp_id, "i": i},
+            )
+        # Draft → live lifecycle (#131): source point goes live when first edge created
         proj.g.query(
             "MATCH (s:Point {id:$sid}) SET s.status = 'live'",
             params={"sid": source_id},
@@ -336,14 +378,26 @@ class TortoiseSDK:
 
     # ── Query ─────────────────────────────────────────────────────
 
-    def query(self, kind: str | None = None, context: str | None = None, **filters) -> list[dict]:
-        """Query points by pointKind, context, and/or custom property filters."""
+    def query(self, kind: str | None = None, context: str | None = None,
+              **filters) -> list[dict]:
+        """Query points by pointKind, context, and/or custom property filters.
+
+        For confidence-aware queries, use tortoise_fts_query() with query=None
+        for full-scan mode with EP annotation.
+        """
         proj = self._get_proj()
         clauses = ["(n.is_operator IS NULL OR n.is_operator = false)"]
         params: dict[str, Any] = {}
         if kind:
-            clauses.append("n.pointKind = $kind")
-            params["kind"] = kind
+            expanded = self._expand_kind(kind)
+            if len(expanded) == 1:
+                clauses.append("n.pointKind = $kind")
+                params["kind"] = expanded[0]
+            else:
+                placeholders = [f"$kind_{i}" for i in range(len(expanded))]
+                clauses.append(f"n.pointKind IN [{', '.join(placeholders)}]")
+                for i, k in enumerate(expanded):
+                    params[f"kind_{i}"] = k
         if context:
             clauses.append("n.context = $ctx")
             params["ctx"] = context
@@ -366,8 +420,15 @@ class TortoiseSDK:
         clauses = ["(n.is_operator IS NULL OR n.is_operator = false)"]
         params: dict[str, Any] = {}
         if kind:
-            clauses.append("n.pointKind = $kind")
-            params["kind"] = kind
+            expanded = self._expand_kind(kind)
+            if len(expanded) == 1:
+                clauses.append("n.pointKind = $kind")
+                params["kind"] = expanded[0]
+            else:
+                placeholders = [f"$kind_{i}" for i in range(len(expanded))]
+                clauses.append(f"n.pointKind IN [{', '.join(placeholders)}]")
+                for i, k in enumerate(expanded):
+                    params[f"kind_{i}"] = k
         if context:
             clauses.append("n.context = $ctx")
             params["ctx"] = context
@@ -416,20 +477,31 @@ class TortoiseSDK:
     # ── Chain Integrity ───────────────────────────────────────────
 
     def check_structure(self) -> list[dict]:
-        """Check Gate 0→4 chain integrity. Returns list of violation dicts."""
+        """Check Gate 0→4 chain integrity. Uses pack-aware kind expansion."""
         proj = self._get_proj()
         violations: list[dict] = []
 
+        # Resolve kinds via pack registry (handles namespace prefixes)
+        uc_kind = self._expand_kind("useCase")
+        jtbd_kind = self._expand_kind("jobToBeDone")
+        uj_kind = self._expand_kind("userJourney")
+        wf_kind = self._expand_kind("workflow")
+        req_kind = self._expand_kind("requirement")
+
+        # Build IN clauses
+        def kind_in(kinds):
+            return ", ".join(f"'{k}'" for k in kinds)
+
         # useCase without parent JTBD
         ucs = proj.g.query(
-            "MATCH (uc:Point {pointKind:'useCase'}) RETURN uc.id, uc.uc_id"
+            f"MATCH (uc:Point) WHERE uc.pointKind IN [{kind_in(uc_kind)}] RETURN uc.id, uc.uc_id"
         ).result_set
         for uc_id, uc_ref in ucs:
             parents = proj.g.query(
-                "MATCH (op:Point {is_operator:true, op_type:'composedOf'})"
-                "-[:hasPart]->(uc:Point {id:$id}), "
-                "(op)-[:hasPart]->(jtbd:Point {pointKind:'jobToBeDone'}) "
-                "RETURN jtbd.id",
+                f"MATCH (op:Point {{is_operator:true, op_type:'composedOf'}})"
+                f"-[:hasPart]->(uc:Point {{id:$id}}), "
+                f"(op)-[:hasPart]->(jtbd:Point) WHERE jtbd.pointKind IN [{kind_in(jtbd_kind)}] "
+                f"RETURN jtbd.id",
                 params={"id": uc_id},
             ).result_set
             if not parents:
@@ -441,14 +513,14 @@ class TortoiseSDK:
 
         # userJourney dangling UC refs
         for uj_id, covered in proj.g.query(
-            "MATCH (uj:Point {pointKind:'userJourney'}) RETURN uj.id, uj.covered_use_cases"
+            f"MATCH (uj:Point) WHERE uj.pointKind IN [{kind_in(uj_kind)}] RETURN uj.id, uj.covered_use_cases"
         ).result_set:
             if not covered:
                 continue
             for uc_ref in covered.split(","):
                 uc_ref = uc_ref.strip()
                 if not proj.g.query(
-                    "MATCH (uc:Point {pointKind:'useCase', uc_id:$ref}) RETURN count(uc) > 0",
+                    f"MATCH (uc:Point) WHERE uc.pointKind IN [{kind_in(uc_kind)}] AND uc.uc_id=$ref RETURN count(uc) > 0",
                     params={"ref": uc_ref},
                 ).result_set[0][0]:
                     violations.append({
@@ -459,14 +531,14 @@ class TortoiseSDK:
 
         # Workflow dangling JTBD refs
         for wf_id, enables in proj.g.query(
-            "MATCH (wf:Point {pointKind:'workflow'}) RETURN wf.id, wf.enables_jtbd"
+            f"MATCH (wf:Point) WHERE wf.pointKind IN [{kind_in(wf_kind)}] RETURN wf.id, wf.enables_jtbd"
         ).result_set:
             if not enables:
                 continue
             for jtbd_ref in enables.split(","):
                 jtbd_ref = jtbd_ref.strip()
                 if not proj.g.query(
-                    "MATCH (j:Point {pointKind:'jobToBeDone', jtbd_id:$ref}) RETURN count(j) > 0",
+                    f"MATCH (j:Point) WHERE j.pointKind IN [{kind_in(jtbd_kind)}] AND j.jtbd_id=$ref RETURN count(j) > 0",
                     params={"ref": jtbd_ref},
                 ).result_set[0][0]:
                     violations.append({
@@ -477,12 +549,12 @@ class TortoiseSDK:
 
         # Requirement dangling Workflow refs
         for req_id, wf_ref in proj.g.query(
-            "MATCH (req:Point {pointKind:'requirement'}) RETURN req.id, req.enabled_workflow"
+            f"MATCH (req:Point) WHERE req.pointKind IN [{kind_in(req_kind)}] RETURN req.id, req.enabled_workflow"
         ).result_set:
             if not wf_ref or wf_ref == "ALL":
                 continue
             if not proj.g.query(
-                "MATCH (w:Point {pointKind:'workflow', wf_id:$ref}) RETURN count(w) > 0",
+                f"MATCH (w:Point) WHERE w.pointKind IN [{kind_in(wf_kind)}] AND w.wf_id=$ref RETURN count(w) > 0",
                 params={"ref": wf_ref},
             ).result_set[0][0]:
                 violations.append({
@@ -620,6 +692,15 @@ class TortoiseSDK:
     def list_graphs(self) -> list[str]:
         """List all graph names in the database."""
         return self._get_proj().list_graphs()
+
+    def list_relations(self) -> list[dict]:
+        """List all relation declarations across installed packs.
+
+        Returns [{"pack": ..., "predicate": ..., "fromKind": ..., "toKind": ...,
+        "mechanism": ...}]. Pack relations describe valid edge types between
+        entity kinds — use for schema discovery.
+        """
+        return _get_kind_expander().list_relations()
 
     def close(self) -> None:
         """Close the underlying database connection."""
@@ -1162,11 +1243,13 @@ class TortoiseSDK:
         results.sort(key=lambda r: r["confidence"], reverse=True)
         results = results[:limit]
 
-        # Embedding fallback if no string matches (respects kind_filter as context)
+        # Hybrid fallback if no string matches (Phase 0, #7748)
+        # kind_filter filters by CONTEXT (namespace), not pointKind — preserve semantics
         if not results:
-            semantic = self.search(q, context=kind_filter, threshold=0.3, limit=limit)
-            results = [{"id": r["id"], "name": r["content"], "kind": "",
-                        "confidence": round(r["similarity"] * 0.5, 4)} for r in semantic]
+            fts_results = self.tortoise_fts_query(q, context=kind_filter, limit=limit)
+            results = [{"id": r["id"], "name": r.get("content", ""), "kind": r.get("point_kind", ""),
+                        "confidence": round(r.get("scores", {}).get("rrf", 0.0) * 0.5, 4)}
+                       for r in fts_results]
 
         return results
 
@@ -1208,19 +1291,229 @@ class TortoiseSDK:
             "confidence_changes": confidence_changes,
         }
 
-    # ── Semantic Search (#6990) ─────────────────────────────────
+    # ── Hybrid Search (Phase 0, #7748) ───────────────────────────
 
-    def search(self, query: str, kind: str | None = None,
-               context: str | None = None, *,
-               threshold: float = 0.3, limit: int = 10) -> list[dict]:
-        """Semantic/vector search over Points. Returns ranked [{id, content, similarity, snippet}, ...]."""
+    def tortoise_fts_query(
+        self,
+        query: str | None = None,
+        kind: str | None = None,
+        context: str | None = None,
+        *,
+        entity_type: str = "point",
+        min_confidence: float = 0.0,
+        order_by: str = "relevance",
+        limit: int = 10,
+        threshold: float = 0.0,
+    ) -> list[dict]:
+        """Hybrid search with RRF fusion + EP annotation.
+
+        entity_type: 'point' (default), 'event', or 'subject'.
+        Full-scan mode: omit query, set context → all Points in context.
+        Best-match mode: provide query → RRF fusion of FTS + vector + structural.
+
+        Point results annotated with EP breakdown (confidence_mean + evidence + contention).
+        Non-Point entities skip EP annotation.
+        min_confidence defaults to 0.0 (no filter).
+        """
+        from .search_engine import (
+            classify_query, degradation_chain, rrf_fusion,
+            annotate_ep_batch, fallback_tfidf, SearchResult, SearchScores,
+        )
+
+        if entity_type not in ("point", "event", "subject"):
+            raise ValueError(f"entity_type must be 'point', 'event', or 'subject', got {entity_type!r}")
         if limit < 1:
             raise ValueError(f"limit must be >= 1, got {limit}")
         if not (0.0 <= threshold <= 1.0):
             raise ValueError(f"threshold must be 0.0-1.0, got {threshold}")
-        from .embeddings import search_points
-        points = self.query(kind=kind, context=context)
-        return search_points(query, points, threshold=threshold, limit=limit)
+        if not (0.0 <= min_confidence <= 1.0):
+            raise ValueError(f"min_confidence must be 0.0-1.0, got {min_confidence}")
+        if order_by not in ("relevance", "confidence"):
+            raise ValueError(f"order_by must be 'relevance' or 'confidence', got {order_by!r}")
+
+        proj = self._get_proj()
+        graph = proj.g
+        label = entity_type.capitalize()  # point→Point, event→Event, subject→Subject
+        kind_field = {"point": "pointKind", "event": "eventKind", "subject": "subjectKind"}[entity_type]
+
+        # 1. Classify query → determine active strategies
+        strategies = classify_query(query, kind, context)
+        is_full_scan = (query is None and context is not None and not kind)
+
+        # Expand kind early for pack-aware structural query + kind filter
+        expanded_kinds = self._expand_kind(kind) if kind else None
+
+        # 2. Get query vector if needed (Point only — no embeddings for Event/Subject)
+        query_vec = None
+        if entity_type == "point" and strategies.get("vector") and query and query.strip():
+            try:
+                from .embeddings import EmbeddingModel
+                model = EmbeddingModel.get()
+                if model:
+                    query_vec = model.encode([query])[0].tolist()
+            except Exception:
+                pass  # Graceful — vector strategy will degrade
+
+        # 3. Run retrieval with degradation
+        is_embedded = getattr(proj, '_is_embedded', True)
+        # Full-scan mode: no truncation — return ALL Points in context (#7811 completeness)
+        str_limit = limit * 2 if not is_full_scan else 100000
+        raw_results = degradation_chain(
+            graph, query, kind, context, query_vec, strategies,
+            entity_type=entity_type, limit=str_limit,
+            is_embedded=is_embedded,
+            expanded_kinds=expanded_kinds,
+        )
+
+        if not raw_results:
+            # All strategies failed — fallback to in-memory TF-IDF (Point only)
+            if query and entity_type == "point":
+                points = self.query(kind=kind, context=context)
+                return fallback_tfidf(query, points, limit=limit)
+            return []
+
+        # 4. Fuse via RRF (skip if single strategy or full-scan)
+        if is_full_scan or len(raw_results) == 1:
+            strat_name, ranked = next(iter(raw_results.items()))
+            # Apply threshold filter (score floor)
+            fused = {pid: score for pid, score in ranked if score >= threshold}
+            match_source = strat_name
+        else:
+            ranked_lists = list(raw_results.values())
+            fused = rrf_fusion(ranked_lists)
+            # Apply threshold filter to RRF scores
+            if threshold > 0:
+                fused = {pid: score for pid, score in fused.items() if score >= threshold}
+            match_source = "rrf"
+
+        # 5. Apply kind filter BEFORE truncating (skip if structural-only already filtered)
+        result_ids = list(fused.keys())
+        id_field = "eventId" if entity_type == "event" else "id"
+
+        if kind and query is not None and result_ids:
+            expanded = expanded_kinds
+            kind_ids = set()
+            try:
+                if len(expanded) == 1:
+                    kind_rows = graph.query(
+                        f"MATCH (n:{label}) WHERE n.{kind_field} = $kind AND n.{id_field} IN $ids RETURN n.{id_field}",
+                        params={"kind": expanded[0], "ids": result_ids},
+                    ).result_set
+                else:
+                    placeholders = [f"$kind_{i}" for i in range(len(expanded))]
+                    params_dict: dict[str, Any] = {"ids": result_ids}
+                    for i, k in enumerate(expanded):
+                        params_dict[f"kind_{i}"] = k
+                    kind_rows = graph.query(
+                        f"MATCH (n:{label}) WHERE n.{kind_field} IN [{', '.join(placeholders)}] AND n.{id_field} IN $ids RETURN n.{id_field}",
+                        params=params_dict,
+                    ).result_set
+                kind_ids = {row[0] for row in kind_rows}
+            except Exception:
+                kind_ids = set(result_ids)  # Pass-through on error
+            result_ids = [pid for pid in result_ids if pid in kind_ids]
+
+        # Truncate AFTER filtering
+        result_ids = result_ids[:limit]
+
+        # 6. EP annotation (Point only)
+        ep_breakdowns = annotate_ep_batch(graph, result_ids) if entity_type == "point" else {}
+
+        # 7. Fetch entity content in BATCH (not N+1)
+        entity_data: dict[str, dict] = {}
+        try:
+            if entity_type == "point":
+                rows = graph.query(
+                    "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, n.content, n.pointKind, n.context",
+                    params={"ids": result_ids},
+                ).result_set
+                for row in rows:
+                    pid = row[0]
+                    entity_data[pid] = {
+                        "content": row[1],
+                        "kind": row[2],
+                        "context": row[3] if len(row) > 3 else None,
+                    }
+            elif entity_type == "event":
+                rows = graph.query(
+                    "MATCH (n:Event) WHERE n.eventId IN $ids RETURN n.eventId, n.subject, n.eventKind",
+                    params={"ids": result_ids},
+                ).result_set
+                for row in rows:
+                    eid = row[0]
+                    entity_data[eid] = {
+                        "content": row[1] or "",
+                        "kind": row[2] or "",
+                        "context": None,
+                    }
+            elif entity_type == "subject":
+                rows = graph.query(
+                    "MATCH (n:Subject) WHERE n.id IN $ids RETURN n.id, n.name, n.subjectKind",
+                    params={"ids": result_ids},
+                ).result_set
+                for row in rows:
+                    sid = row[0]
+                    entity_data[sid] = {
+                        "content": row[1] or "",
+                        "kind": row[2] or "",
+                        "context": None,
+                    }
+        except Exception:
+            logger.warning("Batch content fetch failed — returning results with minimal metadata")
+            for pid in result_ids:
+                entity_data[pid] = {"content": "", "kind": "", "context": None}
+
+        # 8. Build SearchResult objects, filter, and order
+        results = []
+        for pid in result_ids:
+            pt = entity_data.get(pid)
+            if not pt:
+                continue
+            content, pt_kind, pt_context = pt["content"], pt["kind"], pt["context"]
+            ep = ep_breakdowns.get(pid) if entity_type == "point" else None
+
+            # Apply min_confidence filter (Point only; non-Point always pass)
+            if entity_type == "point" and ep and ep.confidence_mean < min_confidence:
+                continue
+
+            # Build scores
+            scores = SearchScores(rrf=fused.get(pid, 0.0))
+            if "fts" in raw_results:
+                for fid, fscore in raw_results["fts"]:
+                    if fid == pid:
+                        scores.fts = fscore
+                        break
+            if "vector" in raw_results:
+                for vid, vscore in raw_results["vector"]:
+                    if vid == pid:
+                        scores.vector = vscore
+                        break
+            if "structural" in raw_results:
+                for sid, sscore in raw_results["structural"]:
+                    if sid == pid:
+                        scores.structural = sscore
+                        break
+
+            result = SearchResult(
+                id=pid,
+                content=content,
+                point_kind=pt_kind,
+                context=pt_context,
+                scores=scores,
+                match_source=match_source,
+                ep=ep,
+            )
+            results.append(result)
+
+        # 9. Order results
+        if order_by == "confidence":
+            results.sort(
+                key=lambda r: r.ep.confidence_mean if r.ep else 0.0,
+                reverse=True,
+            )
+        # Default: RRF relevance order (already in fused order)
+
+        return [r.to_dict() for r in results[:limit]]
 
     # ── Multi-tenancy (#7001) ─────────────────────────────────
 
@@ -1289,6 +1582,14 @@ class TortoiseSDK:
         return {"name": name, "graph_name": graph_name, "api_key": api_key, "id": tid}
 
     # ── Helpers ───────────────────────────────────────────────────
+
+    def _expand_kind(self, kind: str) -> list[str]:
+        """Expand kind via subclassOf + equivalentTo for Cypher IN clause.
+
+        Uses PackRegistry.expand_kind(). Registry is loaded once and cached.
+        Returns [kind] if no packs loaded or kind is unknown.
+        """
+        return _get_kind_expander().expand_kind(kind)
 
     @staticmethod
     def _validate_kind(kind: str) -> None:
