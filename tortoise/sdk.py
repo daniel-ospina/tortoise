@@ -1286,9 +1286,11 @@ class TortoiseSDK:
                 pass  # Graceful — vector strategy will degrade
 
         # 3. Run retrieval with degradation
+        is_embedded = getattr(proj, '_is_embedded', True)
         raw_results = degradation_chain(
             graph, query, kind, context, query_vec, strategies,
             entity_type=entity_type, limit=limit * 2,
+            is_embedded=is_embedded,
         )
 
         if not raw_results:
