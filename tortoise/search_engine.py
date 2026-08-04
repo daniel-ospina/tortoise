@@ -60,7 +60,7 @@ class SearchResult:
             "match_source": self.match_source,
             # Backward-compat aliases (Phase 0 migration from old search() API)
             "similarity": self.scores.rrf if self.scores else 0.0,
-            "snippet": self.content[:200] if len(self.content) > 200 else self.content,
+            "snippet": self.content[:200] + "..." if len(self.content) > 200 else self.content,
         }
         if self.scores:
             d["scores"] = asdict(self.scores)
@@ -95,14 +95,17 @@ def run_fts_query(
 
     Falls back gracefully if index doesn't exist or query fails.
     entity_type: 'point' (default), 'event', or 'subject'.
+    Returns entity-type-specific identifier: Point/Subject → node.id, Event → node.eventId.
     """
     label = entity_type.capitalize()  # point→Point, event→Event, subject→Subject
+    # Event nodes use eventId as their identifier; Point/Subject use id
+    id_field = "eventId" if entity_type == "event" else "id"
     try:
         start = time.monotonic()
         cypher = (
             f"CALL db.idx.fulltext.queryNodes('{label}', $query) "
-            "YIELD node, score "
-            "RETURN node.id, score "
+            f"YIELD node, score "
+            f"RETURN node.{id_field}, score "
             "ORDER BY score DESC "
             "LIMIT $limit"
         )
@@ -111,6 +114,9 @@ def run_fts_query(
         ).result_set
         # NOTE: Timeout is checked AFTER query completes (post-hoc filter).
         # A slow query still consumes DB resources. Future: connection-level timeout.
+        # LIMITATION: This is a post-hoc check, not a true query timeout.
+        # A query that takes 30s will still run for 30s before being discarded.
+        # True connection-level timeout requires FalkorDB client support (not available yet).
         elapsed = (time.monotonic() - start) * 1000
         if elapsed > timeout_ms:
             logger.warning("FTS query exceeded timeout: %.0fms > %dms", elapsed, timeout_ms)
@@ -204,20 +210,31 @@ def run_vector_query(
 
 def run_structural_query(
     graph, kind: str | None, context: str | None,
-    entity_type: str = "point", limit: int = 20
+    entity_type: str = "point", limit: int = 20,
+    expanded_kinds: list[str] | None = None,
 ) -> list[tuple[str, float]]:
     """Run structural/kind query via range indexes.
 
     entity_type: 'point' (filters on pointKind/context), 'event' (eventKind),
                  'subject' (subjectKind).
     Returns matching entities with a score of 1.0 (exact match) or 0.5 (partial match).
+    Event entity_type returns eventId; Point/Subject return id.
+
+    expanded_kinds: pack-expanded kind list for IN-clause filtering.
+                   If provided, uses IN clause instead of single `= $kind`.
     """
     label = entity_type.capitalize()
     kind_field = {"point": "pointKind", "event": "eventKind", "subject": "subjectKind"}[entity_type]
+    id_field = "eventId" if entity_type == "event" else "id"
     try:
         conditions = []
         params = {}
-        if kind:
+        if expanded_kinds:
+            placeholders = [f"$ekind_{i}" for i in range(len(expanded_kinds))]
+            conditions.append(f"n.{kind_field} IN [{', '.join(placeholders)}]")
+            for i, k in enumerate(expanded_kinds):
+                params[f"ekind_{i}"] = k
+        elif kind:
             conditions.append(f"n.{kind_field} = $kind")
             params["kind"] = kind
         if context:
@@ -233,7 +250,7 @@ def run_structural_query(
         cypher = (
             f"MATCH (n:{label}) "
             f"WHERE {where_clause} "
-            f"RETURN n.id, n.{kind_field}, n.{kind_field} "
+            f"RETURN n.{id_field} "
             f"LIMIT $limit"
         )
         params["limit"] = limit
@@ -288,6 +305,7 @@ def degradation_chain(
     entity_type: str = "point",
     limit: int = 20,
     is_embedded: bool = True,
+    expanded_kinds: list[str] | None = None,
 ) -> dict[str, list[tuple[str, float]]]:
     """Run retrieval strategies in parallel with per-strategy degradation.
 
@@ -320,7 +338,8 @@ def degradation_chain(
 
         if strategies.get("structural"):
             futures[executor.submit(
-                run_structural_query, graph, kind, context, entity_type=entity_type, limit=limit
+                run_structural_query, graph, kind, context, entity_type=entity_type, limit=limit,
+                expanded_kinds=expanded_kinds,
             )] = "structural"
 
         # Collect results with 500ms total timeout across all strategies.
@@ -353,6 +372,8 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
     """Fetch EP confidence breakdown for a batch of Point IDs.
 
     Single Cypher query — NOT N+1. Returns EpBreakdown per Point ID.
+    Uses simple edge-count ratio (impl / total) — this is a fast batch annotation,
+    not full EP belief propagation. Full EP runs separately via compute_confidence().
     Points with no EP data get EpBreakdown with confidence_mean=0.0, contention=0.0.
     """
     if not point_ids:
@@ -395,8 +416,8 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
                 )
 
         return breakdowns
-    except Exception as e:
-        logger.warning("EP batch annotation failed: %s", e)
+    except Exception:
+        logger.warning("EP batch annotation failed", exc_info=True)
         return {}
 
 
@@ -409,7 +430,7 @@ def fallback_tfidf(query: str, points: list[dict], limit: int = 10) -> list[dict
     """
     try:
         from tortoise.embeddings import search_points
-        meta = {p["id"]: p for p in points}
+        meta = {p["id"]: p for p in points if p.get("id")}
         results = search_points(query, points, threshold=0.0, limit=limit)
         return [
             SearchResult(
