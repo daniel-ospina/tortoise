@@ -344,3 +344,99 @@ async def list_api_keys(team: dict = Depends(get_current_team)):
             for row in keys.result_set
         ]
     }
+
+
+# ── Session Capture ───────────────────────────────────────────────
+
+from pydantic import BaseModel
+from typing import Optional
+
+class SessionRequest(BaseModel):
+    conversation: list[dict]
+    session_id: Optional[str] = None
+    metadata: Optional[dict] = None
+
+
+@app.post("/v1/sessions")
+async def capture_session(body: SessionRequest, team: dict = Depends(get_current_team)):
+    """Capture an agent session and extract turns as episodic Points."""
+    import uuid, re
+    from datetime import datetime, timezone
+
+    sdk = TortoiseSDK(namespace=team["team_id"])
+    proj = sdk._get_proj()
+    session_id = body.session_id or f"session_{uuid.uuid4().hex[:12]}"
+    now = datetime.now(timezone.utc).isoformat()
+
+    proj.g.query(
+        "CREATE (s:Session {id:$sid, created_at:$now, turn_count:$tc})",
+        params={"sid": session_id, "now": now, "tc": len(body.conversation)},
+    )
+
+    extracted = []
+    decisions = [
+        r"(?i)(?:let'?s|we will|we should|I will|I'm going to|decided|decision)\s+[^.!?]+[.!?]",
+        r"(?i)(?:plan is|next steps?:|action item:)\s+[^.!?]+[.!?]",
+    ]
+    claims = [
+        r"(?i)(?:I think|I believe|my understanding is|the problem is|the key insight)\s+[^.!?]+[.!?]",
+        r"(?i)(?:evidence suggests|data shows|we found that|this means)\s+[^.!?]+[.!?]",
+    ]
+
+    for i, turn in enumerate(body.conversation):
+        role = turn.get("role", "unknown")
+        content = turn.get("content", "")
+        turn_id = f"{session_id}_t{i}"
+
+        proj.g.query(
+            "CREATE (t:Point {id:$id, content:$c, pointKind:$k, is_operator:false, status:$s, createdAt:$now, updatedAt:$now})",
+            params={"id": turn_id, "c": f"[{role}] {content[:5000]}", "k": "event", "s": "draft", "now": now},
+        )
+        proj.g.query(
+            "MATCH (s:Session {id:$sid}), (t:Point {id:$tid}) CREATE (s)-[:CONTAINS]->(t)",
+            params={"sid": session_id, "tid": turn_id},
+        )
+
+        idx = 0
+        for pat in decisions:
+            for match in re.finditer(pat, content):
+                pid = f"{turn_id}_d{idx}"
+                text = match.group().strip()
+                proj.g.query(
+                    "CREATE (p:Point {id:$id, content:$c, pointKind:$k, is_operator:false, status:$s, createdAt:$now, updatedAt:$now})",
+                    params={"id": pid, "c": text[:5000], "k": "decision", "s": "draft", "now": now},
+                )
+                proj.g.query(
+                    "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) CREATE (s)-[:CONTAINS]->(p)",
+                    params={"sid": session_id, "pid": pid},
+                )
+                extracted.append({"id": pid, "kind": "decision", "text": text[:200]})
+                idx += 1
+
+        for pat in claims:
+            for match in re.finditer(pat, content):
+                pid = f"{turn_id}_c{idx}"
+                text = match.group().strip()
+                proj.g.query(
+                    "CREATE (p:Point {id:$id, content:$c, pointKind:$k, is_operator:false, status:$s, createdAt:$now, updatedAt:$now})",
+                    params={"id": pid, "c": text[:5000], "k": "statement", "s": "draft", "now": now},
+                )
+                proj.g.query(
+                    "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) CREATE (s)-[:CONTAINS]->(p)",
+                    params={"sid": session_id, "pid": pid},
+                )
+                extracted.append({"id": pid, "kind": "statement", "text": text[:200]})
+                idx += 1
+
+    return {"session_id": session_id, "turns": len(body.conversation), "extracted": len(extracted), "points": extracted}
+
+
+@app.get("/v1/sessions")
+async def list_sessions(team: dict = Depends(get_current_team)):
+    """List captured sessions."""
+    sdk = TortoiseSDK(namespace=team["team_id"])
+    proj = sdk._get_proj()
+    rows = proj.g.query(
+        "MATCH (s:Session) RETURN s.id, s.created_at, s.turn_count ORDER BY s.created_at DESC LIMIT 50"
+    ).result_set
+    return {"sessions": [{"id": r[0], "created_at": r[1], "turns": r[2]} for r in rows]}
