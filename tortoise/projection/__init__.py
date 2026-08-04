@@ -143,6 +143,16 @@ class FalkorProjection(
 
         self.g = self.db.select_graph(graph_name)
         self._is_embedded = (path is not None)
+        self._falkordb_version = self._get_falkordb_version()
+        if self._falkordb_version is not None and self._falkordb_version[0] < 4:
+            import logging
+            logging.getLogger(__name__).warning(
+                "FalkorDB version %s is below minimum 4.x. FTS and vector indexes will be skipped.",
+                '.'.join(map(str, self._falkordb_version)))
+        elif self._falkordb_version is None:
+            import logging
+            logging.getLogger(__name__).warning(
+                "Could not determine FalkorDB version. FTS and vector indexes may fail.")
         self._ensure_indexes()
 
     @classmethod
@@ -275,6 +285,37 @@ class FalkorProjection(
     def query(self, cypher: str, **params):
         return self.g.query(cypher, params=params or None)
 
+    def _get_falkordb_version(self):
+        """Parse FalkorDB version from db.info().
+
+        Returns (major, minor, patch) tuple or None if undetermined.
+        """
+        import re
+        try:
+            info = self.db.info()
+        except Exception:
+            return None
+
+        info_str = info if isinstance(info, str) else str(info)
+
+        # Module format: module:name=falkordb,ver=40000 (4.0.0)
+        m = re.search(r'module:name=(?:falkordb|graph),ver=(\d+)', info_str, re.IGNORECASE)
+        if m:
+            v = int(m.group(1))
+            return (v // 10000, (v // 100) % 100, v % 100)
+
+        # Server section: falkordb_version:4.0
+        try:
+            server = self.db.info('server')
+            server_str = server if isinstance(server, str) else str(server)
+            m = re.search(r'falkordb_version:(\d+)\.(\d+)', server_str)
+            if m:
+                return (int(m.group(1)), int(m.group(2)), 0)
+        except Exception:
+            pass
+
+        return None
+
     def _ensure_indexes(self) -> None:
         """Create indexes on frequently-filtered Point properties.
 
@@ -282,8 +323,10 @@ class FalkorProjection(
         "Attribute 'X' is already indexed" rather than silently no-opping.
         On subsequent startups, each CREATE INDEX errors immediately
         (O(1) check), so there is no startup penalty on large graphs.
+
+        FTS and vector indexes are gated on FalkorDB >= 4.x.
         """
-        # ── Range indexes (existing) ──
+        # ── Range indexes (always safe, pre-4.x compatible) ──
         for prop in ("id", "pointKind", "context", "content_hash", "is_operator"):
             try:
                 self.g.query(f"CREATE INDEX FOR (n:Point) ON (n.{prop})")
@@ -296,35 +339,43 @@ class FalkorProjection(
                     logging.getLogger(__name__).warning(
                         "Failed to create index on n.%s: %s", prop, e)
 
-        # ── Full-text indexes (works in both Docker and embedded modes) ──
-        for label, field in [("Point", "content"), ("Event", "subject"), ("Subject", "name")]:
-            try:
-                self.g.query(f"CALL db.idx.fulltext.createNodeIndex('{label}', '{field}')")
-            except Exception as e:
-                msg = str(e).lower()
-                if "already" in msg:
-                    pass
-                else:
-                    import logging
-                    logging.getLogger(__name__).warning(
-                        "Failed to create fulltext index on %s.%s: %s", label, field, e)
+        # ── Full-text & vector indexes require FalkorDB 4.x+ (#7779) ──
+        _ver = getattr(self, '_falkordb_version', None)
+        if _ver is None or _ver[0] >= 4:
+            # ── Full-text indexes ──
+            for label, field in [("Point", "content"), ("Event", "subject"), ("Subject", "name")]:
+                try:
+                    self.g.query(f"CALL db.idx.fulltext.createNodeIndex('{label}', '{field}')")
+                except Exception as e:
+                    msg = str(e).lower()
+                    if "already" in msg:
+                        pass
+                    else:
+                        import logging
+                        logging.getLogger(__name__).warning(
+                            "Failed to create fulltext index on %s.%s: %s", label, field, e)
 
-        # ── Vector index (HNSW) — Docker/server FalkorDB only (#7764) ──
-        # Embedded mode (redislite) uses brute-force vec.euclideanDistance instead.
-        # HNSW requires RediSearch module, not bundled with redislite.
-        if not getattr(self, '_is_embedded', False):
-            try:
-                self.g.query(
-                    "CALL db.idx.vector.createNodeIndex('Point', 'embedding', 384, 'HNSW')"
-                )
-            except Exception as e:
-                msg = str(e).lower()
-                if "already" in msg:
-                    pass
-                else:
-                    import logging
-                    logging.getLogger(__name__).warning(
-                        "Failed to create vector index on Point.embedding: %s", e)
+            # ── Vector index (HNSW) — Docker/server FalkorDB only (#7764) ──
+            # Embedded mode (redislite) uses brute-force vec.euclideanDistance instead.
+            # HNSW requires RediSearch module, not bundled with redislite.
+            if not getattr(self, '_is_embedded', False):
+                try:
+                    self.g.query(
+                        "CALL db.idx.vector.createNodeIndex('Point', 'embedding', 384, 'HNSW')"
+                    )
+                except Exception as e:
+                    msg = str(e).lower()
+                    if "already" in msg:
+                        pass
+                    else:
+                        import logging
+                        logging.getLogger(__name__).warning(
+                            "Failed to create vector index on Point.embedding: %s", e)
+        else:
+            import logging
+            logging.getLogger(__name__).info(
+                "Skipping FTS and vector indexes: FalkorDB %s < 4.x",
+                '.'.join(map(str, _ver)))
 
     def close(self) -> None:
         self.db.close()
