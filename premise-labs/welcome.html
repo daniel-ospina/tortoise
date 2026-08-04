@@ -1,0 +1,482 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Your Tortoise is ready! — Tortoise</title>
+  <meta name="description" content="Your Tortoise knowledge graph is provisioned. Copy your API key and create your first Point.">
+  <meta name="theme-color" content="#060b14">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #060b14;
+      --surface: #0d1a2d;
+      --surface-hover: #12223d;
+      --text: #cbd5e1;
+      --text-dim: #64748b;
+      --accent: #06b6d4;
+      --accent-hover: #0891b2;
+      --green: #4ade80;
+      --green-dim: rgba(74, 222, 128, 0.15);
+      --gold: #f59e0b;
+      --red: #ef4444;
+      --border: #1e293b;
+      --mono: 'SF Mono', 'Cascadia Code', 'Fira Code', 'JetBrains Mono', monospace;
+      --serif: 'Georgia', 'Times New Roman', serif;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 14px;
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+    }
+
+    .container {
+      width: 100%;
+      max-width: 560px;
+      padding: 2rem;
+    }
+
+    .logo {
+      text-align: center;
+      margin-bottom: 2rem;
+    }
+
+    .logo a {
+      font-family: var(--serif);
+      font-size: 1.5rem;
+      color: var(--text);
+      text-decoration: none;
+    }
+
+    .logo span {
+      color: var(--accent);
+    }
+
+    .checkmark {
+      text-align: center;
+      margin-bottom: 0.5rem;
+    }
+
+    .checkmark svg {
+      width: 48px;
+      height: 48px;
+      color: var(--green);
+    }
+
+    h1 {
+      font-family: var(--serif);
+      font-size: 1.5rem;
+      font-weight: 400;
+      color: var(--text);
+      text-align: center;
+      margin-bottom: 0.5rem;
+    }
+
+    .team-info {
+      text-align: center;
+      color: var(--text-dim);
+      font-size: 13px;
+      margin-bottom: 2rem;
+    }
+
+    .team-info strong {
+      color: var(--text);
+    }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1.5rem;
+      margin-bottom: 1.5rem;
+    }
+
+    .card-label {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-dim);
+      margin-bottom: 0.75rem;
+    }
+
+    .api-key-display {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      background: rgba(6, 182, 212, 0.06);
+      border: 1px solid rgba(6, 182, 212, 0.2);
+      border-radius: 8px;
+      padding: 0.875rem 1rem;
+      font-family: var(--mono);
+      font-size: 15px;
+      word-break: break-all;
+      position: relative;
+    }
+
+    .api-key-display .key-text {
+      flex: 1;
+      color: var(--accent);
+      user-select: all;
+    }
+
+    .btn-copy {
+      flex-shrink: 0;
+      padding: 0.5rem 0.75rem;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--surface-hover);
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 12px;
+      cursor: pointer;
+      transition: border-color 0.2s, background 0.2s;
+      white-space: nowrap;
+    }
+
+    .btn-copy:hover {
+      border-color: var(--accent);
+      background: rgba(6, 182, 212, 0.12);
+    }
+
+    .btn-copy.copied {
+      border-color: var(--green);
+      color: var(--green);
+    }
+
+    .warning {
+      font-size: 12px;
+      color: var(--gold);
+      margin-top: 0.75rem;
+      display: flex;
+      align-items: flex-start;
+      gap: 0.5rem;
+    }
+
+    .warning svg {
+      width: 16px;
+      height: 16px;
+      flex-shrink: 0;
+      margin-top: 1px;
+    }
+
+    .snippet {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1rem;
+      overflow-x: auto;
+      margin-bottom: 1rem;
+    }
+
+    .snippet pre {
+      font-family: var(--mono);
+      font-size: 13px;
+      line-height: 1.7;
+      color: var(--text);
+      margin: 0;
+      white-space: pre-wrap;
+    }
+
+    .snippet .cmd {
+      color: var(--accent);
+    }
+
+    .snippet .comment {
+      color: var(--text-dim);
+    }
+
+    .btn-dashboard {
+      display: block;
+      width: 100%;
+      padding: 0.75rem;
+      border: none;
+      border-radius: 8px;
+      background: var(--accent);
+      color: var(--bg);
+      font-family: var(--mono);
+      font-size: 14px;
+      font-weight: 600;
+      text-align: center;
+      text-decoration: none;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    .btn-dashboard:hover {
+      background: var(--accent-hover);
+    }
+
+    .loading-state {
+      text-align: center;
+      padding: 3rem 1rem;
+      color: var(--text-dim);
+    }
+
+    .loading-spinner {
+      display: inline-block;
+      width: 24px;
+      height: 24px;
+      border: 3px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      margin-bottom: 1rem;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    .error-state {
+      text-align: center;
+      padding: 2rem 1rem;
+    }
+
+    .error-state p {
+      color: var(--text-dim);
+      margin-bottom: 1rem;
+    }
+
+    .error-state a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+
+    .hidden {
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="logo">
+      <a href="/">Premise <span>Labs</span></a>
+    </div>
+
+    <!-- Loading state -->
+    <div id="loading" class="loading-state">
+      <div class="loading-spinner"></div>
+      <p>Provisioning your Tortoise&hellip;</p>
+    </div>
+
+    <!-- Error state -->
+    <div id="error-state" class="error-state hidden">
+      <p id="error-message">Something went wrong during provisioning.</p>
+      <p><a href="/signup.html">Try signing up again</a></p>
+    </div>
+
+    <!-- Success state -->
+    <div id="success" class="hidden">
+      <div class="checkmark">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+          <polyline points="22 4 12 14.01 9 11.01"/>
+        </svg>
+      </div>
+      <h1>Your Tortoise is ready!</h1>
+      <div class="team-info">
+        Team: <strong id="team-name">—</strong> &nbsp;·&nbsp; Tier: <strong>Free</strong>
+      </div>
+
+      <div class="card">
+        <div class="card-label">Your API key</div>
+        <div class="api-key-display">
+          <span class="key-text" id="api-key">••••••••••••••••</span>
+          <button class="btn-copy" id="btn-copy" onclick="copyApiKey()">
+            <span id="copy-icon">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline;vertical-align:middle;margin-right:4px;">
+                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+              </svg>
+            </span>
+            <span id="copy-text">Copy</span>
+          </button>
+        </div>
+        <div class="warning">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+            <line x1="12" y1="9" x2="12" y2="13"/>
+            <line x1="12" y1="17" x2="12.01" y2="17"/>
+          </svg>
+          Save this key — it won't be shown again.
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-label">Quickstart</div>
+        <div class="snippet" id="snippet">
+          <pre><span class="comment"># Install Tortoise</span>
+<span class="cmd">pip install tortoise-client</span>
+
+<span class="comment"># Connect to your hosted graph</span>
+<span class="cmd">tortoise init --api-key <span id="snippet-key">tt_YOUR_KEY</span></span>
+
+<span class="comment"># Create your first Point</span>
+<span class="cmd">tortoise create-point "Hello world" --kind statement</span></pre>
+        </div>
+        <button class="btn-copy" onclick="copySnippet()" style="width:100%;">
+          Copy quickstart
+        </button>
+      </div>
+
+      <a href="/dashboard" class="btn-dashboard">Open Dashboard →</a>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+  <script>
+    // ── Configuration ──────────────────────────────────────────────────────
+    const SUPABASE_URL = "https://eldato-epistemic.supabase.co";
+    const SUPABASE_ANON_KEY = "{% raw %}{{SUPABASE_ANON_KEY}}{% endraw %}";
+    const POLL_INTERVAL_MS = 1000;
+    const POLL_MAX_ATTEMPTS = 30; // 30 seconds max
+
+    const isLocal = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
+    const supabaseUrl = isLocal
+      ? "http://127.0.0.1:54321"
+      : SUPABASE_URL;
+    const supabaseAnonKey = isLocal
+      ? "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0"
+      : SUPABASE_ANON_KEY;
+
+    // Guard: check if the anon key placeholder was replaced at deploy time
+    const isConfigured = supabaseAnonKey && !supabaseAnonKey.includes("{{");
+
+    let supabase = null;
+    if (isConfigured) {
+      supabase = window.supabase.createClient(supabaseUrl, supabaseAnonKey);
+    } else {
+      console.warn("SUPABASE_ANON_KEY not configured — page disabled");
+    }
+
+    // ── Poll for provisioning ──────────────────────────────────────────────
+    async function waitForProvisioning() {
+      const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+
+      if (sessionError || !session) {
+        showError("No active session. Please sign up first.");
+        return;
+      }
+
+      const userId = session.user.id;
+
+      // Poll the user_teams table until api_key is populated
+      for (let attempt = 0; attempt < POLL_MAX_ATTEMPTS; attempt++) {
+        const { data, error } = await supabase
+          .from("user_teams")
+          .select("team_id, team_name, api_key, graph_name")
+          .eq("user_id", userId)
+          .single();
+
+        if (error) {
+          // Table might not exist yet or row not created — keep polling
+          await sleep(POLL_INTERVAL_MS);
+          continue;
+        }
+
+        if (data && data.api_key && data.api_key !== "pending") {
+          showSuccess(data);
+          return;
+        }
+
+        await sleep(POLL_INTERVAL_MS);
+      }
+
+      // Timed out — check one more time
+      const { data } = await supabase
+        .from("user_teams")
+        .select("team_id, team_name, api_key, graph_name")
+        .eq("user_id", userId)
+        .single();
+
+      if (data && data.api_key && data.api_key !== "pending") {
+        showSuccess(data);
+      } else {
+        showError("Provisioning is taking longer than expected. Your team is being set up — please refresh in a moment.");
+      }
+    }
+
+    function sleep(ms) {
+      return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+
+    // ── Display states ─────────────────────────────────────────────────────
+    function showSuccess(data) {
+      document.getElementById("loading").classList.add("hidden");
+      document.getElementById("error-state").classList.add("hidden");
+      document.getElementById("success").classList.remove("hidden");
+
+      document.getElementById("team-name").textContent = data.team_name;
+      document.getElementById("api-key").textContent = data.api_key;
+      document.getElementById("snippet-key").textContent = data.api_key;
+    }
+
+    function showError(message) {
+      document.getElementById("loading").classList.add("hidden");
+      document.getElementById("success").classList.add("hidden");
+      document.getElementById("error-state").classList.remove("hidden");
+      document.getElementById("error-message").textContent = message;
+    }
+
+    // ── Copy functions ─────────────────────────────────────────────────────
+    function copyApiKey() {
+      const key = document.getElementById("api-key").textContent;
+      copyToClipboard(key);
+      const btn = document.getElementById("btn-copy");
+      btn.classList.add("copied");
+      document.getElementById("copy-text").textContent = "Copied!";
+      setTimeout(() => {
+        btn.classList.remove("copied");
+        document.getElementById("copy-text").textContent = "Copy";
+      }, 2000);
+    }
+
+    function copySnippet() {
+      const key = document.getElementById("api-key").textContent;
+      const snippet = `# Install Tortoise
+pip install tortoise-client
+
+# Connect to your hosted graph
+tortoise init --api-key ${key}
+
+# Create your first Point
+tortoise create-point "Hello world" --kind statement`;
+      copyToClipboard(snippet);
+    }
+
+    async function copyToClipboard(text) {
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch {
+        // Fallback for older browsers
+        const textarea = document.createElement("textarea");
+        textarea.value = text;
+        textarea.style.position = "fixed";
+        textarea.style.opacity = "0";
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand("copy");
+        document.body.removeChild(textarea);
+      }
+    }
+
+    // ── Start ──────────────────────────────────────────────────────────────
+    if (isConfigured && supabase) {
+      waitForProvisioning();
+    } else {
+      document.getElementById("loading").classList.add("hidden");
+      document.getElementById("error-state").classList.remove("hidden");
+      document.getElementById("error-message").textContent = "This page is not configured yet. Please contact support.";
+    }
+  </script>
+</body>
+</html>
