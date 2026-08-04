@@ -49,6 +49,7 @@ class SearchResult:
     scores: SearchScores | None = None
     match_source: Literal["fts", "vector", "structural", "rrf", "tfidf"] = "rrf"
     ep: EpBreakdown | None = None
+    relationships: list[dict] | None = None
 
     def to_dict(self) -> dict:
         """Convert to JSON-safe dict for API responses."""
@@ -66,6 +67,8 @@ class SearchResult:
             d["scores"] = asdict(self.scores)
         if self.ep and self.ep.evidence is not None:
             d["ep"] = asdict(self.ep)
+        if self.relationships is not None:
+            d["relationships"] = self.relationships
         return d
 
 
@@ -419,6 +422,74 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
     except Exception:
         logger.warning("EP batch annotation failed", exc_info=True)
         return {}
+
+
+# ── Relationships ────────────────────────────────────────────────────────────
+
+def get_relationships(graph, point_ids: list[str]) -> dict[str, list[dict]]:
+    """Fetch operator-edge relationships for a batch of Point IDs.
+
+    Single Cypher query — NOT N+1. Returns dict mapping point_id → list of
+    relationship dicts with {predicate, mechanism, related_id, related_kind,
+    related_content, direction, operator_id}.
+
+    Points with no operator edges get an empty list.
+    """
+    if not point_ids:
+        return {}
+
+    rels: dict[str, list[dict]] = {pid: [] for pid in point_ids}
+
+    try:
+        cypher = (
+            "MATCH (n:Point) WHERE n.id IN $ids "
+            "MATCH (n)-[r:IMPL|NAND|hasPart]-(op:Point {is_operator:true}) "
+            "MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point) "
+            "WHERE other.id <> n.id "
+            "  AND (other.is_operator IS NULL OR other.is_operator = false) "
+            "RETURN n.id, op.op_type AS mechanism, "
+            "  coalesce(op.label, '') AS predicate, "
+            "  op.id AS operator_id, other.id AS related_id, "
+            "  other.pointKind AS related_kind, "
+            "  other.content AS related_content, "
+            "  r.idx AS n_idx, r2.idx AS other_idx"
+        )
+        rows = graph.query(cypher, params={"ids": point_ids}).result_set
+
+        for row in rows:
+            pid = row[0]
+            mechanism = row[1] or "IMPL"
+            predicate = row[2]
+            operator_id = row[3]
+            related_id = row[4]
+            related_kind = row[5] or ""
+            related_content = row[6] or ""
+            n_idx = row[7] if len(row) > 7 else None
+            other_idx = row[8] if len(row) > 8 else None
+
+            # Determine direction: idx=0 = source, idx>0 = target.
+            # Our point is source → relationship is outgoing.
+            # Our point is target + other is source → relationship is incoming.
+            if n_idx is not None and n_idx == 0:
+                direction = "outgoing"
+            else:
+                direction = "incoming"
+
+            rel_entry = {
+                "predicate": predicate if predicate else "",
+                "mechanism": mechanism,
+                "related_id": related_id,
+                "related_kind": related_kind,
+                "related_content": related_content[:200] if related_content else "",
+                "direction": direction,
+                "operator_id": operator_id,
+            }
+            if pid in rels:
+                rels[pid].append(rel_entry)
+    except Exception:
+        logger.warning("Relationship query failed", exc_info=True)
+
+    return rels
 
 
 # ── TF-IDF fallback (in-memory, from embeddings.py) ─────────────────────────

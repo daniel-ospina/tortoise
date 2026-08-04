@@ -421,17 +421,24 @@ class PackRegistry:
         """
         expansions: dict[str, list[str]] = {}
 
-        # Core kinds: expand to [self] + all pack subclasses
-        for parent in CANONICAL_OBJECT_KINDS:
+        # Core kinds: expand to [self] + all pack subclasses (all 5 categories)
+        all_canonical: list[str] = []
+        for kind_set in (CANONICAL_OBJECT_KINDS, CANONICAL_POINT_KINDS,
+                          CANONICAL_EVENT_KINDS, CANONICAL_DOCUMENT_KINDS,
+                          CANONICAL_ACTION_KINDS):
+            all_canonical.extend(kind_set)
+        for parent in all_canonical:
             subs = self.get_subclasses(parent)
             expansions[parent] = [parent] + subs
 
-        # Pack kinds: each maps to [self] initially
+        # Pack kinds: each maps to [self] initially (all 5 categories)
         for p in self.packs.values():
             ns = p.namespace
-            for kind in p.object_kinds:
-                full = f"{ns}:{kind}"
-                expansions[full] = [full]
+            for kind_list in (p.object_kinds, p.point_kinds, p.event_kinds,
+                               p.document_kinds, p.action_kinds):
+                for kind in kind_list:
+                    full = f"{ns}:{kind}"
+                    expansions[full] = [full]
 
         # Apply subclassOf: children also expand to parent
         for p in self.packs.values():
