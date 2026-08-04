@@ -142,6 +142,7 @@ class FalkorProjection(
             raise ValueError("Either path or host must be provided")
 
         self.g = self.db.select_graph(graph_name)
+        self._is_embedded = (path is not None)
         self._ensure_indexes()
 
     @classmethod
@@ -295,7 +296,7 @@ class FalkorProjection(
                     logging.getLogger(__name__).warning(
                         "Failed to create index on n.%s: %s", prop, e)
 
-        # ── Full-text index (Phase 0, #7748) ──
+        # ── Full-text index (works in both Docker and embedded modes) ──
         try:
             self.g.query("CALL db.idx.fulltext.createNodeIndex('Point', 'content')")
         except Exception as e:
@@ -307,19 +308,22 @@ class FalkorProjection(
                 logging.getLogger(__name__).warning(
                     "Failed to create fulltext index on Point.content: %s", e)
 
-        # ── Vector index (Phase 0, #7748) ──
-        try:
-            self.g.query(
-                "CALL db.idx.vector.createNodeIndex('Point', 'embedding', 384, 'HNSW')"
-            )
-        except Exception as e:
-            msg = str(e).lower()
-            if "already" in msg:
-                pass
-            else:
-                import logging
-                logging.getLogger(__name__).warning(
-                    "Failed to create vector index on Point.embedding: %s", e)
+        # ── Vector index (HNSW) — Docker/server FalkorDB only (#7764) ──
+        # Embedded mode (redislite) uses brute-force vec.euclideanDistance instead.
+        # HNSW requires RediSearch module, not bundled with redislite.
+        if not getattr(self, '_is_embedded', False):
+            try:
+                self.g.query(
+                    "CALL db.idx.vector.createNodeIndex('Point', 'embedding', 384, 'HNSW')"
+                )
+            except Exception as e:
+                msg = str(e).lower()
+                if "already" in msg:
+                    pass
+                else:
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        "Failed to create vector index on Point.embedding: %s", e)
 
     def close(self) -> None:
         self.db.close()
