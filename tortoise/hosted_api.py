@@ -455,6 +455,45 @@ async def list_points(
     return {"points": results, "count": len(results)}
 
 
+@app.get("/v1/points/{point_id}")
+async def get_point(point_id: str, team: dict = Depends(get_current_team)):
+    """Get a single Point by ID."""
+    sdk = TortoiseSDK(namespace=team["team_id"])
+    proj = sdk._get_proj()
+    rows = proj.g.query(
+        "MATCH (p:Point {id: $id}) RETURN properties(p)",
+        params={"id": point_id},
+    ).result_set
+    if not rows:
+        raise HTTPException(status_code=404, detail="Point not found")
+    props = dict(rows[0][0])
+    if "pointKind" in props:
+        props["kind"] = props.pop("pointKind")
+    return props
+
+
+@app.get("/v1/search")
+async def search(q: str, limit: int = Query(10, ge=1, le=100), team: dict = Depends(get_current_team)):
+    """Keyword search across Points. Returns ranked results by recency."""
+    sdk = TortoiseSDK(namespace=team["team_id"])
+    proj = sdk._get_proj()
+    rows = proj.g.query(
+        "MATCH (p:Point) WHERE (p.is_operator IS NULL OR p.is_operator = false) "
+        "AND toLower(p.content) CONTAINS toLower($q) "
+        "RETURN properties(p) ORDER BY p.createdAt DESC LIMIT $limit",
+        params={"q": q, "limit": limit},
+    ).result_set
+    results = []
+    for r in rows:
+        props = dict(r[0])
+        if "pointKind" in props:
+            props["kind"] = props.pop("pointKind")
+        if "kind" not in props:
+            props["kind"] = "statement"
+        results.append(props)
+    return {"results": results, "count": len(results)}
+
+
 @app.get("/v1/team", response_model=TeamInfoResponse)
 async def team_info(team: dict = Depends(get_current_team)):
     """Get current team info: tier, usage, limits."""
