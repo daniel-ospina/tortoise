@@ -157,6 +157,7 @@ class PackRegistry:
             except Exception as e:
                 self.errors[ns] = [str(e)]
         self._build_kind_expansions()
+        self._validate_cross_pack_relations()
         return count
 
     def _load_one(self, path: Path) -> PackManifest:
@@ -233,6 +234,20 @@ class PackRegistry:
                             f"vocabulary — no need to register"
                         )
 
+            # Collect all pack-declared kinds (used by relation + subclassOf validation)
+            all_pack_kinds: set[str] = set()
+            for kf in ["objectKinds", "eventKinds", "pointKinds",
+                        "documentKinds", "actionKinds"]:
+                all_pack_kinds.update(ont.get(kf, []))
+
+            # Pre-built core kind set for relation validation
+            ALL_CORE_KINDS = (CANONICAL_OBJECT_KINDS | CANONICAL_EVENT_KINDS |
+                              CANONICAL_POINT_KINDS | CANONICAL_DOCUMENT_KINDS |
+                              CANONICAL_ACTION_KINDS |
+                              {"Subject", "Object", "Action", "Event",
+                               "Point", "Document", "Source",
+                               "Project", "WorkItem"})
+
             # Validate relations (new format: fromKind/toKind/mechanism)
             for rel in ont.get("relations", []):
                 pred = rel.get("predicate", "")
@@ -251,6 +266,43 @@ class PackRegistry:
                             f"relation '{pred}': mechanism must be IMPL or NAND, "
                             f"got {mechanism!r}"
                         )
+                    # Referential integrity: fromKind/toKind must reference
+                    # existing kinds (core CANONICAL or this pack's own kinds).
+                    # Cross-pack refs validated in load_all() after all packs loaded.
+                    for direction, kind_val in [("fromKind", rel.get("fromKind", "")),
+                                                 ("toKind", rel.get("toKind", ""))]:
+                        if not kind_val:
+                            continue  # already caught above
+                        if kind_val[0].isupper():
+                            # Core PascalCase kind — must be in canonical vocab
+                            if kind_val not in ALL_CORE_KINDS:
+                                errors.append(
+                                    f"relation '{pred}': {direction} '{kind_val}' is not "
+                                    f"a known core kind"
+                                )
+                        elif ":" in kind_val:
+                            # Prefixed kind: namespace:localKind
+                            ref_ns, ref_kind = kind_val.split(":", 1)
+                            if not ref_ns or not ref_kind:
+                                errors.append(
+                                    f"relation '{pred}': {direction} '{kind_val}' "
+                                    f"has empty namespace or kind"
+                                )
+                            elif ref_ns == ns:
+                                # Self-reference — must be in this pack's kinds
+                                if ref_kind not in all_pack_kinds:
+                                    errors.append(
+                                        f"relation '{pred}': {direction} '{kind_val}' "
+                                        f"references '{ref_kind}' which is not "
+                                        f"declared in this pack"
+                                    )
+                            # Cross-pack refs (ref_ns != ns): validate in load_all()
+                        else:
+                            # Unprefixed camelCase — not valid in new format
+                            errors.append(
+                                f"relation '{pred}': {direction} '{kind_val}' "
+                                f"must be a core PascalCase kind or 'namespace:kind'"
+                            )
                 else:
                     # Old format: from/to (entity types) — backward compat
                     if rel.get("from") not in VALID_ENTITY_TYPES:
@@ -266,6 +318,22 @@ class PackRegistry:
                     errors.append(
                         f"relation '{pred}': invalid cardinality: {rel.get('cardinality')}"
                     )
+
+            # Validate hierarchies
+            hierarchies = ont.get("hierarchies", [])
+            if not isinstance(hierarchies, list):
+                errors.append("ontology.hierarchies must be a list")
+            else:
+                for h in hierarchies:
+                    if not isinstance(h, dict):
+                        errors.append(
+                            f"hierarchies: expected dict, got {type(h).__name__}"
+                        )
+                        continue
+                    if not h.get("path"):
+                        errors.append("hierarchies: entry missing 'path' field")
+                    if not h.get("type"):
+                        errors.append("hierarchies: entry missing 'type' field")
 
         # Validate connectors
         for conn in raw.get("connectors", []):
@@ -299,10 +367,6 @@ class PackRegistry:
         if not isinstance(subclass_of, dict):
             errors.append("ontology.subclassOf must be a dict")
         else:
-            all_pack_kinds = set()
-            for kf in ["objectKinds", "eventKinds", "pointKinds",
-                        "documentKinds", "actionKinds"]:
-                all_pack_kinds.update(ont.get(kf, []))
             for child, parent in subclass_of.items():
                 if child not in all_pack_kinds:
                     errors.append(
@@ -345,6 +409,72 @@ class PackRegistry:
                         )
 
         return errors
+
+    # ── Cross-pack validation ──────────────────────────────────────────
+
+    def _validate_cross_pack_refs(self) -> None:
+        """Validate that all kind references resolve across packs.
+
+        Called after load_all() populates all packs. Checks:
+          1. Every relation's fromKind/toKind values reference known kinds.
+          2. Every equivalentTo target references a kind in another loaded pack.
+        Adds errors to self.errors keyed by pack namespace.
+        """
+        # Build the set of all known kinds (core + all packs)
+        all_known: set[str] = set()
+
+        # Core entity types and core kinds
+        all_known |= {"Subject", "Object", "Action", "Event",
+                       "Point", "Document", "Source",
+                       "Project", "WorkItem"}
+        all_known |= CANONICAL_OBJECT_KINDS
+        all_known |= CANONICAL_EVENT_KINDS
+        all_known |= CANONICAL_POINT_KINDS
+        all_known |= CANONICAL_DOCUMENT_KINDS
+        all_known |= CANONICAL_ACTION_KINDS
+
+        # All pack-prefixed kinds
+        for ns, pack in self.packs.items():
+            for kind in pack.object_kinds:
+                all_known.add(f"{ns}:{kind}")
+            for kind in pack.event_kinds:
+                all_known.add(f"{ns}:{kind}")
+            for kind in pack.point_kinds:
+                all_known.add(f"{ns}:{kind}")
+            for kind in pack.document_kinds:
+                all_known.add(f"{ns}:{kind}")
+            for kind in pack.action_kinds:
+                all_known.add(f"{ns}:{kind}")
+
+        # Check every relation's fromKind/toKind
+        for ns, pack in self.packs.items():
+            for rel in pack.relations:
+                pred = rel.get("predicate", "?")
+                for direction in ("fromKind", "toKind"):
+                    kind_val = rel.get(direction, "")
+                    if not kind_val:
+                        continue  # old-format, already validated
+                    if kind_val not in all_known:
+                        msg = (
+                            f"relation '{pred}': {direction} '{kind_val}' "
+                            f"does not resolve to any known kind "
+                            f"(core or loaded pack)"
+                        )
+                        self.errors.setdefault(ns, []).append(msg)
+
+            # Check every equivalentTo target resolves
+            for kind, targets in pack.kind_equivalences.items():
+                for target in targets:
+                    if target not in all_known:
+                        msg = (
+                            f"equivalentTo: target '{target}' (for '{kind}') "
+                            f"does not resolve to any known kind "
+                            f"(core or loaded pack)"
+                        )
+                        self.errors.setdefault(ns, []).append(msg)
+
+    # Keep backward-compatible alias
+    _validate_cross_pack_relations = _validate_cross_pack_refs
 
     # ── Query ──────────────────────────────────────────────────────────
 
