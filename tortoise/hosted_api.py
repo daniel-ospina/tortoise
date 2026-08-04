@@ -182,7 +182,7 @@ async def provision_tenant(request: Request):
 
     # Validate team_id and team_name against allowed pattern
     import re
-    _team_pattern = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$')
+    _team_pattern = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9 _-]{0,63}$')
     if not _team_pattern.match(team_id):
         raise HTTPException(status_code=400, detail="Invalid team_id format")
     if not _team_pattern.match(team_name):
@@ -206,7 +206,7 @@ async def provision_tenant(request: Request):
         )
 
         # Create APIKey node
-        api_key_id = _ulid()
+        api_key_id = _short_id()
         sdk._get_proj().g.query(
             """
             CREATE (k:APIKey {
@@ -241,7 +241,7 @@ async def provision_tenant(request: Request):
             })
             """,
             params={
-                "id": _ulid(),
+                "id": _short_id(),
                 "user_id": created_by,
                 "team_id": team_id,
                 "now": now,
@@ -272,8 +272,8 @@ async def provision_tenant(request: Request):
         raise HTTPException(status_code=500, detail="Tenant provisioning failed")
 
 
-def _ulid() -> str:
-    """Generate a simple ULID-like identifier."""
+def _short_id() -> str:
+    """Generate a short unique identifier (26 hex chars, no dashes)."""
     import uuid
     return uuid.uuid4().hex[:26]
 
@@ -305,8 +305,10 @@ async def get_current_team(request: Request) -> dict:
     if request.url.path in SKIP_AUTH or request.url.path.startswith("/internal"):
         return {"team_id": None, "tier": "free", "key_id": None}
     auth = request.headers.get("Authorization", "")
-    if not auth.startswith("Bearer "):
+    if not auth:
         raise HTTPException(status_code=401, detail="Missing Authorization header")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Authorization header must use Bearer scheme")
     token = auth[7:]
     if not token.startswith("tt_"):
         raise HTTPException(status_code=401, detail="Invalid API key format")
@@ -444,7 +446,12 @@ async def list_points(
         params["context"] = context
     query = "MATCH (n:Point) WHERE " + " AND ".join(conditions) + " RETURN properties(n) ORDER BY n.createdAt DESC LIMIT $limit"
     rows = proj.g.query(query, params=params).result_set
-    results = [r[0] for r in rows]
+    results = []
+    for r in rows:
+        d = r[0]
+        if "pointKind" in d:
+            d["kind"] = d.pop("pointKind")
+        results.append(d)
     return {"points": results, "count": len(results)}
 
 
@@ -659,11 +666,11 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
     api_key = f"tt_{uuid.uuid4().hex}"
     key_hash = hash_api_key(api_key)
     key_prefix = api_key[:10]
-    kid = str(uuid.uuid4())[:26]
+    kid = _short_id()
     now = datetime.now(timezone.utc).isoformat()
     proj.g.query(
         "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, key_prefix:$kp, created_by:$cb, created_at:$now})",
-        params={"id": kid, "tid": team["team_id"], "kh": key_hash, "kp": key_prefix, "cb": team.get("key_id", "system"), "now": now},
+        params={"id": kid, "tid": team["team_id"], "kh": key_hash, "kp": key_prefix, "cb": "api", "now": now},
     )
     # Log audit event
     await _async_audit(
@@ -710,13 +717,10 @@ async def list_api_keys(team: dict = Depends(get_current_team)):
 
 # ── Session Capture ───────────────────────────────────────────────
 
-from pydantic import BaseModel
-from typing import Optional
-
 class SessionRequest(BaseModel):
     conversation: list[dict] = Field(..., max_length=1000)
-    session_id: Optional[str] = None
-    metadata: Optional[dict] = None
+    session_id: str | None = None
+    metadata: dict | None = None
 
 
 @app.post("/v1/sessions")
@@ -731,7 +735,7 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
     now = datetime.now(timezone.utc).isoformat()
 
     proj.g.query(
-        "CREATE (s:Session {id:$sid, created_at:$now, turn_count:$tc})",
+        "MERGE (s:Session {id:$sid}) SET s.created_at=$now, s.turn_count=$tc",
         params={"sid": session_id, "now": now, "tc": len(body.conversation)},
     )
 
@@ -775,6 +779,7 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
                 extracted.append({"id": pid, "kind": "decision", "text": text[:200]})
                 idx += 1
 
+        idx = 0
         for pat in claims:
             for match in re.finditer(pat, content):
                 pid = f"{turn_id}_c{idx}"

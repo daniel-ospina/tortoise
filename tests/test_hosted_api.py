@@ -148,7 +148,7 @@ class TestAuthMatrix:
             "/v1/points", headers={"Authorization": "Token abc123"}
         )
         assert r.status_code == 401
-        assert "Missing Authorization header" in r.text
+        assert "Authorization header must use Bearer scheme" in r.text
 
     def test_invalid_api_key_returns_401(self, unauth_client):
         r = unauth_client.get(
