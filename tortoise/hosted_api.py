@@ -352,7 +352,7 @@ class ErrorResponse(BaseModel):
 # ── Endpoints ─────────────────────────────────────────────────────
 
 @app.post("/v1/points", response_model=PointResponse)
-async def create_point(body: CreatePointRequest, team: dict = Depends(get_current_team)):
+async def create_point(body: CreatePointRequest, request: Request, team: dict = Depends(get_current_team)):
     """Create a Point in the team's graph."""
     sdk = TortoiseSDK(namespace=team["team_id"])
     result = sdk.create_point(
@@ -593,7 +593,7 @@ async def create_demo_graph(request: Request):
 
 
 @app.post("/v1/team/keys", response_model=CreateKeyResponse)
-async def create_api_key(team: dict = Depends(get_current_team)):
+async def create_api_key(request: Request, team: dict = Depends(get_current_team)):
     """Generate a new API key for the team."""
     import uuid
     from tortoise.auth import hash_api_key
@@ -658,7 +658,7 @@ class SessionRequest(BaseModel):
 
 
 @app.post("/v1/sessions")
-async def capture_session(body: SessionRequest, team: dict = Depends(get_current_team)):
+async def capture_session(body: SessionRequest, request: Request, team: dict = Depends(get_current_team)):
     """Capture an agent session and extract turns as episodic Points."""
     import uuid, re
     from datetime import datetime, timezone
