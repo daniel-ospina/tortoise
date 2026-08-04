@@ -302,7 +302,7 @@ async def team_info(team: dict = Depends(get_current_team)):
 async def create_api_key(team: dict = Depends(get_current_team)):
     """Generate a new API key for the team."""
     sdk = TortoiseSDK(namespace="registry")
-    result = sdk.apikey_create(team_id=team["team_id"])
+    result = sdk.apikey_create(team_id=team["team_id"], created_by=team.get("key_id", team["team_id"]))
     return CreateKeyResponse(
         id=result["id"],
         key=result["key"],
