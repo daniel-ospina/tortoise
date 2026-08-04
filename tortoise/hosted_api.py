@@ -10,10 +10,13 @@ from __future__ import annotations
 
 import logging
 import os
+import time
+from collections import defaultdict
 from datetime import datetime, timezone
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from tortoise.auth import hash_api_key
 from tortoise.sdk import TortoiseSDK
@@ -28,6 +31,55 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ── Rate Limiter ──────────────────────────────────────────────────
+
+class RateLimitMiddleware(BaseHTTPMiddleware):
+    """In-memory token bucket rate limiter. 100 Points/min per API key."""
+
+    SKIP = {"/health", "/docs", "/openapi.json"}
+
+    def __init__(self, app, max_per_minute=100):
+        super().__init__(app)
+        self.max_per_minute = max_per_minute
+        self._buckets: dict[str, list[float]] = defaultdict(list)
+        self._last_cleanup = time.time()
+
+    async def dispatch(self, request: Request, call_next):
+        if request.url.path in self.SKIP or request.url.path.startswith("/internal"):
+            return await call_next(request)
+
+        auth = request.headers.get("Authorization", "")
+        if not auth.startswith("Bearer ") or not auth[7:].startswith("tt_"):
+            return await call_next(request)
+
+        # Use API key as bucket key (per-key limits, avoids hashing in hot path)
+        key_id = auth[7:]
+        now = time.time()
+
+        # Periodic cleanup: prune all buckets every 5 minutes
+        if now - self._last_cleanup > 300:
+            stale = [k for k, v in self._buckets.items() if not v]
+            for k in stale:
+                del self._buckets[k]
+            self._last_cleanup = now
+
+        bucket = self._buckets[key_id]
+        bucket[:] = [t for t in bucket if now - t < 60]
+
+        if len(bucket) >= self.max_per_minute:
+            raise HTTPException(
+                status_code=429,
+                detail="Rate limit exceeded. 100 points/minute per API key.",
+                headers={"Retry-After": "60"},
+            )
+
+        bucket.append(now)
+        return await call_next(request)
+
+
+app.add_middleware(RateLimitMiddleware, max_per_minute=100)
 
 # Internal auth key for Edge Function → API communication
 _INTERNAL_KEY = os.environ.get("FASTAPI_INTERNAL_KEY", "")
@@ -296,6 +348,165 @@ async def team_info(team: dict = Depends(get_current_team)):
         max_teams=team["max_teams"],
         point_count=point_count,
     )
+
+
+@app.post("/v1/internal/demo")
+async def create_demo_graph(request: Request):
+    """Create a demo graph with sample Points across all 4 ontology layers.
+
+    Called by the tenant-provision Edge Function after provisioning to seed
+    demo data so new users see a populated graph immediately.
+    """
+    _check_internal(request)
+
+    body = await request.json()
+    team_id = body.get("team_id")
+    if not team_id:
+        raise HTTPException(status_code=400, detail="Missing team_id")
+
+    from datetime import datetime, timezone
+    sdk = TortoiseSDK(namespace=team_id)
+    proj = sdk._get_proj()
+    now = datetime.now(timezone.utc).isoformat()
+
+    # ── Semantic Layer — facts and statements ────────────────────
+    semantic_points = [
+        ("sem_welcome", "observation",
+         "Your Tortoise graph is ready. This is where agents file decisions, "
+         "observations, and findings so your team remembers across sessions.",
+         ["system", "welcome"]),
+        ("sem_fact_tortoise", "statement",
+         "Tortoise is a semantic epistemic graph engine that powers agent memory "
+         "through four ontology layers: Semantic, Episodic, Epistemic, and Procedural.",
+         ["tortoise", "overview"]),
+        ("sem_fact_layers", "statement",
+         "Semantic = facts and statements. Episodic = session history and events. "
+         "Epistemic = claims with evidence and confidence. Procedural = workflows and skills.",
+         ["tortoise", "ontology"]),
+    ]
+    for pid, kind, content, tags in semantic_points:
+        proj.g.query(
+            "CREATE (p:Point {id:$id, content:$c, pointKind:$k, is_operator:false, "
+            "status:'live', createdAt:$now, updatedAt:$now})",
+            params={"id": pid, "c": content, "k": kind, "now": now},
+        )
+        for tag in tags:
+            proj.g.query(
+                "MATCH (p:Point {id:$pid}) "
+                "MERGE (t:Tag {name:$tag}) "
+                "CREATE (p)-[:TAGGED]->(t)",
+                params={"pid": pid, "tag": tag},
+            )
+
+    # ── Episodic Layer — session events ──────────────────────────
+    session_id = f"session_demo_{team_id[:8]}"
+    proj.g.query(
+        "CREATE (s:Session {id:$sid, created_at:$now, turn_count:3})",
+        params={"sid": session_id, "now": now},
+    )
+    episodic_turns = [
+        ("epi_turn1", "[user] Let's set up our agent memory system with Tortoise."),
+        ("epi_turn2", "[assistant] I'll initialize the graph and configure the ontology layers. "
+         "Once set up, all decisions will be tracked automatically."),
+        ("epi_turn3", "[user] Great — make sure we capture decisions about architecture and product strategy."),
+    ]
+    for pid, content in episodic_turns:
+        proj.g.query(
+            "CREATE (t:Point {id:$id, content:$c, pointKind:'event', is_operator:false, "
+            "status:'live', createdAt:$now, updatedAt:$now})",
+            params={"id": pid, "c": content, "now": now},
+        )
+        proj.g.query(
+            "MATCH (s:Session {id:$sid}), (t:Point {id:$pid}) CREATE (s)-[:CONTAINS]->(t)",
+            params={"sid": session_id, "pid": pid},
+        )
+
+    # ── Epistemic Layer — claims with evidence ───────────────────
+    epistemic_points = [
+        ("epis_claim1", "hypothesis",
+         "Agent memory systems should be graph-native rather than vector-only "
+         "because semantic relationships carry more signal than embedding proximity.",
+         0.7, ["hypothesis", "architecture"]),
+        ("epis_claim2", "evidence",
+         "Teams using structured agent memory report 40% fewer repeated mistakes "
+         "and 3x faster onboarding for new team members.",
+         0.5, ["evidence", "adoption"]),
+        ("epis_claim3", "decision",
+         "We will use FalkorDB as the graph backend because it supports Cypher "
+         "queries and runs as a lightweight extension to Redis.",
+         0.9, ["decision", "infrastructure"]),
+    ]
+    for pid, kind, content, confidence, tags in epistemic_points:
+        proj.g.query(
+            "CREATE (p:Point {id:$id, content:$c, pointKind:$k, is_operator:false, "
+            "status:'live', confidence:$conf, createdAt:$now, updatedAt:$now})",
+            params={"id": pid, "c": content, "k": kind, "conf": confidence, "now": now},
+        )
+        for tag in tags:
+            proj.g.query(
+                "MATCH (p:Point {id:$pid}) "
+                "MERGE (t:Tag {name:$tag}) "
+                "CREATE (p)-[:TAGGED]->(t)",
+                params={"pid": pid, "tag": tag},
+            )
+
+    # ── Procedural Layer — workflows ─────────────────────────────
+    procedural_points = [
+        ("proc_wf1", "workflow",
+         "CONTEXT-INJECTION: Before any coding task, call tortoise_suggest_entry_points() "
+         "to find related context from past sessions and decisions.",
+         ["workflow", "context"]),
+        ("proc_wf2", "workflow",
+         "DECISION-CAPTURE: After making a design decision, call tortoise_create_point() "
+         "with kind='decision' so future agents can trace the reasoning chain.",
+         ["workflow", "decision"]),
+        ("proc_wf3", "workflow",
+         "REVIEW-GATE: Before merging any PR, verify that key decisions are filed in Tortoise. "
+         "If not, file them before merging.",
+         ["workflow", "review"]),
+    ]
+    for pid, kind, content, tags in procedural_points:
+        proj.g.query(
+            "CREATE (p:Point {id:$id, content:$c, pointKind:$k, is_operator:false, "
+            "status:'live', createdAt:$now, updatedAt:$now})",
+            params={"id": pid, "c": content, "k": kind, "now": now},
+        )
+        for tag in tags:
+            proj.g.query(
+                "MATCH (p:Point {id:$pid}) "
+                "MERGE (t:Tag {name:$tag}) "
+                "CREATE (p)-[:TAGGED]->(t)",
+                params={"pid": pid, "tag": tag},
+            )
+
+    # ── Cross-layer links ────────────────────────────────────────
+    # Link epistemic claim to supporting semantic fact
+    proj.g.query(
+        "MATCH (c:Point {id:'epis_claim1'}), (f:Point {id:'sem_fact_layers'}) "
+        "CREATE (c)-[:SUPPORTS]->(f)"
+    )
+    # Link workflow to epistemic claim
+    proj.g.query(
+        "MATCH (w:Point {id:'proc_wf1'}), (c:Point {id:'epis_claim1'}) "
+        "CREATE (w)-[:INFORMED_BY]->(c)"
+    )
+
+    total_points = (
+        len(semantic_points) + len(episodic_turns)
+        + len(epistemic_points) + len(procedural_points)
+    )
+    return {
+        "status": "demo_created",
+        "team_id": team_id,
+        "session_id": session_id,
+        "points": total_points,
+        "layers": {
+            "semantic": len(semantic_points),
+            "episodic": len(episodic_turns),
+            "epistemic": len(epistemic_points),
+            "procedural": len(procedural_points),
+        },
+    }
 
 
 @app.post("/v1/team/keys", response_model=CreateKeyResponse)
