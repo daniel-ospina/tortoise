@@ -301,14 +301,25 @@ async def team_info(team: dict = Depends(get_current_team)):
 @app.post("/v1/team/keys", response_model=CreateKeyResponse)
 async def create_api_key(team: dict = Depends(get_current_team)):
     """Generate a new API key for the team."""
+    import uuid
+    from tortoise.auth import hash_api_key
     sdk = TortoiseSDK(namespace="registry")
-    result = sdk.apikey_create(team_id=team["team_id"], created_by=team.get("key_id", team["team_id"]))
-    return CreateKeyResponse(
-        id=result["id"],
-        key=result["key"],
-        key_prefix=result.get("key_prefix", result["key"][:8]),
-        created_at=result.get("created_at", ""),
+    proj = sdk._get_proj()
+    api_key = f"tt_{uuid.uuid4().hex}"
+    key_hash = hash_api_key(api_key)
+    key_prefix = api_key[:10]
+    kid = str(uuid.uuid4())[:26]
+    now = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
+    proj.g.query(
+        "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, key_prefix:$kp, created_by:$cb, created_at:$now})",
+        params={"id": kid, "tid": team["team_id"], "kh": key_hash, "kp": key_prefix, "cb": team.get("key_id", "system"), "now": now},
     )
+    return {
+        "id": kid,
+        "key": api_key,
+        "key_prefix": key_prefix,
+        "created_at": now,
+    }
 
 
 @app.get("/v1/team/keys")
