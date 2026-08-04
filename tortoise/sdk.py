@@ -1415,9 +1415,14 @@ class TortoiseSDK:
             return []
         proj = self._get_proj()
         
-        # Build Cypher query for Event search
+        # Build Cypher query with keyword search in the DB
         clauses = ["e.eventKind = 'AgentSession'"]
-        params = {"offset": offset, "limit": max(limit * 3, 30)}
+        params: dict = {"limit": max(limit * 3, 30)}
+        
+        if query and query.strip():
+            query_lower = query.strip().lower()
+            clauses.append("(toLower(e.name) CONTAINS $q OR any(kw IN e.keywords WHERE toLower(kw) CONTAINS $q))")
+            params["q"] = query_lower
         if agent:
             clauses.append("e.agent = $agent")
             params["agent"] = agent
@@ -1435,8 +1440,8 @@ class TortoiseSDK:
         query_lower = query.lower()
         rows = proj.g.query(
             f"MATCH (e:Event) WHERE {where} "
-            "RETURN properties(e) ORDER BY e.startedAt DESC SKIP $offset LIMIT $limit",
-            params=params
+            "RETURN properties(e) ORDER BY coalesce(e.startedAt, '') DESC, e.name SKIP $skip LIMIT $limit",
+            params={**params, "skip": offset}
         ).result_set
         
         results = []
