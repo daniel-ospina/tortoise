@@ -1233,6 +1233,7 @@ class TortoiseSDK:
         kind: str | None = None,
         context: str | None = None,
         *,
+        entity_type: str = "point",
         min_confidence: float = 0.0,
         order_by: str = "relevance",
         limit: int = 10,
@@ -1240,10 +1241,12 @@ class TortoiseSDK:
     ) -> list[dict]:
         """Hybrid search with RRF fusion + EP annotation.
 
+        entity_type: 'point' (default), 'event', or 'subject'.
         Full-scan mode: omit query, set context → all Points in context.
         Best-match mode: provide query → RRF fusion of FTS + vector + structural.
 
-        All results annotated with EP breakdown (confidence_mean + evidence + contention).
+        Point results annotated with EP breakdown (confidence_mean + evidence + contention).
+        Non-Point entities skip EP annotation.
         min_confidence defaults to 0.0 (no filter).
         """
         from .search_engine import (
@@ -1251,6 +1254,8 @@ class TortoiseSDK:
             annotate_ep_batch, fallback_tfidf, SearchResult, SearchScores,
         )
 
+        if entity_type not in ("point", "event", "subject"):
+            raise ValueError(f"entity_type must be 'point', 'event', or 'subject', got {entity_type!r}")
         if limit < 1:
             raise ValueError(f"limit must be >= 1, got {limit}")
         if not (0.0 <= threshold <= 1.0):
@@ -1262,14 +1267,16 @@ class TortoiseSDK:
 
         proj = self._get_proj()
         graph = proj.g
+        label = entity_type.capitalize()  # point→Point, event→Event, subject→Subject
+        kind_field = {"point": "pointKind", "event": "eventKind", "subject": "subjectKind"}[entity_type]
 
         # 1. Classify query → determine active strategies
         strategies = classify_query(query, kind, context)
         is_full_scan = (query is None and context is not None and not kind)
 
-        # 2. Get query vector if needed
+        # 2. Get query vector if needed (Point only — no embeddings for Event/Subject)
         query_vec = None
-        if strategies.get("vector") and query and query.strip():
+        if entity_type == "point" and strategies.get("vector") and query and query.strip():
             try:
                 from .embeddings import EmbeddingModel
                 model = EmbeddingModel.get()
@@ -1281,12 +1288,12 @@ class TortoiseSDK:
         # 3. Run retrieval with degradation
         raw_results = degradation_chain(
             graph, query, kind, context, query_vec, strategies,
-            limit=limit * 2,
+            entity_type=entity_type, limit=limit * 2,
         )
 
         if not raw_results:
-            # All strategies failed — fallback to in-memory TF-IDF
-            if query:
+            # All strategies failed — fallback to in-memory TF-IDF (Point only)
+            if query and entity_type == "point":
                 points = self.query(kind=kind, context=context)
                 return fallback_tfidf(query, points, limit=limit)
             return []
@@ -1305,15 +1312,14 @@ class TortoiseSDK:
                 fused = {pid: score for pid, score in fused.items() if score >= threshold}
             match_source = "rrf"
 
-        # 5. Apply kind filter BEFORE truncating. Skip when structural-only
-        # already filtered (query is None → structural already did kind match).
+        # 5. Apply kind filter BEFORE truncating (skip if structural-only already filtered)
         result_ids = list(fused.keys())
 
-        if kind and query is not None:
+        if kind and query is not None and result_ids:
             kind_ids = set()
             try:
                 kind_rows = graph.query(
-                    "MATCH (n:Point) WHERE n.pointKind = $kind AND n.id IN $ids RETURN n.id",
+                    f"MATCH (n:{label}) WHERE n.{kind_field} = $kind AND n.id IN $ids RETURN n.id",
                     params={"kind": kind, "ids": result_ids},
                 ).result_set
                 kind_ids = {row[0] for row in kind_rows}
@@ -1324,38 +1330,64 @@ class TortoiseSDK:
         # Truncate AFTER filtering
         result_ids = result_ids[:limit]
 
-        ep_breakdowns = annotate_ep_batch(graph, result_ids)
+        # 6. EP annotation (Point only)
+        ep_breakdowns = annotate_ep_batch(graph, result_ids) if entity_type == "point" else {}
 
-        # 6. Fetch Point content in BATCH (not N+1)
-        point_data = {}
+        # 7. Fetch entity content in BATCH (not N+1)
+        entity_data: dict[str, dict] = {}
         try:
-            rows = graph.query(
-                "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, n.content, n.pointKind, n.context",
-                params={"ids": result_ids},
-            ).result_set
-            for row in rows:
-                pid = row[0]
-                point_data[pid] = {
-                    "content": row[1],
-                    "point_kind": row[2],
-                    "context": row[3] if len(row) > 3 else None,
-                }
+            if entity_type == "point":
+                rows = graph.query(
+                    "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, n.content, n.pointKind, n.context",
+                    params={"ids": result_ids},
+                ).result_set
+                for row in rows:
+                    pid = row[0]
+                    entity_data[pid] = {
+                        "content": row[1],
+                        "kind": row[2],
+                        "context": row[3] if len(row) > 3 else None,
+                    }
+            elif entity_type == "event":
+                rows = graph.query(
+                    "MATCH (n:Event) WHERE n.eventId IN $ids RETURN n.eventId, n.subject, n.eventKind",
+                    params={"ids": result_ids},
+                ).result_set
+                for row in rows:
+                    eid = row[0]
+                    entity_data[eid] = {
+                        "content": row[1] or "",
+                        "kind": row[2] or "",
+                        "context": None,
+                    }
+            elif entity_type == "subject":
+                rows = graph.query(
+                    "MATCH (n:Subject) WHERE n.id IN $ids RETURN n.id, n.name, n.subjectKind",
+                    params={"ids": result_ids},
+                ).result_set
+                for row in rows:
+                    sid = row[0]
+                    entity_data[sid] = {
+                        "content": row[1] or "",
+                        "kind": row[2] or "",
+                        "context": None,
+                    }
         except Exception:
             logger.warning("Batch content fetch failed — returning results with minimal metadata")
             for pid in result_ids:
-                point_data[pid] = {"content": "", "point_kind": "", "context": None}
+                entity_data[pid] = {"content": "", "kind": "", "context": None}
 
-        # 7. Build SearchResult objects, filter, and order
+        # 8. Build SearchResult objects, filter, and order
         results = []
         for pid in result_ids:
-            pt = point_data.get(pid)
+            pt = entity_data.get(pid)
             if not pt:
                 continue
-            content, pt_kind, pt_context = pt["content"], pt["point_kind"], pt["context"]
-            ep = ep_breakdowns.get(pid)
+            content, pt_kind, pt_context = pt["content"], pt["kind"], pt["context"]
+            ep = ep_breakdowns.get(pid) if entity_type == "point" else None
 
-            # Apply min_confidence filter (default 0.0 = no filter)
-            if ep and ep.confidence_mean < min_confidence:
+            # Apply min_confidence filter (Point only; non-Point always pass)
+            if entity_type == "point" and ep and ep.confidence_mean < min_confidence:
                 continue
 
             # Build scores
@@ -1387,7 +1419,7 @@ class TortoiseSDK:
             )
             results.append(result)
 
-        # 7. Order results
+        # 9. Order results
         if order_by == "confidence":
             results.sort(
                 key=lambda r: r.ep.confidence_mean if r.ep else 0.0,

@@ -296,17 +296,18 @@ class FalkorProjection(
                     logging.getLogger(__name__).warning(
                         "Failed to create index on n.%s: %s", prop, e)
 
-        # ── Full-text index (works in both Docker and embedded modes) ──
-        try:
-            self.g.query("CALL db.idx.fulltext.createNodeIndex('Point', 'content')")
-        except Exception as e:
-            msg = str(e).lower()
-            if "already" in msg:
-                pass
-            else:
-                import logging
-                logging.getLogger(__name__).warning(
-                    "Failed to create fulltext index on Point.content: %s", e)
+        # ── Full-text indexes (works in both Docker and embedded modes) ──
+        for label, field in [("Point", "content"), ("Event", "subject"), ("Subject", "name")]:
+            try:
+                self.g.query(f"CALL db.idx.fulltext.createNodeIndex('{label}', '{field}')")
+            except Exception as e:
+                msg = str(e).lower()
+                if "already" in msg:
+                    pass
+                else:
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        "Failed to create fulltext index on %s.%s: %s", label, field, e)
 
         # ── Vector index (HNSW) — Docker/server FalkorDB only (#7764) ──
         # Embedded mode (redislite) uses brute-force vec.euclideanDistance instead.

@@ -89,16 +89,18 @@ def classify_query(
 # ── FalkorDB query runners ──────────────────────────────────────────────────
 
 def run_fts_query(
-    graph, query: str, limit: int = 20, timeout_ms: int = 500
+    graph, query: str, entity_type: str = "point", limit: int = 20, timeout_ms: int = 500
 ) -> list[tuple[str, float]]:
     """Run full-text search via FalkorDB FTS index.
 
     Falls back gracefully if index doesn't exist or query fails.
+    entity_type: 'point' (default), 'event', or 'subject'.
     """
+    label = entity_type.capitalize()  # point→Point, event→Event, subject→Subject
     try:
         start = time.monotonic()
         cypher = (
-            "CALL db.idx.fulltext.queryNodes('Point', $query) "
+            f"CALL db.idx.fulltext.queryNodes('{label}', $query) "
             "YIELD node, score "
             "RETURN node.id, score "
             "ORDER BY score DESC "
@@ -164,31 +166,37 @@ def run_vector_query(
 
 
 def run_structural_query(
-    graph, kind: str | None, context: str | None, limit: int = 20
+    graph, kind: str | None, context: str | None,
+    entity_type: str = "point", limit: int = 20
 ) -> list[tuple[str, float]]:
     """Run structural/kind query via range indexes.
 
-    Returns Points matching kind and/or context with a score of 1.0 (exact match)
-    or 0.5 (partial match).
+    entity_type: 'point' (filters on pointKind/context), 'event' (eventKind),
+                 'subject' (subjectKind).
+    Returns matching entities with a score of 1.0 (exact match) or 0.5 (partial match).
     """
+    label = entity_type.capitalize()
+    kind_field = {"point": "pointKind", "event": "eventKind", "subject": "subjectKind"}[entity_type]
     try:
         conditions = []
         params = {}
         if kind:
-            conditions.append("n.pointKind = $kind")
+            conditions.append(f"n.{kind_field} = $kind")
             params["kind"] = kind
         if context:
-            conditions.append("n.context = $context")
-            params["context"] = context
+            # Only Point entities have context; skip for Event/Subject
+            if entity_type == "point":
+                conditions.append("n.context = $context")
+                params["context"] = context
 
         if not conditions:
             return []  # No filters — caller should use full-scan path instead
 
         where_clause = " AND ".join(conditions)
         cypher = (
-            f"MATCH (n:Point) "
+            f"MATCH (n:{label}) "
             f"WHERE {where_clause} "
-            f"RETURN n.id, n.content, n.pointKind, n.context "
+            f"RETURN n.id, n.{kind_field}, n.{kind_field} "
             f"LIMIT $limit"
         )
         params["limit"] = limit
@@ -197,7 +205,7 @@ def run_structural_query(
         # Assign score: 1.0 if both kind AND context match, 0.5 if only one
         results = []
         for row in rows:
-            pid, content = row[0], row[1]
+            pid = row[0]
             match_score = 1.0 if (kind and context) else 0.5
             results.append((pid, match_score))
         return results
@@ -240,6 +248,7 @@ def degradation_chain(
     context: str | None,
     query_vec: list[float] | None,
     strategies: dict[str, bool],
+    entity_type: str = "point",
     limit: int = 20,
 ) -> dict[str, list[tuple[str, float]]]:
     """Run retrieval strategies with per-strategy degradation.
@@ -254,7 +263,7 @@ def degradation_chain(
 
     # FTS strategy
     if strategies.get("fts") and query:
-        fts_results = run_fts_query(graph, query, limit=limit)
+        fts_results = run_fts_query(graph, query, entity_type=entity_type, limit=limit)
         if fts_results:
             results["fts"] = fts_results
         else:
@@ -270,7 +279,7 @@ def degradation_chain(
 
     # Structural strategy
     if strategies.get("structural"):
-        struct_results = run_structural_query(graph, kind, context, limit=limit)
+        struct_results = run_structural_query(graph, kind, context, entity_type=entity_type, limit=limit)
         if struct_results:
             results["structural"] = struct_results
         else:

@@ -124,16 +124,19 @@ def tortoise_query(kind: str | None = None, context: str | None = None,
                    text: str | None = None,
                    order_by: str | None = None,
                    min_confidence: float | None = None,
+                   entity_type: str = "point",
                    limit: int = 100) -> list[dict]:
     """Query points by pointKind, context, and/or property filters.
 
     When text is provided, routes through tortoise_fts_query() for hybrid search.
     When text is None, uses existing structural query (full-scan for context).
+    entity_type: 'point' (default), 'event', or 'subject'.
     """
     filters = _parse(filters)
     if text:
         return _safe(sdk.tortoise_fts_query, text, kind=kind, context=context,
-                     limit=limit, min_confidence=min_confidence or 0.0,
+                     entity_type=entity_type, limit=limit,
+                     min_confidence=min_confidence or 0.0,
                      order_by=order_by or "relevance")
     return _safe(sdk.query, kind, context, **(filters or {}))
 
@@ -198,17 +201,20 @@ def tortoise_search(query: str | None = None, kind: str | None = None,
                     context: str | None = None,
                     threshold: float = 0.0, limit: int = 10,
                     min_confidence: float = 0.0,
-                    order_by: str = "relevance") -> list[dict]:
+                    order_by: str = "relevance",
+                    entity_type: str = "point") -> list[dict]:
     """Hybrid search with RRF fusion + EP annotation.
 
+    entity_type: 'point' (default), 'event', or 'subject'.
     Full-scan mode: omit query, set context → all Points in context.
     Best-match mode: provide query → RRF fusion of FTS + vector + structural.
 
-    All results annotated with EP breakdown (confidence_mean + evidence + contention).
+    Point results annotated with EP breakdown (confidence_mean + evidence + contention).
     min_confidence defaults to 0.0 (no filter).
     """
     return _safe(sdk.tortoise_fts_query, query, kind=kind, context=context,
                  threshold=threshold, limit=limit,
+                 entity_type=entity_type,
                  min_confidence=min_confidence, order_by=order_by)
 
 
