@@ -15,7 +15,7 @@ import time
 from collections import defaultdict
 from datetime import datetime, timezone
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 
@@ -57,10 +57,14 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
         auth = request.headers.get("Authorization", "")
         if not auth.startswith("Bearer ") or not auth[7:].startswith("tt_"):
-            return await call_next(request)
-
-        # Use API key as bucket key (per-key limits, avoids hashing in hot path)
-        key_id = auth[7:]
+            # IP-based fallback for unauthenticated requests
+            if request.client and request.client.host:
+                key_id = f"ip:{request.client.host}"
+            else:
+                return await call_next(request)
+        else:
+            # Use API key as bucket key (per-key limits, avoids hashing in hot path)
+            key_id = auth[7:]
         now = time.time()
 
         async with self._lock:
@@ -103,6 +107,20 @@ class HSTSMiddleware(BaseHTTPMiddleware):
         return response
 
 app.add_middleware(HSTSMiddleware)
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Add security headers to every response."""
+
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        return response
+
+
+app.add_middleware(SecurityHeadersMiddleware)
 
 # Internal auth key for Edge Function → API communication
 _INTERNAL_KEY = os.environ.get("FASTAPI_INTERNAL_KEY", "")
@@ -161,6 +179,14 @@ async def provision_tenant(request: Request):
 
     if not all([team_id, team_name, api_key_hash, created_by]):
         raise HTTPException(status_code=400, detail="Missing required fields")
+
+    # Validate team_id and team_name against allowed pattern
+    import re
+    _team_pattern = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$')
+    if not _team_pattern.match(team_id):
+        raise HTTPException(status_code=400, detail="Invalid team_id format")
+    if not _team_pattern.match(team_name):
+        raise HTTPException(status_code=400, detail="Invalid team_name format")
 
     sdk = TortoiseSDK(namespace="registry")
     now = datetime.now(timezone.utc).isoformat()
@@ -402,7 +428,7 @@ async def create_point(body: CreatePointRequest, request: Request, team: dict = 
 async def list_points(
     kind: str | None = None,
     context: str | None = None,
-    limit: int = 50,
+    limit: int = Query(50, ge=1, le=1000),
     team: dict = Depends(get_current_team),
 ):
     """Query Points in the team's graph."""
@@ -624,7 +650,7 @@ async def create_demo_graph(request: Request):
 
 
 @app.post("/v1/team/keys", response_model=CreateKeyResponse)
-async def create_api_key(request: Request, team: dict = Depends(get_current_team)):
+async def create_api_key(request: Request, response: Response, team: dict = Depends(get_current_team)):
     """Generate a new API key for the team."""
     import uuid
     from tortoise.auth import hash_api_key
@@ -644,6 +670,8 @@ async def create_api_key(request: Request, team: dict = Depends(get_current_team
         request, team["team_id"], "api_key_create",
         resource_type="api_key", resource_id=kid,
     )
+
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
 
     return {
         "id": kid,

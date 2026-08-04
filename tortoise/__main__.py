@@ -231,8 +231,10 @@ def _cmd_init(args):
             "api_url": os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co"),
         }
         config_path.write_text(_json.dumps(config, indent=2) + "\n")
+        os.chmod(config_path, 0o600)
         print("Connected to Tortoise Cloud (team will be resolved from API key)")
         print(f"Config saved to {config_path}")
+        print("⚠️  .tortoise contains a plaintext API key — do NOT commit this file.")
         return 0
 
     print("Tortoise init — auto-detecting FalkorDB…")
