@@ -177,7 +177,7 @@ class FalkorProjection(
         elif t == "PointRetracted":
             self._delete(ev["id"])
         elif t == "PointsMerged":
-            for mid in event.get("merge_ids", []):
+            for mid in ev.get("merge_ids", []):
                 self._delete(mid)
         elif t == "EventRecorded":
             self._upsert_event(ev)

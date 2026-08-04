@@ -235,6 +235,11 @@ def _cmd_init(args):
         print("Connected to Tortoise Cloud (team will be resolved from API key)")
         print(f"Config saved to {config_path}")
         print("⚠️  .tortoise contains a plaintext API key — do NOT commit this file.")
+        print()
+        print("Next steps:")
+        print("  tortoise session capture --file transcript.txt   # capture an agent session")
+        print("  tortoise session list                             # view your sessions")
+        print("  # Connect your agent via MCP (see welcome page)")
         return 0
 
     print("Tortoise init — auto-detecting FalkorDB…")
@@ -406,6 +411,215 @@ def _cmd_team_info(args) -> int:
     print(f"Points:     {data.get('point_count', 0)}")
     print(f"Max users:  {data.get('max_users', 1)}")
     print(f"Max graphs: {data.get('max_graphs', 1)}")
+    return 0
+
+
+def _cmd_session(args) -> int:
+    """Manage Tortoise Cloud sessions."""
+    import json, os, sys
+    from pathlib import Path
+    from urllib.request import Request, urlopen
+    from urllib.error import URLError, HTTPError
+
+    # Read config
+    config_path = Path.cwd() / ".tortoise"
+    if not config_path.exists():
+        print("No .tortoise config found. Run 'tortoise init --api-key <key>' first.", file=sys.stderr)
+        return 1
+
+    try:
+        config = json.loads(config_path.read_text())
+    except json.JSONDecodeError:
+        print(f"Invalid .tortoise config at {config_path}", file=sys.stderr)
+        return 1
+
+    api_key = config.get("api_key")
+    api_url = config.get("api_url") or os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co")
+    if not api_key:
+        print("No api_key in .tortoise config.", file=sys.stderr)
+        return 1
+
+    if args.session_cmd == "capture":
+        return _cmd_session_capture(args, api_key, api_url)
+    elif args.session_cmd == "list":
+        return _cmd_session_list(api_key, api_url)
+    elif args.session_cmd == "view":
+        return _cmd_session_view(args, api_key, api_url)
+    else:
+        print("Unknown session command. Try capture, list, or view.", file=sys.stderr)
+        return 1
+
+
+def _parse_transcript(text: str) -> list:
+    """Parse a transcript file into conversation turns.
+
+    Handles common speaker prefixes: User:, Human:, Me:, Assistant:, AI:, You:, System:
+    """
+    turns = []
+    current_role = None
+    current_lines = []
+
+    for line in text.split('\n'):
+        stripped = line.strip()
+        lower = stripped.lower()
+        if any(lower.startswith(p) for p in ('user:', 'human:', 'me:')):
+            if current_role is not None and current_lines:
+                turns.append({"role": current_role, "content": '\n'.join(current_lines).strip()})
+                current_lines = []
+            colon = stripped.index(':')
+            current_role = 'user'
+            content = stripped[colon + 1:].strip()
+            if content:
+                current_lines.append(content)
+        elif any(lower.startswith(p) for p in ('assistant:', 'ai:', 'you:')):
+            if current_role is not None and current_lines:
+                turns.append({"role": current_role, "content": '\n'.join(current_lines).strip()})
+                current_lines = []
+            colon = stripped.index(':')
+            current_role = 'assistant'
+            content = stripped[colon + 1:].strip()
+            if content:
+                current_lines.append(content)
+        elif lower.startswith('system:'):
+            if current_role is not None and current_lines:
+                turns.append({"role": current_role, "content": '\n'.join(current_lines).strip()})
+                current_lines = []
+            colon = stripped.index(':')
+            current_role = 'system'
+            content = stripped[colon + 1:].strip()
+            if content:
+                current_lines.append(content)
+        elif stripped:
+            if current_role is not None:
+                current_lines.append(stripped)
+
+    if current_role is not None and current_lines:
+        turns.append({"role": current_role, "content": '\n'.join(current_lines).strip()})
+
+    return turns
+
+
+def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
+    """Read transcript, parse into turns, POST to /v1/sessions."""
+    import json as _json, sys as _sys
+    from pathlib import Path
+    from urllib.request import Request, urlopen
+    from urllib.error import URLError, HTTPError
+
+    transcript_path = Path(args.file)
+    if not transcript_path.exists():
+        print(f"Transcript file not found: {args.file}", file=_sys.stderr)
+        return 1
+
+    text = transcript_path.read_text(encoding="utf-8")
+    turns = _parse_transcript(text)
+
+    if not turns:
+        print("No conversation turns found in transcript.", file=_sys.stderr)
+        return 1
+
+    payload = {
+        "source": transcript_path.stem,
+        "turns": turns,
+    }
+
+    try:
+        data = _json.dumps(payload).encode("utf-8")
+        req = Request(
+            f"{api_url}/v1/sessions",
+            data=data,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        with urlopen(req, timeout=30) as resp:
+            result = _json.loads(resp.read())
+    except HTTPError as e:
+        body = e.read().decode() if e.fp else ""
+        print(f"API error ({e.code}): {body}", file=_sys.stderr)
+        return 1
+    except URLError as e:
+        print(f"Cannot reach API at {api_url}: {e.reason}", file=_sys.stderr)
+        return 1
+
+    session_id = result.get("session_id", result.get("id", "unknown"))
+    print(f"Captured session: {session_id}")
+    print(f"  Turns: {len(turns)}")
+    print(f"  Source: {transcript_path.stem}")
+    return 0
+
+
+def _cmd_session_list(api_key: str, api_url: str) -> int:
+    """GET /v1/sessions — list all sessions."""
+    import json as _json, sys as _sys
+    from urllib.request import Request, urlopen
+    from urllib.error import URLError, HTTPError
+
+    try:
+        req = Request(
+            f"{api_url}/v1/sessions",
+            headers={"Authorization": f"Bearer {api_key}"},
+        )
+        with urlopen(req, timeout=10) as resp:
+            data = _json.loads(resp.read())
+    except HTTPError as e:
+        body = e.read().decode() if e.fp else ""
+        print(f"API error ({e.code}): {body}", file=_sys.stderr)
+        return 1
+    except URLError as e:
+        print(f"Cannot reach API at {api_url}: {e.reason}", file=_sys.stderr)
+        return 1
+
+    sessions = data if isinstance(data, list) else data.get("sessions", [])
+    if not sessions:
+        print("No sessions found.")
+        return 0
+
+    print(f"{'ID':<36} {'Turns':<6} {'Created'}")
+    print("-" * 60)
+    for s in sessions:
+        sid = s.get("id", s.get("session_id", "?"))
+        turns = s.get("turns", s.get("turn_count", "?"))
+        created = s.get("created_at", s.get("created", ""))[:19]
+        print(f"{sid:<36} {str(turns):<6} {created}")
+    return 0
+
+
+def _cmd_session_view(args, api_key: str, api_url: str) -> int:
+    """GET /v1/sessions/<id> — view session details."""
+    import json as _json, sys as _sys
+    from urllib.request import Request, urlopen
+    from urllib.error import URLError, HTTPError
+
+    session_id = args.id
+    try:
+        req = Request(
+            f"{api_url}/v1/sessions/{session_id}",
+            headers={"Authorization": f"Bearer {api_key}"},
+        )
+        with urlopen(req, timeout=10) as resp:
+            data = _json.loads(resp.read())
+    except HTTPError as e:
+        body = e.read().decode() if e.fp else ""
+        print(f"API error ({e.code}): {body}", file=_sys.stderr)
+        return 1
+    except URLError as e:
+        print(f"Cannot reach API at {api_url}: {e.reason}", file=_sys.stderr)
+        return 1
+
+    print(f"Session: {session_id}")
+    print(f"Created: {data.get('created_at', data.get('created', '?'))}")
+    turns = data.get("turns", [])
+    print(f"Turns:   {len(turns)}")
+    print()
+    for i, t in enumerate(turns):
+        role = t.get("role", "?").upper()
+        content = t.get("content", "")
+        if len(content) > 200:
+            content = content[:200] + "..."
+        print(f"[{i + 1}] {role}: {content}")
     return 0
 
 
@@ -1106,7 +1320,7 @@ def main(argv: list[str] | None = None) -> int:
     setup.add_argument("--output", default=None, help="Save config to file instead of stdout")
     doctor = sp.add_parser("doctor", help="Health check — verify Tortoise setup")
     onboard = sp.add_parser("onboard", help="Guided onboarding: init → index → demo → doctor")
-    onboard.add_argument("--path", required=True, help="Path for embedded mode")
+    onboard.add_argument("--path", default=None, help="Path for embedded mode")
     hs = sp.add_parser("health-server", help="Start standalone /health HTTP server")
     hs.add_argument("--port", type=int, default=9090, help="HTTP port (default: 9090)")
     hs.add_argument("--bind", default="127.0.0.1", help="Bind address (default: 127.0.0.1)")
@@ -1122,6 +1336,14 @@ def main(argv: list[str] | None = None) -> int:
     ig.add_argument("--db", required=True, help="Docker URI or file path for target database")
     ig.add_argument("--branch", default="main", help="Git branch to index")
     ig.add_argument("--background", action="store_true", help="Run in background")
+    # tortoise session <subcommand>
+    session = sp.add_parser("session", help="Manage Tortoise Cloud sessions")
+    session_sp = session.add_subparsers(dest="session_cmd")
+    session_capture = session_sp.add_parser("capture", help="Capture a session from a transcript file")
+    session_capture.add_argument("--file", required=True, help="Path to transcript file")
+    session_list = session_sp.add_parser("list", help="List all sessions")
+    session_view = session_sp.add_parser("view", help="View a specific session")
+    session_view.add_argument("id", help="Session ID")
     try:
         args = p.parse_args(argv)
     except (argparse.ArgumentError, SystemExit) as e:
@@ -1196,6 +1418,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_team_info(args)
         team.print_help()
         return 1
+    elif args.cmd == "session":
+        return _cmd_session(args)
     elif args.cmd == "index":
         if args.index_cmd == "github":
             return _cmd_index_github(args)
