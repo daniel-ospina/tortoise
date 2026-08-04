@@ -466,15 +466,7 @@ def tortoise_list_relations() -> list[dict]:
     Returns [{"pack": ..., "predicate": ..., "fromKind": ..., "toKind": ..., "mechanism": ...}].
     Pack relations describe valid edge types between entity kinds — use for schema discovery.
     """
-    try:
-        from tortoise.pack_registry import PackRegistry
-        from pathlib import Path
-        packs_dir = Path(__file__).resolve().parent.parent / "packs"
-        registry = PackRegistry(packs_dir)
-        registry.load_all()
-        return _safe(lambda: registry.list_relations())
-    except Exception as e:
-        return {"error": str(e)}
+    return _safe(sdk.list_relations)
 
 
 @mcp.tool()

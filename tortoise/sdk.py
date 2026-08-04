@@ -13,6 +13,7 @@ from .domain_loader import known_kinds, register_kind
 from .ids import ulid
 from . import monitoring
 from .projection import FalkorProjection
+import threading
 
 # P0 Group 3: register custom kinds for diary + checkpoint
 register_kind("diary")
@@ -32,17 +33,20 @@ def _content_hash(text: str) -> str:
 
 # Module-level cached registry for kind expansion
 _registry_cache: "PackRegistry | None" = None
+_registry_lock = threading.Lock()
 
 
 def _get_kind_expander():
     """Return cached PackRegistry with pre-computed expansion table."""
     global _registry_cache
     if _registry_cache is None:
-        from .pack_registry import PackRegistry
-        from pathlib import Path as _Path
-        packs_dir = _Path(__file__).resolve().parent.parent / "packs"
-        _registry_cache = PackRegistry(packs_dir)
-        _registry_cache.load_all()
+        with _registry_lock:
+            if _registry_cache is None:
+                from .pack_registry import PackRegistry
+                from pathlib import Path as _Path
+                packs_dir = _Path(__file__).resolve().parent.parent / "packs"
+                _registry_cache = PackRegistry(packs_dir)
+                _registry_cache.load_all()
     return _registry_cache
 
 
@@ -244,12 +248,13 @@ class TortoiseSDK:
     # ── Operators ─────────────────────────────────────────────────
 
     def create_operator(self, op_type: str, source_id: str, target_ids: list[str],
-                        label: str | None = None) -> dict:
+                        label: str | None = None, context: str | None = None) -> dict:
         """Create an operator Point with optional semantic label.
 
         Semantic-epistemic edge model (#7801):
           - op_type: IMPL or NAND (epistemic mechanism)
           - label: domain verb — "addresses", "hasPart", "opposes" (semantic layer)
+          - context: namespace context stored on the operator
           - Operator carries the label; IMPL/NAND edges carry confidence via EP.
         """
         if op_type not in ("IMPL", "NAND", "composedOf", "decomposesInto", "contains", "wraps"):
@@ -259,12 +264,29 @@ class TortoiseSDK:
         pid = ulid()
         inputs = [source_id] + list(target_ids)
         proj = self._get_proj()
-        label_clause = ", label:$label" if label else ""
+
+        # Validate all source/target Points exist (fail loudly, not silently)
+        existing = proj.g.query(
+            "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id",
+            params={"ids": inputs},
+        ).result_set
+        existing_ids = {row[0] for row in existing}
+        missing = [i for i in inputs if i not in existing_ids]
+        if missing:
+            raise ValueError(f"Cannot create operator: Points {missing} do not exist")
+
+        # Build operator node with label/context properties
+        extra_props = []
         params = {"id": pid, "op": op_type}
         if label:
+            extra_props.append("label:$label")
             params["label"] = label
+        if context:
+            extra_props.append("context:$context")
+            params["context"] = context
+        props_clause = ", " + ", ".join(extra_props) if extra_props else ""
         proj.g.query(
-            f"CREATE (o:Point {{id:$id, is_operator:true, op_type:$op{label_clause}}})",
+            f"CREATE (o:Point {{id:$id, is_operator:true, op_type:$op{props_clause}}})",
             params=params,
         )
         # Ontology v2.1: map part/whole ops to hasPart, remove INPUT edges
@@ -275,6 +297,11 @@ class TortoiseSDK:
                 f"CREATE (o)-[:{edge_type} {{idx:$i}}]->(s)",
                 params={"oid": pid, "sid": inp_id, "i": i},
             )
+        # Draft → live lifecycle (#131): source point goes live when first edge created
+        proj.g.query(
+            "MATCH (s:Point {id:$sid}) SET s.status = 'live'",
+            params={"sid": source_id},
+        )
         return self.get_point(pid)
 
     def annotate_operator(self, id: str, bias: float, precision: float,
@@ -1217,8 +1244,9 @@ class TortoiseSDK:
         results = results[:limit]
 
         # Hybrid fallback if no string matches (Phase 0, #7748)
+        # kind_filter filters by CONTEXT (namespace), not pointKind — preserve semantics
         if not results:
-            fts_results = self.tortoise_fts_query(q, kind=kind_filter, limit=limit)
+            fts_results = self.tortoise_fts_query(q, context=kind_filter, limit=limit)
             results = [{"id": r["id"], "name": r.get("content", ""), "kind": r.get("point_kind", ""),
                         "confidence": round(r.get("scores", {}).get("rrf", 0.0) * 0.5, 4)}
                        for r in fts_results]
@@ -1328,9 +1356,11 @@ class TortoiseSDK:
 
         # 3. Run retrieval with degradation
         is_embedded = getattr(proj, '_is_embedded', True)
+        # Full-scan mode: no truncation — return ALL Points in context (#7811 completeness)
+        str_limit = limit * 2 if not is_full_scan else 100000
         raw_results = degradation_chain(
             graph, query, kind, context, query_vec, strategies,
-            entity_type=entity_type, limit=limit * 2,
+            entity_type=entity_type, limit=str_limit,
             is_embedded=is_embedded,
             expanded_kinds=expanded_kinds,
         )
