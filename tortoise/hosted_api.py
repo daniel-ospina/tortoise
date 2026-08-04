@@ -431,9 +431,9 @@ async def create_demo_graph(request: Request):
     proj = sdk._get_proj()
     now = datetime.now(timezone.utc).isoformat()
 
-    # Idempotency: skip if demo already seeded for this team
+    # Idempotency: sentinel written last — skip if already fully seeded
     existing = proj.g.query(
-        "MATCH (p:Point {id: 'sem_welcome'}) RETURN p.id"
+        "MATCH (p:Point {id: '_demo_sentinel'}) RETURN p.id"
     ).result_set
     if existing:
         return {"status": "already_seeded", "team_id": team_id}
@@ -455,22 +455,24 @@ async def create_demo_graph(request: Request):
     ]
     for pid, kind, content, tags in semantic_points:
         proj.g.query(
-            "CREATE (p:Point {id:$id, content:$c, pointKind:$k, is_operator:false, "
-            "status:'live', createdAt:$now, updatedAt:$now})",
+            "MERGE (p:Point {id:$id}) "
+            "SET p.content=$c, p.pointKind=$k, p.is_operator=false, "
+            "p.status='live', p.createdAt=$now, p.updatedAt=$now",
             params={"id": pid, "c": content, "k": kind, "now": now},
         )
         for tag in tags:
             proj.g.query(
                 "MATCH (p:Point {id:$pid}) "
                 "MERGE (t:Tag {name:$tag}) "
-                "CREATE (p)-[:TAGGED]->(t)",
+                "MERGE (p)-[:TAGGED]->(t)",
                 params={"pid": pid, "tag": tag},
             )
 
     # ── Episodic Layer — session events ──────────────────────────
     session_id = f"session_demo_{team_id[:8]}"
     proj.g.query(
-        "CREATE (s:Session {id:$sid, created_at:$now, turn_count:3})",
+        "MERGE (s:Session {id:$sid}) "
+        "SET s.created_at=$now, s.turn_count=3",
         params={"sid": session_id, "now": now},
     )
     episodic_turns = [
@@ -481,12 +483,14 @@ async def create_demo_graph(request: Request):
     ]
     for pid, content in episodic_turns:
         proj.g.query(
-            "CREATE (t:Point {id:$id, content:$c, pointKind:'event', is_operator:false, "
-            "status:'live', createdAt:$now, updatedAt:$now})",
+            "MERGE (t:Point {id:$id}) "
+            "SET t.content=$c, t.pointKind='event', t.is_operator=false, "
+            "t.status='live', t.createdAt=$now, t.updatedAt=$now",
             params={"id": pid, "c": content, "now": now},
         )
         proj.g.query(
-            "MATCH (s:Session {id:$sid}), (t:Point {id:$pid}) CREATE (s)-[:CONTAINS]->(t)",
+            "MATCH (s:Session {id:$sid}), (t:Point {id:$pid}) "
+            "MERGE (s)-[:CONTAINS]->(t)",
             params={"sid": session_id, "pid": pid},
         )
 
@@ -507,15 +511,16 @@ async def create_demo_graph(request: Request):
     ]
     for pid, kind, content, confidence, tags in epistemic_points:
         proj.g.query(
-            "CREATE (p:Point {id:$id, content:$c, pointKind:$k, is_operator:false, "
-            "status:'live', confidence:$conf, createdAt:$now, updatedAt:$now})",
+            "MERGE (p:Point {id:$id}) "
+            "SET p.content=$c, p.pointKind=$k, p.is_operator=false, "
+            "p.status='live', p.confidence=$conf, p.createdAt=$now, p.updatedAt=$now",
             params={"id": pid, "c": content, "k": kind, "conf": confidence, "now": now},
         )
         for tag in tags:
             proj.g.query(
                 "MATCH (p:Point {id:$pid}) "
                 "MERGE (t:Tag {name:$tag}) "
-                "CREATE (p)-[:TAGGED]->(t)",
+                "MERGE (p)-[:TAGGED]->(t)",
                 params={"pid": pid, "tag": tag},
             )
 
@@ -536,15 +541,16 @@ async def create_demo_graph(request: Request):
     ]
     for pid, kind, content, tags in procedural_points:
         proj.g.query(
-            "CREATE (p:Point {id:$id, content:$c, pointKind:$k, is_operator:false, "
-            "status:'live', createdAt:$now, updatedAt:$now})",
+            "MERGE (p:Point {id:$id}) "
+            "SET p.content=$c, p.pointKind=$k, p.is_operator=false, "
+            "p.status='live', p.createdAt=$now, p.updatedAt=$now",
             params={"id": pid, "c": content, "k": kind, "now": now},
         )
         for tag in tags:
             proj.g.query(
                 "MATCH (p:Point {id:$pid}) "
                 "MERGE (t:Tag {name:$tag}) "
-                "CREATE (p)-[:TAGGED]->(t)",
+                "MERGE (p)-[:TAGGED]->(t)",
                 params={"pid": pid, "tag": tag},
             )
 
@@ -552,12 +558,20 @@ async def create_demo_graph(request: Request):
     # Link epistemic claim to supporting semantic fact
     proj.g.query(
         "MATCH (c:Point {id:'epis_claim1'}), (f:Point {id:'sem_fact_layers'}) "
-        "CREATE (c)-[:SUPPORTS]->(f)"
+        "MERGE (c)-[:SUPPORTS]->(f)"
     )
     # Link workflow to epistemic claim
     proj.g.query(
         "MATCH (w:Point {id:'proc_wf1'}), (c:Point {id:'epis_claim1'}) "
-        "CREATE (w)-[:INFORMED_BY]->(c)"
+        "MERGE (w)-[:INFORMED_BY]->(c)"
+    )
+
+    # ── Sentinel — written last so partial failure allows retry ──
+    proj.g.query(
+        "CREATE (p:Point {id:'_demo_sentinel', content:'demo-sentinel', "
+        "pointKind:'system', is_operator:false, status:'live', "
+        "createdAt:$now, updatedAt:$now})",
+        params={"now": now},
     )
 
     total_points = (

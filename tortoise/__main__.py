@@ -213,8 +213,28 @@ def _cmd_reconcile(args):
 
 def _cmd_init(args):
     """Auto-detect FalkorDB and create default graph — onboarding."""
+    import json as _json
     import os, tempfile
     from pathlib import Path
+
+    # ── Cloud mode (--api-key) ──────────────────────────────────
+    if getattr(args, 'api_key', None):
+        config_path = Path.cwd() / ".tortoise"
+        if config_path.exists():
+            existing = _json.loads(config_path.read_text())
+            if existing.get("api_key") == args.api_key:
+                print("Already connected to Tortoise Cloud with this API key.")
+                return 0
+            print(f"⚠️  Existing .tortoise config found — overwriting.")
+        config = {
+            "api_key": args.api_key,
+            "api_url": "https://api.premiselabs.co",
+        }
+        config_path.write_text(_json.dumps(config, indent=2) + "\n")
+        print("Connected to Tortoise Cloud (team will be resolved from API key)")
+        print(f"Config saved to {config_path}")
+        return 0
+
     print("Tortoise init — auto-detecting FalkorDB…")
 
     # 1. Try Docker FalkorDB
@@ -251,7 +271,7 @@ def _cmd_init(args):
 
     # 2. Fallback: embedded mode (SQLite-backed)
     if not graph_ready:
-        db_path = args.path
+        db_path = args.path or str(Path.home() / ".tortoise" / "embedded.db")
         try:
             from redislite.falkordb_client import FalkorDB
             db = FalkorDB(db_path)
@@ -332,6 +352,58 @@ def _cmd_init(args):
                         start_new_session=True,
                     )
                     print("Indexing in background. Tortoise is ready to use immediately.")
+    return 0
+
+
+def _cmd_team_info(args) -> int:
+    """Show team info from Tortoise Cloud API."""
+    import json, sys
+    from pathlib import Path
+    from urllib.request import Request, urlopen
+    from urllib.error import URLError, HTTPError
+
+    # Read config
+    config_path = Path.cwd() / ".tortoise"
+    if not config_path.exists():
+        print("No .tortoise config found. Run 'tortoise init --api-key <key>' first.", file=sys.stderr)
+        return 1
+
+    try:
+        config = json.loads(config_path.read_text())
+    except json.JSONDecodeError:
+        print(f"Invalid .tortoise config at {config_path}", file=sys.stderr)
+        return 1
+
+    api_key = config.get("api_key")
+    api_url = config.get("api_url", "https://api.premiselabs.co")
+    if not api_key:
+        print("No api_key in .tortoise config.", file=sys.stderr)
+        return 1
+
+    # Call API
+    try:
+        req = Request(
+            f"{api_url}/v1/team",
+            headers={"Authorization": f"Bearer {api_key}"},
+        )
+        with urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+    except (json.JSONDecodeError, ValueError) as e:
+        print(f"Invalid response from API: {e}", file=sys.stderr)
+        return 1
+    except HTTPError as e:
+        body = e.read().decode() if e.fp else ""
+        print(f"API error ({e.code}): {body}", file=sys.stderr)
+        return 1
+    except URLError as e:
+        print(f"Cannot reach API at {api_url}: {e.reason}", file=sys.stderr)
+        return 1
+
+    print(f"Team:       {data.get('team_id', '?')}")
+    print(f"Tier:       {data.get('tier', 'free')}")
+    print(f"Points:     {data.get('point_count', 0)}")
+    print(f"Max users:  {data.get('max_users', 1)}")
+    print(f"Max graphs: {data.get('max_graphs', 1)}")
     return 0
 
 
@@ -1017,8 +1089,9 @@ def main(argv: list[str] | None = None) -> int:
     mc.add_argument("--db", default=None, help="FalkorDB docker:// URI for projection")
     sr = sp.add_parser("serve", help="Start Tortoise MCP server (stdio)")
     init = sp.add_parser("init", help="Auto-detect FalkorDB and create default graph")
-    init.add_argument("--path", required=True, help="Path for embedded mode (opt-in)")
+    init.add_argument("--path", default=None, help="Path for embedded mode (opt-in)")
     init.add_argument("--yes", "-y", action="store_true", help="Skip prompts, auto-index repo")
+    init.add_argument("--api-key", dest="api_key", default=None, help="Connect to Tortoise Cloud instead of local Docker")
     setup = sp.add_parser("setup", help="Configure memory_filter per role (interactive)")
     setup.add_argument("--role", default=None, help="Role name (non-interactive, outputs YAML)")
     setup.add_argument("--team", default=None, help="Team name (used with --role)")
@@ -1029,6 +1102,10 @@ def main(argv: list[str] | None = None) -> int:
     hs = sp.add_parser("health-server", help="Start standalone /health HTTP server")
     hs.add_argument("--port", type=int, default=9090, help="HTTP port (default: 9090)")
     hs.add_argument("--bind", default="127.0.0.1", help="Bind address (default: 127.0.0.1)")
+    # tortoise team <subcommand>
+    team = sp.add_parser("team", help="Team management (Tortoise Cloud)")
+    team_sp = team.add_subparsers(dest="team_cmd")
+    team_info_p = team_sp.add_parser("info", help="Show team info and usage")
     # tortoise index github <url>
     idx = sp.add_parser("index", help="Index content into the graph")
     idx_sp = idx.add_subparsers(dest="index_cmd")
@@ -1106,6 +1183,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Health server on http://{args.bind}:{args.port}/health")
         serve_health(args.port, bind=args.bind)
         return 0
+    elif args.cmd == "team":
+        if args.team_cmd == "info":
+            return _cmd_team_info(args)
+        team.print_help()
+        return 1
     elif args.cmd == "index":
         if args.index_cmd == "github":
             return _cmd_index_github(args)
