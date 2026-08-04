@@ -224,7 +224,9 @@ def tortoise_search(query: str | None = None, kind: str | None = None,
                     threshold: float = 0.0, limit: int = 10,
                     min_confidence: float = 0.0,
                     order_by: str = "relevance",
-                    entity_type: str = "point") -> list[dict]:
+                    entity_type: str = "point",
+                    relationship_filter: str | None = None,
+                    traversal_path: str | None = None) -> list[dict]:
     """Hybrid search with RRF fusion + EP annotation.
 
     entity_type: 'point' (default), 'event', or 'subject'.
@@ -233,11 +235,20 @@ def tortoise_search(query: str | None = None, kind: str | None = None,
 
     Point results annotated with EP breakdown (confidence_mean + evidence + contention).
     min_confidence defaults to 0.0 (no filter).
+
+    relationship_filter: 'predicate:target_id' — only return points connected to
+        target_id via an operator with label=predicate.
+        Example: relationship_filter="addresses:customerSegment-1"
+    traversal_path: 'FromKind→ToKind' — only return points that participate in a
+        pack-declared relation chain. Resolved via pack registry.
+        Example: traversal_path="Product→Feature"
     """
     return _safe(sdk.tortoise_fts_query, query, kind=kind, context=context,
                  threshold=threshold, limit=limit,
                  entity_type=entity_type,
-                 min_confidence=min_confidence, order_by=order_by)
+                 min_confidence=min_confidence, order_by=order_by,
+                 relationship_filter=relationship_filter,
+                 traversal_path=traversal_path)
 
 
 # ── EP Belief Propagation (#6908) ────────────────────────────────

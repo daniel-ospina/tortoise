@@ -423,6 +423,73 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
 
 # ── TF-IDF fallback (in-memory, from embeddings.py) ─────────────────────────
 
+# ── Relationship / Traversal filters (#7846) ──────────────────────────────────
+
+def filter_by_relationship(
+    graph,
+    point_ids: list[str],
+    predicate: str,
+    target_id: str,
+    entity_type: str = "point",
+    id_field: str = "id",
+) -> list[str]:
+    """Post-filter: keep only points connected to target_id via operator with label=predicate.
+
+    Operators are middle entities — Product→(op:contains)→Feature = 2 graph hops.
+    Traversal: point <-[IMPL]-(op {label:predicate})-[IMPL]-> target.
+    Returns filtered list of point IDs (subset of input).
+    """
+    if not point_ids or not predicate or not target_id:
+        return []
+    try:
+        label = entity_type.capitalize()
+        cypher = (
+            f"MATCH (n:{label}) WHERE n.{id_field} IN $ids "
+            f"MATCH (n)<-[r1:hasPart|IMPL|NAND]-(op:Point {{is_operator:true, label:$pred}})"
+            f"-[r2:hasPart|IMPL|NAND]->(t:{label} {{{id_field}: $tid}}) "
+            f"RETURN DISTINCT n.{id_field}"
+        )
+        rows = graph.query(
+            cypher,
+            params={"ids": point_ids, "pred": predicate, "tid": target_id},
+        ).result_set
+        return [row[0] for row in rows]
+    except Exception:
+        logger.warning("Relationship filter failed — returning empty", exc_info=True)
+        return []
+
+
+def filter_by_traversal_predicate(
+    graph,
+    point_ids: list[str],
+    predicate: str,
+    entity_type: str = "point",
+    id_field: str = "id",
+) -> list[str]:
+    """Post-filter: keep only points that participate in ANY operator with label=predicate.
+
+    Points are matched if they are either the source or target of an operator
+    carrying the given predicate label. Returns filtered list of point IDs.
+    """
+    if not point_ids or not predicate:
+        return []
+    try:
+        label = entity_type.capitalize()
+        cypher = (
+            f"MATCH (n:{label}) WHERE n.{id_field} IN $ids "
+            f"MATCH (n)<-[r:hasPart|IMPL|NAND]-(op:Point {{is_operator:true, label:$pred}}) "
+            f"RETURN DISTINCT n.{id_field}"
+        )
+        rows = graph.query(
+            cypher,
+            params={"ids": point_ids, "pred": predicate},
+        ).result_set
+        return [row[0] for row in rows]
+    except Exception:
+        logger.warning("Traversal predicate filter failed — returning empty", exc_info=True)
+        return []
+
+
 def fallback_tfidf(query: str, points: list[dict], limit: int = 10) -> list[dict]:
     """Last-resort TF-IDF fallback when all FalkorDB strategies fail.
 

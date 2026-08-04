@@ -1304,6 +1304,8 @@ class TortoiseSDK:
         order_by: str = "relevance",
         limit: int = 10,
         threshold: float = 0.0,
+        relationship_filter: str | None = None,
+        traversal_path: str | None = None,
     ) -> list[dict]:
         """Hybrid search with RRF fusion + EP annotation.
 
@@ -1314,10 +1316,16 @@ class TortoiseSDK:
         Point results annotated with EP breakdown (confidence_mean + evidence + contention).
         Non-Point entities skip EP annotation.
         min_confidence defaults to 0.0 (no filter).
+
+        relationship_filter: 'predicate:target_id' — only return points connected to
+            target_id via an operator with label=predicate (e.g., 'addresses:customerSegment-1').
+        traversal_path: 'FromKind→ToKind' — only return points that participate in a
+            pack-declared relation chain (e.g., 'Product→Feature'). Resolved via pack registry.
         """
         from .search_engine import (
             classify_query, degradation_chain, rrf_fusion,
             annotate_ep_batch, fallback_tfidf, SearchResult, SearchScores,
+            filter_by_relationship, filter_by_traversal_predicate,
         )
 
         if entity_type not in ("point", "event", "subject"):
@@ -1412,6 +1420,39 @@ class TortoiseSDK:
             except Exception:
                 kind_ids = set(result_ids)  # Pass-through on error
             result_ids = [pid for pid in result_ids if pid in kind_ids]
+
+        # 5b. Apply relationship_filter (predicate:target_id format)
+        if relationship_filter and result_ids:
+            parts = relationship_filter.split(":", 1)
+            if len(parts) == 2:
+                pred, tid = parts[0].strip(), parts[1].strip()
+                if pred and tid:
+                    result_ids = filter_by_relationship(
+                        graph, result_ids, pred, tid,
+                        entity_type=entity_type, id_field=id_field,
+                    )
+                else:
+                    logger.warning("Invalid relationship_filter format: %s", relationship_filter)
+            else:
+                logger.warning(
+                    "relationship_filter must be 'predicate:target_id', got: %s",
+                    relationship_filter,
+                )
+
+        # 5c. Apply traversal_path (e.g., 'Product→Feature') — resolve via pack registry
+        if traversal_path and result_ids:
+            resolved = self._resolve_traversal_path(traversal_path)
+            if resolved:
+                pred = resolved["predicate"]
+                result_ids = filter_by_traversal_predicate(
+                    graph, result_ids, pred,
+                    entity_type=entity_type, id_field=id_field,
+                )
+            else:
+                logger.warning(
+                    "traversal_path %r could not be resolved to a pack relation",
+                    traversal_path,
+                )
 
         # Truncate AFTER filtering
         result_ids = result_ids[:limit]
@@ -1590,6 +1631,44 @@ class TortoiseSDK:
         Returns [kind] if no packs loaded or kind is unknown.
         """
         return _get_kind_expander().expand_kind(kind)
+
+    def _resolve_traversal_path(self, path: str) -> dict | None:
+        """Resolve 'Product→Feature' to {predicate, fromKind, toKind} from pack registry.
+
+        Matches against pack-declared relations — fromKind/toKind suffixes
+        (e.g., 'product-strategy:product' matches 'Product' via kind name 'product').
+        Returns None if no matching relation found.
+        """
+        segments = [s.strip() for s in path.split("→")]
+        if len(segments) < 2:
+            # Hint: user may have used ASCII '->' instead of Unicode '→'
+            if "->" in path:
+                logger.warning(
+                    "traversal_path uses ASCII '->' — use Unicode '→' instead "
+                    "(e.g., 'Product→Feature')"
+                )
+            return None
+
+        registry = _get_kind_expander()
+        relations = registry.list_relations()
+        if not relations:
+            return None
+
+        from_name, to_name = segments[0].strip(), segments[1].strip()
+
+        for rel in relations:
+            if "fromKind" not in rel or "toKind" not in rel:
+                continue
+            fk = rel["fromKind"]
+            tk = rel["toKind"]
+            # Extract kind name after the namespace prefix
+            fk_name = fk.split(":", 1)[-1] if ":" in fk else fk
+            tk_name = tk.split(":", 1)[-1] if ":" in tk else tk
+            # Match case-insensitively against path segments
+            if fk_name.lower() == from_name.lower() and tk_name.lower() == to_name.lower():
+                return {"predicate": rel["predicate"], "fromKind": fk, "toKind": tk}
+
+        return None
 
     @staticmethod
     def _validate_kind(kind: str) -> None:
