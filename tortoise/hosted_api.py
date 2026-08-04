@@ -8,6 +8,7 @@ See: docs/epics/2026-08-03-tortoise-hosted-platform/04-plan.md §5, §6.1
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
@@ -18,6 +19,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from tortoise.audit_events import AuditLogger
 from tortoise.auth import hash_api_key
 from tortoise.sdk import TortoiseSDK
 
@@ -81,8 +83,49 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(RateLimitMiddleware, max_per_minute=100)
 
+
+class HSTSMiddleware(BaseHTTPMiddleware):
+    """Add Strict-Transport-Security header to every response."""
+
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        response.headers["Strict-Transport-Security"] = (
+            "max-age=31536000; includeSubDomains"
+        )
+        return response
+
+app.add_middleware(HSTSMiddleware)
+
 # Internal auth key for Edge Function → API communication
 _INTERNAL_KEY = os.environ.get("FASTAPI_INTERNAL_KEY", "")
+
+
+# ── Audit Event Logger ───────────────────────────────────────────
+
+_audit_logger = AuditLogger(dsn=os.environ.get("TORTOISE_AUDIT_DSN"))
+
+
+async def _async_audit(
+    request: Request,
+    team_id: str,
+    operation: str,
+    *,
+    resource_type: str | None = None,
+    resource_id: str | None = None,
+) -> None:
+    """Async-safe audit event writer. Offloads sync psycopg2 to thread pool."""
+    ip = request.client.host if request.client else None
+    ua = request.headers.get("user-agent")
+    await asyncio.to_thread(
+        _audit_logger.append,
+        team_id=team_id,
+        actor_user_id=None,
+        operation=operation,
+        resource_type=resource_type,
+        resource_id=resource_id,
+        ip_address=ip,
+        user_agent=ua,
+    )
 
 
 def _check_internal(request: Request) -> None:
@@ -177,6 +220,12 @@ async def provision_tenant(request: Request):
         },
     )
 
+    # Log audit event
+    await _async_audit(
+        request, team_id, "tenant_provision",
+        resource_type="team", resource_id=team_id,
+    )
+
     return {"status": "provisioned", "team_id": team_id, "graph_name": graph_name}
 
 
@@ -190,14 +239,22 @@ def _ulid() -> str:
 async def health():
     return {"status": "ok"}
 
+
+@app.get("/health/security")
+async def health_security():
+    """Security posture endpoint — verifies pepper, hashing, and auth config."""
+    pepper_set = bool(os.environ.get("TORTOISE_SECRET_PEPPER"))
+    from tortoise.auth import is_dev_mode as _is_dev
+    return {
+        "pepper_configured": pepper_set,
+        "hashing": "pbkdf2_hmac_sha256" if pepper_set else "sha256",
+        "auth_dev_mode": _is_dev(),
+    }
+
 # ── Phase 1a: Core Endpoints ──────────────────────────────────────
 
 
 # ── Auth Dependency ────────────────────────────────────────────────
-
-from fastapi import Depends, HTTPException, Request
-from tortoise.auth import hash_api_key
-from tortoise.sdk import TortoiseSDK
 
 SKIP_AUTH = {"/health", "/docs", "/openapi.json"}
 
@@ -304,6 +361,12 @@ async def create_point(body: CreatePointRequest, team: dict = Depends(get_curren
         context=body.context,
         tags=body.tags,
     )
+    # Log audit event
+    await _async_audit(
+        request, team["team_id"], "point_create",
+        resource_type="point", resource_id=result.get("id"),
+    )
+
     return {
         "id": result["id"],
         "content": result["content"],
@@ -364,10 +427,16 @@ async def create_demo_graph(request: Request):
     if not team_id:
         raise HTTPException(status_code=400, detail="Missing team_id")
 
-    from datetime import datetime, timezone
     sdk = TortoiseSDK(namespace=team_id)
     proj = sdk._get_proj()
     now = datetime.now(timezone.utc).isoformat()
+
+    # Idempotency: skip if demo already seeded for this team
+    existing = proj.g.query(
+        "MATCH (p:Point {id: 'sem_welcome'}) RETURN p.id"
+    ).result_set
+    if existing:
+        return {"status": "already_seeded", "team_id": team_id}
 
     # ── Semantic Layer — facts and statements ────────────────────
     semantic_points = [
@@ -525,6 +594,12 @@ async def create_api_key(team: dict = Depends(get_current_team)):
         "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, key_prefix:$kp, created_by:$cb, created_at:$now})",
         params={"id": kid, "tid": team["team_id"], "kh": key_hash, "kp": key_prefix, "cb": team.get("key_id", "system"), "now": now},
     )
+    # Log audit event
+    await _async_audit(
+        request, team["team_id"], "api_key_create",
+        resource_type="api_key", resource_id=kid,
+    )
+
     return {
         "id": kid,
         "key": api_key,
@@ -638,6 +713,12 @@ async def capture_session(body: SessionRequest, team: dict = Depends(get_current
                 )
                 extracted.append({"id": pid, "kind": "statement", "text": text[:200]})
                 idx += 1
+
+    # Log audit event
+    await _async_audit(
+        request, team["team_id"], "session_capture",
+        resource_type="session", resource_id=session_id,
+    )
 
     return {"session_id": session_id, "turns": len(body.conversation), "extracted": len(extracted), "points": extracted}
 
