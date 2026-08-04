@@ -359,18 +359,21 @@ class FalkorProjection(
             # Embedded mode (redislite) uses brute-force vec.euclideanDistance instead.
             # HNSW requires RediSearch module, not bundled with redislite.
             if not getattr(self, '_is_embedded', False):
-                try:
-                    self.g.query(
-                        "CALL db.idx.vector.createNodeIndex('Point', 'embedding', 384, 'HNSW')"
-                    )
-                except Exception as e:
-                    msg = str(e).lower()
-                    if "already" in msg:
-                        pass
-                    else:
-                        import logging
-                        logging.getLogger(__name__).warning(
-                            "Failed to create vector index on Point.embedding: %s", e)
+                # Core entity types with embeddings (#7845): Point, Event, Subject, Document, Object.
+                # Action is skipped — procedural, not content-bearing.
+                for label in ("Point", "Event", "Subject", "Document", "Object"):
+                    try:
+                        self.g.query(
+                            f"CALL db.idx.vector.createNodeIndex('{label}', 'embedding', 384, 'HNSW')"
+                        )
+                    except Exception as e:
+                        msg = str(e).lower()
+                        if "already" in msg:
+                            pass
+                        else:
+                            import logging
+                            logging.getLogger(__name__).warning(
+                                "Failed to create vector index on %s.embedding: %s", label, e)
         else:
             import logging
             logging.getLogger(__name__).info(

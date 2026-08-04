@@ -133,7 +133,7 @@ def run_fts_query(
 
 def run_vector_query(
     graph, query_vec: list[float], limit: int = 20, timeout_ms: int = 500,
-    is_embedded: bool = True,
+    is_embedded: bool = True, entity_type: str = "point",
 ) -> list[tuple[str, float]]:
     """Run vector similarity search via FalkorDB vector index.
 
@@ -143,18 +143,23 @@ def run_vector_query(
     via CALL db.idx.vector.queryNodes. Falls back to brute-force
     vec.euclideanDistance if the index is unavailable (embedded mode,
     old FalkorDB, or index creation failed).
+
+    entity_type: 'point' (default), 'event', 'subject', 'document', 'object'.
     """
     if not query_vec:
         return []
+
+    label = entity_type.capitalize()  # point→Point, event→Event, etc.
+    id_field = "eventId" if entity_type == "event" else "id"
 
     # Docker/server mode → try index-accelerated vector search (#7777)
     if not is_embedded:
         try:
             start = time.monotonic()
             cypher = (
-                "CALL db.idx.vector.queryNodes('Point', 'embedding', $query_vec, $limit) "
+                f"CALL db.idx.vector.queryNodes('{label}', 'embedding', $query_vec, $limit) "
                 "YIELD node "
-                "RETURN node.id "
+                f"RETURN node.{id_field} "
                 "LIMIT $limit"
             )
             rows = graph.query(
@@ -164,15 +169,12 @@ def run_vector_query(
             if elapsed > timeout_ms:
                 logger.warning("Vector query exceeded timeout: %.0fms > %dms", elapsed, timeout_ms)
                 return []
-            # Index results are ranked by similarity; assign rank-based scores.
-            # RRF fusion uses rank not absolute scores; single-strategy mode
-            # gets reasonable descending ordering.
             total = len(rows)
             return [(row[0], 1.0 - (i / max(total, 1))) for i, row in enumerate(rows)]
         except Exception as e:
             msg = str(e).lower()
             if "index" in msg or "not found" in msg or "does not exist" in msg:
-                logger.info("Vector index not available — falling back to brute-force")
+                logger.info("Vector index not available for %s — falling back to brute-force", label)
             else:
                 logger.warning("Vector index query failed, falling back to brute-force: %s", e)
             # Fall through to brute-force below
@@ -181,11 +183,11 @@ def run_vector_query(
     try:
         start = time.monotonic()
         cypher = (
-            "MATCH (n:Point) "
+            f"MATCH (n:{label}) "
             "WHERE n.embedding IS NOT NULL "
             "WITH n, vec.euclideanDistance(n.embedding, $query_vec) AS distance "
             "WHERE distance IS NOT NULL "
-            "RETURN n.id, 1.0 / (1.0 + distance) AS score "
+            f"RETURN n.{id_field}, 1.0 / (1.0 + distance) AS score "
             "ORDER BY score DESC "
             "LIMIT $limit"
         )
@@ -200,11 +202,11 @@ def run_vector_query(
     except Exception as e:
         msg = str(e).lower()
         if "index" in msg or "not found" in msg or "does not exist" in msg:
-            logger.info("Vector index not available — skipping vector strategy")
+            logger.info("Vector index not available for %s — skipping vector strategy", label)
         elif "embedding" in msg and "null" in msg:
-            logger.info("No Points with embeddings — skipping vector strategy")
+            logger.info("No %s nodes with embeddings — skipping vector strategy", label)
         else:
-            logger.warning("Vector query failed: %s", e)
+            logger.warning("Vector query failed for %s: %s", label, e)
         return []
 
 
@@ -216,15 +218,16 @@ def run_structural_query(
     """Run structural/kind query via range indexes.
 
     entity_type: 'point' (filters on pointKind/context), 'event' (eventKind),
-                 'subject' (subjectKind).
+                 'subject' (subjectKind), 'document' (documentKind),
+                 'object' (objectKind).
     Returns matching entities with a score of 1.0 (exact match) or 0.5 (partial match).
-    Event entity_type returns eventId; Point/Subject return id.
+    Event entity_type returns eventId; all others return id.
 
     expanded_kinds: pack-expanded kind list for IN-clause filtering.
                    If provided, uses IN clause instead of single `= $kind`.
     """
     label = entity_type.capitalize()
-    kind_field = {"point": "pointKind", "event": "eventKind", "subject": "subjectKind"}[entity_type]
+    kind_field = {"point": "pointKind", "event": "eventKind", "subject": "subjectKind", "document": "documentKind", "object": "objectKind"}[entity_type]
     id_field = "eventId" if entity_type == "event" else "id"
     try:
         conditions = []
@@ -333,7 +336,8 @@ def degradation_chain(
 
         if strategies.get("vector") and query_vec:
             futures[executor.submit(
-                run_vector_query, graph, query_vec, limit=limit, is_embedded=is_embedded
+                run_vector_query, graph, query_vec, limit=limit, is_embedded=is_embedded,
+                entity_type=entity_type,
             )] = "vector"
 
         if strategies.get("structural"):
