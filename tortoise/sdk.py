@@ -432,20 +432,31 @@ class TortoiseSDK:
     # ── Chain Integrity ───────────────────────────────────────────
 
     def check_structure(self) -> list[dict]:
-        """Check Gate 0→4 chain integrity. Returns list of violation dicts."""
+        """Check Gate 0→4 chain integrity. Uses pack-aware kind expansion."""
         proj = self._get_proj()
         violations: list[dict] = []
 
+        # Resolve kinds via pack registry (handles namespace prefixes)
+        uc_kind = self._expand_kind("useCase")
+        jtbd_kind = self._expand_kind("jobToBeDone")
+        uj_kind = self._expand_kind("userJourney")
+        wf_kind = self._expand_kind("workflow")
+        req_kind = self._expand_kind("requirement")
+
+        # Build IN clauses
+        def kind_in(kinds):
+            return ", ".join(f"'{k}'" for k in kinds)
+
         # useCase without parent JTBD
         ucs = proj.g.query(
-            "MATCH (uc:Point {pointKind:'useCase'}) RETURN uc.id, uc.uc_id"
+            f"MATCH (uc:Point) WHERE uc.pointKind IN [{kind_in(uc_kind)}] RETURN uc.id, uc.uc_id"
         ).result_set
         for uc_id, uc_ref in ucs:
             parents = proj.g.query(
-                "MATCH (op:Point {is_operator:true, op_type:'composedOf'})"
-                "-[:hasPart]->(uc:Point {id:$id}), "
-                "(op)-[:hasPart]->(jtbd:Point {pointKind:'jobToBeDone'}) "
-                "RETURN jtbd.id",
+                f"MATCH (op:Point {{is_operator:true, op_type:'composedOf'}})"
+                f"-[:hasPart]->(uc:Point {{id:$id}}), "
+                f"(op)-[:hasPart]->(jtbd:Point) WHERE jtbd.pointKind IN [{kind_in(jtbd_kind)}] "
+                f"RETURN jtbd.id",
                 params={"id": uc_id},
             ).result_set
             if not parents:
@@ -457,14 +468,14 @@ class TortoiseSDK:
 
         # userJourney dangling UC refs
         for uj_id, covered in proj.g.query(
-            "MATCH (uj:Point {pointKind:'userJourney'}) RETURN uj.id, uj.covered_use_cases"
+            f"MATCH (uj:Point) WHERE uj.pointKind IN [{kind_in(uj_kind)}] RETURN uj.id, uj.covered_use_cases"
         ).result_set:
             if not covered:
                 continue
             for uc_ref in covered.split(","):
                 uc_ref = uc_ref.strip()
                 if not proj.g.query(
-                    "MATCH (uc:Point {pointKind:'useCase', uc_id:$ref}) RETURN count(uc) > 0",
+                    f"MATCH (uc:Point) WHERE uc.pointKind IN [{kind_in(uc_kind)}] AND uc.uc_id=$ref RETURN count(uc) > 0",
                     params={"ref": uc_ref},
                 ).result_set[0][0]:
                     violations.append({
@@ -475,14 +486,14 @@ class TortoiseSDK:
 
         # Workflow dangling JTBD refs
         for wf_id, enables in proj.g.query(
-            "MATCH (wf:Point {pointKind:'workflow'}) RETURN wf.id, wf.enables_jtbd"
+            f"MATCH (wf:Point) WHERE wf.pointKind IN [{kind_in(wf_kind)}] RETURN wf.id, wf.enables_jtbd"
         ).result_set:
             if not enables:
                 continue
             for jtbd_ref in enables.split(","):
                 jtbd_ref = jtbd_ref.strip()
                 if not proj.g.query(
-                    "MATCH (j:Point {pointKind:'jobToBeDone', jtbd_id:$ref}) RETURN count(j) > 0",
+                    f"MATCH (j:Point) WHERE j.pointKind IN [{kind_in(jtbd_kind)}] AND j.jtbd_id=$ref RETURN count(j) > 0",
                     params={"ref": jtbd_ref},
                 ).result_set[0][0]:
                     violations.append({
@@ -493,12 +504,12 @@ class TortoiseSDK:
 
         # Requirement dangling Workflow refs
         for req_id, wf_ref in proj.g.query(
-            "MATCH (req:Point {pointKind:'requirement'}) RETURN req.id, req.enabled_workflow"
+            f"MATCH (req:Point) WHERE req.pointKind IN [{kind_in(req_kind)}] RETURN req.id, req.enabled_workflow"
         ).result_set:
             if not wf_ref or wf_ref == "ALL":
                 continue
             if not proj.g.query(
-                "MATCH (w:Point {pointKind:'workflow', wf_id:$ref}) RETURN count(w) > 0",
+                f"MATCH (w:Point) WHERE w.pointKind IN [{kind_in(wf_kind)}] AND w.wf_id=$ref RETURN count(w) > 0",
                 params={"ref": wf_ref},
             ).result_set[0][0]:
                 violations.append({
