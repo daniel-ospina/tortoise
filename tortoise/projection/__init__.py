@@ -333,7 +333,9 @@ class FalkorProjection(
         if new_content:
             try:
                 from tortoise.embeddings import compute_embedding
-                params["embedding"] = compute_embedding(new_content)
+                emb = compute_embedding(new_content)
+                if emb is not None:
+                    params["embedding"] = emb
             except Exception:
                 pass
 

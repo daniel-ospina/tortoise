@@ -1328,7 +1328,7 @@ class TortoiseSDK:
 
         # 6. Build SearchResult objects, filter, and order
         results = []
-        for pid in result_ids[:limit]:
+        for pid in result_ids:
             # Fetch Point content
             try:
                 rows = graph.query(

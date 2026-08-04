@@ -81,7 +81,7 @@ def classify_query(
     - No text query → structural only (full-scan if context set, kind-filtered otherwise)
     - Text query present → all available strategies (FTS + vector + structural)
     """
-    if query is None:
+    if not query or not query.strip():
         return {"fts": False, "vector": False, "structural": True}
     return {"fts": True, "vector": True, "structural": True}
 
