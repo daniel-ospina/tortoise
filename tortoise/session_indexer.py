@@ -116,8 +116,12 @@ def _tfidf_keywords(content: str, top_n: int = 8) -> list[str]:
     return [t for t, _ in sorted(scores.items(), key=lambda x: -x[1])[:top_n]]
 
 
+# Cached FalkorDB connection for graph entity lookups
+_graph_db = None
+
 def _graph_entity_keywords(content: str) -> list[str]:
     """Find Object and Subject names from the graph mentioned in content."""
+    global _graph_db
     content_lower = content.lower()
     matches = []
     try:
@@ -125,13 +129,14 @@ def _graph_entity_keywords(content: str) -> list[str]:
         uri = _os.environ.get('TORTOISE_DB_URI', '')
         if not uri:
             return []
-        from falkordb import FalkorDB
-        from urllib.parse import urlparse
-        parsed = urlparse(uri)
-        host = parsed.hostname or 'localhost'
-        port = parsed.port or 16379
-        db = FalkorDB(host=host, port=port)
-        g = db.select_graph(parsed.path.lstrip('/') or 'tortoise')
+        if _graph_db is None:
+            from falkordb import FalkorDB
+            from urllib.parse import urlparse
+            parsed = urlparse(uri)
+            host = parsed.hostname or 'localhost'
+            port = parsed.port or 16379
+            _graph_db = FalkorDB(host=host, port=port)
+        g = _graph_db.select_graph('tortoise')
         rows = g.query('MATCH (n) WHERE (n:Object OR n:Subject) AND n.name IS NOT NULL RETURN DISTINCT n.name').result_set
         for row in rows:
             name = str(row[0])
@@ -215,7 +220,7 @@ def extract_keywords_from_frontmatter(content: str) -> dict:
             "phase": "Session",
             "topic": summary[:100] or "Untitled",
             "decisions": [],
-            "message_range": [1, _count_messages(content)]
+            "message_range": [1, max(1, _count_messages(content))]
         }]
     
     # Critical decisions from frontmatter
@@ -301,7 +306,17 @@ def extract_metadata_with_llm(content: str, model: str = "gpt-5-mini") -> dict |
                 text = text[:-3]
         text = text.strip()
         
-        return json.loads(text)
+        result = json.loads(text)
+        # Validate types to prevent downstream crashes
+        if not isinstance(result.get("narrative_arc"), list):
+            result["narrative_arc"] = []
+        if not isinstance(result.get("keywords"), list):
+            result["keywords"] = []
+        if not isinstance(result.get("issues"), list):
+            result["issues"] = []
+        if not isinstance(result.get("prs"), list):
+            result["prs"] = []
+        return result
     except Exception as e:
         print(f"[session_indexer] LLM extraction failed: {e}", file=sys.stderr)
         return None
@@ -323,13 +338,19 @@ def extract_metadata(content: str, llm_model: str | None = "gpt-5-mini") -> dict
     
     # Tier 1: Rich frontmatter — skip LLM
     if fm.get("keywords") and fm.get("narrative_arc"):
+        issues = fm.get("issues", [])
+        if isinstance(issues, str):
+            issues = [issues]
+        prs = fm.get("prs", [])
+        if isinstance(prs, str):
+            prs = [prs]
         return {
             "summary": fm.get("title", ""),
             "narrative_arc": fm["narrative_arc"],
             "keywords": fm["keywords"] if isinstance(fm["keywords"], list) else [fm["keywords"]],
             "topics": fm.get("topics", []),
-            "issues": fm.get("issues", []),
-            "prs": fm.get("prs", []),
+            "issues": issues,
+            "prs": prs,
             "critical_decisions": fm.get("critical_decisions", []),
         }
     
@@ -347,10 +368,13 @@ def extract_metadata(content: str, llm_model: str | None = "gpt-5-mini") -> dict
 
 # ── File utilities ────────────────────────────────────────────────
 
-def compute_file_hash(file_path: str) -> str:
-    """SHA256 hash of file contents."""
-    with open(file_path, "rb") as f:
-        return hashlib.sha256(f.read()).hexdigest()
+def compute_file_hash(file_path: str) -> str | None:
+    """SHA256 hash of file contents. Returns None on error."""
+    try:
+        with open(file_path, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    except Exception:
+        return None
 
 
 def extract_session_id(file_path: str) -> str | None:
@@ -422,11 +446,53 @@ def main():
             from tortoise.sdk import TortoiseSDK
             sdk = TortoiseSDK()
             llm = None if args.no_llm else args.model
-            # Pass directory containing the file — ingest_corpus will only process this one
-            # via rglob when no directory flag is set
-            result = sdk.ingest_corpus(str(file_path.parent), eventKind="AgentSession",
-                                       extract_metadata=True, llm_model=llm)
-            print(json.dumps(result, indent=2))
+            content = file_path.read_text()
+            metadata = extract_metadata(content, llm)
+            session_id = extract_session_id(str(file_path))
+            file_hash = compute_file_hash(str(file_path))
+            event_id = f"session_{session_id}" if session_id else f"file_{file_path.stem}"
+            proj = sdk._get_proj()
+            exists = proj.g.query(
+                "MATCH (e:Event {eventId: $eid}) RETURN properties(e)",
+                params={"eid": event_id}
+            ).result_set
+            if exists and exists[0][0].get("file_hash") == file_hash:
+                print(json.dumps({"status": "skipped", "reason": "unchanged"}))
+            else:
+                props = {
+                    "name": metadata.get("summary", file_path.stem),
+                    "eventKind": "AgentSession",
+                    "session_id": session_id or f"file_{file_path.stem}",
+                    "agent": "pi",
+                    "source_file": str(file_path),
+                    "file_hash": file_hash,
+                    "keywords": metadata.get("keywords", []),
+                    "topics": metadata.get("topics", []),
+                    "message_count": _count_messages(content),
+                    "content_metadata": json.dumps({
+                        "schema_version": 1,
+                        "summary": metadata.get("summary", ""),
+                        "narrative_arc": metadata.get("narrative_arc", []),
+                        "issues": metadata.get("issues", []),
+                        "prs": metadata.get("prs", []),
+                        "critical_decisions": metadata.get("critical_decisions", []),
+                    }),
+                    "eventStatus": "completed",
+                    "classificationLevel": "internal",
+                }
+                if exists:
+                    proj.g.query(
+                        "MATCH (e:Event {eventId: $eid}) SET e += $props",
+                        params={"eid": event_id, "props": props}
+                    )
+                    print(json.dumps({"status": "updated", "eventId": event_id}))
+                else:
+                    props["startedAt"] = __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat()
+                    proj.g.query(
+                        "CREATE (e:Event {eventId: $eid}) SET e += $props",
+                        params={"eid": event_id, "props": props}
+                    )
+                    print(json.dumps({"status": "ingested", "eventId": event_id}))
         else:
             content = file_path.read_text()
             metadata = extract_metadata(content, args.model if not args.no_llm else None)
