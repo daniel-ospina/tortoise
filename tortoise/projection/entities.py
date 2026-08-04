@@ -14,6 +14,16 @@ class _EntityHandlers:
     def _upsert(self, p: dict) -> None:
         op = p.get("operator")
         prov = p.get("provenance", {})
+
+        # Compute embedding for non-operator Points (#7778)
+        embedding = None
+        if not op:
+            try:
+                from tortoise.embeddings import compute_embedding
+                embedding = compute_embedding(p["content"])
+            except Exception:
+                pass
+
         self.g.query(
             "MERGE (n:Point {id:$id}) "
             "SET n.content=$content, n.context=$context, "
@@ -21,6 +31,7 @@ class _EntityHandlers:
             "    n.pointKind=coalesce($pk, n.pointKind), "
             "    n.status=coalesce($st, n.status, 'live'), "
             "    n.authoredBy=coalesce($ab, n.authoredBy), "
+            "    n.embedding=coalesce($embedding, n.embedding), "
 
             "    n.confidence=coalesce($cf, n.confidence), "
             "    n.createdAt=coalesce($ca, n.createdAt, $now), "
@@ -32,6 +43,7 @@ class _EntityHandlers:
                     "pk": p.get("pointKind"),
                     "st": p.get("status"),
                     "ab": p.get("authoredBy"),
+                    "embedding": embedding,
 
                     "cf": p.get("confidence"),
                     "ca": p.get("createdAt") or p.get("created_at"),
