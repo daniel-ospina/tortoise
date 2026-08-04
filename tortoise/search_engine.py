@@ -94,7 +94,7 @@ def run_fts_query(
     """Run full-text search via FalkorDB FTS index.
 
     Falls back gracefully if index doesn't exist or query fails.
-    entity_type: 'point' (default), 'event', or 'subject'.
+    entity_type: 'point' (default), 'event', 'subject', or 'document'.
     Returns entity-type-specific identifier: Point/Subject → node.id, Event → node.eventId.
     """
     label = entity_type.capitalize()  # point→Point, event→Event, subject→Subject

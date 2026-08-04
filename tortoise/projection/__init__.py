@@ -343,7 +343,7 @@ class FalkorProjection(
         _ver = getattr(self, '_falkordb_version', None)
         if _ver is None or _ver[0] >= 4:
             # ── Full-text indexes ──
-            for label, field in [("Point", "content"), ("Event", "subject"), ("Subject", "name")]:
+            for label, field in [("Point", "content"), ("Event", "subject"), ("Subject", "name"), ("Document", "title")]:
                 try:
                     self.g.query(f"CALL db.idx.fulltext.createNodeIndex('{label}', '{field}')")
                 except Exception as e:
