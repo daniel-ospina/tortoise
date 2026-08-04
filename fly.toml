@@ -1,0 +1,43 @@
+# Tortoise Hosted API — Fly.io configuration
+# See: docs/epics/2026-08-03-tortoise-hosted-platform/04-plan.md §5
+
+app = "tortoise-api"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile.hosted"
+
+[[services]]
+  protocol = "tcp"
+  internal_port = 8000
+
+  [[services.ports]]
+    port = 443
+    handlers = ["tls", "http"]
+  [[services.ports]]
+    port = 80
+    handlers = ["http"]
+
+  [services.concurrency]
+    type = "connections"
+    soft_limit = 100
+    hard_limit = 200
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory_mb = 256
+
+[env]
+  TORTOISE_DB_URI = ""  # Empty = embedded redislite mode (no external FalkorDB needed)
+  FASTAPI_INTERNAL_KEY = ""  # Set via fly secrets
+
+[deploy]
+  release_command = "python -c 'from tortoise.sdk import TortoiseSDK; sdk = TortoiseSDK(namespace=\"registry\"); print(\"registry OK\")'"
+
+[[http_service.checks]]
+  interval = "15s"
+  timeout = "15s"
+  grace_period = "60s"
+  method = "get"
+  path = "/health"
