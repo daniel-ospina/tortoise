@@ -49,13 +49,13 @@
     },
     {
       "id": "swarm",
-      "name": "Swarm",
+      "name": "Swarm VSM",
       "icon": "🐝",
-      "description": "Multi-tenant org data — Supabase migrations + config",
-      "check": {"type": "file", "path": "~/swarm/supabase/config.toml"},
-      "launch": null,
-      "stop": null,
-      "url": "https://supabase.com/dashboard/project/ptbzuiqglfalemdclppy"
+      "description": "VSM coordination — Kanban boards, roles, agent dashboard",
+      "check": {"type": "http", "url": "http://localhost:8080/data"},
+      "launch": {"type": "shell", "command": "cd ~/eldato && python3 operations/coordination/dashboard_serve.py"},
+      "stop": {"type": "shell", "command": "pkill -f dashboard_serve"},
+      "url": "http://localhost:8080"
     }
   ]
 }
