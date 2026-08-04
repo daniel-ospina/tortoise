@@ -21,10 +21,11 @@ import yaml
 # ── Canonical kind vocabularies (ONTOLOGY_v2.5 §1.1) ──────────────────────
 
 CANONICAL_OBJECT_KINDS = frozenset({
-    "document", "product", "customer", "competitor", "user", "skill",
-    "workflow", "tool", "agent", "indicator", "database", "api", "code",
-    "software", "infrastructure", "agreement", "standard", "epic",
-    "project", "task", "other",
+    # Core work concepts
+    "Project", "WorkItem",
+    # Universal
+    "document", "user", "skill", "tool", "agent",
+    "workflow", "agreement", "standard", "other",
 })
 
 CANONICAL_EVENT_KINDS = frozenset({
@@ -90,6 +91,24 @@ class PackManifest:
     action_kinds: list[str] = dataclasses.field(default_factory=list)
     relations: list[dict] = dataclasses.field(default_factory=list)
 
+    # Subclass declarations: {kind: parent_kind} — e.g., {"epic": "Project"}
+    # Parent must exist in core CANONICAL_OBJECT_KINDS or another pack's kinds.
+    kind_subclasses: dict[str, str] = dataclasses.field(default_factory=dict)
+
+    # Equivalence declarations: {kind: [other_ns:kind, ...]} — e.g., {"issue": ["pm:task"]}
+    # Means "this pack's 'issue' is the same concept as 'pm:task'."
+    # Bidirectional: the registry makes it symmetric at query time.
+    kind_equivalences: dict[str, list[str]] = dataclasses.field(default_factory=dict)
+
+    # Relations: edge schema declarations
+    # New format (preferred): {predicate, fromKind, toKind, mechanism, cardinality?}
+    #   - predicate: domain verb — "addresses", "competesWith", "implements"
+    #   - fromKind/toKind: specific pack kinds — "product-strategy:feature"
+    #   - mechanism: IMPL or NAND — epistemic mechanism
+    #   - cardinality: optional (one_to_one, one_to_many, many_to_one, many_to_many)
+    # Old format (compat): {predicate, from, to, cardinality?}
+    #   - from/to: entity types — "Object", "Subject"
+
     # Connectors
     connectors: list[dict] = dataclasses.field(default_factory=list)
 
@@ -137,6 +156,7 @@ class PackRegistry:
                 count += 1
             except Exception as e:
                 self.errors[ns] = [str(e)]
+        self._build_kind_expansions()
         return count
 
     def _load_one(self, path: Path) -> PackManifest:
@@ -159,6 +179,8 @@ class PackRegistry:
             document_kinds=ont.get("documentKinds", []),
             action_kinds=ont.get("actionKinds", []),
             relations=ont.get("relations", []),
+            kind_subclasses=ont.get("subclassOf", {}),
+            kind_equivalences=ont.get("equivalentTo", {}),
             connectors=raw.get("connectors", []),
             tools=raw.get("tools", []),
             depends_on=raw.get("depends_on", []),
@@ -185,6 +207,8 @@ class PackRegistry:
 
         # Validate ontology section
         if ont:
+            # extends: core is a marker — no actual 'core' manifest file exists.
+            # Validation is against CANONICAL_OBJECT_KINDS (see subclassOf checks).
             if ont.get("extends") != "core":
                 errors.append("ontology.extends must be 'core'")
 
@@ -209,17 +233,39 @@ class PackRegistry:
                             f"vocabulary — no need to register"
                         )
 
-            # Validate relations
+            # Validate relations (new format: fromKind/toKind/mechanism)
             for rel in ont.get("relations", []):
                 pred = rel.get("predicate", "")
                 if not pred or not pred[0].islower():
                     errors.append(f"relation predicate '{pred}' must be camelCase")
-                if rel.get("from") not in VALID_ENTITY_TYPES:
-                    errors.append(f"relation '{pred}': invalid 'from' type: {rel.get('from')}")
-                if rel.get("to") not in VALID_ENTITY_TYPES:
-                    errors.append(f"relation '{pred}': invalid 'to' type: {rel.get('to')}")
-                if rel.get("cardinality") not in VALID_CARDINALITIES:
-                    errors.append(f"relation '{pred}': invalid cardinality: {rel.get('cardinality')}")
+
+                # New format: fromKind/toKind (specific pack kinds)
+                if "fromKind" in rel or "toKind" in rel:
+                    if "fromKind" not in rel or "toKind" not in rel:
+                        errors.append(
+                            f"relation '{pred}': both fromKind and toKind required"
+                        )
+                    mechanism = rel.get("mechanism", "")
+                    if mechanism not in ("IMPL", "NAND"):
+                        errors.append(
+                            f"relation '{pred}': mechanism must be IMPL or NAND, "
+                            f"got {mechanism!r}"
+                        )
+                else:
+                    # Old format: from/to (entity types) — backward compat
+                    if rel.get("from") not in VALID_ENTITY_TYPES:
+                        errors.append(
+                            f"relation '{pred}': invalid 'from' type: {rel.get('from')}"
+                        )
+                    if rel.get("to") not in VALID_ENTITY_TYPES:
+                        errors.append(
+                            f"relation '{pred}': invalid 'to' type: {rel.get('to')}"
+                        )
+
+                if rel.get("cardinality") and rel["cardinality"] not in VALID_CARDINALITIES:
+                    errors.append(
+                        f"relation '{pred}': invalid cardinality: {rel.get('cardinality')}"
+                    )
 
         # Validate connectors
         for conn in raw.get("connectors", []):
@@ -247,6 +293,56 @@ class PackRegistry:
         tier = raw.get("tier", "free")
         if tier not in ("free", "premium"):
             errors.append(f"tier must be 'free' or 'premium', got: {tier}")
+
+        # Validate subclassOf declarations
+        subclass_of = ont.get("subclassOf", {})
+        if not isinstance(subclass_of, dict):
+            errors.append("ontology.subclassOf must be a dict")
+        else:
+            all_pack_kinds = set()
+            for kf in ["objectKinds", "eventKinds", "pointKinds",
+                        "documentKinds", "actionKinds"]:
+                all_pack_kinds.update(ont.get(kf, []))
+            for child, parent in subclass_of.items():
+                if child not in all_pack_kinds:
+                    errors.append(
+                        f"subclassOf: '{child}' is not declared in this pack's kinds"
+                    )
+                if not parent or not parent[0].isupper():
+                    errors.append(
+                        f"subclassOf: parent kind '{parent}' must be PascalCase "
+                        f"(core kinds use PascalCase)"
+                    )
+                # Check parent exists in core object kinds or core concepts
+                core_parents = CANONICAL_OBJECT_KINDS | {"Project", "WorkItem",
+                    "Document", "Subject", "Object", "Action", "Event", "Point", "Source"}
+                if parent not in core_parents:
+                    errors.append(
+                        f"subclassOf: parent kind '{parent}' not found in core "
+                        f"ontology. Must be a core entity type or core objectKind."
+                    )
+
+        # Validate equivalentTo declarations
+        equiv_to = ont.get("equivalentTo", {})
+        if not isinstance(equiv_to, dict):
+            errors.append("ontology.equivalentTo must be a dict")
+        else:
+            for kind, targets in equiv_to.items():
+                if kind not in all_pack_kinds:
+                    errors.append(
+                        f"equivalentTo: '{kind}' is not declared in this pack's kinds"
+                    )
+                if not isinstance(targets, list):
+                    errors.append(
+                        f"equivalentTo: value for '{kind}' must be a list of "
+                        f"'namespace:kind' strings"
+                    )
+                    continue
+                for target in targets:
+                    if ":" not in target:
+                        errors.append(
+                            f"equivalentTo: '{target}' must use 'namespace:kind' format"
+                        )
 
         return errors
 
@@ -292,6 +388,77 @@ class PackRegistry:
         """Get a pack by namespace."""
         return self.packs.get(namespace)
 
+    def get_subclasses(self, parent_kind: str) -> list[str]:
+        """Return all pack kinds that are subclasses of parent_kind.
+
+        Example: get_subclasses("Project") → ["dev:epic"]
+        """
+        result = []
+        for p in self.packs.values():
+            ns = p.namespace
+            for child, parent in p.kind_subclasses.items():
+                if parent == parent_kind:
+                    result.append(f"{ns}:{child}")
+        return result
+
+    def expand_kind(self, kind: str) -> list[str]:
+        """Expand a kind to include subclasses and equivalents.
+
+        Returns list of kind strings for Cypher IN clause.
+        Example: expand_kind("WorkItem") → ["WorkItem", "dev:issue", "pm:task"]
+
+        Pre-computed at load_all() time, O(1) dict lookup at query time.
+        """
+        if not hasattr(self, '_kind_expansions'):
+            self._build_kind_expansions()
+        return self._kind_expansions.get(kind, [kind])
+
+    def _build_kind_expansions(self) -> None:
+        """Build the pre-computed kind expansion table.
+
+        Called once after load_all(). Maps each kind to [self] + subclasses +
+        bidirectional equivalents.
+        """
+        expansions: dict[str, list[str]] = {}
+
+        # Core kinds: expand to [self] + all pack subclasses
+        for parent in CANONICAL_OBJECT_KINDS:
+            subs = self.get_subclasses(parent)
+            expansions[parent] = [parent] + subs
+
+        # Pack kinds: each maps to [self] initially
+        for p in self.packs.values():
+            ns = p.namespace
+            for kind in p.object_kinds:
+                full = f"{ns}:{kind}"
+                expansions[full] = [full]
+
+        # Apply subclassOf: children also expand to parent
+        for p in self.packs.values():
+            ns = p.namespace
+            for child, parent in p.kind_subclasses.items():
+                full_child = f"{ns}:{child}"
+                if full_child not in expansions:
+                    expansions[full_child] = [full_child]
+
+        # Apply equivalentTo: bidirectional
+        for p in self.packs.values():
+            ns = p.namespace
+            for kind, targets in p.kind_equivalences.items():
+                full_kind = f"{ns}:{kind}"
+                for target in targets:
+                    # Add target to this kind's expansion
+                    if full_kind in expansions:
+                        if target not in expansions[full_kind]:
+                            expansions[full_kind].append(target)
+                    # Add this kind to target's expansion (bidirectional)
+                    if target not in expansions:
+                        expansions[target] = [target]
+                    if full_kind not in expansions[target]:
+                        expansions[target].append(full_kind)
+
+        self._kind_expansions = expansions
+
     def list_tools(self) -> list[dict]:
         """Return all tools across all packs with their schemas."""
         tools: list[dict] = []
@@ -319,6 +486,33 @@ class PackRegistry:
                     "required_config": c.get("config", {}).get("required", []),
                 })
         return connectors
+
+    def list_relations(self) -> list[dict]:
+        """Return all relation declarations across packs with mechanisms.
+
+        Example: [{"pack": "product-strategy", "predicate": "addresses",
+                   "fromKind": "product-strategy:feature",
+                   "toKind": "product-strategy:customerNeed",
+                   "mechanism": "IMPL"}]
+        """
+        relations: list[dict] = []
+        for p in self.packs.values():
+            ns = p.namespace
+            for r in p.relations:
+                entry = {"pack": ns, "predicate": r.get("predicate")}
+                # New format
+                if "fromKind" in r:
+                    entry["fromKind"] = r["fromKind"]
+                    entry["toKind"] = r["toKind"]
+                    entry["mechanism"] = r.get("mechanism", "IMPL")
+                # Old format (backward compat)
+                else:
+                    entry["from"] = r.get("from")
+                    entry["to"] = r.get("to")
+                if r.get("cardinality"):
+                    entry["cardinality"] = r["cardinality"]
+                relations.append(entry)
+        return relations
 
     # ── Register (idempotent) ──────────────────────────────────────────
 

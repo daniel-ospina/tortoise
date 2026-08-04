@@ -30,6 +30,22 @@ def _content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+# Module-level cached registry for kind expansion
+_registry_cache: "PackRegistry | None" = None
+
+
+def _get_kind_expander():
+    """Return cached PackRegistry with pre-computed expansion table."""
+    global _registry_cache
+    if _registry_cache is None:
+        from .pack_registry import PackRegistry
+        from pathlib import Path as _Path
+        packs_dir = _Path(__file__).resolve().parent.parent / "packs"
+        _registry_cache = PackRegistry(packs_dir)
+        _registry_cache.load_all()
+    return _registry_cache
+
+
 class TortoiseSDK:
     """Layer 1 facade for Tortoise epistemic graph interaction.
 
@@ -228,49 +244,37 @@ class TortoiseSDK:
     # ── Operators ─────────────────────────────────────────────────
 
     def create_operator(self, op_type: str, source_id: str, target_ids: list[str],
-                        *, context: str = "sdk") -> dict:
-        """Create an operator Point via the projection's event-sourced path.
+                        label: str | None = None) -> dict:
+        """Create an operator Point with optional semantic label.
 
-        Routes through projection.apply() so operators get the full schema
-        (context, createdAt, content, etc.) — not just id/is_operator/op_type.
-        Uses MERGE for edges (not CREATE) so source/target stubs are
-        auto-created rather than silently failing (#130).
-
-        Ontology v2.1: part/whole types (composedOf/decomposesInto/contains)
-        → hasPart edge. Edge creation is handled by projection._create_edges.
+        Semantic-epistemic edge model (#7801):
+          - op_type: IMPL or NAND (epistemic mechanism)
+          - label: domain verb — "addresses", "hasPart", "opposes" (semantic layer)
+          - Operator carries the label; IMPL/NAND edges carry confidence via EP.
         """
         if op_type not in ("IMPL", "NAND", "composedOf", "decomposesInto", "contains", "wraps"):
             raise ValueError(
                 f"op_type must be 'IMPL', 'NAND', or a part/whole type, got {op_type!r}"
             )
-        from datetime import datetime, timezone
-        now = datetime.now(timezone.utc).isoformat()
         pid = ulid()
         inputs = [source_id] + list(target_ids)
         proj = self._get_proj()
-
-        # Build event dict and route through projection for full schema (#130)
-        event = {
-            "type": "OperatorAdded",
-            "point": {
-                "id": pid,
-                "content": f"{op_type}: {source_id} -> {target_ids}",
-                "context": context,
-                "pointKind": "operator",
-                "operator": {"op_type": op_type, "inputs": inputs},
-                "status": "live",
-                "createdAt": now,
-                "updatedAt": now,
-            },
-        }
-        proj.apply(event)
-        # Create edges — MERGE avoids silent failures on missing source/target
-        proj._create_edges(event["point"])
-        # Mark source point as live now that it has its first edge (#131)
+        label_clause = ", label:$label" if label else ""
+        params = {"id": pid, "op": op_type}
+        if label:
+            params["label"] = label
         proj.g.query(
-            "MATCH (s:Point {id:$sid}) SET s.status = 'live'",
-            params={"sid": source_id},
+            f"CREATE (o:Point {{id:$id, is_operator:true, op_type:$op{label_clause}}})",
+            params=params,
         )
+        # Ontology v2.1: map part/whole ops to hasPart, remove INPUT edges
+        edge_type = "hasPart" if op_type not in ("IMPL", "NAND") else op_type
+        for i, inp_id in enumerate(inputs):
+            proj.g.query(
+                f"MATCH (o:Point {{id:$oid}}), (s:Point {{id:$sid}}) "
+                f"CREATE (o)-[:{edge_type} {{idx:$i}}]->(s)",
+                params={"oid": pid, "sid": inp_id, "i": i},
+            )
         return self.get_point(pid)
 
     def annotate_operator(self, id: str, bias: float, precision: float,
@@ -358,8 +362,15 @@ class TortoiseSDK:
         clauses = ["(n.is_operator IS NULL OR n.is_operator = false)"]
         params: dict[str, Any] = {}
         if kind:
-            clauses.append("n.pointKind = $kind")
-            params["kind"] = kind
+            expanded = self._expand_kind(kind)
+            if len(expanded) == 1:
+                clauses.append("n.pointKind = $kind")
+                params["kind"] = expanded[0]
+            else:
+                placeholders = [f"$kind_{i}" for i in range(len(expanded))]
+                clauses.append(f"n.pointKind IN [{', '.join(placeholders)}]")
+                for i, k in enumerate(expanded):
+                    params[f"kind_{i}"] = k
         if context:
             clauses.append("n.context = $ctx")
             params["ctx"] = context
@@ -382,8 +393,15 @@ class TortoiseSDK:
         clauses = ["(n.is_operator IS NULL OR n.is_operator = false)"]
         params: dict[str, Any] = {}
         if kind:
-            clauses.append("n.pointKind = $kind")
-            params["kind"] = kind
+            expanded = self._expand_kind(kind)
+            if len(expanded) == 1:
+                clauses.append("n.pointKind = $kind")
+                params["kind"] = expanded[0]
+            else:
+                placeholders = [f"$kind_{i}" for i in range(len(expanded))]
+                clauses.append(f"n.pointKind IN [{', '.join(placeholders)}]")
+                for i, k in enumerate(expanded):
+                    params[f"kind_{i}"] = k
         if context:
             clauses.append("n.context = $ctx")
             params["ctx"] = context
@@ -647,6 +665,15 @@ class TortoiseSDK:
     def list_graphs(self) -> list[str]:
         """List all graph names in the database."""
         return self._get_proj().list_graphs()
+
+    def list_relations(self) -> list[dict]:
+        """List all relation declarations across installed packs.
+
+        Returns [{"pack": ..., "predicate": ..., "fromKind": ..., "toKind": ...,
+        "mechanism": ...}]. Pack relations describe valid edge types between
+        entity kinds — use for schema discovery.
+        """
+        return _get_kind_expander().list_relations()
 
     def close(self) -> None:
         """Close the underlying database connection."""
@@ -1285,6 +1312,9 @@ class TortoiseSDK:
         strategies = classify_query(query, kind, context)
         is_full_scan = (query is None and context is not None and not kind)
 
+        # Expand kind early for pack-aware structural query + kind filter
+        expanded_kinds = self._expand_kind(kind) if kind else None
+
         # 2. Get query vector if needed (Point only — no embeddings for Event/Subject)
         query_vec = None
         if entity_type == "point" and strategies.get("vector") and query and query.strip():
@@ -1302,6 +1332,7 @@ class TortoiseSDK:
             graph, query, kind, context, query_vec, strategies,
             entity_type=entity_type, limit=limit * 2,
             is_embedded=is_embedded,
+            expanded_kinds=expanded_kinds,
         )
 
         if not raw_results:
@@ -1327,14 +1358,26 @@ class TortoiseSDK:
 
         # 5. Apply kind filter BEFORE truncating (skip if structural-only already filtered)
         result_ids = list(fused.keys())
+        id_field = "eventId" if entity_type == "event" else "id"
 
         if kind and query is not None and result_ids:
+            expanded = expanded_kinds
             kind_ids = set()
             try:
-                kind_rows = graph.query(
-                    f"MATCH (n:{label}) WHERE n.{kind_field} = $kind AND n.id IN $ids RETURN n.id",
-                    params={"kind": kind, "ids": result_ids},
-                ).result_set
+                if len(expanded) == 1:
+                    kind_rows = graph.query(
+                        f"MATCH (n:{label}) WHERE n.{kind_field} = $kind AND n.{id_field} IN $ids RETURN n.{id_field}",
+                        params={"kind": expanded[0], "ids": result_ids},
+                    ).result_set
+                else:
+                    placeholders = [f"$kind_{i}" for i in range(len(expanded))]
+                    params_dict: dict[str, Any] = {"ids": result_ids}
+                    for i, k in enumerate(expanded):
+                        params_dict[f"kind_{i}"] = k
+                    kind_rows = graph.query(
+                        f"MATCH (n:{label}) WHERE n.{kind_field} IN [{', '.join(placeholders)}] AND n.{id_field} IN $ids RETURN n.{id_field}",
+                        params=params_dict,
+                    ).result_set
                 kind_ids = {row[0] for row in kind_rows}
             except Exception:
                 kind_ids = set(result_ids)  # Pass-through on error
@@ -1509,6 +1552,14 @@ class TortoiseSDK:
         return {"name": name, "graph_name": graph_name, "api_key": api_key, "id": tid}
 
     # ── Helpers ───────────────────────────────────────────────────
+
+    def _expand_kind(self, kind: str) -> list[str]:
+        """Expand kind via subclassOf + equivalentTo for Cypher IN clause.
+
+        Uses PackRegistry.expand_kind(). Registry is loaded once and cached.
+        Returns [kind] if no packs loaded or kind is unknown.
+        """
+        return _get_kind_expander().expand_kind(kind)
 
     @staticmethod
     def _validate_kind(kind: str) -> None:

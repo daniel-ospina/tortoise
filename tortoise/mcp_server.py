@@ -134,10 +134,29 @@ def tortoise_query(kind: str | None = None, context: str | None = None,
     """
     filters = _parse(filters)
     if text:
-        return _safe(sdk.tortoise_fts_query, text, kind=kind, context=context,
+        # Merge kind/context from filters if not explicitly provided
+        if filters:
+            if not kind and "kind" in filters:
+                kind = filters.pop("kind")
+            if not context and "context" in filters:
+                context = filters.pop("context")
+        results = _safe(sdk.tortoise_fts_query, text, kind=kind, context=context,
                      entity_type=entity_type, limit=limit,
                      min_confidence=min_confidence or 0.0,
                      order_by=order_by or "relevance")
+        # Apply remaining property filters as post-filter
+        if filters and isinstance(results, list) and results and "error" not in results[0]:
+            filtered = []
+            for r in results:
+                match = True
+                for key, val in filters.items():
+                    if r.get(key) != val:
+                        match = False
+                        break
+                if match:
+                    filtered.append(r)
+            return filtered[:limit]
+        return results
     return _safe(sdk.query, kind, context, **(filters or {}))
 
 
@@ -185,6 +204,9 @@ def tortoise_suggest_entry_points(query: str, limit: int = 5,
         if isinstance(results, list) and results and "error" not in results[0]:
             return [{"id": r["id"], "name": r.get("content", ""),
                      "kind": r.get("point_kind", ""),
+                     # Confidence merge: 50% RRF relevance + 50% EP confidence mean.
+                     # Simple unweighted average — both components are [0,1] bounded.
+                     # Future: weight by result count or calibrate against human judgments.
                      "confidence": round(
                          0.5 * r.get("scores", {}).get("rrf", 0.0) +
                          0.5 * r.get("ep", {}).get("confidence_mean", 0.0), 4)}
@@ -262,7 +284,8 @@ def tortoise_update_point(id: str, props: Any) -> dict:
 
 @mcp.tool()
 def tortoise_create_operator(op_type: str, source_id: str, target_ids: Any,
-                              context: str = "sdk") -> dict:
+                              context: str = "sdk",
+                              label: str | None = None) -> dict:
     """Create an operator connecting Points.
     
     op_type: 'IMPL' (A supports B), 'NAND' (A contradicts B),
@@ -270,12 +293,13 @@ def tortoise_create_operator(op_type: str, source_id: str, target_ids: Any,
     source_id: source/parent Point ID.
     target_ids: target/child Point IDs (1 for IMPL/NAND, N for part/whole).
     context: domain context for the operator (default: 'sdk').
+    label: optional semantic label — "addresses", "hasPart", "opposes".
 
     → See /skill:tortoise-graph-reasoning for proper usage:
       annotation, mitigation, NAND constraints, veracity vs implication.
     """
     target_ids = _parse(target_ids)
-    return _safe(sdk.create_operator, op_type, source_id, target_ids, context=context)
+    return _safe(sdk.create_operator, op_type, source_id, target_ids, label=label)
 
 
 @mcp.tool()
@@ -433,6 +457,24 @@ def tortoise_diary_read(agent_name: str, last_n: int = 10,
                         wing: str | None = None) -> list[dict]:
     """Read recent diary entries for an agent, newest first."""
     return _safe(sdk.diary_read, agent_name, last_n, wing=wing)
+
+
+@mcp.tool()
+def tortoise_list_relations() -> list[dict]:
+    """List all relation declarations across installed packs.
+
+    Returns [{"pack": ..., "predicate": ..., "fromKind": ..., "toKind": ..., "mechanism": ...}].
+    Pack relations describe valid edge types between entity kinds — use for schema discovery.
+    """
+    try:
+        from tortoise.pack_registry import PackRegistry
+        from pathlib import Path
+        packs_dir = Path(__file__).resolve().parent.parent / "packs"
+        registry = PackRegistry(packs_dir)
+        registry.load_all()
+        return _safe(lambda: registry.list_relations())
+    except Exception as e:
+        return {"error": str(e)}
 
 
 @mcp.tool()

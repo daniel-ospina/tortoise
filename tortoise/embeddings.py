@@ -6,6 +6,7 @@ finds 0 cross-lens connections; embeddings bridge that gap.
 from __future__ import annotations
 
 import logging
+import threading
 import numpy as np
 
 logger = logging.getLogger(__name__)
@@ -18,12 +19,15 @@ class EmbeddingModel:
     """
     _instance: "EmbeddingModel | None" = None
     _model = None
+    _lock = threading.Lock()
 
     @classmethod
     def get(cls) -> "EmbeddingModel | None":
         """Get or create the singleton. Returns None if model unavailable."""
         if cls._instance is None:
-            cls._instance = cls()
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = cls()
         return cls._instance if cls._instance._model else None
 
     def __init__(self):
