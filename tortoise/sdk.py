@@ -152,6 +152,10 @@ class TortoiseSDK:
             if existing:
                 pid = existing[0][0]
                 props["updatedAt"] = now
+                # Existing point already stores content_hash — don't re-write it
+                # (would make the `if props:` guard always truthy and bump
+                # updatedAt on every dedup hit, #80 review).
+                props.pop("content_hash", None)
                 if credibility is not None:
                     _logger.warning(
                         "credibility=%r ignored — point %s already exists and dedup=True",
