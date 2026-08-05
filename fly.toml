@@ -40,7 +40,7 @@ primary_region = "iad"
   destination = "/data"
 
 [env]
-  TORTOISE_DB_URI = ""  # Constructed at runtime by entrypoint.sh from FALKORDB_PASSWORD → redis://:{pwd}@falkordb-tortoise.internal:6379/tortoise
+  TORTOISE_DB_URI = ""  # Constructed at runtime by entrypoint.sh from FALKORDB_CLOUD_URI → FalkorDB Cloud
   FASTAPI_INTERNAL_KEY = ""  # Set via fly secrets
 
 [deploy]
