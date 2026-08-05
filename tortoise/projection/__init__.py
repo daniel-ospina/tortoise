@@ -139,6 +139,7 @@ class FalkorProjection(
         else:
             raise ValueError("Either path or host must be provided")
 
+        self.graph_name = graph_name
         self.g = self.db.select_graph(graph_name)
         self._is_embedded = (path is not None)
         self._falkordb_version = self._get_falkordb_version()

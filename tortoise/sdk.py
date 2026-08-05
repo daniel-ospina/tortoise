@@ -115,6 +115,40 @@ class TortoiseSDK:
                 self._proj = FalkorProjection(self._db_path, graph_name=graph_name)
         return self._proj
 
+    def test_guard(self) -> None:
+        """Assert the connected graph is safe for destructive test teardowns.
+
+        Raises RuntimeError if the graph appears to be a production graph
+        (named ``tortoise`` or ``tortoise_restored_*``).  Test fixtures
+        should call this before any ``MATCH (n) DETACH DELETE n``.
+
+        Override with ``TORTOISE_ALLOW_PRODUCTION=1``.
+        """
+        import os
+        if os.environ.get("TORTOISE_ALLOW_PRODUCTION") == "1":
+            return
+
+        proj = self._get_proj()
+        graph_name = getattr(proj, "graph_name", None)
+        if graph_name is None:
+            graph_name = getattr(proj.g, "name", "unknown")
+
+        # Block destructive ops on production graphs:
+        #   tortoise             — the real graph
+        #   tortoise_restored_*  — restored snapshots (precious)
+        blocked = (
+            graph_name == "tortoise"
+            or graph_name.startswith("tortoise_restored")
+        )
+        if blocked:
+            raise RuntimeError(
+                f"SAFETY GUARD: Destructive operation blocked on graph "
+                f"'{graph_name}'. This appears to be a production graph. "
+                f"Use an isolated test graph (e.g. "
+                f"'tortoise_test_calibration') instead. "
+                f"Override with TORTOISE_ALLOW_PRODUCTION=1."
+            )
+
     def _get_registry(self):
         """Return the control_plane registry graph handle (cached).
 
@@ -378,8 +412,58 @@ class TortoiseSDK:
         return {"invalidated": True, "id": id, "corrected_by": corrected_by_id}
 
     def supersede_point(self, old_id: str, new_id: str) -> dict:
-        """Atomically replace old Point with new — CORRECTS edge + outdated flag."""
-        return self.invalidate_point(old_id, new_id)
+        """Atomically replace old Point with new — CORRECTS edge + outdated flag + edge transfer.
+
+        Transfers all operator edges (IMPL, NAND, hasPart) from the old point to the
+        new point, so EP no longer propagates through superseded claims.  Preserves
+        edge type and idx (source vs target position).  Leaves the old point outdated
+        with only the CORRECTS edge from the new point.
+        """
+        from datetime import datetime, timezone
+        proj = self._get_proj()
+        now = datetime.now(timezone.utc).isoformat()
+
+        # 1. Mark old outdated + create CORRECTS edge (same as invalidate)
+        proj.g.query(
+            "MATCH (n:Point {id:$id}) SET n.outdated = true, n.updatedAt = $now",
+            params={"id": old_id, "now": now},
+        )
+        proj.g.query(
+            "MATCH (a:Point {id:$new_id}), (b:Point {id:$old_id}) "
+            "CREATE (a)-[:CORRECTS]->(b)",
+            params={"new_id": new_id, "old_id": old_id},
+        )
+
+        # 2. Transfer operator edges from old to new — preserve provenance
+        edges_result = proj.g.query(
+            "MATCH (op:Point {is_operator:true})-[r]->(old:Point {id:$old_id}) "
+            "RETURN op.id, type(r), r.idx",
+            params={"old_id": old_id},
+        )
+
+        transferred = 0
+        for row in edges_result.result_set:
+            op_id, edge_type, idx = row[0], row[1], row[2]
+            # Create new edge: operator → new point (same idx preserves source/target position)
+            proj.g.query(
+                f"MATCH (op:Point {{id:$op_id}}), (new:Point {{id:$new_id}}) "
+                f"CREATE (op)-[:{edge_type} {{idx:$idx}}]->(new)",
+                params={"op_id": op_id, "new_id": new_id, "idx": idx},
+            )
+            # Delete old edge (match by idx for precision)
+            proj.g.query(
+                f"MATCH (op:Point {{id:$op_id}})-[r:{edge_type} {{idx:$idx}}]->(old:Point {{id:$old_id}}) "
+                f"DELETE r",
+                params={"op_id": op_id, "idx": idx, "old_id": old_id},
+            )
+            transferred += 1
+
+        return {
+            "invalidated": True,
+            "id": old_id,
+            "corrected_by": new_id,
+            "edges_transferred": transferred,
+        }
 
     # ── Operators ─────────────────────────────────────────────────
 
