@@ -3,9 +3,6 @@ from __future__ import annotations
 
 import json
 import os
-import urllib.request
-import urllib.error
-import urllib.parse
 from typing import Any
 
 from fastmcp import FastMCP
@@ -48,46 +45,8 @@ elif _db_uri:
 else:
     sdk = TortoiseSDK()
 
-# ── Hosted mode detection (#7836) ────────────────────────────────
-_HOSTED_API_KEY = os.environ.get("TORTOISE_API_KEY", "")
-_HOSTED_API_BASE = os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co")
-
-
-def _is_hosted() -> bool:
-    """True when TORTOISE_API_KEY is set — route via hosted REST API."""
-    return bool(_HOSTED_API_KEY)
-
-
-def _hosted_request(method: str, path: str, body: dict | None = None) -> dict:
-    """Route to hosted Tortoise REST API."""
-    url = f"{_HOSTED_API_BASE}{path}"
-    headers = {
-        "Authorization": f"Bearer {_HOSTED_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, headers=headers, method=method)
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return json.loads(resp.read().decode())
-    except urllib.error.HTTPError as e:
-        body = e.read().decode() if e.fp else ""
-        detail = ""
-        try:
-            detail = json.loads(body).get("error", body)[:200]
-        except Exception:
-            detail = body[:200]
-        return {"error": f"Hosted API error {e.code}: {detail or e.reason}"}
-    except Exception as e:
-        return {"error": str(e)}
-
-
 # Announce auth mode at startup
-if _is_hosted():
-    import logging
-    _log = logging.getLogger(__name__)
-    _log.info("TORTOISE_API_KEY set — running in hosted mode (%s)", _HOSTED_API_BASE)
-elif _is_dev_mode():
+if _is_dev_mode():
     import logging
     _log = logging.getLogger(__name__)
     _log.warning("TORTOISE_API_KEY not set — running in dev mode (no auth)")
@@ -96,26 +55,18 @@ elif _is_dev_mode():
 def _safe(fn, *args, **kwargs):
     """Call fn; return error dict on exception instead of raising.
 
-    Hosted mode (#7836): operations route through the hosted REST API,
-    not the local SDK. If a tool reaches _safe in hosted mode, it means
-    the tool doesn't have a hosted endpoint yet.
+    Auth (#7395): In production mode (TORTOISE_API_KEY set), stdio MCP
+    transport cannot carry HTTP Bearer tokens — all operations are
+    rejected. Use the authenticated HTTP endpoint instead.
     Dev mode (no key) is always unlocked.
-    No key + not dev → block with helpful message.
     """
-    if _is_hosted():
-        return {
-            "error": (
-                "This operation is not available in hosted mode yet. "
-                "Available hosted tools: create_point, query, paginated_query, "
-                "search, suggest_entry_points, get_point."
-            )
-        }
     if not _is_dev_mode():
         return {
             "error": (
-                "Authentication required. Set TORTOISE_API_KEY for hosted mode "
-                "(https://api.premiselabs.co), or unset TORTOISE_API_KEY for "
-                "local dev mode."
+                "Authentication required. The MCP stdio transport cannot "
+                "carry auth tokens. Use an authenticated HTTP endpoint "
+                "(tortoise health-server) with Authorization: Bearer <key> "
+                "header, or unset TORTOISE_API_KEY for dev mode."
             )
         }
     try:
@@ -158,17 +109,6 @@ def tortoise_create_point(kind: str, content: str, context: str | None = None,
       evidence is a role (not a kind), use Source for provenance.
     """
     props = _parse(props)
-    if _is_hosted():
-        body: dict[str, Any] = {"kind": kind, "content": content}
-        if context:
-            body["context"] = context
-        if authoredBy:
-            body["authoredBy"] = authoredBy
-        if props:
-            body["props"] = props
-        if not dedup:
-            body["dedup"] = False
-        return _hosted_request("POST", "/v1/points", body)
     merged = dict(props or {})
     if context:
         merged["context"] = context
@@ -190,43 +130,14 @@ def tortoise_query(kind: str | None = None, context: str | None = None,
 
     When text is provided, routes through tortoise_fts_query() for hybrid search.
     When text is None, uses existing structural query (full-scan for context).
-    entity_type: 'point' (default), 'event', 'subject', 'document', or 'object'.
+    entity_type: 'point' (default), 'event', or 'subject'.
     """
     filters = _parse(filters)
-    if _is_hosted():
-        params: dict[str, str] = {}
-        if kind:
-            params["kind"] = kind
-        if context:
-            params["context"] = context
-        if filters:
-            params.update({k: str(v) for k, v in filters.items()})
-        qs = urllib.parse.urlencode(params)
-        return _hosted_request("GET", f"/v1/points?{qs}")
     if text:
-        # Merge kind/context from filters if not explicitly provided
-        if filters:
-            if not kind and "kind" in filters:
-                kind = filters.pop("kind")
-            if not context and "context" in filters:
-                context = filters.pop("context")
-        results = _safe(sdk.tortoise_fts_query, text, kind=kind, context=context,
+        return _safe(sdk.tortoise_fts_query, text, kind=kind, context=context,
                      entity_type=entity_type, limit=limit,
                      min_confidence=min_confidence or 0.0,
                      order_by=order_by or "relevance")
-        # Apply remaining property filters as post-filter
-        if filters and isinstance(results, list) and results and "error" not in results[0]:
-            filtered = []
-            for r in results:
-                match = True
-                for key, val in filters.items():
-                    if r.get(key) != val:
-                        match = False
-                        break
-                if match:
-                    filtered.append(r)
-            return filtered[:limit]
-        return results
     return _safe(sdk.query, kind, context, **(filters or {}))
 
 
@@ -236,16 +147,6 @@ def tortoise_paginated_query(kind: str | None = None, context: str | None = None
                              filters: Any = None) -> dict:
     """Query points with SKIP/LIMIT pagination. Returns {results, total, hasMore}."""
     filters = _parse(filters)
-    if _is_hosted():
-        params: dict[str, str] = {"skip": str(skip), "limit": str(limit)}
-        if kind:
-            params["kind"] = kind
-        if context:
-            params["context"] = context
-        if filters:
-            params.update({k: str(v) for k, v in filters.items()})
-        qs = urllib.parse.urlencode(params)
-        return _hosted_request("GET", f"/v1/points?{qs}")
     return _safe(sdk.paginated_query, kind, context, skip=skip, limit=limit,
                  **(filters or {}))
 
@@ -265,8 +166,6 @@ def tortoise_summarize_structure() -> dict:
 @mcp.tool()
 def tortoise_get_point(id: str) -> dict:
     """Get a single Point by ID. Returns all properties, or empty dict."""
-    if _is_hosted():
-        return _hosted_request("GET", f"/v1/points/{id}")
     return _safe(sdk.get_point, id)
 
 
@@ -281,20 +180,11 @@ def tortoise_suggest_entry_points(query: str, limit: int = 5,
     Falls back to string match (CONTAINS) if hybrid search unavailable.
     Returns [{id, name, kind, confidence}] sorted by confidence DESC.
     """
-    if _is_hosted():
-        params: dict[str, str] = {"query": query, "limit": str(limit)}
-        if kind_filter:
-            params["kind_filter"] = kind_filter
-        qs = urllib.parse.urlencode(params)
-        return _hosted_request("GET", f"/v1/search?{qs}")
     try:
         results = _safe(sdk.tortoise_fts_query, query, kind=kind_filter, limit=limit)
         if isinstance(results, list) and results and "error" not in results[0]:
             return [{"id": r["id"], "name": r.get("content", ""),
                      "kind": r.get("point_kind", ""),
-                     # Confidence merge: 50% RRF relevance + 50% EP confidence mean.
-                     # Simple unweighted average — both components are [0,1] bounded.
-                     # Future: weight by result count or calibrate against human judgments.
                      "confidence": round(
                          0.5 * r.get("scores", {}).get("rrf", 0.0) +
                          0.5 * r.get("ep", {}).get("confidence_mean", 0.0), 4)}
@@ -312,42 +202,25 @@ def tortoise_search(query: str | None = None, kind: str | None = None,
                     threshold: float = 0.0, limit: int = 10,
                     min_confidence: float = 0.0,
                     order_by: str = "relevance",
-                    entity_type: str = "point",
-                    relationship_filter: str | None = None,
-                    traversal_path: str | None = None) -> list[dict]:
+                    entity_type: str = "point") -> list[dict]:
     """Hybrid search with RRF fusion + EP annotation.
 
-    entity_type: 'point' (default), 'event', 'subject', 'document', or 'object'.
+    entity_type: 'point' (default), 'event', or 'subject'.
     Full-scan mode: omit query, set context → all Points in context.
     Best-match mode: provide query → RRF fusion of FTS + vector + structural.
 
     Point results annotated with EP breakdown (confidence_mean + evidence + contention).
     min_confidence defaults to 0.0 (no filter).
 
-    relationship_filter: 'predicate:target_id' — only return points connected to
-        target_id via an operator with label=predicate.
-        Example: relationship_filter="addresses:customerSegment-1"
-    traversal_path: 'FromKind→ToKind' — only return points that participate in a
-        pack-declared relation chain. Resolved via pack registry.
-        Example: traversal_path="Product→Feature"
+    Note: threshold default changed from 0.3 (Phase 0 semantic search) to 0.0.
+    RRF scores are rank-based (0.01-0.05 range typical), not cosine similarity (0-1).
+    Use threshold > 0 to filter out very weak matches; the old 0.3 default would
+    reject nearly all RRF results. (#20)
     """
-    if _is_hosted():
-        params: dict[str, str] = {"query": query, "limit": str(limit)}
-        if kind:
-            params["kind"] = kind
-        if context:
-            params["context"] = context
-        params["threshold"] = str(threshold)
-        params["min_confidence"] = str(min_confidence)
-        params["entity_type"] = entity_type
-        qs = urllib.parse.urlencode(params)
-        return _hosted_request("GET", f"/v1/search?{qs}")
     return _safe(sdk.tortoise_fts_query, query, kind=kind, context=context,
                  threshold=threshold, limit=limit,
                  entity_type=entity_type,
-                 min_confidence=min_confidence, order_by=order_by,
-                 relationship_filter=relationship_filter,
-                 traversal_path=traversal_path)
+                 min_confidence=min_confidence, order_by=order_by)
 
 
 # ── EP Belief Propagation (#6908) ────────────────────────────────
@@ -394,8 +267,7 @@ def tortoise_update_point(id: str, props: Any) -> dict:
 
 @mcp.tool()
 def tortoise_create_operator(op_type: str, source_id: str, target_ids: Any,
-                              context: str = "sdk",
-                              label: str | None = None) -> dict:
+                              context: str = "sdk") -> dict:
     """Create an operator connecting Points.
     
     op_type: 'IMPL' (A supports B), 'NAND' (A contradicts B),
@@ -403,13 +275,12 @@ def tortoise_create_operator(op_type: str, source_id: str, target_ids: Any,
     source_id: source/parent Point ID.
     target_ids: target/child Point IDs (1 for IMPL/NAND, N for part/whole).
     context: domain context for the operator (default: 'sdk').
-    label: optional semantic label — "addresses", "hasPart", "opposes".
 
     → See /skill:tortoise-graph-reasoning for proper usage:
       annotation, mitigation, NAND constraints, veracity vs implication.
     """
     target_ids = _parse(target_ids)
-    return _safe(sdk.create_operator, op_type, source_id, target_ids, context=context, label=label)
+    return _safe(sdk.create_operator, op_type, source_id, target_ids, context=context)
 
 
 @mcp.tool()
@@ -570,16 +441,6 @@ def tortoise_diary_read(agent_name: str, last_n: int = 10,
 
 
 @mcp.tool()
-def tortoise_list_relations() -> list[dict]:
-    """List all relation declarations across installed packs.
-
-    Returns [{"pack": ..., "predicate": ..., "fromKind": ..., "toKind": ..., "mechanism": ...}].
-    Pack relations describe valid edge types between entity kinds — use for schema discovery.
-    """
-    return _safe(sdk.list_relations)
-
-
-@mcp.tool()
 def tortoise_list_graphs() -> list[str]:
     """List all graph names in the database. Useful for namespace discovery."""
     return _safe(sdk.list_graphs)
@@ -630,17 +491,6 @@ def tortoise_list_domains() -> list[dict]:
 
 
 @mcp.tool()
-def tortoise_list_contexts() -> list[dict]:
-    """List all graph contexts with point counts, sorted by count DESC.
-
-    Same as tortoise_list_domains — 'context' and 'domain' are synonyms
-    for the same namespace field. Enables context discovery without
-    guessing context names. Returns [{context, count}].
-    """
-    return _safe(sdk.list_domains)
-
-
-@mcp.tool()
 def tortoise_list_topics(entity_id: str) -> dict:
     """entityProfile lite for an entity. Returns {id, pointKind, context, neighbors, neighborCounts}."""
     return _safe(sdk.list_topics, entity_id)
@@ -676,8 +526,8 @@ def tortoise_analyze(question: str, context: str | None = None,
         except Exception:
             pass  # fall back to full-graph analysis
 
-    return _safe(analyze, question, sdk._get_proj(), context=context,
-                 entity_subgraph_ids=entity_subgraph_ids)
+    return analyze(question, sdk._get_proj(), context=context,
+                   entity_subgraph_ids=entity_subgraph_ids)
 
 
 # ── P1-3: Staleness Detection ─────────────────────────────────
@@ -698,84 +548,12 @@ def tortoise_provenance(point_id: str) -> dict:
 
 @mcp.tool()
 def tortoise_team_create(name: str) -> dict:
-    """Create a team with its own graph namespace.
-
-    Writes to the control_plane registry graph.
+    """Create isolated team graph via FalkorDB select_graph.
+    Generates a per-team API key. Returns {name, graph_name, api_key, id}.
     destructiveHint=true — creates persistent resources.
     idempotentHint=false — duplicate team names raise an error.
     """
     return _safe(sdk.team_create, name)
-
-
-# ── Control Plane: Read-Only Tools ─────────────────────────────
-
-@mcp.tool(annotations={"readOnlyHint": True})
-def tortoise_team_list() -> list[dict]:
-    """List all teams in the registry."""
-    return _safe(sdk.team_list)
-
-
-@mcp.tool(annotations={"readOnlyHint": True})
-def tortoise_team_get(team_id: str) -> dict:
-    """Get a team by ID."""
-    return _safe(sdk.team_get, team_id)
-
-
-@mcp.tool(annotations={"readOnlyHint": True})
-def tortoise_membership_list(team_id: str) -> list[dict]:
-    """List all memberships for a team."""
-    return _safe(sdk.membership_list, team_id)
-
-
-@mcp.tool(annotations={"readOnlyHint": True})
-def tortoise_apikey_list(team_id: str) -> list[dict]:
-    """List API keys for a team (no plaintext keys)."""
-    return _safe(sdk.apikey_list, team_id)
-
-
-@mcp.tool(annotations={"readOnlyHint": True})
-def tortoise_invitation_list(team_id: str) -> list[dict]:
-    """List invitations for a team."""
-    return _safe(sdk.invitation_list, team_id)
-
-
-# ── Control Plane: Mutation Tools ───────────────────────────────
-
-@mcp.tool(annotations={"destructiveHint": True})
-def tortoise_apikey_create(team_id: str, created_by: str) -> dict:
-    """Generate an API key for a team. Plaintext returned once.
-
-    destructiveHint=true — creates persistent credentials.
-    """
-    return _safe(sdk.apikey_create, team_id, created_by)
-
-
-@mcp.tool(annotations={"destructiveHint": True})
-def tortoise_apikey_revoke(key_id: str) -> dict:
-    """Revoke an API key. Idempotent.
-
-    destructiveHint=true — permanently revokes access.
-    """
-    return _safe(sdk.apikey_revoke, key_id)
-
-
-@mcp.tool(annotations={"destructiveHint": True})
-def tortoise_invitation_create(team_id: str, email: str, role: str,
-                                created_by: str) -> dict:
-    """Create an invitation with 7-day expiry.
-
-    destructiveHint=true — creates persistent invitation.
-    """
-    return _safe(sdk.invitation_create, team_id, email, role, created_by)
-
-
-@mcp.tool(annotations={"destructiveHint": True})
-def tortoise_invitation_revoke(invitation_id: str) -> dict:
-    """Revoke an invitation. Idempotent.
-
-    destructiveHint=true — permanently revokes invitation.
-    """
-    return _safe(sdk.invitation_revoke, invitation_id)
 
 
 # ── Entity CRUD (ONTOLOGY v2.5) ───────────────────────────────

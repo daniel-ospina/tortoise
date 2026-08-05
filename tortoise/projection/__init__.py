@@ -12,65 +12,8 @@ Backends behind the `Projection` protocol:
 """
 from __future__ import annotations
 
-import re
 from datetime import datetime, timezone
 from typing import Protocol, runtime_checkable
-
-# P0 guard (#99): bulk graph-wipe classifier.
-# A query is a bulk wipe when it contains DETACH DELETE but has NO property map
-# ({...} — e.g. MATCH (n:Label {id:$id})) and NO real WHERE clause.
-# A WHERE clause is "real" only if it references a property (n.xxx) or a
-# parameter ($id) or CONTAINS/IN — tautologies (WHERE true, WHERE 1=1) don't count.
-# Blocks: MATCH (n) DETACH DELETE n, MATCH (n:Label) DETACH DELETE n,
-#   MATCH (n) WHERE true DETACH DELETE n, MATCH (n:Point:Object) DETACH DELETE n.
-# Allows: MATCH (n:Label {id:$id}) DETACH DELETE n,
-#   MATCH (n) WHERE n.id = $id OR n.eventId = $id DETACH DELETE n.
-_WHERE_REAL_RE = re.compile(
-    r"\b[a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*|\$[a-zA-Z_]|CONTAINS|IN\s*\(",
-    re.IGNORECASE,
-)
-
-
-def _is_bulk_wipe(cypher: str) -> bool:
-    up = cypher.upper()
-    if "DETACH" not in up or "DELETE" not in up:
-        return False
-    # Property map in MATCH => targeted (e.g. {id:$id}, {team_id:$id})
-    if "{" in cypher:
-        return False
-    # Real WHERE clause (property/param/CONTAINS/IN reference) => targeted
-    m = re.search(r"WHERE\s+(.+) ", cypher + " ", re.IGNORECASE)
-    if m and _WHERE_REAL_RE.search(m.group(1)):
-        return False
-    return True
-
-
-class _GuardedGraph:
-    """Wrapper around FalkorDB Graph that guards against bulk graph-wipe queries.
-
-    Intercepts MATCH (n) DETACH DELETE n (no label, no WHERE) and asserts
-    the graph is a test graph before allowing execution. Targeted deletes
-    (MATCH (n:Label {...}) DETACH DELETE n) pass through unchanged.
-
-    Production code that intentionally wipes the graph (rebuild, rebuild_all)
-    sets FalkorProjection._skip_guard = True to bypass the guard.
-    """
-
-    __slots__ = ("_g", "_proj")
-
-    def __init__(self, g, projection):
-        self._g = g
-        self._proj = projection
-
-    def query(self, cypher: str, params=None):
-        if _is_bulk_wipe(cypher) and not self._proj._skip_guard:
-            self._proj._assert_test_graph(
-                "REFUSING to run MATCH (n) DETACH DELETE n on non-test graph"
-            )
-        return self._g.query(cypher, params=params)
-
-    def __getattr__(self, name):
-        return getattr(self._g, name)
 
 # ── Mixins ────────────────────────────────────────────────────────────────
 from tortoise.projection.entities import _EntityHandlers
@@ -170,39 +113,35 @@ class FalkorProjection(
     Same API regardless of backend — constructor swap is the only difference.
     """
 
-    _skip_guard: bool = False  # set True during intentional rebuild/rebuild_all
-
     def __init__(self, path: str | None = None, *,
                  host: str | None = None,
                  port: int = 16379,
-                 username: str | None = None,
                  password: str | None = None,
                  graph_name: str = "tortoise"):
 
-        self._graph_name = graph_name
-        self._skip_guard = False
-
         if path is not None:
-            # Embedded mode (opt-in via path=).
-            #
-            # ROOT CAUSE (#82): The falkordb package's FalkorDB is a TCP Redis
-            # client — its __init__(host, port, ...) treats the first arg as a
-            # hostname.  Passing a file path triggers getaddrinfo → IDNA encode
-            # → "label too long" on Python 3.14.  The *redislite* package ships
-            # its own FalkorDB subclass (redislite.falkordb_client.FalkorDB) that
-            # wraps an embedded Redis server — its __init__(dbfilename, ...) is
-            # what we need for path-based embedded mode.
-            from redislite.falkordb_client import FalkorDB  # lazy: keep import optional
-            self.db = FalkorDB(path)
+            # Embedded mode (opt-in via path=). Check for redislite .settings file
+            from falkordb import FalkorDB  # lazy: keep import optional
+            import json as _json
+            from pathlib import Path as _Path
+            settings_file = _Path(path).with_suffix('.db.settings')
+            if settings_file.exists():
+                settings = _json.loads(settings_file.read_text())
+                socket = settings.get('unixsocket', '')
+                if socket:
+                    self.db = FalkorDB(unix_socket_path=socket)
+                else:
+                    self.db = FalkorDB(path)
+            else:
+                self.db = FalkorDB(path)
         elif host is not None:
             # Docker FalkorDB
             from falkordb import FalkorDB  # ponytail: lazy import, only needed for Docker mode
-            self.db = FalkorDB(host=host, port=port, username=username, password=password, socket_connect_timeout=5, socket_timeout=10)
+            self.db = FalkorDB(host=host, port=port, password=password, socket_connect_timeout=5, socket_timeout=10)
         else:
             raise ValueError("Either path or host must be provided")
 
-        self.graph_name = graph_name
-        self.g = _GuardedGraph(self.db.select_graph(graph_name), self)
+        self.g = self.db.select_graph(graph_name)
         self._is_embedded = (path is not None)
         self._falkordb_version = self._get_falkordb_version()
         if self._falkordb_version is not None and self._falkordb_version[0] < 4:
@@ -220,18 +159,16 @@ class FalkorProjection(
     def from_uri(cls, uri: str) -> "FalkorProjection":
         """Parse docker:// connection string.
 
-        docker://[user]:password@host:port/graph_name
+        docker://:password@host:port/graph_name
         """
         from urllib.parse import urlparse
         parsed = urlparse(uri)
         if parsed.scheme != "docker":
             raise ValueError(f"Unsupported scheme: {parsed.scheme} (expected docker://)")
-        username = parsed.username or None
         password = parsed.password or None
         graph_name = parsed.path.lstrip('/') or "tortoise"
         return cls(host=parsed.hostname or "localhost",
                    port=parsed.port or 16379,
-                   username=username,
                    password=password,
                    graph_name=graph_name)
 
@@ -252,7 +189,7 @@ class FalkorProjection(
         elif t == "PointRetracted":
             self._delete(ev["id"])
         elif t == "PointsMerged":
-            for mid in ev.get("merge_ids", []):
+            for mid in event.get("merge_ids", []):
                 self._delete(mid)
         elif t == "EventRecorded":
             self._upsert_event(ev)
@@ -264,7 +201,7 @@ class FalkorProjection(
             self._upsert_document(ev)
 
     def rebuild(self, log) -> None:
-        self._destroy_graph("MATCH (n) DETACH DELETE n")
+        self.g.query("MATCH (n) DETACH DELETE n")
         for ev in log.read_all():
             self.apply(ev)
 
@@ -281,7 +218,7 @@ class FalkorProjection(
         """
         import os
         from tortoise.log import EventLog
-        self._destroy_graph("MATCH (n) DETACH DELETE n")
+        self.g.query("MATCH (n) DETACH DELETE n")
 
         # Collect all events from all files
         events = []
@@ -290,30 +227,8 @@ class FalkorProjection(
                 events.extend(EventLog(os.path.join(log_dir, fname)).read_all())
 
         # Pass 1: create all Point/Operator nodes (skip edges) + non-edge events
-        try:
-            self._rebuild_pass1(events)
-        except Exception:
-            # If pass 1 fails partway through, the graph is in an inconsistent
-            # state. Wipe and re-raise so the caller can retry from clean.
-            self._destroy_graph("MATCH (n) DETACH DELETE n")
-            raise
-
-        # Pass 2: create edges for all operators
-        try:
-            self._rebuild_pass2(events)
-        except Exception:
-            self._destroy_graph("MATCH (n) DETACH DELETE n")
-            raise
-
-        node_count = self.g.query(
-            "MATCH (n:Point) RETURN count(n)"
-        ).result_set[0][0]
-        edge_count = self.g.query(
-            "MATCH ()-[r]->() RETURN count(r)"
-        ).result_set[0][0]
-        return {"events": len(events), "nodes": node_count, "edges": edge_count}
-
-    def _rebuild_pass1(self, events: list) -> None:
+        # Pass 1a: create all Point/Operator nodes first
+        # (skip edges), so cross-file PointRevised always has a node to revise (#21).
         for ev in events:
             t = ev["type"]
             if t in ("PointAdded", "OperatorAdded"):
@@ -339,8 +254,14 @@ class FalkorProjection(
                             "ca": p.get("createdAt") or p.get("created_at"),
                             "now": _now_iso()},
                 )
+
+        # Pass 1b: apply revisions + other non-edge events AFTER all nodes exist
+        for ev in events:
+            t = ev["type"]
+            if t in ("PointAdded", "OperatorAdded"):
+                continue  # already handled in pass 1a
             elif t == "PointRetracted":
-                self._delete(ev.get("id") or ev.get("event_id"))
+                self._delete(ev.get("id") or ev["event_id"])
             elif t == "PointsMerged":
                 for mid in ev.get("merge_ids", []):
                     self._delete(mid)
@@ -356,41 +277,21 @@ class FalkorProjection(
                 self._upsert_document(ev)
             # ConfidenceChanged: no graph effect (audit-only event)
 
-    def _rebuild_pass2(self, events: list) -> None:
+        # Pass 2: create edges for all operators
         for ev in events:
             if ev["type"] == "OperatorAdded":
                 self._create_edges(ev["point"])
 
+        node_count = self.g.query(
+            "MATCH (n:Point) RETURN count(n)"
+        ).result_set[0][0]
+        edge_count = self.g.query(
+            "MATCH ()-[r]->() RETURN count(r)"
+        ).result_set[0][0]
+        return {"events": len(events), "nodes": node_count, "edges": edge_count}
+
     def query(self, cypher: str, **params):
-        # P0 guard (#99): routed through _GuardedGraph which checks DETACH DELETE.
         return self.g.query(cypher, params=params or None)
-
-    def _assert_test_graph(self, reason: str = "") -> None:
-        """Raise RuntimeError if the active graph is not a test graph.
-
-        Test graphs must start with 'test_' or 'tortoise_test'.
-        Guards against test teardowns accidentally wiping a real graph (#99).
-        """
-        if not self._graph_name.startswith(("test_", "tortoise_test")):
-            msg = (
-                f"Graph guard: operation blocked on non-test graph "
-                f"'{self._graph_name}'. "
-                f"{reason} — tests must use a graph name starting with "
-                f"'test_' or 'tortoise_test'."
-            ).rstrip()
-            raise RuntimeError(msg)
-
-    def _destroy_graph(self, cypher: str, **params):
-        """Internal: run a destructive Cypher query bypassing the guard.
-
-        Used by rebuild/rebuild_all which intentionally wipe the graph.
-        NOT for general use — prefer query() which has guard protection.
-        """
-        self._skip_guard = True
-        try:
-            return self.g._g.query(cypher, params=params or None)
-        finally:
-            self._skip_guard = False
 
     def _get_falkordb_version(self):
         """Parse FalkorDB version from db.info().
@@ -450,7 +351,7 @@ class FalkorProjection(
         _ver = getattr(self, '_falkordb_version', None)
         if _ver is None or _ver[0] >= 4:
             # ── Full-text indexes ──
-            for label, field in [("Point", "content"), ("Event", "subject"), ("Subject", "name"), ("Document", "title")]:
+            for label, field in [("Point", "content"), ("Event", "subject"), ("Subject", "name")]:
                 try:
                     self.g.query(f"CALL db.idx.fulltext.createNodeIndex('{label}', '{field}')")
                 except Exception as e:
@@ -465,25 +366,19 @@ class FalkorProjection(
             # ── Vector index (HNSW) — Docker/server FalkorDB only (#7764) ──
             # Embedded mode (redislite) uses brute-force vec.euclideanDistance instead.
             # HNSW requires RediSearch module, not bundled with redislite.
-            # NOTE (#117): the correct syntax is CREATE VECTOR INDEX FOR ... OPTIONS
-            # — the old CALL db.idx.vector.createNodeIndex is not a registered procedure.
             if not getattr(self, '_is_embedded', False):
-                # Core entity types with embeddings (#7845): Point, Event, Subject, Document, Object.
-                # Action is skipped — procedural, not content-bearing.
-                for label in ("Point", "Event", "Subject", "Document", "Object"):
-                    try:
-                        self.g.query(
-                            f"CREATE VECTOR INDEX FOR (n:{label}) ON (n.embedding) "
-                            f"OPTIONS {{dimension: 384, similarityFunction: 'cosine'}}"
-                        )
-                    except Exception as e:
-                        msg = str(e).lower()
-                        if "already" in msg or "exist" in msg:
-                            pass
-                        else:
-                            import logging
-                            logging.getLogger(__name__).warning(
-                                "Failed to create vector index on %s.embedding: %s", label, e)
+                try:
+                    self.g.query(
+                        "CALL db.idx.vector.createNodeIndex('Point', 'embedding', 384, 'HNSW')"
+                    )
+                except Exception as e:
+                    msg = str(e).lower()
+                    if "already" in msg:
+                        pass
+                    else:
+                        import logging
+                        logging.getLogger(__name__).warning(
+                            "Failed to create vector index on Point.embedding: %s", e)
         else:
             import logging
             logging.getLogger(__name__).info(
@@ -499,19 +394,21 @@ class FalkorProjection(
         pid = ev.get("id") or ev["event_id"]
         params: dict = {"id": pid, "c": new_content, "x": ev.get("new_context")}
 
-        # Re-compute embedding when content changes (even to empty — wipe stale)
+        # Re-compute embedding when content changes (even to empty — wipe stale).
+        # Always set params["embedding"] so SET overwrites any stale value;
+        # on compute failure, set to None rather than preserving old embedding (#19).
         if new_content is not None:
             try:
                 from tortoise.embeddings import compute_embedding
                 emb = compute_embedding(new_content) if new_content else None
                 params["embedding"] = emb  # None = wipe stale embedding for empty content
             except Exception:
-                pass
+                params["embedding"] = None  # wipe stale embedding on failure (#19)
 
         set_clauses = ["n.content = coalesce($c, n.content)",
                        "n.context = coalesce($x, n.context)"]
         if "embedding" in params:
-            set_clauses.append("n.embedding = vecf32($embedding)")
+            set_clauses.append("n.embedding = $embedding")
         if set_updated_at:
             set_clauses.append("n.updatedAt = $now")
             params["now"] = _now_iso()

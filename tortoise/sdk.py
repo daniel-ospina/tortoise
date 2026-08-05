@@ -1474,7 +1474,17 @@ class TortoiseSDK:
             # ponytail: guard empty content (stub nodes may have '')
             if not content:
                 continue
-            confidence = 1.0 if content.lower() == q_lower else round(len(q) / len(content), 4)
+            # Confidence formula (#22): exact match → 1.0, partial match →
+            # [0.5, 1.0) via length ratio, smoothed to avoid scale collapse.
+            # len(q)/len(content) alone would give 0.001 for 1-char in 1000-char
+            # doc and 0.5 for 5-char in 10-char — not comparable. The 0.5 offset
+            # ensures all substring matches score ≥ 0.5, reserving [0, 0.5) for
+            # the hybrid fallback path (which has no substring match at all).
+            if content.lower() == q_lower:
+                confidence = 1.0
+            else:
+                ratio = len(q) / len(content)
+                confidence = round(0.5 + 0.5 * ratio, 4)
             results.append({"id": pid, "name": content, "kind": kind or "", "confidence": confidence})
 
         results.sort(key=lambda r: r["confidence"], reverse=True)

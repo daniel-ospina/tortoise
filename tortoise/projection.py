@@ -487,7 +487,10 @@ class FalkorProjection:
             if fname.endswith('.jsonl'):
                 events.extend(EventLog(os.path.join(log_dir, fname)).read_all())
 
-        # Pass 1: create all Point/Operator nodes (skip edges) + non-edge events
+        # Pass 1: create all Point/Operator nodes first (skip edges),
+        # then apply PointRevised and other non-edge events.
+        # Sub-ordering within pass 1 ensures PointAdded always runs before
+        # PointRevised regardless of cross-file sort order (#21).
         for ev in events:
             t = ev["type"]
             if t in ("PointAdded", "OperatorAdded"):
@@ -513,6 +516,12 @@ class FalkorProjection:
                             "ca": p.get("createdAt") or p.get("created_at"),
                             "now": _now_iso()},
                 )
+
+        # Pass 1b: apply revisions + other non-edge events AFTER all nodes exist
+        for ev in events:
+            t = ev["type"]
+            if t in ("PointAdded", "OperatorAdded"):
+                continue  # already handled in pass 1a
             elif t == "PointRetracted":
                 self._delete(ev["id"])
             elif t == "PointsMerged":

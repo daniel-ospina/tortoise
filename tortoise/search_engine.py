@@ -34,7 +34,6 @@ class EpBreakdown:
     confidence_mean: float = 0.0
     evidence: EpEvidence | None = None
     contention: float = 0.0
-    has_evidence: bool = False
 
     def __post_init__(self):
         if self.evidence is None:
@@ -50,7 +49,6 @@ class SearchResult:
     scores: SearchScores | None = None
     match_source: Literal["fts", "vector", "structural", "rrf", "tfidf"] = "rrf"
     ep: EpBreakdown | None = None
-    relationships: list[dict] | None = None
 
     def to_dict(self) -> dict:
         """Convert to JSON-safe dict for API responses."""
@@ -60,16 +58,17 @@ class SearchResult:
             "point_kind": self.point_kind,
             "context": self.context,
             "match_source": self.match_source,
-            # Backward-compat aliases (Phase 0 migration from old search() API)
+            # Backward-compat aliases (Phase 0 migration from old search() API).
+            # IMPORTANT: "similarity" was cosine (0-1) in Phase 0; now it's the
+            # RRF fusion score (rank-based, typically 0.01-0.05). Clients that
+            # threshold on similarity must recalibrate. (#23)
             "similarity": self.scores.rrf if self.scores else 0.0,
-            "snippet": self.content[:200] + "..." if len(self.content) > 200 else self.content,
+            "snippet": self.content[:200] if len(self.content) > 200 else self.content,
         }
         if self.scores:
             d["scores"] = asdict(self.scores)
         if self.ep and self.ep.evidence is not None:
             d["ep"] = asdict(self.ep)
-        if self.relationships is not None:
-            d["relationships"] = self.relationships
         return d
 
 
@@ -98,29 +97,27 @@ def run_fts_query(
     """Run full-text search via FalkorDB FTS index.
 
     Falls back gracefully if index doesn't exist or query fails.
-    entity_type: 'point' (default), 'event', 'subject', or 'document'.
-    Returns entity-type-specific identifier: Point/Subject → node.id, Event → node.eventId.
+    entity_type: 'point' (default), 'event', or 'subject'.
+
+    Note: timeout_ms is checked AFTER the query completes (post-hoc).
+    A slow query still consumes DB resources — this is a soft guard,
+    not a connection-level kill. For connection-level timeout, set it
+    at the FalkorDB driver level. (#18)
     """
     label = entity_type.capitalize()  # point→Point, event→Event, subject→Subject
-    # Event nodes use eventId as their identifier; Point/Subject use id
-    id_field = "eventId" if entity_type == "event" else "id"
     try:
         start = time.monotonic()
         cypher = (
             f"CALL db.idx.fulltext.queryNodes('{label}', $query) "
-            f"YIELD node, score "
-            f"RETURN node.{id_field}, score "
+            "YIELD node, score "
+            "RETURN node.id, score "
             "ORDER BY score DESC "
             "LIMIT $limit"
         )
         rows = graph.query(
             cypher, params={"query": query, "limit": limit}
         ).result_set
-        # NOTE: Timeout is checked AFTER query completes (post-hoc filter).
-        # A slow query still consumes DB resources. Future: connection-level timeout.
-        # LIMITATION: This is a post-hoc check, not a true query timeout.
-        # A query that takes 30s will still run for 30s before being discarded.
-        # True connection-level timeout requires FalkorDB client support (not available yet).
+        # Post-hoc timeout check (see docstring for rationale)
         elapsed = (time.monotonic() - start) * 1000
         if elapsed > timeout_ms:
             logger.warning("FTS query exceeded timeout: %.0fms > %dms", elapsed, timeout_ms)
@@ -137,7 +134,7 @@ def run_fts_query(
 
 def run_vector_query(
     graph, query_vec: list[float], limit: int = 20, timeout_ms: int = 500,
-    is_embedded: bool = True, entity_type: str = "point",
+    is_embedded: bool = True,
 ) -> list[tuple[str, float]]:
     """Run vector similarity search via FalkorDB vector index.
 
@@ -148,22 +145,21 @@ def run_vector_query(
     vec.euclideanDistance if the index is unavailable (embedded mode,
     old FalkorDB, or index creation failed).
 
-    entity_type: 'point' (default), 'event', 'subject', 'document', 'object'.
+    Note: timeout_ms is checked AFTER the query completes (post-hoc).
+    A slow query still consumes DB resources — this is a soft guard,
+    not a connection-level kill. (#18)
     """
     if not query_vec:
         return []
-
-    label = entity_type.capitalize()  # point→Point, event→Event, etc.
-    id_field = "eventId" if entity_type == "event" else "id"
 
     # Docker/server mode → try index-accelerated vector search (#7777)
     if not is_embedded:
         try:
             start = time.monotonic()
             cypher = (
-                f"CALL db.idx.vector.queryNodes('{label}', 'embedding', $limit, vecf32($query_vec)) "
-                "YIELD node, score "
-                f"RETURN node.{id_field}, score "
+                "CALL db.idx.vector.queryNodes('Point', 'embedding', $query_vec, $limit) "
+                "YIELD node "
+                "RETURN node.id "
                 "LIMIT $limit"
             )
             rows = graph.query(
@@ -173,12 +169,15 @@ def run_vector_query(
             if elapsed > timeout_ms:
                 logger.warning("Vector query exceeded timeout: %.0fms > %dms", elapsed, timeout_ms)
                 return []
-            # queryNodes returns (node.id, score) — score is already similarity
-            return [(row[0], float(row[1])) for row in rows]
+            # Index results are ranked by similarity; assign rank-based scores.
+            # RRF fusion uses rank not absolute scores; single-strategy mode
+            # gets reasonable descending ordering.
+            total = len(rows)
+            return [(row[0], 1.0 - (i / max(total, 1))) for i, row in enumerate(rows)]
         except Exception as e:
             msg = str(e).lower()
             if "index" in msg or "not found" in msg or "does not exist" in msg:
-                logger.info("Vector index not available for %s — falling back to brute-force", label)
+                logger.info("Vector index not available — falling back to brute-force")
             else:
                 logger.warning("Vector index query failed, falling back to brute-force: %s", e)
             # Fall through to brute-force below
@@ -187,11 +186,11 @@ def run_vector_query(
     try:
         start = time.monotonic()
         cypher = (
-            f"MATCH (n:{label}) "
+            "MATCH (n:Point) "
             "WHERE n.embedding IS NOT NULL "
             "WITH n, vec.euclideanDistance(n.embedding, $query_vec) AS distance "
             "WHERE distance IS NOT NULL "
-            f"RETURN n.{id_field}, 1.0 / (1.0 + distance) AS score "
+            "RETURN n.id, 1.0 / (1.0 + distance) AS score "
             "ORDER BY score DESC "
             "LIMIT $limit"
         )
@@ -206,42 +205,30 @@ def run_vector_query(
     except Exception as e:
         msg = str(e).lower()
         if "index" in msg or "not found" in msg or "does not exist" in msg:
-            logger.info("Vector index not available for %s — skipping vector strategy", label)
+            logger.info("Vector index not available — skipping vector strategy")
         elif "embedding" in msg and "null" in msg:
-            logger.info("No %s nodes with embeddings — skipping vector strategy", label)
+            logger.info("No Points with embeddings — skipping vector strategy")
         else:
-            logger.warning("Vector query failed for %s: %s", label, e)
+            logger.warning("Vector query failed: %s", e)
         return []
 
 
 def run_structural_query(
     graph, kind: str | None, context: str | None,
-    entity_type: str = "point", limit: int = 20,
-    expanded_kinds: list[str] | None = None,
+    entity_type: str = "point", limit: int = 20
 ) -> list[tuple[str, float]]:
     """Run structural/kind query via range indexes.
 
     entity_type: 'point' (filters on pointKind/context), 'event' (eventKind),
-                 'subject' (subjectKind), 'document' (documentKind),
-                 'object' (objectKind).
+                 'subject' (subjectKind).
     Returns matching entities with a score of 1.0 (exact match) or 0.5 (partial match).
-    Event entity_type returns eventId; all others return id.
-
-    expanded_kinds: pack-expanded kind list for IN-clause filtering.
-                   If provided, uses IN clause instead of single `= $kind`.
     """
     label = entity_type.capitalize()
-    kind_field = {"point": "pointKind", "event": "eventKind", "subject": "subjectKind", "document": "documentKind", "object": "objectKind"}[entity_type]
-    id_field = "eventId" if entity_type == "event" else "id"
+    kind_field = {"point": "pointKind", "event": "eventKind", "subject": "subjectKind"}[entity_type]
     try:
         conditions = []
         params = {}
-        if expanded_kinds:
-            placeholders = [f"$ekind_{i}" for i in range(len(expanded_kinds))]
-            conditions.append(f"n.{kind_field} IN [{', '.join(placeholders)}]")
-            for i, k in enumerate(expanded_kinds):
-                params[f"ekind_{i}"] = k
-        elif kind:
+        if kind:
             conditions.append(f"n.{kind_field} = $kind")
             params["kind"] = kind
         if context:
@@ -257,7 +244,7 @@ def run_structural_query(
         cypher = (
             f"MATCH (n:{label}) "
             f"WHERE {where_clause} "
-            f"RETURN n.{id_field} "
+            f"RETURN n.id, n.{kind_field}, n.{kind_field} "
             f"LIMIT $limit"
         )
         params["limit"] = limit
@@ -312,7 +299,6 @@ def degradation_chain(
     entity_type: str = "point",
     limit: int = 20,
     is_embedded: bool = True,
-    expanded_kinds: list[str] | None = None,
 ) -> dict[str, list[tuple[str, float]]]:
     """Run retrieval strategies in parallel with per-strategy degradation.
 
@@ -340,14 +326,12 @@ def degradation_chain(
 
         if strategies.get("vector") and query_vec:
             futures[executor.submit(
-                run_vector_query, graph, query_vec, limit=limit, is_embedded=is_embedded,
-                entity_type=entity_type,
+                run_vector_query, graph, query_vec, limit=limit, is_embedded=is_embedded
             )] = "vector"
 
         if strategies.get("structural"):
             futures[executor.submit(
-                run_structural_query, graph, kind, context, entity_type=entity_type, limit=limit,
-                expanded_kinds=expanded_kinds,
+                run_structural_query, graph, kind, context, entity_type=entity_type, limit=limit
             )] = "structural"
 
         # Collect results with 500ms total timeout across all strategies.
@@ -380,10 +364,7 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
     """Fetch EP confidence breakdown for a batch of Point IDs.
 
     Single Cypher query — NOT N+1. Returns EpBreakdown per Point ID.
-    Uses simple edge-count ratio (impl / total) — this is a fast batch annotation,
-    not full EP belief propagation. Full EP runs separately via compute_confidence().
-    Points with no EP data get EpBreakdown with confidence_mean=0.5 (neutral),
-    contention=0.0, has_evidence=False (distinct from all-NAND which has_evidence=True).
+    Points with no EP data get EpBreakdown with confidence_mean=0.0, contention=0.0.
     """
     if not point_ids:
         return {}
@@ -408,176 +389,29 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
         for row in rows:
             pid, impl, nand, contention = row[0], int(row[1]), int(row[2]), float(row[3])
             total = impl + nand
-            if total > 0:
-                confidence_mean = impl / total
-                breakdowns[pid] = EpBreakdown(
-                    confidence_mean=confidence_mean,
-                    evidence=EpEvidence(impl_count=impl, nand_count=nand, total=total),
-                    contention=contention,
-                    has_evidence=True,
-                )
-            else:
-                # Zero edges: treat as "no evidence" — neutral 0.5 mean
-                breakdowns[pid] = EpBreakdown(
-                    confidence_mean=0.5,
-                    evidence=EpEvidence(impl_count=0, nand_count=0, total=0),
-                    contention=0.0,
-                    has_evidence=False,
-                )
+            confidence_mean = impl / total if total > 0 else 0.0
+            breakdowns[pid] = EpBreakdown(
+                confidence_mean=confidence_mean,
+                evidence=EpEvidence(impl_count=impl, nand_count=nand, total=total),
+                contention=contention,
+            )
 
-        # Fill in defaults for IDs not in the query result at all
-        # (shouldn't happen with OPTIONAL MATCH, but safety net)
+        # Fill in defaults for IDs with no edges
         for pid in point_ids:
             if pid not in breakdowns:
                 breakdowns[pid] = EpBreakdown(
-                    confidence_mean=0.5,
+                    confidence_mean=0.0,
                     evidence=EpEvidence(impl_count=0, nand_count=0, total=0),
                     contention=0.0,
-                    has_evidence=False,
                 )
 
         return breakdowns
-    except Exception:
-        logger.warning("EP batch annotation failed", exc_info=True)
+    except Exception as e:
+        logger.warning("EP batch annotation failed: %s", e)
         return {}
-
-
-# ── Relationships ────────────────────────────────────────────────────────────
-
-def get_relationships(graph, point_ids: list[str]) -> dict[str, list[dict]]:
-    """Fetch operator-edge relationships for a batch of Point IDs.
-
-    Single Cypher query — NOT N+1. Returns dict mapping point_id → list of
-    relationship dicts with {predicate, mechanism, related_id, related_kind,
-    related_content, direction, operator_id}.
-
-    Points with no operator edges get an empty list.
-    """
-    if not point_ids:
-        return {}
-
-    rels: dict[str, list[dict]] = {pid: [] for pid in point_ids}
-
-    try:
-        cypher = (
-            "MATCH (n:Point) WHERE n.id IN $ids "
-            "MATCH (n)-[r:IMPL|NAND|hasPart]-(op:Point {is_operator:true}) "
-            "MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point) "
-            "WHERE other.id <> n.id "
-            "  AND (other.is_operator IS NULL OR other.is_operator = false) "
-            "RETURN n.id, op.op_type AS mechanism, "
-            "  coalesce(op.label, '') AS predicate, "
-            "  op.id AS operator_id, other.id AS related_id, "
-            "  other.pointKind AS related_kind, "
-            "  other.content AS related_content, "
-            "  r.idx AS n_idx, r2.idx AS other_idx"
-        )
-        rows = graph.query(cypher, params={"ids": point_ids}).result_set
-
-        for row in rows:
-            pid = row[0]
-            mechanism = row[1] or "IMPL"
-            predicate = row[2]
-            operator_id = row[3]
-            related_id = row[4]
-            related_kind = row[5] or ""
-            related_content = row[6] or ""
-            n_idx = row[7] if len(row) > 7 else None
-            other_idx = row[8] if len(row) > 8 else None
-
-            # Determine direction: idx=0 = source, idx>0 = target.
-            # Our point is source → relationship is outgoing.
-            # Our point is target + other is source → relationship is incoming.
-            if n_idx is not None and n_idx == 0:
-                direction = "outgoing"
-            else:
-                direction = "incoming"
-
-            rel_entry = {
-                "predicate": predicate if predicate else "",
-                "mechanism": mechanism,
-                "related_id": related_id,
-                "related_kind": related_kind,
-                "related_content": related_content[:200] if related_content else "",
-                "direction": direction,
-                "operator_id": operator_id,
-            }
-            if pid in rels:
-                rels[pid].append(rel_entry)
-    except Exception:
-        logger.warning("Relationship query failed", exc_info=True)
-
-    return rels
 
 
 # ── TF-IDF fallback (in-memory, from embeddings.py) ─────────────────────────
-
-# ── Relationship / Traversal filters (#7846) ──────────────────────────────────
-
-def filter_by_relationship(
-    graph,
-    point_ids: list[str],
-    predicate: str,
-    target_id: str,
-    entity_type: str = "point",
-    id_field: str = "id",
-) -> list[str]:
-    """Post-filter: keep only points connected to target_id via operator with label=predicate.
-
-    Operators are middle entities — Product→(op:contains)→Feature = 2 graph hops.
-    Traversal: point <-[IMPL]-(op {label:predicate})-[IMPL]-> target.
-    Returns filtered list of point IDs (subset of input).
-    """
-    if not point_ids or not predicate or not target_id:
-        return []
-    try:
-        label = entity_type.capitalize()
-        cypher = (
-            f"MATCH (n:{label}) WHERE n.{id_field} IN $ids "
-            f"MATCH (n)<-[r1:hasPart|IMPL|NAND]-(op:Point {{is_operator:true, label:$pred}})"
-            f"-[r2:hasPart|IMPL|NAND]->(t:{label} {{{id_field}: $tid}}) "
-            f"RETURN DISTINCT n.{id_field}"
-        )
-        rows = graph.query(
-            cypher,
-            params={"ids": point_ids, "pred": predicate, "tid": target_id},
-        ).result_set
-        return [row[0] for row in rows]
-    except Exception:
-        logger.warning("Relationship filter failed — returning empty", exc_info=True)
-        return []
-
-
-def filter_by_traversal_predicate(
-    graph,
-    point_ids: list[str],
-    predicate: str,
-    entity_type: str = "point",
-    id_field: str = "id",
-) -> list[str]:
-    """Post-filter: keep only points that participate in ANY operator with label=predicate.
-
-    Points are matched if they are either the source or target of an operator
-    carrying the given predicate label. Returns filtered list of point IDs.
-    """
-    if not point_ids or not predicate:
-        return []
-    try:
-        label = entity_type.capitalize()
-        cypher = (
-            f"MATCH (n:{label}) WHERE n.{id_field} IN $ids "
-            f"MATCH (n)<-[r:hasPart|IMPL|NAND]-(op:Point {{is_operator:true, label:$pred}}) "
-            f"RETURN DISTINCT n.{id_field}"
-        )
-        rows = graph.query(
-            cypher,
-            params={"ids": point_ids, "pred": predicate},
-        ).result_set
-        return [row[0] for row in rows]
-    except Exception:
-        logger.warning("Traversal predicate filter failed — returning empty", exc_info=True)
-        return []
-
 
 def fallback_tfidf(query: str, points: list[dict], limit: int = 10) -> list[dict]:
     """Last-resort TF-IDF fallback when all FalkorDB strategies fail.
@@ -586,7 +420,7 @@ def fallback_tfidf(query: str, points: list[dict], limit: int = 10) -> list[dict
     """
     try:
         from tortoise.embeddings import search_points
-        meta = {p["id"]: p for p in points if p.get("id")}
+        meta = {p["id"]: p for p in points}
         results = search_points(query, points, threshold=0.0, limit=limit)
         return [
             SearchResult(
