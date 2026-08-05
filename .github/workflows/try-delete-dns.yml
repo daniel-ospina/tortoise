@@ -1,0 +1,14 @@
+name: Try Delete DNS
+on:
+  workflow_dispatch:
+jobs:
+  try:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          ZONE="e2f87d461a335b66235fcd11054baa7c"
+          RECORD="bcc81b64429047a43fe40ec3bd42e9bb"
+          echo "=== try delete stale CNAME ==="
+          curl -s -X DELETE \
+            "https://api.cloudflare.com/client/v4/zones/$ZONE/dns_records/$RECORD" \
+            -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" | python3 -c "import json,sys; d=json.load(sys.stdin); print('delete success:', d.get('success')); print('errors:', d.get('errors'))"
