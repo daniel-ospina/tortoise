@@ -17,17 +17,26 @@ import secrets
 
 _logger = logging.getLogger(__name__)
 
-# TORTOISE_SECRET_PEPPER is mandatory. Without a stable pepper, API key
-# hashes cannot be verified across process restarts (#67).
+# TORTOISE_SECRET_PEPPER is mandatory in PRODUCTION. Without a stable pepper,
+# API key hashes cannot be verified across process restarts (#67).
+# Dev mode (no TORTOISE_API_KEY): auth is bypassed and hashing is never used,
+# so fall back to a stable dev-only pepper instead of failing at import
+# (which broke local MCP server / pi sessions and the test suite).
+_DEV_PEPPER = "dev-mode-tortoise-pepper-do-not-use-in-production"
 _SECRET_PEPPER = os.environ.get("TORTOISE_SECRET_PEPPER", "")
-
 if not _SECRET_PEPPER:
-    raise RuntimeError(
-        "TORTOISE_SECRET_PEPPER is not set. "
-        "Set TORTOISE_SECRET_PEPPER in production to ensure API key hashes "
-        "survive process restart. API key hashes cannot be verified without "
-        "a stable pepper value."
+    if os.environ.get("TORTOISE_API_KEY"):
+        raise RuntimeError(
+            "TORTOISE_SECRET_PEPPER is not set. "
+            "Set TORTOISE_SECRET_PEPPER in production to ensure API key hashes "
+            "survive process restart. API key hashes cannot be verified without "
+            "a stable pepper value."
+        )
+    _logger.warning(
+        "TORTOISE_SECRET_PEPPER not set — using dev-mode pepper. "
+        "DO NOT run in production without setting it."
     )
+    _SECRET_PEPPER = _DEV_PEPPER
 
 _PEPPER_BYTES = _SECRET_PEPPER.encode()
 
