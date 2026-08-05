@@ -19,6 +19,10 @@ ontology:
     - card           # Generic work unit on a board (supertype of issue, task)
     - milestone      # Grouping of issues/cards toward a goal
 
+  subclassOf:
+    issue: WorkItem
+    card: WorkItem
+
   eventKinds:
     - cardCreated    # Card/issue/task was created
     - cardMoved      # Card moved between status columns
