@@ -1,0 +1,15 @@
+name: Provision Tortoise Domain
+on:
+  workflow_dispatch:
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          ACC="367c7ecf27e1b1b092d04fe9915a1e56"
+          echo "=== check pages API for validation retrigger (PATCH domain) ==="
+          curl -s -X PATCH \
+            "https://api.cloudflare.com/client/v4/accounts/$ACC/pages/projects/premise-labs/domains/tortoise.premiselabs.co" \
+            -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{"status":"pending"}' | python3 -m json.tool | head -20
