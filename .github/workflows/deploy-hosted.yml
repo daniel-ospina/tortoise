@@ -18,10 +18,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: superfly/flyctl-actions/setup-flyctl@master
-      - name: Create app if missing
-        run: flyctl apps create tortoise-api || echo "app exists or created"
+      - name: Get Fly org
+        id: fly-org
+        run: |
+          ORG=$(flyctl orgs list --json | python3 -c "import sys,json; orgs=json.load(sys.stdin); print(orgs[0]['slug'] if orgs else '')")
+          echo "org=$ORG" >> $GITHUB_OUTPUT
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-      - run: flyctl deploy --remote-only
+      - name: Create app if missing
+        run: flyctl apps create tortoise-api --org ${{ steps.fly-org.outputs.org }} || echo "app exists"
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      - run: flyctl deploy --remote-only --app tortoise-api
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
