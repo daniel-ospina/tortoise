@@ -437,3 +437,164 @@ def fallback_tfidf(query: str, points: list[dict], limit: int = 10) -> list[dict
     except Exception as e:
         logger.error("TF-IDF fallback failed: %s", e)
         return []
+
+
+def get_relationships(graph, point_ids: list[str]) -> dict[str, list[dict]]:
+    """Fetch operator-edge relationships for a batch of Point IDs.
+
+    Single Cypher query — NOT N+1. Returns dict mapping point_id → list of
+    relationship dicts with {predicate, mechanism, related_id, related_kind,
+    related_content, direction, operator_id}.
+
+    Points with no operator edges get an empty list.
+    """
+    if not point_ids:
+        return {}
+
+    rels: dict[str, list[dict]] = {pid: [] for pid in point_ids}
+
+    try:
+        cypher = (
+            "MATCH (n:Point) WHERE n.id IN $ids "
+            "MATCH (n)-[r:IMPL|NAND|hasPart]-(op:Point {is_operator:true}) "
+            "MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point) "
+            "WHERE other.id <> n.id "
+            "  AND (other.is_operator IS NULL OR other.is_operator = false) "
+            "RETURN n.id, op.op_type AS mechanism, "
+            "  coalesce(op.label, '') AS predicate, "
+            "  op.id AS operator_id, other.id AS related_id, "
+            "  other.pointKind AS related_kind, "
+            "  other.content AS related_content, "
+            "  r.idx AS n_idx, r2.idx AS other_idx"
+        )
+        rows = graph.query(cypher, params={"ids": point_ids}).result_set
+
+        for row in rows:
+            pid = row[0]
+            mechanism = row[1] or "IMPL"
+            predicate = row[2]
+            operator_id = row[3]
+            related_id = row[4]
+            related_kind = row[5] or ""
+            related_content = row[6] or ""
+            n_idx = row[7] if len(row) > 7 else None
+            other_idx = row[8] if len(row) > 8 else None
+
+            # Determine direction: idx=0 = source, idx>0 = target.
+            # Our point is source → relationship is outgoing.
+            # Our point is target + other is source → relationship is incoming.
+            if n_idx is not None and n_idx == 0:
+                direction = "outgoing"
+            else:
+                direction = "incoming"
+
+            rel_entry = {
+                "predicate": predicate if predicate else "",
+                "mechanism": mechanism,
+                "related_id": related_id,
+                "related_kind": related_kind,
+                "related_content": related_content[:200] if related_content else "",
+                "direction": direction,
+                "operator_id": operator_id,
+            }
+            if pid in rels:
+                rels[pid].append(rel_entry)
+    except Exception:
+        logger.warning("Relationship query failed", exc_info=True)
+
+    return rels
+
+
+# ── TF-IDF fallback (in-memory, from embeddings.py) ─────────────────────────
+
+# ── Relationship / Traversal filters (#7846) ──────────────────────────────────
+
+def filter_by_relationship(
+    graph,
+    point_ids: list[str],
+    predicate: str,
+    target_id: str,
+    entity_type: str = "point",
+    id_field: str = "id",
+) -> list[str]:
+    """Post-filter: keep only points connected to target_id via operator with label=predicate.
+
+    Operators are middle entities — Product→(op:contains)→Feature = 2 graph hops.
+    Traversal: point <-[IMPL]-(op {label:predicate})-[IMPL]-> target.
+    Returns filtered list of point IDs (subset of input).
+    """
+    if not point_ids or not predicate or not target_id:
+        return []
+    try:
+        label = entity_type.capitalize()
+        cypher = (
+            f"MATCH (n:{label}) WHERE n.{id_field} IN $ids "
+            f"MATCH (n)<-[r1:hasPart|IMPL|NAND]-(op:Point {{is_operator:true, label:$pred}})"
+            f"-[r2:hasPart|IMPL|NAND]->(t:{label} {{{id_field}: $tid}}) "
+            f"RETURN DISTINCT n.{id_field}"
+        )
+        rows = graph.query(
+            cypher,
+            params={"ids": point_ids, "pred": predicate, "tid": target_id},
+        ).result_set
+        return [row[0] for row in rows]
+    except Exception:
+        logger.warning("Relationship filter failed — returning empty", exc_info=True)
+        return []
+
+
+def filter_by_traversal_predicate(
+    graph,
+    point_ids: list[str],
+    predicate: str,
+    entity_type: str = "point",
+    id_field: str = "id",
+) -> list[str]:
+    """Post-filter: keep only points that participate in ANY operator with label=predicate.
+
+    Points are matched if they are either the source or target of an operator
+    carrying the given predicate label. Returns filtered list of point IDs.
+    """
+    if not point_ids or not predicate:
+        return []
+    try:
+        label = entity_type.capitalize()
+        cypher = (
+            f"MATCH (n:{label}) WHERE n.{id_field} IN $ids "
+            f"MATCH (n)<-[r:hasPart|IMPL|NAND]-(op:Point {{is_operator:true, label:$pred}}) "
+            f"RETURN DISTINCT n.{id_field}"
+        )
+        rows = graph.query(
+            cypher,
+            params={"ids": point_ids, "pred": predicate},
+        ).result_set
+        return [row[0] for row in rows]
+    except Exception:
+        logger.warning("Traversal predicate filter failed — returning empty", exc_info=True)
+        return []
+
+
+def fallback_tfidf(query: str, points: list[dict], limit: int = 10) -> list[dict]:
+    """Last-resort TF-IDF fallback when all FalkorDB strategies fail.
+
+    points should be dicts with at least 'id', 'content', 'pointKind', 'context'.
+    """
+    try:
+        from tortoise.embeddings import search_points
+        meta = {p["id"]: p for p in points if p.get("id")}
+        results = search_points(query, points, threshold=0.0, limit=limit)
+        return [
+            SearchResult(
+                id=r["id"],
+                content=r["content"],
+                point_kind=meta.get(r["id"], {}).get("pointKind", ""),
+                context=meta.get(r["id"], {}).get("context"),
+                scores=SearchScores(fts=None, vector=None, structural=None, rrf=r["similarity"]),
+                match_source="tfidf",
+                ep=None,
+            ).to_dict()
+            for r in results
+        ]
+    except Exception as e:
+        logger.error("TF-IDF fallback failed: %s", e)
+        return []
