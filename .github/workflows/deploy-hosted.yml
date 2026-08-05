@@ -27,9 +27,9 @@ jobs:
           fi
       - name: Set FalkorDB Cloud URI secret on Fly.io
         run: |
-          flyctl secrets set FALKORDB_CLOUD_URI="${{ secrets.FALKORDB_CLOUD_URI }}" --app tortoise-api
+          flyctl secrets set FALKORDB_CLOUD_URI="${{ secrets.FALKORDB_CLOUD_URI }}" --app tortoise-y4mjjq
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-      - run: flyctl deploy --remote-only --wait-timeout 300 --app tortoise-api
+      - run: flyctl deploy --remote-only --wait-timeout 300 --app tortoise-y4mjjq
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
