@@ -1,0 +1,18 @@
+# One-off: attach tortoise.premiselabs.co → premise-labs Pages project
+# (product landing page). premiselabs.co stays the company page,
+# app.premiselabs.co stays the dashboard (tortoise-dashboard project).
+name: Attach Tortoise Domain
+on:
+  workflow_dispatch:
+
+jobs:
+  attach:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Attach custom domain
+        run: |
+          curl -s -X POST \
+            "https://api.cloudflare.com/client/v4/accounts/367c7ecf27e1b1b092d04fe9915a1e56/pages/projects/premise-labs/domains" \
+            -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{"name":"tortoise.premiselabs.co"}'
