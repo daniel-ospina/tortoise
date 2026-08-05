@@ -243,7 +243,7 @@ async def provision_tenant(request: Request):
         )
 
         # Provision FalkorDB namespace for the team
-        team_graph = sdk.db.select_graph(graph_name)
+        team_graph = sdk._get_proj().db.select_graph(graph_name)
         team_graph.query(
             "CREATE (:TeamMeta {name: $name, created: $now})",
             params={"name": team_name, "now": now},
@@ -282,7 +282,7 @@ async def provision_tenant(request: Request):
             "MATCH (m:Membership {team_id: $id}) DETACH DELETE m", params={"id": team_id}
         )
         try:
-            team_graph = sdk.db.select_graph(graph_name)
+            team_graph = sdk._get_proj().db.select_graph(graph_name)
             team_graph.delete()
         except Exception:
             pass
