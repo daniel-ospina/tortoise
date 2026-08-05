@@ -229,3 +229,32 @@ More content.
         # All should be updates since docs already exist
         assert result["updated"] == 3
         assert result["ingested"] == 0
+
+
+# ── create_point dedup regression (#80) ─────────────────────────
+
+def test_create_point_dedup_without_first_dedup(sdk):
+    """#80: dedup=True must find points created WITHOUT dedup.
+
+    Before the fix, content_hash was only persisted when dedup=True was
+    passed.  A point created without dedup had no content_hash, so a
+    later call with dedup=True would silently create a duplicate."""
+    content = "dedup-regression-test-#80"
+
+    # 1) Create WITHOUT dedup — pre-fix this would NOT store content_hash
+    p1 = sdk.create_point("statement", content)
+    assert p1["id"]
+
+    # 2) Create same content WITH dedup — must return the SAME id
+    p2 = sdk.create_point("statement", content, dedup=True)
+    assert p2["id"] == p1["id"], (
+        f"dedup=True should return existing point id. "
+        f"Got {p2['id']!r}, expected {p1['id']!r}"
+    )
+
+    # 3) Verify content_hash is actually stored on p1
+    point = sdk.get_point(p1["id"])
+    from tortoise.sdk import _content_hash
+    assert point.get("content_hash") == _content_hash(content), (
+        "content_hash should be stored on every new point (#80)"
+    )

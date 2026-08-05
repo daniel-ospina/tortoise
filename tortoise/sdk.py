@@ -160,10 +160,13 @@ class TortoiseSDK:
 
         # Calibration: pop credibility before storing as node property
         credibility = props.pop("credibility", None)
+        # Always compute and store content hash — dedup flag only gates the
+        # existing-point lookup, not hash persistence (fix #80).
+        ch = _content_hash(content)
+        props["content_hash"] = ch
         # Idempotency guard: dedup by content hash when requested
         dedup = props.pop("dedup", False)
         if dedup:
-            ch = _content_hash(content)
             existing = proj.g.query(
                 "MATCH (n:Point {content_hash:$ch}) "
                 "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
@@ -173,6 +176,10 @@ class TortoiseSDK:
             if existing:
                 pid = existing[0][0]
                 props["updatedAt"] = now
+                # Existing point already stores content_hash — don't re-write it
+                # (would make the `if props:` guard always truthy and bump
+                # updatedAt on every dedup hit, #80 review).
+                props.pop("content_hash", None)
                 if credibility is not None:
                     _logger.warning(
                         "credibility=%r ignored — point %s already exists and dedup=True",
@@ -180,7 +187,6 @@ class TortoiseSDK:
                 if props:
                     self.update_point(pid, **props)
                 return self.get_point(pid)
-            props["content_hash"] = ch
 
         # Issue #52 — warn when caller passes an explicit non-ULID id
         explicit_id = props.pop("id", None)
