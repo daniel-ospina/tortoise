@@ -312,10 +312,36 @@
       </div>
 
       <div class="card">
+        <div class="card-label">MCP config</div>
+        <div class="snippet" id="mcp-snippet">
+          <pre><code>{
+  "mcpServers": {
+    "tortoise": {
+      "command": "python3",
+      "args": ["-m", "tortoise.mcp_server"],
+      "env": {
+        "TORTOISE_API_KEY": "<span id="mcp-snippet-key">tt_YOUR_KEY</span>",
+        "TORTOISE_API_URL": "https://api.premiselabs.co"
+      }
+    }
+  }
+}</code></pre>
+        </div>
+        <button class="btn-copy" id="btn-copy-mcp" onclick="copyMcpConfig()" style="width:100%;margin-bottom:0.75rem;">
+          <span>Copy MCP config</span>
+        </button>
+        <p style="font-size:0.72rem;color:var(--text-dim);line-height:1.4;">
+          Paste into <code style="color:var(--accent);">.mcp.json</code> (Claude Code),
+          <code style="color:var(--accent);">.cursor/mcp.json</code> (Cursor),
+          or <code style="color:var(--accent);">claude_desktop_config.json</code> (Claude Desktop).
+        </p>
+      </div>
+
+      <div class="card">
         <div class="card-label">Quickstart</div>
         <div class="snippet" id="snippet">
           <pre><span class="comment"># Install Tortoise</span>
-<span class="cmd">pip install tortoise-client</span>
+<span class="cmd">pip install git+https://github.com/daniel-ospina/tortoise.git</span>
 
 <span class="comment"># Connect to your hosted graph</span>
 <span class="cmd">tortoise init --api-key <span id="snippet-key">tt_YOUR_KEY</span></span>
@@ -323,8 +349,8 @@
 <span class="comment"># Create your first Point</span>
 <span class="cmd">tortoise create-point "Hello world" --kind statement</span></pre>
         </div>
-        <button class="btn-copy" onclick="copySnippet()" style="width:100%;">
-          Copy quickstart
+        <button class="btn-copy" id="btn-copy-snippet" onclick="copySnippet()" style="width:100%;">
+          <span>Copy quickstart</span>
         </button>
       </div>
 
@@ -335,8 +361,8 @@
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
   <script>
     // ── Configuration ──────────────────────────────────────────────────────
-    const SUPABASE_URL = "https://eldato-epistemic.supabase.co";
-    const SUPABASE_ANON_KEY = "{% raw %}{{SUPABASE_ANON_KEY}}{% endraw %}";
+    const SUPABASE_URL = "https://ybetwichurajbfswfeqa.supabase.co";
+    const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InliZXR3aWNodXJhamJmc3dmZXFhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODUyNzgzNDYsImV4cCI6MjEwMDg1NDM0Nn0.YHysJAebPualDNDQTU5bnGBUHg5guLe8eBadm0LiEiY";
     const POLL_INTERVAL_MS = 1000;
     const POLL_MAX_ATTEMPTS = 30; // 30 seconds max
 
@@ -418,6 +444,7 @@
       document.getElementById("team-name").textContent = data.team_name;
       document.getElementById("api-key").textContent = data.api_key;
       document.getElementById("snippet-key").textContent = data.api_key;
+      document.getElementById("mcp-snippet-key").textContent = data.api_key;
     }
 
     function showError(message) {
@@ -443,7 +470,7 @@
     function copySnippet() {
       const key = document.getElementById("api-key").textContent;
       const snippet = `# Install Tortoise
-pip install tortoise-client
+pip install git+https://github.com/daniel-ospina/tortoise.git
 
 # Connect to your hosted graph
 tortoise init --api-key ${key}
@@ -451,6 +478,48 @@ tortoise init --api-key ${key}
 # Create your first Point
 tortoise create-point "Hello world" --kind statement`;
       copyToClipboard(snippet);
+
+      // Visual feedback (matches copyApiKey / copyMcpConfig)
+      const btn = document.getElementById("btn-copy-snippet");
+      const textEl = btn.querySelector("span");
+      const origText = textEl ? textEl.textContent : btn.textContent;
+      btn.classList.add("copied");
+      if (textEl) textEl.textContent = "Copied!";
+      else btn.textContent = "Copied!";
+      setTimeout(() => {
+        btn.classList.remove("copied");
+        if (textEl) textEl.textContent = origText;
+        else btn.textContent = origText;
+      }, 2000);
+    }
+
+    function copyMcpConfig() {
+      const key = document.getElementById("api-key").textContent;
+      const config = `{
+  "mcpServers": {
+    "tortoise": {
+      "command": "python3",
+      "args": ["-m", "tortoise.mcp_server"],
+      "env": {
+        "TORTOISE_API_KEY": "${key}",
+        "TORTOISE_API_URL": "https://api.premiselabs.co"
+      }
+    }
+  }
+}`;
+      copyToClipboard(config);
+
+      const btn = document.getElementById("btn-copy-mcp");
+      const textEl = btn.querySelector("span");
+      const origText = textEl ? textEl.textContent : btn.textContent;
+      btn.classList.add("copied");
+      if (textEl) textEl.textContent = "Copied!";
+      else btn.textContent = "Copied!";
+      setTimeout(() => {
+        btn.classList.remove("copied");
+        if (textEl) textEl.textContent = origText;
+        else btn.textContent = origText;
+      }, 2000);
     }
 
     async function copyToClipboard(text) {

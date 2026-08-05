@@ -2,7 +2,7 @@
 # https://supabase.com/docs/guides/local-development/cli/config
 # A string used to distinguish different Supabase projects on the same host. Defaults to the
 # working directory name when running `supabase init`.
-project_id = "eldato-epistemic"
+project_id = "ybetwichurajbfswfeqa"
 
 [api]
 enabled = true
@@ -270,6 +270,11 @@ max_frequency = "5s"
 # enabled = true
 # uri = "pg-functions://postgres/auth/before-user-created-hook"
 
+# Auth hook after_user_created is configured on the REMOTE project (Management API)
+# — CLI v2.90 cannot parse [auth.hook.after_user_created] in config.toml.
+# Remote state: hook_after_user_created_enabled=true,
+#   uri=https://ybetwichurajbfswfeqa.functions.supabase.co/tenant-provision
+
 # This hook runs before a token is issued and allows you to add additional claims based on the authentication method used.
 # [auth.hook.custom_access_token]
 # enabled = true
@@ -417,3 +422,10 @@ s3_secret_key = "env(S3_SECRET_KEY)"
 # declarative_schema_path = "./database"
 # JSON string passed through to pg-delta SQL formatting.
 # format_options = "{\"keywordCase\":\"upper\",\"indent\":2,\"maxWidth\":80,\"commaStyle\":\"trailing\"}"
+
+# ── Edge Functions ────────────────────────────────────────────────
+# tenant-provision is invoked by the after_user_created auth hook.
+# Auth hooks call WITHOUT a user JWT → verify_jwt must be false
+# (Supabase Auth signs the hook request itself).
+[functions.tenant-provision]
+verify_jwt = false

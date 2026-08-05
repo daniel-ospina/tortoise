@@ -18,6 +18,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: Verify secrets exist
+        run: |
+          if [ -z "${{ secrets.FASTAPI_INTERNAL_KEY }}" ] || [ -z "${{ secrets.TORTOISE_SECRET_PEPPER }}" ]; then
+            echo "::error::FASTAPI_INTERNAL_KEY and TORTOISE_SECRET_PEPPER must be set in GitHub secrets"
+            exit 1
+          fi
+      - name: Set secrets
+        # FASTAPI_INTERNAL_KEY (edge-function → API internal auth) and
+        # TORTOISE_SECRET_PEPPER (PBKDF2 salt for API key hashing) must match
+        # the values set on the tenant-provision Supabase edge function.
+        run: |
+          flyctl secrets set \
+            FASTAPI_INTERNAL_KEY="${{ secrets.FASTAPI_INTERNAL_KEY }}" \
+            TORTOISE_SECRET_PEPPER="${{ secrets.TORTOISE_SECRET_PEPPER }}" \
+            --app tortoise-y4mjjq
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
       - run: flyctl deploy --remote-only --app tortoise-y4mjjq
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
