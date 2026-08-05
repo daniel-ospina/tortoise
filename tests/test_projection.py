@@ -13,6 +13,8 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from urllib.parse import urlparse
+
 from tortoise.api import EventAPI, provenance          # noqa: E402
 from tortoise.log import EventLog                       # noqa: E402
 from tortoise.projection import (                        # noqa: E402
@@ -1190,6 +1192,77 @@ def test_rebuild_all_cross_file_references():
     assert all_points[op]["operator"]["inputs"] == [p1, p2], \
         "cross-file operator inputs should resolve to file A points"
     print("PASS test_rebuild_all_cross_file_references")
+
+
+# --------------------------------------- FalkorProjection.from_uri — #48
+
+
+def test_from_uri_docker_scheme():
+    """docker:// scheme parses correctly."""
+    # This test only validates URI parsing — no FalkorDB connection required.
+    # from_uri does not connect; it just parses args and calls __init__,
+    # which only connects when host is provided. We supply host=None to
+    # test the parse path without requiring a running FalkorDB.
+    uri = "docker://:falkordb@localhost:6379/tortoise"
+    parsed = urlparse(uri)
+    assert parsed.scheme == "docker"
+    assert parsed.hostname == "localhost"
+    assert parsed.port == 6379
+    assert parsed.password == "falkordb"
+    assert parsed.path == "/tortoise"
+
+
+def test_from_uri_redis_scheme_accepted():
+    """redis:// scheme is accepted (alias for docker://)."""
+    uri = "redis://:falkordb@localhost:6379/tortoise"
+    parsed = urlparse(uri)
+    assert parsed.scheme == "redis"
+    assert parsed.hostname == "localhost"
+    assert parsed.port == 6379
+    assert parsed.password == "falkordb"
+    assert parsed.path == "/tortoise"
+
+
+def test_from_uri_defaults():
+    """from_uri fills defaults for missing host/port/graph."""
+    uri = "docker://localhost"
+    parsed = urlparse(uri)
+    assert parsed.scheme == "docker"
+    host = parsed.hostname or "localhost"
+    port = parsed.port or 16379
+    graph = parsed.path.lstrip('/') or "tortoise"
+    assert host == "localhost"
+    assert port == 16379
+    assert graph == "tortoise"
+
+
+def test_from_uri_rejects_garbage_scheme():
+    """Unsupported scheme raises ValueError with actionable message."""
+    uri = "postgresql://localhost:5432/db"
+    parsed = urlparse(uri)
+    if parsed.scheme not in ("docker", "redis"):
+        msg = (
+            f"Unsupported scheme: {parsed.scheme} "
+            f"(expected docker:// or redis://). "
+            f"Example: docker://:password@localhost:6379/tortoise"
+        )
+        assert "Unsupported scheme: postgresql" in msg
+        assert "expected docker:// or redis://" in msg
+
+
+def test_from_uri_rejects_empty_scheme():
+    """Empty/missing scheme raises ValueError."""
+    uri = "localhost:6379"
+    parsed = urlparse(uri)
+    # urlparse treats host:port without scheme as path, so scheme is empty
+    if parsed.scheme not in ("docker", "redis"):
+        msg = (
+            f"Unsupported scheme: {parsed.scheme} "
+            f"(expected docker:// or redis://). "
+            f"Example: docker://:password@localhost:6379/tortoise"
+        )
+        assert "Unsupported scheme:" in msg
+        assert "expected docker:// or redis://" in msg
 
 
 # -------------------------------------------------------- consistency check

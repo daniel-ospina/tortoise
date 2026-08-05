@@ -120,14 +120,20 @@ class FalkorProjection:
 
     @classmethod
     def from_uri(cls, uri: str) -> "FalkorProjection":
-        """Parse docker:// connection string.
+        """Parse a FalkorDB connection string.
 
-        docker://[user]:password@host:port/graph_name
+        Supported schemes:
+          docker://[user]:password@host:port/graph_name
+          redis://[user]:password@host:port/graph_name  (alias for docker://)
         """
         from urllib.parse import urlparse
         parsed = urlparse(uri)
-        if parsed.scheme != "docker":
-            raise ValueError(f"Unsupported scheme: {parsed.scheme} (expected docker://)")
+        if parsed.scheme not in ("docker", "redis"):
+            raise ValueError(
+                f"Unsupported scheme: {parsed.scheme} "
+                f"(expected docker:// or redis://). "
+                f"Example: docker://:password@localhost:6379/tortoise"
+            )
         username = parsed.username or None
         password = parsed.password or None
         graph_name = parsed.path.lstrip('/') or "tortoise"
