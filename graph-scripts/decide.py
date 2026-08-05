@@ -102,6 +102,8 @@ def main():
                    help='JSON list of relevance mitigation edges: [{source, op_type, target, reason, strength}]')
     p.add_argument("--db", type=str, default=None,
                    help="Override TORTOISE_DB_URI (docker:// URI)")
+    p.add_argument("--context-free", action="store_true",
+                   help="Compute confidence via explicit operator factors instead of context isolation")
 
     args = p.parse_args()
 
@@ -132,6 +134,9 @@ def main():
     uri = args.db or os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise")
     sdk = TortoiseSDK()
     sdk._proj = FalkorProjection.from_uri(uri)
+
+    # Track all operator IDs for --context-free mode
+    all_operator_ids: list[str] = []
 
     try:
         # ── Create all points ──
@@ -176,6 +181,7 @@ def main():
                 op = sdk.create_operator(op_type, _resolve(src), [_resolve(tgt)],
                                          context=ctx, label=label)
                 created_ops[(src, op_type, tgt)] = op["id"]
+                all_operator_ids.append(op["id"])
                 print(f"  ✓ {src} --{op_type}--> {tgt}")
             except Exception as e:
                 print(f"  ⚠ {src} --{op_type}--> {tgt}: {e}")
@@ -186,7 +192,8 @@ def main():
             op_type = te.get("op_type", "NAND")
             tgt = te["target"]
             try:
-                sdk.create_operator(op_type, _resolve(src), [_resolve(tgt)], context=ctx)
+                top = sdk.create_operator(op_type, _resolve(src), [_resolve(tgt)], context=ctx)
+                all_operator_ids.append(top["id"])
                 print(f"  ⚡ truth: {src} --{op_type}--> {tgt}")
             except Exception as e:
                 print(f"  ⚠ truth {src} --{op_type}--> {tgt}: {e}")
@@ -207,6 +214,7 @@ def main():
                 if op_id is None:
                     op = sdk.create_operator(op_type, _resolve(src), [_resolve(tgt)], context=ctx)
                     op_id = op["id"]
+                    all_operator_ids.append(op_id)
                 sdk.mitigate_operator(op_id, reason, strength)
                 print(f"  ⚖ relevance: {src} --{op_type}--> {tgt} "
                       f"(mitigated {strength:.2f}: {reason})")
@@ -215,7 +223,11 @@ def main():
 
         # ── Compute confidence per option ──
         try:
-            result = sdk.compute_confidence(context=ctx)
+            if args.context_free and all_operator_ids:
+                print(f"  (context-free mode: {len(all_operator_ids)} operator factors)")
+                result = sdk.compute_confidence(factors=all_operator_ids)
+            else:
+                result = sdk.compute_confidence(context=ctx)
             print(f"\n✓ EP computed: {result['iterations']} iterations, "
                   f"converged={result['converged']}")
             confs = result.get("confidences", {})
