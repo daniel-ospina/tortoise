@@ -74,12 +74,24 @@ class TestApiKeyHashing:
         # Different peppers → different hashes for the same key
         assert h_a != h_b
 
-    def test_hash_api_key_import_crashes_without_pepper(self, monkeypatch):
-        """Importing auth module without TORTOISE_SECRET_PEPPER raises RuntimeError."""
+    def test_hash_api_key_import_uses_dev_pepper_without_env(self, monkeypatch):
+        """Dev mode (no TORTOISE_API_KEY, no pepper): import succeeds using dev pepper."""
         monkeypatch.delenv("TORTOISE_SECRET_PEPPER", raising=False)
+        monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+        mod = importlib.reload(auth_mod)
+        assert mod._SECRET_PEPPER == auth_mod._DEV_PEPPER
+        # Restore env so auth_mod can be re-imported cleanly
+        monkeypatch.setenv("TORTOISE_SECRET_PEPPER", "test-static-pepper")
+        importlib.reload(auth_mod)
+
+    def test_hash_api_key_import_crashes_without_pepper_in_prod(self, monkeypatch):
+        """Prod mode (TORTOISE_API_KEY set, no pepper): import raises RuntimeError."""
+        monkeypatch.delenv("TORTOISE_SECRET_PEPPER", raising=False)
+        monkeypatch.setenv("TORTOISE_API_KEY", "tt_prod_key")
         with pytest.raises(RuntimeError, match="TORTOISE_SECRET_PEPPER"):
             importlib.reload(auth_mod)
         # Restore env so auth_mod can be re-imported cleanly
+        monkeypatch.delenv("TORTOISE_API_KEY")
         monkeypatch.setenv("TORTOISE_SECRET_PEPPER", "test-static-pepper")
         importlib.reload(auth_mod)
 
