@@ -1,0 +1,15 @@
+name: Test DNS Write
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          ZONE="e2f87d461a335b66235fcd11054baa7c"
+          echo "=== try create a temp CNAME ==="
+          curl -s -X POST \
+            "https://api.cloudflare.com/client/v4/zones/$ZONE/dns_records" \
+            -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{"type":"CNAME","name":"temp-test.premiselabs.co","content":"premise-labs.pages.dev","proxied":true,"ttl":1}' | python3 -c "import json,sys; d=json.load(sys.stdin); print('create success:', d.get('success')); print('errors:', d.get('errors'))"
