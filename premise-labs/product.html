@@ -3,14 +3,14 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Premise Labs</title>
-  <meta name="description" content="An AI lab building the premises intelligence stands on.">
-  <meta property="og:title" content="Premise Labs">
-  <meta property="og:description" content="An AI lab building the premises intelligence stands on.">
+  <title>Tortoise — Memory Graph for AI Agents</title>
+  <meta name="description" content="Tortoise gives your AI agents persistent memory. Capture sessions, persist decisions, and let future agents recall them via MCP.">
+  <meta property="og:title" content="Tortoise — Memory Graph for AI Agents">
+  <meta property="og:description" content="Tortoise gives your AI agents persistent memory. Capture sessions, persist decisions, and let future agents recall them via MCP.">
   <meta property="og:type" content="website">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="Premise Labs">
-  <meta name="twitter:description" content="An AI lab building the premises intelligence stands on.">
+  <meta name="twitter:title" content="Tortoise — Memory Graph for AI Agents">
+  <meta name="twitter:description" content="Tortoise gives your AI agents persistent memory. Capture sessions, persist decisions, and let future agents recall them via MCP.">
   <meta name="theme-color" content="#060b14">
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -81,6 +81,13 @@
       letter-spacing: -0.01em;
     }
     #beat-hero h1 span { color: var(--accent); }
+    #beat-hero .hero-sub {
+      margin-top: 1.25rem;
+      max-width: 560px;
+      color: var(--text-dim);
+      font-size: clamp(0.95rem, 1.6vw, 1.1rem);
+      line-height: 1.6;
+    }
 
     /* Sub-beats */
     .beat p {
@@ -94,52 +101,29 @@
     .beat p strong { color: var(--text); font-weight: 400; }
     .beat p em { color: var(--accent); font-style: normal; }
 
-    /* Tortoise reveal */
-    #beat-tortoise h2 {
-      font-family: var(--serif);
-      font-size: clamp(1.4rem, 3vw, 2rem);
-      color: var(--text);
-      text-align: center;
-      font-weight: 400;
-      line-height: 1.4;
-    }
-    #beat-tortoise h2 span { color: var(--accent); }
-
-    /* Lab name */
-    #beat-lab h3 {
-      font-family: var(--mono);
-      font-size: clamp(1.35rem, 2.4vw, 1.65rem);
-      color: var(--text-dim);
-      text-align: center;
-      font-weight: 400;
-      letter-spacing: 0.04em;
-      text-transform: uppercase;
-    }
-    #beat-lab h3 strong { color: var(--text); font-weight: 400; }
-    #beat-lab p { margin-top: 1.25rem; }
-
     /* CTA */
     #beat-cta .cta-start {
       display: inline-block;
       background: var(--accent);
       color: var(--bg);
-      border: none;
-      padding: 0.85rem 2rem;
+      padding: 0.9rem 2rem;
       font-family: var(--mono);
-      font-size: 0.95rem;
+      font-size: 1rem;
       font-weight: 600;
       text-decoration: none;
       cursor: pointer;
-      transition: background 0.2s;
+      transition: background 0.2s, transform 0.2s;
       margin-bottom: 2rem;
     }
     #beat-cta .cta-start:hover {
-      background: var(--accent-hover);
+      background: #0891b2;
+      transform: scale(1.02);
     }
     #beat-cta .cta-subtle {
-      font-size: 0.75rem;
-      color: var(--text-dim);
+      margin-top: 0;
       margin-bottom: 1rem;
+      color: var(--text-dim);
+      font-size: 0.8rem;
     }
     #beat-cta form {
       display: flex; gap: 0.75rem; max-width: 400px; width: 100%;
@@ -190,43 +174,71 @@
       margin-top: 0.5rem;
     }
 
-    /* CTA button */
-    #beat-cta .cta-start {
-      display: inline-block;
-      background: var(--accent);
-      color: var(--bg);
-      padding: 0.9rem 2rem;
-      font-family: var(--mono);
-      font-size: 1rem;
-      text-decoration: none;
-      transition: background 0.2s, transform 0.2s;
+    /* MCP snippet */
+    #beat-cta .mcp-snippet {
+      margin-top: 1.25rem;
+      margin-bottom: 1rem;
+      background: rgba(6, 182, 212, 0.06);
+      border: 1px solid rgba(6, 182, 212, 0.2);
+      padding: 0.875rem 1rem;
+      border-radius: 4px;
+      text-align: left;
+      max-width: 480px;
     }
-    #beat-cta .cta-start:hover {
-      background: #0891b2;
-      transform: scale(1.02);
-    }
-    #beat-cta .cta-subtle {
-      margin-top: 1rem;
+    #beat-cta .mcp-snippet .snippet-label {
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
       color: var(--text-dim);
-      font-size: 0.8rem;
+      margin-bottom: 0.5rem;
+    }
+    #beat-cta .mcp-snippet pre {
+      margin: 0;
+      overflow-x: auto;
+    }
+    #beat-cta .mcp-snippet code {
+      display: block;
+      color: var(--accent);
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      line-height: 1.6;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    #beat-cta .mcp-snippet .snippet-note {
+      margin-top: 0.6rem;
+      font-size: 0.68rem;
+      color: var(--text-dim);
+      line-height: 1.4;
     }
 
-    /* CLI snippet */
+    /* CLI snippet — demoted below MCP */
     #beat-cta .cli-snippet {
-      margin-top: 1.5rem;
-      background: rgba(6, 182, 212, 0.08);
-      border: 1px solid rgba(6, 182, 212, 0.2);
-      padding: 0.75rem 1.25rem;
+      margin-top: 0;
+      margin-bottom: 1.25rem;
+      background: rgba(6, 182, 212, 0.04);
+      border: 1px solid rgba(6, 182, 212, 0.12);
+      padding: 0.625rem 1rem;
       border-radius: 4px;
       text-align: left;
       max-width: 420px;
+      overflow-x: auto;
+    }
+    #beat-cta .cli-snippet .snippet-label {
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-dim);
+      margin-bottom: 0.4rem;
     }
     #beat-cta .cli-snippet code {
       display: block;
       color: var(--accent);
       font-family: var(--mono);
-      font-size: 0.8rem;
-      line-height: 1.8;
+      font-size: 0.78rem;
+      line-height: 1.7;
+      white-space: pre-wrap;
+      word-break: break-word;
     }
 
     /* Self-hosting link */
@@ -262,20 +274,60 @@
 
   <div id="scroll-wrapper">
     <section id="beat-hero" class="beat">
-      <h1>The primary function of memory is not <span>recall</span>, but <span>learning</span>.</h1>
+      <h1>Your agents <span>remember</span> every decision, every session, every time.</h1>
+      <p class="hero-sub">Tortoise is the memory graph for AI agents. Sessions stream in, decisions persist, and future agents recall them — over MCP.</p>
     </section>
-    <section id="beat-origin" class="beat">
-      <p style="color: var(--text); font-size: clamp(1.15rem, 2.2vw, 1.5rem); line-height: 1.5;">Humans update their <span style="color: var(--accent);">world models</span> too slowly.<br>Agents forget them halfway through a session.<br><br>We made them persistent — unlocking better decisions, learning, and collaboration.</p>
+    <section id="beat-capture" class="beat">
+      <h2>Capture</h2>
+      <p>Agent sessions flow into a semantic graph automatically.</p>
+      <div class="cli-snippet">
+        <code>$ tortoise session capture --file chat.json</code>
+        <code>✓ 47 turns → 12 decisions, 8 claims, 3 hypotheses</code>
+      </div>
     </section>
-    <section id="beat-tortoise" class="beat">
-      <h2><span>Tortoise</span> — a memory system where agents learn.</h2>
+    <section id="beat-recall" class="beat">
+      <h2>Recall</h2>
+      <p>Future agents query the past — and answer from what you decided.</p>
+      <div class="cli-snippet">
+        <code>$ tortoise_suggest_entry_points("database architecture")</code>
+        <code>→ "Last session you decided FalkorDB Cloud (confidence 0.9)"</code>
+      </div>
     </section>
-    <section id="beat-lab" class="beat">
-      <h3><strong>Premise Labs</strong></h3>
+    <section id="beat-reason" class="beat">
+      <h2>Reason</h2>
+      <p>Belief propagation surfaces what's true — and what's been contradicted.</p>
+      <div class="cli-snippet">
+        <code>IMPL  a → b    confidence: 0.87</code>
+        <code>NAND  c → a    confidence: 0.72</code>
+      </div>
     </section>
     <section id="beat-cta" class="beat">
-      <a href="https://tortoise.premiselabs.co" class="cta-start">Learn more →</a>
-      <p class="cta-subtle">Meet Tortoise — the memory graph for AI agents.</p>
+      <a href="/signup" class="cta-start">Connect your agent →</a>
+      <p class="cta-subtle">5,000 Points free. No credit card. Start building in minutes.</p>
+      <!-- MCP config — works with Claude Code, Cursor, Pi, Claude Desktop -->
+      <div class="mcp-snippet">
+        <div class="snippet-label">MCP config</div>
+        <pre><code>{
+  "mcpServers": {
+    "tortoise": {
+      "command": "python3",
+      "args": ["-m", "tortoise.mcp_server"],
+      "env": {
+        "TORTOISE_API_KEY": "tt_YOUR_KEY",
+        "TORTOISE_API_URL": "https://api.premiselabs.co"
+      }
+    }
+  }
+}</code></pre>
+        <p class="snippet-note">Paste into <code>.mcp.json</code> (Claude Code), <code>.cursor/mcp.json</code> (Cursor), or <code>claude_desktop_config.json</code> (Claude Desktop).</p>
+      </div>
+      <div class="cli-snippet">
+        <div class="snippet-label">CLI quickstart</div>
+        <code>$ pip install git+https://github.com/daniel-ospina/tortoise.git</code>
+        <code>$ tortoise init --api-key &lt;key&gt;</code>
+        <code>$ tortoise create-point "Hello world" --kind statement</code>
+        <code>$ tortoise session capture --file chat.json</code>
+      </div>
       <a class="selfhost-link" href="https://github.com/daniel-ospina/tortoise" target="_blank" rel="noopener">Self-hosting docs →</a>
       <a class="twitter-link" href="https://x.com/permiselabs" target="_blank" rel="noopener">@permiselabs</a>
     </section>
@@ -412,7 +464,7 @@
     draw();
 
     /* ── Content beats (opacity scrubbed to scroll) ── */
-    const beats = ['beat-hero', 'beat-origin', 'beat-tortoise', 'beat-lab', 'beat-cta'];
+    const beats = ['beat-hero', 'beat-capture', 'beat-recall', 'beat-reason', 'beat-cta'];
 
     const beatSpan = 0.11;
     const gapSpan = 0.015;

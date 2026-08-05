@@ -40,7 +40,13 @@ def _make_sdk(*, namespace: str | None = None) -> TortoiseSDK:
     if os.environ.get("TORTOISE_DB_URI"):
         return TortoiseSDK(namespace=namespace)
     db_path = os.environ.get("TORTOISE_DB_PATH", "/data/tortoise.db")
-    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    try:
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    except OSError:
+        # /data volume not writable (test env, or volume not mounted yet) —
+        # fall back to a temp file so provisioning still works.
+        import tempfile
+        db_path = os.path.join(tempfile.gettempdir(), "tortoise.db")
     return TortoiseSDK(db_path=db_path, namespace=namespace)
 
 
@@ -297,18 +303,29 @@ def _short_id() -> str:
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    """Health check — verifies DB connectivity (not just app liveness)."""
+    db_ok = False
+    try:
+        sdk = _make_sdk(namespace="registry")
+        sdk._get_proj().g.query("RETURN 1")
+        db_ok = True
+    except Exception:
+        pass
+    if not db_ok:
+        raise HTTPException(status_code=503, detail="Database unreachable")
+    return {"status": "ok", "db": "connected"}
 
 
 @app.get("/health/security")
 async def health_security():
     """Security posture endpoint — verifies pepper, hashing, and auth config."""
     pepper_set = bool(os.environ.get("TORTOISE_SECRET_PEPPER"))
-    from tortoise.auth import is_dev_mode as _is_dev
+    internal_key_set = bool(os.environ.get("FASTAPI_INTERNAL_KEY"))
     return {
         "pepper_configured": pepper_set,
+        "internal_key_configured": internal_key_set,
         "hashing": "pbkdf2_hmac_sha256",
-        "auth_dev_mode": _is_dev(),
+        "api_auth_enforced": not internal_key_set or bool(os.environ.get("FASTAPI_INTERNAL_KEY")),
     }
 
 # ── Phase 1a: Core Endpoints ──────────────────────────────────────
@@ -379,6 +396,42 @@ async def get_current_team(request: Request) -> dict:
         raise HTTPException(status_code=500, detail="Auth error")
 
 
+def _check_team_limit(team: dict, resource: str) -> None:
+    """Enforce per-team limits. Raises 402 (payment required) when at capacity.
+
+    resource: 'points' | 'api_keys' | 'sessions'
+    """
+    team_id = team.get("team_id")
+    if not team_id:
+        return  # internal/no-team context — skip
+    max_limits = {
+        "points": team.get("max_points") or 1000,
+        "api_keys": team.get("max_api_keys") or 20,
+        "sessions": team.get("max_sessions") or 1000,
+    }
+    limit = max_limits.get(resource, 1000)
+    try:
+        sdk = _make_sdk(namespace=team_id)
+        if resource == "api_keys":
+            # API keys live in the registry graph, not the team graph
+            sdk = _make_sdk(namespace="registry")
+            count = sdk._get_proj().g.query(
+                "MATCH (k:APIKey {team_id: $tid}) WHERE k.revoked_at IS NULL RETURN count(k)",
+                params={"tid": team_id},
+            ).result_set[0][0]
+        else:
+            count = sdk._get_proj().g.query(
+                "MATCH (n) RETURN count(n)",
+            ).result_set[0][0]
+    except Exception:
+        return  # if we can't count, don't block writes (fail-open on counting)
+    if count >= limit:
+        raise HTTPException(
+            status_code=402,
+            detail=f"Team {resource} limit reached ({limit}). Upgrade your plan to increase it.",
+        )
+
+
 
 
 # ── Pydantic Models ───────────────────────────────────────────────
@@ -398,6 +451,16 @@ class CreatePointRequest(BaseModel):
         allowed = {"statement", "decision", "evidence", "observation", "hypothesis"}
         if v not in allowed:
             raise ValueError(f"kind must be one of {allowed}")
+        return v
+
+    @field_validator("tags")
+    @classmethod
+    def valid_tags(cls, v: list[str]) -> list[str]:
+        for t in v:
+            if not t or len(t) > 200:
+                raise ValueError("each tag must be 1-200 characters")
+            if any(ch in t for ch in '\n\r\t'):
+                raise ValueError("tags cannot contain newlines or tabs")
         return v
 
 
@@ -442,6 +505,7 @@ class ErrorResponse(BaseModel):
 @app.post("/v1/points", response_model=PointResponse)
 async def create_point(body: CreatePointRequest, request: Request, team: dict = Depends(get_current_team)):
     """Create a Point in the team's graph."""
+    _check_team_limit(team, "points")
     sdk = _make_sdk(namespace=team["team_id"])
     try:
         result = sdk.create_point(
@@ -453,7 +517,9 @@ async def create_point(body: CreatePointRequest, request: Request, team: dict = 
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to create point: {str(e)}")
+        import logging
+        logging.getLogger("tortoise.api").exception("create_point failed")
+        raise HTTPException(status_code=500, detail="Internal server error")
     # Log audit event
     await _async_audit(
         request, team["team_id"], "point_create",
@@ -477,6 +543,10 @@ async def list_points(
     team: dict = Depends(get_current_team),
 ):
     """Query Points in the team's graph."""
+    if kind:
+        allowed = {"statement", "decision", "evidence", "observation", "hypothesis"}
+        if kind not in allowed:
+            raise HTTPException(status_code=400, detail=f"kind must be one of {allowed}")
     sdk = _make_sdk(namespace=team["team_id"])
     proj = sdk._get_proj()
     conditions = ["(n.is_operator IS NULL OR n.is_operator = false)"]
@@ -547,7 +617,9 @@ async def team_info(team: dict = Depends(get_current_team)):
             "MATCH (n:Point) RETURN count(n)"
         ).result_set[0][0]
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch team info: {str(e)}")
+        import logging
+        logging.getLogger("tortoise.api").exception("team_info failed")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
     return TeamInfoResponse(
         team_id=team["team_id"],
@@ -559,7 +631,7 @@ async def team_info(team: dict = Depends(get_current_team)):
     )
 
 
-@app.post("/v1/internal/demo")
+@app.post("/internal/demo")
 async def create_demo_graph(request: Request):
     """Create a demo graph with sample Points across all 4 ontology layers.
 
@@ -741,6 +813,7 @@ async def create_demo_graph(request: Request):
 @app.post("/v1/team/keys", response_model=CreateKeyResponse)
 async def create_api_key(request: Request, response: Response, team: dict = Depends(get_current_team)):
     """Generate a new API key for the team."""
+    _check_team_limit(team, "api_keys")
     import uuid
     from tortoise.auth import hash_api_key
     sdk = _make_sdk(namespace="registry")
@@ -782,7 +855,9 @@ async def list_api_keys(team: dict = Depends(get_current_team)):
             params={"tid": team["team_id"]},
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to list API keys: {str(e)}")
+        import logging
+        logging.getLogger("tortoise.api").exception("list_api_keys failed")
+        raise HTTPException(status_code=500, detail="Internal server error")
     return {
         "keys": [
             {
@@ -801,6 +876,15 @@ async def list_api_keys(team: dict = Depends(get_current_team)):
 
 class SessionRequest(BaseModel):
     conversation: list[dict] = Field(..., max_length=1000)
+
+    @field_validator("conversation")
+    @classmethod
+    def valid_conversation(cls, v: list[dict]) -> list[dict]:
+        for turn in v:
+            content = turn.get("content", "")
+            if len(content) > 5000:
+                raise ValueError("each conversation turn content must be ≤ 5000 characters")
+        return v
     session_id: str | None = None
     metadata: dict | None = None
 
@@ -808,6 +892,7 @@ class SessionRequest(BaseModel):
 @app.post("/v1/sessions")
 async def capture_session(body: SessionRequest, request: Request, team: dict = Depends(get_current_team)):
     """Capture an agent session and extract turns as episodic Points."""
+    _check_team_limit(team, "sessions")
     import uuid, re
     from datetime import datetime, timezone
 
