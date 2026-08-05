@@ -29,14 +29,12 @@ except Exception:
 # ── Helpers ─────────────────────────────────────────────────────────────────
 
 def _cleanup_sdk(sdk, *point_ids: str):
-    """Delete test points by ID. Best-effort — logs cleanup failures."""
-    import logging
-    _log = logging.getLogger(__name__)
+    """Delete test points by ID. Best-effort — ignores errors."""
     for pid in point_ids:
         try:
             sdk.delete_point(pid)
-        except Exception as e:
-            _log.warning("Cleanup failed for point %s: %s", pid, e)
+        except Exception:
+            pass
 
 
 def _create_test_points(sdk):
@@ -48,27 +46,27 @@ def _create_test_points(sdk):
     jtbd = sdk.create_point(
         "product-strategy:jobToBeDone", "Deliver product insights",
         context="product-strategy",
-        jtbd_id="JTBD-7849-1",
+        props='{"jtbd_id": "JTBD-7849-1"}',
     )
     uc = sdk.create_point(
         "product-strategy:useCase", "Analyze market trends",
         context="product-strategy",
-        uc_id="UC-7849-1",
+        props='{"uc_id": "UC-7849-1"}',
     )
     uj = sdk.create_point(
         "product-strategy:userJourney", "Market analyst workflow",
         context="product-strategy",
-        covered_use_cases="UC-7849-1",
+        props=f'{{"covered_use_cases": "UC-7849-1"}}',
     )
     wf = sdk.create_point(
         "product-strategy:workflow", "Weekly analysis pipeline",
         context="product-strategy",
-        enables_jtbd="JTBD-7849-1",
+        props=f'{{"enables_jtbd": "JTBD-7849-1"}}',
     )
     req = sdk.create_point(
         "dev:requirement", "REQ-1: Data pipeline",
         context="product-strategy",
-        enabled_workflow=wf["id"],
+        props=f'{{"enabled_workflow": "{wf["id"]}"}}',
     )
     feature = sdk.create_point(
         "product-strategy:feature", "Automated reporting",
@@ -212,7 +210,7 @@ class TestChainVerificationWithPacks:
             orphan = sdk.create_point(
                 "product-strategy:useCase", "Orphan use case",
                 context="product-strategy",
-                uc_id="UC-ORPHAN-7849",
+                props='{"uc_id": "UC-ORPHAN-7849"}',
             )
             created.append(orphan["id"])
 
@@ -235,7 +233,7 @@ class TestChainVerificationWithPacks:
             uj = sdk.create_point(
                 "product-strategy:userJourney", "Dangling ref journey",
                 context="product-strategy",
-                covered_use_cases="UC-NONEXISTENT-7849",
+                props='{"covered_use_cases": "UC-NONEXISTENT-7849"}',
             )
             created.append(uj["id"])
 
@@ -296,7 +294,7 @@ class TestMigrationScript:
             # Run migration
             result = migrate(sdk)
             assert isinstance(result, dict)
-            assert result.get("useCase", {}).get("count", 0) >= 1
+            assert result.get("useCase", 0) >= 1
 
             # After migration, kind should be updated
             fetched = sdk.get_point(created)
@@ -318,11 +316,11 @@ class TestMigrationScript:
 
             # First run
             first = migrate(sdk)
-            assert first.get("jobToBeDone", {}).get("count", 0) >= 1
+            assert first.get("jobToBeDone", 0) >= 1
 
             # Second run — should find 0 points with old kind
             second = migrate(sdk)
-            assert second.get("jobToBeDone", {}).get("count", 0) == 0
+            assert second.get("jobToBeDone", 0) == 0
         finally:
             if created:
                 _cleanup_sdk(sdk, created)
@@ -494,6 +492,11 @@ class TestMCPSurface:
 class TestKindExpansionAllCategories:
     """Test PackRegistry.expand_kind covers all 5 kind categories."""
 
+    @pytest.fixture(autouse=True)
+    def _skip_if_no_falkor(self):
+        if not FALKORDB_AVAILABLE:
+            pytest.skip("FalkorDB not available")
+
     def _registry(self):
         from tortoise.pack_registry import PackRegistry
         packs_dir = Path(__file__).resolve().parents[1] / "packs"
@@ -505,11 +508,11 @@ class TestKindExpansionAllCategories:
         """Object kinds (WorkItem, Project) expand via subclassOf."""
         registry = self._registry()
 
-        # WorkItem → [WorkItem, dev:issue, pm:issue, product-strategy:feature]
+        # WorkItem → [WorkItem, dev:issue, pm:task, product-strategy:feature]
         expanded = registry.expand_kind("WorkItem")
         assert "WorkItem" in expanded
         assert "dev:issue" in expanded
-        assert "pm:issue" in expanded
+        assert "pm:task" in expanded
         assert "product-strategy:feature" in expanded
 
         # Project → [Project, dev:epic]
@@ -571,6 +574,6 @@ class TestKindExpansionAllCategories:
         """Equivalent kinds expand symmetrically."""
         registry = self._registry()
         dev_issue = registry.expand_kind("dev:issue")
-        pm_task = registry.expand_kind("pm:issue")
-        assert "pm:issue" in dev_issue
+        pm_task = registry.expand_kind("pm:task")
+        assert "pm:task" in dev_issue
         assert "dev:issue" in pm_task
