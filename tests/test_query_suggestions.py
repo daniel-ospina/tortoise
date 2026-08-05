@@ -119,8 +119,14 @@ class TestQueryWithSuggestions:
     """query_with_suggestions: SDK-level wrapper."""
 
     def test_kind_valid_but_empty(self, sdk):
-        """Valid registered kind with 0 points → hint, not did-you-mean."""
-        result = query_with_suggestions(sdk.query, kind="statement")
+        """Valid registered kind with 0 points → hint, not did-you-mean.
+
+        Uses 'hypothesis' (a canonical registered kind) rather than 'statement'
+        to avoid the FalkorDBLite cross-test namespace leak (#82 / PR #137
+        re-review ISSUE-2-3) — other tests create 'statement' points that
+        leak into this namespace when run in the same process.
+        """
+        result = query_with_suggestions(sdk.query, kind="hypothesis")
         assert result["results"] == []
         assert "suggestion" in result
         assert "valid but has 0 points" in result["suggestion"]

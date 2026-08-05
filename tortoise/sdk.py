@@ -2060,12 +2060,25 @@ class TortoiseSDK:
             in_session = self._session_context_map.get(context, set())
             if in_session:
                 if kind:
-                    # Respect kind filter: only include in-session points of this kind
+                    # Respect kind filter: only include in-session points matching
+                    # the expanded kind set. Use IN with placeholders (mirrors
+                    # step 5) — single-kind `=` would drop in-session points when
+                    # _expand_kind returns multiple kinds (e.g. WorkItem).
                     try:
-                        kind_rows = graph.query(
-                            f"MATCH (n:{label}) WHERE n.{id_field} IN $ids AND n.pointKind = $kind RETURN n.{id_field}",
-                            params={"ids": list(in_session), "kind": expanded_kinds[0] if len(expanded_kinds) == 1 else kind},
-                        ).result_set
+                        if len(expanded_kinds) == 1:
+                            kind_rows = graph.query(
+                                f"MATCH (n:{label}) WHERE n.{id_field} IN $ids AND n.{kind_field} = $kind RETURN n.{id_field}",
+                                params={"ids": list(in_session), "kind": expanded_kinds[0]},
+                            ).result_set
+                        else:
+                            placeholders = [f"$kind_{i}" for i in range(len(expanded_kinds))]
+                            params_dict: dict[str, Any] = {"ids": list(in_session)}
+                            for i, k in enumerate(expanded_kinds):
+                                params_dict[f"kind_{i}"] = k
+                            kind_rows = graph.query(
+                                f"MATCH (n:{label}) WHERE n.{id_field} IN $ids AND n.{kind_field} IN [{', '.join(placeholders)}] RETURN n.{id_field}",
+                                params=params_dict,
+                            ).result_set
                         in_session = {row[0] for row in kind_rows}
                     except Exception:
                         pass  # Pass-through on error
