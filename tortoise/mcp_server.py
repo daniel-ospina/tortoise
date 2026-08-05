@@ -3,6 +3,9 @@ from __future__ import annotations
 
 import json
 import os
+import urllib.request
+import urllib.error
+import urllib.parse
 from typing import Any
 
 from fastmcp import FastMCP
@@ -45,8 +48,46 @@ elif _db_uri:
 else:
     sdk = TortoiseSDK()
 
+# ── Hosted mode detection (#7836) ────────────────────────────────
+_HOSTED_API_KEY = os.environ.get("TORTOISE_API_KEY", "")
+_HOSTED_API_BASE = os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co")
+
+
+def _is_hosted() -> bool:
+    """True when TORTOISE_API_KEY is set — route via hosted REST API."""
+    return bool(_HOSTED_API_KEY)
+
+
+def _hosted_request(method: str, path: str, body: dict | None = None) -> dict:
+    """Route to hosted Tortoise REST API."""
+    url = f"{_HOSTED_API_BASE}{path}"
+    headers = {
+        "Authorization": f"Bearer {_HOSTED_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        body = e.read().decode() if e.fp else ""
+        detail = ""
+        try:
+            detail = json.loads(body).get("error", body)[:200]
+        except Exception:
+            detail = body[:200]
+        return {"error": f"Hosted API error {e.code}: {detail or e.reason}"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
 # Announce auth mode at startup
-if _is_dev_mode():
+if _is_hosted():
+    import logging
+    _log = logging.getLogger(__name__)
+    _log.info("TORTOISE_API_KEY set — running in hosted mode (%s)", _HOSTED_API_BASE)
+elif _is_dev_mode():
     import logging
     _log = logging.getLogger(__name__)
     _log.warning("TORTOISE_API_KEY not set — running in dev mode (no auth)")
@@ -55,18 +96,26 @@ if _is_dev_mode():
 def _safe(fn, *args, **kwargs):
     """Call fn; return error dict on exception instead of raising.
 
-    Auth (#7395): In production mode (TORTOISE_API_KEY set), stdio MCP
-    transport cannot carry HTTP Bearer tokens — all operations are
-    rejected. Use the authenticated HTTP endpoint instead.
+    Hosted mode (#7836): operations route through the hosted REST API,
+    not the local SDK. If a tool reaches _safe in hosted mode, it means
+    the tool doesn't have a hosted endpoint yet.
     Dev mode (no key) is always unlocked.
+    No key + not dev → block with helpful message.
     """
+    if _is_hosted():
+        return {
+            "error": (
+                "This operation is not available in hosted mode yet. "
+                "Available hosted tools: create_point, query, paginated_query, "
+                "search, suggest_entry_points, get_point."
+            )
+        }
     if not _is_dev_mode():
         return {
             "error": (
-                "Authentication required. The MCP stdio transport cannot "
-                "carry auth tokens. Use an authenticated HTTP endpoint "
-                "(tortoise health-server) with Authorization: Bearer <key> "
-                "header, or unset TORTOISE_API_KEY for dev mode."
+                "Authentication required. Set TORTOISE_API_KEY for hosted mode "
+                "(https://api.premiselabs.co), or unset TORTOISE_API_KEY for "
+                "local dev mode."
             )
         }
     try:
@@ -109,6 +158,17 @@ def tortoise_create_point(kind: str, content: str, context: str | None = None,
       evidence is a role (not a kind), use Source for provenance.
     """
     props = _parse(props)
+    if _is_hosted():
+        body: dict[str, Any] = {"kind": kind, "content": content}
+        if context:
+            body["context"] = context
+        if authoredBy:
+            body["authoredBy"] = authoredBy
+        if props:
+            body["props"] = props
+        if not dedup:
+            body["dedup"] = False
+        return _hosted_request("POST", "/v1/points", body)
     merged = dict(props or {})
     if context:
         merged["context"] = context
@@ -133,6 +193,16 @@ def tortoise_query(kind: str | None = None, context: str | None = None,
     entity_type: 'point' (default), 'event', 'subject', 'document', or 'object'.
     """
     filters = _parse(filters)
+    if _is_hosted():
+        params: dict[str, str] = {}
+        if kind:
+            params["kind"] = kind
+        if context:
+            params["context"] = context
+        if filters:
+            params.update({k: str(v) for k, v in filters.items()})
+        qs = urllib.parse.urlencode(params)
+        return _hosted_request("GET", f"/v1/points?{qs}")
     if text:
         # Merge kind/context from filters if not explicitly provided
         if filters:
@@ -166,6 +236,16 @@ def tortoise_paginated_query(kind: str | None = None, context: str | None = None
                              filters: Any = None) -> dict:
     """Query points with SKIP/LIMIT pagination. Returns {results, total, hasMore}."""
     filters = _parse(filters)
+    if _is_hosted():
+        params: dict[str, str] = {"skip": str(skip), "limit": str(limit)}
+        if kind:
+            params["kind"] = kind
+        if context:
+            params["context"] = context
+        if filters:
+            params.update({k: str(v) for k, v in filters.items()})
+        qs = urllib.parse.urlencode(params)
+        return _hosted_request("GET", f"/v1/points?{qs}")
     return _safe(sdk.paginated_query, kind, context, skip=skip, limit=limit,
                  **(filters or {}))
 
@@ -185,6 +265,8 @@ def tortoise_summarize_structure() -> dict:
 @mcp.tool()
 def tortoise_get_point(id: str) -> dict:
     """Get a single Point by ID. Returns all properties, or empty dict."""
+    if _is_hosted():
+        return _hosted_request("GET", f"/v1/points/{id}")
     return _safe(sdk.get_point, id)
 
 
@@ -199,6 +281,12 @@ def tortoise_suggest_entry_points(query: str, limit: int = 5,
     Falls back to string match (CONTAINS) if hybrid search unavailable.
     Returns [{id, name, kind, confidence}] sorted by confidence DESC.
     """
+    if _is_hosted():
+        params: dict[str, str] = {"query": query, "limit": str(limit)}
+        if kind_filter:
+            params["kind_filter"] = kind_filter
+        qs = urllib.parse.urlencode(params)
+        return _hosted_request("GET", f"/v1/search?{qs}")
     try:
         results = _safe(sdk.tortoise_fts_query, query, kind=kind_filter, limit=limit)
         if isinstance(results, list) and results and "error" not in results[0]:
@@ -243,6 +331,17 @@ def tortoise_search(query: str | None = None, kind: str | None = None,
         pack-declared relation chain. Resolved via pack registry.
         Example: traversal_path="Product→Feature"
     """
+    if _is_hosted():
+        params: dict[str, str] = {"query": query, "limit": str(limit)}
+        if kind:
+            params["kind"] = kind
+        if context:
+            params["context"] = context
+        params["threshold"] = str(threshold)
+        params["min_confidence"] = str(min_confidence)
+        params["entity_type"] = entity_type
+        qs = urllib.parse.urlencode(params)
+        return _hosted_request("GET", f"/v1/search?{qs}")
     return _safe(sdk.tortoise_fts_query, query, kind=kind, context=context,
                  threshold=threshold, limit=limit,
                  entity_type=entity_type,
@@ -566,8 +665,8 @@ def tortoise_analyze(question: str, context: str | None = None,
         except Exception:
             pass  # fall back to full-graph analysis
 
-    return analyze(question, sdk._get_proj(), context=context,
-                   entity_subgraph_ids=entity_subgraph_ids)
+    return _safe(analyze, question, sdk._get_proj(), context=context,
+                 entity_subgraph_ids=entity_subgraph_ids)
 
 
 # ── P1-3: Staleness Detection ─────────────────────────────────
@@ -588,12 +687,84 @@ def tortoise_provenance(point_id: str) -> dict:
 
 @mcp.tool()
 def tortoise_team_create(name: str) -> dict:
-    """Create isolated team graph via FalkorDB select_graph.
-    Generates a per-team API key. Returns {name, graph_name, api_key, id}.
+    """Create a team with its own graph namespace.
+
+    Writes to the control_plane registry graph.
     destructiveHint=true — creates persistent resources.
     idempotentHint=false — duplicate team names raise an error.
     """
     return _safe(sdk.team_create, name)
+
+
+# ── Control Plane: Read-Only Tools ─────────────────────────────
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def tortoise_team_list() -> list[dict]:
+    """List all teams in the registry."""
+    return _safe(sdk.team_list)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def tortoise_team_get(team_id: str) -> dict:
+    """Get a team by ID."""
+    return _safe(sdk.team_get, team_id)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def tortoise_membership_list(team_id: str) -> list[dict]:
+    """List all memberships for a team."""
+    return _safe(sdk.membership_list, team_id)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def tortoise_apikey_list(team_id: str) -> list[dict]:
+    """List API keys for a team (no plaintext keys)."""
+    return _safe(sdk.apikey_list, team_id)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def tortoise_invitation_list(team_id: str) -> list[dict]:
+    """List invitations for a team."""
+    return _safe(sdk.invitation_list, team_id)
+
+
+# ── Control Plane: Mutation Tools ───────────────────────────────
+
+@mcp.tool(annotations={"destructiveHint": True})
+def tortoise_apikey_create(team_id: str, created_by: str) -> dict:
+    """Generate an API key for a team. Plaintext returned once.
+
+    destructiveHint=true — creates persistent credentials.
+    """
+    return _safe(sdk.apikey_create, team_id, created_by)
+
+
+@mcp.tool(annotations={"destructiveHint": True})
+def tortoise_apikey_revoke(key_id: str) -> dict:
+    """Revoke an API key. Idempotent.
+
+    destructiveHint=true — permanently revokes access.
+    """
+    return _safe(sdk.apikey_revoke, key_id)
+
+
+@mcp.tool(annotations={"destructiveHint": True})
+def tortoise_invitation_create(team_id: str, email: str, role: str,
+                                created_by: str) -> dict:
+    """Create an invitation with 7-day expiry.
+
+    destructiveHint=true — creates persistent invitation.
+    """
+    return _safe(sdk.invitation_create, team_id, email, role, created_by)
+
+
+@mcp.tool(annotations={"destructiveHint": True})
+def tortoise_invitation_revoke(invitation_id: str) -> dict:
+    """Revoke an invitation. Idempotent.
+
+    destructiveHint=true — permanently revokes invitation.
+    """
+    return _safe(sdk.invitation_revoke, invitation_id)
 
 
 # ── Entity CRUD (ONTOLOGY v2.5) ───────────────────────────────

@@ -1,0 +1,29 @@
+# FalkorDB instance for Tortoise Hosted Platform
+# Runs on Fly.io private network, accessible from tortoise-api app
+# See: docs/epics/2026-08-03-tortoise-hosted-platform/04-plan.md §5
+# Provisioning: fly apps create falkordb-tortoise && fly deploy -c falkordb.fly.toml
+
+app = "falkordb-tortoise"
+primary_region = "iad"
+
+[build]
+  image = "falkordb/falkordb:latest"
+
+[[services]]
+  protocol = "tcp"
+  internal_port = 6379
+
+  [[services.ports]]
+    port = 6379
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory_mb = 512
+
+[mounts]
+  source = "falkordb_data"
+  destination = "/data"
+
+[env]
+  FALKORDB_PASSWORD = ""  # Set via fly secrets set FALKORDB_PASSWORD=<value>

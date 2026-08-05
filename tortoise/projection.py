@@ -100,6 +100,7 @@ class FalkorProjection:
     def __init__(self, path: str | None = None, *,
                  host: str | None = None,
                  port: int = 16379,
+                 username: str | None = None,
                  password: str | None = None,
                  graph_name: str = "tortoise"):
 
@@ -110,7 +111,7 @@ class FalkorProjection:
         elif host is not None:
             # Docker FalkorDB
             from falkordb import FalkorDB  # ponytail: lazy import, only needed for Docker mode
-            self.db = FalkorDB(host=host, port=port, password=password)
+            self.db = FalkorDB(host=host, port=port, username=username, password=password)
         else:
             raise ValueError("Either path or host must be provided")
 
@@ -121,16 +122,18 @@ class FalkorProjection:
     def from_uri(cls, uri: str) -> "FalkorProjection":
         """Parse docker:// connection string.
 
-        docker://:password@host:port/graph_name
+        docker://[user]:password@host:port/graph_name
         """
         from urllib.parse import urlparse
         parsed = urlparse(uri)
         if parsed.scheme != "docker":
             raise ValueError(f"Unsupported scheme: {parsed.scheme} (expected docker://)")
+        username = parsed.username or None
         password = parsed.password or None
         graph_name = parsed.path.lstrip('/') or "tortoise"
         return cls(host=parsed.hostname or "localhost",
                    port=parsed.port or 16379,
+                   username=username,
                    password=password,
                    graph_name=graph_name)
 

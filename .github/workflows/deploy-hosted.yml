@@ -1,0 +1,22 @@
+# Deploy Tortoise Hosted API to Fly.io
+name: Deploy Hosted API
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'tortoise/**'
+      - 'fly.toml'
+      - 'Dockerfile.hosted'
+      - 'requirements.txt'
+      - 'pyproject.toml'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - run: flyctl deploy --remote-only
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}

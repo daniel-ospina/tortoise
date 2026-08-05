@@ -3,10 +3,10 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Premise Labs</title>
-  <meta name="description" content="An AI lab building the premises intelligence stands on.">
+  <title>Tortoise — Memory Graph for AI Agents</title>
+  <meta name="description" content="Tortoise gives your AI agents persistent memory. Capture sessions, persist decisions, and let future agents recall them via MCP.">
   <meta property="og:title" content="Premise Labs">
-  <meta property="og:description" content="An AI lab building the premises intelligence stands on.">
+  <meta property="og:description" content="Tortoise gives your AI agents persistent memory.">
   <meta property="og:type" content="website">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Premise Labs">
@@ -81,6 +81,13 @@
       letter-spacing: -0.01em;
     }
     #beat-hero h1 span { color: var(--accent); }
+    #beat-hero .hero-sub {
+      margin-top: 1.25rem;
+      max-width: 560px;
+      color: var(--text-dim);
+      font-size: clamp(0.95rem, 1.6vw, 1.1rem);
+      line-height: 1.6;
+    }
 
     /* Sub-beats */
     .beat p {
@@ -119,6 +126,28 @@
     #beat-lab p { margin-top: 1.25rem; }
 
     /* CTA */
+    #beat-cta .cta-start {
+      display: inline-block;
+      background: var(--accent);
+      color: var(--bg);
+      border: none;
+      padding: 0.85rem 2rem;
+      font-family: var(--mono);
+      font-size: 0.95rem;
+      font-weight: 600;
+      text-decoration: none;
+      cursor: pointer;
+      transition: background 0.2s;
+      margin-bottom: 2rem;
+    }
+    #beat-cta .cta-start:hover {
+      background: var(--accent-hover);
+    }
+    #beat-cta .cta-subtle {
+      font-size: 0.75rem;
+      color: var(--text-dim);
+      margin-bottom: 1rem;
+    }
     #beat-cta form {
       display: flex; gap: 0.75rem; max-width: 400px; width: 100%;
     }
@@ -168,6 +197,55 @@
       margin-top: 0.5rem;
     }
 
+    /* CTA button */
+    #beat-cta .cta-start {
+      display: inline-block;
+      background: var(--accent);
+      color: var(--bg);
+      padding: 0.9rem 2rem;
+      font-family: var(--mono);
+      font-size: 1rem;
+      text-decoration: none;
+      transition: background 0.2s, transform 0.2s;
+    }
+    #beat-cta .cta-start:hover {
+      background: #0891b2;
+      transform: scale(1.02);
+    }
+    #beat-cta .cta-subtle {
+      margin-top: 1rem;
+      color: var(--text-dim);
+      font-size: 0.8rem;
+    }
+
+    /* CLI snippet */
+    #beat-cta .cli-snippet {
+      margin-top: 1.5rem;
+      background: rgba(6, 182, 212, 0.08);
+      border: 1px solid rgba(6, 182, 212, 0.2);
+      padding: 0.75rem 1.25rem;
+      border-radius: 4px;
+      text-align: left;
+      max-width: 420px;
+    }
+    #beat-cta .cli-snippet code {
+      display: block;
+      color: var(--accent);
+      font-family: var(--mono);
+      font-size: 0.8rem;
+      line-height: 1.8;
+    }
+
+    /* Self-hosting link */
+    #beat-cta .selfhost-link {
+      margin-top: 1.25rem;
+      color: var(--text-dim);
+      text-decoration: none;
+      font-size: 0.78rem;
+      transition: color 0.2s;
+    }
+    #beat-cta .selfhost-link:hover { color: var(--accent); }
+
     /* Mobile */
     @media (max-width: 640px) {
       #beat-cta form { flex-direction: column; }
@@ -191,27 +269,48 @@
 
   <div id="scroll-wrapper">
     <section id="beat-hero" class="beat">
-      <h1>The primary function of memory is not <span>recall</span>, but <span>learning</span>.</h1>
+      <h1>Your agents <span>remember</span> every decision, every session, every time.</h1>
+      <p class="hero-sub">Tortoise is the memory graph for AI agents. Sessions stream in, decisions persist, and future agents recall them — over MCP.</p>
     </section>
-    <section id="beat-origin" class="beat">
-      <p style="color: var(--text); font-size: clamp(1.15rem, 2.2vw, 1.5rem); line-height: 1.5;">Humans update their <span style="color: var(--accent);">world models</span> too slowly.<br>Agents forget them halfway through a session.<br><br>We made them persistent — unlocking better decisions, learning, and collaboration.</p>
+    <section id="beat-capture" class="beat">
+      <h2>Capture</h2>
+      <p>Agent sessions flow into a semantic graph automatically.</p>
+      <div class="cli-snippet">
+        <code>$ tortoise session capture --file chat.json</code>
+        <code>✓ 47 turns → 12 decisions, 8 claims, 3 hypotheses</code>
+      </div>
     </section>
-    <section id="beat-tortoise" class="beat">
-      <h2><span>Tortoise</span> — a memory system where agents learn.</h2>
+    <section id="beat-recall" class="beat">
+      <h2>Recall</h2>
+      <p>Future agents query the past — and answer from what you decided.</p>
+      <div class="cli-snippet">
+        <code>$ tortoise_suggest_entry_points("database architecture")</code>
+        <code>→ "Last session you decided FalkorDB Cloud (confidence 0.9)"</code>
+      </div>
     </section>
-    <section id="beat-lab" class="beat">
-      <h3><strong>Premise Labs</strong></h3>
+    <section id="beat-reason" class="beat">
+      <h2>Reason</h2>
+      <p>Belief propagation surfaces what's true — and what's been contradicted.</p>
+      <div class="cli-snippet">
+        <code>IMPL  a → b    confidence: 0.87</code>
+        <code>NAND  c → a    confidence: 0.72</code>
+      </div>
     </section>
     <section id="beat-cta" class="beat">
-      <form id="waitlist-form" action="https://ybetwichurajbfswfeqa.supabase.co/functions/v1/waitlist-subscribe" method="POST">
-        <input type="email" name="email" placeholder="your@email.com" required autocomplete="email">
-        <button type="submit">Stay in touch</button>
-      </form>
-      <p class="success-msg" id="form-success">Thanks — we'll be in touch.</p>
+      <a href="/signup" class="cta-start">Connect your agent →</a>
+      <p class="cta-subtle">No credit card. 5,000 Points free. First session in 5 minutes.</p>
+      <div class="cli-snippet">
+        <code>$ pip install tortoise</code>
+        <code>$ tortoise init --api-key &lt;key&gt;</code>
+        <code>$ tortoise create-point "Hello world" --kind statement</code>
+        <code>$ tortoise session capture --file chat.json</code>
+      </div>
+      <a class="selfhost-link" href="https://github.com/daniel-ospina/tortoise" target="_blank" rel="noopener">Self-hosting docs →</a>
       <a class="twitter-link" href="https://x.com/permiselabs" target="_blank" rel="noopener">@permiselabs</a>
     </section>
   </div>
 
+  <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/ScrollTrigger.min.js"></script>
   <script>
@@ -343,7 +442,7 @@
     draw();
 
     /* ── Content beats (opacity scrubbed to scroll) ── */
-    const beats = ['beat-hero', 'beat-origin', 'beat-tortoise', 'beat-lab', 'beat-cta'];
+    const beats = ['beat-hero', 'beat-capture', 'beat-recall', 'beat-reason', 'beat-cta'];
 
     const beatSpan = 0.11;
     const gapSpan = 0.015;
@@ -411,37 +510,7 @@
       }
     });
 
-    /* ── Form: AJAX submit to avoid page nav ── */
-    document.getElementById('waitlist-form').addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const form = e.target;
-      const btn = form.querySelector('button');
-      const input = form.querySelector('input');
-      const success = document.getElementById('form-success');
 
-      // Skip if placeholder action
-      btn.disabled = true;
-      btn.textContent = '...';
-
-      try {
-        const res = await fetch(form.action, {
-          method: 'POST',
-          body: JSON.stringify({ email: input.value }),
-          headers: { 'Content-Type': 'application/json' },
-        });
-        if (res.ok) {
-          input.style.display = 'none';
-          btn.style.display = 'none';
-          success.style.display = 'block';
-        } else {
-          btn.textContent = 'Try again';
-          btn.disabled = false;
-        }
-      } catch {
-        btn.textContent = 'Try again';
-        btn.disabled = false;
-      }
-    });
   </script>
 </body>
 </html>

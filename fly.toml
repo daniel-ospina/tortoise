@@ -1,27 +1,43 @@
-# fly.toml app configuration file generated for tortoise-y4mjjq on 2026-08-04T03:19:54Z
-#
-# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
-#
+# Tortoise Hosted API — Fly.io configuration
+# See: docs/epics/2026-08-03-tortoise-hosted-platform/04-plan.md §5
 
-app = 'tortoise-y4mjjq'
-primary_region = 'iad'
+app = "tortoise-api"
+primary_region = "iad"
 
 [build]
-  builder = 'paketobuildpacks/builder:base'
+  dockerfile = "Dockerfile.hosted"
 
-[env]
-  PORT = '8080'
+[[services]]
+  protocol = "tcp"
+  internal_port = 8000
 
-[http_service]
-  internal_port = 8080
-  force_https = true
-  auto_stop_machines = 'stop'
-  auto_start_machines = true
-  min_machines_running = 0
-  processes = ['app']
+  [[services.ports]]
+    port = 443
+    handlers = ["tls", "http"]
+  [[services.ports]]
+    port = 80
+    handlers = ["http"]
+
+  [services.concurrency]
+    type = "connections"
+    soft_limit = 100
+    hard_limit = 200
 
 [[vm]]
-  memory = '1gb'
-  cpu_kind = 'shared'
+  cpu_kind = "shared"
   cpus = 1
-  memory_mb = 1024
+  memory_mb = 256
+
+[env]
+  TORTOISE_DB_URI = ""  # Empty = embedded redislite mode (no external FalkorDB needed)
+  FASTAPI_INTERNAL_KEY = ""  # Set via fly secrets
+
+[deploy]
+  release_command = "python -c 'from tortoise.sdk import TortoiseSDK; sdk = TortoiseSDK(namespace=\"registry\"); print(\"registry OK\")'"
+
+[[http_service.checks]]
+  interval = "15s"
+  timeout = "15s"
+  grace_period = "60s"
+  method = "get"
+  path = "/health"

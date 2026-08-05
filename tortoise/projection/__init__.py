@@ -116,6 +116,7 @@ class FalkorProjection(
     def __init__(self, path: str | None = None, *,
                  host: str | None = None,
                  port: int = 16379,
+                 username: str | None = None,
                  password: str | None = None,
                  graph_name: str = "tortoise"):
 
@@ -137,7 +138,7 @@ class FalkorProjection(
         elif host is not None:
             # Docker FalkorDB
             from falkordb import FalkorDB  # ponytail: lazy import, only needed for Docker mode
-            self.db = FalkorDB(host=host, port=port, password=password, socket_connect_timeout=5, socket_timeout=10)
+            self.db = FalkorDB(host=host, port=port, username=username, password=password, socket_connect_timeout=5, socket_timeout=10)
         else:
             raise ValueError("Either path or host must be provided")
 
@@ -159,16 +160,18 @@ class FalkorProjection(
     def from_uri(cls, uri: str) -> "FalkorProjection":
         """Parse docker:// connection string.
 
-        docker://:password@host:port/graph_name
+        docker://[user]:password@host:port/graph_name
         """
         from urllib.parse import urlparse
         parsed = urlparse(uri)
         if parsed.scheme != "docker":
             raise ValueError(f"Unsupported scheme: {parsed.scheme} (expected docker://)")
+        username = parsed.username or None
         password = parsed.password or None
         graph_name = parsed.path.lstrip('/') or "tortoise"
         return cls(host=parsed.hostname or "localhost",
                    port=parsed.port or 16379,
+                   username=username,
                    password=password,
                    graph_name=graph_name)
 
@@ -189,7 +192,7 @@ class FalkorProjection(
         elif t == "PointRetracted":
             self._delete(ev["id"])
         elif t == "PointsMerged":
-            for mid in event.get("merge_ids", []):
+            for mid in ev.get("merge_ids", []):
                 self._delete(mid)
         elif t == "EventRecorded":
             self._upsert_event(ev)
@@ -227,6 +230,30 @@ class FalkorProjection(
                 events.extend(EventLog(os.path.join(log_dir, fname)).read_all())
 
         # Pass 1: create all Point/Operator nodes (skip edges) + non-edge events
+        try:
+            self._rebuild_pass1(events)
+        except Exception:
+            # If pass 1 fails partway through, the graph is in an inconsistent
+            # state. Wipe and re-raise so the caller can retry from clean.
+            self.g.query("MATCH (n) DETACH DELETE n")
+            raise
+
+        # Pass 2: create edges for all operators
+        try:
+            self._rebuild_pass2(events)
+        except Exception:
+            self.g.query("MATCH (n) DETACH DELETE n")
+            raise
+
+        node_count = self.g.query(
+            "MATCH (n:Point) RETURN count(n)"
+        ).result_set[0][0]
+        edge_count = self.g.query(
+            "MATCH ()-[r]->() RETURN count(r)"
+        ).result_set[0][0]
+        return {"events": len(events), "nodes": node_count, "edges": edge_count}
+
+    def _rebuild_pass1(self, events: list) -> None:
         for ev in events:
             t = ev["type"]
             if t in ("PointAdded", "OperatorAdded"):
@@ -253,7 +280,7 @@ class FalkorProjection(
                             "now": _now_iso()},
                 )
             elif t == "PointRetracted":
-                self._delete(ev.get("id") or ev["event_id"])
+                self._delete(ev.get("id") or ev.get("event_id"))
             elif t == "PointsMerged":
                 for mid in ev.get("merge_ids", []):
                     self._delete(mid)
@@ -269,18 +296,10 @@ class FalkorProjection(
                 self._upsert_document(ev)
             # ConfidenceChanged: no graph effect (audit-only event)
 
-        # Pass 2: create edges for all operators
+    def _rebuild_pass2(self, events: list) -> None:
         for ev in events:
             if ev["type"] == "OperatorAdded":
                 self._create_edges(ev["point"])
-
-        node_count = self.g.query(
-            "MATCH (n:Point) RETURN count(n)"
-        ).result_set[0][0]
-        edge_count = self.g.query(
-            "MATCH ()-[r]->() RETURN count(r)"
-        ).result_set[0][0]
-        return {"events": len(events), "nodes": node_count, "edges": edge_count}
 
     def query(self, cypher: str, **params):
         return self.g.query(cypher, params=params or None)

@@ -1,0 +1,854 @@
+"""FastAPI app for Tortoise Hosted Platform.
+
+Provides the internal /provision endpoint called by the Supabase
+tenant-provision Edge Function, and will be extended with the full
+multi-tenant REST API (issue #7717).
+
+See: docs/epics/2026-08-03-tortoise-hosted-platform/04-plan.md §5, §6.1
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import time
+from collections import defaultdict
+from datetime import datetime, timezone
+
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
+
+from tortoise.audit_events import AuditLogger
+from tortoise.auth import hash_api_key
+import hmac
+
+from tortoise.sdk import TortoiseSDK
+
+_logger = logging.getLogger(__name__)
+
+app = FastAPI(title="Tortoise Hosted API", version="0.1.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["https://premiselabs.co", "https://app.premiselabs.co", "https://tortoise-y4mjjq.fly.dev"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ── Rate Limiter ──────────────────────────────────────────────────
+
+class RateLimitMiddleware(BaseHTTPMiddleware):
+    """In-memory token bucket rate limiter. 100 Points/min per API key."""
+
+    SKIP = {"/health", "/docs", "/openapi.json"}
+
+    def __init__(self, app, max_per_minute=100):
+        super().__init__(app)
+        self.max_per_minute = max_per_minute
+        self._buckets: dict[str, list[float]] = defaultdict(list)
+        self._last_cleanup = time.time()
+        self._lock = asyncio.Lock()
+
+    async def dispatch(self, request: Request, call_next):
+        if request.url.path in self.SKIP or request.url.path.startswith("/internal"):
+            return await call_next(request)
+
+        auth = request.headers.get("Authorization", "")
+        if not auth.startswith("Bearer ") or not auth[7:].startswith("tt_"):
+            # IP-based fallback for unauthenticated requests
+            if request.client and request.client.host:
+                key_id = f"ip:{request.client.host}"
+            else:
+                return await call_next(request)
+        else:
+            # Use API key as bucket key (per-key limits, avoids hashing in hot path)
+            key_id = auth[7:]
+        now = time.time()
+
+        async with self._lock:
+            # Periodic cleanup: prune empty buckets and buckets older than 60s
+            if now - self._last_cleanup > 60:
+                stale = []
+                for k, v in list(self._buckets.items()):
+                    v[:] = [t for t in v if now - t < 60]
+                    if not v:
+                        stale.append(k)
+                for k in stale:
+                    del self._buckets[k]
+                self._last_cleanup = now
+
+            bucket = self._buckets[key_id]
+            bucket[:] = [t for t in bucket if now - t < 60]
+
+            if len(bucket) >= self.max_per_minute:
+                raise HTTPException(
+                    status_code=429,
+                    detail="Rate limit exceeded. 100 points/minute per API key.",
+                    headers={"Retry-After": "60"},
+                )
+
+            bucket.append(now)
+        return await call_next(request)
+
+
+app.add_middleware(RateLimitMiddleware, max_per_minute=100)
+
+
+class HSTSMiddleware(BaseHTTPMiddleware):
+    """Add Strict-Transport-Security header to every response."""
+
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        response.headers["Strict-Transport-Security"] = (
+            "max-age=31536000; includeSubDomains"
+        )
+        return response
+
+app.add_middleware(HSTSMiddleware)
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Add security headers to every response."""
+
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        return response
+
+
+app.add_middleware(SecurityHeadersMiddleware)
+
+# Internal auth key for Edge Function → API communication
+_INTERNAL_KEY = os.environ.get("FASTAPI_INTERNAL_KEY", "")
+
+
+# ── Audit Event Logger ───────────────────────────────────────────
+
+_audit_logger = AuditLogger(dsn=os.environ.get("TORTOISE_AUDIT_DSN"))
+
+
+async def _async_audit(
+    request: Request,
+    team_id: str,
+    operation: str,
+    *,
+    resource_type: str | None = None,
+    resource_id: str | None = None,
+) -> None:
+    """Async-safe audit event writer. Offloads sync psycopg2 to thread pool."""
+    ip = request.client.host if request.client else None
+    ua = request.headers.get("user-agent")
+    await asyncio.to_thread(
+        _audit_logger.append,
+        team_id=team_id,
+        actor_user_id=None,
+        operation=operation,
+        resource_type=resource_type,
+        resource_id=resource_id,
+        ip_address=ip,
+        user_agent=ua,
+    )
+
+
+def _check_internal(request: Request) -> None:
+    """Verify internal auth — only Edge Functions call this."""
+    if not _INTERNAL_KEY:
+        raise HTTPException(status_code=503, detail="Internal API not configured")
+    auth = request.headers.get("authorization", "")
+    if not auth.startswith("Bearer ") or not hmac.compare_digest(auth[7:], _INTERNAL_KEY):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+@app.post("/internal/provision")
+async def provision_tenant(request: Request):
+    """Provision a new team: create Team node + FalkorDB namespace + store API key.
+
+    Called by the tenant-provision Supabase Edge Function on user signup.
+    """
+    _check_internal(request)
+
+    body = await request.json()
+    team_id = body.get("team_id")
+    team_name = body.get("team_name")
+    api_key_hash = body.get("api_key_hash")
+    created_by = body.get("created_by")
+
+    if not all([team_id, team_name, api_key_hash, created_by]):
+        raise HTTPException(status_code=400, detail="Missing required fields")
+
+    # Validate team_id and team_name against allowed pattern
+    import re
+    _team_pattern = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9 _-]{0,63}$')
+    if not _team_pattern.match(team_id):
+        raise HTTPException(status_code=400, detail="Invalid team_id format")
+    if not _team_pattern.match(team_name):
+        raise HTTPException(status_code=400, detail="Invalid team_name format")
+
+    sdk = TortoiseSDK(namespace="registry")
+    now = datetime.now(timezone.utc).isoformat()
+    graph_name = f"team_{team_id}"
+
+    try:
+        # Create Team node in registry graph
+        sdk._get_proj().g.query(
+            """
+            CREATE (t:Team {
+                id: $id, name: $name, tier: 'free',
+                created_at: $now, backup_enabled: false,
+                max_users: 1, max_teams: 1, max_graphs: 1
+            })
+            """,
+            params={"id": team_id, "name": team_name, "now": now},
+        )
+
+        # Create APIKey node
+        api_key_id = _short_id()
+        sdk._get_proj().g.query(
+            """
+            CREATE (k:APIKey {
+                id: $id, team_id: $team_id, key_hash: $hash,
+                key_prefix: $prefix, created_by: $created_by,
+                created_at: $now
+            })
+            """,
+            params={
+                "id": api_key_id,
+                "team_id": team_id,
+                "hash": api_key_hash,
+                "prefix": team_id[:8],
+                "created_by": created_by,
+                "now": now,
+            },
+        )
+
+        # Provision FalkorDB namespace for the team
+        team_graph = sdk.db.select_graph(graph_name)
+        team_graph.query(
+            "CREATE (:TeamMeta {name: $name, created: $now})",
+            params={"name": team_name, "now": now},
+        )
+
+        # Create Membership (creator is Owner)
+        sdk._get_proj().g.query(
+            """
+            CREATE (m:Membership {
+                id: $id, user_id: $user_id, team_id: $team_id,
+                role: 'owner', joined_at: $now
+            })
+            """,
+            params={
+                "id": _short_id(),
+                "user_id": created_by,
+                "team_id": team_id,
+                "now": now,
+            },
+        )
+
+        # Log audit event
+        await _async_audit(
+            request, team_id, "tenant_provision",
+            resource_type="team", resource_id=team_id,
+        )
+
+        return {"status": "provisioned", "team_id": team_id, "graph_name": graph_name}
+    except Exception:
+        # Full rollback on any failure
+        sdk._get_proj().g.query("MATCH (t:Team {id: $id}) DETACH DELETE t", params={"id": team_id})
+        sdk._get_proj().g.query(
+            "MATCH (k:APIKey {team_id: $id}) DETACH DELETE k", params={"id": team_id}
+        )
+        sdk._get_proj().g.query(
+            "MATCH (m:Membership {team_id: $id}) DETACH DELETE m", params={"id": team_id}
+        )
+        try:
+            team_graph = sdk.db.select_graph(graph_name)
+            team_graph.delete()
+        except Exception:
+            pass
+        raise HTTPException(status_code=500, detail="Tenant provisioning failed")
+
+
+def _short_id() -> str:
+    """Generate a short unique identifier (26 hex chars, no dashes)."""
+    import uuid
+    return uuid.uuid4().hex[:26]
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+
+@app.get("/health/security")
+async def health_security():
+    """Security posture endpoint — verifies pepper, hashing, and auth config."""
+    pepper_set = bool(os.environ.get("TORTOISE_SECRET_PEPPER"))
+    from tortoise.auth import is_dev_mode as _is_dev
+    return {
+        "pepper_configured": pepper_set,
+        "hashing": "pbkdf2_hmac_sha256" if pepper_set else "sha256",
+        "auth_dev_mode": _is_dev(),
+    }
+
+# ── Phase 1a: Core Endpoints ──────────────────────────────────────
+
+
+# ── Auth Dependency ────────────────────────────────────────────────
+
+SKIP_AUTH = {"/health", "/docs", "/openapi.json"}
+
+async def get_current_team(request: Request) -> dict:
+    if request.url.path in SKIP_AUTH or request.url.path.startswith("/internal"):
+        return {"team_id": None, "tier": "free", "key_id": None}
+    auth = request.headers.get("Authorization", "")
+    if not auth:
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Authorization header must use Bearer scheme")
+    token = auth[7:]
+    if not token.startswith("tt_"):
+        raise HTTPException(status_code=401, detail="Invalid API key format")
+    try:
+        sdk = TortoiseSDK(namespace="registry")
+        key_result = sdk._get_proj().g.query(
+            "MATCH (k:APIKey {key_hash: $hash}) WHERE k.revoked_at IS NULL RETURN k.team_id, k.id",
+            params={"hash": hash_api_key(token)},
+        )
+        if not key_result.result_set:
+            raise HTTPException(status_code=401, detail="Invalid API key")
+        team_id, key_id = key_result.result_set[0]
+        team = sdk._get_proj().g.query(
+            "MATCH (t:Team {id: $id}) RETURN t.tier, t.max_users, t.max_graphs, t.max_teams",
+            params={"id": team_id},
+        )
+        tier, mu, mg, mt = team.result_set[0] if team.result_set else ("free", 1, 1, 1)
+        request.state.team_id = team_id
+        request.state.tier = tier or "free"
+        return {"team_id": team_id, "key_id": key_id, "tier": tier or "free",
+                "max_users": mu or 1, "max_graphs": mg or 1, "max_teams": mt or 1}
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=500, detail="Auth error")
+
+
+
+
+# ── Pydantic Models ───────────────────────────────────────────────
+
+from pydantic import BaseModel, Field, field_validator
+
+
+class CreatePointRequest(BaseModel):
+    content: str = Field(..., min_length=1, max_length=10000)
+    kind: str = Field(default="statement")
+    context: str | None = None
+    tags: list[str] = Field(default_factory=list)
+
+    @field_validator("kind")
+    @classmethod
+    def valid_kind(cls, v: str) -> str:
+        allowed = {"statement", "decision", "evidence", "observation", "hypothesis"}
+        if v not in allowed:
+            raise ValueError(f"kind must be one of {allowed}")
+        return v
+
+
+class PointResponse(BaseModel):
+    id: str
+    content: str
+    kind: str
+    context: str | None = None
+    created_at: str | None = None
+
+
+class TeamInfoResponse(BaseModel):
+    team_id: str
+    tier: str
+    max_users: int
+    max_graphs: int | None
+    max_teams: int | None
+    point_count: int = 0
+
+
+class CreateKeyResponse(BaseModel):
+    id: str
+    key: str  # plaintext — shown once
+    key_prefix: str
+    created_at: str
+
+
+class KeyListResponse(BaseModel):
+    id: str
+    key_prefix: str
+    created_at: str | None
+    last_used_at: str | None
+    revoked_at: str | None
+
+
+class ErrorResponse(BaseModel):
+    error: dict
+
+
+# ── Endpoints ─────────────────────────────────────────────────────
+
+@app.post("/v1/points", response_model=PointResponse)
+async def create_point(body: CreatePointRequest, request: Request, team: dict = Depends(get_current_team)):
+    """Create a Point in the team's graph."""
+    sdk = TortoiseSDK(namespace=team["team_id"])
+    try:
+        result = sdk.create_point(
+            content=body.content,
+            kind=body.kind,
+            context=body.context,
+            tags=body.tags,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create point: {str(e)}")
+    # Log audit event
+    await _async_audit(
+        request, team["team_id"], "point_create",
+        resource_type="point", resource_id=result.get("id"),
+    )
+
+    return {
+        "id": result["id"],
+        "content": result["content"],
+        "kind": result.get("pointKind", result.get("kind", "")),
+        "context": result.get("context"),
+        "created_at": result.get("createdAt", result.get("created_at", "")),
+    }
+
+
+@app.get("/v1/points")
+async def list_points(
+    kind: str | None = None,
+    context: str | None = None,
+    limit: int = Query(50, ge=1, le=1000),
+    team: dict = Depends(get_current_team),
+):
+    """Query Points in the team's graph."""
+    sdk = TortoiseSDK(namespace=team["team_id"])
+    proj = sdk._get_proj()
+    conditions = ["(n.is_operator IS NULL OR n.is_operator = false)"]
+    params: dict = {"limit": limit}
+    if kind:
+        conditions.append("n.pointKind = $kind")
+        params["kind"] = kind
+    if context:
+        conditions.append("n.context = $context")
+        params["context"] = context
+    query = "MATCH (n:Point) WHERE " + " AND ".join(conditions) + " RETURN properties(n) ORDER BY n.createdAt DESC LIMIT $limit"
+    rows = proj.g.query(query, params=params).result_set
+    results = []
+    for r in rows:
+        d = r[0]
+        if "pointKind" in d:
+            d["kind"] = d.pop("pointKind")
+        results.append(d)
+    return {"points": results, "count": len(results)}
+
+
+@app.get("/v1/points/{point_id}")
+async def get_point(point_id: str, team: dict = Depends(get_current_team)):
+    """Get a single Point by ID."""
+    sdk = TortoiseSDK(namespace=team["team_id"])
+    proj = sdk._get_proj()
+    rows = proj.g.query(
+        "MATCH (p:Point {id: $id}) RETURN properties(p)",
+        params={"id": point_id},
+    ).result_set
+    if not rows:
+        raise HTTPException(status_code=404, detail="Point not found")
+    props = dict(rows[0][0])
+    if "pointKind" in props:
+        props["kind"] = props.pop("pointKind")
+    return props
+
+
+@app.get("/v1/search")
+async def search(q: str, limit: int = Query(10, ge=1, le=100), team: dict = Depends(get_current_team)):
+    """Keyword search across Points. Returns ranked results by recency."""
+    sdk = TortoiseSDK(namespace=team["team_id"])
+    proj = sdk._get_proj()
+    rows = proj.g.query(
+        "MATCH (p:Point) WHERE (p.is_operator IS NULL OR p.is_operator = false) "
+        "AND toLower(p.content) CONTAINS toLower($q) "
+        "RETURN properties(p) ORDER BY p.createdAt DESC LIMIT $limit",
+        params={"q": q, "limit": limit},
+    ).result_set
+    results = []
+    for r in rows:
+        props = dict(r[0])
+        if "pointKind" in props:
+            props["kind"] = props.pop("pointKind")
+        if "kind" not in props:
+            props["kind"] = "statement"
+        results.append(props)
+    return {"results": results, "count": len(results)}
+
+
+@app.get("/v1/team", response_model=TeamInfoResponse)
+async def team_info(team: dict = Depends(get_current_team)):
+    """Get current team info: tier, usage, limits."""
+    sdk = TortoiseSDK(namespace=team["team_id"])
+    # Count Points in default graph
+    try:
+        point_count = sdk._get_proj().g.query(
+            "MATCH (n:Point) RETURN count(n)"
+        ).result_set[0][0]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch team info: {str(e)}")
+
+    return TeamInfoResponse(
+        team_id=team["team_id"],
+        tier=team["tier"],
+        max_users=team["max_users"],
+        max_graphs=team["max_graphs"],
+        max_teams=team["max_teams"],
+        point_count=point_count,
+    )
+
+
+@app.post("/v1/internal/demo")
+async def create_demo_graph(request: Request):
+    """Create a demo graph with sample Points across all 4 ontology layers.
+
+    Called by the tenant-provision Edge Function after provisioning to seed
+    demo data so new users see a populated graph immediately.
+    """
+    _check_internal(request)
+
+    body = await request.json()
+    team_id = body.get("team_id")
+    if not team_id:
+        raise HTTPException(status_code=400, detail="Missing team_id")
+
+    sdk = TortoiseSDK(namespace=team_id)
+    proj = sdk._get_proj()
+    now = datetime.now(timezone.utc).isoformat()
+
+    # Idempotency: sentinel written last — skip if already fully seeded
+    existing = proj.g.query(
+        "MATCH (p:Point {id: '_demo_sentinel'}) RETURN p.id"
+    ).result_set
+    if existing:
+        return {"status": "already_seeded", "team_id": team_id}
+
+    # ── Semantic Layer — facts and statements ────────────────────
+    semantic_points = [
+        ("sem_welcome", "observation",
+         "Your Tortoise graph is ready. This is where agents file decisions, "
+         "observations, and findings so your team remembers across sessions.",
+         ["system", "welcome"]),
+        ("sem_fact_tortoise", "statement",
+         "Tortoise is a semantic epistemic graph engine that powers agent memory "
+         "through four ontology layers: Semantic, Episodic, Epistemic, and Procedural.",
+         ["tortoise", "overview"]),
+        ("sem_fact_layers", "statement",
+         "Semantic = facts and statements. Episodic = session history and events. "
+         "Epistemic = claims with evidence and confidence. Procedural = workflows and skills.",
+         ["tortoise", "ontology"]),
+    ]
+    for pid, kind, content, tags in semantic_points:
+        proj.g.query(
+            "MERGE (p:Point {id:$id}) "
+            "SET p.content=$c, p.pointKind=$k, p.is_operator=false, "
+            "p.status='live', p.createdAt=$now, p.updatedAt=$now",
+            params={"id": pid, "c": content, "k": kind, "now": now},
+        )
+        for tag in tags:
+            proj.g.query(
+                "MATCH (p:Point {id:$pid}) "
+                "MERGE (t:Tag {name:$tag}) "
+                "MERGE (p)-[:TAGGED]->(t)",
+                params={"pid": pid, "tag": tag},
+            )
+
+    # ── Episodic Layer — session events ──────────────────────────
+    session_id = f"session_demo_{team_id[:8]}"
+    proj.g.query(
+        "MERGE (s:Session {id:$sid}) "
+        "SET s.created_at=$now, s.turn_count=3",
+        params={"sid": session_id, "now": now},
+    )
+    episodic_turns = [
+        ("epi_turn1", "[user] Let's set up our agent memory system with Tortoise."),
+        ("epi_turn2", "[assistant] I'll initialize the graph and configure the ontology layers. "
+         "Once set up, all decisions will be tracked automatically."),
+        ("epi_turn3", "[user] Great — make sure we capture decisions about architecture and product strategy."),
+    ]
+    for pid, content in episodic_turns:
+        proj.g.query(
+            "MERGE (t:Point {id:$id}) "
+            "SET t.content=$c, t.pointKind='event', t.is_operator=false, "
+            "t.status='live', t.createdAt=$now, t.updatedAt=$now",
+            params={"id": pid, "c": content, "now": now},
+        )
+        proj.g.query(
+            "MATCH (s:Session {id:$sid}), (t:Point {id:$pid}) "
+            "MERGE (s)-[:CONTAINS]->(t)",
+            params={"sid": session_id, "pid": pid},
+        )
+
+    # ── Epistemic Layer — claims with evidence ───────────────────
+    epistemic_points = [
+        ("epis_claim1", "hypothesis",
+         "Agent memory systems should be graph-native rather than vector-only "
+         "because semantic relationships carry more signal than embedding proximity.",
+         0.7, ["hypothesis", "architecture"]),
+        ("epis_claim2", "evidence",
+         "Teams using structured agent memory report 40% fewer repeated mistakes "
+         "and 3x faster onboarding for new team members.",
+         0.5, ["evidence", "adoption"]),
+        ("epis_claim3", "decision",
+         "We will use FalkorDB as the graph backend because it supports Cypher "
+         "queries and runs as a lightweight extension to Redis.",
+         0.9, ["decision", "infrastructure"]),
+    ]
+    for pid, kind, content, confidence, tags in epistemic_points:
+        proj.g.query(
+            "MERGE (p:Point {id:$id}) "
+            "SET p.content=$c, p.pointKind=$k, p.is_operator=false, "
+            "p.status='live', p.confidence=$conf, p.createdAt=$now, p.updatedAt=$now",
+            params={"id": pid, "c": content, "k": kind, "conf": confidence, "now": now},
+        )
+        for tag in tags:
+            proj.g.query(
+                "MATCH (p:Point {id:$pid}) "
+                "MERGE (t:Tag {name:$tag}) "
+                "MERGE (p)-[:TAGGED]->(t)",
+                params={"pid": pid, "tag": tag},
+            )
+
+    # ── Procedural Layer — workflows ─────────────────────────────
+    procedural_points = [
+        ("proc_wf1", "workflow",
+         "CONTEXT-INJECTION: Before any coding task, call tortoise_suggest_entry_points() "
+         "to find related context from past sessions and decisions.",
+         ["workflow", "context"]),
+        ("proc_wf2", "workflow",
+         "DECISION-CAPTURE: After making a design decision, call tortoise_create_point() "
+         "with kind='decision' so future agents can trace the reasoning chain.",
+         ["workflow", "decision"]),
+        ("proc_wf3", "workflow",
+         "REVIEW-GATE: Before merging any PR, verify that key decisions are filed in Tortoise. "
+         "If not, file them before merging.",
+         ["workflow", "review"]),
+    ]
+    for pid, kind, content, tags in procedural_points:
+        proj.g.query(
+            "MERGE (p:Point {id:$id}) "
+            "SET p.content=$c, p.pointKind=$k, p.is_operator=false, "
+            "p.status='live', p.createdAt=$now, p.updatedAt=$now",
+            params={"id": pid, "c": content, "k": kind, "now": now},
+        )
+        for tag in tags:
+            proj.g.query(
+                "MATCH (p:Point {id:$pid}) "
+                "MERGE (t:Tag {name:$tag}) "
+                "MERGE (p)-[:TAGGED]->(t)",
+                params={"pid": pid, "tag": tag},
+            )
+
+    # ── Cross-layer links ────────────────────────────────────────
+    # Link epistemic claim to supporting semantic fact
+    proj.g.query(
+        "MATCH (c:Point {id:'epis_claim1'}), (f:Point {id:'sem_fact_layers'}) "
+        "MERGE (c)-[:SUPPORTS]->(f)"
+    )
+    # Link workflow to epistemic claim
+    proj.g.query(
+        "MATCH (w:Point {id:'proc_wf1'}), (c:Point {id:'epis_claim1'}) "
+        "MERGE (w)-[:INFORMED_BY]->(c)"
+    )
+
+    # ── Sentinel — written last so partial failure allows retry ──
+    proj.g.query(
+        "CREATE (p:Point {id:'_demo_sentinel', content:'demo-sentinel', "
+        "pointKind:'system', is_operator:false, status:'live', "
+        "createdAt:$now, updatedAt:$now})",
+        params={"now": now},
+    )
+
+    total_points = (
+        len(semantic_points) + len(episodic_turns)
+        + len(epistemic_points) + len(procedural_points)
+    )
+    return {
+        "status": "demo_created",
+        "team_id": team_id,
+        "session_id": session_id,
+        "points": total_points,
+        "layers": {
+            "semantic": len(semantic_points),
+            "episodic": len(episodic_turns),
+            "epistemic": len(epistemic_points),
+            "procedural": len(procedural_points),
+        },
+    }
+
+
+@app.post("/v1/team/keys", response_model=CreateKeyResponse)
+async def create_api_key(request: Request, response: Response, team: dict = Depends(get_current_team)):
+    """Generate a new API key for the team."""
+    import uuid
+    from tortoise.auth import hash_api_key
+    sdk = TortoiseSDK(namespace="registry")
+    proj = sdk._get_proj()
+    api_key = f"tt_{uuid.uuid4().hex}"
+    key_hash = hash_api_key(api_key)
+    key_prefix = api_key[:10]
+    kid = _short_id()
+    now = datetime.now(timezone.utc).isoformat()
+    proj.g.query(
+        "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, key_prefix:$kp, created_by:$cb, created_at:$now})",
+        params={"id": kid, "tid": team["team_id"], "kh": key_hash, "kp": key_prefix, "cb": "api", "now": now},
+    )
+    # Log audit event
+    await _async_audit(
+        request, team["team_id"], "api_key_create",
+        resource_type="api_key", resource_id=kid,
+    )
+
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+
+    return {
+        "id": kid,
+        "key": api_key,
+        "key_prefix": key_prefix,
+        "created_at": now,
+    }
+
+
+@app.get("/v1/team/keys")
+async def list_api_keys(team: dict = Depends(get_current_team)):
+    """List API keys for the team (hashes only — no plaintext)."""
+    sdk = TortoiseSDK(namespace="registry")
+    try:
+        keys = sdk._get_proj().g.query(
+            "MATCH (k:APIKey {team_id: $tid}) "
+            "RETURN k.id, k.key_prefix, k.created_at, k.last_used_at, k.revoked_at "
+            "ORDER BY k.created_at DESC",
+            params={"tid": team["team_id"]},
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to list API keys: {str(e)}")
+    return {
+        "keys": [
+            {
+                "id": row[0],
+                "key_prefix": row[1],
+                "created_at": row[2],
+                "last_used_at": row[3],
+                "revoked_at": row[4],
+            }
+            for row in keys.result_set
+        ]
+    }
+
+
+# ── Session Capture ───────────────────────────────────────────────
+
+class SessionRequest(BaseModel):
+    conversation: list[dict] = Field(..., max_length=1000)
+    session_id: str | None = None
+    metadata: dict | None = None
+
+
+@app.post("/v1/sessions")
+async def capture_session(body: SessionRequest, request: Request, team: dict = Depends(get_current_team)):
+    """Capture an agent session and extract turns as episodic Points."""
+    import uuid, re
+    from datetime import datetime, timezone
+
+    sdk = TortoiseSDK(namespace=team["team_id"])
+    proj = sdk._get_proj()
+    session_id = body.session_id or f"session_{uuid.uuid4().hex[:12]}"
+    now = datetime.now(timezone.utc).isoformat()
+
+    proj.g.query(
+        "MERGE (s:Session {id:$sid}) SET s.created_at=$now, s.turn_count=$tc",
+        params={"sid": session_id, "now": now, "tc": len(body.conversation)},
+    )
+
+    extracted = []
+    decisions = [
+        r"(?i)(?:let'?s|we will|we should|I will|I'm going to|decided|decision)\s+[^.!?]+[.!?]",
+        r"(?i)(?:plan is|next steps?:|action item:)\s+[^.!?]+[.!?]",
+    ]
+    claims = [
+        r"(?i)(?:I think|I believe|my understanding is|the problem is|the key insight)\s+[^.!?]+[.!?]",
+        r"(?i)(?:evidence suggests|data shows|we found that|this means)\s+[^.!?]+[.!?]",
+    ]
+
+    for i, turn in enumerate(body.conversation):
+        role = turn.get("role", "unknown")
+        content = turn.get("content", "")
+        turn_id = f"{session_id}_t{i}"
+
+        proj.g.query(
+            "CREATE (t:Point {id:$id, content:$c, pointKind:$k, is_operator:false, status:$s, createdAt:$now, updatedAt:$now})",
+            params={"id": turn_id, "c": f"[{role}] {content[:5000]}", "k": "event", "s": "draft", "now": now},
+        )
+        proj.g.query(
+            "MATCH (s:Session {id:$sid}), (t:Point {id:$tid}) CREATE (s)-[:CONTAINS]->(t)",
+            params={"sid": session_id, "tid": turn_id},
+        )
+
+        idx = 0
+        for pat in decisions:
+            for match in re.finditer(pat, content):
+                pid = f"{turn_id}_d{idx}"
+                text = match.group().strip()
+                proj.g.query(
+                    "CREATE (p:Point {id:$id, content:$c, pointKind:$k, is_operator:false, status:$s, createdAt:$now, updatedAt:$now})",
+                    params={"id": pid, "c": text[:5000], "k": "decision", "s": "draft", "now": now},
+                )
+                proj.g.query(
+                    "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) CREATE (s)-[:CONTAINS]->(p)",
+                    params={"sid": session_id, "pid": pid},
+                )
+                extracted.append({"id": pid, "kind": "decision", "text": text[:200]})
+                idx += 1
+
+        idx = 0
+        for pat in claims:
+            for match in re.finditer(pat, content):
+                pid = f"{turn_id}_c{idx}"
+                text = match.group().strip()
+                proj.g.query(
+                    "CREATE (p:Point {id:$id, content:$c, pointKind:$k, is_operator:false, status:$s, createdAt:$now, updatedAt:$now})",
+                    params={"id": pid, "c": text[:5000], "k": "statement", "s": "draft", "now": now},
+                )
+                proj.g.query(
+                    "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) CREATE (s)-[:CONTAINS]->(p)",
+                    params={"sid": session_id, "pid": pid},
+                )
+                extracted.append({"id": pid, "kind": "statement", "text": text[:200]})
+                idx += 1
+
+    # Log audit event
+    await _async_audit(
+        request, team["team_id"], "session_capture",
+        resource_type="session", resource_id=session_id,
+    )
+
+    return {"session_id": session_id, "turns": len(body.conversation), "extracted": len(extracted), "points": extracted}
+
+
+@app.get("/v1/sessions")
+async def list_sessions(team: dict = Depends(get_current_team)):
+    """List captured sessions."""
+    sdk = TortoiseSDK(namespace=team["team_id"])
+    proj = sdk._get_proj()
+    rows = proj.g.query(
+        "MATCH (s:Session) RETURN s.id, s.created_at, s.turn_count ORDER BY s.created_at DESC LIMIT 50"
+    ).result_set
+    return {"sessions": [{"id": r[0], "created_at": r[1], "turns": r[2]} for r in rows]}
