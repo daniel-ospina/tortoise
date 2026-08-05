@@ -21,8 +21,7 @@ import os as _os
 FALKORDB_AVAILABLE = False
 _uri_candidates = [
     _os.environ.get("TORTOISE_DB_URI"),
-    "docker://localhost:6379/tortoise",
-    "docker://localhost:16379/tortoise",
+    "docker://localhost:16379/test_integration_search",
 ]
 _old_uri = _os.environ.get("TORTOISE_DB_URI")
 for _uri in _uri_candidates:

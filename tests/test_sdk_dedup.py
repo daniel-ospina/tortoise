@@ -1,7 +1,7 @@
 """Tests for create_point dedup — #80 (content_hash always persisted) + #93 (context-scoped dedup).
 
 Runnable with:
-  TORTOISE_DB_URI=docker://:@localhost:16379/tortoise python3 -m pytest tests/test_sdk_dedup.py -v
+  TORTOISE_DB_URI=docker://:@localhost:16379/test_tortoise python3 -m pytest tests/test_sdk_dedup.py -v
 """
 from __future__ import annotations
 

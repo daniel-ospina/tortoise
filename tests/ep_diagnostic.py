@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-os.environ["TORTOISE_DB_URI"] = "docker://:falkordb@localhost:6379/tortoise"
+os.environ["TORTOISE_DB_URI"] = "docker://localhost:16379/test_ep_diagnostic"
 
 from tortoise.sdk import TortoiseSDK
 from tortoise.weights import compute_operator_weight

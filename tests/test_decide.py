@@ -1,7 +1,7 @@
 """Tests for tortoise decide — decision comparison wiring, truth vs relevance semantics.
 
 Runnable with: python3 -m pytest tests/test_decide.py -v
-Requires TORTOISE_DB_URI pointing at a FalkorDB (defaults to docker://:@localhost:16379/tortoise).
+Requires TORTOISE_DB_URI pointing at a FalkorDB (defaults to docker://:@localhost:16379/test_tortoise).
 """
 from __future__ import annotations
 
