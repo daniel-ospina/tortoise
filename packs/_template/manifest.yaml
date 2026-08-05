@@ -1,6 +1,8 @@
 # Expansion Pack Manifest — Template
 # Copy this file to start a new domain extension pack.
 # All fields marked REQUIRED must be filled. Optional fields have defaults shown.
+#
+# Full example packs: packs/dev/, packs/product-strategy/, packs/pm/
 
 # REQUIRED: Short prefix for kind namespacing (e.g., "pm", "mkt", "fin")
 # All kind values registered by this pack are prefixed: {namespace}:{kind}
@@ -39,8 +41,50 @@ ontology:
   # New actionKind values (camelCase)
   actionKinds: []
 
+  # Subclass declarations: {kind: parent_kind}
+  #   kind = a camelCase kind declared in this pack's *Kinds above
+  #   parent_kind = a PascalCase core entity type (Project, WorkItem, Document,
+  #                 Subject, Object, Action, Event, Point, Source) or a core
+  #                 objectKind from CANONICAL_OBJECT_KINDS
+  # Example:
+  #   subclassOf:
+  #     epic: Project
+  #     issue: WorkItem
+  subclassOf: {}
+
+  # Equivalence declarations: {kind: [other_ns:kind, ...]}
+  # Declares this pack's kind is semantically equivalent to another pack's kind.
+  # Bidirectional — the registry makes it symmetric at query time.
+  # Example:
+  #   equivalentTo:
+  #     issue: [pm:issue]
+  equivalentTo: {}
+
+  # Hierarchies: visual/structural parent-child relationships for UIs
+  # Documents compositional structure declared in relations (hasPart/contains).
+  # Example:
+  #   hierarchies:
+  #     - path: "Epic → Issue"
+  #       type: hasPart
+  hierarchies: []
+
   # New predicates (edges between entities)
-  # { predicate, from, to, cardinality }
+  # New format (preferred): { predicate, fromKind, toKind, mechanism, semantics?, cardinality? }
+  #   - predicate: domain verb — "addresses", "competesWith", "implements"
+  #   - fromKind/toKind: prefixed pack kinds — "myapp:concept" or core PascalCase kinds
+  #   - mechanism: IMPL (A supports B) or NAND (A contradicts B)
+  #   - semantics: optional — "hasPart", "addresses", "opposes" (defaults to predicate)
+  #   - cardinality: optional (one_to_one, one_to_many, many_to_one, many_to_many)
+  # Old format (compat): { predicate, from, to, cardinality? }
+  #   - from/to: entity types — "Object", "Subject"
+  # Example:
+  #   relations:
+  #     - predicate: contains
+  #       mechanism: IMPL
+  #       semantics: hasPart
+  #       fromKind: myapp:concept
+  #       toKind: myapp:subconcept
+  #       cardinality: one_to_many
   relations: []
 
 # ── Layer 2: Connectors ──────────────────────────────────────────────────

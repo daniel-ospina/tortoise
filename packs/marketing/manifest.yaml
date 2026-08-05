@@ -1,0 +1,66 @@
+# Marketing Domain Extension
+# Campaigns, Content, Channels, Audiences, Keywords.
+
+namespace: marketing
+name: "Marketing"
+version: "0.1.0"
+tier: free
+description: "Marketing concepts — campaigns, content, channels, audiences, keywords"
+
+ontology:
+  extends: core
+
+  objectKinds:
+    - campaign
+    - content
+    - channel
+    - audience
+    - keyword
+    - competitorContent
+
+  subclassOf:
+    content: WorkItem
+
+  pointKinds:
+    - contentBrief
+    - contentPerformance
+
+  documentKinds:
+    - contentBrief
+    - contentCalendar
+    - performanceReport
+    - brandGuide
+
+  relations:
+    - predicate: contains
+      mechanism: IMPL
+      semantics: hasPart
+      fromKind: marketing:campaign
+      toKind: marketing:content
+      cardinality: one_to_many
+
+    - predicate: distributesVia
+      mechanism: IMPL
+      semantics: addresses
+      fromKind: marketing:content
+      toKind: marketing:channel
+
+    - predicate: targets
+      mechanism: IMPL
+      semantics: addresses
+      fromKind: marketing:campaign
+      toKind: marketing:audience
+
+    - predicate: optimizedFor
+      mechanism: IMPL
+      semantics: addresses
+      fromKind: marketing:content
+      toKind: marketing:keyword
+
+  hierarchies:
+    - path: "Campaign → Content"
+      type: hasPart
+
+connectors: []
+tools: []
+depends_on: []
