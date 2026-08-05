@@ -33,11 +33,13 @@ primary_region = "iad"
   FASTAPI_INTERNAL_KEY = ""  # Set via fly secrets
 
 [deploy]
+  wait_timeout = "5m"
   release_command = "python -c 'from tortoise.sdk import TortoiseSDK; sdk = TortoiseSDK(namespace=\"registry\"); print(\"registry OK\")'"
+  strategy = "immediate"
 
 [[http_service.checks]]
   interval = "15s"
   timeout = "15s"
-  grace_period = "60s"
+  grace_period = "120s"
   method = "get"
   path = "/health"
