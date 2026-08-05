@@ -43,6 +43,10 @@ CANONICAL_DOCUMENT_KINDS = frozenset({
     "evidenceLog", "handoff", "transcript", "roadmap", "brief",
 })
 
+# DEPRECATED (#122): CANONICAL_ACTION_KINDS is no longer canonical.
+# Action kinds are still valid in pack manifests but the centralized 17-value
+# frozenset is unnecessary — packs declare their own actionKinds.
+# Kept for backward compatibility; will be removed in a future version.
 CANONICAL_ACTION_KINDS = frozenset({
     "research", "scope", "plan", "implement", "verify", "reflect",
     "decompose", "delegate", "loop", "brainstorm", "decide", "agree",
@@ -66,7 +70,7 @@ CANONICAL_KINDS = {
     "eventKinds": CANONICAL_EVENT_KINDS,
     "pointKinds": CANONICAL_POINT_KINDS,
     "documentKinds": CANONICAL_DOCUMENT_KINDS,
-    "actionKinds": CANONICAL_ACTION_KINDS,
+    # "actionKinds": CANONICAL_ACTION_KINDS,  # DEPRECATED (#122)
 }
 
 

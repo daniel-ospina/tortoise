@@ -171,9 +171,10 @@ class _EdgeHandlers:
         """Create a named edge between two entities by their IDs.
         Matches target by id OR eventId (Event nodes use eventId as key)."""
         valid_predicates = {
-            'performs', 'produces', 'authoredBy', 'ownedBy', 'managedBy',
+            'performs', 'produces', 'uses', 'authoredBy', 'ownedBy', 'managedBy',
             'partOf', 'hasMember', 'holdsRole', 'reportsTo',
-            'instantiates', 'participatesIn', 'hasPart', 'related', 'dependsOn', 'references'
+            'instantiates', 'participatesIn', 'hasPart', 'related', 'dependsOn', 'references',
+            'wasDerivedFrom'
         }
         if predicate not in valid_predicates:
             raise ValueError(f"Unknown predicate: {predicate}")

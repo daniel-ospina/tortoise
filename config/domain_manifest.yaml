@@ -16,7 +16,6 @@
 #         subjectKind: [str] — additional subject kind values
 #         objectKind: [str]  — additional object kind values
 #         eventKind: [str]   — additional event kind values
-#         actionKind: [str]  — additional action kind values
 #       event_types: [str]   — JSONL event types this domain handles (write-side routing)
 #       query_patterns: [str] — NL query pattern keys this domain answers (read-side routing)
 #       cypher_template: str  — base Cypher query template for this domain

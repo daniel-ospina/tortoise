@@ -172,6 +172,11 @@ class _EntityHandlers:
 
         Handles both nested ({type:EventRecorded, event:{eventId:...}}) and
         flat (eventId at top level) formats transparently.
+
+        Auto-creates structural edges:
+          - (Subject)-[:performs]->(Event) from event.subject
+          - (Event)-[:produces]->(Object) from event.object
+          - (Event)-[:uses]->(Object) from event.uses (list or single)
         """
         inner = event.get("event", event)  # unwrap nested format
         eid = inner.get("id") or inner.get("eventId")
@@ -191,6 +196,7 @@ class _EntityHandlers:
             except Exception:
                 pass
         props = {
+            "id": eid,  # ensure Event node has id for edge matching (#122)
             "eventKind": inner.get("eventKind", ""),
             "subject": inner.get("subject", ""),
             "object": inner.get("object", ""),
@@ -209,3 +215,47 @@ class _EntityHandlers:
             "ON MATCH SET e += $props",
             params={"eid": eid, "props": props},
         )
+        # ── Auto-create structural edges (#122) ──
+        # Subject -[:performs]-> Event
+        subj = inner.get("subject", "")
+        if subj:
+            self.g.query(
+                "MERGE (s:Subject {name:$name}) "
+                "ON CREATE SET s.id=$name, s.subjectKind='other'",
+                params={"name": subj},
+            )
+            self.g.query(
+                "MATCH (s:Subject {name:$name}), (e:Event {eventId:$eid}) "
+                "MERGE (s)-[:performs]->(e)",
+                params={"name": subj, "eid": eid},
+            )
+        # Event -[:produces]-> Object
+        obj = inner.get("object", "")
+        if obj:
+            self.g.query(
+                "MERGE (o:Object {name:$name}) "
+                "ON CREATE SET o.id=$name, o.objectKind='other'",
+                params={"name": obj},
+            )
+            self.g.query(
+                "MATCH (o:Object {name:$name}), (e:Event {eventId:$eid}) "
+                "MERGE (e)-[:produces]->(o)",
+                params={"name": obj, "eid": eid},
+            )
+        # Event -[:uses]-> Object (input entities, #122)
+        uses = inner.get("uses")
+        if uses:
+            if isinstance(uses, str):
+                uses = [uses]
+            for use_name in uses:
+                if use_name:
+                    self.g.query(
+                        "MERGE (o:Object {name:$name}) "
+                        "ON CREATE SET o.id=$name, o.objectKind='other'",
+                        params={"name": str(use_name)},
+                    )
+                    self.g.query(
+                        "MATCH (o:Object {name:$name}), (e:Event {eventId:$eid}) "
+                        "MERGE (e)-[:uses]->(o)",
+                        params={"name": str(use_name), "eid": eid},
+                    )
