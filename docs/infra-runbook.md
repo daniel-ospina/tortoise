@@ -1,3 +1,14 @@
+---
+title: Tortoise Hosted Platform Infrastructure Runbook
+type: operations
+domain: platform
+doc_status: live
+subjects.team: epistemic-team
+aboutSubjects: tortoise-infra
+aboutObjects: fly-io, falkordb, cloudflare
+created: 2026-08-03
+---
+
 # Tortoise Hosted Platform — Infrastructure Runbook
 
 **Epic:** #7711
@@ -19,6 +30,8 @@ fly apps create tortoise-api
 fly secrets set FASTAPI_INTERNAL_KEY=$(openssl rand -hex 32)
 fly secrets set TORTOISE_SECRET_PEPPER=$(openssl rand -hex 32)
 fly secrets set FALKORDB_PASSWORD=$(openssl rand -hex 16)
+# TORTOISE_DB_URI is auto-constructed at runtime by entrypoint.sh
+# from FALKORDB_PASSWORD → redis://:{pwd}@falkordb-tortoise.internal:6379/tortoise
 fly deploy
 fly certs create api.premiselabs.co
 ```
@@ -28,6 +41,7 @@ fly certs create api.premiselabs.co
 fly apps create falkordb-tortoise
 fly volumes create falkordb_data --size 1 --region iad
 fly secrets set FALKORDB_PASSWORD=<same value as tortoise-api>
+# Deployed automatically by .github/workflows/deploy-hosted.yml on push to main
 fly deploy -c falkordb.fly.toml
 ```
 
@@ -112,7 +126,7 @@ wrangler pages deploy dist --project-name=tortoise-dashboard
 ## Reproducibility Test
 Can a fresh Fly.io account + Cloudflare account follow §1 from zero and arrive at the same infra?
 - [ ] `fly apps create tortoise-api` → deploys, health check passes
-- [ ] `fly apps create falkordb-tortoise` → deploys, volume mounted, reachable from tortoise-api
+- [ ] `fly apps create falkordb-tortoise` → deploys (auto-deployed by CI on push), volume mounted, reachable from tortoise-api
 - [ ] `api.premiselabs.co` → resolves, TLS valid, /health returns ok
 - [ ] `app.premiselabs.co` → resolves, serves dashboard placeholder
 - [ ] GitHub push to main → auto-deploys tortoise-api

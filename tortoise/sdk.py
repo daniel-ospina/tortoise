@@ -79,6 +79,17 @@ class TortoiseSDK:
         else:
             self._db_path = db_path
             self._db_uri = None
+        # P0: Crash early if running in production with no database configured.
+        # Embedded redislite has no persistent volume → all data lost on deploy.
+        if not db_uri and not db_path:
+            if os.environ.get("FLY_APP_NAME"):
+                raise RuntimeError(
+                    "TORTOISE_DB_URI is empty in production. "
+                    "Set FALKORDB_PASSWORD (recommended: entrypoint.sh auto-constructs the URI) "
+                    "or set TORTOISE_DB_URI directly. "
+                    "See docs/infra-runbook.md §1."
+                )
+            # Dev/CI: proceed, will use embedded redislite (tests set their own URI)
         # Namespace isolation: prefix graph name to segregate data
         if namespace is not None:
             if not re.match(r'^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$', namespace):
