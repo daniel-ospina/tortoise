@@ -320,7 +320,77 @@ def health():
     }
 
 
-static_dir = __import__('pathlib').Path(__file__).resolve().parent.parent / "dist"
+# ── Hosted Platform: Tenant Provisioning (#7713) ────────────────────────
+# /api/provision is called by the Supabase Edge Function tenant-provision
+# after a new user signs up via OAuth or email/password.
+# Authenticated via Supabase service role key.
+
+import sys as _sys
+from pathlib import Path as _Path
+_TORTOISE_ROOT = _Path(__file__).resolve().parent.parent.parent.parent
+if str(_TORTOISE_ROOT) not in _sys.path:
+    _sys.path.insert(0, str(_TORTOISE_ROOT))
+
+SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+REGISTRY_GRAPH = os.environ.get("TORTOISE_REGISTRY_GRAPH", "registry")
+
+
+class ProvisionRequest(BaseModel):
+    team_name: str
+    user_id: str
+
+
+class ProvisionResponse(BaseModel):
+    team_id: str
+    team_name: str
+    api_key: str
+    graph_name: str
+
+
+@app.post("/api/provision", response_model=ProvisionResponse)
+def provision_tenant(body: ProvisionRequest, authorization: str | None = None):
+    """Provision a new team + FalkorDB namespace + API key.
+
+    Called by the Supabase Edge Function tenant-provision after user signup.
+    Requires Supabase service role key for authentication.
+    """
+    # Auth: require service role key
+    if not SUPABASE_SERVICE_ROLE_KEY:
+        raise HTTPException(500, "SUPABASE_SERVICE_ROLE_KEY not configured")
+    auth_header = authorization or ""
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:]
+    else:
+        token = ""
+    if token != SUPABASE_SERVICE_ROLE_KEY:
+        raise HTTPException(401, "Unauthorized — service role key required")
+
+    # Validate team name
+    team_name = (body.team_name or "").strip()
+    if not team_name:
+        raise HTTPException(400, "team_name is required")
+
+    # Import TortoiseSDK lazily to avoid circular issues at startup
+    from tortoise.sdk import TortoiseSDK
+
+    try:
+        # Use registry namespace for team management
+        sdk = TortoiseSDK(namespace=REGISTRY_GRAPH)
+        result = sdk.team_create(team_name)
+        return ProvisionResponse(
+            team_id=result["id"],
+            team_name=result["name"],
+            api_key=result["api_key"],
+            graph_name=result["graph_name"],
+        )
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+    except Exception as e:
+        print(f"Provisioning failed for {team_name}: {e}", flush=True)
+        raise HTTPException(500, f"Provisioning failed: {e}")
+
+
+static_dir = _Path(__file__).resolve().parent.parent / "dist"
 if static_dir.exists():
     app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="static")
 

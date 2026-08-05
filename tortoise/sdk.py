@@ -57,6 +57,8 @@ class TortoiseSDK:
         self._proj: FalkorProjection | None = None
         self._ep = None  # lazy-init TortoiseEP
         self._evidence: dict[str, tuple[float, float]] = {}
+        self._registry_g = None
+        self._audit_logger = None
 
     def _get_proj(self) -> FalkorProjection:
         if self._proj is None:
@@ -68,6 +70,37 @@ class TortoiseSDK:
             else:
                 self._proj = FalkorProjection(self._db_path, graph_name=graph_name)
         return self._proj
+
+    def _get_registry(self):
+        """Return the control_plane registry graph handle (cached).
+
+        Uses the existing db connection — no second FalkorDB connection.
+        """
+        if self._registry_g is None:
+            proj = self._get_proj()
+            self._registry_g = proj.db.select_graph("control_plane")
+            self._ensure_registry_indexes()
+        return self._registry_g
+
+    def _ensure_registry_indexes(self) -> None:
+        """Create indexes on registry graph labels (idempotent)."""
+        g = self._registry_g
+        if g is None:
+            return
+        indexes = [
+            ("Team", "name"),
+            ("Membership", "team_id"),
+            ("Membership", "user_id"),
+            ("APIKey", "team_id"),
+            ("APIKey", "key_hash"),
+            ("Invitation", "team_id"),
+            ("Invitation", "token_hash"),
+        ]
+        for label, prop in indexes:
+            try:
+                g.query(f"CREATE INDEX FOR (n:{label}) ON (n.{prop})")
+            except Exception:
+                _logger.debug("Index may already exist: %s.%s", label, prop)
 
     # ── Core CRUD ─────────────────────────────────────────────────
 
@@ -621,11 +654,28 @@ class TortoiseSDK:
         """List all graph names in the database."""
         return self._get_proj().list_graphs()
 
+    def _audit(self, team_id: str, actor_user_id: str | None,
+                operation: str, **kwargs) -> None:
+        """Log an audit event. No-op if audit logger not initialized."""
+        if self._audit_logger is None:
+            from .audit_events import AuditLogger
+            self._audit_logger = AuditLogger()
+        self._audit_logger.append(
+            team_id=team_id,
+            actor_user_id=actor_user_id,
+            operation=operation,
+            **kwargs,
+        )
+
     def close(self) -> None:
-        """Close the underlying database connection."""
+        """Close the underlying database connection and audit logger."""
+        if self._audit_logger is not None:
+            self._audit_logger.close()
+            self._audit_logger = None
         if self._proj is not None:
             self._proj.close()
             self._proj = None
+        self._registry_g = None
 
     # ── P1-4: Entity Linking ────────────────────────────────────
 
@@ -1224,51 +1274,70 @@ class TortoiseSDK:
 
     # ── Multi-tenancy (#7001) ─────────────────────────────────
 
-    def team_create(self, name: str) -> dict:
-        """Create isolated team graph via FalkorDB select_graph.
-        Returns {name, graph_name, api_key, id}.
+    # ── Control Plane: Team CRUD ───────────────────────────────────
 
-        Per-team API key enforcement is Phase 2 — this is infrastructure creation.
-        Caller must store the returned api_key securely; it is not retrievable later.
+    def team_create(self, name: str, *, idempotency_key: str | None = None) -> dict:
+        """Create a team with its own graph namespace.
+
+        Writes to the control_plane registry graph. Creates a tenant
+        graph (team_{name}) for Point/Operator storage.
+
+        Returns {name, graph_name, api_key, id}.
         """
         import re, uuid
         from datetime import datetime, timezone
+        from tortoise.auth import hash_api_key
+        from .exceptions import ControlPlaneError
 
         # Input validation
         if not name or not name.strip():
-            raise ValueError("Team name must not be empty")
+            raise ControlPlaneError("Team name must not be empty")
         if len(name) > 64:
-            raise ValueError("Team name must be 64 characters or fewer")
+            raise ControlPlaneError("Team name must be 64 characters or fewer")
         if not re.match(r'^[a-zA-Z0-9][a-zA-Z0-9_-]*$', name):
-            raise ValueError(
+            raise ControlPlaneError(
                 f"Invalid team name: {name!r}. Use alphanumeric, hyphens, underscores."
             )
 
         api_key = f"tt_{uuid.uuid4().hex}"
-        # #7395: hash before storing — graph dump won't reveal plaintext keys
-        from tortoise.auth import hash_api_key
         key_hash = hash_api_key(api_key)
         graph_name = f"team_{name}"
         proj = self._get_proj()
+        reg = self._get_registry()
         now = datetime.now(timezone.utc).isoformat()
 
-        # Idempotency check — prevent duplicate teams
-        existing = proj.g.query(
+        # Idempotency — check registry graph for existing team
+        if idempotency_key:
+            existing = reg.query(
+                "MATCH (t:Team {idempotency_key:$ik}) RETURN t.id, t.name",
+                params={"ik": idempotency_key},
+            ).result_set
+            if existing:
+                row = existing[0]
+                return {"name": name, "graph_name": graph_name,
+                        "api_key": api_key, "id": row[0],
+                        "existing": True}
+
+        # Duplicate name check
+        dup = reg.query(
             "MATCH (t:Team {name:$name}) RETURN count(t) > 0",
             params={"name": name},
         ).result_set[0][0]
-        if existing:
-            raise ValueError(f"Team {name!r} already exists")
+        if dup:
+            raise ControlPlaneError(f"Team {name!r} already exists")
 
-        # Write registry entry first (source of truth), then create team graph.
-        # On team-graph failure we can clean up the registry entry.
         tid = ulid()
-        proj.g.query(
+        reg.query(
             "CREATE (t:Team {id:$id, name:$name, api_key:$key, "
-            "graph_name:$gn, createdAt:$now})",
+            "graph_name:$gn, createdAt:$now, tier:'free'})",
             params={"id": tid, "name": name, "key": key_hash,
                     "gn": graph_name, "now": now},
         )
+        if idempotency_key:
+            reg.query(
+                "MATCH (t:Team {id:$id}) SET t.idempotency_key = $ik",
+                params={"id": tid, "ik": idempotency_key},
+            )
         try:
             team_graph = proj.db.select_graph(graph_name)
             team_graph.query(
@@ -1276,17 +1345,520 @@ class TortoiseSDK:
                 params={"name": name, "now": now},
             )
         except Exception:
-            # Roll back registry entry; don't mask the original error
             try:
-                proj.g.query(
-                    "MATCH (t:Team {id:$id}) DETACH DELETE t",
-                    params={"id": tid},
-                )
+                reg.query("MATCH (t:Team {id:$id}) DETACH DELETE t",
+                          params={"id": tid})
             except Exception:
-                pass  # ponytail: best-effort rollback; if DB is dead, nothing to do
+                pass
             raise
 
+        self._audit(tid, None, "team_create", resource_type="team", resource_id=tid)
         return {"name": name, "graph_name": graph_name, "api_key": api_key, "id": tid}
+
+    def team_get(self, team_id: str) -> dict | None:
+        """Get a team by ID. Returns None if not found."""
+        reg = self._get_registry()
+        rows = reg.query(
+            "MATCH (t:Team {id:$id}) RETURN properties(t)",
+            params={"id": team_id},
+        ).result_set
+        return rows[0][0] if rows else None
+
+    def team_list(self) -> list[dict]:
+        """List all teams."""
+        reg = self._get_registry()
+        rows = reg.query(
+            "MATCH (t:Team) RETURN properties(t) ORDER BY t.createdAt"
+        ).result_set
+        return [r[0] for r in rows]
+
+    def team_update(self, team_id: str, **fields) -> dict:
+        """Update mutable team fields."""
+        from .exceptions import ControlPlaneError
+        allowed = {
+            "name", "tier", "stripe_customer_id", "subscription_id",
+            "backup_enabled", "max_users", "max_teams", "max_graphs",
+        }
+        invalid = set(fields.keys()) - allowed
+        if invalid:
+            raise ControlPlaneError(f"Invalid team fields: {invalid}")
+        reg = self._get_registry()
+        reg.query(
+            "MATCH (t:Team {id:$id}) SET t += $fields",
+            params={"id": team_id, "fields": fields},
+        )
+        self._audit(team_id, None, "team_update", resource_type="team",
+                     resource_id=team_id)
+        return self.team_get(team_id) or {}
+
+    def team_delete(self, team_id: str, *, confirmation: str) -> dict:
+        """Delete a team and all associated control-plane entities.
+
+        Cascading: Membership, APIKey, Invitation nodes are deleted.
+        Tenant graphs are dropped (best-effort — FalkorDBLite may skip).
+        Postgres audit_events are preserved (immutable).
+
+        Requires confirmation matching the team name.
+        """
+        from .exceptions import ControlPlaneError
+        team = self.team_get(team_id)
+        if team is None:
+            raise ControlPlaneError(f"Team {team_id!r} not found")
+        if confirmation != team.get("name", ""):
+            raise ControlPlaneError(
+                "Confirmation must match team name exactly"
+            )
+
+        reg = self._get_registry()
+        # Cascade delete: Membership, APIKey, Invitation
+        reg.query(
+            "MATCH (m:Membership {team_id:$tid}) DETACH DELETE m",
+            params={"tid": team_id},
+        )
+        reg.query(
+            "MATCH (k:APIKey {team_id:$tid}) DETACH DELETE k",
+            params={"tid": team_id},
+        )
+        reg.query(
+            "MATCH (i:Invitation {team_id:$tid}) DETACH DELETE i",
+            params={"tid": team_id},
+        )
+        reg.query(
+            "MATCH (t:Team {id:$id}) DETACH DELETE t",
+            params={"id": team_id},
+        )
+
+        # Best-effort tenant graph deletion
+        graph_name = team.get("graph_name", f"team_{team.get('name', '')}")
+        proj = self._get_proj()
+        try:
+            if hasattr(proj.db, 'delete_graph'):
+                proj.db.delete_graph(graph_name)
+            else:
+                _logger.debug("delete_graph not available (FalkorDBLite) — skipping")
+        except Exception:
+            _logger.debug("Failed to delete tenant graph %s — skipping", graph_name)
+
+        self._audit(team_id, None, "team_delete", resource_type="team",
+                     resource_id=team_id)
+        return {"deleted": True, "team_id": team_id}
+
+    def migrate_teams_to_registry(self) -> dict:
+        """One-shot: move Team nodes from tortoise graph to control_plane graph.
+
+        Idempotent — running twice produces the same state.
+        Existing Team nodes in the tortoise graph are marked as outdated.
+        """
+        proj = self._get_proj()
+        reg = self._get_registry()
+        teams = proj.g.query("MATCH (t:Team) RETURN properties(t)").result_set
+        migrated, skipped = 0, 0
+        for row in teams:
+            team = row[0]
+            name = team.get("name", "")
+            # Check if already in registry
+            existing = reg.query(
+                "MATCH (t:Team {name:$name}) RETURN count(t) > 0",
+                params={"name": name},
+            ).result_set[0][0]
+            if existing:
+                skipped += 1
+                continue
+            reg.query(
+                "CREATE (t:Team {id:$id, name:$name, api_key:$key, "
+                "graph_name:$gn, createdAt:$now})",
+                params={
+                    "id": team.get("id", ulid()),
+                    "name": name,
+                    "key": team.get("api_key", ""),
+                    "gn": team.get("graph_name", f"team_{name}"),
+                    "now": team.get("createdAt", ""),
+                },
+            )
+            migrated += 1
+        if migrated > 0:
+            proj.g.query("MATCH (t:Team) SET t.status = 'outdated'")
+        return {"migrated": migrated, "skipped": skipped}
+
+    # ── Control Plane: Membership CRUD ─────────────────────────────
+
+    def membership_create(self, team_id: str, user_id: str, role: str) -> dict:
+        """Add a user to a team with a given role.
+
+        Validates role, team existence, and max_users constraint.
+        Creates BELONGS_TO edge to Team.
+        """
+        from datetime import datetime, timezone
+        from .exceptions import ControlPlaneError
+
+        if role not in ("owner", "admin"):
+            raise ControlPlaneError(
+                f"Invalid role {role!r}. Must be 'owner' or 'admin'."
+            )
+
+        team = self.team_get(team_id)
+        if team is None:
+            raise ControlPlaneError(f"Team {team_id!r} not found")
+
+        # Check max_users constraint
+        max_users = team.get("max_users")
+        if max_users is not None:
+            reg = self._get_registry()
+            count = reg.query(
+                "MATCH (m:Membership {team_id:$tid}) RETURN count(m)",
+                params={"tid": team_id},
+            ).result_set[0][0]
+            if count >= max_users:
+                raise ControlPlaneError(
+                    f"Team at max users ({max_users}). Upgrade to add more."
+                )
+
+        mid = ulid()
+        now = datetime.now(timezone.utc).isoformat()
+        reg = self._get_registry()
+        reg.query(
+            "CREATE (m:Membership {id:$id, user_id:$uid, team_id:$tid, "
+            "role:$role, joinedAt:$now})",
+            params={"id": mid, "uid": user_id, "tid": team_id,
+                    "role": role, "now": now},
+        )
+        # Create BELONGS_TO edge
+        reg.query(
+            "MATCH (m:Membership {id:$mid}), (t:Team {id:$tid}) "
+            "CREATE (m)-[:BELONGS_TO]->(t)",
+            params={"mid": mid, "tid": team_id},
+        )
+
+        self._audit(team_id, user_id, "membership_create",
+                     resource_type="membership", resource_id=mid)
+        return {"id": mid, "team_id": team_id, "user_id": user_id, "role": role}
+
+    def membership_get(self, membership_id: str) -> dict | None:
+        """Get a membership by ID."""
+        reg = self._get_registry()
+        rows = reg.query(
+            "MATCH (m:Membership {id:$id}) RETURN properties(m)",
+            params={"id": membership_id},
+        ).result_set
+        return rows[0][0] if rows else None
+
+    def membership_list(self, team_id: str) -> list[dict]:
+        """List all memberships for a team."""
+        reg = self._get_registry()
+        rows = reg.query(
+            "MATCH (m:Membership {team_id:$tid}) RETURN properties(m)",
+            params={"tid": team_id},
+        ).result_set
+        return [r[0] for r in rows]
+
+    def membership_update_role(self, membership_id: str,
+                                new_role: str) -> dict:
+        """Update a membership's role."""
+        from .exceptions import ControlPlaneError
+        if new_role not in ("owner", "admin"):
+            raise ControlPlaneError(
+                f"Invalid role {new_role!r}. Must be 'owner' or 'admin'."
+            )
+        m = self.membership_get(membership_id)
+        if m is None:
+            raise ControlPlaneError(f"Membership {membership_id!r} not found")
+        reg = self._get_registry()
+        reg.query(
+            "MATCH (m:Membership {id:$id}) SET m.role = $role",
+            params={"id": membership_id, "role": new_role},
+        )
+        self._audit(m["team_id"], m["user_id"], "membership_update_role",
+                     resource_type="membership", resource_id=membership_id)
+        return self.membership_get(membership_id) or {}
+
+    def membership_delete(self, membership_id: str) -> dict:
+        """Delete a membership. Idempotent."""
+        m = self.membership_get(membership_id)
+        if m is None:
+            return {"deleted": False, "reason": "not found"}
+        reg = self._get_registry()
+        reg.query(
+            "MATCH (m:Membership {id:$id}) DETACH DELETE m",
+            params={"id": membership_id},
+        )
+        self._audit(m["team_id"], m["user_id"], "membership_delete",
+                     resource_type="membership", resource_id=membership_id)
+        return {"deleted": True, "membership_id": membership_id}
+
+    # ── Control Plane: APIKey CRUD ─────────────────────────────────
+
+    def apikey_create(self, team_id: str, created_by: str) -> dict:
+        """Generate an API key for a team.
+
+        Stores SHA-256 hash (never plaintext). Plaintext returned once.
+        """
+        import uuid
+        from datetime import datetime, timezone
+        from tortoise.auth import hash_api_key
+        from .exceptions import ControlPlaneError
+
+        team = self.team_get(team_id)
+        if team is None:
+            raise ControlPlaneError(f"Team {team_id!r} not found")
+
+        api_key = f"tt_{uuid.uuid4().hex}"
+        key_hash = hash_api_key(api_key)
+        key_prefix = api_key[:10]
+        kid = ulid()
+        now = datetime.now(timezone.utc).isoformat()
+
+        reg = self._get_registry()
+        reg.query(
+            "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, "
+            "key_prefix:$kp, created_by:$cb, created_at:$now})",
+            params={"id": kid, "tid": team_id, "kh": key_hash,
+                    "kp": key_prefix, "cb": created_by, "now": now},
+        )
+        # BELONGS_TO edge
+        reg.query(
+            "MATCH (k:APIKey {id:$kid}), (t:Team {id:$tid}) "
+            "CREATE (k)-[:BELONGS_TO]->(t)",
+            params={"kid": kid, "tid": team_id},
+        )
+
+        self._audit(team_id, created_by, "apikey_create",
+                     resource_type="apikey", resource_id=kid)
+        return {"id": kid, "key_prefix": key_prefix, "api_key": api_key,
+                "team_id": team_id, "created_at": now}
+
+    def apikey_list(self, team_id: str) -> list[dict]:
+        """List API keys for a team (no plaintext or hashes)."""
+        reg = self._get_registry()
+        rows = reg.query(
+            "MATCH (k:APIKey {team_id:$tid}) "
+            "RETURN k.id, k.key_prefix, k.created_by, k.created_at, "
+            "k.last_used_at, k.revoked_at",
+            params={"tid": team_id},
+        ).result_set
+        keys = []
+        for r in rows:
+            keys.append({
+                "id": r[0], "key_prefix": r[1], "created_by": r[2],
+                "created_at": r[3], "last_used_at": r[4], "revoked_at": r[5],
+            })
+        return keys
+
+    def apikey_revoke(self, key_id: str) -> dict:
+        """Revoke an API key (soft delete — sets revoked_at). Idempotent."""
+        from datetime import datetime, timezone
+        reg = self._get_registry()
+        rows = reg.query(
+            "MATCH (k:APIKey {id:$id}) RETURN k.revoked_at, k.team_id",
+            params={"id": key_id},
+        ).result_set
+        if not rows:
+            return {"revoked": False, "reason": "not found"}
+        if rows[0][0] is not None:
+            return {"revoked": True, "already": True, "key_id": key_id}
+        now = datetime.now(timezone.utc).isoformat()
+        reg.query(
+            "MATCH (k:APIKey {id:$id}) SET k.revoked_at = $now",
+            params={"id": key_id, "now": now},
+        )
+        self._audit(rows[0][1], None, "apikey_revoke",
+                     resource_type="apikey", resource_id=key_id)
+        return {"revoked": True, "key_id": key_id, "revoked_at": now}
+
+    def apikey_verify(self, key_plaintext: str) -> dict | None:
+        """Verify an API key against stored hashes.
+
+        Returns {team_id, key_id} if valid, None if not found or revoked.
+        """
+        from tortoise.auth import hash_api_key
+        key_hash = hash_api_key(key_plaintext)
+        reg = self._get_registry()
+        rows = reg.query(
+            "MATCH (k:APIKey {key_hash:$kh}) "
+            "WHERE k.revoked_at IS NULL "
+            "RETURN k.team_id, k.id",
+            params={"kh": key_hash},
+        ).result_set
+        if rows:
+            return {"team_id": rows[0][0], "key_id": rows[0][1]}
+        return None
+
+    # ── Control Plane: Invitation CRUD ─────────────────────────────
+
+    def invitation_create(self, team_id: str, email: str, role: str,
+                          created_by: str) -> dict:
+        """Create an invitation with 7-day expiry.
+
+        Token is hashed for storage; plaintext returned once.
+        """
+        import uuid
+        from datetime import datetime, timedelta, timezone
+        from tortoise.auth import hash_api_key
+        from .exceptions import ControlPlaneError
+
+        team = self.team_get(team_id)
+        if team is None:
+            raise ControlPlaneError(f"Team {team_id!r} not found")
+        if role not in ("owner", "admin"):
+            raise ControlPlaneError(
+                f"Invalid role {role!r}. Must be 'owner' or 'admin'."
+            )
+
+        # Reject duplicate pending invitations for same email+team
+        reg = self._get_registry()
+        dup = reg.query(
+            "MATCH (i:Invitation {team_id:$tid, email:$email}) "
+            "WHERE i.accepted_at IS NULL AND (i.status IS NULL OR i.status <> 'revoked') "
+            "RETURN count(i) > 0",
+            params={"tid": team_id, "email": email},
+        ).result_set[0][0]
+        if dup:
+            raise ControlPlaneError(
+                f"Pending invitation already exists for {email} in this team"
+            )
+
+        token = str(uuid.uuid4())
+        token_hash = hash_api_key(token)
+        iid = ulid()
+        now = datetime.now(timezone.utc).isoformat()
+        expires_at = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
+
+        reg.query(
+            "CREATE (i:Invitation {id:$id, team_id:$tid, email:$email, "
+            "role:$role, token_hash:$th, created_by:$cb, "
+            "created_at:$now, expires_at:$exp, accepted_at:null})",
+            params={"id": iid, "tid": team_id, "email": email,
+                    "role": role, "th": token_hash, "cb": created_by,
+                    "now": now, "exp": expires_at},
+        )
+        # FOR_TEAM edge
+        reg.query(
+            "MATCH (i:Invitation {id:$iid}), (t:Team {id:$tid}) "
+            "CREATE (i)-[:FOR_TEAM]->(t)",
+            params={"iid": iid, "tid": team_id},
+        )
+
+        self._audit(team_id, created_by, "invitation_create",
+                     resource_type="invitation", resource_id=iid)
+        return {"id": iid, "email": email, "role": role,
+                "expires_at": expires_at, "token": token}
+
+    def invitation_list(self, team_id: str) -> list[dict]:
+        """List invitations for a team (no token hashes)."""
+        reg = self._get_registry()
+        rows = reg.query(
+            "MATCH (i:Invitation {team_id:$tid}) "
+            "RETURN i.id, i.email, i.role, i.created_by, i.created_at, "
+            "i.expires_at, i.accepted_at, i.status",
+            params={"tid": team_id},
+        ).result_set
+        invs = []
+        for r in rows:
+            invs.append({
+                "id": r[0], "email": r[1], "role": r[2],
+                "created_by": r[3], "created_at": r[4],
+                "expires_at": r[5], "accepted_at": r[6], "status": r[7],
+            })
+        return invs
+
+    def invitation_get_by_token(self, token_plaintext: str) -> dict | None:
+        """Look up an invitation by its plaintext token."""
+        from tortoise.auth import hash_api_key
+        token_hash = hash_api_key(token_plaintext)
+        reg = self._get_registry()
+        rows = reg.query(
+            "MATCH (i:Invitation {token_hash:$th}) RETURN properties(i)",
+            params={"th": token_hash},
+        ).result_set
+        return rows[0][0] if rows else None
+
+    def invitation_accept(self, invitation_id: str, user_id: str) -> dict:
+        """Accept an invitation and create a membership.
+
+        Checks expiry and single-use (not already accepted).
+        """
+        from datetime import datetime, timezone
+        from .exceptions import ControlPlaneError
+
+        inv = self.invitation_get_by_id(invitation_id)
+        if inv is None:
+            raise ControlPlaneError(f"Invitation {invitation_id!r} not found")
+
+        expires_at = inv.get("expires_at", "")
+        now = datetime.now(timezone.utc)
+        if expires_at:
+            exp = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+            if now > exp:
+                raise ControlPlaneError("Invitation has expired")
+
+        if inv.get("accepted_at"):
+            raise ControlPlaneError("Invitation already accepted")
+
+        if inv.get("status") == "revoked":
+            raise ControlPlaneError("Invitation has been revoked")
+
+        # Accept: mark as accepted + create membership
+        now_iso = now.isoformat()
+        reg = self._get_registry()
+        reg.query(
+            "MATCH (i:Invitation {id:$id}) SET i.accepted_at = $now",
+            params={"id": invitation_id, "now": now_iso},
+        )
+
+        membership = self.membership_create(
+            team_id=inv["team_id"],
+            user_id=user_id,
+            role=inv.get("role", "admin"),
+        )
+
+        self._audit(inv["team_id"], user_id, "invitation_accept",
+                     resource_type="invitation", resource_id=invitation_id)
+        return {"membership_id": membership["id"],
+                "team_id": inv["team_id"], "accepted_at": now_iso}
+
+    def invitation_get_by_id(self, invitation_id: str) -> dict | None:
+        """Get an invitation by its ULID."""
+        reg = self._get_registry()
+        rows = reg.query(
+            "MATCH (i:Invitation {id:$id}) RETURN properties(i)",
+            params={"id": invitation_id},
+        ).result_set
+        return rows[0][0] if rows else None
+
+    def invitation_revoke(self, invitation_id: str) -> dict:
+        """Revoke an invitation (soft delete). Idempotent."""
+        inv = self.invitation_get_by_id(invitation_id)
+        if inv is None:
+            return {"revoked": False, "reason": "not found"}
+        if inv.get("status") == "revoked":
+            return {"revoked": True, "already": True,
+                    "invitation_id": invitation_id}
+        reg = self._get_registry()
+        reg.query(
+            "MATCH (i:Invitation {id:$id}) SET i.status = 'revoked'",
+            params={"id": invitation_id},
+        )
+        self._audit(inv["team_id"], None, "invitation_revoke",
+                     resource_type="invitation", resource_id=invitation_id)
+        return {"revoked": True, "invitation_id": invitation_id}
+
+    def cleanup_expired_invitations(self) -> dict:
+        """Mark expired invitations as 'expired' status.
+
+        Returns count of cleaned invitations.
+        """
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        reg = self._get_registry()
+        rows = reg.query(
+            "MATCH (i:Invitation) "
+            "WHERE i.expires_at < $now AND i.accepted_at IS NULL "
+            "AND (i.status IS NULL OR i.status <> 'expired') "
+            "SET i.status = 'expired' "
+            "RETURN count(i)",
+            params={"now": now},
+        ).result_set
+        count = rows[0][0] if rows else 0
+        return {"cleaned": count}
 
     # ── Helpers ───────────────────────────────────────────────────
 

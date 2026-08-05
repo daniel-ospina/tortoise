@@ -414,6 +414,65 @@ def _cmd_team_info(args) -> int:
     return 0
 
 
+def _cmd_create_point(args) -> int:
+    """Create a Point via Tortoise Cloud API."""
+    import json as _json, os, sys as _sys
+    from pathlib import Path
+    from urllib.request import Request, urlopen
+    from urllib.error import URLError, HTTPError
+
+    # Read config
+    config_path = Path.cwd() / ".tortoise"
+    if not config_path.exists():
+        print("No .tortoise config found. Run 'tortoise init --api-key <key>' first.", file=_sys.stderr)
+        return 1
+
+    try:
+        config = _json.loads(config_path.read_text())
+    except _json.JSONDecodeError:
+        print(f"Invalid .tortoise config at {config_path}", file=_sys.stderr)
+        return 1
+
+    api_key = config.get("api_key")
+    api_url = config.get("api_url") or os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co")
+    if not api_key:
+        print("No api_key in .tortoise config.", file=_sys.stderr)
+        return 1
+
+    payload = {
+        "content": args.content,
+        "kind": args.kind or "statement",
+    }
+
+    try:
+        data = _json.dumps(payload).encode("utf-8")
+        req = Request(
+            f"{api_url}/v1/points",
+            data=data,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        with urlopen(req, timeout=30) as resp:
+            result = _json.loads(resp.read())
+    except HTTPError as e:
+        body = e.read().decode() if e.fp else ""
+        print(f"API error ({e.code}): {body}", file=_sys.stderr)
+        return 1
+    except URLError as e:
+        print(f"Cannot reach API at {api_url}: {e.reason}", file=_sys.stderr)
+        return 1
+
+    point_id = result.get("id", result.get("point_id", "unknown"))
+    print(f"Created point: {point_id}")
+    print(f"  Kind: {args.kind or 'statement'}")
+    content_preview = args.content[:100] + "..." if len(args.content) > 100 else args.content
+    print(f"  Content: {content_preview}")
+    return 0
+
+
 def _cmd_session(args) -> int:
     """Manage Tortoise Cloud sessions."""
     import json, os, sys
@@ -520,7 +579,7 @@ def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
 
     payload = {
         "source": transcript_path.stem,
-        "turns": turns,
+        "conversation": turns,
     }
 
     try:
@@ -1336,6 +1395,10 @@ def main(argv: list[str] | None = None) -> int:
     ig.add_argument("--db", required=True, help="Docker URI or file path for target database")
     ig.add_argument("--branch", default="main", help="Git branch to index")
     ig.add_argument("--background", action="store_true", help="Run in background")
+    # tortoise create-point <content> --kind <kind>
+    cp = sp.add_parser("create-point", help="Create a Point via Tortoise Cloud API")
+    cp.add_argument("content", help="Point content (text)")
+    cp.add_argument("--kind", default="statement", help="Point kind (default: statement)")
     # tortoise session <subcommand>
     session = sp.add_parser("session", help="Manage Tortoise Cloud sessions")
     session_sp = session.add_subparsers(dest="session_cmd")
@@ -1418,6 +1481,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_team_info(args)
         team.print_help()
         return 1
+    elif args.cmd == "create-point":
+        return _cmd_create_point(args)
     elif args.cmd == "session":
         return _cmd_session(args)
     elif args.cmd == "index":
