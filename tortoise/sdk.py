@@ -414,10 +414,12 @@ class TortoiseSDK:
     def supersede_point(self, old_id: str, new_id: str) -> dict:
         """Atomically replace old Point with new — CORRECTS edge + outdated flag + edge transfer.
 
-        Transfers all operator edges (IMPL, NAND, hasPart) from the old point to the
-        new point, so EP no longer propagates through superseded claims.  Preserves
-        edge type and idx (source vs target position).  Leaves the old point outdated
-        with only the CORRECTS edge from the new point.
+        Transfers all edges from the old point to the new point:
+          - Operator edges (IMPL, NAND, hasPart) with idx
+          - Plain structural edges (aboutSubject, aboutObject, aboutAction,
+            aboutEvent, aboutPoint, aboutDocument, extractedFrom, etc.)
+        Preserves edge type and idx (source vs target position).
+        Leaves the old point outdated with only the CORRECTS edge from the new point.
         """
         from datetime import datetime, timezone
         proj = self._get_proj()
@@ -434,7 +436,7 @@ class TortoiseSDK:
             params={"new_id": new_id, "old_id": old_id},
         )
 
-        # 2. Transfer operator edges from old to new — preserve provenance
+        # 2a. Transfer operator edges (IMPL, NAND, hasPart) — preserve provenance
         edges_result = proj.g.query(
             "MATCH (op:Point {is_operator:true})-[r]->(old:Point {id:$old_id}) "
             "RETURN op.id, type(r), r.idx",
@@ -457,6 +459,34 @@ class TortoiseSDK:
                 params={"op_id": op_id, "idx": idx, "old_id": old_id},
             )
             transferred += 1
+
+        # 2b. Transfer plain structural edges (#122) — about*, extractedFrom, etc.
+        # These edges connect the Point to entities (Subject, Object, Source, etc.)
+        structural_rels = [
+            'aboutSubject', 'aboutObject', 'aboutAction', 'aboutEvent',
+            'aboutPoint', 'aboutDocument', 'extractedFrom'
+        ]
+        for rel in structural_rels:
+            struct_rows = proj.g.query(
+                f"MATCH (old:Point {{id:$old_id}})-[r:{rel}]->(target) "
+                f"RETURN target.id, target.name, labels(target)",
+                params={"old_id": old_id},
+            ).result_set
+            for row in struct_rows:
+                target_id = row[0]
+                # Create new edge: new point → same target
+                proj.g.query(
+                    f"MATCH (new:Point {{id:$new_id}}), (t) WHERE t.id = $tid OR t.name = $tname OR t.eventId = $tid "
+                    f"CREATE (new)-[:{rel}]->(t)",
+                    params={"new_id": new_id, "tid": target_id, "tname": row[1] or ""},
+                )
+                # Delete old edge
+                proj.g.query(
+                    f"MATCH (old:Point {{id:$old_id}})-[r:{rel}]->(t) WHERE t.id = $tid OR t.name = $tname OR t.eventId = $tid "
+                    f"DELETE r",
+                    params={"old_id": old_id, "tid": target_id, "tname": row[1] or ""},
+                )
+                transferred += 1
 
         return {
             "invalidated": True,
@@ -1037,7 +1067,8 @@ class TortoiseSDK:
         return self._ep
 
     def compute_confidence(self, factors=None, evidence=None, context=None,
-                           require_calibration: bool = False) -> dict:
+                           require_calibration: bool = False,
+                           recency_decay: float | None = None) -> dict:
         """Compute confidence via EP belief propagation. Returns {iterations, converged, confidences}.
 
         Args:
@@ -1045,6 +1076,8 @@ class TortoiseSDK:
             evidence: optional {claim_id: (alpha, beta)} priors.
             context: if set, scopes auto-extraction to operators connecting Points in this context.
             require_calibration: if True, raises CalibrationError when evidence points are uncalibrated.
+            recency_decay: optional recency decay factor (default 0.95 from TORTOISE_EP_RECENCY_DECAY).
+                T0 sources exempt; lower tiers get gentle decay. 1.0 = no decay.
         """
         proj = self._get_proj()
         ep = self._get_ep()
@@ -1056,8 +1089,8 @@ class TortoiseSDK:
         for pid, alpha, beta in rows:
             if pid not in self._evidence:
                 self._evidence[pid] = (alpha, beta)
-        # Apply source-based credibility inheritance
-        self._apply_source_inheritance(context=context)
+        # Apply source-based credibility inheritance (with recency modulation #122)
+        self._apply_source_inheritance(context=context, recency_decay=recency_decay)
         if evidence:
             self._evidence.update(evidence)
         # Calibration gate
@@ -1121,13 +1154,23 @@ class TortoiseSDK:
         """Get EP confidence for a claim: {mean, variance, alpha, beta}."""
         return self._get_ep().compute_confidence(claim_id)
 
-    def _apply_source_inheritance(self, context: str | None = None):
+    def _apply_source_inheritance(self, context: str | None = None,
+                                  recency_decay: float | None = None):
         """Apply credibilityTier from Source nodes to Points via extractedFrom edge.
         
         Only activates when credibilityTier is explicitly set on the Source (NOT NULL).
         Sources without credibilityTier = no inheritance = neutral Beta(1,1).
         If a Point has multiple Sources, the highest tier (lowest number: T0 > T1 > ...) wins.
+
+        Recency modulation (#122 Part 3): older sources get slightly reduced evidence
+        weight via recency_decay (default 0.95 from TORTOISE_EP_RECENCY_DECAY env var).
+        T0 sources (gold/meta-analysis) are exempt from decay. Lower tiers get gentle
+        decay: effective_count *= recency_decay ** years_since_ingested.
         """
+        import os
+        from datetime import datetime, timezone
+        if recency_decay is None:
+            recency_decay = float(os.environ.get("TORTOISE_EP_RECENCY_DECAY", "0.95"))
         proj = self._get_proj()
         tier_map = {"T0": (10, 1), "T1": (5, 1), "T2": (3, 1), "T3": (2, 1), "T4": (1.1, 1)}
         tier_order = {"T0": 0, "T1": 1, "T2": 2, "T3": 3, "T4": 4}
@@ -1140,19 +1183,44 @@ class TortoiseSDK:
         
         rows = proj.g.query(
             f"MATCH (n:Point)-[:extractedFrom]->(s:Source) {where} "
-            "RETURN n.id, s.credibilityTier",
+            "RETURN n.id, s.credibilityTier, s.ingestedAt",
             params=params,
         ).result_set
         
         # Group by Point ID, select highest tier (lowest number) for each Point
         from collections import defaultdict
-        point_tiers = defaultdict(list)
-        for pid, tier in rows:
-            point_tiers[pid].append(tier)
+        point_data = defaultdict(list)
+        for pid, tier, ingested in rows:
+            point_data[pid].append((tier, ingested))
+
+        now_ts = datetime.now(timezone.utc).timestamp()
         
-        for pid, tiers in point_tiers.items():
+        for pid, entries in point_data.items():
+            tiers = [e[0] for e in entries]
             best_tier = min(tiers, key=lambda t: tier_order.get(t, 99))
             alpha, beta = tier_map.get(best_tier, (1, 1))
+
+            # Recency modulation: T0 exempt, others decay gently (#122)
+            if best_tier != "T0" and recency_decay < 1.0:
+                # Use the most recent ingestedAt for this source tier
+                ingested_ts = None
+                for t, ingested in entries:
+                    if t == best_tier and ingested:
+                        try:
+                            dt = datetime.fromisoformat(ingested.replace("Z", "+00:00"))
+                            ts = dt.timestamp()
+                            if ingested_ts is None or ts > ingested_ts:
+                                ingested_ts = ts
+                        except (ValueError, TypeError):
+                            pass
+                if ingested_ts is not None:
+                    years = max(0, (now_ts - ingested_ts) / (365.25 * 86400))
+                    decay = recency_decay ** years
+                    # Decay pulls toward Beta(1,1): alpha' = 1 + (alpha-1)*decay
+                    # Stable facts (high alpha from multiple sources) stay strong
+                    alpha = 1.0 + (alpha - 1.0) * decay
+                    beta = 1.0 + (beta - 1.0) * decay
+
             self.set_point_baseline(pid, alpha, beta)
 
     def calibrate_summary(self, context: str | None = None) -> list[dict]:
@@ -2546,8 +2614,27 @@ class TortoiseSDK:
         return self._create_entity("Action", self.ulid(), {"name": name, "actionKind": actionKind, "actionStatus": "pending", **props}, "ActionCreated")
 
     def create_event(self, name: str, eventKind: str, **props) -> dict:
+        """Create an Event node.
+
+        If aboutSubject or aboutObject are provided in **props, they are extracted
+        and wired as graph edges (Event)-[:aboutSubject]->(Subject) and
+        (Event)-[:aboutObject]->(Object), rather than stored as string properties.
+        """
         eid = self.ulid()
-        return self._create_entity("Event", eid, {"eventId": eid, "name": name, "eventKind": eventKind, "eventStatus": "scheduled", **props}, "EventRecorded")
+        about_subject = props.pop("aboutSubject", None)
+        about_object = props.pop("aboutObject", None)
+        result = self._create_entity("Event", eid, {"eventId": eid, "name": name, "eventKind": eventKind, "eventStatus": "scheduled", **props}, "EventRecorded")
+        proj = self._get_proj()
+        if about_subject:
+            proj.create_about_edge(eid, about_subject, "aboutSubject")
+            # Only name-resolve if it looks like a plain name, not an ID
+            if isinstance(about_subject, str) and not _is_ulid(about_subject):
+                proj._create_about_edges(eid, about_subject)
+        if about_object:
+            proj.create_about_edge(eid, about_object, "aboutObject")
+            if isinstance(about_object, str) and not _is_ulid(about_object):
+                proj._create_about_edges(eid, about_object)
+        return result
 
     def create_document(self, title: str, documentKind: str, **props) -> dict:
         did = self.ulid()
@@ -2555,6 +2642,81 @@ class TortoiseSDK:
 
     def create_source(self, url: str, sourceKind: str, **props) -> dict:
         return self._create_entity("Source", url, {"url": url, "sourceKind": sourceKind, "ingestedAt": __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(), **props}, None)
+
+    # ── Entity Derivation (#122 Part 2) ──────────────────────────
+
+    def create_derivation(self, src_id: str, dst_id: str) -> dict:
+        """Create a wasDerivedFrom edge: (dst)-[:wasDerivedFrom]->(src).
+
+        PROV-O entity derivation — dst was derived from src. Distinct from
+        extractedFrom (claim provenance) — wasDerivedFrom is Object→Object
+        entity derivation.
+        """
+        proj = self._get_proj()
+        ok = proj.create_edge(dst_id, src_id, "wasDerivedFrom")
+        return {"derived": ok, "src": src_id, "dst": dst_id}
+
+    # ── Reputation (#122 Part 4) ─────────────────────────────────
+
+    def compute_reputation(self, subject_id: str) -> dict:
+        """Derive reputation score for a Subject from event outcomes.
+
+        Traverses: Subject -[:performs]-> Event -[:IMPL|NAND]-> Point
+        Aggregates success/failure from direct event outcomes.
+        Returns derived score (NOT stored).
+
+        Returns {mean, total_events, impl_count, nand_count, alpha, beta, outcomes}.
+        """
+        proj = self._get_proj()
+        # Direct: Event connects directly to claim Points via IMPL/NAND
+        # (Operators connect ONLY epistemic targets per ONTOLOGY: Event→Point, Point→Point)
+        impl_rows = proj.g.query(
+            "MATCH (s:Subject)-[:performs]->(e:Event) "
+            "MATCH (e)-[:IMPL]->(p:Point) "
+            "WHERE (p.is_operator IS NULL OR p.is_operator = false) "
+            "AND (s.id = $sid OR s.name = $sid) "
+            "RETURN p.id, p.content, coalesce(p.confidence, 0.5) AS conf",
+            params={"sid": subject_id},
+        ).result_set
+        nand_rows = proj.g.query(
+            "MATCH (s:Subject)-[:performs]->(e:Event) "
+            "MATCH (e)-[:NAND]->(p:Point) "
+            "WHERE (p.is_operator IS NULL OR p.is_operator = false) "
+            "AND (s.id = $sid OR s.name = $sid) "
+            "RETURN p.id, p.content, coalesce(p.confidence, 0.5) AS conf",
+            params={"sid": subject_id},
+        ).result_set
+
+        # Collect outcomes
+        outcomes: list[dict] = []
+        for row in impl_rows:
+            outcomes.append({"point_id": row[0], "content": row[1], "confidence": float(row[2]), "outcome": "IMPL"})
+        for row in nand_rows:
+            outcomes.append({"point_id": row[0], "content": row[1], "confidence": float(row[2]), "outcome": "NAND"})
+
+        total = len(outcomes)
+        impl_count = sum(1 for o in outcomes if o["outcome"] == "IMPL")
+        nand_count = sum(1 for o in outcomes if o["outcome"] == "NAND")
+
+        if total == 0:
+            return {"mean": 0.5, "total_events": 0, "impl_count": 0, "nand_count": 0,
+                    "alpha": 1.0, "beta": 1.0, "outcomes": []}
+
+        # Simple Beta reputation: IMPL = success, NAND = failure
+        # Prior: Beta(1, 1) uniform
+        alpha = 1.0 + impl_count
+        beta = 1.0 + nand_count
+        mean = alpha / (alpha + beta)
+
+        return {
+            "mean": round(mean, 4),
+            "total_events": total,
+            "impl_count": impl_count,
+            "nand_count": nand_count,
+            "alpha": alpha,
+            "beta": beta,
+            "outcomes": outcomes[:20],  # cap for readability
+        }
 
     def get_entity(self, id_val: str) -> dict:
         return self._get_entity(id_val)

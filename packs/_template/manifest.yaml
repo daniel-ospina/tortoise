@@ -38,9 +38,6 @@ ontology:
   # New documentKind values (camelCase)
   documentKinds: []
 
-  # New actionKind values (camelCase)
-  actionKinds: []
-
   # Subclass declarations: {kind: parent_kind}
   #   kind = a camelCase kind declared in this pack's *Kinds above
   #   parent_kind = a PascalCase core entity type (Project, WorkItem, Document,
