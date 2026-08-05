@@ -148,14 +148,21 @@ def _parse_node(node: Any) -> dict:
     """Parse FalkorDB Node → flat dict {id, type, ...properties}.
 
     Handles FalkorDB Node objects (1.6+) and raw list form for testing.
+
+    Prefers the public ``id`` property (ULID) from node properties over the
+    internal FalkorDB numeric node ID.  Falls back to the internal ID only
+    when nodes lack an ``id`` property (edge case, typically test mocks).
+    See #44: traverse was leaking internal IDs downstream.
     """
     if hasattr(node, 'properties'):
         props = dict(node.properties)
-        props["id"] = str(node.id)
+        if "id" not in props:
+            props["id"] = str(node.id)
         props["type"] = node.labels[0] if node.labels else "unknown"
         return props
     # Raw list form: [id, [labels], [[k, v], ...]]
     props = {k: v for k, v in node[2]}
-    props["id"] = str(node[0])
+    if "id" not in props:
+        props["id"] = str(node[0])
     props["type"] = node[1][0] if node[1] else "unknown"
     return props

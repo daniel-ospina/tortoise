@@ -7,17 +7,51 @@ on:
     paths:
       - 'tortoise/**'
       - 'fly.toml'
+      - 'falkordb.fly.toml'
       - 'Dockerfile.hosted'
+      - 'entrypoint.sh'
       - 'requirements.txt'
       - 'pyproject.toml'
   workflow_dispatch:
 
 jobs:
-  deploy:
+  deploy-falkordb:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: superfly/flyctl-actions/setup-flyctl@master
-      - run: flyctl deploy --remote-only --app tortoise-y4mjjq
+      - name: Verify FalkorDB secrets exist
+        run: |
+          if [ -z "${{ secrets.FALKORDB_PASSWORD }}" ]; then
+            echo "::error::FALKORDB_PASSWORD must be set in GitHub secrets"
+            exit 1
+          fi
+      - name: Set FALKORDB_PASSWORD secret on Fly.io
+        run: |
+          flyctl secrets set FALKORDB_PASSWORD="${{ secrets.FALKORDB_PASSWORD }}" --app falkordb-tortoise
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      - run: flyctl deploy --remote-only --wait-timeout 300 --config falkordb.fly.toml --app falkordb-tortoise
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+  deploy-api:
+    needs: deploy-falkordb
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: Verify secrets exist
+        run: |
+          if [ -z "${{ secrets.FASTAPI_INTERNAL_KEY }}" ] || [ -z "${{ secrets.TORTOISE_SECRET_PEPPER }}" ] || [ -z "${{ secrets.FALKORDB_PASSWORD }}" ]; then
+            echo "::error::FASTAPI_INTERNAL_KEY, TORTOISE_SECRET_PEPPER, and FALKORDB_PASSWORD must be set in GitHub secrets"
+            exit 1
+          fi
+      - name: Set FALKORDB_PASSWORD secret on Fly.io
+        run: |
+          flyctl secrets set FALKORDB_PASSWORD="${{ secrets.FALKORDB_PASSWORD }}" --app tortoise-api
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      - run: flyctl deploy --remote-only --wait-timeout 300 --app tortoise-api
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}

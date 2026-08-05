@@ -1340,6 +1340,224 @@ def _cmd_doctor(args):
     return 0 if fails == 0 else 1
 
 
+def _cmd_list_contexts(args) -> int:
+    """List all graph contexts with point counts, sorted by count DESC."""
+    import os as _os
+    from tortoise.sdk import TortoiseSDK
+    from tortoise.projection import FalkorProjection
+
+    uri = _os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise")
+    sdk = TortoiseSDK()
+    sdk._proj = FalkorProjection.from_uri(uri)
+
+    try:
+        domains = sdk.list_domains()
+        if not domains:
+            print("No contexts found.")
+            return 0
+        # Print count + context, sorted DESC (already sorted by list_domains)
+        max_width = max(len(str(d["context"])) for d in domains)
+        for d in domains:
+            print(f"{d['count']:>6}  {d['context']:<{max_width}}")
+        print(f"\n{len(domains)} context(s) total")
+    finally:
+        if sdk._proj:
+            sdk._proj.close()
+    return 0
+
+
+def _cmd_decide(args) -> int:
+    """Compare options via EP belief propagation.
+
+    Reads a JSON or YAML input file with:
+      {context, options, criteria, findings, edges, truth_edges?, relevance_edges?}
+
+    Wires criteria+findings→options via IMPL/NAND, handles truth challenges
+    (NAND on finding points) and relevance mitigations (mitigate on operators),
+    then runs EP belief propagation and prints a ranked confidence table.
+
+    MITIGATION SEMANTICS (TRUTH vs RELEVANCE):
+      - truth_edges: NAND directly on the target finding point (it's FALSE)
+      - relevance_edges: mitigate the OPERATOR (it's TRUE but matters LESS)
+        Uses mitigate_operator with strength in [0.10, 0.50] range.
+      - Never NAND an option/criterion point for bad fit — express fit on the operator.
+    """
+    import json as _json
+    import sys as _sys
+    from pathlib import Path
+    from tortoise.sdk import TortoiseSDK
+    from tortoise.projection import FalkorProjection
+
+    # Two modes: --input <file> or inline (--options/--criteria/--findings/--edges)
+    if args.input:
+        input_path = Path(args.input)
+        if not input_path.exists():
+            print(f"Input file not found: {args.input}", file=_sys.stderr)
+            return 1
+        raw = input_path.read_text(encoding="utf-8")
+        # Parse JSON or YAML
+        if input_path.suffix in (".yaml", ".yml"):
+            try:
+                import yaml
+            except ImportError:
+                print("Error: PyYAML is required for YAML input. Run: pip install PyYAML", file=_sys.stderr)
+                return 1
+            data = yaml.safe_load(raw)
+        else:
+            data = _json.loads(raw)
+    else:
+        # Inline mode
+        data: dict = {"context": args.context or "decide"}
+        if args.options:
+            data["options"] = _json.loads(args.options)
+        if args.criteria:
+            data["criteria"] = _json.loads(args.criteria)
+        if args.findings:
+            data["findings"] = _json.loads(args.findings)
+        if args.edges:
+            data["edges"] = _json.loads(args.edges)
+
+    ctx = data.get("context", "decide")
+    options = data.get("options", {})
+    criteria = data.get("criteria", {})
+    findings = data.get("findings", {})
+    edges = data.get("edges", [])
+    truth_edges = data.get("truth_edges", [])
+    relevance_edges = data.get("relevance_edges", [])
+
+    if not options:
+        print("Error: at least one option required (--input file with 'options' or --options JSON)", file=_sys.stderr)
+        return 1
+
+    import os as _os
+    context_free = getattr(args, "context_free", False)
+
+    uri = getattr(args, "db", None) or _os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise")
+    sdk = TortoiseSDK()
+    sdk._proj = FalkorProjection.from_uri(uri)
+
+    # Track all operator IDs for --context-free mode
+    all_operator_ids: list[str] = []
+
+    try:
+        # ── Create all points ──
+        all_points: dict[str, str] = {}
+        for pid, content in {**options, **criteria, **findings}.items():
+            kind = (
+                "option" if pid.startswith(("opt:", "option:")) else
+                "criterion" if pid.startswith(("crit:", "criterion:")) else
+                "evidence"
+            )
+            try:
+                p = sdk.create_point(kind, content, context=ctx, dedup=True)
+                all_points[pid] = p["id"]
+                print(f"  ✓ {pid} → {p['id']}")
+            except Exception as e:
+                print(f"  ⚠ {pid}: {e}")
+
+        # ── Resolve helper: name → point_id ──
+        def _resolve(name: str) -> str:
+            """Resolve a key or point ID to a graph point ID."""
+            if name in all_points:
+                return all_points[name]
+            # Try as a raw graph ID (pass-through)
+            return name
+
+        # ── Create regular edges (IMPL/NAND) ──
+        # Track created operators so relevance_edges can reuse them instead of
+        # creating duplicates (same src/op_type/tgt in both sections).
+        created_ops: dict[tuple[str, str, str], str] = {}
+        for edge in edges:
+            if isinstance(edge, list):
+                # Tuple format: [source, op_type, target]
+                src, op_type, tgt = edge[0], edge[1], edge[2]
+                label = edge[3] if len(edge) > 3 else None
+            elif isinstance(edge, dict):
+                src = edge["source"]
+                op_type = edge["op_type"]
+                tgt = edge["target"]
+                label = edge.get("label")
+            else:
+                print(f"  ⚠ Unknown edge format: {edge}")
+                continue
+
+            try:
+                op = sdk.create_operator(op_type, _resolve(src), [_resolve(tgt)], context=ctx, label=label)
+                created_ops[(src, op_type, tgt)] = op["id"]
+                all_operator_ids.append(op["id"])
+                print(f"  ✓ {src} --{op_type}--> {tgt}")
+            except Exception as e:
+                print(f"  ⚠ {src} --{op_type}--> {tgt}: {e}")
+
+        # ── Truth edges: NAND the target finding point (it's FALSE) ──
+        for te in truth_edges:
+            src = te["source"]
+            op_type = te.get("op_type", "NAND")
+            tgt = te["target"]
+            try:
+                top = sdk.create_operator(op_type, _resolve(src), [_resolve(tgt)], context=ctx)
+                all_operator_ids.append(top["id"])
+                print(f"  ⚡ truth: {src} --{op_type}--> {tgt}")
+            except Exception as e:
+                print(f"  ⚠ truth {src} --{op_type}--> {tgt}: {e}")
+
+        # ── Relevance edges: mitigate the OPERATOR (TRUE but matters LESS) ──
+        for re in relevance_edges:
+            src = re["source"]
+            op_type = re.get("op_type", "NAND")
+            tgt = re["target"]
+            reason = re.get("reason", "Overstated relevance")
+            strength = re.get("strength", 0.30)
+            # Clamp to valid mitigation range
+            strength = max(0.10, min(0.50, strength))
+            try:
+                # Reuse the operator if already created in `edges` (prevents
+                # duplicate operators feeding EP twice).
+                op_id = created_ops.get((src, op_type, tgt))
+                if op_id is None:
+                    op = sdk.create_operator(op_type, _resolve(src), [_resolve(tgt)], context=ctx)
+                    op_id = op["id"]
+                    all_operator_ids.append(op_id)
+                sdk.mitigate_operator(op_id, reason, strength)
+                print(f"  ⚖ relevance: {src} --{op_type}--> {tgt} (mitigated {strength:.2f}: {reason})")
+            except Exception as e:
+                print(f"  ⚠ relevance {src} --{op_type}--> {tgt}: {e}")
+
+        # ── Compute confidence per option ──
+        try:
+            if context_free and all_operator_ids:
+                print(f"  (context-free mode: {len(all_operator_ids)} operator factors)")
+                result = sdk.compute_confidence(factors=all_operator_ids)
+            else:
+                result = sdk.compute_confidence(context=ctx)
+            print(f"\n✓ EP computed: {result['iterations']} iterations, converged={result['converged']}")
+            confs = result.get("confidences", {})
+
+            opt_conf: dict[str, float] = {}
+            for pid, cid in all_points.items():
+                if pid.startswith(("opt:", "option:")):
+                    mean = confs.get(cid, {}).get("mean")
+                    if isinstance(mean, (int, float)):
+                        opt_conf[pid] = float(mean)
+
+            if opt_conf:
+                print("\n=== OPTION CONFIDENCE (higher = more supported) ===")
+                ranked = sorted(opt_conf.items(), key=lambda kv: kv[1], reverse=True)
+                name_width = max(len(pid) for pid in opt_conf)
+                for pid, c in ranked:
+                    bar = "█" * int(c * 20) + "░" * (20 - int(c * 20))
+                    print(f"  {pid:<{name_width}}  {c:.4f}  {bar}")
+        except Exception as e:
+            print(f"\n⚠ compute_confidence: {e}")
+
+    finally:
+        if sdk._proj:
+            sdk._proj.close()
+
+    print(f"\nDone. Decision comparison filed to context='{ctx}'")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
 
     p = argparse.ArgumentParser(prog="tortoise", exit_on_error=False)
@@ -1407,6 +1625,19 @@ def main(argv: list[str] | None = None) -> int:
     session_list = session_sp.add_parser("list", help="List all sessions")
     session_view = session_sp.add_parser("view", help="View a specific session")
     session_view.add_argument("id", help="Session ID")
+    # tortoise list-contexts
+    lc = sp.add_parser("list-contexts", help="List all graph contexts with point counts, sorted DESC")
+    # tortoise decide --input <json|yaml>
+    dc = sp.add_parser("decide", help="Compare options via EP belief propagation")
+    dc.add_argument("--input", "-i", help="Path to JSON or YAML input file with options/criteria/findings/edges")
+    dc.add_argument("--options", help="JSON dict of options, e.g. '{\"opt:a\": \"desc\"}'")
+    dc.add_argument("--criteria", help="JSON dict of criteria")
+    dc.add_argument("--findings", help="JSON dict of findings")
+    dc.add_argument("--edges", help="JSON list of edges, e.g. '[\"crit:1\", \"IMPL\", \"opt:a\"]' or full edge dicts")
+    dc.add_argument("--context", help="Graph context namespace (default: 'decide')")
+    dc.add_argument("--context-free", action="store_true",
+                    help="Compute confidence via explicit operator factors instead of context isolation")
+    dc.add_argument("--db", help="FalkorDB URI override (default: TORTOISE_DB_URI or docker://:@localhost:16379/tortoise)")
     try:
         args = p.parse_args(argv)
     except (argparse.ArgumentError, SystemExit) as e:
@@ -1490,6 +1721,10 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_index_github(args)
         idx.print_help()
         return 1
+    elif args.cmd == "list-contexts":
+        return _cmd_list_contexts(args)
+    elif args.cmd == "decide":
+        return _cmd_decide(args)
     else:
         p.print_help()
         return 1

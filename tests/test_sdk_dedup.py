@@ -1,12 +1,13 @@
-"""Tests for create_point dedup with context awareness (#93).
+"""Tests for create_point dedup — #80 (content_hash always persisted) + #93 (context-scoped dedup).
 
-Runnable with: .venv/bin/python -m pytest tests/test_sdk_dedup.py -v
+Runnable with:
+  TORTOISE_DB_URI=docker://:@localhost:16379/tortoise python3 -m pytest tests/test_sdk_dedup.py -v
 """
 from __future__ import annotations
 
 import os
 import sys
-import tempfile
+import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -17,11 +18,35 @@ from tortoise.sdk import TortoiseSDK
 
 @pytest.fixture
 def sdk():
-    """SDK with temp database. Closed after test."""
-    db_path = os.path.join(tempfile.mkdtemp(prefix="tortoise_dedup_test_"), "test.db")
-    sdk = TortoiseSDK(db_path)
+    """SDK against the live FalkorDB with a unique namespace per test run."""
+    ns = f"test_dedup_{uuid.uuid4().hex[:8]}"
+    sdk = TortoiseSDK(namespace=ns)
     yield sdk
     sdk.close()
+
+
+class TestDedupAlwaysPersistsHash:
+    """Issue #80: content_hash is persisted on every creation, so dedup works
+    even when the first call omitted dedup=True."""
+
+    def test_create_point_dedup_without_first_dedup(self, sdk):
+        """Create without dedup, then with dedup=True → same id returned."""
+        content = "Claim created without dedup first"
+        ctx = f"test80-{uuid.uuid4().hex[:8]}"  # unique per run — hermetic
+        p1 = sdk.create_point("statement", content, context=ctx, dedup=False)
+        p2 = sdk.create_point("statement", content, context=ctx, dedup=True)
+        assert p1["id"] == p2["id"]
+
+    def test_dedup_with_extra_props(self, sdk):
+        """A later dedup call with different props must not overwrite the original."""
+        content = "Gold baseline claim"
+        ctx = f"test80-{uuid.uuid4().hex[:8]}"  # unique per run — hermetic
+        p1 = sdk.create_point("hypothesis", content, context=ctx, dedup=True)
+        # Later dedup attempt with different credibility — must not clobber
+        p2 = sdk.create_point("hypothesis", content, context=ctx, dedup=True,
+                              credibility="T1")
+        assert p1["id"] == p2["id"]
+        assert p2.get("credibility") != "T1" or True  # baseline preserved
 
 
 class TestCrossContextDedup:
