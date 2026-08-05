@@ -22,27 +22,20 @@ created: 2026-08-03
 - GitHub repo access with Actions secrets permission
 - `premiselabs.co` domain on Cloudflare DNS
 
-### Fly.io Apps
+### FalkorDB Cloud (managed database)
+FalkorDB runs on FalkorDB Cloud (managed) — provides AOF durability, automated
+backups, and multi-tenancy. Create the instance in the FalkorDB Cloud console,
+then set the connection string:
 
-**tortoise-api (FastAPI):**
+**tortoise-api (FastAPI) on Fly.io:**
 ```bash
-fly apps create tortoise-api
+fly apps create tortoise-y4mjjq   # or use the existing app
 fly secrets set FASTAPI_INTERNAL_KEY=$(openssl rand -hex 32)
 fly secrets set TORTOISE_SECRET_PEPPER=$(openssl rand -hex 32)
-fly secrets set FALKORDB_PASSWORD=$(openssl rand -hex 16)
-# TORTOISE_DB_URI is auto-constructed at runtime by entrypoint.sh
-# from FALKORDB_PASSWORD → redis://:{pwd}@falkordb-tortoise.internal:6379/tortoise
+# Set FALKORDB_CLOUD_URI in GitHub Actions secrets (deploy workflow sets it on Fly):
+#   docker://tortoise:<password>@<instance-endpoint>:53171/tortoise
 fly deploy
 fly certs create api.premiselabs.co
-```
-
-**falkordb-tortoise (FalkorDB):**
-```bash
-fly apps create falkordb-tortoise
-fly volumes create falkordb_data --size 1 --region iad
-fly secrets set FALKORDB_PASSWORD=<same value as tortoise-api>
-# Deployed automatically by .github/workflows/deploy-hosted.yml on push to main
-fly deploy -c falkordb.fly.toml
 ```
 
 ### Cloudflare Pages (Dashboard)
@@ -115,18 +108,18 @@ wrangler pages deploy dist --project-name=tortoise-dashboard
 
 ## Secrets Matrix
 
-| Secret | tortoise-api | falkordb-tortoise | GitHub Actions |
-|--------|-------------|-------------------|----------------|
+| Secret | tortoise-api (Fly.io) | FalkorDB Cloud | GitHub Actions |
+|--------|----------------------|---------------|----------------|
 | FASTAPI_INTERNAL_KEY | ✅ | — | — |
 | TORTOISE_SECRET_PEPPER | ✅ | — | — |
-| FALKORDB_PASSWORD | ✅ | ✅ | — |
+| FALKORDB_CLOUD_URI | ✅ (set via GitHub secret → Fly) | ✅ (instance creds) | ✅ |
 | FLY_API_TOKEN | — | — | ✅ |
 | CLOUDFLARE_API_TOKEN | — | — | ✅ |
 
 ## Reproducibility Test
 Can a fresh Fly.io account + Cloudflare account follow §1 from zero and arrive at the same infra?
-- [ ] `fly apps create tortoise-api` → deploys, health check passes
-- [ ] `fly apps create falkordb-tortoise` → deploys (auto-deployed by CI on push), volume mounted, reachable from tortoise-api
-- [ ] `api.premiselabs.co` → resolves, TLS valid, /health returns ok
+- [ ] FalkorDB Cloud instance provisioned, FALKORDB_CLOUD_URI secret set
+- [ ] `fly apps create tortoise-y4mjjq` → deploys, health check passes, connects to FalkorDB Cloud
+- [ ] `api.premiselabs.co` → resolves, TLS valid, /health returns ok (db: connected)
 - [ ] `app.premiselabs.co` → resolves, serves dashboard placeholder
 - [ ] GitHub push to main → auto-deploys tortoise-api

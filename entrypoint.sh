@@ -3,12 +3,13 @@
 # Resolves TORTOISE_DB_URI at runtime. Priority:
 #   1. TORTOISE_DB_URI (already set — explicit override)
 #   2. FALKORDB_CLOUD_URI (FalkorDB Cloud managed instance — production)
-#   3. FALKORDB_PASSWORD (self-hosted falkordb-tortoise sidecar fallback)
-#   4. embedded redislite (local/dev)
+#   3. embedded redislite (local/dev)
 #
-# FalkorDB Cloud (managed) provides AOF durability, automated backups,
-# and multi-tenancy — the production default. The self-hosted sidecar
-# is a dev/fallback only.
+# FalkorDB Cloud (managed) is the ONLY production database — it provides
+# AOF durability, automated backups, and multi-tenancy. The former
+# self-hosted falkordb-tortoise sidecar (AOF off, no backups) caused the
+# 2026-08-05 data-loss incident and has been removed. If the cloud URI is
+# missing in production, fail loudly rather than silently degrading.
 # ──────────────────────────────────────────────────────────────────
 
 set -euo pipefail
@@ -18,11 +19,9 @@ if [ -n "${TORTOISE_DB_URI:-}" ]; then
 elif [ -n "${FALKORDB_CLOUD_URI:-}" ]; then
     export TORTOISE_DB_URI="${FALKORDB_CLOUD_URI}"
     echo "tortoise: using FalkorDB Cloud (managed) → ${TORTOISE_DB_URI}"
-elif [ -n "${FALKORDB_PASSWORD:-}" ]; then
-    export TORTOISE_DB_URI="redis://:${FALKORDB_PASSWORD}@falkordb-tortoise.internal:6379/tortoise"
-    echo "tortoise: using falkordb-tortoise sidecar (dev/fallback)"
 elif [ -n "${FLY_APP_NAME:-}" ]; then
-    echo "tortoise: WARNING — no DB configured. SDK will refuse to start." >&2
+    echo "tortoise: FATAL — FALKORDB_CLOUD_URI not set in production. Refusing to start with no durable DB." >&2
+    exit 1
 else
     echo "tortoise: using embedded redislite (local/dev mode)" >&2
 fi
