@@ -943,7 +943,13 @@ class TortoiseSDK:
         return violations
 
     def summarize_structure(self) -> dict:
-        """Count points per Gate (by pointKind). Returns {gate: count, ..., total}."""
+        """Count points per Gate (by pointKind). Returns {gate: count, ..., total}.
+
+        P1 #49: re-keyed from context strings (tortoise-wf-gate0..4) to pointKind
+        (jobToBeDone, useCase, userJourney, workflow, requirement). Pre-existing
+        experimental points that had context but no matching pointKind may show 0
+        — expected under the #49 re-home (pointKind is the target vocabulary).
+        """
         proj = self._get_proj()
         gates = [
             ("gate0_jtbds", "jobToBeDone"),
@@ -1048,7 +1054,7 @@ class TortoiseSDK:
         return [self.create_point(**p) for p in points_list]
 
     def file_decision(self, options: list[str], evidence: list[str],
-                      choice: int, context: str) -> dict:
+                      choice: int, context: str | None = None) -> dict:
         """File a simple decision directly to the graph — no EP, no calibration,
         no research cycles. Creates decision + options + evidence + IMPL edges
         atomically. For low-stakes decisions where the answer is clear (#133).
@@ -2047,6 +2053,24 @@ class TortoiseSDK:
                     "traversal_path %r could not be resolved to a pack relation",
                     traversal_path,
                 )
+
+        # 5d. P1 #49: union in-session context-map points (context no longer
+        # persisted — the session map preserves create-then-query for FTS too).
+        if context is not None and self._session_context_map:
+            in_session = self._session_context_map.get(context, set())
+            if in_session:
+                if kind:
+                    # Respect kind filter: only include in-session points of this kind
+                    try:
+                        kind_rows = graph.query(
+                            f"MATCH (n:{label}) WHERE n.{id_field} IN $ids AND n.pointKind = $kind RETURN n.{id_field}",
+                            params={"ids": list(in_session), "kind": expanded_kinds[0] if len(expanded_kinds) == 1 else kind},
+                        ).result_set
+                        in_session = {row[0] for row in kind_rows}
+                    except Exception:
+                        pass  # Pass-through on error
+                # Prepend in-session points (they have no persisted context to match)
+                result_ids = [pid for pid in in_session if pid not in result_ids] + result_ids
 
         # Truncate AFTER filtering
         result_ids = result_ids[:limit]

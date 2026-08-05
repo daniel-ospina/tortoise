@@ -349,7 +349,9 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int = 1,
                 "BFS selector: collected %d operators, truncating to 200.",
                 len(collected),
             )
-            collected = set(list(collected)[:200])
+            # Deterministic truncation — set iteration order is non-deterministic
+            # (hash randomization); sort by ID for reproducible selection.
+            collected = set(sorted(collected)[:200])
             break
 
         # Expand to new frontier points from collected operators

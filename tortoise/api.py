@@ -117,7 +117,7 @@ class EventAPI:
         self._emit("PointAdded", point=p, corrects=corrects, projection_version=2)
         # Auto-compute grounding when a resolution event seeds the a-vector (#6704).
         # P1 #49: check pointKind, not context (context is deprecated).
-        ponytail: duck-typed; add a proper protocol if more backends gain grounding.
+        # ponytail: duck-typed; add a proper protocol if more backends gain grounding.
         pk = p.get("pointKind") or fields.get("pointKind")
         if pk == "resolution-event" and self.projection is not None:
             if hasattr(self.projection, "compute_grounding"):

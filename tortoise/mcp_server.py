@@ -366,7 +366,7 @@ def tortoise_mitigate_operator(id: str, reason: str, strength: float = 0.5) -> d
 
 @mcp.tool()
 def tortoise_file_decision(options: Any, evidence: Any,
-                           choice: int, context: str) -> dict:
+                           choice: int, context: str | None = None) -> dict:
     """File a simple decision directly to the graph.
 
     Creates decision + options + evidence + IMPL edges atomically.

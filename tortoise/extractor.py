@@ -187,7 +187,7 @@ class MockExtractor:
                 prov = provenance(source_id, span, quote=text, speaker=speaker,
                                   extracted_by=self.version)
                 # P1 #49: context is deprecated — use extractedFrom for provenance
-                pid = api.add_point(content=text, context="", provenance=prov,
+                pid = api.add_point(content=text, context=None, provenance=prov,
                                     extractedFrom=source_id)
                 pids.append((pid, text.lower(), prov))
             
@@ -222,7 +222,7 @@ class MockExtractor:
                         elif _has_cue(ti_clean, _REFUTE_SINGLE_RE, _REFUTE_PHRASES) or _has_cue(tj_clean, _REFUTE_SINGLE_RE, _REFUTE_PHRASES):
                             gate = "NAND"
                         if gate:
-                            api.add_operator(gate, inputs=[pi, pj], context="", provenance=pvi)
+                            api.add_operator(gate, inputs=[pi, pj], context=None, provenance=pvi)
                         elif (pi, pj) in matched_pairs:
                             # Semantic agreement: similar claims from different sources = IMPL
                             # But require shared noun phrase to avoid weak thematic connections
@@ -240,7 +240,7 @@ class MockExtractor:
                                         'more','less','very','also','just','only','now','still','already'}
                             shared_content = shared - stopwords
                             if len(shared_content) >= 3:
-                                api.add_operator("IMPL", inputs=[pi, pj], context="", provenance=pvi)
+                                api.add_operator("IMPL", inputs=[pi, pj], context=None, provenance=pvi)
             except Exception:
                 # Fallback: cue-word only all-pairs (noisy but works)
                 # (catches ImportError for missing dependencies AND runtime errors
@@ -257,7 +257,7 @@ class MockExtractor:
                         elif _has_cue(ti_clean, _REFUTE_SINGLE_RE, _REFUTE_PHRASES) or _has_cue(tj_clean, _REFUTE_SINGLE_RE, _REFUTE_PHRASES):
                             gate = "NAND"
                         if gate:
-                            api.add_operator(gate, inputs=[pi, pj], context="", provenance=pvi)
+                            api.add_operator(gate, inputs=[pi, pj], context=None, provenance=pvi)
         else:
             # Sequential mode (original): only connect consecutive utterances
             prev_pid = None
@@ -265,7 +265,7 @@ class MockExtractor:
                 prov = provenance(source_id, span, quote=text, speaker=speaker,
                                   extracted_by=self.version)
                 # P1 #49: context is deprecated — use extractedFrom for provenance
-                pid = api.add_point(content=text, context="", provenance=prov,
+                pid = api.add_point(content=text, context=None, provenance=prov,
                                     extractedFrom=source_id)
                 low = _PUNC.sub('', f" {text.lower()} ")
                 gate = None
@@ -274,7 +274,7 @@ class MockExtractor:
                 elif _has_cue(low, _REFUTE_SINGLE_RE, _REFUTE_PHRASES):
                     gate = "NAND"
                 if gate and prev_pid is not None:
-                    api.add_operator(gate, inputs=[prev_pid, pid], context="",
+                    api.add_operator(gate, inputs=[prev_pid, pid], context=None,
                                      provenance=prov)
                 prev_pid = pid
 
