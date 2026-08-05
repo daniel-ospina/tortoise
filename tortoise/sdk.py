@@ -469,22 +469,22 @@ class TortoiseSDK:
         for rel in structural_rels:
             struct_rows = proj.g.query(
                 f"MATCH (old:Point {{id:$old_id}})-[r:{rel}]->(target) "
-                f"RETURN target.id, target.name, labels(target)",
+                f"RETURN id(target), target.id, labels(target)",
                 params={"old_id": old_id},
             ).result_set
             for row in struct_rows:
-                target_id = row[0]
-                # Create new edge: new point → same target
+                target_graph_id = row[0]  # FalkorDB internal node id — exact match
+                # Create new edge: new point → same target (MERGE = idempotent, no dupes)
                 proj.g.query(
-                    f"MATCH (new:Point {{id:$new_id}}), (t) WHERE t.id = $tid OR t.name = $tname OR t.eventId = $tid "
-                    f"CREATE (new)-[:{rel}]->(t)",
-                    params={"new_id": new_id, "tid": target_id, "tname": row[1] or ""},
+                    f"MATCH (new:Point {{id:$new_id}}), (t) WHERE id(t) = $tid "
+                    f"MERGE (new)-[:{rel}]->(t)",
+                    params={"new_id": new_id, "tid": target_graph_id},
                 )
-                # Delete old edge
+                # Delete old edge (match by exact internal node id)
                 proj.g.query(
-                    f"MATCH (old:Point {{id:$old_id}})-[r:{rel}]->(t) WHERE t.id = $tid OR t.name = $tname OR t.eventId = $tid "
+                    f"MATCH (old:Point {{id:$old_id}})-[r:{rel}]->(t) WHERE id(t) = $tid "
                     f"DELETE r",
-                    params={"old_id": old_id, "tid": target_id, "tname": row[1] or ""},
+                    params={"old_id": old_id, "tid": target_graph_id},
                 )
                 transferred += 1
 
@@ -2674,6 +2674,7 @@ class TortoiseSDK:
             "MATCH (s:Subject)-[:performs]->(e:Event) "
             "MATCH (e)-[:IMPL]->(p:Point) "
             "WHERE (p.is_operator IS NULL OR p.is_operator = false) "
+            "AND (p.outdated IS NULL OR p.outdated = false) "
             "AND (s.id = $sid OR s.name = $sid) "
             "RETURN p.id, p.content, coalesce(p.confidence, 0.5) AS conf",
             params={"sid": subject_id},
@@ -2682,6 +2683,7 @@ class TortoiseSDK:
             "MATCH (s:Subject)-[:performs]->(e:Event) "
             "MATCH (e)-[:NAND]->(p:Point) "
             "WHERE (p.is_operator IS NULL OR p.is_operator = false) "
+            "AND (p.outdated IS NULL OR p.outdated = false) "
             "AND (s.id = $sid OR s.name = $sid) "
             "RETURN p.id, p.content, coalesce(p.confidence, 0.5) AS conf",
             params={"sid": subject_id},
