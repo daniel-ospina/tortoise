@@ -24,6 +24,15 @@ jobs:
             echo "::error::FASTAPI_INTERNAL_KEY and TORTOISE_SECRET_PEPPER must be set in GitHub secrets"
             exit 1
           fi
+      - name: Ensure data volume
+        # Persistent volume for embedded redislite DB at /data.
+        run: |
+          REGION=$(grep 'primary_region' fly.toml | cut -d'"' -f2)
+          if ! flyctl volumes list --app tortoise-y4mjjq | awk '$2 == "tortoise_api_data"' | grep -q .; then
+            flyctl volumes create tortoise_api_data --app tortoise-y4mjjq --region "$REGION" --size 1 || true
+          fi
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
       - run: flyctl deploy --remote-only --wait-timeout 300 --app tortoise-y4mjjq
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
