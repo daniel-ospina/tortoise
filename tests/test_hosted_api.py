@@ -17,6 +17,9 @@ import tempfile
 import pytest
 from fastapi.testclient import TestClient
 
+# #67: TORTOISE_SECRET_PEPPER is mandatory for auth module — set before import
+os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
+
 from tortoise.hosted_api import app, get_current_team
 from tortoise.sdk import TortoiseSDK
 
