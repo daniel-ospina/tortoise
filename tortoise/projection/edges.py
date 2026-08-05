@@ -65,9 +65,6 @@ class _EdgeHandlers:
         # Try Object
         if self._try_about_edge(point_id, entity_name, 'Object', 'aboutObject', 'objectKind', 'other'):
             return
-        # Try Action
-        if self._try_about_edge(point_id, entity_name, 'Action', 'aboutAction', 'actionKind', 'other'):
-            return
         # Try Event
         if self._try_about_edge(point_id, entity_name, 'Event', 'aboutEvent', 'eventKind', 'other'):
             return
@@ -111,11 +108,11 @@ class _EdgeHandlers:
         Args:
             source_id: ID of source node (Point, Document, or Event)
             target_id: ID of target node
-            edge_type: one of aboutSubject, aboutObject, aboutAction, aboutEvent, aboutPoint, aboutDocument
+            edge_type: one of aboutSubject, aboutObject, aboutEvent, aboutPoint, aboutDocument
         
         Returns True if edge was created.
         """
-        valid = {'aboutSubject', 'aboutObject', 'aboutAction', 'aboutEvent', 'aboutPoint', 'aboutDocument'}
+        valid = {'aboutSubject', 'aboutObject', 'aboutEvent', 'aboutPoint', 'aboutDocument'}
         if edge_type not in valid:
             raise ValueError(f"Invalid about edge type: {edge_type}. Must be one of {valid}")
         

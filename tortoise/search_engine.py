@@ -97,13 +97,37 @@ def run_fts_query(
     """Run full-text search via FalkorDB FTS index.
 
     Falls back gracefully if index doesn't exist or query fails.
-    entity_type: 'point' (default), 'event', or 'subject'.
+    entity_type: 'point' (default), 'event', 'subject', or 'operator'.
+    Operators are Point nodes with is_operator=true — matched by label via
+    CONTAINS (not FTS, since operator labels aren't in the content FTS index).
 
     Note: timeout_ms is checked AFTER the query completes (post-hoc).
     A slow query still consumes DB resources — this is a soft guard,
     not a connection-level kill. For connection-level timeout, set it
     at the FalkorDB driver level. (#18)
     """
+    if entity_type == "operator":
+        # Operators are Points with is_operator=true — match label via CONTAINS
+        try:
+            start = time.monotonic()
+            cypher = (
+                "MATCH (n:Point) "
+                "WHERE n.is_operator = true AND toLower(n.label) CONTAINS toLower($query) "
+                "RETURN n.id, 1.0 AS score "
+                "ORDER BY score DESC "
+                "LIMIT $limit"
+            )
+            rows = graph.query(
+                cypher, params={"query": query, "limit": limit}
+            ).result_set
+            elapsed = (time.monotonic() - start) * 1000
+            if elapsed > timeout_ms:
+                logger.warning("FTS query exceeded timeout: %.0fms > %dms", elapsed, timeout_ms)
+                return []
+            return [(row[0], float(row[1])) for row in rows]
+        except Exception as e:
+            logger.warning("Operator FTS query failed: %s", e)
+            return []
     label = entity_type.capitalize()  # point→Point, event→Event, subject→Subject
     try:
         start = time.monotonic()
@@ -220,20 +244,37 @@ def run_structural_query(
     """Run structural/kind query via range indexes.
 
     entity_type: 'point' (filters on pointKind/context), 'event' (eventKind),
-                 'subject' (subjectKind).
+                 'subject' (subjectKind), 'operator' (op_type, Point nodes with is_operator=true),
+                 'source' (sourceKind), 'document' (documentKind), 'object' (objectKind).
     Returns matching entities with a score of 1.0 (exact match) or 0.5 (partial match).
     """
-    label = entity_type.capitalize()
-    kind_field = {"point": "pointKind", "event": "eventKind", "subject": "subjectKind"}[entity_type]
+    if entity_type == "operator":
+        # Operators are Points with is_operator=true, kind=op_type
+        label_str = "Point"
+        kind_field = "op_type"
+    elif entity_type == "source":
+        label_str = "Source"
+        kind_field = "sourceKind"
+    elif entity_type == "document":
+        label_str = "Document"
+        kind_field = "documentKind"
+    elif entity_type == "object":
+        label_str = "Object"
+        kind_field = "objectKind"
+    else:
+        label_str = entity_type.capitalize()
+        kind_field = {"point": "pointKind", "event": "eventKind", "subject": "subjectKind"}[entity_type]
     try:
         conditions = []
         params = {}
+        if entity_type == "operator":
+            conditions.append("n.is_operator = true")
         if kind:
             conditions.append(f"n.{kind_field} = $kind")
             params["kind"] = kind
         if context:
-            # Only Point entities have context; skip for Event/Subject
-            if entity_type == "point":
+            # Only Point entities and operators have context; skip for Event/Subject
+            if entity_type in ("point", "operator"):
                 conditions.append("n.context = $context")
                 params["context"] = context
 
@@ -242,7 +283,7 @@ def run_structural_query(
 
         where_clause = " AND ".join(conditions)
         cypher = (
-            f"MATCH (n:{label}) "
+            f"MATCH (n:{label_str}) "
             f"WHERE {where_clause} "
             f"RETURN n.id, n.{kind_field}, n.{kind_field} "
             f"LIMIT $limit"
