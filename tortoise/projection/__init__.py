@@ -12,8 +12,65 @@ Backends behind the `Projection` protocol:
 """
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from typing import Protocol, runtime_checkable
+
+# P0 guard (#99): bulk graph-wipe classifier.
+# A query is a bulk wipe when it contains DETACH DELETE but has NO property map
+# ({...} — e.g. MATCH (n:Label {id:$id})) and NO real WHERE clause.
+# A WHERE clause is "real" only if it references a property (n.xxx) or a
+# parameter ($id) or CONTAINS/IN — tautologies (WHERE true, WHERE 1=1) don't count.
+# Blocks: MATCH (n) DETACH DELETE n, MATCH (n:Label) DETACH DELETE n,
+#   MATCH (n) WHERE true DETACH DELETE n, MATCH (n:Point:Object) DETACH DELETE n.
+# Allows: MATCH (n:Label {id:$id}) DETACH DELETE n,
+#   MATCH (n) WHERE n.id = $id OR n.eventId = $id DETACH DELETE n.
+_WHERE_REAL_RE = re.compile(
+    r"\b[a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*|\$[a-zA-Z_]|CONTAINS|IN\s*\(",
+    re.IGNORECASE,
+)
+
+
+def _is_bulk_wipe(cypher: str) -> bool:
+    up = cypher.upper()
+    if "DETACH" not in up or "DELETE" not in up:
+        return False
+    # Property map in MATCH => targeted (e.g. {id:$id}, {team_id:$id})
+    if "{" in cypher:
+        return False
+    # Real WHERE clause (property/param/CONTAINS/IN reference) => targeted
+    m = re.search(r"WHERE\s+(.+) ", cypher + " ", re.IGNORECASE)
+    if m and _WHERE_REAL_RE.search(m.group(1)):
+        return False
+    return True
+
+
+class _GuardedGraph:
+    """Wrapper around FalkorDB Graph that guards against bulk graph-wipe queries.
+
+    Intercepts MATCH (n) DETACH DELETE n (no label, no WHERE) and asserts
+    the graph is a test graph before allowing execution. Targeted deletes
+    (MATCH (n:Label {...}) DETACH DELETE n) pass through unchanged.
+
+    Production code that intentionally wipes the graph (rebuild, rebuild_all)
+    sets FalkorProjection._skip_guard = True to bypass the guard.
+    """
+
+    __slots__ = ("_g", "_proj")
+
+    def __init__(self, g, projection):
+        self._g = g
+        self._proj = projection
+
+    def query(self, cypher: str, params=None):
+        if _is_bulk_wipe(cypher) and not self._proj._skip_guard:
+            self._proj._assert_test_graph(
+                "REFUSING to run MATCH (n) DETACH DELETE n on non-test graph"
+            )
+        return self._g.query(cypher, params=params)
+
+    def __getattr__(self, name):
+        return getattr(self._g, name)
 
 # ── Mixins ────────────────────────────────────────────────────────────────
 from tortoise.projection.entities import _EntityHandlers
@@ -113,12 +170,17 @@ class FalkorProjection(
     Same API regardless of backend — constructor swap is the only difference.
     """
 
+    _skip_guard: bool = False  # set True during intentional rebuild/rebuild_all
+
     def __init__(self, path: str | None = None, *,
                  host: str | None = None,
                  port: int = 16379,
                  username: str | None = None,
                  password: str | None = None,
                  graph_name: str = "tortoise"):
+
+        self._graph_name = graph_name
+        self._skip_guard = False
 
         if path is not None:
             # Embedded mode (opt-in via path=).
@@ -140,7 +202,7 @@ class FalkorProjection(
             raise ValueError("Either path or host must be provided")
 
         self.graph_name = graph_name
-        self.g = self.db.select_graph(graph_name)
+        self.g = _GuardedGraph(self.db.select_graph(graph_name), self)
         self._is_embedded = (path is not None)
         self._falkordb_version = self._get_falkordb_version()
         if self._falkordb_version is not None and self._falkordb_version[0] < 4:
@@ -202,7 +264,7 @@ class FalkorProjection(
             self._upsert_document(ev)
 
     def rebuild(self, log) -> None:
-        self.g.query("MATCH (n) DETACH DELETE n")
+        self._destroy_graph("MATCH (n) DETACH DELETE n")
         for ev in log.read_all():
             self.apply(ev)
 
@@ -219,7 +281,7 @@ class FalkorProjection(
         """
         import os
         from tortoise.log import EventLog
-        self.g.query("MATCH (n) DETACH DELETE n")
+        self._destroy_graph("MATCH (n) DETACH DELETE n")
 
         # Collect all events from all files
         events = []
@@ -233,14 +295,14 @@ class FalkorProjection(
         except Exception:
             # If pass 1 fails partway through, the graph is in an inconsistent
             # state. Wipe and re-raise so the caller can retry from clean.
-            self.g.query("MATCH (n) DETACH DELETE n")
+            self._destroy_graph("MATCH (n) DETACH DELETE n")
             raise
 
         # Pass 2: create edges for all operators
         try:
             self._rebuild_pass2(events)
         except Exception:
-            self.g.query("MATCH (n) DETACH DELETE n")
+            self._destroy_graph("MATCH (n) DETACH DELETE n")
             raise
 
         node_count = self.g.query(
@@ -300,7 +362,35 @@ class FalkorProjection(
                 self._create_edges(ev["point"])
 
     def query(self, cypher: str, **params):
+        # P0 guard (#99): routed through _GuardedGraph which checks DETACH DELETE.
         return self.g.query(cypher, params=params or None)
+
+    def _assert_test_graph(self, reason: str = "") -> None:
+        """Raise RuntimeError if the active graph is not a test graph.
+
+        Test graphs must start with 'test_' or 'tortoise_test'.
+        Guards against test teardowns accidentally wiping a real graph (#99).
+        """
+        if not self._graph_name.startswith(("test_", "tortoise_test")):
+            msg = (
+                f"Graph guard: operation blocked on non-test graph "
+                f"'{self._graph_name}'. "
+                f"{reason} — tests must use a graph name starting with "
+                f"'test_' or 'tortoise_test'."
+            ).rstrip()
+            raise RuntimeError(msg)
+
+    def _destroy_graph(self, cypher: str, **params):
+        """Internal: run a destructive Cypher query bypassing the guard.
+
+        Used by rebuild/rebuild_all which intentionally wipe the graph.
+        NOT for general use — prefer query() which has guard protection.
+        """
+        self._skip_guard = True
+        try:
+            return self.g._g.query(cypher, params=params or None)
+        finally:
+            self._skip_guard = False
 
     def _get_falkordb_version(self):
         """Parse FalkorDB version from db.info().

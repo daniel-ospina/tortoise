@@ -12,11 +12,40 @@ Backends behind the `Projection` protocol:
 """
 from __future__ import annotations
 
+import re
 from collections import deque
 from datetime import datetime, timezone
 
 import numpy as np
 from typing import Protocol, runtime_checkable
+
+# P0 guard (#99): bulk graph-wipe classifier.
+# A query is a bulk wipe when it contains DETACH DELETE but has NO property map
+# ({...} — e.g. MATCH (n:Label {id:$id})) and NO real WHERE clause.
+# A WHERE clause is "real" only if it references a property (n.xxx) or a
+# parameter ($id) or CONTAINS/IN — tautologies (WHERE true, WHERE 1=1) don't count.
+# Blocks: MATCH (n) DETACH DELETE n, MATCH (n:Label) DETACH DELETE n,
+#   MATCH (n) WHERE true DETACH DELETE n, MATCH (n:Point:Object) DETACH DELETE n.
+# Allows: MATCH (n:Label {id:$id}) DETACH DELETE n,
+#   MATCH (n) WHERE n.id = $id OR n.eventId = $id DETACH DELETE n.
+_WHERE_REAL_RE = re.compile(
+    r"\b[a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*|\$[a-zA-Z_]|CONTAINS|IN\s*\(",
+    re.IGNORECASE,
+)
+
+
+def _is_bulk_wipe(cypher: str) -> bool:
+    up = cypher.upper()
+    if "DETACH" not in up or "DELETE" not in up:
+        return False
+    # Property map in MATCH => targeted (e.g. {id:$id}, {team_id:$id})
+    if "{" in cypher:
+        return False
+    # Real WHERE clause (property/param/CONTAINS/IN reference) => targeted
+    m = re.search(r"WHERE\s+(.+) ", cypher + " ", re.IGNORECASE)
+    if m and _WHERE_REAL_RE.search(m.group(1)):
+        return False
+    return True
 
 
 def _now_iso() -> str:
@@ -103,6 +132,8 @@ class FalkorProjection:
                  username: str | None = None,
                  password: str | None = None,
                  graph_name: str = "tortoise"):
+
+        self._graph_name = graph_name
 
         if path is not None:
             # Embedded mode (opt-in via path=)
@@ -532,7 +563,31 @@ class FalkorProjection:
         return {"operators": ops, "impl_edges": impl, "nand_edges": nand}
 
     def query(self, cypher: str, **params):
+        # P0 guard (#99): refuse bulk graph-wipe on non-test graphs.
+        # The only safe DETACH DELETE pattern matches graph-wide MATCH (n) DETACH DELETE n
+        # with no label filter and no WHERE clause. Targeted deletes (MATCH (n:Point {id:$id})
+        # DETACH DELETE n) are NOT blocked — they use label/WHERE constraints.
+        if _is_bulk_wipe(cypher):
+            self._assert_test_graph(
+                f"REFUSING to run MATCH (n) DETACH DELETE n on "
+                f"non-test graph '{self._graph_name}'"
+            )
         return self.g.query(cypher, params=params or None)
+
+    def _assert_test_graph(self, reason: str = "") -> None:
+        """Raise RuntimeError if the active graph is not a test graph.
+
+        Test graphs must start with 'test_' or 'tortoise_test'.
+        Guards against test teardowns accidentally wiping a real graph.
+        """
+        if not self._graph_name.startswith(("test_", "tortoise_test")):
+            msg = (
+                f"Graph guard: operation blocked on non-test graph "
+                f"'{self._graph_name}'. "
+                f"{reason} — tests must use a graph name starting with "
+                f"'test_' or 'tortoise_test'."
+            ).rstrip()
+            raise RuntimeError(msg)
 
     def compute_grounding(self, lam: float = 0.6) -> dict[str, float]:
         """Solve (I - lam*M)g = a and write n.grounding on every :Point.

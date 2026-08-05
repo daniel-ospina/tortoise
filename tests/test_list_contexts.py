@@ -1,7 +1,7 @@
 """Tests for tortoise list-contexts — context discovery and output format.
 
 Runnable with: python3 -m pytest tests/test_list_contexts.py -v
-Requires TORTOISE_DB_URI pointing at a FalkorDB (defaults to docker://:@localhost:16379/tortoise).
+Requires TORTOISE_DB_URI pointing at a FalkorDB (set by tests/conftest.py — isolated test graph #99).
 """
 from __future__ import annotations
 
