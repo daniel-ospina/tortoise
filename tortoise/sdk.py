@@ -153,10 +153,24 @@ class TortoiseSDK:
         """Return the control_plane registry graph handle (cached).
 
         Uses the existing db connection — no second FalkorDB connection.
+        Test isolation (#135): when the main graph is a test graph
+        (tortoise_test_*/test_*), derive an isolated registry graph name from
+        the same session UUID so parallel runs never share registry state
+        (previously fixed 'control_plane' persisted teams across runs →
+        'Team already exists' failures on re-runs).
         """
         if self._registry_g is None:
             proj = self._get_proj()
-            self._registry_g = proj.db.select_graph("control_plane")
+            graph_name = getattr(proj, "graph_name", None)
+            if graph_name and graph_name.startswith(("tortoise_test_", "test_")):
+                # Keep the test prefix so test-graph guards still apply, and
+                # scope by namespace so different namespaces are independent
+                # (#135, test_team_create_different_namespaces_independent).
+                ns = self._namespace or ""
+                registry_name = f"{ns}_{graph_name}_control_plane" if ns else f"{graph_name}_control_plane"
+            else:
+                registry_name = "control_plane"
+            self._registry_g = proj.db.select_graph(registry_name)
             self._ensure_registry_indexes()
         return self._registry_g
 
