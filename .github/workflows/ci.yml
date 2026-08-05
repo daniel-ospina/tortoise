@@ -9,3 +9,10 @@ jobs:
   ci:
     uses: daniel-ospina/agent-infra/.github/workflows/docs-ci.yml@main
     secrets: inherit
+
+  test-isolation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check test isolation
+        run: python3 scripts/check-test-isolation.py
