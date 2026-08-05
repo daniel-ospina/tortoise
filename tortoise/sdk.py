@@ -1624,7 +1624,7 @@ class TortoiseSDK:
     ) -> list[dict]:
         """Hybrid search with RRF fusion + EP annotation.
 
-        entity_type: 'point' (default), 'event', 'subject', 'document', or 'object'.
+        entity_type: 'point' (default), 'event', 'subject', 'document', 'object', 'operator', or 'source'.
         Full-scan mode: omit query, set context → all Points in context.
         Best-match mode: provide query → RRF fusion of FTS + vector + structural.
 
@@ -1644,8 +1644,8 @@ class TortoiseSDK:
             filter_by_relationship, filter_by_traversal_predicate,
         )
 
-        if entity_type not in ("point", "event", "subject", "document", "object"):
-            raise ValueError(f"entity_type must be 'point', 'event', 'subject', 'document', or 'object', got {entity_type!r}")
+        if entity_type not in ("point", "event", "subject", "document", "object", "operator", "source"):
+            raise ValueError(f"entity_type must be 'point', 'event', 'subject', 'document', 'object', 'operator', or 'source', got {entity_type!r}")
         if limit < 1:
             raise ValueError(f"limit must be >= 1, got {limit}")
         if not (0.0 <= threshold <= 1.0):
@@ -1658,7 +1658,9 @@ class TortoiseSDK:
         proj = self._get_proj()
         graph = proj.g
         label = entity_type.capitalize()  # point→Point, event→Event, subject→Subject
-        kind_field = {"point": "pointKind", "event": "eventKind", "subject": "subjectKind", "document": "documentKind", "object": "objectKind"}[entity_type]
+        # Operator: Point nodes with is_operator=true, kind=op_type
+        # Source: Source nodes, kind=sourceKind
+        kind_field = {"point": "pointKind", "event": "eventKind", "subject": "subjectKind", "document": "documentKind", "object": "objectKind", "operator": "op_type", "source": "sourceKind"}[entity_type]
 
         # 1. Classify query → determine active strategies
         strategies = classify_query(query, kind, context)
@@ -1712,15 +1714,23 @@ class TortoiseSDK:
 
         # 5. Apply kind filter BEFORE truncating (skip if structural-only already filtered)
         result_ids = list(fused.keys())
-        id_field = "eventId" if entity_type == "event" else "id"
+        if entity_type == "source":
+            id_field = "url"
+        elif entity_type == "event":
+            id_field = "eventId"
+        else:
+            id_field = "id"
+        # Graph label for MATCH (operators are Point nodes with is_operator=true)
+        graph_label = "Point" if entity_type == "operator" else label
 
         if kind and query is not None and result_ids:
             expanded = expanded_kinds
             kind_ids = set()
+            extra_clause = "AND n.is_operator = true" if entity_type == "operator" else ""
             try:
                 if len(expanded) == 1:
                     kind_rows = graph.query(
-                        f"MATCH (n:{label}) WHERE n.{kind_field} = $kind AND n.{id_field} IN $ids RETURN n.{id_field}",
+                        f"MATCH (n:{graph_label}) WHERE n.{kind_field} = $kind {extra_clause} AND n.{id_field} IN $ids RETURN n.{id_field}",
                         params={"kind": expanded[0], "ids": result_ids},
                     ).result_set
                 else:
@@ -1729,7 +1739,7 @@ class TortoiseSDK:
                     for i, k in enumerate(expanded):
                         params_dict[f"kind_{i}"] = k
                     kind_rows = graph.query(
-                        f"MATCH (n:{label}) WHERE n.{kind_field} IN [{', '.join(placeholders)}] AND n.{id_field} IN $ids RETURN n.{id_field}",
+                        f"MATCH (n:{graph_label}) WHERE n.{kind_field} IN [{', '.join(placeholders)}] {extra_clause} AND n.{id_field} IN $ids RETURN n.{id_field}",
                         params=params_dict,
                     ).result_set
                 kind_ids = {row[0] for row in kind_rows}
@@ -1835,6 +1845,30 @@ class TortoiseSDK:
                 for row in rows:
                     oid = row[0]
                     entity_data[oid] = {
+                        "content": row[1] or "",
+                        "kind": row[2] or "",
+                        "context": None,
+                    }
+            elif entity_type == "operator":
+                rows = graph.query(
+                    "MATCH (n:Point {is_operator: true}) WHERE n.id IN $ids RETURN n.id, n.label, n.op_type, n.context",
+                    params={"ids": result_ids},
+                ).result_set
+                for row in rows:
+                    oid = row[0]
+                    entity_data[oid] = {
+                        "content": row[1] or "",  # label is searchable text
+                        "kind": row[2] or "",    # op_type is kind
+                        "context": row[3] if len(row) > 3 else None,
+                    }
+            elif entity_type == "source":
+                rows = graph.query(
+                    "MATCH (n:Source) WHERE n.url IN $ids RETURN n.url, n.title, n.sourceKind",
+                    params={"ids": result_ids},
+                ).result_set
+                for row in rows:
+                    sid = row[0]
+                    entity_data[sid] = {
                         "content": row[1] or "",
                         "kind": row[2] or "",
                         "context": None,
@@ -2610,9 +2644,6 @@ class TortoiseSDK:
     def create_object(self, name: str, objectKind: str = "other", **props) -> dict:
         return self._create_entity("Object", self.ulid(), {"name": name, "objectKind": objectKind, "status": "live", **props}, "ObjectRegistered")
 
-    def create_action(self, name: str, actionKind: str, **props) -> dict:
-        return self._create_entity("Action", self.ulid(), {"name": name, "actionKind": actionKind, "actionStatus": "pending", **props}, "ActionCreated")
-
     def create_event(self, name: str, eventKind: str, **props) -> dict:
         """Create an Event node.
 
@@ -2641,7 +2672,7 @@ class TortoiseSDK:
         return self._create_entity("Document", did, {"title": title, "documentKind": documentKind, "objectKind": "document", "status": "draft", **props}, "DocumentCreated")
 
     def create_source(self, url: str, sourceKind: str, **props) -> dict:
-        return self._create_entity("Source", url, {"url": url, "sourceKind": sourceKind, "ingestedAt": __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(), **props}, None)
+        return self._create_entity("Source", url, {"url": url, "sourceKind": sourceKind, "ingestedAt": __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(), **props}, "SourceCreated")
 
     # ── Entity Derivation (#122 Part 2) ──────────────────────────
 

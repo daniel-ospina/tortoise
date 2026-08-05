@@ -202,6 +202,8 @@ class FalkorProjection(
             self._upsert_object(ev)
         elif t == "DocumentCreated":
             self._upsert_document(ev)
+        elif t == "SourceCreated":
+            self._upsert_source(ev)
 
     def rebuild(self, log) -> None:
         self.g.query("MATCH (n) DETACH DELETE n")

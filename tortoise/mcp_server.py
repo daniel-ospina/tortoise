@@ -130,7 +130,7 @@ def tortoise_query(kind: str | None = None, context: str | None = None,
 
     When text is provided, routes through tortoise_fts_query() for hybrid search.
     When text is None, uses existing structural query (full-scan for context).
-    entity_type: 'point' (default), 'event', or 'subject'.
+    entity_type: 'point' (default), 'event', 'subject', 'document', 'object', 'operator', or 'source'.
     """
     filters = _parse(filters)
     if text:
@@ -205,7 +205,7 @@ def tortoise_search(query: str | None = None, kind: str | None = None,
                     entity_type: str = "point") -> list[dict]:
     """Hybrid search with RRF fusion + EP annotation.
 
-    entity_type: 'point' (default), 'event', or 'subject'.
+    entity_type: 'point' (default), 'event', 'subject', 'document', 'object', 'operator', or 'source'.
     Full-scan mode: omit query, set context → all Points in context.
     Best-match mode: provide query → RRF fusion of FTS + vector + structural.
 
@@ -271,7 +271,7 @@ def tortoise_create_operator(op_type: str, source_id: str, target_ids: Any,
     """Create an operator connecting Points.
     
     op_type: 'IMPL' (A supports B), 'NAND' (A contradicts B),
-             'composedOf'/'decomposesInto'/'contains'/'wraps' → hasPart.
+             'composedOf'/'decomposesInto'/'contains'/'wraps' → stored as hasPart edge.
     source_id: source/parent Point ID.
     target_ids: target/child Point IDs (1 for IMPL/NAND, N for part/whole).
     context: domain context for the operator (default: 'sdk').
@@ -571,12 +571,6 @@ def tortoise_create_object(name: str, objectKind: str, props: Any = None) -> dic
     return _safe(sdk.create_object, name, objectKind, **(props or {}))
 
 @mcp.tool()
-def tortoise_create_action(name: str, actionKind: str, props: Any = None) -> dict:
-    """Create an Action node (research, implement, deploy, etc.)."""
-    props = _parse(props)
-    return _safe(sdk.create_action, name, actionKind, **(props or {}))
-
-@mcp.tool()
 def tortoise_create_event(name: str, eventKind: str, props: Any = None) -> dict:
     """Create an Event node (meeting, decision, deployment, etc.)."""
     props = _parse(props)
@@ -587,6 +581,16 @@ def tortoise_create_document(title: str, documentKind: str, props: Any = None) -
     """Create a Document node (research, planDoc, meetingNotes, etc.)."""
     props = _parse(props)
     return _safe(sdk.create_document, title, documentKind, **(props or {}))
+
+@mcp.tool()
+def tortoise_create_source(url: str, sourceKind: str, props: Any = None) -> dict:
+    """Create a Source node for provenance (document, web, db, etc.).
+
+    Sources track content origin — url is the permalink key.
+    Points link to Sources via extractedFrom edge (Ontology v2.5).
+    """
+    props = _parse(props)
+    return _safe(sdk.create_source, url, sourceKind, **(props or {}))
 
 @mcp.tool()
 def tortoise_get_entity(id: str) -> dict:

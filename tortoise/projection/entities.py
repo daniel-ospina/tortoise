@@ -259,3 +259,37 @@ class _EntityHandlers:
                         "MERGE (e)-[:uses]->(o)",
                         params={"name": str(use_name), "eid": eid},
                     )
+
+    def _upsert_source(self, ev: dict) -> None:
+        """MERGE Source node for layered provenance (Ontology v2.1).
+
+        Source properties: url (permalink), sourceType, contentHash, title,
+        ingestedAt, version, externalId. Creates stub if missing.
+        """
+        sid = ev.get("id")
+        url = ev.get("url", "")
+        if not sid and not url:
+            return
+        key = url or sid
+        self.g.query(
+            "MERGE (s:Source {url: $url}) "
+            "ON CREATE SET s.id = coalesce($id, $url), "
+            "              s.sourceKind = $sk, "
+            "              s.contentHash = $hash, "
+            "              s.title = $title, "
+            "              s.ingestedAt = $now, "
+            "              s.version = 1, "
+            "              s.externalId = $ext "
+            "ON MATCH SET s.contentHash = $hash, "
+            "           s.title = coalesce($title, s.title), "
+            "           s.version = s.version + 1, "
+            "           s.updatedAt = $now",
+            params={
+                "url": key, "id": sid or key,
+                "sk": ev.get("sourceKind", "document"),
+                "hash": ev.get("contentHash", ""),
+                "title": ev.get("title", key),
+                "now": _now_iso(),
+                "ext": ev.get("externalId", ""),
+            },
+        )
