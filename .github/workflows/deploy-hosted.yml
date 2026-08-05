@@ -22,6 +22,17 @@ jobs:
         run: flyctl apps create tortoise-api --org premise-labs || echo "app exists"
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      - name: Set secrets
+        # FASTAPI_INTERNAL_KEY (edge-function → API internal auth) and
+        # TORTOISE_SECRET_PEPPER (PBKDF2 salt for API key hashing) must match
+        # the values set on the tenant-provision Supabase edge function.
+        run: |
+          flyctl secrets set \
+            FASTAPI_INTERNAL_KEY="${{ secrets.FASTAPI_INTERNAL_KEY }}" \
+            TORTOISE_SECRET_PEPPER="${{ secrets.TORTOISE_SECRET_PEPPER }}" \
+            --app tortoise-api
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
       - run: flyctl deploy --remote-only --app tortoise-api
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}

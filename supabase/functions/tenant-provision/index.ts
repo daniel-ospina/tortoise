@@ -4,9 +4,18 @@
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-interface ProvisionRequest {
-  user_id: string;
-  email: string;
+// Supabase Auth hook payload: { metadata: {...}, user: { id, email, user_metadata, ... } }
+// Also tolerates a direct { user_id, email, display_name } payload for manual testing.
+interface HookPayload {
+  metadata?: Record<string, unknown>;
+  user?: {
+    id: string;
+    email: string;
+    user_metadata?: { display_name?: string; [k: string]: unknown };
+    [k: string]: unknown;
+  };
+  user_id?: string;
+  email?: string;
   display_name?: string;
 }
 
@@ -24,7 +33,14 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
-    const { user_id, email, display_name } = await req.json() as ProvisionRequest;
+    const body = await req.json() as HookPayload;
+
+    // Auth hook sends user object nested under `user`; direct payloads send top-level fields.
+    const user = body.user;
+    const user_id = user?.id || body.user_id;
+    const email = user?.email || body.email;
+    const display_name =
+      user?.user_metadata?.display_name || body.display_name || undefined;
 
     if (!user_id || !email) {
       return new Response(
@@ -87,13 +103,17 @@ Deno.serve(async (req: Request) => {
       Deno.env.get("SUPABASE_URL")!,
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
     );
-    const { error: userTeamsError } = await supabase.from("user_teams").insert({
+    // Upsert: the on_auth_user_created trigger pre-inserts a placeholder row
+    // (key_hash='pending') for this user_id, so plain insert would violate
+    // the UNIQUE(user_id) constraint. Upsert on user_id updates that row.
+    const { error: userTeamsError } = await supabase.from("user_teams").upsert({
       user_id: user_id,
       team_id: teamId,
       team_name: safeName,
       api_key: apiKey,  // plaintext — shown once on welcome page
+      key_hash: await hashApiKey(apiKey),
       graph_name: `team_${teamId}`,
-    });
+    }, { onConflict: "user_id" });
     if (userTeamsError) {
       console.error("Failed to write user_teams:", userTeamsError);
       // Don't fail the whole provisioning — the key is already in the response
@@ -130,29 +150,29 @@ Deno.serve(async (req: Request) => {
   }
 });
 
-// SHA-256 hash with optional pepper (mirrors tortoise/auth.py)
+// PBKDF2-HMAC-SHA256 with pepper as salt — MUST match tortoise/auth.py hash_api_key()
+// (100,000 iterations, hex digest). Used for at-rest key storage and lookup.
 async function hashApiKey(key: string): Promise<string> {
   const pepper = Deno.env.get("TORTOISE_SECRET_PEPPER") || "";
-  const data = new TextEncoder().encode(key);
-
-  if (pepper) {
-    // PBKDF2-HMAC-SHA256 with pepper
-    const pepperKey = await crypto.subtle.importKey(
-      "raw",
-      new TextEncoder().encode(pepper),
-      { name: "HMAC", hash: "SHA-256" },
-      false,
-      ["sign"]
-    );
-    const signature = await crypto.subtle.sign("HMAC", pepperKey, data);
-    return Array.from(new Uint8Array(signature))
-      .map(b => b.toString(16).padStart(2, "0"))
-      .join("");
-  }
-
-  // Plain SHA-256 (no pepper)
-  const hash = await crypto.subtle.digest("SHA-256", data);
-  return Array.from(new Uint8Array(hash))
+  const salt = new TextEncoder().encode(pepper);
+  const keyMaterial = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(key),
+    "PBKDF2",
+    false,
+    ["deriveBits"]
+  );
+  const bits = await crypto.subtle.deriveBits(
+    {
+      name: "PBKDF2",
+      hash: "SHA-256",
+      salt: salt,
+      iterations: 100_000,
+    },
+    keyMaterial,
+    256
+  );
+  return Array.from(new Uint8Array(bits))
     .map(b => b.toString(16).padStart(2, "0"))
     .join("");
 }
