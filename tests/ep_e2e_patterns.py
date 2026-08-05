@@ -18,7 +18,8 @@ from pathlib import Path
 # Ensure we can import tortoise
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-os.environ["TORTOISE_DB_URI"] = "docker://:falkordb@localhost:6379/tortoise"
+# Isolated test graph — never the production graph
+os.environ["TORTOISE_DB_URI"] = "docker://:falkordb@localhost:6379/tortoise_test_ep_e2e_patterns"
 
 from tortoise.sdk import TortoiseSDK
 

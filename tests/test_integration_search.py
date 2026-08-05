@@ -3,7 +3,7 @@
 Requires live FalkorDB. Skips gracefully when unavailable.
 
 Usage:
-    TORTOISE_DB_URI=docker://localhost:6379 pytest tests/test_integration_search.py -v
+    TORTOISE_DB_URI=docker://localhost:6379/tortoise_test_integration_search pytest tests/test_integration_search.py -v
     pytest tests/test_integration_search.py -v -m integration  # (with marker config)
 """
 from __future__ import annotations
@@ -21,8 +21,8 @@ import os as _os
 FALKORDB_AVAILABLE = False
 _uri_candidates = [
     _os.environ.get("TORTOISE_DB_URI"),
-    "docker://localhost:6379/tortoise",
-    "docker://localhost:16379/tortoise",
+    "docker://localhost:6379/tortoise_test_integration_search",
+    "docker://localhost:16379/tortoise_test_integration_search",
 ]
 _old_uri = _os.environ.get("TORTOISE_DB_URI")
 for _uri in _uri_candidates:

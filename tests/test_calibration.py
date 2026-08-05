@@ -8,11 +8,19 @@ from tortoise.exceptions import CalibrationError
 
 @pytest.fixture
 def sdk():
-    """Create a TortoiseSDK connected to the local FalkorDB Docker container."""
+    """Create a TortoiseSDK connected to an ISOLATED test graph.
+
+    Uses ``tortoise_test_calibration`` — never the production graph.
+    """
     import os
-    os.environ.setdefault("TORTOISE_DB_URI", "docker://:falkordb@localhost:6379/tortoise")
+    os.environ.setdefault(
+        "TORTOISE_DB_URI",
+        "docker://:falkordb@localhost:6379/tortoise_test_calibration"
+    )
     s = TortoiseSDK()
     yield s
+    # Safety guard: refuse to wipe production graphs
+    s.test_guard()
     # Cleanup: delete ALL nodes (Points + Sources + operators)
     s._get_proj().g.query("MATCH (n) DETACH DELETE n")
 

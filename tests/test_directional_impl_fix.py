@@ -18,7 +18,8 @@ import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-os.environ["TORTOISE_DB_URI"] = "docker://:falkordb@localhost:6379/tortoise"
+# Isolated test graph — never the production graph
+os.environ["TORTOISE_DB_URI"] = "docker://:falkordb@localhost:6379/tortoise_test_dir_impl_fix"
 
 from tortoise.sdk import TortoiseSDK
 from tortoise.ep import TortoiseEP
