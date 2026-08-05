@@ -7,7 +7,6 @@ on:
     paths:
       - 'tortoise/**'
       - 'fly.toml'
-      - 'falkordb.fly.toml'
       - 'Dockerfile.hosted'
       - 'entrypoint.sh'
       - 'requirements.txt'
@@ -15,41 +14,20 @@ on:
   workflow_dispatch:
 
 jobs:
-  deploy-falkordb:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: superfly/flyctl-actions/setup-flyctl@master
-      - name: Verify FalkorDB secrets exist
-        run: |
-          if [ -z "${{ secrets.FALKORDB_PASSWORD }}" ]; then
-            echo "::error::FALKORDB_PASSWORD must be set in GitHub secrets"
-            exit 1
-          fi
-      - name: Set FALKORDB_PASSWORD secret on Fly.io
-        run: |
-          flyctl secrets set FALKORDB_PASSWORD="${{ secrets.FALKORDB_PASSWORD }}" --app falkordb-tortoise
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-      - run: flyctl deploy --remote-only --wait-timeout 300 --config falkordb.fly.toml --app falkordb-tortoise
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-
   deploy-api:
-    needs: deploy-falkordb
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: superfly/flyctl-actions/setup-flyctl@master
       - name: Verify secrets exist
         run: |
-          if [ -z "${{ secrets.FASTAPI_INTERNAL_KEY }}" ] || [ -z "${{ secrets.TORTOISE_SECRET_PEPPER }}" ] || [ -z "${{ secrets.FALKORDB_PASSWORD }}" ]; then
-            echo "::error::FASTAPI_INTERNAL_KEY, TORTOISE_SECRET_PEPPER, and FALKORDB_PASSWORD must be set in GitHub secrets"
+          if [ -z "${{ secrets.FASTAPI_INTERNAL_KEY }}" ] || [ -z "${{ secrets.TORTOISE_SECRET_PEPPER }}" ] || [ -z "${{ secrets.FALKORDB_CLOUD_URI }}" ]; then
+            echo "::error::FASTAPI_INTERNAL_KEY, TORTOISE_SECRET_PEPPER, and FALKORDB_CLOUD_URI must be set in GitHub secrets"
             exit 1
           fi
-      - name: Set FALKORDB_PASSWORD secret on Fly.io
+      - name: Set FalkorDB Cloud URI secret on Fly.io
         run: |
-          flyctl secrets set FALKORDB_PASSWORD="${{ secrets.FALKORDB_PASSWORD }}" --app tortoise-api
+          flyctl secrets set FALKORDB_CLOUD_URI="${{ secrets.FALKORDB_CLOUD_URI }}" --app tortoise-api
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
       - run: flyctl deploy --remote-only --wait-timeout 300 --app tortoise-api
