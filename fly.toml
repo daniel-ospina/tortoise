@@ -1,7 +1,7 @@
 # Tortoise Hosted API — Fly.io configuration
 # See: docs/epics/2026-08-03-tortoise-hosted-platform/04-plan.md §5
 
-app = "tortoise-y4mjjq"
+app = "tortoise-api"
 primary_region = "iad"
 
 [build]
@@ -29,7 +29,7 @@ primary_region = "iad"
   memory_mb = 256
 
 [env]
-  TORTOISE_DB_URI = ""  # Empty = embedded redislite mode (no external FalkorDB needed)
+  TORTOISE_DB_URI = ""  # Constructed at runtime by entrypoint.sh from FALKORDB_PASSWORD → redis://:{pwd}@falkordb-tortoise.internal:6379/tortoise
   FASTAPI_INTERNAL_KEY = ""  # Set via fly secrets
 
 [deploy]
