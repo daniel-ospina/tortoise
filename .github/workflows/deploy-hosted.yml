@@ -25,9 +25,13 @@ jobs:
             echo "::error::FASTAPI_INTERNAL_KEY, TORTOISE_SECRET_PEPPER, and FALKORDB_CLOUD_URI must be set in GitHub secrets"
             exit 1
           fi
-      - name: Set FalkorDB Cloud URI secret on Fly.io
+      - name: Set all app secrets on Fly.io (keeps in sync with GitHub/Supabase)
         run: |
-          flyctl secrets set FALKORDB_CLOUD_URI="${{ secrets.FALKORDB_CLOUD_URI }}" --app tortoise-y4mjjq
+          flyctl secrets set \
+            FASTAPI_INTERNAL_KEY="${{ secrets.FASTAPI_INTERNAL_KEY }}" \
+            TORTOISE_SECRET_PEPPER="${{ secrets.TORTOISE_SECRET_PEPPER }}" \
+            FALKORDB_CLOUD_URI="${{ secrets.FALKORDB_CLOUD_URI }}" \
+            --app tortoise-y4mjjq
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
       - run: flyctl deploy --remote-only --wait-timeout 300 --app tortoise-y4mjjq
