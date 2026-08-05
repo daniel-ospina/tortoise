@@ -39,7 +39,7 @@ Each layer answers a different question.
 
 | Layer | Question | Entity | Notes |
 |-------|----------|--------|-------|
-| **Semantic** | Who/what exists? | Subject, Object, Document, Source | Nouns. Standing structural relations (owns, memberOf) via plain edges. |
+| **Semantic** | Who/what exists? | Subject, Object (incl. Document), Source | Nouns. Standing structural relations (owns, memberOf) via plain edges. Document is an Object (`objectKind: document`) — see §4.4. |
 | **Epistemic** | What do we believe and why? | Point, Operator (IMPL/NAND + label + EP confidence) | Operators ONLY here: Event→Point (outcome), Point→Point (belief). |
 | **Episodic** | What happened when? | Event | Verbs. Reified middle node: (Subject)-[performs]->(Event)-[produces]->(Object). Append-only, timestamped. |
 | ~~Procedural~~ | ~~Current state of work~~ | ~~Action~~ | **Dissolved.** Verb → Event. Artifact → Object. Status → projection of event stream. |
@@ -82,8 +82,10 @@ Each layer answers a different question.
 |-----------|-----------|-------------|----------|---------|
 | `performs` | Subject → Event | N-ary | `prov:wasAssociatedWith` | Who executed the event |
 | `produces` | Event → Object | N-ary (1→many) | `prov:wasGeneratedBy` | Output artifact the event created |
-| `uses` | Event → Object | N-ary | `prov:used` | Input the event consumed |
+| `uses` | Event → Object | N-ary | `prov:used` | Input the event consumed — **including the mechanism** (skill/tool/agent/workflow Object) that produced the output |
 | `wasDerivedFrom` | Object → Object | N-ary | `prov:wasDerivedFrom` | Entity derivation (distinct from Source provenance) |
+
+> **Mechanism provenance ("how was it produced"):** the producing mechanism is a first-class Object linked via `uses` — `(Event)-[:uses]->(Object {objectKind: skill|tool|agent|workflow})`. The mechanism is therefore searchable and shared (finite skill set, not per-event). Mechanism *specifics* (version, model, config, pipeline hash) live in the immutable event-log record, reachable via the Event's `eventId` — they are NOT materialized as per-event graph nodes (avoids O(events) node growth at scale). Full lineage: `(Point)-[:extractedFrom]->(Source)-[:references]->(Object:document)<-[:produces]-(Event {eventId})` → log record.
 
 ### §3.5 Subject ↔ Subject (Organisational)
 
@@ -139,15 +141,23 @@ Each layer answers a different question.
 
 ### §4.4 Document
 
+> **Document is an Object** (`objectKind: document`) with its own `documentKind` sub-vocabulary. A Document node carries both `objectKind: document` and `documentKind: <type>`. Graph label is `:Object`; do not create a separate `:Document` label.
+
 | Field | Type | Required | Meaning |
 |-------|------|----------|---------|
+| `objectKind` | string | ✅ | `document` (fixed for Documents) |
 | `documentKind` | string | ✅ | research, reflectPostmortem, strategyDoc, visionDoc, planDoc, decisionDoc, meetingNotes, experimentResults, evidenceLog, handoff, transcript, roadmap, brief + pack documentKinds |
+| `title` | string | — | Human-readable title |
+| `topics` | list[str] | — | Searchable topic labels (session/discussion index). FTS-indexed metadata — NOT Points, never EP-participating |
+| `summary` | string | — | One-paragraph summary (e.g. of a captured session). Searchable via FTS |
+| `eventId` | string | — | Link to the producing Event's log record — 1-hop audit to the mechanism snapshot |
+| `sessionId` | string | — | Source session identifier (for `documentKind: transcript` captures) |
 
 ### §4.5 Event
 
 | Field | Type | Required | Meaning |
 |-------|------|----------|---------|
-| `eventKind` | string | ✅ | meeting, decision, experiment, deployment, review, friction, extraction, documentCreated, roleCreated, pointAdded + pack eventKinds |
+| `eventKind` | string | ✅ | meeting, decision, experiment, deployment, review, friction, extraction, documentCreated, roleCreated, pointAdded, sessionCaptured + pack eventKinds |
 | `eventId` | string | ✅ | Unique occurrence ID |
 | `startedAt` / `endedAt` | ISO8601 | — | Temporal extent (on the Event, per PROV-O/OWL-Time) |
 
