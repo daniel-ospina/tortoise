@@ -29,7 +29,7 @@ jobs:
         run: |
           REGION=$(grep 'primary_region' fly.toml | cut -d'"' -f2)
           if ! flyctl volumes list --app tortoise-y4mjjq | awk '$2 == "tortoise_api_data"' | grep -q .; then
-            flyctl volumes create tortoise_api_data --app tortoise-y4mjjq --region "$REGION" --size 1 || true
+            flyctl volumes create tortoise_api_data --app tortoise-y4mjjq --region "$REGION" --size 1 --yes || true
           fi
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
