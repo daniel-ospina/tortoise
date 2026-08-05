@@ -22,6 +22,12 @@ jobs:
         run: flyctl apps create tortoise-api --org premise-labs || echo "app exists"
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      - name: Verify secrets exist
+        run: |
+          if [ -z "${{ secrets.FASTAPI_INTERNAL_KEY }}" ] || [ -z "${{ secrets.TORTOISE_SECRET_PEPPER }}" ]; then
+            echo "::error::FASTAPI_INTERNAL_KEY and TORTOISE_SECRET_PEPPER must be set in GitHub secrets"
+            exit 1
+          fi
       - name: Set secrets
         # FASTAPI_INTERNAL_KEY (edge-function → API internal auth) and
         # TORTOISE_SECRET_PEPPER (PBKDF2 salt for API key hashing) must match

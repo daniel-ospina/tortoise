@@ -49,6 +49,16 @@ Deno.serve(async (req: Request) => {
       );
     }
 
+    // Validate user_id is a UUID before provisioning (avoids orphaned
+    // FalkorDB namespaces when called manually with a malformed payload).
+    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!UUID_RE.test(user_id)) {
+      return new Response(
+        JSON.stringify({ error: "invalid user_id format" }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
+    }
+
     // Generate team name from provider display name, fallback to email prefix
     const rawName = display_name || email.split("@")[0];
     const teamName = rawName
@@ -133,7 +143,8 @@ Deno.serve(async (req: Request) => {
       team_id: teamId,
       team_name: safeName,
       api_key: apiKey,
-      graph_name: `team_${safeName}`,
+      // Must match the value upserted into user_teams above (team_${teamId}).
+      graph_name: `team_${teamId}`,
     };
 
     return new Response(JSON.stringify(response), {
