@@ -381,7 +381,7 @@ class TestMCPSurface:
 
     def test_relationship_filter_format(self):
         """relationship_filter with 'predicate:target_id' format."""
-        from tortoise.mcp_server import tortoise_search, tortoise_create_point
+        from tortoise.mcp_server import tortoise_search
 
         sdk_obj = TortoiseSDK()
         ids = {}
