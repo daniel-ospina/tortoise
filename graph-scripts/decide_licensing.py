@@ -1,3 +1,14 @@
+# ────────────────────────────────────────────────────────────────
+# ARCHIVED (2026-08-05) — superseded by the generic `tortoise decide` command.
+# This one-off data-filing script hardcoded the licensing decision content as
+# Python literals and wrote it to the graph. It served as a pattern-prover for
+# the generic decision-comparison tool (#43/#81) and as a manual re-load
+# mechanism. Domain content belongs in the graph with Source provenance — do NOT
+# use this script for new decisions; use `tortoise decide` instead.
+#
+# The licensing decision was re-filed to context 'licensing-decision-compare' on
+# 2026-08-05 (recovery of the 2026-08-05 graph wipe). Kept for provenance/audit.
+# ────────────────────────────────────────────────────────────────
 """File the licensing decision comparison to the Tortoise graph.
 
 Compares the three license options recorded in graph research:
