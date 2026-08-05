@@ -373,14 +373,23 @@ async def get_current_team(request: Request) -> dict:
         raise HTTPException(status_code=401, detail="Invalid API key format")
     try:
         sdk = _make_sdk(namespace="registry")
+        # API keys are stored as "salt:hash" (per-key random salt). hash_api_key()
+        # generates a NEW random salt per call, so we CANNOT look up by exact
+        # match. Instead fetch all non-revoked keys and verify each against the
+        # token using the embedded salt (verify_api_key). This is O(keys) but
+        # the registry is small (teams × keys) and auth happens per-request.
         key_result = sdk._get_proj().g.query(
-            "MATCH (k:APIKey {key_hash: $hash}) WHERE k.revoked_at IS NULL RETURN k.team_id, k.id",
-            params={"hash": hash_api_key(token)},
-        )
-        if not key_result.result_set:
+            "MATCH (k:APIKey) WHERE k.revoked_at IS NULL RETURN k.team_id, k.id, k.key_hash"
+        ).result_set
+        from tortoise.auth import verify_api_key
+        team_id = key_id = None
+        for k_team_id, k_id, stored_hash in key_result:
+            if verify_api_key(token, stored_hash):
+                team_id, key_id = k_team_id, k_id
+                break
+        if team_id is None:
             await _audit_auth_failure(request, "invalid_key")
             raise HTTPException(status_code=401, detail="Invalid API key")
-        team_id, key_id = key_result.result_set[0]
         team = sdk._get_proj().g.query(
             "MATCH (t:Team {id: $id}) RETURN t.tier, t.max_users, t.max_graphs, t.max_teams",
             params={"id": team_id},
