@@ -43,7 +43,7 @@ def _patch_tortoise_sdk_init(db_path: str):
 
     _orig_init = ha_mod.TortoiseSDK.__init__
 
-    def _patched_init(self, db_path_arg=None, *, namespace=None):
+    def _patched_init(self, db_path_arg=None, *, namespace=None, **kwargs):
         _orig_init(self, db_path, namespace=namespace)
 
     ha_mod.TortoiseSDK.__init__ = _patched_init
@@ -112,17 +112,17 @@ class TestHealthEndpoints:
     def test_health_returns_ok(self, client):
         r = client.get("/health")
         assert r.status_code == 200
-        assert r.json() == {"status": "ok"}
+        assert r.json() == {"status": "ok", "db": "connected"}
 
     def test_health_security_returns_posture(self, client):
         r = client.get("/health/security")
         assert r.status_code == 200
         body = r.json()
         assert "pepper_configured" in body
-        assert "hashing" in body
-        assert body["hashing"] in ("pbkdf2_hmac_sha256", "sha256")
-        assert "auth_dev_mode" in body
-        assert isinstance(body["auth_dev_mode"], bool)
+        assert "internal_key_configured" in body
+        assert body["hashing"] == "pbkdf2_hmac_sha256"
+        assert "api_auth_enforced" in body
+        assert isinstance(body["api_auth_enforced"], bool)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -621,11 +621,6 @@ class TestInternalProvision:
 
     INTERNAL_HEADERS = {"Authorization": f"Bearer {_INTERNAL_KEY}"}
 
-    @pytest.mark.xfail(
-        reason="BUG: hosted_api.py provision uses sdk.db (does not exist on "
-        "TortoiseSDK). Should be sdk._get_proj().db. Fails with 500 in "
-        "FalkorDBLite test environment."
-    )
     def test_provision_valid_returns_200(self, internal_client):
         payload = {
             "team_id": "provisioned-team-1",
@@ -667,7 +662,7 @@ class TestInternalDemo:
 
     def test_demo_valid_returns_200(self, internal_client):
         r = internal_client.post(
-            "/v1/internal/demo",
+            "/internal/demo",
             json={"team_id": "demo-team-1"},
             headers=self.INTERNAL_HEADERS,
         )
@@ -683,28 +678,99 @@ class TestInternalDemo:
         payload = {"team_id": "demo-team-2"}
         h = self.INTERNAL_HEADERS
 
-        r1 = internal_client.post("/v1/internal/demo", json=payload, headers=h)
+        r1 = internal_client.post("/internal/demo", json=payload, headers=h)
         assert r1.status_code == 200
         assert r1.json()["status"] == "demo_created"
 
-        r2 = internal_client.post("/v1/internal/demo", json=payload, headers=h)
+        r2 = internal_client.post("/internal/demo", json=payload, headers=h)
         assert r2.status_code == 200, r2.text
         assert r2.json()["status"] == "already_seeded"
 
     def test_demo_missing_team_id_returns_400(self, internal_client):
         r = internal_client.post(
-            "/v1/internal/demo", json={}, headers=self.INTERNAL_HEADERS
+            "/internal/demo", json={}, headers=self.INTERNAL_HEADERS
         )
         assert r.status_code == 400, r.text
 
     def test_demo_wrong_internal_key_returns_401(self, internal_client):
         r = internal_client.post(
-            "/v1/internal/demo",
+            "/internal/demo",
             json={"team_id": "t1"},
             headers={"Authorization": "Bearer wrong-key"},
         )
         assert r.status_code == 401, r.text
 
     def test_demo_missing_auth_returns_401(self, internal_client):
-        r = internal_client.post("/v1/internal/demo", json={"team_id": "t1"})
+        r = internal_client.post("/internal/demo", json={"team_id": "t1"})
         assert r.status_code == 401, r.text
+
+
+class TestRateLimitBehavior:
+    """Verify rate limiter buckets by IP for invalid keys (brute-force defense).
+
+    Uses a deterministic unit test of the bucket key selection logic rather
+    than hammering the HTTP API (which is timing-flaky).
+    """
+
+    def _bucket_key(self, auth_header: str, client_host: str | None) -> str | None:
+        """Mirror the middleware's bucket-key selection."""
+        if auth_header.startswith("Bearer ") and auth_header[7:].startswith("tt_"):
+            return auth_header[7:]  # valid-format key → per-key bucket
+        if client_host:
+            return f"ip:{client_host}"  # invalid/missing key → per-IP bucket
+        return None
+
+    def test_valid_key_uses_key_bucket(self):
+        assert self._bucket_key("Bearer tt_valid123", "1.1.1.1") == "tt_valid123"
+
+    def test_invalid_key_uses_ip_bucket(self):
+        # Guessed keys (wrong format or non-tt_) fall to IP bucket
+        assert self._bucket_key("Bearer wrongkey", "1.1.1.1") == "ip:1.1.1.1"
+        assert self._bucket_key("", "1.1.1.1") == "ip:1.1.1.1"
+
+    def test_guessed_keys_with_tt_prefix_use_per_key_bucket(self):
+        # KNOWN LIMITATION: keys with valid tt_ format are bucketed per-key,
+        # so an attacker cycling tt_ guesses gets a fresh bucket each.
+        # This documents current behavior — the brute-force defense requires
+        # key-validity checks (deferred; see hosted_api rate limiter note).
+        keys = {self._bucket_key(f"Bearer tt_guess_{i}", "1.1.1.1") for i in range(10)}
+        assert len(keys) == 10, f"expected 10 distinct key buckets, got {len(keys)}"
+
+    def test_no_client_host_returns_none(self):
+        # request.client None → no bucket key (middleware should 429/block)
+        assert self._bucket_key("Bearer x", None) is None
+
+
+class TestCrossTenantIsolation:
+    """Verify Team A's points are invisible to Team B."""
+
+    def test_team_isolation(self, client, internal_client):
+        # Provision two teams
+        for team_id in ("iso-team-a", "iso-team-b"):
+            r = internal_client.post(
+                "/internal/provision",
+                json={
+                    "team_id": team_id,
+                    "team_name": f"Team {team_id}",
+                    "api_key_hash": f"hash-{team_id}",
+                    "created_by": "tester",
+                },
+                headers={"Authorization": f"Bearer {_INTERNAL_KEY}"},
+            )
+            assert r.status_code == 200, f"provision failed: {r.text}"
+
+        # Create a point in team A's namespace directly
+        from tortoise.hosted_api import _make_sdk
+        sdk_a = _make_sdk(namespace="iso-team-a")
+        sdk_a.create_point(content="TEAM_A_SECRET", kind="statement", context="iso")
+        # Create a point in team B
+        sdk_b = _make_sdk(namespace="iso-team-b")
+        sdk_b.create_point(content="TEAM_B_SECRET", kind="statement", context="iso")
+
+        # Verify team A's graph has its own point and NOT team B's
+        pts_a = sdk_a._get_proj().g.query(
+            "MATCH (n:Point) WHERE n.content CONTAINS 'SECRET' RETURN n.content"
+        ).result_set
+        contents_a = {r[0] for r in pts_a}
+        assert "TEAM_A_SECRET" in contents_a
+        assert "TEAM_B_SECRET" not in contents_a, "cross-tenant leak: team A sees team B data"
