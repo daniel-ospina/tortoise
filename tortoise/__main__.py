@@ -1430,9 +1430,14 @@ def _cmd_decide(args) -> int:
         return 1
 
     import os as _os
+    context_free = getattr(args, "context_free", False)
+
     uri = getattr(args, "db", None) or _os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise")
     sdk = TortoiseSDK()
     sdk._proj = FalkorProjection.from_uri(uri)
+
+    # Track all operator IDs for --context-free mode
+    all_operator_ids: list[str] = []
 
     try:
         # ── Create all points ──
@@ -1479,6 +1484,7 @@ def _cmd_decide(args) -> int:
             try:
                 op = sdk.create_operator(op_type, _resolve(src), [_resolve(tgt)], context=ctx, label=label)
                 created_ops[(src, op_type, tgt)] = op["id"]
+                all_operator_ids.append(op["id"])
                 print(f"  ✓ {src} --{op_type}--> {tgt}")
             except Exception as e:
                 print(f"  ⚠ {src} --{op_type}--> {tgt}: {e}")
@@ -1489,7 +1495,8 @@ def _cmd_decide(args) -> int:
             op_type = te.get("op_type", "NAND")
             tgt = te["target"]
             try:
-                sdk.create_operator(op_type, _resolve(src), [_resolve(tgt)], context=ctx)
+                top = sdk.create_operator(op_type, _resolve(src), [_resolve(tgt)], context=ctx)
+                all_operator_ids.append(top["id"])
                 print(f"  ⚡ truth: {src} --{op_type}--> {tgt}")
             except Exception as e:
                 print(f"  ⚠ truth {src} --{op_type}--> {tgt}: {e}")
@@ -1510,6 +1517,7 @@ def _cmd_decide(args) -> int:
                 if op_id is None:
                     op = sdk.create_operator(op_type, _resolve(src), [_resolve(tgt)], context=ctx)
                     op_id = op["id"]
+                    all_operator_ids.append(op_id)
                 sdk.mitigate_operator(op_id, reason, strength)
                 print(f"  ⚖ relevance: {src} --{op_type}--> {tgt} (mitigated {strength:.2f}: {reason})")
             except Exception as e:
@@ -1517,7 +1525,11 @@ def _cmd_decide(args) -> int:
 
         # ── Compute confidence per option ──
         try:
-            result = sdk.compute_confidence(context=ctx)
+            if context_free and all_operator_ids:
+                print(f"  (context-free mode: {len(all_operator_ids)} operator factors)")
+                result = sdk.compute_confidence(factors=all_operator_ids)
+            else:
+                result = sdk.compute_confidence(context=ctx)
             print(f"\n✓ EP computed: {result['iterations']} iterations, converged={result['converged']}")
             confs = result.get("confidences", {})
 
@@ -1623,6 +1635,8 @@ def main(argv: list[str] | None = None) -> int:
     dc.add_argument("--findings", help="JSON dict of findings")
     dc.add_argument("--edges", help="JSON list of edges, e.g. '[\"crit:1\", \"IMPL\", \"opt:a\"]' or full edge dicts")
     dc.add_argument("--context", help="Graph context namespace (default: 'decide')")
+    dc.add_argument("--context-free", action="store_true",
+                    help="Compute confidence via explicit operator factors instead of context isolation")
     dc.add_argument("--db", help="FalkorDB URI override (default: TORTOISE_DB_URI or docker://:@localhost:16379/tortoise)")
     try:
         args = p.parse_args(argv)

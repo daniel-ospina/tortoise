@@ -223,3 +223,123 @@ class TestDecideWiring:
         b_mean = confs.get(opt_b["id"], {}).get("mean", 0)
         if isinstance(a_mean, (int, float)) and isinstance(b_mean, (int, float)):
             assert a_mean > b_mean, f"Expected A ({a_mean:.3f}) > B ({b_mean:.3f})"
+
+
+class TestDecideContextFree:
+    """Context-free mode: compute_confidence(factors=[operator_ids]) without context isolation."""
+
+    def test_context_free_produces_ranked_table(self, sdk):
+        """Wire 2 options + findings, run compute_confidence(factors=...),
+        and assert a ranked table is produced with numeric confidences."""
+        ctx = "test-cf"
+        # Options
+        opt_a = sdk.create_point("option", "Option A", context=ctx)
+        opt_b = sdk.create_point("option", "Option B", context=ctx)
+
+        # Findings
+        f1 = sdk.create_point("evidence", "A is strongly supported", context=ctx)
+        f2 = sdk.create_point("evidence", "B has major issues", context=ctx)
+
+        # Collect operator IDs as the CLI would for --context-free mode
+        operator_ids: list[str] = []
+
+        # Wire: finding → options (IMPL supports, NAND opposes)
+        # A gets 2 IMPL supports, B gets 1 NAND oppose → clear A > B
+        op1 = sdk.create_operator("IMPL", f1["id"], [opt_a["id"]], context=ctx)
+        operator_ids.append(op1["id"])
+
+        op2 = sdk.create_operator("IMPL", f1["id"], [opt_b["id"]], context=ctx)
+        operator_ids.append(op2["id"])
+
+        op3 = sdk.create_operator("NAND", f2["id"], [opt_b["id"]], context=ctx)
+        operator_ids.append(op3["id"])
+
+        # Extra IMPL for A to create clear separation
+        f3 = sdk.create_point("evidence", "A is also cost-effective", context=ctx)
+        op4 = sdk.create_operator("IMPL", f3["id"], [opt_a["id"]], context=ctx)
+        operator_ids.append(op4["id"])
+
+        assert len(operator_ids) == 4, f"Expected 4 operators, got {len(operator_ids)}"
+
+        # Compute confidence via explicit factors (context-free) — no context param
+        result = sdk.compute_confidence(factors=operator_ids)
+
+        assert "iterations" in result
+        assert result["iterations"] >= 0
+        assert "converged" in result
+
+        confs = result.get("confidences", {})
+        assert len(confs) > 0, "Expected at least some confidence entries"
+
+        # Collect per-option confidence (only option-kind points)
+        opt_conf: dict[str, float] = {}
+        for pid, cid in {"opt:a": opt_a["id"], "opt:b": opt_b["id"]}.items():
+            mean = confs.get(cid, {}).get("mean")
+            if isinstance(mean, (int, float)):
+                opt_conf[pid] = float(mean)
+
+        assert len(opt_conf) > 0, "Expected ranked confidence for at least one option"
+
+        # Assert all confidences are numeric and in [0, 1]
+        for pid, c in opt_conf.items():
+            assert isinstance(c, float), f"{pid} confidence is not float: {type(c)}"
+            assert 0.0 <= c <= 1.0, f"{pid} confidence out of range: {c}"
+
+        # Option A (2 IMPL, 0 NAND) should have higher confidence than
+        # Option B (1 IMPL, 1 NAND)
+        a_mean = opt_conf.get("opt:a", 0)
+        b_mean = opt_conf.get("opt:b", 0)
+        assert a_mean > b_mean, (
+            f"Expected A ({a_mean:.4f}) > B ({b_mean:.4f}) — "
+            f"A has 2 IMPL (strong support), B has 1 IMPL + 1 NAND (contested)"
+        )
+
+    def test_context_free_and_scoped_produce_consistent_ranking(self, sdk):
+        """Same wiring with context-scoped vs context-free should produce
+        ranked output within tolerance (not identical — different EP scopes —
+        but same relative ordering)."""
+        ctx = "test-cf-compare"
+        # Options
+        opt_a = sdk.create_point("option", "Option A", context=ctx)
+        opt_b = sdk.create_point("option", "Option B", context=ctx)
+
+        # Findings
+        f1 = sdk.create_point("evidence", "A is good", context=ctx)
+        f2 = sdk.create_point("evidence", "B is bad", context=ctx)
+
+        operator_ids: list[str] = []
+
+        op1 = sdk.create_operator("IMPL", f1["id"], [opt_a["id"]], context=ctx)
+        operator_ids.append(op1["id"])
+        op2 = sdk.create_operator("NAND", f2["id"], [opt_b["id"]], context=ctx)
+        operator_ids.append(op2["id"])
+
+        # Context-free
+        result_cf = sdk.compute_confidence(factors=operator_ids)
+        # Context-scoped
+        result_ctx = sdk.compute_confidence(context=ctx)
+
+        cf_confs = result_cf.get("confidences", {})
+        ctx_confs = result_ctx.get("confidences", {})
+
+        def get_mean(confs, pid):
+            m = confs.get(pid, {}).get("mean")
+            return float(m) if isinstance(m, (int, float)) else None
+
+        a_cf = get_mean(cf_confs, opt_a["id"])
+        b_cf = get_mean(cf_confs, opt_b["id"])
+        a_ctx = get_mean(ctx_confs, opt_a["id"])
+        b_ctx = get_mean(ctx_confs, opt_b["id"])
+
+        # Both modes should rank Option A above Option B
+        if all(v is not None for v in [a_cf, b_cf, a_ctx, b_ctx]):
+            assert a_cf > b_cf, (
+                f"Context-free: Expected A ({a_cf:.4f}) > B ({b_cf:.4f})"
+            )
+            assert a_ctx > b_ctx, (
+                f"Context-scoped: Expected A ({a_ctx:.4f}) > B ({b_ctx:.4f})"
+            )
+            # Confidences should be within reasonable tolerance
+            assert abs(a_cf - a_ctx) < 0.5, (
+                f"A confidence divergence: cf={a_cf:.4f} ctx={a_ctx:.4f}"
+            )
