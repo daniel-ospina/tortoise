@@ -285,8 +285,98 @@ def _inject_subgraph_filter(cypher: str, vars: list[str],
 # Main API
 # ═══════════════════════════════════════════════════════════════════
 
+def _bfs_select_operators(proj, anchors: list[str], max_hops: int = 1,
+                          rel_filter: str = "IMPL|NAND",
+                          direction: str = "both") -> set[str]:
+    """BFS subgraph selection from anchor Points — returns set of operator Point IDs.
+
+    Shared helper for both compute_confidence and tortoise_analyze.
+    Expands from anchor Points along operator edges (IMPL|NAND) for max_hops hops.
+    IMPL edges respect direction; NAND always traversed bidirectionally.
+    Capped at 200 operator IDs.
+    """
+    import logging
+    _log = logging.getLogger(__name__)
+    collected: set[str] = set()
+    frontier: set[str] = set(anchors)
+    visited: set[str] = set(anchors)
+    rel_types = set(rel_filter.split("|"))
+
+    for hop in range(max_hops):
+        if not frontier:
+            break
+        new_ops: set[str] = set()
+        new_points: set[str] = set()
+        frontier_list = list(frontier)
+
+        for rel in rel_types:
+            if rel not in ("IMPL", "NAND"):
+                continue
+
+            # NAND is always bidirectional; IMPL respects direction flag
+            if rel == "NAND":
+                dirs = ("incoming", "outgoing")
+            elif direction == "both":
+                dirs = ("incoming", "outgoing")
+            else:
+                dirs = (direction,)
+
+            for d in dirs:
+                if d == "incoming":
+                    rows = proj.g.query(
+                        f"MATCH (op:Point {{is_operator:true}})-[:{rel}]->(p:Point) "
+                        "WHERE p.id IN $frontier "
+                        "RETURN DISTINCT op.id",
+                        params={"frontier": frontier_list},
+                    ).result_set
+                    for (op_id,) in rows:
+                        new_ops.add(op_id)
+                        new_points.add(op_id)
+                else:  # outgoing
+                    rows = proj.g.query(
+                        f"MATCH (op:Point {{is_operator:true}})-[:{rel}]->(target:Point) "
+                        "WHERE op.id IN $frontier "
+                        "RETURN DISTINCT target.id",
+                        params={"frontier": frontier_list},
+                    ).result_set
+                    for (target_id,) in rows:
+                        new_points.add(target_id)
+
+        collected |= new_ops
+
+        if len(collected) > 200:
+            _log.warning(
+                "BFS selector: collected %d operators, truncating to 200.",
+                len(collected),
+            )
+            collected = set(list(collected)[:200])
+            break
+
+        # Expand to new frontier points from collected operators
+        if new_ops and hop < max_hops - 1:
+            ops_list = list(new_ops)
+            rows = proj.g.query(
+                "MATCH (op:Point {is_operator:true})-[r:IMPL|NAND]->(p:Point) "
+                "WHERE op.id IN $ops "
+                "RETURN DISTINCT p.id",
+                params={"ops": ops_list},
+            ).result_set
+            for (p_id,) in rows:
+                if p_id not in visited:
+                    new_points.add(p_id)
+
+        frontier = new_points - visited
+        visited |= new_points
+
+    return collected
+
+
 def analyze(question: str, proj=None, *, context: str | None = None,
             entity_subgraph_ids: set[str] | None = None,
+            anchor_ids: list[str] | None = None,
+            max_hops: int = 1,
+            rel_filter: str = "IMPL|NAND",
+            direction: str = "both",
             use_llm: bool = True) -> dict[str, Any]:
     """Answer a natural language question about the Tortoise graph.
 
@@ -295,11 +385,21 @@ def analyze(question: str, proj=None, *, context: str | None = None,
         proj: FalkorProjection instance (optional — for Cypher execution)
         context: Team/domain scope filter (e.g. "epistemic-team/strategy")
         entity_subgraph_ids: Pre-filter results to these Point IDs (entity-scoped analysis)
+        anchor_ids: list of Point IDs for BFS subgraph selection (new; alternative to entity_subgraph_ids)
+        max_hops: BFS expansion depth when using anchor_ids (default 1)
+        rel_filter: edge types for BFS — "IMPL", "NAND", or "IMPL|NAND" (default)
+        direction: IMPL edge traversal direction — "incoming", "outgoing", or "both" (default)
         use_llm: Fall back to LLM if keyword match fails
 
     Returns:
         {"answer": "...", "raw": [...], "pattern": "...", "query": "..."}
     """
+    # BFS subgraph selection from anchor IDs
+    if anchor_ids is not None and proj is not None and entity_subgraph_ids is None:
+        entity_subgraph_ids = _bfs_select_operators(
+            proj, anchor_ids, max_hops=max_hops,
+            rel_filter=rel_filter, direction=direction,
+        )
     # 1. Classify intent
     result = classify(question)
     if result is None and use_llm:

@@ -38,8 +38,9 @@ class SessionContinuity:
     
     def capture(self, content, kind="observation", **props):
         """Capture a finding during the session."""
+        # P1 #49: use session_id property instead of deprecated context
         point = self.sdk.create_point(kind, content, 
-            context=self.session_id,
+            session_id=self.session_id,
             captured_at=datetime.now().isoformat(),
             **props)
         self.findings.append(point)

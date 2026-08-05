@@ -24,31 +24,41 @@ class _EntityHandlers:
             except Exception:
                 pass
 
+        # Build SET clauses + params; context is optional (Phase 1 stop-writes, #49)
+        set_clauses = [
+            "n.content=$content",
+            "n.is_operator=$isop",
+            "n.op_type=$opt",
+            "n.pointKind=coalesce($pk, n.pointKind)",
+            "n.status=coalesce($st, n.status, 'live')",
+            "n.authoredBy=coalesce($ab, n.authoredBy)",
+            "n.embedding=CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE n.embedding END",
+            "n.confidence=coalesce($cf, n.confidence)",
+            "n.createdAt=coalesce($ca, n.createdAt, $now)",
+            "n.validFrom=coalesce($vf, n.validFrom)",
+            "n.validTo=coalesce($vt, n.validTo)",
+            "n.updatedAt=$now",
+        ]
+        params = {
+            "id": p["id"], "content": p["content"],
+            "isop": bool(op), "opt": op["op_type"] if op else None,
+            "pk": p.get("pointKind"),
+            "st": p.get("status"),
+            "ab": p.get("authoredBy"),
+            "embedding": embedding,
+            "cf": p.get("confidence"),
+            "ca": p.get("createdAt") or p.get("created_at"),
+            "vf": p.get("validFrom"), "vt": p.get("validTo"),
+            "now": _now_iso(),
+        }
+        # Phase 1 backward compat: only write context when present in point dict (#49)
+        if "context" in p and p["context"] is not None:
+            set_clauses.insert(1, "n.context=$context")
+            params["context"] = p["context"]
+
         self.g.query(
-            "MERGE (n:Point {id:$id}) "
-            "SET n.content=$content, n.context=$context, "
-            "    n.is_operator=$isop, n.op_type=$opt, "
-            "    n.pointKind=coalesce($pk, n.pointKind), "
-            "    n.status=coalesce($st, n.status, 'live'), "
-            "    n.authoredBy=coalesce($ab, n.authoredBy), "
-            "    n.embedding=CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE n.embedding END, "
-
-            "    n.confidence=coalesce($cf, n.confidence), "
-            "    n.createdAt=coalesce($ca, n.createdAt, $now), "
-            "    n.validFrom=coalesce($vf, n.validFrom), "
-            "    n.validTo=coalesce($vt, n.validTo), "
-            "    n.updatedAt=$now",
-            params={"id": p["id"], "content": p["content"], "context": p["context"],
-                    "isop": bool(op), "opt": op["op_type"] if op else None,
-                    "pk": p.get("pointKind"),
-                    "st": p.get("status"),
-                    "ab": p.get("authoredBy"),
-                    "embedding": embedding,
-
-                    "cf": p.get("confidence"),
-                    "ca": p.get("createdAt") or p.get("created_at"),
-                    "vf": p.get("validFrom"), "vt": p.get("validTo"),
-                    "now": _now_iso()},
+            "MERGE (n:Point {id:$id}) SET " + ", ".join(set_clauses),
+            params=params,
         )
         # Ontology v2.1: link Point → Source via extractedFrom edge
         source_ref = p.get("extractedFrom")

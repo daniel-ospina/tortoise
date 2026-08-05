@@ -144,6 +144,30 @@ class _EdgeHandlers:
             params={"pid": point_id, "url": source_ref},
         )
 
+    def link_source_to_entity(self, source_url: str, entity_id: str, entity_label: str) -> None:
+        """Create Source → Entity references edge (Ontology v3.0 §3.2-3.3).
+
+        Args:
+            source_url: the Source node's url (must exist — created by _link_source)
+            entity_id: the Document/Event/Object node id the source references
+            entity_label: the entity label (Document|Event|Object) for the MATCH
+
+        Raises:
+            ValueError: if entity_label is not one of Document, Event, Object
+                (Action was dissolved in Ontology v3.0).
+        """
+        valid = {"Document", "Event", "Object"}
+        if entity_label not in valid:
+            raise ValueError(
+                f"Invalid entity_label: {entity_label}. Must be one of {valid} "
+                f"(Action was dissolved in Ontology v3.0)."
+            )
+        self.g.query(
+            f"MATCH (s:Source {{url:$url}}), (e:{entity_label} {{id:$eid}}) "
+            f"MERGE (s)-[:references]->(e)",
+            params={"url": source_url, "eid": entity_id},
+        )
+
     # ponytail: SDK compat alias (Phase 1b will rename caller)
     _link_extracted_from = _link_source
 

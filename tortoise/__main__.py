@@ -1366,6 +1366,60 @@ def _cmd_list_contexts(args) -> int:
     return 0
 
 
+def _cmd_list_kinds(args) -> int:
+    """List all pointKinds present in the graph with counts."""
+    import os as _os
+    from tortoise.sdk import TortoiseSDK
+    from tortoise.projection import FalkorProjection
+
+    uri = _os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise")
+    sdk = TortoiseSDK()
+    sdk._proj = FalkorProjection.from_uri(uri)
+
+    try:
+        kinds = sdk.list_pointkinds()
+        if not kinds:
+            print("No pointKinds found.")
+            return 0
+        max_width = max(len(str(k["kind"])) for k in kinds)
+        for k in kinds:
+            pack_str = f" ({k['pack']})" if k["pack"] else ""
+            print(f"{k['count']:>6}  {k['kind']:<{max_width}}{pack_str}")
+        print(f"\n{len(kinds)} kind(s) total")
+    finally:
+        if sdk._proj:
+            sdk._proj.close()
+    return 0
+
+
+def _cmd_list_sources(args) -> int:
+    """List all Sources with point counts."""
+    import os as _os
+    from tortoise.sdk import TortoiseSDK
+    from tortoise.projection import FalkorProjection
+
+    uri = _os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise")
+    sdk = TortoiseSDK()
+    sdk._proj = FalkorProjection.from_uri(uri)
+
+    try:
+        sources = sdk.list_sources()
+        if not sources:
+            print("No sources found.")
+            return 0
+        max_url_width = max(len(str(s["url"] or "")) for s in sources)
+        max_sk_width = max(len(str(s["sourceKind"] or "")) for s in sources)
+        for s in sources:
+            url = str(s["url"] or "")
+            sk = str(s["sourceKind"] or "")
+            print(f"{s['points']:>6}  {url:<{max_url_width}}  {sk:<{max_sk_width}}")
+        print(f"\n{len(sources)} source(s) total")
+    finally:
+        if sdk._proj:
+            sdk._proj.close()
+    return 0
+
+
 def _cmd_decide(args) -> int:
     """Compare options via EP belief propagation.
 
@@ -1627,6 +1681,10 @@ def main(argv: list[str] | None = None) -> int:
     session_view.add_argument("id", help="Session ID")
     # tortoise list-contexts
     lc = sp.add_parser("list-contexts", help="List all graph contexts with point counts, sorted DESC")
+    # tortoise list-kinds
+    lk = sp.add_parser("list-kinds", help="List all pointKinds present in the graph with counts")
+    # tortoise list-sources
+    ls = sp.add_parser("list-sources", help="List all Sources with point counts")
     # tortoise decide --input <json|yaml>
     dc = sp.add_parser("decide", help="Compare options via EP belief propagation")
     dc.add_argument("--input", "-i", help="Path to JSON or YAML input file with options/criteria/findings/edges")
@@ -1723,6 +1781,10 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     elif args.cmd == "list-contexts":
         return _cmd_list_contexts(args)
+    elif args.cmd == "list-kinds":
+        return _cmd_list_kinds(args)
+    elif args.cmd == "list-sources":
+        return _cmd_list_sources(args)
     elif args.cmd == "decide":
         return _cmd_decide(args)
     else:
