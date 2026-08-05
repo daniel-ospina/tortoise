@@ -1,0 +1,16 @@
+name: Fix Tortoise DNS
+on:
+  workflow_dispatch:
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          ZONE="e2f87d461a335b66235fcd11054baa7c"
+          RECORD="bcc81b64429047a43fe40ec3bd42e9bb"
+          echo "=== update CNAME to premise-labs.pages.dev ==="
+          curl -s -X PATCH \
+            "https://api.cloudflare.com/client/v4/zones/$ZONE/dns_records/$RECORD" \
+            -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{"type":"CNAME","name":"tortoise.premiselabs.co","content":"premise-labs.pages.dev","proxied":true,"ttl":1}' | python3 -m json.tool
