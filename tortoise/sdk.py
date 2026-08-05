@@ -167,12 +167,24 @@ class TortoiseSDK:
         # Idempotency guard: dedup by content hash when requested
         dedup = props.pop("dedup", False)
         if dedup:
-            existing = proj.g.query(
-                "MATCH (n:Point {content_hash:$ch}) "
-                "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
-                "RETURN n.id",
-                params={"ch": ch},
-            ).result_set
+            ch = _content_hash(content)
+            ctx = props.get("context")
+            if ctx:
+                existing = proj.g.query(
+                    "MATCH (n:Point {content_hash:$ch}) "
+                    "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+                    "AND n.context = $ctx "
+                    "RETURN n.id",
+                    params={"ch": ch, "ctx": ctx},
+                ).result_set
+            else:
+                existing = proj.g.query(
+                    "MATCH (n:Point {content_hash:$ch}) "
+                    "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+                    "AND n.context IS NULL "
+                    "RETURN n.id",
+                    params={"ch": ch},
+                ).result_set
             if existing:
                 pid = existing[0][0]
                 props["updatedAt"] = now
@@ -1574,9 +1586,9 @@ class TortoiseSDK:
                         entity_type=entity_type, id_field=id_field,
                     )
                 else:
-                    logger.warning("Invalid relationship_filter format: %s", relationship_filter)
+                    _logger.warning("Invalid relationship_filter format: %s", relationship_filter)
             else:
-                logger.warning(
+                _logger.warning(
                     "relationship_filter must be 'predicate:target_id', got: %s",
                     relationship_filter,
                 )
@@ -1591,7 +1603,7 @@ class TortoiseSDK:
                     entity_type=entity_type, id_field=id_field,
                 )
             else:
-                logger.warning(
+                _logger.warning(
                     "traversal_path %r could not be resolved to a pack relation",
                     traversal_path,
                 )
@@ -1666,7 +1678,7 @@ class TortoiseSDK:
                         "context": None,
                     }
         except Exception:
-            logger.warning("Batch content fetch failed — returning results with minimal metadata")
+            _logger.warning("Batch content fetch failed — returning results with minimal metadata")
             for pid in result_ids:
                 entity_data[pid] = {"content": "", "kind": "", "context": None}
 
@@ -2335,7 +2347,7 @@ class TortoiseSDK:
         if len(segments) < 2:
             # Hint: user may have used ASCII '->' instead of Unicode '→'
             if "->" in path:
-                logger.warning(
+                _logger.warning(
                     "traversal_path uses ASCII '->' — use Unicode '→' instead "
                     "(e.g., 'Product→Feature')"
                 )
