@@ -1,0 +1,17 @@
+name: Force Domain Validation
+on:
+  workflow_dispatch:
+jobs:
+  force:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          ACC="367c7ecf27e1b1b092d04fe9915a1e56"
+          echo "=== retry domain validation (POST to domain endpoint triggers re-validation) ==="
+          curl -s -X POST \
+            "https://api.cloudflare.com/client/v4/accounts/$ACC/pages/projects/premise-labs/domains/tortoise.premiselabs.co/validate" \
+            -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" | python3 -m json.tool
+          echo "=== check if Pages auto-creates DNS (GET domain validation data) ==="
+          curl -s \
+            "https://api.cloudflare.com/client/v4/accounts/$ACC/pages/projects/premise-labs/domains/tortoise.premiselabs.co" \
+            -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" | python3 -c "import json,sys; d=json.load(sys.stdin); r=d.get('result',{}); print('status:', r.get('status')); print('validation:', r.get('validation_data'))"
