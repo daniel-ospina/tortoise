@@ -23,10 +23,21 @@ primary_region = "iad"
     soft_limit = 100
     hard_limit = 200
 
+  [[services.http_checks]]
+    interval = "15s"
+    timeout = "15s"
+    grace_period = "120s"
+    method = "get"
+    path = "/health"
+
 [[vm]]
   cpu_kind = "shared"
   cpus = 1
   memory_mb = 256
+
+[[mounts]]
+  source = "tortoise_api_data"
+  destination = "/data"
 
 [env]
   TORTOISE_DB_URI = ""  # Constructed at runtime by entrypoint.sh from FALKORDB_PASSWORD → redis://:{pwd}@falkordb-tortoise.internal:6379/tortoise
@@ -34,12 +45,5 @@ primary_region = "iad"
 
 [deploy]
   wait_timeout = "5m"
-  release_command = "python -c 'from tortoise.sdk import TortoiseSDK; sdk = TortoiseSDK(namespace=\"registry\"); print(\"registry OK\")'"
   strategy = "immediate"
-
-[[http_service.checks]]
-  interval = "15s"
-  timeout = "15s"
-  grace_period = "120s"
-  method = "get"
-  path = "/health"
+  release_command = "python -c 'from tortoise.hosted_api import _make_sdk; s = _make_sdk(namespace=\"registry\"); s._get_proj(); print(\"registry OK\")'"

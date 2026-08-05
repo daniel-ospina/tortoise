@@ -630,6 +630,17 @@ def tortoise_list_domains() -> list[dict]:
 
 
 @mcp.tool()
+def tortoise_list_contexts() -> list[dict]:
+    """List all graph contexts with point counts, sorted by count DESC.
+
+    Same as tortoise_list_domains — 'context' and 'domain' are synonyms
+    for the same namespace field. Enables context discovery without
+    guessing context names. Returns [{context, count}].
+    """
+    return _safe(sdk.list_domains)
+
+
+@mcp.tool()
 def tortoise_list_topics(entity_id: str) -> dict:
     """entityProfile lite for an entity. Returns {id, pointKind, context, neighbors, neighborCounts}."""
     return _safe(sdk.list_topics, entity_id)
