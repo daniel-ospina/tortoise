@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 .worktrees/
 __pycache__/
+*.egg-info/

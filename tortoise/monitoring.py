@@ -11,7 +11,8 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from prometheus_client import Counter, Histogram, generate_latest
 
-from tortoise.auth import require_auth, is_dev_mode
+# Auth functions imported lazily (in _Handler.do_GET) to avoid
+# triggering TORTOISE_SECRET_PEPPER requirement at module import time (#67).
 
 _start = time.monotonic()
 _last_ingest: float | None = None
@@ -87,6 +88,7 @@ def metrics() -> dict:
 class _Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         # Auth gate (#7395): require valid Bearer token in prod mode
+        from tortoise.auth import require_auth, is_dev_mode  # lazy — #67
         if not is_dev_mode():
             headers = {k.lower(): v for k, v in self.headers.items()}
             if not require_auth(headers):

@@ -34,6 +34,7 @@ class EpBreakdown:
     confidence_mean: float = 0.0
     evidence: EpEvidence | None = None
     contention: float = 0.0
+    has_evidence: bool = False
 
     def __post_init__(self):
         if self.evidence is None:
@@ -381,7 +382,8 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
     Single Cypher query — NOT N+1. Returns EpBreakdown per Point ID.
     Uses simple edge-count ratio (impl / total) — this is a fast batch annotation,
     not full EP belief propagation. Full EP runs separately via compute_confidence().
-    Points with no EP data get EpBreakdown with confidence_mean=0.0, contention=0.0.
+    Points with no EP data get EpBreakdown with confidence_mean=0.5 (neutral),
+    contention=0.0, has_evidence=False (distinct from all-NAND which has_evidence=True).
     """
     if not point_ids:
         return {}
@@ -406,20 +408,32 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
         for row in rows:
             pid, impl, nand, contention = row[0], int(row[1]), int(row[2]), float(row[3])
             total = impl + nand
-            confidence_mean = impl / total if total > 0 else 0.0
-            breakdowns[pid] = EpBreakdown(
-                confidence_mean=confidence_mean,
-                evidence=EpEvidence(impl_count=impl, nand_count=nand, total=total),
-                contention=contention,
-            )
+            if total > 0:
+                confidence_mean = impl / total
+                breakdowns[pid] = EpBreakdown(
+                    confidence_mean=confidence_mean,
+                    evidence=EpEvidence(impl_count=impl, nand_count=nand, total=total),
+                    contention=contention,
+                    has_evidence=True,
+                )
+            else:
+                # Zero edges: treat as "no evidence" — neutral 0.5 mean
+                breakdowns[pid] = EpBreakdown(
+                    confidence_mean=0.5,
+                    evidence=EpEvidence(impl_count=0, nand_count=0, total=0),
+                    contention=0.0,
+                    has_evidence=False,
+                )
 
-        # Fill in defaults for IDs with no edges
+        # Fill in defaults for IDs not in the query result at all
+        # (shouldn't happen with OPTIONAL MATCH, but safety net)
         for pid in point_ids:
             if pid not in breakdowns:
                 breakdowns[pid] = EpBreakdown(
-                    confidence_mean=0.0,
+                    confidence_mean=0.5,
                     evidence=EpEvidence(impl_count=0, nand_count=0, total=0),
                     contention=0.0,
+                    has_evidence=False,
                 )
 
         return breakdowns

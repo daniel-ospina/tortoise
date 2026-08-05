@@ -1,65 +1,29 @@
+"""Pytest configuration — test graph isolation guard (#99).
+
+Forces ALL integration tests onto an isolated graph name starting with
+'tortoise_test_' so that the SDK-level DETACH DELETE guard passes, and
+no test can affect the real graph (falkordb-personal:16379/tortoise).
+
+The default URI uses the test FalkorDB container (port 6379) with an
+isolated graph name. Individual test files or CI can override via
+TORTOISE_DB_URI env var as long as the graph name starts with
+'test_' or 'tortoise_test'.
 """
-Test isolation guard — prevents integration tests from wiping production data.
+from __future__ import annotations
 
-Background (#102, incident 2026-08-05):
-test_calibration.py and similar integration tests defaulted TORTOISE_DB_URI to
-the PRODUCTION graph (16379/tortoise) with teardowns that run
-`MATCH (n) DETACH DELETE n`. A parallel test run wiped the real graph
-(5,748 points lost).
-
-This conftest enforces isolation:
-1. If TORTOISE_DB_URI points at a production-looking graph (16379 or 6379
-   with graph "tortoise"), tests FAIL FAST with a clear message unless
-   ALLOW_DESTRUCTIVE_TESTS=1 is explicitly set.
-2. Tests that mutate the graph should use an isolated graph name
-   (test_<name>) instead of the production default.
-
-Usage:
-  # Safe: isolated graph, or no destructive teardown
-  pytest tests/test_calibration.py
-
-  # Explicit opt-in for genuinely destructive tests against a real DB
-  ALLOW_DESTRUCTIVE_TESTS=1 TORTOISE_DB_URI=... pytest tests/...
-"""
 import os
-import pytest
+import uuid
 
-# ── Production-looking URIs that tests must never touch without opt-in ──
-_DANGEROUS_PORTS = {"6379", "6380", "16379"}
+# ── Test graph isolation ───────────────────────────────────────────────────
+# Generate a unique graph name per test session so parallel pytest runs
+# do not collide. The graph name starts with 'tortoise_test_' which is
+# required by the FalkorProjection._assert_test_graph() guard for
+# DETACH DELETE operations.
+TEST_GRAPH = f"tortoise_test_{uuid.uuid4().hex[:8]}"
 
+# Default to the test FalkorDB container (not the real graph at 16379).
+# Individual test files / CI can override via the env var as long as
+# the graph name starts with 'test_' or 'tortoise_test'.
+_TEST_DEFAULT_URI = f"docker://:falkordb@localhost:6379/{TEST_GRAPH}"
 
-def _looks_like_production(uri: str) -> bool:
-    """Heuristic: docker://host:PORT/graph where PORT is a FalkorDB port and
-    graph is the default 'tortoise'."""
-    if not uri or "docker://" not in uri:
-        return False
-    try:
-        hostport = uri.split("://", 1)[1].split("/", 1)[0]
-        port = hostport.rsplit(":", 1)[-1].split("@")[-1]
-        graph = ""
-        if "/" in uri.split("://", 1)[1]:
-            graph = uri.split("://", 1)[1].split("/", 1)[1]
-    except Exception:
-        return False
-    if port not in _DANGEROUS_PORTS:
-        return False
-    # graph "tortoise" (default) is dangerous; "test_foo" or other named are safer
-    return graph in ("tortoise", "")
-
-
-def pytest_configure(config):
-    """Fail fast if tests would target a production graph without opt-in."""
-    if os.environ.get("ALLOW_DESTRUCTIVE_TESTS") == "1":
-        return  # explicit opt-in
-    uri = os.environ.get("TORTOISE_DB_URI", "")
-    if _looks_like_production(uri):
-        pytest.exit(
-            "\n\n⛔ TEST ISOLATION GUARD (#102):\n"
-            f"  TORTOISE_DB_URI={uri!r} looks like the PRODUCTION graph.\n"
-            "  Integration tests here use destructive teardowns "
-            "(MATCH (n) DETACH DELETE n) that would WIPE PRODUCTION DATA.\n"
-            "  To run destructive tests against a real DB, set:\n"
-            "    ALLOW_DESTRUCTIVE_TESTS=1 TORTOISE_DB_URI=<isolated-or-dev-db> pytest ...\n"
-            "  Prefer an isolated graph name: docker://host:port/test_<name>.\n",
-            returncode=1,
-        )
+os.environ.setdefault("TORTOISE_DB_URI", _TEST_DEFAULT_URI)

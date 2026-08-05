@@ -8,15 +8,20 @@ from tortoise.exceptions import CalibrationError
 
 @pytest.fixture
 def sdk():
-    """Create a TortoiseSDK connected to an ISOLATED test graph."""
+    """Create a TortoiseSDK connected to an ISOLATED test graph.
+
+    Uses ``tortoise_test_calibration`` — never the production graph.
+    """
     import os
-    # Isolated test graph — never the production default. The conftest.py
-    # guard (#102) blocks production URIs unless ALLOW_DESTRUCTIVE_TESTS=1.
-    os.environ.setdefault("TORTOISE_DB_URI", "docker://localhost:16379/test_calibration")
+    os.environ.setdefault(
+        "TORTOISE_DB_URI",
+        "docker://:falkordb@localhost:6379/tortoise_test_calibration"
+    )
     s = TortoiseSDK()
     yield s
-    # Cleanup: delete ALL nodes in the ISOLATED test graph only.
-    # (Safe because conftest.py redirects/guards production URIs.)
+    # Safety guard: refuse to wipe production graphs
+    s.test_guard()
+    # Cleanup: delete ALL nodes (Points + Sources + operators)
     s._get_proj().g.query("MATCH (n) DETACH DELETE n")
 
 

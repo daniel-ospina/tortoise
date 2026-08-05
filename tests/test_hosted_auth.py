@@ -16,6 +16,11 @@ import tempfile
 from pathlib import Path
 
 import pytest
+
+# #67: TORTOISE_SECRET_PEPPER is mandatory for auth module import.
+# Set a test pepper before importing tortoise.auth.
+os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
+
 import tortoise.auth as auth_mod
 from tortoise.sdk import TortoiseSDK
 
@@ -36,13 +41,19 @@ def sdk():
 class TestApiKeyHashing:
     """Tests for hash_api_key and verify_api_key from tortoise.auth."""
 
-    def test_hash_api_key_is_deterministic(self):
-        """Same input always produces same hash."""
+    def test_hash_api_key_roundtrip(self):
+        """hash_api_key + verify_api_key roundtrip works (per-key salt means
+        hashes are not deterministic across calls, but verification always works)."""
         key = "tt_abc123def456"
         h1 = auth_mod.hash_api_key(key)
         h2 = auth_mod.hash_api_key(key)
-        assert h1 == h2
-        assert len(h1) == 64  # SHA-256 produces 32 bytes = 64 hex chars
+        # Per-key random salt: same input → different stored values
+        assert h1 != h2
+        # But both verify correctly against the original key
+        assert auth_mod.verify_api_key(key, h1) is True
+        assert auth_mod.verify_api_key(key, h2) is True
+        # Format: salt_hex(64):digest_hex(64) = 129 chars
+        assert len(h1) == 129
 
     def test_hash_api_key_different_inputs_produce_different_hashes(self):
         """Different keys produce different hashes."""
@@ -50,25 +61,27 @@ class TestApiKeyHashing:
         h2 = auth_mod.hash_api_key("tt_key_two")
         assert h1 != h2
 
-    def test_hash_api_key_uses_pepper_when_set(self, monkeypatch):
-        """When TORTOISE_SECRET_PEPPER is set, PBKDF2 is used."""
+    def test_hash_api_key_uses_different_pepper_produces_different_hashes(self, monkeypatch):
+        """With a different pepper, the same key produces different stored values."""
         monkeypatch.setenv("TORTOISE_SECRET_PEPPER", "my-pepper-value")
-        mod = importlib.reload(auth_mod)
-        try:
-            hashed = mod.hash_api_key("test-key-123")
-            assert len(hashed) == 64  # PBKDF2-HMAC SHA-256 produces 32 bytes = 64 hex chars
-        finally:
-            monkeypatch.delenv("TORTOISE_SECRET_PEPPER", raising=False)
+        mod_a = importlib.reload(auth_mod)
+        h_a = mod_a.hash_api_key("test-key-123")
 
-    def test_hash_api_key_no_pepper_fallback(self, monkeypatch):
-        """Without pepper, uses plain SHA-256."""
+        monkeypatch.setenv("TORTOISE_SECRET_PEPPER", "other-pepper-value")
+        mod_b = importlib.reload(auth_mod)
+        h_b = mod_b.hash_api_key("test-key-123")
+
+        # Different peppers → different hashes for the same key
+        assert h_a != h_b
+
+    def test_hash_api_key_import_crashes_without_pepper(self, monkeypatch):
+        """Importing auth module without TORTOISE_SECRET_PEPPER raises RuntimeError."""
         monkeypatch.delenv("TORTOISE_SECRET_PEPPER", raising=False)
-        mod = importlib.reload(auth_mod)
-        try:
-            hashed = mod.hash_api_key("test-key")
-            assert len(hashed) == 64  # SHA-256 hex digest
-        finally:
-            pass  # env already cleared
+        with pytest.raises(RuntimeError, match="TORTOISE_SECRET_PEPPER"):
+            importlib.reload(auth_mod)
+        # Restore env so auth_mod can be re-imported cleanly
+        monkeypatch.setenv("TORTOISE_SECRET_PEPPER", "test-static-pepper")
+        importlib.reload(auth_mod)
 
     def test_verify_api_key_correct(self):
         """verify_api_key returns True for correct key."""
@@ -88,6 +101,14 @@ class TestApiKeyHashing:
         # Test with keys of same length but different last char
         wrong_key = key[:-1] + "b"
         assert auth_mod.verify_api_key(wrong_key, stored) is False
+
+    def test_verify_api_key_rejects_malformed_stored(self):
+        """verify_api_key handles malformed stored strings gracefully."""
+        assert auth_mod.verify_api_key("tt_key", "not-a-valid-format") is False
+        assert auth_mod.verify_api_key("tt_key", "short:hash") is False
+        assert auth_mod.verify_api_key("tt_key", "") is False
+        # None is caught by the ValueError/AttributeError handler
+        assert auth_mod.verify_api_key("tt_key", None) is False
 
 
 # ── Team Name Sanitization Tests ────────────────────────────────────────────
@@ -207,6 +228,7 @@ class TestAuthDevMode:
     def test_dev_mode_allows_all_requests(self, monkeypatch):
         """When TORTOISE_API_KEY is unset, all requests pass."""
         monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+        monkeypatch.setenv("TORTOISE_SECRET_PEPPER", "test-pepper")
         mod = importlib.reload(auth_mod)
         try:
             assert mod.is_dev_mode() is True
@@ -218,6 +240,7 @@ class TestAuthDevMode:
     def test_production_mode_rejects_unauthorized(self, monkeypatch):
         """When TORTOISE_API_KEY is set, bad tokens are rejected."""
         monkeypatch.setenv("TORTOISE_API_KEY", "prod-key-123")
+        monkeypatch.setenv("TORTOISE_SECRET_PEPPER", "test-pepper")
         mod = importlib.reload(auth_mod)
         try:
             assert mod.is_dev_mode() is False
@@ -232,12 +255,16 @@ class TestAuthDevMode:
 class TestSecurityBaseline:
     """Security tests from E2E-7-D test design."""
 
-    def test_api_key_hash_is_sha256_or_pbkdf2(self):
-        """hash_api_key produces a hex string of correct length."""
+    def test_api_key_hash_is_pbkdf2(self):
+        """hash_api_key produces a 'salt:hash' hex string of correct length."""
         h = auth_mod.hash_api_key("test-key")
-        # SHA-256 = 64 chars hex, PBKDF2-HMAC SHA-256 = 128 chars hex
-        assert len(h) in (64, 128)
-        assert all(c in "0123456789abcdef" for c in h)
+        # Format: salt_hex(64):digest_hex(64) = 129 chars
+        assert len(h) == 129
+        salt_hex, digest_hex = h.split(":")
+        assert len(salt_hex) == 64
+        assert len(digest_hex) == 64
+        assert all(c in "0123456789abcdef" for c in salt_hex)
+        assert all(c in "0123456789abcdef" for c in digest_hex)
 
     def test_api_keys_are_not_stored_in_plaintext(self, sdk):
         """After team_create, verify the graph doesn't store the plaintext key."""
@@ -264,3 +291,15 @@ class TestSecurityBaseline:
         assert auth_mod.verify_api_key(api_key, stored_hash) is True
         # Wrong key does not
         assert auth_mod.verify_api_key("tt_wrong_key_000000000000", stored_hash) is False
+
+    def test_hash_survives_pepper_reload(self, monkeypatch):
+        """Hashes generated with one pepper can be verified after re-import
+        with the same pepper (simulating process restart)."""
+        monkeypatch.setenv("TORTOISE_SECRET_PEPPER", "survive-restart-pepper")
+        mod_a = importlib.reload(auth_mod)
+        key = "tt_key_for_restart_test"
+        stored = mod_a.hash_api_key(key)
+
+        # Simulate restart: re-import with same pepper
+        mod_b = importlib.reload(auth_mod)
+        assert mod_b.verify_api_key(key, stored) is True
