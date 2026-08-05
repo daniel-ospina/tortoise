@@ -23,6 +23,13 @@ primary_region = "iad"
     soft_limit = 100
     hard_limit = 200
 
+  [[services.http_checks]]
+    interval = "15s"
+    timeout = "15s"
+    grace_period = "60s"
+    method = "get"
+    path = "/health"
+
 [[vm]]
   cpu_kind = "shared"
   cpus = 1
@@ -34,12 +41,5 @@ primary_region = "iad"
 
 [deploy]
   wait_timeout = "5m"
-  release_command = "python -c 'from tortoise.sdk import TortoiseSDK; sdk = TortoiseSDK(namespace=\"registry\"); print(\"registry OK\")'"
   strategy = "immediate"
-
-[[http_service.checks]]
-  interval = "15s"
-  timeout = "15s"
-  grace_period = "120s"
-  method = "get"
-  path = "/health"
+  release_command = "python -c 'from tortoise.sdk import TortoiseSDK; sdk = TortoiseSDK(namespace=\"registry\"); print(\"registry OK\")'"
