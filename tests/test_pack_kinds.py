@@ -23,16 +23,16 @@ def registry():
                 "extends": "core",
                 "objectKinds": ["epic", "issue", "code"],
                 "subclassOf": {"epic": "Project", "issue": "WorkItem"},
-                "equivalentTo": {"issue": ["pm:task"]},
+                "equivalentTo": {"issue": ["pm:issue"]},
             }
         },
         "pm": {
             "namespace": "pm", "name": "Project Management",
             "ontology": {
                 "extends": "core",
-                "objectKinds": ["task", "sprint"],
-                "subclassOf": {"task": "WorkItem"},
-                "equivalentTo": {"task": ["dev:issue"]},
+                "objectKinds": ["issue", "sprint"],
+                "subclassOf": {"issue": "WorkItem"},
+                "equivalentTo": {"issue": ["dev:issue"]},
             }
         },
         "product-strategy": {
@@ -67,7 +67,7 @@ class TestKindExpansion:
         expanded = registry.expand_kind("WorkItem")
         assert "WorkItem" in expanded
         assert "dev:issue" in expanded
-        assert "pm:task" in expanded
+        assert "pm:issue" in expanded
         assert "product-strategy:feature" in expanded
 
     def test_project_expands_to_epic(self, registry):
@@ -77,8 +77,8 @@ class TestKindExpansion:
 
     def test_equivalence_bidirectional(self, registry):
         dev_expanded = registry.expand_kind("dev:issue")
-        pm_expanded = registry.expand_kind("pm:task")
-        assert "pm:task" in dev_expanded
+        pm_expanded = registry.expand_kind("pm:issue")
+        assert "pm:issue" in dev_expanded
         assert "dev:issue" in pm_expanded
 
     def test_unknown_kind_returns_self(self, registry):
@@ -135,7 +135,7 @@ class TestEquivalenceValidation:
             "ontology": {
                 "extends": "core",
                 "objectKinds": ["issue"],
-                "equivalentTo": {"issue": ["pm:task"]},
+                "equivalentTo": {"issue": ["pm:issue"]},
             }
         })
         assert not errors
@@ -159,7 +159,7 @@ class TestEquivalenceValidation:
             "ontology": {
                 "extends": "core",
                 "objectKinds": ["epic"],
-                "equivalentTo": {"issue": ["pm:task"]},  # issue not declared
+                "equivalentTo": {"issue": ["pm:issue"]},  # issue not declared
             }
         })
         assert errors
