@@ -199,6 +199,118 @@ def test_tortoise_traverse_diamond():
     print("✓ tortoise_traverse diamond (dedup)")
 
 
+def test_parse_node_prefers_public_id_over_internal():
+    """Regression: #44 — _parse_node must return the public id property,
+    not the internal FalkorDB numeric node ID.
+
+    Internal id(n) = 2189, public id property = 01KXR94MK1B3FEF2ASKF279KST.
+    Downstream tools fail when the internal ID leaks (they query by public id).
+    """
+    from tortoise.navigation import _parse_node
+
+    # Simulate a real FalkorDB node: properties.id = public ULID, node.id = internal numeric
+    public_id = "01KXR94MK1B3FEF2ASKF279KST"
+    internal_id = 2189
+
+    class FakeFalkorNode:
+        def __init__(self):
+            self.id = internal_id
+            self.labels = ["Point"]
+            self.properties = {
+                "id": public_id,
+                "content": "some claim",
+                "pointKind": "claim",
+            }
+
+    parsed = _parse_node(FakeFalkorNode())
+    assert parsed["id"] == public_id, (
+        f"Expected public id {public_id}, got {parsed['id']} (internal leak)"
+    )
+    assert parsed["id"] != str(internal_id), (
+        f"Internal ID {internal_id} leaked into parsed id"
+    )
+    assert parsed["content"] == "some claim"
+    assert parsed["type"] == "Point"
+    print("✓ _parse_node prefers public id over internal")
+
+
+def test_tortoise_traverse_returns_public_ids():
+    """Regression: #44 — traverse output must use public ids from properties,
+    never internal FalkorDB node ids.
+    """
+    # Build mock nodes where properties.id differs from the "internal" node.id
+    root = _node("2189", ["Point"], {
+        "id": "01KXR94MK1B3FEF2ASKF279KST",
+        "content": "root point",
+    })
+    a = _node("9999", ["Point"], {
+        "id": "01J0ABC123DEF456789GHIJK",
+        "content": "child a (operator)",
+    })
+    b = _node("9998", ["Point"], {
+        "id": "01J0LMN456OPQ789RSTUVWX",
+        "content": "child b",
+    })
+
+    db = _mock_db({
+        "tortoise": [
+            [[root]],
+            [[a, "IMPL"], [b, "NAND"]],
+            [],  # no further from a
+            [],  # no further from b
+        ],
+    })
+    result = tortoise_traverse(db, "tortoise", "01KXR94MK1B3FEF2ASKF279KST", max_hops=2)
+
+    # Entity must have the public id
+    assert result["entity"]["id"] == "01KXR94MK1B3FEF2ASKF279KST", (
+        f"entity.id leaked internal ID: {result['entity']['id']}"
+    )
+    assert result["entity"]["id"] != "2189"
+
+    # All nodes must have public ids
+    node_ids = {n["node"]["id"] for n in result["nodes"]}
+    expected = {"01J0ABC123DEF456789GHIJK", "01J0LMN456OPQ789RSTUVWX"}
+    assert node_ids == expected, f"node ids: {node_ids}"
+
+    # No numeric internal IDs anywhere
+    all_ids = [result["entity"]["id"]] + [n["node"]["id"] for n in result["nodes"]]
+    for i, rid in enumerate(all_ids):
+        assert not rid.isdigit(), f"Numeric internal ID leak at position {i}: {rid}"
+
+    print("✓ tortoise_traverse returns public IDs only")
+
+
+def test_entity_profile_returns_public_ids():
+    """Regression: #44 — entityProfile must also use public ids."""
+    root = _node("2189", ["Point"], {
+        "id": "01KXR94MK1B3FEF2ASKF279KST",
+        "content": "root point",
+    })
+    child = _node("9999", ["Point"], {
+        "id": "01J0ABC123DEF456789GHIJK",
+        "content": "connected point",
+        "confidence": 0.8,
+    })
+
+    db = _mock_db({
+        "tortoise": [
+            [[root]],
+            [[child, "IMPL"]],
+        ],
+    })
+    result = entityProfile(db, "tortoise", "01KXR94MK1B3FEF2ASKF279KST", hops=1)
+
+    assert result["entity"]["id"] == "01KXR94MK1B3FEF2ASKF279KST", (
+        f"entity.id leaked: {result['entity']['id']}"
+    )
+    assert result["connected"]["points"][0]["id"] == "01J0ABC123DEF456789GHIJK", (
+        f"connected point id leaked: {result['connected']['points'][0]['id']}"
+    )
+
+    print("✓ entityProfile returns public IDs only")
+
+
 # ── Entity-anchored dispatch tests ────────────────────
 
 def test_entity_anchored_cypher_injection():
@@ -250,6 +362,9 @@ if __name__ == "__main__":
         test_entity_profile_categorize_types,
         test_tortoise_traverse_basic,
         test_tortoise_traverse_diamond,
+        test_parse_node_prefers_public_id_over_internal,
+        test_tortoise_traverse_returns_public_ids,
+        test_entity_profile_returns_public_ids,
         test_entity_anchored_cypher_injection,
         test_cross_ontology_query_with_entity_id,
         test_cross_ontology_query_no_entity_id,
