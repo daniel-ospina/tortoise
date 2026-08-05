@@ -144,3 +144,65 @@ epic → dev:epic
 useCase → product-strategy:useCase
 ...
 ```
+
+
+---
+
+## §5. Four-Ontology Model (Refined)
+
+Each layer answers a different question. The Procedural layer (Action) is dissolved.
+
+| Layer | Question | Entity | Notes |
+|-------|----------|--------|-------|
+| **Semantic** | Who/what exists? | Subject, Object, Document, Source | Nouns. Standing structural relations (owns, memberOf) via plain edges. |
+| **Epistemic** | What do we believe and why? | Point, Operator (IMPL/NAND + label + EP confidence) | Operators ONLY here: Event→Point (outcome), Point→Point (belief). |
+| **Episodic** | What happened when? | Event | Verbs. Reified middle node: (Subject)-[performs]->(Event)-[produces]->(Object). Append-only, timestamped. |
+| ~~Procedural~~ | ~~Current state of work~~ | ~~Action~~ | **Dissolved.** Verb → Event. Artifact → Object. Status → projection of event stream. |
+
+### Structural vs Epistemic Edges
+
+| Edge | Type | Confidence | Example |
+|------|------|-----------|---------|
+| performs / produces / owns / memberOf | **Structural** (plain) | None (factual) | (User)-[performs]->(Event), (User)-[owns]->(Doc) |
+| Event→Point, Point→Point | **Epistemic** (operator) | EP confidence | (Event:deployFailed)-[NAND]->(Point:"deploy succeeded") |
+
+**Principle:** Operators connect only epistemic targets (Event→Point, Point→Point). Subjects connect via plain structural edges. Evaluations of subjects (expertise, reliability) are Statements (Points) with EP confidence — not edges. Reputation is derived at query time.
+
+### Facts = Confidence 1.0
+
+Structural edges are facts — we are certain they occurred. No operator needed. Confidence lives on epistemic operators (Event→Point outcome influence).
+
+### Event Model
+
+```
+(Subject)-[:performs]->(Event)-[:produces]->(Object)
+                     (Event)-[:uses]->(Object)          ← input
+                     (Event)-[op: IMPL/NAND]->(Point)   ← outcome influence
+```
+
+- `performs`: subject → event (actor)
+- `produces`: event → object (output artifact)
+- `uses`: event → object (input consumed)  *(NEW — PROV-O provenance consensus)*
+- Object→Object `wasDerivedFrom` *(NEW — entity derivation, distinct from Source provenance)*
+- Event→Point operators: the event's outcome influences belief confidence
+- Event sequencing edge (Graphiti NextEpisode equivalent) *(planned)*
+
+### Epistemic Recency Modulation *(NEW)*
+
+Evidence aging is **user-configurable with a light default** — NOT blunt time decay. Old evidence is often still true ("sky is blue", 2010). Recency adds nuance:
+- Stable facts stay strong regardless of age
+- Changeable-domain evidence is gently modulated by recency
+- Interacts with sourceKind/credibility tier (T0 direct observation ages differently than T4 speculation)
+- Never auto-deprecates old evidence
+
+### Reputation *(NEW — derived, not stored)*
+
+`compute_reputation(subject_id)` is a query-time primitive:
+```
+subject -[:performs]-> events → outcome operators (Event→Point IMPL/NAND)
+  → aggregate success/failure, optionally weighted by recency
+  → return reputation score
+```
+- Not stored (would go stale)
+- Bridges procedural history to epistemic belief: "how much weight should this agent's claim carry?"
+- Validated by Honcho Dialectic traceability + trust-model consensus (TRAVOS/FIRE/Regret)
