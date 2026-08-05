@@ -143,7 +143,7 @@ def main():
                 "evidence"
             )
             try:
-                p = sdk.create_point(kind, content, context=ctx)
+                p = sdk.create_point(kind, content, context=ctx, dedup=True)
                 all_points[pid] = p["id"]
                 print(f"  ✓ {pid} → {p['id']}")
             except Exception as e:
@@ -156,6 +156,9 @@ def main():
             return name
 
         # ── Regular edges (IMPL/NAND from criteria/findings → options) ──
+        # Track created operators so relevance_edges can reuse them instead of
+        # creating duplicates (same src/op_type/tgt in both sections).
+        created_ops: dict[tuple[str, str, str], str] = {}
         for edge in edges:
             if isinstance(edge, list):
                 src, op_type, tgt = edge[0], edge[1], edge[2]
@@ -170,8 +173,9 @@ def main():
                 continue
 
             try:
-                sdk.create_operator(op_type, _resolve(src), [_resolve(tgt)],
-                                    context=ctx, label=label)
+                op = sdk.create_operator(op_type, _resolve(src), [_resolve(tgt)],
+                                         context=ctx, label=label)
+                created_ops[(src, op_type, tgt)] = op["id"]
                 print(f"  ✓ {src} --{op_type}--> {tgt}")
             except Exception as e:
                 print(f"  ⚠ {src} --{op_type}--> {tgt}: {e}")
@@ -197,8 +201,12 @@ def main():
             # Clamp to valid mitigation range [0.10, 0.50]
             strength = max(0.10, min(0.50, strength))
             try:
-                op = sdk.create_operator(op_type, _resolve(src), [_resolve(tgt)], context=ctx)
-                op_id = op["id"]
+                # Reuse the operator if this edge was already created in `edges`
+                # (prevents duplicate operators feeding EP twice).
+                op_id = created_ops.get((src, op_type, tgt))
+                if op_id is None:
+                    op = sdk.create_operator(op_type, _resolve(src), [_resolve(tgt)], context=ctx)
+                    op_id = op["id"]
                 sdk.mitigate_operator(op_id, reason, strength)
                 print(f"  ⚖ relevance: {src} --{op_type}--> {tgt} "
                       f"(mitigated {strength:.2f}: {reason})")

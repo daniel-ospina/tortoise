@@ -1388,23 +1388,34 @@ def _cmd_decide(args) -> int:
     from tortoise.sdk import TortoiseSDK
     from tortoise.projection import FalkorProjection
 
-    input_path = Path(args.input)
-    if not input_path.exists():
-        print(f"Input file not found: {args.input}", file=_sys.stderr)
-        return 1
-
-    raw = input_path.read_text(encoding="utf-8")
-
-    # Parse JSON or YAML
-    if input_path.suffix in (".yaml", ".yml"):
-        try:
-            import yaml
-        except ImportError:
-            print("Error: PyYAML is required for YAML input. Run: pip install PyYAML", file=_sys.stderr)
+    # Two modes: --input <file> or inline (--options/--criteria/--findings/--edges)
+    if args.input:
+        input_path = Path(args.input)
+        if not input_path.exists():
+            print(f"Input file not found: {args.input}", file=_sys.stderr)
             return 1
-        data = yaml.safe_load(raw)
+        raw = input_path.read_text(encoding="utf-8")
+        # Parse JSON or YAML
+        if input_path.suffix in (".yaml", ".yml"):
+            try:
+                import yaml
+            except ImportError:
+                print("Error: PyYAML is required for YAML input. Run: pip install PyYAML", file=_sys.stderr)
+                return 1
+            data = yaml.safe_load(raw)
+        else:
+            data = _json.loads(raw)
     else:
-        data = _json.loads(raw)
+        # Inline mode
+        data: dict = {"context": args.context or "decide"}
+        if args.options:
+            data["options"] = _json.loads(args.options)
+        if args.criteria:
+            data["criteria"] = _json.loads(args.criteria)
+        if args.findings:
+            data["findings"] = _json.loads(args.findings)
+        if args.edges:
+            data["edges"] = _json.loads(args.edges)
 
     ctx = data.get("context", "decide")
     options = data.get("options", {})
@@ -1415,11 +1426,11 @@ def _cmd_decide(args) -> int:
     relevance_edges = data.get("relevance_edges", [])
 
     if not options:
-        print("Error: at least one option required", file=_sys.stderr)
+        print("Error: at least one option required (--input file with 'options' or --options JSON)", file=_sys.stderr)
         return 1
 
     import os as _os
-    uri = _os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise")
+    uri = getattr(args, "db", None) or _os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise")
     sdk = TortoiseSDK()
     sdk._proj = FalkorProjection.from_uri(uri)
 
@@ -1433,7 +1444,7 @@ def _cmd_decide(args) -> int:
                 "evidence"
             )
             try:
-                p = sdk.create_point(kind, content, context=ctx)
+                p = sdk.create_point(kind, content, context=ctx, dedup=True)
                 all_points[pid] = p["id"]
                 print(f"  ✓ {pid} → {p['id']}")
             except Exception as e:
@@ -1448,6 +1459,9 @@ def _cmd_decide(args) -> int:
             return name
 
         # ── Create regular edges (IMPL/NAND) ──
+        # Track created operators so relevance_edges can reuse them instead of
+        # creating duplicates (same src/op_type/tgt in both sections).
+        created_ops: dict[tuple[str, str, str], str] = {}
         for edge in edges:
             if isinstance(edge, list):
                 # Tuple format: [source, op_type, target]
@@ -1463,7 +1477,8 @@ def _cmd_decide(args) -> int:
                 continue
 
             try:
-                sdk.create_operator(op_type, _resolve(src), [_resolve(tgt)], context=ctx, label=label)
+                op = sdk.create_operator(op_type, _resolve(src), [_resolve(tgt)], context=ctx, label=label)
+                created_ops[(src, op_type, tgt)] = op["id"]
                 print(f"  ✓ {src} --{op_type}--> {tgt}")
             except Exception as e:
                 print(f"  ⚠ {src} --{op_type}--> {tgt}: {e}")
@@ -1489,8 +1504,12 @@ def _cmd_decide(args) -> int:
             # Clamp to valid mitigation range
             strength = max(0.10, min(0.50, strength))
             try:
-                op = sdk.create_operator(op_type, _resolve(src), [_resolve(tgt)], context=ctx)
-                op_id = op["id"]
+                # Reuse the operator if already created in `edges` (prevents
+                # duplicate operators feeding EP twice).
+                op_id = created_ops.get((src, op_type, tgt))
+                if op_id is None:
+                    op = sdk.create_operator(op_type, _resolve(src), [_resolve(tgt)], context=ctx)
+                    op_id = op["id"]
                 sdk.mitigate_operator(op_id, reason, strength)
                 print(f"  ⚖ relevance: {src} --{op_type}--> {tgt} (mitigated {strength:.2f}: {reason})")
             except Exception as e:
@@ -1598,7 +1617,13 @@ def main(argv: list[str] | None = None) -> int:
     lc = sp.add_parser("list-contexts", help="List all graph contexts with point counts, sorted DESC")
     # tortoise decide --input <json|yaml>
     dc = sp.add_parser("decide", help="Compare options via EP belief propagation")
-    dc.add_argument("--input", "-i", required=True, help="Path to JSON or YAML input file with options/criteria/findings/edges")
+    dc.add_argument("--input", "-i", help="Path to JSON or YAML input file with options/criteria/findings/edges")
+    dc.add_argument("--options", help="JSON dict of options, e.g. '{\"opt:a\": \"desc\"}'")
+    dc.add_argument("--criteria", help="JSON dict of criteria")
+    dc.add_argument("--findings", help="JSON dict of findings")
+    dc.add_argument("--edges", help="JSON list of edges, e.g. '[\"crit:1\", \"IMPL\", \"opt:a\"]' or full edge dicts")
+    dc.add_argument("--context", help="Graph context namespace (default: 'decide')")
+    dc.add_argument("--db", help="FalkorDB URI override (default: TORTOISE_DB_URI or docker://:@localhost:16379/tortoise)")
     try:
         args = p.parse_args(argv)
     except (argparse.ArgumentError, SystemExit) as e:
