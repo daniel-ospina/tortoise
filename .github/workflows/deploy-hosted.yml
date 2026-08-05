@@ -18,34 +18,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: superfly/flyctl-actions/setup-flyctl@master
-      - name: Get Fly org
-        id: fly-org
-        run: |
-          # Debug: show orgs output format
-          flyctl orgs list --json || true
-          ORG=$(flyctl orgs list --json 2>/dev/null | python3 -c "
-import sys, json
-try:
-    data = json.load(sys.stdin)
-    if isinstance(data, list) and data:
-        print(data[0].get('slug', data[0].get('id', '')))
-    elif isinstance(data, dict):
-        orgs = data.get('data', data.get('orgs', []))
-        if orgs:
-            print(orgs[0].get('slug', orgs[0].get('id', '')))
-except Exception as e:
-    print('', file=sys.stderr)
-" || true)
-          echo "org=$ORG" >> $GITHUB_OUTPUT
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
       - name: Create app if missing
-        run: |
-          if [ -n "${{ steps.fly-org.outputs.org }}" ]; then
-            flyctl apps create tortoise-api --org ${{ steps.fly-org.outputs.org }} || echo "app exists"
-          else
-            flyctl apps create tortoise-api || echo "app exists or org needed"
-          fi
+        run: flyctl apps create tortoise-api --org premise-labs || echo "app exists"
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
       - run: flyctl deploy --remote-only --app tortoise-api
