@@ -26,7 +26,7 @@ primary_region = "iad"
   [[services.http_checks]]
     interval = "15s"
     timeout = "15s"
-    grace_period = "60s"
+    grace_period = "120s"
     method = "get"
     path = "/health"
 
@@ -35,6 +35,10 @@ primary_region = "iad"
   cpus = 1
   memory_mb = 256
 
+[[mounts]]
+  source = "tortoise_api_data"
+  destination = "/data"
+
 [env]
   TORTOISE_DB_URI = ""  # Empty = embedded redislite mode (no external FalkorDB needed)
   FASTAPI_INTERNAL_KEY = ""  # Set via fly secrets
@@ -42,4 +46,4 @@ primary_region = "iad"
 [deploy]
   wait_timeout = "5m"
   strategy = "immediate"
-  release_command = "python -c 'from tortoise.sdk import TortoiseSDK; sdk = TortoiseSDK(namespace=\"registry\"); print(\"registry OK\")'"
+  release_command = "python -c 'from tortoise.hosted_api import _make_sdk; s = _make_sdk(namespace=\"registry\"); s._get_proj(); print(\"registry OK\")'"
