@@ -99,15 +99,16 @@ class _PropagationMixin:
         return r[0][0] if r else None
 
     def _neighbors(self, node_id: str) -> list[str]:
-        """All Points reachable via IMPL or NAND edges (both directions)."""
+        """All Points reachable via IMPL or NAND edges (both directions).
+
+        Hops through operator nodes: (claim)-[r]-(op:Point {is_operator:true})-[r2]-(other).
+        A point's neighbors are the other endpoints of any operator it participates in,
+        regardless of source/target role — this is what makes EP affected-set expansion
+        work for directional IMPL and bidirectional hasPart/NAND alike (#86).
+        """
         rows = self.g.query(
-            "MATCH (n:Point {id:$id})-[r:IMPL]-(m:Point {status: 'live'}) RETURN DISTINCT m.id",
+            "MATCH (n:Point {id:$id})-[r]-(op:Point {is_operator:true})-[r2]-(m:Point) "
+            "WHERE m.id <> $id RETURN DISTINCT m.id",
             params={"id": node_id},
         ).result_set
-        neighbors = {r[0] for r in rows}
-        rows = self.g.query(
-            "MATCH (n:Point {id:$id})-[r:NAND]-(m:Point {status: 'live'}) RETURN DISTINCT m.id",
-            params={"id": node_id},
-        ).result_set
-        neighbors.update(r[0] for r in rows)
-        return list(neighbors)
+        return [r[0] for r in rows]

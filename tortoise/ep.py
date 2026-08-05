@@ -165,12 +165,33 @@ class TortoiseEP:
 
     # ── Single-factor EP update ───────────────────────────────────
 
+    def _is_strong(self, claim_id: str, threshold: float = 0.85) -> bool:
+        """True if the claim's current belief is at/above the given threshold.
+
+        Used for hasPart back-message semantics: a part that is still strong
+        (>= threshold) keeps the whole's support; a weakened part triggers a
+        reduction signal to the whole (#86).
+        """
+        if hasattr(self, "_node_cache") and claim_id in self._node_cache:
+            a, b = self._node_cache[claim_id]
+            mean = a / (a + b) if (a + b) > 0 else 0.5
+            return mean >= threshold
+        rows = self.g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.ep_alpha, n.ep_beta",
+            params={"id": claim_id},
+        ).result_set
+        if not rows or rows[0][0] is None:
+            return False
+        a, b = float(rows[0][0]), float(rows[0][1])
+        return a / (a + b) >= threshold
+
     def _update_factor(self, op_id: str, op_type: str,
-                       input_ids: list[str], weight: float = 1.0) -> None:
+                       input_ids: list[str], weight: float = 1.0,
+                       label: str | None = None) -> None:
         if len(input_ids) < 2:
             return
         if len(input_ids) > 2:
-            return self._update_nary_factor(op_id, op_type, input_ids, weight)
+            return self._update_nary_factor(op_id, op_type, input_ids, weight, label)
 
         id_a, id_b = input_ids
 
@@ -191,6 +212,28 @@ class TortoiseEP:
 
         raw_eta_a = (new_eta_a[0] - cav_eta_a[0], new_eta_a[1] - cav_eta_a[1])
         raw_eta_b = (new_eta_b[0] - cav_eta_b[0], new_eta_b[1] - cav_eta_b[1])
+
+        # Determine if this operator is bidirectional.
+        # - NAND is always bidirectional (mutual contradiction).
+        # - IMPL with hasPart/partOf label is bidirectional (composition hierarchies).
+        # - IMPL with addresses/supports or no label is directional (source→target only).
+        bidirectional = op_type == "NAND" or (
+            op_type == "IMPL" and label in ("hasPart", "partOf")
+        )
+
+        # For bidirectional hasPart IMPL, the back-message to the source must
+        # carry the TARGET's state as a reduction signal — if the part is
+        # weakened (by NAND or low evidence), the whole must be pulled DOWN,
+        # not given a weak positive agreement push. Recompute the back-message
+        # with NAND-style coupling (contradiction) when the target is below its
+        # cavity prior, so composition hierarchies propagate damage upward (#86).
+        if (op_type == "IMPL" and bidirectional and not self._is_strong(id_b)):
+            mom_bk, _ = tilted_moments(
+                alpha_a, beta_a, alpha_b, beta_b, weight, phi_nand, self.n_quad
+            )
+            new_a_bk, new_b_bk = moments_to_beta(*mom_bk)
+            new_eta_a = self._natural_from_beta(new_a_bk, new_b_bk)
+            raw_eta_a = (new_eta_a[0] - cav_eta_a[0], new_eta_a[1] - cav_eta_a[1])
 
         # Proportional boost: breaks EP fixed-point symmetry that forces
         # messages to near-zero for unevidenced targets. Fades as evidence
@@ -217,13 +260,12 @@ class TortoiseEP:
                     max(min(damped_b[1], 1000), -1000))
 
         self._write_message(op_id, id_b, *damped_b, op_type)
-        # NAND is bidirectional (mutual contradiction). IMPL is directional
-        # (source→target only) — back-message only for NAND.
-        if op_type == "NAND":
+        if bidirectional:
             self._write_message(op_id, id_a, *damped_a, op_type)
 
     def _update_nary_factor(self, op_id: str, op_type: str,
-                            input_ids: list[str], weight: float = 1.0) -> None:
+                            input_ids: list[str], weight: float = 1.0,
+                            label: str | None = None) -> None:
         # input_ids are sorted by idx (source=0, targets=1..N).
         # For IMPL: only create source→target pairs (skip target↔target).
         # For NAND: create all pairwise combinations (full mutual contradiction).
@@ -231,12 +273,12 @@ class TortoiseEP:
             # Source is input_ids[0] (idx=0). Targets are input_ids[1:].
             for j in range(1, len(input_ids)):
                 self._update_factor(op_id, op_type,
-                                    [input_ids[0], input_ids[j]], weight)
+                                    [input_ids[0], input_ids[j]], weight, label)
         else:
             for i in range(len(input_ids)):
                 for j in range(i + 1, len(input_ids)):
                     self._update_factor(op_id, op_type,
-                                        [input_ids[i], input_ids[j]], weight)
+                                        [input_ids[i], input_ids[j]], weight, label)
 
     def _update_claim_posterior(self, claim_id: str) -> None:
         # Start from evidence prior in natural parameter space
@@ -298,10 +340,10 @@ class TortoiseEP:
             for rel in ("IMPL", "NAND"):
                 rows = self.g.query(
                     f"MATCH (o:Point)-[r:{rel}]->(c:Point {{id:$cid}}) "
-                    "RETURN o.id, o.op_type",
+                    "RETURN o.id, o.op_type, o.label",
                     params={"cid": claim_id},
                 ).result_set
-                for op_id, op_type in rows:
+                for op_id, op_type, label in rows:
                     if op_id not in seen:
                         seen.add(op_id)
                         # ORDER BY r.idx ensures source (idx=0) comes first.
@@ -316,7 +358,7 @@ class TortoiseEP:
                         input_ids = [r[0] for r in input_rows]
                         from .weights import compute_operator_weight
                         weight = compute_operator_weight(self.proj, op_id)
-                        factors.append((op_id, op_type, input_ids, weight))
+                        factors.append((op_id, op_type, input_ids, weight, label))
         return factors
 
     # ── Calibration ──────────────────────────────────────────────
@@ -411,8 +453,8 @@ class TortoiseEP:
                     for cid in affected}
 
             random.shuffle(factors)
-            for op_id, op_type, input_ids, weight in factors:
-                self._update_factor(op_id, op_type, input_ids, weight)
+            for op_id, op_type, input_ids, weight, label in factors:
+                self._update_factor(op_id, op_type, input_ids, weight, label)
 
             for cid in affected:
                 self._update_claim_posterior(cid)
