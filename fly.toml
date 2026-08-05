@@ -1,7 +1,7 @@
 # Tortoise Hosted API — Fly.io configuration
 # See: docs/epics/2026-08-03-tortoise-hosted-platform/04-plan.md §5
 
-app = "tortoise-api"
+app = "tortoise-y4mjjq"
 primary_region = "iad"
 
 [build]
