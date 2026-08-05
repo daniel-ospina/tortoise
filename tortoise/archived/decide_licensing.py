@@ -1,4 +1,18 @@
-"""File the licensing decision comparison to the Tortoise graph.
+"""ARCHIVED — 2026-08-05. Replaced by the generic `tortoise decide` tool.
+
+Why archived: this was a one-off data-filing script written before the
+generic decision-comparison command (`tortoise decide`, #43/#81) existed.
+Its content (licensing decision) is now a graph artifact in context
+'licensing-decision-compare' (restored 2026-08-05 after the data-loss
+incident). Bespoke scripts that re-write domain content into the graph
+are a backup-in-code smell — the graph is the source of truth, and the
+generic decide tool handles the criteria->options->findings->EP workflow.
+
+The licensing decision has been re-filed to the restored graph via this
+script's final run (2026-08-05): 71 points, AGPLv3-dual leads at 0.906.
+Do not re-run this script to create duplicates; use `tortoise decide`.
+
+File the licensing decision comparison to the Tortoise graph.
 
 Compares the three license options recorded in graph research:
   1. AGPLv3 + commercial dual-licensing path (DEC-002, current)
