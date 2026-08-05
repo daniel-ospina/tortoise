@@ -31,7 +31,7 @@ class _EntityHandlers:
             "    n.pointKind=coalesce($pk, n.pointKind), "
             "    n.status=coalesce($st, n.status, 'live'), "
             "    n.authoredBy=coalesce($ab, n.authoredBy), "
-            "    n.embedding=coalesce($embedding, n.embedding), "
+            "    n.embedding=CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE n.embedding END, "
 
             "    n.confidence=coalesce($cf, n.confidence), "
             "    n.createdAt=coalesce($ca, n.createdAt, $now), "
@@ -91,9 +91,9 @@ class _EntityHandlers:
         self.g.query(
             "MERGE (s:Subject {name:$name}) "
             "ON CREATE SET s.id=$id, s.subjectKind=$sk, s.createdAt=coalesce($ca, $now), "
-            "            s.embedding=coalesce($embedding, s.embedding) "
+            "            s.embedding=CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE s.embedding END "
             "ON MATCH SET s.subjectKind=coalesce($sk, s.subjectKind), "
-            "            s.embedding=coalesce($embedding, s.embedding)",
+            "            s.embedding=CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE s.embedding END",
             params={"id": sid, "name": name,
                     "sk": ev.get("subject_kind", "other"),
                     "ca": ev.get("createdAt"), "now": _now_iso(),
@@ -123,10 +123,10 @@ class _EntityHandlers:
         self.g.query(
             "MERGE (o:Object {name:$name}) "
             "ON CREATE SET o.id=$id, o.objectKind=coalesce($ok, 'other'), o.createdAt=coalesce($ca, $now), o.title=coalesce($title, ''), "
-            "            o.embedding=coalesce($embedding, o.embedding) "
+            "            o.embedding=CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE o.embedding END "
             "ON MATCH SET o.objectKind=coalesce($ok, o.objectKind), "
             "            o.title=coalesce($title, o.title), "
-            "            o.embedding=coalesce($embedding, o.embedding)",
+            "            o.embedding=CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE o.embedding END",
             params={"id": oid, "name": name,
                     "ok": ok,
                     "ca": ev.get("createdAt"), "now": _now_iso(),
@@ -157,7 +157,7 @@ class _EntityHandlers:
             "    d.documentKind=coalesce($dk, d.documentKind), "
             "    d.format=coalesce($fmt, d.format), "
             "    d.content=coalesce($content, d.content), "
-            "    d.embedding=coalesce($embedding, d.embedding), "
+            "    d.embedding=CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE d.embedding END, "
             "    d.updatedAt=$now",
             params={"id": did, "title": ev.get("title", did),
                     "dk": ev.get("document_kind", ""),

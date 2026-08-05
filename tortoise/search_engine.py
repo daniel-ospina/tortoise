@@ -161,9 +161,9 @@ def run_vector_query(
         try:
             start = time.monotonic()
             cypher = (
-                f"CALL db.idx.vector.queryNodes('{label}', 'embedding', $query_vec, $limit) "
-                "YIELD node "
-                f"RETURN node.{id_field} "
+                f"CALL db.idx.vector.queryNodes('{label}', 'embedding', $limit, vecf32($query_vec)) "
+                "YIELD node, score "
+                f"RETURN node.{id_field}, score "
                 "LIMIT $limit"
             )
             rows = graph.query(
@@ -173,8 +173,8 @@ def run_vector_query(
             if elapsed > timeout_ms:
                 logger.warning("Vector query exceeded timeout: %.0fms > %dms", elapsed, timeout_ms)
                 return []
-            total = len(rows)
-            return [(row[0], 1.0 - (i / max(total, 1))) for i, row in enumerate(rows)]
+            # queryNodes returns (node.id, score) — score is already similarity
+            return [(row[0], float(row[1])) for row in rows]
         except Exception as e:
             msg = str(e).lower()
             if "index" in msg or "not found" in msg or "does not exist" in msg:
