@@ -49,7 +49,7 @@ def require_auth(headers: dict | None = None) -> bool:
     auth = headers.get("authorization", "")
     if auth.startswith("Bearer "):
         token = auth[7:]
-        return token == api_key
+        return _hmac.compare_digest(token, api_key)
 
     return False
 
