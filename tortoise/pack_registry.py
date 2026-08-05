@@ -594,6 +594,22 @@ class PackRegistry:
                     if full_kind not in expansions[target]:
                         expansions[target].append(full_kind)
 
+        # Bare-kind resolution: a bare kind name (e.g., "useCase") maps to
+        # [self] + all pack-prefixed forms (e.g., "product-strategy:useCase").
+        # Handles migrated data where points may store either form.
+        bare_to_full: dict[str, list[str]] = {}
+        for full in expansions:
+            if ":" in full:
+                _ns, _kind = full.split(":", 1)
+                bare_to_full.setdefault(_kind, []).append(full)
+        for bare, fulls in bare_to_full.items():
+            if bare in expansions:
+                for f in fulls:
+                    if f not in expansions[bare]:
+                        expansions[bare].append(f)
+            else:
+                expansions[bare] = fulls
+
         self._kind_expansions = expansions
 
     def list_tools(self) -> list[dict]:

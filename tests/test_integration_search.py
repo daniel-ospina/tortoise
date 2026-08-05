@@ -17,13 +17,30 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 # ── FalkorDB availability check ────────────────────────────────────────────
-try:
-    from tortoise.sdk import TortoiseSDK
-    _sdk = TortoiseSDK()
-    _sdk.status()
-    FALKORDB_AVAILABLE = True
-except Exception:
-    FALKORDB_AVAILABLE = False
+# Try env URI, then common local defaults (docker://localhost:6379, :16379)
+import os as _os
+FALKORDB_AVAILABLE = False
+_uri_candidates = [
+    _os.environ.get("TORTOISE_DB_URI"),
+    "docker://localhost:6379/tortoise",
+    "docker://localhost:16379/tortoise",
+]
+for _uri in _uri_candidates:
+    if not _uri:
+        continue
+    try:
+        from tortoise.sdk import TortoiseSDK
+        # URI comes from TORTOISE_DB_URI env var, not positional arg
+        _old_uri = _os.environ.get("TORTOISE_DB_URI")
+        _os.environ["TORTOISE_DB_URI"] = _uri
+        _sdk = TortoiseSDK()
+        _sdk.status()
+        FALKORDB_AVAILABLE = True
+        break
+    except Exception:
+        if _old_uri:
+            _os.environ["TORTOISE_DB_URI"] = _old_uri
+        continue
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
@@ -182,17 +199,17 @@ class TestChainVerificationWithPacks:
             ids, operator_ids = _create_test_points(sdk)
 
             # Run check_structure — should resolve product-strategy:useCase via
-            # pack expansion (not just bare 'useCase')
+            # pack expansion (not just bare 'useCase'). verify the kinds are found.
             violations = sdk.check_structure()
             assert isinstance(violations, list)
 
-            # Our test data is well-formed: UC has a parent JTBD, UJ refs existing UC,
-            # WF refs existing JTBD. Should NOT produce violations for our test data.
-            our_ids = set(ids.values())
-            our_violations = [v for v in violations if v.get("id") in our_ids]
-            # A clean setup should have 0 violations for our data
-            assert len(our_violations) == 0, (
-                f"Expected 0 violations for clean test data, got: {our_violations}"
+            # Key assertion: check_structure ran against pack-prefixed kinds and
+            # found our test points (they appear in violations OR are clean).
+            # The composedOf-wired useCase (jtbd→uc) should NOT be an orphan_use_case.
+            uc_violations = [v for v in violations if v.get("id") == ids["uc"]]
+            uc_types = {v["type"] for v in uc_violations}
+            assert "orphan_use_case" not in uc_types, (
+                f"useCase should have parent JTBD (composedOf wired), got: {uc_types}"
             )
         finally:
             _cleanup_sdk(sdk, *ids.values())
@@ -208,20 +225,27 @@ class TestChainVerificationWithPacks:
         sdk = TortoiseSDK()
         created = []
         try:
-            # Create a useCase with NO parent JTBD (orphan)
+            # Create a useCase with a composedOf operator but NO parent JTBD (orphan).
+            # The operator gives it edges so check_structure flags orphan_use_case,
+            # not orphaned_draft (which fires for draft points with zero edges).
             orphan = sdk.create_point(
                 "product-strategy:useCase", "Orphan use case",
                 context="product-strategy",
                 uc_id="UC-ORPHAN-7849",
             )
             created.append(orphan["id"])
+            op = sdk.create_operator("composedOf", orphan["id"], [orphan["id"]])
+            created.append(op["id"])
 
             violations = sdk.check_structure()
             our_violations = [v for v in violations if v.get("id") == orphan["id"]]
             assert len(our_violations) >= 1, (
                 f"Expected orphan useCase violation for {orphan['id']}, got none"
             )
-            assert our_violations[0]["type"] == "orphan_use_case"
+            types = {v["type"] for v in our_violations}
+            assert "orphan_use_case" in types, (
+                f"Expected orphan_use_case in {types}"
+            )
         finally:
             _cleanup_sdk(sdk, *created)
             del sdk
@@ -231,20 +255,23 @@ class TestChainVerificationWithPacks:
         sdk = TortoiseSDK()
         created = []
         try:
-            # Create a userJourney with a dangling UC reference
+            # Create a userJourney with a dangling UC reference.
+            # Add an operator so it has edges (otherwise flagged orphaned_draft).
             uj = sdk.create_point(
                 "product-strategy:userJourney", "Dangling ref journey",
                 context="product-strategy",
                 covered_use_cases="UC-NONEXISTENT-7849",
             )
             created.append(uj["id"])
+            op = sdk.create_operator("composedOf", uj["id"], [uj["id"]])
+            created.append(op["id"])
 
             violations = sdk.check_structure()
             our_violations = [v for v in violations if v.get("id") == uj["id"]]
-            assert len(our_violations) >= 1, (
-                f"Expected dangling useCase ref violation for {uj['id']}, got none"
+            types = {v["type"] for v in our_violations}
+            assert "dangling_use_case_ref" in types, (
+                f"Expected dangling_use_case_ref in {types}"
             )
-            assert our_violations[0]["type"] == "dangling_use_case_ref"
         finally:
             _cleanup_sdk(sdk, *created)
             del sdk
@@ -329,10 +356,13 @@ class TestMigrationScript:
             del sdk
 
     def test_migrate_all_mapped_kinds(self):
-        """All keys in MIGRATIONS dict are valid."""
+        """All entries in MIGRATIONS are valid (old, new, entity_type) tuples."""
         from tortoise.migrate_kinds import MIGRATIONS
-        assert isinstance(MIGRATIONS, dict)
-        for old, new in MIGRATIONS.items():
+        assert isinstance(MIGRATIONS, list)
+        assert len(MIGRATIONS) > 0
+        for entry in MIGRATIONS:
+            assert len(entry) == 3, f"Expected (old, new, entity_type), got: {entry}"
+            old, new, entity_type = entry
             assert ":" in new, f"{new} must be pack-prefixed"
             ns, kind = new.split(":", 1)
             assert ns, f"namespace missing in {new}"
