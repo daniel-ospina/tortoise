@@ -10,6 +10,7 @@ on:
       - 'Dockerfile.hosted'
       - 'requirements.txt'
       - 'pyproject.toml'
+  workflow_dispatch:
 
 jobs:
   deploy:
