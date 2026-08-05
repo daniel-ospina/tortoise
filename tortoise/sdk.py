@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 from typing import Any
 
 from .domain_loader import known_kinds, register_kind
@@ -25,6 +26,18 @@ register_kind("evidence")  # used by file_decision (#133)
 POINT_STATUS_VALUES = frozenset({'live', 'draft', 'outdated', 'archived'})
 
 _logger = logging.getLogger(__name__)
+
+
+# ── ULID validation (Issue #52) ──
+# Canonical format (from tortoise/ids.py): <timestamp-hex>-<uuid12>
+_ULID_RE = re.compile(r"^[0-9a-f]+-[0-9a-f]{12}$")
+# Standard Crockford base32 ULID (26 chars) — recognized as valid
+_CROCKFORD_ULID_RE = re.compile(r"^[0-7][0-9A-HJKMNP-TV-Z]{25}$", re.IGNORECASE)
+
+
+def _is_ulid(s: str) -> bool:
+    """Return True if *s* matches a valid ULID format (canonical or Crockford)."""
+    return bool(_ULID_RE.match(s) or _CROCKFORD_ULID_RE.match(s))
 
 
 def _content_hash(text: str) -> str:
@@ -158,7 +171,19 @@ class TortoiseSDK:
                 return self.get_point(pid)
             props["content_hash"] = ch
 
-        pid = ulid()
+        # Issue #52 — warn when caller passes an explicit non-ULID id
+        explicit_id = props.pop("id", None)
+        if explicit_id is not None:
+            if not _is_ulid(explicit_id):
+                _logger.warning(
+                    "create_point received non-ULID id=%r — canonical format is "
+                    "<timestamp-hex>-<uuid12>. This will override the auto-generated ULID. "
+                    "Prefer omitting 'id' to use auto-generated ULID.",
+                    explicit_id,
+                )
+            pid = explicit_id
+        else:
+            pid = ulid()
         # Points enter as draft, go live when first edge is created (#131)
         status = props.pop("status", "draft")
 
@@ -201,6 +226,55 @@ class TortoiseSDK:
     def create_or_update_point(self, kind: str, content: str, **props) -> dict:
         """Idempotent create/update — matches by content hash."""
         return self.create_point(kind, content, dedup=True, **props)
+
+    # ── Resolution helper (Issue #52) ──
+
+    def resolve_id(self, id_str: str) -> dict | None:
+        """Resolve any Point ID (legacy / numeric / ULID) to the canonical point.
+
+        Returns the Point dict if found, None otherwise.
+
+        Strategy:
+        1. Exact match on Point.id
+        2. If the id looks like a numeric reference, search by content/properties
+           (best-effort — legacy numeric IDs may not have explicit mappings yet)
+
+        Non-destructive — read-only operation.
+
+        Limitations:
+        - For legacy prefix IDs (letta-*, op-*, etc.) with no exact match,
+          there is currently no migration mapping to a canonical ULID.
+          This is a known gap covered by docs/migrations/id-normalization-plan.md.
+        - The resolution is exact-id-first; fuzzy matching is future work.
+        """
+        proj = self._get_proj()
+
+        # 1. Exact match
+        rows = proj.g.query(
+            "MATCH (n:Point {id: $id}) RETURN n.id, n.content, n.pointKind, n.status, n.context",
+            params={"id": id_str},
+        ).result_set
+        if rows:
+            return self.get_point(rows[0][0])
+
+        # 2. If numeric, try finding a point whose properties reference it
+        #    (best-effort — many numeric IDs are native node IDs and would have
+        #     matched in step 1; this handles edge cases like internal refs)
+        if id_str.isdigit():
+            # Search for points whose content or any property contains the numeric ID
+            rows = proj.g.query(
+                "MATCH (n:Point) WHERE n.content CONTAINS $id_str "
+                "RETURN n.id, n.content LIMIT 5",
+                params={"id_str": id_str},
+            ).result_set
+            if rows:
+                _logger.info(
+                    "resolve_id: numeric %r not found as direct id; "
+                    "returning best-match point %r", id_str, rows[0][0]
+                )
+                return self.get_point(rows[0][0])
+
+        return None
 
     def update_point(self, id: str, **props) -> dict:
         """Update properties on an existing Point. Returns updated point dict.
