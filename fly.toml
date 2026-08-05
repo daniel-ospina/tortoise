@@ -35,6 +35,10 @@ primary_region = "iad"
   cpus = 1
   memory_mb = 256
 
+[[mounts]]
+  source = "tortoise_api_data"
+  destination = "/data"
+
 [env]
   TORTOISE_DB_URI = ""  # Empty = embedded redislite mode (no external FalkorDB needed)
   FASTAPI_INTERNAL_KEY = ""  # Set via fly secrets

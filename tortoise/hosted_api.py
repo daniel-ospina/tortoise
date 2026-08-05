@@ -27,6 +27,23 @@ from tortoise.sdk import TortoiseSDK
 
 _logger = logging.getLogger(__name__)
 
+
+def _make_sdk(*, namespace: str | None = None) -> TortoiseSDK:
+    """Build an SDK backed by TORTOISE_DB_URI, or embedded mode when unset.
+
+    Embedded fallback: when no URI is configured (fly.toml default), the SDK
+    previously received no path and FalkorProjection raised
+    "Either path or host must be provided" — every /internal/provision call
+    failed with 500. Using an on-disk redislite DB keeps onboarding functional
+    until a production FalkorDB instance is provisioned (#7722).
+    """
+    if os.environ.get("TORTOISE_DB_URI"):
+        return TortoiseSDK(namespace=namespace)
+    db_path = os.environ.get("TORTOISE_DB_PATH", "/data/tortoise.db")
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    return TortoiseSDK(db_path=db_path, namespace=namespace)
+
+
 app = FastAPI(title="Tortoise Hosted API", version="0.1.0")
 
 app.add_middleware(
@@ -188,7 +205,7 @@ async def provision_tenant(request: Request):
     if not _team_pattern.match(team_name):
         raise HTTPException(status_code=400, detail="Invalid team_name format")
 
-    sdk = TortoiseSDK(namespace="registry")
+    sdk = _make_sdk(namespace="registry")
     now = datetime.now(timezone.utc).isoformat()
     graph_name = f"team_{team_id}"
 
@@ -313,7 +330,7 @@ async def get_current_team(request: Request) -> dict:
     if not token.startswith("tt_"):
         raise HTTPException(status_code=401, detail="Invalid API key format")
     try:
-        sdk = TortoiseSDK(namespace="registry")
+        sdk = _make_sdk(namespace="registry")
         key_result = sdk._get_proj().g.query(
             "MATCH (k:APIKey {key_hash: $hash}) WHERE k.revoked_at IS NULL RETURN k.team_id, k.id",
             params={"hash": hash_api_key(token)},
@@ -399,7 +416,7 @@ class ErrorResponse(BaseModel):
 @app.post("/v1/points", response_model=PointResponse)
 async def create_point(body: CreatePointRequest, request: Request, team: dict = Depends(get_current_team)):
     """Create a Point in the team's graph."""
-    sdk = TortoiseSDK(namespace=team["team_id"])
+    sdk = _make_sdk(namespace=team["team_id"])
     try:
         result = sdk.create_point(
             content=body.content,
@@ -434,7 +451,7 @@ async def list_points(
     team: dict = Depends(get_current_team),
 ):
     """Query Points in the team's graph."""
-    sdk = TortoiseSDK(namespace=team["team_id"])
+    sdk = _make_sdk(namespace=team["team_id"])
     proj = sdk._get_proj()
     conditions = ["(n.is_operator IS NULL OR n.is_operator = false)"]
     params: dict = {"limit": limit}
@@ -458,7 +475,7 @@ async def list_points(
 @app.get("/v1/points/{point_id}")
 async def get_point(point_id: str, team: dict = Depends(get_current_team)):
     """Get a single Point by ID."""
-    sdk = TortoiseSDK(namespace=team["team_id"])
+    sdk = _make_sdk(namespace=team["team_id"])
     proj = sdk._get_proj()
     rows = proj.g.query(
         "MATCH (p:Point {id: $id}) RETURN properties(p)",
@@ -475,7 +492,7 @@ async def get_point(point_id: str, team: dict = Depends(get_current_team)):
 @app.get("/v1/search")
 async def search(q: str, limit: int = Query(10, ge=1, le=100), team: dict = Depends(get_current_team)):
     """Keyword search across Points. Returns ranked results by recency."""
-    sdk = TortoiseSDK(namespace=team["team_id"])
+    sdk = _make_sdk(namespace=team["team_id"])
     proj = sdk._get_proj()
     rows = proj.g.query(
         "MATCH (p:Point) WHERE (p.is_operator IS NULL OR p.is_operator = false) "
@@ -497,7 +514,7 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), team: dict = Depe
 @app.get("/v1/team", response_model=TeamInfoResponse)
 async def team_info(team: dict = Depends(get_current_team)):
     """Get current team info: tier, usage, limits."""
-    sdk = TortoiseSDK(namespace=team["team_id"])
+    sdk = _make_sdk(namespace=team["team_id"])
     # Count Points in default graph
     try:
         point_count = sdk._get_proj().g.query(
@@ -530,7 +547,7 @@ async def create_demo_graph(request: Request):
     if not team_id:
         raise HTTPException(status_code=400, detail="Missing team_id")
 
-    sdk = TortoiseSDK(namespace=team_id)
+    sdk = _make_sdk(namespace=team_id)
     proj = sdk._get_proj()
     now = datetime.now(timezone.utc).isoformat()
 
@@ -700,7 +717,7 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
     """Generate a new API key for the team."""
     import uuid
     from tortoise.auth import hash_api_key
-    sdk = TortoiseSDK(namespace="registry")
+    sdk = _make_sdk(namespace="registry")
     proj = sdk._get_proj()
     api_key = f"tt_{uuid.uuid4().hex}"
     key_hash = hash_api_key(api_key)
@@ -730,7 +747,7 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
 @app.get("/v1/team/keys")
 async def list_api_keys(team: dict = Depends(get_current_team)):
     """List API keys for the team (hashes only — no plaintext)."""
-    sdk = TortoiseSDK(namespace="registry")
+    sdk = _make_sdk(namespace="registry")
     try:
         keys = sdk._get_proj().g.query(
             "MATCH (k:APIKey {team_id: $tid}) "
@@ -768,7 +785,7 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
     import uuid, re
     from datetime import datetime, timezone
 
-    sdk = TortoiseSDK(namespace=team["team_id"])
+    sdk = _make_sdk(namespace=team["team_id"])
     proj = sdk._get_proj()
     session_id = body.session_id or f"session_{uuid.uuid4().hex[:12]}"
     now = datetime.now(timezone.utc).isoformat()
@@ -846,7 +863,7 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
 @app.get("/v1/sessions")
 async def list_sessions(team: dict = Depends(get_current_team)):
     """List captured sessions."""
-    sdk = TortoiseSDK(namespace=team["team_id"])
+    sdk = _make_sdk(namespace=team["team_id"])
     proj = sdk._get_proj()
     rows = proj.g.query(
         "MATCH (s:Session) RETURN s.id, s.created_at, s.turn_count ORDER BY s.created_at DESC LIMIT 50"
