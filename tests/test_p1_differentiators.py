@@ -10,6 +10,9 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# #67: TORTOISE_SECRET_PEPPER is mandatory — set before any tortoise import
+os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
+
 import pytest
 
 from tortoise.sdk import TortoiseSDK

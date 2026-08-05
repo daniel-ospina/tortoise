@@ -307,7 +307,7 @@ async def health_security():
     from tortoise.auth import is_dev_mode as _is_dev
     return {
         "pepper_configured": pepper_set,
-        "hashing": "pbkdf2_hmac_sha256" if pepper_set else "sha256",
+        "hashing": "pbkdf2_hmac_sha256",
         "auth_dev_mode": _is_dev(),
     }
 
@@ -318,16 +318,41 @@ async def health_security():
 
 SKIP_AUTH = {"/health", "/docs", "/openapi.json"}
 
+
+async def _audit_auth_failure(request: Request, reason: str) -> None:
+    """Fire-and-forget audit log for an auth failure (401).
+
+    Offloaded to a thread to avoid blocking the 401 response.
+    """
+    ip = request.client.host if request.client else None
+    try:
+        await asyncio.to_thread(
+            _audit_logger.append,
+            team_id="",
+            actor_user_id=None,
+            operation=f"auth_failure:{reason}",
+            resource_type="api_key",
+            resource_id=None,
+            ip_address=ip,
+            user_agent=request.headers.get("user-agent"),
+        )
+    except Exception:
+        pass  # Audit failure must not affect the auth flow
+
+
 async def get_current_team(request: Request) -> dict:
     if request.url.path in SKIP_AUTH or request.url.path.startswith("/internal"):
         return {"team_id": None, "tier": "free", "key_id": None}
     auth = request.headers.get("Authorization", "")
     if not auth:
+        await _audit_auth_failure(request, "missing_header")
         raise HTTPException(status_code=401, detail="Missing Authorization header")
     if not auth.startswith("Bearer "):
+        await _audit_auth_failure(request, "bad_scheme")
         raise HTTPException(status_code=401, detail="Authorization header must use Bearer scheme")
     token = auth[7:]
     if not token.startswith("tt_"):
+        await _audit_auth_failure(request, "invalid_format")
         raise HTTPException(status_code=401, detail="Invalid API key format")
     try:
         sdk = _make_sdk(namespace="registry")
@@ -336,6 +361,7 @@ async def get_current_team(request: Request) -> dict:
             params={"hash": hash_api_key(token)},
         )
         if not key_result.result_set:
+            await _audit_auth_failure(request, "invalid_key")
             raise HTTPException(status_code=401, detail="Invalid API key")
         team_id, key_id = key_result.result_set[0]
         team = sdk._get_proj().g.query(
