@@ -1,3 +1,12 @@
+---
+title: "Ontology v3.0 — Proposed Changes"
+type: data
+domain: data
+doc_status: draft
+created: 2026-08-03
+subjects.team: organisation-design-team
+---
+
 # Ontology v3.0 — Proposed Changes (#7767)
 
 **Status:** Proposed. Supersedes ONTOLOGY_v2.5.md §1.1 objectKind vocabulary.
@@ -80,11 +89,13 @@ Operator:      (op-123)                                   ← mitigation anchor
 
 ### Semantic Types
 
-| Type | Mechanism | Propagation | Example |
-|------|-----------|------------|---------|
-| hasPart | IMPL | Bidirectional cascade (parts↔whole) | Epic hasPart Issue |
-| addresses | IMPL | Unidirectional (A supports B) | Feature addresses Need |
-| opposes | NAND | Unidirectional (A contradicts B) | Feature competesWith Competitor |
+> **Directionality is two orthogonal axes.** *Epistemic propagation* is fixed by the mechanism: NAND is always symmetric (contradiction propagates both ways — `phi_nand` is symmetric in `(ca, cb)`), IMPL is directional (its direction is declared by the semantic type). *Semantic label direction* is how the domain verb points — declared per relation by the pack; `addresses` is unidirectional, `competesWith` is mutually true.
+
+| Type | Mechanism | Epistemic propagation | Semantic label direction | Example |
+|------|-----------|------------|-------------------------|---------|
+| hasPart | IMPL | Bidirectional cascade (parts↔whole) | bidirectional | Epic hasPart Issue |
+| addresses | IMPL | Unidirectional (A supports B) | unidirectional | Feature addresses Need |
+| opposes | NAND | **Symmetric** (A↔B — contradiction always propagates both ways) | declared by pack (unidirectional `opposes` / bidirectional `competesWith`) | Feature competesWith Competitor |
 
 ### Pack Relation Declarations
 
