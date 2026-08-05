@@ -261,7 +261,7 @@ class TortoiseSDK:
         proj.g.query(
             "CREATE (n:Point {id:$id, content:$c, pointKind:$k, "
             "is_operator:false, status:$st, createdAt:$now, updatedAt:$now}) "
-            "SET n.embedding = $embedding",
+            "SET n.embedding = vecf32($embedding)",
             params={"id": pid, "c": content, "k": kind, "st": status, "now": now,
                     "embedding": embedding},
         )

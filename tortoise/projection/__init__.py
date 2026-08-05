@@ -465,17 +465,20 @@ class FalkorProjection(
             # ── Vector index (HNSW) — Docker/server FalkorDB only (#7764) ──
             # Embedded mode (redislite) uses brute-force vec.euclideanDistance instead.
             # HNSW requires RediSearch module, not bundled with redislite.
+            # NOTE (#117): the correct syntax is CREATE VECTOR INDEX FOR ... OPTIONS
+            # — the old CALL db.idx.vector.createNodeIndex is not a registered procedure.
             if not getattr(self, '_is_embedded', False):
                 # Core entity types with embeddings (#7845): Point, Event, Subject, Document, Object.
                 # Action is skipped — procedural, not content-bearing.
                 for label in ("Point", "Event", "Subject", "Document", "Object"):
                     try:
                         self.g.query(
-                            f"CALL db.idx.vector.createNodeIndex('{label}', 'embedding', 384, 'HNSW')"
+                            f"CREATE VECTOR INDEX FOR (n:{label}) ON (n.embedding) "
+                            f"OPTIONS {{dimension: 384, similarityFunction: 'cosine'}}"
                         )
                     except Exception as e:
                         msg = str(e).lower()
-                        if "already" in msg:
+                        if "already" in msg or "exist" in msg:
                             pass
                         else:
                             import logging
@@ -508,7 +511,7 @@ class FalkorProjection(
         set_clauses = ["n.content = coalesce($c, n.content)",
                        "n.context = coalesce($x, n.context)"]
         if "embedding" in params:
-            set_clauses.append("n.embedding = $embedding")
+            set_clauses.append("n.embedding = vecf32($embedding)")
         if set_updated_at:
             set_clauses.append("n.updatedAt = $now")
             params["now"] = _now_iso()
