@@ -8,7 +8,6 @@ Usage:
 """
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 
@@ -25,20 +24,25 @@ _uri_candidates = [
     "docker://localhost:6379/tortoise",
     "docker://localhost:16379/tortoise",
 ]
+_old_uri = _os.environ.get("TORTOISE_DB_URI")
 for _uri in _uri_candidates:
     if not _uri:
         continue
     try:
         from tortoise.sdk import TortoiseSDK
-        # URI comes from TORTOISE_DB_URI env var, not positional arg
-        _old_uri = _os.environ.get("TORTOISE_DB_URI")
+        # URI comes from TORTOISE_DB_URI env var, not positional arg.
+        # Keep the working URI set for the duration of the test run —
+        # integration test classes construct TortoiseSDK() directly.
         _os.environ["TORTOISE_DB_URI"] = _uri
         _sdk = TortoiseSDK()
         _sdk.status()
         FALKORDB_AVAILABLE = True
         break
     except Exception:
-        if _old_uri:
+        # Restore the user's original env var (or unset if never set)
+        if _old_uri is None:
+            _os.environ.pop("TORTOISE_DB_URI", None)
+        else:
             _os.environ["TORTOISE_DB_URI"] = _old_uri
         continue
 
