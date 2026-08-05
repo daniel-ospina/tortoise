@@ -32,7 +32,7 @@ _logger = logging.getLogger(__name__)
 # Canonical format (from tortoise/ids.py): <timestamp-hex>-<uuid12>
 _ULID_RE = re.compile(r"^[0-9a-f]+-[0-9a-f]{12}$")
 # Standard Crockford base32 ULID (26 chars) — recognized as valid
-_CROCKFORD_ULID_RE = re.compile(r"^[0-7][0-9A-HJKMNP-TV-Z]{25}$")
+_CROCKFORD_ULID_RE = re.compile(r"^[0-7][0-9A-HJKMNP-TV-Z]{25}$", re.IGNORECASE)
 
 
 def _is_ulid(s: str) -> bool:

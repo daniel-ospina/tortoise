@@ -7,6 +7,8 @@ Usage:
 FalkorDB does not support =~ regex in Cypher, so all categorization is client-side
 after fetching IDs.
 """
+from __future__ import annotations
+
 import os
 import re
 import sys
@@ -22,7 +24,7 @@ URI = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise")
 ULID_RE = re.compile(r"^[0-9a-f]+-[0-9a-f]{12}$")
 
 # ── Standard ULID (Crockford base32, 26 chars) — e.g., 01KXGMG4FZJDDACP918R1MX11Y ──
-CROCKFORD_ULID_RE = re.compile(r"^[0-7][0-9A-HJKMNP-TV-Z]{25}$")
+CROCKFORD_ULID_RE = re.compile(r"^[0-7][0-9A-HJKMNP-TV-Z]{25}$", re.IGNORECASE)
 
 # ── Legacy prefix map (ordered: more-specific first, catch-all last) ──
 LEGACY_PREFIXES = [
