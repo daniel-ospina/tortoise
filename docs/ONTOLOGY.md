@@ -29,7 +29,7 @@ Five core types.
 | 4 | **Event** | `prov:Activity` (instantiated) / `schema:Event` | Temporal occurrence — the verb. Reified middle node: (Subject)-[performs]->(Event)-[produces]->(Object) | What happened |
 | 5 | **Source** | `prov:Entity` (provenance) / `pav:Source` | Provenance anchor — where content was extracted from | Where it came from |
 
-**Core subclass model (§6):** Document ⊂ Object (`objectKind: document`). Object has core subclasses (Project, WorkItem, document, user, skill, tool, agent, workflow, agreement, standard). Subject has core subclasses (organization, team, role, legalPerson, naturalPerson, other). Expansion packs declare further subclasses via `subclassOf` (§9).
+**Core subclass model (§6):** Document ⊂ Object (`objectKind: document`). Object has core subclasses (Project, WorkItem, document, tag, user, skill, tool, agent, workflow, agreement, standard). Subject has core subclasses (organization, team, role, legalPerson, naturalPerson, other). Expansion packs declare further subclasses via `subclassOf` (§9).
 
 ---
 
@@ -64,6 +64,9 @@ Each layer answers a different question. All four are live mechanisms.
 | `IMPL` | Point → Point | default bidirectional; optional unidirectional | N-ary | Epistemic (EP confidence) | A supports/implies B. Direction is an explicit operator flag — **default bidirectional**, option to declare unidirectional (source→target only). Not inferred from label. |
 | `NAND` | Point → Point | default bidirectional; optional unidirectional | N-ary | Epistemic (EP confidence) | A contradicts B. Same direction model as IMPL — default mutual contradiction (bidirectional), optional unidirectional. |
 | `hasPart` | Point → Point | bidirectional (composition) | N-ary | Structural via operator label | A contains B (parts/whole cascade). |
+| `CORRECTS` | Point → Point | unidirectional | 1→1 | — | New point **corrects/replaces** an outdated point (supersession). Marks target `outdated: true`; all edges transfer from old to new. Created by `supersede_point` / `invalidate_point` (sdk.py:448-485). |
+
+> **Supersession semantics:** `CORRECTS` is the structural replacement edge. `supersede_point(old, new)` = mark old `outdated:true` + create `(new)-[:CORRECTS]->(old)` + transfer all old edges (IMPL/NAND/hasPart operators + structural edges) to new. `invalidate_point(id, corrected_by)` = mark outdated + CORRECTS only (no edge transfer). Old point retains only the CORRECTS edge as provenance.
 
 > **Direction flag (code note):** operator direction is carried as an explicit flag on the operator Point. Current implementation (ep.py) derives bidirectionality from label (hasPart/partOf → bidirectional; else directional for IMPL; NAND always bidirectional) — this is being migrated to an explicit `direction` flag with default bidirectional. See follow-up issue.
 
@@ -78,6 +81,7 @@ Per-type edges (chosen over single polymorphic edge — FalkorDB matrix-per-type
 | `aboutEvent` | Point/Document → Event | unidirectional | many→many | `schema:about` (typed) | What Event this describes. Event is a target only — Events don't describe other Events |
 | `aboutPoint` | Event → Point | unidirectional | many→many | `schema:about` (typed) | What Point this Event describes. Event-only edge |
 | `aboutDocument` | Event → Document | unidirectional | many→many | `schema:about` (typed) | What Document this Event describes |
+| `TAGGED` | Point → Tag | unidirectional | many→many | `schema:keywords` | Free-form label on a Point. Tags are `:Tag` nodes (Object subclass, `objectKind: tag`) shared across Points via MERGE. Created by hosted-api point ingestion (hosted_api.py:695-787). ⚠️ **Write-only today — no tag-filter query surfaced yet** (see follow-up). |
 
 > **Legacy:** `aboutEntities` property → per-type `about*` edges. `_create_about_edges()` auto-detects Subject/Object from the legacy property. `schema:about` is polymorphic; we split per-type for graph performance.
 
@@ -112,10 +116,12 @@ Per-type edges (chosen over single polymorphic edge — FalkorDB matrix-per-type
 
 | Predicate | From → To | Direction | Cardinality | Standard alignment | Meaning |
 |-----------|-----------|-----------|-------------|--------------------|---------|
-| `participatesIn` | Subject → Event | unidirectional | N-ary | `schema:attendee` | Subjects involved in an event |
-| `memberOf` | Subject → Subject | unidirectional | N-ary | `org:membership` | Membership in team/group |
+| `participatesIn` | Subject → Event | unidirectional | N-ary | `schema:attendee` | Subjects involved in an event (⚠️ spec-only — no producer yet, see follow-up) |
+| `memberOf` | Subject → Subject | unidirectional | N-ary | `org:membership` | Membership in team/group/organization. **Canonical** — generalizable to teams, orgs, any hierarchy. |
 | `managedBy` | Entity → Subject | unidirectional | N-ary | RACI Responsible | Operational responsibility |
 | `ownedBy` | Entity → Subject | unidirectional | N-ary | RACI Accountable | Accountability, data boundary |
+
+> **memberOf is canonical.** Code's `hasMember` (org→member, sdk.py:3137) and `holdsRole` (person→role, sdk.py:3141) are **legacy aliases** — the ontology standardizes on `memberOf`; code alignment tracked as follow-up.
 
 ### §3.7 Object ↔ Object
 
@@ -269,7 +275,7 @@ statement, decision, vision, strategy, plan, goal, target, observation, hypothes
 ### Object Kind Vocabulary (core)
 
 ```
-Project, WorkItem, document, user, skill, tool, agent, workflow, agreement, standard, other
+Project, WorkItem, document, tag, user, skill, tool, agent, workflow, agreement, standard, other
 ```
 
 ### Event Kind Vocabulary (core)
@@ -321,7 +327,7 @@ At query time, `expand_kind("Project")` returns `["Project", "dev:epic"]`. Queri
 
 | Parent | Core subclasses |
 |--------|-----------------|
-| Object | Project, WorkItem, document, user, skill, tool, agent, workflow, agreement, standard |
+| Object | Project, WorkItem, document, tag, user, skill, tool, agent, workflow, agreement, standard |
 | Document (⊂ Object) | research, reflectPostmortem, strategyDoc, visionDoc, planDoc, decisionDoc, meetingNotes, experimentResults, evidenceLog, handoff, transcript, roadmap, brief |
 | Subject | organization, team, role, legalPerson, naturalPerson |
 
@@ -364,6 +370,7 @@ Operator:      (op-123)                                   ← mitigation anchor
 |------|-----------|------------|-------------------------|---------|
 | hasPart | IMPL | Bidirectional cascade (parts↔whole) | bidirectional | Epic hasPart Issue |
 | addresses | IMPL | Unidirectional (A supports B) | unidirectional | Feature addresses Need |
+| supports | IMPL | Unidirectional (A supports B) | unidirectional | Evidence supports Claim (CLI default label for IMPL, `__main__.py:81`) |
 | opposes | NAND | Bidirectional by default, optional unidirectional | declared by pack | Feature competesWith Competitor |
 
 > **Direction is an explicit operator flag, default bidirectional.** The table above shows typical pack declarations; any pack may override the default with an explicit `direction: unidirectional` on the relation.
