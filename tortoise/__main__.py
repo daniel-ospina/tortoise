@@ -519,13 +519,11 @@ def _cmd_context(args) -> int:
     else:
         # ── Local: SDK (embedded or TORTOISE_DB_URI) ──
         try:
-            import os as _os2
             from tortoise.sdk import TortoiseSDK
-            if _os2.environ.get("TORTOISE_DB_URI"):
+            if _os.environ.get("TORTOISE_DB_URI"):
                 sdk = TortoiseSDK()
             else:
-                _db_path = _os2.environ.get("TORTOISE_DB_PATH") or _os.environ.get("TORTOISE_DB_PATH")
-                sdk = TortoiseSDK(db_path=_db_path)
+                sdk = TortoiseSDK(db_path=_os.environ.get("TORTOISE_DB_PATH"))
             data = sdk.session_context()
         except Exception as e:
             print(f"Tortoise unavailable: {e}", file=_sys.stderr)
@@ -1747,7 +1745,6 @@ def main(argv: list[str] | None = None) -> int:
     lk = sp.add_parser("list-kinds", help="List all pointKinds present in the graph with counts")
     # tortoise context — memory digest for agent session-start hooks
     ctx = sp.add_parser("context", help="Print memory digest for agent session-start injection")
-    ctx.add_argument("--db", default=None, help="Docker URI or file path for target database")
     # tortoise list-sources
     ls = sp.add_parser("list-sources", help="List all Sources with point counts")
     # tortoise decide --input <json|yaml>

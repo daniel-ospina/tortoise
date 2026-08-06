@@ -1032,7 +1032,6 @@ async def session_context(team: dict = Depends(get_current_team)):
     injection payload as local users.
     """
     sdk = _make_sdk(namespace=team["team_id"])
-    proj = sdk._get_proj()
     try:
         return sdk.session_context()
     except Exception as e:
