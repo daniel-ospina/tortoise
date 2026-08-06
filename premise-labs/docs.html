@@ -99,7 +99,8 @@
     <h2 id="how">How it works</h2>
     <div class="card">
       <h3>The data model</h3>
-      <p>Everything is a <code>Point</code>: an atomic claim with an <code>id</code>, <code>content</code> (text), <code>pointKind</code> (<code>statement</code>, <code>decision</code>, <code>evidence</code>, <code>observation</code>, <code>hypothesis</code>), and a <code>status</code>.</p>
+      <p>Everything is a <code>Point</code>: an atomic claim with an <code>id</code>, <code>content</code> (text), <code>pointKind</code>, and a <code>status</code>. The core kind vocabulary (ontology v3.1 §5) is: <code>statement</code>, <code>decision</code>, <code>vision</code>, <code>strategy</code>, <code>plan</code>, <code>goal</code>, <code>target</code>, <code>observation</code>, <code>hypothesis</code> — plus <code>evidence</code> and domain kinds registered by expansion packs.</p>
+      <p class="callout">The hosted API currently accepts a subset: <code>statement</code>, <code>decision</code>, <code>evidence</code>, <code>observation</code>, <code>hypothesis</code> (tracked in issue #7881). The graph and SDK accept the full vocabulary.</p>
       <ul>
         <li><code>status: draft</code> — created but not yet connected (not counted in confidence)</li>
         <li><code>status: live</code> — promoted when its first edge is created (#131); participates in confidence computation</li>
@@ -125,6 +126,7 @@
     <div class="card">
       <h3>Sessions &amp; provenance</h3>
       <p>Agent conversations are captured as <code>Session</code> nodes (with turn counts and metadata). Points created from a session are linked to it, so every insight traces back to the conversation that produced it. Listing sessions and their linked Points is a first-class API operation.</p>
+      <p class="callout">The ontology defines a richer episodic <code>Event</code> model (eventKind, startedAt/endedAt, produces/uses edges). The hosted API currently produces <code>:Session</code> nodes; alignment is tracked in issue #7882.</p>
     </div>
     <div class="card">
       <h3>Search</h3>
