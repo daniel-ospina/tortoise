@@ -47,25 +47,28 @@ class TestTaxonomy:
         assert result["Document"] == 0
 
 
-# ── list_domains ──────────────────────────────────────────────────────
+# ── list_pointkinds (replaces list_domains, #49) ─────────────────────────
 
-class TestListDomains:
+class TestListPointKinds:
     def test_returns_list(self, sdk):
-        result = sdk.list_domains()
+        result = sdk.list_pointkinds()
         assert isinstance(result, list)
 
-    def test_counts_by_context(self, sdk):
-        result = sdk.list_domains()
-        assert len(result) == 2  # strategy, research (goal has no context)
-        contexts = {r["context"]: r["count"] for r in result}
-        assert contexts["strategy"] == 2
-        assert contexts["research"] == 2
+    def test_counts_by_kind(self, sdk):
+        sdk.create_point("strategy", "strat one")
+        sdk.create_point("strategy", "strat two")
+        sdk.create_point("research", "research one")
+        sdk.create_point("research", "research two")
+        result = sdk.list_pointkinds()
+        kinds = {r["kind"]: r["count"] for r in result}
+        assert kinds["strategy"] == 2
+        assert kinds["research"] == 2
 
     def test_empty_db(self):
         db_path = os.path.join(tempfile.mkdtemp(), "empty.db")
         s = TortoiseSDK(db_path)
         try:
-            assert s.list_domains() == []
+            assert s.list_pointkinds() == []
         finally:
             s.close()
 

@@ -28,7 +28,7 @@ def _mk():
 def test_create_point_context_raises_type_error(sdk):
     """create_point(context=X) raises TypeError in Phase 2."""
     with pytest.raises(TypeError, match="context"):
-        sdk.create_point("statement", "test point")
+        sdk.create_point("statement", "test point", context="legacy")
 
 
 def test_create_operator_context_raises_type_error(sdk):
@@ -36,14 +36,14 @@ def test_create_operator_context_raises_type_error(sdk):
     p1 = sdk.create_point("statement", "source point")
     p2 = sdk.create_point("statement", "target point")
     with pytest.raises(TypeError, match="context"):
-        sdk.create_operator("IMPL", p1["id"], [p2["id"]])
+        sdk.create_operator("IMPL", p1["id"], [p2["id"]], context="legacy")
 
 
 def test_update_point_context_raises_type_error(sdk):
     """update_point(context=X) raises TypeError."""
     p = sdk.create_point("statement", "test point")
     with pytest.raises(TypeError, match="context"):
-        sdk.update_point(p["id"])
+        sdk.update_point(p["id"], context="legacy")
 
 
 def test_dedup_content_hash_pointkind(sdk):
@@ -69,4 +69,6 @@ def test_file_decision_no_context(sdk):
         sdk.file_decision(
             options=["A", "B"],
             evidence=["E1 supports A"],
-            choice=0, )
+            choice=0,
+            context="legacy",
+        )

@@ -34,7 +34,7 @@ def _build(api, source="doc.txt"):
     prov = provenance(source, [0, 10], "quote", extracted_by="test@0")
     a = api.add_point("we should raise B slowly", prov)
     b = api.add_point("fast raises wreck early buyers", prov)
-    op = api.add_operator("IMPL", [b, a], "ctx", prov)
+    op = api.add_operator("IMPL", [b, a], prov)
     return a, b, op
 
 
@@ -177,7 +177,7 @@ def test_add_operator_normalizes_dict_inputs():
     pid = api.add_operator(
         "NAND",
         [{"id": "aaa", "x": 1}, {"id": "bbb", "y": 2}],
-        "ctx", prov,
+        prov,
     )
     points = fold(log.read_all())
     assert points[pid]["operator"]["inputs"] == ["aaa", "bbb"]
@@ -197,7 +197,7 @@ def test_add_operator_normalizes_object_inputs():
     pid = api.add_operator(
         "IMPL",
         [_FakeNode("n1"), _FakeNode("n2")],
-        "ctx", prov,
+        prov,
     )
     points = fold(log.read_all())
     assert points[pid]["operator"]["inputs"] == ["n1", "n2"]
@@ -209,7 +209,7 @@ def test_add_operator_invalid_type():
     api, _log = _api()
     prov = provenance("doc.txt", [0, 1], "x", extracted_by="test@0")
     try:
-        api.add_operator("XOR", ["a"], "ctx", prov)
+        api.add_operator("XOR", ["a"], prov)
         assert False, "should have raised"
     except AssertionError as e:
         assert "XOR" in str(e)
@@ -220,7 +220,7 @@ def test_add_operator_fallback_inputs():
     """Non-dict, non-.id inputs pass through as-is (raw strings)."""
     api, log = _api()
     prov = provenance("doc.txt", [0, 1], "x", extracted_by="test@0")
-    pid = api.add_operator("IMPL", ["raw_str_1", "raw_str_2"], "ctx", prov)
+    pid = api.add_operator("IMPL", ["raw_str_1", "raw_str_2"], prov)
     points = fold(log.read_all())
     assert points[pid]["operator"]["inputs"] == ["raw_str_1", "raw_str_2"]
     print("PASS test_add_operator_fallback_inputs")
@@ -344,7 +344,7 @@ def test_projection_matches_log_after_every_mutation():
     _check()
 
     # add_operator
-    op = api.add_operator("IMPL", [b, a], "ctx", prov)
+    op = api.add_operator("IMPL", [b, a], prov)
     _check()
 
     # revise_point

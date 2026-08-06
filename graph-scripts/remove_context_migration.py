@@ -246,10 +246,11 @@ def _connect():
 
     Returns (proj, mode) where mode is 'server' or 'embedded'.
     """
-    # Try the SDK's standard connection path
+    # Try the SDK's standard connection path. No namespace — in docker mode the
+    # URI's graph name is authoritative (namespace is ignored by from_uri).
     from tortoise.sdk import TortoiseSDK
 
-    sdk = TortoiseSDK(namespace="__migration_49_phase2")
+    sdk = TortoiseSDK()
     proj = sdk._get_proj()
 
     # Detect mode
