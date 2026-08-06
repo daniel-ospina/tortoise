@@ -523,7 +523,8 @@ class TortoiseSDK:
     # ── Operators ─────────────────────────────────────────────────
 
     def create_operator(self, op_type: str, source_id: str, target_ids: list[str],
-                        label: str | None = None) -> dict:
+                        label: str | None = None, context: str | None = None,
+                        direction: str = "bidirectional") -> dict:
         """Create an operator Point with optional semantic label.
 
         Semantic-epistemic edge model (#7801):
@@ -534,6 +535,10 @@ class TortoiseSDK:
         if op_type not in ("IMPL", "NAND", "composedOf", "decomposesInto", "contains", "wraps"):
             raise ValueError(
                 f"op_type must be 'IMPL', 'NAND', or a part/whole type, got {op_type!r}"
+            )
+        if direction not in ("bidirectional", "unidirectional"):
+            raise ValueError(
+                f"direction must be 'bidirectional' or 'unidirectional', got {direction!r}"
             )
         pid = ulid()
         inputs = [source_id] + list(target_ids)
@@ -549,15 +554,15 @@ class TortoiseSDK:
         if missing:
             raise ValueError(f"Cannot create operator: Points {missing} do not exist")
 
-        # Build operator node with label property (context is NOT written — P1 #49)
+        # Build operator node with direction + optional label (context is NOT written — P1 #49)
         extra_props = []
-        params = {"id": pid, "op": op_type}
+        params = {"id": pid, "op": op_type, "direction": direction}
         if label:
             extra_props.append("label:$label")
             params["label"] = label
         props_clause = ", " + ", ".join(extra_props) if extra_props else ""
         proj.g.query(
-            f"CREATE (o:Point {{id:$id, is_operator:true, op_type:$op{props_clause}}})",
+            f"CREATE (o:Point {{id:$id, is_operator:true, op_type:$op, direction:$direction{props_clause}}})",
             params=params,
         )
         # Ontology v2.1: map part/whole ops to hasPart, remove INPUT edges

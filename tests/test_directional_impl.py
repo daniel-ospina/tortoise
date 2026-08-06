@@ -91,8 +91,11 @@ def make_point(sdk, content, kind="statement"):
     return sdk.create_point(kind, content)
 
 
-def make_operator(sdk, source_id, target_id, op_type="IMPL", label=None):
-    return sdk.create_operator(op_type, source_id, [target_id], label=label)
+def make_operator(sdk, source_id, target_id, op_type="IMPL", label=None, direction=None):
+    kwargs = {"label": label}
+    if direction is not None:
+        kwargs["direction"] = direction
+    return sdk.create_operator(op_type, source_id, [target_id], **kwargs)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -129,8 +132,8 @@ def test_impl_directional_refuted_conclusion():
     sdk.set_point_baseline(defeater_c["id"], *TIER_MAP["T0"])
     # conclusion B gets no baseline (starts at uniform)
 
-    # Create operators
-    op_impl = make_operator(sdk, premise_a["id"], conclusion_b["id"], "IMPL")
+    # Create operators (IMPL is unidirectional — explicit flag)
+    op_impl = make_operator(sdk, premise_a["id"], conclusion_b["id"], "IMPL", direction="unidirectional")
     op_nand = make_operator(sdk, defeater_c["id"], conclusion_b["id"], "NAND")
 
     # Verify operator properties
@@ -409,7 +412,7 @@ def test_addresses_directional():
     sdk.set_point_baseline(need["id"], *TIER_MAP["T0"])
     sdk.set_point_baseline(defeater["id"], *TIER_MAP["T0"])
 
-    op_addr = make_operator(sdk, need["id"], feature["id"], "IMPL", label="addresses")
+    op_addr = make_operator(sdk, need["id"], feature["id"], "IMPL", label="addresses", direction="unidirectional")
     op_nand = make_operator(sdk, defeater["id"], feature["id"], "NAND")
 
     print(f"  addresses operator: label={op_addr.get('label', 'none')}")
