@@ -2,13 +2,50 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+from pathlib import Path
 from typing import Any
 
 from fastmcp import FastMCP
 from tortoise.auth import is_dev_mode as _is_dev_mode
 from tortoise.sdk import TortoiseSDK
 from tortoise import monitoring
+
+_log = logging.getLogger(__name__)
+
+
+def _load_dotenv(path: str | None = None) -> None:
+    """Tiny .env loader — repo-root .env, KEY=VALUE lines, no new deps.
+
+    Only sets environment keys that are empty/unset, so an explicit
+    TORTOISE_DB_URI in the process env always wins. Mirrors the hosted
+    entrypoint philosophy: the DB target must be explicit, never accidental.
+    """
+    if path is None:
+        path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", ".env"
+        )
+    if not os.path.exists(path):
+        return
+    try:
+        for raw in Path(path).read_text().splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[len("export "):]
+            if "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key, value = key.strip(), value.strip().strip("\"'")
+            if key and not os.environ.get(key):
+                os.environ[key] = value
+    except OSError:
+        pass  # .env is best-effort — never block MCP startup on it
+
+
+_load_dotenv()  # resolve TORTOISE_DB_URI from repo-root .env before anything else
 
 
 # ── Safety annotations ───────────────────────────────────────────
@@ -20,10 +57,9 @@ mcp = FastMCP("tortoise")
 
 # Resolve SDK connection from TORTOISE_DB_URI env var
 _db_uri = os.environ.get("TORTOISE_DB_URI", "")
-if _db_uri.startswith("docker://"):
+if _db_uri.startswith(("docker://", "redis://", "rediss://")):
     from tortoise.projection import FalkorProjection
-    import time, logging, sys
-    _log = logging.getLogger(__name__)
+    import time, sys
     sdk = TortoiseSDK()
     # Retry Docker connection 3x with backoff; exit on exhaustion (#25 P3a, #32)
     for attempt in range(3):
@@ -47,8 +83,6 @@ else:
 
 # Announce auth mode at startup
 if _is_dev_mode():
-    import logging
-    _log = logging.getLogger(__name__)
     _log.warning("TORTOISE_API_KEY not set — running in dev mode (no auth)")
 
 
@@ -431,6 +465,20 @@ def tortoise_traverse(entity_id: str, max_hops: int = 2,
 
 def main():
     monitoring.register(sdk)
+    if not os.environ.get("TORTOISE_DB_URI"):
+        if os.environ.get("TORTOISE_ALLOW_EMBEDDED") == "1":
+            _log.warning(
+                "TORTOISE_DB_URI unset — running embedded (empty graph). "
+                "This is a test-only escape hatch; agents will read/write an empty DB."
+            )
+        else:
+            _log.error(
+                "TORTOISE_DB_URI is not set. MCP would silently connect to an empty "
+                "embedded DB. Set TORTOISE_DB_URI in the environment or in .env "
+                "(repo root) to the hosted FalkorDB instance, then restart. "
+                "See .env.example. Override with TORTOISE_ALLOW_EMBEDDED=1 (test only)."
+            )
+            sys.exit(1)
     mcp.run(transport="stdio")
 
 

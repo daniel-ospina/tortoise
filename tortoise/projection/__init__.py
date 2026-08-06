@@ -157,6 +157,24 @@ class InMemoryProjection:
         self.points = fold(log.read_all())
 
 
+_SUPPORTED_URI_SCHEMES = ("docker", "redis", "rediss")
+
+
+def _validate_uri_scheme(scheme: str) -> str:
+    """Accept docker:// (local) and redis:// / rediss:// (FalkorDB Cloud) URIs.
+
+    Raises ValueError for anything else, mirroring the historical docker://-only
+    contract while making managed-instance URIs first-class.
+    """
+    if scheme not in _SUPPORTED_URI_SCHEMES:
+        raise ValueError(
+            f"Unsupported scheme: {scheme} "
+            f"(expected docker://, redis://, or rediss://). "
+            f"Example: docker://:password@localhost:6379/tortoise"
+        )
+    return scheme
+
+
 # ── FalkorProjection ──────────────────────────────────────────────────────
 
 
@@ -214,14 +232,19 @@ class FalkorProjection(
 
     @classmethod
     def from_uri(cls, uri: str) -> "FalkorProjection":
-        """Parse docker:// connection string.
+        """Parse a connection URI into a projection.
 
-        docker://:password@host:port/graph_name
+        Supported schemes (all treated as docker://):
+          docker://:password@host:port/graph_name   — canonical local form
+          redis:// or rediss://                     — FalkorDB Cloud / managed
+                                                     instances use the redis
+                                                     scheme; accept as aliases.
+
+        Unsupported schemes raise ValueError with an actionable message.
         """
         from urllib.parse import urlparse
         parsed = urlparse(uri)
-        if parsed.scheme != "docker":
-            raise ValueError(f"Unsupported scheme: {parsed.scheme} (expected docker://)")
+        _validate_uri_scheme(parsed.scheme)
         username = parsed.username or None
         password = parsed.password or None
         graph_name = parsed.path.lstrip('/') or "tortoise"
