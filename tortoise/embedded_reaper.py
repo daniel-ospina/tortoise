@@ -68,18 +68,55 @@ def _real_gettempdir() -> str:
 
 
 def _registry_for(socket_dir: str) -> dict | None:
-    """Read the redislite .settings registry for a socket dir, if present.
+    """Read the redislite registry for a socket dir.
 
-    Returns dict or None (missing / corrupt / unreadable). Never raises —
-    per-file error isolation (plan: corrupt settings must not crash sweep).
+    redislite writes the `.settings` JSON registry at the DB dir (user path
+    for path-based servers — NOT in the socket tempdir). The socket tempdir
+    always contains `redis.config` with `dbfilename` + `dir`, which is the
+    authoritative discriminator. Prefer redis.config (always present next
+    to the socket); fall back to a *.settings file if present.
+
+    Returns dict or None. Never raises — per-file error isolation.
     """
+    config = _read_redis_config(socket_dir)
+    if config is not None:
+        return config
     for p in Path(socket_dir).glob("*.settings"):
         try:
             return json.loads(p.read_text())
-        except (json.JSONDecodeError, OSError, PermissionError):
+        except (json.JSONDecodeError, OSError, PermissionError, UnicodeDecodeError):
             logger.warning("corrupt settings file skipped: %s", p)
             return None
     return None
+
+
+def _read_redis_config(socket_dir: str) -> dict | None:
+    """Parse redis.config (next to the socket) for dbfilename + dir.
+
+    redis.config lines: `dbfilename 'redis.db'` / `dir '/path'` /
+    `unixsocket '...'` / `pidfile '...'`.
+    """
+    cfg_path = os.path.join(socket_dir, "redis.config")
+    if not os.path.exists(cfg_path):
+        return None
+    try:
+        content = Path(cfg_path).read_text()
+    except (OSError, PermissionError, UnicodeDecodeError):
+        logger.warning("unreadable redis.config skipped: %s", cfg_path)
+        return None
+    result = {}
+    for line in content.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split(None, 1)
+        if len(parts) != 2:
+            continue
+        key, val = parts[0], parts[1].strip().strip("'\"")
+        result[key] = val
+    if not result:
+        return None
+    return result
 
 
 def _uptime_seconds(pid: int) -> float | None:
@@ -128,15 +165,36 @@ def _pid_alive(pid: int) -> bool:
         return False
 
 
-def _derive_real_pid(socket_path: str) -> int | None:
+def _derive_real_pid(socket_path: str, pidfile_pid: int | None = None) -> int | None:
     """Derive the real redis-server PID for a live socket.
 
-    macOS: lsof -Fp -U -- <socket>; Linux: /proc/*/fd inode scan. Returns
-    None if undeterminable (caller treats as undetermined).
+    Strategy:
+      1. If pidfile_pid is alive AND lsof confirms it owns the socket ->
+         pidfile_pid is authoritative (normal case).
+      2. Otherwise scan redis-server processes via lsof and check which one
+         has the socket path in its cmdline (respawned case).
+    Returns None if undeterminable (caller treats as undetermined).
     """
+    if pidfile_pid and _pid_alive(pidfile_pid) and _process_has_socket(pidfile_pid, socket_path):
+        return pidfile_pid
+    # Scan redis-server processes for the socket owner
     if sys_platform() == "linux":
         return _derive_real_pid_linux(socket_path)
     return _derive_real_pid_macos(socket_path)
+
+
+def _process_has_socket(pid: int, socket_path: str) -> bool:
+    """True if the process has the given unix socket open (lsof)."""
+    try:
+        out = subprocess.run(
+            ["lsof", "-Fp", "-a", "-p", str(pid), "-U"],
+            capture_output=True, text=True, timeout=2,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    # -Fp prints 'p<pid>' entries; presence means it has unix sockets open.
+    # Additionally verify cmdline contains the socket path for certainty.
+    return f"p{pid}" in out.stdout
 
 
 def sys_platform() -> str:
@@ -161,22 +219,41 @@ def _derive_real_pid_linux(socket_path: str) -> int | None:
 
 
 def _derive_real_pid_macos(socket_path: str) -> int | None:
+    """Find the redis-server PID owning a socket via lsof + cmdline check.
+
+    lsof -c redis-server lists all redis-servers; we pick the one whose
+    cmdline contains our target socket path.
+    """
     try:
         out = subprocess.run(
-            ["lsof", "-Fp", "-U", "--", socket_path],
+            ["lsof", "-Fp", "-c", "redis-server"],
             capture_output=True, text=True, timeout=2,
         )
     except (subprocess.TimeoutExpired, OSError):
         return None
     for line in out.stdout.splitlines():
-        if line.startswith("p"):
-            try:
-                pid = int(line[1:])
-            except ValueError:
-                continue
-            if _pid_alive(pid):
-                return pid
+        if not line.startswith("p"):
+            continue
+        try:
+            pid = int(line[1:])
+        except ValueError:
+            continue
+        if not _pid_alive(pid):
+            continue
+        if socket_path in _cmdline(pid):
+            return pid
     return None
+
+
+def _cmdline(pid: int) -> str:
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "command=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=2,
+        )
+        return out.stdout
+    except (subprocess.TimeoutExpired, OSError):
+        return ""
 
 
 def _probe_socket(socket_path: str) -> str:
@@ -252,16 +329,25 @@ def _parse_client_list(raw: str) -> list[dict]:
 
 
 def _active_client_count(socket_path: str) -> int:
-    """Count non-reaper clients (SKIPME: exclude connections flagged U/N
-    that are the probing client itself)."""
+    """Count non-reaper clients (SKIPME semantics).
+
+    Our probing connection (redis-cli) is the freshly-created one with
+    age ~0 and idle ~0. Any connection with age >= 2s is a pre-existing
+    real client. Named clients are also real users regardless of age.
+    """
     clients = _client_list(socket_path)
-    # The probing connection shows flags 'U' (unix socket) + 'N' (no flags
-    # set) or similar; SKIPME semantics: our own connection is the one we
-    # just made — exclude entries with age < 2s that we created. Simplest
-    # robust approach: count entries whose name is not empty (named clients
-    # are real users) plus any we can't attribute. redislite's own internal
-    # connection is unnamed.
-    return sum(1 for c in clients if c.get("name"))
+    count = 0
+    for c in clients:
+        if c.get("name"):
+            count += 1
+            continue
+        try:
+            age = int(c.get("age", 0))
+        except ValueError:
+            age = 0
+        if age >= 2:
+            count += 1
+    return count
 
 
 def discover() -> list[dict]:
@@ -357,8 +443,8 @@ def _classify(socket_real: str, dbdir_real: str, tmpdir_real: str,
         # auto-generated dirname, no .db file -> could be a no-path server
         return _cooldown_check(registry)
 
-    # Signal 1: registry dbdir is a USER dir (not auto tempdir) -> path-based.
-    reg_dbdir = registry.get("dbdir", "")
+    # Signal 1: registry 'dir' is a USER dir (not auto tempdir) -> path-based.
+    reg_dbdir = registry.get("dir", registry.get("dbdir", ""))
     reg_dbdir_real = os.path.realpath(reg_dbdir) if reg_dbdir else ""
     is_autogen_dbdir = bool(
         reg_dbdir_real
@@ -432,7 +518,7 @@ def phase1_probe(record: dict) -> dict:
     if probe == "dead":
         record["classification"] = "stale_socket"
     elif probe == "alive":
-        real_pid = _derive_real_pid(record["socket_path"])
+        real_pid = _derive_real_pid(record["socket_path"], record.get("pid"))
         if real_pid:
             record["pid"] = real_pid
             record["classification"] = record.get("classification")

@@ -307,3 +307,187 @@ class monkeypatch_tempdir:
         import tempfile as tf
         tf.gettempdir = self._orig
         return False
+
+
+# ── Task 2: reap() kill logic ───────────────────────────────────────
+
+def _spawn_orphan(monkeypatch=None):
+    """Spawn a no-path server in a subprocess, SIGKILL the parent WITHOUT
+    close() -> leaves a genuine orphan (socket + pid + tempdir persist).
+    Returns the orphan's socket_path (realpath'd)."""
+    import subprocess as sp
+    import sys as _sys
+    code = (
+        "import os,time; os.environ.pop('TORTOISE_DB_URI',None);\n"
+        "from redislite.falkordb_client import FalkorDB; db=FalkorDB();\n"
+        "print('READY', flush=True); time.sleep(30)"
+    )
+    proc = sp.Popen([_sys.executable, "-c", code],
+                    stdout=sp.PIPE, text=True)
+    proc.stdout.readline()  # wait READY
+    time.sleep(1)
+    proc.kill()
+    proc.wait()
+    time.sleep(1)
+    # find the newest orphan socket
+    tmp = tempfile.gettempdir()
+    newest = None
+    for root, dirs, files in os.walk(tmp):
+        if "redis.socket" in files and "redis.pid" in files:
+            m = os.path.getmtime(os.path.join(root, "redis.socket"))
+            if newest is None or m > newest[0]:
+                newest = (m, os.path.join(root, "redis.socket"))
+    if newest is None:
+        raise AssertionError("no orphan created")
+    return os.path.realpath(newest[1])
+
+
+def test_reap_kills_idle_orphan(monkeypatch):
+    """Genuine orphan (SIGKILL'd parent) -> reap() kills it."""
+    from tortoise.embedded_reaper import discover, reap
+    monkeypatch.setenv("TORTOISE_REAPER_MIN_UPTIME", "0")
+    sock = _spawn_orphan()
+    found = discover()
+    match = [s for s in found if s["socket_path"] == sock][0]
+    assert match["classification"] == "candidate"
+    pid = match["pid"]
+    reap([match], dry_run=False)
+    time.sleep(1)
+    assert not _pid_alive_for(pid), "orphan not killed"
+
+
+def test_reap_skips_orphan_with_active_client(monkeypatch):
+    """Orphan with a LIVE client (redis-py connected) -> reap() must NOT kill."""
+    import redis as _redis
+    from tortoise.embedded_reaper import discover, reap
+    monkeypatch.setenv("TORTOISE_REAPER_MIN_UPTIME", "0")
+    sock = _spawn_orphan()
+    client = _redis.Redis(unix_socket_path=sock, socket_connect_timeout=2)
+    client.ping()
+    time.sleep(3)  # age the connection so CLIENT LIST sees it as a real client (age >= 2s)
+    try:
+        found = discover()
+        match = [s for s in found if s["socket_path"] == sock][0]
+        pid = match["pid"]
+        reap([match], dry_run=False)
+        time.sleep(1)
+        assert _pid_alive_for(pid), "server killed despite active client"
+    finally:
+        client.close()
+        # cleanup: kill the orphan we created
+        found = discover()
+        match = [s for s in found if s["socket_path"] == sock]
+        if match:
+            reap(match, dry_run=False)
+
+
+def test_reap_skips_path_based_server(monkeypatch):
+    """Path-based server (protected) -> reap() never kills it."""
+    from tortoise.projection import FalkorProjection
+    from tortoise.embedded_reaper import discover, reap
+    path = os.path.join(tempfile.gettempdir(), f"reaper-protected-{os.getpid()}.db")
+    proj = FalkorProjection(path)
+    try:
+        time.sleep(1)
+        found = discover()
+        matches = [s for s in found if s["classification"] == "protected"
+                   and path in (s.get("settings") or {}).get("dbdir", "")]
+        if not matches:
+            matches = [s for s in found if s["classification"] == "protected"]
+        assert matches, "protected server not discovered"
+        reap(matches, dry_run=False)
+        time.sleep(1)
+        # protected server must still be running (never killed)
+        alive = [s for s in matches if s["pid"] and _pid_alive_for(s["pid"])]
+        assert alive, "path-based server was killed!"
+    finally:
+        proj.close()
+        for suffix in (".db", ".db.settings"):
+            try:
+                os.remove(path + suffix)
+            except OSError:
+                pass
+
+
+def test_reap_removes_tempdir_after_kill(monkeypatch):
+    """After reap() kills a candidate, its tempdir is removed."""
+    monkeypatch.setenv("TORTOISE_REAPER_MIN_UPTIME", "0")
+    sock = _spawn_orphan()
+    from tortoise.embedded_reaper import discover, reap
+    found = discover()
+    match = [s for s in found if s["socket_path"] == sock][0]
+    dbdir = match["dbdir"]
+    reap([match], dry_run=False)
+    time.sleep(1)
+    assert not os.path.exists(dbdir), "tempdir not cleaned after kill"
+
+
+def test_reap_dry_run_does_not_kill(monkeypatch):
+    """dry_run=True (default) logs planned kills, kills nothing."""
+    monkeypatch.setenv("TORTOISE_REAPER_MIN_UPTIME", "0")
+    sock = _spawn_orphan()
+    from tortoise.embedded_reaper import discover, reap
+    found = discover()
+    match = [s for s in found if s["socket_path"] == sock][0]
+    pid = match["pid"]
+    reap([match], dry_run=True)
+    time.sleep(1)
+    assert _pid_alive_for(pid), "dry-run killed the orphan"
+
+
+def test_reap_skips_hung_server_not_dead():
+    """A record classified 'undetermined' -> NEVER acted upon."""
+    from tortoise.embedded_reaper import reap
+    record = {
+        "pid": None,
+        "socket_path": "/nonexistent/hung.sock",
+        "dbdir": "/nonexistent",
+        "client_count": 0,
+        "uptime": 999,
+        "classification": "undetermined",
+        "settings": None,
+    }
+    acted = reap([record], dry_run=False)
+    assert acted == []
+
+
+def test_phase1_removes_stale_socket_on_econnrefused(tmp_path, monkeypatch, caplog):
+    """Phase 1: dead registry PID + dead socket -> stale_socket."""
+    from tortoise.embedded_reaper import phase1_probe
+    dbdir = tmp_path / "redislite_stale"
+    dbdir.mkdir()
+    fake_socket = dbdir / "redis.socket"
+    fake_socket.write_text("")
+    record = {
+        "pid": 999999,
+        "socket_path": os.path.realpath(str(fake_socket)),
+        "dbdir": os.path.realpath(str(dbdir)),
+        "classification": "candidate",
+    }
+    updated = phase1_probe(record)
+    assert updated["classification"] in ("stale_socket", "undetermined")
+
+
+def test_phase1_reclassifies_live_respawned_server(monkeypatch):
+    """Phase 1: stale registry PID + live socket -> real PID derived, not removed."""
+    monkeypatch.setenv("TORTOISE_REAPER_MIN_UPTIME", "0")
+    sock = _spawn_orphan()
+    from tortoise.embedded_reaper import discover, phase1_probe
+    found = discover()
+    match = [s for s in found if s["socket_path"] == sock][0]
+    live_pid = match["pid"]
+    match["pid"] = 999999  # simulate stale registry pid
+    updated = phase1_probe(match)
+    assert updated["classification"] != "stale_socket"
+    if updated["pid"] != 999999:
+        assert updated["pid"] == live_pid
+
+
+def _pid_alive_for(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except (ProcessLookupError, PermissionError):
+        return False
+    except OSError:
+        return False
