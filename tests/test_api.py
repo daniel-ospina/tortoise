@@ -413,6 +413,24 @@ def test_add_document_partial_update_preserves_source_path():
     assert events[1]["source_path"] is None, f"got {events[1]['source_path']!r}"
 
 
+def test_add_document_partial_update_preserves_capture_fields():
+    """#167 P2: summary/session_id/event_id defaults None so partial updates
+    through add_document don't wipe existing values via coalesce("", d.x, '')."""
+    api, log = _api()
+    api.add_document("doc-sp3", "Full", document_kind="transcript",
+                     summary="Original summary", session_id="s9", event_id="e9")
+    # Partial update — none of the capture fields provided
+    api.add_document("doc-sp3", "Full", document_kind="transcript",
+                     doc_status="archived")
+    events = [e for e in log.read_all() if e["type"] == "DocumentCreated"]
+    assert len(events) == 2
+    e0, e1 = events
+    assert e0["summary"] == "Original summary" and e0["session_id"] == "s9"
+    assert e1["summary"] is None, f"got {e1['summary']!r}"
+    assert e1["session_id"] is None, f"got {e1['session_id']!r}"
+    assert e1["event_id"] is None, f"got {e1['event_id']!r}"
+
+
 def test_add_event_emits_eventrecorded():
     """#125: add_event emits EventRecorded with id=eid and full payload."""
     api, log = _api()

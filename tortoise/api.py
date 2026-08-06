@@ -223,9 +223,9 @@ class EventAPI:
                      updatedAt: str | None = None,
                      corrects: str | None = None,
                      topics: list[str] | None = None,
-                     summary: str = "",
-                     session_id: str = "",
-                     event_id: str = "",
+                     summary: str | None = None,
+                     session_id: str | None = None,
+                     event_id: str | None = None,
                      source_path: str | None = None) -> str:
         """Emit DocumentCreated event. Returns the document id (same as input).
 
