@@ -178,6 +178,7 @@ Epistemic edges (operators): `IMPL`, `NAND` (+ semantic label). About edges: `ab
 | `name` | string | ✅ | `foaf:name` / `schema:name` | ⚠️ | Human-readable name |
 | `subjectKind` | string | ✅ | `dcterms:type` | ✅ | organization, team, role, legalPerson, naturalPerson, other |
 | `status` | string | — | `pav:status` | ⚠️ | Lifecycle: draft, live, superseded, deprecated, archived |
+| `createdAt` / `updatedAt` | ISO8601 | ✅ | `dc:created` / `dc:modified` | ✅ | Timestamps |
 
 > **Why no `subjectStatus`?** PROV-O, W3C ORG, and FOAF model agent existence temporally (`validFrom`/`validTo`) with termination events, not status enumerations. A simple shared `status` covers "is this team active?" while Events capture the how/why of changes.
 
@@ -195,11 +196,11 @@ Epistemic edges (operators): `IMPL`, `NAND` (+ semantic label). About edges: `ab
 
 ### §4.4 Document (subclass of Object)
 
-> **Document is an Object** (`objectKind: document`) — a core subclass (§6). Inherits all Object fields; additions below. Graph label is `:Object`; do not create a separate `:Document` label. `documentKind` is the subclass-of-Document vocabulary (BIBO-aligned).
+> **Document is an Object** (`objectKind: document`) — a core subclass (§6). Inherits all Object fields; additions below. Graph label is `:Document` (matching `_upsert_document`'s `MERGE (d:Document {id:$id})`); the subclass relationship to Object is expressed via `objectKind: document`, not via a second graph label. Do not create a separate `:Object` label for Documents. `documentKind` is the subclass-of-Document vocabulary (BIBO-aligned).
 
 | Field | Type | Required | ISO/PROV/DC | Impl | Meaning |
 |-------|------|----------|-------------|------|---------|
-| `objectKind` | string | ✅ | — | ✅ | `document` (fixed for Documents) |
+| `objectKind` | string | ✅ | — | ✅ | `document` (conceptual subclass of Object — the `:Document` graph label implies it; not stored as a separate property) |
 | `documentKind` | string | ✅ | `bibo:Document` subclasses | ✅ | research, reflectPostmortem, strategyDoc, visionDoc, planDoc, decisionDoc, meetingNotes, experimentResults, evidenceLog, handoff, transcript, roadmap, brief + pack documentKinds |
 | `title` | string | — | `dc:title` | ✅ | Human-readable title |
 | `format` | string | — | `dc:format` | ✅ | Storage format (markdown, jsonl, yaml, cypher) |
