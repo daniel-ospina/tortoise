@@ -125,20 +125,11 @@ class FalkorProjection(
                  graph_name: str = "tortoise"):
 
         if path is not None:
-            # Embedded mode (opt-in via path=). Check for redislite .settings file
-            from falkordb import FalkorDB  # lazy: keep import optional
-            import json as _json
-            from pathlib import Path as _Path
-            settings_file = _Path(path).with_suffix('.db.settings')
-            if settings_file.exists():
-                settings = _json.loads(settings_file.read_text())
-                socket = settings.get('unixsocket', '')
-                if socket:
-                    self.db = FalkorDB(unix_socket_path=socket)
-                else:
-                    self.db = FalkorDB(path)
-            else:
-                self.db = FalkorDB(path)
+            # Embedded mode (opt-in via path=). Use redislite's FalkorDB client —
+            # the plain falkordb.FalkorDB treats a positional path arg as a HOST
+            # (IDNA crash: redis tries to resolve the file path as a hostname).
+            from redislite.falkordb_client import FalkorDB  # lazy: keep import optional
+            self.db = FalkorDB(path)
         elif host is not None:
             # Docker FalkorDB
             from falkordb import FalkorDB  # ponytail: lazy import, only needed for Docker mode
