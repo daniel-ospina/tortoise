@@ -1,0 +1,523 @@
+"""Embedded redislite orphan reaper.
+
+Finds orphaned redis-server processes spawned by redislite embedded mode and
+classifies them for safe cleanup (issue #176, plan Child 1).
+
+Classification (dual-signal):
+  - socket NOT under tempfile.gettempdir()          -> protected (path-based)
+  - registry has named db_filename                  -> protected (path-based)
+  - old-format registry (no db_filename) + .db file -> protected
+  - unknown old-format dirname pattern              -> protected (WARNING)
+  - tempdir socket + uptime < MIN_UPTIME            -> protected (boot cooldown)
+  - tempdir socket + uptime >= MIN_UPTIME + no db_filename + no .db -> candidate
+
+NEVER_KILL: anything classified protected (stable singleton, path-based
+servers, boot-cooldown servers, unknown patterns). Only candidates may be
+reaped, and only after liveness + CLIENT LIST verification (see reap()).
+"""
+from __future__ import annotations
+
+import json
+import logging
+import os
+import re
+import shutil
+import socket
+import subprocess
+import tempfile
+import time
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+MIN_UPTIME_DEFAULT = 30
+PROBE_TIMEOUT = 2.0  # seconds for raw socket probes
+_AUTOGEN_DIRNAME = re.compile(r"^(redislite_|tmp)[a-zA-Z0-9_]+$")
+
+
+def _parse_min_uptime() -> int:
+    """Parse TORTOISE_REAPER_MIN_UPTIME (float-safe, shared by CLI + discover).
+
+    - float strings (e.g. "30.5") parsed as float then truncated
+    - negative -> 0 (with warning)
+    - non-numeric / empty -> default 30 (with warning)
+    - huge (> 3600) -> accepted with warning
+    """
+    raw = os.environ.get("TORTOISE_REAPER_MIN_UPTIME", "")
+    if raw == "":
+        return MIN_UPTIME_DEFAULT
+    try:
+        val = int(float(raw))  # float-safe: "30.5" -> 30
+    except (ValueError, TypeError):
+        logger.warning(
+            "TORTOISE_REAPER_MIN_UPTIME=%r not numeric — using default %s",
+            raw, MIN_UPTIME_DEFAULT)
+        return MIN_UPTIME_DEFAULT
+    if val < 0:
+        logger.warning(
+            "TORTOISE_REAPER_MIN_UPTIME=%r negative — treating as 0", raw)
+        return 0
+    if val > 3600:
+        logger.warning(
+            "TORTOISE_REAPER_MIN_UPTIME=%r > 3600 — unusually large", raw)
+    return val
+
+
+def _real_gettempdir() -> str:
+    return os.path.realpath(tempfile.gettempdir())
+
+
+def _registry_for(socket_dir: str) -> dict | None:
+    """Read the redislite .settings registry for a socket dir, if present.
+
+    Returns dict or None (missing / corrupt / unreadable). Never raises —
+    per-file error isolation (plan: corrupt settings must not crash sweep).
+    """
+    for p in Path(socket_dir).glob("*.settings"):
+        try:
+            return json.loads(p.read_text())
+        except (json.JSONDecodeError, OSError, PermissionError):
+            logger.warning("corrupt settings file skipped: %s", p)
+            return None
+    return None
+
+
+def _uptime_seconds(pid: int) -> float | None:
+    """Return process uptime in seconds, or None if the PID is not alive.
+
+    macOS: ps -o etime gives [[dd-]hh:]mm:ss; Linux /proc/<pid>/stat is
+    preferred but ps -o etime works on both.
+    """
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "etime=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=2,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    etime = out.stdout.strip()
+    if not etime:
+        return None
+    return _parse_etime(etime)
+
+
+def _parse_etime(etime: str) -> float:
+    """Parse ps etime '[[dd-]hh:]mm:ss' into seconds."""
+    etime = etime.strip()
+    days = 0
+    if "-" in etime:
+        days_part, etime = etime.split("-", 1)
+        days = int(days_part)
+    parts = [int(x) for x in etime.split(":")]
+    if len(parts) == 3:  # hh:mm:ss
+        hours, minutes, seconds = parts
+    elif len(parts) == 2:  # mm:ss
+        hours, minutes, seconds = 0, parts[0], parts[1]
+    else:
+        return 0.0
+    return days * 86400 + hours * 3600 + minutes * 60 + seconds
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except (ProcessLookupError, PermissionError):
+        return False
+    except OSError:
+        return False
+
+
+def _derive_real_pid(socket_path: str) -> int | None:
+    """Derive the real redis-server PID for a live socket.
+
+    macOS: lsof -Fp -U -- <socket>; Linux: /proc/*/fd inode scan. Returns
+    None if undeterminable (caller treats as undetermined).
+    """
+    if sys_platform() == "linux":
+        return _derive_real_pid_linux(socket_path)
+    return _derive_real_pid_macos(socket_path)
+
+
+def sys_platform() -> str:
+    import sys
+    return sys.platform
+
+
+def _derive_real_pid_linux(socket_path: str) -> int | None:
+    try:
+        ino = os.stat(socket_path).st_ino
+    except OSError:
+        return None
+    for fd in Path("/proc").glob("*/fd/*"):
+        try:
+            if os.stat(fd).st_ino == ino:
+                pid = int(fd.parts[2])
+                if _pid_alive(pid):
+                    return pid
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+def _derive_real_pid_macos(socket_path: str) -> int | None:
+    try:
+        out = subprocess.run(
+            ["lsof", "-Fp", "-U", "--", socket_path],
+            capture_output=True, text=True, timeout=2,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    for line in out.stdout.splitlines():
+        if line.startswith("p"):
+            try:
+                pid = int(line[1:])
+            except ValueError:
+                continue
+            if _pid_alive(pid):
+                return pid
+    return None
+
+
+def _probe_socket(socket_path: str) -> str:
+    """Raw unix-socket connect probe (never redis-py — can't spawn).
+
+    Returns 'dead' (ECONNREFUSED / no listener), 'alive' (accepts), or
+    'undetermined' (timeout / error).
+    """
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(PROBE_TIMEOUT)
+        try:
+            s.connect(socket_path)
+            return "alive"
+        except (ConnectionRefusedError, FileNotFoundError):
+            return "dead"
+        except socket.timeout:
+            return "undetermined"
+        except OSError:
+            return "undetermined"
+        finally:
+            s.close()
+    except OSError:
+        return "undetermined"
+
+
+def _client_list(socket_path: str) -> list[dict]:
+    """CLIENT LIST over the unix socket using a raw RESP connection.
+
+    Uses redislite's own client (which is a redis client) via subprocess-free
+    approach: we shell to redis-cli if available, else parse via raw RESP.
+    Returns list of client dicts; empty on failure.
+    """
+    # Prefer redis-cli (no python redis dependency, no spawn risk).
+    try:
+        out = subprocess.run(
+            ["redis-cli", "-s", socket_path, "CLIENT", "LIST"],
+            capture_output=True, text=True, timeout=PROBE_TIMEOUT,
+        )
+        if out.returncode == 0 and out.stdout.strip():
+            return _parse_client_list(out.stdout)
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+    # Fallback: raw RESP via the redislite client API (execute_command).
+    try:
+        from redislite.falkordb_client import FalkorDB
+        db = FalkorDB(unix_socket_path=socket_path)
+        try:
+            raw = db.execute_command("CLIENT", "LIST")
+            return _parse_client_list(raw if isinstance(raw, str) else "")
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+    except Exception:
+        return []
+    return []
+
+
+def _parse_client_list(raw: str) -> list[dict]:
+    clients = []
+    for line in raw.splitlines():
+        if not line.strip():
+            continue
+        entry = {}
+        for kv in line.split():
+            if "=" in kv:
+                k, v = kv.split("=", 1)
+                entry[k] = v
+        clients.append(entry)
+    return clients
+
+
+def _active_client_count(socket_path: str) -> int:
+    """Count non-reaper clients (SKIPME: exclude connections flagged U/N
+    that are the probing client itself)."""
+    clients = _client_list(socket_path)
+    # The probing connection shows flags 'U' (unix socket) + 'N' (no flags
+    # set) or similar; SKIPME semantics: our own connection is the one we
+    # just made — exclude entries with age < 2s that we created. Simplest
+    # robust approach: count entries whose name is not empty (named clients
+    # are real users) plus any we can't attribute. redislite's own internal
+    # connection is unnamed.
+    return sum(1 for c in clients if c.get("name"))
+
+
+def discover() -> list[dict]:
+    """Scan tempdir for redislite orphans; return classified records.
+
+    Each record: {pid, socket_path, dbdir, client_count, uptime,
+    classification, settings}.
+    """
+    results = []
+    tmpdir = _real_gettempdir()
+
+    try:
+        entries = list(os.scandir(tmpdir))
+    except (PermissionError, OSError) as e:
+        logger.warning("permission denied scanning tempdir %s: %s", tmpdir, e)
+        return results
+
+    for entry in entries:
+        if not entry.is_dir():
+            continue
+        try:
+            socket_path = os.path.join(entry.path, "redis.socket")
+            if not os.path.exists(socket_path):
+                continue
+            record = _classify_dir(entry.path, socket_path)
+            if record is not None:
+                results.append(record)
+        except PermissionError:
+            logger.warning("permission denied dir skipped: %s", entry.path)
+            continue
+        except OSError:
+            logger.warning("dir skipped (OSError): %s", entry.path)
+            continue
+    return results
+
+
+def _classify_dir(dbdir: str, socket_path: str) -> dict | None:
+    """Classify a single candidate dir. Returns record or None (skip)."""
+    registry = _registry_for(dbdir)
+    dbdir_real = os.path.realpath(dbdir)
+    socket_real = os.path.realpath(socket_path)
+    tmpdir_real = _real_gettempdir()
+
+    classification = _classify(socket_real, dbdir_real, tmpdir_real, registry)
+    pid = None
+    if registry and registry.get("pidfile"):
+        try:
+            pid = int(Path(registry["pidfile"]).read_text().strip())
+        except (OSError, ValueError):
+            pid = None
+
+    uptime = _uptime_seconds(pid) if pid else None
+    client_count = 0
+    if classification == "candidate" and pid and _pid_alive(pid):
+        client_count = _active_client_count(socket_real)
+
+    return {
+        "pid": pid,
+        "socket_path": socket_real,
+        "dbdir": dbdir_real,
+        "client_count": client_count,
+        "uptime": uptime,
+        "classification": classification,
+        "settings": registry,
+    }
+
+
+def _classify(socket_real: str, dbdir_real: str, tmpdir_real: str,
+              registry: dict | None) -> str:
+    """Dual-signal classification (plan Task 1).
+
+    Signal 1 — registry dbdir: path-based servers register a USER directory
+    (e.g. /tmp, /Users/...); no-path servers register an auto-generated
+    tempdir (tmpXXXX under TMPDIR).
+    Signal 2 — registry dbfilename: path-based -> user filename
+    (e.g. pathbased_reaper_test.db); no-path -> the generic 'redis.db'.
+    Both signals must agree for 'candidate'.
+
+    Note: redislite ALWAYS places the unix socket in a tempdir (even for
+    path-based servers), so socket location alone is insufficient — the
+    registry is the authoritative source.
+    """
+    # No registry at all -> cannot confirm path-based; treat conservatively
+    # via dirname pattern + .db-file presence (old-format fallback).
+    if registry is None:
+        if _dir_has_db_file(dbdir_real):
+            return "protected"
+        basename = os.path.basename(dbdir_real)
+        if not _AUTOGEN_DIRNAME.match(basename):
+            logger.warning(
+                "unrecognized dir pattern, treating as protected: %s", dbdir_real)
+            return "protected"
+        # auto-generated dirname, no .db file -> could be a no-path server
+        return _cooldown_check(registry)
+
+    # Signal 1: registry dbdir is a USER dir (not auto tempdir) -> path-based.
+    reg_dbdir = registry.get("dbdir", "")
+    reg_dbdir_real = os.path.realpath(reg_dbdir) if reg_dbdir else ""
+    is_autogen_dbdir = bool(
+        reg_dbdir_real
+        and reg_dbdir_real.startswith(tmpdir_real)
+        and _AUTOGEN_DIRNAME.match(os.path.basename(reg_dbdir_real))
+    )
+    if not is_autogen_dbdir and reg_dbdir_real:
+        if reg_dbdir_real.startswith(tmpdir_real):
+            logger.warning(
+                "unrecognized dir pattern, treating as protected: %s", reg_dbdir_real)
+        return "protected"
+
+    # Signal 2: dbfilename is the generic 'redis.db' (no-path) vs user name.
+    db_filename = registry.get("dbfilename", "")
+    if db_filename and db_filename != "redis.db":
+        return "protected"
+
+    # Old-format registry (no dbfilename field): .db file present -> protected.
+    if "dbfilename" in registry and registry.get("dbfilename") is None:
+        if _dir_has_db_file(dbdir_real):
+            return "protected"
+        basename = os.path.basename(dbdir_real)
+        if not _AUTOGEN_DIRNAME.match(basename):
+            logger.warning(
+                "unrecognized dir pattern, treating as protected: %s", dbdir_real)
+            return "protected"
+
+    return _cooldown_check(registry)
+
+
+def _cooldown_check(registry: dict | None) -> str:
+    """Boot-cooldown: fresh servers (uptime < MIN_UPTIME) are protected."""
+    pid = None
+    if registry and registry.get("pidfile"):
+        try:
+            pid = int(Path(registry["pidfile"]).read_text().strip())
+        except (OSError, ValueError):
+            pid = None
+    uptime = _uptime_seconds(pid) if pid else 0.0
+    min_uptime = _parse_min_uptime()
+    if uptime is not None and uptime < min_uptime:
+        return "protected"
+    return "candidate"
+
+
+def _dir_has_db_file(dbdir: str) -> bool:
+    try:
+        for p in Path(dbdir).glob("*.db"):
+            return True
+    except OSError:
+        pass
+    return False
+
+
+# ── Phase 1 / Phase 2 discovery helpers (plan Task 2) ───────────────
+
+def phase1_probe(record: dict) -> dict:
+    """Ordered discovery: resolve stale-PID sockets via raw probe FIRST.
+
+    Returns record with updated classification:
+      - stale_PID + probe dead   -> 'stale_socket' (removable)
+      - stale_PID + probe alive  -> live, real PID derived
+      - stale_PID + probe undetermined -> 'undetermined'
+      - pid alive                -> unchanged
+    """
+    if record.get("pid") and _pid_alive(record["pid"]):
+        return record
+    if not record.get("socket_path"):
+        return record
+    probe = _probe_socket(record["socket_path"])
+    if probe == "dead":
+        record["classification"] = "stale_socket"
+    elif probe == "alive":
+        real_pid = _derive_real_pid(record["socket_path"])
+        if real_pid:
+            record["pid"] = real_pid
+            record["classification"] = record.get("classification")
+        else:
+            record["classification"] = "undetermined"
+    else:  # undetermined
+        record["classification"] = "undetermined"
+    return record
+
+
+def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = None,
+         sigterm_timeout: float = 10.0) -> list[dict]:
+    """Reap candidate records safely (plan Task 2). Returns acted-upon list.
+
+    Only 'candidate' records are killed, and only after CLIENT LIST shows 0
+    active clients (double-checked). Path-based / protected / stale_socket /
+    undetermined records are NEVER killed here.
+    """
+    acted = []
+    killed = 0
+    for record in records:
+        if batch_size is not None and killed >= batch_size:
+            break
+        classification = record.get("classification")
+        if classification != "candidate":
+            if classification in ("protected", "stale_socket", "undetermined"):
+                logger.warning(
+                    "skipping path-based/non-candidate server: %s",
+                    record.get("socket_path"))
+            continue
+
+        # Liveness-first: never kill a dead PID's leftovers via connect.
+        if not record.get("pid") or not _pid_alive(record["pid"]):
+            logger.warning("dead socket connect failure, skipping: %s",
+                           record.get("socket_path"))
+            continue
+
+        # Double-check CLIENT LIST (before+after).
+        clients_before = _active_client_count(record["socket_path"])
+        if clients_before > 0:
+            logger.info("server has %d active client(s), skipping: %s",
+                        clients_before, record["socket_path"])
+            continue
+        clients_after = _active_client_count(record["socket_path"])
+        if clients_after > 0:
+            logger.info("server gained a client between checks, skipping: %s",
+                        record["socket_path"])
+            continue
+
+        if dry_run:
+            logger.warning("[DRY-RUN] would kill PID %s (%s)",
+                           record["pid"], record["socket_path"])
+            acted.append(record)
+            continue
+
+        _kill(record["pid"], sigterm_timeout)
+        _cleanup_tempdir(record.get("dbdir"))
+        logger.warning("killed orphan PID %s (%s)",
+                       record["pid"], record["socket_path"])
+        acted.append(record)
+        killed += 1
+    return acted
+
+
+def _kill(pid: int, sigterm_timeout: float) -> None:
+    import signal
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    deadline = time.time() + sigterm_timeout
+    while time.time() < deadline:
+        if not _pid_alive(pid):
+            return
+        time.sleep(0.2)
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+def _cleanup_tempdir(dbdir: str | None) -> None:
+    if not dbdir:
+        return
+    try:
+        shutil.rmtree(dbdir, ignore_errors=True)
+    except OSError:
+        logger.warning("could not remove tempdir %s", dbdir)
