@@ -10,7 +10,9 @@ fastapi>=0.100.0
 uvicorn>=0.23.0
 
 
-# Embeddings for vector search (#160) — 384-dim all-MiniLM-L6-v2.
-# Heavy (~2GB with torch) but required for HNSW vector index queries.
-sentence-transformers>=2.0
-scikit-learn>=1.0
+# NOTE: sentence-transformers intentionally NOT in the deploy requirements.
+# It downloads ~90MB from HuggingFace on first use, which hangs in the
+# sandboxed Fly network and blocks create_point (see fix/embedding-hang).
+# Embeddings are optional (Phase 1A) — enable via the pyproject extra only
+# where the model is reachable (local dev). Vector search falls back to
+# FTS+structural RRF without them.
