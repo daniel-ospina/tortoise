@@ -395,6 +395,24 @@ def test_add_document_capture_fields():
     assert created[0]["about_entities"] == ["agent-pi"]
 
 
+def test_add_document_partial_update_preserves_source_path():
+    """#167 (P0 fix): partial update through add_document WITHOUT source_path
+    must NOT wipe an existing sourcePath. Regression: "" default was non-null
+    in Cypher and coalesce("", d.sourcePath) wiped it."""
+    api, log = _api()
+    api.add_document("doc-sp2", "With Source", document_kind="transcript",
+                     source_path="/tmp/test.md")
+    # Partial update via API — source_path omitted entirely
+    api.add_document("doc-sp2", "With Source", document_kind="transcript",
+                     summary="Updated only")
+    events = [e for e in log.read_all() if e["type"] == "DocumentCreated"]
+    assert len(events) == 2
+    assert events[0]["source_path"] == "/tmp/test.md"
+    # Second event must carry source_path=None (not "") so projection coalesce
+    # preserves the value
+    assert events[1]["source_path"] is None, f"got {events[1]['source_path']!r}"
+
+
 def test_add_event_emits_eventrecorded():
     """#125: add_event emits EventRecorded with id=eid and full payload."""
     api, log = _api()

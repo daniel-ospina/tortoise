@@ -226,7 +226,7 @@ class EventAPI:
                      summary: str = "",
                      session_id: str = "",
                      event_id: str = "",
-                     source_path: str = "") -> str:
+                     source_path: str | None = None) -> str:
         """Emit DocumentCreated event. Returns the document id (same as input).
 
         JSONL fields are snake_case per plan §4.3 convention.
