@@ -1662,7 +1662,7 @@ def main(argv: list[str] | None = None) -> int:
     dc.add_argument("--findings", help="JSON dict of findings")
     dc.add_argument("--edges", help="JSON list of edges, e.g. '[\"crit:1\", \"IMPL\", \"opt:a\"]' or full edge dicts")
     dc.add_argument("--context-free", action="store_true",
-                    help="Compute confidence via explicit operator factors instead of context isolation (default)")
+                    help="Deprecated no-op — context-free (explicit factors) is the only mode since #49 Phase 2",)
     dc.add_argument("--db", help="FalkorDB URI override (default: TORTOISE_DB_URI or docker://:@localhost:16379/tortoise)")
     try:
         args = p.parse_args(argv)
