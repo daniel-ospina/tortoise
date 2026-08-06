@@ -36,9 +36,14 @@ class TestCoerceProps:
         assert result == {"topic": "debug", "status": "live", "authoredBy": "x"}
         assert "props" not in result
 
-    def test_nested_dict_overrides_existing_key(self):
+    def test_explicit_top_level_kwarg_wins_over_nested(self):
+        # Explicit kwargs are the caller's more specific intent (Qwen gate).
         props = {"topic": "outer", "props": {"topic": "inner"}}
-        assert _coerce_props(props) == {"topic": "inner"}
+        assert _coerce_props(props) == {"topic": "outer"}
+
+    def test_nested_dict_adds_new_keys(self):
+        props = {"topic": "outer", "props": {"status": "live"}}
+        assert _coerce_props(props) == {"topic": "outer", "status": "live"}
 
     def test_props_none_is_noop(self):
         props = {"props": None, "authoredBy": "x"}
@@ -209,3 +214,19 @@ class TestLoadDotenv:
     def test_missing_file_is_noop(self, monkeypatch, tmp_path):
         from tortoise.mcp_server import _load_dotenv
         _load_dotenv(str(tmp_path / "does-not-exist.env"))  # must not raise
+
+    def test_quoted_value_with_space_hash_preserved(self, monkeypatch, tmp_path):
+        from tortoise.mcp_server import _load_dotenv
+        env = tmp_path / ".env"
+        env.write_text('QUOTED_HASH="a # b"\n')
+        monkeypatch.delenv("QUOTED_HASH", raising=False)
+        _load_dotenv(str(env))
+        assert os.environ.get("QUOTED_HASH") == "a # b"
+
+    def test_does_not_override_explicit_empty_env(self, monkeypatch, tmp_path):
+        from tortoise.mcp_server import _load_dotenv
+        env = tmp_path / ".env"
+        env.write_text("EMPTY_OVERRIDE=from-dotenv\n")
+        monkeypatch.setenv("EMPTY_OVERRIDE", "")  # explicitly set empty
+        _load_dotenv(str(env))
+        assert os.environ.get("EMPTY_OVERRIDE") == ""  # .env must NOT win

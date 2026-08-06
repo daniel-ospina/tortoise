@@ -40,10 +40,17 @@ def _load_dotenv(path: str | None = None) -> None:
                 continue
             key, _, value = line.partition("=")
             key = key.strip()
-            # Strip inline comments (whitespace + '#') — python-dotenv behavior.
-            # A bare '#' inside an unquoted value is preserved (passwords).
-            value = value.strip().split(" #", 1)[0].strip().strip("\"'")
-            if key and not os.environ.get(key):
+            # python-dotenv semantics: quoted values are literal (no inline
+            # comment stripping); unquoted values strip inline comments
+            # (whitespace + '#'). A bare '#' in an unquoted value is preserved.
+            value = value.strip()
+            if value[:1] in ('"', "'") and value[-1:] == value[:1]:
+                value = value[1:-1]
+            else:
+                value = value.split(" #", 1)[0].strip()
+            # Only fill keys that are absent — never override an explicitly
+            # set (even empty) environment variable.
+            if key and key not in os.environ:
                 os.environ[key] = value
     except OSError as e:
         _log.debug("Could not read .env (%s): %s — continuing without it", path, e)

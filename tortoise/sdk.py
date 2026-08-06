@@ -47,7 +47,10 @@ def _coerce_props(props: dict) -> dict:
     """
     nested = props.pop("props", None)
     if isinstance(nested, dict):
-        props.update(nested)
+        # Explicit top-level kwargs are the caller's more specific intent —
+        # they win over nested props on collision (mirrors the MCP server,
+        # where explicit tool args override user-supplied props).
+        props.update({k: v for k, v in nested.items() if k not in props})
     elif nested is not None:
         # Scalar 'props' value — restore as a literal property.
         props["props"] = nested
