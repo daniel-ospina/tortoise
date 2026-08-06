@@ -314,6 +314,116 @@ class TestComputeReputation:
                      "alpha", "beta", "outcomes"]:
             assert key in rep, f"Missing key: {key}"
 
+    def test_reputation_mixed_impl_and_nand(self, sdk):
+        """Mixed IMPL+NAND outcomes compute Beta(1+impl, 1+nand) (#140).
+
+        The alpha/beta assertions deliberately verify the Beta parameters the
+        issue names (Beta(1+impl_count, 1+nand_count)) — not just the mean ratio:
+        1 IMPL + 1 NAND → 2/4 = 0.5; add a 2nd IMPL → 3/5 = 0.6.
+        """
+        proj = sdk._get_proj()
+        subj = sdk.create_subject("judy", "reviewer")
+
+        def _add_outcome(event_id: str, rel: str, point_id: str):
+            proj.apply({
+                "type": "EventRecorded",
+                "id": event_id,
+                "eventId": event_id,
+                "eventKind": "review",
+                "subject": subj["name"],
+            })
+            proj.g.query(
+                f"MATCH (e:Event {{eventId:$eid}}), (p:Point {{id:$pid}}) "
+                f"CREATE (e)-[:{rel}]->(p)",
+                params={"eid": event_id, "pid": point_id},
+            )
+
+        p1 = sdk.create_point("observation", "market up", context="test")
+        p2 = sdk.create_point("observation", "market down", context="test")
+
+        # 1 IMPL + 1 NAND → Beta(2, 2) → mean 0.5
+        _add_outcome("ev-mix-1", "IMPL", p1["id"])
+        _add_outcome("ev-mix-2", "NAND", p2["id"])
+        rep = sdk.compute_reputation(subj["id"])
+        assert rep["impl_count"] == 1
+        assert rep["nand_count"] == 1
+        assert rep["total_events"] == 2
+        assert rep["alpha"] == 2.0
+        assert rep["beta"] == 2.0
+        assert rep["mean"] == 0.5
+        # outcomes list labels each event correctly (IMPL success, NAND failure)
+        assert len(rep["outcomes"]) == 2
+        assert any(o["outcome"] == "NAND" for o in rep["outcomes"])
+        assert any(o["outcome"] == "IMPL" for o in rep["outcomes"])
+
+        # Add a 2nd IMPL → Beta(3, 2) → mean 0.6
+        p3 = sdk.create_point("observation", "market up again", context="test")
+        _add_outcome("ev-mix-3", "IMPL", p3["id"])
+        rep = sdk.compute_reputation(subj["id"])
+        assert rep["impl_count"] == 2
+        assert rep["nand_count"] == 1
+        assert rep["total_events"] == 3
+        assert rep["alpha"] == 3.0
+        assert rep["beta"] == 2.0
+        assert rep["mean"] == 0.6
+        # outcomes now holds 3 entries: two IMPL, one NAND
+        assert len(rep["outcomes"]) == 3
+        assert sum(1 for o in rep["outcomes"] if o["outcome"] == "IMPL") == 2
+        assert sum(1 for o in rep["outcomes"] if o["outcome"] == "NAND") == 1
+
+    def test_reputation_all_nand_lowers_mean(self, sdk):
+        """Pure-NAND outcomes drive reputation below neutral (Beta(1, 1+nand)).
+
+        Complementary to the mixed test — proves NAND edges are counted as
+        failures independent of IMPL presence: 1 NAND → 1/3 ≈ 0.3333;
+        add a 2nd NAND → 1/4 = 0.25.
+        """
+        proj = sdk._get_proj()
+        subj = sdk.create_subject("karl", "auditor")
+
+        def _add_outcome(event_id: str, rel: str, point_id: str):
+            proj.apply({
+                "type": "EventRecorded",
+                "id": event_id,
+                "eventId": event_id,
+                "eventKind": "review",
+                "subject": subj["name"],
+            })
+            proj.g.query(
+                f"MATCH (e:Event {{eventId:$eid}}), (p:Point {{id:$pid}}) "
+                f"CREATE (e)-[:{rel}]->(p)",
+                params={"eid": event_id, "pid": point_id},
+            )
+
+        # 1 NAND → Beta(1, 2) → mean 0.3333
+        p1 = sdk.create_point("observation", "false claim", context="test")
+        _add_outcome("ev-nand-1", "NAND", p1["id"])
+        rep = sdk.compute_reputation(subj["id"])
+        assert rep["impl_count"] == 0
+        assert rep["nand_count"] == 1
+        assert rep["total_events"] == 1
+        assert rep["alpha"] == 1.0
+        assert rep["beta"] == 2.0
+        assert rep["mean"] == 0.3333
+        assert len(rep["outcomes"]) == 1
+        assert all(o["outcome"] == "NAND" for o in rep["outcomes"])
+
+        # Add a 2nd NAND → Beta(1, 3) → mean 0.25
+        p2 = sdk.create_point("observation", "another false claim", context="test")
+        _add_outcome("ev-nand-2", "NAND", p2["id"])
+        rep = sdk.compute_reputation(subj["id"])
+        assert rep["impl_count"] == 0
+        assert rep["nand_count"] == 2
+        assert rep["total_events"] == 2
+        assert rep["alpha"] == 1.0
+        assert rep["beta"] == 3.0
+        assert rep["mean"] == 0.25
+        assert len(rep["outcomes"]) == 2
+        assert all(o["outcome"] == "NAND" for o in rep["outcomes"])
+        # each outcome dict carries the full contract fields
+        for o in rep["outcomes"]:
+            assert set(o.keys()) >= {"point_id", "content", "confidence", "outcome"}
+
 
 # ── Review fixes: supersede_point structural transfer + negative cases ──
 
