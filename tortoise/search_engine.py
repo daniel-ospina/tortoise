@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from typing import Literal
 
 logger = logging.getLogger(__name__)
@@ -49,6 +49,12 @@ class SearchResult:
     scores: SearchScores | None = None
     match_source: Literal["fts", "vector", "structural", "rrf", "tfidf"] = "rrf"
     ep: EpBreakdown | None = None
+    relationships: list[dict] = field(default_factory=list)  # SDK compat (sdk.py passes it; non-point = empty)
+    # #125 capture metadata (document entity_type) — optional, empty for non-docs
+    topics: list = field(default_factory=list)
+    summary: str = ""
+    session_id: str = ""
+    event_id: str = ""
 
     def to_dict(self) -> dict:
         """Convert to JSON-safe dict for API responses."""
@@ -58,6 +64,11 @@ class SearchResult:
             "point_kind": self.point_kind,
             "context": self.context,
             "match_source": self.match_source,
+            "relationships": self.relationships,
+            "topics": self.topics,
+            "summary": self.summary,
+            "sessionId": self.session_id,
+            "eventId": self.event_id,
             # Backward-compat aliases (Phase 0 migration from old search() API).
             # IMPORTANT: "similarity" was cosine (0-1) in Phase 0; now it's the
             # RRF fusion score (rank-based, typically 0.01-0.05). Clients that
@@ -97,9 +108,9 @@ def run_fts_query(
     """Run full-text search via FalkorDB FTS index.
 
     Falls back gracefully if index doesn't exist or query fails.
-    entity_type: 'point' (default), 'event', 'subject', or 'operator'.
-    Operators are Point nodes with is_operator=true — matched by label via
-    CONTAINS (not FTS, since operator labels aren't in the content FTS index).
+    entity_type: 'point' (default), 'event', 'subject', 'document', 'object',
+    'source', or 'operator'. Document FTS searches the _searchText index
+    (#125) which concatenates title+summary+topics.
 
     Note: timeout_ms is checked AFTER the query completes (post-hoc).
     A slow query still consumes DB resources — this is a soft guard,
@@ -285,7 +296,7 @@ def run_structural_query(
         cypher = (
             f"MATCH (n:{label_str}) "
             f"WHERE {where_clause} "
-            f"RETURN n.id, n.{kind_field}, n.{kind_field} "
+            f"RETURN n.id "
             f"LIMIT $limit"
         )
         params["limit"] = limit
@@ -340,6 +351,7 @@ def degradation_chain(
     entity_type: str = "point",
     limit: int = 20,
     is_embedded: bool = True,
+    expanded_kinds=None,  # accepted for SDK compat; kind expansion is post-retrieval (sdk.py)
 ) -> dict[str, list[tuple[str, float]]]:
     """Run retrieval strategies in parallel with per-strategy degradation.
 

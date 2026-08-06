@@ -356,3 +356,40 @@ def _run_all():
 
 if __name__ == "__main__":
     _run_all()
+
+
+# ------------------------------------------------------------------ #125 capture API
+
+
+def test_add_document_capture_fields():
+    """#125: add_document persists topics/summary/session_id/event_id in the event."""
+    api, log = _api()
+    api.add_document("doc-1", "Conv", document_kind="transcript",
+                     topics=["licensing", "AGPL"], summary="Compared",
+                     session_id="s1", event_id="evt-1", about_entities=["agent-pi"])
+    events = log.read_all()
+    created = [e for e in events if e["type"] == "DocumentCreated"]
+    assert len(created) == 1
+    assert created[0]["topics"] == ["licensing", "AGPL"]
+    assert created[0]["summary"] == "Compared"
+    assert created[0]["session_id"] == "s1"
+    assert created[0]["event_id"] == "evt-1"
+    assert created[0]["about_entities"] == ["agent-pi"]
+
+
+def test_add_event_emits_eventrecorded():
+    """#125: add_event emits EventRecorded with id=eid and full payload."""
+    api, log = _api()
+    eid = api.add_event("evt-1", "sessionCaptured", subject="agent-pi",
+                        object_name="doc-1", object_type="Document",
+                        uses=[{"name": "tortoise-capture", "kind": "skill"}],
+                        about_entities=["agent-pi"])
+    assert eid == "evt-1"
+    events = log.read_all()
+    evs = [e for e in events if e["type"] == "EventRecorded"]
+    assert len(evs) == 1
+    assert evs[0]["id"] == "evt-1"  # id, not eventId — matches _upsert_event lookup
+    assert evs[0]["eventKind"] == "sessionCaptured"
+    assert evs[0]["object"] == "doc-1"
+    assert evs[0]["objectType"] == "Document"
+    assert evs[0]["uses"] == [{"name": "tortoise-capture", "kind": "skill"}]

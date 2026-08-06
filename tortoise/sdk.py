@@ -2136,7 +2136,9 @@ class TortoiseSDK:
                     }
             elif entity_type == "document":
                 rows = graph.query(
-                    "MATCH (n:Document) WHERE n.id IN $ids RETURN n.id, n.title, n.documentKind",
+                    "MATCH (n:Document) WHERE n.id IN $ids "
+                    "RETURN n.id, n.title, n.documentKind, n.topics, n.summary, "
+                    "n.sessionId, n.eventId",
                     params={"ids": result_ids},
                 ).result_set
                 for row in rows:
@@ -2145,6 +2147,10 @@ class TortoiseSDK:
                         "content": row[1] or "",
                         "kind": row[2] or "",
                         "context": None,
+                        "topics": row[3] or [],
+                        "summary": row[4] or "",
+                        "sessionId": row[5] or "",
+                        "eventId": row[6] or "",
                     }
             elif entity_type == "object":
                 rows = graph.query(
@@ -2198,6 +2204,11 @@ class TortoiseSDK:
                 continue
             content, pt_kind, pt_context = pt["content"], pt["kind"], pt["context"]
             ep = ep_breakdowns.get(pid) if entity_type == "point" else None
+            # #125 capture metadata (document entity_type)
+            cap_topics = pt.get("topics", [])
+            cap_summary = pt.get("summary", "")
+            cap_session = pt.get("sessionId", "")
+            cap_event = pt.get("eventId", "")
 
             # Apply min_confidence filter (Point only; non-Point always pass)
             if entity_type == "point" and ep and ep.confidence_mean < min_confidence:
@@ -2230,6 +2241,10 @@ class TortoiseSDK:
                 match_source=match_source,
                 ep=ep,
                 relationships=point_relationships.get(pid, []),
+                topics=cap_topics,
+                summary=cap_summary,
+                session_id=cap_session,
+                event_id=cap_event,
             )
             results.append(result)
 

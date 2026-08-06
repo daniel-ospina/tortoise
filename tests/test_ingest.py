@@ -472,3 +472,92 @@ def _run_all():
 
 if __name__ == "__main__":
     _run_all()
+
+
+# ------------------------------------------------------------------ #125 capture-metadata (live DB)
+
+
+def test_capture_metadata_creates_document_no_points():
+    """#125: --capture-metadata creates Document + sessionCaptured Event,
+    ZERO Points, and does NOT block a later full extraction (no begin_ingest)."""
+    import json
+    uri = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise_test_ingest125")
+    db = uri  # live DB URI
+    log = _tmp("events_capture.jsonl")
+    # Flush the test graph (test-prefixed — safe) for hermetic Point count
+    from tortoise.projection import FalkorProjection as _FP
+    _f = _FP.from_uri(uri)
+    _f.g.query("MATCH (n) DETACH DELETE n")
+    _f.close()
+    # Sample .md with topics/summary frontmatter
+    t = _tmp("sess.md")
+    Path(t).write_text(
+        "---\ntitle: Test\ntopics: licensing, AGPL\nsummary: Compared\n"
+        "sessionId: s1\ndoc_status: captured\n---\n\n## User\nDiscuss licensing\n",
+        encoding="utf-8")
+    args = ["ingest", str(t), "--db", db, "--log", log, "--capture-metadata",
+            "--point-model", "mock:cheap", "--relation-model", "mock:reason"]
+    with patch("sys.argv", args):
+        _run_main(None)
+    # Verify via live projection
+    from tortoise.projection import FalkorProjection
+    proj = FalkorProjection.from_uri(uri)
+    try:
+        # Document exists with fields (discover by sessionId — doc_id may differ)
+        rows = proj.g.query(
+            "MATCH (d:Document) WHERE d.sessionId = 's1' "
+            "RETURN d.topics, d.summary, d.eventId"
+        ).result_set
+        assert rows, "Document not created"
+        assert rows[0][0] == ["licensing", "AGPL"], rows[0][0]
+        assert rows[0][1] == "Compared"
+        # sessionCaptured Event + produces→Document + uses→Skill
+        ev = proj.g.query(
+            "MATCH (e:Event {eventKind:'sessionCaptured'})-[:produces]->(d:Document) "
+            "WHERE d.sessionId = 's1' RETURN count(e)"
+        ).result_set
+        assert ev[0][0] >= 1, ev
+        uses = proj.g.query(
+            "MATCH (e:Event {eventKind:'sessionCaptured'})-[:uses]->(o:Object {objectKind:'skill'}) "
+            "RETURN count(o)"
+        ).result_set
+        assert uses[0][0] >= 1, uses
+        # ZERO Points extracted
+        pts = proj.g.query("MATCH (p:Point) RETURN count(p)").result_set
+        assert pts[0][0] == 0, f"Points extracted during capture: {pts[0][0]}"
+    finally:
+        proj.close()
+    # No IngestStarted written (capture skips begin_ingest — doesn't block full later)
+    lines = [ln for ln in Path(log).read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert not any("IngestStarted" in ln for ln in lines), "capture must not write IngestStarted"
+
+
+def test_full_ingest_unaffected_and_not_blocked_by_capture():
+    """#125: full ingest (no flag) extracts Points; a prior capture does NOT block it."""
+    uri = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise_test_ingest125")
+    db = uri
+    log1 = _tmp("events_capture2.jsonl")
+    # Flush test graph for hermetic assertions
+    from tortoise.projection import FalkorProjection as _FP
+    _f = _FP.from_uri(uri)
+    _f.g.query("MATCH (n) DETACH DELETE n")
+    _f.close()
+    log2 = _tmp("events_full.jsonl")
+    t = _tmp("sess2.md")
+    Path(t).write_text(
+        "---\ntitle: Test2\ntopics: licensing\nsummary: Compared\nsessionId: s2\n---\n\n"
+        "## User\nWe should raise B slowly\n## Assistant\nFast raises wreck early buyers\n",
+        encoding="utf-8")
+    # 1. capture-metadata first (should NOT block full later)
+    with patch("sys.argv", ["ingest", str(t), "--db", db, "--log", log1,
+                            "--capture-metadata", "--point-model", "mock:cheap",
+                            "--relation-model", "mock:reason"]):
+        _run_main(None)
+    # 2. full ingest on same file → MUST extract (not skipped)
+    with patch("sys.argv", ["ingest", str(t), "--db", db, "--log", log2,
+                            "--point-model", "mock:cheap", "--relation-model", "mock:reason"]):
+        _run_main(None)
+    # Full ingest should have produced points/events (begin_ingest not blocked)
+    lines = [ln for ln in Path(log2).read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert any("IngestStarted" in ln for ln in lines), \
+        "full ingest was blocked by prior capture (idempotency gotcha)"

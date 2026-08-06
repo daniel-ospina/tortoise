@@ -8,6 +8,16 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _build_search_text(title, summary=None, topics=None) -> str:
+    """#125: compute the Document FTS search surface.
+
+    Concatenates title + summary + topics (None-safe). Always includes title
+    so every Document has a search floor.
+    """
+    parts = [title, summary] + list(topics or [])
+    return " ".join(filter(None, parts))
+
+
 class _EntityHandlers:
     """Mixin: entity upsert/delete methods for FalkorProjection."""
 
@@ -161,21 +171,48 @@ class _EntityHandlers:
                 embedding = compute_embedding(doc_content)
             except Exception:
                 pass
+        # #125 capture fields — use ev.get(field) with NO default so None →
+        # Cypher null, letting coalesce fall through to existing on partial
+        # updates. CRITICAL: "" is non-null in Cypher — coalesce("", d.f, ...)
+        # returns "" and WIPES existing. Never use "" defaults in SET clauses.
+        topics = ev.get("topics")
+        summary = ev.get("summary")
+        sid = ev.get("session_id")
+        eid = ev.get("event_id")
+        ds = ev.get("doc_status")
+        # _searchText computed only when the event carries meaningful text
+        has_text = bool(ev.get("title") or summary or topics)
+        st = (_build_search_text(ev.get("title", ""), summary, topics)
+              if has_text else None)
         self.g.query(
             "MERGE (d:Document {id:$id}) "
             "SET d.title=coalesce($title, d.title), "
             "    d.documentKind=coalesce($dk, d.documentKind), "
             "    d.format=coalesce($fmt, d.format), "
             "    d.content=coalesce($content, d.content), "
+            "    d.topics=coalesce($topics, d.topics, []), "
+            "    d.summary=coalesce($summary, d.summary, ''), "
+            "    d.sessionId=coalesce($sid, d.sessionId, ''), "
+            "    d.eventId=coalesce($eid, d.eventId, ''), "
+            "    d.doc_status=coalesce($ds, d.doc_status, 'draft'), "
+            "    d._searchText=coalesce($st, d._searchText, d.title), "
             "    d.embedding=CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE d.embedding END, "
             "    d.updatedAt=$now",
             params={"id": did, "title": ev.get("title", did),
                     "dk": ev.get("document_kind", ""),
                     "fmt": ev.get("format", "markdown"),
                     "content": ev.get("content"),
+                    "topics": topics, "summary": summary, "sid": sid,
+                    "eid": eid, "ds": ds, "st": st,
                     "embedding": embedding,
                     "now": _now_iso()},
         )
+        # #125 — aboutSubject edges when about_entities present (Task 1
+        # self-contained: label-agnostic generalization lives in edges.py)
+        about = ev.get("about_entities") or []
+        if about:
+            for ent in about:
+                self._create_about_edges(did, ent)
 
     def _upsert_event(self, event: dict) -> None:
         """MERGE Event node with all ONTOLOGY §3.1 properties.
@@ -239,35 +276,59 @@ class _EntityHandlers:
                 "MERGE (s)-[:performs]->(e)",
                 params={"name": subj, "eid": eid},
             )
-        # Event -[:produces]-> Object
+        # Event -[:produces]-> Object (or Document when objectType='document', #125)
         obj = inner.get("object", "")
+        object_type = inner.get("objectType", "")  # 'Document' | 'Object' | '' (legacy)
         if obj:
-            self.g.query(
-                "MERGE (o:Object {name:$name}) "
-                "ON CREATE SET o.id=$name, o.objectKind='other'",
-                params={"name": obj},
-            )
-            self.g.query(
-                "MATCH (o:Object {name:$name}), (e:Event {eventId:$eid}) "
-                "MERGE (e)-[:produces]->(o)",
-                params={"name": obj, "eid": eid},
-            )
-        # Event -[:uses]-> Object (input entities, #122)
+            if object_type == "Document":
+                self.g.query(
+                    "MERGE (d:Document {id:$id}) "
+                    "ON CREATE SET d.title=$id, d.documentKind='transcript'",
+                    params={"id": obj},
+                )
+                self.g.query(
+                    "MATCH (d:Document {id:$id}), (e:Event {eventId:$eid}) "
+                    "MERGE (e)-[:produces]->(d)",
+                    params={"id": obj, "eid": eid},
+                )
+            else:
+                self.g.query(
+                    "MERGE (o:Object {name:$name}) "
+                    "ON CREATE SET o.id=$name, o.objectKind='other'",
+                    params={"name": obj},
+                )
+                self.g.query(
+                    "MATCH (o:Object {name:$name}), (e:Event {eventId:$eid}) "
+                    "MERGE (e)-[:produces]->(o)",
+                    params={"name": obj, "eid": eid},
+                )
+        # Event -[:uses]-> Object (input entities, #122; #125 structured dicts)
         uses = inner.get("uses")
         if uses:
             if isinstance(uses, str):
                 uses = [uses]
-            for use_name in uses:
+            elif isinstance(uses, dict):
+                uses = [uses]  # bare dict → normalize to list
+            for use_item in uses:
+                if isinstance(use_item, dict):
+                    # #125 structured uses: {name, kind} → objectKind from kind
+                    use_name = use_item.get("name", "")
+                    use_kind = use_item.get("kind", "other")
+                else:
+                    # legacy string uses → default objectKind='other'
+                    use_name = str(use_item)
+                    use_kind = "other"
                 if use_name:
                     self.g.query(
                         "MERGE (o:Object {name:$name}) "
-                        "ON CREATE SET o.id=$name, o.objectKind='other'",
-                        params={"name": str(use_name)},
+                        "ON CREATE SET o.id=$name, o.objectKind=$kind "
+                        "ON MATCH SET o.objectKind=$kind",
+                        params={"name": use_name, "kind": use_kind},
                     )
                     self.g.query(
                         "MATCH (o:Object {name:$name}), (e:Event {eventId:$eid}) "
                         "MERGE (e)-[:uses]->(o)",
-                        params={"name": str(use_name), "eid": eid},
+                        params={"name": use_name, "eid": eid},
                     )
 
     def _upsert_source(self, ev: dict) -> None:

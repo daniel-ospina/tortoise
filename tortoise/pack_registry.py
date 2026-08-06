@@ -30,6 +30,7 @@ CANONICAL_OBJECT_KINDS = frozenset({
 CANONICAL_EVENT_KINDS = frozenset({
     "meeting", "decision", "experiment", "deployment", "review",
     "friction", "extraction", "documentCreated", "roleCreated", "pointAdded",
+    "sessionCaptured",  # #125 metadata-only session capture
 })
 
 CANONICAL_POINT_KINDS = frozenset({
