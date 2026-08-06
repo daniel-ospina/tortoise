@@ -596,24 +596,31 @@ async def get_point(point_id: str, team: dict = Depends(get_current_team)):
 
 @app.get("/v1/search")
 async def search(q: str, limit: int = Query(10, ge=1, le=100), team: dict = Depends(get_current_team)):
-    """Keyword search across Points. Returns ranked results by recency."""
+    """Hybrid search across Points (FTS + vector + structural, RRF-fused).
+
+    Uses the SDK's tortoise_fts_query (search_engine) instead of raw
+    substring CONTAINS — substring missed stemmed/fuzzy/typo matches and
+    was not relevance-ranked (#160). FTS index on content/title/name/subject
+    works without the embedding extra; vector joins in automatically when
+    embeddings are available.
+    """
     sdk = _make_sdk(namespace=team["team_id"])
-    proj = sdk._get_proj()
-    rows = proj.g.query(
-        "MATCH (p:Point) WHERE (p.is_operator IS NULL OR p.is_operator = false) "
-        "AND toLower(p.content) CONTAINS toLower($q) "
-        "RETURN properties(p) ORDER BY p.createdAt DESC LIMIT $limit",
-        params={"q": q, "limit": limit},
-    ).result_set
-    results = []
-    for r in rows:
-        props = dict(r[0])
+    try:
+        results = sdk.tortoise_fts_query(q, limit=limit)
+    except Exception:
+        import logging
+        logging.getLogger("tortoise.api").exception("search failed")
+        raise HTTPException(status_code=500, detail="Search failed")
+    # Normalize to the public response shape (kind from pointKind).
+    out = []
+    for r in results:
+        props = dict(r)
         if "pointKind" in props:
             props["kind"] = props.pop("pointKind")
         if "kind" not in props:
             props["kind"] = "statement"
-        results.append(props)
-    return {"results": results, "count": len(results)}
+        out.append(props)
+    return {"results": out, "count": len(out)}
 
 
 @app.get("/v1/team", response_model=TeamInfoResponse)
