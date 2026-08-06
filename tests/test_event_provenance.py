@@ -381,7 +381,7 @@ class TestComputeReputation:
         proj = sdk._get_proj()
         subj = sdk.create_subject("karl", "auditor")
 
-        def _add_nand(event_id: str, point_id: str):
+        def _add_outcome(event_id: str, rel: str, point_id: str):
             proj.apply({
                 "type": "EventRecorded",
                 "id": event_id,
@@ -391,13 +391,13 @@ class TestComputeReputation:
             })
             proj.g.query(
                 f"MATCH (e:Event {{eventId:$eid}}), (p:Point {{id:$pid}}) "
-                f"CREATE (e)-[:NAND]->(p)",
+                f"CREATE (e)-[:{rel}]->(p)",
                 params={"eid": event_id, "pid": point_id},
             )
 
         # 1 NAND → Beta(1, 2) → mean 0.3333
         p1 = sdk.create_point("observation", "false claim", context="test")
-        _add_nand("ev-nand-1", p1["id"])
+        _add_outcome("ev-nand-1", "NAND", p1["id"])
         rep = sdk.compute_reputation(subj["id"])
         assert rep["impl_count"] == 0
         assert rep["nand_count"] == 1
@@ -410,7 +410,7 @@ class TestComputeReputation:
 
         # Add a 2nd NAND → Beta(1, 3) → mean 0.25
         p2 = sdk.create_point("observation", "another false claim", context="test")
-        _add_nand("ev-nand-2", p2["id"])
+        _add_outcome("ev-nand-2", "NAND", p2["id"])
         rep = sdk.compute_reputation(subj["id"])
         assert rep["impl_count"] == 0
         assert rep["nand_count"] == 2
