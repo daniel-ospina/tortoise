@@ -85,6 +85,10 @@ Deno.serve(async (req: Request) => {
     const fastApiUrl = Deno.env.get("FASTAPI_URL") || "http://localhost:8000";
     const fastApiKey = Deno.env.get("FASTAPI_INTERNAL_KEY") || "";
 
+    // Hash once, reuse for both consumers (each call mints a fresh salt —
+    // calling twice would store two different hashes for the same key).
+    const keyHash = await hashApiKey(apiKey);
+
     const provisionRes = await fetch(`${fastApiUrl}/internal/provision`, {
       method: "POST",
       headers: {
@@ -94,7 +98,7 @@ Deno.serve(async (req: Request) => {
       body: JSON.stringify({
         team_id: teamId,
         team_name: safeName,
-        api_key_hash: await hashApiKey(apiKey),
+        api_key_hash: keyHash,
         created_by: user_id,
       }),
     });
@@ -121,7 +125,7 @@ Deno.serve(async (req: Request) => {
       team_id: teamId,
       team_name: safeName,
       api_key: apiKey,  // plaintext — shown once on welcome page
-      key_hash: await hashApiKey(apiKey),
+      key_hash: keyHash,
       graph_name: `team_${teamId}`,
     }, { onConflict: "user_id" });
     if (userTeamsError) {
@@ -161,14 +165,33 @@ Deno.serve(async (req: Request) => {
   }
 });
 
-// PBKDF2-HMAC-SHA256 with pepper as salt — MUST match tortoise/auth.py hash_api_key()
-// (100,000 iterations, hex digest). Used for at-rest key storage and lookup.
+// PBKDF2-HMAC-SHA256 — MUST match tortoise/auth.py hash_api_key() exactly.
+// auth.py: per-key 32-byte random salt + pepper mixed into KEY MATERIAL
+// (not as salt), returns "salt_hex:hash_hex". If this diverges, provisioned
+// API keys will never validate against the API (they hash differently).
 async function hashApiKey(key: string): Promise<string> {
   const pepper = Deno.env.get("TORTOISE_SECRET_PEPPER") || "";
-  const salt = new TextEncoder().encode(pepper);
+  // Fail fast if pepper is missing: without it, hashes can never match
+  // auth.py (which either raises in prod or uses a dev-only pepper), so
+  // every provisioned key would silently fail API auth.
+  if (!pepper) {
+    throw new Error(
+      "TORTOISE_SECRET_PEPPER is not set. Set it in Supabase secrets — " +
+      "provisioned API keys cannot be verified without a stable pepper."
+    );
+  }
+  // Per-key 32-byte random salt (matches auth.py: secrets.token_bytes(32))
+  const perKeySalt = crypto.getRandomValues(new Uint8Array(32));
+  // Pepper mixed into key material: key.encode() + pepper (matches auth.py)
+  const keyBytes = new TextEncoder().encode(key);
+  const pepperBytes = new TextEncoder().encode(pepper);
+  const keyMaterialBytes = new Uint8Array(keyBytes.length + pepperBytes.length);
+  keyMaterialBytes.set(keyBytes, 0);
+  keyMaterialBytes.set(pepperBytes, keyBytes.length);
+
   const keyMaterial = await crypto.subtle.importKey(
     "raw",
-    new TextEncoder().encode(key),
+    keyMaterialBytes,
     "PBKDF2",
     false,
     ["deriveBits"]
@@ -177,13 +200,17 @@ async function hashApiKey(key: string): Promise<string> {
     {
       name: "PBKDF2",
       hash: "SHA-256",
-      salt: salt,
+      salt: perKeySalt,
       iterations: 100_000,
     },
     keyMaterial,
     256
   );
-  return Array.from(new Uint8Array(bits))
+  const hashHex = Array.from(new Uint8Array(bits))
     .map(b => b.toString(16).padStart(2, "0"))
     .join("");
+  const saltHex = Array.from(perKeySalt)
+    .map(b => b.toString(16).padStart(2, "0"))
+    .join("");
+  return `${saltHex}:${hashHex}`;
 }
