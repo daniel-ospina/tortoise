@@ -25,6 +25,44 @@ from tortoise.search_engine import (
 )
 
 
+# ── FalkorDB availability check (#174) ─────────────────────────────────────
+# The #125 document-FTS tests below need a LIVE FalkorDB server: FTS indexes
+# are version-gated (>= 4.x) and are not supported by the embedded FalkorDBLite
+# backend, so graceful skip is the right semantic instead of an embedded swap.
+# Probe the env URI and common local defaults once at import time; when no
+# server is reachable the tests skip so the documented no-Docker command
+# `python3 -m pytest tests/` passes (AGENTS.md: FalkorDBLite embedded, no
+# Docker needed). Mirrors tests/test_integration_search.py's probe pattern,
+# but records the working URI in _WORKING_URI instead of mutating
+# os.environ, so other test files in the same session are unaffected.
+FALKORDB_AVAILABLE = False
+_WORKING_URI: str | None = None
+_uri_candidates = [
+    os.environ.get("TORTOISE_DB_URI"),
+    "docker://:falkordb@localhost:6379/tortoise_test_fts125",
+    "docker://:@localhost:16379/tortoise_test_fts125",
+]
+for _uri in _uri_candidates:
+    if not _uri:
+        continue
+    _proj = None
+    try:
+        from tortoise.projection import FalkorProjection
+        _proj = FalkorProjection.from_uri(_uri)
+        _proj.g.query("RETURN 1")
+        _WORKING_URI = _uri
+        FALKORDB_AVAILABLE = True
+        break
+    except Exception:
+        continue
+    finally:
+        if _proj is not None:
+            try:
+                _proj.close()
+            except Exception:
+                pass
+
+
 # ── Mock helpers ────────────────────────────────────────────────────────────
 
 class MockResultSet:
@@ -668,11 +706,11 @@ class TestCrossCutting:
 # ------------------------------------------------------------------ #125 Document FTS + backfill
 
 
+@pytest.mark.skipif(not FALKORDB_AVAILABLE, reason="FalkorDB not available")
 def test_document_fts_index_created(live_proj_fixture=None):
     """#125: Document._searchText FTS index exists after projection init."""
     from tortoise.projection import FalkorProjection
-    proj = FalkorProjection.from_uri(os.environ.get(
-        "TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise_test_fts125"))
+    proj = FalkorProjection.from_uri(_WORKING_URI)
     proj.g.query("MATCH (n) DETACH DELETE n")
     proj._ensure_indexes()
     # db.indexes() output: [label, properties, ...] — label is col 0, props col 1
@@ -682,11 +720,11 @@ def test_document_fts_index_created(live_proj_fixture=None):
     assert found, f"Document _searchText FTS index missing: {rows[:3]}"
 
 
+@pytest.mark.skipif(not FALKORDB_AVAILABLE, reason="FalkorDB not available")
 def test_backfill_document_search_text():
     """#125: backfill sets _searchText=title on pre-existing Documents."""
     from tortoise.projection import FalkorProjection
-    proj = FalkorProjection.from_uri(os.environ.get(
-        "TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise_test_fts125"))
+    proj = FalkorProjection.from_uri(_WORKING_URI)
     proj.g.query("MATCH (n) DETACH DELETE n")
     # Create a Document WITHOUT _searchText (simulating pre-125)
     proj.g.query(
@@ -699,12 +737,12 @@ def test_backfill_document_search_text():
     assert rows and rows[0][0] == "Old Doc", rows
 
 
+@pytest.mark.skipif(not FALKORDB_AVAILABLE, reason="FalkorDB not available")
 def test_document_fts_search_by_topic():
     """#125: Document FTS on _searchText returns sessions matching a topic."""
     from tortoise.projection import FalkorProjection
     import tortoise.search_engine as se
-    uri = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise_test_fts125")
-    proj = FalkorProjection.from_uri(uri)
+    proj = FalkorProjection.from_uri(_WORKING_URI)
     proj.g.query("MATCH (n) DETACH DELETE n")
     proj._ensure_indexes()
     proj.g.query(
@@ -723,11 +761,11 @@ def test_document_fts_search_by_topic():
         proj.close()
 
 
+@pytest.mark.skipif(not FALKORDB_AVAILABLE, reason="FalkorDB not available")
 def test_document_structural_topic_any():
     """#125: any() list filter matches topics on Document nodes."""
     from tortoise.projection import FalkorProjection
-    uri = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise_test_fts125")
-    proj = FalkorProjection.from_uri(uri)
+    proj = FalkorProjection.from_uri(_WORKING_URI)
     proj.g.query("MATCH (n) DETACH DELETE n")
     proj.g.query(
         "CREATE (d:Document {id:'doc-a', topics:['licensing','AGPL'], documentKind:'transcript'})"
