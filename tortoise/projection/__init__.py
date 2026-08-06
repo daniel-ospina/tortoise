@@ -185,7 +185,7 @@ class FalkorProjection(
         if path is not None:
             # Embedded mode (opt-in via path=). Use redislite's FalkorDB client —
             # the plain falkordb.FalkorDB treats a positional path arg as a HOST
-            # (IDNA crash: redis tries to resolve the file path as a hostname).
+            # (IDNA crash: redis tries to resolve the file path as a hostname, #82).
             from redislite.falkordb_client import FalkorDB  # lazy: keep import optional
             self.db = FalkorDB(path)
         elif host is not None:
@@ -383,8 +383,12 @@ class FalkorProjection(
         """Raise RuntimeError if the active graph is not a test graph.
 
         Test graphs must start with 'test_' or 'tortoise_test'.
-        Guards against test teardowns / destructive ops wiping a real graph (#99).
+        Embedded mode (path=) is inherently isolated (per-instance temp DB) —
+        the guard does NOT apply to it. Only server mode (docker) needs the
+        graph-name check, protecting the shared real graph (#99).
         """
+        if getattr(self, "_is_embedded", False):
+            return
         if not self._graph_name.startswith(("test_", "tortoise_test")):
             msg = (
                 f"Graph guard: operation blocked on non-test graph "

@@ -39,9 +39,9 @@ def _api(projection=None):
 def _build(api, source="doc.txt"):
     """Two statements + one IMPL operator between them."""
     prov = provenance(source, [0, 10], "quote", extracted_by="test@0")
-    a = api.add_point("we should raise B slowly", "ctx", prov)
-    b = api.add_point("fast raises wreck early buyers", "ctx", prov)
-    op = api.add_operator("IMPL", [b, a], "ctx", prov)
+    a = api.add_point("we should raise B slowly", prov)
+    b = api.add_point("fast raises wreck early buyers", prov)
+    op = api.add_operator("IMPL", [b, a], prov)
     return a, b, op
 
 
@@ -96,10 +96,13 @@ def test_apply_one_operator_added():
 def test_apply_one_point_revised_both_fields():
     points: dict[str, dict] = {"p1": {"id": "p1", "content": "old", "context": "old_ctx"}}
     ev = {"type": "PointRevised", "id": "p1",
-          "new_content": "new", "new_context": "new_ctx"}
+          "new_content": "new", "new_context": "new_ctx",
+          "projection_version": 2}
     _apply_one(points, ev)
     assert points["p1"]["content"] == "new"
-    assert points["p1"]["context"] == "new_ctx"
+    # P2 #49: v2 events discard new_context — context is NOT revised
+    # (old context property, if present, is retained; new_context is dropped)
+    assert points["p1"].get("context") == "old_ctx"
 
 
 def test_apply_one_point_revised_content_only():
@@ -112,10 +115,12 @@ def test_apply_one_point_revised_content_only():
 
 def test_apply_one_point_revised_context_only():
     points: dict[str, dict] = {"p1": {"id": "p1", "content": "old", "context": "old_ctx"}}
-    ev = {"type": "PointRevised", "id": "p1", "new_context": "new_ctx"}
+    ev = {"type": "PointRevised", "id": "p1", "new_context": "new_ctx",
+          "projection_version": 2}
     _apply_one(points, ev)
     assert points["p1"]["content"] == "old"  # unchanged
-    assert points["p1"]["context"] == "new_ctx"
+    # P2 #49: v2 events discard new_context — context is NOT revised
+    assert points["p1"].get("context") == "old_ctx"
 
 
 def test_apply_one_point_revised_missing_id():
@@ -345,7 +350,8 @@ def test_falkor_apply_point_revised():
             "MATCH (n:Point {id:'p1'}) RETURN n.content, n.context"
         ).result_set
         assert r[0][0] == "new"
-        assert r[0][1] == "new_ctx"
+        # P2 #49: context revision removed — n.context is None/gone
+        assert r[0][1] is None
     finally:
         proj.close()
 
@@ -450,8 +456,7 @@ def test_falkor_rebuild_then_apply():
     try:
         proj.rebuild(log)
         # Apply a new event incrementally
-        c = api.add_point("third statement", "ctx",
-                          provenance("doc.txt", [20, 30], "extra"))
+        c = api.add_point("third statement", provenance("doc.txt", [20, 30], "extra"))
         proj.apply(log.read_all()[-1])  # the newly appended event
         n = proj.query("MATCH (n:Point) RETURN count(n)").result_set[0][0]
         assert n == 4
@@ -1171,13 +1176,13 @@ def test_rebuild_all_cross_file_references():
     log_a = EventLog(os.path.join(d, "a.jsonl"))
     api_a = EventAPI(log_a, initiated_by="extractor", agent_id="test")
     prov = provenance("doc.txt", [0, 10], "quote", extracted_by="test@0")
-    p1 = api_a.add_point("point from file A", "ctx", prov)
-    p2 = api_a.add_point("another from file A", "ctx", prov)
+    p1 = api_a.add_point("point from file A", prov)
+    p2 = api_a.add_point("another from file A", prov)
 
     # File B: operator referencing points in file A (cross-file)
     log_b = EventLog(os.path.join(d, "b.jsonl"))
     api_b = EventAPI(log_b, initiated_by="extractor", agent_id="test")
-    op = api_b.add_operator("IMPL", [p1, p2], "ctx", prov,
+    op = api_b.add_operator("IMPL", [p1, p2], prov,
                             content="operator in file B → points in file A")
 
     # fold everything from both files
