@@ -19,6 +19,7 @@ import pytest
 from tortoise.search_engine import (
     fallback_tfidf,
     degradation_chain,
+    get_relationships,
     run_fts_query,
     run_vector_query,
     run_structural_query,
@@ -701,6 +702,134 @@ class TestCrossCutting:
 
         # kind="stmt" with context=None → score=0.5
         assert result == {"structural": [("p1", 0.5)]}
+
+
+# ── get_relationships ──────────────────────────────────────────────────────
+
+class TestGetRelationships:
+    """get_relationships — operator-edge batch fetch for Points (#141).
+
+    Handles direction inference, multiple operator types, predicate/
+    mechanism/operator_id fields, error handling, empty inputs.
+    """
+
+    # Row shape from the Cypher RETURN clause (9 columns):
+    # n.id, mechanism, predicate, operator_id, related_id, related_kind,
+    # related_content, n_idx, other_idx
+    OUTGOING_ROW = (
+        "p1", "IMPL", "supports", "op-1", "p2", "statement",
+        "related content", 0, 0,
+    )
+    INCOMING_ROW = (
+        "p1", "NAND", "contradicts", "op-2", "p3", "hypothesis",
+        "other content", 1, 0,
+    )
+
+    def test_empty_input_returns_empty_dict(self):
+        """No point_ids → {} and no DB query is issued."""
+        graph = SimpleMockGraph()
+        result = get_relationships(graph, [])
+        assert result == {}
+        assert graph.query_calls == []
+
+    def test_point_with_no_operators_returns_empty_list(self):
+        """Graph returns no rows → every requested point maps to [] ."""
+        graph = SimpleMockGraph(result_set=[])
+        result = get_relationships(graph, ["p1", "p2"])
+        assert result == {"p1": [], "p2": []}
+
+    def test_outgoing_impl_direction(self):
+        """n_idx=0 → direction='outgoing'; full output shape is populated."""
+        graph = SimpleMockGraph(result_set=[self.OUTGOING_ROW])
+        result = get_relationships(graph, ["p1"])
+        assert result["p1"] == [{
+            "predicate": "supports",
+            "mechanism": "IMPL",
+            "related_id": "p2",
+            "related_kind": "statement",
+            "related_content": "related content",
+            "direction": "outgoing",
+            "operator_id": "op-1",
+        }]
+
+    def test_incoming_nand_direction(self):
+        """n_idx>0 → direction='incoming'; mechanism/operator_id preserved."""
+        graph = SimpleMockGraph(result_set=[self.INCOMING_ROW])
+        result = get_relationships(graph, ["p1"])
+        assert result["p1"][0]["direction"] == "incoming"
+        assert result["p1"][0]["mechanism"] == "NAND"
+        assert result["p1"][0]["operator_id"] == "op-2"
+        assert result["p1"][0]["related_id"] == "p3"
+
+    def test_hasp_part_edge(self):
+        """hasPart composition edges are surfaced with their mechanism."""
+        row = ("p1", "hasPart", "contains", "op-3", "p4", "statement", "child", 0, 0)
+        graph = SimpleMockGraph(result_set=[row])
+        result = get_relationships(graph, ["p1"])
+        assert result["p1"][0]["mechanism"] == "hasPart"
+        assert result["p1"][0]["direction"] == "outgoing"
+        assert result["p1"][0]["predicate"] == "contains"
+
+    def test_multiple_points_in_batch(self):
+        """Each point in the batch gets its own relationship list."""
+        rows = [
+            ("p1", "IMPL", "supports", "op-1", "p2", "statement", "c1", 0, 0),
+            ("p2", "NAND", "contradicts", "op-2", "p3", "hypothesis", "c2", 1, 0),
+        ]
+        graph = SimpleMockGraph(result_set=rows)
+        result = get_relationships(graph, ["p1", "p2"])
+        assert len(result["p1"]) == 1
+        assert len(result["p2"]) == 1
+        assert result["p1"][0]["related_id"] == "p2"
+        assert result["p1"][0]["direction"] == "outgoing"
+        assert result["p2"][0]["related_id"] == "p3"
+        assert result["p2"][0]["direction"] == "incoming"
+
+    def test_graph_failure_returns_empty_lists_gracefully(self):
+        """graph.query raises → per-point empty lists, no crash."""
+        graph = SimpleMockGraph(raise_on_query=RuntimeError("Connection refused"))
+        result = get_relationships(graph, ["p1", "p2"])
+        assert result == {"p1": [], "p2": []}
+
+    def test_mechanism_defaults_to_impl_when_missing(self):
+        """None mechanism/predicate/kind/content → safe defaults."""
+        row = ("p1", None, None, "op-1", "p2", None, None, 0, 0)
+        graph = SimpleMockGraph(result_set=[row])
+        result = get_relationships(graph, ["p1"])
+        entry = result["p1"][0]
+        assert entry["mechanism"] == "IMPL"
+        assert entry["predicate"] == ""
+        assert entry["related_kind"] == ""
+        assert entry["related_content"] == ""
+
+    def test_related_content_truncated_to_200_chars(self):
+        """related_content longer than 200 chars is truncated."""
+        row = ("p1", "IMPL", "supports", "op-1", "p2", "statement", "x" * 500, 0, 0)
+        graph = SimpleMockGraph(result_set=[row])
+        result = get_relationships(graph, ["p1"])
+        assert len(result["p1"][0]["related_content"]) == 200
+
+    def test_row_missing_index_columns_defaults_to_incoming(self):
+        """Short row (no idx columns) → n_idx=None → direction='incoming'."""
+        row = ("p1", "IMPL", "supports", "op-1", "p2", "statement", "content")
+        graph = SimpleMockGraph(result_set=[row])
+        result = get_relationships(graph, ["p1"])
+        assert result["p1"][0]["direction"] == "incoming"
+
+    def test_row_for_unrequested_point_is_dropped(self):
+        """Rows whose pid was not requested are filtered out."""
+        graph = SimpleMockGraph(result_set=[self.OUTGOING_ROW])  # row is for "p1"
+        result = get_relationships(graph, ["p9"])
+        assert result == {"p9": []}
+
+    def test_query_receives_ids_param_and_operator_edge_patterns(self):
+        """Cypher covers IMPL|NAND|hasPart operator edges + ids param."""
+        graph = SimpleMockGraph(result_set=[])
+        get_relationships(graph, ["p1", "p2"])
+        cypher, params = graph.query_calls[0]
+        assert params == {"ids": ["p1", "p2"]}
+        assert "IMPL|NAND|hasPart" in cypher
+        assert "is_operator:true" in cypher
 
 
 # ------------------------------------------------------------------ #125 Document FTS + backfill
