@@ -26,6 +26,21 @@
       --serif: 'Georgia', 'Times New Roman', serif;
     }
 
+    .topbar {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+      display: flex; align-items: center; gap: 20px;
+      padding: 14px 24px; background: rgba(6, 11, 20, 0.92);
+      border-bottom: 1px solid var(--border, #1e293b);
+      backdrop-filter: blur(8px);
+    }
+    .topbar .logo { font-family: var(--serif, Georgia, serif); font-size: 1.15rem; color: var(--text, #cbd5e1); text-decoration: none; }
+    .topbar .logo span { color: var(--accent, #06b6d4); }
+    .topbar nav { flex: 1; display: flex; gap: 16px; }
+    .topbar nav a { color: var(--text-dim, #64748b); text-decoration: none; font-size: 14px; }
+    .topbar nav a:hover, .topbar nav a.active { color: var(--accent, #06b6d4); }
+    .topbar .login { background: var(--accent, #06b6d4); color: #04121a; padding: 6px 16px; border-radius: 6px; text-decoration: none; font-weight: 600; font-size: 14px; }
+    .topbar .login:hover { background: var(--accent-hover, #0891b2); }
+
     body {
       background: var(--bg);
       color: var(--text);
@@ -37,6 +52,7 @@
       align-items: center;
       justify-content: center;
       min-height: 100vh;
+      padding-top: 80px;
     }
 
     .container {
@@ -257,6 +273,15 @@
   </style>
 </head>
 <body>
+  <div class="topbar">
+    <a class="logo" href="/">Tortoise<span>.</span></a>
+    <nav>
+      <a href="/product.html">Product</a>
+      <a href="/docs">Docs</a>
+    </nav>
+    <a class="login" href="https://app.premiselabs.co">Login</a>
+  </div>
+
   <div class="container">
     <div class="logo">
       <a href="/">Premise <span>Labs</span></a>
