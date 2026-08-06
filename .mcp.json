@@ -45,7 +45,7 @@
       "cwd": "/Users/home/tortoise",
       "env": {
         "PYTHONPATH": "/Users/home/tortoise",
-        "TORTOISE_DB_URI": "${TORTOISE_DB_URI}"
+        "TORTOISE_DB_URI": "docker://:@localhost:16379/tortoise"
       }
     }
   }

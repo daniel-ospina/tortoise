@@ -475,7 +475,8 @@ def main():
             _log.error(
                 "TORTOISE_DB_URI is not set. MCP would silently connect to an empty "
                 "embedded DB. Set TORTOISE_DB_URI in the environment or in .env "
-                "(repo root) to the hosted FalkorDB instance, then restart. "
+                "(repo root) to your local FalkorDB instance "
+                "(e.g. docker://:@localhost:16379/tortoise), then restart. "
                 "See .env.example. Override with TORTOISE_ALLOW_EMBEDDED=1 (test only)."
             )
             sys.exit(1)

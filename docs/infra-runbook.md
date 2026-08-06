@@ -97,23 +97,24 @@ curl https://api.premiselabs.co/health
 fly ssh console -a tortoise-api -C "python -c 'from tortoise.sdk import TortoiseSDK; sdk = TortoiseSDK(namespace=\"registry\"); print(sdk.db.ping())'"
 ```
 
-## 4.5 Local Development — Use the Hosted Instance
+## 4.5 Local Development — Local Stays Local
 
-Local tooling (MCP server, SDK scripts, graph-scripts) resolves its DB target
-from `TORTOISE_DB_URI`:
+**Best practice: a self-hosted/local instance is intentionally local.** Do not
+point local tooling at the hosted (cloud) DB — a remote connection from a local
+install defeats the purpose of hosting locally.
 
-1. Copy `FALKORDB_CLOUD_URI` (GitHub secret / FalkorDB Cloud console) into the
-   repo-root `.env` (gitignored): `TORTOISE_DB_URI=redis://default:<pw>@<host>:<port>/tortoise`
-2. The MCP server loads `.env` at startup and **fails loud** if the URI is
-   unset — it never silently connects to an empty embedded graph.
-3. `FalkorProjection.from_uri` accepts `docker://`, `redis://`, and `rediss://`
-   schemes, so both local containers and the cloud instance work from the same
-   env var.
-4. Restart the MCP server after changing `.env` (the connection is resolved once
-   at startup).
+- Local tooling (MCP server, SDK scripts, graph-scripts) resolves its DB target
+  from `TORTOISE_DB_URI`, defaulting to the local container
+  `docker://:@localhost:16379/tortoise` (`.mcp.json`, `.env.example`).
+- The MCP server loads a repo-root `.env` if present and **fails loud** when the
+  URI is unset — it never silently connects to an empty embedded graph.
+- `FalkorProjection.from_uri` accepts `docker://`, `redis://`, and `rediss://`.
+  The `redis://`/`rediss://` schemes exist for the **hosted API** (Fly), which
+  resolves `FALKORDB_CLOUD_URI` → `TORTOISE_DB_URI` at runtime (entrypoint.sh).
+- Restart the MCP server after changing the URI (resolved once at startup).
 
-Do **not** put credentials in `.mcp.json` or commit `.env` — `.env` is gitignored
-and `.mcp.json` reads `\${TORTOISE_DB_URI}` from the environment.
+Do **not** commit `.env` (gitignored) and do **not** put DB credentials in
+`.mcp.json`.
 
 ## 5. Dashboard Deploy
 
