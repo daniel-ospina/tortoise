@@ -16,27 +16,62 @@ class EmbeddingModel:
     """Lazy-loaded embedding model singleton.
 
     Phase 0 stub (#7748): returns None until Phase 1A (#7698) loads all-MiniLM-L6-v2.
+
+    Model loading runs in a worker thread with a hard timeout (#7871 E2E):
+    SentenceTransformer downloads ~90MB from HuggingFace on first use. In a
+    sandboxed/blocked network this hangs indefinitely, blocking every
+    create_point call. We therefore (1) load in a thread, (2) time-box it,
+    (3) remember failure so we never retry the download per-request.
+    Embeddings are OPTIONAL — point creation must never depend on them.
     """
     _instance: "EmbeddingModel | None" = None
     _model = None
+    _load_failed = False
     _lock = threading.Lock()
+    _LOAD_TIMEOUT_S = 10.0
 
     @classmethod
     def get(cls) -> "EmbeddingModel | None":
         """Get or create the singleton. Returns None if model unavailable."""
-        if cls._instance is None:
+        if cls._instance is None and not cls._load_failed:
             with cls._lock:
-                if cls._instance is None:
+                if cls._instance is None and not cls._load_failed:
                     cls._instance = cls()
-        return cls._instance if cls._instance._model else None
+        return cls._instance._model if (cls._instance and cls._instance._model) else None
+
+    @classmethod
+    def _reset(cls) -> None:
+        """Test hook — clear cached instance/failure state."""
+        with cls._lock:
+            cls._instance = None
+            cls._model = None
+            cls._load_failed = False
 
     def __init__(self):
-        try:
-            from sentence_transformers import SentenceTransformer
-            self._model = SentenceTransformer("all-MiniLM-L6-v2")
-        except Exception:
-            logger.info("sentence-transformers not available — embeddings disabled")
+        result: dict = {"model": None}
+
+        def _load():
+            try:
+                from sentence_transformers import SentenceTransformer
+                result["model"] = SentenceTransformer("all-MiniLM-L6-v2")
+            except Exception as e:  # noqa: BLE001
+                logger.info("sentence-transformers unavailable: %s", e)
+                result["model"] = None
+
+        t = threading.Thread(target=_load, daemon=True)
+        t.start()
+        t.join(timeout=self._LOAD_TIMEOUT_S)
+        if t.is_alive():
+            # Download/load hung — give up, remember failure, never retry.
+            logger.warning(
+                "Embedding model load exceeded %ss — disabling embeddings "
+                "for this process (point creation must not block on it).",
+                self._LOAD_TIMEOUT_S,
+            )
+            type(self)._load_failed = True
             self._model = None
+            return
+        self._model = result["model"]
 
     def encode(self, texts: list[str], batch_size: int = 32):
         """Encode texts to embeddings. Returns numpy array or None."""
