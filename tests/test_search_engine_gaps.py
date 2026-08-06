@@ -553,6 +553,19 @@ class TestRunFtsQuery:
         assert "node.id" in cypher
         assert "Subject" in cypher
 
+    def test_entity_type_operator_uses_contains(self):
+        """entity_type='operator' → Point label + is_operator CONTAINS branch."""
+        graph = SimpleMockGraph(result_set=[("op-1", 1.0)])
+
+        result = run_fts_query(graph, "label", entity_type="operator")
+
+        assert len(result) == 1
+        assert result[0] == ("op-1", 1.0)
+        cypher = graph.query_calls[0][0]
+        assert "MATCH (n:Point)" in cypher
+        assert "n.is_operator = true" in cypher
+        assert "CONTAINS" in cypher
+
     def test_empty_result_set_returns_empty(self):
         """FTS returns zero rows → []."""
         graph = SimpleMockGraph(result_set=[])
