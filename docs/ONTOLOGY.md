@@ -177,8 +177,9 @@ Epistemic edges (operators): `IMPL`, `NAND` (+ semantic label). About edges: `ab
 | `id` | string | ✅ | `dc:identifier` | ✅ | Canonical identifier |
 | `name` | string | ✅ | `foaf:name` / `schema:name` | ⚠️ | Human-readable name |
 | `subjectKind` | string | ✅ | `dcterms:type` | ✅ | organization, team, role, legalPerson, naturalPerson, other |
-| `status` | string | — | `pav:status` | ⚠️ | Lifecycle: draft, live, superseded, deprecated, archived |
-| `createdAt` / `updatedAt` | ISO8601 | ✅ | `dc:created` / `dc:modified` | ✅ | Timestamps |
+| `status` | string | — | `pav:status` | ❌ | Lifecycle: draft, live, superseded, deprecated, archived — **planned, not yet implemented on Subject** (only `createdAt`/`subjectKind`/`embedding` are written by `_upsert_subject`) |
+| `createdAt` | ISO8601 | ✅ | `dc:created` | ✅ | Timestamp (set ON CREATE) |
+| `updatedAt` | ISO8601 | — | `dc:modified` | ❌ | **Not written by `_upsert_subject`** — planned follow-up |
 
 > **Why no `subjectStatus`?** PROV-O, W3C ORG, and FOAF model agent existence temporally (`validFrom`/`validTo`) with termination events, not status enumerations. A simple shared `status` covers "is this team active?" while Events capture the how/why of changes.
 
@@ -187,12 +188,14 @@ Epistemic edges (operators): `IMPL`, `NAND` (+ semantic label). About edges: `ab
 | Field | Type | Required | ISO/PROV/DC | Impl | Meaning |
 |-------|------|----------|-------------|------|---------|
 | `id` | string | ✅ | `dc:identifier` | ✅ | Canonical identifier |
-| `name` | string | ✅ | `schema:name` | ⚠️ | Human-readable name |
+| `name` | string | ✅ | `schema:name` | ⚠️ | Human-readable name (`_upsert_object` writes `title`; `name` aliased) |
 | `objectKind` | string | ✅ | — | ✅ | Project, WorkItem, document, user, skill, tool, agent, workflow, agreement, standard, other + pack objectKinds |
-| `status` | string | — | `pav:status` | ⚠️ | Projected from event stream (in_progress, completed, failed) — NOT stored truth |
-| `authoredBy` / `ownedBy` / `managedBy` | SubjectID | — | `dc:creator` / RACI Accountable / RACI Responsible | ✅ | Responsibility triad |
-| `format` | string | — | `dc:format` | ✅ | markdown, jsonl, yaml, cypher, other |
-| `createdAt` / `updatedAt` | ISO8601 | ✅ | `dc:created` / `dc:modified` | ✅ | Timestamps |
+| `title` | string | — | `dc:title` | ✅ | Display title (what `_upsert_object` actually stores) |
+| `status` | string | — | `pav:status` | ❌ | Projected from event stream (in_progress, completed, failed) — **derived at query time, NOT stored** |
+| `createdAt` | ISO8601 | ✅ | `dc:created` | ✅ | Timestamp (set ON CREATE) |
+| `updatedAt` | ISO8601 | — | `dc:modified` | ❌ | **Not written by `_upsert_object`** — planned follow-up |
+
+> **Responsibility fields (authoredBy / ownedBy / managedBy) are EDGES, not node properties** — see §3.5-3.6. `_upsert_object` does not store them as properties; they exist as graph edges to Subject nodes.
 
 ### §4.4 Document (subclass of Object)
 
@@ -232,6 +235,7 @@ Epistemic edges (operators): `IMPL`, `NAND` (+ semantic label). About edges: `ab
 | `contentHash` | string | ✅ | `premis:messageDigest` | ✅ | Idempotency anchor — skip re-extraction if unchanged |
 | `title` | string | — | `dc:title` | ⚠️ | Human-readable label. Defaults to url |
 | `ingestedAt` | ISO8601 | ✅ | `pav:importedOn` | ✅ | When Tortoise first saw this source |
+| `updatedAt` | ISO8601 | — | `dc:modified` | ✅ | Last modified (set ON MATCH by `_upsert_source`) |
 | `externalId` | string | — | `dc:identifier` (external) | ⚠️ | System-of-record ID (Slack ts, GitHub issue #) |
 
 ### §4.7 Cross-Entity Field Map
@@ -242,12 +246,12 @@ Epistemic edges (operators): `IMPL`, `NAND` (+ semantic label). About edges: `ab
 | kind tag | pointKind | subjectKind | objectKind | documentKind | eventKind | sourceKind |
 | name/title | — | name | name | title | — | title |
 | createdAt | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ ingestedAt |
-| updatedAt | ✅ | ✅ | ✅ | ✅ | — | — |
-| status | status | status | status (projected) | doc_status | — | — |
-| responsibility | authoredBy | — | authoredBy | — | — | — |
-| ownership | — | — | ownedBy | — | — | — |
-| management | — | — | managedBy | — | — | — |
-| format | — | — | format | format | format | — |
+| updatedAt | ✅ | ❌ | ❌ | ✅ | — | ✅ |
+| status | status | ❌ (planned) | ❌ (projected, not stored) | doc_status | — | — |
+| responsibility | authoredBy | — | edge (§3.5) | — | — | — |
+| ownership | — | — | edge (§3.5) | — | — | — |
+| management | — | — | edge (§3.5) | — | — | — |
+| format | — | — | — | format | format | — |
 | aboutEdges | ✅ | — | ✅ | ✅ | ✅ | — |
 | temporal | validFrom/To | — | — | — | startedAt/endedAt | — |
 
