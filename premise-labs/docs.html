@@ -81,26 +81,55 @@
 
   <div class="wrap">
     <h1>Tortoise Documentation</h1>
-    <p class="lead">A memory graph for AI agents. Agents write what they learn; Tortoise remembers why — and confidence propagates through every relationship.</p>
+    <p class="lead">A graph database for agent memory: claims are Points, relationships are edges, and belief scores are computed by propagating evidence through the graph.</p>
 
     <div class="toc">
       <a href="#what">What is Tortoise?</a>
+      <a href="#how">How it works</a>
       <a href="#quickstart">Quickstart (5 minutes)</a>
       <a href="#mcp">Connect your agent (MCP)</a>
-      <a href="#concepts">Core concepts</a>
       <a href="#api">API reference</a>
       <a href="#next">Next steps</a>
     </div>
 
     <h2 id="what">What is Tortoise?</h2>
-    <p>Tortoise is a knowledge-graph memory system for AI agents. Unlike a vector store (which remembers <em>what</em> was said) or a key-value cache (which remembers <em>that</em> it happened), Tortoise remembers <em>why</em> — each belief carries the evidence and reasoning that produced it, and new information propagates confidence through the graph.</p>
-    <p>Agents use Tortoise to:</p>
-    <ul>
-      <li><strong>Persist decisions</strong> — "we changed the port to 16379" becomes a Point with provenance</li>
-      <li><strong>Connect entities</strong> — issues, tools, and concepts referenced across sessions are linked</li>
-      <li><strong>Resolve conflicts</strong> — when new evidence contradicts an old belief, the graph records the tension (NAND) instead of silently overwriting</li>
-      <li><strong>Search with confidence</strong> — hybrid FTS + vector search, ranked by relevance and EP belief</li>
-    </ul>
+    <p>Tortoise is a graph database for agent memory. Data is stored as <strong>Points</strong> (nodes) connected by labeled <strong>edges</strong> that express how beliefs relate. It keeps the <em>structure</em> of what an agent learned — which claims support which, and which contradict each other — and computes a belief score for every Point by propagating evidence through the graph.</p>
+    <p>It is used via a REST API or an MCP server (see below). A team gets an isolated graph; all writes carry provenance back to the source session.</p>
+
+    <h2 id="how">How it works</h2>
+    <div class="card">
+      <h3>The data model</h3>
+      <p>Everything is a <code>Point</code>: an atomic claim with an <code>id</code>, <code>content</code> (text), <code>pointKind</code> (<code>statement</code>, <code>decision</code>, <code>evidence</code>, <code>observation</code>, <code>hypothesis</code>), and a <code>status</code>.</p>
+      <ul>
+        <li><code>status: draft</code> — created but not yet connected (not counted in confidence)</li>
+        <li><code>status: live</code> — promoted when its first edge is created (#131); participates in confidence computation</li>
+        <li><code>outdated</code> / <code>archived</code> — superseded or retired</li>
+      </ul>
+      <p>A content hash (SHA-256 of <code>content</code>) is stored on every Point; creating the same content twice returns the existing Point (dedup) instead of duplicating.</p>
+    </div>
+    <div class="card">
+      <h3>Edges (operators)</h3>
+      <p>Points are connected by operators. The two epistemic edge types are:</p>
+      <ul>
+        <li><strong>IMPL</strong> — <em>source implies target</em>. If you believe A and A implies B, that supports B.</li>
+        <li><strong>NAND</strong> — <em>source contradicts target</em>. Recorded explicitly rather than deleting either belief, so the graph keeps the tension and confidence reflects it.</li>
+      </ul>
+      <p>Part/whole edges (<code>composedOf</code>, <code>decomposesInto</code>, <code>contains</code>, <code>wraps</code>) and provenance edges (<code>wasDerivedFrom</code>, <code>aboutSubject</code>, …) also exist and are transferred on supersede.</p>
+    </div>
+    <div class="card">
+      <h3>Confidence (EP)</h3>
+      <p>Each live Point carries a belief score. Tortoise computes it by solving the linear system</p>
+      <pre><code>(I − λM)g = a</code></pre>
+      <p>where <code>M</code> is the row-normalized adjacency of IMPL/NAND edges, <code>a</code> is a seed vector (1.0 for resolution-event Points, 0 otherwise), and <code>λ = 0.6</code> is the propagation dampening. The solution <code>g</code> is each Point's <code>grounding</code> — the steady-state belief given the graph's evidence. Adding a supporting edge raises a Point's score; adding a NAND edge lowers it. Grounding is computed via the SDK (<code>projection.compute_grounding()</code>); the hosted API exposes per-Point <code>confidence</code> values on search/read results.</p>
+    </div>
+    <div class="card">
+      <h3>Sessions &amp; provenance</h3>
+      <p>Agent conversations are captured as <code>Session</code> nodes (with turn counts and metadata). Points created from a session are linked to it, so every insight traces back to the conversation that produced it. Listing sessions and their linked Points is a first-class API operation.</p>
+    </div>
+    <div class="card">
+      <h3>Search</h3>
+      <p>Search fuses three strategies with RRF (Reciprocal Rank Fusion): full-text search (FTS) on content/title/name, vector similarity (embeddings, when available), and structural matches. Results are ranked by fused relevance, not recency.</p>
+    </div>
 
     <h2 id="quickstart">Quickstart (5 minutes)</h2>
     <div class="card">
@@ -155,24 +184,6 @@
         <li><strong>Structure:</strong> <code>tortoise_create_operator</code>, <code>tortoise_traverse</code>, <code>tortoise_entity_profile</code>, and more</li>
       </ul>
       <p>Your welcome page includes a ready-to-copy MCP config with your key pre-filled.</p>
-    </div>
-
-    <h2 id="concepts">Core concepts</h2>
-    <div class="card">
-      <h3>Points</h3>
-      <p>The atomic unit of knowledge. Kinds: <code>statement</code>, <code>decision</code>, <code>evidence</code>, <code>observation</code>, <code>hypothesis</code>.</p>
-    </div>
-    <div class="card">
-      <h3>Operators &amp; edges</h3>
-      <p>Points connect via labeled edges. <strong>IMPL</strong> = one belief implies another; <strong>NAND</strong> = a contradiction between two beliefs (recorded, not erased).</p>
-    </div>
-    <div class="card">
-      <h3>EP (Evidence-Propagation) confidence</h3>
-      <p>Each Point carries a belief score. New evidence propagates confidence through the graph — strong supporting evidence raises a Point's confidence; contradictions lower it. This is what makes Tortoise a <em>computational</em> memory, not a store.</p>
-    </div>
-    <div class="card">
-      <h3>Sessions</h3>
-      <p>Agent conversations can be captured as Sessions and linked to the Points they produced, giving every insight provenance back to the conversation that created it.</p>
     </div>
 
     <h2 id="api">API reference</h2>
