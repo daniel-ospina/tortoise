@@ -1371,6 +1371,12 @@ def test_upsert_document_capture_fields(live_proj):
         "MATCH (d:Document {id:'test-doc-1'})-[:aboutSubject]->(s) RETURN s.name"
     ).result_set
     assert len(rows2) == 1 and rows2[0][0] == "agent-pi", rows2
+    # #205: _upsert_document now creates references edge (Source → Document)
+    rows3 = proj.g.query(
+        "MATCH (s:Source {url:'test-doc-1'})-[:references]->"
+        "(d:Document {id:'test-doc-1'}) RETURN count(*) > 0"
+    ).result_set
+    assert rows3[0][0] is True, "references edge not created by _upsert_document (#205)"
 
 
 def test_upsert_document_partial_update_preserves_search_text(live_proj):

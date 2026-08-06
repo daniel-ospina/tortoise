@@ -145,13 +145,17 @@ class _EdgeHandlers:
             params={"pid": point_id, "url": source_ref},
         )
 
-    def link_source_to_entity(self, source_url: str, entity_id: str, entity_label: str) -> None:
-        """Create Source → Entity references edge (Ontology v3.0 §3.2-3.3).
+    def link_source_to_entity(self, source_url: str, entity_id: str, entity_label: str, source_kind: str = "document") -> None:
+        """Create Source → Entity references edge (Ontology v3.1 §3.4).
+
+        Auto-creates the Source node if it doesn't exist (MERGE + ON CREATE SET)
+        so the edge works even when no Point extracted the source yet (#205).
 
         Args:
-            source_url: the Source node's url (must exist — created by _link_source)
+            source_url: the Source node's url (auto-created if missing)
             entity_id: the Document/Event/Object node id the source references
             entity_label: the entity label (Document|Event|Object) for the MATCH
+            source_kind: sourceKind to set on auto-created Source (default: "document")
 
         Raises:
             ValueError: if entity_label is not one of Document, Event, Object
@@ -163,6 +167,13 @@ class _EdgeHandlers:
                 f"Invalid entity_label: {entity_label}. Must be one of {valid} "
                 f"(Action was dissolved in Ontology v3.0)."
             )
+        # MERGE Source with auto-create (mirrors _link_source) — #205
+        self.g.query(
+            "MERGE (s:Source {url:$url}) "
+            "ON CREATE SET s.sourceKind=$sk, s.title=$url, "
+            "    s.contentHash='', s.ingestedAt=$now",
+            params={"url": source_url, "sk": source_kind, "now": _now_iso()},
+        )
         self.g.query(
             f"MATCH (s:Source {{url:$url}}), (e:{entity_label} {{id:$eid}}) "
             f"MERGE (s)-[:references]->(e)",

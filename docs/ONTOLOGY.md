@@ -95,7 +95,7 @@ Per-type edges (chosen over single polymorphic edge — FalkorDB matrix-per-type
 
 | Predicate | From → To | Direction | Cardinality | Standard alignment | Meaning |
 |-----------|-----------|-----------|-------------|--------------------|---------|
-| `references` | Source → Entity | unidirectional | 1→many | — | The source document links to / references this entity. ⚠️ **Spec-only — no production creator yet** (only `link_source_to_entity` SDK call, no caller wired; tracked in issue #7884). |
+| `references` | Source → Entity | unidirectional | 1→many | — | The source document links to / references this entity. Wired in the ingest path — `_upsert_document` links `(Source {url:doc_id})-[:references]->(Document {id:doc_id})` (#205). |
 
 `(Point)-[:extractedFrom]->(Source)-[:references]->(Entity)` — layered provenance. Source carries `sourceKind` (T0-T4 credibility tier).
 
@@ -110,7 +110,7 @@ Per-type edges (chosen over single polymorphic edge — FalkorDB matrix-per-type
 
 > **One edge, two names:** `uses` (graph predicate) = `prov:used` (PROV property). Same thing — present tense in our vocabulary, past tense in PROV's. `produces` = `schema:result` (Activity→Entity, matching direction); `prov:wasGeneratedBy` names the reverse (Entity→Activity).
 >
-> **Mechanism provenance ("how was it produced"):** the producing mechanism is a first-class Object linked via `uses` — `(Event)-[:uses]->(Object {objectKind: skill|tool|agent|workflow})`. The mechanism is therefore searchable and shared (finite skill set, not per-event). Mechanism *specifics* (version, model, config, pipeline hash) live in the immutable event-log record, reachable via the Event's `eventId` — they are NOT materialized as per-event graph nodes (avoids O(events) node growth at scale). Full lineage: `(Point)-[:extractedFrom]->(Source)-[:references]->(Object:document)<-[:produces]-(Event {eventId})` → log record. (The `references` hop is spec-only until a producer is wired — see §3.4.)
+> **Mechanism provenance ("how was it produced"):** the producing mechanism is a first-class Object linked via `uses` — `(Event)-[:uses]->(Object {objectKind: skill|tool|agent|workflow})`. The mechanism is therefore searchable and shared (finite skill set, not per-event). Mechanism *specifics* (version, model, config, pipeline hash) live in the immutable event-log record, reachable via the Event's `eventId` — they are NOT materialized as per-event graph nodes (avoids O(events) node growth at scale). Full lineage: `(Point)-[:extractedFrom]->(Source)-[:references]->(Object:document)<-[:produces]-(Event {eventId})` → log record. (The `references` hop is wired in the ingest path for Documents — see §3.4; entity-reference detection in connectors remains a follow-up.)
 
 ### §3.6 Subject ↔ Subject (Organisational)
 

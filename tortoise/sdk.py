@@ -2930,20 +2930,24 @@ class TortoiseSDK:
         )
         return [{"source": dict(row[0]), "entity": dict(row[1]), "labels": list(row[2])} for row in r.result_set]
 
-    def link_source_to_entity(self, source_url: str, entity_id: str, entity_label: str) -> None:
-        """Create Source → Entity references edge (Ontology v3.0 §3.2-3.3).
+    def link_source_to_entity(self, source_url: str, entity_id: str, entity_label: str, source_kind: str = "document") -> None:
+        """Create Source → Entity references edge (Ontology v3.1 §3.4).
+
+        Auto-creates the Source node if it doesn't exist (MERGE + ON CREATE SET)
+        so the edge works even when no Point extracted the source yet (#205).
 
         Args:
-            source_url: the Source node's url (must exist — created by _link_source)
+            source_url: the Source node's url (auto-created if missing)
             entity_id: the Document/Event/Object node id the source references
             entity_label: the entity label (Document|Event|Object) for the MATCH
+            source_kind: sourceKind to set on auto-created Source (default: "document")
 
         Raises:
             ValueError: if entity_label is not one of Document, Event, Object
                 (Action was dissolved in Ontology v3.0).
         """
         proj = self._get_proj()
-        proj.link_source_to_entity(source_url, entity_id, entity_label)
+        proj.link_source_to_entity(source_url, entity_id, entity_label, source_kind)
 
     def get_org_structure(self, subject_id: str) -> dict:
         """Return organisational structure: members, roles, sub-teams."""
