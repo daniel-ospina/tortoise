@@ -86,13 +86,14 @@
     <div class="toc">
       <a href="#what">What is Tortoise?</a>
       <a href="#quickstart">Quickstart (5 minutes)</a>
+      <a href="#mcp">Connect your agent (MCP)</a>
       <a href="#concepts">Core concepts</a>
       <a href="#api">API reference</a>
       <a href="#next">Next steps</a>
     </div>
 
     <h2 id="what">What is Tortoise?</h2>
-    <p>Tortoise is a hosted knowledge-graph memory system for AI agents. Unlike a vector store (which remembers <em>what</em> was said) or a key-value cache (which remembers <em>that</em> it happened), Tortoise remembers <em>why</em> — each belief carries the evidence and reasoning that produced it, and new information propagates confidence through the graph.</p>
+    <p>Tortoise is a knowledge-graph memory system for AI agents. Unlike a vector store (which remembers <em>what</em> was said) or a key-value cache (which remembers <em>that</em> it happened), Tortoise remembers <em>why</em> — each belief carries the evidence and reasoning that produced it, and new information propagates confidence through the graph.</p>
     <p>Agents use Tortoise to:</p>
     <ul>
       <li><strong>Persist decisions</strong> — "we changed the port to 16379" becomes a Point with provenance</li>
@@ -123,6 +124,37 @@
     <div class="card">
       <h3>4. Manage in the dashboard</h3>
       <p>Open <a href="https://app.premiselabs.co">app.premiselabs.co</a>, paste your key, and you can create/revoke API keys and view sessions.</p>
+    </div>
+
+    <h2 id="mcp">Connect your agent (MCP)</h2>
+    <p>The fastest way to give an agent Tortoise memory is the <strong>MCP server</strong> — no code required. Your agent (Claude Code, Cursor, Claude Desktop, or any MCP client) reads and writes your Tortoise graph automatically.</p>
+    <div class="card">
+      <h3>Setup</h3>
+      <p>Add this to your MCP config (replace <code>tt_YOUR_KEY</code> with your API key):</p>
+      <pre><code>{
+  "mcpServers": {
+    "tortoise": {
+      "command": "python3",
+      "args": ["-m", "tortoise.mcp_server"],
+      "env": {
+        "TORTOISE_API_KEY": "tt_YOUR_KEY",
+        "TORTOISE_API_URL": "https://api.premiselabs.co"
+      }
+    }
+  }
+}</code></pre>
+      <p>Paste into <code>.mcp.json</code> (Claude Code), <code>.cursor/mcp.json</code> (Cursor), or <code>claude_desktop_config.json</code> (Claude Desktop). Restart your client.</p>
+      <p class="callout">Need <code>python3</code> and <code>tortoise</code> installed where the client runs? <code>pip install tortoise</code> — the MCP server ships with the package.</p>
+    </div>
+    <div class="card">
+      <h3>What your agent can do</h3>
+      <ul>
+        <li><strong>Remember:</strong> <code>tortoise_create_point</code> — store a decision, observation, or claim</li>
+        <li><strong>Recall:</strong> <code>tortoise_search</code> — query the past with hybrid search</li>
+        <li><strong>Reason:</strong> <code>tortoise_compute_confidence</code> — see how evidence propagates</li>
+        <li><strong>Structure:</strong> <code>tortoise_create_operator</code>, <code>tortoise_traverse</code>, <code>tortoise_entity_profile</code>, and more</li>
+      </ul>
+      <p>Your welcome page includes a ready-to-copy MCP config with your key pre-filled.</p>
     </div>
 
     <h2 id="concepts">Core concepts</h2>
