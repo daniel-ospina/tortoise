@@ -184,6 +184,9 @@ class _EntityHandlers:
         has_text = bool(ev.get("title") or summary or topics)
         st = (_build_search_text(ev.get("title", ""), summary, topics)
               if has_text else None)
+        # #167: sourcePath — coalesce-null sentinel (no "" default) so
+        # partial updates preserve existing value
+        sp = ev.get("source_path")
         self.g.query(
             "MERGE (d:Document {id:$id}) "
             "SET d.title=coalesce($title, d.title), "
@@ -195,6 +198,7 @@ class _EntityHandlers:
             "    d.sessionId=coalesce($sid, d.sessionId, ''), "
             "    d.eventId=coalesce($eid, d.eventId, ''), "
             "    d.doc_status=coalesce($ds, d.doc_status, 'draft'), "
+            "    d.sourcePath=coalesce($sp, d.sourcePath), "
             "    d._searchText=coalesce($st, d._searchText, d.title), "
             "    d.embedding=CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE d.embedding END, "
             "    d.updatedAt=$now",
@@ -203,7 +207,7 @@ class _EntityHandlers:
                     "fmt": ev.get("format", "markdown"),
                     "content": ev.get("content"),
                     "topics": topics, "summary": summary, "sid": sid,
-                    "eid": eid, "ds": ds, "st": st,
+                    "eid": eid, "ds": ds, "st": st, "sp": sp,
                     "embedding": embedding,
                     "now": _now_iso()},
         )

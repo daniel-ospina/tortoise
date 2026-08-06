@@ -225,12 +225,14 @@ class EventAPI:
                      topics: list[str] | None = None,
                      summary: str = "",
                      session_id: str = "",
-                     event_id: str = "") -> str:
+                     event_id: str = "",
+                     source_path: str = "") -> str:
         """Emit DocumentCreated event. Returns the document id (same as input).
 
         JSONL fields are snake_case per plan §4.3 convention.
         Projection normalizes to camelCase for the graph.
         #125: topics/summary/session_id/event_id capture metadata.
+        #167: source_path → d.sourcePath for file resolution.
         """
         self._emit("DocumentCreated",
                    corrects=corrects,
@@ -251,7 +253,8 @@ class EventAPI:
                    topics=topics or [],
                    summary=summary,
                    session_id=session_id,
-                   event_id=event_id)
+                   event_id=event_id,
+                   source_path=source_path)
         return doc_id
 
     def add_event(self, event_id: str, event_kind: str, *,

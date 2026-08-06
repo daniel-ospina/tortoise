@@ -185,6 +185,7 @@ def main(argv=None):
                     summary=summary,
                     session_id=session_id,
                     event_id=event_id,
+                    source_path=str(args.transcript),
                 )
                 if args.capture_metadata:
                     # #125 metadata-only: emit sessionCaptured Event with uses→Skill,

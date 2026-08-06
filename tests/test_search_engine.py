@@ -111,7 +111,8 @@ class TestAnnotateEpBatch:
 
 
 def test_sdk_document_search_returns_metadata():
-    """#125: tortoise_search(entity_type='document') returns capture metadata."""
+    """#125: tortoise_search(entity_type='document') returns capture metadata.
+    #167: includes sourcePath in results."""
     from tortoise.projection import FalkorProjection
     uri = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise_test_sdk125")
     proj = FalkorProjection.from_uri(uri)
@@ -121,6 +122,7 @@ def test_sdk_document_search_returns_metadata():
         "CREATE (d:Document {id:'test-sdk-doc', title:'Conv', "
         "documentKind:'transcript', topics:['licensing'], "
         "summary:'Test', sessionId:'s1', eventId:'e1', "
+        "sourcePath:'/tmp/conv.md', "
         "_searchText:'Conv Test licensing'})"
     )
     try:
@@ -134,5 +136,6 @@ def test_sdk_document_search_returns_metadata():
         assert doc["summary"] == "Test"
         assert doc["sessionId"] == "s1"
         assert doc["eventId"] == "e1"
+        assert doc.get("sourcePath") == "/tmp/conv.md", doc.get("sourcePath")
     finally:
         proj.close()

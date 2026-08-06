@@ -55,6 +55,7 @@ class SearchResult:
     summary: str = ""
     session_id: str = ""
     event_id: str = ""
+    source_path: str = ""  # #167: file path for agent to open/search
 
     def to_dict(self) -> dict:
         """Convert to JSON-safe dict for API responses."""
@@ -69,6 +70,7 @@ class SearchResult:
             "summary": self.summary,
             "sessionId": self.session_id,
             "eventId": self.event_id,
+            "sourcePath": self.source_path,
             # Backward-compat aliases (Phase 0 migration from old search() API).
             # IMPORTANT: "similarity" was cosine (0-1) in Phase 0; now it's the
             # RRF fusion score (rank-based, typically 0.01-0.05). Clients that

@@ -1428,3 +1428,24 @@ def test_upsert_event_legacy_string_uses_still_works(live_proj):
     ).result_set
     assert rows and rows[0][0] == "legacy-tool", rows
     assert rows[0][1] == "other", rows
+
+
+def test_upsert_document_includes_source_path(live_proj):
+    """#167: _upsert_document persists sourcePath on DocumentCreated + partial
+    update preserves existing value via coalesce-null sentinel."""
+    proj = live_proj
+    proj.apply({"type": "DocumentCreated", "id": "doc-sp",
+                "title": "With Source", "source_path": "/tmp/test.md"})
+    rows = proj.g.query(
+        "MATCH (d:Document {id:'doc-sp'}) RETURN d.sourcePath"
+    ).result_set
+    assert rows and rows[0][0] == "/tmp/test.md", rows
+
+    # Partial update without source_path must preserve existing value
+    proj.apply({"type": "DocumentCreated", "id": "doc-sp",
+                "doc_status": "archived"})
+    rows = proj.g.query(
+        "MATCH (d:Document {id:'doc-sp'}) RETURN d.sourcePath, d.doc_status"
+    ).result_set
+    assert rows[0][0] == "/tmp/test.md", f"sourcePath wiped: {rows[0][0]}"
+    assert rows[0][1] == "archived"
