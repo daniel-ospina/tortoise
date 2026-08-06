@@ -216,8 +216,8 @@ async def provision_tenant(request: Request):
     graph_name = f"team_{team_id}"
 
     try:
-        # Create Team node in registry graph
-        sdk._get_proj().g.query(
+        # Create Team node in the control_plane registry graph
+        sdk._get_registry().query(
             """
             CREATE (t:Team {
                 id: $id, name: $name, tier: 'free',
@@ -230,7 +230,7 @@ async def provision_tenant(request: Request):
 
         # Create APIKey node
         api_key_id = _short_id()
-        sdk._get_proj().g.query(
+        sdk._get_registry().query(
             """
             CREATE (k:APIKey {
                 id: $id, team_id: $team_id, key_hash: $hash,
@@ -256,7 +256,7 @@ async def provision_tenant(request: Request):
         )
 
         # Create Membership (creator is Owner)
-        sdk._get_proj().g.query(
+        sdk._get_registry().query(
             """
             CREATE (m:Membership {
                 id: $id, user_id: $user_id, team_id: $team_id,
@@ -279,12 +279,12 @@ async def provision_tenant(request: Request):
 
         return {"status": "provisioned", "team_id": team_id, "graph_name": graph_name}
     except Exception:
-        # Full rollback on any failure
-        sdk._get_proj().g.query("MATCH (t:Team {id: $id}) DETACH DELETE t", params={"id": team_id})
-        sdk._get_proj().g.query(
+        # Full rollback on any failure (registry graph)
+        sdk._get_registry().query("MATCH (t:Team {id: $id}) DETACH DELETE t", params={"id": team_id})
+        sdk._get_registry().query(
             "MATCH (k:APIKey {team_id: $id}) DETACH DELETE k", params={"id": team_id}
         )
-        sdk._get_proj().g.query(
+        sdk._get_registry().query(
             "MATCH (m:Membership {team_id: $id}) DETACH DELETE m", params={"id": team_id}
         )
         try:
@@ -378,7 +378,7 @@ async def get_current_team(request: Request) -> dict:
         # match. Instead fetch all non-revoked keys and verify each against the
         # token using the embedded salt (verify_api_key). This is O(keys) but
         # the registry is small (teams × keys) and auth happens per-request.
-        key_result = sdk._get_proj().g.query(
+        key_result = sdk._get_registry().query(
             "MATCH (k:APIKey) WHERE k.revoked_at IS NULL RETURN k.team_id, k.id, k.key_hash"
         ).result_set
         from tortoise.auth import verify_api_key
@@ -390,7 +390,7 @@ async def get_current_team(request: Request) -> dict:
         if team_id is None:
             await _audit_auth_failure(request, "invalid_key")
             raise HTTPException(status_code=401, detail="Invalid API key")
-        team = sdk._get_proj().g.query(
+        team = sdk._get_registry().query(
             "MATCH (t:Team {id: $id}) RETURN t.tier, t.max_users, t.max_graphs, t.max_teams",
             params={"id": team_id},
         )
@@ -424,7 +424,7 @@ def _check_team_limit(team: dict, resource: str) -> None:
         if resource == "api_keys":
             # API keys live in the registry graph, not the team graph
             sdk = _make_sdk(namespace="registry")
-            count = sdk._get_proj().g.query(
+            count = sdk._get_registry().query(
                 "MATCH (k:APIKey {team_id: $tid}) WHERE k.revoked_at IS NULL RETURN count(k)",
                 params={"tid": team_id},
             ).result_set[0][0]
@@ -833,13 +833,12 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
     import uuid
     from tortoise.auth import hash_api_key
     sdk = _make_sdk(namespace="registry")
-    proj = sdk._get_proj()
     api_key = f"tt_{uuid.uuid4().hex}"
     key_hash = hash_api_key(api_key)
     key_prefix = api_key[:10]
     kid = _short_id()
     now = datetime.now(timezone.utc).isoformat()
-    proj.g.query(
+    sdk._get_registry().query(
         "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, key_prefix:$kp, created_by:$cb, created_at:$now})",
         params={"id": kid, "tid": team["team_id"], "kh": key_hash, "kp": key_prefix, "cb": "api", "now": now},
     )
@@ -864,7 +863,7 @@ async def list_api_keys(team: dict = Depends(get_current_team)):
     """List API keys for the team (hashes only — no plaintext)."""
     sdk = _make_sdk(namespace="registry")
     try:
-        keys = sdk._get_proj().g.query(
+        keys = sdk._get_registry().query(
             "MATCH (k:APIKey {team_id: $tid}) "
             "RETURN k.id, k.key_prefix, k.created_at, k.last_used_at, k.revoked_at "
             "ORDER BY k.created_at DESC",
@@ -894,15 +893,13 @@ async def list_api_keys(team: dict = Depends(get_current_team)):
 async def revoke_api_key(key_id: str, team: dict = Depends(get_current_team)):
     """Revoke an API key (soft delete — sets revoked_at). Team-scoped.
 
-    Keys are stored on the registry main graph (registry_tortoise) — created
-    via POST /v1/team/keys and listed via GET /v1/team/keys, both on proj.g.
-    The SDK's apikey_revoke uses _get_registry() (control_plane registry
-    graph), which does NOT hold hosted-API keys, so revoke must operate on
-    proj.g to be consistent with create/list.
+    Keys live in the control_plane registry graph (per #7873) — created via
+    POST /v1/team/keys, listed via GET /v1/team/keys, revoked here, all on
+    _get_registry(), consistent with the SDK's control-plane methods.
     """
     sdk = _make_sdk(namespace="registry")
     try:
-        rows = sdk._get_proj().g.query(
+        rows = sdk._get_registry().query(
             "MATCH (k:APIKey {id: $id}) RETURN k.team_id, k.revoked_at",
             params={"id": key_id},
         ).result_set
@@ -914,7 +911,7 @@ async def revoke_api_key(key_id: str, team: dict = Depends(get_current_team)):
             return {"revoked": True, "already": True, "key_id": key_id}
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc).isoformat()
-        sdk._get_proj().g.query(
+        sdk._get_registry().query(
             "MATCH (k:APIKey {id: $id}) SET k.revoked_at = $now",
             params={"id": key_id, "now": now},
         )
