@@ -186,7 +186,7 @@ def test_discover_protects_path_based_server_under_tempdir():
 
 **Intent:** Prevent Category-3 (per-CWD) leaks at the choke-point; fail loudly with actionable error.
 
-**Acceptance:** `FalkorProjection('tortoise.db')` raises ValueError with 3 remedies listed; `allow_nonstandard_path=True` (public kwarg) or env `TORTOISE_ALLOW_NONSTANDARD_PATH=1` bypasses; absolute paths (incl. tempdirs) unaffected; error message enumerates remedies.
+**Acceptance:** `FalkorProjection('tortoise.db')` raises ValueError with 3 remedies listed; `allow_nonstandard_path=True` (public kwarg) or env `TORTOISE_ALLOW_NONSTANDARD_PATH=1` bypasses canonical-path enforcement for **ABSOLUTE non-standard paths only** — relative paths are NEVER permitted regardless of escape hatch (C6 P2 fix — acceptance now matches Step 1's constraint); absolute paths (incl. tempdirs) unaffected; error message enumerates remedies.
 **Files:**
 - Modify: `tortoise/projection/__init__.py`
 - Test: `tests/test_projection.py` (hard-reject + escape hatch cases)
@@ -256,7 +256,7 @@ proj = FalkorProjection('/tmp/custom.db', allow_nonstandard_path=True)
 1. **Backup first (P0 fix):** `cp ~/.tortoise/embedded.db ~/.tortoise/embedded.db.bak-<timestamp>` before rebuild (restore point if rebuild fails).
 2. **Advisory lock (P0 fix):** `~/.tortoise/.migrate.lock` (fcntl/OS lock) — concurrent migrate-db runs serialize; exactly one wins, others skip with message.
 3. JSONL `rebuild_all()` if tortoise.db absent + embedded.db exists; **tortoise.db partially-present + no marker = INCOMPLETE migration (P0 fix)** → delete partial + rebuild cleanly (never treat as no-op).
-4. **Marker `~/.tortoise/.migrated-v2` written AFTER successful rebuild + integrity verification** — marker-before-rebuild would block recovery (P1 fix). **Integrity = node-ID-set equality + edge (src,dst,type) tuple equality + content spot-check: 5 random source nodes fetched via GRAPH.QUERY compared byte-for-byte vs target, 3 random edges verified (C2 P1 fix — count-only comparison is shallow and misses corrupt properties/edges).**
+4. **Marker `~/.tortoise/.migrated-v2` written AFTER successful rebuild + integrity verification** — marker-before-rebuild would block recovery (P1 fix). **Integrity = node-ID-set equality + edge (src,dst,type) tuple equality + full-dict replay through InMemoryProjection comparing ALL node properties (C6 P2 fix — supersedes the earlier 5-node/3-edge spot-check, which was dropped as redundant).**
 5. Handles FileNotFoundError (no-op) + FileExistsError. **Skip-if-marker-present does a DB integrity probe first (C2 P0 fix — marker + corrupt/truncated DB must NOT silently skip; probe = open DB + GRAPH.LIST/count; on failure delete corrupt DB + marker + re-migrate from source, or fail with clear error + `--force` flag to bypass marker).** Uses logging.warning not print (stdio-safe). **Backup failure aborts migration (C2 P1 fix): wrap backup in try/except — on OSError, exit non-zero with `backup failed: <reason>. Migration aborted. Source DB intact.` — never proceed without the restore point.**
 **Files:**
 - Modify: `tortoise/__main__.py` (add migrate-db command), `tortoise/backup.py` (restore reads DB filename from manifest, not hardcoded `tortoise.db`)
@@ -338,3 +338,5 @@ proj = FalkorProjection('/tmp/custom.db', allow_nonstandard_path=True)
 - **Rollback (P2 fix from review):** (1) delete `~/.tortoise/.migrated-v2` + restore `embedded.db.bak-*` if migrate-db data lost; (2) set `TORTOISE_DB_PATH=~/.tortoise/embedded.db` to revert path; (3) revert CHANGELOG entry.
 - **Known accepted risks (from scoping + review):** TOCTOU on no-path kills (transient, client retry — validated in Task 12 chaos); 1 bounded stable-path orphan if SIGKILLed (intentional — NEVER_KILL); setsid infeasibility if redislite lacks spawn hook (downgraded to best-effort, CHANGELOG note); per-CWD old DBs orphaned on disk after migration (JSONL rebuildable — migrate-db note); Task 8 guard is best-effort against import-order bypass (pre-commit + CI are the enforcement).
 - **Related issues:** #190 (dead Fly embedded fallback), #191 (hardcoded DB password — rotate credential).
+
+<!-- plan-review: cycles=6, status=clean, version=2.2.0 -->
