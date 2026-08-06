@@ -140,11 +140,19 @@ class TortoiseSDK:
 
     def _get_proj(self) -> FalkorProjection:
         if self._proj is None:
-            graph_name = "tortoise"
-            if self._namespace:
-                graph_name = f"{self._namespace}_{graph_name}"
+            if self._namespace == "registry":
+                # Control-plane SDK: shared registry main graph.
+                graph_name = "registry_tortoise"
+            elif self._namespace:
+                # Team SDK: isolated team graph (matches provision's
+                # team_{team_id} namespace creation, #7886).
+                graph_name = f"team_{self._namespace}"
+            else:
+                graph_name = "tortoise"
             if self._db_uri is not None:
-                self._proj = FalkorProjection.from_uri(self._db_uri)
+                # Multi-tenant isolation (#7886): pass the namespaced graph
+                # name so tenants never share the URI's default graph.
+                self._proj = FalkorProjection.from_uri(self._db_uri, graph_name=graph_name)
             else:
                 self._proj = FalkorProjection(self._db_path, graph_name=graph_name)
         return self._proj

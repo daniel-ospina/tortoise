@@ -233,7 +233,7 @@ class FalkorProjection(
         self._ensure_indexes()
 
     @classmethod
-    def from_uri(cls, uri: str) -> "FalkorProjection":
+    def from_uri(cls, uri: str, graph_name: str | None = None) -> "FalkorProjection":
         """Parse a connection URI into a projection.
 
         Supported schemes (all treated as docker://):
@@ -242,6 +242,9 @@ class FalkorProjection(
                                                      instances use the redis
                                                      scheme; accept as aliases.
 
+        graph_name overrides the URI path (multi-tenant isolation, #7886) —
+        each tenant SDK selects its own graph instead of the URI default.
+
         Unsupported schemes raise ValueError with an actionable message.
         """
         from urllib.parse import urlparse
@@ -249,7 +252,8 @@ class FalkorProjection(
         _validate_uri_scheme(parsed.scheme)
         username = parsed.username or None
         password = parsed.password or None
-        graph_name = parsed.path.lstrip('/') or "tortoise"
+        if graph_name is None:
+            graph_name = parsed.path.lstrip('/') or "tortoise"
         return cls(host=parsed.hostname or "localhost",
                    port=parsed.port or 16379,
                    username=username,
