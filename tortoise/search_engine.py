@@ -170,7 +170,7 @@ def run_fts_query(
 
 def run_vector_query(
     graph, query_vec: list[float], limit: int = 20, timeout_ms: int = 500,
-    is_embedded: bool = True,
+    is_embedded: bool = True, entity_type: str = "point",
 ) -> list[tuple[str, float]]:
     """Run vector similarity search via FalkorDB vector index.
 
@@ -181,6 +181,13 @@ def run_vector_query(
     vec.euclideanDistance if the index is unavailable (embedded mode,
     old FalkorDB, or index creation failed).
 
+    entity_type: 'point' (default), 'event', 'subject', 'document', 'object',
+    'source', or 'operator'. The vector index is queried against the label
+    matching the entity_type (Event/Subject/Document/Object/...), and results
+    return the entity's id field (eventId for events, id otherwise).
+    Operators are Points with is_operator=true — they query the Point label.
+    (#172)
+
     Note: timeout_ms is checked AFTER the query completes (post-hoc).
     A slow query still consumes DB resources — this is a soft guard,
     not a connection-level kill. (#18)
@@ -188,14 +195,19 @@ def run_vector_query(
     if not query_vec:
         return []
 
+    # Operators are Points with is_operator=true — match the Point label
+    # (consistent with run_fts_query / run_structural_query). (#172)
+    label = "Point" if entity_type == "operator" else entity_type.capitalize()
+    id_field = "eventId" if entity_type == "event" else "id"
+
     # Docker/server mode → try index-accelerated vector search (#7777)
     if not is_embedded:
         try:
             start = time.monotonic()
             cypher = (
-                "CALL db.idx.vector.queryNodes('Point', 'embedding', $query_vec, $limit) "
+                f"CALL db.idx.vector.queryNodes('{label}', 'embedding', $query_vec, $limit) "
                 "YIELD node "
-                "RETURN node.id "
+                f"RETURN node.{id_field} "
                 "LIMIT $limit"
             )
             rows = graph.query(
@@ -222,11 +234,11 @@ def run_vector_query(
     try:
         start = time.monotonic()
         cypher = (
-            "MATCH (n:Point) "
+            f"MATCH (n:{label}) "
             "WHERE n.embedding IS NOT NULL "
             "WITH n, vec.euclideanDistance(n.embedding, $query_vec) AS distance "
             "WHERE distance IS NOT NULL "
-            "RETURN n.id, 1.0 / (1.0 + distance) AS score "
+            f"RETURN n.{id_field}, 1.0 / (1.0 + distance) AS score "
             "ORDER BY score DESC "
             "LIMIT $limit"
         )
@@ -363,6 +375,9 @@ def degradation_chain(
 
     is_embedded: True for embedded/redislite mode (brute-force vector),
                  False for Docker/server mode (HNSW index-accelerated).
+    entity_type: 'point' (default), 'event', 'subject', 'document', 'object',
+                 'source', or 'operator' — forwarded to each retrieval
+                 strategy to query the correct entity label/id field. (#172)
 
     Returns:
         {strategy_name: [(id, score), ...]} — only strategies that succeeded
@@ -381,7 +396,8 @@ def degradation_chain(
 
         if strategies.get("vector") and query_vec:
             futures[executor.submit(
-                run_vector_query, graph, query_vec, limit=limit, is_embedded=is_embedded
+                run_vector_query, graph, query_vec, limit=limit, is_embedded=is_embedded,
+                entity_type=entity_type,
             )] = "vector"
 
         if strategies.get("structural"):
