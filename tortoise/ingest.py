@@ -26,6 +26,7 @@ from .idempotency import document_key
 from .log import EventLog
 from .models import OllamaModel, OpenAICompatModel
 from .projection import FalkorProjection, fold, split
+from .ids import ulid
 from .render import render
 
 # OpenAI-compatible providers (Ollama is handled separately via its native API).
@@ -102,6 +103,9 @@ def main(argv=None):
                     help="domain ontology key for domain-specific kind values (e.g. product-strategy)")
     ap.add_argument("--semantic-extract", action="store_true",
                     help="run S7 semantic extraction (Subjects + Objects + aboutEntities) after points")
+    ap.add_argument("--capture-metadata", action="store_true",
+                    help="#125 metadata-only capture: emit Document + sessionCaptured Event, "
+                         "SKIP LLM point extraction (topics/summary from frontmatter)")
     args = ap.parse_args(argv)
 
     text = args.transcript.read_text(encoding="utf-8")
@@ -131,12 +135,22 @@ def main(argv=None):
     api = EventAPI(log, initiated_by="extractor", agent_id=extractor.version,
                    projection=proj)
     try:
-        result = api.begin_ingest(source_id, extractor.version,
-                                  document_key(text), force=args.force)
-        if result.skip:
+        # #125 capture-metadata skips begin_ingest — it is a DIFFERENT operation
+        # from full extraction. Using begin_ingest here would write an
+        # IngestStarted with the content-hash key, and a later full `tortoise
+        # ingest` on the same file would see it as already-processed and SKIP
+        # (the idempotency gotcha). Capture dedup is event-level (MERGE on
+        # doc_id/sessionCaptured).
+        if args.capture_metadata:
+            result = None
+        else:
+            result = api.begin_ingest(source_id, extractor.version,
+                                      document_key(text), force=args.force)
+        if result and result.skip:
             print(f"skip: {result.reason} (run {result.run_id}); use --force to reprocess")
         else:
-            print(f"ingesting with {extractor.version} …")
+            if result:
+                print(f"ingesting with {extractor.version} …")
 
             # S8: Extract document metadata from frontmatter → DocumentCreated event
             is_doc, _ = _document_sections(text)
@@ -147,6 +161,12 @@ def main(argv=None):
                 domain = fm.get("domain", fm.get("documentKnowledgeDomain", ""))
                 if not domain:
                     domain = resolve_domain_from_path(str(args.transcript))
+                # #125 capture metadata (topics/summary from frontmatter)
+                topics_raw = fm.get("topics", "")
+                topics = [t.strip() for t in topics_raw.split(",") if t.strip()] if topics_raw else []
+                summary = fm.get("summary", "")
+                session_id = fm.get("sessionId", "")
+                event_id = str(ulid())
                 api.add_document(
                     doc_id=source_id,
                     title=fm.get("title", args.transcript.stem),
@@ -161,9 +181,26 @@ def main(argv=None):
                     version=fm.get("version", ""),
                     createdAt=fm.get("created", None),
                     updatedAt=fm.get("updated", None),
+                    topics=topics,
+                    summary=summary,
+                    session_id=session_id,
+                    event_id=event_id,
                 )
+                if args.capture_metadata:
+                    # #125 metadata-only: emit sessionCaptured Event with uses→Skill,
+                    # SKIP LLM point extraction entirely
+                    api.add_event(
+                        event_id, "sessionCaptured",
+                        subject="pi-agent",
+                        object_name=source_id,
+                        object_type="Document",
+                        uses=[{"name": "tortoise-capture", "kind": "skill"}],
+                        about_entities=["pi-agent"],
+                    )
+                    print(f"[capture-metadata] Document {source_id} + sessionCaptured {event_id} "
+                          f"(topics={topics}, summary={summary[:40]!r}); extraction skipped")
 
-            if is_doc:
+            if is_doc and not args.capture_metadata:
                 # Document mode: extract Points + IMPL/NAND via LLM, then propagate
                 stats = extract_from_document(
                     text, source_id, api,
