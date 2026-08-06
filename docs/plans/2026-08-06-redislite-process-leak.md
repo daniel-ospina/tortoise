@@ -218,13 +218,6 @@ proj = FalkorProjection('/tmp/custom.db', allow_nonstandard_path=True)
 **Step 3:** Implement wrapper (subclass, not global monkeypatch).
 **Step 4:** Run → PASS
 **Step 5:** Commit
-- Test: `tests/test_projection.py` or `tests/test_guard.py`
-
-**Step 1:** Write test — direct `from redislite.falkordb_client import FalkorDB; FalkorDB('relative.db')` after `import tortoise` raises RuntimeError.
-**Step 2:** Run → FAIL
-**Step 3:** Implement wrapper.
-**Step 4:** Run → PASS
-**Step 5:** Commit
 
 ### Task 9: Migrate graph-scripts (19 files)
 
