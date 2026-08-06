@@ -236,8 +236,7 @@ class TestDegradationChain:
         })
 
         result = degradation_chain(
-            graph, query="test", kind=None, context=None,
-            query_vec=self.QUERY_VEC, strategies=self.STRATEGIES_ALL,
+            graph, query="test", kind=None, query_vec=self.QUERY_VEC, strategies=self.STRATEGIES_ALL,
             entity_type="point", limit=20, is_embedded=True,
         )
 
@@ -256,8 +255,7 @@ class TestDegradationChain:
         })
 
         result = degradation_chain(
-            graph, query="test", kind=None, context=None,
-            query_vec=self.QUERY_VEC, strategies=self.STRATEGIES_ALL,
+            graph, query="test", kind=None, query_vec=self.QUERY_VEC, strategies=self.STRATEGIES_ALL,
         )
 
         assert result == {}
@@ -272,8 +270,7 @@ class TestDegradationChain:
         })
 
         result = degradation_chain(
-            graph, query="test", kind=None, context=None,
-            query_vec=self.QUERY_VEC, strategies=self.STRATEGIES_ALL,
+            graph, query="test", kind=None, query_vec=self.QUERY_VEC, strategies=self.STRATEGIES_ALL,
         )
 
         assert "fts" in result
@@ -289,8 +286,7 @@ class TestDegradationChain:
         only_struct = {"fts": False, "vector": False, "structural": True}
 
         result = degradation_chain(
-            graph, query="test", kind="stmt", context=None,
-            query_vec=None, strategies=only_struct,
+            graph, query="test", kind="stmt", query_vec=None, strategies=only_struct,
         )
 
         # kind="stmt" with context=None → score=0.5 (kind only)
@@ -309,8 +305,7 @@ class TestDegradationChain:
         strategies = {"fts": True, "vector": True, "structural": True}
 
         result = degradation_chain(
-            graph, query=None, kind=None, context=None,
-            query_vec=self.QUERY_VEC, strategies=strategies,
+            graph, query=None, kind=None, query_vec=self.QUERY_VEC, strategies=strategies,
         )
 
         assert "vector" in result
@@ -328,8 +323,7 @@ class TestDegradationChain:
         strategies = {"fts": True, "vector": True, "structural": True}
 
         result = degradation_chain(
-            graph, query="test", kind=None, context=None,
-            query_vec=None, strategies=strategies,
+            graph, query="test", kind=None, query_vec=None, strategies=strategies,
         )
 
         assert "fts" in result
@@ -587,7 +581,7 @@ class TestRunStructuralQuery:
         """Both kind and context match → score=1.0."""
         graph = SimpleMockGraph(result_set=[("p1",), ("p2",)])
 
-        result = run_structural_query(graph, kind="statement", context="physics")
+        result = run_structural_query(graph, kind="statement")
 
         assert len(result) == 2
         assert result[0][1] == 1.0
@@ -597,38 +591,39 @@ class TestRunStructuralQuery:
         """Only kind filter → score=0.5."""
         graph = SimpleMockGraph(result_set=[("p1",)])
 
-        result = run_structural_query(graph, kind="decision", context=None)
+        result = run_structural_query(graph, kind="decision")
 
         assert result[0][1] == 0.5
 
-    def test_context_without_kind_gives_half_score(self):
-        """context provided, kind=None → score=0.5."""
+    def test_no_kind_returns_empty(self):
+        """P2 #49: context removed — no kind → [] (no filters to apply)."""
         graph = SimpleMockGraph(result_set=[("p1",)])
 
-        result = run_structural_query(graph, kind=None, context="physics")
+        result = run_structural_query(graph, kind=None)
 
-        assert result[0][1] == 0.5
+        assert result == []
 
     def test_no_kind_and_no_context_returns_empty(self):
         """Neither kind nor context → [] (no filters to apply)."""
         graph = SimpleMockGraph()
 
-        result = run_structural_query(graph, kind=None, context=None)
+        result = run_structural_query(graph, kind=None)
 
         assert result == []
 
     def test_graph_raises_returns_empty(self):
         """graph.query raises → []."""
         graph = SimpleMockGraph(raise_on_query=RuntimeError("DB connection lost"))
-        result = run_structural_query(graph, kind="statement", context=None)
+        result = run_structural_query(graph, kind="statement")
         assert result == []
+
 
     def test_entity_type_event_uses_eventkind(self):
         """entity_type='event' → eventKind + eventId."""
         graph = SimpleMockGraph(result_set=[("evt-1",)])
 
         result = run_structural_query(
-            graph, kind="transcript", context=None, entity_type="event",
+            graph, kind="transcript", entity_type="event",
         )
 
         assert result[0][0] == "evt-1"
@@ -637,16 +632,17 @@ class TestRunStructuralQuery:
         assert "n.eventId" in cypher
         assert "MATCH (n:Event)" in cypher
 
-    def test_entity_type_point_context_is_factored_in(self):
-        """For points, context is included in WHERE clause."""
+    def test_entity_type_point_kind_is_factored_in(self):
+        """P2 #49: for points, kind is included in WHERE clause (context removed)."""
         graph = SimpleMockGraph(result_set=[("p1",)])
 
         result = run_structural_query(
-            graph, kind="statement", context="physics", entity_type="point",
+            graph, kind="statement", entity_type="point",
         )
 
         cypher = graph.query_calls[0][0]
-        assert "n.context = $context" in cypher
+        assert "n.pointKind" in cypher
+        assert "n.context" not in cypher
         assert result[0][1] == 1.0
 
     def test_entity_type_subject_ignores_context_for_filtering_but_not_score(self):
@@ -659,7 +655,7 @@ class TestRunStructuralQuery:
         graph = SimpleMockGraph(result_set=[("sub-1",)])
 
         result = run_structural_query(
-            graph, kind="person", context="ignored-context", entity_type="subject",
+            graph, kind="person", entity_type="subject",
         )
 
         cypher = graph.query_calls[0][0]
@@ -672,7 +668,7 @@ class TestRunStructuralQuery:
         """limit is passed as a Cypher param."""
         graph = SimpleMockGraph(result_set=[("p1",), ("p2",)])
 
-        run_structural_query(graph, kind="statement", context=None, limit=5)
+        run_structural_query(graph, kind="statement", limit=5)
 
         assert graph.query_calls[0][1]["limit"] == 5
 
@@ -689,8 +685,7 @@ class TestCrossCutting:
         })
 
         result = degradation_chain(
-            graph, query=None, kind="statement", context=None,
-            query_vec=[], strategies={"fts": True, "vector": True, "structural": True},
+            graph, query=None, kind="statement", query_vec=[], strategies={"fts": True, "vector": True, "structural": True},
         )
 
         assert "structural" in result
@@ -711,8 +706,7 @@ class TestCrossCutting:
         graph = SimpleMockGraph(result_set=[("p1",)])
 
         result = degradation_chain(
-            graph, query="test", kind="stmt", context=None,
-            query_vec=[0.1] * 384,
+            graph, query="test", kind="stmt", query_vec=[0.1] * 384,
             strategies={"fts": False, "vector": False, "structural": True},
         )
 

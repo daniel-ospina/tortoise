@@ -29,7 +29,7 @@ class _EdgeHandlers:
                 if not exists:
                     self.g.query(
                         "CREATE (s:Point {id:$sid}) "
-                        "SET s.content='[missing]', s.context='orphan-stub', "
+                        "SET s.content='[missing]', "
                         "    s.is_operator=false",
                         params={"sid": src}
                     )

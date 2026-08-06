@@ -51,10 +51,10 @@ class TestOperatorEntityType:
 
     def test_search_operators_by_label(self, sdk):
         """Operators searchable by their semantic label."""
-        sdk.create_point("statement", "feature-a", context="t")
-        sdk.create_point("statement", "need-b", context="t")
-        feat = sdk.create_point("statement", "feature-x", context="t")
-        need = sdk.create_point("statement", "need-y", context="t")
+        sdk.create_point("statement", "feature-a")
+        sdk.create_point("statement", "need-b")
+        feat = sdk.create_point("statement", "feature-x")
+        need = sdk.create_point("statement", "need-y")
         op = sdk.create_operator("IMPL", feat["id"], [need["id"]], label="addresses")
         assert op.get("id")
 
@@ -63,8 +63,8 @@ class TestOperatorEntityType:
 
     def test_search_operator_by_op_type(self, sdk):
         """Operators filterable by op_type."""
-        a = sdk.create_point("statement", "a", context="t")
-        b = sdk.create_point("statement", "b", context="t")
+        a = sdk.create_point("statement", "a")
+        b = sdk.create_point("statement", "b")
         sdk.create_operator("IMPL", a["id"], [b["id"]], label="addresses")
         sdk.create_operator("NAND", a["id"], [b["id"]], label="opposes")
 

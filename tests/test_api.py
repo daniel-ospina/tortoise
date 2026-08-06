@@ -32,9 +32,9 @@ def _api(projection=None):
 
 def _build(api, source="doc.txt"):
     prov = provenance(source, [0, 10], "quote", extracted_by="test@0")
-    a = api.add_point("we should raise B slowly", "ctx", prov)
-    b = api.add_point("fast raises wreck early buyers", "ctx", prov)
-    op = api.add_operator("IMPL", [b, a], "ctx", prov)
+    a = api.add_point("we should raise B slowly", prov)
+    b = api.add_point("fast raises wreck early buyers", prov)
+    op = api.add_operator("IMPL", [b, a], prov)
     return a, b, op
 
 
@@ -48,7 +48,7 @@ def test_reprocess_retracts_superseded_points():
 
     # Run 1 (v1)
     api.begin_ingest("doc.txt", "v1", document_key(text))
-    p1 = api.add_point("old extraction", "ctx", prov)
+    p1 = api.add_point("old extraction", prov)
 
     # Run 2 (v2) — should retract p1
     r2 = api.begin_ingest("doc.txt", "v2", document_key(text))
@@ -76,12 +76,12 @@ def test_reprocess_retracts_only_old_run_points():
     prov = provenance("doc.txt", [0, 3], text, extracted_by="test@0")
 
     api.begin_ingest("doc.txt", "v1", document_key(text))
-    old_a = api.add_point("old A", "ctx", prov)
-    old_b = api.add_point("old B", "ctx", prov)
+    old_a = api.add_point("old A", prov)
+    old_b = api.add_point("old B", prov)
 
     # Reprocess: old points retracted, new points in fresh run survive
     api.begin_ingest("doc.txt", "v2", document_key(text))
-    new_c = api.add_point("new C", "ctx", prov)
+    new_c = api.add_point("new C", prov)
 
     events = log.read_all()
     retracted = {e["id"] for e in events if e["type"] == "PointRetracted"}
@@ -126,7 +126,7 @@ def test_resolution_event_triggers_grounding():
     api, _log = _api(projection=proj)
     prov = provenance("doc.txt", [0, 1], "x", extracted_by="test@0")
 
-    api.add_point("foo", "ctx", prov, pointKind="resolution-event")
+    api.add_point("foo", prov, pointKind="resolution-event")
     assert len(proj.calls) == 1, "compute_grounding must fire once"
 
     print("PASS test_resolution_event_triggers_grounding")
@@ -141,7 +141,7 @@ def test_resolution_event_legacy_context_no_grounding():
     api, _log = _api(projection=proj)
     prov = provenance("doc.txt", [0, 1], "x", extracted_by="test@0")
 
-    api.add_point("foo", "resolution-event", prov)
+    api.add_point("foo", prov)
     assert len(proj.calls) == 0, "legacy context must not trigger grounding"
 
     print("PASS test_resolution_event_legacy_context_no_grounding")
@@ -153,7 +153,7 @@ def test_normal_context_does_not_trigger_grounding():
     api, _log = _api(projection=proj)
     prov = provenance("doc.txt", [0, 1], "x", extracted_by="test@0")
 
-    api.add_point("bar", "ctx", prov)
+    api.add_point("bar", prov)
     assert len(proj.calls) == 0, "normal context must not trigger grounding"
 
     print("PASS test_normal_context_does_not_trigger_grounding")
@@ -163,7 +163,7 @@ def test_resolution_event_no_projection_safe():
     """resolution-event with no projection attached must not crash."""
     api, log = _api(projection=None)
     prov = provenance("doc.txt", [0, 1], "x", extracted_by="test@0")
-    pid = api.add_point("z", "ctx", prov, pointKind="resolution-event")
+    pid = api.add_point("z", prov, pointKind="resolution-event")
     assert pid and isinstance(pid, str)
     print("PASS test_resolution_event_no_projection_safe")
 
@@ -177,7 +177,7 @@ def test_add_operator_normalizes_dict_inputs():
     pid = api.add_operator(
         "NAND",
         [{"id": "aaa", "x": 1}, {"id": "bbb", "y": 2}],
-        "ctx", prov,
+        prov,
     )
     points = fold(log.read_all())
     assert points[pid]["operator"]["inputs"] == ["aaa", "bbb"]
@@ -197,7 +197,7 @@ def test_add_operator_normalizes_object_inputs():
     pid = api.add_operator(
         "IMPL",
         [_FakeNode("n1"), _FakeNode("n2")],
-        "ctx", prov,
+        prov,
     )
     points = fold(log.read_all())
     assert points[pid]["operator"]["inputs"] == ["n1", "n2"]
@@ -209,7 +209,7 @@ def test_add_operator_invalid_type():
     api, _log = _api()
     prov = provenance("doc.txt", [0, 1], "x", extracted_by="test@0")
     try:
-        api.add_operator("XOR", ["a"], "ctx", prov)
+        api.add_operator("XOR", ["a"], prov)
         assert False, "should have raised"
     except AssertionError as e:
         assert "XOR" in str(e)
@@ -220,7 +220,7 @@ def test_add_operator_fallback_inputs():
     """Non-dict, non-.id inputs pass through as-is (raw strings)."""
     api, log = _api()
     prov = provenance("doc.txt", [0, 1], "x", extracted_by="test@0")
-    pid = api.add_operator("IMPL", ["raw_str_1", "raw_str_2"], "ctx", prov)
+    pid = api.add_operator("IMPL", ["raw_str_1", "raw_str_2"], prov)
     points = fold(log.read_all())
     assert points[pid]["operator"]["inputs"] == ["raw_str_1", "raw_str_2"]
     print("PASS test_add_operator_fallback_inputs")
@@ -265,7 +265,7 @@ def test_begin_ingest_force():
 
     r1 = api.begin_ingest("doc.txt", "v1", document_key(text))
     assert not r1.skip
-    old = api.add_point("old", "ctx", prov)
+    old = api.add_point("old", prov)
 
     # Same key + version, but force → must reprocess
     r2 = api.begin_ingest("doc.txt", "v1", document_key(text), force=True)
@@ -337,14 +337,14 @@ def test_projection_matches_log_after_every_mutation():
     prov = provenance("doc.txt", [0, 10], "quote", extracted_by="test@0")
 
     # add_point
-    a = api.add_point("statement A", "ctx", prov)
+    a = api.add_point("statement A", prov)
     _check()
 
-    b = api.add_point("statement B", "ctx", prov)
+    b = api.add_point("statement B", prov)
     _check()
 
     # add_operator
-    op = api.add_operator("IMPL", [b, a], "ctx", prov)
+    op = api.add_operator("IMPL", [b, a], prov)
     _check()
 
     # revise_point
@@ -356,7 +356,7 @@ def test_projection_matches_log_after_every_mutation():
     _check()
 
     # merge_points
-    c = api.add_point("statement C", "ctx", prov)
+    c = api.add_point("statement C", prov)
     api.merge_points(keep_id=op, merge_ids=[c])
     _check()
 

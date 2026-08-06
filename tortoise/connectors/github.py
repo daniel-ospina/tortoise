@@ -22,6 +22,14 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _extract_label_prefix(labels: list[str], prefix: str) -> str | None:
+    """Extract value after a label prefix. E.g., _extract_label_prefix(['complexity:micro'], 'complexity:') -> 'micro'."""
+    for label in labels:
+        if label.startswith(prefix):
+            return label[len(prefix):]
+    return None
+
+
 class GitHubConnector:
     """Poll GitHub issues/PRs via `gh` CLI + optional webhook server."""
 
@@ -149,6 +157,8 @@ class GitHubConnector:
         closed_at = issue.get("closedAt", "")
         url = issue.get("url", "")
         labels = [l.get("name", "") for l in (issue.get("labels") or [])]
+        complexity = _extract_label_prefix(labels, "complexity:") or "standard"
+        ux_rating = _extract_label_prefix(labels, "ux:") or ""
         assignees = [a.get("login", "") for a in (issue.get("assignees") or [])]
         author = (issue.get("author") or {}).get("login", "")  # P0: handle null author
         milestone = (issue.get("milestone") or {}).get("title", "")
@@ -170,6 +180,8 @@ class GitHubConnector:
             "routed_team": route["team"],
             "routed_role": route["role"],
             "routed_product": route["product"],
+            "complexity": complexity,
+            "ux_rating": ux_rating,
         }
 
         # Event — temporal occurrence (PM domain extension)
@@ -236,12 +248,15 @@ class GitHubConnector:
                 obj = entities["object"]
                 proj.g.query(
                     "MATCH (o:Object {id: $id}) "
-                    "SET o.routed_team = $team, o.routed_role = $role, o.routed_product = $product",
+                    "SET o.routed_team = $team, o.routed_role = $role, o.routed_product = $product, "
+                    "o.complexity = $complexity, o.ux_rating = $ux_rating",
                     params={
                         "id": obj.get("id"),
                         "team": obj.get("routed_team", ""),
                         "role": obj.get("routed_role", ""),
                         "product": obj.get("routed_product", ""),
+                        "complexity": obj.get("complexity", "standard"),
+                        "ux_rating": obj.get("ux_rating", ""),
                     },
                 )
 

@@ -14,7 +14,7 @@
       "command": "npx",
       "args": [
         "-y",
-        "@modelcontextprotocol/server-brave-search"
+        "@brave/brave-search-mcp-server"
       ],
       "env": {
         "BRAVE_API_KEY": "${BRAVE_API_KEY}"
@@ -42,10 +42,10 @@
         "-m",
         "tortoise.mcp_server"
       ],
-      "cwd": "/Users/home/tortoise",
+      "cwd": "/Users/danielospina/Documents/GitHub/tortoise",
       "env": {
-        "PYTHONPATH": "/Users/home/tortoise",
-        "TORTOISE_DB_URI": "docker://:falkordb@localhost:6379/tortoise"
+        "PYTHONPATH": "/Users/danielospina/Documents/GitHub/tortoise",
+        "TORTOISE_DB_URI": "docker://:falkordb@localhost:16379/tortoise"
       }
     }
   }

@@ -186,8 +186,8 @@ class MockExtractor:
                     continue
                 prov = provenance(source_id, span, quote=text, speaker=speaker,
                                   extracted_by=self.version)
-                # P1 #49: context is deprecated — use extractedFrom for provenance
-                pid = api.add_point(content=text, context=None, provenance=prov,
+                # #49 Phase 2: context is deprecated — use extractedFrom for provenance
+                pid = api.add_point(content=text, provenance=prov,
                                     extractedFrom=source_id)
                 pids.append((pid, text.lower(), prov))
             
@@ -222,7 +222,7 @@ class MockExtractor:
                         elif _has_cue(ti_clean, _REFUTE_SINGLE_RE, _REFUTE_PHRASES) or _has_cue(tj_clean, _REFUTE_SINGLE_RE, _REFUTE_PHRASES):
                             gate = "NAND"
                         if gate:
-                            api.add_operator(gate, inputs=[pi, pj], context=None, provenance=pvi)
+                            api.add_operator(gate, inputs=[pi, pj], provenance=pvi)
                         elif (pi, pj) in matched_pairs:
                             # Semantic agreement: similar claims from different sources = IMPL
                             # But require shared noun phrase to avoid weak thematic connections
@@ -240,7 +240,7 @@ class MockExtractor:
                                         'more','less','very','also','just','only','now','still','already'}
                             shared_content = shared - stopwords
                             if len(shared_content) >= 3:
-                                api.add_operator("IMPL", inputs=[pi, pj], context=None, provenance=pvi)
+                                api.add_operator("IMPL", inputs=[pi, pj], provenance=pvi)
             except Exception:
                 # Fallback: cue-word only all-pairs (noisy but works)
                 # (catches ImportError for missing dependencies AND runtime errors
@@ -257,15 +257,15 @@ class MockExtractor:
                         elif _has_cue(ti_clean, _REFUTE_SINGLE_RE, _REFUTE_PHRASES) or _has_cue(tj_clean, _REFUTE_SINGLE_RE, _REFUTE_PHRASES):
                             gate = "NAND"
                         if gate:
-                            api.add_operator(gate, inputs=[pi, pj], context=None, provenance=pvi)
+                            api.add_operator(gate, inputs=[pi, pj], provenance=pvi)
         else:
             # Sequential mode (original): only connect consecutive utterances
             prev_pid = None
             for speaker, text, span in _utterances(transcript):
                 prov = provenance(source_id, span, quote=text, speaker=speaker,
                                   extracted_by=self.version)
-                # P1 #49: context is deprecated — use extractedFrom for provenance
-                pid = api.add_point(content=text, context=None, provenance=prov,
+                # #49 Phase 2: context is deprecated — use extractedFrom for provenance
+                pid = api.add_point(content=text, provenance=prov,
                                     extractedFrom=source_id)
                 low = _PUNC.sub('', f" {text.lower()} ")
                 gate = None
@@ -274,7 +274,7 @@ class MockExtractor:
                 elif _has_cue(low, _REFUTE_SINGLE_RE, _REFUTE_PHRASES):
                     gate = "NAND"
                 if gate and prev_pid is not None:
-                    api.add_operator(gate, inputs=[prev_pid, pid], context=None,
+                    api.add_operator(gate, inputs=[prev_pid, pid],
                                      provenance=prov)
                 prev_pid = pid
 
@@ -501,13 +501,13 @@ class _PointStage:
     def __init__(self, model):
         self.model = model
 
-    def run(self, utterances, context) -> dict[int, str]:
+    def run(self, utterances, llm_context) -> dict[int, str]:
         """Return {utterance_index: cleaned_content}. The caller owns identity and
         provenance; this is best-effort cleaning only. Tolerates map or list output."""
         numbered = {str(i): u for i, u in enumerate(utterances)}
         out = self.model.complete(
             system=_POINTS_SYS,
-            user=json.dumps({"context": context, "utterances": numbered}),
+            user=json.dumps({"context": llm_context, "utterances": numbered}),
         )
         raw = _json(out).get("points", {})
         cleaned: dict[int, str] = {}
@@ -540,11 +540,11 @@ class _DocumentPointStage:
             pointKind_list=_build_pointkind_prompt(point_kinds),
         )
 
-    def run(self, title: str, body: str, context: str) -> list[dict]:
+    def run(self, title: str, body: str, llm_context: str) -> list[dict]:
         out = self.model.complete(
             system=self._system,
             user=json.dumps({
-                "context": context,
+                "context": llm_context,
                 "section_title": title,
                 "section_body": body,
             }),
@@ -569,11 +569,11 @@ class _RelationStage:
         self.model = model
         self._sys = system_prompt or _RELATIONS_SYS
 
-    def run(self, point_contents, context, *, multi_source: bool = False):
+    def run(self, point_contents, llm_context, *, multi_source: bool = False):
         extra = " These statements come from DIFFERENT sources. Identify where they agree or contradict." if multi_source else ""
         out = self.model.complete(
             system=self._sys,
-            user=json.dumps({"context": context + extra,
+            user=json.dumps({"context": llm_context + extra,
                              "points": [{"i": i, "content": c}
                                         for i, c in enumerate(point_contents)]}),
         )
@@ -618,7 +618,7 @@ class _SemanticStage:
                                              "infrastructure", "agreement", "standard",
                                              "epic", "project", "task", "other"]
 
-    def run(self, title: str, body: str, context: str) -> dict:
+    def run(self, title: str, body: str, llm_context: str) -> dict:
         system = _SEMANTIC_SYS.format(
             subject_kinds=", ".join(self.subject_kinds),
             object_kinds=", ".join(self.object_kinds),
@@ -626,7 +626,7 @@ class _SemanticStage:
         out = self.model.complete(
             system=system,
             user=json.dumps({
-                "context": context,
+                "context": llm_context,
                 "section_title": title,
                 "section_body": body,
             }),
@@ -686,8 +686,8 @@ class LLMExtractor:
             contents.append(content)
             prov = provenance(source_id, span, quote=text, speaker=speaker,
                               extracted_by=self.version)
-            # P1 #49: context is deprecated — use extractedFrom for provenance
-            ids.append(api.add_point(content, "", prov, extractedFrom=source_id))
+            # #49 Phase 2: context is deprecated — use extractedFrom for provenance
+            ids.append(api.add_point(content, prov, extractedFrom=source_id))
 
         for r in self.relations.run(contents, f"conversation:{source_id}", multi_source=multi_source):
             s, d = r.get("src"), r.get("dst")
@@ -697,7 +697,7 @@ class LLMExtractor:
             speaker, text, span = segs[d]
             prov = provenance(source_id, span, quote=text, speaker=speaker,
                               extracted_by=self.version)
-            api.add_operator(r["op_type"], [ids[s], ids[d]], "", prov)
+            api.add_operator(r["op_type"], [ids[s], ids[d]], prov)
 
     def _run_document(self, sections, source_id, api, *,
                       max_utterances: int = 0, max_points_per_batch: int = 40,
@@ -738,9 +738,9 @@ class LLMExtractor:
                                   speaker="document", extracted_by=self.version)
                 pk = pd.get("pointKind", "statement")
                 seen_kinds.add(pk)
-                # P1 #49: context is deprecated — use extractedFrom for provenance
+                # #49 Phase 2: context is deprecated — use extractedFrom for provenance
                 pid = api.add_point(
-                    pd["content"], "", prov,
+                    pd["content"], prov,
                     pointKind=pk,
                     aboutEntities=pd["aboutEntities"],
                     confidence=pd["confidence"],
@@ -784,9 +784,9 @@ class LLMExtractor:
                     api.add_operator(
                         r["op_type"],
                         [all_point_ids[pair[0]], all_point_ids[pair[1]]],
-                        "", provenance(source_id, None, quote="",
-                                           speaker="document",
-                                           extracted_by=self.version),
+                        provenance(source_id, None, quote="",
+                                       speaker="document",
+                                       extracted_by=self.version),
                     )
                 except Exception:
                     # ponytail: skip malformed operator, don't abort whole run

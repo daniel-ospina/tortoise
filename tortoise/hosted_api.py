@@ -73,8 +73,14 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         self._buckets: dict[str, list[float]] = defaultdict(list)
         self._last_cleanup = time.time()
         self._lock = asyncio.Lock()
+        # RATE_LIMIT_DISABLED=1 disables throttling (test env) — the test
+        # suite creates >100 points per run against a shared IP bucket,
+        # tripping 429 in full-suite runs. Production keeps the limit.
+        self._disabled = os.environ.get("RATE_LIMIT_DISABLED") == "1"
 
     async def dispatch(self, request: Request, call_next):
+        if self._disabled:
+            return await call_next(request)
         if request.url.path in self.SKIP or request.url.path.startswith("/internal"):
             return await call_next(request)
 
@@ -451,15 +457,15 @@ from pydantic import BaseModel, Field, field_validator
 class CreatePointRequest(BaseModel):
     content: str = Field(..., min_length=1, max_length=10000)
     kind: str = Field(default="statement")
-    context: str | None = None
     tags: list[str] = Field(default_factory=list)
 
     @field_validator("kind")
     @classmethod
     def valid_kind(cls, v: str) -> str:
-        allowed = {"statement", "decision", "evidence", "observation", "hypothesis"}
+        from tortoise.domain_loader import known_kinds
+        allowed = known_kinds()
         if v not in allowed:
-            raise ValueError(f"kind must be one of {allowed}")
+            raise ValueError(f"kind must be one of {sorted(allowed)}")
         return v
 
     @field_validator("tags")
@@ -477,7 +483,6 @@ class PointResponse(BaseModel):
     id: str
     content: str
     kind: str
-    context: str | None = None
     created_at: str | None = None
 
 
@@ -520,7 +525,6 @@ async def create_point(body: CreatePointRequest, request: Request, team: dict = 
         result = sdk.create_point(
             content=body.content,
             kind=body.kind,
-            context=body.context,
             tags=body.tags,
         )
     except HTTPException:
@@ -539,7 +543,6 @@ async def create_point(body: CreatePointRequest, request: Request, team: dict = 
         "id": result["id"],
         "content": result["content"],
         "kind": result.get("pointKind", result.get("kind", "")),
-        "context": result.get("context"),
         "created_at": result.get("createdAt", result.get("created_at", "")),
     }
 
@@ -547,15 +550,16 @@ async def create_point(body: CreatePointRequest, request: Request, team: dict = 
 @app.get("/v1/points")
 async def list_points(
     kind: str | None = None,
-    context: str | None = None,
+    tag: str | None = None,
     limit: int = Query(50, ge=1, le=1000),
     team: dict = Depends(get_current_team),
 ):
-    """Query Points in the team's graph."""
+    """Query Points in the team's graph. Optional kind and tag filters."""
     if kind:
-        allowed = {"statement", "decision", "evidence", "observation", "hypothesis"}
+        from tortoise.domain_loader import known_kinds
+        allowed = known_kinds()
         if kind not in allowed:
-            raise HTTPException(status_code=400, detail=f"kind must be one of {allowed}")
+            raise HTTPException(status_code=400, detail=f"kind must be one of {sorted(allowed)}")
     sdk = _make_sdk(namespace=team["team_id"])
     proj = sdk._get_proj()
     conditions = ["(n.is_operator IS NULL OR n.is_operator = false)"]
@@ -563,9 +567,11 @@ async def list_points(
     if kind:
         conditions.append("n.pointKind = $kind")
         params["kind"] = kind
-    if context:
-        conditions.append("n.context = $context")
-        params["context"] = context
+    if tag:
+        # Tags are stored as a node property (n.tags = [...]); demo data also
+        # creates TAGGED edges. Match the property (#7883).
+        conditions.append("$tag IN coalesce(n.tags, [])")
+        params["tag"] = tag
     query = "MATCH (n:Point) WHERE " + " AND ".join(conditions) + " RETURN properties(n) ORDER BY n.createdAt DESC LIMIT $limit"
     rows = proj.g.query(query, params=params).result_set
     results = []
@@ -1012,6 +1018,26 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
                 extracted.append({"id": pid, "kind": "statement", "text": text[:200]})
                 idx += 1
 
+    # Ontology v3.1 §4.5/§3.2 (#7882): also create an episodic :Event node
+    # (eventKind: sessionCaptured) and link extracted Points to it via
+    # aboutEvent — the ontology's episodic model. The :Session node remains
+    # the API-visible handle; the Event carries ontology-compliant provenance.
+    try:
+        event = sdk.create_event(
+            f"session_{session_id}",
+            "sessionCaptured",
+            startedAt=now,
+            endedAt=now,
+            sessionId=session_id,
+        )
+        event_id = event.get("id") or event.get("eventId")
+        for p in extracted:
+            proj.create_about_edge(p["id"], event_id, "aboutEvent")
+    except Exception:
+        import logging
+        logging.getLogger("tortoise.api").exception(
+            "session Event creation failed (non-fatal)")
+
     # Log audit event
     await _async_audit(
         request, team["team_id"], "session_capture",
@@ -1030,3 +1056,17 @@ async def list_sessions(team: dict = Depends(get_current_team)):
         "MATCH (s:Session) RETURN s.id, s.created_at, s.turn_count ORDER BY s.created_at DESC LIMIT 50"
     ).result_set
     return {"sessions": [{"id": r[0], "created_at": r[1], "turns": r[2]} for r in rows]}
+
+
+@app.get("/v1/context")
+async def session_context(team: dict = Depends(get_current_team)):
+    """Memory digest for agent session-start hooks (tortoise context CLI).
+
+    Mirrors TortoiseSDK.session_context() so hosted users get the same
+    injection payload as local users.
+    """
+    sdk = _make_sdk(namespace=team["team_id"])
+    try:
+        return sdk.session_context()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Context unavailable: {e}")

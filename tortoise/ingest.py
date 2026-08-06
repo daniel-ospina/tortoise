@@ -258,7 +258,7 @@ def main(argv=None):
                 extractor.run(text, source_id, api, max_utterances=args.max_utterances)
 
         if args.resolution:
-            api.add_point(f"Resolved: {source_id}", "resolution-event",
+            api.add_point(f"Resolved: {source_id}",
                           provenance(source_id, None, None, speaker="system",
                                      extracted_by=extractor.version),
                           pointKind="resolution-event")

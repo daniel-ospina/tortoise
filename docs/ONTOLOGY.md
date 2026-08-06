@@ -116,7 +116,7 @@ Per-type edges (chosen over single polymorphic edge — FalkorDB matrix-per-type
 
 | Predicate | From → To | Direction | Cardinality | Standard alignment | Meaning |
 |-----------|-----------|-----------|-------------|--------------------|---------|
-| `participatesIn` | Subject → Event | unidirectional | N-ary | `schema:attendee` | Subjects involved in an event (⚠️ spec-only — no producer yet, see follow-up) |
+| `participatesIn` | Subject → Event | unidirectional | N-ary | `schema:attendee` | Subjects involved in an event (⚠️ spec-only — no producer yet, tracked in issue #7884) |
 | `memberOf` | Subject → Subject | unidirectional | N-ary | `org:membership` | Membership in team/group/organization. **Canonical** — generalizable to teams, orgs, any hierarchy. |
 | `managedBy` | Entity → Subject | unidirectional | N-ary | RACI Responsible | Operational responsibility |
 | `ownedBy` | Entity → Subject | unidirectional | N-ary | RACI Accountable | Accountability, data boundary |
@@ -168,7 +168,6 @@ Epistemic edges (operators): `IMPL`, `NAND` (+ semantic label). About edges: `ab
 | `pointKind` | string | ✅ | — | ✅ | Classification tag: statement, decision, vision, strategy, plan, goal, target, observation, hypothesis + pack pointKinds |
 | `is_operator` | bool | — | — | ✅ | true for operator Points |
 | `op_type` | string | — | — | ✅ | IMPL / NAND (operator Points only) |
-| `context` | string | — | — | ✅ | Namespace context (#49 — removed from new writes) |
 | `status` | string | — | `pav:status` | ✅ | Lifecycle: draft, live, superseded, deprecated, archived, resolved. draft/deprecated inert for computation |
 | `confidence` | float 0..1 | — | — | ⚠️ | EP posterior mean, computed by propagation |
 | `authoredBy` | SubjectID | — | `dc:creator` | ✅ | Who created the claim |
@@ -362,7 +361,7 @@ Operator:      (op-123)                                   ← mitigation anchor
 |-------|-------|------|
 | Semantic | operator.label | Domain verb: addresses, hasPart, opposes |
 | Epistemic | IMPL/NAND edges | Confidence via EP (0-1 continuum) |
-| Operator | Point (is_operator:true) | Mitigation target, evidence anchor |
+| Operator | Point (is_operator:true) | Mitigation target |
 
 ### Semantic Types
 

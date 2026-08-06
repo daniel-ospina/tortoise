@@ -54,12 +54,11 @@ class EventAPI:
             self.projection.apply(event)
         return event
 
-    def _point(self, content, context, provenance, operator=None) -> dict:
+    def _point(self, content, provenance, operator=None) -> dict:
         prov = dict(provenance)
         prov.setdefault("run_id", self.current_run)
-        # P1 #49: context is accepted but NOT stored in the point dict.
-        # The projection version gate (v2) strips context from events.
-        # Context is instead recorded in the SDK's session context map.
+        # #49 Phase 2: context param removed — context is deprecated.
+        # Context/domain is now tracked via pointKind + provenance extractedFrom.
         return {
             "id": ulid(),
             "content": content,
@@ -109,8 +108,8 @@ class EventAPI:
         return IngestResult(run_id=run_id, skip=False)
 
     # -- mutations ----------------------------------------------------------
-    def add_point(self, content, context, provenance, *, corrects=None, **fields) -> str:
-        p = self._point(content, context, provenance)
+    def add_point(self, content, provenance, *, corrects=None, **fields) -> str:
+        p = self._point(content, provenance)
         p.update(fields)
         # P1 #49: mark events with projection_version=2 so the projection gate
         # (Task 1.6) knows to strip context from v2 events.
@@ -124,14 +123,14 @@ class EventAPI:
                 self.projection.compute_grounding()
         return p["id"]
 
-    def add_operator(self, op_type, inputs, context, provenance, *,
+    def add_operator(self, op_type, inputs, provenance, *,
                      content=None, corrects=None) -> str:
         assert op_type in ("NAND", "IMPL"), f"unknown gate {op_type!r}"
         _inputs = [x["id"] if isinstance(x, dict) and "id" in x
                    else x.id if hasattr(x, "id") else x
                    for x in inputs]
         label = content or f"{op_type}({', '.join(_inputs)})"
-        p = self._point(label, context, provenance,
+        p = self._point(label, provenance,
                         operator={"op_type": op_type, "inputs": _inputs})
         self._emit("OperatorAdded", point=p, corrects=corrects, projection_version=2)
 
@@ -178,9 +177,9 @@ class EventAPI:
             return None
         return self._svbp.compute_confidence(point_id)
 
-    def revise_point(self, id, *, new_content=None, new_context=None, corrects) -> str:
+    def revise_point(self, id, *, new_content=None, corrects) -> str:
         ev = self._emit("PointRevised", id=id, new_content=new_content,
-                        new_context=new_context, corrects=corrects)
+                        corrects=corrects)
         return ev["event_id"]
 
     def retract_point(self, id, *, corrects) -> str:

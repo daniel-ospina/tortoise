@@ -19,6 +19,9 @@ from fastapi.testclient import TestClient
 
 # #67: TORTOISE_SECRET_PEPPER is mandatory for auth module — set before import
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
+# Rate limiter trips 429 in full-suite runs (>100 points per shared IP bucket).
+# Tests opt out; production keeps the limit (RATE_LIMIT_DISABLED=1).
+os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 
 from tortoise.hosted_api import app, get_current_team
 from tortoise.sdk import TortoiseSDK
@@ -213,16 +216,14 @@ class TestPointsCreate:
         body = r.json()
         assert body["kind"] == "decision"
 
-    def test_create_point_with_context_deprecated(self, client):
-        """context is deprecated (#49) — accepted but not persisted."""
+    def test_create_point_with_kind_observation(self, client):
         r = client.post(
             "/v1/points",
-            json={"content": "ctx test", "kind": "observation", "context": "test-ctx"},
+            json={"content": "tagged point", "kind": "observation", "tags": ["test-tag"]},
         )
         assert r.status_code == 200, r.text
         body = r.json()
-        # #49: context is popped and NOT written to the node → response has None
-        assert body["context"] is None
+        assert body["kind"] == "observation"
 
     def test_create_point_with_tags(self, client):
         r = client.post(
@@ -232,7 +233,9 @@ class TestPointsCreate:
         assert r.status_code == 200, r.text
 
     def test_create_point_with_all_allowed_kinds(self, client):
-        allowed = {"statement", "decision", "evidence", "observation", "hypothesis"}
+        # Ontology v3.1 §5 core vocabulary (#7881) — not just the old 5.
+        allowed = {"statement", "decision", "evidence", "observation", "hypothesis",
+                   "vision", "strategy", "plan", "goal", "target"}
         for kind in sorted(allowed):
             r = client.post(
                 "/v1/points",
@@ -305,18 +308,18 @@ class TestPointsList:
         for p in body["points"]:
             assert p.get("pointKind", p.get("kind")) == "decision"
 
-    def test_list_points_filter_by_context_deprecated(self, client):
-        """context filtering is deprecated (#49) — context is not persisted, so
-        filtering by it returns no matches."""
-        client.post("/v1/points", json={"content": "ctx-a", "context": "project-alpha"})
-        client.post("/v1/points", json={"content": "ctx-b", "context": "project-beta"})
-        client.post("/v1/points", json={"content": "no-ctx"})
+    def test_list_points_filter_by_kind_multi(self, client):
+        """GET /v1/points?kind=<kind> returns only matching Points — second variant."""
+        client.post("/v1/points", json={"content": "alpha point", "kind": "evidence"})
+        client.post("/v1/points", json={"content": "beta point", "kind": "hypothesis"})
+        client.post("/v1/points", json={"content": "plain point"})
 
-        r = client.get("/v1/points", params={"context": "project-alpha"})
+        r = client.get("/v1/points", params={"kind": "evidence"})
         assert r.status_code == 200, r.text
         body = r.json()
-        # #49: context is never written → filter matches nothing
-        assert body["count"] == 0
+        assert body["count"] >= 1
+        for p in body["points"]:
+            assert p.get("pointKind", p.get("kind")) == "evidence"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -767,10 +770,10 @@ class TestCrossTenantIsolation:
         # Create a point in team A's namespace directly
         from tortoise.hosted_api import _make_sdk
         sdk_a = _make_sdk(namespace="iso-team-a")
-        sdk_a.create_point(content="TEAM_A_SECRET", kind="statement", context="iso")
+        sdk_a.create_point(content="TEAM_A_SECRET", kind="statement")
         # Create a point in team B
         sdk_b = _make_sdk(namespace="iso-team-b")
-        sdk_b.create_point(content="TEAM_B_SECRET", kind="statement", context="iso")
+        sdk_b.create_point(content="TEAM_B_SECRET", kind="statement")
 
         # Verify team A's graph has its own point and NOT team B's
         pts_a = sdk_a._get_proj().g.query(
@@ -812,3 +815,90 @@ class TestKeysRevoke:
         listed = client.get("/v1/team/keys").json()
         target = [k for k in listed["keys"] if k["id"] == created["id"]]
         assert len(target) == 1
+
+
+class TestPointsTagFilter:
+    """GET /v1/points?tag=<tag> filters by TAGGED edge (#7883)."""
+
+    def test_list_points_filter_by_tag(self, client):
+        client.post("/v1/points", json={"content": "tagged point", "tags": ["alpha"]})
+        client.post("/v1/points", json={"content": "untagged point"})
+
+        r = client.get("/v1/points", params={"tag": "alpha"})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["count"] >= 1
+        for p in body["points"]:
+            assert "tagged point" in p["content"]
+
+    def test_list_points_filter_by_tag_no_match(self, client):
+        client.post("/v1/points", json={"content": "plain point"})
+
+        r = client.get("/v1/points", params={"tag": "nonexistent"})
+        assert r.status_code == 200, r.text
+        assert r.json()["count"] == 0
+
+
+class TestPointsNewKinds:
+    """Ontology v3.1 core kinds beyond the old 5 (#7881)."""
+
+    def test_create_vision_kind(self, client):
+        r = client.post("/v1/points", json={"content": "vision statement", "kind": "vision"})
+        assert r.status_code == 200, r.text
+        assert r.json()["kind"] == "vision"
+
+    def test_create_plan_kind(self, client):
+        r = client.post("/v1/points", json={"content": "plan point", "kind": "plan"})
+        assert r.status_code == 200, r.text
+        assert r.json()["kind"] == "plan"
+
+    def test_filter_by_new_kind(self, client):
+        client.post("/v1/points", json={"content": "a strategy", "kind": "strategy"})
+        client.post("/v1/points", json={"content": "plain"})
+        r = client.get("/v1/points", params={"kind": "strategy"})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["count"] >= 1
+        for p in body["points"]:
+            assert p.get("pointKind", p.get("kind")) == "strategy"
+
+
+class TestSessionEventAlignment:
+    """Session capture creates an ontology-compliant :Event (#7882)."""
+
+    def test_capture_creates_event_node(self, client):
+        from tortoise.sdk import TortoiseSDK
+        r = client.post(
+            "/v1/sessions",
+            json={"conversation": [
+                {"role": "user", "content": "We decided to use FalkorDB Cloud."},
+                {"role": "assistant", "content": "Agreed, that is the plan."},
+            ]},
+        )
+        assert r.status_code == 200, r.text
+        sid = r.json()["session_id"]
+
+        # The client fixture patched TortoiseSDK.__init__ to use the temp DB,
+        # so constructing an SDK inside the test reads the same graph.
+        sdk = TortoiseSDK(namespace="test-team-001")
+        proj = sdk._get_proj()
+
+        # The :Session node exists
+        rows = proj.g.query(
+            "MATCH (s:Session {id:$sid}) RETURN s.id", params={"sid": sid}
+        ).result_set
+        assert rows, "Session node missing"
+
+        # An :Event with eventKind sessionCaptured exists
+        ev = proj.g.query(
+            "MATCH (e:Event {eventKind:'sessionCaptured'}) RETURN e.eventId, e.startedAt",
+        ).result_set
+        assert ev, "Event node missing for session"
+        eid = ev[0][0]
+
+        # Extracted Points link to the Event via aboutEvent (ontology §3.2)
+        linked = proj.g.query(
+            "MATCH (e:Event {eventId:$eid})<-[:aboutEvent]-(p:Point) RETURN count(p)",
+            params={"eid": eid},
+        ).result_set
+        assert linked[0][0] >= 1, "no extracted Points linked to Event"

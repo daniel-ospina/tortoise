@@ -2,13 +2,62 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+import sys
+from pathlib import Path
 from typing import Any
 
 from fastmcp import FastMCP
 from tortoise.auth import is_dev_mode as _is_dev_mode
 from tortoise.sdk import TortoiseSDK
 from tortoise import monitoring
+
+_log = logging.getLogger(__name__)
+
+
+def _load_dotenv(path: str | None = None) -> None:
+    """Tiny .env loader — repo-root .env, KEY=VALUE lines, no new deps.
+
+    Only sets environment keys that are empty/unset, so an explicit
+    TORTOISE_DB_URI in the process env always wins. Mirrors the hosted
+    entrypoint philosophy: the DB target must be explicit, never accidental.
+    """
+    if path is None:
+        path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", ".env"
+        )
+    if not os.path.exists(path):
+        return
+    try:
+        for raw in Path(path).read_text().splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[len("export "):]
+            if "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            # python-dotenv semantics: quoted values are literal (no inline
+            # comment stripping); unquoted values strip inline comments
+            # (whitespace + '#'). A bare '#' in an unquoted value is preserved.
+            value = value.strip()
+            if value[:1] in ('"', "'") and value[-1:] == value[:1]:
+                value = value[1:-1]
+            else:
+                value = value.split(" #", 1)[0].strip()
+            # Only fill keys that are absent — never override an explicitly
+            # set (even empty) environment variable.
+            if key and key not in os.environ:
+                os.environ[key] = value
+    except OSError as e:
+        _log.debug("Could not read .env (%s): %s — continuing without it", path, e)
+
+
+if "pytest" not in sys.modules:
+    _load_dotenv()  # resolve TORTOISE_DB_URI from repo-root .env (skipped under pytest)
 
 
 # ── Safety annotations ───────────────────────────────────────────
@@ -20,10 +69,9 @@ mcp = FastMCP("tortoise")
 
 # Resolve SDK connection from TORTOISE_DB_URI env var
 _db_uri = os.environ.get("TORTOISE_DB_URI", "")
-if _db_uri.startswith("docker://"):
+if _db_uri.startswith(("docker://", "redis://", "rediss://")):
     from tortoise.projection import FalkorProjection
-    import time, logging, sys
-    _log = logging.getLogger(__name__)
+    import time, sys
     sdk = TortoiseSDK()
     # Retry Docker connection 3x with backoff; exit on exhaustion (#25 P3a, #32)
     for attempt in range(3):
@@ -47,8 +95,6 @@ else:
 
 # Announce auth mode at startup
 if _is_dev_mode():
-    import logging
-    _log = logging.getLogger(__name__)
     _log.warning("TORTOISE_API_KEY not set — running in dev mode (no auth)")
 
 
@@ -71,12 +117,6 @@ def _safe(fn, *args, **kwargs):
         }
     try:
         result = fn(*args, **kwargs)
-        # Dual-channel deprecation (#49 §9.6): print deprecation warnings to
-        # stderr (visible in the agent's text stream) in addition to the
-        # result-dict key — MCP clients don't render unknown top-level keys.
-        if isinstance(result, dict) and result.get("deprecation_warnings"):
-            for w in result["deprecation_warnings"]:
-                print(f"[Tortoise DEPRECATED] {w}", file=sys.stderr)
         return result
     except Exception as e:
         monitoring.record_error()
@@ -103,7 +143,7 @@ def _parse(v: Any) -> Any:
 
 
 @mcp.tool()
-def tortoise_create_point(kind: str, content: str, context: str | None = None,
+def tortoise_create_point(kind: str, content: str,
                           authoredBy: str | None = None,
                           props: Any = None,
                           dedup: bool = True) -> dict:
@@ -117,8 +157,6 @@ def tortoise_create_point(kind: str, content: str, context: str | None = None,
     """
     props = _parse(props)
     merged = dict(props or {})
-    if context:
-        merged["context"] = context
     if authoredBy:
         merged["authoredBy"] = authoredBy
     merged["dedup"] = dedup
@@ -126,17 +164,17 @@ def tortoise_create_point(kind: str, content: str, context: str | None = None,
 
 
 @mcp.tool()
-def tortoise_query(kind: str | None = None, context: str | None = None,
+def tortoise_query(kind: str | None = None,
                    filters: Any = None,
                    text: str | None = None,
                    order_by: str | None = None,
                    min_confidence: float | None = None,
                    entity_type: str = "point",
                    limit: int = 100) -> list[dict] | dict:
-    """Query points by pointKind, context, and/or property filters.
+    """Query points by pointKind and/or property filters.
 
     When text is provided, routes through tortoise_fts_query() for hybrid search.
-    When text is None, uses existing structural query (full-scan for context).
+    When text is None, uses existing structural query.
     entity_type: 'point' (default), 'event', 'subject', 'document', 'object', 'operator', or 'source'.
 
     When results are empty and a kind filter was provided, a 'suggestion'
@@ -144,11 +182,11 @@ def tortoise_query(kind: str | None = None, context: str | None = None,
     """
     filters = _parse(filters)
     if text:
-        return _safe(sdk.tortoise_fts_query, text, kind=kind, context=context,
+        return _safe(sdk.tortoise_fts_query, text, kind=kind,
                      entity_type=entity_type, limit=limit,
                      min_confidence=min_confidence or 0.0,
                      order_by=order_by or "relevance")
-    result = _safe(sdk.query, kind, context, **(filters or {}))
+    result = _safe(sdk.query, kind, **(filters or {}))
     # If empty results and a kind filter was provided, attach suggestion
     if isinstance(result, list) and len(result) == 0 and kind is not None:
         from tortoise.query_suggestions import compute_suggestion
@@ -159,12 +197,12 @@ def tortoise_query(kind: str | None = None, context: str | None = None,
 
 
 @mcp.tool()
-def tortoise_paginated_query(kind: str | None = None, context: str | None = None,
+def tortoise_paginated_query(kind: str | None = None,
                              skip: int = 0, limit: int = 20,
                              filters: Any = None) -> dict:
     """Query points with SKIP/LIMIT pagination. Returns {results, total, hasMore}."""
     filters = _parse(filters)
-    return _safe(sdk.paginated_query, kind, context, skip=skip, limit=limit,
+    return _safe(sdk.paginated_query, kind, skip=skip, limit=limit,
                  **(filters or {}))
 
 
@@ -233,7 +271,6 @@ def tortoise_suggest_entry_points(query: str, limit: int = 5,
 
 @mcp.tool()
 def tortoise_search(query: str | None = None, kind: str | None = None,
-                    context: str | None = None,
                     threshold: float = 0.0, limit: int = 10,
                     min_confidence: float = 0.0,
                     order_by: str = "relevance",
@@ -241,7 +278,7 @@ def tortoise_search(query: str | None = None, kind: str | None = None,
     """Hybrid search with RRF fusion + EP annotation.
 
     entity_type: 'point' (default), 'event', 'subject', 'document', 'object', 'operator', or 'source'.
-    Full-scan mode: omit query, set context → all Points in context.
+    Full-scan mode: omit query, set kind → all Points of kind.
     Best-match mode: provide query → RRF fusion of FTS + vector + structural.
 
     Point results annotated with EP breakdown (confidence_mean + evidence + contention).
@@ -252,7 +289,7 @@ def tortoise_search(query: str | None = None, kind: str | None = None,
     Use threshold > 0 to filter out very weak matches; the old 0.3 default would
     reject nearly all RRF results. (#20)
     """
-    return _safe(sdk.tortoise_fts_query, query, kind=kind, context=context,
+    return _safe(sdk.tortoise_fts_query, query, kind=kind,
                  threshold=threshold, limit=limit,
                  entity_type=entity_type,
                  min_confidence=min_confidence, order_by=order_by)
@@ -263,7 +300,6 @@ def tortoise_search(query: str | None = None, kind: str | None = None,
 @mcp.tool()
 def tortoise_compute_confidence(factors: Any = None,
                     evidence: Any = None,
-                    context: str | None = None,
                     anchors: Any = None,
                     max_hops: int = 1,
                     rel_filter: str = "IMPL|NAND",
@@ -271,8 +307,7 @@ def tortoise_compute_confidence(factors: Any = None,
                     require_calibration: bool = False) -> dict:
     """Compute confidence via EP belief propagation. Returns {iterations, converged, confidences}.
 
-    Pass anchors=[point_ids] for BFS subgraph selection (new, preferred).
-    Pass context='licensing-decision' to scope to a specific subgraph (legacy).
+    Pass anchors=[point_ids] for BFS subgraph selection.
     Pass require_calibration=True to gate on calibration state.
     max_hops: BFS depth from anchors (default 1).
     rel_filter: edge types — "IMPL", "NAND", or "IMPL|NAND" (default).
@@ -282,7 +317,7 @@ def tortoise_compute_confidence(factors: Any = None,
     evidence = _parse(evidence)
     anchors = _parse(anchors)
     return _safe(sdk.compute_confidence, factors, evidence,
-                 context=context, anchors=anchors,
+                 anchors=anchors,
                  max_hops=max_hops, rel_filter=rel_filter,
                  direction=direction,
                  require_calibration=require_calibration)
@@ -301,9 +336,9 @@ def tortoise_get_confidence(claim_id: str) -> dict:
 
 
 @mcp.tool()
-def tortoise_calibrate_summary(context: str | None = None) -> list[dict]:
+def tortoise_calibrate_summary() -> list[dict]:
     """Audit graph calibration state. Returns per-point guidance."""
-    return _safe(sdk.calibrate_summary, context)
+    return _safe(sdk.calibrate_summary)
 
 
 @mcp.tool()
@@ -313,21 +348,19 @@ def tortoise_update_point(id: str, props: Any) -> dict:
     return _safe(sdk.update_point, id, **(props or {}))
 
 @mcp.tool()
-def tortoise_create_operator(op_type: str, source_id: str, target_ids: Any,
-                              context: str = "sdk") -> dict:
+def tortoise_create_operator(op_type: str, source_id: str, target_ids: Any) -> dict:
     """Create an operator connecting Points.
     
     op_type: 'IMPL' (A supports B), 'NAND' (A contradicts B),
              'composedOf'/'decomposesInto'/'contains'/'wraps' → stored as hasPart edge.
     source_id: source/parent Point ID.
     target_ids: target/child Point IDs (1 for IMPL/NAND, N for part/whole).
-    context: domain context for the operator (default: 'sdk').
 
     → See /skill:tortoise-graph-reasoning for proper usage:
       annotation, mitigation, NAND constraints, veracity vs implication.
     """
     target_ids = _parse(target_ids)
-    return _safe(sdk.create_operator, op_type, source_id, target_ids, context=context)
+    return _safe(sdk.create_operator, op_type, source_id, target_ids)
 
 
 @mcp.tool()
@@ -366,7 +399,7 @@ def tortoise_mitigate_operator(id: str, reason: str, strength: float = 0.5) -> d
 
 @mcp.tool()
 def tortoise_file_decision(options: Any, evidence: Any,
-                           choice: int, context: str | None = None) -> dict:
+                           choice: int) -> dict:
     """File a simple decision directly to the graph.
 
     Creates decision + options + evidence + IMPL edges atomically.
@@ -376,13 +409,12 @@ def tortoise_file_decision(options: Any, evidence: Any,
     options: list of option descriptions (e.g. ["JSON", "YAML", "TOML"])
     evidence: list of evidence statements supporting the choice
     choice: 0-indexed option index (e.g. 0 = JSON)
-    context: domain context for the decision
 
     Returns {decision_id, option_ids: [...], evidence_ids: [...]}.
     """
     options = _parse(options)
     evidence = _parse(evidence)
-    return _safe(sdk.file_decision, options, evidence, choice, context)
+    return _safe(sdk.file_decision, options, evidence, choice)
 
 
 @mcp.tool()
@@ -445,6 +477,21 @@ def tortoise_traverse(entity_id: str, max_hops: int = 2,
 
 def main():
     monitoring.register(sdk)
+    if not os.environ.get("TORTOISE_DB_URI"):
+        if os.environ.get("TORTOISE_ALLOW_EMBEDDED") == "1":
+            _log.warning(
+                "TORTOISE_DB_URI unset — running embedded (empty graph). "
+                "This is a test-only escape hatch; agents will read/write an empty DB."
+            )
+        else:
+            _log.error(
+                "TORTOISE_DB_URI is not set. MCP would silently connect to an empty "
+                "embedded DB. Set TORTOISE_DB_URI in the environment or in .env "
+                "(repo root) to your local FalkorDB instance "
+                "(e.g. docker://:@localhost:16379/tortoise), then restart. "
+                "See .env.example. Override with TORTOISE_ALLOW_EMBEDDED=1 (test only)."
+            )
+            sys.exit(1)
     mcp.run(transport="stdio")
 
 
@@ -532,21 +579,15 @@ def tortoise_taxonomy() -> dict[str, int]:
 
 
 @mcp.tool()
-def tortoise_list_domains() -> list[dict]:
-    """List active domains with entity counts. Returns [{context, count}] ordered by count DESC."""
-    return _safe(sdk.list_domains)
-
-
-@mcp.tool()
 def tortoise_list_topics(entity_id: str) -> dict:
-    """entityProfile lite for an entity. Returns {id, pointKind, context, neighbors, neighborCounts}."""
+    """entityProfile lite for an entity. Returns {id, pointKind, neighbors, neighborCounts}."""
     return _safe(sdk.list_topics, entity_id)
 
 
 # ── Graph Analysis ──────────────────────────────────────────────
 
 @mcp.tool()
-def tortoise_analyze(question: str, context: str | None = None,
+def tortoise_analyze(question: str,
                     entityId: str | None = None,
                     anchor_ids: Any = None,
                     max_hops: int = 1,
@@ -558,7 +599,7 @@ def tortoise_analyze(question: str, context: str | None = None,
     "what are we most uncertain about?" "show me the evidence chain for Y."
 
     Optional entityId scopes the analysis to a specific entity's subgraph.
-    Optional anchor_ids (list of Point IDs) scopes via BFS subgraph selection (new).
+    Optional anchor_ids (list of Point IDs) scopes via BFS subgraph selection.
     max_hops: BFS depth from anchors (default 1).
     rel_filter: edge types — "IMPL", "NAND", or "IMPL|NAND" (default).
     direction: IMPL traversal — "incoming", "outgoing", or "both" (default).
@@ -583,7 +624,7 @@ def tortoise_analyze(question: str, context: str | None = None,
         except Exception:
             pass  # fall back to full-graph analysis
 
-    return analyze(question, sdk._get_proj(), context=context,
+    return analyze(question, sdk._get_proj(),
                    entity_subgraph_ids=entity_subgraph_ids,
                    anchor_ids=anchor_ids,
                    max_hops=max_hops,

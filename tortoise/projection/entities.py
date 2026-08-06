@@ -61,11 +61,7 @@ class _EntityHandlers:
             "vf": p.get("validFrom"), "vt": p.get("validTo"),
             "now": _now_iso(),
         }
-        # Phase 1 backward compat: only write context when present in point dict (#49)
-        if "context" in p and p["context"] is not None:
-            set_clauses.insert(1, "n.context=$context")
-            params["context"] = p["context"]
-
+        # Phase 2 #49: context removed — never written
         self.g.query(
             "MERGE (n:Point {id:$id}) SET " + ", ".join(set_clauses),
             params=params,
