@@ -52,38 +52,39 @@ class _EdgeHandlers:
                     params={"oid": p["id"], "sid": src, "idx": idx},
                 )
 
-    def _create_about_edges(self, point_id: str, entity_name: str) -> None:
-        """Link Point to named entity via per-type about* edge.
+    def _create_about_edges(self, source_id: str, entity_name: str) -> None:
+        """Link entity (Point, Document, Event, or Object) to a named entity.
 
         Auto-detects entity type from the legacy flat aboutEntities list.
         Tries Subject → Object → Action → Event → Document, creates stub if none found.
         ONTOLOGY v2.5 §2.2: Point/Doc/Event → Subject/Object/Action; Point/Doc → Event; Event → Point/Document.
+        #125: source MATCH is label-agnostic so Document/Event sources work too.
         """
         # Try Subject
-        if self._try_about_edge(point_id, entity_name, 'Subject', 'aboutSubject', 'subjectKind', 'other'):
+        if self._try_about_edge(source_id, entity_name, 'Subject', 'aboutSubject', 'subjectKind', 'other'):
             return
         # Try Object
-        if self._try_about_edge(point_id, entity_name, 'Object', 'aboutObject', 'objectKind', 'other'):
+        if self._try_about_edge(source_id, entity_name, 'Object', 'aboutObject', 'objectKind', 'other'):
             return
         # Try Event
-        if self._try_about_edge(point_id, entity_name, 'Event', 'aboutEvent', 'eventKind', 'other'):
+        if self._try_about_edge(source_id, entity_name, 'Event', 'aboutEvent', 'eventKind', 'other'):
             return
         # Try Document
-        if self._try_about_edge(point_id, entity_name, 'Document', 'aboutDocument', 'documentKind', 'other'):
+        if self._try_about_edge(source_id, entity_name, 'Document', 'aboutDocument', 'documentKind', 'other'):
             return
         # Try Point (for Event→Point reverse direction)
-        if self._try_about_edge(point_id, entity_name, 'Point', 'aboutPoint', 'pointKind', 'statement'):
+        if self._try_about_edge(source_id, entity_name, 'Point', 'aboutPoint', 'pointKind', 'statement'):
             return
-        # Neither exists — default to Subject stub
+        # Neither exists — default to Subject stub (label-agnostic source)
         self.g.query(
             "MERGE (s:Subject {name:$name}) "
             "ON CREATE SET s.id=$name, s.subjectKind='other'",
             params={"name": entity_name},
         )
         self.g.query(
-            "MATCH (n:Point {id:$pid}), (s:Subject {name:$name}) "
+            "MATCH (n {id:$pid}), (s:Subject {name:$name}) "
             "MERGE (n)-[:aboutSubject]->(s)",
-            params={"pid": point_id, "name": entity_name},
+            params={"pid": source_id, "name": entity_name},
         )
 
     def _try_about_edge(self, source_id: str, target_name: str, 

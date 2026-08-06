@@ -11,6 +11,8 @@ import os
 import sys
 import tempfile
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from urllib.parse import urlparse
@@ -1321,3 +1323,108 @@ def _run_all():
 if __name__ == "__main__":
     _run_all()
     print("\nall projection tests passed")
+
+
+
+# ------------------------------------------------------------------ #125 capture fields (live DB)
+
+
+@pytest.fixture
+def live_proj():
+    """Live FalkorProjection on a test-prefixed graph (safe via test_guard)."""
+    uri = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise_test_proj125")
+    proj = FalkorProjection.from_uri(uri)
+    # Clean the test graph (test-prefixed — test_guard permits; production blocked)
+    proj.g.query("MATCH (n) DETACH DELETE n")
+    yield proj
+    proj.close()
+
+
+def test_upsert_document_capture_fields(live_proj):
+    """#125: _upsert_document persists topics/summary/sessionId/eventId/
+    doc_status/_searchText + aboutSubject edges."""
+    proj = live_proj
+    proj.apply({"type": "SubjectAdded", "id": "agent-pi", "name": "agent-pi",
+                "subject_kind": "other"})
+    proj.apply({"type": "DocumentCreated", "id": "test-doc-1",
+                "title": "Conv", "topics": ["licensing", "AGPL"],
+                "summary": "Compared licenses", "session_id": "sess-1",
+                "event_id": "evt-1", "doc_status": "captured",
+                "about_entities": ["agent-pi"]})
+    rows = proj.g.query(
+        "MATCH (d:Document {id:'test-doc-1'}) "
+        "RETURN d.topics, d.summary, d.sessionId, d.eventId, d.doc_status, d._searchText"
+    ).result_set
+    assert rows, "Document not created"
+    assert rows[0][0] == ["licensing", "AGPL"], rows[0][0]
+    assert rows[0][1] == "Compared licenses"
+    assert rows[0][2] == "sess-1"
+    assert rows[0][3] == "evt-1"
+    assert rows[0][4] == "captured"
+    assert "AGPL" in rows[0][5] and "Compared" in rows[0][5], rows[0][5]
+    rows2 = proj.g.query(
+        "MATCH (d:Document {id:'test-doc-1'})-[:aboutSubject]->(s) RETURN s.name"
+    ).result_set
+    assert len(rows2) == 1 and rows2[0][0] == "agent-pi", rows2
+
+
+def test_upsert_document_partial_update_preserves_search_text(live_proj):
+    """#125: partial update must NOT wipe _searchText (coalesce null sentinel)."""
+    proj = live_proj
+    proj.apply({"type": "DocumentCreated", "id": "doc-p",
+                "title": "Full Title", "topics": ["alpha"], "summary": "Sum"})
+    rows = proj.g.query("MATCH (d:Document {id:'doc-p'}) RETURN d._searchText").result_set
+    assert rows[0][0] and "alpha" in rows[0][0], rows
+    proj.apply({"type": "DocumentCreated", "id": "doc-p", "doc_status": "captured"})
+    rows = proj.g.query(
+        "MATCH (d:Document {id:'doc-p'}) RETURN d._searchText, d.doc_status"
+    ).result_set
+    assert "alpha" in rows[0][0], f"_searchText wiped on partial update: {rows[0][0]}"
+    assert rows[0][1] == "captured"
+
+
+def test_upsert_event_uses_dict_kind(live_proj):
+    """#125: structured uses {name, kind} → Object objectKind from kind field."""
+    proj = live_proj
+    proj.apply({"type": "EventRecorded", "event": {
+        "id": "evt-1", "eventKind": "sessionCaptured",
+        "subject": "agent-pi", "object": "doc-1", "objectType": "Document",
+        "uses": [{"name": "tortoise-capture", "kind": "skill"}]}})
+    rows = proj.g.query(
+        "MATCH (e:Event {eventId:'evt-1'})-[:uses]->(o:Object) "
+        "RETURN o.name, o.objectKind"
+    ).result_set
+    assert rows and rows[0][0] == "tortoise-capture", rows
+    assert rows[0][1] == "skill", rows
+
+
+def test_upsert_event_produces_document(live_proj):
+    """#125: objectType='Document' → produces→real Document node, no Object clone."""
+    proj = live_proj
+    proj.apply({"type": "EventRecorded", "event": {
+        "id": "evt-2", "eventKind": "sessionCaptured",
+        "subject": "agent-pi", "object": "doc-1", "objectType": "Document",
+        "uses": [{"name": "tortoise-capture", "kind": "skill"}]}})
+    rows = proj.g.query(
+        "MATCH (e:Event {eventId:'evt-2'})-[:produces]->(d:Document) RETURN d.id"
+    ).result_set
+    assert rows and rows[0][0] == "doc-1", rows
+    # No Object clone
+    rows2 = proj.g.query(
+        "MATCH (e:Event {eventId:'evt-2'})-[:produces]->(o:Object) RETURN count(o)"
+    ).result_set
+    assert rows2[0][0] == 0, rows2
+
+
+def test_upsert_event_legacy_string_uses_still_works(live_proj):
+    """#125 backward compat: legacy string uses still create Object objectKind='other'."""
+    proj = live_proj
+    proj.apply({"type": "EventRecorded", "event": {
+        "id": "evt-3", "eventKind": "review", "subject": "agent-pi",
+        "object": "thing-1", "uses": "legacy-tool"}})
+    rows = proj.g.query(
+        "MATCH (e:Event {eventId:'evt-3'})-[:uses]->(o:Object) "
+        "RETURN o.name, o.objectKind"
+    ).result_set
+    assert rows and rows[0][0] == "legacy-tool", rows
+    assert rows[0][1] == "other", rows

@@ -221,11 +221,16 @@ class EventAPI:
                      version: str = "",
                      createdAt: str | None = None,
                      updatedAt: str | None = None,
-                     corrects: str | None = None) -> str:
+                     corrects: str | None = None,
+                     topics: list[str] | None = None,
+                     summary: str = "",
+                     session_id: str = "",
+                     event_id: str = "") -> str:
         """Emit DocumentCreated event. Returns the document id (same as input).
 
         JSONL fields are snake_case per plan §4.3 convention.
         Projection normalizes to camelCase for the graph.
+        #125: topics/summary/session_id/event_id capture metadata.
         """
         self._emit("DocumentCreated",
                    corrects=corrects,
@@ -242,8 +247,46 @@ class EventAPI:
                    format=format,
                    version=version,
                    createdAt=createdAt or now_iso(),
-                   updatedAt=updatedAt or now_iso())
+                   updatedAt=updatedAt or now_iso(),
+                   topics=topics or [],
+                   summary=summary,
+                   session_id=session_id,
+                   event_id=event_id)
         return doc_id
+
+    def add_event(self, event_id: str, event_kind: str, *,
+                  subject: str = "",
+                  object_name: str = "",
+                  object_type: str = "",
+                  uses: list | None = None,
+                  about_entities: list[str] | None = None,
+                  participants: list[str] | None = None,
+                  started_at: str = "",
+                  ended_at: str = "",
+                  classification_level: str = "internal",
+                  format: str = "jsonl",
+                  **extra) -> str:
+        """Emit an EventRecorded event (#125). Returns the event id.
+
+        The event id is passed as ``id`` (not ``eventId``) to match the
+        projection's ``_upsert_event`` lookup (``inner.get("id") or
+        inner.get("eventId")``).
+        """
+        self._emit("EventRecorded",
+                   id=event_id,
+                   eventKind=event_kind,
+                   subject=subject,
+                   object=object_name,
+                   objectType=object_type,
+                   uses=uses or [],
+                   about_entities=about_entities or [],
+                   participants=participants or [],
+                   startedAt=started_at,
+                   endedAt=ended_at,
+                   classificationLevel=classification_level,
+                   format=format,
+                   **extra)
+        return event_id
 
     # ── Cleanup ───────────────────────────────────────────────────
 
