@@ -195,7 +195,6 @@ def main(argv=None):
                         object_name=source_id,
                         object_type="Document",
                         uses=[{"name": "tortoise-capture", "kind": "skill"}],
-                        about_entities=["pi-agent"],
                     )
                     print(f"[capture-metadata] Document {source_id} + sessionCaptured {event_id} "
                           f"(topics={topics}, summary={summary[:40]!r}); extraction skipped")
