@@ -95,7 +95,7 @@ Per-type edges (chosen over single polymorphic edge — FalkorDB matrix-per-type
 
 | Predicate | From → To | Direction | Cardinality | Standard alignment | Meaning |
 |-----------|-----------|-----------|-------------|--------------------|---------|
-| `references` | Source → Entity | unidirectional | 1→many | — | The source document links to / references this entity. ⚠️ **Spec-only — no production creator yet** (only `link_source_to_entity` SDK call, no caller wired; see follow-up issue). |
+| `references` | Source → Entity | unidirectional | 1→many | — | The source document links to / references this entity. ⚠️ **Spec-only — no production creator yet** (only `link_source_to_entity` SDK call, no caller wired; tracked in issue #7884). |
 
 `(Point)-[:extractedFrom]->(Source)-[:references]->(Entity)` — layered provenance. Source carries `sourceKind` (T0-T4 credibility tier).
 
@@ -116,7 +116,7 @@ Per-type edges (chosen over single polymorphic edge — FalkorDB matrix-per-type
 
 | Predicate | From → To | Direction | Cardinality | Standard alignment | Meaning |
 |-----------|-----------|-----------|-------------|--------------------|---------|
-| `participatesIn` | Subject → Event | unidirectional | N-ary | `schema:attendee` | Subjects involved in an event (⚠️ spec-only — no producer yet, see follow-up) |
+| `participatesIn` | Subject → Event | unidirectional | N-ary | `schema:attendee` | Subjects involved in an event (⚠️ spec-only — no producer yet, tracked in issue #7884) |
 | `memberOf` | Subject → Subject | unidirectional | N-ary | `org:membership` | Membership in team/group/organization. **Canonical** — generalizable to teams, orgs, any hierarchy. |
 | `managedBy` | Entity → Subject | unidirectional | N-ary | RACI Responsible | Operational responsibility |
 | `ownedBy` | Entity → Subject | unidirectional | N-ary | RACI Accountable | Accountability, data boundary |
