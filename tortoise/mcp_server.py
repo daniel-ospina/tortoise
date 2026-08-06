@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -38,14 +39,18 @@ def _load_dotenv(path: str | None = None) -> None:
             if "=" not in line:
                 continue
             key, _, value = line.partition("=")
-            key, value = key.strip(), value.strip().strip("\"'")
+            key = key.strip()
+            # Strip inline comments (whitespace + '#') — python-dotenv behavior.
+            # A bare '#' inside an unquoted value is preserved (passwords).
+            value = value.strip().split(" #", 1)[0].strip().strip("\"'")
             if key and not os.environ.get(key):
                 os.environ[key] = value
-    except OSError:
-        pass  # .env is best-effort — never block MCP startup on it
+    except OSError as e:
+        _log.debug("Could not read .env (%s): %s — continuing without it", path, e)
 
 
-_load_dotenv()  # resolve TORTOISE_DB_URI from repo-root .env before anything else
+if "pytest" not in sys.modules:
+    _load_dotenv()  # resolve TORTOISE_DB_URI from repo-root .env (skipped under pytest)
 
 
 # ── Safety annotations ───────────────────────────────────────────

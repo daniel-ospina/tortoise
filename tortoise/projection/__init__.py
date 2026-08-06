@@ -198,7 +198,8 @@ class FalkorProjection(
                  port: int = 16379,
                  username: str | None = None,
                  password: str | None = None,
-                 graph_name: str = "tortoise"):
+                 graph_name: str = "tortoise",
+                 ssl: bool = False):
 
         if path is not None:
             # Embedded mode (opt-in via path=). Use redislite's FalkorDB client —
@@ -209,7 +210,8 @@ class FalkorProjection(
         elif host is not None:
             # Docker FalkorDB
             from falkordb import FalkorDB  # ponytail: lazy import, only needed for Docker mode
-            self.db = FalkorDB(host=host, port=port, username=username, password=password, socket_connect_timeout=5, socket_timeout=10)
+            self.db = FalkorDB(host=host, port=port, username=username, password=password,
+                               socket_connect_timeout=5, socket_timeout=10, ssl=ssl)
         else:
             raise ValueError("Either path or host must be provided")
 
@@ -252,7 +254,8 @@ class FalkorProjection(
                    port=parsed.port or 16379,
                    username=username,
                    password=password,
-                   graph_name=graph_name)
+                   graph_name=graph_name,
+                   ssl=(parsed.scheme == "rediss"))
 
     def _norm(self, ev: dict) -> dict:
         """Normalize event shape — tolerates API (flat) and script (nested point)."""

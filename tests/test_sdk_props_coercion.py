@@ -137,3 +137,75 @@ class TestUriSchemes:
         assert parsed.port == 6379
         assert parsed.password == "secret"
         assert parsed.path == "/tortoise"
+
+
+# ── from_uri arg forwarding (regression: #13428c7 username drop, rediss TLS) ──
+
+class TestFromUriForwarding:
+    def test_from_uri_forwards_rediss_tls_and_credentials(self, monkeypatch):
+        """rediss:// must forward ssl=True + username/password/host/port/graph.
+
+        Regression guard for the historical P0 where from_uri parsed the
+        username but never passed it to the FalkorDB constructor (#13428c7).
+        """
+        captured = {}
+        from tortoise.projection import FalkorProjection
+
+        def fake_init(self, *args, **kwargs):
+            captured.update(kwargs)
+
+        monkeypatch.setattr(FalkorProjection, "__init__", fake_init)
+        FalkorProjection.from_uri(
+            "rediss://myuser:mypass@db.example.com:6379/tortoise"
+        )
+        assert captured["username"] == "myuser"
+        assert captured["password"] == "mypass"
+        assert captured["host"] == "db.example.com"
+        assert captured["port"] == 6379
+        assert captured["graph_name"] == "tortoise"
+        assert captured["ssl"] is True
+
+    def test_from_uri_docker_no_ssl(self, monkeypatch):
+        captured = {}
+        from tortoise.projection import FalkorProjection
+
+        def fake_init(self, *args, **kwargs):
+            captured.update(kwargs)
+
+        monkeypatch.setattr(FalkorProjection, "__init__", fake_init)
+        FalkorProjection.from_uri("docker://:@localhost:16379/tortoise")
+        assert captured["ssl"] is False
+        assert captured["graph_name"] == "tortoise"
+
+
+# ── _load_dotenv parsing (inline comments, quoted values, bare #) ────────
+
+class TestLoadDotenv:
+    def test_strips_inline_comments_and_preserves_bare_hash(self, monkeypatch, tmp_path):
+        from tortoise.mcp_server import _load_dotenv
+        env = tmp_path / ".env"
+        env.write_text(
+            'PLAIN=value # inline comment\n'
+            'PASSWORD=a#b\n'
+            'QUOTED="quoted value"\n'
+            'EXPORTED=export me\n'
+        )
+        for k in ("PLAIN", "PASSWORD", "QUOTED", "EXPORTED"):
+            monkeypatch.delenv(k, raising=False)
+        _load_dotenv(str(env))
+        assert os.environ.get("PLAIN") == "value"
+        assert os.environ.get("PASSWORD") == "a#b"  # bare # in value preserved
+        assert os.environ.get("QUOTED") == "quoted value"
+        assert os.environ.get("EXPORTED") == "export me"
+
+    def test_does_not_override_existing_env(self, monkeypatch, tmp_path):
+        from tortoise.mcp_server import _load_dotenv
+        env = tmp_path / ".env"
+        env.write_text("EXISTING=from-dotenv\n")
+        monkeypatch.setenv("EXISTING", "from-env")
+        _load_dotenv(str(env))
+        assert os.environ.get("EXISTING") == "from-env"
+
+    def test_missing_file_is_noop(self, monkeypatch, tmp_path):
+        from tortoise.mcp_server import _load_dotenv
+        _load_dotenv(str(tmp_path / "does-not-exist.env"))  # must not raise

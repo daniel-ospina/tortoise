@@ -2801,6 +2801,7 @@ class TortoiseSDK:
         return self._create_entity("Document", did, {"title": title, "documentKind": documentKind, "objectKind": "document", "status": "draft", **props}, "DocumentCreated")
 
     def create_source(self, url: str, sourceKind: str, **props) -> dict:
+        _coerce_props(props)  # accept MCP-style nested props= dict (#218)
         return self._create_entity("Source", url, {"url": url, "sourceKind": sourceKind, "ingestedAt": __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(), **props}, "SourceCreated")
 
     # ── Entity Derivation (#122 Part 2) ──────────────────────────
