@@ -72,7 +72,16 @@ def restore(backup_dir: str, db_path: str,
 
     manifest_file = source / "manifest.json"
     events_file = source / "events.jsonl"
-    db_file = source / "tortoise.db"
+    # Read DB filename from manifest (issue #176, plan Task 11): pre-migration
+    # backups may have embedded.db in their manifest — never hardcode.
+    import json as _json
+    _db_name = "tortoise.db"
+    if manifest_file.exists():
+        try:
+            _db_name = _json.loads(manifest_file.read_text()).get("db", "tortoise.db")
+        except Exception:
+            pass
+    db_file = source / _db_name
 
     if not events_file.exists():
         return {"events": 0, "status": "error: no events.jsonl in backup"}
