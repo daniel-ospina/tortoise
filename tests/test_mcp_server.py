@@ -67,9 +67,9 @@ class TestToolFunctions:
         from tortoise.mcp_server import tortoise_taxonomy
         assert callable(tortoise_taxonomy)
 
-    def test_tortoise_list_domains_exists(self):
-        from tortoise.mcp_server import tortoise_list_domains
-        assert callable(tortoise_list_domains)
+    def test_tortoise_list_sources_exists(self):
+        from tortoise.mcp_server import tortoise_list_sources
+        assert callable(tortoise_list_sources)
 
     def test_all_core_tools_registered(self):
         """Verify the key tools agents use are importable and callable."""
@@ -127,7 +127,6 @@ class TestToolIntegration:
         result = tortoise_create_point(
             kind="observation",
             content="Integration test point — should be cleaned up",
-            context="test",
             authoredBy="test-suite",
         )
         assert isinstance(result, dict)

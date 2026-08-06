@@ -93,7 +93,7 @@ class TestListPointKinds:
         p1 = _make_point(sdk, kind="statement", content="regular point")
         p2 = _make_point(sdk, kind="statement", content="another point")
         # Create an operator (is_operator=true) — needs real source/target
-        sdk.create_operator("IMPL", p1["id"], [p2["id"]], context="test")
+        sdk.create_operator("IMPL", p1["id"], [p2["id"]])
 
         result = sdk.list_pointkinds()
         # Only "statement" should appear (2 points), not the operator
@@ -269,7 +269,7 @@ class TestSummarizeStructureRekeyed:
         p1 = _make_point(sdk, kind="jobToBeDone", content="real jtbd")
         p2 = _make_point(sdk, kind="jobToBeDone", content="another jtbd")
         # Create operator linking the two JTBDs
-        sdk.create_operator("IMPL", p1["id"], [p2["id"]], context="test")
+        sdk.create_operator("IMPL", p1["id"], [p2["id"]])
 
         status = sdk.summarize_structure()
         # Only the 2 real jtbds count, operator excluded

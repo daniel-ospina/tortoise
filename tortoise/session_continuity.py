@@ -16,8 +16,7 @@ class SessionContinuity:
         """Called at session start. Returns context from prior sessions."""
         self.session_id = datetime.now().strftime("session-%Y%m%d-%H%M%S")
         
-        # Find recent context
-        recent = self.sdk.query(context=self.session_id) if False else []
+        # Find recent context (context-based query removed #49 Phase 2)
         prior = self.sdk.query(kind="observation")
         
         summary = []

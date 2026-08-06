@@ -11,7 +11,7 @@ def compute_operator_weight(proj, op_id: str, use_dynamic: bool = False) -> floa
     g = proj.g
     rows = g.query(
         "MATCH (o:Point {id:$id}) "
-        "RETURN o.op_type, o.context, "
+        "RETURN o.op_type, "
         "coalesce(o.annotator_bias, 0.0) AS bias, "
         "coalesce(o.annotator_precision, 1.0) AS precision, "
         "coalesce(o.annotator_consistency, 1.0) AS consistency, "
@@ -20,7 +20,7 @@ def compute_operator_weight(proj, op_id: str, use_dynamic: bool = False) -> floa
     ).result_set
     if not rows:
         return 1.0
-    op_type, context, bias, precision, consistency, directness = rows[0]
+    op_type, bias, precision, consistency, directness = rows[0]
     w = 1.0
 
     # Mitigation: operator targets another operator
@@ -37,14 +37,8 @@ def compute_operator_weight(proj, op_id: str, use_dynamic: bool = False) -> floa
     # so hub nodes no longer need manual dampening.
     w *= 1.0  # no-op, preserved for reference
 
-    # Context tags
-    context_multipliers = {
-        "resolution-event": 3.0,
-        "criteria-tensions": 2.0,
-        "low-relevance-wiring": 0.5,
-    }
-    if context in context_multipliers:
-        w *= context_multipliers[context]
+    # Context tag multipliers removed (#49 Phase 2 — n.context is deprecated).
+    # Re-key to pointKind-based weighting when needed.
 
     # Annotation dimensions (ARCHIVED — no active effect)
     # Restore to (1.0 - bias * 0.5) * precision * consistency * directness when reactivated.

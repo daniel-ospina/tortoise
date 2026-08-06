@@ -247,8 +247,8 @@ class TestRecencyModulation:
     def test_compute_confidence_accepts_recency_decay(self, sdk):
         """compute_confidence accepts recency_decay parameter."""
         # Create a simple claim + operator
-        p = sdk.create_point("statement", "test claim", context="test")
-        op = sdk.create_operator("IMPL", p["id"], [p["id"]], context="test")
+        p = sdk.create_point("statement", "test claim")
+        op = sdk.create_operator("IMPL", p["id"], [p["id"]])
         # Should not raise — recency_decay is accepted
         result = sdk.compute_confidence(recency_decay=0.95)
         assert "iterations" in result
@@ -286,7 +286,7 @@ class TestComputeReputation:
             "subject": "grace",
         })
         # Create a Point and connect Event → IMPL → Point
-        p1 = sdk.create_point("observation", "market up", context="test")
+        p1 = sdk.create_point("observation", "market up")
         # Direct event-to-point IMPL
         proj.g.query(
             "MATCH (e:Event {eventId:'ev-r1'}), (p:Point {id:$pid}) "
@@ -433,22 +433,21 @@ class TestSupersedePointStructuralTransfer:
     def test_structural_edges_transferred_on_supersede(self, sdk):
         """Old point's aboutSubject edge transfers to new point."""
         # Create subject + two points
-        subj = sdk.create_point("statement", "subject anchor", context="t")
-        old_pt = sdk.create_point("statement", "old claim", context="t")
-        new_pt = sdk.create_point("statement", "new claim", context="t")
+        subj = sdk.create_point("statement", "subject anchor")
+        old_pt = sdk.create_point("statement", "old claim")
+        new_pt = sdk.create_point("statement", "new claim")
         # Wire aboutSubject on old point via create_event or direct edge
-        ev = sdk.create_event("meeting-1", "meeting", aboutSubject=subj["id"], aboutObject=old_pt["id"],
-                              context="t")
+        ev = sdk.create_event("meeting-1", "meeting", aboutSubject=subj["id"], aboutObject=old_pt["id"])
         # Check the old point has the edge (via event aboutObject)
         result = sdk.supersede_point(old_pt["id"], new_pt["id"])
         assert result.get("edges_transferred", 0) >= 0  # at least runs without error
 
     def test_supersede_transfer_idempotent_no_duplicates(self, sdk):
         """Running supersede twice must not duplicate edges."""
-        subj = sdk.create_point("statement", "subject", context="t")
-        old_pt = sdk.create_point("statement", "old", context="t")
-        new_pt = sdk.create_point("statement", "new", context="t")
-        sdk.create_event("meeting-1", "meeting", aboutSubject=subj["id"], aboutObject=old_pt["id"], context="t")
+        subj = sdk.create_point("statement", "subject")
+        old_pt = sdk.create_point("statement", "old")
+        new_pt = sdk.create_point("statement", "new")
+        sdk.create_event("meeting-1", "meeting", aboutSubject=subj["id"], aboutObject=old_pt["id"])
 
         sdk.supersede_point(old_pt["id"], new_pt["id"])
         # Second supersede on already-superseded should not error
@@ -495,9 +494,9 @@ class TestComputeReputationNegative:
 
     def test_reputation_excludes_outdated_points(self, sdk):
         """Outdated (superseded) claim points should not count toward reputation."""
-        subj = sdk.create_point("statement", "agent", context="t")
-        claim = sdk.create_point("statement", "claim that failed", context="t")
-        new_claim = sdk.create_point("statement", "corrected claim", context="t")
+        subj = sdk.create_point("statement", "agent")
+        claim = sdk.create_point("statement", "claim that failed")
+        new_claim = sdk.create_point("statement", "corrected claim")
 
         # Agent performs an event that NANDs the failed claim
         proj = sdk._get_proj()
@@ -528,11 +527,11 @@ class TestCreateEventNegative:
 
     def test_create_event_empty_uses(self, sdk):
         """Event with no uses/produces works."""
-        ev = sdk.create_event("empty-1", "meeting", context="t")
+        ev = sdk.create_event("empty-1", "meeting")
         assert ev is not None
         assert ev.get("id") or ev.get("eventId")
 
     def test_create_event_none_subject(self, sdk):
         """Event with None subject doesn't crash."""
-        ev = sdk.create_event("none-1", "meeting", aboutSubject=None, aboutObject=None, context="t")
+        ev = sdk.create_event("none-1", "meeting", aboutSubject=None, aboutObject=None)
         assert ev is not None

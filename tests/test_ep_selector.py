@@ -34,25 +34,25 @@ def _fresh_sdk():
     return TortoiseSDK(db_path)
 
 
-def _make_claim(sdk: TortoiseSDK, content: str, context: str | None = None,
+def _make_claim(sdk: TortoiseSDK, content: str,
                 kind: str = "statement") -> dict:
-    """Create a non-operator claim Point with optional context."""
-    return sdk.create_point(kind, content, context=context, dedup=False)
+    """Create a non-operator claim Point."""
+    return sdk.create_point(kind, content, dedup=False)
 
 
-def _make_finding(sdk: TortoiseSDK, content: str, context: str | None = None) -> dict:
+def _make_finding(sdk: TortoiseSDK, content: str) -> dict:
     """Create a finding claim Point."""
-    return _make_claim(sdk, content, context=context, kind="finding")
+    return _make_claim(sdk, content, kind="finding")
 
 
-def _make_criterion(sdk: TortoiseSDK, content: str, context: str | None = None) -> dict:
+def _make_criterion(sdk: TortoiseSDK, content: str) -> dict:
     """Create a criterion claim Point."""
-    return _make_claim(sdk, content, context=context, kind="criterion")
+    return _make_claim(sdk, content, kind="criterion")
 
 
-def _make_option(sdk: TortoiseSDK, content: str, context: str | None = None) -> dict:
+def _make_option(sdk: TortoiseSDK, content: str) -> dict:
     """Create an option claim Point."""
-    return _make_claim(sdk, content, context=context, kind="option")
+    return _make_claim(sdk, content, kind="option")
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -81,23 +81,23 @@ def build_synthetic_subgraph(sdk: TortoiseSDK) -> dict:
     ctx = SYNTHETIC_CONTEXT
 
     # ── Option claims ──
-    opt_a = _make_option(sdk, "Option A: JSON config", context=ctx)
-    opt_b = _make_option(sdk, "Option B: YAML config", context=ctx)
-    opt_c = _make_option(sdk, "Option C: TOML config", context=ctx)
+    opt_a = _make_option(sdk, "Option A: JSON config")
+    opt_b = _make_option(sdk, "Option B: YAML config")
+    opt_c = _make_option(sdk, "Option C: TOML config")
     options = [opt_a, opt_b, opt_c]
 
     # ── Criteria ──
-    crit_sec = _make_criterion(sdk, "Security is paramount", context=ctx)
-    crit_spd = _make_criterion(sdk, "Speed matters most", context=ctx)
-    crit_cost = _make_criterion(sdk, "Cost must be minimized", context=ctx)
+    crit_sec = _make_criterion(sdk, "Security is paramount")
+    crit_spd = _make_criterion(sdk, "Speed matters most")
+    crit_cost = _make_criterion(sdk, "Cost must be minimized")
     criteria = [crit_sec, crit_spd, crit_cost]
 
     # ── Findings (evidence) ──
-    f1 = _make_finding(sdk, "JSON has wide tooling support", context=ctx)
-    f2 = _make_finding(sdk, "YAML is human-readable", context=ctx)
-    f3 = _make_finding(sdk, "TOML is simple to parse", context=ctx)
-    f4 = _make_finding(sdk, "TOML has security concerns with large files", context=ctx)
-    f5 = _make_finding(sdk, "JSON parsing is fastest in Python", context=ctx)
+    f1 = _make_finding(sdk, "JSON has wide tooling support")
+    f2 = _make_finding(sdk, "YAML is human-readable")
+    f3 = _make_finding(sdk, "TOML is simple to parse")
+    f4 = _make_finding(sdk, "TOML has security concerns with large files")
+    f5 = _make_finding(sdk, "JSON parsing is fastest in Python")
     findings = [f1, f2, f3, f4, f5]
 
     # ── Set baselines (priors) on findings so EP has signal ──
@@ -109,34 +109,24 @@ def build_synthetic_subgraph(sdk: TortoiseSDK) -> dict:
 
     # ── Operators: IMPL (supports) ──
     # Findings → options (via criteria in some cases)
-    op_impl_1 = sdk.create_operator("IMPL", f1["id"], [opt_a["id"]],
-                                     context=ctx)  # JSON tooling → A
-    op_impl_2 = sdk.create_operator("IMPL", f2["id"], [opt_b["id"]],
-                                     context=ctx)  # YAML readable → B
-    op_impl_3 = sdk.create_operator("IMPL", f3["id"], [opt_c["id"]],
-                                     context=ctx)  # TOML simple → C
-    op_impl_4 = sdk.create_operator("IMPL", f5["id"], [opt_a["id"]],
-                                     context=ctx)  # JSON fast → A
+    op_impl_1 = sdk.create_operator("IMPL", f1["id"], [opt_a["id"]])
+    op_impl_2 = sdk.create_operator("IMPL", f2["id"], [opt_b["id"]])
+    op_impl_3 = sdk.create_operator("IMPL", f3["id"], [opt_c["id"]])
+    op_impl_4 = sdk.create_operator("IMPL", f5["id"], [opt_a["id"]])
     # Criteria → options
-    op_impl_5 = sdk.create_operator("IMPL", crit_sec["id"], [opt_a["id"]],
-                                     context=ctx)  # security → A
-    op_impl_6 = sdk.create_operator("IMPL", crit_spd["id"], [opt_b["id"]],
-                                     context=ctx)  # speed → B
-    op_impl_7 = sdk.create_operator("IMPL", crit_cost["id"], [opt_c["id"]],
-                                     context=ctx)  # cost → C
+    op_impl_5 = sdk.create_operator("IMPL", crit_sec["id"], [opt_a["id"]])
+    op_impl_6 = sdk.create_operator("IMPL", crit_spd["id"], [opt_b["id"]])
+    op_impl_7 = sdk.create_operator("IMPL", crit_cost["id"], [opt_c["id"]])
     # Criteria → findings (chain)
-    op_impl_8 = sdk.create_operator("IMPL", f4["id"], [crit_sec["id"]],
-                                     context=ctx)  # TOML sec issues → security
+    op_impl_8 = sdk.create_operator("IMPL", f4["id"], [crit_sec["id"]])
 
     impl_ops = [op_impl_1, op_impl_2, op_impl_3, op_impl_4,
                 op_impl_5, op_impl_6, op_impl_7, op_impl_8]
 
     # ── Operators: NAND (opposes) ──
     # NAND edges always go operator→point
-    op_nand_1 = sdk.create_operator("NAND", f4["id"], [opt_c["id"]],
-                                     context=ctx)  # TOML security → against C
-    op_nand_2 = sdk.create_operator("NAND", opt_a["id"], [opt_b["id"]],
-                                     context=ctx)  # A opposes B
+    op_nand_1 = sdk.create_operator("NAND", f4["id"], [opt_c["id"]])
+    op_nand_2 = sdk.create_operator("NAND", opt_a["id"], [opt_b["id"]])
 
     nand_ops = [op_nand_1, op_nand_2]
 
@@ -264,12 +254,12 @@ def test_bfs_direction_incoming():
     sdk = _fresh_sdk()
     try:
         ctx = "test-incoming"
-        opt = _make_option(sdk, "Target option", context=ctx)
-        finding = _make_finding(sdk, "Supporting finding", context=ctx)
+        opt = _make_option(sdk, "Target option")
+        finding = _make_finding(sdk, "Supporting finding")
         sdk.set_point_baseline(finding["id"], 8.0, 2.0)
 
         # Operator: finding IMPL→option (operator targets option)
-        op = sdk.create_operator("IMPL", finding["id"], [opt["id"]], context=ctx)
+        op = sdk.create_operator("IMPL", finding["id"], [opt["id"]])
         op_id = op["id"]
 
         proj = sdk._get_proj()
@@ -292,11 +282,11 @@ def test_bfs_direction_outgoing_from_operator():
     sdk = _fresh_sdk()
     try:
         ctx = "test-outgoing"
-        opt = _make_option(sdk, "Target option", context=ctx)
-        finding = _make_finding(sdk, "Supporting finding", context=ctx)
+        opt = _make_option(sdk, "Target option")
+        finding = _make_finding(sdk, "Supporting finding")
         sdk.set_point_baseline(finding["id"], 8.0, 2.0)
 
-        op = sdk.create_operator("IMPL", finding["id"], [opt["id"]], context=ctx)
+        op = sdk.create_operator("IMPL", finding["id"], [opt["id"]])
         op_id = op["id"]
 
         proj = sdk._get_proj()
@@ -353,11 +343,11 @@ def test_bfs_nand_bidirectional():
     sdk = _fresh_sdk()
     try:
         ctx = "test-nand-bidi"
-        opt_a = _make_option(sdk, "Option A", context=ctx)
-        opt_b = _make_option(sdk, "Option B", context=ctx)
+        opt_a = _make_option(sdk, "Option A")
+        opt_b = _make_option(sdk, "Option B")
 
         # Operator NAND: opt_a NANDs opt_b (operator persists the NAND)
-        op = sdk.create_operator("NAND", opt_a["id"], [opt_b["id"]], context=ctx)
+        op = sdk.create_operator("NAND", opt_a["id"], [opt_b["id"]])
         op_id = op["id"]
 
         proj = sdk._get_proj()
@@ -438,15 +428,15 @@ def test_rel_filter_excludes_nand():
     sdk = _fresh_sdk()
     try:
         ctx = "test-relfilter"
-        opt = _make_option(sdk, "Option X", context=ctx)
-        f_good = _make_finding(sdk, "Good evidence", context=ctx)
-        f_bad = _make_finding(sdk, "Bad evidence against", context=ctx)
+        opt = _make_option(sdk, "Option X")
+        f_good = _make_finding(sdk, "Good evidence")
+        f_bad = _make_finding(sdk, "Bad evidence against")
 
         sdk.set_point_baseline(f_good["id"], 8.0, 2.0)
         sdk.set_point_baseline(f_bad["id"], 3.0, 5.0)
 
-        impl_op = sdk.create_operator("IMPL", f_good["id"], [opt["id"]], context=ctx)
-        nand_op = sdk.create_operator("NAND", f_bad["id"], [opt["id"]], context=ctx)
+        impl_op = sdk.create_operator("IMPL", f_good["id"], [opt["id"]])
+        nand_op = sdk.create_operator("NAND", f_bad["id"], [opt["id"]])
 
         proj = sdk._get_proj()
 
@@ -485,14 +475,14 @@ def test_max_nodes_cap_warns_and_truncates(caplog):
     sdk = _fresh_sdk()
     try:
         ctx = "test-maxcap"
-        opt = _make_option(sdk, "Central option", context=ctx)
+        opt = _make_option(sdk, "Central option")
 
         # Create 250 operators all targeting the same option.
         # Each operator needs a unique source finding.
         op_ids = []
         for i in range(250):
-            finding = _make_finding(sdk, f"Finding {i}", context=ctx)
-            op = sdk.create_operator("IMPL", finding["id"], [opt["id"]], context=ctx)
+            finding = _make_finding(sdk, f"Finding {i}")
+            op = sdk.create_operator("IMPL", finding["id"], [opt["id"]])
             op_ids.append(op["id"])
 
         proj = sdk._get_proj()
@@ -526,26 +516,23 @@ def test_anchors_precedence_over_context():
         ctx_context = "test-context-different"
 
         # Build graph in anchors context
-        opt = _make_option(sdk, "Option in anchors ctx", context=ctx_anchors)
-        finding = _make_finding(sdk, "Finding in anchors ctx", context=ctx_anchors)
+        opt = _make_option(sdk, "Option in anchors ctx")
+        finding = _make_finding(sdk, "Finding in anchors ctx")
         sdk.set_point_baseline(finding["id"], 8.0, 2.0)
-        op_good = sdk.create_operator("IMPL", finding["id"], [opt["id"]],
-                                       context=ctx_anchors)
+        op_good = sdk.create_operator("IMPL", finding["id"], [opt["id"]])
 
         # Build separate graph in context ctx (should be excluded when anchors used)
-        opt_other = _make_option(sdk, "Option in other ctx", context=ctx_context)
-        finding_other = _make_finding(sdk, "Finding in other ctx", context=ctx_context)
+        opt_other = _make_option(sdk, "Option in other ctx")
+        finding_other = _make_finding(sdk, "Finding in other ctx")
         sdk.set_point_baseline(finding_other["id"], 1.0, 9.0)  # very weak
-        op_other = sdk.create_operator("IMPL", finding_other["id"], [opt_other["id"]],
-                                        context=ctx_context)
+        op_other = sdk.create_operator("IMPL", finding_other["id"], [opt_other["id"]])
 
         # With anchors pointing to the first graph only
         anchor_ids = [opt["id"], finding["id"]]
         result = sdk.compute_confidence(
             anchors=anchor_ids,
             max_hops=1,
-            direction="both",
-            context=ctx_context,  # should be IGNORED
+            direction="both", # should be IGNORED
         )
 
         # Should have computed confidence for the anchors-reachable claims

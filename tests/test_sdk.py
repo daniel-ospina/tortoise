@@ -54,9 +54,9 @@ class TestCreatePoint:
         assert len(caplog.records) >= 1
 
     def test_with_props(self, sdk):
-        p = sdk.create_point("statement", "x", confidence=0.9, context="ctx")
+        p = sdk.create_point("statement", "x", confidence=0.9)
         assert p["confidence"] == 0.9
-        assert p["context"] == "ctx"
+        assert "context" not in p
 
 
 # ── create_or_update_point ───────────────────────────────────────────
@@ -79,9 +79,8 @@ class TestCreateOrUpdatePoint:
 class TestUpdatePoint:
     def test_set_properties(self, sdk):
         p = _make_point(sdk)
-        updated = sdk.update_point(p["id"], confidence=0.5, context="new")
+        updated = sdk.update_point(p["id"], confidence=0.5)
         assert updated["confidence"] == 0.5
-        assert updated["context"] == "new"
 
     def test_verify_with_get_point(self, sdk):
         p = _make_point(sdk, content="before")
@@ -153,12 +152,13 @@ class TestQuery:
         assert len(results) == 1
         assert results[0]["pointKind"] == "statement"
 
-    def test_by_context(self, sdk):
-        sdk.create_point("statement", "X", context="g0")
-        sdk.create_point("statement", "Y", context="g1")
-        results = sdk.query(context="g0")
+    def test_by_kind_filter(self, sdk):
+        """P2 #49: context removed — query filters by kind instead."""
+        sdk.create_point("statement", "X")
+        sdk.create_point("observation", "Y")
+        results = sdk.query(kind="statement")
         assert len(results) == 1
-        assert results[0]["context"] == "g0"
+        assert results[0]["pointKind"] == "statement"
 
     def test_by_filter(self, sdk):
         sdk.create_point("statement", "A", confidence=0.99)

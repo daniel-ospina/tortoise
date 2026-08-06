@@ -45,7 +45,6 @@ class SearchResult:
     id: str
     content: str
     point_kind: str
-    context: str | None = None
     scores: SearchScores | None = None
     match_source: Literal["fts", "vector", "structural", "rrf", "tfidf"] = "rrf"
     ep: EpBreakdown | None = None
@@ -63,7 +62,6 @@ class SearchResult:
             "id": self.id,
             "content": self.content,
             "point_kind": self.point_kind,
-            "context": self.context,
             "match_source": self.match_source,
             "relationships": self.relationships,
             "topics": self.topics,
@@ -90,11 +88,10 @@ class SearchResult:
 def classify_query(
     query: str | None,
     kind: str | None,
-    context: str | None,
 ) -> dict[str, bool]:
     """Determine which retrieval strategies to activate.
 
-    - No text query → structural only (full-scan if context set, kind-filtered otherwise)
+    - No text query → structural only (kind-filtered)
     - Text query present → all available strategies (FTS + vector + structural)
     """
     if not query or not query.strip():
@@ -264,12 +261,12 @@ def run_vector_query(
 
 
 def run_structural_query(
-    graph, kind: str | None, context: str | None,
+    graph, kind: str | None,
     entity_type: str = "point", limit: int = 20
 ) -> list[tuple[str, float]]:
     """Run structural/kind query via range indexes.
 
-    entity_type: 'point' (filters on pointKind/context), 'event' (eventKind),
+    entity_type: 'point' (filters on pointKind), 'event' (eventKind),
                  'subject' (subjectKind), 'operator' (op_type, Point nodes with is_operator=true),
                  'source' (sourceKind), 'document' (documentKind), 'object' (objectKind).
     Returns matching entities with a score of 1.0 (exact match) or 0.5 (partial match).
@@ -299,11 +296,6 @@ def run_structural_query(
         if kind:
             conditions.append(f"n.{kind_field} = $kind")
             params["kind"] = kind
-        if context:
-            # Only Point entities and operators have context; skip for Event/Subject
-            if entity_type in ("point", "operator"):
-                conditions.append("n.context = $context")
-                params["context"] = context
 
         if not conditions:
             return []  # No filters — caller should use full-scan path instead
@@ -318,11 +310,11 @@ def run_structural_query(
         params["limit"] = limit
         rows = graph.query(cypher, params=params).result_set
 
-        # Assign score: 1.0 if both kind AND context match, 0.5 if only one
+        # Score: 1.0 if kind matched, 0.5 for no-kind broad scan
         results = []
         for row in rows:
             pid = row[0]
-            match_score = 1.0 if (kind and context) else 0.5
+            match_score = 1.0 if kind else 0.5
             results.append((pid, match_score))
         return results
     except Exception as e:
@@ -361,7 +353,6 @@ def degradation_chain(
     graph,
     query: str | None,
     kind: str | None,
-    context: str | None,
     query_vec: list[float] | None,
     strategies: dict[str, bool],
     entity_type: str = "point",
@@ -404,7 +395,7 @@ def degradation_chain(
 
         if strategies.get("structural"):
             futures[executor.submit(
-                run_structural_query, graph, kind, context, entity_type=entity_type, limit=limit
+                run_structural_query, graph, kind, entity_type=entity_type, limit=limit
             )] = "structural"
 
         # Collect results with 500ms total timeout across all strategies.
@@ -489,18 +480,17 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
 def fallback_tfidf(query: str, points: list[dict], limit: int = 10) -> list[dict]:
     """Last-resort TF-IDF fallback when all FalkorDB strategies fail.
 
-    points should be dicts with at least 'id', 'content', 'pointKind', 'context'.
+    points should be dicts with at least 'id', 'content', 'pointKind'.
     """
     try:
         from tortoise.embeddings import search_points
-        meta = {p["id"]: p for p in points}
+        meta = {p["id"]: p for p in points if p.get("id")}
         results = search_points(query, points, threshold=0.0, limit=limit)
         return [
             SearchResult(
                 id=r["id"],
                 content=r["content"],
                 point_kind=meta.get(r["id"], {}).get("pointKind", ""),
-                context=meta.get(r["id"], {}).get("context"),
                 scores=SearchScores(fts=None, vector=None, structural=None, rrf=r["similarity"]),
                 match_source="tfidf",
                 ep=None,
@@ -673,7 +663,7 @@ def filter_by_traversal_predicate(
 def fallback_tfidf(query: str, points: list[dict], limit: int = 10) -> list[dict]:
     """Last-resort TF-IDF fallback when all FalkorDB strategies fail.
 
-    points should be dicts with at least 'id', 'content', 'pointKind', 'context'.
+    points should be dicts with at least 'id', 'content', 'pointKind'.
     """
     try:
         from tortoise.embeddings import search_points
@@ -684,7 +674,6 @@ def fallback_tfidf(query: str, points: list[dict], limit: int = 10) -> list[dict
                 id=r["id"],
                 content=r["content"],
                 point_kind=meta.get(r["id"], {}).get("pointKind", ""),
-                context=meta.get(r["id"], {}).get("context"),
                 scores=SearchScores(fts=None, vector=None, structural=None, rrf=r["similarity"]),
                 match_source="tfidf",
                 ep=None,

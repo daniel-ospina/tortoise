@@ -17,10 +17,10 @@ def sdk():
     db_path = os.path.join(tempfile.mkdtemp(prefix="tortoise_tax_test_"), "test.db")
     sdk = TortoiseSDK(db_path)
     # Seed: Points with different contexts/kinds
-    sdk.create_point("statement", "S1", context="strategy")
-    sdk.create_point("decision", "D1", context="strategy")
-    sdk.create_point("observation", "O1", context="research")
-    sdk.create_point("hypothesis", "H1", context="research")
+    sdk.create_point("statement", "S1")
+    sdk.create_point("decision", "D1")
+    sdk.create_point("observation", "O1")
+    sdk.create_point("hypothesis", "H1")
     sdk.create_point("goal", "G1")  # no context
     yield sdk
     sdk.close()
@@ -47,25 +47,28 @@ class TestTaxonomy:
         assert result["Document"] == 0
 
 
-# ── list_domains ──────────────────────────────────────────────────────
+# ── list_pointkinds (replaces list_domains, #49) ─────────────────────────
 
-class TestListDomains:
+class TestListPointKinds:
     def test_returns_list(self, sdk):
-        result = sdk.list_domains()
+        result = sdk.list_pointkinds()
         assert isinstance(result, list)
 
-    def test_counts_by_context(self, sdk):
-        result = sdk.list_domains()
-        assert len(result) == 2  # strategy, research (goal has no context)
-        contexts = {r["context"]: r["count"] for r in result}
-        assert contexts["strategy"] == 2
-        assert contexts["research"] == 2
+    def test_counts_by_kind(self, sdk):
+        sdk.create_point("strategy", "strat one")
+        sdk.create_point("strategy", "strat two")
+        sdk.create_point("research", "research one")
+        sdk.create_point("research", "research two")
+        result = sdk.list_pointkinds()
+        kinds = {r["kind"]: r["count"] for r in result}
+        assert kinds["strategy"] == 2
+        assert kinds["research"] == 2
 
     def test_empty_db(self):
         db_path = os.path.join(tempfile.mkdtemp(), "empty.db")
         s = TortoiseSDK(db_path)
         try:
-            assert s.list_domains() == []
+            assert s.list_pointkinds() == []
         finally:
             s.close()
 
@@ -86,9 +89,9 @@ class TestListTopics:
         assert result["neighborCounts"] == {}
 
     def test_entity_with_neighbors(self, sdk):
-        a = sdk.create_point("statement", "A", context="ctx-a")
-        b = sdk.create_point("decision", "B", context="ctx-b")
-        c = sdk.create_point("observation", "C", context="ctx-b")
+        a = sdk.create_point("statement", "A")
+        b = sdk.create_point("decision", "B")
+        c = sdk.create_point("observation", "C")
         sdk.create_operator("IMPL", a["id"], [b["id"]])
         sdk.create_operator("NAND", a["id"], [c["id"]])
 

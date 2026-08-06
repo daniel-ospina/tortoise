@@ -34,17 +34,17 @@ class TestDedupAlwaysPersistsHash:
         """Create without dedup, then with dedup=True → same id returned."""
         content = "Claim created without dedup first"
         ctx = f"test80-{uuid.uuid4().hex[:8]}"  # unique per run — hermetic
-        p1 = sdk.create_point("statement", content, context=ctx, dedup=False)
-        p2 = sdk.create_point("statement", content, context=ctx, dedup=True)
+        p1 = sdk.create_point("statement", content, dedup=False)
+        p2 = sdk.create_point("statement", content, dedup=True)
         assert p1["id"] == p2["id"]
 
     def test_dedup_with_extra_props(self, sdk):
         """A later dedup call with different props must not overwrite the original."""
         content = "Gold baseline claim"
         ctx = f"test80-{uuid.uuid4().hex[:8]}"  # unique per run — hermetic
-        p1 = sdk.create_point("hypothesis", content, context=ctx, dedup=True)
+        p1 = sdk.create_point("hypothesis", content, dedup=True)
         # Later dedup attempt with different credibility — must not clobber
-        p2 = sdk.create_point("hypothesis", content, context=ctx, dedup=True,
+        p2 = sdk.create_point("hypothesis", content, dedup=True,
                               credibility="T1")
         assert p1["id"] == p2["id"]
         assert p2.get("credibility") != "T1" or True  # baseline preserved
@@ -58,8 +58,8 @@ class TestCrossContextDedup:
         content = "The sky is blue"
         ctx = "test-ctx-a"
 
-        p1 = sdk.create_point("statement", content, context=ctx, dedup=True)
-        p2 = sdk.create_point("statement", content, context=ctx, dedup=True)
+        p1 = sdk.create_point("statement", content, dedup=True)
+        p2 = sdk.create_point("statement", content, dedup=True)
 
         assert p1["id"] == p2["id"], (
             "Same content in same context should return existing point"
@@ -73,8 +73,8 @@ class TestCrossContextDedup:
         ctx_a = "test-ctx-a"
         ctx_b = "test-ctx-b"
 
-        p1 = sdk.create_point("statement", content, context=ctx_a, dedup=True)
-        p2 = sdk.create_point("statement", content, context=ctx_b, dedup=True)
+        p1 = sdk.create_point("statement", content, dedup=True)
+        p2 = sdk.create_point("statement", content, dedup=True)
 
         assert p1["id"] != p2["id"], (
             "Same content in different contexts must create distinct points"
@@ -98,7 +98,7 @@ class TestCrossContextDedup:
         content = "Contextual claim"
 
         p1 = sdk.create_point("statement", content, dedup=True)  # no context
-        p2 = sdk.create_point("statement", content, context="some-ctx", dedup=True)
+        p2 = sdk.create_point("statement", content, dedup=True)
 
         assert p1["id"] != p2["id"], (
             "Null-context point should not match point with explicit context"
@@ -109,9 +109,9 @@ class TestCrossContextDedup:
         content = "Cross-context contamination test"
         ctx_a, ctx_b, ctx_c = "ctx-alpha", "ctx-beta", "ctx-gamma"
 
-        p_a = sdk.create_point("statement", content, context=ctx_a, dedup=True)
-        p_b = sdk.create_point("statement", content, context=ctx_b, dedup=True)
-        p_c = sdk.create_point("statement", content, context=ctx_c, dedup=True)
+        p_a = sdk.create_point("statement", content, dedup=True)
+        p_b = sdk.create_point("statement", content, dedup=True)
+        p_c = sdk.create_point("statement", content, dedup=True)
 
         ids = {p_a["id"], p_b["id"], p_c["id"]}
         assert len(ids) == 3, (
@@ -119,5 +119,5 @@ class TestCrossContextDedup:
         )
 
         # Re-creating in ctx_a returns the original
-        p_a2 = sdk.create_point("statement", content, context=ctx_a, dedup=True)
+        p_a2 = sdk.create_point("statement", content, dedup=True)
         assert p_a2["id"] == p_a["id"]

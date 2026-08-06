@@ -18,22 +18,10 @@ def taxonomy(proj) -> dict[str, int]:
     return result
 
 
-def list_domains(proj) -> list[dict]:
-    """Active domains with entity counts. Groups :Point nodes by context.
-
-    Returns [{context, count}] ordered by count descending.
-    """
-    rows = proj.g.query(
-        "MATCH (n:Point) WHERE n.context IS NOT NULL "
-        "RETURN n.context, count(n) ORDER BY count(n) DESC"
-    ).result_set
-    return [{"context": r[0], "count": r[1]} for r in rows]
-
-
 def list_topics(proj, entity_id: str) -> dict:
-    """entityProfile lite: connected topics/contexts grouped by kind.
+    """entityProfile lite: connected topics grouped by kind.
 
-    Returns {entity, pointKind, context, neighbors: [{pointKind, context}], neighborCounts: {kind: N}}.
+    Returns {entity, pointKind, neighbors: [{pointKind}], neighborCounts: {kind: N}}.
     """
     entity = proj.g.query(
         "MATCH (n:Point {id:$id}) RETURN properties(n)",
@@ -51,20 +39,20 @@ def list_topics(proj, entity_id: str) -> dict:
         "MATCH (n:Point {id:$id})<-[r1:IMPL]-(op:Point {is_operator:true})"
         "-[r2:IMPL]->(m:Point) "
         "WHERE m.id <> n.id AND (m.is_operator IS NULL OR m.is_operator = false) "
-        "RETURN m.pointKind, m.context",
+        "RETURN m.pointKind",
         params={"id": entity_id},
     ).result_set
     neighbors_nand = proj.g.query(
         "MATCH (n:Point {id:$id})<-[r1:NAND]-(op:Point {is_operator:true})"
         "-[r2:NAND]->(m:Point) "
         "WHERE m.id <> n.id AND (m.is_operator IS NULL OR m.is_operator = false) "
-        "RETURN m.pointKind, m.context",
+        "RETURN m.pointKind",
         params={"id": entity_id},
     ).result_set
     neighbors = neighbors_impl + neighbors_nand
 
     neighbor_list = [
-        {"pointKind": r[0], "context": r[1]}
+        {"pointKind": r[0]}
         for r in neighbors if r[0] is not None
     ]
 
@@ -77,7 +65,6 @@ def list_topics(proj, entity_id: str) -> dict:
     return {
         "id": props.get("id"),
         "pointKind": props.get("pointKind"),
-        "context": props.get("context"),
         "content": props.get("content", "")[:200],  # ponytail: preview, not full
         "neighbors": neighbor_list,
         "neighborCounts": kind_counts,

@@ -56,7 +56,7 @@ class _GroundingMixin:
         #    ponytail: uniform activity (no timestamps to EWMA over); add
         #    EWMA decay (alpha=0.3) when resolution events carry timestamps.
         res = self.g.query(
-            "MATCH (n:Point) WHERE n.context IN ['resolution-event','resolution-vector'] "
+            "MATCH (n:Point) WHERE n.pointKind IN ['resolution-event','resolution-vector'] "
             "AND (n.is_operator IS NULL OR n.is_operator = false) RETURN n.id"
         ).result_set
         a = np.zeros(n)

@@ -451,7 +451,6 @@ from pydantic import BaseModel, Field, field_validator
 class CreatePointRequest(BaseModel):
     content: str = Field(..., min_length=1, max_length=10000)
     kind: str = Field(default="statement")
-    context: str | None = None
     tags: list[str] = Field(default_factory=list)
 
     @field_validator("kind")
@@ -477,7 +476,6 @@ class PointResponse(BaseModel):
     id: str
     content: str
     kind: str
-    context: str | None = None
     created_at: str | None = None
 
 
@@ -520,7 +518,6 @@ async def create_point(body: CreatePointRequest, request: Request, team: dict = 
         result = sdk.create_point(
             content=body.content,
             kind=body.kind,
-            context=body.context,
             tags=body.tags,
         )
     except HTTPException:
@@ -539,7 +536,6 @@ async def create_point(body: CreatePointRequest, request: Request, team: dict = 
         "id": result["id"],
         "content": result["content"],
         "kind": result.get("pointKind", result.get("kind", "")),
-        "context": result.get("context"),
         "created_at": result.get("createdAt", result.get("created_at", "")),
     }
 
@@ -547,7 +543,6 @@ async def create_point(body: CreatePointRequest, request: Request, team: dict = 
 @app.get("/v1/points")
 async def list_points(
     kind: str | None = None,
-    context: str | None = None,
     limit: int = Query(50, ge=1, le=1000),
     team: dict = Depends(get_current_team),
 ):
@@ -563,9 +558,6 @@ async def list_points(
     if kind:
         conditions.append("n.pointKind = $kind")
         params["kind"] = kind
-    if context:
-        conditions.append("n.context = $context")
-        params["context"] = context
     query = "MATCH (n:Point) WHERE " + " AND ".join(conditions) + " RETURN properties(n) ORDER BY n.createdAt DESC LIMIT $limit"
     rows = proj.g.query(query, params=params).result_set
     results = []

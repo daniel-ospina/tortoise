@@ -155,8 +155,8 @@ def test_apply_one_always_fields_preserved_v2():
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-def test_falkor_old_event_writes_context():
-    """Event WITHOUT projection_version → context written to graph node."""
+def test_falkor_old_event_no_context_written():
+    """P2 #49: context field removed — even old-format events don't write it."""
     if _skip_if_no_falkor():
         return
     proj = FalkorProjection(_tmp("g.db"), graph_name="test")
@@ -169,7 +169,8 @@ def test_falkor_old_event_writes_context():
             "MATCH (n:Point {id:'p1'}) RETURN n.content, n.context"
         ).result_set
         assert r[0][0] == "hello"
-        assert r[0][1] == "my_ctx"
+        # Context is not persisted — the field no longer exists in projections
+        assert r[0][1] is None
     finally:
         proj.close()
 
@@ -218,8 +219,8 @@ def test_falkor_v2_pointrevised_does_not_mutate_context():
             "MATCH (n:Point {id:'p1'}) RETURN n.content, n.context"
         ).result_set
         assert r[0][0] == "new"
-        # Context should remain the old value (not overwritten by v2 revision)
-        assert r[0][1] == "old_ctx"
+        # P2 #49: context never written — no context property on the node
+        assert r[0][1] is None
     finally:
         proj.close()
 
@@ -309,13 +310,13 @@ def test_falkor_mixed_old_and_v2_events():
             "point": {"id": "v2_p", "content": "v2 event", "context": "discarded"},
         })
 
-        # Old point has context
+        # P2 #49: context never written for ANY event version
         r = proj.query(
             "MATCH (n:Point {id:'old_p'}) RETURN n.context"
         ).result_set
-        assert r[0][0] == "old_ctx"
+        assert r[0][0] is None
 
-        # V2 point has no context
+        # V2 point also has no context
         r = proj.query(
             "MATCH (n:Point {id:'v2_p'}) RETURN n.context"
         ).result_set
