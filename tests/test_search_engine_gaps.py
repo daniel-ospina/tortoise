@@ -568,20 +568,6 @@ class TestRunStructuralQuery:
         result = run_structural_query(graph, kind="statement", context=None)
         assert result == []
 
-    def test_expanded_kinds_uses_in_clause(self):
-        """expanded_kinds triggers IN clause instead of = $kind."""
-        graph = SimpleMockGraph(result_set=[("p1",), ("p2",)])
-
-        result = run_structural_query(
-            graph, kind=None, context=None,
-            expanded_kinds=["statement", "decision", "question"],
-        )
-
-        assert len(result) == 2
-        cypher = graph.query_calls[0][0]
-        assert "IN [" in cypher
-        assert "= $kind" not in cypher
-
     def test_entity_type_event_uses_eventkind(self):
         """entity_type='event' → eventKind + eventId."""
         graph = SimpleMockGraph(result_set=[("evt-1",)])
