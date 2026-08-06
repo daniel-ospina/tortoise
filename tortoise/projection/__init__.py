@@ -12,8 +12,66 @@ Backends behind the `Projection` protocol:
 """
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from typing import Protocol, runtime_checkable
+
+# P0 guard (#99): bulk graph-wipe classifier. Restored here in #49 Phase 2 —
+# the guard was lost from this (live) module during the v3.0 ontology rewrite
+# (0f9e6a2) and only survived in the legacy standalone projection.py, which
+# Phase 2 deletes. This is the ACTIVE wipe-protection: it must live in the
+# module the SDK actually imports.
+# A query is a bulk wipe when it contains DETACH DELETE but has NO property map
+# ({...} — e.g. MATCH (n:Label {id:$id})) and NO real WHERE clause.
+# A WHERE clause is "real" only if it references a property (n.xxx) or a
+# parameter ($id) or CONTAINS/IN — tautologies (WHERE true, WHERE 1=1) don't count.
+_WHERE_REAL_RE = re.compile(
+    r"\b[a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*|\$[a-zA-Z_]|CONTAINS|IN\s*\(",
+    re.IGNORECASE,
+)
+
+
+def _is_bulk_wipe(cypher: str) -> bool:
+    up = cypher.upper()
+    if "DETACH" not in up or "DELETE" not in up:
+        return False
+    # Property map in MATCH => targeted (e.g. {id:$id}, {team_id:$id})
+    if "{" in cypher:
+        return False
+    # Real WHERE clause (property/param/CONTAINS/IN reference) => targeted
+    m = re.search(r"WHERE\s+(.+) ", cypher + " ", re.IGNORECASE)
+    if m and _WHERE_REAL_RE.search(m.group(1)):
+        return False
+    return True
+
+
+class _GuardedGraph:
+    """Wrapper around the FalkorDB Graph handle that guards bulk graph-wipe queries.
+
+    The SDK calls proj.g.query() (raw handle) throughout — the guard must wrap
+    self.g itself, not FalkorProjection.query(). Restored in #49 Phase 2 after
+    the v3.0 rewrite (0f9e6a2) dropped it from this live module.
+
+    Intercepts bulk DETACH DELETE (no property map, no real WHERE) and asserts
+    the graph is a test graph before allowing execution. Targeted deletes
+    (MATCH (n:Label {id:$id}) ...) pass through unchanged.
+    """
+
+    __slots__ = ("_g", "_proj")
+
+    def __init__(self, g, projection):
+        self._g = g
+        self._proj = projection
+
+    def query(self, cypher: str, params=None):
+        if _is_bulk_wipe(cypher) and not getattr(self._proj, "_skip_guard", False):
+            self._proj._assert_test_graph(
+                "REFUSING to run bulk DETACH DELETE on non-test graph"
+            )
+        return self._g.query(cypher, params=params)
+
+    def __getattr__(self, name):
+        return getattr(self._g, name)
 
 # ── Mixins ────────────────────────────────────────────────────────────────
 from tortoise.projection.entities import _EntityHandlers
@@ -137,8 +195,10 @@ class FalkorProjection(
         else:
             raise ValueError("Either path or host must be provided")
 
-        self.g = self.db.select_graph(graph_name)
+        self.g = _GuardedGraph(self.db.select_graph(graph_name), self)
         self.graph_name = graph_name
+        self._graph_name = graph_name
+        self._skip_guard = False
         self._is_embedded = (path is not None)
         self._falkordb_version = self._get_falkordb_version()
         if self._falkordb_version is not None and self._falkordb_version[0] < 4:
@@ -267,9 +327,6 @@ class FalkorProjection(
                     "ca": p.get("createdAt") or p.get("created_at"),
                     "now": _now_iso(),
                 }
-                if "context" in p and p["context"] is not None:
-                    set_clauses.insert(1, "n.context=$context")
-                    params["context"] = p["context"]
                 self.g.query(
                     "MERGE (n:Point {id:$id}) SET " + ", ".join(set_clauses),
                     params=params,
@@ -314,7 +371,28 @@ class FalkorProjection(
         return {"events": len(events), "nodes": node_count, "edges": edge_count}
 
     def query(self, cypher: str, **params):
+        # P0 guard (#99): refuse bulk graph-wipe on non-test graphs.
+        if _is_bulk_wipe(cypher):
+            self._assert_test_graph(
+                f"REFUSING to run bulk DETACH DELETE on non-test graph "
+                f"'{self._graph_name}'"
+            )
         return self.g.query(cypher, params=params or None)
+
+    def _assert_test_graph(self, reason: str = "") -> None:
+        """Raise RuntimeError if the active graph is not a test graph.
+
+        Test graphs must start with 'test_' or 'tortoise_test'.
+        Guards against test teardowns / destructive ops wiping a real graph (#99).
+        """
+        if not self._graph_name.startswith(("test_", "tortoise_test")):
+            msg = (
+                f"Graph guard: operation blocked on non-test graph "
+                f"'{self._graph_name}'. "
+                f"{reason} — destructive bulk ops require a graph name starting "
+                f"with 'test_' or 'tortoise_test'."
+            ).rstrip()
+            raise RuntimeError(msg)
 
     def _get_falkordb_version(self):
         """Parse FalkorDB version from db.info().
@@ -457,10 +535,7 @@ class FalkorProjection(
                 params["embedding"] = None  # wipe stale embedding on failure (#19)
 
         set_clauses = ["n.content = coalesce($c, n.content)"]
-        # Phase 1: only include context SET when new_context is present (#49)
-        if new_context is not None:
-            set_clauses.append("n.context = coalesce($x, n.context)")
-            params["x"] = new_context
+        # Phase 2 #49: context removed — new_context no longer written
         if "embedding" in params:
             set_clauses.append("n.embedding = $embedding")
         if set_updated_at:

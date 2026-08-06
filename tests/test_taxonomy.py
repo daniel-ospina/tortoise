@@ -17,10 +17,10 @@ def sdk():
     db_path = os.path.join(tempfile.mkdtemp(prefix="tortoise_tax_test_"), "test.db")
     sdk = TortoiseSDK(db_path)
     # Seed: Points with different contexts/kinds
-    sdk.create_point("statement", "S1", context="strategy")
-    sdk.create_point("decision", "D1", context="strategy")
-    sdk.create_point("observation", "O1", context="research")
-    sdk.create_point("hypothesis", "H1", context="research")
+    sdk.create_point("statement", "S1")
+    sdk.create_point("decision", "D1")
+    sdk.create_point("observation", "O1")
+    sdk.create_point("hypothesis", "H1")
     sdk.create_point("goal", "G1")  # no context
     yield sdk
     sdk.close()
@@ -86,9 +86,9 @@ class TestListTopics:
         assert result["neighborCounts"] == {}
 
     def test_entity_with_neighbors(self, sdk):
-        a = sdk.create_point("statement", "A", context="ctx-a")
-        b = sdk.create_point("decision", "B", context="ctx-b")
-        c = sdk.create_point("observation", "C", context="ctx-b")
+        a = sdk.create_point("statement", "A")
+        b = sdk.create_point("decision", "B")
+        c = sdk.create_point("observation", "C")
         sdk.create_operator("IMPL", a["id"], [b["id"]])
         sdk.create_operator("NAND", a["id"], [c["id"]])
 

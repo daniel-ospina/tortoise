@@ -96,9 +96,9 @@ def test_sdk_fts_query_empty(sdk=None):
 def test_sdk_fts_query_kind_filter(sdk=None):
     if sdk is None:
         sdk = _new_sdk()
-    sdk.create_point("statement", "quantum computing breakthroughs", context="physics")
-    sdk.create_point("hypothesis", "quantum decoherence effects", context="physics")
-    sdk.create_point("statement", "cookie recipe collection", context="cooking")
+    sdk.create_point("statement", "quantum computing breakthroughs")
+    sdk.create_point("hypothesis", "quantum decoherence effects")
+    sdk.create_point("statement", "cookie recipe collection")
 
     results = sdk.tortoise_fts_query("quantum", kind="hypothesis")
     assert len(results) == 1
@@ -108,11 +108,11 @@ def test_sdk_fts_query_kind_filter(sdk=None):
 def test_sdk_fts_query_context_filter(sdk=None):
     if sdk is None:
         sdk = _new_sdk()
-    sdk.create_point("statement", "quantum computing", context="physics")
-    sdk.create_point("statement", "quantum gravity", context="physics")
-    sdk.create_point("statement", "quantum of solace", context="movies")
+    sdk.create_point("statement", "quantum computing")
+    sdk.create_point("statement", "quantum gravity")
+    sdk.create_point("statement", "quantum of solace")
 
-    results = sdk.tortoise_fts_query("quantum", context="movies")
+    results = sdk.tortoise_fts_query("quantum")
     assert len(results) == 1, f"Expected 1 movie result, got {len(results)}"
     assert results[0]["content"] == "quantum of solace"
 
@@ -120,9 +120,9 @@ def test_sdk_fts_query_context_filter(sdk=None):
 def test_sdk_fts_query_ranking_order(sdk=None):
     if sdk is None:
         sdk = _new_sdk()
-    sdk.create_point("statement", "puppies and kittens care", context="pets")
-    sdk.create_point("statement", "quantum entanglement theory", context="physics")
-    sdk.create_point("statement", "quantum field theory basics", context="physics")
+    sdk.create_point("statement", "puppies and kittens care")
+    sdk.create_point("statement", "quantum entanglement theory")
+    sdk.create_point("statement", "quantum field theory basics")
 
     results = sdk.tortoise_fts_query("quantum physics")
     if len(results) >= 2:
@@ -134,7 +134,7 @@ def test_sdk_fts_query_limit(sdk=None):
     if sdk is None:
         sdk = _new_sdk()
     for i in range(20):
-        sdk.create_point("statement", f"quantum topic number {i}", context="physics")
+        sdk.create_point("statement", f"quantum topic number {i}")
 
     results = sdk.tortoise_fts_query("quantum", limit=5)
     assert len(results) == 5
@@ -177,13 +177,13 @@ def test_sdk_fts_query_invalid_order_by(sdk=None):
 def test_sdk_fts_query_full_scan(sdk=None):
     if sdk is None:
         sdk = _new_sdk()
-    sdk.create_point("statement", "point a", context="test_ctx")
-    sdk.create_point("statement", "point b", context="test_ctx")
-    sdk.create_point("hypothesis", "point c", context="other")
+    sdk.create_point("statement", "point a")
+    sdk.create_point("statement", "point b")
+    sdk.create_point("hypothesis", "point c")
 
-    results = sdk.tortoise_fts_query(context="test_ctx")
+    results = sdk.tortoise_fts_query(kind="statement")
     assert len(results) >= 2
-    # Full-scan returns all in context, match_source should be structural
+    # Full-scan returns all of the kind, match_source should be structural
     if results:
         assert results[0]["match_source"] == "structural"
 

@@ -23,7 +23,6 @@ class AuditIssue:
 
 @dataclass
 class AuditResult:
-    context: str
     issues: list[AuditIssue] = field(default_factory=list)
     node_count: int = 0
     edge_count: int = 0
@@ -38,40 +37,44 @@ class AuditResult:
         return sum(1 for i in self.issues if i.severity == "low")
 
 
-def audit_graph(proj, context: str | list[str]) -> AuditResult:
-    """Audit graph wiring for the given context pattern(s)."""
-    if isinstance(context, str):
-        contexts = [context]
+def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
+    """Audit graph wiring for the given pointKind(s).
+
+    Args:
+        proj: FalkorProjection instance
+        point_kinds: Optional list of pointKind values to scope the audit.
+                     If None, all Points are audited (no filter applied).
+    """
+    if point_kinds is None:
+        kinds = []  # empty = audit all (no filter)
     else:
-        contexts = context
+        kinds = point_kinds
 
-    def _ctx_w(alias: str = "n") -> str:
-        """Build context WHERE clause for the given node alias, parenthesized for safe AND/OR."""
-        clauses = " OR ".join(f'{alias}.context CONTAINS "{c}"' for c in contexts)
-        return f"({clauses})" if clauses else "TRUE"
+    def _kinds_w(alias: str = "n") -> str:
+        """Build pointKind WHERE clause for the given node alias, parenthesized."""
+        if not kinds:
+            return "TRUE"
+        return f"{alias}.pointKind IN $kinds"
 
-    def _op_in_context(alias: str = "op", tgt_alias: str = "tgt") -> str:
-        """Context WHERE for operators — matches by own context (post-#130)
-        OR by target point's context (pre-#130 compat).
-
-        Caller MUST have a MATCH for the target: (op)-[:IMPL|NAND]->(tgt:Point).
-        The target alias must match tgt_alias.
-        """
-        own = _ctx_w(alias)
-        clauses = " OR ".join(f'{tgt_alias}.context CONTAINS "{c}"' for c in contexts)
-        target = f"({clauses})" if clauses else "FALSE"
-        return f"({own} OR {target})" if own != "TRUE" else "TRUE"
+    def _op_in_kinds(alias: str = "op", tgt_alias: str = "tgt") -> str:
+        """pointKind WHERE for operators — matches by own pointKind or target's."""
+        if not kinds:
+            return "TRUE"
+        own = _kinds_w(alias)
+        tgt_q = f"{tgt_alias}.pointKind IN $kinds"
+        return f"({own} OR {tgt_q})"
 
     issues: list[AuditIssue] = []
 
     # ── 0. Count nodes/edges in scope ──────────────────────────────
-    r = proj.g.query(f"MATCH (n:Point) WHERE {_ctx_w('n')} RETURN count(n)")
+    r = proj.g.query(f"MATCH (n:Point) WHERE {_kinds_w('n')} RETURN count(n)", params={"kinds": kinds})
     node_count = r.result_set[0][0] if r.result_set else 0
 
     # Count edges TO context-scoped points (correct traversal: operator -> point)
     r = proj.g.query(
-        f"MATCH (n:Point) WHERE {_ctx_w('n')} "
-        f"OPTIONAL MATCH (op:Point)-[e:IMPL|NAND]->(n) RETURN count(e)"
+        f"MATCH (n:Point) WHERE {_kinds_w('n')} "
+        f"OPTIONAL MATCH (op:Point)-[e:IMPL|NAND]->(n) RETURN count(e)",
+        params={"kinds": kinds},
     )
     edge_count = r.result_set[0][0] if r.result_set else 0
 
@@ -80,9 +83,10 @@ def audit_graph(proj, context: str | list[str]) -> AuditResult:
     # Match operators by own context (post-#130) OR target context (pre-#130 compat).
     r = proj.g.query(
         f"MATCH (op:Point {{is_operator: true}})-[:IMPL|NAND]->(ev:Point)\n"
-        f"WHERE {_op_in_context('op', 'ev')}\n"
+        f"WHERE {_op_in_kinds('op', 'ev')}\n"
         "AND ev.sourceKind IS NULL AND (ev.is_operator IS NULL OR ev.is_operator = false)\n"
-        "RETURN DISTINCT op.id, ev.id, ev.content LIMIT 50"
+        "RETURN DISTINCT op.id, ev.id, ev.content LIMIT 50",
+        params={"kinds": kinds},
     )
     for row in r.result_set:
         op_id, ev_id, ev_content = row[0], row[1], (row[2] or "")[:80]
@@ -96,9 +100,10 @@ def audit_graph(proj, context: str | list[str]) -> AuditResult:
 
     # ── 2. missing_sourceDate (low) ─────────────────────────────────
     r = proj.g.query(
-        f"MATCH (ev:Point) WHERE {_ctx_w('ev')}\n"
+        f"MATCH (ev:Point) WHERE {_kinds_w('ev')}\n"
         "AND ev.sourceKind IS NOT NULL AND ev.sourceDate IS NULL\n"
-        "RETURN ev.id, ev.content, ev.sourceKind LIMIT 50"
+        "RETURN ev.id, ev.content, ev.sourceKind LIMIT 50",
+        params={"kinds": kinds},
     )
     for row in r.result_set:
         ev_id, ev_content, sk = row[0], (row[1] or "")[:80], row[2]
@@ -112,10 +117,11 @@ def audit_graph(proj, context: str | list[str]) -> AuditResult:
 
     # ── 3. superseded_no_edge (high) ──────────────────────────────
     r = proj.g.query(
-        f"MATCH (n:Point) WHERE {_ctx_w('n')} AND n.status = 'superseded'\n"
+        f"MATCH (n:Point) WHERE {_kinds_w('n')} AND n.status = 'superseded'\n"
         "OPTIONAL MATCH (n)-[s:SUPERSEDES]->(:Point)\n"
         "WITH n, s WHERE s IS NULL\n"
-        "RETURN n.id, n.content LIMIT 50"
+        "RETURN n.id, n.content LIMIT 50",
+        params={"kinds": kinds},
     )
     for row in r.result_set:
         nid, content = row[0], (row[1] or "")[:80]
@@ -130,9 +136,10 @@ def audit_graph(proj, context: str | list[str]) -> AuditResult:
 
     # ── 4. superseded_active_edges (medium) ──────────────────────
     r = proj.g.query(
-        f"MATCH (sup:Point) WHERE {_ctx_w('sup')} AND sup.status = 'superseded'\n"
+        f"MATCH (sup:Point) WHERE {_kinds_w('sup')} AND sup.status = 'superseded'\n"
         "MATCH (sup)<-[r:IMPL|NAND]-(active:Point {status: 'live'})\n"
-        "RETURN DISTINCT sup.id, sup.content, type(r), active.id LIMIT 50"
+        "RETURN DISTINCT sup.id, sup.content, type(r), active.id LIMIT 50",
+        params={"kinds": kinds},
     )
     for row in r.result_set:
         sup_id, sup_content, edge_type, active_id = row[0], (row[1] or "")[:80], row[2], row[3]
@@ -151,9 +158,10 @@ def audit_graph(proj, context: str | list[str]) -> AuditResult:
         # Match by source context OR by target context (operators may lack context pre-#130)
         r = proj.g.query(
             f"MATCH (src:Point)-[e:IMPL]->(tgt:Point)\n"
-            f"WHERE {_op_in_context('src', 'tgt')}\n"
+            f"WHERE {_op_in_kinds('src', 'tgt')}\n"
             f"AND toLower(tgt.content) CONTAINS '{kw}' AND tgt.is_operator IS NULL\n"
-            "RETURN src.id, tgt.id, tgt.content LIMIT 20"
+            "RETURN src.id, tgt.id, tgt.content LIMIT 20",
+            params={"kinds": kinds},
         )
         for row in r.result_set:
             src_id, tgt_id, tgt_content = row[0], row[1], (row[2] or "")[:80]
@@ -171,10 +179,11 @@ def audit_graph(proj, context: str | list[str]) -> AuditResult:
     # ── 6. mitigation_recommended (medium) ──────────────────────
     r = proj.g.query(
         f"MATCH (op:Point {{is_operator: true}})-[:IMPL|NAND]->(tgt:Point)\n"
-        f"WHERE {_op_in_context('op', 'tgt')} AND op.confidence <= 0.35\n"
+        f"WHERE {_op_in_kinds('op', 'tgt')} AND op.confidence <= 0.35\n"
         "OPTIONAL MATCH (tgt)<-[mit:mitigates]-(:Point)\n"
         "WITH op, tgt, mit WHERE mit IS NULL\n"
-        "RETURN DISTINCT op.id, op.confidence, tgt.content LIMIT 50"
+        "RETURN DISTINCT op.id, op.confidence, tgt.content LIMIT 50",
+        params={"kinds": kinds},
     )
     for row in r.result_set:
         op_id, conf, tgt_content = row[0], row[1], (row[2] or "")[:80]
@@ -187,7 +196,6 @@ def audit_graph(proj, context: str | list[str]) -> AuditResult:
         ))
 
     return AuditResult(
-        context=", ".join(contexts),
         issues=issues,
         node_count=node_count,
         edge_count=edge_count,
@@ -197,7 +205,7 @@ def audit_graph(proj, context: str | list[str]) -> AuditResult:
 def print_audit(result: AuditResult) -> None:
     """Pretty-print audit results."""
     print(f"\n{'='*60}")
-    print(f"Tortoise Audit — {result.context}")
+    print(f"Tortoise Audit — {result.node_count} nodes, {result.edge_count} edges")
     print(f"Scope: {result.node_count} nodes, {result.edge_count} edges")
     print(f"Issues: {len(result.issues)} total "
           f"({result.high_count()} high, {result.medium_count()} medium, {result.low_count()} low)")

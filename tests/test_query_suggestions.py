@@ -143,8 +143,7 @@ class TestQueryWithSuggestions:
 
     def test_query_results_present_no_suggestion(self, sdk):
         """Non-empty results → no suggestion key in response."""
-        sdk.create_point("statement", "Test point for suggestion test",
-                          context="test-qsug", dedup=True)
+        sdk.create_point("statement", "Test point for suggestion test", dedup=True)
         result = query_with_suggestions(sdk.query, kind="statement")
         assert len(result["results"]) >= 1
         assert "suggestion" not in result

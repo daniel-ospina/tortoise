@@ -170,7 +170,6 @@ def compute_suggestion(kind: str) -> str | None:
 # ── SDK wrapper ────────────────────────────────────────────────────────
 
 def query_with_suggestions(query_fn, kind: str | None = None,
-                           context: str | None = None,
                            **filters) -> dict:
     """Call query_fn (e.g., sdk.query) and attach suggestion for silent-empty results.
 
@@ -180,7 +179,7 @@ def query_with_suggestions(query_fn, kind: str | None = None,
         - suggestion: (only present when results empty and kind provided)
           a hint or "did you mean" string
     """
-    results = query_fn(kind, context, **filters)
+    results = query_fn(kind, **filters)
 
     if results:
         return {"results": results}

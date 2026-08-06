@@ -60,8 +60,7 @@ class TestRRFFusion:
 class TestSearchResult:
     def test_to_dict(self):
         r = SearchResult(
-            id="1", content="test", point_kind="statement", context="ctx",
-            scores=SearchScores(fts=0.8, rrf=0.9),
+            id="1", content="test", point_kind="statement", scores=SearchScores(fts=0.8, rrf=0.9),
             match_source="rrf",
             ep=EpBreakdown(
                 confidence_mean=0.7,

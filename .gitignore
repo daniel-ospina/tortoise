@@ -12,3 +12,4 @@ tortoise.db
 *.db
 backups/
 services/*.plist
+data/migrations/

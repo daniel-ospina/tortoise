@@ -2,6 +2,8 @@
 
 Runnable with: python3 -m pytest tests/test_decide.py -v
 Requires TORTOISE_DB_URI pointing at a FalkorDB (set by tests/conftest.py — isolated test graph #99).
+
+Phase 2 (#49): context field removed. Tests use anchors or omit context entirely.
 """
 from __future__ import annotations
 
@@ -25,51 +27,55 @@ def sdk():
     sdk.close()
 
 
+def _mk():
+    return uuid.uuid4().hex[:8]
+
+
 class TestDecideWiring:
     """Decision comparison — create points, operators, EP computation."""
 
     def test_create_option_point(self, sdk):
         """Option points are created with kind='option'."""
-        p = sdk.create_point("option", "AGPLv3 dual-licensing", context="test-decide", dedup=True)
+        p = sdk.create_point("option", "AGPLv3 dual-licensing", dedup=True)
         assert p["id"]
         assert p.get("pointKind") == "option"
         # Verify dedup works (opt-in via dedup=True; content_hash stored on first call)
-        p2 = sdk.create_point("option", "AGPLv3 dual-licensing", context="test-decide", dedup=True)
+        p2 = sdk.create_point("option", "AGPLv3 dual-licensing", dedup=True)
         assert p2["id"] == p["id"]
 
     def test_create_criterion_point(self, sdk):
         """Criterion points are created with kind='criterion'."""
-        p = sdk.create_point("criterion", "Developer adoption", context="test-decide")
+        p = sdk.create_point("criterion", "Developer adoption")
         assert p["id"]
         assert p.get("pointKind") == "criterion"
 
     def test_create_evidence_point(self, sdk):
         """Evidence/finding points are created with kind='evidence'."""
-        p = sdk.create_point("evidence", "AGPLv3 is OSI-approved", context="test-decide")
+        p = sdk.create_point("evidence", "AGPLv3 is OSI-approved")
         assert p["id"]
         assert p.get("pointKind") == "evidence"
 
     def test_impl_operator_wiring(self, sdk):
         """IMPL edge from evidence to option."""
-        opt = sdk.create_point("option", "Option A", context="test-decide")
-        ev = sdk.create_point("evidence", "Supports A", context="test-decide")
-        op = sdk.create_operator("IMPL", ev["id"], [opt["id"]], context="test-decide")
+        opt = sdk.create_point("option", "Option A")
+        ev = sdk.create_point("evidence", "Supports A")
+        op = sdk.create_operator("IMPL", ev["id"], [opt["id"]])
         assert op["id"]
         assert op.get("is_operator") is True
 
     def test_nand_operator_wiring(self, sdk):
         """NAND edge from evidence to option."""
-        opt = sdk.create_point("option", "Option A", context="test-decide")
-        ev = sdk.create_point("evidence", "Opposes A", context="test-decide")
-        op = sdk.create_operator("NAND", ev["id"], [opt["id"]], context="test-decide")
+        opt = sdk.create_point("option", "Option A")
+        ev = sdk.create_point("evidence", "Opposes A")
+        op = sdk.create_operator("NAND", ev["id"], [opt["id"]])
         assert op["id"]
         assert op.get("is_operator") is True
 
     def test_mitigation_range_clamped(self, sdk):
-        """mitigate_operator enforces [0.10, 0.50] range on strength."""
-        opt = sdk.create_point("option", "Option A", context="test-decide")
-        ev = sdk.create_point("evidence", "Weak evidence", context="test-decide")
-        op = sdk.create_operator("IMPL", ev["id"], [opt["id"]], context="test-decide")
+        """mitigate_operator enforces [0, 1] range on strength."""
+        opt = sdk.create_point("option", "Option A")
+        ev = sdk.create_point("evidence", "Weak evidence")
+        op = sdk.create_operator("IMPL", ev["id"], [opt["id"]])
 
         # Valid range
         m1 = sdk.mitigate_operator(op["id"], "Minor caveat", 0.10)
@@ -98,11 +104,11 @@ class TestDecideWiring:
     def test_relevance_edge_reuses_existing_operator(self, sdk):
         """A (src, op_type, tgt) in both edges and relevance_edges must NOT
         create a duplicate operator — it reuses the one from edges."""
-        crit = sdk.create_point("criterion", "Enterprise readiness", context="test-decide")
-        opt = sdk.create_point("option", "Option A", context="test-decide")
+        crit = sdk.create_point("criterion", "Enterprise readiness")
+        opt = sdk.create_point("option", "Option A")
 
         # Simulate decide wiring: create the edge, then mitigate the SAME operator
-        op1 = sdk.create_operator("NAND", crit["id"], [opt["id"]], context="test-decide")
+        op1 = sdk.create_operator("NAND", crit["id"], [opt["id"]])
         sdk.mitigate_operator(op1["id"], "Not relevant", 0.20)
 
         # The decide layer reuses op1 (tracked by (src, op_type, tgt)) rather
@@ -117,20 +123,21 @@ class TestDecideWiring:
         # reuse semantics are encoded in decide.py (created_ops tracking).
         assert rows[0][0] >= 1
 
-    def test_compute_confidence_scoped_to_context(self, sdk):
-        """EP computes confidence for points in the specified context."""
+    def test_compute_confidence_with_anchors(self, sdk):
+        """EP computes confidence for points via anchors-based selection."""
         # Create two options
-        opt_a = sdk.create_point("option", "Option A", context="test-ep")
-        opt_b = sdk.create_point("option", "Option B", context="test-ep")
+        opt_a = sdk.create_point("option", "Option A")
+        opt_b = sdk.create_point("option", "Option B")
 
         # Evidence strongly supports A, opposes B
-        ev1 = sdk.create_point("evidence", "A is better", context="test-ep")
-        ev2 = sdk.create_point("evidence", "B has problems", context="test-ep")
+        ev1 = sdk.create_point("evidence", "A is better")
+        ev2 = sdk.create_point("evidence", "B has problems")
 
-        sdk.create_operator("IMPL", ev1["id"], [opt_a["id"]], context="test-ep")
-        sdk.create_operator("NAND", ev2["id"], [opt_b["id"]], context="test-ep")
+        sdk.create_operator("IMPL", ev1["id"], [opt_a["id"]])
+        sdk.create_operator("NAND", ev2["id"], [opt_b["id"]])
 
-        result = sdk.compute_confidence(context="test-ep")
+        # Use anchors-based selection (replaces context scoping)
+        result = sdk.compute_confidence(anchors=[opt_a["id"], opt_b["id"]])
         assert "iterations" in result
         assert "converged" in result
         confs = result.get("confidences", {})
@@ -139,26 +146,24 @@ class TestDecideWiring:
     def test_truth_challenge_nands_point(self, sdk):
         """Truth challenge: NAND the target finding POINT directly (it's FALSE)."""
         # Finding that supports option
-        ev_support = sdk.create_point("evidence", "Provider protects privacy", context="test-truth")
-        opt = sdk.create_point("option", "Option A", context="test-truth")
-        sdk.create_operator("IMPL", ev_support["id"], [opt["id"]], context="test-truth")
+        ev_support = sdk.create_point("evidence", "Provider protects privacy")
+        opt = sdk.create_point("option", "Option A")
+        sdk.create_operator("IMPL", ev_support["id"], [opt["id"]])
 
         # Truth challenge: another finding says ev_support is FALSE
         ev_challenge = sdk.create_point("evidence",
-            "Metadata reveals topics — provider CAN infer content", context="test-truth")
-        truth_op = sdk.create_operator("NAND", ev_challenge["id"], [ev_support["id"]],
-                                       context="test-truth")
+            "Metadata reveals topics — provider CAN infer content")
+        truth_op = sdk.create_operator("NAND", ev_challenge["id"], [ev_support["id"]])
         assert truth_op["id"]
         # The NAND is directly on the finding point — not on the operator
         # This means the finding itself is challenged as FALSE
 
     def test_relevance_challenge_mitigates_operator(self, sdk):
         """Relevance challenge: mitigates the OPERATOR (TRUE but matters LESS)."""
-        opt = sdk.create_point("option", "Option A", context="test-relevance")
+        opt = sdk.create_point("option", "Option A")
         ev = sdk.create_point("evidence",
-            "Provider cannot read content", context="test-relevance")
-        impl_op = sdk.create_operator("IMPL", ev["id"], [opt["id"]],
-                                      context="test-relevance")
+            "Provider cannot read content")
+        impl_op = sdk.create_operator("IMPL", ev["id"], [opt["id"]])
 
         # Relevance challenge: the finding is TRUE but its importance is OVERSTATED
         # → mitigate the OPERATOR, NOT the finding point
@@ -169,12 +174,11 @@ class TestDecideWiring:
 
     def test_option_point_never_nanded_for_bad_fit(self, sdk):
         """Never NAND an option or criterion point for bad fit — express fit on the operator."""
-        opt = sdk.create_point("option", "Option A", context="test-fit")
-        crit = sdk.create_point("criterion", "Enterprise readiness", context="test-fit")
+        opt = sdk.create_point("option", "Option A")
+        crit = sdk.create_point("criterion", "Enterprise readiness")
 
         # Bad fit: criterion opposes option — express as NAND on the operator
-        bad_fit_op = sdk.create_operator("NAND", crit["id"], [opt["id"]],
-                                         context="test-fit")
+        bad_fit_op = sdk.create_operator("NAND", crit["id"], [opt["id"]])
         assert bad_fit_op["id"]
 
         # The option point itself is never NANDed — it's still a valid option
@@ -187,33 +191,34 @@ class TestDecideWiring:
 
     def test_full_wiring_produces_ranked_output(self, sdk):
         """End-to-end: create options + criteria + findings, wire edges, compute confidence."""
-        ctx = "test-full"
         # Options
-        opt_a = sdk.create_point("option", "Option A", context=ctx)
-        opt_b = sdk.create_point("option", "Option B", context=ctx)
+        opt_a = sdk.create_point("option", "Option A")
+        opt_b = sdk.create_point("option", "Option B")
 
         # Criteria
-        crit_1 = sdk.create_point("criterion", "Security", context=ctx)
-        crit_2 = sdk.create_point("criterion", "Adoption", context=ctx)
+        crit_1 = sdk.create_point("criterion", "Security")
+        crit_2 = sdk.create_point("criterion", "Adoption")
 
         # Findings
-        f1 = sdk.create_point("evidence", "A is secure", context=ctx)
-        f2 = sdk.create_point("evidence", "A has wide adoption", context=ctx)
-        f3 = sdk.create_point("evidence", "B has security issues", context=ctx)
+        f1 = sdk.create_point("evidence", "A is secure")
+        f2 = sdk.create_point("evidence", "A has wide adoption")
+        f3 = sdk.create_point("evidence", "B has security issues")
 
         # Wire: criteria → options
-        sdk.create_operator("IMPL", crit_1["id"], [opt_a["id"]], context=ctx)
-        sdk.create_operator("IMPL", crit_2["id"], [opt_a["id"]], context=ctx)
-        sdk.create_operator("IMPL", crit_1["id"], [opt_b["id"]], context=ctx)
-        sdk.create_operator("NAND", crit_2["id"], [opt_b["id"]], context=ctx)
+        sdk.create_operator("IMPL", crit_1["id"], [opt_a["id"]])
+        sdk.create_operator("IMPL", crit_2["id"], [opt_a["id"]])
+        sdk.create_operator("IMPL", crit_1["id"], [opt_b["id"]])
+        sdk.create_operator("NAND", crit_2["id"], [opt_b["id"]])
 
         # Wire: findings → options
-        sdk.create_operator("IMPL", f1["id"], [opt_a["id"]], context=ctx)
-        sdk.create_operator("IMPL", f2["id"], [opt_a["id"]], context=ctx)
-        sdk.create_operator("NAND", f3["id"], [opt_b["id"]], context=ctx)
+        sdk.create_operator("IMPL", f1["id"], [opt_a["id"]])
+        sdk.create_operator("IMPL", f2["id"], [opt_a["id"]])
+        sdk.create_operator("NAND", f3["id"], [opt_b["id"]])
 
-        # Compute
-        result = sdk.compute_confidence(context=ctx)
+        # Compute with anchors
+        all_ids = [opt_a["id"], opt_b["id"], crit_1["id"], crit_2["id"],
+                     f1["id"], f2["id"], f3["id"]]
+        result = sdk.compute_confidence(anchors=all_ids)
         assert result["iterations"] >= 0
         confs = result.get("confidences", {})
 
@@ -226,42 +231,41 @@ class TestDecideWiring:
 
 
 class TestDecideContextFree:
-    """Context-free mode: compute_confidence(factors=[operator_ids]) without context isolation."""
+    """Context-free mode: compute_confidence(factors=[operator_ids]) — no context param needed."""
 
     def test_context_free_produces_ranked_table(self, sdk):
         """Wire 2 options + findings, run compute_confidence(factors=...),
         and assert a ranked table is produced with numeric confidences."""
-        ctx = "test-cf"
         # Options
-        opt_a = sdk.create_point("option", "Option A", context=ctx)
-        opt_b = sdk.create_point("option", "Option B", context=ctx)
+        opt_a = sdk.create_point("option", "Option A")
+        opt_b = sdk.create_point("option", "Option B")
 
         # Findings
-        f1 = sdk.create_point("evidence", "A is strongly supported", context=ctx)
-        f2 = sdk.create_point("evidence", "B has major issues", context=ctx)
+        f1 = sdk.create_point("evidence", "A is strongly supported")
+        f2 = sdk.create_point("evidence", "B has major issues")
 
         # Collect operator IDs as the CLI would for --context-free mode
         operator_ids: list[str] = []
 
         # Wire: finding → options (IMPL supports, NAND opposes)
         # A gets 2 IMPL supports, B gets 1 NAND oppose → clear A > B
-        op1 = sdk.create_operator("IMPL", f1["id"], [opt_a["id"]], context=ctx)
+        op1 = sdk.create_operator("IMPL", f1["id"], [opt_a["id"]])
         operator_ids.append(op1["id"])
 
-        op2 = sdk.create_operator("IMPL", f1["id"], [opt_b["id"]], context=ctx)
+        op2 = sdk.create_operator("IMPL", f1["id"], [opt_b["id"]])
         operator_ids.append(op2["id"])
 
-        op3 = sdk.create_operator("NAND", f2["id"], [opt_b["id"]], context=ctx)
+        op3 = sdk.create_operator("NAND", f2["id"], [opt_b["id"]])
         operator_ids.append(op3["id"])
 
         # Extra IMPL for A to create clear separation
-        f3 = sdk.create_point("evidence", "A is also cost-effective", context=ctx)
-        op4 = sdk.create_operator("IMPL", f3["id"], [opt_a["id"]], context=ctx)
+        f3 = sdk.create_point("evidence", "A is also cost-effective")
+        op4 = sdk.create_operator("IMPL", f3["id"], [opt_a["id"]])
         operator_ids.append(op4["id"])
 
         assert len(operator_ids) == 4, f"Expected 4 operators, got {len(operator_ids)}"
 
-        # Compute confidence via explicit factors (context-free) — no context param
+        # Compute confidence via explicit factors (context-free)
         result = sdk.compute_confidence(factors=operator_ids)
 
         assert "iterations" in result
@@ -294,33 +298,34 @@ class TestDecideContextFree:
             f"A has 2 IMPL (strong support), B has 1 IMPL + 1 NAND (contested)"
         )
 
-    def test_context_free_and_scoped_produce_consistent_ranking(self, sdk):
-        """Same wiring with context-scoped vs context-free should produce
+    def test_context_free_produces_consistent_ranking(self, sdk):
+        """Same wiring with anchors-based vs context-free should produce
         ranked output within tolerance (not identical — different EP scopes —
         but same relative ordering)."""
-        ctx = "test-cf-compare"
         # Options
-        opt_a = sdk.create_point("option", "Option A", context=ctx)
-        opt_b = sdk.create_point("option", "Option B", context=ctx)
+        opt_a = sdk.create_point("option", "Option A")
+        opt_b = sdk.create_point("option", "Option B")
 
         # Findings
-        f1 = sdk.create_point("evidence", "A is good", context=ctx)
-        f2 = sdk.create_point("evidence", "B is bad", context=ctx)
+        f1 = sdk.create_point("evidence", "A is good")
+        f2 = sdk.create_point("evidence", "B is bad")
 
         operator_ids: list[str] = []
 
-        op1 = sdk.create_operator("IMPL", f1["id"], [opt_a["id"]], context=ctx)
+        op1 = sdk.create_operator("IMPL", f1["id"], [opt_a["id"]])
         operator_ids.append(op1["id"])
-        op2 = sdk.create_operator("NAND", f2["id"], [opt_b["id"]], context=ctx)
+        op2 = sdk.create_operator("NAND", f2["id"], [opt_b["id"]])
         operator_ids.append(op2["id"])
 
         # Context-free
         result_cf = sdk.compute_confidence(factors=operator_ids)
-        # Context-scoped
-        result_ctx = sdk.compute_confidence(context=ctx)
+        # Anchors-based
+        result_anchors = sdk.compute_confidence(
+            anchors=[opt_a["id"], opt_b["id"], f1["id"], f2["id"]],
+        )
 
         cf_confs = result_cf.get("confidences", {})
-        ctx_confs = result_ctx.get("confidences", {})
+        anchor_confs = result_anchors.get("confidences", {})
 
         def get_mean(confs, pid):
             m = confs.get(pid, {}).get("mean")
@@ -328,18 +333,18 @@ class TestDecideContextFree:
 
         a_cf = get_mean(cf_confs, opt_a["id"])
         b_cf = get_mean(cf_confs, opt_b["id"])
-        a_ctx = get_mean(ctx_confs, opt_a["id"])
-        b_ctx = get_mean(ctx_confs, opt_b["id"])
+        a_an = get_mean(anchor_confs, opt_a["id"])
+        b_an = get_mean(anchor_confs, opt_b["id"])
 
         # Both modes should rank Option A above Option B
-        if all(v is not None for v in [a_cf, b_cf, a_ctx, b_ctx]):
+        if all(v is not None for v in [a_cf, b_cf, a_an, b_an]):
             assert a_cf > b_cf, (
                 f"Context-free: Expected A ({a_cf:.4f}) > B ({b_cf:.4f})"
             )
-            assert a_ctx > b_ctx, (
-                f"Context-scoped: Expected A ({a_ctx:.4f}) > B ({b_ctx:.4f})"
+            assert a_an > b_an, (
+                f"Anchors: Expected A ({a_an:.4f}) > B ({b_an:.4f})"
             )
             # Confidences should be within reasonable tolerance
-            assert abs(a_cf - a_ctx) < 0.5, (
-                f"A confidence divergence: cf={a_cf:.4f} ctx={a_ctx:.4f}"
+            assert abs(a_cf - a_an) < 0.5, (
+                f"A confidence divergence: cf={a_cf:.4f} anchors={a_an:.4f}"
             )

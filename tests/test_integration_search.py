@@ -67,38 +67,24 @@ def _create_test_points(sdk):
         jtbd, uc, uj, wf, req, feature, customer_seg
     """
     jtbd = sdk.create_point(
-        "product-strategy:jobToBeDone", "Deliver product insights",
-        context="product-strategy",
-        jtbd_id="JTBD-7849-1",
+        "product-strategy:jobToBeDone", "Deliver product insights", jtbd_id="JTBD-7849-1",
     )
     uc = sdk.create_point(
-        "product-strategy:useCase", "Analyze market trends",
-        context="product-strategy",
-        uc_id="UC-7849-1",
+        "product-strategy:useCase", "Analyze market trends", uc_id="UC-7849-1",
     )
     uj = sdk.create_point(
-        "product-strategy:userJourney", "Market analyst workflow",
-        context="product-strategy",
-        covered_use_cases="UC-7849-1",
+        "product-strategy:userJourney", "Market analyst workflow", covered_use_cases="UC-7849-1",
     )
     wf = sdk.create_point(
-        "product-strategy:workflow", "Weekly analysis pipeline",
-        context="product-strategy",
-        enables_jtbd="JTBD-7849-1",
+        "product-strategy:workflow", "Weekly analysis pipeline", enables_jtbd="JTBD-7849-1",
     )
     req = sdk.create_point(
-        "dev:requirement", "REQ-1: Data pipeline",
-        context="product-strategy",
-        enabled_workflow=wf["id"],
+        "dev:requirement", "REQ-1: Data pipeline", enabled_workflow=wf["id"],
     )
     feature = sdk.create_point(
-        "product-strategy:feature", "Automated reporting",
-        context="product-strategy",
-    )
+        "product-strategy:feature", "Automated reporting", )
     customer_seg = sdk.create_point(
-        "product-strategy:customerSegment", "Enterprise data teams",
-        context="product-strategy",
-    )
+        "product-strategy:customerSegment", "Enterprise data teams", )
 
     # Build relationships:
     # JTBD -(composedOf)-> UC
@@ -233,9 +219,7 @@ class TestChainVerificationWithPacks:
             # The operator gives it edges so check_structure flags orphan_use_case,
             # not orphaned_draft (which fires for draft points with zero edges).
             orphan = sdk.create_point(
-                "product-strategy:useCase", "Orphan use case",
-                context="product-strategy",
-                uc_id="UC-ORPHAN-7849",
+                "product-strategy:useCase", "Orphan use case", uc_id="UC-ORPHAN-7849",
             )
             created.append(orphan["id"])
             op = sdk.create_operator("composedOf", orphan["id"], [orphan["id"]])
@@ -262,9 +246,7 @@ class TestChainVerificationWithPacks:
             # Create a userJourney with a dangling UC reference.
             # Add an operator so it has edges (otherwise flagged orphaned_draft).
             uj = sdk.create_point(
-                "product-strategy:userJourney", "Dangling ref journey",
-                context="product-strategy",
-                covered_use_cases="UC-NONEXISTENT-7849",
+                "product-strategy:userJourney", "Dangling ref journey", covered_use_cases="UC-NONEXISTENT-7849",
             )
             created.append(uj["id"])
             op = sdk.create_operator("composedOf", uj["id"], [uj["id"]])
@@ -316,8 +298,7 @@ class TestMigrationScript:
         created = None
         try:
             # Create a point with an old core kind
-            pt = sdk.create_point("useCase", "Migration test use case",
-                                  context="test-migration")
+            pt = sdk.create_point("useCase", "Migration test use case")
             created = pt["id"]
 
             # Before migration, it should have old kind
@@ -343,8 +324,7 @@ class TestMigrationScript:
         sdk = TortoiseSDK()
         created = None
         try:
-            pt = sdk.create_point("jobToBeDone", "Idempotent test",
-                                  context="test-migration")
+            pt = sdk.create_point("jobToBeDone", "Idempotent test")
             created = pt["id"]
 
             # First run

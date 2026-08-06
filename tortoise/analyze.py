@@ -373,7 +373,7 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int = 1,
     return collected
 
 
-def analyze(question: str, proj=None, *, context: str | None = None,
+def analyze(question: str, proj=None, *,
             entity_subgraph_ids: set[str] | None = None,
             anchor_ids: list[str] | None = None,
             max_hops: int = 1,
@@ -385,8 +385,8 @@ def analyze(question: str, proj=None, *, context: str | None = None,
     Args:
         question: Natural language question
         proj: FalkorProjection instance (optional — for Cypher execution)
-        context: Team/domain scope filter (e.g. "epistemic-team/strategy")
         entity_subgraph_ids: Pre-filter results to these Point IDs (entity-scoped analysis)
+        anchor_ids: list of Point IDs for BFS subgraph selection (new; alternative to entity_subgraph_ids)
         anchor_ids: list of Point IDs for BFS subgraph selection (new; alternative to entity_subgraph_ids)
         max_hops: BFS expansion depth when using anchor_ids (default 1)
         rel_filter: edge types for BFS — "IMPL", "NAND", or "IMPL|NAND" (default)
@@ -419,8 +419,6 @@ def analyze(question: str, proj=None, *, context: str | None = None,
 
     # 2. Execute Cypher
     cypher = tmpl["cypher"]
-    if context:
-        cypher = cypher.replace("WHERE ", f"WHERE n.context STARTS WITH '{context}' AND ", 1)
     if entity_subgraph_ids is not None:
         cypher = _inject_subgraph_filter(cypher, tmpl.get("subgraph_vars", []),
                                           entity_subgraph_ids)

@@ -213,16 +213,14 @@ class TestPointsCreate:
         body = r.json()
         assert body["kind"] == "decision"
 
-    def test_create_point_with_context_deprecated(self, client):
-        """context is deprecated (#49) — accepted but not persisted."""
+    def test_create_point_with_kind_observation(self, client):
         r = client.post(
             "/v1/points",
-            json={"content": "ctx test", "kind": "observation", "context": "test-ctx"},
+            json={"content": "tagged point", "kind": "observation", "tags": ["test-tag"]},
         )
         assert r.status_code == 200, r.text
         body = r.json()
-        # #49: context is popped and NOT written to the node → response has None
-        assert body["context"] is None
+        assert body["kind"] == "observation"
 
     def test_create_point_with_tags(self, client):
         r = client.post(
@@ -305,18 +303,18 @@ class TestPointsList:
         for p in body["points"]:
             assert p.get("pointKind", p.get("kind")) == "decision"
 
-    def test_list_points_filter_by_context_deprecated(self, client):
-        """context filtering is deprecated (#49) — context is not persisted, so
-        filtering by it returns no matches."""
-        client.post("/v1/points", json={"content": "ctx-a", "context": "project-alpha"})
-        client.post("/v1/points", json={"content": "ctx-b", "context": "project-beta"})
-        client.post("/v1/points", json={"content": "no-ctx"})
+    def test_list_points_filter_by_kind_multi(self, client):
+        """GET /v1/points?kind=<kind> returns only matching Points — second variant."""
+        client.post("/v1/points", json={"content": "alpha point", "kind": "evidence"})
+        client.post("/v1/points", json={"content": "beta point", "kind": "hypothesis"})
+        client.post("/v1/points", json={"content": "plain point"})
 
-        r = client.get("/v1/points", params={"context": "project-alpha"})
+        r = client.get("/v1/points", params={"kind": "evidence"})
         assert r.status_code == 200, r.text
         body = r.json()
-        # #49: context is never written → filter matches nothing
-        assert body["count"] == 0
+        assert body["count"] >= 1
+        for p in body["points"]:
+            assert p.get("pointKind", p.get("kind")) == "evidence"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -767,10 +765,10 @@ class TestCrossTenantIsolation:
         # Create a point in team A's namespace directly
         from tortoise.hosted_api import _make_sdk
         sdk_a = _make_sdk(namespace="iso-team-a")
-        sdk_a.create_point(content="TEAM_A_SECRET", kind="statement", context="iso")
+        sdk_a.create_point(content="TEAM_A_SECRET", kind="statement")
         # Create a point in team B
         sdk_b = _make_sdk(namespace="iso-team-b")
-        sdk_b.create_point(content="TEAM_B_SECRET", kind="statement", context="iso")
+        sdk_b.create_point(content="TEAM_B_SECRET", kind="statement")
 
         # Verify team A's graph has its own point and NOT team B's
         pts_a = sdk_a._get_proj().g.query(

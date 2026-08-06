@@ -24,7 +24,7 @@ def _seed(sdk: TortoiseSDK) -> list[str]:
         ("B2B carousel pipeline", "carousel-design", "decision"),
         ("FalkorDB setup guide", "infrastructure", "statement"),
     ]:
-        p = sdk.create_point(kind, content, context=context)
+        p = sdk.create_point(kind, content)
         ids.append(p["id"])
     return ids
 
@@ -92,9 +92,9 @@ def test_results_sorted_by_confidence():
     db_path = _tmp_db()
     sdk = TortoiseSDK(db_path)
     # Create points with varying match quality
-    sdk.create_point("test", "the quick brown fox", context="ctx")
-    sdk.create_point("test", "quick fox jumps", context="ctx")
-    sdk.create_point("test", "the fox says hello", context="ctx")
+    sdk.create_point("test", "the quick brown fox")
+    sdk.create_point("test", "quick fox jumps")
+    sdk.create_point("test", "the fox says hello")
 
     results = sdk.suggest_entry_points("quick")
     # "quick fox jumps" (shortest content with match) should have highest confidence
@@ -124,10 +124,9 @@ def test_limit_respects_confidence_sort():
     sdk = TortoiseSDK(db_path)
     # Many partial matches (longer content = lower confidence)
     for i in range(10):
-        sdk.create_point("test", f"competitor project alpha beta gamma delta {i}",
-                         context="ctx")
+        sdk.create_point("test", f"competitor project alpha beta gamma delta {i}")
     # One exact match
-    sdk.create_point("test", "competitor", context="ctx")
+    sdk.create_point("test", "competitor")
 
     results = sdk.suggest_entry_points("competitor", limit=3)
     # Exact match must be in results and at top
