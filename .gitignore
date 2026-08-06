@@ -16,3 +16,4 @@ data/migrations/
 
 # Local environment — contains DB credentials, never commit
 .env
+.husky/_/
