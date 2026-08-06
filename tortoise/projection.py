@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """DEPRECATED — This flat file is dead code.
 
 `tortoise.projection` resolves to the canonical package at
