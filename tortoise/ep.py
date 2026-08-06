@@ -222,12 +222,12 @@ class TortoiseEP:
         # Default and missing → bidirectional.
         bidirectional = (direction == "bidirectional")
 
-        # For bidirectional hasPart IMPL, the back-message to the source must
-        # carry the TARGET's state as a reduction signal — if the part is
-        # weakened (by NAND or low evidence), the whole must be pulled DOWN,
+        # For bidirectional IMPL, the back-message to the source must
+        # carry the TARGET's state as a reduction signal — if the target is
+        # weakened (by NAND or low evidence), the source must be pulled DOWN,
         # not given a weak positive agreement push. Recompute the back-message
         # with NAND-style coupling (contradiction) when the target is below its
-        # cavity prior, so composition hierarchies propagate damage upward (#86).
+        # cavity prior, so bidirectional operators propagate damage upward (#86).
         if (op_type == "IMPL" and bidirectional and not self._is_strong(id_b)):
             mom_bk, _ = tilted_moments(
                 alpha_a, beta_a, alpha_b, beta_b, weight, phi_nand, self.n_quad

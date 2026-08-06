@@ -50,6 +50,9 @@ def main():
         # Determine direction per old semantics
         if op_type == "NAND":
             new_direction = "bidirectional"
+        elif op_type in ("composedOf", "decomposesInto", "contains", "wraps"):
+            # Part/whole op_types → hasPart edges → bidirectional (ontology v3.1)
+            new_direction = "bidirectional"
         elif op_type == "IMPL" and label in ("hasPart", "partOf"):
             new_direction = "bidirectional"
         else:

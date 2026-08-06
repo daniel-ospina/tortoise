@@ -123,8 +123,8 @@ def test_two_sources_higher_than_one():
     sdk.set_point_baseline(source_a["id"], *TIER_MAP["T0"])
     sdk.set_point_baseline(source_b["id"], *TIER_MAP["T0"])
 
-    op_a = make_operator(sdk, source_a["id"], claim["id"], "IMPL")
-    op_b = make_operator(sdk, source_b["id"], claim["id"], "IMPL")
+    op_a = make_operator(sdk, source_a["id"], claim["id"], "IMPL", direction="unidirectional")
+    op_b = make_operator(sdk, source_b["id"], claim["id"], "IMPL", direction="unidirectional")
 
     # Check weights
     proj = sdk._get_proj()
