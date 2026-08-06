@@ -118,15 +118,33 @@ class _MockGroundingProjection:
 
 
 def test_resolution_event_triggers_grounding():
-    """add_point with context='resolution-event' calls compute_grounding."""
+    """add_point with pointKind='resolution-event' calls compute_grounding.
+
+    #49: context is deprecated — grounding keys off pointKind now.
+    """
+    proj = _MockGroundingProjection()
+    api, _log = _api(projection=proj)
+    prov = provenance("doc.txt", [0, 1], "x", extracted_by="test@0")
+
+    api.add_point("foo", "ctx", prov, pointKind="resolution-event")
+    assert len(proj.calls) == 1, "compute_grounding must fire once"
+
+    print("PASS test_resolution_event_triggers_grounding")
+
+
+def test_resolution_event_legacy_context_no_grounding():
+    """Legacy context='resolution-event' (no pointKind) must NOT fire grounding.
+
+    #49 deprecation: the trigger is pointKind, not the context param.
+    """
     proj = _MockGroundingProjection()
     api, _log = _api(projection=proj)
     prov = provenance("doc.txt", [0, 1], "x", extracted_by="test@0")
 
     api.add_point("foo", "resolution-event", prov)
-    assert len(proj.calls) == 1, "compute_grounding must fire once"
+    assert len(proj.calls) == 0, "legacy context must not trigger grounding"
 
-    print("PASS test_resolution_event_triggers_grounding")
+    print("PASS test_resolution_event_legacy_context_no_grounding")
 
 
 def test_normal_context_does_not_trigger_grounding():
@@ -145,7 +163,7 @@ def test_resolution_event_no_projection_safe():
     """resolution-event with no projection attached must not crash."""
     api, log = _api(projection=None)
     prov = provenance("doc.txt", [0, 1], "x", extracted_by="test@0")
-    pid = api.add_point("z", "resolution-event", prov)
+    pid = api.add_point("z", "ctx", prov, pointKind="resolution-event")
     assert pid and isinstance(pid, str)
     print("PASS test_resolution_event_no_projection_safe")
 
