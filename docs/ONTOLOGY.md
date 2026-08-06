@@ -361,7 +361,7 @@ Operator:      (op-123)                                   ← mitigation anchor
 |-------|-------|------|
 | Semantic | operator.label | Domain verb: addresses, hasPart, opposes |
 | Epistemic | IMPL/NAND edges | Confidence via EP (0-1 continuum) |
-| Operator | Point (is_operator:true) | Mitigation target, evidence anchor |
+| Operator | Point (is_operator:true) | Mitigation target |
 
 ### Semantic Types
 
