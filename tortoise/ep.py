@@ -171,9 +171,9 @@ class TortoiseEP:
     def _is_strong(self, claim_id: str, threshold: float = 0.85) -> bool:
         """True if the claim's current belief is at/above the given threshold.
 
-        Used for hasPart back-message semantics: a part that is still strong
-        (>= threshold) keeps the whole's support; a weakened part triggers a
-        reduction signal to the whole (#86).
+        Used for bidirectional IMPL back-message semantics (#86): a target that
+        is still strong (>= threshold) keeps the source's support unchanged; a
+        weakened target triggers a reduction signal to the source.
         """
         if hasattr(self, "_node_cache") and claim_id in self._node_cache:
             a, b = self._node_cache[claim_id]
