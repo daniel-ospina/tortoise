@@ -136,6 +136,12 @@ class TortoiseSDK:
             self._db_path = None
             self._db_uri = db_uri
         else:
+            # Task 6 wiring (issue #176): when neither a path nor a URI is
+            # given, default to the canonical embedded path via resolve_db_path()
+            # so the SDK is not blind to TORTOISE_DB_PATH.
+            if db_path is None and not db_uri:
+                from tortoise.config import resolve_db_path
+                db_path = resolve_db_path()
             self._db_path = db_path
             self._db_uri = None
         # P0: Crash early if running in production with no database configured.

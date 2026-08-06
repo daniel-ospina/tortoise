@@ -123,10 +123,14 @@ def _get_sdk():
                     _log.error("Docker connection failed after 3 attempts. Set TORTOISE_DB_URI or ensure FalkorDB is running.")
                     sys.exit(1)
     elif _db_uri:
-        # File path — use Lite mode
-        _sdk = TortoiseSDK(db_path=_db_uri)
+        # File path — use Lite mode (backward compat: bare non-docker URI).
+        # resolve_db_path() rejects relative paths + applies canonical default.
+        from tortoise.config import resolve_db_path as _resolve_db_path
+        _sdk = TortoiseSDK(db_path=_resolve_db_path(_db_uri))
     else:
-        _sdk = TortoiseSDK()
+        # No URI: default to canonical embedded path via resolve_db_path()
+        from tortoise.config import resolve_db_path as _resolve_db_path
+        _sdk = TortoiseSDK(db_path=_resolve_db_path())
     return _sdk
 
 # Announce auth mode at startup
@@ -516,19 +520,21 @@ def tortoise_traverse(entity_id: str, max_hops: int = 2,
 
 def main():
     monitoring.register(_get_sdk())
-    if not os.environ.get("TORTOISE_DB_URI"):
+    uri = os.environ.get("TORTOISE_DB_URI")
+    db_path = os.environ.get("TORTOISE_DB_PATH")
+    if not uri and not db_path:
         if os.environ.get("TORTOISE_ALLOW_EMBEDDED") == "1":
             _log.warning(
-                "TORTOISE_DB_URI unset — running embedded (empty graph). "
-                "This is a test-only escape hatch; agents will read/write an empty DB."
+                "Neither TORTOISE_DB_URI nor TORTOISE_DB_PATH set — running "
+                "embedded (empty graph). Test-only escape hatch."
             )
         else:
             _log.error(
-                "TORTOISE_DB_URI is not set. MCP would silently connect to an empty "
-                "embedded DB. Set TORTOISE_DB_URI in the environment or in .env "
-                "(repo root) to your local FalkorDB instance "
-                "(e.g. docker://:@localhost:16379/tortoise), then restart. "
-                "See .env.example. Override with TORTOISE_ALLOW_EMBEDDED=1 (test only)."
+                "Neither TORTOISE_DB_URI nor TORTOISE_DB_PATH is set. MCP would "
+                "silently connect to an empty embedded DB. Set TORTOISE_DB_URI "
+                "(docker://...) or TORTOISE_DB_PATH (canonical embedded path) in "
+                "the environment or .env, then restart. "
+                "Override with TORTOISE_ALLOW_EMBEDDED=1 (test only)."
             )
             sys.exit(1)
     mcp.run(transport="stdio")
