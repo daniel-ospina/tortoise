@@ -1,6 +1,6 @@
 # Implementation Plan: Delete `context` field from Point/Operator nodes (#49)
 
-> ⚠️ **EXECUTED — DO NOT RE-EXECUTE.** This plan was implemented in PR #137 (#49 Phase 1 & 2: context deprecation, stop-writes, projection_version gate). Retained for design rationale and historical reference only. Any §1–§9 tasks have already been completed — do not treat this document as an execution guide.
+> ⚠️ **PARTIALLY EXECUTED — READ CAREFULLY.** Phase 1 (context deprecation, stop-writes, projection_version gate) was implemented in PR #137. Phase 2 (context removal tooling, read-path sweep, #99 guard restoration) is tracked in PR #155 (open). Retained for design rationale. Do not re-execute completed Phase 1 tasks; §3 Phase 2 tasks (2.1–2.13) are pending in #155.
 
 **Status:** Executed  
 **Complexity:** Complex  
