@@ -161,14 +161,25 @@ Deno.serve(async (req: Request) => {
   }
 });
 
-// PBKDF2-HMAC-SHA256 with pepper as salt — MUST match tortoise/auth.py hash_api_key()
-// (100,000 iterations, hex digest). Used for at-rest key storage and lookup.
+// PBKDF2-HMAC-SHA256 — MUST match tortoise/auth.py hash_api_key() exactly.
+// auth.py: per-key 32-byte random salt + pepper mixed into KEY MATERIAL
+// (not as salt), returns "salt_hex:hash_hex". If this diverges, provisioned
+// API keys will never validate against the API (they hash differently).
 async function hashApiKey(key: string): Promise<string> {
   const pepper = Deno.env.get("TORTOISE_SECRET_PEPPER") || "";
-  const salt = new TextEncoder().encode(pepper);
+  // Per-key 32-byte random salt (matches auth.py: secrets.token_bytes(32))
+  const perKeySalt = crypto.getRandomValues(new Uint8Array(32));
+  // Pepper mixed into key material: key.encode() + pepper (matches auth.py)
+  const pepperBytes = new TextEncoder().encode(pepper);
+  const keyMaterialBytes = new Uint8Array(
+    new TextEncoder().encode(key).length + pepperBytes.length
+  );
+  keyMaterialBytes.set(new TextEncoder().encode(key), 0);
+  keyMaterialBytes.set(pepperBytes, new TextEncoder().encode(key).length);
+
   const keyMaterial = await crypto.subtle.importKey(
     "raw",
-    new TextEncoder().encode(key),
+    keyMaterialBytes,
     "PBKDF2",
     false,
     ["deriveBits"]
@@ -177,13 +188,17 @@ async function hashApiKey(key: string): Promise<string> {
     {
       name: "PBKDF2",
       hash: "SHA-256",
-      salt: salt,
+      salt: perKeySalt,
       iterations: 100_000,
     },
     keyMaterial,
     256
   );
-  return Array.from(new Uint8Array(bits))
+  const hashHex = Array.from(new Uint8Array(bits))
     .map(b => b.toString(16).padStart(2, "0"))
     .join("");
+  const saltHex = Array.from(perKeySalt)
+    .map(b => b.toString(16).padStart(2, "0"))
+    .join("");
+  return `${saltHex}:${hashHex}`;
 }
