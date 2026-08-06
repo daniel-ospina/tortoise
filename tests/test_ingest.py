@@ -484,6 +484,11 @@ def test_capture_metadata_creates_document_no_points():
     uri = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise_test_ingest125")
     db = uri  # live DB URI
     log = _tmp("events_capture.jsonl")
+    # Flush the test graph (test-prefixed — safe) for hermetic Point count
+    from tortoise.projection import FalkorProjection as _FP
+    _f = _FP.from_uri(uri)
+    _f.g.query("MATCH (n) DETACH DELETE n")
+    _f.close()
     # Sample .md with topics/summary frontmatter
     t = _tmp("sess.md")
     Path(t).write_text(
@@ -532,6 +537,11 @@ def test_full_ingest_unaffected_and_not_blocked_by_capture():
     uri = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise_test_ingest125")
     db = uri
     log1 = _tmp("events_capture2.jsonl")
+    # Flush test graph for hermetic assertions
+    from tortoise.projection import FalkorProjection as _FP
+    _f = _FP.from_uri(uri)
+    _f.g.query("MATCH (n) DETACH DELETE n")
+    _f.close()
     log2 = _tmp("events_full.jsonl")
     t = _tmp("sess2.md")
     Path(t).write_text(
