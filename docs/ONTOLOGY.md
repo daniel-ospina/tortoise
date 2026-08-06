@@ -222,6 +222,7 @@ Epistemic edges (operators): `IMPL`, `NAND` (+ semantic label). About edges: `ab
 |-------|------|----------|-------------|------|---------|
 | `eventId` | ULID | ✅ | `dc:identifier` | ✅ | Unique occurrence ID |
 | `eventKind` | string | ✅ | — | ✅ | meeting, decision, experiment, deployment, review, friction, extraction, documentCreated, roleCreated, pointAdded, sessionCaptured + pack eventKinds |
+| `format` | string | — | `dc:format` | ✅ | Storage format (jsonl default, markdown) |
 | `startedAt` / `endedAt` | ISO8601 | — | `prov:startedAtTime` / `schema:startDate` | ✅ | Temporal extent |
 | `subject` | SubjectID | — | `prov:wasAssociatedWith` (inverse) | ✅ | Who performed the event (mirrors `performs` edge) |
 | `object_name` / `object_type` | string | — | `prov:used` | ✅ | What was acted on / produced |
@@ -245,7 +246,7 @@ Epistemic edges (operators): `IMPL`, `NAND` (+ semantic label). About edges: `ab
 | `id` | ✅ | ✅ | ✅ | ✅ | ✅ eventId | ✅ url |
 | kind tag | pointKind | subjectKind | objectKind | documentKind | eventKind | sourceKind |
 | name/title | — | name | name | title | — | title |
-| createdAt | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ ingestedAt |
+| createdAt | ✅ | ✅ | ✅ | ✅ | ✅ startedAt | ✅ ingestedAt |
 | updatedAt | ✅ | ❌ | ❌ | ✅ | — | ✅ |
 | status | status | ❌ (planned) | ❌ (projected, not stored) | doc_status | — | — |
 | responsibility | authoredBy | — | edge (§3.5) | — | — | — |
