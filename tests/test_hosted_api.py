@@ -19,6 +19,9 @@ from fastapi.testclient import TestClient
 
 # #67: TORTOISE_SECRET_PEPPER is mandatory for auth module — set before import
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
+# Rate limiter trips 429 in full-suite runs (>100 points per shared IP bucket).
+# Tests opt out; production keeps the limit (RATE_LIMIT_DISABLED=1).
+os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 
 from tortoise.hosted_api import app, get_current_team
 from tortoise.sdk import TortoiseSDK
@@ -230,7 +233,9 @@ class TestPointsCreate:
         assert r.status_code == 200, r.text
 
     def test_create_point_with_all_allowed_kinds(self, client):
-        allowed = {"statement", "decision", "evidence", "observation", "hypothesis"}
+        # Ontology v3.1 §5 core vocabulary (#7881) — not just the old 5.
+        allowed = {"statement", "decision", "evidence", "observation", "hypothesis",
+                   "vision", "strategy", "plan", "goal", "target"}
         for kind in sorted(allowed):
             r = client.post(
                 "/v1/points",
@@ -810,3 +815,49 @@ class TestKeysRevoke:
         listed = client.get("/v1/team/keys").json()
         target = [k for k in listed["keys"] if k["id"] == created["id"]]
         assert len(target) == 1
+
+
+class TestPointsTagFilter:
+    """GET /v1/points?tag=<tag> filters by TAGGED edge (#7883)."""
+
+    def test_list_points_filter_by_tag(self, client):
+        client.post("/v1/points", json={"content": "tagged point", "tags": ["alpha"]})
+        client.post("/v1/points", json={"content": "untagged point"})
+
+        r = client.get("/v1/points", params={"tag": "alpha"})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["count"] >= 1
+        for p in body["points"]:
+            assert "tagged point" in p["content"]
+
+    def test_list_points_filter_by_tag_no_match(self, client):
+        client.post("/v1/points", json={"content": "plain point"})
+
+        r = client.get("/v1/points", params={"tag": "nonexistent"})
+        assert r.status_code == 200, r.text
+        assert r.json()["count"] == 0
+
+
+class TestPointsNewKinds:
+    """Ontology v3.1 core kinds beyond the old 5 (#7881)."""
+
+    def test_create_vision_kind(self, client):
+        r = client.post("/v1/points", json={"content": "vision statement", "kind": "vision"})
+        assert r.status_code == 200, r.text
+        assert r.json()["kind"] == "vision"
+
+    def test_create_plan_kind(self, client):
+        r = client.post("/v1/points", json={"content": "plan point", "kind": "plan"})
+        assert r.status_code == 200, r.text
+        assert r.json()["kind"] == "plan"
+
+    def test_filter_by_new_kind(self, client):
+        client.post("/v1/points", json={"content": "a strategy", "kind": "strategy"})
+        client.post("/v1/points", json={"content": "plain"})
+        r = client.get("/v1/points", params={"kind": "strategy"})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["count"] >= 1
+        for p in body["points"]:
+            assert p.get("pointKind", p.get("kind")) == "strategy"
