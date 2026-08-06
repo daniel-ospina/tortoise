@@ -56,3 +56,76 @@ def test_restore_replays_events():
 def test_restore_missing_dir():
     result = restore("/nonexistent/backup")
     assert result["status"].startswith("error")
+
+
+def test_restore_rdb_first_when_snapshot_present(monkeypatch):
+    """into_falkor restores via RDB snapshot when present (#114)."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        src = Path(tmpdir) / "backup_src"
+        src.mkdir()
+        (src / "events.jsonl").write_text(
+            json.dumps({"type": "PointAdded", "point": {"id": "p1", "content": "event-only"}}) + "\n"
+        )
+        (src / "manifest.json").write_text('{"backed_up_at":"2026-01-01","db":"tortoise.db","events":"events.jsonl"}')
+        # A non-empty RDB stub — restore must use it, not replay JSONL
+        (src / "tortoise.db").write_text("rdb-snapshot-data")
+
+        dst_events = os.path.join(tmpdir, "restored.jsonl")
+        dst_db = os.path.join(tmpdir, "restored.db")
+
+        # Fake a projection whose snapshot has data (count > 0) so the
+        # RDB-first path returns without replaying JSONL.
+        class _FakeProj:
+            def __init__(self, db_path):
+                class _G:
+                    def query(self, cypher, params=None):
+                        class _R:
+                            result_set = [[5]]
+                        return _R()
+                self.g = _G()
+            def close(self):
+                pass
+
+        import tortoise.projection as proj_mod
+        monkeypatch.setattr(proj_mod, "FalkorProjection", _FakeProj)
+
+        result = restore(str(src), db_path=dst_db, events_path=dst_events, into_falkor=True)
+        assert result["status"] == "ok"
+        assert result.get("restored_via") == "rdb"
+        assert os.path.exists(dst_db)
+
+
+def test_restore_jsonl_fallback_when_rdb_empty(monkeypatch):
+    """into_falkor falls back to JSONL replay when the RDB snapshot is empty (#114)."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        src = Path(tmpdir) / "backup_src"
+        src.mkdir()
+        (src / "events.jsonl").write_text(
+            json.dumps({"type": "PointAdded", "point": {"id": "p1", "content": "event-only"}}) + "\n"
+        )
+        (src / "manifest.json").write_text('{"backed_up_at":"2026-01-01","db":"tortoise.db","events":"events.jsonl"}')
+        (src / "tortoise.db").write_text("rdb-snapshot-data")
+
+        dst_events = os.path.join(tmpdir, "restored.jsonl")
+        dst_db = os.path.join(tmpdir, "restored.db")
+
+        class _EmptyProj:
+            def __init__(self, db_path):
+                class _G:
+                    def query(self, cypher, params=None):
+                        class _R:
+                            result_set = [[0]]
+                        return _R()
+                self.g = _G()
+            def apply(self, ev):
+                pass
+            def close(self):
+                pass
+
+        import tortoise.projection as proj_mod
+        monkeypatch.setattr(proj_mod, "FalkorProjection", _EmptyProj)
+
+        result = restore(str(src), db_path=dst_db, events_path=dst_events, into_falkor=True)
+        assert result["status"] == "ok"
+        # Empty RDB → fell through to JSONL replay → no restored_via=rdb
+        assert result.get("restored_via") is None

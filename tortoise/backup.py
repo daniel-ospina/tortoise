@@ -57,6 +57,14 @@ def restore(backup_dir: str, db_path: str,
     """Restore from backup directory. Replays events into a fresh projection.
 
     Returns {events, status}.
+
+    Event-sourcing contract (#114): when the backup contains a FalkorDB
+    snapshot (tortoise.db — BGSAVE RDB), into_falkor mode opens that
+    snapshot directly. The RDB is the complete graph state INCLUDING
+    SDK-created points (which never appear in events.jsonl, since the SDK
+    writes via Cypher). Replaying only events.jsonl would silently drop
+    every SDK-created point. RDB-first restore preserves the full graph;
+    JSONL replay is the fallback when no snapshot exists.
     """
     source = Path(backup_dir)
     if not source.exists():
@@ -78,10 +86,23 @@ def restore(backup_dir: str, db_path: str,
     with open(events_file) as f:
         count = sum(1 for _ in f)
 
-    # Replay into FalkorDB if requested
+    # Restore into FalkorDB if requested
     if into_falkor:
         from tortoise.projection import FalkorProjection
         from tortoise.log import EventLog
+        # RDB-first: open the snapshot directly — it holds the full graph
+        # incl. SDK-created points that never made it into events.jsonl.
+        if db_file.exists():
+            proj = FalkorProjection(db_path)
+            try:
+                # Verify the snapshot actually has data; if the RDB is a
+                # stub/empty, fall through to JSONL replay below.
+                rows = proj.g.query("MATCH (n) RETURN count(n)").result_set
+                if rows and rows[0][0]:
+                    return {"events": count, "status": "ok", "restored_via": "rdb"}
+            finally:
+                proj.close()
+        # JSONL replay fallback (no RDB, or RDB was empty)
         proj = FalkorProjection(db_path)
         try:
             for ev in EventLog(events_path).read_all():
