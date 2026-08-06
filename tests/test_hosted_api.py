@@ -861,3 +861,44 @@ class TestPointsNewKinds:
         assert body["count"] >= 1
         for p in body["points"]:
             assert p.get("pointKind", p.get("kind")) == "strategy"
+
+
+class TestSessionEventAlignment:
+    """Session capture creates an ontology-compliant :Event (#7882)."""
+
+    def test_capture_creates_event_node(self, client):
+        from tortoise.sdk import TortoiseSDK
+        r = client.post(
+            "/v1/sessions",
+            json={"conversation": [
+                {"role": "user", "content": "We decided to use FalkorDB Cloud."},
+                {"role": "assistant", "content": "Agreed, that is the plan."},
+            ]},
+        )
+        assert r.status_code == 200, r.text
+        sid = r.json()["session_id"]
+
+        # The client fixture patched TortoiseSDK.__init__ to use the temp DB,
+        # so constructing an SDK inside the test reads the same graph.
+        sdk = TortoiseSDK(namespace="test-team-001")
+        proj = sdk._get_proj()
+
+        # The :Session node exists
+        rows = proj.g.query(
+            "MATCH (s:Session {id:$sid}) RETURN s.id", params={"sid": sid}
+        ).result_set
+        assert rows, "Session node missing"
+
+        # An :Event with eventKind sessionCaptured exists
+        ev = proj.g.query(
+            "MATCH (e:Event {eventKind:'sessionCaptured'}) RETURN e.eventId, e.startedAt",
+        ).result_set
+        assert ev, "Event node missing for session"
+        eid = ev[0][0]
+
+        # Extracted Points link to the Event via aboutEvent (ontology §3.2)
+        linked = proj.g.query(
+            "MATCH (e:Event {eventId:$eid})<-[:aboutEvent]-(p:Point) RETURN count(p)",
+            params={"eid": eid},
+        ).result_set
+        assert linked[0][0] >= 1, "no extracted Points linked to Event"

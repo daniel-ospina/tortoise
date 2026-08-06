@@ -1018,6 +1018,26 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
                 extracted.append({"id": pid, "kind": "statement", "text": text[:200]})
                 idx += 1
 
+    # Ontology v3.1 §4.5/§3.2 (#7882): also create an episodic :Event node
+    # (eventKind: sessionCaptured) and link extracted Points to it via
+    # aboutEvent — the ontology's episodic model. The :Session node remains
+    # the API-visible handle; the Event carries ontology-compliant provenance.
+    try:
+        event = sdk.create_event(
+            f"session_{session_id}",
+            "sessionCaptured",
+            startedAt=now,
+            endedAt=now,
+            sessionId=session_id,
+        )
+        event_id = event.get("id") or event.get("eventId")
+        for p in extracted:
+            proj.create_about_edge(p["id"], event_id, "aboutEvent")
+    except Exception:
+        import logging
+        logging.getLogger("tortoise.api").exception(
+            "session Event creation failed (non-fatal)")
+
     # Log audit event
     await _async_audit(
         request, team["team_id"], "session_capture",
