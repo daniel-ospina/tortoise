@@ -677,3 +677,79 @@ class TestCrossCutting:
 
         # kind="stmt" with context=None → score=0.5
         assert result == {"structural": [("p1", 0.5)]}
+
+
+# ------------------------------------------------------------------ #125 Document FTS + backfill
+
+
+def test_document_fts_index_created(live_proj_fixture=None):
+    """#125: Document._searchText FTS index exists after projection init."""
+    from tortoise.projection import FalkorProjection
+    proj = FalkorProjection.from_uri(os.environ.get(
+        "TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise_test_fts125"))
+    proj.g.query("MATCH (n) DETACH DELETE n")
+    proj._ensure_indexes()
+    # db.indexes() output: [label, properties, ...] — label is col 0, props col 1
+    rows = proj.g.query("CALL db.indexes()").result_set
+    found = any(r[0] == "Document" and "_searchText" in r[1] for r in rows)
+    proj.close()
+    assert found, f"Document _searchText FTS index missing: {rows[:3]}"
+
+
+def test_backfill_document_search_text():
+    """#125: backfill sets _searchText=title on pre-existing Documents."""
+    from tortoise.projection import FalkorProjection
+    proj = FalkorProjection.from_uri(os.environ.get(
+        "TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise_test_fts125"))
+    proj.g.query("MATCH (n) DETACH DELETE n")
+    # Create a Document WITHOUT _searchText (simulating pre-125)
+    proj.g.query(
+        "CREATE (d:Document {id:'old-1', title:'Old Doc', documentKind:'transcript'})"
+    )
+    n = proj.backfill_document_search_text()
+    rows = proj.g.query("MATCH (d:Document {id:'old-1'}) RETURN d._searchText").result_set
+    proj.close()
+    assert n >= 1, f"backfill returned {n}"
+    assert rows and rows[0][0] == "Old Doc", rows
+
+
+def test_document_fts_search_by_topic():
+    """#125: Document FTS on _searchText returns sessions matching a topic."""
+    from tortoise.projection import FalkorProjection
+    import tortoise.search_engine as se
+    uri = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise_test_fts125")
+    proj = FalkorProjection.from_uri(uri)
+    proj.g.query("MATCH (n) DETACH DELETE n")
+    proj._ensure_indexes()
+    proj.g.query(
+        "CREATE (d:Document {id:'doc-t1', title:'Licensing Talk', "
+        "documentKind:'transcript', _searchText:'Licensing Talk Compared AGPL licenses'})"
+    )
+    try:
+        # FTS query by topic word (in _searchText)
+        hits = se.run_fts_query(proj.g, "AGPL", entity_type="document")
+        ids = [h[0] for h in hits]
+        assert "doc-t1" in ids, f"FTS did not return doc-t1: {hits}"
+        # Structural query by documentKind
+        s_hits = se.run_structural_query(proj.g, kind="transcript", context=None, entity_type="document")
+        assert any(h[0] == "doc-t1" for h in s_hits), f"structural miss: {s_hits}"
+    finally:
+        proj.close()
+
+
+def test_document_structural_topic_any():
+    """#125: any() list filter matches topics on Document nodes."""
+    from tortoise.projection import FalkorProjection
+    uri = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise_test_fts125")
+    proj = FalkorProjection.from_uri(uri)
+    proj.g.query("MATCH (n) DETACH DELETE n")
+    proj.g.query(
+        "CREATE (d:Document {id:'doc-a', topics:['licensing','AGPL'], documentKind:'transcript'})"
+    )
+    try:
+        rows = proj.g.query(
+            "MATCH (d:Document) WHERE any(t IN d.topics WHERE t = 'licensing') RETURN d.id"
+        ).result_set
+        assert any(r[0] == "doc-a" for r in rows), rows
+    finally:
+        proj.close()

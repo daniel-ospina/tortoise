@@ -97,9 +97,9 @@ def run_fts_query(
     """Run full-text search via FalkorDB FTS index.
 
     Falls back gracefully if index doesn't exist or query fails.
-    entity_type: 'point' (default), 'event', 'subject', or 'operator'.
-    Operators are Point nodes with is_operator=true — matched by label via
-    CONTAINS (not FTS, since operator labels aren't in the content FTS index).
+    entity_type: 'point' (default), 'event', 'subject', 'document', 'object',
+    'source', or 'operator'. Document FTS searches the _searchText index
+    (#125) which concatenates title+summary+topics.
 
     Note: timeout_ms is checked AFTER the query completes (post-hoc).
     A slow query still consumes DB resources — this is a soft guard,
@@ -285,7 +285,7 @@ def run_structural_query(
         cypher = (
             f"MATCH (n:{label_str}) "
             f"WHERE {where_clause} "
-            f"RETURN n.id, n.{kind_field}, n.{kind_field} "
+            f"RETURN n.id "
             f"LIMIT $limit"
         )
         params["limit"] = limit

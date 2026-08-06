@@ -379,11 +379,25 @@ class FalkorProjection(
                     logging.getLogger(__name__).warning(
                         "Failed to create index on n.%s: %s", prop, e)
 
+        # ── Document range indexes (#125 — structural queries filter by kind) ──
+        for prop in ("id", "documentKind"):
+            try:
+                self.g.query(f"CREATE INDEX FOR (n:Document) ON (n.{prop})")
+            except Exception as e:
+                msg = str(e).lower()
+                if "already indexed" in msg or "already exists" in msg:
+                    pass
+                else:
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        "Failed to create index on Document.%s: %s", prop, e)
+
         # ── Full-text & vector indexes require FalkorDB 4.x+ (#7779) ──
         _ver = getattr(self, '_falkordb_version', None)
         if _ver is None or _ver[0] >= 4:
             # ── Full-text indexes ──
-            for label, field in [("Point", "content"), ("Event", "subject"), ("Subject", "name")]:
+            for label, field in [("Point", "content"), ("Event", "subject"), ("Subject", "name"),
+                                 ("Document", "_searchText")]:  # #125 Document FTS
                 try:
                     self.g.query(f"CALL db.idx.fulltext.createNodeIndex('{label}', '{field}')")
                 except Exception as e:
@@ -416,6 +430,19 @@ class FalkorProjection(
             logging.getLogger(__name__).info(
                 "Skipping FTS and vector indexes: FalkorDB %s < 4.x",
                 '.'.join(map(str, _ver)))
+
+    def backfill_document_search_text(self) -> int:
+        """#125: set _searchText=title on Documents missing it (idempotent).
+
+        Covers pre-existing Documents created before the capture-fields change.
+        Returns the number of Documents backfilled.
+        """
+        rows = self.g.query(
+            "MATCH (d:Document) WHERE d._searchText IS NULL "
+            "SET d._searchText = coalesce(d.title, '') "
+            "RETURN count(d)"
+        ).result_set
+        return rows[0][0] if rows else 0
 
     def close(self) -> None:
         self.db.close()
