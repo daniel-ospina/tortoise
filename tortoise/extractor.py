@@ -178,7 +178,6 @@ class MockExtractor:
 
     def run(self, transcript: str, source_id: str, api: EventAPI,
             *, multi_source: bool = False) -> None:
-        context = f"conversation:{source_id}"
         if multi_source:
             # Multi-source mode: claim extraction → embedding pre-filter → cue-word gate typing
             pids = []
@@ -187,7 +186,9 @@ class MockExtractor:
                     continue
                 prov = provenance(source_id, span, quote=text, speaker=speaker,
                                   extracted_by=self.version)
-                pid = api.add_point(content=text, context=context, provenance=prov)
+                # P1 #49: context is deprecated — use extractedFrom for provenance
+                pid = api.add_point(content=text, context=None, provenance=prov,
+                                    extractedFrom=source_id)
                 pids.append((pid, text.lower(), prov))
             
             # Use embedding pre-filter if available
@@ -221,7 +222,7 @@ class MockExtractor:
                         elif _has_cue(ti_clean, _REFUTE_SINGLE_RE, _REFUTE_PHRASES) or _has_cue(tj_clean, _REFUTE_SINGLE_RE, _REFUTE_PHRASES):
                             gate = "NAND"
                         if gate:
-                            api.add_operator(gate, inputs=[pi, pj], context=context, provenance=pvi)
+                            api.add_operator(gate, inputs=[pi, pj], context=None, provenance=pvi)
                         elif (pi, pj) in matched_pairs:
                             # Semantic agreement: similar claims from different sources = IMPL
                             # But require shared noun phrase to avoid weak thematic connections
@@ -239,7 +240,7 @@ class MockExtractor:
                                         'more','less','very','also','just','only','now','still','already'}
                             shared_content = shared - stopwords
                             if len(shared_content) >= 3:
-                                api.add_operator("IMPL", inputs=[pi, pj], context=context, provenance=pvi)
+                                api.add_operator("IMPL", inputs=[pi, pj], context=None, provenance=pvi)
             except Exception:
                 # Fallback: cue-word only all-pairs (noisy but works)
                 # (catches ImportError for missing dependencies AND runtime errors
@@ -256,14 +257,16 @@ class MockExtractor:
                         elif _has_cue(ti_clean, _REFUTE_SINGLE_RE, _REFUTE_PHRASES) or _has_cue(tj_clean, _REFUTE_SINGLE_RE, _REFUTE_PHRASES):
                             gate = "NAND"
                         if gate:
-                            api.add_operator(gate, inputs=[pi, pj], context=context, provenance=pvi)
+                            api.add_operator(gate, inputs=[pi, pj], context=None, provenance=pvi)
         else:
             # Sequential mode (original): only connect consecutive utterances
             prev_pid = None
             for speaker, text, span in _utterances(transcript):
                 prov = provenance(source_id, span, quote=text, speaker=speaker,
                                   extracted_by=self.version)
-                pid = api.add_point(content=text, context=context, provenance=prov)
+                # P1 #49: context is deprecated — use extractedFrom for provenance
+                pid = api.add_point(content=text, context=None, provenance=prov,
+                                    extractedFrom=source_id)
                 low = _PUNC.sub('', f" {text.lower()} ")
                 gate = None
                 if _has_cue(low, _SUPPORT_SINGLE_RE, _SUPPORT_PHRASES):
@@ -271,7 +274,7 @@ class MockExtractor:
                 elif _has_cue(low, _REFUTE_SINGLE_RE, _REFUTE_PHRASES):
                     gate = "NAND"
                 if gate and prev_pid is not None:
-                    api.add_operator(gate, inputs=[prev_pid, pid], context=context,
+                    api.add_operator(gate, inputs=[prev_pid, pid], context=None,
                                      provenance=prov)
                 prev_pid = pid
 
@@ -671,12 +674,11 @@ class LLMExtractor:
         segs = list(_utterances(transcript))
         if max_utterances:  # exploration cap (whole-transcript relations don't scale yet)
             segs = segs[:max_utterances]
-        context = f"conversation:{source_id}"
 
         # Deterministic 1:1 utterance→point. The segmenter owns identity + provenance;
         # the model only supplies cleaned content, with the raw utterance as fallback,
         # so a weak point model can neither drop points nor corrupt grounding.
-        cleaned = self.points.run([s[1] for s in segs], context)
+        cleaned = self.points.run([s[1] for s in segs], f"conversation:{source_id}")
         ids, contents = [], []
         for i, (speaker, text, span) in enumerate(segs):
             c = cleaned.get(i)
@@ -684,9 +686,10 @@ class LLMExtractor:
             contents.append(content)
             prov = provenance(source_id, span, quote=text, speaker=speaker,
                               extracted_by=self.version)
-            ids.append(api.add_point(content, context, prov))
+            # P1 #49: context is deprecated — use extractedFrom for provenance
+            ids.append(api.add_point(content, "", prov, extractedFrom=source_id))
 
-        for r in self.relations.run(contents, context, multi_source=multi_source):
+        for r in self.relations.run(contents, f"conversation:{source_id}", multi_source=multi_source):
             s, d = r.get("src"), r.get("dst")
             if s is None or d is None or not (0 <= s < len(ids)) or not (0 <= d < len(ids)):
                 continue
@@ -694,7 +697,7 @@ class LLMExtractor:
             speaker, text, span = segs[d]
             prov = provenance(source_id, span, quote=text, speaker=speaker,
                               extracted_by=self.version)
-            api.add_operator(r["op_type"], [ids[s], ids[d]], context, prov)
+            api.add_operator(r["op_type"], [ids[s], ids[d]], "", prov)
 
     def _run_document(self, sections, source_id, api, *,
                       max_utterances: int = 0, max_points_per_batch: int = 40,
@@ -715,7 +718,6 @@ class LLMExtractor:
                 pass  # ponytail: use defaults if loader fails
 
         doc_stage = _DocumentPointStage(self.points.model, point_kinds=point_kinds)
-        context = f"document:{source_id}"
         all_point_ids: list[str] = []
         all_contents: list[str] = []
         seen_kinds: set[str] = set()
@@ -723,7 +725,7 @@ class LLMExtractor:
 
         for title, body, span in sections:
             try:
-                points_data = doc_stage.run(title, body, context)
+                points_data = doc_stage.run(title, body, f"document:{source_id}")
             except Exception:
                 if skip_on_failure:
                     failed.append(title)
@@ -736,8 +738,9 @@ class LLMExtractor:
                                   speaker="document", extracted_by=self.version)
                 pk = pd.get("pointKind", "statement")
                 seen_kinds.add(pk)
+                # P1 #49: context is deprecated — use extractedFrom for provenance
                 pid = api.add_point(
-                    pd["content"], context, prov,
+                    pd["content"], "", prov,
                     pointKind=pk,
                     aboutEntities=pd["aboutEntities"],
                     confidence=pd["confidence"],
@@ -760,7 +763,7 @@ class LLMExtractor:
         for batch_start in range(0, len(all_point_ids), max_points_per_batch):
             batch_ids = all_point_ids[batch_start:batch_start + max_points_per_batch]
             batch_contents = all_contents[batch_start:batch_start + max_points_per_batch]
-            for r in rel_stage.run(batch_contents, context):
+            for r in rel_stage.run(batch_contents, f"document:{source_id}"):
                 s, d = r.get("src"), r.get("dst")
                 if s is None or d is None:
                     continue
@@ -781,7 +784,7 @@ class LLMExtractor:
                     api.add_operator(
                         r["op_type"],
                         [all_point_ids[pair[0]], all_point_ids[pair[1]]],
-                        context, provenance(source_id, None, quote="",
+                        "", provenance(source_id, None, quote="",
                                            speaker="document",
                                            extracted_by=self.version),
                     )

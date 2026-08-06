@@ -103,6 +103,10 @@ class TortoiseSDK:
         self._evidence: dict[str, tuple[float, float]] = {}
         self._registry_g = None
         self._audit_logger = None
+        # P1 transitional: in-session map of context → point IDs created in this session
+        # (context is NOT persisted in P1; this map preserves create-then-query semantics)
+        # Shared across calls from same SDK instance (MCP server holds ONE module-level SDK).
+        self._session_context_map: dict[str, set[str]] = {}
 
     def _get_proj(self) -> FalkorProjection:
         if self._proj is None:
@@ -196,6 +200,18 @@ class TortoiseSDK:
 
     # ── Core CRUD ─────────────────────────────────────────────────
 
+    @staticmethod
+    def _deprecation_warning_context(replacement: str = "") -> str:
+        """Build a deprecation warning message for the 'context' parameter."""
+        msg = (
+            "context is deprecated. "
+            "Use anchors=[...] for EP scoping, pointKind for filtering, "
+            "extractedFrom for provenance. See #49."
+        )
+        if replacement:
+            msg += f" {replacement}"
+        return msg
+
     def create_point(self, kind: str, content: str, **props) -> dict:
         """Create a new Point node. Raises ValueError if kind is invalid.
 
@@ -205,6 +221,12 @@ class TortoiseSDK:
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc).isoformat()
         proj = self._get_proj()
+
+        # P1 #49: pop context from props — NOT written to node, recorded in session map
+        context_val = props.pop("context", None)
+        deprecation_warnings: list[str] = []
+        if context_val is not None:
+            deprecation_warnings.append(self._deprecation_warning_context())
 
         # Calibration: pop credibility before storing as node property
         credibility = props.pop("credibility", None)
@@ -216,23 +238,14 @@ class TortoiseSDK:
         dedup = props.pop("dedup", False)
         if dedup:
             ch = _content_hash(content)
-            ctx = props.get("context")
-            if ctx:
-                existing = proj.g.query(
-                    "MATCH (n:Point {content_hash:$ch}) "
-                    "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
-                    "AND n.context = $ctx "
-                    "RETURN n.id",
-                    params={"ch": ch, "ctx": ctx},
-                ).result_set
-            else:
-                existing = proj.g.query(
-                    "MATCH (n:Point {content_hash:$ch}) "
-                    "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
-                    "AND n.context IS NULL "
-                    "RETURN n.id",
-                    params={"ch": ch},
-                ).result_set
+            # P1 #49: dedup by content_hash + pointKind (NOT context, which is no longer written)
+            existing = proj.g.query(
+                "MATCH (n:Point {content_hash:$ch}) "
+                "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+                "AND n.pointKind = $kind "
+                "RETURN n.id",
+                params={"ch": ch, "kind": kind},
+            ).result_set
             if existing:
                 pid = existing[0][0]
                 props["updatedAt"] = now
@@ -246,7 +259,10 @@ class TortoiseSDK:
                         credibility, pid)
                 if props:
                     self.update_point(pid, **props)
-                return self.get_point(pid)
+                result = self.get_point(pid)
+                if deprecation_warnings:
+                    result["deprecation_warnings"] = deprecation_warnings
+                return result
 
         # Issue #52 — warn when caller passes an explicit non-ULID id
         explicit_id = props.pop("id", None)
@@ -287,6 +303,10 @@ class TortoiseSDK:
         # P1-1: Ontology v2.1 — link Point → Source via extractedFrom
         if props.get("extractedFrom"):
             proj._link_source(pid, props["extractedFrom"])
+        # P1 #49: record context → point ID in session map (preserves create-then-query semantics)
+        if context_val is not None:
+            self._session_context_map.setdefault(context_val, set()).add(pid)
+
         # Apply credibility baseline (only on new creation, not dedup)
         if credibility is not None:
             tier_map = {
@@ -298,7 +318,10 @@ class TortoiseSDK:
             }
             alpha, beta = tier_map.get(credibility, (1, 1))
             self.set_point_baseline(pid, alpha, beta)
-        return self.get_point(pid)
+        result = self.get_point(pid)
+        if deprecation_warnings:
+            result["deprecation_warnings"] = deprecation_warnings
+        return result
 
     def create_or_update_point(self, kind: str, content: str, **props) -> dict:
         """Idempotent create/update — matches by content hash."""
@@ -361,6 +384,12 @@ class TortoiseSDK:
         """
         proj = self._get_proj()
 
+        # P1 #49: context is deprecated — warn and strip if present
+        deprecation_warnings: list[str] = []
+        if "context" in props:
+            deprecation_warnings.append(self._deprecation_warning_context())
+            del props["context"]
+
         # Validate status if present
         if 'status' in props and props['status'] not in POINT_STATUS_VALUES:
             raise ValueError(
@@ -388,7 +417,10 @@ class TortoiseSDK:
                     "MATCH (n:Point {id:$id}) SET n += $props",
                     params={"id": id, "props": {key: val}},
                 )
-        return self.get_point(id)
+        result = self.get_point(id)
+        if deprecation_warnings:
+            result["deprecation_warnings"] = deprecation_warnings
+        return result
 
     def delete_point(self, id: str) -> bool:
         """Delete a Point and its relationships. Returns True if found."""
@@ -518,7 +550,7 @@ class TortoiseSDK:
         Semantic-epistemic edge model (#7801):
           - op_type: IMPL or NAND (epistemic mechanism)
           - label: domain verb — "addresses", "hasPart", "opposes" (semantic layer)
-          - context: namespace context stored on the operator
+          - context: DEPRECATED — accepted but NOT written (P1 #49). Recorded in session map.
           - Operator carries the label; IMPL/NAND edges carry confidence via EP.
         """
         if op_type not in ("IMPL", "NAND", "composedOf", "decomposesInto", "contains", "wraps"):
@@ -528,6 +560,12 @@ class TortoiseSDK:
         pid = ulid()
         inputs = [source_id] + list(target_ids)
         proj = self._get_proj()
+
+        # P1 #49: context is deprecated — record in session map, NOT written to node
+        deprecation_warnings: list[str] = []
+        if context is not None:
+            deprecation_warnings.append(self._deprecation_warning_context())
+            self._session_context_map.setdefault(context, set()).add(pid)
 
         # Validate all source/target Points exist (fail loudly, not silently)
         existing = proj.g.query(
@@ -539,15 +577,12 @@ class TortoiseSDK:
         if missing:
             raise ValueError(f"Cannot create operator: Points {missing} do not exist")
 
-        # Build operator node with label/context properties
+        # Build operator node with label property (context is NOT written — P1 #49)
         extra_props = []
         params = {"id": pid, "op": op_type}
         if label:
             extra_props.append("label:$label")
             params["label"] = label
-        if context:
-            extra_props.append("context:$context")
-            params["context"] = context
         props_clause = ", " + ", ".join(extra_props) if extra_props else ""
         proj.g.query(
             f"CREATE (o:Point {{id:$id, is_operator:true, op_type:$op{props_clause}}})",
@@ -566,7 +601,10 @@ class TortoiseSDK:
             "MATCH (s:Point {id:$sid}) SET s.status = 'live'",
             params={"sid": source_id},
         )
-        return self.get_point(pid)
+        result = self.get_point(pid)
+        if deprecation_warnings:
+            result["deprecation_warnings"] = deprecation_warnings
+        return result
 
     def annotate_operator(self, id: str, bias: float, precision: float,
                           consistency: float, directness: float) -> dict:
@@ -646,6 +684,9 @@ class TortoiseSDK:
               **filters) -> list[dict]:
         """Query points by pointKind, context, and/or custom property filters.
 
+        P1 #49: context queries use UNION semantics — graph MATCH results
+        UNION session-context-map points (created this session, context not persisted).
+
         For confidence-aware queries, use tortoise_fts_query() with query=None
         for full-scan mode with EP annotation.
         """
@@ -675,11 +716,38 @@ class TortoiseSDK:
             f"MATCH (n:Point) WHERE {where} RETURN properties(n)",
             params=params,
         ).result_set
-        return [r[0] for r in rows]
+        results = [r[0] for r in rows]
+
+        # P1 #49: UNION with session context map (preserves create-then-query semantics)
+        if context and context in self._session_context_map:
+            seen_ids = {r.get("id") for r in results}
+            for pid in self._session_context_map[context]:
+                if pid not in seen_ids:
+                    pt = self.get_point(pid)
+                    if pt:
+                        # Apply kind filter if present
+                        if kind is not None:
+                            expanded = self._expand_kind(kind)
+                            if pt.get("pointKind") not in expanded:
+                                continue
+                        # Apply custom property filters
+                        skip = False
+                        for key, val in filters.items():
+                            if pt.get(key) != val:
+                                skip = True
+                                break
+                        if not skip:
+                            results.append(pt)
+                            seen_ids.add(pid)
+
+        return results
 
     def paginated_query(self, kind: str | None = None, context: str | None = None,
                          skip: int = 0, limit: int = 20, **filters) -> dict:
-        """Query points with pagination. Returns {results, total, hasMore}."""
+        """Query points with pagination. Returns {results, total, hasMore}.
+
+        P1 #49: context queries use UNION semantics with session context map.
+        """
         proj = self._get_proj()
         clauses = ["(n.is_operator IS NULL OR n.is_operator = false)"]
         params: dict[str, Any] = {}
@@ -712,6 +780,33 @@ class TortoiseSDK:
             params={**params, "skip": skip, "limit": limit},
         ).result_set
         results = [r[0] for r in rows]
+
+        # P1 #49: UNION with session context map
+        if context and context in self._session_context_map:
+            seen_ids = {r.get("id") for r in results}
+            session_extra: list[dict] = []
+            for pid in self._session_context_map[context]:
+                if pid not in seen_ids:
+                    pt = self.get_point(pid)
+                    if pt:
+                        if kind is not None:
+                            expanded_kinds = self._expand_kind(kind)
+                            if pt.get("pointKind") not in expanded_kinds:
+                                continue
+                        skip_filter = False
+                        for key, val in filters.items():
+                            if pt.get(key) != val:
+                                skip_filter = True
+                                break
+                        if not skip_filter:
+                            session_extra.append(pt)
+                            seen_ids.add(pid)
+            total += len(session_extra)
+            # Merge: session points first (newest), then graph results
+            results = session_extra + results
+            # Re-apply pagination to merged results
+            results = results[skip:skip + limit]
+
         return {"results": results, "total": total, "hasMore": skip + limit < total}
 
     def get_point(self, id: str) -> dict:
@@ -848,22 +943,28 @@ class TortoiseSDK:
         return violations
 
     def summarize_structure(self) -> dict:
-        """Count points per Gate (by context). Returns {gate: count, ..., total}."""
+        """Count points per Gate (by pointKind). Returns {gate: count, ..., total}.
+
+        P1 #49: re-keyed from context strings (tortoise-wf-gate0..4) to pointKind
+        (jobToBeDone, useCase, userJourney, workflow, requirement). Pre-existing
+        experimental points that had context but no matching pointKind may show 0
+        — expected under the #49 re-home (pointKind is the target vocabulary).
+        """
         proj = self._get_proj()
         gates = [
-            ("gate0_jtbds", "tortoise-wf-gate0"),
-            ("gate1_use_cases", "tortoise-wf-gate1"),
-            ("gate2_user_journeys", "tortoise-wf-gate2"),
-            ("gate3_workflows", "tortoise-wf-gate3"),
-            ("gate4_requirements", "tortoise-wf-gate4"),
+            ("gate0_jtbds", "jobToBeDone"),
+            ("gate1_use_cases", "useCase"),
+            ("gate2_user_journeys", "userJourney"),
+            ("gate3_workflows", "workflow"),
+            ("gate4_requirements", "requirement"),
         ]
         result: dict[str, int] = {}
-        for key, ctx in gates:
+        for key, kind in gates:
             result[key] = proj.g.query(
-                "MATCH (n:Point {context:$c}) "
+                "MATCH (n:Point {pointKind:$k}) "
                 "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
                 "RETURN count(n)",
-                params={"c": ctx},
+                params={"k": kind},
             ).result_set[0][0]
         result["total"] = sum(result.values())
         return result
@@ -875,10 +976,71 @@ class TortoiseSDK:
         from .taxonomy import taxonomy as _taxonomy
         return _taxonomy(self._get_proj())
 
+    def list_pointkinds(self) -> list[dict]:
+        """All pointKinds present in the graph with counts. Returns [{kind, count, pack}]."""
+        proj = self._get_proj()
+        rows = proj.g.query(
+            "MATCH (n:Point) "
+            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "AND n.pointKind IS NOT NULL "
+            "RETURN n.pointKind, count(n) ORDER BY count(n) DESC"
+        ).result_set
+        result: list[dict] = []
+        for row in rows:
+            kind = row[0]
+            count = row[1]
+            pack = kind.split(":", 1)[0] if ":" in kind else ""
+            result.append({"kind": kind, "count": count, "pack": pack})
+        return result
+
+    def list_sources(self) -> list[dict]:
+        """All Sources with point counts. Returns [{url, sourceKind, points}]."""
+        proj = self._get_proj()
+        rows = proj.g.query(
+            "MATCH (s:Source) "
+            "OPTIONAL MATCH (p:Point)-[:extractedFrom]->(s) "
+            "RETURN s.url, s.sourceKind, count(p) AS points "
+            "ORDER BY points DESC"
+        ).result_set
+        return [
+            {"url": row[0], "sourceKind": row[1], "points": row[2]}
+            for row in rows
+        ]
+
+    def list_namespaces(self) -> list[dict]:
+        """Installed pack namespaces with kind counts. Returns [{namespace, name, kind_count}]."""
+        registry = _get_kind_expander()
+        packs = registry.list_packs()
+        return [
+            {
+                "namespace": p["namespace"],
+                "name": p["name"],
+                "kind_count": sum(p["kind_counts"].values()),
+            }
+            for p in packs
+        ]
+
     def list_domains(self) -> list[dict]:
-        """Active domains with entity counts. Returns [{context, count}] ordered by count DESC."""
+        """Active domains with entity counts. Returns [{context, count}] ordered by count DESC.
+
+        P1 #49: UNIONs graph-based contexts with the in-session context map so
+        newly-created (context-not-persisted) points are visible via the
+        deprecated API during the transition.
+        """
         from .taxonomy import list_domains as _list_domains
-        return _list_domains(self._get_proj())
+        result = _list_domains(self._get_proj())
+        # P1 #49: merge in-session contexts (context not persisted in P1)
+        if self._session_context_map:
+            by_ctx = {r["context"]: r["count"] for r in result}
+            for ctx, ids in self._session_context_map.items():
+                if ctx is None:
+                    continue
+                by_ctx[ctx] = by_ctx.get(ctx, 0) + len(ids)
+            result = sorted(
+                ({"context": c, "count": n} for c, n in by_ctx.items()),
+                key=lambda r: r["count"], reverse=True,
+            )
+        return result
 
     def list_topics(self, entity_id: str) -> dict:
         """entityProfile lite for an entity. Returns {id, pointKind, context, neighbors, neighborCounts}."""
@@ -892,7 +1054,7 @@ class TortoiseSDK:
         return [self.create_point(**p) for p in points_list]
 
     def file_decision(self, options: list[str], evidence: list[str],
-                      choice: int, context: str) -> dict:
+                      choice: int, context: str | None = None) -> dict:
         """File a simple decision directly to the graph — no EP, no calibration,
         no research cycles. Creates decision + options + evidence + IMPL edges
         atomically. For low-stakes decisions where the answer is clear (#133).
@@ -1080,7 +1242,24 @@ class TortoiseSDK:
             self._ep = TortoiseEP(self._get_proj())
         return self._ep
 
+    def _select_subgraph(self, anchors: list[str], max_hops: int = 1,
+                         rel_filter: str = "IMPL|NAND",
+                         direction: str = "both") -> list[str]:
+        """BFS subgraph selection from anchor Points to collect operator IDs.
+
+        Delegates to the shared _bfs_select_operators in tortoise.analyze.
+        """
+        from .analyze import _bfs_select_operators
+        proj = self._get_proj()
+        result = _bfs_select_operators(proj, anchors, max_hops=max_hops,
+                                        rel_filter=rel_filter, direction=direction)
+        return list(result)
+
     def compute_confidence(self, factors=None, evidence=None, context=None,
+                           anchors: list[str] | None = None,
+                           max_hops: int = 1,
+                           rel_filter: str = "IMPL|NAND",
+                           direction: str = "both",
                            require_calibration: bool = False,
                            recency_decay: float | None = None) -> dict:
         """Compute confidence via EP belief propagation. Returns {iterations, converged, confidences}.
@@ -1089,9 +1268,15 @@ class TortoiseSDK:
             factors: operator IDs (list[str]) or factor tuples. If None, auto-extracts.
             evidence: optional {claim_id: (alpha, beta)} priors.
             context: if set, scopes auto-extraction to operators connecting Points in this context.
+            anchors: list of Point IDs for BFS subgraph selection (new; preferred over context).
+            max_hops: BFS expansion depth when using anchors (default 1).
+            rel_filter: edge types for BFS — "IMPL", "NAND", or "IMPL|NAND" (default).
+            direction: IMPL edge traversal direction — "incoming", "outgoing", or "both" (default).
             require_calibration: if True, raises CalibrationError when evidence points are uncalibrated.
             recency_decay: optional recency decay factor (default 0.95 from TORTOISE_EP_RECENCY_DECAY).
                 T0 sources exempt; lower tiers get gentle decay. 1.0 = no decay.
+
+        Precedence: factors > anchors > context > auto-extract-all.
         """
         proj = self._get_proj()
         ep = self._get_ep()
@@ -1125,14 +1310,38 @@ class TortoiseSDK:
                 raise CalibrationError(msg)
         if factors is not None:
             operator_ids = [f if isinstance(f, str) else f[0] for f in factors]
+        elif anchors is not None:
+            # NEW: BFS subgraph selection from anchor points
+            operator_ids = self._select_subgraph(anchors, max_hops=max_hops,
+                                                  rel_filter=rel_filter,
+                                                  direction=direction)
         elif context is not None:
-            # Scoped extraction: only operators connecting nodes in this context
+            # P1 #49: UNION graph-context points + session map as anchors for BFS
+            point_ids = list(self._session_context_map.get(context, set()))
             rows = proj.g.query(
+                "MATCH (n:Point {context:$ctx}) "
+                "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+                "RETURN n.id",
+                params={"ctx": context},
+            ).result_set
+            for r in rows:
+                if r[0] not in point_ids:
+                    point_ids.append(r[0])
+            if point_ids:
+                operator_ids = self._select_subgraph(
+                    point_ids, max_hops=1,
+                    rel_filter="IMPL|NAND", direction="both",
+                )
+            else:
+                operator_ids = []
+            # Still scope legacy operator extraction for backward compat
+            legacy_rows = proj.g.query(
                 "MATCH (op:Point {is_operator:true})-[r:IMPL|NAND]->(c:Point {context:$ctx}) "
                 "RETURN distinct op.id",
                 params={"ctx": context},
             ).result_set
-            operator_ids = [r[0] for r in rows]
+            legacy_ids = [r[0] for r in legacy_rows]
+            operator_ids = list(set(operator_ids + legacy_ids))
         else:
             factors_data, _ = proj.extract_svbp_factors()
             operator_ids = [f[0] for f in factors_data]
@@ -1180,6 +1389,8 @@ class TortoiseSDK:
         weight via recency_decay (default 0.95 from TORTOISE_EP_RECENCY_DECAY env var).
         T0 sources (gold/meta-analysis) are exempt from decay. Lower tiers get gentle
         decay: effective_count *= recency_decay ** years_since_ingested.
+
+        P1 #49: when context is provided, also includes session-map points.
         """
         import os
         from datetime import datetime, timezone
@@ -1192,8 +1403,19 @@ class TortoiseSDK:
         where = "WHERE s.credibilityTier IS NOT NULL AND (n.baseline_set IS NULL OR n.baseline_set = false)"
         params = {}
         if context:
-            where += " AND n.context = $ctx"
-            params["ctx"] = context
+            # Include both graph-context points and session-map points
+            session_ids = list(self._session_context_map.get(context, set()))
+            if session_ids:
+                where += " AND (n.context = $ctx"
+                params["ctx"] = context
+                # Add session-map point IDs
+                for i, sid in enumerate(session_ids):
+                    where += f" OR n.id = $sid_{i}"
+                    params[f"sid_{i}"] = sid
+                where += ")"
+            else:
+                where += " AND n.context = $ctx"
+                params["ctx"] = context
         
         rows = proj.g.query(
             f"MATCH (n:Point)-[:extractedFrom]->(s:Source) {where} "
@@ -1242,6 +1464,8 @@ class TortoiseSDK:
         
         Checks baseline_set flag on non-operator Points. For uncalibrated
         points, traverses extractedFrom→Source to check for inherited credibilityTier.
+
+        P1 #49: when context is provided, also includes session-map points.
         """
         proj = self._get_proj()
         where = "WHERE (n.is_operator IS NULL OR n.is_operator = false)"
@@ -1278,6 +1502,34 @@ class TortoiseSDK:
                         f"or recreate with credibility kwarg"
                     )
             results.append(item)
+
+        # P1 #49: include session-map points in the summary
+        if context and context in self._session_context_map:
+            for pid in self._session_context_map[context]:
+                pt = self.get_point(pid)
+                if not pt:
+                    continue
+                calibrated = pt.get("baseline_set") in (True, "true")
+                item = {
+                    "id": pid,
+                    "content": pt.get("content"),
+                    "pointKind": pt.get("pointKind"),
+                    "calibrated": calibrated,
+                }
+                if not calibrated:
+                    src_url = pt.get("extractedFrom")
+                    if src_url:
+                        item["suggestion"] = (
+                            f"Point created in-session with extractedFrom={src_url}. "
+                            f"Call set_point_baseline('{pid}', alpha, beta) "
+                            f"or set credibilityTier on the Source."
+                        )
+                    else:
+                        item["suggestion"] = (
+                            f"Call set_point_baseline('{pid}', alpha, beta) "
+                            f"or recreate with credibility kwarg"
+                        )
+                results.append(item)
         
         # Deduplicate: keep one entry per Point ID, prefer Source-based suggestions
         seen = {}
@@ -1288,7 +1540,6 @@ class TortoiseSDK:
                 seen[pid] = item
                 deduped.append(item)
             elif "Source" in str(item.get("suggestion", "")) and "Source" not in str(seen[pid].get("suggestion", "")):
-                # Replace in deduped list with the better Source-aware suggestion
                 for i, d in enumerate(deduped):
                     if d["id"] == pid:
                         deduped[i] = item
@@ -1415,20 +1666,29 @@ class TortoiseSDK:
         props: dict[str, Any] = {"authoredBy": agent_name}
         if topic:
             props["topic"] = topic
-        context = wing or f"diary_{agent_name}"
-        return self.create_point("diary", entry, context=context, **props)
+        # P1 #49: use wing property only — context is deprecated
+        if wing:
+            props["wing"] = wing
+        return self.create_point("diary", entry, **props)
 
     def diary_read(self, agent_name: str, last_n: int = 10,
                    wing: str | None = None) -> list[dict]:
         """Read recent diary entries for an agent, newest first."""
-        context = wing or f"diary_{agent_name}"
         proj = self._get_proj()
-        rows = proj.g.query(
-            "MATCH (n:Point {pointKind:'diary', authoredBy:$agent, context:$ctx}) "
-            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
-            "RETURN properties(n) ORDER BY n.createdAt DESC LIMIT $lim",
-            params={"agent": agent_name, "ctx": context, "lim": last_n},
-        ).result_set
+        if wing:
+            rows = proj.g.query(
+                "MATCH (n:Point {pointKind:'diary', authoredBy:$agent, wing:$wing}) "
+                "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+                "RETURN properties(n) ORDER BY n.createdAt DESC LIMIT $lim",
+                params={"agent": agent_name, "wing": wing, "lim": last_n},
+            ).result_set
+        else:
+            rows = proj.g.query(
+                "MATCH (n:Point {pointKind:'diary', authoredBy:$agent}) "
+                "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+                "RETURN properties(n) ORDER BY n.createdAt DESC LIMIT $lim",
+                params={"agent": agent_name, "lim": last_n},
+            ).result_set
         return [r[0] for r in rows]
 
     def status(self) -> dict:
@@ -1793,6 +2053,37 @@ class TortoiseSDK:
                     "traversal_path %r could not be resolved to a pack relation",
                     traversal_path,
                 )
+
+        # 5d. P1 #49: union in-session context-map points (context no longer
+        # persisted — the session map preserves create-then-query for FTS too).
+        if context is not None and self._session_context_map:
+            in_session = self._session_context_map.get(context, set())
+            if in_session:
+                if kind:
+                    # Respect kind filter: only include in-session points matching
+                    # the expanded kind set. Use IN with placeholders (mirrors
+                    # step 5) — single-kind `=` would drop in-session points when
+                    # _expand_kind returns multiple kinds (e.g. WorkItem).
+                    try:
+                        if len(expanded_kinds) == 1:
+                            kind_rows = graph.query(
+                                f"MATCH (n:{label}) WHERE n.{id_field} IN $ids AND n.{kind_field} = $kind RETURN n.{id_field}",
+                                params={"ids": list(in_session), "kind": expanded_kinds[0]},
+                            ).result_set
+                        else:
+                            placeholders = [f"$kind_{i}" for i in range(len(expanded_kinds))]
+                            params_dict: dict[str, Any] = {"ids": list(in_session)}
+                            for i, k in enumerate(expanded_kinds):
+                                params_dict[f"kind_{i}"] = k
+                            kind_rows = graph.query(
+                                f"MATCH (n:{label}) WHERE n.{id_field} IN $ids AND n.{kind_field} IN [{', '.join(placeholders)}] RETURN n.{id_field}",
+                                params=params_dict,
+                            ).result_set
+                        in_session = {row[0] for row in kind_rows}
+                    except Exception:
+                        pass  # Pass-through on error
+                # Prepend in-session points (they have no persisted context to match)
+                result_ids = [pid for pid in in_session if pid not in result_ids] + result_ids
 
         # Truncate AFTER filtering
         result_ids = result_ids[:limit]
@@ -2794,6 +3085,21 @@ class TortoiseSDK:
             params={"pid": point_id},
         )
         return [{"source": dict(row[0]), "entity": dict(row[1]), "labels": list(row[2])} for row in r.result_set]
+
+    def link_source_to_entity(self, source_url: str, entity_id: str, entity_label: str) -> None:
+        """Create Source → Entity references edge (Ontology v3.0 §3.2-3.3).
+
+        Args:
+            source_url: the Source node's url (must exist — created by _link_source)
+            entity_id: the Document/Event/Object node id the source references
+            entity_label: the entity label (Document|Event|Object) for the MATCH
+
+        Raises:
+            ValueError: if entity_label is not one of Document, Event, Object
+                (Action was dissolved in Ontology v3.0).
+        """
+        proj = self._get_proj()
+        proj.link_source_to_entity(source_url, entity_id, entity_label)
 
     def get_org_structure(self, subject_id: str) -> dict:
         """Return organisational structure: members, roles, sub-teams."""

@@ -57,10 +57,12 @@ class EventAPI:
     def _point(self, content, context, provenance, operator=None) -> dict:
         prov = dict(provenance)
         prov.setdefault("run_id", self.current_run)
+        # P1 #49: context is accepted but NOT stored in the point dict.
+        # The projection version gate (v2) strips context from events.
+        # Context is instead recorded in the SDK's session context map.
         return {
             "id": ulid(),
             "content": content,
-            "context": context,
             "operator": operator,
             "provenance": prov,
             "status": "live",
@@ -110,10 +112,14 @@ class EventAPI:
     def add_point(self, content, context, provenance, *, corrects=None, **fields) -> str:
         p = self._point(content, context, provenance)
         p.update(fields)
-        self._emit("PointAdded", point=p, corrects=corrects)
+        # P1 #49: mark events with projection_version=2 so the projection gate
+        # (Task 1.6) knows to strip context from v2 events.
+        self._emit("PointAdded", point=p, corrects=corrects, projection_version=2)
         # Auto-compute grounding when a resolution event seeds the a-vector (#6704).
+        # P1 #49: check pointKind, not context (context is deprecated).
         # ponytail: duck-typed; add a proper protocol if more backends gain grounding.
-        if context == "resolution-event" and self.projection is not None:
+        pk = p.get("pointKind") or fields.get("pointKind")
+        if pk == "resolution-event" and self.projection is not None:
             if hasattr(self.projection, "compute_grounding"):
                 self.projection.compute_grounding()
         return p["id"]
@@ -127,7 +133,7 @@ class EventAPI:
         label = content or f"{op_type}({', '.join(_inputs)})"
         p = self._point(label, context, provenance,
                         operator={"op_type": op_type, "inputs": _inputs})
-        self._emit("OperatorAdded", point=p, corrects=corrects)
+        self._emit("OperatorAdded", point=p, corrects=corrects, projection_version=2)
 
         # Gate 4: incrementally update SVBP on the new operator
         # ponytail: only FalkorProjection supports SVBP; InMemoryProjection doesn't.

@@ -40,6 +40,9 @@ def _apply_one(points: dict[str, dict], ev: dict) -> None:
     t = ev["type"]
     if t in ("PointAdded", "OperatorAdded"):
         p = ev["point"]
+        # Phase 1 stop-writes: strip context from v2+ events (#49)
+        if ev.get("projection_version", 0) >= 2:
+            p.pop("context", None)
         points[p["id"]] = p
         # Flatten speaker from point's provenance into node data
         prov = p.get("provenance", {})
@@ -50,7 +53,8 @@ def _apply_one(points: dict[str, dict], ev: dict) -> None:
         if p:
             if ev.get("new_content") is not None:
                 p["content"] = ev["new_content"]
-            if ev.get("new_context") is not None:
+            # Phase 1: discard new_context for v2+ events (#49)
+            if ev.get("new_context") is not None and ev.get("projection_version", 0) < 2:
                 p["context"] = ev["new_context"]
     elif t == "PointRetracted":
         points.pop(ev["id"], None)
@@ -187,8 +191,15 @@ class FalkorProjection(
         ev = self._norm(event)
         t = ev["type"]
         if t in ("PointAdded", "OperatorAdded"):
-            self._upsert(ev["point"])
+            p = ev["point"]
+            # Phase 1 stop-writes: strip context from v2+ events (#49)
+            if ev.get("projection_version", 0) >= 2:
+                p.pop("context", None)
+            self._upsert(p)
         elif t == "PointRevised":
+            # Phase 1: discard new_context for v2+ events (#49)
+            if ev.get("projection_version", 0) >= 2:
+                ev.pop("new_context", None)
             self._revise_point(ev, set_updated_at=True)
         elif t == "PointRetracted":
             self._delete(ev["id"])
@@ -239,26 +250,38 @@ class FalkorProjection(
             t = ev["type"]
             if t in ("PointAdded", "OperatorAdded"):
                 p = ev["point"]
+                # Phase 1 stop-writes: strip context from v2+ events (#49)
+                if ev.get("projection_version", 0) >= 2:
+                    p.pop("context", None)
                 op = p.get("operator")
                 prov = p.get("provenance", {})
+                # Build SET clauses + params; context is optional (#49)
+                set_clauses = [
+                    "n.content=$content",
+                    "n.is_operator=$isop",
+                    "n.op_type=$opt",
+                    "n.pointKind=coalesce($pk, n.pointKind)",
+                    "n.status=coalesce($st, n.status, 'live')",
+                    "n.confidence=coalesce($cf, n.confidence)",
+                    "n.createdAt=coalesce($ca, n.createdAt, $now)",
+                    "n.updatedAt=$now",
+                ]
+                params = {
+                    "id": p["id"], "content": p["content"],
+                    "isop": bool(op),
+                    "opt": op["op_type"] if op else None,
+                    "pk": p.get("pointKind"),
+                    "st": p.get("status"),
+                    "cf": p.get("confidence"),
+                    "ca": p.get("createdAt") or p.get("created_at"),
+                    "now": _now_iso(),
+                }
+                if "context" in p and p["context"] is not None:
+                    set_clauses.insert(1, "n.context=$context")
+                    params["context"] = p["context"]
                 self.g.query(
-                    "MERGE (n:Point {id:$id}) "
-                    "SET n.content=$content, n.context=$context, "
-                    "    n.is_operator=$isop, n.op_type=$opt, "
-                    "    n.pointKind=coalesce($pk, n.pointKind), "
-                    "    n.status=coalesce($st, n.status, 'live'), "
-                    "    n.confidence=coalesce($cf, n.confidence), "
-                    "    n.createdAt=coalesce($ca, n.createdAt, $now), "
-                    "    n.updatedAt=$now",
-                    params={"id": p["id"], "content": p["content"],
-                            "context": p["context"],
-                            "isop": bool(op),
-                            "opt": op["op_type"] if op else None,
-                            "pk": p.get("pointKind"),
-                            "st": p.get("status"),
-                            "cf": p.get("confidence"),
-                            "ca": p.get("createdAt") or p.get("created_at"),
-                            "now": _now_iso()},
+                    "MERGE (n:Point {id:$id}) SET " + ", ".join(set_clauses),
+                    params=params,
                 )
 
         # Pass 1b: apply revisions + other non-edge events AFTER all nodes exist
@@ -272,6 +295,9 @@ class FalkorProjection(
                 for mid in ev.get("merge_ids", []):
                     self._delete(mid)
             elif t == "PointRevised":
+                # Phase 1: discard new_context for v2+ events (#49)
+                if ev.get("projection_version", 0) >= 2:
+                    ev.pop("new_context", None)
                 self._revise_point(ev)
             elif t == "EventRecorded":
                 self._upsert_event(ev)
@@ -397,8 +423,9 @@ class FalkorProjection(
     def _revise_point(self, ev: dict, set_updated_at: bool = False) -> None:
         """Apply PointRevised event — update content, context, and re-compute embedding."""
         new_content = ev.get("new_content")
+        new_context = ev.get("new_context")
         pid = ev.get("id") or ev["event_id"]
-        params: dict = {"id": pid, "c": new_content, "x": ev.get("new_context")}
+        params: dict = {"id": pid, "c": new_content}
 
         # Re-compute embedding when content changes (even to empty — wipe stale).
         # Always set params["embedding"] so SET overwrites any stale value;
@@ -411,8 +438,11 @@ class FalkorProjection(
             except Exception:
                 params["embedding"] = None  # wipe stale embedding on failure (#19)
 
-        set_clauses = ["n.content = coalesce($c, n.content)",
-                       "n.context = coalesce($x, n.context)"]
+        set_clauses = ["n.content = coalesce($c, n.content)"]
+        # Phase 1: only include context SET when new_context is present (#49)
+        if new_context is not None:
+            set_clauses.append("n.context = coalesce($x, n.context)")
+            params["x"] = new_context
         if "embedding" in params:
             set_clauses.append("n.embedding = $embedding")
         if set_updated_at:

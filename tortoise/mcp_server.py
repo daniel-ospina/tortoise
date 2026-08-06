@@ -70,7 +70,14 @@ def _safe(fn, *args, **kwargs):
             )
         }
     try:
-        return fn(*args, **kwargs)
+        result = fn(*args, **kwargs)
+        # Dual-channel deprecation (#49 §9.6): print deprecation warnings to
+        # stderr (visible in the agent's text stream) in addition to the
+        # result-dict key — MCP clients don't render unknown top-level keys.
+        if isinstance(result, dict) and result.get("deprecation_warnings"):
+            for w in result["deprecation_warnings"]:
+                print(f"[Tortoise DEPRECATED] {w}", file=sys.stderr)
+        return result
     except Exception as e:
         monitoring.record_error()
         msg = str(e)
@@ -125,12 +132,15 @@ def tortoise_query(kind: str | None = None, context: str | None = None,
                    order_by: str | None = None,
                    min_confidence: float | None = None,
                    entity_type: str = "point",
-                   limit: int = 100) -> list[dict]:
+                   limit: int = 100) -> list[dict] | dict:
     """Query points by pointKind, context, and/or property filters.
 
     When text is provided, routes through tortoise_fts_query() for hybrid search.
     When text is None, uses existing structural query (full-scan for context).
     entity_type: 'point' (default), 'event', 'subject', 'document', 'object', 'operator', or 'source'.
+
+    When results are empty and a kind filter was provided, a 'suggestion'
+    key is added to the response with a hint or "did you mean" suggestion.
     """
     filters = _parse(filters)
     if text:
@@ -138,7 +148,14 @@ def tortoise_query(kind: str | None = None, context: str | None = None,
                      entity_type=entity_type, limit=limit,
                      min_confidence=min_confidence or 0.0,
                      order_by=order_by or "relevance")
-    return _safe(sdk.query, kind, context, **(filters or {}))
+    result = _safe(sdk.query, kind, context, **(filters or {}))
+    # If empty results and a kind filter was provided, attach suggestion
+    if isinstance(result, list) and len(result) == 0 and kind is not None:
+        from tortoise.query_suggestions import compute_suggestion
+        suggestion = compute_suggestion(kind)
+        if suggestion:
+            return {"results": result, "suggestion": suggestion}
+    return result
 
 
 @mcp.tool()
@@ -159,8 +176,26 @@ def tortoise_check_structure() -> list[dict]:
 
 @mcp.tool()
 def tortoise_summarize_structure() -> dict:
-    """Count points per Gate (by context). Returns {gateN_*, total}."""
+    """Count points per Gate (by pointKind). Returns {gateN_*, total}."""
     return _safe(sdk.summarize_structure)
+
+
+@mcp.tool()
+def tortoise_list_pointkinds() -> list[dict]:
+    """List all pointKinds present in the graph with counts. What EXISTS."""
+    return _safe(sdk.list_pointkinds)
+
+
+@mcp.tool()
+def tortoise_list_sources() -> list[dict]:
+    """List all Sources with point counts. Where data came FROM."""
+    return _safe(sdk.list_sources)
+
+
+@mcp.tool()
+def tortoise_list_namespaces() -> list[dict]:
+    """List installed pack namespaces."""
+    return _safe(sdk.list_namespaces)
 
 
 @mcp.tool()
@@ -229,16 +264,28 @@ def tortoise_search(query: str | None = None, kind: str | None = None,
 def tortoise_compute_confidence(factors: Any = None,
                     evidence: Any = None,
                     context: str | None = None,
+                    anchors: Any = None,
+                    max_hops: int = 1,
+                    rel_filter: str = "IMPL|NAND",
+                    direction: str = "both",
                     require_calibration: bool = False) -> dict:
     """Compute confidence via EP belief propagation. Returns {iterations, converged, confidences}.
 
-    Pass context='licensing-decision' to scope to a specific subgraph.
+    Pass anchors=[point_ids] for BFS subgraph selection (new, preferred).
+    Pass context='licensing-decision' to scope to a specific subgraph (legacy).
     Pass require_calibration=True to gate on calibration state.
+    max_hops: BFS depth from anchors (default 1).
+    rel_filter: edge types — "IMPL", "NAND", or "IMPL|NAND" (default).
+    direction: IMPL traversal — "incoming", "outgoing", or "both" (default).
     """
     factors = _parse(factors)
     evidence = _parse(evidence)
+    anchors = _parse(anchors)
     return _safe(sdk.compute_confidence, factors, evidence,
-                 context=context, require_calibration=require_calibration)
+                 context=context, anchors=anchors,
+                 max_hops=max_hops, rel_filter=rel_filter,
+                 direction=direction,
+                 require_calibration=require_calibration)
 
 
 @mcp.tool()
@@ -319,7 +366,7 @@ def tortoise_mitigate_operator(id: str, reason: str, strength: float = 0.5) -> d
 
 @mcp.tool()
 def tortoise_file_decision(options: Any, evidence: Any,
-                           choice: int, context: str) -> dict:
+                           choice: int, context: str | None = None) -> dict:
     """File a simple decision directly to the graph.
 
     Creates decision + options + evidence + IMPL edges atomically.
@@ -500,17 +547,27 @@ def tortoise_list_topics(entity_id: str) -> dict:
 
 @mcp.tool()
 def tortoise_analyze(question: str, context: str | None = None,
-                    entityId: str | None = None) -> dict:
+                    entityId: str | None = None,
+                    anchor_ids: Any = None,
+                    max_hops: int = 1,
+                    rel_filter: str = "IMPL|NAND",
+                    direction: str = "both") -> dict:
     """Answer natural language questions about the Tortoise epistemic graph.
 
     Ask things like: "where is the disagreement?" "what supports claim X?"
     "what are we most uncertain about?" "show me the evidence chain for Y."
 
     Optional entityId scopes the analysis to a specific entity's subgraph.
+    Optional anchor_ids (list of Point IDs) scopes via BFS subgraph selection (new).
+    max_hops: BFS depth from anchors (default 1).
+    rel_filter: edge types — "IMPL", "NAND", or "IMPL|NAND" (default).
+    direction: IMPL traversal — "incoming", "outgoing", or "both" (default).
     Returns {"answer": "...", "raw": [...], "pattern": "...", "query": "..."}
     """
     from tortoise.analyze import analyze
     from tortoise.navigation import entityProfile
+
+    anchor_ids = _parse(anchor_ids)
 
     entity_subgraph_ids = None
     if entityId:
@@ -527,7 +584,11 @@ def tortoise_analyze(question: str, context: str | None = None,
             pass  # fall back to full-graph analysis
 
     return analyze(question, sdk._get_proj(), context=context,
-                   entity_subgraph_ids=entity_subgraph_ids)
+                   entity_subgraph_ids=entity_subgraph_ids,
+                   anchor_ids=anchor_ids,
+                   max_hops=max_hops,
+                   rel_filter=rel_filter,
+                   direction=direction)
 
 
 # ── P1-3: Staleness Detection ─────────────────────────────────
