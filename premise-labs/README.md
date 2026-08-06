@@ -16,7 +16,7 @@ npx wrangler pages deploy . --project-name=premise-labs --branch=main
 
 Two placeholders to replace in `index.html`:
 - **Formspree ID:** `REPLACE_ME` in `<form action="https://formspree.io/f/REPLACE_ME">`
-- **Twitter link:** Already set to `@permiselabs`
+- **Twitter link:** Already set to `@premiselabs`
 
 ## Tech
 
