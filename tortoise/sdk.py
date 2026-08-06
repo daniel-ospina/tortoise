@@ -28,6 +28,35 @@ POINT_STATUS_VALUES = frozenset({'live', 'draft', 'outdated', 'archived'})
 _logger = logging.getLogger(__name__)
 
 
+def _coerce_props(props: dict) -> dict:
+    """Flatten a nested 'props' dict into top-level keyword props, in place.
+
+    The MCP server passes props= through as-is (shallow copy, no flatten), so
+    this helper is the single place that handles both conventions. Direct SDK
+    callers naturally mirror the MCP tool signature and pass props={"k": v}.
+    FalkorDB rejects non-primitive property values, so a dict-valued 'props'
+    keyword would otherwise fail with
+    "Property values can only be of primitive types". Accept both conventions:
+
+      - props={"k": v}  -> k, v merged into top-level props
+      - props=None       -> no-op (MCP convention for absent props)
+      - flattened kwargs -> unchanged
+
+    A non-dict, non-None 'props' value (e.g. a string) is preserved as a literal
+    property named 'props' — scalars are legal FalkorDB property values.
+    """
+    nested = props.pop("props", None)
+    if isinstance(nested, dict):
+        # Explicit top-level kwargs are the caller's more specific intent —
+        # they win over nested props on collision (mirrors the MCP server,
+        # where explicit tool args override user-supplied props).
+        props.update({k: v for k, v in nested.items() if k not in props})
+    elif nested is not None:
+        # Scalar 'props' value — restore as a literal property.
+        props["props"] = nested
+    return props
+
+
 # ── ULID validation (Issue #52) ──
 # Canonical format (from tortoise/ids.py): <timestamp-hex>-<uuid12>
 _ULID_RE = re.compile(r"^[0-9a-f]+-[0-9a-f]{12}$")
@@ -206,6 +235,7 @@ class TortoiseSDK:
         Set dedup=True for idempotent creation (matches by content hash).
         """
         self._validate_kind(kind)
+        _coerce_props(props)  # accept MCP-style nested props= dict (#218)
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc).isoformat()
         proj = self._get_proj()
@@ -364,6 +394,7 @@ class TortoiseSDK:
         Status changes are validated against POINT_STATUS_VALUES.
         """
         proj = self._get_proj()
+        _coerce_props(props)  # accept MCP-style nested props= dict (#218)
 
         # #49 Phase 2: context is REMOVED — raise TypeError if passed
         if "context" in props:
@@ -2736,12 +2767,15 @@ class TortoiseSDK:
         return bool(r.result_set[0][0]) if r.result_set else False
 
     def create_subject(self, name: str, subjectKind: str = "other", **props) -> dict:
+        _coerce_props(props)  # accept MCP-style nested props= dict (#218)
         return self._create_entity("Subject", self.ulid(), {"name": name, "subjectKind": subjectKind, "status": "live", **props}, "SubjectAdded")
 
     def create_object(self, name: str, objectKind: str = "other", **props) -> dict:
+        _coerce_props(props)  # accept MCP-style nested props= dict (#218)
         return self._create_entity("Object", self.ulid(), {"name": name, "objectKind": objectKind, "status": "live", **props}, "ObjectRegistered")
 
     def create_event(self, name: str, eventKind: str, **props) -> dict:
+        _coerce_props(props)  # accept MCP-style nested props= dict (#218)
         """Create an Event node.
 
         If aboutSubject or aboutObject are provided in **props, they are extracted
@@ -2765,10 +2799,12 @@ class TortoiseSDK:
         return result
 
     def create_document(self, title: str, documentKind: str, **props) -> dict:
+        _coerce_props(props)  # accept MCP-style nested props= dict (#218)
         did = self.ulid()
         return self._create_entity("Document", did, {"title": title, "documentKind": documentKind, "objectKind": "document", "status": "draft", **props}, "DocumentCreated")
 
     def create_source(self, url: str, sourceKind: str, **props) -> dict:
+        _coerce_props(props)  # accept MCP-style nested props= dict (#218)
         return self._create_entity("Source", url, {"url": url, "sourceKind": sourceKind, "ingestedAt": __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(), **props}, "SourceCreated")
 
     # ── Entity Derivation (#122 Part 2) ──────────────────────────
@@ -2852,6 +2888,7 @@ class TortoiseSDK:
         return self._get_entity(id_val)
 
     def update_entity(self, id_val: str, **props) -> dict:
+        _coerce_props(props)  # accept MCP-style nested props= dict (#218)
         return self._update_entity(id_val, **props)
 
     def delete_entity(self, id_val: str) -> bool:

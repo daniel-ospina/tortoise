@@ -13,3 +13,6 @@ tortoise.db
 backups/
 services/*.plist
 data/migrations/
+
+# Local environment — contains DB credentials, never commit
+.env

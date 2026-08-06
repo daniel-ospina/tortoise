@@ -157,6 +157,24 @@ class InMemoryProjection:
         self.points = fold(log.read_all())
 
 
+_SUPPORTED_URI_SCHEMES = ("docker", "redis", "rediss")
+
+
+def _validate_uri_scheme(scheme: str) -> str:
+    """Accept docker:// (local) and redis:// / rediss:// (FalkorDB Cloud) URIs.
+
+    Raises ValueError for anything else, mirroring the historical docker://-only
+    contract while making managed-instance URIs first-class.
+    """
+    if scheme not in _SUPPORTED_URI_SCHEMES:
+        raise ValueError(
+            f"Unsupported scheme: {scheme} "
+            f"(expected docker://, redis://, or rediss://). "
+            f"Example: docker://:password@localhost:6379/tortoise"
+        )
+    return scheme
+
+
 # ── FalkorProjection ──────────────────────────────────────────────────────
 
 
@@ -180,7 +198,8 @@ class FalkorProjection(
                  port: int = 16379,
                  username: str | None = None,
                  password: str | None = None,
-                 graph_name: str = "tortoise"):
+                 graph_name: str = "tortoise",
+                 ssl: bool = False):
 
         if path is not None:
             # Embedded mode (opt-in via path=). Use redislite's FalkorDB client —
@@ -191,7 +210,8 @@ class FalkorProjection(
         elif host is not None:
             # Docker FalkorDB
             from falkordb import FalkorDB  # ponytail: lazy import, only needed for Docker mode
-            self.db = FalkorDB(host=host, port=port, username=username, password=password, socket_connect_timeout=5, socket_timeout=10)
+            self.db = FalkorDB(host=host, port=port, username=username, password=password,
+                               socket_connect_timeout=5, socket_timeout=10, ssl=ssl)
         else:
             raise ValueError("Either path or host must be provided")
 
@@ -214,14 +234,19 @@ class FalkorProjection(
 
     @classmethod
     def from_uri(cls, uri: str) -> "FalkorProjection":
-        """Parse docker:// connection string.
+        """Parse a connection URI into a projection.
 
-        docker://:password@host:port/graph_name
+        Supported schemes (all treated as docker://):
+          docker://:password@host:port/graph_name   — canonical local form
+          redis:// or rediss://                     — FalkorDB Cloud / managed
+                                                     instances use the redis
+                                                     scheme; accept as aliases.
+
+        Unsupported schemes raise ValueError with an actionable message.
         """
         from urllib.parse import urlparse
         parsed = urlparse(uri)
-        if parsed.scheme != "docker":
-            raise ValueError(f"Unsupported scheme: {parsed.scheme} (expected docker://)")
+        _validate_uri_scheme(parsed.scheme)
         username = parsed.username or None
         password = parsed.password or None
         graph_name = parsed.path.lstrip('/') or "tortoise"
@@ -229,7 +254,8 @@ class FalkorProjection(
                    port=parsed.port or 16379,
                    username=username,
                    password=password,
-                   graph_name=graph_name)
+                   graph_name=graph_name,
+                   ssl=(parsed.scheme == "rediss"))
 
     def _norm(self, ev: dict) -> dict:
         """Normalize event shape — tolerates API (flat) and script (nested point)."""
