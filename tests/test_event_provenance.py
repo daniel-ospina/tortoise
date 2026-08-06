@@ -346,6 +346,34 @@ class TestSupersedePointStructuralTransfer:
         sdk.supersede_point(old_pt["id"], new_pt["id"])
         assert True
 
+    def test_was_derived_from_transferred_on_supersede(self, sdk):
+        """wasDerivedFrom edge transfers to the superseding Point (#150)."""
+        proj = sdk._get_proj()
+        # Create source point and a derived point
+        src = sdk.create_point("statement", "source data", context="t")
+        derived = sdk.create_point("statement", "derived claim", context="t")
+        new_pt = sdk.create_point("statement", "new derived claim", context="t")
+        # Wire wasDerivedFrom on derived point: (derived)-[:wasDerivedFrom]->(src)
+        proj.create_edge(derived["id"], src["id"], "wasDerivedFrom")
+        # Supersede the derived point
+        result = sdk.supersede_point(derived["id"], new_pt["id"])
+        # Verify wasDerivedFrom edge now connects new_pt -> src
+        r = proj.g.query(
+            "MATCH (new:Point {id:$nid})-[w:wasDerivedFrom]->(s:Point {id:$sid}) "
+            "RETURN count(w) > 0",
+            params={"nid": new_pt["id"], "sid": src["id"]},
+        ).result_set
+        assert r[0][0] is True
+        # Old derived point should no longer have the edge
+        r2 = proj.g.query(
+            "MATCH (old:Point {id:$oid})-[w:wasDerivedFrom]->(s:Point {id:$sid}) "
+            "RETURN count(w)",
+            params={"oid": derived["id"], "sid": src["id"]},
+        ).result_set
+        assert r2[0][0] == 0
+        # edges_transferred should count the wasDerivedFrom transfer
+        assert result.get("edges_transferred", 0) >= 1
+
 
 class TestComputeReputationNegative:
     """Negative / edge cases for compute_reputation."""

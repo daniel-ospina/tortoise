@@ -510,11 +510,11 @@ class TortoiseSDK:
             )
             transferred += 1
 
-        # 2b. Transfer plain structural edges (#122) — about*, extractedFrom, etc.
+        # 2b. Transfer plain structural edges (#122) — about*, extractedFrom, wasDerivedFrom, etc.
         # These edges connect the Point to entities (Subject, Object, Source, etc.)
         structural_rels = [
             'aboutSubject', 'aboutObject', 'aboutAction', 'aboutEvent',
-            'aboutPoint', 'aboutDocument', 'extractedFrom'
+            'aboutPoint', 'aboutDocument', 'extractedFrom', 'wasDerivedFrom'
         ]
         for rel in structural_rels:
             struct_rows = proj.g.query(
