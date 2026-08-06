@@ -115,9 +115,16 @@ if __name__ == "__main__":
 
     dry_run = "--dry-run" in sys.argv
 
+    from tortoise.config import resolve_db_path, is_docker_uri
     uri = os.environ.get("TORTOISE_DB_URI")
     if not uri:
-        print("Set TORTOISE_DB_URI to run migration")
+        # Embedded migration against canonical path (issue #176)
+        print(f"Using embedded DB at {resolve_db_path()} (set TORTOISE_DB_URI to run against a server)")
+        sdk = TortoiseSDK(db_path=resolve_db_path())
+        results = migrate(sdk, dry_run=dry_run)
+        return
+    if not is_docker_uri(uri):
+        print("Set TORTOISE_DB_URI to a docker:// URI to run migration")
         exit(1)
 
     sdk = TortoiseSDK(uri)

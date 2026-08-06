@@ -114,7 +114,14 @@ def main(argv=None):
                              build_model(args.relation_model, reasoning=True))
 
     log = EventLog(args.log)
-    # Check DB accessibility before trying to connect
+    # Check DB accessibility before trying to connect.
+    # Hard-reject relative paths cleanly (issue #176): a relative --db would
+    # otherwise fall through to 'Docker unreachable' instead of the clear
+    # hard-reject error (shared RELATIVE_PATH_ERROR).
+    import os as _os
+    if args.db and not _os.path.isabs(args.db) and not args.db.startswith("docker://"):
+        from tortoise.config import RELATIVE_PATH_ERROR
+        raise ValueError(RELATIVE_PATH_ERROR.format(path=args.db))
     if args.db.startswith("docker://"):
         proj = FalkorProjection.from_uri(args.db)
     elif Path(args.db).exists():

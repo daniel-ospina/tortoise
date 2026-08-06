@@ -95,7 +95,7 @@ def _connect(graph_name: str, embedded_path: str | None = None) -> tuple[str, ob
     except Exception:
         pass
     # Fall back to embedded
-    from redislite.falkordb_client import FalkorDB as EmbeddedDB
+    from redislite.falkordb_client import FalkorDB as EmbeddedDB  # noqa: redis-guard — intentional bypass (issue #176)
     db = EmbeddedDB(embedded_path)
     g = db.select_graph(graph_name)
     return 'embedded', db, g

@@ -278,11 +278,12 @@ def _cmd_init(args):
 
     # 2. Fallback: embedded mode (SQLite-backed)
     if not graph_ready:
-        db_path = args.path or str(Path.home() / ".tortoise" / "embedded.db")
+        from tortoise.config import resolve_db_path
+        db_path = args.path or resolve_db_path()
         try:
-            from redislite.falkordb_client import FalkorDB
-            db = FalkorDB(db_path)
-            db.select_graph("tortoise").query("RETURN 1")
+            from tortoise.projection import FalkorProjection
+            _proj = FalkorProjection(db_path)
+            _proj.g.query("RETURN 1")
             print(f"  ✅ Embedded mode initialized at {db_path}")
             graph_ready = True
         except ImportError:
@@ -305,7 +306,7 @@ def _cmd_init(args):
                 f"docker://:{docker_pass}@{docker_host}:{docker_port}/tortoise")
             sdk = TortoiseSDK()
         else:
-            sdk = TortoiseSDK(db_path=args.path)
+            sdk = TortoiseSDK(db_path=db_path)
         sdk.create_point(
             kind="observation",
             content="Tortoise graph initialized — file decisions and observations here so your agents remember across sessions.",

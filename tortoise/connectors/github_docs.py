@@ -33,7 +33,7 @@ class GitHubDocIndexer:
         import os
         if sdk:
             self.sdk = sdk
-        elif os.environ.get("TORTOISE_DB_URI"):
+        elif os.environ.get("TORTOISE_DB_URI") or os.environ.get("TORTOISE_DB_PATH"):
             self.sdk = TortoiseSDK()
         else:
             raise ValueError(
