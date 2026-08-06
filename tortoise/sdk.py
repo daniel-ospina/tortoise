@@ -67,13 +67,18 @@ class TortoiseSDK:
     """Layer 1 facade for Tortoise epistemic graph interaction.
 
     Args:
-        db_path: Optional path to FalkorDBLite database file (None = must use TORTOISE_DB_URI env var).
+        db_path: Optional path to FalkorDBLite database file (None = use TORTOISE_DB_URI env var).
+        namespace: Optional namespace for graph-name isolation.
+
+    Precedence: an explicitly-provided db_path wins over the TORTOISE_DB_URI
+    env var. This lets tests/fixtures force a temp embedded DB even when a
+    shared test URI is set in the environment (#139).
     """
 
     def __init__(self, db_path: str | None = None, *, namespace: str | None = None):
         import os, re
         db_uri = os.environ.get("TORTOISE_DB_URI")
-        if db_uri:
+        if db_uri and db_path is None:
             self._db_path = None
             self._db_uri = db_uri
         else:
@@ -157,21 +162,20 @@ class TortoiseSDK:
         """Return the control_plane registry graph handle (cached).
 
         Uses the existing db connection — no second FalkorDB connection.
-        Test isolation (#135): when the main graph is a test graph
-        (tortoise_test_*/test_*), derive an isolated registry graph name from
-        the same session UUID so parallel runs never share registry state
-        (previously fixed 'control_plane' persisted teams across runs →
-        'Team already exists' failures on re-runs).
+        Registry graph name is namespace-scoped (``{ns}_control_plane``) so
+        different namespaces never share registry state, and test graphs get
+        an isolated name (``{ns}_{test_graph}_control_plane``) so parallel
+        test runs stay independent (#135, #139).
         """
         if self._registry_g is None:
             proj = self._get_proj()
             graph_name = getattr(proj, "graph_name", None)
+            ns = self._namespace or ""
             if graph_name and graph_name.startswith(("tortoise_test_", "test_")):
-                # Keep the test prefix so test-graph guards still apply, and
-                # scope by namespace so different namespaces are independent
-                # (#135, test_team_create_different_namespaces_independent).
-                ns = self._namespace or ""
+                # Keep the test prefix so test-graph guards still apply.
                 registry_name = f"{ns}_{graph_name}_control_plane" if ns else f"{graph_name}_control_plane"
+            elif ns:
+                registry_name = f"{ns}_control_plane"
             else:
                 registry_name = "control_plane"
             self._registry_g = proj.db.select_graph(registry_name)
@@ -2554,6 +2558,26 @@ class TortoiseSDK:
 
     # ── Control Plane: APIKey CRUD ─────────────────────────────────
 
+    def _verify_hashed_lookup(self, label: str, prop: str, plaintext: str) -> list[dict]:
+        """Verify a plaintext secret against stored salted hashes in the registry.
+
+        hash_api_key() embeds a per-key random salt ("salt:hash"), so we can
+        NOT look up by exact hash match — the lookup hash would never equal the
+        stored hash (same root cause as #130). Instead fetch all candidate
+        rows of the label and verify each stored hash against the plaintext.
+        The registry is small (teams × keys × invites), so a scan is fine.
+        """
+        from tortoise.auth import verify_api_key
+        reg = self._get_registry()
+        rows = reg.query(
+            f"MATCH (n:{label}) RETURN n.{prop}, properties(n)"
+        ).result_set
+        out = []
+        for stored_hash, props in rows:
+            if verify_api_key(plaintext, stored_hash):
+                out.append(props)
+        return out
+
     def apikey_create(self, team_id: str, created_by: str) -> dict:
         """Generate an API key for a team.
 
@@ -2635,18 +2659,15 @@ class TortoiseSDK:
         """Verify an API key against stored hashes.
 
         Returns {team_id, key_id} if valid, None if not found or revoked.
+        Uses salted-hash verification (per-key salt means exact-hash lookup
+        never matches — see #130, #139).
         """
-        from tortoise.auth import hash_api_key
-        key_hash = hash_api_key(key_plaintext)
-        reg = self._get_registry()
-        rows = reg.query(
-            "MATCH (k:APIKey {key_hash:$kh}) "
-            "WHERE k.revoked_at IS NULL "
-            "RETURN k.team_id, k.id",
-            params={"kh": key_hash},
-        ).result_set
-        if rows:
-            return {"team_id": rows[0][0], "key_id": rows[0][1]}
+        matches = [
+            p for p in self._verify_hashed_lookup("APIKey", "key_hash", key_plaintext)
+            if p.get("revoked_at") is None
+        ]
+        if matches:
+            return {"team_id": matches[0]["team_id"], "key_id": matches[0]["id"]}
         return None
 
     # ── Control Plane: Invitation CRUD ─────────────────────────────
@@ -2728,15 +2749,9 @@ class TortoiseSDK:
         return invs
 
     def invitation_get_by_token(self, token_plaintext: str) -> dict | None:
-        """Look up an invitation by its plaintext token."""
-        from tortoise.auth import hash_api_key
-        token_hash = hash_api_key(token_plaintext)
-        reg = self._get_registry()
-        rows = reg.query(
-            "MATCH (i:Invitation {token_hash:$th}) RETURN properties(i)",
-            params={"th": token_hash},
-        ).result_set
-        return rows[0][0] if rows else None
+        """Look up an invitation by its plaintext token (salted-hash verify)."""
+        matches = self._verify_hashed_lookup("Invitation", "token_hash", token_plaintext)
+        return matches[0] if matches else None
 
     def invitation_accept(self, invitation_id: str, user_id: str) -> dict:
         """Accept an invitation and create a membership.

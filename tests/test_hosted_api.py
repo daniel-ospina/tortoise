@@ -213,14 +213,16 @@ class TestPointsCreate:
         body = r.json()
         assert body["kind"] == "decision"
 
-    def test_create_point_with_context(self, client):
+    def test_create_point_with_context_deprecated(self, client):
+        """context is deprecated (#49) — accepted but not persisted."""
         r = client.post(
             "/v1/points",
             json={"content": "ctx test", "kind": "observation", "context": "test-ctx"},
         )
         assert r.status_code == 200, r.text
         body = r.json()
-        assert body["context"] == "test-ctx"
+        # #49: context is popped and NOT written to the node → response has None
+        assert body["context"] is None
 
     def test_create_point_with_tags(self, client):
         r = client.post(
@@ -303,8 +305,9 @@ class TestPointsList:
         for p in body["points"]:
             assert p.get("pointKind", p.get("kind")) == "decision"
 
-    def test_list_points_filter_by_context(self, client):
-        """GET /v1/points?context=<value> returns only matching Points."""
+    def test_list_points_filter_by_context_deprecated(self, client):
+        """context filtering is deprecated (#49) — context is not persisted, so
+        filtering by it returns no matches."""
         client.post("/v1/points", json={"content": "ctx-a", "context": "project-alpha"})
         client.post("/v1/points", json={"content": "ctx-b", "context": "project-beta"})
         client.post("/v1/points", json={"content": "no-ctx"})
@@ -312,9 +315,8 @@ class TestPointsList:
         r = client.get("/v1/points", params={"context": "project-alpha"})
         assert r.status_code == 200, r.text
         body = r.json()
-        assert body["count"] >= 1
-        for p in body["points"]:
-            assert p.get("context") == "project-alpha"
+        # #49: context is never written → filter matches nothing
+        assert body["count"] == 0
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
