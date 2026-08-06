@@ -1966,7 +1966,6 @@ class TortoiseSDK:
             graph, query, kind, context, query_vec, strategies,
             entity_type=entity_type, limit=str_limit,
             is_embedded=is_embedded,
-            expanded_kinds=expanded_kinds,
         )
 
         if not raw_results:
