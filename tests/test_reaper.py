@@ -491,3 +491,139 @@ def _pid_alive_for(pid):
         return False
     except OSError:
         return False
+
+
+# ── Task 3: CLI, singleton lock, timeout ────────────────────────────
+
+def _run_cli(*args, timeout=30):
+    """Run the reaper CLI as a subprocess; return (rc, stdout, stderr)."""
+    import subprocess as sp
+    import sys as _sys
+    env = dict(os.environ)
+    env.pop("TORTOISE_DB_URI", None)
+    proc = sp.run(
+        [_sys.executable, "-m", "tortoise.embedded_reaper", *args],
+        capture_output=True, text=True, timeout=timeout, env=env,
+    )
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+def test_cli_defaults_to_dry_run(monkeypatch):
+    """CLI with no args defaults to dry-run (no processes killed)."""
+    import subprocess as sp
+    import sys as _sys
+    from tortoise.embedded_reaper import discover, reap
+    monkeypatch.setenv("TORTOISE_REAPER_MIN_UPTIME", "0")
+    sock = _spawn_orphan()
+    # capture the orphan pid directly from the socket's pidfile
+    dbdir = os.path.dirname(sock)
+    pid = int(open(os.path.join(dbdir, "redis.pid")).read().strip())
+    try:
+        rc, out, err = _run_cli()
+        assert rc == 0
+        assert "DRY-RUN" in (out + err) or "dry" in (out + err).lower()
+        # orphan must still be alive (dry-run)
+        assert _pid_alive_for(pid), "dry-run killed the orphan"
+    finally:
+        found = discover()
+        match = [s for s in found if s["socket_path"] == sock]
+        if match:
+            reap(match, dry_run=False)
+
+
+def test_cli_no_dry_run_kills(monkeypatch):
+    """--no-dry-run actually kills orphans."""
+    monkeypatch.setenv("TORTOISE_REAPER_MIN_UPTIME", "0")
+    sock = _spawn_orphan()
+    try:
+        rc, out, err = _run_cli("--no-dry-run")
+        assert rc == 0
+        from tortoise.embedded_reaper import discover
+        found = discover()
+        match = [s for s in found if s["socket_path"] == sock]
+        assert not match, "orphan not killed by --no-dry-run"
+    finally:
+        from tortoise.embedded_reaper import discover, reap
+        found = discover()
+        match = [s for s in found if s["socket_path"] == sock]
+        if match:
+            reap(match, dry_run=False)
+
+
+def test_cli_json_output(monkeypatch):
+    """--json emits parseable machine-readable output."""
+    monkeypatch.setenv("TORTOISE_REAPER_MIN_UPTIME", "0")
+    sock = _spawn_orphan()
+    try:
+        import json as _json
+        rc, out, err = _run_cli("--json")
+        assert rc == 0
+        data = _json.loads(out)
+        assert isinstance(data, list)
+    finally:
+        from tortoise.embedded_reaper import discover, reap
+        found = discover()
+        match = [s for s in found if s["socket_path"] == sock]
+        if match:
+            reap(match, dry_run=False)
+
+
+def test_cli_batch_size_limits_kills(monkeypatch):
+    """--batch-size N limits kills per run."""
+    monkeypatch.setenv("TORTOISE_REAPER_MIN_UPTIME", "0")
+    socks = [_spawn_orphan() for _ in range(2)]
+    try:
+        rc, out, err = _run_cli("--no-dry-run", "--batch-size", "1")
+        assert rc == 0
+        from tortoise.embedded_reaper import discover
+        found = discover()
+        remaining = [s for s in found if s["socket_path"] in socks]
+        assert len(remaining) >= 1, "batch-size 1 killed more than 1"
+    finally:
+        from tortoise.embedded_reaper import discover, reap
+        found = discover()
+        match = [s for s in found if s["socket_path"] in socks]
+        if match:
+            reap(match, dry_run=False)
+
+
+def test_cli_singleton_lock_prevents_concurrent(monkeypatch):
+    """Second concurrent instance (lock held mid-sweep) exits 0 with
+    'already running'. The lock is held only DURING a sweep, so we hold it
+    directly to simulate a mid-sweep overlap."""
+    from tortoise.embedded_reaper import _ReaperLock
+    monkeypatch.setenv("TORTOISE_REAPER_MIN_UPTIME", "0")
+    lock = _ReaperLock()
+    assert lock.acquire(), "could not acquire lock for test"
+    try:
+        rc, out, err = _run_cli("--no-dry-run", timeout=10)
+        assert rc == 0
+        assert "already running" in (out + err).lower()
+    finally:
+        lock.release()
+
+
+def test_cli_singleton_lock_released_on_sigkill(monkeypatch):
+    """SIGKILL the lock-holder -> fcntl auto-releases -> second acquires."""
+    import subprocess as sp
+    import sys as _sys
+    monkeypatch.setenv("TORTOISE_REAPER_MIN_UPTIME", "0")
+    env = dict(os.environ)
+    env.pop("TORTOISE_DB_URI", None)
+    holder = sp.Popen(
+        [_sys.executable, "-c",
+         "import time; from tortoise.embedded_reaper import _ReaperLock; "
+         "l=_ReaperLock(); print('LOCKED', l.acquire(), flush=True); "
+         "time.sleep(60)"],
+        stdout=sp.PIPE, stderr=sp.PIPE, text=True, env=env,
+    )
+    # wait for the holder to acquire
+    assert holder.stdout.readline().strip() == "LOCKED True"
+    time.sleep(1)
+    holder.kill()  # SIGKILL while holding lock
+    holder.wait(timeout=5)
+    time.sleep(1)
+    rc, out, err = _run_cli("--no-dry-run", timeout=10)
+    # should run normally (lock released via kernel), not 'already running'
+    assert rc == 0
+    assert "already running" not in (out + err).lower()

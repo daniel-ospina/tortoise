@@ -607,3 +607,136 @@ def _cleanup_tempdir(dbdir: str | None) -> None:
         shutil.rmtree(dbdir, ignore_errors=True)
     except OSError:
         logger.warning("could not remove tempdir %s", dbdir)
+
+
+# ── CLI + singleton lock + timeout (plan Task 3) ────────────────────
+
+_LOCK_PATH = os.path.join(
+    os.path.expanduser("~"), ".tortoise", ".reaper.lock")
+TIMEOUT_DEFAULT = 120
+
+
+class _ReaperLock:
+    """fcntl-based exclusive lock; auto-released on process exit (incl. SIGKILL)."""
+
+    def __init__(self, path: str = _LOCK_PATH):
+        self.path = path
+        self._fh = None
+
+    def acquire(self) -> bool:
+        import fcntl
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        self._fh = open(self.path, "w")
+        try:
+            fcntl.flock(self._fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self._fh.write(str(os.getpid()))
+            self._fh.flush()
+            return True
+        except OSError:
+            self._fh.close()
+            self._fh = None
+            return False
+
+    def release(self) -> None:
+        import fcntl
+        if self._fh:
+            try:
+                fcntl.flock(self._fh, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            self._fh.close()
+            self._fh = None
+
+
+def _parse_timeout(cli_value: str | None) -> int:
+    """Timeout resolution: CLI --timeout > TORTOISE_REAPER_TIMEOUT env > 120."""
+    if cli_value is not None:
+        try:
+            return int(float(cli_value))
+        except ValueError:
+            logger.warning("invalid --timeout %r — using default", cli_value)
+    env = os.environ.get("TORTOISE_REAPER_TIMEOUT", "")
+    if env:
+        try:
+            return int(float(env))
+        except ValueError:
+            logger.warning(
+                "TORTOISE_REAPER_TIMEOUT=%r invalid — using default", env)
+    return TIMEOUT_DEFAULT
+
+
+def _run_sweep(dry_run: bool, batch_size: int | None) -> list[dict]:
+    """Discover + classify + reap; return acted-upon records."""
+    records = discover()
+    candidates = [r for r in records if r["classification"] == "candidate"]
+    # Phase 1: resolve stale-PID records via probe before any kill
+    resolved = [phase1_probe(r) for r in candidates]
+    return reap(resolved, dry_run=dry_run, batch_size=batch_size)
+
+
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+    import json as _json
+    import signal
+    import sys
+
+    logging.basicConfig(level=logging.INFO,
+                        format="%(levelname)s %(message)s")
+
+    parser = argparse.ArgumentParser(
+        prog="tortoise.embedded_reaper",
+        description="Reap orphaned redislite redis-server processes "
+                    "(issue #176).",
+    )
+    parser.add_argument("--no-dry-run", action="store_true",
+                        help="Actually kill orphans (default is dry-run)")
+    parser.add_argument("--batch-size", type=int, default=None,
+                        help="Limit kills per run")
+    parser.add_argument("--json", action="store_true",
+                        help="Machine-readable JSON output")
+    parser.add_argument("--timeout", type=str, default=None,
+                        help=f"Sweep timeout in seconds (default "
+                             f"{TIMEOUT_DEFAULT}; env TORTOISE_REAPER_TIMEOUT)")
+    args = parser.parse_args(argv)
+
+    timeout = _parse_timeout(args.timeout)
+
+    # Singleton lock: second concurrent instance exits 0 with message.
+    lock = _ReaperLock()
+    if not lock.acquire():
+        logger.warning("reaper already running (PID %s)",
+                       _lock_holder_pid())
+        return 0
+
+    def _alarm_handler(signum, frame):
+        logger.error("reaper timeout (%ss) exceeded — aborting sweep", timeout)
+        sys.exit(1)
+
+    try:
+        signal.signal(signal.SIGALRM, _alarm_handler)
+        signal.alarm(timeout)
+        acted = _run_sweep(dry_run=not args.no_dry_run,
+                           batch_size=args.batch_size)
+        signal.alarm(0)
+    finally:
+        lock.release()
+
+    if args.json:
+        print(_json.dumps([
+            {"pid": r.get("pid"), "socket_path": r.get("socket_path"),
+             "classification": r.get("classification")}
+            for r in acted
+        ]))
+    return 0
+
+
+def _lock_holder_pid() -> str:
+    try:
+        with open(_LOCK_PATH) as fh:
+            return fh.read().strip() or "unknown"
+    except OSError:
+        return "unknown"
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
