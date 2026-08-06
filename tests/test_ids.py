@@ -14,21 +14,28 @@ from tortoise.ids import content_hash, now_iso, ulid  # noqa: E402
 
 # ── helpers ──────────────────────────────────────────────────────────
 
-_CROCKFORD = set("0123456789ABCDEFGHJKMNPQRSTVWXYZ")
+# Canonical Tortoise ID format (tortoise/ids.py): <timestamp-hex>-<uuid-hex12>
+# (24 chars). NOT the standard 26-char Crockford ULID — the SDK's own
+# _is_ulid() treats this canonical format as primary (sdk.py _ULID_RE) and
+# only "recognizes" Crockford for backward compatibility.
+_CANONICAL_ID_RE = __import__("re").compile(r"^[0-9a-f]+-[0-9a-f]{12}$")
 
 
 # ── ulid ─────────────────────────────────────────────────────────────
 
-def test_ulid_returns_26_chars():
+def test_ulid_returns_canonical_format():
+    """ulid() returns <timestamp-hex>-<uuid-hex12> (24 chars, hex + dash)."""
     u = ulid()
-    assert len(u) == 26, f"expected 26 chars, got {len(u)}"
-    print("PASS test_ulid_returns_26_chars")
+    assert _CANONICAL_ID_RE.match(u), f"{u!r} not in canonical <ts>-<uuid12> format"
+    print("PASS test_ulid_returns_canonical_format")
 
 
-def test_ulid_only_crockford_chars():
+def test_ulid_only_hex_and_dash():
+    """Canonical format uses only hex chars and a single dash separator."""
     u = ulid()
-    assert set(u).issubset(_CROCKFORD), f"illegal chars: {set(u) - _CROCKFORD}"
-    print("PASS test_ulid_only_crockford_chars")
+    assert set(u) <= set("0123456789abcdef-"), f"illegal chars: {set(u)}"
+    assert u.count("-") == 1
+    print("PASS test_ulid_only_hex_and_dash")
 
 
 def test_ulid_unique_on_consecutive_calls():
