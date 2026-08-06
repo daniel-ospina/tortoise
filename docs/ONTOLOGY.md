@@ -59,11 +59,11 @@ Each layer answers a different question. All four are live mechanisms.
 
 ### §3.1 Point ↔ Point (Epistemic — Operators)
 
-| Predicate | Direction | Cardinality | Mechanism | Meaning |
-|-----------|-----------|-------------|-----------|---------|
-| `IMPL` | default bidirectional; optional unidirectional | N-ary | Epistemic | A supports/implies B. Direction is an explicit operator flag — **default bidirectional**, option to declare unidirectional (source→target only). Not inferred from label. |
-| `NAND` | default bidirectional; optional unidirectional | N-ary | Epistemic | A contradicts B. Same direction model as IMPL — default mutual contradiction (bidirectional), optional unidirectional. |
-| `hasPart` | bidirectional (composition) | N-ary | Structural via operator label | A contains B (parts/whole cascade). |
+| Predicate | From → To | Direction | Cardinality | Standard alignment | Meaning |
+|-----------|-----------|-----------|-------------|--------------------|---------|
+| `IMPL` | Point → Point | default bidirectional; optional unidirectional | N-ary | Epistemic (EP confidence) | A supports/implies B. Direction is an explicit operator flag — **default bidirectional**, option to declare unidirectional (source→target only). Not inferred from label. |
+| `NAND` | Point → Point | default bidirectional; optional unidirectional | N-ary | Epistemic (EP confidence) | A contradicts B. Same direction model as IMPL — default mutual contradiction (bidirectional), optional unidirectional. |
+| `hasPart` | Point → Point | bidirectional (composition) | N-ary | Structural via operator label | A contains B (parts/whole cascade). |
 
 > **Direction flag (code note):** operator direction is carried as an explicit flag on the operator Point. Current implementation (ep.py) derives bidirectionality from label (hasPart/partOf → bidirectional; else directional for IMPL; NAND always bidirectional) — this is being migrated to an explicit `direction` flag with default bidirectional. See follow-up issue.
 
@@ -71,64 +71,68 @@ Each layer answers a different question. All four are live mechanisms.
 
 Per-type edges (chosen over single polymorphic edge — FalkorDB matrix-per-type architecture).
 
-| Predicate | From → To | Cardinality | ISO/PROV | Meaning |
-|-----------|-----------|-------------|----------|---------|
-| `aboutSubject` | Point/Document/Event → Subject | N-ary (many→many) | `schema:about` (typed) | What Subject this describes |
-| `aboutObject` | Point/Document/Event → Object | N-ary (many→many) | `schema:about` (typed) | What Object this describes |
-| `aboutEvent` | Point/Document → Event | N-ary (many→many) | `schema:about` (typed) | What Event this describes. Event is a target only — Events don't describe other Events |
-| `aboutPoint` | Event → Point | N-ary (many→many) | `schema:about` (typed) | What Point this Event describes. Event-only edge |
-| `aboutDocument` | Event → Document | N-ary (many→many) | `schema:about` (typed) | What Document this Event describes |
+| Predicate | From → To | Direction | Cardinality | Standard alignment | Meaning |
+|-----------|-----------|-----------|-------------|--------------------|---------|
+| `aboutSubject` | Point/Document/Event → Subject | unidirectional | many→many | `schema:about` (typed) | What Subject this describes |
+| `aboutObject` | Point/Document/Event → Object | unidirectional | many→many | `schema:about` (typed) | What Object this describes |
+| `aboutEvent` | Point/Document → Event | unidirectional | many→many | `schema:about` (typed) | What Event this describes. Event is a target only — Events don't describe other Events |
+| `aboutPoint` | Event → Point | unidirectional | many→many | `schema:about` (typed) | What Point this Event describes. Event-only edge |
+| `aboutDocument` | Event → Document | unidirectional | many→many | `schema:about` (typed) | What Document this Event describes |
 
 > **Legacy:** `aboutEntities` property → per-type `about*` edges. `_create_about_edges()` auto-detects Subject/Object from the legacy property. `schema:about` is polymorphic; we split per-type for graph performance.
 
 ### §3.3 Point → Source (Provenance)
 
-| Predicate | Direction | Meaning |
-|-----------|-----------|---------|
-| `extractedFrom` | Point → Source | This claim was extracted from this source. |
-| `references` | Source → Entity | The source references this entity. |
+| Predicate | From → To | Direction | Cardinality | Standard alignment | Meaning |
+|-----------|-----------|-----------|-------------|--------------------|---------|
+| `extractedFrom` | Point → Source | unidirectional | many→1 | `pav:retrievedFrom` (inverse) | This claim was extracted from this source. One source backs many Points. |
 
 ### §3.4 Source → Entity (Provenance)
+
+| Predicate | From → To | Direction | Cardinality | Standard alignment | Meaning |
+|-----------|-----------|-----------|-------------|--------------------|---------|
+| `references` | Source → Entity | unidirectional | 1→many | — | The source document links to / references this entity. ⚠️ **Spec-only — no production creator yet** (only `link_source_to_entity` SDK call, no caller wired; see follow-up issue). |
 
 `(Point)-[:extractedFrom]->(Source)-[:references]->(Entity)` — layered provenance. Source carries `sourceKind` (T0-T4 credibility tier).
 
 ### §3.5 Subject → Event → Object (Procedural)
 
-| Predicate | Direction | Cardinality | Standard alignment | Meaning |
-|-----------|-----------|-------------|--------------------|---------|
-| `performs` | Subject → Event | N-ary | **`schema:agent` inverse** — schema.org's "direct performer or driver of the action", reversed (we go Agent→Activity) | X **did** this. The doing relation: subject executes the event. PROV has no Agent→Activity predicate (its `wasAssociatedWith` is Activity→Agent accountability); we name the performer-side verb ourselves, aligned to schema.org's performer concept. |
-| `produces` | Event → Object | N-ary (1→many) | `schema:result` (same direction) / `prov:wasGeneratedBy` inverse | Output artifact the event created |
-| `uses` | Event → Object | N-ary | **`prov:used`** (W3C: Activity→Entity, direction-identical — canonical) / `schema:instrument` for mechanisms | Input the event consumed — **including the mechanism** (skill/tool/agent/workflow Object) that produced the output |
-| `wasDerivedFrom` | Object → Object | N-ary | `prov:wasDerivedFrom` | Entity derivation (distinct from Source provenance) |
+| Predicate | From → To | Direction | Cardinality | Standard alignment | Meaning |
+|-----------|-----------|-----------|-------------|--------------------|---------|
+| `performs` | Subject → Event | unidirectional | N-ary | **`schema:agent` inverse** — schema.org's "direct performer or driver of the action", reversed (we go Agent→Activity) | X **did** this. The doing relation: subject executes the event. PROV has no Agent→Activity predicate (its `wasAssociatedWith` is Activity→Agent accountability); we name the performer-side verb ourselves, aligned to schema.org's performer concept. |
+| `produces` | Event → Object | unidirectional | 1→many | `schema:result` (same direction) / `prov:wasGeneratedBy` inverse | Output artifact the event created |
+| `uses` | Event → Object | unidirectional | N-ary | **`prov:used`** (W3C: Activity→Entity, direction-identical — canonical) / `schema:instrument` for mechanisms | Input the event consumed — **including the mechanism** (skill/tool/agent/workflow Object) that produced the output |
+| `wasDerivedFrom` | Object → Object | unidirectional | N-ary | `prov:wasDerivedFrom` | Entity derivation (distinct from Source provenance) |
 
 > **One edge, two names:** `uses` (graph predicate) = `prov:used` (PROV property). Same thing — present tense in our vocabulary, past tense in PROV's. `produces` = `schema:result` (Activity→Entity, matching direction); `prov:wasGeneratedBy` names the reverse (Entity→Activity).
 >
-> **Mechanism provenance ("how was it produced"):** the producing mechanism is a first-class Object linked via `uses` — `(Event)-[:uses]->(Object {objectKind: skill|tool|agent|workflow})`. The mechanism is therefore searchable and shared (finite skill set, not per-event). Mechanism *specifics* (version, model, config, pipeline hash) live in the immutable event-log record, reachable via the Event's `eventId` — they are NOT materialized as per-event graph nodes (avoids O(events) node growth at scale). Full lineage: `(Point)-[:extractedFrom]->(Source)-[:references]->(Object:document)<-[:produces]-(Event {eventId})` → log record.
+> **Mechanism provenance ("how was it produced"):** the producing mechanism is a first-class Object linked via `uses` — `(Event)-[:uses]->(Object {objectKind: skill|tool|agent|workflow})`. The mechanism is therefore searchable and shared (finite skill set, not per-event). Mechanism *specifics* (version, model, config, pipeline hash) live in the immutable event-log record, reachable via the Event's `eventId` — they are NOT materialized as per-event graph nodes (avoids O(events) node growth at scale). Full lineage: `(Point)-[:extractedFrom]->(Source)-[:references]->(Object:document)<-[:produces]-(Event {eventId})` → log record. (The `references` hop is spec-only until a producer is wired — see §3.4.)
 
 ### §3.6 Subject ↔ Subject (Organisational)
 
-| Predicate | Direction | Meaning |
-|-----------|-----------|---------|
-| `participatesIn` | Subject → Event | Subjects involved in an event |
-| `memberOf` | Subject → Subject | Membership in team/group |
-| `managedBy` | Entity → Subject | Operational responsibility (RACI Responsible) |
-| `ownedBy` | Entity → Subject | Accountability, data boundary (RACI Accountable) |
+| Predicate | From → To | Direction | Cardinality | Standard alignment | Meaning |
+|-----------|-----------|-----------|-------------|--------------------|---------|
+| `participatesIn` | Subject → Event | unidirectional | N-ary | `schema:attendee` | Subjects involved in an event |
+| `memberOf` | Subject → Subject | unidirectional | N-ary | `org:membership` | Membership in team/group |
+| `managedBy` | Entity → Subject | unidirectional | N-ary | RACI Responsible | Operational responsibility |
+| `ownedBy` | Entity → Subject | unidirectional | N-ary | RACI Accountable | Accountability, data boundary |
 
 ### §3.7 Object ↔ Object
 
-| Predicate | Direction | Meaning |
-|-----------|-----------|---------|
-| `wasDerivedFrom` | Object → Object | Derivation |
-| `hasPart` / `partOf` | Object → Object | Composition |
+| Predicate | From → To | Direction | Cardinality | Standard alignment | Meaning |
+|-----------|-----------|-----------|-------------|--------------------|---------|
+| `wasDerivedFrom` | Object → Object | unidirectional | N-ary | `prov:wasDerivedFrom` | Derivation |
+| `hasPart` / `partOf` | Object → Object | bidirectional | N-ary | `dcterms:hasPart` | Composition |
 
 ### §3.8 Event Edges
 
-| Predicate | Direction | Meaning |
-|-----------|-----------|---------|
-| `performs` (in) | Subject → Event | Actor — who did it |
-| `produces` / `uses` | Event → Object | Output / input |
-| `nextEvent` | Event → Event | Sequencing (Graphiti NextEpisode equivalent) — planned |
-| `op: IMPL/NAND` | Event → Point | Outcome influence on belief (epistemic) |
+| Predicate | From → To | Direction | Cardinality | Standard alignment | Meaning |
+|-----------|-----------|-----------|-------------|--------------------|---------|
+| `performs` (in) | Subject → Event | unidirectional | N-ary | `schema:agent` inverse | Actor — who did it |
+| `produces` | Event → Object | unidirectional | 1→many | `schema:result` | Output artifact |
+| `uses` | Event → Object | unidirectional | N-ary | `prov:used` | Input consumed |
+| `nextEvent` | Event → Event | unidirectional | 1→1 | — | Sequencing (Graphiti NextEpisode equivalent) — planned |
+| `op: IMPL/NAND` | Event → Point | default bidirectional; optional unidirectional | N-ary | Epistemic | Outcome influence on belief (epistemic) |
 
 ### §3.9 Valid Predicate Vocabulary (code)
 
