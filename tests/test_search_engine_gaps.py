@@ -595,13 +595,13 @@ class TestRunStructuralQuery:
 
         assert result[0][1] == 0.5
 
-    def test_context_without_kind_gives_half_score(self):
-        """context provided, kind=None → score=0.5."""
+    def test_no_kind_returns_empty(self):
+        """P2 #49: context removed — no kind → [] (no filters to apply)."""
         graph = SimpleMockGraph(result_set=[("p1",)])
 
         result = run_structural_query(graph, kind=None)
 
-        assert result[0][1] == 0.5
+        assert result == []
 
     def test_no_kind_and_no_context_returns_empty(self):
         """Neither kind nor context → [] (no filters to apply)."""
@@ -632,8 +632,8 @@ class TestRunStructuralQuery:
         assert "n.eventId" in cypher
         assert "MATCH (n:Event)" in cypher
 
-    def test_entity_type_point_context_is_factored_in(self):
-        """For points, context is included in WHERE clause."""
+    def test_entity_type_point_kind_is_factored_in(self):
+        """P2 #49: for points, kind is included in WHERE clause (context removed)."""
         graph = SimpleMockGraph(result_set=[("p1",)])
 
         result = run_structural_query(
@@ -641,7 +641,8 @@ class TestRunStructuralQuery:
         )
 
         cypher = graph.query_calls[0][0]
-        assert "n.context = $context" in cypher
+        assert "n.pointKind" in cypher
+        assert "n.context" not in cypher
         assert result[0][1] == 1.0
 
     def test_entity_type_subject_ignores_context_for_filtering_but_not_score(self):
