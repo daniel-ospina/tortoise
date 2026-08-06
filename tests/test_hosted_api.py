@@ -779,3 +779,36 @@ class TestCrossTenantIsolation:
         contents_a = {r[0] for r in pts_a}
         assert "TEAM_A_SECRET" in contents_a
         assert "TEAM_B_SECRET" not in contents_a, "cross-tenant leak: team A sees team B data"
+
+
+class TestKeysRevoke:
+    """DELETE /v1/team/keys/{id} — revoke an API key (team-scoped)."""
+
+    def test_revoke_key_sets_revoked_at(self, client):
+        created = client.post("/v1/team/keys").json()
+        r = client.delete(f"/v1/team/keys/{created['id']}")
+        assert r.status_code == 200, r.text
+        assert r.json()["revoked"] is True
+        # Listed key now shows revoked
+        listed = client.get("/v1/team/keys").json()
+        target = [k for k in listed["keys"] if k["id"] == created["id"]]
+        assert target and target[0]["revoked_at"] is not None
+
+    def test_revoke_nonexistent_key_returns_404(self, client):
+        r = client.delete("/v1/team/keys/nonexistent-key")
+        assert r.status_code == 404
+
+    def test_revoke_requires_auth(self, unauth_client):
+        r = unauth_client.delete("/v1/team/keys/some-key")
+        assert r.status_code == 401
+
+    def test_revoking_twice_is_idempotent(self, client):
+        created = client.post("/v1/team/keys").json()
+        r1 = client.delete(f"/v1/team/keys/{created['id']}")
+        r2 = client.delete(f"/v1/team/keys/{created['id']}")
+        assert r1.status_code == 200
+        assert r2.json()["already"] is True
+        # Still exactly one revoked entry after double revoke
+        listed = client.get("/v1/team/keys").json()
+        target = [k for k in listed["keys"] if k["id"] == created["id"]]
+        assert len(target) == 1

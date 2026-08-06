@@ -888,6 +888,43 @@ async def list_api_keys(team: dict = Depends(get_current_team)):
     }
 
 
+
+
+@app.delete("/v1/team/keys/{key_id}")
+async def revoke_api_key(key_id: str, team: dict = Depends(get_current_team)):
+    """Revoke an API key (soft delete — sets revoked_at). Team-scoped.
+
+    Keys are stored on the registry main graph (registry_tortoise) — created
+    via POST /v1/team/keys and listed via GET /v1/team/keys, both on proj.g.
+    The SDK's apikey_revoke uses _get_registry() (control_plane registry
+    graph), which does NOT hold hosted-API keys, so revoke must operate on
+    proj.g to be consistent with create/list.
+    """
+    sdk = _make_sdk(namespace="registry")
+    try:
+        rows = sdk._get_proj().g.query(
+            "MATCH (k:APIKey {id: $id}) RETURN k.team_id, k.revoked_at",
+            params={"id": key_id},
+        ).result_set
+        if not rows:
+            raise HTTPException(status_code=404, detail="API key not found")
+        if rows[0][0] != team["team_id"]:
+            raise HTTPException(status_code=403, detail="Not your API key")
+        if rows[0][1] is not None:
+            return {"revoked": True, "already": True, "key_id": key_id}
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        sdk._get_proj().g.query(
+            "MATCH (k:APIKey {id: $id}) SET k.revoked_at = $now",
+            params={"id": key_id, "now": now},
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        import logging
+        logging.getLogger("tortoise.api").exception("revoke_api_key failed")
+        raise HTTPException(status_code=500, detail="Internal server error")
+    return {"revoked": True, "key_id": key_id, "revoked_at": now}
 # ── Session Capture ───────────────────────────────────────────────
 
 class SessionRequest(BaseModel):
