@@ -232,6 +232,17 @@ class FalkorProjection(
                 "Could not determine FalkorDB version. FTS and vector indexes may fail.")
         self._ensure_indexes()
 
+        # Lifecycle hardening (plan Task 4):
+        # - _closed flag for idempotent close()
+        # - weakref.finalize so GC cleans up without explicit close
+        # - atexit so normal process exit never orphans the server
+        # - NO per-instance signal handlers (atexit suffices; avoids leaks)
+        import atexit as _atexit
+        import weakref as _weakref
+        self._closed = False
+        self._finalizer = _weakref.finalize(self, self.close)
+        _atexit.register(self.close)
+
     @classmethod
     def from_uri(cls, uri: str, graph_name: str | None = None) -> "FalkorProjection":
         """Parse a connection URI into a projection.
@@ -550,7 +561,25 @@ class FalkorProjection(
         return rows[0][0] if rows else 0
 
     def close(self) -> None:
-        self.db.close()
+        """Close the underlying DB connection idempotently.
+
+        Lifecycle hardening (plan Task 4): idempotent (2nd call no-op),
+        registered via weakref.finalize so GC cleans up without explicit
+        close, and atexit-registered so normal process exit never orphans.
+        """
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
+        try:
+            self.db.close()
+        except Exception:
+            pass
+
+    def __enter__(self) -> "FalkorProjection":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
 
     def _revise_point(self, ev: dict, set_updated_at: bool = False) -> None:
         """Apply PointRevised event — update content, context, and re-compute embedding."""
