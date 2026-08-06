@@ -51,10 +51,11 @@
       display: flex; flex-direction: column; align-items: center; justify-content: center;
       z-index: 1; pointer-events: none; opacity: 0;
       padding: 2rem;
+      box-sizing: border-box;
     }
 
     /* Specific beats get pointer events for interactive elements */
-    #beat-cta { pointer-events: auto; }
+    #beat-cta { pointer-events: auto; overflow-y: auto; }
 
     #beat-hero { opacity: 1; }
 
@@ -133,6 +134,14 @@
       color: var(--text-dim);
       font-size: 0.8rem;
     }
+    #beat-cta .cta-step {
+      margin: 0.35rem 0 0.35rem;
+      color: var(--text);
+      font-size: 0.78rem;
+      text-align: left;
+      width: 100%;
+      max-width: 480px;
+    }
     #beat-cta form {
       display: flex; gap: 0.75rem; max-width: 400px; width: 100%;
     }
@@ -186,12 +195,14 @@
     #beat-cta .mcp-snippet {
       margin-top: 1.25rem;
       margin-bottom: 1rem;
-      background: rgba(6, 182, 212, 0.06);
+      background: #0d1a2d; /* solid surface — readability */
       border: 1px solid rgba(6, 182, 212, 0.2);
       padding: 0.875rem 1rem;
       border-radius: 4px;
       text-align: left;
       max-width: 480px;
+      width: 100%;
+      box-sizing: border-box;
     }
     #beat-cta .mcp-snippet .snippet-label {
       font-size: 0.7rem;
@@ -224,12 +235,14 @@
     #beat-cta .cli-snippet {
       margin-top: 0;
       margin-bottom: 1.25rem;
-      background: rgba(6, 182, 212, 0.04);
+      background: #0a1626; /* solid surface — readability */
       border: 1px solid rgba(6, 182, 212, 0.12);
       padding: 0.625rem 1rem;
       border-radius: 4px;
       text-align: left;
       max-width: 420px;
+      width: 100%;
+      box-sizing: border-box;
       overflow-x: auto;
     }
     #beat-cta .cli-snippet .snippet-label {
@@ -314,9 +327,10 @@
     <section id="beat-cta" class="beat">
       <a href="/signup" class="cta-start">Connect your agent →</a>
       <p class="cta-subtle">5,000 Points free. No credit card. Start building in minutes.</p>
-      <!-- MCP config — works with Claude Code, Cursor, Pi, Claude Desktop -->
+      <p class="cta-step">1 · Sign up to get your API key, then either:</p>
+      <!-- MCP config — the agent integration path -->
       <div class="mcp-snippet">
-        <div class="snippet-label">MCP config</div>
+        <div class="snippet-label">A · Connect your agent (MCP)</div>
         <pre><code>{
   "mcpServers": {
     "tortoise": {
@@ -329,10 +343,11 @@
     }
   }
 }</code></pre>
-        <p class="snippet-note">Paste into <code>.mcp.json</code> (Claude Code), <code>.cursor/mcp.json</code> (Cursor), or <code>claude_desktop_config.json</code> (Claude Desktop).</p>
+        <p class="snippet-note">Paste into <code>.mcp.json</code> (Claude Code), <code>.cursor/mcp.json</code> (Cursor), or <code>claude_desktop_config.json</code> (Claude Desktop). Your agent then reads and writes Tortoise memory automatically.</p>
       </div>
+      <p class="cta-step">2 · For scripting and automation, use the CLI:</p>
       <div class="cli-snippet">
-        <div class="snippet-label">CLI quickstart</div>
+        <div class="snippet-label">B · CLI quickstart</div>
         <code>$ pip install git+https://github.com/daniel-ospina/tortoise.git</code>
         <code>$ tortoise init --api-key &lt;key&gt;</code>
         <code>$ tortoise create-point "Hello world" --kind statement</code>
