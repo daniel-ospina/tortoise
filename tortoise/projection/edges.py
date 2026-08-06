@@ -146,7 +146,7 @@ class _EdgeHandlers:
         )
 
     def link_source_to_entity(self, source_url: str, entity_id: str, entity_label: str, source_kind: str = "document") -> None:
-        """Create Source → Entity references edge (Ontology v3.0 §3.2-3.3).
+        """Create Source → Entity references edge (Ontology v3.1 §3.4).
 
         Auto-creates the Source node if it doesn't exist (MERGE + ON CREATE SET)
         so the edge works even when no Point extracted the source yet (#205).
