@@ -54,7 +54,7 @@ def test_restore_replays_events():
 
 
 def test_restore_missing_dir():
-    result = restore("/nonexistent/backup")
+    result = restore("/nonexistent/backup", db_path="/tmp/unused.db")
     assert result["status"].startswith("error")
 
 
