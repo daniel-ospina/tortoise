@@ -61,15 +61,15 @@ def _check_available() -> bool:
 def query_prior_research(domain: str) -> list[dict]:
     """Query epistemic graph for existing claims about a domain.
 
-    Searches Points by context (exact match). Returns list of dicts:
-    {id, content, pointKind, context, confidence, status}.
+    Searches Points by kind (fuzzy match). Returns list of dicts:
+    {id, content, pointKind, confidence, status}.
     """
     sdk = _get_sdk()
     if sdk is None:
         return []
 
-    # Bare context query catches all points regardless of kind
-    return sdk.query(context=domain)
+    # Query by kind — domain is used as a keyword search in content
+    return sdk.query(kind=domain)
 
 
 # ── §6.3 Contract: writeStrategyPoints ──────────────────
@@ -89,8 +89,7 @@ def write_strategy_points(points: list[dict], kind: str = "strategy") -> list[di
     created: list[dict] = []
     for p in points:
         content = p["content"]
-        context = p.get("context") or ""
-        props = {"context": context}
+        props = {}
         if p.get("authoredBy"):
             props["authoredBy"] = p["authoredBy"]
         if p.get("confidence") is not None:
@@ -112,28 +111,26 @@ def query_existing_strategies() -> list[dict]:
 
 # ── Vision queries (from E2E-10 pattern) ───────────────
 
-def query_existing_visions(context: str | None = None) -> list[dict]:
+def query_existing_visions(point_kind: str | None = None) -> list[dict]:
     """Query epistemic graph for existing vision Points."""
     sdk = _get_sdk()
     if sdk is None:
         return []
-    if context:
-        return sdk.query(kind="vision", context=context)
+    if point_kind:
+        return sdk.query(kind=point_kind)
     return sdk.query(kind="vision")
 
 
 # ── Generic claim writing ──────────────────────────────
 
 def write_claim(content: str, kind: str = "statement", *,
-                context: str = "", authored_by: str = "",
+                authored_by: str = "",
                 confidence: float | None = None) -> dict:
     """Write a single claim Point to the epistemic graph."""
     sdk = _get_sdk()
     if sdk is None:
         return {"error": "tortoise_unavailable", "id": "", "written": False}
     props: dict = {}
-    if context:
-        props["context"] = context
     if authored_by:
         props["authoredBy"] = authored_by
     if confidence is not None:
@@ -201,19 +198,17 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # query-visions
     qv = sub.add_parser("query-visions", help="Query existing vision Points")
-    qv.add_argument("--context", default=None, help="Optional context filter")
+    qv.add_argument("--point-kind", default=None, help="Optional pointKind filter")
 
     # write-points
     wp = sub.add_parser("write-points", help="Write Points to epistemic graph")
     wp.add_argument("--kind", required=True, help="Point kind (strategy, vision, statement, etc.)")
     wp.add_argument("--points-json", required=True, help="JSON array of point dicts with 'content' key")
-    wp.add_argument("--context", default="", help="Default context for all points")
 
     # write-claim
     wc = sub.add_parser("write-claim", help="Write a single claim Point")
     wc.add_argument("--content", required=True, help="Claim content")
     wc.add_argument("--kind", default="statement", help="Point kind")
-    wc.add_argument("--context", default="", help="Context/domain")
     wc.add_argument("--authored-by", default="", help="Who authored this claim")
     wc.add_argument("--confidence", type=float, default=None, help="Confidence 0.0-1.0")
 
@@ -236,7 +231,7 @@ def main():
         print(_to_json({"count": len(results), "results": results}))
 
     elif args.command == "query-visions":
-        results = query_existing_visions(context=args.context)
+        results = query_existing_visions(point_kind=args.point_kind)
         print(_to_json({"count": len(results), "results": results}))
 
     elif args.command == "write-points":
@@ -245,16 +240,12 @@ def main():
         except json.JSONDecodeError as e:
             print(_to_json({"error": "invalid-json", "detail": str(e)}), file=sys.stderr)
             sys.exit(1)
-        if args.context:
-            for p in points:
-                if not p.get("context"):
-                    p["context"] = args.context
         results = write_strategy_points(points, kind=args.kind)
         print(_to_json({"written": len(results), "results": results}))
 
     elif args.command == "write-claim":
         result = write_claim(
-            args.content, kind=args.kind, context=args.context,
+            args.content, kind=args.kind,
             authored_by=args.authored_by, confidence=args.confidence,
         )
         print(_to_json(result))

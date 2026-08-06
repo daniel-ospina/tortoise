@@ -78,10 +78,11 @@ def main(argv: list[str] | None = None):
         for iss in issues:
             content = f"GitHub #{iss['number']}: {iss['title']}"
             api.add_point(
-                content, "resolution-event",
+                content,
                 provenance("github-issues", None, None,
                            speaker="system",
                            extracted_by=f"github:{iss.get('url','')}"),
+                pointKind="resolution-event",
             )
             count += 1
             print(f"  ✓ #{iss['number']}: {iss['title']}")

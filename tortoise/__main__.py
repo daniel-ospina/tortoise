@@ -1340,32 +1340,6 @@ def _cmd_doctor(args):
     return 0 if fails == 0 else 1
 
 
-def _cmd_list_contexts(args) -> int:
-    """List all graph contexts with point counts, sorted by count DESC."""
-    import os as _os
-    from tortoise.sdk import TortoiseSDK
-    from tortoise.projection import FalkorProjection
-
-    uri = _os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise")
-    sdk = TortoiseSDK()
-    sdk._proj = FalkorProjection.from_uri(uri)
-
-    try:
-        domains = sdk.list_domains()
-        if not domains:
-            print("No contexts found.")
-            return 0
-        # Print count + context, sorted DESC (already sorted by list_domains)
-        max_width = max(len(str(d["context"])) for d in domains)
-        for d in domains:
-            print(f"{d['count']:>6}  {d['context']:<{max_width}}")
-        print(f"\n{len(domains)} context(s) total")
-    finally:
-        if sdk._proj:
-            sdk._proj.close()
-    return 0
-
-
 def _cmd_list_kinds(args) -> int:
     """List all pointKinds present in the graph with counts."""
     import os as _os
@@ -1461,7 +1435,7 @@ def _cmd_decide(args) -> int:
             data = _json.loads(raw)
     else:
         # Inline mode
-        data: dict = {"context": args.context or "decide"}
+        data: dict = {}
         if args.options:
             data["options"] = _json.loads(args.options)
         if args.criteria:
@@ -1471,7 +1445,6 @@ def _cmd_decide(args) -> int:
         if args.edges:
             data["edges"] = _json.loads(args.edges)
 
-    ctx = data.get("context", "decide")
     options = data.get("options", {})
     criteria = data.get("criteria", {})
     findings = data.get("findings", {})
@@ -1484,13 +1457,11 @@ def _cmd_decide(args) -> int:
         return 1
 
     import os as _os
-    context_free = getattr(args, "context_free", False)
-
     uri = getattr(args, "db", None) or _os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise")
     sdk = TortoiseSDK()
     sdk._proj = FalkorProjection.from_uri(uri)
 
-    # Track all operator IDs for --context-free mode
+    # Track all operator IDs for explicit-factor mode
     all_operator_ids: list[str] = []
 
     try:
@@ -1503,7 +1474,7 @@ def _cmd_decide(args) -> int:
                 "evidence"
             )
             try:
-                p = sdk.create_point(kind, content, context=ctx, dedup=True)
+                p = sdk.create_point(kind, content, dedup=True)
                 all_points[pid] = p["id"]
                 print(f"  ✓ {pid} → {p['id']}")
             except Exception as e:
@@ -1536,7 +1507,7 @@ def _cmd_decide(args) -> int:
                 continue
 
             try:
-                op = sdk.create_operator(op_type, _resolve(src), [_resolve(tgt)], context=ctx, label=label)
+                op = sdk.create_operator(op_type, _resolve(src), [_resolve(tgt)], label=label)
                 created_ops[(src, op_type, tgt)] = op["id"]
                 all_operator_ids.append(op["id"])
                 print(f"  ✓ {src} --{op_type}--> {tgt}")
@@ -1549,7 +1520,7 @@ def _cmd_decide(args) -> int:
             op_type = te.get("op_type", "NAND")
             tgt = te["target"]
             try:
-                top = sdk.create_operator(op_type, _resolve(src), [_resolve(tgt)], context=ctx)
+                top = sdk.create_operator(op_type, _resolve(src), [_resolve(tgt)])
                 all_operator_ids.append(top["id"])
                 print(f"  ⚡ truth: {src} --{op_type}--> {tgt}")
             except Exception as e:
@@ -1569,7 +1540,7 @@ def _cmd_decide(args) -> int:
                 # duplicate operators feeding EP twice).
                 op_id = created_ops.get((src, op_type, tgt))
                 if op_id is None:
-                    op = sdk.create_operator(op_type, _resolve(src), [_resolve(tgt)], context=ctx)
+                    op = sdk.create_operator(op_type, _resolve(src), [_resolve(tgt)])
                     op_id = op["id"]
                     all_operator_ids.append(op_id)
                 sdk.mitigate_operator(op_id, reason, strength)
@@ -1579,11 +1550,11 @@ def _cmd_decide(args) -> int:
 
         # ── Compute confidence per option ──
         try:
-            if context_free and all_operator_ids:
-                print(f"  (context-free mode: {len(all_operator_ids)} operator factors)")
+            if all_operator_ids:
+                print(f"  (operator-factor mode: {len(all_operator_ids)} operator factors)")
                 result = sdk.compute_confidence(factors=all_operator_ids)
             else:
-                result = sdk.compute_confidence(context=ctx)
+                result = sdk.compute_confidence()
             print(f"\n✓ EP computed: {result['iterations']} iterations, converged={result['converged']}")
             confs = result.get("confidences", {})
 
@@ -1608,7 +1579,7 @@ def _cmd_decide(args) -> int:
         if sdk._proj:
             sdk._proj.close()
 
-    print(f"\nDone. Decision comparison filed to context='{ctx}'")
+    print(f"\nDone. Decision comparison filed.")
     return 0
 
 
@@ -1679,8 +1650,6 @@ def main(argv: list[str] | None = None) -> int:
     session_list = session_sp.add_parser("list", help="List all sessions")
     session_view = session_sp.add_parser("view", help="View a specific session")
     session_view.add_argument("id", help="Session ID")
-    # tortoise list-contexts
-    lc = sp.add_parser("list-contexts", help="List all graph contexts with point counts, sorted DESC")
     # tortoise list-kinds
     lk = sp.add_parser("list-kinds", help="List all pointKinds present in the graph with counts")
     # tortoise list-sources
@@ -1692,9 +1661,8 @@ def main(argv: list[str] | None = None) -> int:
     dc.add_argument("--criteria", help="JSON dict of criteria")
     dc.add_argument("--findings", help="JSON dict of findings")
     dc.add_argument("--edges", help="JSON list of edges, e.g. '[\"crit:1\", \"IMPL\", \"opt:a\"]' or full edge dicts")
-    dc.add_argument("--context", help="Graph context namespace (default: 'decide')")
     dc.add_argument("--context-free", action="store_true",
-                    help="Compute confidence via explicit operator factors instead of context isolation")
+                    help="Deprecated no-op — context-free (explicit factors) is the only mode since #49 Phase 2",)
     dc.add_argument("--db", help="FalkorDB URI override (default: TORTOISE_DB_URI or docker://:@localhost:16379/tortoise)")
     try:
         args = p.parse_args(argv)
@@ -1779,8 +1747,6 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_index_github(args)
         idx.print_help()
         return 1
-    elif args.cmd == "list-contexts":
-        return _cmd_list_contexts(args)
     elif args.cmd == "list-kinds":
         return _cmd_list_kinds(args)
     elif args.cmd == "list-sources":
