@@ -205,6 +205,13 @@ class FalkorProjection(
                  ssl: bool = False,
                  allow_nonstandard_path: bool = False):
 
+        # No-arg construction -> canonical embedded path (plan Task 9: graph-
+        # scripts migrated from FalkorProjection('tortoise.db') to no-arg,
+        # which must resolve to the canonical TORTOISE_DB_PATH).
+        if path is None and host is None:
+            from tortoise.config import resolve_db_path
+            path = resolve_db_path()
+
         if path is not None:
             # Hard-reject relative paths (plan Task 7, issue #176): a relative
             # path like 'tortoise.db' resolves per-CWD and silently creates a

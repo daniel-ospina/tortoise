@@ -20,12 +20,10 @@ from tortoise.projection import FalkorProjection
 LOG_PATH = "/Users/home/eldato/negation-game-explorations/tortoise/events.jsonl"
 DB_PATH  = "/Users/home/eldato/negation-game-explorations/tortoise/tortoise.db"
 
-from redislite.falkordb_client import FalkorDB
-db = FalkorDB(DB_PATH)
 g = db.select_graph('tortoise')
 
 log = EventLog(LOG_PATH)
-proj = FalkorProjection(DB_PATH)
+proj = FalkorProjection()
 api = EventAPI(log, initiated_by="user", agent_id="fix-6709@pi",
                projection=proj)
 

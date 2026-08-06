@@ -18,7 +18,7 @@ LOG_PATH = "/Users/home/eldato/negation-game-explorations/tortoise/convergence-a
 DB_PATH   = "/Users/home/eldato/negation-game-explorations/tortoise/tortoise.db"
 
 log = EventLog(LOG_PATH)
-proj = FalkorProjection(DB_PATH)
+proj = FalkorProjection()
 api = EventAPI(log, initiated_by="user", agent_id="pi@deepseek-v4",
                projection=proj)
 

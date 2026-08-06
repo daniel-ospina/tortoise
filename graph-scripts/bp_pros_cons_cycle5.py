@@ -8,7 +8,7 @@ from tortoise.log import EventLog
 from tortoise.projection import FalkorProjection
 
 log = EventLog('bp-pros-cons.jsonl')
-proj = FalkorProjection('tortoise.db')
+proj = FalkorProjection()
 api = EventAPI(log, initiated_by="user", agent_id="research-agent", projection=proj)
 
 pv = lambda quote: provenance("bp-pros-cons-research", (0,0), quote, speaker="research-agent", extracted_by="manual@1.0")

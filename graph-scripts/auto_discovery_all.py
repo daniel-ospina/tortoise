@@ -9,7 +9,7 @@ from tortoise.projection import FalkorProjection
 
 # ── Cycle 1 ──────────────────────────────────────────────────────────────
 log1 = EventLog('auto-discovery-cycle1.jsonl')
-proj = FalkorProjection('tortoise.db')
+proj = FalkorProjection()
 api = EventAPI(log1, initiated_by="user", agent_id="research-agent", projection=proj)
 pv = lambda quote: provenance("auto-discovery", (0,0), quote, speaker="research-agent", extracted_by="manual@1.0")
 
