@@ -211,6 +211,10 @@ class _EntityHandlers:
                     "embedding": embedding,
                     "now": _now_iso()},
         )
+        # #205 — wire references edge (Source → Document) for provenance chain.
+        # doc_id IS the source url (file path) in the ingest flow, and the
+        # Document node was just created/updated above. MERGE is idempotent.
+        self.link_source_to_entity(did, did, "Document")
         # #125 — aboutSubject edges when about_entities present (Task 1
         # self-contained: label-agnostic generalization lives in edges.py)
         about = ev.get("about_entities") or []

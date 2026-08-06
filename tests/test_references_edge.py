@@ -282,3 +282,71 @@ def test_get_provenance_chain_complete():
         assert "Object" in result["labels"]
     finally:
         sdk.close()
+
+
+# ── provenance chain via ingest path (#205) ────────────────────────────────
+
+def test_provenance_chain_returns_data_for_ingested_document():
+    """#205: _upsert_document → link_source_to_entity → get_provenance_chain
+    returns Source + Document for a Point extractedFrom the doc."""
+    sdk = TortoiseSDK(_tmp("test.db"))
+    try:
+        proj = sdk._get_proj()
+
+        # Create Document via _upsert_document (production ingest path).
+        # This now internally calls link_source_to_entity(did, did, "Document")
+        # which MERGEs Source + references edge (#205).
+        proj.apply({"type": "DocumentCreated", "id": "doc-ingest-1",
+                     "title": "Ingested Document"})
+
+        # Create Point that was extracted from this document
+        proj.g.query(
+            "CREATE (p:Point {id:'pt-ingest-1', content:'A claim from the doc', "
+            "context:'test', is_operator:false})"
+        )
+        # Wire: Point extractedFrom Source (the Source was auto-created by
+        # link_source_to_entity above)
+        proj.g.query(
+            "MATCH (p:Point {id:'pt-ingest-1'}), (s:Source {url:'doc-ingest-1'}) "
+            "MERGE (p)-[:extractedFrom]->(s)"
+        )
+
+        # Verify the provenance chain returns data
+        chain = sdk.get_provenance_chain("pt-ingest-1")
+        assert len(chain) == 1, f"Expected 1 result, got {len(chain)}"
+        result = chain[0]
+        assert result["source"]["url"] == "doc-ingest-1"
+        assert result["entity"]["title"] == "Ingested Document"
+        assert "Document" in result["labels"]
+    finally:
+        sdk.close()
+
+
+def test_link_source_to_entity_source_kind_passthrough():
+    """#205: source_kind param is persisted on auto-created Source node."""
+    sdk = TortoiseSDK(_tmp("test.db"))
+    try:
+        proj = sdk._get_proj()
+
+        # Create Document + references edge with custom source_kind
+        proj.g.query(
+            "CREATE (d:Document {id:'doc-k', title:'Kind Test', documentKind:'report'})"
+        )
+        sdk.link_source_to_entity("src-kind.txt", "doc-k", "Document",
+                                   source_kind="github_issue")
+
+        # Verify the Source node was created with the right sourceKind
+        r = proj.g.query(
+            "MATCH (s:Source {url:'src-kind.txt'}) RETURN s.sourceKind"
+        ).result_set
+        assert r and r[0][0] == "github_issue", \
+            f"Expected sourceKind='github_issue', got {r}"
+
+        # Verify the references edge exists
+        r2 = proj.g.query(
+            "MATCH (s:Source {url:'src-kind.txt'})-[:references]->"
+            "(d:Document {id:'doc-k'}) RETURN count(*) > 0"
+        ).result_set
+        assert r2[0][0] is True
+    finally:
+        sdk.close()
