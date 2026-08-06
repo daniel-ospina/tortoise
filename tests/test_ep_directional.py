@@ -25,11 +25,16 @@ def make_point(sdk, content, kind="statement"):
     return sdk.create_point(kind, content)
 
 
-def make_operator(sdk, source_id, target_id, op_type="IMPL"):
-    return sdk.create_operator(op_type, source_id, [target_id])
+def make_operator(sdk, source_id, target_id, op_type="IMPL", direction=None):
+    kwargs = {}
+    if direction is not None:
+        kwargs["direction"] = direction
+    return sdk.create_operator(op_type, source_id, [target_id], **kwargs)
 
 
-def run_ep(sdk, directed=False):
+def run_ep(sdk):
+    """Run EP belief propagation. Direction is controlled per-operator
+    via the `direction` property (ONTOLOGY v3.1 #189), not via a global EP flag."""
     from tortoise.ep import TortoiseEP
     proj = sdk._get_proj()
     rows = proj.g.query(
@@ -43,7 +48,7 @@ def run_ep(sdk, directed=False):
     ).result_set
     evidence = {r[0]: (r[1], r[2]) for r in ev_rows} if ev_rows else {}
     ep = TortoiseEP(proj, damping=0.5, n_quad=12, max_iter=50, tol=1e-3,
-                    directed=directed, evidence=evidence)
+                    evidence=evidence)
     ep.run(op_ids, max_hops=2)
     rows = proj.g.query(
         "MATCH (n:Point) WHERE n.confidence IS NOT NULL RETURN n.id, n.confidence"
@@ -60,19 +65,19 @@ class TestE019DirectionalCascade:
 
     # ── Helpers ──────────────────────────────────────────────
 
-    def build_shared_conclusion_graph(self, sdk, num_shared=1):
+    def build_shared_conclusion_graph(self, sdk, num_shared=1, direction=None):
         """A and B both IMPL C1 (and C1a, C1b...). B also IMPL C2."""
         a = make_point(sdk, "Point A")
         b = make_point(sdk, "Point B")
         c2 = make_point(sdk, "C2 — independent conclusion")
 
-        make_operator(sdk, b["id"], c2["id"], "IMPL")
+        make_operator(sdk, b["id"], c2["id"], "IMPL", direction=direction)
 
         shared_ids = []
         for i in range(num_shared):
             ci = make_point(sdk, f"C1{'abcdef'[i]} — shared conclusion {i+1}")
-            make_operator(sdk, a["id"], ci["id"], "IMPL")
-            make_operator(sdk, b["id"], ci["id"], "IMPL")
+            make_operator(sdk, a["id"], ci["id"], "IMPL", direction=direction)
+            make_operator(sdk, b["id"], ci["id"], "IMPL", direction=direction)
             shared_ids.append(ci["id"])
 
         return a["id"], b["id"], c2["id"], shared_ids
@@ -91,14 +96,14 @@ class TestE019DirectionalCascade:
             make_operator(sdk, anchor["id"], c2_id, "IMPL")
 
     def measure_drop(self, sdk, a_id, b_id, c2_id, shared_ids,
-                     b_tier, directed=False):
+                     b_tier, direction="bidirectional"):
         """Run EP, get baseline, NAND A, run EP again, return drops."""
         # Set source evidence
         sdk.set_point_baseline(a_id, *TIER_MAP["T0"])
         sdk.set_point_baseline(b_id, *TIER_MAP[b_tier])
 
         # Baseline EP
-        result_before = run_ep(sdk, directed=directed)
+        result_before = run_ep(sdk)
         c2_before = get_conf(result_before, c2_id)
         b_before = get_conf(result_before, b_id)
         c1_before = get_conf(result_before, shared_ids[0])
@@ -107,7 +112,7 @@ class TestE019DirectionalCascade:
         self.add_nand(sdk, a_id)
 
         # After NAND EP
-        result_after = run_ep(sdk, directed=directed)
+        result_after = run_ep(sdk)
         c2_after = get_conf(result_after, c2_id)
         b_after = get_conf(result_after, b_id)
         c1_after = get_conf(result_after, shared_ids[0])
@@ -130,9 +135,9 @@ class TestE019DirectionalCascade:
         sdk.set_point_baseline(a_id, *TIER_MAP["T4"])
         sdk.set_point_baseline(b_id, *TIER_MAP["T0"])
 
-        result_before = run_ep(sdk, directed=False)
+        result_before = run_ep(sdk)
         self.add_nand(sdk, a_id)
-        result_after = run_ep(sdk, directed=False)
+        result_after = run_ep(sdk)
         sdk.close()
 
         a_drop = get_conf(result_before, a_id) - get_conf(result_after, a_id)
@@ -148,9 +153,10 @@ class TestE019DirectionalCascade:
     def test_directed_also_clean(self):
         """Directed EP also shows no cascade (same result)."""
         sdk = fresh_sdk()
-        a_id, b_id, c2_id, shared_ids = self.build_shared_conclusion_graph(sdk)
+        a_id, b_id, c2_id, shared_ids = self.build_shared_conclusion_graph(
+            sdk, direction="unidirectional")
         r = self.measure_drop(sdk, a_id, b_id, c2_id, shared_ids,
-                              "T4", directed=True)
+                              "T4", direction="unidirectional")
         sdk.close()
         assert r["c2_drop"] < 0.02, f"Directed C2: {r['c2_drop']:.4f}"
 
@@ -160,9 +166,9 @@ class TestE019DirectionalCascade:
         """3 shared conclusions: bidirectional cascade is larger."""
         sdk = fresh_sdk()
         a_id, b_id, c2_id, shared_ids = self.build_shared_conclusion_graph(
-            sdk, num_shared=3)
+            sdk, num_shared=3, direction="bidirectional")
         r = self.measure_drop(sdk, a_id, b_id, c2_id, shared_ids,
-                              "T4", directed=False)
+                              "T4", direction="bidirectional")
         sdk.close()
         # 3 shared should drop MORE than 1 shared (~0.05-0.10)
         assert r["c2_drop"] > 0.04, \
@@ -174,9 +180,9 @@ class TestE019DirectionalCascade:
         """3 shared conclusions: directed EP still clean."""
         sdk = fresh_sdk()
         a_id, b_id, c2_id, shared_ids = self.build_shared_conclusion_graph(
-            sdk, num_shared=3)
+            sdk, num_shared=3, direction="unidirectional")
         r = self.measure_drop(sdk, a_id, b_id, c2_id, shared_ids,
-                              "T4", directed=True)
+                              "T4", direction="unidirectional")
         sdk.close()
         assert r["c2_drop"] < 0.02, \
             f"Directed C2 should not drop: {r['c2_drop']:.4f}"
@@ -189,7 +195,7 @@ class TestE019DirectionalCascade:
         a_id, b_id, c2_id, shared_ids = self.build_shared_conclusion_graph(sdk)
         self.add_anchors(sdk, c2_id, 1, "T4")
         r = self.measure_drop(sdk, a_id, b_id, c2_id, shared_ids,
-                              "T4", directed=False)
+                              "T4")
         sdk.close()
         # 1 T4 anchor should reduce but not eliminate cascade
         assert r["c2_drop"] < 0.08, \
@@ -203,7 +209,7 @@ class TestE019DirectionalCascade:
         a_id, b_id, c2_id, shared_ids = self.build_shared_conclusion_graph(sdk)
         self.add_anchors(sdk, c2_id, 2, "T4")
         r = self.measure_drop(sdk, a_id, b_id, c2_id, shared_ids,
-                              "T4", directed=False)
+                              "T4")
         sdk.close()
         assert r["c2_drop"] < 0.05, \
             f"Med-anchor drop too large: {r['c2_drop']:.4f}"
@@ -214,7 +220,7 @@ class TestE019DirectionalCascade:
         a_id, b_id, c2_id, shared_ids = self.build_shared_conclusion_graph(sdk)
         self.add_anchors(sdk, c2_id, 5, "T2")
         r = self.measure_drop(sdk, a_id, b_id, c2_id, shared_ids,
-                              "T4", directed=False)
+                              "T4")
         sdk.close()
         assert r["c2_drop"] < 0.03, \
             f"High-anchor drop too large: {r['c2_drop']:.4f}"
@@ -228,7 +234,7 @@ class TestE019DirectionalCascade:
 
         # Isolated
         r0 = self.measure_drop(sdk, a_id, b_id, c2_id, shared_ids,
-                                "T4", directed=False)
+                                "T4")
 
         # Reset NAND
         sdk2 = fresh_sdk()
@@ -236,14 +242,14 @@ class TestE019DirectionalCascade:
             self.build_shared_conclusion_graph(sdk2)
         self.add_anchors(sdk2, c2_id2, 1, "T4")
         r1 = self.measure_drop(sdk2, a_id2, b_id2, c2_id2, shared_ids2,
-                                "T4", directed=False)
+                                "T4")
 
         sdk3 = fresh_sdk()
         a_id3, b_id3, c2_id3, shared_ids3 = \
             self.build_shared_conclusion_graph(sdk3)
         self.add_anchors(sdk3, c2_id3, 5, "T2")
         r5 = self.measure_drop(sdk3, a_id3, b_id3, c2_id3, shared_ids3,
-                                "T4", directed=False)
+                                "T4")
 
         sdk.close(); sdk2.close(); sdk3.close()
 
@@ -258,16 +264,16 @@ class TestE019DirectionalCascade:
         """C1 loses A's support regardless of mode."""
         sdk = fresh_sdk()
         a_id, b_id, c2_id, shared_ids = self.build_shared_conclusion_graph(sdk)
-        # Bidirectional
+        # Bidirectional (default)
         r_bi = self.measure_drop(sdk, a_id, b_id, c2_id, shared_ids,
-                                  "T4", directed=False)
+                                  "T4")
         sdk.close()
         # Directed
         sdk2 = fresh_sdk()
         a_id2, b_id2, c2_id2, shared_ids2 = \
-            self.build_shared_conclusion_graph(sdk2)
+            self.build_shared_conclusion_graph(sdk2, direction="unidirectional")
         r_dir = self.measure_drop(sdk2, a_id2, b_id2, c2_id2, shared_ids2,
-                                   "T4", directed=True)
+                                   "T4", direction="unidirectional")
         sdk2.close()
         assert r_bi["c1_drop"] > 0.05, "C1 should drop in bidirectional"
         assert r_dir["c1_drop"] > 0.05, "C1 should drop in directed"
@@ -279,7 +285,7 @@ class TestE019DirectionalCascade:
         sdk = fresh_sdk()
         a_id, b_id, c2_id, shared_ids = self.build_shared_conclusion_graph(sdk)
         r = self.measure_drop(sdk, a_id, b_id, c2_id, shared_ids,
-                              "T4", directed=False)
+                              "T4")
         sdk.close()
         assert r["b_drop"] > 0.01, \
             f"B should receive feedback: drop={r['b_drop']:.4f}"
@@ -287,9 +293,10 @@ class TestE019DirectionalCascade:
     def test_b_no_feedback_directed(self):
         """B receives no feedback from C1 in directed mode."""
         sdk = fresh_sdk()
-        a_id, b_id, c2_id, shared_ids = self.build_shared_conclusion_graph(sdk)
+        a_id, b_id, c2_id, shared_ids = self.build_shared_conclusion_graph(
+            sdk, direction="unidirectional")
         r = self.measure_drop(sdk, a_id, b_id, c2_id, shared_ids,
-                              "T4", directed=True)
+                              "T4", direction="unidirectional")
         sdk.close()
         assert r["b_drop"] < 0.02, \
             f"B should not receive feedback in directed: drop={r['b_drop']:.4f}"

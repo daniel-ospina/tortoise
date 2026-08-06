@@ -126,9 +126,12 @@ def make_point(sdk: TortoiseSDK, content: str, kind: str = "statement") -> dict:
 
 
 def make_operator(sdk: TortoiseSDK, source_id: str, target_id: str,
-                   op_type: str = "IMPL") -> dict:
+                   op_type: str = "IMPL", direction: str | None = None) -> dict:
     """Create an operator edge between two Points."""
-    return sdk.create_operator(op_type, source_id, [target_id])
+    kwargs = {}
+    if direction is not None:
+        kwargs["direction"] = direction
+    return sdk.create_operator(op_type, source_id, [target_id], **kwargs)
 
 
 def set_source_evidence(sdk: TortoiseSDK, point_id: str, tier: str):
@@ -190,9 +193,10 @@ def build_scenario_b(sdk: TortoiseSDK) -> tuple[str, str, str]:
     a = make_point(sdk, "Point A: loopy cluster")
     b = make_point(sdk, "Point B: loopy cluster")
     c = make_point(sdk, "Point C: loopy cluster")
-    make_operator(sdk, a["id"], b["id"], "IMPL")
-    make_operator(sdk, b["id"], c["id"], "IMPL")
-    make_operator(sdk, c["id"], a["id"], "IMPL")
+    # Directed cycle — unidirectional to preserve directional semantics (#189)
+    make_operator(sdk, a["id"], b["id"], "IMPL", direction="unidirectional")
+    make_operator(sdk, b["id"], c["id"], "IMPL", direction="unidirectional")
+    make_operator(sdk, c["id"], a["id"], "IMPL", direction="unidirectional")
     return a["id"], b["id"], c["id"]
 
 
