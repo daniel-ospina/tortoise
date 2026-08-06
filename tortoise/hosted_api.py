@@ -1022,3 +1022,18 @@ async def list_sessions(team: dict = Depends(get_current_team)):
         "MATCH (s:Session) RETURN s.id, s.created_at, s.turn_count ORDER BY s.created_at DESC LIMIT 50"
     ).result_set
     return {"sessions": [{"id": r[0], "created_at": r[1], "turns": r[2]} for r in rows]}
+
+
+@app.get("/v1/context")
+async def session_context(team: dict = Depends(get_current_team)):
+    """Memory digest for agent session-start hooks (tortoise context CLI).
+
+    Mirrors TortoiseSDK.session_context() so hosted users get the same
+    injection payload as local users.
+    """
+    sdk = _make_sdk(namespace=team["team_id"])
+    proj = sdk._get_proj()
+    try:
+        return sdk.session_context()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Context unavailable: {e}")

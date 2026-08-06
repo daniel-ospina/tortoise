@@ -473,6 +473,98 @@ def _cmd_create_point(args) -> int:
     return 0
 
 
+def _cmd_context(args) -> int:
+    """Print a compact memory digest for agent session-start injection.
+
+    Used by the Claude Code SessionStart hook: stdout from this command is
+    injected into the session context automatically, so the agent starts
+    each session knowing what Tortoise already remembers.
+
+    Hosted mode (\".tortoise\" config): calls the hosted API.
+    Local mode (embedded/Docker): uses TortoiseSDK.session_context().
+    """
+    import json as _json, os as _os, sys as _sys
+    from pathlib import Path
+
+    config_path = Path.cwd() / ".tortoise"
+    api_key = None
+    api_url = _os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co")
+
+    if config_path.exists():
+        try:
+            cfg = _json.loads(config_path.read_text())
+            api_key = cfg.get("api_key")
+            api_url = cfg.get("api_url") or api_url
+        except _json.JSONDecodeError:
+            pass
+
+    if api_key:
+        # ── Hosted: query the API ──
+        from urllib.request import Request, urlopen
+        from urllib.error import URLError, HTTPError
+        try:
+            req = Request(
+                f"{api_url}/v1/context",
+                headers={"Authorization": f"Bearer {api_key}"},
+            )
+            with urlopen(req, timeout=15) as resp:
+                data = _json.loads(resp.read())
+        except HTTPError as e:
+            body = e.read().decode() if e.fp else ""
+            print(f"Cannot reach Tortoise API ({e.code}): {body}", file=_sys.stderr)
+            return 1
+        except (URLError, ValueError) as e:
+            print(f"Cannot reach Tortoise API: {e.reason if hasattr(e,'reason') else e}", file=_sys.stderr)
+            return 1
+    else:
+        # ── Local: SDK (embedded or TORTOISE_DB_URI) ──
+        try:
+            import os as _os2
+            from tortoise.sdk import TortoiseSDK
+            if _os2.environ.get("TORTOISE_DB_URI"):
+                sdk = TortoiseSDK()
+            else:
+                _db_path = _os2.environ.get("TORTOISE_DB_PATH") or _os.environ.get("TORTOISE_DB_PATH")
+                sdk = TortoiseSDK(db_path=_db_path)
+            data = sdk.session_context()
+        except Exception as e:
+            print(f"Tortoise unavailable: {e}", file=_sys.stderr)
+            return 1
+
+    if data.get("no_prior_sessions") or not (data.get("diary_entries") or data.get("recent_points") or data.get("recent_events")):
+        print("<Tortoise memory is empty — no prior sessions yet.>")
+        return 0
+
+    print("# Tortoise memory (from previous sessions)")
+
+    diary = data.get("diary_entries") or []
+    if diary:
+        print()
+        print("## Recent diary")
+        for p in diary[:5]:
+            ts = (p.get("createdAt") or "")[:10]
+            print(f"- [{ts}] {p.get('content','')[:160]}")
+
+    points = data.get("recent_points") or []
+    if points:
+        print()
+        print("## Recent points/decisions")
+        for p in points[:8]:
+            kind = p.get("pointKind", "point")
+            print(f"- ({kind}) {p.get('content','')[:160]}")
+
+    conf = data.get("confidence_changes") or []
+    if conf:
+        print()
+        print("## Confidence-tracked claims")
+        for c in conf[:5]:
+            print(f"- [{c.get('confidence',0):.2f}] {c.get('content','')[:120]}")
+
+    print()
+    print("Ask me about any of the above; file new decisions with tortoise_create_point.")
+    return 0
+
+
 def _cmd_session(args) -> int:
     """Manage Tortoise Cloud sessions."""
     import json, os, sys
@@ -1023,7 +1115,8 @@ def _print_harness_instructions(harness: str) -> None:
         print("  Add tortoise MCP to your .mcp.json:")
         print('    {"tortoise": {"command": "python3", "args": ["-m", "tortoise.mcp_server"]}}')
         print("  Claude Code will auto-discover MCP tools on restart.")
-        print("  Optional: add .claude/hooks/session-start.sh for auto-injection (Phase B).")
+        print("  Optional: add .claude/hooks/session-start.sh for auto-injection.")
+        print("    cp tortoise/claude-hooks/session-start.sh .claude/hooks/session-start.sh")
     if harness == "codex" or harness == "multiple":
         print()
         print("Codex:")
@@ -1652,6 +1745,9 @@ def main(argv: list[str] | None = None) -> int:
     session_view.add_argument("id", help="Session ID")
     # tortoise list-kinds
     lk = sp.add_parser("list-kinds", help="List all pointKinds present in the graph with counts")
+    # tortoise context — memory digest for agent session-start hooks
+    ctx = sp.add_parser("context", help="Print memory digest for agent session-start injection")
+    ctx.add_argument("--db", default=None, help="Docker URI or file path for target database")
     # tortoise list-sources
     ls = sp.add_parser("list-sources", help="List all Sources with point counts")
     # tortoise decide --input <json|yaml>
@@ -1749,6 +1845,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     elif args.cmd == "list-kinds":
         return _cmd_list_kinds(args)
+    elif args.cmd == "context":
+        return _cmd_context(args)
     elif args.cmd == "list-sources":
         return _cmd_list_sources(args)
     elif args.cmd == "decide":
