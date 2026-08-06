@@ -195,8 +195,13 @@ class AuditLogger:
             return False
 
     def _write_fallback(self, event: dict) -> None:
-        """Append event to local JSONL fallback file."""
+        """Append event to local JSONL fallback file.
+
+        Ensures the parent directory exists so a reassigned fallback path
+        (or a deleted dir) never silently drops audit events.
+        """
         try:
+            self._fallback_path.parent.mkdir(parents=True, exist_ok=True)
             with open(self._fallback_path, "a") as f:
                 f.write(json.dumps(event, default=str) + "\n")
         except Exception as e:

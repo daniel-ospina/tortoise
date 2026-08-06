@@ -259,7 +259,8 @@ def main(argv=None):
         if args.resolution:
             api.add_point(f"Resolved: {source_id}", "resolution-event",
                           provenance(source_id, None, None, speaker="system",
-                                     extracted_by=extractor.version))
+                                     extracted_by=extractor.version),
+                          pointKind="resolution-event")
         points = fold(log.read_all())
         statements, operators = split(points)
         args.out.write_text(render(points, title=f"Tortoise — {source_id}"),
