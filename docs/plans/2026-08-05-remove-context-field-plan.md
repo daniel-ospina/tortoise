@@ -1,6 +1,8 @@
 # Implementation Plan: Delete `context` field from Point/Operator nodes (#49)
 
-**Status:** Draft  
+> ⚠️ **EXECUTED — DO NOT RE-EXECUTE.** This plan was implemented in PR #137 (#49 Phase 1 & 2: context deprecation, stop-writes, projection_version gate). Retained for design rationale and historical reference only. Any §1–§9 tasks have already been completed — do not treat this document as an execution guide.
+
+**Status:** Executed  
 **Complexity:** Complex  
 **Issue:** [daniel-ospina/tortoise#49](https://github.com/daniel-ospina/tortoise/issues/49)  
 **Prerequisites:** #86 (directional IMPL), #99 (test-guard), graph restored state (4,546 pts with context)  
