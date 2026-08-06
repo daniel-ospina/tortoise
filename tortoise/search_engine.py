@@ -598,10 +598,20 @@ def filter_by_relationship(
     """
     if not point_ids or not predicate or not target_id:
         return []
+    # Relationship filters only make sense for Point-backed entities — the chain
+    # always traverses operator edges, which only connect Points. Bail early
+    # with a warning instead of silently returning empty for unsupported types.
+    if entity_type not in ("point", "operator"):
+        logger.warning("Relationship filters not supported for entity_type=%s", entity_type)
+        return []
     try:
-        label = entity_type.capitalize()
+        # Operators are Points with is_operator=true — no Operator label exists (#148).
+        # Map both point and operator to the Point label, mirroring
+        # run_fts_query / run_structural_query label logic.
+        label = "Point"
+        is_operator_clause = " AND n.is_operator = true" if entity_type == "operator" else ""
         cypher = (
-            f"MATCH (n:{label}) WHERE n.{id_field} IN $ids "
+            f"MATCH (n:{label}) WHERE n.{id_field} IN $ids{is_operator_clause} "
             f"MATCH (n)<-[r1:hasPart|IMPL|NAND]-(op:Point {{is_operator:true, label:$pred}})"
             f"-[r2:hasPart|IMPL|NAND]->(t:{label} {{{id_field}: $tid}}) "
             f"RETURN DISTINCT n.{id_field}"
@@ -630,10 +640,23 @@ def filter_by_traversal_predicate(
     """
     if not point_ids or not predicate:
         return []
+    # Traversal predicate filters only make sense for Point-backed entities —
+    # the chain always traverses operator edges, which only connect Points.
+    # Bail early with a warning instead of silently returning empty for
+    # unsupported types.
+    if entity_type not in ("point", "operator"):
+        logger.warning(
+            "Traversal predicate filters not supported for entity_type=%s", entity_type
+        )
+        return []
     try:
-        label = entity_type.capitalize()
+        # Operators are Points with is_operator=true — no Operator label exists (#148).
+        # Map both point and operator to the Point label, mirroring
+        # run_fts_query / run_structural_query label logic.
+        label = "Point"
+        is_operator_clause = " AND n.is_operator = true" if entity_type == "operator" else ""
         cypher = (
-            f"MATCH (n:{label}) WHERE n.{id_field} IN $ids "
+            f"MATCH (n:{label}) WHERE n.{id_field} IN $ids{is_operator_clause} "
             f"MATCH (n)<-[r:hasPart|IMPL|NAND]-(op:Point {{is_operator:true, label:$pred}}) "
             f"RETURN DISTINCT n.{id_field}"
         )
