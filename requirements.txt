@@ -9,3 +9,8 @@ prometheus-client>=0.16
 fastapi>=0.100.0
 uvicorn>=0.23.0
 
+
+# Embeddings for vector search (#160) — 384-dim all-MiniLM-L6-v2.
+# Heavy (~2GB with torch) but required for HNSW vector index queries.
+sentence-transformers>=2.0
+scikit-learn>=1.0
