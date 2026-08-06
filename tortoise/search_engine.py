@@ -140,12 +140,13 @@ def run_fts_query(
             logger.warning("Operator FTS query failed: %s", e)
             return []
     label = entity_type.capitalize()  # point→Point, event→Event, subject→Subject
+    id_field = "eventId" if entity_type == "event" else "id"
     try:
         start = time.monotonic()
         cypher = (
             f"CALL db.idx.fulltext.queryNodes('{label}', $query) "
             "YIELD node, score "
-            "RETURN node.id, score "
+            f"RETURN node.{id_field}, score "
             "ORDER BY score DESC "
             "LIMIT $limit"
         )
@@ -275,6 +276,7 @@ def run_structural_query(
     else:
         label_str = entity_type.capitalize()
         kind_field = {"point": "pointKind", "event": "eventKind", "subject": "subjectKind"}[entity_type]
+    id_field = "eventId" if entity_type == "event" else "id"
     try:
         conditions = []
         params = {}
@@ -296,7 +298,7 @@ def run_structural_query(
         cypher = (
             f"MATCH (n:{label_str}) "
             f"WHERE {where_clause} "
-            f"RETURN n.id "
+            f"RETURN n.{id_field} "
             f"LIMIT $limit"
         )
         params["limit"] = limit
