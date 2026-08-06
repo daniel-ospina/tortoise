@@ -13,6 +13,7 @@ Backends behind the `Projection` protocol:
 from __future__ import annotations
 
 import re
+import os
 from datetime import datetime, timezone
 from typing import Protocol, runtime_checkable
 
@@ -72,6 +73,8 @@ class _GuardedGraph:
 
     def __getattr__(self, name):
         return getattr(self._g, name)
+
+from tortoise.config import RELATIVE_PATH_ERROR
 
 # ── Mixins ────────────────────────────────────────────────────────────────
 from tortoise.projection.entities import _EntityHandlers
@@ -199,9 +202,26 @@ class FalkorProjection(
                  username: str | None = None,
                  password: str | None = None,
                  graph_name: str = "tortoise",
-                 ssl: bool = False):
+                 ssl: bool = False,
+                 allow_nonstandard_path: bool = False):
 
         if path is not None:
+            # Hard-reject relative paths (plan Task 7, issue #176): a relative
+            # path like 'tortoise.db' resolves per-CWD and silently creates a
+            # per-directory redislite server (Category-3 leak). Relative is
+            # ALWAYS rejected — the escape hatch only permits absolute
+            # non-canonical paths. Env TORTOISE_ALLOW_NONSTANDARD_PATH=1
+            # enables the same escape hatch without the kwarg.
+            if not allow_nonstandard_path and \
+                    os.environ.get("TORTOISE_ALLOW_NONSTANDARD_PATH") == "1":
+                allow_nonstandard_path = True
+            if not os.path.isabs(path) and not path.startswith("~"):
+                raise ValueError(RELATIVE_PATH_ERROR.format(path=path))
+            if path.startswith("~") and not allow_nonstandard_path:
+                # tilde is only valid if expanded to absolute via env;
+                # unexpanded it is relative-like -> reject with hint
+                raise ValueError(RELATIVE_PATH_ERROR.format(path=path))
+
             # Embedded mode (opt-in via path=). Use redislite's FalkorDB client —
             # the plain falkordb.FalkorDB treats a positional path arg as a HOST
             # (IDNA crash: redis tries to resolve the file path as a hostname, #82).
