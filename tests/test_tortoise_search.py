@@ -105,7 +105,8 @@ def test_sdk_fts_query_kind_filter(sdk=None):
     assert results[0]["point_kind"] == "hypothesis"
 
 
-def test_sdk_fts_query_context_filter(sdk=None):
+def test_sdk_fts_query_text_matches_all(sdk=None):
+    """P2 #49: context filter removed — FTS text query returns all matches."""
     if sdk is None:
         sdk = _new_sdk()
     sdk.create_point("statement", "quantum computing")
@@ -113,8 +114,7 @@ def test_sdk_fts_query_context_filter(sdk=None):
     sdk.create_point("statement", "quantum of solace")
 
     results = sdk.tortoise_fts_query("quantum")
-    assert len(results) == 1, f"Expected 1 movie result, got {len(results)}"
-    assert results[0]["content"] == "quantum of solace"
+    assert len(results) >= 2, f"Expected >=2 quantum results, got {len(results)}"
 
 
 def test_sdk_fts_query_ranking_order(sdk=None):

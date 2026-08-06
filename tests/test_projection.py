@@ -332,7 +332,7 @@ def test_falkor_apply_operator_added_orphan_stubs():
                                "operator": {"op_type": "IMPL", "inputs": ["42"]}}})
         stub = proj.query("MATCH (n:Point {id:'42'}) RETURN n.content, n.context").result_set
         assert stub[0][0] == "[missing]"
-        assert stub[0][1] == "orphan-stub"
+        assert stub[0][1] is None  # P2 #49: context field removed — stubs carry no context
     finally:
         proj.close()
 

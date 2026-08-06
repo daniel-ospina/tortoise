@@ -1435,7 +1435,7 @@ def _cmd_decide(args) -> int:
             data = _json.loads(raw)
     else:
         # Inline mode
-        data: dict = {"context": "decide"}
+        data: dict = {}
         if args.options:
             data["options"] = _json.loads(args.options)
         if args.criteria:
@@ -1445,7 +1445,6 @@ def _cmd_decide(args) -> int:
         if args.edges:
             data["edges"] = _json.loads(args.edges)
 
-    ctx = data.get("context", "decide")
     options = data.get("options", {})
     criteria = data.get("criteria", {})
     findings = data.get("findings", {})
@@ -1458,13 +1457,11 @@ def _cmd_decide(args) -> int:
         return 1
 
     import os as _os
-    context_free = getattr(args, "context_free", False)
-
     uri = getattr(args, "db", None) or _os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise")
     sdk = TortoiseSDK()
     sdk._proj = FalkorProjection.from_uri(uri)
 
-    # Track all operator IDs for --context-free mode
+    # Track all operator IDs for explicit-factor mode
     all_operator_ids: list[str] = []
 
     try:

@@ -372,7 +372,9 @@ class FalkorProjection(
 
     def query(self, cypher: str, **params):
         # P0 guard (#99): refuse bulk graph-wipe on non-test graphs.
-        if _is_bulk_wipe(cypher):
+        # Respect _skip_guard (consistent with _GuardedGraph.query) so a
+        # legitimate maintenance bypass works through either call path.
+        if _is_bulk_wipe(cypher) and not self._skip_guard:
             self._assert_test_graph(
                 f"REFUSING to run bulk DETACH DELETE on non-test graph "
                 f"'{self._graph_name}'"
@@ -440,7 +442,7 @@ class FalkorProjection(
         FTS and vector indexes are gated on FalkorDB >= 4.x.
         """
         # ── Range indexes (always safe, pre-4.x compatible) ──
-        for prop in ("id", "pointKind", "context", "content_hash", "is_operator"):
+        for prop in ("id", "pointKind", "content_hash", "is_operator"):
             try:
                 self.g.query(f"CREATE INDEX FOR (n:Point) ON (n.{prop})")
             except Exception as e:

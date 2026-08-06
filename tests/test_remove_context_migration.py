@@ -321,24 +321,23 @@ class TestGuard99:
                 pass
 
     def test_delete_is_blocked(self):
-        """Bulk DETACH DELETE still triggers the guard (sanity check)."""
-        from tortoise.sdk import TortoiseSDK
-        sdk = TortoiseSDK()
+        """Bulk DETACH DELETE still triggers the guard (sanity check).
+
+        Uses embedded mode (no live DB needed) with _is_embedded flipped to
+        False to exercise the server-mode guard path.
+        """
+        import tempfile as _tf
+        import pytest
+        from tortoise.projection import FalkorProjection
+        db_path = os.path.join(_tf.mkdtemp(prefix="tortoise_guard_"), "g.db")
+        proj = FalkorProjection(db_path, graph_name="tortoise")
         try:
-            proj = sdk._get_proj()
-            # Bulk DETACH DELETE on a non-test graph must raise RuntimeError
-            import pytest
-            with pytest.raises(RuntimeError):
-                # Force a non-test graph name to trigger the guard
-                from tortoise.projection import FalkorProjection
-                from_uri = FalkorProjection.from_uri(
-                    "docker://:@localhost:16379/tortoise")
-                try:
-                    from_uri.g.query("MATCH (n) DETACH DELETE n")
-                finally:
-                    from_uri.close()
+            # Force server-mode guard behavior (embedded normally skips)
+            proj._is_embedded = False
+            proj._graph_name = "tortoise"
+            with pytest.raises(RuntimeError, match="Graph guard"):
+                proj.g.query("MATCH (n) DETACH DELETE n")
+            # Targeted delete still allowed
+            proj.g.query("MATCH (n:Point {id:'nonexistent'}) DETACH DELETE n")
         finally:
-            try:
-                sdk.close()
-            except Exception:
-                pass
+            proj.close()

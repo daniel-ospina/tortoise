@@ -1740,7 +1740,7 @@ class TortoiseSDK:
         kind_field = {"point": "pointKind", "event": "eventKind", "subject": "subjectKind", "document": "documentKind", "object": "objectKind", "operator": "op_type", "source": "sourceKind"}[entity_type]
 
         # 1. Classify query → determine active strategies
-        strategies = classify_query(query, kind, None)
+        strategies = classify_query(query, kind)
         is_full_scan = (query is None and kind is not None)
 
         # Expand kind early for pack-aware structural query + kind filter
@@ -1762,7 +1762,7 @@ class TortoiseSDK:
         # Full-scan mode: no truncation — return ALL Points in context (#7811 completeness)
         str_limit = limit * 2 if not is_full_scan else 100000
         raw_results = degradation_chain(
-            graph, query, kind, None, query_vec, strategies,
+            graph, query, kind, query_vec, strategies,
             entity_type=entity_type, limit=str_limit,
             is_embedded=is_embedded,
         )
@@ -1875,7 +1875,6 @@ class TortoiseSDK:
                     entity_data[pid] = {
                         "content": row[1],
                         "kind": row[2],
-                        "context": None,
                     }
             elif entity_type == "event":
                 rows = graph.query(
@@ -1887,7 +1886,6 @@ class TortoiseSDK:
                     entity_data[eid] = {
                         "content": row[1] or "",
                         "kind": row[2] or "",
-                        "context": None,
                     }
             elif entity_type == "subject":
                 rows = graph.query(
@@ -1899,7 +1897,6 @@ class TortoiseSDK:
                     entity_data[sid] = {
                         "content": row[1] or "",
                         "kind": row[2] or "",
-                        "context": None,
                     }
             elif entity_type == "document":
                 rows = graph.query(
@@ -1913,7 +1910,6 @@ class TortoiseSDK:
                     entity_data[did] = {
                         "content": row[1] or "",
                         "kind": row[2] or "",
-                        "context": None,
                         "topics": row[3] or [],
                         "summary": row[4] or "",
                         "sessionId": row[5] or "",
@@ -1930,7 +1926,6 @@ class TortoiseSDK:
                     entity_data[oid] = {
                         "content": row[1] or "",
                         "kind": row[2] or "",
-                        "context": None,
                     }
             elif entity_type == "operator":
                 rows = graph.query(
@@ -1942,7 +1937,6 @@ class TortoiseSDK:
                     entity_data[oid] = {
                         "content": row[1] or "",  # label is searchable text
                         "kind": row[2] or "",    # op_type is kind
-                        "context": None,
                     }
             elif entity_type == "source":
                 rows = graph.query(
@@ -1954,12 +1948,11 @@ class TortoiseSDK:
                     entity_data[sid] = {
                         "content": row[1] or "",
                         "kind": row[2] or "",
-                        "context": None,
                     }
         except Exception:
             _logger.warning("Batch content fetch failed — returning results with minimal metadata")
             for pid in result_ids:
-                entity_data[pid] = {"content": "", "kind": "", "context": None}
+                entity_data[pid] = {"content": "", "kind": ""}
 
         # 7.5. Fetch relationships for result Points (Point only)
         point_relationships = get_relationships(graph, result_ids) if entity_type == "point" else {}
@@ -1970,7 +1963,7 @@ class TortoiseSDK:
             pt = entity_data.get(pid)
             if not pt:
                 continue
-            content, pt_kind, pt_context = pt["content"], pt["kind"], pt["context"]
+            content, pt_kind = pt["content"], pt["kind"]
             ep = ep_breakdowns.get(pid) if entity_type == "point" else None
             # #125 capture metadata (document entity_type)
             cap_topics = pt.get("topics", [])
@@ -2005,7 +1998,6 @@ class TortoiseSDK:
                 id=pid,
                 content=content,
                 point_kind=pt_kind,
-                context=pt_context,
                 scores=scores,
                 match_source=match_source,
                 ep=ep,

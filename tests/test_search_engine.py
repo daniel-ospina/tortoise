@@ -14,19 +14,19 @@ from tortoise.search_engine import (
 
 class TestClassifyQuery:
     def test_full_scan(self):
-        result = classify_query(None, None, "ctx")
+        result = classify_query(None, None)
         assert result == {"fts": False, "vector": False, "structural": True}
 
     def test_text_query(self):
-        result = classify_query("hello", None, None)
+        result = classify_query("hello", None)
         assert result == {"fts": True, "vector": True, "structural": True}
 
     def test_kind_only(self):
-        result = classify_query(None, "statement", None)
+        result = classify_query(None, "statement")
         assert result == {"fts": False, "vector": False, "structural": True}
 
     def test_text_with_kind_and_context(self):
-        result = classify_query("test", "statement", "physics")
+        result = classify_query("test", "statement")
         assert result == {"fts": True, "vector": True, "structural": True}
 
 
