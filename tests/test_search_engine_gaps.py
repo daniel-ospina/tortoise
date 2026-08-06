@@ -9,6 +9,7 @@ Covers:
 """
 from __future__ import annotations
 
+import logging
 import os
 import sys
 import unittest.mock as mock
@@ -19,6 +20,8 @@ import pytest
 from tortoise.search_engine import (
     fallback_tfidf,
     degradation_chain,
+    filter_by_relationship,
+    filter_by_traversal_predicate,
     get_relationships,
     run_fts_query,
     run_vector_query,
@@ -843,6 +846,108 @@ class TestGetRelationships:
         assert params == {"ids": ["p1", "p2"]}
         assert "IMPL|NAND|hasPart" in cypher
         assert "is_operator:true" in cypher
+
+
+# ── filter_by_relationship / filter_by_traversal_predicate (#148) ───────────
+# Operators are stored as :Point {is_operator:true} — no Operator label exists.
+# Both filters must map operator→Point label + is_operator=true WHERE clause,
+# and bail early with a warning for non-Point entity types.
+
+class TestFilterByRelationshipEntityType:
+    """entity_type handling in filter_by_relationship (#148)."""
+
+    def test_operator_entity_type_maps_to_point_label(self):
+        """operator → MATCH (n:Point) + is_operator=true, never :Operator."""
+        graph = SimpleMockGraph(result_set=[("op1",), ("op3",)])
+
+        result = filter_by_relationship(
+            graph, ["op1", "op2", "op3"], "contains", "t1", entity_type="operator",
+        )
+
+        assert result == ["op1", "op3"]
+        cypher = graph.query_calls[0][0]
+        assert "MATCH (n:Point)" in cypher
+        assert "n.is_operator = true" in cypher
+        assert ":Operator" not in cypher
+
+    def test_point_entity_type_unchanged(self):
+        """point → MATCH (n:Point) without is_operator clause (regression guard)."""
+        graph = SimpleMockGraph(result_set=[("p1",)])
+
+        result = filter_by_relationship(graph, ["p1"], "contains", "t1")
+
+        assert result == ["p1"]
+        cypher = graph.query_calls[0][0]
+        assert "MATCH (n:Point)" in cypher
+        assert "n.is_operator = true" not in cypher
+
+    def test_operator_entity_type_keeps_target_map(self):
+        """operator target node t matches the Point label by id."""
+        graph = SimpleMockGraph(result_set=[("op1",)])
+
+        filter_by_relationship(
+            graph, ["op1"], "contains", "op9", entity_type="operator",
+        )
+
+        cypher = graph.query_calls[0][0]
+        assert "t:Point {id: $tid}" in cypher
+
+    @pytest.mark.parametrize("bad_type", ["event", "subject", "source", "document", "object"])
+    def test_unsupported_types_return_empty_with_warning(self, bad_type, caplog):
+        """Non-Point entity types → [] + warning, no DB round-trip."""
+        graph = SimpleMockGraph(result_set=[("p1",)])
+
+        with caplog.at_level(logging.WARNING, logger="tortoise.search_engine"):
+            result = filter_by_relationship(
+                graph, ["p1"], "contains", "t1", entity_type=bad_type,
+            )
+
+        assert result == []
+        assert graph.query_calls == [], "should bail before hitting the graph"
+        assert any("not supported" in r.message for r in caplog.records)
+
+
+class TestFilterByTraversalPredicateEntityType:
+    """entity_type handling in filter_by_traversal_predicate (#148)."""
+
+    def test_operator_entity_type_maps_to_point_label(self):
+        """operator → MATCH (n:Point) + is_operator=true, never :Operator."""
+        graph = SimpleMockGraph(result_set=[("op2",), ("op4",)])
+
+        result = filter_by_traversal_predicate(
+            graph, ["op1", "op2", "op3", "op4"], "contains", entity_type="operator",
+        )
+
+        assert result == ["op2", "op4"]
+        cypher = graph.query_calls[0][0]
+        assert "MATCH (n:Point)" in cypher
+        assert "n.is_operator = true" in cypher
+        assert ":Operator" not in cypher
+
+    def test_point_entity_type_unchanged(self):
+        """point → MATCH (n:Point) without is_operator clause (regression guard)."""
+        graph = SimpleMockGraph(result_set=[("p1",)])
+
+        result = filter_by_traversal_predicate(graph, ["p1"], "contains")
+
+        assert result == ["p1"]
+        cypher = graph.query_calls[0][0]
+        assert "MATCH (n:Point)" in cypher
+        assert "n.is_operator = true" not in cypher
+
+    @pytest.mark.parametrize("bad_type", ["event", "subject", "source", "document", "object"])
+    def test_unsupported_types_return_empty_with_warning(self, bad_type, caplog):
+        """Non-Point entity types → [] + warning, no DB round-trip."""
+        graph = SimpleMockGraph(result_set=[("p1",)])
+
+        with caplog.at_level(logging.WARNING, logger="tortoise.search_engine"):
+            result = filter_by_traversal_predicate(
+                graph, ["p1"], "contains", entity_type=bad_type,
+            )
+
+        assert result == []
+        assert graph.query_calls == [], "should bail before hitting the graph"
+        assert any("not supported" in r.message for r in caplog.records)
 
 
 # ------------------------------------------------------------------ #125 Document FTS + backfill
