@@ -105,3 +105,34 @@ class TestAnnotateEpBatch:
         # Without a real graph, should return empty dict gracefully
         result = annotate_ep_batch(None, ["test-id"])
         assert isinstance(result, dict)
+
+
+# ------------------------------------------------------------------ #125 SDK document metadata
+
+
+def test_sdk_document_search_returns_metadata():
+    """#125: tortoise_search(entity_type='document') returns capture metadata."""
+    from tortoise.projection import FalkorProjection
+    uri = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise_test_sdk125")
+    proj = FalkorProjection.from_uri(uri)
+    proj.g.query("MATCH (n) DETACH DELETE n")
+    proj._ensure_indexes()
+    proj.g.query(
+        "CREATE (d:Document {id:'test-sdk-doc', title:'Conv', "
+        "documentKind:'transcript', topics:['licensing'], "
+        "summary:'Test', sessionId:'s1', eventId:'e1', "
+        "_searchText:'Conv Test licensing'})"
+    )
+    try:
+        from tortoise.sdk import TortoiseSDK
+        sdk = TortoiseSDK()
+        sdk._proj = proj
+        results = sdk.tortoise_fts_query("licensing", entity_type="document")
+        doc = next((r for r in results if r.get("id") == "test-sdk-doc"), None)
+        assert doc, f"doc not in results: {results}"
+        assert doc["topics"] == ["licensing"], doc.get("topics")
+        assert doc["summary"] == "Test"
+        assert doc["sessionId"] == "s1"
+        assert doc["eventId"] == "e1"
+    finally:
+        proj.close()

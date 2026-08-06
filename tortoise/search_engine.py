@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from typing import Literal
 
 logger = logging.getLogger(__name__)
@@ -49,6 +49,12 @@ class SearchResult:
     scores: SearchScores | None = None
     match_source: Literal["fts", "vector", "structural", "rrf", "tfidf"] = "rrf"
     ep: EpBreakdown | None = None
+    relationships: list[dict] = field(default_factory=list)  # SDK compat (sdk.py passes it; non-point = empty)
+    # #125 capture metadata (document entity_type) — optional, empty for non-docs
+    topics: list = field(default_factory=list)
+    summary: str = ""
+    session_id: str = ""
+    event_id: str = ""
 
     def to_dict(self) -> dict:
         """Convert to JSON-safe dict for API responses."""
@@ -58,6 +64,11 @@ class SearchResult:
             "point_kind": self.point_kind,
             "context": self.context,
             "match_source": self.match_source,
+            "relationships": self.relationships,
+            "topics": self.topics,
+            "summary": self.summary,
+            "sessionId": self.session_id,
+            "eventId": self.event_id,
             # Backward-compat aliases (Phase 0 migration from old search() API).
             # IMPORTANT: "similarity" was cosine (0-1) in Phase 0; now it's the
             # RRF fusion score (rank-based, typically 0.01-0.05). Clients that
@@ -340,6 +351,7 @@ def degradation_chain(
     entity_type: str = "point",
     limit: int = 20,
     is_embedded: bool = True,
+    expanded_kinds=None,  # accepted for SDK compat; kind expansion is post-retrieval (sdk.py)
 ) -> dict[str, list[tuple[str, float]]]:
     """Run retrieval strategies in parallel with per-strategy degradation.
 
