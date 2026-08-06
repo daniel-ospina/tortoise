@@ -132,35 +132,16 @@ def test_build_model_reasoning():
 # main end-to-end tests (mock models only — no network)
 # ---------------------------------------------------------------------------
 
-# FalkorDB/redislite shutdown can hang on close() in rapid succession.
-# Patch it to a no-op — temp files are cleaned by the OS anyway.
-_original_close = FalkorProjection.close
-
-
-def _noop_close(self):
-    pass
-
-
-def _patch_close():
-    FalkorProjection.close = _noop_close
-
-
-def _unpatch_close():
-    FalkorProjection.close = _original_close
-
-
 def _run_main(argv, *, capture=False):
-    """Run main() with close patched to avoid redislite shutdown hang."""
-    _patch_close()
-    try:
-        if capture:
-            with patch("sys.stdout", new_callable=StringIO) as buf:
-                main(argv)
-            return buf.getvalue()
-        else:
+    """Run main() directly (close-monkeypatch removed — Task 5, issue #176:
+    FalkorProjection.close() is now idempotent + atexit/finalize-registered,
+    so no hang on rapid succession)."""
+    if capture:
+        with patch("sys.stdout", new_callable=StringIO) as buf:
             main(argv)
-    finally:
-        _unpatch_close()
+        return buf.getvalue()
+    else:
+        main(argv)
 
 
 def test_main_end_to_end():
