@@ -2137,7 +2137,7 @@ class TortoiseSDK:
                 rows = graph.query(
                     "MATCH (n:Document) WHERE n.id IN $ids "
                     "RETURN n.id, n.title, n.documentKind, n.topics, n.summary, "
-                    "n.sessionId, n.eventId",
+                    "n.sessionId, n.eventId, n.sourcePath",
                     params={"ids": result_ids},
                 ).result_set
                 for row in rows:
@@ -2150,6 +2150,7 @@ class TortoiseSDK:
                         "summary": row[4] or "",
                         "sessionId": row[5] or "",
                         "eventId": row[6] or "",
+                        "sourcePath": row[7] or "" if len(row) > 7 else "",
                     }
             elif entity_type == "object":
                 rows = graph.query(
@@ -2208,6 +2209,7 @@ class TortoiseSDK:
             cap_summary = pt.get("summary", "")
             cap_session = pt.get("sessionId", "")
             cap_event = pt.get("eventId", "")
+            cap_source_path = pt.get("sourcePath", "")  # #167
 
             # Apply min_confidence filter (Point only; non-Point always pass)
             if entity_type == "point" and ep and ep.confidence_mean < min_confidence:
@@ -2244,6 +2246,7 @@ class TortoiseSDK:
                 summary=cap_summary,
                 session_id=cap_session,
                 event_id=cap_event,
+                source_path=cap_source_path,
             )
             results.append(result)
 

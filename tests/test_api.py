@@ -395,6 +395,42 @@ def test_add_document_capture_fields():
     assert created[0]["about_entities"] == ["agent-pi"]
 
 
+def test_add_document_partial_update_preserves_source_path():
+    """#167 (P0 fix): partial update through add_document WITHOUT source_path
+    must NOT wipe an existing sourcePath. Regression: "" default was non-null
+    in Cypher and coalesce("", d.sourcePath) wiped it."""
+    api, log = _api()
+    api.add_document("doc-sp2", "With Source", document_kind="transcript",
+                     source_path="/tmp/test.md")
+    # Partial update via API — source_path omitted entirely
+    api.add_document("doc-sp2", "With Source", document_kind="transcript",
+                     summary="Updated only")
+    events = [e for e in log.read_all() if e["type"] == "DocumentCreated"]
+    assert len(events) == 2
+    assert events[0]["source_path"] == "/tmp/test.md"
+    # Second event must carry source_path=None (not "") so projection coalesce
+    # preserves the value
+    assert events[1]["source_path"] is None, f"got {events[1]['source_path']!r}"
+
+
+def test_add_document_partial_update_preserves_capture_fields():
+    """#167 P2: summary/session_id/event_id defaults None so partial updates
+    through add_document don't wipe existing values via coalesce("", d.x, '')."""
+    api, log = _api()
+    api.add_document("doc-sp3", "Full", document_kind="transcript",
+                     summary="Original summary", session_id="s9", event_id="e9")
+    # Partial update — none of the capture fields provided
+    api.add_document("doc-sp3", "Full", document_kind="transcript",
+                     doc_status="archived")
+    events = [e for e in log.read_all() if e["type"] == "DocumentCreated"]
+    assert len(events) == 2
+    e0, e1 = events
+    assert e0["summary"] == "Original summary" and e0["session_id"] == "s9"
+    assert e1["summary"] is None, f"got {e1['summary']!r}"
+    assert e1["session_id"] is None, f"got {e1['session_id']!r}"
+    assert e1["event_id"] is None, f"got {e1['event_id']!r}"
+
+
 def test_add_event_emits_eventrecorded():
     """#125: add_event emits EventRecorded with id=eid and full payload."""
     api, log = _api()
