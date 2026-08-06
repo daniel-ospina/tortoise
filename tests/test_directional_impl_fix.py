@@ -42,10 +42,11 @@ def fresh_sdk(graph_name=None):
     return TortoiseSDK(db_path=None, namespace=ns)
 
 
-def run_ep_directed(sdk, directed=True):
-    """Run TortoiseEP. The directed flag is accepted for legacy test
-    compatibility but has no effect: IMPL is now always directional
-    (source→target only), NAND always bidirectional."""
+def run_ep_directed(sdk):
+    """Run TortoiseEP. Directionality is now controlled per-operator via
+    the `direction` property set at create_operator time (ONTOLOGY v3.1 #189).
+    IMPL defaults to bidirectional; pass direction="unidirectional" for
+    source→target-only propagation."""
     proj = sdk._get_proj()
     rows = proj.g.query(
         "MATCH (o:Point) WHERE o.is_operator = true RETURN o.id"
@@ -79,8 +80,11 @@ def make_point(sdk, content, kind="statement"):
     return sdk.create_point(kind, content)
 
 
-def make_operator(sdk, source_id, target_id, op_type="IMPL"):
-    return sdk.create_operator(op_type, source_id, [target_id])
+def make_operator(sdk, source_id, target_id, op_type="IMPL", direction=None):
+    kwargs = {}
+    if direction is not None:
+        kwargs["direction"] = direction
+    return sdk.create_operator(op_type, source_id, [target_id], **kwargs)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -119,8 +123,8 @@ def test_two_sources_higher_than_one():
     sdk.set_point_baseline(source_a["id"], *TIER_MAP["T0"])
     sdk.set_point_baseline(source_b["id"], *TIER_MAP["T0"])
 
-    op_a = make_operator(sdk, source_a["id"], claim["id"], "IMPL")
-    op_b = make_operator(sdk, source_b["id"], claim["id"], "IMPL")
+    op_a = make_operator(sdk, source_a["id"], claim["id"], "IMPL", direction="unidirectional")
+    op_b = make_operator(sdk, source_b["id"], claim["id"], "IMPL", direction="unidirectional")
 
     # Check weights
     proj = sdk._get_proj()
@@ -132,7 +136,7 @@ def test_two_sources_higher_than_one():
     assert abs(w_b - 1.0) < 0.01, f"op_b weight {w_b:.4f} — density penalty should be removed!"
 
     # Run EP with both sources (directed)
-    result_both = run_ep_directed(sdk, directed=True)
+    result_both = run_ep_directed(sdk)
     claim_both = result_both[claim["id"]]
     src_a_both = result_both[source_a["id"]]
     src_b_both = result_both[source_b["id"]]
@@ -144,7 +148,7 @@ def test_two_sources_higher_than_one():
 
     # Remove source B's operator, re-run
     sdk.delete_point(op_b["id"])
-    result_a_only = run_ep_directed(sdk, directed=True)
+    result_a_only = run_ep_directed(sdk)
     claim_a = result_a_only[claim["id"]]
 
     print(f"\n  Source A only:")
@@ -182,11 +186,11 @@ def test_two_sources_higher_than_one():
     op1 = make_operator(sdk2, s_a["id"], cl["id"], "IMPL")
     op2 = make_operator(sdk2, s_b["id"], cl["id"], "IMPL")
 
-    result_undirected_both = run_ep_directed(sdk2, directed=False)
+    result_undirected_both = run_ep_directed(sdk2)
     cl_ub = result_undirected_both[cl["id"]]
 
     sdk2.delete_point(op2["id"])
-    result_undirected_a = run_ep_directed(sdk2, directed=False)
+    result_undirected_a = run_ep_directed(sdk2)
     cl_ua = result_undirected_a[cl["id"]]
 
     drop_undir = cl_ub["mean"] - cl_ua["mean"]
@@ -239,8 +243,9 @@ def test_chain_propagation():
 
         sdk.set_point_baseline(source["id"], *TIER_MAP["T0"])
 
-        op1 = make_operator(sdk, source["id"], middle["id"], "IMPL")
-        op2 = make_operator(sdk, middle["id"], conclusion["id"], "IMPL")
+        impl_direction = "unidirectional" if directed else "bidirectional"
+        op1 = make_operator(sdk, source["id"], middle["id"], "IMPL", direction=impl_direction)
+        op2 = make_operator(sdk, middle["id"], conclusion["id"], "IMPL", direction=impl_direction)
 
         # Check weights
         proj = sdk._get_proj()
@@ -255,7 +260,7 @@ def test_chain_propagation():
         assert abs(w2 - 1.0) < 0.01, \
             f"op2 weight {w2:.4f} — density penalty wrongly applied!"
 
-        result = run_ep_directed(sdk, directed=directed)
+        result = run_ep_directed(sdk)
 
         sc = result[source["id"]]
         mc = result[middle["id"]]
@@ -312,10 +317,11 @@ def test_nand_bidirectional():
         sdk.set_point_baseline(source["id"], *TIER_MAP["T0"])
         sdk.set_point_baseline(defeater["id"], *TIER_MAP["T0"])
 
-        op_impl = make_operator(sdk, source["id"], claim["id"], "IMPL")
+        impl_direction = "unidirectional" if directed else "bidirectional"
+        op_impl = make_operator(sdk, source["id"], claim["id"], "IMPL", direction=impl_direction)
         op_nand = make_operator(sdk, defeater["id"], claim["id"], "NAND")
 
-        result = run_ep_directed(sdk, directed=directed)
+        result = run_ep_directed(sdk)
         sc = result[source["id"]]
         dc = result[defeater["id"]]
         cc = result[claim["id"]]
@@ -384,9 +390,9 @@ def test_source_isolation():
     source = make_point(sdk, "T0 Source: evidence")
     claim = make_point(sdk, "Claim: conclusion")
     sdk.set_point_baseline(source["id"], *TIER_MAP["T0"])
-    op = make_operator(sdk, source["id"], claim["id"], "IMPL")
+    op = make_operator(sdk, source["id"], claim["id"], "IMPL", direction="unidirectional")
 
-    result = run_ep_directed(sdk, directed=True)
+    result = run_ep_directed(sdk)
     sc = result[source["id"]]
     cc = result[claim["id"]]
 
@@ -406,9 +412,9 @@ def test_source_isolation():
     s2 = make_point(sdk2, "T0 Source: evidence")
     c2 = make_point(sdk2, "Claim: conclusion")
     sdk2.set_point_baseline(s2["id"], *TIER_MAP["T0"])
-    op2 = make_operator(sdk2, s2["id"], c2["id"], "IMPL")
+    op2 = make_operator(sdk2, s2["id"], c2["id"], "IMPL", direction="bidirectional")
 
-    result2 = run_ep_directed(sdk2, directed=False)
+    result2 = run_ep_directed(sdk2)
     sc2 = result2[s2["id"]]
     cc2 = result2[c2["id"]]
 

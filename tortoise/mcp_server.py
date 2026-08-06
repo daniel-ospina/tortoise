@@ -348,19 +348,22 @@ def tortoise_update_point(id: str, props: Any) -> dict:
     return _safe(sdk.update_point, id, **(props or {}))
 
 @mcp.tool()
-def tortoise_create_operator(op_type: str, source_id: str, target_ids: Any) -> dict:
+def tortoise_create_operator(op_type: str, source_id: str, target_ids: Any,
+                              direction: str = "bidirectional") -> dict:
     """Create an operator connecting Points.
     
     op_type: 'IMPL' (A supports B), 'NAND' (A contradicts B),
              'composedOf'/'decomposesInto'/'contains'/'wraps' → stored as hasPart edge.
     source_id: source/parent Point ID.
     target_ids: target/child Point IDs (1 for IMPL/NAND, N for part/whole).
+    direction: 'bidirectional' (default) or 'unidirectional' — EP propagation direction.
 
     → See /skill:tortoise-graph-reasoning for proper usage:
       annotation, mitigation, NAND constraints, veracity vs implication.
     """
     target_ids = _parse(target_ids)
-    return _safe(sdk.create_operator, op_type, source_id, target_ids)
+    return _safe(sdk.create_operator, op_type, source_id, target_ids,
+                 direction=direction)
 
 
 @mcp.tool()

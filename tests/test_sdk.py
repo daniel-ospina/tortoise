@@ -124,6 +124,23 @@ class TestCreateOperator:
         with pytest.raises(ValueError, match="op_type must be"):
             sdk.create_operator("FOOBAR", "x", ["y"])
 
+    def test_invalid_direction_raises(self, sdk):
+        a, b = _make_point(sdk), _make_point(sdk)
+        with pytest.raises(ValueError, match="direction must be"):
+            sdk.create_operator("IMPL", a["id"], [b["id"]], direction="sideways")
+
+    def test_valid_direction_accepted(self, sdk):
+        a, b = _make_point(sdk), _make_point(sdk)
+        op_bi = sdk.create_operator("IMPL", a["id"], [b["id"]], direction="bidirectional")
+        assert op_bi.get("direction") == "bidirectional"
+        op_uni = sdk.create_operator("NAND", a["id"], [b["id"]], direction="unidirectional")
+        assert op_uni.get("direction") == "unidirectional"
+
+    def test_direction_default_bidirectional(self, sdk):
+        a, b = _make_point(sdk), _make_point(sdk)
+        op = sdk.create_operator("IMPL", a["id"], [b["id"]])
+        assert op.get("direction") == "bidirectional"
+
 
 # ── query ────────────────────────────────────────────────────────────
 

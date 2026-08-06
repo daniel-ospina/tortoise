@@ -8,9 +8,12 @@ See: tortoise/research/reflection-agentic-systems/ep-implementation-plan.md
 """
 from __future__ import annotations
 
+import logging
 import random
 
 from .quadrature import tilted_moments, moments_to_beta, phi_nand, phi_impl
+
+logger = logging.getLogger(__name__)
 
 
 class TortoiseEP:
@@ -168,9 +171,9 @@ class TortoiseEP:
     def _is_strong(self, claim_id: str, threshold: float = 0.85) -> bool:
         """True if the claim's current belief is at/above the given threshold.
 
-        Used for hasPart back-message semantics: a part that is still strong
-        (>= threshold) keeps the whole's support; a weakened part triggers a
-        reduction signal to the whole (#86).
+        Used for bidirectional IMPL back-message semantics (#86): a target that
+        is still strong (>= threshold) keeps the source's support unchanged; a
+        weakened target triggers a reduction signal to the source.
         """
         if hasattr(self, "_node_cache") and claim_id in self._node_cache:
             a, b = self._node_cache[claim_id]
@@ -187,11 +190,12 @@ class TortoiseEP:
 
     def _update_factor(self, op_id: str, op_type: str,
                        input_ids: list[str], weight: float = 1.0,
-                       label: str | None = None) -> None:
+                       label: str | None = None,
+                       direction: str = "bidirectional") -> None:
         if len(input_ids) < 2:
             return
         if len(input_ids) > 2:
-            return self._update_nary_factor(op_id, op_type, input_ids, weight, label)
+            return self._update_nary_factor(op_id, op_type, input_ids, weight, label, direction)
 
         id_a, id_b = input_ids
 
@@ -214,19 +218,16 @@ class TortoiseEP:
         raw_eta_b = (new_eta_b[0] - cav_eta_b[0], new_eta_b[1] - cav_eta_b[1])
 
         # Determine if this operator is bidirectional.
-        # - NAND is always bidirectional (mutual contradiction).
-        # - IMPL with hasPart/partOf label is bidirectional (composition hierarchies).
-        # - IMPL with addresses/supports or no label is directional (source→target only).
-        bidirectional = op_type == "NAND" or (
-            op_type == "IMPL" and label in ("hasPart", "partOf")
-        )
+        # Direction is an explicit operator flag (ONTOLOGY v3.1 §3.1, §8).
+        # Default and missing → bidirectional.
+        bidirectional = (direction == "bidirectional")
 
-        # For bidirectional hasPart IMPL, the back-message to the source must
-        # carry the TARGET's state as a reduction signal — if the part is
-        # weakened (by NAND or low evidence), the whole must be pulled DOWN,
+        # For bidirectional IMPL, the back-message to the source must
+        # carry the TARGET's state as a reduction signal — if the target is
+        # weakened (by NAND or low evidence), the source must be pulled DOWN,
         # not given a weak positive agreement push. Recompute the back-message
         # with NAND-style coupling (contradiction) when the target is below its
-        # cavity prior, so composition hierarchies propagate damage upward (#86).
+        # cavity prior, so bidirectional operators propagate damage upward (#86).
         if (op_type == "IMPL" and bidirectional and not self._is_strong(id_b)):
             mom_bk, _ = tilted_moments(
                 alpha_a, beta_a, alpha_b, beta_b, weight, phi_nand, self.n_quad
@@ -265,7 +266,8 @@ class TortoiseEP:
 
     def _update_nary_factor(self, op_id: str, op_type: str,
                             input_ids: list[str], weight: float = 1.0,
-                            label: str | None = None) -> None:
+                            label: str | None = None,
+                            direction: str = "bidirectional") -> None:
         # input_ids are sorted by idx (source=0, targets=1..N).
         # For IMPL: only create source→target pairs (skip target↔target).
         # For NAND: create all pairwise combinations (full mutual contradiction).
@@ -273,12 +275,12 @@ class TortoiseEP:
             # Source is input_ids[0] (idx=0). Targets are input_ids[1:].
             for j in range(1, len(input_ids)):
                 self._update_factor(op_id, op_type,
-                                    [input_ids[0], input_ids[j]], weight, label)
+                                    [input_ids[0], input_ids[j]], weight, label, direction)
         else:
             for i in range(len(input_ids)):
                 for j in range(i + 1, len(input_ids)):
                     self._update_factor(op_id, op_type,
-                                        [input_ids[i], input_ids[j]], weight, label)
+                                        [input_ids[i], input_ids[j]], weight, label, direction)
 
     def _update_claim_posterior(self, claim_id: str) -> None:
         # Start from evidence prior in natural parameter space
@@ -333,17 +335,25 @@ class TortoiseEP:
         return affected
 
     def _affected_factors(self, affected_claims: set[str]
-                          ) -> list[tuple[str, str, list[str], float]]:
-        factors: list[tuple[str, str, list[str], float]] = []
+                          ) -> list[tuple[str, str, list[str], float, str | None, str]]:
+        factors: list[tuple[str, str, list[str], float, str | None, str]] = []
         seen: set[str] = set()
         for claim_id in affected_claims:
             for rel in ("IMPL", "NAND"):
                 rows = self.g.query(
                     f"MATCH (o:Point)-[r:{rel}]->(c:Point {{id:$cid}}) "
-                    "RETURN o.id, o.op_type, o.label",
+                    "RETURN o.id, o.op_type, o.label, o.direction",
                     params={"cid": claim_id},
                 ).result_set
-                for op_id, op_type, label in rows:
+                for op_id, op_type, label, direction in rows:
+                    # Defensive: pre-migration operators without direction default to bidirectional
+                    if direction is None:
+                        direction = "bidirectional"
+                        logger.warning(
+                            "Operator %s has no direction property — defaulting to 'bidirectional'. "
+                            "Run graph-scripts/migrate_direction.py to backfill.",
+                            op_id,
+                        )
                     if op_id not in seen:
                         seen.add(op_id)
                         # ORDER BY r.idx ensures source (idx=0) comes first.
@@ -358,7 +368,7 @@ class TortoiseEP:
                         input_ids = [r[0] for r in input_rows]
                         from .weights import compute_operator_weight
                         weight = compute_operator_weight(self.proj, op_id)
-                        factors.append((op_id, op_type, input_ids, weight, label))
+                        factors.append((op_id, op_type, input_ids, weight, label, direction))
         return factors
 
     # ── Calibration ──────────────────────────────────────────────
@@ -453,8 +463,8 @@ class TortoiseEP:
                     for cid in affected}
 
             random.shuffle(factors)
-            for op_id, op_type, input_ids, weight, label in factors:
-                self._update_factor(op_id, op_type, input_ids, weight, label)
+            for op_id, op_type, input_ids, weight, label, direction in factors:
+                self._update_factor(op_id, op_type, input_ids, weight, label, direction)
 
             for cid in affected:
                 self._update_claim_posterior(cid)
