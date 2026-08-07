@@ -112,29 +112,34 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    // ── Fix #7852: Write plaintext API key to user_teams ───────────────
+    // ── Fix #7852: Write plaintext API key to team_memberships ─────────────
     const supabase = createClient(
       Deno.env.get("SUPABASE_URL")!,
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
     );
-    // Upsert: the on_auth_user_created trigger pre-inserts a placeholder row
-    // (key_hash='pending') for this user_id, so plain insert would violate
-    // the UNIQUE(user_id) constraint. Upsert on user_id updates that row.
-    const { error: userTeamsError } = await supabase.from("user_teams").upsert({
-      user_id: user_id,
-      team_id: teamId,
-      team_name: safeName,
-      api_key: apiKey,  // plaintext — shown once on welcome page
-      key_hash: keyHash,
-      graph_name: `team_${teamId}`,
-    }, { onConflict: "user_id" });
+    // M:N placeholder semantics (plan §4.1 step 6): the on_auth_user_created
+    // trigger pre-inserted a placeholder row (team_id='', key_hash='pending').
+    // Under uq_member_team (user_id, team_id), a direct upsert keyed on user_id
+    // would fail (no user_id-unique constraint) and an (user_id, team_id) upsert
+    // would create a PHANTOM second row. The update_user_team RPC updates the
+    // placeholder row (WHERE user_id = X AND team_id = '') and flips team_id to
+    // the real value in the same statement — exactly one membership row.
+    const { error: userTeamsError } = await supabase.rpc("update_user_team", {
+      p_user_id: user_id,
+      p_team_id: teamId,
+      p_team_name: safeName,
+      p_api_key: apiKey,  // plaintext — shown once on welcome page
+      p_key_hash: keyHash,
+      p_graph_name: `team_${teamId}`,
+    });
     if (userTeamsError) {
-      console.error("Failed to write user_teams:", userTeamsError);
+      console.error("Failed to write team_memberships:", userTeamsError);
       // Don't fail the whole provisioning — the key is already in the response
     }
 
     // ── Fix #7854: Trigger demo graph seeding ──────────────────────────
-    await fetch(`${fastApiUrl}/v1/internal/demo`, {
+    // (demo-404 fix: the FastAPI route is /internal/demo, NOT /v1/internal/demo)
+    await fetch(`${fastApiUrl}/internal/demo`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -147,7 +152,7 @@ Deno.serve(async (req: Request) => {
       team_id: teamId,
       team_name: safeName,
       api_key: apiKey,
-      // Must match the value upserted into user_teams above (team_${teamId}).
+      // Must match the value upserted into team_memberships above (team_${teamId}).
       graph_name: `team_${teamId}`,
     };
 

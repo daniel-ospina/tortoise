@@ -3075,11 +3075,22 @@ class TortoiseSDK:
             raise ControlPlaneError(f"Team {name!r} already exists")
 
         tid = ulid()
+        # Tier-driven limits from product/pricing.json (decision 1d) — no max_teams
+        # field: multi-team is a user-level capability, NOT a tier limit.
+        from tortoise.pricing import tier_limits
+        lim = tier_limits("free")  # provision defaults to Free; upgrades = billing epic
         reg.query(
             "CREATE (t:Team {id:$id, name:$name, api_key:$key, "
-            "graph_name:$gn, createdAt:$now, tier:'free'})",
+            "graph_name:$gn, createdAt:$now, tier:'free', "
+            "max_graphs:$max_graphs, max_users:$max_users, "
+            "max_api_keys:$max_keys, ops_allowance:$ops, graph_size_cap:$nodes})",
             params={"id": tid, "name": name, "key": key_hash,
-                    "gn": graph_name, "now": now},
+                    "gn": graph_name, "now": now,
+                    "max_graphs": lim["max_graphs_per_team"],
+                    "max_users": lim["max_users_per_team"],
+                    "max_keys": lim["max_api_keys"],
+                    "ops": lim["included_write_ops_per_month"],
+                    "nodes": lim["max_graph_nodes"]},
         )
         if idempotency_key:
             reg.query(
@@ -3092,6 +3103,8 @@ class TortoiseSDK:
                 "CREATE (:TeamMeta {name:$name, created:$now})",
                 params={"name": name, "now": now},
             )
+            # Graph node (team→graph 1:N, product ontology): the default graph
+            self._graph_create(tid, "default", kind="default", namespace=graph_name)
         except Exception:
             try:
                 reg.query("MATCH (t:Team {id:$id}) DETACH DELETE t",
@@ -3102,6 +3115,55 @@ class TortoiseSDK:
 
         self._audit(tid, None, "team_create", resource_type="team", resource_id=tid)
         return {"name": name, "graph_name": graph_name, "api_key": api_key, "id": tid}
+
+    def _graph_create(self, team_id: str, name: str, *, kind: str = "custom",
+                      namespace: str | None = None) -> dict:
+        """Create a Graph node in the registry (team→graph 1:N).
+
+        The tenant namespace for a custom graph is team_{team_id}_{graph_id};
+        custom namespaces are NOT minted until a consumer exists (E2E-11
+        decision — v1 writes resolve the default graph only). The default
+        graph's namespace is the team namespace itself (back-compat).
+        """
+        import uuid as _uuid
+        from datetime import datetime, timezone as _tz
+        reg = self._get_registry()
+        gid = f"g_{_uuid.uuid4().hex[:16]}"
+        ns = namespace or f"team_{team_id}_{gid}"
+        now = datetime.now(_tz.utc).isoformat()
+        reg.query(
+            "CREATE (g:Graph {id:$gid, team_id:$tid, name:$name, kind:$kind, "
+            "namespace:$ns, created_at:$now})",
+            params={"gid": gid, "tid": team_id, "name": name,
+                    "kind": kind, "ns": ns, "now": now},
+        )
+        return {"graph_id": gid, "name": name, "kind": kind, "namespace": ns}
+
+    def graph_list(self, team_id: str) -> list[dict]:
+        """List Graph nodes for a team (default graph first)."""
+        reg = self._get_registry()
+        rows = reg.query(
+            "MATCH (g:Graph {team_id:$tid}) RETURN properties(g) "
+            "ORDER BY CASE g.kind WHEN 'default' THEN 0 ELSE 1 END, g.created_at",
+            params={"tid": team_id},
+        ).result_set
+        out = []
+        for (props,) in rows:
+            out.append({
+                "graph_id": props.get("id"),
+                "team_id": props.get("team_id"),
+                "name": props.get("name"),
+                "kind": props.get("kind", "custom"),
+                "namespace": props.get("namespace"),
+            })
+        return out
+
+    def graph_count(self, team_id: str) -> int:
+        reg = self._get_registry()
+        return reg.query(
+            "MATCH (g:Graph {team_id:$tid}) RETURN count(g)",
+            params={"tid": team_id},
+        ).result_set[0][0]
 
     def team_get(self, team_id: str) -> dict | None:
         """Get a team by ID. Returns None if not found."""
