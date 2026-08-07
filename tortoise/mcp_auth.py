@@ -62,6 +62,7 @@ def _get_team_sdk() -> TortoiseSDK:
 from tortoise.tool_registry import get_http_allowed as _get_http_allowed
 HTTP_ALLOWED: frozenset[str] = _get_http_allowed()
 
+
 # JSON-RPC error codes (D9)
 ERR_UNAUTHORIZED = -32001
 ERR_RATE_LIMIT = -32002

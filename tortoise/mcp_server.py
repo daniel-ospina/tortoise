@@ -827,14 +827,60 @@ def tortoise_create_document(title: str, documentKind: str, props: Any = None) -
     props = _parse(props)
     return _safe(_get_team_sdk().create_document, title, documentKind, **(props or {}))
 
-def tortoise_create_source(url: str, sourceKind: str, props: Any = None) -> dict:
+@mcp.tool(annotations=ToolAnnotations(idempotentHint=True))
+def tortoise_create_source(url: str, sourceKind: str, tier: str | None = None,
+                           sourceDate: str | None = None, props: Any = None) -> dict:
     """Create a Source node for provenance (document, web, db, etc.).
 
-    Sources track content origin — url is the permalink key.
-    Points link to Sources via extractedFrom edge (Ontology v2.5).
+    Sources track content origin — url is the permalink key. Points link to
+    Sources via extractedFrom edge (Ontology v2.5). ``tier`` (T0-T4) stores the
+    credibility tier on ``credibilityTier`` (dual-write with tier-form
+    sourceKind); ``sourceDate`` is the evidence-age clock for recency decay.
     """
-    props = _parse(props)
-    return _safe(_get_team_sdk().create_source, url, sourceKind, **(props or {}))
+    props = _parse(props) or {}
+    # tier/sourceDate are first-class kwargs (#398) — pop from props if a legacy
+    # caller passed them there (kwarg wins; avoids TypeError on splat).
+    props.pop("tier", None)
+    props.pop("sourceDate", None)
+    return _safe(_get_team_sdk().create_source, url, sourceKind,
+                 tier=tier, sourceDate=sourceDate, **props)
+
+
+@mcp.tool()
+def tortoise_get_source_reliability(url: str) -> dict:
+    """Derive a Source's reliability (0-1) — query-time, cache-consistency-checked.
+
+    Reliability is the mean of the same modulated prior EP uses as base weight
+    (tier + recency decay + reputation-weighted agent assessments). Untiered +
+    unassessed → None. NOTE: refreshes the documented reliability cache on the
+    Source node (write-through projection), so this tool is not read-only.
+    """
+    return _safe(_get_team_sdk().get_source_reliability, url)
+
+
+@mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
+def tortoise_assess_source(url: str, assessor: str, score: float,
+                           rationale: str) -> dict:
+    """Record an agent's assessment of a Source (0-1 score + rationale).
+
+    Creates a pointKind='assessment' Statement Point (ontology §2 — evaluations
+    are Points, not edges). Latest assessment per (url, assessor) wins; older
+    are marked outdated. Weighted by the assessor's reputation snapshot
+    (compute_reputation at write time). Feeds the source's reliability factor
+    (clamped [0.1, 2.0]).
+    """
+    return _safe(_get_team_sdk().assess_source, url, assessor, score, rationale)
+
+
+@mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
+def tortoise_set_source_tier(url: str, tier: str) -> dict:
+    """Set (or change) a Source's credibility tier (T0-T4). Non-destructive.
+
+    Writes credibilityTier only — never overwrites sourceKind type strings.
+    Dirty-marks the inheritance gate + clears the reliability cache so EP and
+    reliability reads reflect the new tier promptly.
+    """
+    return _safe(_get_team_sdk().set_source_tier, url, tier)
 
 def tortoise_get_entity(id: str) -> dict:
     """Get any entity by ID, eventId, or url."""

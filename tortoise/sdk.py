@@ -456,6 +456,9 @@ class TortoiseSDK:
         # P1-1: Ontology v2.1 — link Point → Source via extractedFrom
         if props.get("extractedFrom"):
             proj._link_source(pid, props["extractedFrom"])
+            # Inheritance gate dirty-mark: a freshly-sourced point is always
+            # inherit-eligible on the next EP run (no interval wait, #398).
+            self._invalidate_inheritance_gate([pid])
 
         # Apply credibility baseline (only on new creation, not dedup)
         if credibility is not None:
@@ -648,6 +651,7 @@ class TortoiseSDK:
                 f"exist — refusing to orphan outdated point {id!r}"
             )
         now = datetime.now(timezone.utc).isoformat()
+
         proj.g.query(
             "MATCH (n:Point {id:$id}) SET n.outdated = true, n.updatedAt = $now",
             params={"id": id, "now": now},
@@ -1719,19 +1723,48 @@ class TortoiseSDK:
             if pid not in self._evidence:
                 self._evidence[pid] = (alpha, beta)
 
-    def set_point_baseline(self, claim_id: str, alpha: float, beta: float) -> dict:
-        """Set Beta prior evidence for a claim. Persists to graph immediately."""
+    def set_point_baseline(self, claim_id: str, alpha: float, beta: float, *,
+                           source: str = "explicit") -> dict:
+        """Set Beta prior evidence for a claim. Persists to graph immediately.
+
+        ``source`` records the baseline's provenance (``baseline_source`` graph
+        property): "explicit" (default) — manual/hosted baseline, NEVER
+        recomputed by ``_apply_source_inheritance``; "inherited" — derived from
+        Source evidence, recomputed per EP run subject to the per-point time
+        gate (``n.inherited_at``). Explicit baselines are always distinguishable
+        from legacy ``baseline_set=true`` rows (issue #398 2x2 mapping).
+        """
         self._evidence[claim_id] = (alpha, beta)
         # Persist to graph so baselines survive SDK restarts
         proj = self._get_proj()
         proj.g.query(
-            "MATCH (n:Point {id: $id}) SET n.ep_alpha = $a, n.ep_beta = $b, n.baseline_set = true",
-            params={"id": claim_id, "a": alpha, "b": beta},
+            "MATCH (n:Point {id: $id}) "
+            "SET n.ep_alpha = $a, n.ep_beta = $b, n.baseline_set = true, "
+            "    n.baseline_source = $src",
+            params={"id": claim_id, "a": alpha, "b": beta, "src": source},
         )
         # Dreaming (#85, P1): a baseline change alters the prior — neighbors
         # whose confidence derived from this claim are now stale.
         self._mark_dirty([claim_id])
-        return {"claim_id": claim_id, "alpha": alpha, "beta": beta}
+        return {"claim_id": claim_id, "alpha": alpha, "beta": beta, "source": source}
+
+    def _invalidate_inheritance_gate(self, point_ids: list[str]) -> None:
+        """Dirty-mark the per-point recompute gate for inherited baselines.
+
+        Called by write events that change the inputs of source inheritance
+        (point created from a tiered source, extractedFrom edge deleted, source
+        tier/assessment changed). Clears the point's ``inherited_at`` stamp so
+        the next ``_apply_source_inheritance`` recomputes immediately regardless
+        of the time-gate interval.
+        """
+        if not point_ids:
+            return
+        proj = self._get_proj()
+        proj.g.query(
+            "MATCH (n:Point) WHERE n.id IN $ids REMOVE n.inherited_at",
+            params={"ids": point_ids},
+        )
+        self._mark_dirty(point_ids)
 
     def get_confidence(self, claim_id: str) -> dict:
         """Get EP confidence for a claim: {mean, variance, alpha, beta}.
@@ -1743,72 +1776,192 @@ class TortoiseSDK:
             self.dream(dirty_only=True)
         return self._get_ep().compute_confidence(claim_id)
 
-    def _apply_source_inheritance(self, recency_decay: float | None = None):
-        """Apply credibilityTier from Source nodes to Points via extractedFrom edge.
-        
-        Only activates when credibilityTier is explicitly set on the Source (NOT NULL).
-        Sources without credibilityTier = no inheritance = neutral Beta(1,1).
-        If a Point has multiple Sources, the highest tier (lowest number: T0 > T1 > ...) wins.
+    def _apply_source_inheritance(self, recency_decay: float | None = None,
+                                   recompute_interval: float | None = None):
+        """Apply source credibility (tier → Beta prior) to Points via extractedFrom.
 
-        Recency modulation (#122 Part 3): older sources get slightly reduced evidence
-        weight via recency_decay (default 0.95 from TORTOISE_EP_RECENCY_DECAY env var).
-        T0 sources (gold/meta-analysis) are exempt from decay. Lower tiers get gentle
-        decay: effective_count *= recency_decay ** years_since_ingested.
+        Issue #398 — log-scale multi-source aggregation (replaces
+        highest-tier-wins) through the real graph path:
+
+          - Tier resolution per source: explicit ``credibilityTier`` >
+            ``sourceKind`` tier-form > registry default (``SOURCE_KIND_DEFAULTS``)
+            > None (neutral — no inheritance, preserving the opt-in guard).
+          - Aggregation: pinned formula
+            ``pc_t = log2(N_t+1) * decay_t * mean_i(base_pc(tier_i) * factor_i)``
+            with ``decay_t`` keyed on the tier's MOST-RECENT source (T0 exempt);
+            per-source ``factor_i`` = assessment factor (1.0 until assess_source
+            lands — Task 5).
+          - Positive-only: NAND contradiction is EP's factor domain — inheritance
+            never folds negative pseudo-counts (double-count guard).
+          - Baseline provenance (2x2 mapping): explicit baselines (baseline_source
+            = 'explicit' or legacy baseline_set=true) are NEVER recomputed;
+            inherited baselines (baseline_source='inherited') recompute per run
+            subject to the per-point time gate (``n.inherited_at``); points with
+            no baseline (baseline_source IS NULL AND baseline_set IS NOT true)
+            are ALWAYS eligible.
+          - Gate: recompute at most once per ``recompute_interval`` (default 3600s,
+            env TORTOISE_EP_REINHERIT_INTERVAL; 0 = always), unless the gate was
+            dirty-marked by a write event. Epsilon guard (rel 1e-9) suppresses
+            identical rewrites; ``inherited_at`` is always refreshed on a
+            dirty-marked recompute so dirty points settle after one pass.
+          - Assessment points (pointKind='assessment') are excluded — they are
+            evidence ABOUT sources, not extracted FROM them.
+
+        ep.py is untouched (additive-only — another issue owns EP propagation).
         """
         import os
         from datetime import datetime, timezone
+        from tortoise.source_credibility import (
+            aggregate_prior,
+            assessment_factor,
+            resolve_tier,
+        )
+
         if recency_decay is None:
             recency_decay = float(os.environ.get("TORTOISE_EP_RECENCY_DECAY", "0.95"))
+        if recompute_interval is None:
+            recompute_interval = float(
+                os.environ.get("TORTOISE_EP_REINHERIT_INTERVAL", "3600")
+            )
         proj = self._get_proj()
-        tier_map = {"T0": (10, 1), "T1": (5, 1), "T2": (3, 1), "T3": (2, 1), "T4": (1.1, 1)}
-        tier_order = {"T0": 0, "T1": 1, "T2": 2, "T3": 3, "T4": 4}
-        
-        where = "WHERE s.credibilityTier IS NOT NULL AND (n.baseline_set IS NULL OR n.baseline_set = false)"
-        params = {}
-        
+        now = datetime.now(timezone.utc)
+        from collections import defaultdict
+        # Per-source assessment factors (latest per (url, assessor), outdated
+        # filtered, reputation snapshotted at write). Batched — one query.
+        factor_by_source: dict[str, float] = {}
+        arows = proj.g.query(
+            "MATCH (p:Point {pointKind:'assessment'}) "
+            "WHERE (p.outdated IS NULL OR p.outdated = false) "
+            "RETURN p.targetSource, p.assessor, p.score, "
+            "coalesce(p.assessorReputation, 0.5), p.createdAt "
+            "ORDER BY p.createdAt",
+            params={},
+        ).result_set
+        latest_by_source: dict[str, dict[str, tuple[float, float]]] = defaultdict(dict)
+        for tsrc, assessor, score, rep, _created in arows:
+            if not tsrc:
+                continue
+            try:
+                latest_by_source[tsrc][assessor] = (float(rep), float(score))
+            except (TypeError, ValueError):
+                continue
+        for tsrc, by_assessor in latest_by_source.items():
+            factor_by_source[tsrc] = assessment_factor(by_assessor.values())
+
+        # Inherit-eligible points:
+        #   (baseline_source IS NULL AND baseline_set IS NOT true)  → always eligible
+        #   (baseline_source = 'inherited')                          → gated by inherited_at
+        where = (
+            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "AND (n.pointKind IS NULL OR n.pointKind <> 'assessment') "
+            "AND ("
+            "  (n.baseline_source IS NULL AND (n.baseline_set IS NULL OR n.baseline_set = false)) "
+            "  OR n.baseline_source = 'inherited'"
+            ") "
+            "AND (s.credibilityTier IS NOT NULL OR s.sourceKind IS NOT NULL) "
+        )
         rows = proj.g.query(
             f"MATCH (n:Point)-[:extractedFrom]->(s:Source) {where} "
-            "RETURN n.id, s.credibilityTier, s.ingestedAt",
-            params=params,
+            "RETURN n.id, s.url, s.credibilityTier, s.sourceKind, "
+            "s.sourceDate, s.ingestedAt, n.baseline_source, n.inherited_at",
+            params={},
         ).result_set
-        
-        # Group by Point ID, select highest tier (lowest number) for each Point
+
+        # Collect per-point source evidence
         from collections import defaultdict
-        point_data = defaultdict(list)
-        for pid, tier, ingested in rows:
-            point_data[pid].append((tier, ingested))
+        point_sources: dict[str, list[dict]] = defaultdict(list)
+        for pid, url, ctier, skind, sdate, ingested, bl_src, inherited_at in rows:
+            tier = resolve_tier(ctier, skind)
+            if tier is None:
+                continue  # neutral source — no inheritance contribution
+            point_sources[pid].append({
+                "url": url, "tier": tier, "sourceDate": sdate,
+                "ingestedAt": ingested,
+            })
 
-        now_ts = datetime.now(timezone.utc).timestamp()
-        
-        for pid, entries in point_data.items():
-            tiers = [e[0] for e in entries]
-            best_tier = min(tiers, key=lambda t: tier_order.get(t, 99))
-            alpha, beta = tier_map.get(best_tier, (1, 1))
+        # Revert: points with an inherited baseline but NO eligible sources
+        # (all edges deleted or all sources neutral) return to neutral — subject
+        # to the same per-point gate (dirty-marked or interval elapsed).
+        if point_sources:
+            sourced_ids = set(point_sources)
+        else:
+            sourced_ids = set()
+        revert_rows = proj.g.query(
+            "MATCH (n:Point) WHERE n.baseline_source = 'inherited' "
+            "AND (n.pointKind IS NULL OR n.pointKind <> 'assessment') "
+            "RETURN n.id, n.inherited_at",
+            params={},
+        ).result_set
+        for pid, inherited_at in revert_rows:
+            if pid in sourced_ids:
+                continue
+            # Gate check (same as write path)
+            if inherited_at is not None and recompute_interval > 0:
+                try:
+                    last = datetime.fromisoformat(str(inherited_at).replace("Z", "+00:00"))
+                    if last.tzinfo is None:
+                        last = last.replace(tzinfo=timezone.utc)
+                    age = (now - last).total_seconds()
+                except (ValueError, TypeError):
+                    age = recompute_interval + 1
+                if age < recompute_interval:
+                    continue  # within interval and not dirty-marked → keep
+            proj.g.query(
+                "MATCH (n:Point {id:$id}) REMOVE n.ep_alpha, n.ep_beta, "
+                "n.baseline_set, n.baseline_source, n.inherited_at",
+                params={"id": pid},
+            )
+            self._mark_dirty([pid])
 
-            # Recency modulation: T0 exempt, others decay gently (#122)
-            if best_tier != "T0" and recency_decay < 1.0:
-                # Use the most recent ingestedAt for this source tier
-                ingested_ts = None
-                for t, ingested in entries:
-                    if t == best_tier and ingested:
-                        try:
-                            dt = datetime.fromisoformat(ingested.replace("Z", "+00:00"))
-                            if dt.tzinfo is None:
-                                dt = dt.replace(tzinfo=timezone.utc)
-                            ts = dt.timestamp()
-                            if ingested_ts is None or ts > ingested_ts:
-                                ingested_ts = ts
-                        except (ValueError, TypeError):
-                            pass
-                if ingested_ts is not None:
-                    years = max(0, (now_ts - ingested_ts) / (365.25 * 86400))
-                    decay = recency_decay ** years
-                    # Decay pulls toward Beta(1,1): alpha' = 1 + (alpha-1)*decay
-                    # Stable facts (high alpha from multiple sources) stay strong
-                    alpha = 1.0 + (alpha - 1.0) * decay
-                    beta = 1.0 + (beta - 1.0) * decay
+        for pid, sources in point_sources.items():
+            # Fetch the point's current baseline marker state
+            row = proj.g.query(
+                "MATCH (n:Point {id:$id}) RETURN n.baseline_source, n.inherited_at, "
+                "coalesce(n.ep_alpha, 1.0), coalesce(n.ep_beta, 1.0)",
+                params={"id": pid},
+            ).result_set
+            bl_src, inherited_at, cur_a, cur_b = row[0] if row else (None, None, 1.0, 1.0)
 
-            self.set_point_baseline(pid, alpha, beta)
+            is_inherited = bl_src == "inherited"
+            if is_inherited and inherited_at is not None and recompute_interval > 0:
+                try:
+                    last = datetime.fromisoformat(str(inherited_at).replace("Z", "+00:00"))
+                    if last.tzinfo is None:
+                        last = last.replace(tzinfo=timezone.utc)
+                    age = (now - last).total_seconds()
+                except (ValueError, TypeError):
+                    age = recompute_interval + 1  # stale stamp → recompute
+                if age < recompute_interval:
+                    continue  # within interval and not dirty-marked → skip
+
+            # Per-source assessment factor (clamped [0.1, 2.0]); factor = 1.0
+            # when no assessments — exact tier priors preserved.
+            groups = [
+                (src["tier"], src["sourceDate"], src["ingestedAt"],
+                 factor_by_source.get(src["url"], 1.0))
+                for src in sources
+            ]
+            alpha, beta = aggregate_prior(
+                groups, recency_decay=recency_decay, now=now,
+            )
+
+            # Epsilon guard: skip identical rewrites (no dirty churn).
+            if is_inherited and abs(alpha - cur_a) < 1e-9 * max(1.0, abs(alpha)) \
+                    and abs(beta - cur_b) < 1e-9 * max(1.0, abs(beta)):
+                # Refresh the gate stamp so dirty points settle after one pass.
+                self._touch_inherited_at(pid, now)
+                continue
+
+            self.set_point_baseline(pid, alpha, beta, source="inherited")
+            self._touch_inherited_at(pid, now)
+
+    def _touch_inherited_at(self, point_id: str, now) -> None:
+        """Stamp the per-point inheritance gate timestamp (graph-persisted)."""
+        proj = self._get_proj()
+        proj.g.query(
+            "MATCH (n:Point {id:$id}) SET n.inherited_at = $ts",
+            params={"id": point_id, "ts": now.isoformat()},
+        )
 
     def calibrate_summary(self) -> list[dict]:
         """Audit graph calibration state. Returns per-point guidance.
@@ -1820,32 +1973,50 @@ class TortoiseSDK:
         where = "WHERE (n.is_operator IS NULL OR n.is_operator = false)"
         params = {}
         
+        from tortoise.source_credibility import resolve_tier
         rows = proj.g.query(
             f"MATCH (n:Point) {where} "
+            "AND (n.pointKind IS NULL OR n.pointKind <> 'assessment') "
             "OPTIONAL MATCH (n)-[:extractedFrom]->(s:Source) "
             "RETURN n.id, n.content, n.pointKind, "
             "coalesce(n.baseline_set, false) AS calibrated, "
-            "s.credibilityTier, s.url AS src_url",
+            "s.credibilityTier, s.sourceKind, s.url AS src_url",
             params=params,
         ).result_set
         
         results = []
         for row in rows:
-            pid, content, pk, calibrated, tier, src_url = row
+            pid, content, pk, calibrated, ctier, skind, src_url = row
             item = {"id": pid, "content": content, "pointKind": pk, "calibrated": calibrated}
+            # Effective tier: explicit credibilityTier > sourceKind tier-form >
+            # registry default (issue #398 Task 6 — legacy-inherited advisory).
+            eff_tier = resolve_tier(ctier, skind)
             
             if not calibrated:
-                if src_url and tier:
-                    item["suggestion"] = f"Inherited {tier} from Source {src_url}"
-                elif src_url and not tier:
+                if src_url and eff_tier:
                     item["suggestion"] = (
-                        f"Set credibilityTier on Source {src_url} "
+                        f"Inherited {eff_tier} from Source {src_url} — run "
+                        f"compute_confidence() to apply"
+                    )
+                elif src_url and not eff_tier:
+                    item["suggestion"] = (
+                        f"Source {src_url} is untiered — call "
+                        f"set_source_tier('{src_url}', 'T0'..'T4') or "
+                        f"create_source(url, kind, tier=...) "
                         f"(covers all points from this source)"
                     )
                 else:
                     item["suggestion"] = (
                         f"Call set_point_baseline('{pid}', alpha, beta) "
                         f"or recreate with credibility kwarg"
+                    )
+            else:
+                # Legacy-inherited advisory: explicit/inherited baseline whose
+                # source was re-tiered — suggest re-derivation via the writer.
+                if src_url and ctier and item.get("calibrated"):
+                    item["note"] = (
+                        f"Source {src_url} tier {ctier} — baseline may predate "
+                        f"issue #398; re-derive via set_source_tier"
                     )
             results.append(item)
 
@@ -3862,11 +4033,91 @@ class TortoiseSDK:
         did = self.ulid()
         return self._create_entity("Document", did, {"title": title, "documentKind": documentKind, "objectKind": "document", "status": "draft", **props}, "DocumentCreated")
 
-    def create_source(self, url: str, sourceKind: str, **props) -> dict:
+    def create_source(self, url: str, sourceKind: str, *,
+                      tier: str | None = None, sourceDate: str | None = None,
+                      **props) -> dict:
+        """Create (or merge) a Source node (issue #398 Task 6).
+
+        Dual-write rule (ontology v3.1 §4.6 + code reader contract):
+          - ``tier`` given → stored on ``credibilityTier`` (the property the
+            inheritance adapter reads); ``sourceKind`` left untouched.
+          - ``sourceKind`` is itself a tier-form (T0-T4) → mirrored to
+            ``credibilityTier`` as well (canonical per ontology).
+          - An EXISTING Source (URL collision) NEVER has its ``sourceKind``
+            overwritten — tier lands on ``credibilityTier`` only.
+        ``sourceDate`` is the evidence-age clock for decay (falls back to
+        ``ingestedAt`` — the documented pipeline-arrival proxy). Invalid tier
+        values raise ValueError.
+        """
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
         if not url or not url.strip():
             raise ValueError("url must be a non-empty string")
-        return self._create_entity("Source", url, {"url": url, "sourceKind": sourceKind, "ingestedAt": __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(), **props}, "SourceCreated")
+        from tortoise.source_credibility import TIER_PRIORS, canonical_tier
+        if tier is not None:
+            _orig_tier = tier
+            tier = canonical_tier(tier)
+            if tier is None:
+                raise ValueError(
+                    f"Invalid tier {_orig_tier!r} — must be T0..T4 or a legacy alias "
+                    f"(gold/high/medium/low/unverified)"
+                )
+        if sourceKind in TIER_PRIORS and tier is None:
+            tier = sourceKind  # tier-form sourceKind mirrors to credibilityTier
+        ev = {
+            "url": url,
+            "sourceKind": sourceKind,
+            "ingestedAt": __import__('datetime').datetime.now(
+                __import__('datetime').timezone.utc).isoformat(),
+            **props,
+        }
+        if tier is not None:
+            ev["credibilityTier"] = tier
+        if sourceDate is not None:
+            ev["sourceDate"] = sourceDate
+        result = self._create_entity("Source", url, ev, "SourceCreated")
+        # Write events invalidate the inheritance gate + reliability cache
+        self._invalidate_inheritance_gate_for_source(url)
+        self._clear_reliability_cache(url)
+        return result
+
+    def set_source_tier(self, url: str, tier: str) -> dict:
+        """Set (or change) a Source's credibility tier — non-destructive.
+
+        Writes ``credibilityTier`` only; never touches ``sourceKind`` (legacy
+        type strings are preserved). Mirrors to ``sourceKind`` when it is
+        already a tier-form (keeps the dual-write invariant). Dirty-marks the
+        inheritance gate + clears the reliability cache.
+        """
+        from tortoise.source_credibility import TIER_PRIORS, canonical_tier
+        _orig = tier
+        tier = canonical_tier(tier)
+        if tier is None:
+            raise ValueError(
+                f"Invalid tier {_orig!r} — must be T0..T4 or a legacy alias "
+                f"(gold/high/medium/low/unverified)"
+            )
+        proj = self._get_proj()
+        rows = proj.g.query(
+            "MATCH (s:Source {url:$url}) RETURN s.sourceKind",
+            params={"url": url},
+        ).result_set
+        if not rows:
+            raise ValueError(f"Source {url} does not exist")
+        skind = rows[0][0]
+        if skind in TIER_PRIORS:
+            # Keep the dual-write invariant: tier-form sourceKind mirrors the tier
+            proj.g.query(
+                "MATCH (s:Source {url:$url}) SET s.credibilityTier = $t, s.sourceKind = $t",
+                params={"url": url, "t": tier},
+            )
+        else:
+            proj.g.query(
+                "MATCH (s:Source {url:$url}) SET s.credibilityTier = $t",
+                params={"url": url, "t": tier},
+            )
+        self._invalidate_inheritance_gate_for_source(url)
+        self._clear_reliability_cache(url)
+        return {"url": url, "credibilityTier": tier, "sourceKind": skind}
 
     # ── Entity Derivation (#122 Part 2) ──────────────────────────
 
@@ -3880,6 +4131,285 @@ class TortoiseSDK:
         proj = self._get_proj()
         ok = proj.create_edge(dst_id, src_id, "wasDerivedFrom")
         return {"derived": ok, "src": src_id, "dst": dst_id}
+
+    # ── Source reliability (issue #398 Task 4) ──────────────────────
+
+    def _compute_source_prior(self, url: str) -> dict | None:
+        """Compute a Source's effective Beta prior + components (single source of truth).
+
+        Used by BOTH the inheritance adapter (per-point base weight) and the
+        reliability cache — the two cannot drift. Returns None when the source
+        is untiered (no inheritance contribution). Assessment factor is read
+        from `pointKind='assessment'` Points (latest per assessor wins by
+        createdAt; outdated filtered); until Task 5 lands, factor = 1.0.
+        """
+        import os
+        from datetime import datetime, timezone
+        from tortoise.source_credibility import (
+            aggregate_prior,
+            assessment_factor,
+            resolve_tier,
+        )
+        proj = self._get_proj()
+        rows = proj.g.query(
+            "MATCH (s:Source {url:$url}) "
+            "RETURN s.credibilityTier, s.sourceKind, s.sourceDate, s.ingestedAt",
+            params={"url": url},
+        ).result_set
+        if not rows:
+            return None
+        ctier, skind, sdate, ingested = rows[0]
+        tier = resolve_tier(ctier, skind)
+        if tier is None:
+            return None
+
+        # Batched assessment aggregation (latest per (targetSource, assessor),
+        # outdated filtered; assessorReputation snapshotted at write time).
+        arows = proj.g.query(
+            "MATCH (p:Point {pointKind:'assessment'}) "
+            "WHERE p.targetSource = $url AND (p.outdated IS NULL OR p.outdated = false) "
+            "RETURN p.assessor, p.score, coalesce(p.assessorReputation, 0.5), p.createdAt "
+            "ORDER BY p.createdAt",
+            params={"url": url},
+        ).result_set
+        latest: dict[str, tuple[float, float]] = {}
+        for assessor, score, rep, _created in arows:
+            try:
+                latest[assessor] = (float(rep), float(score))
+            except (TypeError, ValueError):
+                continue
+        assessments = list(latest.values())
+        factor = assessment_factor(assessments)
+
+        from tortoise.source_credibility import decay_factor as _decay_factor
+        alpha, beta = aggregate_prior(
+            [(tier, sdate, ingested, factor)],
+            recency_decay=float(os.environ.get("TORTOISE_EP_RECENCY_DECAY", "0.95")),
+        )
+        return {
+            "tier": tier,
+            "sourceDate": sdate,
+            "ingestedAt": ingested,
+            "decay": _decay_factor(
+                sdate, ingested,
+                recency_decay=float(os.environ.get("TORTOISE_EP_RECENCY_DECAY", "0.95")),
+                tier=tier,
+            ),
+            "factor": factor,
+            "assessment_count": len(assessments),
+            "alpha": alpha,
+            "beta": beta,
+        }
+
+    def get_source_reliability(self, url: str) -> dict:
+        """Derive a Source's reliability (0-1) — query-time, cache-consistency-checked.
+
+        Returns {"url", "reliability" (float 0-1 or None), "components",
+        "cache": "fresh"|"recomputed"|"miss"}. The reliability value is the mean
+        of the SAME modulated prior EP uses as base weight (single source of
+        truth ``_compute_source_prior``), so ``reliability == inherited prior
+        mean`` for single-source points (consistency invariant). Untiered +
+        unassessed → None (reason 'untiered'). The cache
+        (reliability/reliabilityComponents/reliability_derived_at) is a
+        documented projection — recomputed when stale (interval elapsed or tier/
+        sourceDate changed vs cached components) or after write events
+        (set_source_tier/assess_source/create_source(tier=)).
+        """
+        import os
+        from datetime import datetime, timezone
+        from tortoise.source_credibility import resolve_tier
+        proj = self._get_proj()
+        now = datetime.now(timezone.utc)
+        interval = float(os.environ.get("TORTOISE_EP_REINHERIT_INTERVAL", "3600"))
+
+        # Cache freshness check
+        rows = proj.g.query(
+            "MATCH (s:Source {url:$url}) "
+            "RETURN s.reliability, s.reliabilityComponents, s.reliability_derived_at, "
+            "s.credibilityTier, s.sourceKind, s.sourceDate, s.ingestedAt",
+            params={"url": url},
+        ).result_set
+        cached = None
+        if rows and rows[0][2]:
+            cached_rel, cached_comp_raw, cached_at, c_tier, c_kind, c_sdate, c_ingested = rows[0]
+            fresh = False
+            try:
+                derived = datetime.fromisoformat(str(cached_at).replace("Z", "+00:00"))
+                if derived.tzinfo is None:
+                    derived = derived.replace(tzinfo=timezone.utc)
+                fresh = (now - derived).total_seconds() < interval
+            except (ValueError, TypeError):
+                fresh = False
+            if fresh:
+                try:
+                    import json as _json
+                    cached_comp = _json.loads(cached_comp_raw) if cached_comp_raw else {}
+                    # Inputs unchanged → serve cache (tier, sourceDate, ingestedAt
+                    # are the derivation inputs; assessments clear the cache at write)
+                    if (cached_comp.get("tier") == resolve_tier(c_tier, c_kind)
+                            and cached_comp.get("sourceDate") == c_sdate
+                            and cached_comp.get("ingestedAt") == rows[0][5]):
+                        cached = (cached_rel, cached_comp)
+                except (TypeError, ValueError, KeyError):
+                    cached = None
+
+        if cached is not None:
+            rel, comp = cached
+            return {"url": url, "reliability": rel, "components": comp, "cache": "fresh"}
+
+        # Recompute from the single source of truth
+        prior = self._compute_source_prior(url)
+        if prior is None:
+            # Untiered: assessment-only reliability (display — never feeds EP)
+            arows = proj.g.query(
+                "MATCH (p:Point {pointKind:'assessment'}) "
+                "WHERE p.targetSource = $url AND (p.outdated IS NULL OR p.outdated = false) "
+                "RETURN p.assessor, p.score, coalesce(p.assessorReputation, 0.5), p.createdAt "
+                "ORDER BY p.createdAt",
+                params={"url": url},
+            ).result_set
+            if arows:
+                # Latest per (url, assessor) — mirrors _compute_source_prior dedup
+                latest: dict[str, tuple[float, float]] = {}
+                for assessor, score, rep, _created in arows:
+                    try:
+                        latest[assessor] = (float(rep), float(score))
+                    except (TypeError, ValueError):
+                        continue
+                reps = [r for r, _s in latest.values()]
+                rep_sum = sum(reps)
+                weighted = (sum(r * s for r, s in latest.values()) / rep_sum
+                            if rep_sum else 0.0)
+                if weighted != weighted:  # NaN guard
+                    weighted = 0.0
+                comp = {"tier": None, "reason": "untiered; assessment-only",
+                        "assessment_count": len(arows),
+                        "assessment_weighted_mean": weighted}
+                self._write_reliability_cache(url, weighted, comp, now)
+                return {"url": url, "reliability": weighted, "components": comp,
+                        "cache": "recomputed"}
+            comp = {"tier": None, "reason": "untiered", "assessment_count": 0}
+            self._write_reliability_cache(url, None, comp, now)
+            return {"url": url, "reliability": None, "components": comp, "cache": "miss"}
+
+        mean = prior["alpha"] / (prior["alpha"] + prior["beta"])
+        comp = {
+            "tier": prior["tier"],
+            "sourceDate": prior["sourceDate"],
+            "ingestedAt": prior["ingestedAt"],
+            "factor": prior["factor"],
+            "assessment_count": prior["assessment_count"],
+            "decay": prior["decay"],
+            "mean": mean,
+        }
+        self._write_reliability_cache(url, mean, comp, now)
+        return {"url": url, "reliability": mean, "components": comp, "cache": "recomputed"}
+
+    def assess_source(self, url: str, assessor: str, score: float, rationale: str) -> dict:
+        """Record an agent's assessment of a Source (issue #398 Task 5).
+
+        Creates a ``pointKind='assessment'`` Statement Point (ontology §2 —
+        evaluations of subjects are Points with EP confidence, NOT edges),
+        property-linked via ``targetSource`` (never ``extractedFrom`` — it is
+        evidence ABOUT the source, not extracted FROM it).
+
+        Semantics:
+          - score ∈ [0, 1] (non-numeric → ValueError); rationale required.
+          - Assessor reputation is SNAPSHOTTED at write time
+            (``compute_reputation(assessor).mean``, stored as
+            ``assessorReputation``) so later reputation changes never rewrite
+            past assessments' factors.
+          - Latest-wins per (url, assessor): older assessments from the same
+            assessor are marked ``outdated:true`` — the aggregation query picks
+            the latest active assessment by construction (crash-safe).
+          - The assessment factor is clamped [0.1, 2.0] at the read path.
+          - Refreshes the reliability cache + dirty-marks the inheritance gate
+            so EP recomputes promptly.
+        """
+        try:
+            score_f = float(score)
+        except (TypeError, ValueError):
+            raise ValueError(f"score must be numeric, got {score!r}") from None
+        if not (0.0 <= score_f <= 1.0):
+            raise ValueError(f"score must be in [0, 1], got {score_f}")
+        if not rationale or not str(rationale).strip():
+            raise ValueError("rationale is required")
+        if not assessor or not str(assessor).strip():
+            raise ValueError("assessor is required")
+        if not url or not str(url).strip():
+            raise ValueError("url is required")
+
+        from datetime import datetime, timezone
+        rep = self.compute_reputation(str(assessor))["mean"]
+        now = datetime.now(timezone.utc).isoformat()
+
+        proj = self._get_proj()
+        # Create the new assessment FIRST, then mark older ones outdated EXCLUDING
+        # the new point (crash-safe: a failure between the two leaves the new
+        # point active and the old one active — the read path dedupes
+        # latest-per-(url, assessor) by createdAt, so no double-count; a failure
+        # before the mark leaves the previous assessment intact, not orphaned).
+        p = self.create_point(
+            "assessment", str(rationale).strip(),
+            props={
+                "targetSource": url,
+                "assessor": str(assessor),
+                "score": score_f,
+                "assessorReputation": rep,
+                "createdAt": now,
+            },
+        )
+        proj.g.query(
+            "MATCH (p:Point {pointKind:'assessment'}) "
+            "WHERE p.targetSource = $url AND p.assessor = $assessor "
+            "  AND p.id <> $new_id "
+            "  AND (p.outdated IS NULL OR p.outdated = false) "
+            "SET p.outdated = true",
+            params={"url": url, "assessor": str(assessor), "new_id": p["id"]},
+        )
+        # Refresh reliability cache (clear → next read recomputes) + dirty-mark
+        # the inheritance gate so EP recomputes promptly.
+        self._invalidate_inheritance_gate_for_source(url)
+        self._clear_reliability_cache(url)
+        return {"assessment_point_id": p["id"], "url": url, "assessor": str(assessor),
+                "score": score_f, "reputation": rep}
+
+    def _invalidate_inheritance_gate_for_source(self, url: str) -> None:
+        """Dirty-mark all points extracted from a source (inheritance recompute)."""
+        proj = self._get_proj()
+        rows = proj.g.query(
+            "MATCH (n:Point)-[:extractedFrom]->(s:Source {url:$url}) "
+            "RETURN n.id",
+            params={"url": url},
+        ).result_set
+        pids = [r[0] for r in rows]
+        self._invalidate_inheritance_gate(pids)
+
+    def _write_reliability_cache(self, url: str, reliability, components: dict, now) -> None:
+        """Write-through reliability projection on the Source node (documented cache)."""
+        import json as _json
+        proj = self._get_proj()
+        proj.g.query(
+            "MATCH (s:Source {url:$url}) "
+            "SET s.reliability = $r, s.reliabilityComponents = $c, "
+            "s.reliability_derived_at = $ts",
+            params={"url": url, "r": reliability, "c": _json.dumps(components),
+                    "ts": now.isoformat()},
+        )
+
+    def _clear_reliability_cache(self, url: str) -> None:
+        """Invalidate the reliability cache (next read recomputes from scratch).
+
+        Called by write events that change the derivation inputs: assess_source,
+        set_source_tier, create_source(tier=). Prevents indefinite staleness —
+        the cache is a documented projection, never authoritative.
+        """
+        proj = self._get_proj()
+        proj.g.query(
+            "MATCH (s:Source {url:$url}) "
+            "REMOVE s.reliability, s.reliabilityComponents, s.reliability_derived_at",
+            params={"url": url},
+        )
 
     # ── Reputation (#122 Part 4) ─────────────────────────────────
 
