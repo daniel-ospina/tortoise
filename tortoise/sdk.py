@@ -2091,12 +2091,16 @@ class TortoiseSDK:
     # ── Entity Resolution (GAP-01 #6987) ──────────────────────
 
     def suggest_entry_points(self, query: str, *, limit: int = 5,
-                             kind_filter: str | None = None) -> list[dict]:
+                             kind_filter: str | None = None,
+                             graph_ranker=None) -> list[dict]:
         """Entity resolution — NL query → matching entities from the graph.
 
         String match on content (Cypher CONTAINS) + embedding fallback.
         Returns [{id, name, kind, confidence}] sorted by confidence DESC.
         kind_filter filters by n.pointKind.
+        graph_ranker: optional GraphRanker (tortoise.ranking) to rerank the
+        results with graph signals (persisted EP confidence, connectivity,
+        recency) — #25. Off by default for backward compatibility.
         """
         if limit < 1:
             raise ValueError(f"limit must be >= 1, got {limit}")
@@ -2131,6 +2135,7 @@ class TortoiseSDK:
             # doc and 0.5 for 5-char in 10-char — not comparable. The 0.5 offset
             # ensures all substring matches score ≥ 0.5, reserving [0, 0.5) for
             # the hybrid fallback path (which has no substring match at all).
+            # The fallback band-normalizes its RRF scores into [0, 0.5) (#22).
             if content.lower() == q_lower:
                 confidence = 1.0
             else:
@@ -2141,12 +2146,38 @@ class TortoiseSDK:
         results.sort(key=lambda r: r["confidence"], reverse=True)
         results = results[:limit]
 
-        # Hybrid fallback if no string matches (Phase 0, #7748)
+        # Hybrid fallback if no string matches (Phase 0, #7748).
+        # Confidence contract (#22): fallback results must live in the [0, 0.5)
+        # band reserved by the substring-match formula above. Raw RRF scores are
+        # NOT comparable to that band — rank-based fusion caps near 0.016 per
+        # ranked list (~0.05 with 3 fused lists) while embedded FTS raw scores
+        # are unbounded above — so `rrf * 0.5` landed anywhere from ~0.008 to
+        # >1.0, tripping downstream conf > 0.3 thresholds. Band-normalize:
+        # scale each RRF score by the set's max so the strongest fallback hit
+        # lands at 0.49 (just under the 0.5 boundary) and weaker hits scale
+        # proportionally. Invariant to the number of fused ranked lists (no
+        # hardcoded multiplier).
         if not results:
             fts_results = self.tortoise_fts_query(q, limit=limit)
-            results = [{"id": r["id"], "name": r.get("content", ""), "kind": r.get("point_kind", ""),
-                        "confidence": round(r.get("scores", {}).get("rrf", 0.0) * 0.5, 4)}
-                       for r in fts_results]
+            results = []
+            max_rrf = max(
+                (r.get("scores", {}).get("rrf", 0.0) for r in fts_results),
+                default=0.0,
+            )
+            for r in fts_results:
+                rrf = r.get("scores", {}).get("rrf", 0.0)
+                if max_rrf > 0:
+                    confidence = round(0.49 * rrf / max_rrf, 4)
+                else:
+                    confidence = 0.0  # no fusion signal — stay at band floor
+                results.append({"id": r["id"], "name": r.get("content", ""),
+                                "kind": r.get("point_kind", ""), "confidence": confidence})
+            results.sort(key=lambda r: r["confidence"], reverse=True)
+
+        # #25: optional graph-informed rerank (persisted EP confidence,
+        # operator connectivity, recency). Off by default (backward compat).
+        if graph_ranker is not None and results:
+            results = graph_ranker.rerank(results, entity_type="point")
 
         return results
 
@@ -2198,6 +2229,7 @@ class TortoiseSDK:
         entity_type: str = "point",
         min_confidence: float = 0.0,
         order_by: str = "relevance",
+        graph_ranker=None,
         limit: int = 10,
         threshold: float = 0.0,
         relationship_filter: str | None = None,
@@ -2233,8 +2265,8 @@ class TortoiseSDK:
             raise ValueError(f"threshold must be 0.0-1.0, got {threshold}")
         if not (0.0 <= min_confidence <= 1.0):
             raise ValueError(f"min_confidence must be 0.0-1.0, got {min_confidence}")
-        if order_by not in ("relevance", "confidence"):
-            raise ValueError(f"order_by must be 'relevance' or 'confidence', got {order_by!r}")
+        if order_by not in ("relevance", "confidence", "graph"):
+            raise ValueError(f"order_by must be 'relevance', 'confidence', or 'graph', got {order_by!r}")
 
         proj = self._get_proj()
         graph = proj.g
@@ -2515,9 +2547,24 @@ class TortoiseSDK:
             results.append(result)
 
         # 9. Order results
+        if order_by == "graph":
+            # #25: graph-informed rerank — weighted fusion of similarity +
+            # persisted EP confidence + operator connectivity + recency decay.
+            # Requires the caller to allow a large enough candidate pool (limit
+            # here is the pool size; final length is capped below).
+            from .ranking import GraphRanker
+            ranker = graph_ranker or GraphRanker(proj)
+            dicts = [r.to_dict() for r in results]
+            return ranker.rerank(dicts, entity_type=entity_type)[:limit]
         if order_by == "confidence":
+            # #25: sort by the PERSISTED EP confidence (n.confidence, written
+            # by compute_confidence), not the structural impl/(impl+nand) proxy
+            # from annotate_ep_batch (which is edge-ratio, not belief).
+            from .ranking import GraphRanker
+            ranker = graph_ranker or GraphRanker(proj)
+            signals = ranker._fetch_signals([r.id for r in results], entity_type)
             results.sort(
-                key=lambda r: r.ep.confidence_mean if r.ep else 0.0,
+                key=lambda r: signals.get(r.id, {}).get("confidence", 0.5),
                 reverse=True,
             )
         # Default: RRF relevance order (already in fused order)

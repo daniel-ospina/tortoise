@@ -16,7 +16,7 @@ A product of [Premise Labs](https://premiselabs.co).
 ## What's here
 
 - `tortoise/` — the SDK, MCP server, projection, search engine, backup/restore
-- `premise-labs/` — the hosted product's landing pages + dashboard (deploys to Cloudflare Pages)
+- `website/` — the hosted product's landing pages + dashboard (deploys to Cloudflare Pages)
 - `docs/ONTOLOGY.md` — **canonical ontology v3.1** (co-located with the code it governs)
 - `tests/` — test suite
 
@@ -35,7 +35,7 @@ File issues in the repo that owns the code:
 | **daniel-ospina/premise-labs** | Premise Labs internal ops: meetings recorder, CRM (Twenty), bridge scripts, health checks | Ops tooling, CRM, meeting pipeline |
 | **daniel-ospina/eldato** | El Dato app (eldato.com.mx): scanner, webapp, deals/offers, notifications, ads, SEO | El Dato product work |
 
-**Rule of thumb:** if the issue is about Tortoise code (this repo's `tortoise/` or `premise-labs/` dirs), file it here. If it's about agent tooling, file in agent-infra. If it's about Premise Labs ops (meetings/CRM), file in premise-labs.
+**Rule of thumb:** if the issue is about Tortoise code (this repo's `tortoise/` or `website/` dirs), file it here. If it's about agent tooling, file in agent-infra. If it's about Premise Labs ops (meetings/CRM), file in premise-labs.
 
 ## Quickstart
 

@@ -70,10 +70,13 @@ def test_kind_filter_narrows_results():
     assert len(results) >= 1
     for r in results:
         assert "competitor" in r["name"].lower()
-    # With kind_filter=infrastructure, shouldn't find these
+    # kind_filter empties the main path → the hybrid fallback takes over.
+    # Fallback results never claim high confidence: they stay in the
+    # documented [0, 0.5) fallback band (#22) — kind_filter itself is only
+    # applied on the string-match path (fallback honors no kind constraint).
     filtered = sdk.suggest_entry_points("competitor", limit=5,
                                         kind_filter="infrastructure")
-    assert len(filtered) == 0  # no competitor-research Points in infrastructure
+    assert all(r["confidence"] < 0.5 for r in filtered)
     print("PASS test_kind_filter_narrows_results")
 
 
@@ -135,6 +138,88 @@ def test_limit_respects_confidence_sort():
     assert results[0]["confidence"] == 1.0, \
         f"exact match not top: {results[0]}"
     print("PASS test_limit_respects_confidence_sort")
+
+
+# ── Fallback path (#22) ────────────────────────────────────────────────
+
+def test_fallback_confidence_band_normalized_e2e():
+    """#22: hybrid fallback confidence ∈ [0, 0.5), strong hit at the top of
+    the band (was ~0.008–0.02 after the RRF migration).
+
+    Query tokens are reordered so CONTAINS fails (no substring match) while
+    embedded FTS still matches the doc — exercising the real fallback path
+    through the degradation chain. (Embedded falkordblite FTS requires all
+    query tokens in one doc, hence the reordered-token query.)
+    """
+    db_path = _tmp_db()
+    sdk = TortoiseSDK(db_path)
+    _seed(sdk)
+    # No content contains "analysis competitor" as a substring → fallback runs.
+    results = sdk.suggest_entry_points("analysis competitor", limit=5)
+    assert len(results) >= 1, f"expected fallback results: {results}"
+    confs = [r["confidence"] for r in results]
+    assert all(0.0 <= c < 0.5 for c in confs), \
+        f"fallback confidences must be in [0, 0.5): {confs}"
+    assert confs == sorted(confs, reverse=True), \
+        f"not sorted desc: {confs}"
+    # Strongest fallback hit lands near the top of the band (0.49), not at
+    # ~0.02 as before the #22 fix.
+    assert confs[0] == 0.49, f"strongest fallback hit not at band top: {confs}"
+    assert "competitor" in results[0]["name"].lower()
+    print("PASS test_fallback_confidence_band_normalized_e2e")
+
+
+def test_fallback_confidence_scale_invariant_to_rrf():
+    """#22 unit pin: confidence is set-max normalized, so the RRF magnitude
+    (number of fused ranked lists, embedded FTS raw-score scale) cannot
+    collapse or overshoot the band. Strongest → 0.49, weaker proportional.
+    """
+    db_path = _tmp_db()
+    sdk = TortoiseSDK(db_path)
+
+    def fake_fts(q, **kw):
+        # Single-list RRF max (~0.0164) — the scale that broke the old
+        # rrf*0.5 formula (→ ~0.008).
+        return [
+            {"id": "a", "content": "strong hit", "point_kind": "statement",
+             "scores": {"rrf": 0.0164}},
+            {"id": "b", "content": "mid hit", "point_kind": "statement",
+             "scores": {"rrf": 0.0082}},
+            {"id": "c", "content": "weak hit", "point_kind": "statement",
+             "scores": {"rrf": 0.0041}},
+        ]
+
+    sdk.tortoise_fts_query = fake_fts
+    results = sdk.suggest_entry_points("no substring match at all", limit=5)
+    confs = {r["id"]: r["confidence"] for r in results}
+    assert confs["a"] == 0.49                       # strongest → top of band
+    assert confs["b"] == 0.245                      # 0.49 * 0.5
+    assert confs["c"] == 0.1225                     # 0.49 * 0.25
+    assert all(0.0 <= c < 0.5 for c in confs.values())
+    # Same rrf order as the fused list (monotonic mapping).
+    assert [r["id"] for r in results] == ["a", "b", "c"]
+    print("PASS test_fallback_confidence_scale_invariant_to_rrf")
+
+
+def test_fallback_zero_rrf_stays_at_band_floor():
+    """#22: when the fused scores carry no signal (all rrf == 0, e.g. TF-IDF
+    with zero token overlap), confidence stays at the band floor instead of
+    dividing by zero or inflating weak matches.
+    """
+    db_path = _tmp_db()
+    sdk = TortoiseSDK(db_path)
+
+    def fake_fts(q, **kw):
+        return [
+            {"id": "a", "content": "x", "point_kind": "statement", "scores": {"rrf": 0.0}},
+            {"id": "b", "content": "y", "point_kind": "statement", "scores": {"rrf": 0.0}},
+        ]
+
+    sdk.tortoise_fts_query = fake_fts
+    results = sdk.suggest_entry_points("zzz", limit=5)
+    assert [r["confidence"] for r in results] == [0.0, 0.0]
+    assert all(r["confidence"] < 0.5 for r in results)
+    print("PASS test_fallback_zero_rrf_stays_at_band_floor")
 
 
 # ── Runner ──────────────────────────────────────────────────────────

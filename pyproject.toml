@@ -27,7 +27,7 @@ tortoise-ingest = "tortoise.ingest:main"
 tortoise-serve = "tortoise.deployment:serve"
 
 [project.optional-dependencies]
-embeddings = ["sentence-transformers>=2.0", "scikit-learn>=1.0"]
+embeddings = ["sentence-transformers>=3,<6", "scikit-learn>=1.0"]
 quadrature = ["jax>=0.4"]
 postgres = ["psycopg2-binary>=2.9"]
 

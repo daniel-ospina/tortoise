@@ -481,3 +481,19 @@ python -m pytest tests/ -v -m "postgres"
 7. Migration idempotent (run twice = same state)
 8. Tests pass with FalkorDBLite only (`-m "not postgres"`) for CI green
 9. Existing tests pass (backward compat)
+
+---
+
+## Schema reservation — tenant content encryption (ADR-008, #28)
+
+The registry/control-plane schema above is unaffected by tenant content
+encryption. However, tenant-graph write paths (onboarding epic #235, tool
+registry #454) MUST NOT hardcode content-in-clear. Reserved fields on tenant
+`Point`/`Document`/`Event` nodes (see `docs/adr/ADR-008-client-side-content-encryption.md`):
+
+- `encryptionVersion: int` — 0 = plaintext (current), 1 = AES-256-GCM client-key envelope
+- `_searchText: str` — clear derived field, FTS-indexed (already the pattern for `Document` per #125; extend to `Point`)
+
+Search / EP / traversal read ONLY clear fields (`_searchText`, titles, kinds,
+topics, embedding, confidence, timestamps, edge labels) — never the encrypted
+content blob. Encryption is a write-path concern.
