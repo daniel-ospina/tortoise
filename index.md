@@ -4,16 +4,18 @@ type: index
 domain: data
 status: live
 created: 2026-07-09
-updated: 2026-07-21
+updated: 2026-08-07
 ---
 
 # Tortoise — Canonical Documents
 
 ## Architecture
-- [Projection layer](tortoise/projection/) — JSONL → FalkorDB projection, grounding, belief propagation
-- [SDK](tortoise/sdk.py) — Python API for entity CRUD, edge creation, query helpers
-- [MCP Server](tortoise/mcp_server.py) — Agent-facing tools via FastMCP
+- [MCP Server](tortoise/mcp_server.py) — Agent-facing tools via FastMCP (primary interface; 58 tools)
+- [Self-Host Daemon](tortoise/selfhost.py) — thin single-tenant service: MCP Streamable HTTP at /mcp + /health
 - [Connectors](tortoise/connectors/) — GitHub, Linear, Slack data ingestion
+- [MCP Client](tortoise/mcp_client.py) — thin driver for scripts/integrations (connect, don't import)
+- [SDK](tortoise/sdk.py) — Python API for local dev/scripting (connects to a daemon)
+- [Projection layer](tortoise/projection/) — JSONL → FalkorDB projection, grounding, belief propagation
 - [Extractor](tortoise/extractor.py) — Semantic extraction from documents/transcripts
 
 ## Data

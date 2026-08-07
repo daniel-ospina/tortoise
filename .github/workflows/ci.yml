@@ -16,3 +16,17 @@ jobs:
       - uses: actions/checkout@v4
       - name: Check test isolation
         run: python3 scripts/check-test-isolation.py
+
+  license-surface:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check license surface consistency (BSL 1.1 + $5M AUG, 4 files)
+        run: python3 validation/check-license-surface.py
+      - name: Service-first gate — no consumer import instruction in README
+        run: |
+          if grep -nE "(from tortoise|import tortoise)" README.md; then
+            echo "::error::README must not instruct importing tortoise — connect, don't import (service model)"
+            exit 1
+          fi
+          echo "service-first gate OK"
