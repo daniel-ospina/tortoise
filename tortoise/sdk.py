@@ -2309,12 +2309,16 @@ class TortoiseSDK:
                 (r.get("scores", {}).get("rrf", 0.0) for r in fts_results),
                 default=0.0,
             )
+            # No fusion signal at all (max_rrf == 0, e.g. TF-IDF fallback with
+            # all-zero similarity) → return NOTHING: every result would carry
+            # confidence 0.0, which is indistinguishable from 'no match' and
+            # pollutes suggest_entry_points with decoys for garbage queries
+            # (stale test #test_no_match_returns_empty).
+            if max_rrf <= 0:
+                return []
             for r in fts_results:
                 rrf = r.get("scores", {}).get("rrf", 0.0)
-                if max_rrf > 0:
-                    confidence = round(0.49 * rrf / max_rrf, 4)
-                else:
-                    confidence = 0.0  # no fusion signal — stay at band floor
+                confidence = round(0.49 * rrf / max_rrf, 4)
                 results.append({"id": r["id"], "name": r.get("content", ""),
                                 "kind": r.get("point_kind", ""), "confidence": confidence})
             results.sort(key=lambda r: r["confidence"], reverse=True)

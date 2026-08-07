@@ -214,7 +214,16 @@ def test_suggest_entry_points_with_graph_ranker():
 
     # Without ranker — substring confidence order (identical lengths → tie).
     plain = sdk.suggest_entry_points("pricing subscription", limit=10)
-    # With ranker — persisted EP confidence breaks the tie.
+    # With ranker — persisted EP confidence breaks the tie. The embedded FTS
+    # gives zero RRF for this query (→ zero-signal fallback returns []), so
+    # mock the hybrid query deterministically with rrf > 0 to exercise the
+    # ranker path (mirrors test_fallback_confidence_scale_invariant_to_rrf).
+    sdk.tortoise_fts_query = lambda q, **kw: [
+        {"id": p_high["id"], "content": "pricing model for premium subscription tiers",
+         "point_kind": "decision", "scores": {"rrf": 0.0164}},
+        {"id": p_low["id"], "content": "subscription pricing tiers model premium",
+         "point_kind": "decision", "scores": {"rrf": 0.0082}},
+    ]
     ranked = sdk.suggest_entry_points("pricing subscription", limit=10, graph_ranker=ranker)
     ids = [r["id"] for r in ranked if r["id"] in (p_high["id"], p_low["id"])]
     assert ids.index(p_high["id"]) < ids.index(p_low["id"])

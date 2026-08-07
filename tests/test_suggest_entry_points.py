@@ -201,11 +201,11 @@ def test_fallback_confidence_scale_invariant_to_rrf():
     print("PASS test_fallback_confidence_scale_invariant_to_rrf")
 
 
-def test_fallback_zero_rrf_stays_at_band_floor():
-    """#22: when the fused scores carry no signal (all rrf == 0, e.g. TF-IDF
-    with zero token overlap), confidence stays at the band floor instead of
-    dividing by zero or inflating weak matches.
-    """
+def test_fallback_zero_signal_returns_empty():
+    """#22: when the fused scores carry no signal (all rrf == 0, e.g. weak FTS
+    matches or TF-IDF with zero token overlap), the fallback returns NOTHING —
+    every result would carry confidence 0.0, indistinguishable from 'no match'
+    and polluting suggest_entry_points with decoys for garbage queries."""
     db_path = _tmp_db()
     sdk = TortoiseSDK(db_path)
 
@@ -217,9 +217,8 @@ def test_fallback_zero_rrf_stays_at_band_floor():
 
     sdk.tortoise_fts_query = fake_fts
     results = sdk.suggest_entry_points("zzz", limit=5)
-    assert [r["confidence"] for r in results] == [0.0, 0.0]
-    assert all(r["confidence"] < 0.5 for r in results)
-    print("PASS test_fallback_zero_rrf_stays_at_band_floor")
+    assert results == []
+    print("PASS test_fallback_zero_signal_returns_empty")
 
 
 # ── Runner ──────────────────────────────────────────────────────────

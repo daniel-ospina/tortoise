@@ -306,7 +306,7 @@ class TestFallbackTfidf:
         assert result[0]["scores"]["rrf"] == 0.9
         assert result[0]["scores"]["fts"] is None
         assert result[1]["id"] == "p2"
-        assert result[1]["context"] is None
+        assert "context" not in result[1]  # context field removed (#49)
         assert result[1]["point_kind"] == "question"
 
     def test_search_points_raises_returns_empty(self):
@@ -415,8 +415,8 @@ class TestDegradationChain:
             graph, query="test", kind="stmt", query_vec=None, strategies=only_struct,
         )
 
-        # kind="stmt" with context=None → score=0.5 (kind only)
-        assert result == {"structural": [("s1", 0.5)]}
+        # kind="stmt" → score=1.0 (exact kind match)
+        assert result == {"structural": [("s1", 1.0)]}
         # Verify only structural was queried
         assert len(graph.query_calls) == 1
         assert "pointKind" in graph.query_calls[0][0]
@@ -858,13 +858,15 @@ class TestRunStructuralQuery:
         assert result[0][1] == 1.0
         assert result[1][1] == 1.0
 
-    def test_kind_only_gives_half_score(self):
-        """Only kind filter → score=0.5."""
+    def test_kind_match_scores_exact(self):
+        """Kind filter → score=1.0 (exact match; structural runs only with a
+        kind — the no-kind broad-scan 0.5 branch is unreachable, the query
+        returns [] when no conditions exist)."""
         graph = SimpleMockGraph(result_set=[("p1",)])
 
         result = run_structural_query(graph, kind="decision")
 
-        assert result[0][1] == 0.5
+        assert result[0][1] == 1.0
 
     def test_no_kind_returns_empty(self):
         """P2 #49: context removed — no kind → [] (no filters to apply)."""
@@ -1009,8 +1011,8 @@ class TestCrossCutting:
             strategies={"fts": False, "vector": False, "structural": True},
         )
 
-        # kind="stmt" with context=None → score=0.5
-        assert result == {"structural": [("p1", 0.5)]}
+        # kind="stmt" → score=1.0 (exact kind match)
+        assert result == {"structural": [("p1", 1.0)]}
 
 
 # ── get_relationships ──────────────────────────────────────────────────────
