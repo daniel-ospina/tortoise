@@ -1,0 +1,43 @@
+# Tortoise Self-Host — durable reference topology (#338 D2/T4.3)
+#
+# daemon + falkordb sidecar (AOF on, named volume, healthcheck). This is the
+# RECOMMENDED durable path — the embedded-FalkorDBLite single `docker run`
+# (see README quickstart) is EVAL/DEV only (not durable; 2026-08-05 incident
+# #101: AOF-off + no backups failed to prevent data loss).
+#
+# FalkorDB is intentionally NOT bundled inside the Tortoise image — its
+# official image is SSPLv1 (license interaction) and the sidecar lets AOF +
+# backups live with the database (incident-informed, see entrypoint.sh notes).
+#
+# Usage:  docker compose up -d
+#         tortoise daemon → http://localhost:8000 (MCP at /mcp)
+services:
+  tortoise:
+    build:
+      context: .
+      dockerfile: Dockerfile.selfhost
+    image: ghcr.io/daniel-ospina/tortoise-selfhost:local
+    ports:
+      - "8000:8000"
+    environment:
+      TORTOISE_DB_URI: "docker://:falkordb@falkordb:6379/tortoise"
+      # Unset → embedded eval mode. Set → durable sidecar (below).
+    depends_on:
+      falkordb:
+        condition: service_healthy
+    restart: unless-stopped
+
+  falkordb:
+    image: falkordb/falkordb:latest
+    command: ["falkordb-server", "--requirepass", "falkordb", "--dir", "/data", "--appendonly", "yes"]
+    volumes:
+      - falkordb-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "falkordb", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  falkordb-data:
