@@ -104,9 +104,15 @@ class TestTools:
             "authoredBy": "test-client",
             "dedup": True,
         })
-        # CallToolResult — assert no error and text content present
+        # CallToolResult — parse the JSON text and assert a real Point id came
+        # back (fail-closed: a rejected engine call also yields is_error=False
+        # with an error dict — only a parsed "id" proves the write succeeded).
+        import json as _json
+
         assert result.is_error in (False, None)
         text = "".join(
             getattr(b, "text", "") for b in (result.content or [])
         )
-        assert text != ""
+        parsed = _json.loads(text)
+        assert isinstance(parsed, dict)
+        assert parsed.get("id"), f"expected point id in result, got: {parsed}"

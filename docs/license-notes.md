@@ -36,11 +36,11 @@ The service model is the enabler: adopters **connect** to Tortoise over MCP/REST
 
 | Author | Commits | Notes |
 |---|---|---|
-| `daniel-ospina` | 511 | Primary author |
+| `daniel-ospina` | 536 | Primary author |
 | `Daniel Ospina` | 1 | Case-variant of the same human (git config drift) — reconciled as one contributor |
 | `fly-io[bot]` / `Fly.io` | 2 | Deployment bot — no copyrightable contribution |
 
-**Total:** 514 commits, **single human copyright holder** (Daniel Ospina). No third-party contributions exist, so no CLA-reconciliation risk for the AGPL→BSL relicense. The prior LICENSE's "CLA available" note is superseded — CLA remains available for future contributors (MPL 2.0 re-licensing path preserved via the Change License).
+**Total:** 539 commits (as of PR #554 head, 2026-08-07), **single human copyright holder** (Daniel Ospina). No third-party contributions exist, so no CLA-reconciliation risk for the AGPL→BSL relicense. The prior LICENSE's "CLA available" note is superseded — CLA remains available for future contributors (MPL 2.0 re-licensing path preserved via the Change License).
 
 ## 4. FAQ Drafting Notes (for README T5.1)
 

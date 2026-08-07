@@ -1046,11 +1046,10 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
                                    RequestBodySizeMiddleware)
     from fastmcp.server.transforms import Transform
 
-    # auth_mode middleware selection. The TeamResolutionMiddleware import is
-    # guarded behind the tenant branch (P0.4 spike: Python's module cache makes
-    # the guarded import safe — a deployment process serves one mode; no
-    # cross-mode worker reuse). static/none modes never reference hosted
-    # machinery.
+    # auth_mode middleware selection. TeamResolutionMiddleware (tenant mode) is
+    # imported here but only ever INSTANTIATED in the tenant branch — static/none
+    # modes never construct it, and hosted_api is only ever lazily imported when
+    # a tenant token is verified (mcp_auth delegates via function-level import).
     auth_mw = None
     transport_mw = None
     if auth_mode == "tenant":
@@ -1093,11 +1092,15 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
         Middleware(SecurityHeadersMiddleware),
         Middleware(RequestBodySizeMiddleware),
     ]
-    if auth_mw is not None:
-        # Original position: auth sits between body-size and rate-limit
-        # (tenant mode = byte-identical to pre-auth_mode hosted stack).
+    if auth_mw is not None and auth_mode == "tenant":
+        # Original position: tenant auth sits between body-size and rate-limit
+        # (byte-identical to pre-auth_mode hosted stack).
         middleware.append(auth_mw)
     middleware.append(Middleware(MCPRateLimitMiddleware, max_per_minute=rate_limit))
+    if auth_mw is not None and auth_mode != "tenant":
+        # Static mode: rate limiter sits OUTSIDE auth so failed-key attempts are
+        # throttled (code-review P1 — unlimited brute force on a user-chosen key).
+        middleware.append(auth_mw)
     if transport_mw is not None:
         # Innermost — runs after auth validated, right before the app:
         # initializes the transport-mode ContextVars selfhost tools need.

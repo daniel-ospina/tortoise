@@ -24,7 +24,7 @@ Pick one:
 | Path | How | Best for |
 |---|---|---|
 | **Hosted** | Sign up at [tortoise.premiselabs.co](https://api.premiselabs.co) (free tier available), get an API key on the welcome page | Teams that want a managed server; zero ops |
-| **Self-host (eval)** | `docker run -p 8000:8000 ghcr.io/daniel-ospina/tortoise-selfhost` | Solo devs trying it locally (embedded DB — **not durable**, for eval only) |
+| **Self-host (eval)** | `docker run -p 127.0.0.1:8000:8000 ghcr.io/daniel-ospina/tortoise-selfhost` (embedded DB — **not durable**, for eval only; daemon refuses non-loopback binds without `TORTOISE_API_KEY`) | Solo devs trying it locally |
 | **Self-host (durable)** | `docker compose up -d` — daemon + FalkorDB sidecar (AOF on, backups) | Production self-hosting; data locality and trust |
 
 > ⚠️ Embedded mode (plain `docker run`) is for evaluation only — it is not durable. For real data use `docker compose` or point the daemon at a FalkorDB with `TORTOISE_DB_URI`. See [License & FAQ](#license--faq) and [docs/infra-runbook.md](docs/infra-runbook.md).

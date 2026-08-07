@@ -47,6 +47,19 @@ def _auth_mode() -> str:
     return "static" if API_KEY else "none"
 
 
+# ⚠️ Fail-closed startup guard (code-review P1, #338): auth_mode="none" on a
+# non-loopback bind exposes an unauthenticated, fully writable graph API to
+# the network. Refuse to start rather than silently degrade.
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+if _auth_mode() == "none" and HOST not in _LOOPBACK_HOSTS:
+    raise SystemExit(
+        "tortoise selfhost: REFUSING TO START — auth_mode=none (no TORTOISE_API_KEY) "
+        f"with TORTOISE_HOST={HOST!r} (non-loopback) would expose an unauthenticated "
+        "graph engine. Set TORTOISE_API_KEY (→ auth_mode=static) or bind a loopback "
+        "host (127.0.0.1/localhost/::1)."
+    )
+
+
 # ⚠️ Embedded-mode durability warning (2026-08-05 incident #101: AOF-off,
 # no automated backups, empty-state RDB re-save failed → 5,748 points lost).
 # Embedded FalkorDBLite is for EVAL/DEV only — back up or use TORTOISE_DB_URI.
@@ -92,20 +105,22 @@ async def health():
 
 @app.get("/health/ready")
 async def health_ready():
-    """Readiness — DB reachable. 503 (not 500) when DB is down."""
-    from tortoise.sdk import TortoiseSDK  # lazy — liveness stays cheap
+    """Readiness — DB reachable via the SAME path the engine uses.
 
+    503 (not 500) when DB is down. Probes TortoiseSDK(namespace="selfhost")
+    — exactly what the MCP tools resolve — so readiness reflects the engine's
+    real DB (not a divergent default path). Exception details are logged
+    server-side only (no internal info disclosure).
+    """
     try:
-        if os.environ.get("TORTOISE_DB_URI"):
-            sdk = TortoiseSDK()
-        else:
-            db_path = os.environ.get("TORTOISE_DB_PATH", "/data/tortoise.db")
-            sdk = TortoiseSDK(db_path=db_path)
+        from tortoise.sdk import TortoiseSDK  # lazy — liveness stays cheap
+
+        sdk = TortoiseSDK(namespace="selfhost")
         sdk._get_proj()  # touch the DB (hosted_api release_command pattern)
         return JSONResponse({"status": "ready"})
     except Exception as exc:  # noqa: BLE001 — readiness reports, never raises
         _logger.warning("health/ready failed: %s", exc)
-        return JSONResponse({"status": "not_ready", "error": str(exc)}, status_code=503)
+        return JSONResponse({"status": "not_ready"}, status_code=503)
 
 
 if __name__ == "__main__":

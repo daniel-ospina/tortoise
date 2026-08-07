@@ -28,7 +28,8 @@ SURFACES = {
     },
     "README.md": {
         "path": ROOT / "README.md",
-        "required": ["Business Source License", "Business Source License 1.1"],
+        "required": ["Business Source License", "Business Source License 1.1",
+                     "$5,000,000", "Mozilla Public License"],
     },
     "pyproject.toml": {
         "path": ROOT / "pyproject.toml",
@@ -36,7 +37,7 @@ SURFACES = {
     },
     "index.md": {
         "path": ROOT / "index.md",
-        "required": ["Business Source License"],
+        "required": ["Business Source License", "Mozilla Public License"],
     },
 }
 

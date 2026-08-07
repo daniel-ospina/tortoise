@@ -37,7 +37,7 @@ updated: 2026-08-07
 - [Deprecated SVBP tests](tests/deprecated_svbp/) — Replaced by EP (ep.py)
 
 ## License
-Business Source License 1.1 (free self-hosted production use under $5M annual revenue; MPL 2.0 conversion after 4 years) — see [LICENSE](LICENSE) and [license notes](docs/license-notes.md)
+Business Source License 1.1 (free self-hosted production use under $5,000,000 annual revenue; Mozilla Public License 2.0 conversion after 4 years) — see [LICENSE](LICENSE) and [license notes](docs/license-notes.md)
 
 ## Related Repositories
 - [eldato](https://github.com/daniel-ospina/eldato) — Main El Dato app + canonical ONTOLOGY v2.5

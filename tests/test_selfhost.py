@@ -169,6 +169,33 @@ class TestOriginProtection:
             assert r.status_code == 403
 
 
+
+class TestStartupGuard:
+    def test_refuses_none_mode_on_non_loopback(self, monkeypatch, tmp_path):
+        """Fail-closed (code-review P1): no key + non-loopback bind → SystemExit."""
+        import importlib
+
+        monkeypatch.setenv("TORTOISE_DB_URI", "")
+        monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "guard.db"))
+        monkeypatch.setenv("TORTOISE_API_KEY", "")
+        monkeypatch.setenv("TORTOISE_HOST", "0.0.0.0")
+
+        with pytest.raises(SystemExit) as exc:
+            importlib.reload(__import__("tortoise.selfhost", fromlist=["app"]))
+        assert "REFUSING TO START" in str(exc.value)
+
+    def test_allows_static_mode_on_non_loopback(self, monkeypatch, tmp_path):
+        """Key set → auth_mode=static → non-loopback bind is fine."""
+        import importlib
+
+        monkeypatch.setenv("TORTOISE_DB_URI", "")
+        monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "guard2.db"))
+        monkeypatch.setenv("TORTOISE_API_KEY", "k")
+        monkeypatch.setenv("TORTOISE_HOST", "0.0.0.0")
+        importlib.reload(__import__("tortoise.selfhost", fromlist=["app"]))
+        # No exception = guard passed (static mode ok on non-loopback)
+
+
 class TestSubprocessSmoke:
     def test_python_m_selfhost_real_http(self, tmp_path):
         """T1.4 subprocess smoke: `python -m tortoise.selfhost` on an

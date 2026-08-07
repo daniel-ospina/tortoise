@@ -228,27 +228,36 @@ def tortoise_available() -> bool:
         return False
 
 
-def _point_id(result) -> str | None:
-    """Extract the created Point id from an MCP call_tool result.
+def _point_id(result) -> tuple[str | None, str | None]:
+    """Extract (point_id, error) from an MCP call_tool result.
 
-    The result carries JSON text content; parse defensively.
+    Fail-closed (code-review P1, #338): a rejected engine call surfaces as JSON
+    text with an "error" key (and is_error may be False) — detect it so the
+    caller never reports success for a failed write. Returns (None, error_msg)
+    on failure.
     """
     import json as _json
 
     try:
+        if getattr(result, "is_error", False):
+            return None, "engine_error"
         if hasattr(result, "content"):
             for block in result.content:
                 text = getattr(block, "text", None)
                 if text:
                     parsed = _json.loads(text)
                     if isinstance(parsed, dict):
-                        return parsed.get("id")
+                        if "error" in parsed:
+                            return None, str(parsed.get("error"))[:200]
+                        return parsed.get("id"), None
         # dict-shaped fallback (some fastmcp versions unwrap)
         if isinstance(result, dict):
-            return result.get("id")
+            if "error" in result:
+                return None, str(result.get("error"))[:200]
+            return result.get("id"), None
     except (TypeError, ValueError, AttributeError):
         pass
-    return None
+    return None, "unparseable_result"
 
 
 def push_to_tortoise(frontmatter: dict) -> dict:
@@ -264,6 +273,7 @@ def push_to_tortoise(frontmatter: dict) -> dict:
         from tortoise.mcp_client import call_tool
 
         point_ids = []
+        failures = []
 
         meeting_point = call_tool("tortoise_create_point", {
             "kind": "event",
@@ -271,7 +281,10 @@ def push_to_tortoise(frontmatter: dict) -> dict:
             "authoredBy": "minutes-bridge",
             "dedup": True,
         })
-        point_ids.append({"type": "meeting", "id": _point_id(meeting_point)})
+        mid, merr = _point_id(meeting_point)
+        point_ids.append({"type": "meeting", "id": mid})
+        if merr:
+            failures.append({"type": "meeting", "error": merr})
 
         for idx, decision in enumerate(frontmatter.get("decisions", [])):
             if not decision.get("text"):
@@ -279,10 +292,13 @@ def push_to_tortoise(frontmatter: dict) -> dict:
             dp = call_tool("tortoise_create_point", {
                 "kind": "decision",
                 "content": decision["text"],
-                    "authoredBy": "minutes-bridge",
+                "authoredBy": "minutes-bridge",
                 "dedup": True,
             })
-            point_ids.append({"type": "decision", "index": idx, "id": _point_id(dp)})
+            did, derr = _point_id(dp)
+            point_ids.append({"type": "decision", "index": idx, "id": did})
+            if derr:
+                failures.append({"type": "decision", "index": idx, "error": derr})
 
         for idx, commitment in enumerate(frontmatter.get("commitments", [])):
             if not commitment.get("text"):
@@ -290,11 +306,17 @@ def push_to_tortoise(frontmatter: dict) -> dict:
             cp = call_tool("tortoise_create_point", {
                 "kind": "commitment",
                 "content": commitment["text"],
-                    "authoredBy": "minutes-bridge",
+                "authoredBy": "minutes-bridge",
                 "dedup": True,
             })
-            point_ids.append({"type": "commitment", "index": idx, "id": _point_id(cp)})
+            cid, cerr = _point_id(cp)
+            point_ids.append({"type": "commitment", "index": idx, "id": cid})
+            if cerr:
+                failures.append({"type": "commitment", "index": idx, "error": cerr})
 
+        if failures:
+            return {"status": "error", "reason": "tortoise_push_partial",
+                    "points": point_ids, "failed": failures}
         return {"status": "ok", "points": point_ids}
 
     except Exception:
