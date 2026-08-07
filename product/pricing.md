@@ -90,6 +90,12 @@
 - Upgrade as you grow: Free → Solo → Pro → Team
 - Self-host remains the sovereignty/control option (honest tradeoff: your infra, your ops)
 
+### Display fields (mirror of pricing.json `display.*` — single source)
+- **Monthly/annual:** annual default, **-20%** discount (`display.annual_discount_pct`)
+- **Segments:** "Use Tortoise — memory for you and your team" · "Build with Tortoise — embedded memory via API for your product" (`display.segments`)
+- **License line:** BSL 1.1 + $5M AUG, Apache-2.0 in 4 years (`display.license_self_hosted`)
+- **Overage line:** "$5 per additional 10k write ops" · **Integrations line:** "Unlimited integrations at every tier" (`display.overage_line` / `display.integrations_line`)
+
 ---
 
 ## Competitive Pricing Analysis

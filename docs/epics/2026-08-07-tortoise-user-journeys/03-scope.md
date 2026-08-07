@@ -13,7 +13,7 @@ created: 2026-08-07
 # Epic Scope — Tortoise Product User Journeys (self-hosted + hosted)
 
 **Date:** 2026-08-07
-**Status:** draft (awaiting human approval)
+**Status:** approved (human gate #1, 2026-08-07)
 **Inputs:** Align Decision (PROCEED) + Research Brief (14 assumptions, 5 sections)
 
 ---
@@ -58,7 +58,7 @@ created: 2026-08-07
 
 13. **Pricing page on tortoise.premiselabs.co** — the tier structure above rendered as a real pricing section:
     - **Component shape:** reuse the El Dato pricing components (DMeer/website `#pricing`): monthly/annual toggle (-20% badge), pricing cards with ✓ included / ✕ excluded feature rows, "Most popular" tag — re-skinned with Tortoise colors (dark slate/cyan/green/gold).
-    - **Segmented positioning (owner-confirmed):** two value props above the cards — "**Use Tortoise**" (memory for you and your team: connect your agents) and "**Build with Tortoise**" (embedded memory via API for your product) — same pricing cards, segmented framing. Personas P0/P3b (Build) and P1–P5 (Use).
+    - **Segmented positioning (owner-confirmed):** two value props above the cards — "**Use Tortoise**" (memory for you and your team: connect your agents) and "**Build with Tortoise**" (embedded memory via API for your product) — same pricing cards, segmented framing. Personas P0/P3b (Build) and P1/P1b/P2/P3/P4/P5 (Use).
     - **Hosted cards:** Free / Solo / Pro / Team per `product/pricing.json` (canonical), with the "$5 per additional 10k write ops" usage line and "unlimited integrations" on all cards.
     - **Self-hosted section (Sentry/Metabase pattern, research-verified):** honest tradeoff framing — "your infra, your ops" vs "managed, zero-ops" — with the "Migrate to cloud anytime" conversion CTA (self-hosted → hosted as zero-loss upgrade). Hosted remains the primary CTA; self-hosted is a clearly-labeled secondary route. No fear-framing (Sentry 2019 "hidden costs" is the anti-pattern). BSL 1.1 + $5M AUG license line per #338 D3.
     - **"Why hosted?" callout (Vibecoder segment):** no setup, no servers, managed backups, upgrade as you grow — self-host stays visible for P4/P5.

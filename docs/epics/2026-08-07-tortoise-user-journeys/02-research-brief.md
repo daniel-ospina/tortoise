@@ -13,7 +13,7 @@ created: 2026-08-07
 # Epic Research Brief — Tortoise Product User Journeys (self-hosted + hosted)
 
 **Date:** 2026-08-07
-**Status:** draft
+**Status:** approved (review gate CLEAN, 2026-08-07)
 **Research depth:** deep (epic scope)
 **Domain:** engineering + ux + growth
 **Inputs:** Align Decision (PROCEED) · seed issues #518/#519 · onboarding epic #235 research brief (prior art)

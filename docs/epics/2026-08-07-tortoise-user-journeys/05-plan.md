@@ -13,7 +13,7 @@ created: 2026-08-07
 # Epic Plan — Tortoise Product User Journeys
 
 **Date:** 2026-08-07
-**Status:** in progress (sub-step 1 of 8)
+**Status:** complete (all 8 substeps, coherence CLEAN; human gate #2 approved 2026-08-07; decomposed into #568-#578)
 **Inputs:** Align (PROCEED) · Research brief (14 assumptions) · Scope (13 deliverables, 14 E2E, UX decisions recorded)
 
 ---
@@ -894,7 +894,7 @@ Each test: **Setup** (concrete preconditions) · **Steps** (verifiable actions) 
 - **Negative:** never-confirmed account → `tenant_cleaned_up` after expiry · resend rate-limited (429)
 
 ## E2E-9: Self-hosted flow — land → install → first memory (no hosted account)
-- **Setup:** fresh machine, no tortoise
+- **Setup:** fresh machine, no tortoise. **GATED: full daemon assertions (health/MCP/onboard) require parallel epic #338's self-host daemon — v1 asserts smoke-level (docs/GitHub route reachable without hosted account + BSL license line); full daemon assertions land post-#338.**
 - **Steps:** landing → "Self-hosting docs →" → GitHub/docs → `docker compose up` OR pip install → `tortoise onboard`
 - **Assertions:** self-host route reachable without hosted account · daemon /health 200 · MCP connect (`claude mcp add tortoise http://localhost:8000/mcp`) · first local point · BSL license line visible
 - **Negative:** daemon down → tortoise_unavailable graceful
@@ -929,8 +929,8 @@ Each test: **Setup** (concrete preconditions) · **Steps** (verifiable actions) 
 ## E2E-14: Pricing page renders hosted tiers + self-hosted section
 - **Setup:** pricing page live on tortoise.premiselabs.co
 - **Steps:** scroll to pricing; toggle monthly/annual; read self-hosted section
-- **Assertions:** Free/Solo/Pro/Team cards with ✓/✕ rows · toggle swaps prices (annual -20% default) · **"$5 per additional 10k write ops" visible** · **segmented positioning renders — "Use Tortoise" (memory for you/your team) AND "Build with Tortoise" (embedded memory via API) value props** · **integrations "unlimited" visible on all cards** · self-hosted section: BSL 1.1 + $5M AUG + Apache-2.0-in-4yrs + "migrate to cloud anytime" CTA · hosted CTA primary
-- **Negative:** pricing data drift vs **product/pricing.json** (canonical — decision 1d; fail on mismatch, no markdown parsing)
+- **Assertions:** Free/Solo/Pro/Team cards with ✓/✕ rows · toggle swaps prices (annual -20% default, from pricing.json display.annual_discount_pct) · **"$5 per additional 10k write ops" visible (pricing.json display.overage_line)** · **segmented positioning renders — "Use Tortoise" AND "Build with Tortoise" (pricing.json display.segments)** · **integrations "unlimited" visible on all cards (pricing.json display.integrations_line)** · self-hosted section: BSL 1.1 + $5M AUG + Apache-2.0-in-4yrs (pricing.json display.license_self_hosted) + "migrate to cloud anytime" CTA · hosted CTA primary
+- **Negative:** pricing data drift vs **product/pricing.json** (canonical — decision 1d; fail on mismatch; **static copy sections assert against pricing.json display.* fields, no markdown parsing**)
 
 ---
 

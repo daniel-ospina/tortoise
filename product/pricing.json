@@ -5,13 +5,20 @@
   "billing": {
     "model": "per-team",
     "per_seat": false,
-    "multi_team": "user-level capability — any user may be a member of N teams (rate-limited creation for abuse); each team independently selects its plan. NOT a tier feature.",
+    "multi_team": "user-level capability \u2014 any user may be a member of N teams (rate-limited creation for abuse); each team independently selects its plan. NOT a tier feature.",
     "overage_unit": "write_ops",
-    "overage_price_per_10k": 5.00,
-    "overage_tiers": ["pro", "team"],
+    "overage_price_per_10k": 5.0,
+    "overage_tiers": [
+      "pro",
+      "team"
+    ],
     "reads_free": true,
-    "integrations": "unlimited at ALL tiers — more integrations = more usage = more value; abuse controlled by connection rate-limit, not tier caps",
-    "cost_basis": { "falkordb_per_gb": 73.0, "bytes_per_node": 1024, "dedup": "content_hash" }
+    "integrations": "unlimited at ALL tiers \u2014 more integrations = more usage = more value; abuse controlled by connection rate-limit, not tier caps",
+    "cost_basis": {
+      "falkordb_per_gb": 73.0,
+      "bytes_per_node": 1024,
+      "dedup": "content_hash"
+    }
   },
   "tiers": {
     "free": {
@@ -65,7 +72,10 @@
       "integrations": "unlimited",
       "overage": true,
       "support": "standard",
-      "segments": ["power_user", "app_builder"],
+      "segments": [
+        "power_user",
+        "app_builder"
+      ],
       "features": {
         "per_graph_keys": "planned",
         "daily_backups": "planned",
@@ -98,5 +108,17 @@
         "audit_log": "planned"
       }
     }
+  },
+  "display": {
+    "annual_discount_pct": 20,
+    "annual_default": true,
+    "license_self_hosted": "BSL 1.1 + $5M AUG (free <$5M trailing-12mo revenue); Apache-2.0 conversion after 4 years; hosted excluded from grant",
+    "segments": {
+      "use": "Use Tortoise \u2014 memory for you and your team: connect your agents, remember decisions, MCP integration",
+      "build": "Build with Tortoise \u2014 embedded memory via API for your product: REST/MCP, per-team keys, usage-based pricing"
+    },
+    "why_hosted": "No setup, no servers \u2014 your agents just work. Memory backed up and managed for you. Upgrade as you grow.",
+    "overage_line": "$5 per additional 10k write ops",
+    "integrations_line": "Unlimited integrations at every tier"
   }
 }
