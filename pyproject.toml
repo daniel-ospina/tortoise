@@ -1,9 +1,11 @@
 [project]
-name = "tortoise"
+name = "tortoise-graph"
 version = "0.2.0"
 requires-python = ">=3.12"
 license = "BUSL-1.1"
 readme = {file = "README.md", content-type = "text/markdown"}
+description = "Tortoise — live epistemic-graph extraction from transcripts (SDK)"
+authors = [{ name = "Premise Labs", email = "hello@premise-labs.co" }]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",

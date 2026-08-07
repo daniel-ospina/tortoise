@@ -64,10 +64,11 @@ Your agent now has Tortoise's tools — create points, query the graph, check be
 
 ## SDK for local dev / scripting
 
-`pip install tortoise` gives you the **SDK** — a driver for local development, scripting, and power-user access against a running daemon (or embedded mode for experiments). Tortoise is a service: the SDK connects, it doesn't replace the server.
+`pip install tortoise-graph` gives you the **SDK** — a driver for local development, scripting, and power-user access against a running daemon (or embedded mode for experiments). Tortoise is a service: the SDK connects, it doesn't replace the server. (The package is published as `tortoise-graph` on PyPI — the bare `tortoise` name is squatted by an unrelated library, #258.)
 
 ```bash
-pip install -e .            # or: pip install 'tortoise[embeddings]' for vector search
+pip install tortoise-graph   # or: pip install 'tortoise-graph[embeddings]' for vector search
+# from source: pip install -e .
 python -m tortoise.selfhost # run the daemon locally (see env table below)
 ```
 
