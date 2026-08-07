@@ -56,13 +56,16 @@ class PointResponse(BaseModel):
     created_at: str | None = None
 
 
-def _get_api_key() -> str | None:
-    return os.environ.get("TORTOISE_API_KEY")
-
-
 def _require_key(authorization: str | None = Header(default=None)) -> None:
-    """Static-key auth when auth_mode=static; no-op in none mode (loopback)."""
-    api_key = _get_api_key()
+    """Static-key auth when auth_mode=static; allow in none mode (loopback).
+
+    Contract (code-review P2, #525): when no key is configured the daemon is
+    in auth_mode=none — the startup guard in selfhost.py refuses none-mode on
+    non-loopback binds, so allow here is loopback-scoped only. This router is
+    daemon-scoped; do not mount it in other apps without an explicit key.
+    Reads the key per request (env may be set by config/CLI before serving).
+    """
+    api_key = os.environ.get("TORTOISE_API_KEY")
     if not api_key:
         return  # auth_mode=none — loopback-guarded at startup
     if (
@@ -100,7 +103,7 @@ async def create_point(body: CreatePointRequest):
         )
     except Exception as e:  # noqa: BLE001
         _logger.exception("selfhost create_point failed")
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail="Internal error")
     return _point_out(result)
 
 
@@ -129,7 +132,11 @@ async def list_points(
         + " AND ".join(conditions)
         + " RETURN properties(n) ORDER BY n.createdAt DESC LIMIT $limit"
     )
-    rows = proj.g.query(query, params=params).result_set
+    try:
+        rows = proj.g.query(query, params=params).result_set
+    except Exception as e:  # noqa: BLE001
+        _logger.exception("selfhost list_points failed")
+        raise HTTPException(status_code=500, detail="Internal error")
     results = []
     for r in rows:
         d = dict(r[0])
@@ -144,7 +151,7 @@ async def get_point(point_id: str):
     """Get a single Point by id."""
     sdk = _sdk()
     result = sdk.get_point(point_id)
-    if result is None:
+    if not result:  # get_point returns {} for a missing id (code-review P2)
         raise HTTPException(status_code=404, detail="Point not found")
     return _point_out(result)
 
@@ -154,22 +161,26 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100)):
     """Hybrid search (registry: GET /v1/search)."""
     sdk = _sdk()
     try:
-        results = sdk.query(text=q, limit=limit)
+        # Registry-aligned hybrid search (tortoise_search → tortoise_fts_query):
+        # FTS/vector/RRF with an in-memory TF-IDF degradation path — works on
+        # remote FalkorDB AND embedded eval (code-review P1, #525).
+        results = sdk.tortoise_fts_query(query=q, limit=limit)
+        return [_point_out(r) if isinstance(r, dict) else r for r in results]
     except Exception as e:  # noqa: BLE001
         _logger.exception("selfhost search failed")
-        raise HTTPException(status_code=500, detail=str(e)[:200])
-    if results:
-        return [_point_out(r) if isinstance(r, dict) else r for r in results]
-    # FTS unavailable (embedded FalkorDBLite has no FTS index) — fall back to
-    # substring CONTAINS so self-host eval still gets working search.
-    proj = sdk._get_proj()
-    query = (
-        "MATCH (n:Point) WHERE (n.is_operator IS NULL OR n.is_operator = false) "
-        "AND toLower(n.content) CONTAINS toLower($q) "
-        "RETURN properties(n) ORDER BY n.createdAt DESC LIMIT $limit"
-    )
-    rows = proj.g.query(query, params={"q": q, "limit": limit}).result_set
-    return [_point_out(dict(r[0])) for r in rows]
+        # Defensive CONTAINS fallback (FTS genuinely unavailable).
+        try:
+            proj = sdk._get_proj()
+            query = (
+                "MATCH (n:Point) WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+                "AND toLower(n.content) CONTAINS toLower($q) "
+                "RETURN properties(n) ORDER BY n.createdAt DESC LIMIT $limit"
+            )
+            rows = proj.g.query(query, params={"q": q, "limit": limit}).result_set
+            return [_point_out(dict(r[0])) for r in rows]
+        except Exception as e2:  # noqa: BLE001
+            _logger.exception("selfhost search fallback failed")
+            raise HTTPException(status_code=500, detail="Internal error") from e2
 
 
 @router.post("/dream", dependencies=[Depends(_require_key)])
@@ -184,4 +195,4 @@ async def dream(full: bool = False):
         return {"status": "ok", "result": result}
     except Exception as e:  # noqa: BLE001
         _logger.exception("selfhost dream failed")
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail="Internal error")

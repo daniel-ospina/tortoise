@@ -52,6 +52,12 @@ class TestPointsCRUD:
             assert r.status_code == 200
             assert r.json()["id"] == created["id"]
 
+    def test_missing_id_404(self, monkeypatch, tmp_path):
+        tc = _client_for_env(monkeypatch, tmp_path)
+        with tc:
+            r = tc.get("/v1/points/nonexistent-id")
+            assert r.status_code == 404
+
     def test_invalid_kind_400(self, monkeypatch, tmp_path):
         tc = _client_for_env(monkeypatch, tmp_path)
         with tc:
