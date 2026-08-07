@@ -530,14 +530,16 @@ class TestSessionCapture:
     # ── #490: content-hash dedup on the REST path ────────────────────
 
     def test_capture_session_dedups_identical_content(self, client):
-        """#490: re-capturing the same session content must NOT create
-        duplicate Points — REST path must dedup like MCP create_point."""
+        """#490: re-capturing the SAME session must NOT create duplicate
+        Points — turn Points MERGE on {session_id}_t{i} and extracted
+        claims dedup by content hash."""
         conv = [
             {"role": "user", "content": "Let's use PostgreSQL for the backend."},
         ]
-        r1 = client.post("/v1/sessions", json={"conversation": conv})
+        payload = {"conversation": conv, "session_id": "dedup-session-490"}
+        r1 = client.post("/v1/sessions", json=payload)
         assert r1.status_code == 200, r1.text
-        r2 = client.post("/v1/sessions", json={"conversation": conv})
+        r2 = client.post("/v1/sessions", json=payload)
         assert r2.status_code == 200, r2.text
 
         # Count Points mentioning PostgreSQL in the graph.
@@ -568,6 +570,48 @@ class TestSessionCapture:
         import re as _re
         for pid in p1:
             assert _re.match(r"^[0-9a-f]+-[0-9a-f]{12}$", pid), f"non-ULID id: {pid}"
+
+    def test_capture_session_turn_points_are_session_scoped(self, client):
+        """#490 P2-2: turn Points are the episodic stream OF THIS SESSION —
+        identical turns in DIFFERENT sessions must NOT collapse into one
+        Point (only extracted claims dedup across sessions)."""
+        conv = [
+            {"role": "user", "content": "ok"},
+        ]
+        r1 = client.post("/v1/sessions", json={"conversation": conv})
+        r2 = client.post("/v1/sessions", json={"conversation": conv})
+        assert r1.status_code == 200 and r2.status_code == 200
+
+        import tortoise.hosted_api as ha_mod
+        sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+        proj = sdk._get_proj()
+        # "ok" triggers no decision/claim extraction → only turn Points exist.
+        # Two distinct sessions (auto-generated ids) must yield TWO turn
+        # Points — a content-hash dedup would collapse them into one.
+        r = proj.g.query(
+            "MATCH (p:Point) WHERE p.pointKind = 'event' RETURN count(p)"
+        ).result_set
+        assert r[0][0] == 2, f"expected 2 session-scoped turn Points, got {r[0][0]}"
+
+    def test_capture_session_re_capture_is_idempotent_for_turns(self, client):
+        """#490: re-capturing the SAME session_id must not duplicate turn
+        Points or CONTAINS edges (MERGE on {session_id}_t{i})."""
+        conv = [{"role": "user", "content": "Hello"}]
+        for _ in range(2):
+            r = client.post(
+                "/v1/sessions",
+                json={"conversation": conv, "session_id": "same-session-490"},
+            )
+            assert r.status_code == 200, r.text
+
+        import tortoise.hosted_api as ha_mod
+        sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+        proj = sdk._get_proj()
+        r = proj.g.query(
+            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) RETURN count(t)",
+            params={"sid": "same-session-490"},
+        ).result_set
+        assert r[0][0] == 1, f"expected 1 turn Point, got {r[0][0]}"
 
 
 class TestSessionList:

@@ -369,7 +369,6 @@ class TortoiseSDK:
             ).result_set
             if existing:
                 pid = existing[0][0]
-                props["updatedAt"] = now
                 # Existing point already stores content_hash — don't re-write it
                 # (would make the `if props:` guard always truthy and bump
                 # updatedAt on every dedup hit, #80 review).
@@ -379,6 +378,11 @@ class TortoiseSDK:
                         "credibility=%r ignored — point %s already exists and dedup=True",
                         credibility, pid)
                 if props:
+                    # Only touch the existing point when the caller passed
+                    # other props — a pure dedup hit (no props) must not bump
+                    # updatedAt or re-trigger EP dirty-marking (#490 review
+                    # P2-1: re-capture would churn confidence for every point).
+                    props["updatedAt"] = now
                     self.update_point(pid, **props)
                 return self.get_point(pid)
 

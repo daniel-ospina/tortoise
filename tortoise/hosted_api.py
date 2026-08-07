@@ -24,7 +24,7 @@ from tortoise.audit_events import AuditLogger
 from tortoise.auth import hash_api_key
 import hmac
 
-from tortoise.sdk import TortoiseSDK
+from tortoise.sdk import TortoiseSDK, _content_hash
 from tortoise.mcp_server import create_http_app
 
 _logger = logging.getLogger(__name__)
@@ -1104,27 +1104,42 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
         role = turn.get("role", "unknown")
         content = turn.get("content", "")
 
-        # #490: route through sdk.create_point(dedup=True) instead of raw
-        # Cypher CREATE — content-hash dedup matches the MCP create_point
-        # path, and auto-generated ULIDs avoid the old deterministic-id
-        # duplicate hazard ({session_id}_t{i} with CREATE = duplicate nodes
-        # with identical id on re-capture).
-        turn_pt = sdk.create_point(
-            "event", f"[{role}] {content[:5000]}", dedup=True,
-        )
-        turn_id = turn_pt["id"]
+        # #490: turn Points are the episodic turn stream OF THIS SESSION —
+        # keyed deterministically by {session_id}_t{i} so re-capturing the
+        # same session is idempotent, but turns from different sessions never
+        # conflate (content-hash dedup would share an empty "[user] " or
+        # repeated "ok" turn team-wide, destroying per-session turn identity
+        # — #490 review P2-2). Node MERGEs run BEFORE the edge MERGE: a full-
+        # path MERGE (s)-[:CONTAINS]->(t) with a missing edge makes FalkorDB
+        # create the whole path from scratch, duplicating the Point node.
+        turn_id = f"{session_id}_t{i}"
+        turn_text = f"[{role}] {content[:5000]}"
         proj.g.query(
-            "MERGE (s:Session {id:$sid})-[:CONTAINS]->(t:Point {id:$tid})",
+            "MERGE (t:Point {id:$id}) "
+            "SET t.content=$c, t.pointKind=$k, t.is_operator=false, "
+            "    t.status=coalesce(t.status, $s), "
+            "    t.createdAt=coalesce(t.createdAt, $now), "
+            "    t.updatedAt=$now, t.content_hash=$ch",
+            params={"id": turn_id, "c": turn_text, "k": "event",
+                    "s": "draft", "now": now, "ch": _content_hash(turn_text)},
+        )
+        proj.g.query(
+            "MATCH (s:Session {id:$sid}), (t:Point {id:$tid}) "
+            "MERGE (s)-[:CONTAINS]->(t)",
             params={"sid": session_id, "tid": turn_id},
         )
 
         for pat in decisions:
             for match in re.finditer(pat, content):
                 text = match.group().strip()
+                # Extracted decisions/claims ARE cross-session knowledge —
+                # keep content-hash dedup (identical claim in two sessions is
+                # one Point). Dedup by content_hash + pointKind via SDK.
                 p = sdk.create_point("decision", text[:5000], dedup=True)
                 pid = p["id"]
                 proj.g.query(
-                    "MERGE (s:Session {id:$sid})-[:CONTAINS]->(p:Point {id:$pid})",
+                    "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
+                    "MERGE (s)-[:CONTAINS]->(p)",
                     params={"sid": session_id, "pid": pid},
                 )
                 extracted.append({"id": pid, "kind": "decision", "text": text[:200]})
@@ -1135,7 +1150,8 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
                 p = sdk.create_point("statement", text[:5000], dedup=True)
                 pid = p["id"]
                 proj.g.query(
-                    "MERGE (s:Session {id:$sid})-[:CONTAINS]->(p:Point {id:$pid})",
+                    "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
+                    "MERGE (s)-[:CONTAINS]->(p)",
                     params={"sid": session_id, "pid": pid},
                 )
                 extracted.append({"id": pid, "kind": "statement", "text": text[:200]})
