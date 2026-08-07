@@ -310,10 +310,15 @@ async def provision_tenant(request: Request):
 
     # Validate team_id and team_name against allowed pattern
     import re
-    _team_pattern = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9 _-]{0,63}$')
-    if not _team_pattern.match(team_id):
+    # team_id flows into graph names + SDK namespaces — strict (aligned with
+    # the SDK namespace regex + hosted_backup._validate_team_id: a space would
+    # pass provision but fail every downstream _make_sdk(namespace=...) call).
+    # team_name is display-only — spaces allowed.
+    _id_pattern = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$')
+    _name_pattern = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9 _-]{0,63}$')
+    if not _id_pattern.match(team_id):
         raise HTTPException(status_code=400, detail="Invalid team_id format")
-    if not _team_pattern.match(team_name):
+    if not _name_pattern.match(team_name):
         raise HTTPException(status_code=400, detail="Invalid team_name format")
 
     sdk = _make_sdk(namespace="registry")
@@ -1908,6 +1913,19 @@ def _registry_sdk() -> TortoiseSDK:
     return _make_sdk(namespace="registry")
 
 
+# Per-team restore serialization: the swap (delete live → copy temp) must not
+# interleave with a concurrent same-team restore — a second restore landing in
+# the delete→copy window would recreate the live key and fail the copy, or
+# defeat the empty-backup guard's TOCTOU.
+_BACKUP_RESTORE_LOCKS: dict[str, asyncio.Lock] = {}
+_BACKUP_LOCKS_GUARD = asyncio.Lock()
+
+
+async def _team_restore_lock(team_id: str) -> asyncio.Lock:
+    async with _BACKUP_LOCKS_GUARD:
+        return _BACKUP_RESTORE_LOCKS.setdefault(team_id, asyncio.Lock())
+
+
 @app.post("/backups", status_code=201)
 async def backups_create(team: dict = Depends(get_current_team)):
     """Trigger an on-demand backup of the team graph (Pro tier)."""
@@ -1916,14 +1934,22 @@ async def backups_create(team: dict = Depends(get_current_team)):
         raise HTTPException(status_code=401, detail="Missing Authorization header")
     _require_backup_tier(team)
     graph_name = f"team_{team_id}"
+    sdk = None
+    registry_sdk = None
     try:
         sdk = _make_sdk(namespace=team_id)
-        registry = _registry_sdk()._get_registry()
+        registry_sdk = _registry_sdk()
         storage = _backup_storage()
         manifest = await asyncio.to_thread(
-            create_backup, sdk._get_proj(), registry, storage,
+            create_backup, sdk._get_proj(), registry_sdk._get_registry(), storage,
             team_id=team_id, graph_name=graph_name,
         )
+        # Retention: prune after a successful backup so storage stays bounded
+        # (best-effort — a prune failure must not fail the backup).
+        try:
+            await asyncio.to_thread(prune_backups, storage, team_id)
+        except Exception as e:
+            _logger.warning("prune failed for team %s: %s", team_id, e)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=f"Backup rejected: {e}")
     except RuntimeError as e:
@@ -1931,12 +1957,11 @@ async def backups_create(team: dict = Depends(get_current_team)):
     except Exception as e:
         _logger.exception("backup failed for team %s", team_id)
         raise HTTPException(status_code=500, detail=f"Backup failed: {e}")
-    # Retention: prune after a successful backup so storage stays bounded
-    # (best-effort — a prune failure must not fail the backup).
-    try:
-        prune_backups(storage, team_id)
-    except Exception as e:
-        _logger.warning("prune failed for team %s: %s", team_id, e)
+    finally:
+        if sdk is not None:
+            sdk.close()
+        if registry_sdk is not None:
+            registry_sdk.close()
     return manifest
 
 
@@ -1959,28 +1984,41 @@ async def backups_restore(body: BackupRestoreRequest, team: dict = Depends(get_c
             status_code=400, detail="confirm=true required — restore replaces the live graph"
         )
     graph_name = f"team_{team_id}"
-    try:
-        sdk = _make_sdk(namespace=team_id)
-        registry = _registry_sdk()._get_registry()
-        result = await asyncio.to_thread(
-            restore_backup, sdk._get_proj().db, registry, _backup_storage(),
-            body.backup_key, team_id=team_id, graph_name=graph_name,
-        )
-    except RestoreVerificationError as e:
-        raise HTTPException(status_code=409, detail=f"Restore rejected: {e}")
-    except (ValueError, KeyError) as e:
-        raise HTTPException(status_code=400, detail=f"Restore rejected: {e}")
-    except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=f"Restore failed: {e}")
-    except Exception as e:
-        _logger.exception("restore failed for team %s", team_id)
-        raise HTTPException(status_code=500, detail=f"Restore failed: {e}")
-    # Rebuild indexes on the restored live graph (range/FTS/vector) — the
-    # logical dump + GRAPH.COPY restores data, not schema (best-effort).
-    try:
-        sdk._get_proj()._ensure_indexes()
-    except Exception as e:
-        _logger.warning("index rebuild after restore failed for team %s: %s", team_id, e)
+    lock = await _team_restore_lock(team_id)
+    sdk = None
+    registry_sdk = None
+    async with lock:
+        try:
+            sdk = _make_sdk(namespace=team_id)
+            registry_sdk = _registry_sdk()
+            result = await asyncio.to_thread(
+                restore_backup, sdk._get_proj().db, registry_sdk._get_registry(),
+                _backup_storage(),
+                body.backup_key, team_id=team_id, graph_name=graph_name,
+            )
+            # Rebuild indexes on the restored live graph (range/FTS/vector) —
+            # the logical dump + GRAPH.COPY restores data, not schema. Off the
+            # event loop: a large graph's index build must not stall all tenants.
+            try:
+                await asyncio.to_thread(sdk._get_proj()._ensure_indexes)
+            except Exception as e:
+                _logger.warning(
+                    "index rebuild after restore failed for team %s: %s", team_id, e
+                )
+        except RestoreVerificationError as e:
+            raise HTTPException(status_code=409, detail=f"Restore rejected: {e}")
+        except (ValueError, KeyError) as e:
+            raise HTTPException(status_code=400, detail=f"Restore rejected: {e}")
+        except RuntimeError as e:
+            raise HTTPException(status_code=503, detail=f"Restore failed: {e}")
+        except Exception as e:
+            _logger.exception("restore failed for team %s", team_id)
+            raise HTTPException(status_code=500, detail=f"Restore failed: {e}")
+        finally:
+            if sdk is not None:
+                sdk.close()
+            if registry_sdk is not None:
+                registry_sdk.close()
     return result
 
 

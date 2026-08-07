@@ -13,9 +13,12 @@ Why a logical dump, not an RDB file:
 Pipeline (per team graph):
   create_backup:  dump_graph → encrypt (AES-256-GCM) → upload dump.enc + manifest.json
                   → stamp Team.backup_latest_at in the registry graph.
-  restore_backup: download → sha256 verify vs manifest → decrypt → load into temp graph
-                  → verify node count → delete live graph → GRAPH.COPY temp → live
-                  → stamp Team.backup_restored_at.
+  restore_backup: download → sha256 verify vs manifest → decrypt → load into temp
+                  graph → verify node+edge counts against the AUTHENTICATED payload
+                  → empty-backup-over-live guard → pre-restore safety copy of the
+                  live graph → delete live → GRAPH.COPY temp → live → cleanup.
+                  Any verification failure leaves the live graph untouched; a swap
+                  failure leaves the verified temp + pre-restore copies recoverable.
   prune_backups:  keep N daily + M weekly (newest-first).
 
 Env:
@@ -66,7 +69,7 @@ def _get_backup_key() -> bytes:
             "python -c \"import base64,secrets; print(base64.b64encode(secrets.token_bytes(32)).decode())\""
         )
     try:
-        key = base64.b64decode(raw, validate=True)
+        key = base64.b64decode(raw.strip(), validate=True)  # tolerate trailing newline
     except Exception as e:
         raise RuntimeError(
             f"TORTOISE_BACKUP_KEY must be base64-encoded (got {raw[:8]!r}...): {e}"
@@ -180,15 +183,21 @@ def restore_graph(g, dump: dict) -> dict:
             g.query(f"CREATE (n:{safe_labels}) SET n = $p", params={"p": props})
         else:
             g.query("CREATE (n) SET n = $p", params={"p": props})  # unlabeled node
-        # Re-encode vector props as vecf32 (the falkordb client decodes them to
-        # plain lists on read; a plain-list embedding would poison vector
-        # search for the whole graph — search_engine.py documents this).
-        if isinstance(props.get("embedding"), list):
-            g.query(
-                f"MATCH (n {{{_DUMP_ID_PROP}:$id}}) "
-                "SET n.embedding = CASE WHEN $v IS NOT NULL THEN vecf32($v) END",
-                params={"id": n["dump_id"], "v": props["embedding"]},
-            )
+
+    # Re-encode vector props as vecf32 in ONE batched pass (the falkordb client
+    # decodes them to plain lists on read; a plain-list embedding would poison
+    # vector search for the whole graph — search_engine.py documents this).
+    embed_rows = [
+        {"id": n["dump_id"], "v": n["props"]["embedding"]}
+        for n in nodes
+        if isinstance(n.get("props", {}).get("embedding"), list)
+    ]
+    if embed_rows:
+        g.query(
+            f"UNWIND $rows AS r MATCH (n {{{_DUMP_ID_PROP}:r.id}}) "
+            "SET n.embedding = vecf32(r.v)",
+            params={"rows": embed_rows},
+        )
 
     for e in edges:
         if not all(k in e for k in ("src", "dst", "type")):
@@ -285,7 +294,10 @@ class R2Storage:
 
     def upload(self, key: str, data: bytes, content_type: str | None = None) -> None:
         kwargs = {"ContentType": content_type} if content_type else {}
-        self._s3().put_object(Bucket=self._bucket, Key=key, Body=data, **kwargs)
+        try:
+            self._s3().put_object(Bucket=self._bucket, Key=key, Body=data, **kwargs)
+        except Exception as e:
+            raise RuntimeError(f"R2 upload failed for {key}: {e}") from e
 
     def download(self, key: str) -> bytes:
         try:
@@ -296,18 +308,24 @@ class R2Storage:
             # "Backup object not found" ValueError is uniform across stores.
             if _is_no_such_key_error(e):
                 raise KeyError(key) from e
-            raise
+            raise RuntimeError(f"R2 download failed for {key}: {e}") from e
 
     def list(self, prefix: str) -> list[str]:
-        keys: list[str] = []
-        paginator = self._s3().get_paginator("list_objects_v2")
-        for page in paginator.paginate(Bucket=self._bucket, Prefix=prefix):
-            for obj in page.get("Contents", []):
-                keys.append(obj["Key"])
-        return keys
+        try:
+            keys: list[str] = []
+            paginator = self._s3().get_paginator("list_objects_v2")
+            for page in paginator.paginate(Bucket=self._bucket, Prefix=prefix):
+                for obj in page.get("Contents", []):
+                    keys.append(obj["Key"])
+            return keys
+        except Exception as e:
+            raise RuntimeError(f"R2 list failed for {prefix}: {e}") from e
 
     def delete(self, key: str) -> None:
-        self._s3().delete_object(Bucket=self._bucket, Key=key)
+        try:
+            self._s3().delete_object(Bucket=self._bucket, Key=key)
+        except Exception as e:
+            raise RuntimeError(f"R2 delete failed for {key}: {e}") from e
 
 
 class MemoryStorage:
@@ -410,11 +428,12 @@ def list_backups(storage: BackupStorage, team_id: str) -> list[dict]:
         if key.endswith("/manifest.json"):
             try:
                 out.append(json.loads(storage.download(key)))
-            except (json.JSONDecodeError, ValueError, UnicodeDecodeError) as e:
-                logger.warning("unreadable backup manifest %s: %s", key, e)
+            except (json.JSONDecodeError, ValueError, UnicodeDecodeError, KeyError) as e:
+                logger.warning("unreadable/vanished backup manifest %s: %s", key, e)
             # Storage/network failures (AccessDenied, timeouts) propagate — a
             # partial outage must not masquerade as "no backups exist" during
-            # disaster recovery.
+            # disaster recovery. KeyError (concurrently pruned object) is the
+            # same unreadable-manifest class and is skipped.
     out.sort(key=lambda m: str(m.get("created_at", "")), reverse=True)
     return out
 
@@ -433,9 +452,11 @@ def restore_backup(
 
     ``db``: falkordb Connection handle (e.g. ``sdk._get_proj().db``) — temp graph and
     the live graph live on the same server.
-    Swap: restore into ``{graph_name}_restore_{ts}`` → verify node count → delete live
-    graph → GRAPH.COPY temp → live. If the final copy fails the temp graph remains
-    intact (recoverable), never a partial live graph.
+    Flow: restore into ``{graph_name}_restore_{ts}_{rnd}`` → verify node+edge counts
+    against the decrypted payload → empty-backup-over-live guard → pre-restore safety
+    copy of the live graph → delete live → GRAPH.COPY temp → live → cleanup staging
+    and pre-restore copies. Any failure before the swap leaves the live graph
+    untouched; a swap failure leaves the verified temp + pre-restore copies intact.
     """
     _validate_team_id(team_id)
     if not backup_key.endswith("dump.enc"):
@@ -554,12 +575,23 @@ def restore_backup(
 
     # Empty-backup guard (issue #101 class): a backup taken after a wipe (0
     # nodes) must not silently REPLACE live data on restore — the operator
-    # would see "verified ✓" while the live graph is destroyed again.
+    # would see "verified ✓" while the live graph is destroyed again. The live
+    # count read FAILS CLOSED: a query failure is NOT treated as "graph
+    # missing" — only a confirmed-absent graph (via list_graphs) is safe to
+    # proceed on. A read failure must never authorize a destructive delete.
     live_g = db.select_graph(graph_name)
     try:
         live_nodes = int(live_g.query("MATCH (n) RETURN count(n)").result_set[0][0])
     except Exception:
-        live_nodes = 0  # graph missing/empty — nothing to protect
+        if graph_name in set(db.list_graphs()):
+            try:
+                temp_g.delete()
+            except Exception:
+                pass
+            raise RestoreVerificationError(
+                "Cannot verify live graph state before restore — aborting (fail closed)"
+            )
+        live_nodes = 0  # confirmed absent (dropped graph) — nothing to protect
     if live_nodes > 0 and expected_nodes == 0:
         try:
             temp_g.delete()

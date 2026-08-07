@@ -1310,7 +1310,8 @@ def test_r2storage_download_missing_key_normalized(monkeypatch):
 
 
 def test_r2storage_non_missing_error_not_swallowed(monkeypatch):
-    """Only NoSuchKey is normalized — other S3 errors propagate unchanged."""
+    """Only NoSuchKey is normalized — other S3 errors surface as RuntimeError
+    (the pipeline's 503 mapping), never as a silent empty result."""
     pytest.importorskip("botocore.exceptions")
     from botocore.exceptions import ClientError
 
@@ -1320,7 +1321,7 @@ def test_r2storage_non_missing_error_not_swallowed(monkeypatch):
         raise ClientError({"Error": {"Code": "AccessDenied", "Message": "no"}}, "GetObject")
 
     monkeypatch.setattr(type(fake), "get_object", _access_denied)
-    with pytest.raises(ClientError):
+    with pytest.raises(RuntimeError, match="R2 download failed"):
         store.download("backups/x/dump.enc")
 
 
