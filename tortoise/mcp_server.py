@@ -858,6 +858,138 @@ _adapter.register_all(TOOL_REGISTRY, {
 })
 
 
+
+# ── Onboarding MCP tools (#498/#499/#500) ───────────────────────
+# Wrappers for the hosted onboarding flow. These call the team-scoped SDK
+# directly (same pattern as all tools) — the REST endpoints in hosted_api.py
+# expose the same operations to the welcome page.
+
+def _onboarding_state() -> dict:
+    """Read this team's onboarding progress from the registry Team node."""
+    from tortoise.hosted_api import _get_onboarding_state as _read_state
+    team_id = _current_team_id.get()
+    if team_id is None:
+        return {"error": "No team context (HTTP mode required)"}
+    return _read_state(team_id)
+
+
+@mcp.tool(annotations=ToolAnnotations(idempotentHint=True))
+def tortoise_onboarding_demo_create() -> dict:
+    """Create the demo epistemic graph (4 layers) for this team. Idempotent.
+
+    Q4 — 'Create a demo graph?' — shows what Tortoise memory looks like.
+    """
+    from tortoise.hosted_api import _seed_demo_graph
+    team_id = _current_team_id.get()
+    if team_id is None:
+        return {"error": "No team context (HTTP mode required)"}
+    result = _seed_demo_graph(team_id)
+    # Auto-update onboarding state
+    try:
+        from tortoise.hosted_api import _update_onboarding_state
+        _update_onboarding_state(team_id, demo_created=True)
+    except Exception:
+        pass
+    return result
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+def tortoise_onboarding_state() -> dict:
+    """Return this team's onboarding progress (Q6 verification step)."""
+    return _onboarding_state()
+
+
+@mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
+def tortoise_onboarding_session_recording(enabled: bool) -> dict:
+    """Toggle automatic session recording for this team (Q3)."""
+    team_id = _current_team_id.get()
+    if team_id is None:
+        return {"error": "No team context (HTTP mode required)"}
+    from tortoise.hosted_api import _update_onboarding_state
+    state = _update_onboarding_state(team_id, session_recording=enabled)
+    return {"onboarding": state}
+
+
+@mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
+def tortoise_onboarding_github_connect(org: str | None = None) -> dict:
+    """Initiate GitHub OAuth — returns the authorize URL + CSRF state (Q1)."""
+    team_id = _current_team_id.get()
+    if team_id is None:
+        return {"error": "No team context (HTTP mode required)"}
+    import secrets
+    from urllib.parse import urlencode
+    import os as _os
+    client_id = _os.environ.get("GITHUB_CLIENT_ID")
+    if not client_id:
+        return {"error": "GitHub OAuth not configured"}
+    state = secrets.token_urlsafe(24)
+    # Store CSRF state so the callback can validate it (P2 review fix) —
+    # must be visible to the REST callback handler in the same process.
+    import time as _time
+    from tortoise.hosted_api import _GITHUB_STATES
+    _GITHUB_STATES[state] = {"team_id": team_id, "org": org or team_id,
+                             "created_at": _time.time()}
+    callback = _os.environ.get("GITHUB_CALLBACK_URL",
+                               "https://api.premiselabs.co/v1/onboarding/github/callback")
+    params = {"client_id": client_id, "redirect_uri": callback,
+              "scope": "repo", "state": state}
+    auth_url = f"https://github.com/login/oauth/authorize?{urlencode(params)}"
+    return {"auth_url": auth_url, "state": state}
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+def tortoise_onboarding_github_status() -> dict:
+    """Return GitHub connection status for this team (Q1 verify)."""
+    team_id = _current_team_id.get()
+    if team_id is None:
+        return {"error": "No team context (HTTP mode required)"}
+    sdk = _get_team_sdk()
+    try:
+        reg = sdk._get_registry().query(
+            "MATCH (t:Team {id: $id}) RETURN t.github_token_enc, t.github_org",
+            params={"id": team_id}).result_set
+    except Exception:
+        return {"connected": False, "org": None, "repos_count": None}
+    if not reg or not reg[0][0]:
+        return {"connected": False, "org": None, "repos_count": None}
+    return {"connected": True, "org": reg[0][1], "repos_count": None}
+
+
+@mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
+def tortoise_onboarding_github_index(org: str, repo: str | None = None) -> dict:
+    """Start background GitHub indexing of an org's issues/PRs (Q2).
+
+    Returns {job_id, status} — poll via the REST endpoint or check
+    onboarding state for github_indexed.
+    """
+    team_id = _current_team_id.get()
+    if team_id is None:
+        return {"error": "No team context (HTTP mode required)"}
+    import secrets as _secrets
+    import asyncio as _asyncio
+    from tortoise.hosted_api import _INDEX_JOBS, _run_indexing, _make_sdk as _ha_make_sdk
+    sdk = _ha_make_sdk(namespace="registry")
+    try:
+        rows = sdk._get_registry().query(
+            "MATCH (t:Team {id: $id}) RETURN t.github_token_enc",
+            params={"id": team_id}).result_set
+    except Exception:
+        return {"error": "Registry unavailable"}
+    if not rows or not rows[0][0]:
+        return {"error": "GitHub not connected. Run tortoise_onboarding_github_connect first."}
+    job_id = _secrets.token_hex(8)
+    _INDEX_JOBS[job_id] = {"status": "started", "progress": 0,
+                           "points_created": 0, "error": None,
+                           "team_id": team_id,
+                           "created_at": _asyncio.get_event_loop().time()}
+    try:
+        _asyncio.get_event_loop().create_task(
+            _run_indexing(job_id, team_id, org, repo))
+    except RuntimeError:
+        return {"error": "No running event loop"}
+    return {"job_id": job_id, "status": "started"}
+
+
 # ── HTTP Streamable transport (#236) ─────────────────────────────
 
 def create_http_app(*, allowed_origins: list[str] | None = None,

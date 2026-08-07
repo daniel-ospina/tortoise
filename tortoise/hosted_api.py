@@ -9,6 +9,7 @@ See: docs/epics/2026-08-03-tortoise-hosted-platform/04-plan.md §5, §6.1
 from __future__ import annotations
 
 import asyncio
+import json as _json
 import logging
 import os
 import time
@@ -16,6 +17,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from contextlib import asynccontextmanager
@@ -154,7 +156,7 @@ async def _dream_worker(team_id: str) -> None:
 class RateLimitMiddleware(BaseHTTPMiddleware):
     """In-memory token bucket rate limiter. 100 Points/min per API key."""
 
-    SKIP = {"/health", "/docs", "/openapi.json"}
+    SKIP = {"/health", "/docs", "/openapi.json", "/v1/register"}
 
     def __init__(self, app, max_per_minute=100):
         super().__init__(app)
@@ -428,7 +430,7 @@ async def health_security():
 
 # ── Auth Dependency ────────────────────────────────────────────────
 
-SKIP_AUTH = {"/health", "/docs", "/openapi.json"}
+SKIP_AUTH = {"/health", "/docs", "/openapi.json", "/v1/register"}
 
 
 async def _audit_auth_failure(request: Request, reason: str) -> None:
@@ -601,6 +603,85 @@ class KeyListResponse(BaseModel):
 
 class ErrorResponse(BaseModel):
     error: dict
+
+
+# ── Onboarding: Pydantic Models (#498) ────────────────────────────
+
+class RegisterRequest(BaseModel):
+    email: str = Field(..., min_length=5, max_length=254)
+    password: str = Field(..., min_length=8, max_length=128)
+
+    @field_validator("email")
+    @classmethod
+    def valid_email(cls, v: str) -> str:
+        import re
+        if not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', v):
+            raise ValueError("Invalid email format")
+        return v.lower().strip()
+
+
+class RegisterResponse(BaseModel):
+    api_key: str | None = None
+    team_id: str | None = None
+    graph_name: str | None = None
+    message: str | None = None  # "already_registered" on duplicate
+
+
+class OnboardingStateResponse(BaseModel):
+    onboarding: dict
+
+
+class OnboardingStatePatchRequest(BaseModel):
+    github_connected: bool | None = None
+    github_org: str | None = None
+    github_connected_at: str | None = None
+    github_indexed: bool | None = None
+    github_index_job_id: str | None = None
+    session_recording: bool | None = None
+    demo_created: bool | None = None
+    team_created: bool | None = None
+
+
+# ── Onboarding: Default State ─────────────────────────────────────
+
+DEFAULT_ONBOARDING_STATE = {
+    "github_connected": False,
+    "github_org": None,
+    "github_connected_at": None,
+    "github_indexed": False,
+    "github_index_job_id": None,
+    "session_recording": False,
+    "demo_created": False,
+    "team_created": False,
+    "completed_at": None,
+}
+
+
+# ── IP-based Rate Limiter for /v1/register (#498) ─────────────────
+
+_register_buckets: dict[str, list[float]] = defaultdict(list)
+_register_lock = asyncio.Lock()
+_REGISTER_MAX_PER_HOUR = 3
+
+
+async def _check_register_rate_limit(request: Request) -> None:
+    """IP-based rate limit: 3 registrations per hour per IP."""
+    if os.environ.get("RATE_LIMIT_DISABLED") == "1":
+        return
+    if not request.client or not request.client.host:
+        return
+    ip = request.client.host
+    now = time.time()
+    async with _register_lock:
+        bucket = _register_buckets[ip]
+        bucket[:] = [t for t in bucket if now - t < 3600]
+        if len(bucket) >= _REGISTER_MAX_PER_HOUR:
+            raise HTTPException(
+                status_code=429,
+                detail="Too many registration attempts. Please try again later.",
+                headers={"Retry-After": "3600"},
+            )
+        bucket.append(now)
 
 
 # ── Endpoints ─────────────────────────────────────────────────────
@@ -781,20 +862,128 @@ async def team_info(team: dict = Depends(get_current_team)):
     )
 
 
-@app.post("/internal/demo")
-async def create_demo_graph(request: Request):
-    """Create a demo graph with sample Points across all 4 ontology layers.
+# ── Onboarding: Self-Service Registration (#498) ──────────────────
 
-    Called by the tenant-provision Edge Function after provisioning to seed
-    demo data so new users see a populated graph immediately.
+@app.post("/v1/register", response_model=RegisterResponse)
+async def register_user(request: Request, response: Response):
+    """Self-service key provisioning — public variant of /internal/provision.
+
+    Creates a Team node + API key + tenant graph in FalkorDB. Does NOT
+    create a Supabase user (that's handled separately by the welcome page
+    via Supabase client-side auth). Rate limited at 3 registrations/hour/IP.
     """
-    _check_internal(request)
+    await _check_register_rate_limit(request)
 
     body = await request.json()
-    team_id = body.get("team_id")
-    if not team_id:
-        raise HTTPException(status_code=400, detail="Missing team_id")
+    try:
+        reg = RegisterRequest.model_validate(body)
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=str(e))
 
+    email = reg.email
+    password = reg.password  # noqa: F841 — validated, not stored (Supabase handles auth)
+
+    # Idempotency: check if email already registered via Team node property
+    sdk_check = _make_sdk(namespace="registry")
+    existing = sdk_check._get_registry().query(
+        "MATCH (t:Team) WHERE t.email = $email RETURN t.id",
+        params={"email": email},
+    ).result_set
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail={"message": "already_registered", "email": email},
+        )
+
+    # Derive team_id from email (slugified)
+    import re
+    team_name = email.split("@")[0]
+    team_name = re.sub(r'[^a-zA-Z0-9_-]', '-', team_name)[:48]
+    team_id = _short_id()
+
+    # Generate API key
+    import uuid
+    from tortoise.auth import hash_api_key
+    api_key = f"tt_{uuid.uuid4().hex}"
+    key_hash = hash_api_key(api_key)
+    sdk = _make_sdk(namespace="registry")
+    now = datetime.now(timezone.utc).isoformat()
+    graph_name = f"team_{team_id}"
+
+    try:
+        # Create Team node with email and default onboarding state
+        sdk._get_registry().query(
+            """
+            CREATE (t:Team {
+                id: $id, name: $name, email: $email, tier: 'free',
+                created_at: $now, backup_enabled: false,
+                max_users: 1, max_teams: 1, max_graphs: 1,
+                onboarding_state: $onboarding_state
+            })
+            """,
+            params={
+                "id": team_id, "name": team_name, "email": email,
+                "now": now, "onboarding_state": _json.dumps(DEFAULT_ONBOARDING_STATE),
+            },
+        )
+
+        # Create APIKey node
+        api_key_id = _short_id()
+        sdk._get_registry().query(
+            """
+            CREATE (k:APIKey {
+                id: $id, team_id: $team_id, key_hash: $hash,
+                key_prefix: $prefix, created_by: $created_by,
+                created_at: $now
+            })
+            """,
+            params={
+                "id": api_key_id,
+                "team_id": team_id,
+                "hash": key_hash,
+                "prefix": team_id[:8],
+                "created_by": email,
+                "now": now,
+            },
+        )
+
+        # Provision FalkorDB namespace for the team
+        team_graph = sdk._get_proj().db.select_graph(graph_name)
+        team_graph.query(
+            "CREATE (:TeamMeta {name: $name, created: $now})",
+            params={"name": team_name, "now": now},
+        )
+
+        # Log audit event
+        await _async_audit(
+            request, team_id, "tenant_register",
+            resource_type="team", resource_id=team_id,
+        )
+
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+
+        return {"api_key": api_key, "team_id": team_id, "graph_name": graph_name}
+
+    except HTTPException:
+        raise
+    except Exception:
+        # Rollback on failure
+        sdk._get_registry().query(
+            "MATCH (t:Team {id: $id}) DETACH DELETE t", params={"id": team_id}
+        )
+        sdk._get_registry().query(
+            "MATCH (k:APIKey {team_id: $id}) DETACH DELETE k", params={"id": team_id}
+        )
+        try:
+            team_graph = sdk._get_proj().db.select_graph(graph_name)
+            team_graph.delete()
+        except Exception:
+            pass
+        raise HTTPException(status_code=500, detail="Registration failed")
+
+
+def _seed_demo_graph(team_id: str) -> dict:
+    """Seed the 4-layer demo graph for a team. Idempotent (sentinel)."""
     sdk = _make_sdk(namespace=team_id)
     proj = sdk._get_proj()
     now = datetime.now(timezone.utc).isoformat()
@@ -959,6 +1148,24 @@ async def create_demo_graph(request: Request):
         },
     }
 
+
+
+
+@app.post("/internal/demo")
+async def create_demo_graph(request: Request):
+    """Create a demo graph with sample Points across all 4 ontology layers.
+
+    Called by the tenant-provision Edge Function after provisioning to seed
+    demo data so new users see a populated graph immediately.
+    """
+    _check_internal(request)
+
+    body = await request.json()
+    team_id = body.get("team_id")
+    if not team_id:
+        raise HTTPException(status_code=400, detail="Missing team_id")
+
+    return _seed_demo_graph(team_id)
 
 @app.post("/v1/team/keys", response_model=CreateKeyResponse)
 async def create_api_key(request: Request, response: Response, team: dict = Depends(get_current_team)):
@@ -1208,6 +1415,445 @@ async def session_context(team: dict = Depends(get_current_team)):
         return sdk.session_context()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Context unavailable: {e}")
+
+
+
+# ── Onboarding endpoints (#498) ─────────────────────────────────
+
+_ONBOARDING_DEFAULT_STATE = {
+    "github_connected": False,
+    "github_indexed": False,
+    "demo_created": False,
+    "session_recording": False,
+    "team_created": False,
+    "prompt_pasted": False,
+    "onboarding_complete": False,
+}
+
+_ALLOWED_STATE_KEYS = set(_ONBOARDING_DEFAULT_STATE.keys())
+
+
+def _get_onboarding_state(team_id: str) -> dict:
+    """Read onboarding_state from the Team node in the registry graph.
+
+    Auto-initializes to defaults if missing (plan Task 3 — missing state
+    auto-initializes on first read). Stored as a JSON string (FalkorDB
+    properties are primitives-only — dicts raise ResponseError).
+    """
+    import json as _json
+    sdk = _make_sdk(namespace="registry")
+    rows = sdk._get_registry().query(
+        "MATCH (t:Team {id: $id}) RETURN t.onboarding_state",
+        params={"id": team_id},
+    ).result_set
+    if not rows or rows[0][0] is None:
+        state = dict(_ONBOARDING_DEFAULT_STATE)
+        _write_onboarding_state(team_id, state)
+        return state
+    try:
+        stored = _json.loads(rows[0][0]) if isinstance(rows[0][0], str) else rows[0][0]
+    except (TypeError, ValueError):
+        stored = {}
+    state = dict(_ONBOARDING_DEFAULT_STATE)
+    state.update(stored)
+    return state
+
+
+def _write_onboarding_state(team_id: str, state: dict) -> None:
+    """Persist onboarding_state on the Team node (JSON string — #498 fix:
+    FalkorDB node properties must be primitives, not dicts)."""
+    import json as _json
+    sdk = _make_sdk(namespace="registry")
+    sdk._get_registry().query(
+        "MATCH (t:Team {id: $id}) SET t.onboarding_state = $state",
+        params={"id": team_id, "state": _json.dumps(state)},
+    )
+
+
+def _update_onboarding_state(team_id: str, **fields) -> dict:
+    """Merge fields into onboarding state and persist. Returns new state."""
+    state = _get_onboarding_state(team_id)
+    for k, v in fields.items():
+        if k in _ALLOWED_STATE_KEYS:
+            state[k] = v
+    _write_onboarding_state(team_id, state)
+    return state
+
+
+class OnboardingStateResponse(BaseModel):
+    onboarding: dict
+
+
+class OnboardingStatePatchRequest(BaseModel):
+    github_connected: bool | None = None
+    github_indexed: bool | None = None
+    demo_created: bool | None = None
+    session_recording: bool | None = None
+    team_created: bool | None = None
+    prompt_pasted: bool | None = None
+    onboarding_complete: bool | None = None
+
+
+@app.get("/v1/onboarding/state", response_model=OnboardingStateResponse)
+async def get_onboarding_state(team: dict = Depends(get_current_team)):
+    """Return the team's onboarding progress."""
+    return {"onboarding": _get_onboarding_state(team["team_id"])}
+
+
+@app.patch("/v1/onboarding/state", response_model=OnboardingStateResponse)
+async def patch_onboarding_state(body: OnboardingStatePatchRequest,
+                                team: dict = Depends(get_current_team)):
+    """Merge provided onboarding fields into the team's state."""
+    updates = {k: v for k, v in body.model_dump().items() if v is not None}
+    state = _update_onboarding_state(team["team_id"], **updates)
+    return {"onboarding": state}
+
+
+@app.post("/v1/onboarding/session-recording", response_model=OnboardingStateResponse)
+async def set_session_recording(body: dict, team: dict = Depends(get_current_team)):
+    """Toggle automatic session recording (Q3)."""
+    enabled = body.get("enabled")
+    if not isinstance(enabled, bool):
+        raise HTTPException(status_code=400, detail="'enabled' must be a boolean")
+    state = _update_onboarding_state(team["team_id"], session_recording=enabled)
+    _track_onboarding_event(team, "question_answered",
+                            question_id="session_recording",
+                            answer="yes" if enabled else "no")
+    return {"onboarding": state}
+
+
+@app.post("/v1/onboarding/team")
+async def create_onboarding_team(body: dict, team: dict = Depends(get_current_team)):
+    """Create a sub-team for the user (Q5 hosted equivalent of tortoise_team_create)."""
+    name = (body.get("name") or "").strip()
+    if not name or len(name) > 64:
+        raise HTTPException(status_code=400, detail="name is required (max 64 chars)")
+    import re
+    if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$", name):
+        raise HTTPException(status_code=400, detail="Invalid team name")
+    sdk = _make_sdk(namespace=team["team_id"])
+    try:
+        result = sdk.team_create(name)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Team create failed: {e}")
+    _update_onboarding_state(team["team_id"], team_created=True)
+    _track_onboarding_event(team, "question_answered",
+                            question_id="create_team", answer="yes")
+    return {"team_id": result.get("id"), "name": name,
+            "graph_name": result.get("graph_name")}
+
+
+@app.post("/v1/demo")
+async def public_demo(team: dict = Depends(get_current_team)):
+    """Public demo graph creation (Q4) — auth-gated, team-isolated.
+
+    Reuses the same seeding logic as /internal/demo but requires a Bearer
+    tt_ key instead of the internal key. Idempotent (sentinel check).
+    """
+    sdk = _make_sdk(namespace=team["team_id"])
+    proj = sdk._get_proj()
+    existing = proj.g.query(
+        "MATCH (p:Point {id: '_demo_sentinel'}) RETURN p.id"
+    ).result_set
+    if existing:
+        _update_onboarding_state(team["team_id"], demo_created=True)
+        _track_onboarding_event(team, "first_memory_created",
+                                source="demo", point_count=15)
+        return {"status": "already_seeded", "team_id": team["team_id"]}
+
+    # Call the shared demo seeder (extracted from /internal/demo)
+    created = _seed_demo_graph(team["team_id"])
+    _update_onboarding_state(team["team_id"], demo_created=True)
+    return {"status": "seeded", "team_id": team["team_id"],
+            "points_created": created}
+
+
+# ── Analytics instrumentation (#501) ────────────────────────────
+
+# Allowed property keys for analytics events — PII-free guarantee (#501).
+# Server-side validation: unknown keys are stripped, never forwarded.
+_ALLOWED_ANALYTICS_PROPS = {
+    "method", "elapsed_from_signup_s", "harness", "section",
+    "elapsed_from_copy_s", "question_id", "answer", "source", "point_count",
+    "session_id", "message_count", "elapsed_time_s", "steps_completed",
+    "questions", "step", "error_type",
+}
+
+_ANALYTICS_FALLBACK_PATH = None
+
+
+def _track_analytics_event(team_id: str, event_name: str,
+                           properties: dict | None = None) -> None:
+    """Record a funnel event. PII-free; graceful when Supabase is unconfigured.
+
+    Writes to Supabase analytics_events when SUPABASE_URL + SUPABASE_SERVICE_KEY
+    are set; otherwise appends to a local JSONL fallback. Never raises — the
+    onboarding flow must not break because analytics failed.
+    """
+    props = {k: v for k, v in (properties or {}).items()
+             if k in _ALLOWED_ANALYTICS_PROPS}
+    event = {
+        "team_id": team_id,
+        "event_name": event_name,
+        "properties": props,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    url = os.environ.get("SUPABASE_URL")
+    key = os.environ.get("SUPABASE_SERVICE_KEY")
+    if url and key:
+        try:
+            import httpx
+            with httpx.Client(timeout=5) as client:
+                client.post(
+                    f"{url}/rest/v1/analytics_events",
+                    json=event,
+                    headers={"apikey": key, "Authorization": f"Bearer {key}",
+                             "Content-Type": "application/json",
+                             "Prefer": "return=minimal"},
+                )
+            return
+        except Exception:
+            pass  # fall through to JSONL
+    # JSONL fallback (~/.tortoise/analytics_fallback.jsonl)
+    global _ANALYTICS_FALLBACK_PATH
+    if _ANALYTICS_FALLBACK_PATH is None:
+        fallback_dir = os.path.join(os.path.expanduser("~"), ".tortoise")
+        os.makedirs(fallback_dir, exist_ok=True)
+        _ANALYTICS_FALLBACK_PATH = os.path.join(fallback_dir, "analytics_fallback.jsonl")
+    try:
+        import json as _json
+        with open(_ANALYTICS_FALLBACK_PATH, "a") as f:
+            f.write(_json.dumps(event) + "\n")
+    except Exception:
+        pass
+
+
+def _track_onboarding_event(team: dict, event_name: str, **props) -> None:
+    """Convenience: track with the current team, swallowing errors."""
+    try:
+        _track_analytics_event(team["team_id"], event_name, props or None)
+    except Exception:
+        pass
+
+
+# ── GitHub OAuth onboarding (#499) ──────────────────────────────
+
+_GITHUB_AUTHORIZE_URL = "https://github.com/login/oauth/authorize"
+_GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token"
+_GITHUB_API = "https://api.github.com"
+_GITHUB_STATE_TTL_S = 600  # 10 min
+_GITHUB_STATES = {}  # state -> {team_id, org, created_at}
+# NOTE (P1): in-memory — single-worker only (hosted_api runs 1 uvicorn worker
+# on Fly, consistent with the auth cache, rate limiter, and _INDEX_JOBS).
+# Multi-worker would need a shared store (Redis/FalkorDB) for CSRF state.
+
+
+class GitHubConnectRequest(BaseModel):
+    org: str | None = None
+
+
+@app.post("/v1/onboarding/github/connect")
+async def github_connect(body: GitHubConnectRequest | None = None,
+                         team: dict = Depends(get_current_team)):
+    """Initiate GitHub OAuth. Returns the authorize URL + CSRF state."""
+    import secrets
+    from urllib.parse import urlencode
+    client_id = os.environ.get("GITHUB_CLIENT_ID")
+    if not client_id:
+        raise HTTPException(status_code=503, detail="GitHub OAuth not configured")
+    org = (body.org if body else None) or team["team_id"]
+    state = secrets.token_urlsafe(24)
+    _GITHUB_STATES[state] = {
+        "team_id": team["team_id"],
+        "org": org,
+        "created_at": time.time(),
+    }
+    callback = os.environ.get("GITHUB_CALLBACK_URL",
+                              "https://api.premiselabs.co/v1/onboarding/github/callback")
+    params = {
+        "client_id": client_id,
+        "redirect_uri": callback,
+        "scope": "repo",
+        "state": state,
+    }
+    auth_url = f"{_GITHUB_AUTHORIZE_URL}?{urlencode(params)}"
+    return {"auth_url": auth_url, "state": state}
+
+
+@app.get("/v1/onboarding/github/callback")
+async def github_callback(code: str | None = None, state: str | None = None,
+                          error: str | None = None):
+    """GitHub OAuth callback — exchange code, store encrypted token, redirect.
+
+    `error` is the standard OAuth denial query param. (Note: tests must use
+    follow_redirects=False — the 302 target is the external welcome page.)
+    """
+    welcome_url = "https://tortoise.premiselabs.co/welcome.html"
+
+    if error:
+        _track_analytics_event("", "onboarding_error",
+                               {"step": "github_connect", "error_type": "oauth_denied"})
+        return RedirectResponse(f"{welcome_url}?github=denied", status_code=302)
+
+    # Validate state — 404 on missing/invalid (don't leak existence)
+    st = _GITHUB_STATES.pop(state, None) if state else None
+    if not st:
+        raise HTTPException(status_code=404, detail="Not found")
+    if time.time() - st["created_at"] > _GITHUB_STATE_TTL_S:
+        raise HTTPException(status_code=404, detail="Not found")
+    if not code:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    client_id = os.environ.get("GITHUB_CLIENT_ID")
+    client_secret = os.environ.get("GITHUB_CLIENT_SECRET")
+    if not client_id or not client_secret:
+        raise HTTPException(status_code=503, detail="GitHub OAuth not configured")
+
+    # Exchange code for token
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.post(_GITHUB_TOKEN_URL, data={
+                "client_id": client_id, "client_secret": client_secret,
+                "code": code,
+            }, headers={"Accept": "application/json"})
+            tok = r.json()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"GitHub token exchange failed: {e}")
+    access_token = tok.get("access_token")
+    if not access_token:
+        raise HTTPException(status_code=502, detail="GitHub token exchange failed")
+
+    # Encrypt + store on Team node (never log the raw token)
+    from tortoise.crypto import encrypt_token
+    encrypted = encrypt_token(access_token)
+    team_id = st["team_id"]
+    sdk = _make_sdk(namespace="registry")
+    sdk._get_registry().query(
+        "MATCH (t:Team {id: $id}) SET t.github_token_enc = $tok, t.github_org = $org",
+        params={"id": team_id, "tok": encrypted, "org": st["org"]},
+    )
+    _update_onboarding_state(team_id, github_connected=True)
+    _track_analytics_event(team_id, "question_answered",
+                           {"question_id": "github_connect", "answer": "yes"})
+    return RedirectResponse(f"{welcome_url}?github=connected", status_code=302)
+
+
+@app.get("/v1/onboarding/github/status")
+async def github_status(team: dict = Depends(get_current_team)):
+    """Return GitHub connection status + repo count."""
+    sdk = _make_sdk(namespace="registry")
+    rows = sdk._get_registry().query(
+        "MATCH (t:Team {id: $id}) RETURN t.github_token_enc, t.github_org",
+        params={"id": team["team_id"]},
+    ).result_set
+    if not rows or not rows[0][0]:
+        return {"connected": False, "org": None, "repos_count": None}
+    encrypted, org = rows[0]
+    from tortoise.crypto import decrypt_token
+    try:
+        token = decrypt_token(encrypted)
+    except ValueError:
+        return {"connected": False, "org": None, "repos_count": None}
+    repos_count = None
+    try:
+        import httpx
+        with httpx.Client(timeout=10) as client:
+            r = client.get(f"{_GITHUB_API}/user/repos?per_page=1",
+                           headers={"Authorization": f"Bearer {token}",
+                                    "Accept": "application/vnd.github+json"})
+            if r.status_code == 200:
+                import re
+                link = r.headers.get("Link", "")
+                m = re.search(r'page=(\d+)>; rel="last"', link)
+                repos_count = int(m.group(1)) if m else len(r.json())
+    except Exception:
+        repos_count = None
+    return {"connected": True, "org": org, "repos_count": repos_count}
+
+
+
+# ── GitHub indexing endpoints (#499 Task 5) ─────────────────────
+
+_INDEX_JOBS: dict[str, dict] = {}  # job_id -> {status, progress, points_created, error, created_at}
+
+
+class GitHubIndexRequest(BaseModel):
+    org: str
+    repo: str | None = None
+
+
+async def _run_indexing(job_id: str, team_id: str, org: str, repo: str | None) -> None:
+    """Background indexing job: fetch GitHub issues/PRs → Points."""
+    from tortoise.indexer.github_indexer import GitHubIndexer
+    sdk = _make_sdk(namespace="registry")
+    rows = sdk._get_registry().query(
+        "MATCH (t:Team {id: $id}) RETURN t.github_token_enc",
+        params={"id": team_id}).result_set
+    if not rows or not rows[0][0]:
+        _INDEX_JOBS[job_id].update({"status": "failed", "error": "GitHub not connected"})
+        return
+    from tortoise.crypto import decrypt_token
+    try:
+        token = decrypt_token(rows[0][0])
+    except ValueError:
+        _INDEX_JOBS[job_id].update({"status": "failed", "error": "Token undecryptable"})
+        return
+    try:
+        team_sdk = _make_sdk(namespace=team_id)
+        indexer = GitHubIndexer(token)
+        result = await indexer.index_issues(team_sdk, org, repo)
+        _INDEX_JOBS[job_id].update({
+            "status": "completed",
+            "progress": 100,
+            "points_created": result["points_created"],
+            "repos_processed": result["repos_processed"],
+            "error": None,
+        })
+        _update_onboarding_state(team_id, github_indexed=True)
+    except Exception as e:  # noqa: BLE001
+        _INDEX_JOBS[job_id].update({"status": "failed", "error": str(e)})
+    finally:
+        # Evict after 1 hour
+        import asyncio as _asyncio
+        _asyncio.get_running_loop().call_later(
+            3600, lambda: _INDEX_JOBS.pop(job_id, None))
+
+
+@app.post("/v1/index/github")
+async def index_github(body: GitHubIndexRequest, team: dict = Depends(get_current_team)):
+    """Start a background GitHub indexing job (Q2). Returns job_id for polling."""
+    import secrets
+    org = (body.org or "").strip()
+    if not org:
+        raise HTTPException(status_code=400, detail="org is required")
+    # Verify GitHub connected first
+    sdk = _make_sdk(namespace="registry")
+    rows = sdk._get_registry().query(
+        "MATCH (t:Team {id: $id}) RETURN t.github_token_enc",
+        params={"id": team["team_id"]}).result_set
+    if not rows or not rows[0][0]:
+        raise HTTPException(status_code=400, detail="GitHub not connected. Run connect first.")
+    job_id = secrets.token_hex(8)
+    _INDEX_JOBS[job_id] = {"status": "started", "progress": 0,
+                           "points_created": 0, "error": None,
+                           "team_id": team["team_id"], "created_at": time.time()}
+    import asyncio as _asyncio
+    _asyncio.get_event_loop().create_task(
+        _run_indexing(job_id, team["team_id"], org, body.repo))
+    return {"job_id": job_id, "status": "started"}
+
+
+@app.get("/v1/index/github/{job_id}")
+async def index_job_status(job_id: str, team: dict = Depends(get_current_team)):
+    """Poll an indexing job's progress."""
+    job = _INDEX_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    # Cross-tenant isolation (P2 review fix): only the owning team can poll
+    if job.get("team_id") != team["team_id"]:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"job_id": job_id, **job}
 
 
 # ── MCP mount (#236) ─────────────────────────────────────────────

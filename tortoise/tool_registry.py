@@ -510,6 +510,56 @@ TOOL_REGISTRY: list[ToolDefinition] = [
         http_policy=False,
         sdk_method="backfill_v25",
     ),
+    # ── Onboarding tools (#498/#499/#500) ─────────────────────────
+    ToolDefinition(
+        name="tortoise_onboarding_demo_create",
+        description="Create the demo epistemic graph (4 layers) for this team. Idempotent (Q4).",
+        annotations=_idem(),
+        http_policy=True,
+        sdk_method="",  # custom handler in mcp_server.py
+        rest_spec=RestSpec(method="POST", path="/v1/demo"),
+    ),
+    ToolDefinition(
+        name="tortoise_onboarding_state",
+        description="Return this team's onboarding progress (Q6 verification).",
+        annotations=_ro(),
+        http_policy=True,
+        sdk_method="",
+        rest_spec=RestSpec(method="GET", path="/v1/onboarding/state"),
+    ),
+    ToolDefinition(
+        name="tortoise_onboarding_session_recording",
+        description="Toggle automatic session recording for this team (Q3).",
+        annotations=_rw(),
+        http_policy=True,
+        sdk_method="",
+        rest_spec=RestSpec(method="POST", path="/v1/onboarding/session-recording"),
+    ),
+    ToolDefinition(
+        name="tortoise_onboarding_github_connect",
+        description="Initiate GitHub OAuth — returns authorize URL + CSRF state (Q1).",
+        annotations=_rw(),
+        http_policy=True,
+        sdk_method="",
+        rest_spec=RestSpec(method="POST", path="/v1/onboarding/github/connect"),
+    ),
+    ToolDefinition(
+        name="tortoise_onboarding_github_index",
+        description="Start background GitHub indexing of an org's issues/PRs (Q2).",
+        annotations=_rw(),
+        http_policy=True,
+        sdk_method="",
+        rest_spec=RestSpec(method="POST", path="/v1/index/github"),
+    ),
+    ToolDefinition(
+        name="tortoise_onboarding_github_status",
+        description="Return GitHub connection status for this team (Q1 verify).",
+        annotations=_ro(),
+        http_policy=True,
+        sdk_method="",
+        rest_spec=RestSpec(method="GET", path="/v1/onboarding/github/status"),
+    ),
+
 ]
 
 
