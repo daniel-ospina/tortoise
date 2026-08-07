@@ -681,10 +681,14 @@ async def dream(
             result = sdk.dream(full=True)
         else:
             # Drain whatever is queued plus any in-memory dirty roots.
+            # Batch mark once (P3, #85) — one reverse-BFS pair, not N.
             q = _DREAM_QUEUES.get(team["team_id"])
+            queued_roots: list[str] = []
             if q is not None and not q.empty():
                 while not q.empty():
-                    sdk._mark_dirty([q.get_nowait()])
+                    queued_roots.append(q.get_nowait())
+            if queued_roots:
+                sdk._mark_dirty(queued_roots)
             result = sdk.dream(dirty_only=True)
         return result
     finally:
