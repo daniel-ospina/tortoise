@@ -287,7 +287,12 @@ def run_structural_query(
     else:
         label_str = entity_type.capitalize()
         kind_field = {"point": "pointKind", "event": "eventKind", "subject": "subjectKind"}[entity_type]
-    id_field = "eventId" if entity_type == "event" else "id"
+    if entity_type == "source":
+        id_field = "url"  # #149: Source canonical key is url, not id
+    elif entity_type == "event":
+        id_field = "eventId"
+    else:
+        id_field = "id"
     try:
         conditions = []
         params = {}

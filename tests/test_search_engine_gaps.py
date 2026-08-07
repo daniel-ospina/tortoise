@@ -618,6 +618,20 @@ class TestRunStructuralQuery:
         assert result == []
 
 
+    def test_entity_type_source_uses_url(self):
+        """#149: entity_type='source' → RETURN n.url (url is canonical key)."""
+        graph = SimpleMockGraph(result_set=[("https://example.com/doc.pdf",)])
+
+        result = run_structural_query(
+            graph, kind="pdf", entity_type="source",
+        )
+
+        assert result[0][0] == "https://example.com/doc.pdf"
+        cypher = graph.query_calls[0][0]
+        assert "RETURN n.url" in cypher
+        assert "n.sourceKind" in cypher
+        assert "MATCH (n:Source)" in cypher
+
     def test_entity_type_event_uses_eventkind(self):
         """entity_type='event' → eventKind + eventId."""
         graph = SimpleMockGraph(result_set=[("evt-1",)])
