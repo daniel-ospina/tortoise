@@ -73,23 +73,21 @@ def _recompose_graph_name(base_uri: str, new_graph: str) -> str:
     """Replace the graph-name segment of a connection URI.
 
     URI-scheme-aware (#221): docker:// / redis:// / rediss:// URIs get their
-    path (graph name) replaced. Embedded file-path URIs pass through UNCHANGED
-    — they are inherently isolated per-test via the per-test DB path, and a
-    naive rewrite would corrupt them.
+    path (graph name) replaced, preserving query strings and fragments.
+    Embedded file-path URIs pass through UNCHANGED — they are inherently
+    isolated per-test via the per-test DB path, and a naive rewrite would
+    corrupt them.
 
     Returns the original URI if the scheme is not one of the supported
     graph-addressed schemes.
     """
-    scheme_match = re.match(r"^(docker|redis|rediss)://", base_uri)
-    if not scheme_match:
+    from urllib.parse import urlparse, urlunparse
+    parsed = urlparse(base_uri)
+    if parsed.scheme not in ("docker", "redis", "rediss"):
         return base_uri
-    scheme = scheme_match.group(1)
-    # Split authority from path: scheme://authority/path
-    rest = base_uri[len(scheme_match.group(0)):]
-    authority, sep, _path = rest.partition("/")
-    if not sep:
-        return base_uri  # no path to replace
-    return f"{scheme}://{authority}/{new_graph}"
+    # Pathless URI: append the per-test graph so isolation still applies
+    # (P2, #221): docker://host:6379 → docker://host:6379/<graph>
+    return urlunparse(parsed._replace(path=f"/{new_graph}"))
 
 
 def _sanitize_node_name(name: str) -> str:
@@ -98,7 +96,12 @@ def _sanitize_node_name(name: str) -> str:
     fragment = name.split("::")[-1]
     fragment = re.sub(r"[^A-Za-z0-9_]", "_", fragment)
     fragment = fragment[:40]
-    return fragment or "test"
+    # P3 (#221): append a short hash so long parameterized names whose first
+    # 40 sanitized chars collide (e.g. [ctx-a] vs [ctx-b]) still get unique
+    # graphs.
+    import hashlib
+    suffix = hashlib.blake2b(name.encode(), digest_size=3).hexdigest()
+    return f"{fragment or 'test'}_{suffix}"
 
 
 @pytest.fixture(scope="session")
@@ -140,8 +143,16 @@ def _per_test_graph(monkeypatch, request):
     # each is private to its test).
 
 
+def pytest_configure(config):
+    """Register the allow_graph_delete marker (P4, #221)."""
+    config.addinivalue_line(
+        "markers",
+        "allow_graph_delete: test legitimately wipes its own graph (guard-testing)",
+    )
+
+
 def pytest_collection_modifyitems(config, items):
-    """Register the allow_graph_delete marker."""
+    """Attach the allow_graph_delete marker to marked items."""
     for item in items:
         if _ALLOW_GRAPH_DELETE_MARK in item.keywords:
             item.add_marker(getattr(pytest.mark, _ALLOW_GRAPH_DELETE_MARK))
