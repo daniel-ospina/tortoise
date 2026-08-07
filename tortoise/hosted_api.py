@@ -16,6 +16,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from contextlib import asynccontextmanager
@@ -1609,6 +1610,135 @@ async def register_tenant(body: dict, request: Request):
     _write_onboarding_state(team["id"], dict(_ONBOARDING_DEFAULT_STATE))
     return {"api_key": key, "team_id": team["id"],
             "graph_name": team.get("graph_name")}
+
+
+# ── GitHub OAuth onboarding (#499) ──────────────────────────────
+
+_GITHUB_AUTHORIZE_URL = "https://github.com/login/oauth/authorize"
+_GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token"
+_GITHUB_API = "https://api.github.com"
+_GITHUB_STATE_TTL_S = 600  # 10 min
+_GITHUB_STATES = {}  # state -> {team_id, org, created_at} (in-memory, single instance)
+
+
+class GitHubConnectRequest(BaseModel):
+    org: str | None = None
+
+
+@app.post("/v1/onboarding/github/connect")
+async def github_connect(body: GitHubConnectRequest | None = None,
+                         team: dict = Depends(get_current_team)):
+    """Initiate GitHub OAuth. Returns the authorize URL + CSRF state."""
+    import secrets
+    from urllib.parse import urlencode
+    client_id = os.environ.get("GITHUB_CLIENT_ID")
+    if not client_id:
+        raise HTTPException(status_code=503, detail="GitHub OAuth not configured")
+    org = (body.org if body else None) or team["team_id"]
+    state = secrets.token_urlsafe(24)
+    _GITHUB_STATES[state] = {
+        "team_id": team["team_id"],
+        "org": org,
+        "created_at": time.time(),
+    }
+    callback = os.environ.get("GITHUB_CALLBACK_URL",
+                              "https://api.premiselabs.co/v1/onboarding/github/callback")
+    params = {
+        "client_id": client_id,
+        "redirect_uri": callback,
+        "scope": "repo",
+        "state": state,
+    }
+    auth_url = f"{_GITHUB_AUTHORIZE_URL}?{urlencode(params)}"
+    return {"auth_url": auth_url, "state": state}
+
+
+@app.get("/v1/onboarding/github/callback")
+async def github_callback(code: str | None = None, state: str | None = None,
+                          error: str | None = None):
+    """GitHub OAuth callback — exchange code, store encrypted token, redirect.
+
+    `error` is the standard OAuth denial query param. (Note: tests must use
+    follow_redirects=False — the 302 target is the external welcome page.)
+    """
+    welcome_url = "https://tortoise.premiselabs.co/welcome.html"
+
+    if error:
+        return RedirectResponse(f"{welcome_url}?github=denied", status_code=302)
+
+    # Validate state — 404 on missing/invalid (don't leak existence)
+    st = _GITHUB_STATES.pop(state, None) if state else None
+    if not st:
+        raise HTTPException(status_code=404, detail="Not found")
+    if time.time() - st["created_at"] > _GITHUB_STATE_TTL_S:
+        raise HTTPException(status_code=404, detail="Not found")
+    if not code:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    client_id = os.environ.get("GITHUB_CLIENT_ID")
+    client_secret = os.environ.get("GITHUB_CLIENT_SECRET")
+    if not client_id or not client_secret:
+        raise HTTPException(status_code=503, detail="GitHub OAuth not configured")
+
+    # Exchange code for token
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.post(_GITHUB_TOKEN_URL, data={
+                "client_id": client_id, "client_secret": client_secret,
+                "code": code,
+            }, headers={"Accept": "application/json"})
+            tok = r.json()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"GitHub token exchange failed: {e}")
+    access_token = tok.get("access_token")
+    if not access_token:
+        raise HTTPException(status_code=502, detail="GitHub token exchange failed")
+
+    # Encrypt + store on Team node (never log the raw token)
+    from tortoise.crypto import encrypt_token
+    encrypted = encrypt_token(access_token)
+    team_id = st["team_id"]
+    sdk = _make_sdk(namespace="registry")
+    sdk._get_registry().query(
+        "MATCH (t:Team {id: $id}) SET t.github_token_enc = $tok, t.github_org = $org",
+        params={"id": team_id, "tok": encrypted, "org": st["org"]},
+    )
+    _update_onboarding_state(team_id, github_connected=True)
+    return RedirectResponse(f"{welcome_url}?github=connected", status_code=302)
+
+
+@app.get("/v1/onboarding/github/status")
+async def github_status(team: dict = Depends(get_current_team)):
+    """Return GitHub connection status + repo count."""
+    sdk = _make_sdk(namespace="registry")
+    rows = sdk._get_registry().query(
+        "MATCH (t:Team {id: $id}) RETURN t.github_token_enc, t.github_org",
+        params={"id": team["team_id"]},
+    ).result_set
+    if not rows or not rows[0][0]:
+        return {"connected": False, "org": None, "repos_count": None}
+    encrypted, org = rows[0]
+    from tortoise.crypto import decrypt_token
+    try:
+        token = decrypt_token(encrypted)
+    except ValueError:
+        return {"connected": False, "org": None, "repos_count": None}
+    repos_count = None
+    try:
+        import httpx
+        with httpx.Client(timeout=10) as client:
+            r = client.get(f"{_GITHUB_API}/user/repos?per_page=1",
+                           headers={"Authorization": f"Bearer {token}",
+                                    "Accept": "application/vnd.github+json"})
+            if r.status_code == 200:
+                import re
+                link = r.headers.get("Link", "")
+                m = re.search(r'page=(\d+)>; rel="last"', link)
+                repos_count = int(m.group(1)) if m else len(r.json())
+    except Exception:
+        repos_count = None
+    return {"connected": True, "org": org, "repos_count": repos_count}
 
 
 # ── MCP mount (#236) ─────────────────────────────────────────────
