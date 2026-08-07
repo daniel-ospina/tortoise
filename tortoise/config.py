@@ -81,8 +81,16 @@ def is_docker_uri(uri: str | None) -> bool:
 
 
 def _abs(path: str) -> str:
-    """Expand ~ and make absolute (never returns a relative path)."""
+    """Expand ~ and make absolute.
+
+    REJECTS relative paths (plan Task 7): a relative path like 'tortoise.db'
+    resolves per-CWD and silently creates a per-directory redislite server
+    (Category-3 leak). This guard in the single choke-point covers ALL
+    branches (explicit arg, TORTOISE_DB_PATH, TORTOISE_DB_URI) uniformly.
+    """
     expanded = os.path.expanduser(path)
+    if not os.path.isabs(expanded):
+        raise ValueError(RELATIVE_PATH_ERROR.format(path=path))
     return os.path.abspath(expanded)
 
 
