@@ -5,10 +5,13 @@ Restore: replays backup JSONL into a fresh projection.
 """
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 def _timestamp() -> str:
