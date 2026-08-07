@@ -582,3 +582,42 @@ class FastMCPAdapter:
 #
 # Control-plane endpoints (/internal/*, /v1/team*, /v1/team/keys) stay
 # hand-written — out of registry scope per the epic scope guard.
+
+
+class FastAPIRouterAdapter:
+    """Register REST tool-ops from the registry onto a FastAPI APIRouter.
+
+    Reads entries with rest_spec populated and registers routes. Surface
+    policies (audit logging, team limits, dream enqueue) stay in the route
+    handlers — the adapter only wires registration.
+
+    Raw-Cypher ops (list_points, get_point, capture_session, list_sessions)
+    have NO sdk_method — they are registered via handler_override with their
+    existing hosted_api handler functions, OR kept hand-written in
+    hosted_api.py with drift documented (Gate 3 pre-step decision).
+    """
+
+    def __init__(self, router: Any) -> None:
+        self._router = router
+
+    def register_all(self, registry: list[ToolDefinition],
+                     handlers: dict[str, Callable]) -> None:
+        """Register every rest_spec entry as a route.
+
+        Args:
+            registry: TOOL_REGISTRY entries.
+            handlers: dict mapping tool_name → FastAPI route handler callable.
+        """
+        for entry in registry:
+            if entry.rest_spec is None:
+                continue
+            handler = handlers.get(entry.name)
+            if handler is None:
+                continue
+            self._router.add_api_route(
+                entry.rest_spec.path,
+                handler,
+                methods=[entry.rest_spec.method],
+                response_model=entry.rest_spec.response_model,
+                name=entry.name,
+            )

@@ -183,3 +183,34 @@ class TestFastMCPAdapter:
             assert "tortoise_index_sessions" in registered
 
         asyncio.run(_check())
+
+
+class TestFastAPIRouterAdapter:
+    """Gate 3: REST adapter generates correct routes from registry."""
+
+    def test_adapter_registers_all_rest_routes(self):
+        """Every registry entry with rest_spec becomes a route."""
+        from tortoise.tool_registry import TOOL_REGISTRY, FastAPIRouterAdapter
+        from fastapi import APIRouter
+
+        router = APIRouter()
+        adapter = FastAPIRouterAdapter(router)
+
+        def _dummy():
+            return {}
+
+        handlers = {t.name: _dummy for t in TOOL_REGISTRY if t.rest_spec}
+        adapter.register_all(TOOL_REGISTRY, handlers)
+
+        route_paths = set()
+        for r in router.routes:
+            methods = sorted(m for m in getattr(r, "methods", set()) if m != "HEAD")
+            if methods:
+                route_paths.add((methods[0], getattr(r, "path", "")))
+
+        assert ("POST", "/v1/points") in route_paths, route_paths
+        assert ("POST", "/v1/dream") in route_paths
+        assert ("GET", "/v1/search") in route_paths
+        assert ("GET", "/v1/context") in route_paths
+        # raw-Cypher ops NOT registered (no rest_spec) — drift documented
+        assert ("GET", "/v1/sessions") not in route_paths
