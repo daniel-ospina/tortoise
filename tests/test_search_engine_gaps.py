@@ -455,6 +455,51 @@ class TestDegradationChain:
         assert "fts" in result
         assert "vector" not in result
 
+    def test_vector_only_strategy_sets_vector_in_raw_results(self):
+        """#160: When only vector strategy succeeds, 'vector' key is in raw_results.
+
+        The O/I/T vector indicator checks scores.vector is not None. This test
+        verifies the degradation_chain correctly returns the 'vector' key, which
+        the SDK then uses to populate scores.vector in SearchResult.
+        """
+        graph = StrategyControlledGraph({
+            "euclideanDistance": ([("v1", 0.85), ("v2", 0.72)], None),
+        })
+        strategies = {"fts": False, "vector": True, "structural": False}
+
+        result = degradation_chain(
+            graph, query="test", kind=None, query_vec=self.QUERY_VEC,
+            strategies=strategies,
+        )
+
+        assert "vector" in result, (
+            "vector key must be in raw_results so scores.vector is populated"
+        )
+        assert len(result["vector"]) == 2
+        assert result["vector"][0][0] == "v1"
+
+    def test_vector_fts_fusion_both_keys_present(self):
+        """#160: RRF fusion with FTS+vector → both 'fts' and 'vector' keys
+        present in raw_results. The SDK uses these to populate both
+        scores.fts and scores.vector on each SearchResult.
+        """
+        graph = StrategyControlledGraph({
+            "fulltext": (        [("f1", 0.9)], None),
+            "euclideanDistance": ([("v1", 0.8)], None),
+            "pointKind": (       [], None),
+        })
+        strategies = {"fts": True, "vector": True, "structural": True}
+
+        result = degradation_chain(
+            graph, query="test", kind=None, query_vec=self.QUERY_VEC,
+            strategies=strategies,
+        )
+
+        assert "fts" in result
+        assert "vector" in result
+        # RRF fusion needs both strategies to produce match_source="rrf"
+        # with scores.vector populated per-point.
+
 
 # ── run_vector_query ────────────────────────────────────────────────────────
 
