@@ -20,7 +20,6 @@ from tortoise.log import EventLog                       # noqa: E402
 from tortoise.projection import (                        # noqa: E402
     _apply_one, fold, split,
     InMemoryProjection, FalkorProjection, Projection,
-    _validate_uri_scheme,
 )                                                       # noqa: E402
 
 # ------------------------------------------------------------------ helpers
@@ -1206,14 +1205,8 @@ def test_rebuild_all_cross_file_references():
 # from_uri itself.  from_uri validates the scheme BEFORE connecting,
 # so error-path tests need no live FalkorDB server.
 #
-# More comprehensive scheme tests (including from_uri arg forwarding
-# with monkeypatch) live in tests/test_sdk_props_coercion.py.
-
-
-def test_from_uri_validate_scheme_accepts_docker_redis_rediss():
-    """_validate_uri_scheme accepts docker, redis, rediss — no server needed."""
-    for scheme in ("docker", "redis", "rediss"):
-        assert _validate_uri_scheme(scheme) == scheme
+# Scheme-acceptance (docker/redis/rediss) is covered in
+# tests/test_sdk_props_coercion.py (TestUriSchemes) — not duplicated here.
 
 
 def test_from_uri_rejects_unsupported_scheme():
