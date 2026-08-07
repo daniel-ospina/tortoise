@@ -192,16 +192,75 @@ class TestEntityPropsPersisted:
         """Re-creating same entity (content-hash dedup) must not wipe extra props.
 
         Object/Subject MERGE by name, so a second create_object with the same
-        name matches the existing node.  _create_entity returns the NEW ulid
-        which won't match the MERGE'd node — a pre-existing _create_entity
-        gap (not #228).  We verify the round-trip via the first call's id."""
+        name matches the existing node.  #452 fixed _create_entity to return
+        the canonical id, so the second call's return is usable."""
         first = sdk.create_object("Dedup Object 2", "type-a", tag="v1")
         first_id = first.get("id") or first.get("eventId")
         # Second create with same name hits the MERGE'd node; extra props
         # are applied via MATCH + SET, so tag gets updated.
-        sdk.create_object("Dedup Object 2", "type-a", tag="v2")
+        second = sdk.create_object("Dedup Object 2", "type-a", tag="v2")
+        # #452: second call must return the canonical id
+        assert second["id"] == first_id, "#452: second create must return canonical id"
         fetched = sdk.get_entity(first_id)
         assert fetched.get("tag") == "v2"  # last write wins via _persist_extra_props
+        # #452: get_entity with second-returned id also resolves
+        fetched2 = sdk.get_entity(second["id"])
+        assert fetched2.get("name") == "Dedup Object 2"
+        assert fetched2.get("tag") == "v2"
+
+    # ── #452: idempotent create returns canonical id ─────────────────
+
+    def test_idempotent_create_object_returns_canonical_id(self, sdk):
+        """#452: second create_object with same name returns canonical (first) id."""
+        first = sdk.create_object("Canonical Test", "widget")
+        second = sdk.create_object("Canonical Test", "widget")
+        assert second["id"] == first["id"], (
+            f"Expected canonical id {first['id']}, got {second['id']}"
+        )
+
+    def test_idempotent_create_object_id_resolves_via_get_entity(self, sdk):
+        """#452: get_entity on second-returned id returns the node, not {}."""
+        first = sdk.create_object("Resolve Test", "widget", color="blue")
+        second = sdk.create_object("Resolve Test", "widget", color="red")
+        fetched = sdk.get_entity(second["id"])
+        assert fetched, f"get_entity({second['id']!r}) returned empty dict"
+        assert fetched.get("name") == "Resolve Test"
+        assert fetched.get("color") == "red"  # last write wins
+
+    def test_idempotent_create_object_id_works_with_update_entity(self, sdk):
+        """#452: update_entity on second-returned id persists props."""
+        first = sdk.create_object("Update via second", "widget", tag="v1")
+        second = sdk.create_object("Update via second", "widget", tag="v2")
+        updated = sdk.update_entity(second["id"], tier="gold")
+        assert updated.get("tier") == "gold"
+        # verify via canonical id too
+        refetch = sdk.get_entity(first["id"])
+        assert refetch.get("tier") == "gold"
+
+    def test_idempotent_create_subject_returns_canonical_id(self, sdk):
+        """#452: second create_subject with same name returns canonical id."""
+        first = sdk.create_subject("alice-subject", "engineer", level="mid")
+        second = sdk.create_subject("alice-subject", "engineer", level="senior")
+        assert second["id"] == first["id"], (
+            f"Expected canonical id {first['id']}, got {second['id']}"
+        )
+        fetched = sdk.get_entity(second["id"])
+        assert fetched.get("name") == "alice-subject"
+        assert fetched.get("level") == "senior"  # last write wins
+
+    def test_idempotent_create_subject_with_edges_uses_canonical_id(self, sdk):
+        """#452: edge wiring on second create uses canonical node id."""
+        owner = sdk.create_subject("owner452", "person")
+        first = sdk.create_object("Edge Test 452", "widget", ownedBy=owner["id"])
+        first_id = first["id"]
+        # second create wires edges via canonical id
+        second = sdk.create_object("Edge Test 452", "widget", managedBy=owner["id"])
+        assert second["id"] == first_id
+        # verify edge exists (managedBy)
+        owned = sdk.get_owned_entities(owner["id"])
+        assert any(e.get("id") == first_id for e in owned), (
+            "ownedBy edge should connect to canonical node"
+        )
 
     def test_props_none_value_not_stored(self, sdk):
         """None-valued props are skipped (Cypher null sentinel)."""
