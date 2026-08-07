@@ -59,6 +59,67 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ── Dreaming queue (#85) ────────────────────────────────────────────────
+# Per-tenant async queue: writes enqueue the affected roots; a cooperative
+# per-tenant drain task runs incremental EP dreaming. Serialized per tenant
+# (never two concurrent dreams on one tenant graph). Debounced 100ms so
+# bursty writes batch into one dream. Server-mode FalkorDB handles
+# concurrency natively — this is a cooperative asyncio task, not a thread
+# (no SQLite/redislite single-writer hazard, #6761/#176).
+_DREAM_QUEUES: dict[str, asyncio.Queue] = {}
+_DREAM_TASKS: dict[str, asyncio.Task] = {}
+_DREAM_DEBOUNCE_S = 0.1
+_DREAM_BATCH_MAX = 200
+# Evict idle tenant queues after this many seconds (security P2, #85) so
+# per-tenant queue/task dicts don't grow unboundedly across many tenants.
+_DREAM_QUEUE_TTL_S = 600
+
+
+def _enqueue_dream(team_id: str, dirty_roots: list[str]) -> None:
+    """Enqueue affected roots for a tenant's next dream cycle."""
+    if not dirty_roots:
+        return
+    q = _DREAM_QUEUES.setdefault(team_id, asyncio.Queue())
+    for root in dirty_roots[: _DREAM_BATCH_MAX]:
+        q.put_nowait(root)
+    if team_id not in _DREAM_TASKS or _DREAM_TASKS[team_id].done():
+        _DREAM_TASKS[team_id] = asyncio.create_task(_dream_worker(team_id))
+
+
+async def _dream_worker(team_id: str) -> None:
+    """Drain one tenant's queue with debounce, then run incremental dream."""
+    q = _DREAM_QUEUES.get(team_id)
+    if q is None:
+        return
+    try:
+        # Debounce: collect roots that arrive within the window.
+        await asyncio.sleep(_DREAM_DEBOUNCE_S)
+        roots: list[str] = []
+        while not q.empty() and len(roots) < _DREAM_BATCH_MAX:
+            roots.append(q.get_nowait())
+        if not roots:
+            return
+        sdk = _make_sdk(namespace=team_id)
+        try:
+            # Batch mark once (P3, #85) — one reverse-BFS pair, not N.
+            sdk._mark_dirty(roots)
+            sdk.dream(dirty_only=True)
+        finally:
+            sdk.close()
+    except Exception:
+        import logging
+        logging.getLogger("tortoise.api").exception(
+            "dream worker failed for tenant %s", team_id
+        )
+    finally:
+        # Reschedule if more roots arrived during the drain.
+        if not q.empty():
+            _DREAM_TASKS[team_id] = asyncio.create_task(_dream_worker(team_id))
+        elif team_id in _DREAM_QUEUES and team_id in _DREAM_TASKS:
+            # Idle: evict the queue (TTL guard) unless a new write re-adds it.
+            _DREAM_QUEUES.pop(team_id, None)
+            _DREAM_TASKS.pop(team_id, None)
+
 
 # ── Rate Limiter ──────────────────────────────────────────────────
 
@@ -533,6 +594,9 @@ async def create_point(body: CreatePointRequest, request: Request, team: dict = 
         import logging
         logging.getLogger("tortoise.api").exception("create_point failed")
         raise HTTPException(status_code=500, detail="Internal server error")
+    # Dreaming (#85): enqueue the new point's dirty roots for background EP
+    # stabilization (non-blocking — fast path is never gated on the dream).
+    _enqueue_dream(team["team_id"], list(sdk._dirty_roots))
     # Log audit event
     await _async_audit(
         request, team["team_id"], "point_create",
@@ -598,6 +662,37 @@ async def get_point(point_id: str, team: dict = Depends(get_current_team)):
     if "pointKind" in props:
         props["kind"] = props.pop("pointKind")
     return props
+
+
+@app.post("/v1/dream")
+async def dream(
+    full: bool = False,
+    team: dict = Depends(get_current_team),
+):
+    """Trigger EP stabilization (dreaming, #85) for the team's graph.
+
+    Incremental (default): stabilizes the team's accumulated dirty subgraph.
+    full=True: whole-graph stabilization. Fast-path queries never block on
+    this — dreaming is a background maintenance process.
+    """
+    sdk = _make_sdk(namespace=team["team_id"])
+    try:
+        if full:
+            result = sdk.dream(full=True)
+        else:
+            # Drain whatever is queued plus any in-memory dirty roots.
+            # Batch mark once (P3, #85) — one reverse-BFS pair, not N.
+            q = _DREAM_QUEUES.get(team["team_id"])
+            queued_roots: list[str] = []
+            if q is not None and not q.empty():
+                while not q.empty():
+                    queued_roots.append(q.get_nowait())
+            if queued_roots:
+                sdk._mark_dirty(queued_roots)
+            result = sdk.dream(dirty_only=True)
+        return result
+    finally:
+        sdk.close()
 
 
 @app.get("/v1/search")

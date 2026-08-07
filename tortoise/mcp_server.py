@@ -382,6 +382,19 @@ def tortoise_calibrate_summary() -> list[dict]:
 
 
 @mcp.tool()
+def tortoise_dream(full: bool = False, dirty_only: bool = True,
+                   max_hops: int = 2) -> dict:
+    """Run EP stabilization (dreaming, #85).
+
+    Stabilizes confidence values after batch writes without an explicit
+    compute_confidence call. Default: dreams the accumulated dirty subgraph
+    (incremental). Set full=True for whole-graph stabilization.
+    """
+    return _safe(_get_sdk().dream, dirty_only=dirty_only, full=full,
+                 max_hops=max_hops)
+
+
+@mcp.tool()
 def tortoise_update_point(id: str, props: Any) -> dict:
     """Update properties on a Point. Safe — modifies one Point only."""
     props = _parse(props)

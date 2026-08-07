@@ -169,6 +169,10 @@ class TortoiseSDK:
         self._evidence: dict[str, tuple[float, float]] = {}
         self._registry_g = None
         self._audit_logger = None
+        # Dreaming (#85): dirty claim roots awaiting EP stabilization. Write
+        # paths mark affected claims dirty; dream()/lazy-read consume them.
+        self._dirty_roots: set[str] = set()
+        self._dreamer = None  # lazy-init Dreamer
 
     def _get_proj(self) -> FalkorProjection:
         if self._proj is None:
@@ -389,6 +393,9 @@ class TortoiseSDK:
             }
             alpha, beta = tier_map.get(credibility, (1, 1))
             self.set_point_baseline(pid, alpha, beta)
+        # Dreaming (#85): a new point can carry confidence-affecting props;
+        # mark it dirty so the next dream/lazy-read stabilizes it.
+        self._mark_dirty([pid])
         return self.get_point(pid)
 
     def create_or_update_point(self, kind: str, content: str, **props) -> dict:
@@ -487,6 +494,8 @@ class TortoiseSDK:
                     "MATCH (n:Point {id:$id}) SET n += $props",
                     params={"id": id, "props": {key: val}},
                 )
+        # Dreaming (#85): property mutations can affect confidence.
+        self._mark_dirty([id])
         return self.get_point(id)
 
     def delete_point(self, id: str) -> bool:
@@ -499,6 +508,8 @@ class TortoiseSDK:
         if not exists:
             return False
         proj.g.query("MATCH (n:Point {id:$id}) DETACH DELETE n", params={"id": id})
+        # Dreaming (#85): deletion changes the graph structure around neighbors.
+        self._mark_dirty([id])
         return True
 
     def delete_point_wrapped(self, id: str) -> dict:
@@ -522,6 +533,8 @@ class TortoiseSDK:
             "CREATE (a)-[:CORRECTS]->(b)",
             params={"new_id": corrected_by_id, "old_id": id},
         )
+        # Dreaming (#85): invalidation changes the propagation graph.
+        self._mark_dirty([id, corrected_by_id])
         return {"invalidated": True, "id": id, "corrected_by": corrected_by_id}
 
     def supersede_point(self, old_id: str, new_id: str) -> dict:
@@ -601,6 +614,9 @@ class TortoiseSDK:
                 )
                 transferred += 1
 
+        # Dreaming (#85): supersede changes the propagation graph around both.
+        self._mark_dirty([old_id, new_id])
+
         return {
             "invalidated": True,
             "id": old_id,
@@ -668,6 +684,8 @@ class TortoiseSDK:
             "MATCH (s:Point {id:$sid}) SET s.status = 'live'",
             params={"sid": source_id},
         )
+        # Dreaming (#85): new edges change propagation — mark all inputs dirty.
+        self._mark_dirty(inputs)
         result = self.get_point(pid)
         return result
 
@@ -741,6 +759,8 @@ class TortoiseSDK:
             "CREATE (m)-[:IMPL]->(op), (op)-[:mitigated_by]->(m)",
             params={"mid": mid, "oid": id},
         )
+        # Dreaming (#85): new mitigation + IMPL edge change propagation.
+        self._mark_dirty([mid, id])
         return self.get_point(mid)
 
     # ── Query ─────────────────────────────────────────────────────
@@ -1220,6 +1240,76 @@ class TortoiseSDK:
             self._ep = TortoiseEP(self._get_proj())
         return self._ep
 
+    # ── Dreaming (#85) ──────────────────────────────────────────────
+
+    def _get_dreamer(self):
+        """Lazy-init the Dreamer (thread-safe)."""
+        if self._dreamer is None:
+            from .dream import Dreamer
+            self._dreamer = Dreamer(self)
+        return self._dreamer
+
+    def _mark_dirty(self, point_ids: list[str]) -> None:
+        """Mark claims whose confidence is now stale after a write.
+
+        1-hop reverse BFS (#85 contract): from the mutated point, collect the
+        operators that target it, then the claims those operators target.
+        The dream expands to max_hops=2 for full propagation — do not reduce
+        the dream's max_hops below 2 without expanding this marking.
+        """
+        if not point_ids:
+            return
+        # The mutated points themselves are always dirty (their baseline
+        # priors / properties changed).
+        self._dirty_roots.update(point_ids)
+        proj = self._get_proj()
+        # Operators targeting the mutated points (reverse of operator→point).
+        rows = proj.g.query(
+            "MATCH (op:Point {is_operator:true})-[:IMPL|NAND]->(p:Point) "
+            "WHERE p.id IN $ids RETURN DISTINCT op.id",
+            params={"ids": list(point_ids)},
+        ).result_set
+        op_ids = [r[0] for r in rows]
+        if not op_ids:
+            return
+        # Claims those operators target (1-hop forward from operators).
+        rows = proj.g.query(
+            "MATCH (op:Point {is_operator:true})-[:IMPL|NAND]->(c:Point) "
+            "WHERE op.id IN $oids RETURN DISTINCT c.id",
+            params={"oids": op_ids},
+        ).result_set
+        self._dirty_roots.update(r[0] for r in rows)
+
+    def dream(self, dirty_only: bool = True, full: bool = False,
+              max_hops: int = 2) -> dict:
+        """Run EP stabilization (#85).
+
+        Args:
+            dirty_only: dream the accumulated dirty roots (default True).
+            full: whole-graph stabilization (dream_all). Mutually exclusive
+                  with dirty_only + anchors.
+            max_hops: EP subgraph expansion (keep ≥2 — contract with
+                      _mark_dirty).
+
+        Returns {iterations, converged, affected_claims} or the dream_all
+        summary for full=True.
+        """
+        dreamer = self._get_dreamer()
+        if full:
+            return dreamer.dream_all(max_hops=max_hops)
+        if not dirty_only and not self._dirty_roots:
+            return {"iterations": 0, "converged": True, "affected_claims": []}
+        anchors = list(self._dirty_roots)
+        result = dreamer.dream(anchors, max_hops=max_hops)
+        # Clear dirty roots that converged (keep any that failed to converge
+        # so a later dream retries them).
+        if result.get("converged", False):
+            self._dirty_roots.clear()
+        else:
+            affected = set(result.get("affected_claims", []))
+            self._dirty_roots -= affected
+        return result
+
     def _select_subgraph(self, anchors: list[str], max_hops: int = 1,
                          rel_filter: str = "IMPL|NAND",
                          direction: str = "both") -> list[str]:
@@ -1297,6 +1387,16 @@ class TortoiseSDK:
             operator_ids = [f[0] for f in factors_data]
         if not operator_ids:
             return {"iterations": 0, "converged": True, "confidences": {}}
+        # Lazy consistency (#85): if dirty roots exist and this is a
+        # whole-graph/auto-extract computation, dream the dirty subgraph
+        # first so the auto-extracted factors see stabilized values.
+        if factors is None and anchors is None and self._dirty_roots:
+            self.dream(dirty_only=True)
+            # Re-extract factors after dreaming (graph may have changed).
+            factors_data, _ = proj.extract_svbp_factors()
+            operator_ids = [f[0] for f in factors_data]
+            if not operator_ids:
+                return {"iterations": 0, "converged": True, "confidences": {}}
         iterations, converged = ep.run(operator_ids, evidence=self._evidence)
         confidences = {}
         proj = self._get_proj()
@@ -1321,10 +1421,19 @@ class TortoiseSDK:
             "MATCH (n:Point {id: $id}) SET n.ep_alpha = $a, n.ep_beta = $b, n.baseline_set = true",
             params={"id": claim_id, "a": alpha, "b": beta},
         )
+        # Dreaming (#85, P1): a baseline change alters the prior — neighbors
+        # whose confidence derived from this claim are now stale.
+        self._mark_dirty([claim_id])
         return {"claim_id": claim_id, "alpha": alpha, "beta": beta}
 
     def get_confidence(self, claim_id: str) -> dict:
-        """Get EP confidence for a claim: {mean, variance, alpha, beta}."""
+        """Get EP confidence for a claim: {mean, variance, alpha, beta}.
+
+        Lazy consistency (#85): if the claim is a dirty root (confidence
+        diverged after writes), dream it first so reads return fresh values.
+        """
+        if claim_id in self._dirty_roots:
+            self.dream(dirty_only=True)
         return self._get_ep().compute_confidence(claim_id)
 
     def _apply_source_inheritance(self, recency_decay: float | None = None):
