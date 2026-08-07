@@ -73,7 +73,7 @@ MIGRATIONS: list[tuple[str, str, str]] = [
 ]
 
 
-def migrate(sdk: TortoiseSDK, dry_run: bool = False) -> dict:
+def _do_migrate(sdk: TortoiseSDK, dry_run: bool = False) -> dict:
     """Run kind migration across all entity types.
 
     Returns {old_kind: {entity_type: str, new: str, count: int}}.
@@ -121,14 +121,14 @@ if __name__ == "__main__":
         # Embedded migration against canonical path (issue #176)
         print(f"Using embedded DB at {resolve_db_path()} (set TORTOISE_DB_URI to run against a server)")
         sdk = TortoiseSDK(db_path=resolve_db_path())
-        results = migrate(sdk, dry_run=dry_run)
+        results = _do_migrate(sdk, dry_run=dry_run)
         return
     if not is_docker_uri(uri):
         print("Set TORTOISE_DB_URI to a docker:// URI to run migration")
         exit(1)
 
     sdk = TortoiseSDK(uri)
-    results = migrate(sdk, dry_run=dry_run)
+    results = _do_migrate(sdk, dry_run=dry_run)
 
     total = sum(r["count"] for r in results.values())
     by_type: dict[str, int] = {}

@@ -538,6 +538,9 @@ def main():
             )
             sys.exit(1)
     mcp.run(transport="stdio")
+            )
+            sys.exit(1)
+    mcp.run(transport="stdio")
 
 
 if __name__ == "__main__":

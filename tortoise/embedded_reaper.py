@@ -626,9 +626,11 @@ class _ReaperLock:
     def acquire(self) -> bool:
         import fcntl
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
-        self._fh = open(self.path, "w")
+        self._fh = open(self.path, "a")
         try:
             fcntl.flock(self._fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self._fh.seek(0)
+            self._fh.truncate()
             self._fh.write(str(os.getpid()))
             self._fh.flush()
             return True

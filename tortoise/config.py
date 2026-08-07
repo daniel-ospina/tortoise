@@ -61,6 +61,11 @@ def resolve_db_path(explicit: str | None = None) -> str:
     # 3. TORTOISE_DB_URI without docker:// -> treated as file path (backward compat)
     uri = os.environ.get("TORTOISE_DB_URI")
     if uri and not uri.startswith("docker://"):
+        # Reject relative paths BEFORE _abs() normalizes them — otherwise
+        # FalkorProjection's hard-reject is defeated (plan Task 7).
+        expanded = os.path.expanduser(uri)
+        if not os.path.isabs(expanded):
+            raise ValueError(RELATIVE_PATH_ERROR.format(path=uri))
         logger.warning(
             "TORTOISE_DB_URI=%r is a file path (not docker://) — treating as "
             "embedded DB path (backward compat)", uri)

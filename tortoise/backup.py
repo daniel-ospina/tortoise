@@ -82,6 +82,26 @@ def restore(backup_dir: str, db_path: str,
         except Exception:
             pass
     db_file = source / _db_name
+    # Graceful fallback for pre-migration backups that lack the manifest 'db'
+    # key (embedded.db was the legacy filename). Also try scanning for any
+    # *.db file if the manifest-derived name doesn't exist.
+    if not db_file.exists():
+        fallback = source / "embedded.db"
+        if fallback.exists():
+            logger.warning(
+                "manifest db %r not found — falling back to embedded.db in %s",
+                _db_name, source)
+            db_file = fallback
+            _db_name = "embedded.db"
+        else:
+            # Last resort: scan for any *.db file in the backup dir
+            db_candidates = sorted(source.glob("*.db"))
+            if db_candidates:
+                logger.warning(
+                    "manifest db %r not found, embedded.db not found — "
+                    "falling back to %s", _db_name, db_candidates[0].name)
+                db_file = db_candidates[0]
+                _db_name = db_file.name
 
     if not events_file.exists():
         return {"events": 0, "status": "error: no events.jsonl in backup"}
