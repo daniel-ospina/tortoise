@@ -18,13 +18,11 @@ Safety properties:
 from __future__ import annotations
 
 import fcntl
-import json
 import logging
 import os
 import shutil
 import sys
 import time
-from pathlib import Path
 
 logger = logging.getLogger(__name__)
 

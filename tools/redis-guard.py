@@ -41,9 +41,12 @@ ALLOWED_FILES = (
     "graph-scripts/smoke_test.py",  # documented intentional bypass
 )
 
-# Pattern 1: relative-path FalkorProjection calls (quote, not absolute/tilde)
+# Pattern 1: relative-path FalkorProjection calls (quote, not absolute/tilde).
+# NOTE: './'-prefixed is excluded from the lookahead intentionally — the
+# runtime _abs() choke-point (tortoise/config.py) rejects ALL relative forms
+# incl. './'; this hook is source-level belt-and-suspenders.
 RELATIVE_PROJECTION = re.compile(
-    r"FalkorProjection\(\s*['\"](?![/~]|\./)"
+    r"FalkorProjection\(\s*['\"](?!/[~]|\./)"
 )
 # Pattern 2: direct redislite.falkordb_client imports (all forms)
 DIRECT_IMPORT = re.compile(
