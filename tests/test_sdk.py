@@ -225,11 +225,12 @@ class TestTraverse:
     def test_outgoing(self, sdk):
         a, b = _make_point(sdk, content="src"), _make_point(sdk, content="tgt")
         op = sdk.create_operator("IMPL", a["id"], [b["id"]])
-        # Operator edges go FROM operator TO points (Ontology v2.1).
-        # Traverse outgoing from the operator to find its targets.
+        # Ontology v2.1: operators hold IMPL edges to their inputs (source +
+        # targets); INPUT edges were removed. Outgoing IMPL from the operator
+        # node returns both inputs.
         connected = sdk.traverse(op["id"], "IMPL", direction="outgoing")
-        # create_operator links the operator to BOTH inputs (a) and outputs (b)
-        assert len(connected) == 2
+        assert len(connected) >= 2
+        assert {c["id"] for c in connected} == {a["id"], b["id"]}
 
     def test_incoming(self, sdk):
         a, b = _make_point(sdk, content="src"), _make_point(sdk, content="tgt")

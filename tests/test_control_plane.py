@@ -19,8 +19,17 @@ def sdk(tmp_path):
 
 @pytest.fixture
 def team(sdk):
-    """Pre-created team fixture."""
-    return sdk.team_create("test-team")
+    """Pre-created team fixture.
+
+    R6 (#221): deletes the created team in teardown so the registry graph
+    never accumulates leftover teams across runs.
+    """
+    result = sdk.team_create("test-team")
+    yield result
+    try:
+        sdk.team_delete(result["id"], confirmation="test-team")
+    except Exception:
+        pass  # best-effort cleanup
 
 
 class TestTeamCRUD:

@@ -28,10 +28,36 @@ from tortoise.sdk import TortoiseSDK
 from tortoise.analyze import _bfs_select_operators
 
 
+# R5 (#221): session-scoped shared embedded DB path (set by autouse fixture
+# below). One redislite server per session instead of one per _fresh_sdk()
+# call — mitigates the #176 process leak. Each _fresh_sdk() wipes the graph
+# before use so tests stay hermetic.
+# TODO(#176): stopgap — remove when the redislite root-cause fix lands.
+_SHARED_DB_PATH: str | None = None
+
+
+@pytest.fixture(autouse=True)
+def _use_shared_embedded_db(shared_embedded_db):
+    global _SHARED_DB_PATH
+    _SHARED_DB_PATH = shared_embedded_db
+
+
 def _fresh_sdk():
-    """Create an SDK backed by a fresh, isolated FalkorDB Lite instance."""
-    db_path = os.path.join(tempfile.mkdtemp(prefix="tortoise_epsel_"), "test.db")
-    return TortoiseSDK(db_path)
+    """Create an SDK backed by a fresh, isolated FalkorDB Lite instance.
+
+    Uses the session-scoped shared embedded DB path (one redislite server per
+    session) and wipes it before use — hermetic per test, 1 subprocess per
+    session (R5, #221).
+    """
+    db_path = _SHARED_DB_PATH or os.path.join(tempfile.mkdtemp(prefix="tortoise_epsel_"), "test.db")
+    sdk = TortoiseSDK(db_path)
+    # Wipe before use (shared DB — hermeticity comes from the wipe, not a
+    # fresh path). Scoped to the test's own graph (embedded = whole file).
+    try:
+        sdk._get_proj().g.query("MATCH (n) DETACH DELETE n")
+    except Exception:
+        pass
+    return sdk
 
 
 def _make_claim(sdk: TortoiseSDK, content: str,

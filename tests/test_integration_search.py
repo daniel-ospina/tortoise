@@ -25,26 +25,36 @@ _uri_candidates = [
     "docker://localhost:16379/tortoise_test_integration_search",
 ]
 _old_uri = _os.environ.get("TORTOISE_DB_URI")
-for _uri in _uri_candidates:
-    if not _uri:
-        continue
-    try:
-        from tortoise.sdk import TortoiseSDK
-        # URI comes from TORTOISE_DB_URI env var, not positional arg.
-        # Keep the working URI set for the duration of the test run —
-        # integration test classes construct TortoiseSDK() directly.
-        _os.environ["TORTOISE_DB_URI"] = _uri
-        _sdk = TortoiseSDK()
-        _sdk.status()
-        FALKORDB_AVAILABLE = True
-        break
-    except Exception:
-        # Restore the user's original env var (or unset if never set)
-        if _old_uri is None:
-            _os.environ.pop("TORTOISE_DB_URI", None)
-        else:
-            _os.environ["TORTOISE_DB_URI"] = _old_uri
-        continue
+
+try:
+    for _uri in _uri_candidates:
+        if not _uri:
+            continue
+        try:
+            from tortoise.sdk import TortoiseSDK
+            # URI comes from TORTOISE_DB_URI env var, not positional arg.
+            # R3 (#221): probe with the candidate URI, then ALWAYS restore the
+            # original value (try/finally) — never leak a fixed graph name
+            # into the session. Per-test isolation comes from the conftest
+            # autouse fixture, not from this module-level probe.
+            _os.environ["TORTOISE_DB_URI"] = _uri
+            _sdk = TortoiseSDK()
+            try:
+                _sdk.status()
+                FALKORDB_AVAILABLE = True
+            finally:
+                _sdk.close()
+            break
+        except Exception:
+            # Try next candidate.
+            continue
+finally:
+    # R3 (#221): ALWAYS restore the original env (success or failure) so the
+    # session's conftest URI is intact and no fixed graph name leaks.
+    if _old_uri is None:
+        _os.environ.pop("TORTOISE_DB_URI", None)
+    else:
+        _os.environ["TORTOISE_DB_URI"] = _old_uri
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────

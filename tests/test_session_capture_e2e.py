@@ -14,12 +14,13 @@ from tortoise.projection import FalkorProjection
 import tortoise.search_engine as se
 
 
-URI = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise_test_e2e125")
-
-
 def _proj():
-    proj = FalkorProjection.from_uri(URI)
-    proj.g.query("MATCH (n) DETACH DELETE n")  # test-prefixed — safe
+    # R4 (#221): read TORTOISE_DB_URI at CALL time (not module import) so the
+    # conftest per-test fixture's unique graph name is honored. The wipe below
+    # is then scoped to this test's own graph — no cross-test pollution.
+    uri = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise_test_e2e125")
+    proj = FalkorProjection.from_uri(uri)
+    proj.g.query("MATCH (n) DETACH DELETE n")  # test-prefixed — safe (own graph)
     proj._ensure_indexes()
     return proj
 
