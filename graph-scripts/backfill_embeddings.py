@@ -3,6 +3,10 @@
 Computes 384-dim embeddings via all-MiniLM-L6-v2 (tortoise.embeddings) and
 writes them as vecf32 so the HNSW vector index has data to query.
 
+Covers AgentSession Events (#244): sessions indexed before embeddings existed
+have embedding IS NULL — backfilled from name + summary + keywords + topics
+(same composition as the index-time path in session_indexer.py).
+
 Usage:
     python3 scripts/backfill_embeddings.py [--dry-run] [--graph GRAPH] [--uri URI]
 
@@ -14,17 +18,19 @@ Requires the embeddings extra: pip install 'tortoise[embeddings]'
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 
 DEFAULT_URI = "docker://:falkordb@localhost:16379/tortoise"
-LABELS = ("Point", "Label", "Source", "Object", "Subject")
+LABELS = ("Point", "Label", "Source", "Object", "Subject", "Event")
 PROP_MAP = {
     "Point": "content",
     "Label": "name",
     "Source": "name",
     "Object": "name",
     "Subject": "name",
+    "Event": "name",
 }
 
 
@@ -64,29 +70,54 @@ def main() -> int:
     g = db.select_graph(graph_name)
     total = updated = skipped = 0
     for label in LABELS:
-        prop = PROP_MAP[label]
-        rows = g.query(
-            f"MATCH (n:{label}) WHERE n.embedding IS NULL AND n.{prop} IS NOT NULL "
-            f"RETURN n.id, n.{prop}"
-        ).result_set
+        if label == "Event":
+            # #244: AgentSession events — key is eventId, embedding text is
+            # name + summary + keywords + topics (same composition as the
+            # index-time path in tortoise/session_indexer.py).
+            rows = g.query(
+                "MATCH (n:Event) WHERE n.embedding IS NULL AND n.name IS NOT NULL "
+                "RETURN n.eventId, n.name, n.keywords, n.topics, n.content_metadata"
+            ).result_set
+            id_field = "eventId"
+        else:
+            prop = PROP_MAP[label]
+            rows = g.query(
+                f"MATCH (n:{label}) WHERE n.embedding IS NULL AND n.{prop} IS NOT NULL "
+                f"RETURN n.id, n.{prop}"
+            ).result_set
+            id_field = "id"
         if not rows:
             continue
         batch = rows if not args.limit else rows[: args.limit]
         print(f"{label}: {len(rows)} missing embeddings (processing {len(batch)})")
-        for nid, text in batch:
+        for row in batch:
             total += 1
+            if label == "Event":
+                eid, name, keywords, topics, content_metadata = row
+                summary = ""
+                if content_metadata:
+                    try:
+                        cm = json.loads(content_metadata) if isinstance(content_metadata, str) else content_metadata
+                        summary = cm.get("summary", "") or ""
+                    except Exception:
+                        summary = ""
+                from tortoise.session_indexer import session_embedding_text
+                text = session_embedding_text(name, summary, keywords, topics)
+                key = eid
+            else:
+                key, text = row[0], str(row[1])
             emb = compute_embedding(str(text))
             if emb is None:
                 skipped += 1
                 continue
             if args.dry_run:
-                print(f"  [dry] {label} {nid}: would write {len(emb)}-dim")
+                print(f"  [dry] {label} {key}: would write {len(emb)}-dim")
                 updated += 1
                 continue
             g.query(
-                f"MATCH (n:{label} {{id: $id}}) "
+                f"MATCH (n:{label} {{{id_field}: $id}}) "
                 f"SET n.embedding = CASE WHEN $emb IS NOT NULL THEN vecf32($emb) ELSE n.embedding END",
-                params={"id": nid, "emb": emb},
+                params={"id": key, "emb": emb},
             )
             updated += 1
             if total % 25 == 0:

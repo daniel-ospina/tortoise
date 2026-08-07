@@ -82,6 +82,11 @@ from tortoise.projection.edges import _EdgeHandlers
 from tortoise.projection.grounding import _GroundingMixin
 from tortoise.projection.propagation import _PropagationMixin
 
+# #244: one-time per-process migration of the legacy subject-only Event FTS
+# index to subject+name (drop+recreate is too expensive to repeat every
+# startup — see _ensure_indexes).
+_EVENT_FTS_MIGRATED = False
+
 # ── Module-level helpers ──────────────────────────────────────────────────
 
 
@@ -539,18 +544,38 @@ class FalkorProjection(
         _ver = getattr(self, '_falkordb_version', None)
         if _ver is None or _ver[0] >= 4:
             # ── Full-text indexes ──
-            for label, field in [("Point", "content"), ("Event", "subject"), ("Subject", "name"),
-                                 ("Document", "_searchText")]:  # #125 Document FTS
+            for label, fields in [("Point", ["content"]),
+                                  # #244: AgentSession events populate name
+                                  # (not subject) — index both so session name
+                                  # matches surface through FTS.
+                                  ("Event", ["subject", "name"]),
+                                  ("Subject", ["name"]),
+                                  ("Document", ["_searchText"])]:  # #125 Document FTS
                 try:
-                    self.g.query(f"CALL db.idx.fulltext.createNodeIndex('{label}', '{field}')")
+                    fields_sql = ", ".join(f"'{f}'" for f in fields)
+                    self.g.query(f"CALL db.idx.fulltext.createNodeIndex('{label}', {fields_sql})")
                 except Exception as e:
                     msg = str(e).lower()
                     if "already" in msg:
-                        pass
+                        if label == "Event":
+                            # #244: legacy subject-only Event FTS index —
+                            # migrate to include name where dropIndex exists
+                            # (FalkorDB server; FalkorDBLite embedded lacks the
+                            # procedure — leave subject-only, name search still
+                            # covered by the keyword fallback + vector strategies).
+                            try:
+                                if _EVENT_FTS_MIGRATED:
+                                    pass
+                                else:
+                                    _EVENT_FTS_MIGRATED = True
+                                    self.g.query("CALL db.idx.fulltext.dropIndex('Event')")
+                                    self.g.query("CALL db.idx.fulltext.createNodeIndex('Event', 'subject', 'name')")
+                            except Exception:
+                                pass
                     else:
                         import logging
                         logging.getLogger(__name__).warning(
-                            "Failed to create fulltext index on %s.%s: %s", label, field, e)
+                            "Failed to create fulltext index on %s.%s: %s", label, fields, e)
 
             # ── Vector index (HNSW) — Docker/server FalkorDB only (#7764) ──
             # Embedded mode (redislite) uses brute-force vec.euclideanDistance instead.

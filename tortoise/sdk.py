@@ -74,6 +74,27 @@ def _content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _to_iso_utc(value) -> str:
+    """Normalize a datetime or ISO-8601 string to UTC ISO-8601 (with +00:00).
+
+    AgentSession startedAt values are stored via
+    ``datetime.now(timezone.utc).isoformat()`` (e.g.
+    ``2026-08-07T01:20:50.123456+00:00``), so a canonical, timezone-stripped-
+to-UTC string keeps ``>=`` / ``<=`` lexicographic comparisons valid regardless
+of the caller's local timezone or whether they passed ``Z`` or an offset.
+    """
+    from datetime import datetime, timezone
+    if isinstance(value, datetime):
+        dt = value
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        else:
+            dt = dt.astimezone(timezone.utc)
+        return dt.isoformat()
+    # ISO-8601 string — normalize any timezone/offset to UTC.
+    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc).isoformat()
+
+
 def _save_progress(progress_file: str, directory: str, total: int, processed: int,
                    ingested: int, updated: int, skipped: int, failed: int,
                    errors: list[dict],
@@ -1949,9 +1970,16 @@ class TortoiseSDK:
                         }),
                         "message_count": frontmatter.get("message_count", 0),
                     }
+                    # #244: (re)compute the session embedding from the merged
+                    # surface and store as vecf32 — None when model unavailable.
+                    embedding = self._session_embedding(
+                        update_props["name"], metadata.get("summary", ""),
+                        merged_keywords, update_props["topics"],
+                    )
                     proj.g.query(
-                        "MATCH (e:Event {eventId:$eid}) SET e += $props",
-                        params={"eid": event_id, "props": update_props},
+                        "MATCH (e:Event {eventId:$eid}) SET e += $props, "
+                        "e.embedding = CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE e.embedding END",
+                        params={"eid": event_id, "props": update_props, "embedding": embedding},
                     )
                     updated += 1
                     completed_files.append(rel_path)
@@ -1992,9 +2020,17 @@ class TortoiseSDK:
                         "classificationLevel": "internal",
                         "format": "markdown",
                     }
+                    # #244: compute the session embedding (name + summary +
+                    # keywords + topics) and store as vecf32 — None when the
+                    # model is unavailable (indexing never depends on it).
+                    embedding = self._session_embedding(
+                        props["name"], metadata.get("summary", ""),
+                        props["keywords"], props["topics"],
+                    )
                     proj.g.query(
-                        "MERGE (e:Event {eventId:$eid}) SET e += $props",
-                        params={"eid": event_id, "props": props},
+                        "MERGE (e:Event {eventId:$eid}) SET e += $props, "
+                        "e.embedding = CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) END",
+                        params={"eid": event_id, "props": props, "embedding": embedding},
                     )
                     ingested += 1
                     completed_files.append(rel_path)
@@ -3275,13 +3311,106 @@ class TortoiseSDK:
 
     # ── Session Indexing (AgentSession) ─────────────────────────
 
+    def _session_embedding(self, name: str, summary: str = "",
+                           keywords: list[str] | None = None,
+                           topics: list[str] | None = None) -> list[float] | None:
+        """Compute the embedding for an AgentSession Event (#244).
+
+        name + summary + keywords + topics → 384-dim vector, or None when the
+        model is unavailable (session indexing must never depend on it).
+        """
+        from .session_indexer import compute_session_embedding
+        return compute_session_embedding(name, summary, keywords, topics)
+
     def search_sessions(self, query: str, *, agent: str | None = None,
                         topics: list[str] | None = None,
+                        after: "datetime | str | None" = None,
+                        before: "datetime | str | None" = None,
                         limit: int = 10, offset: int = 0) -> list[dict]:
-        """Search indexed agent sessions. Returns Events with metadata snippets."""
+        """Search indexed agent sessions. Returns Events with metadata snippets.
+
+        Routes through the hybrid engine (tortoise_fts_query entity_type='event'
+        kind='AgentSession'): RRF fusion of FTS (Event subject+name index),
+        vector (session embeddings computed at index time, #244) and structural
+        (eventKind) strategies. Results are ordered by relevance with startedAt
+        DESC as tiebreak.
+
+        agent/topics post-filter the candidates. after/before bound the search
+        to sessions whose ``startedAt`` falls in ``[after, before]`` (inclusive).
+        Each may be a ``datetime`` or an ISO-8601 string (``Z`` or offset
+        accepted); both are normalized to UTC ISO-8601 so the comparison
+        against stored ``startedAt`` values is valid regardless of the caller's
+        timezone. Sessions that lack a ``startedAt`` are EXCLUDED whenever a
+        bound is set.
+
+        When no semantic strategy contributed (FTS/vector unavailable — e.g.
+        embedded FalkorDBLite without embeddings, prod before #160 deploys),
+        falls back to the legacy keyword CONTAINS surface (name + keywords) so
+        the previous behavior keeps working.
+        """
         if not query or not query.strip():
             return []
         proj = self._get_proj()
+        has_bound = after is not None or before is not None
+        after_utc = _to_iso_utc(after) if after is not None else None
+        before_utc = _to_iso_utc(before) if before is not None else None
+
+        # ── Hybrid route: RRF fusion of FTS + vector + structural ──
+        # Generous candidate pool — agent/topics/temporal filters drop rows
+        # post-retrieval, so fetch beyond the caller's limit + offset.
+        candidate_limit = max(limit * 5, 50) + offset
+        hybrid = self.tortoise_fts_query(
+            query, kind="AgentSession", entity_type="event",
+            limit=candidate_limit,
+        )
+        has_semantic = any(
+            r.get("scores")
+            and (r["scores"].get("fts") is not None
+                 or r["scores"].get("vector") is not None)
+            for r in hybrid
+        )
+        if has_semantic and hybrid:
+            ids = [r["id"] for r in hybrid]
+            rows = proj.g.query(
+                "MATCH (e:Event) WHERE e.eventId IN $ids RETURN properties(e)",
+                params={"ids": ids},
+            ).result_set
+            props_by_id = {}
+            for row in rows:
+                props = dict(row[0])
+                if props.get("eventId"):
+                    props_by_id[props["eventId"]] = props
+            ranked = []
+            for r in hybrid:
+                props = props_by_id.get(r["id"])
+                if props is None:
+                    continue
+                if agent and props.get("agent") != agent:
+                    continue
+                if topics:
+                    s_topics = set(props.get("topics") or [])
+                    if not any(t in s_topics for t in topics):
+                        continue
+                if has_bound:
+                    started = props.get("startedAt")
+                    if not started:
+                        continue  # sessions without startedAt excluded when a bound is set
+                    if after_utc is not None and started < after_utc:
+                        continue
+                    if before_utc is not None and started > before_utc:
+                        continue
+                ranked.append((r["scores"].get("rrf") or 0.0, props))
+            # Relevance (RRF) desc, startedAt DESC as tiebreak (missing = last)
+            ranked.sort(
+                key=lambda item: (item[0], item[1].get("startedAt") or ""),
+                reverse=True,
+            )
+            return [props for _, props in ranked[offset:offset + limit]]
+
+        # ── Legacy keyword fallback (no FTS/vector contribution) ──
+        # Preserves the pre-#244 CONTAINS surface (name + keywords) plus the
+        # #243 temporal filters (after/before, ISO-8601 UTC normalization,
+        # startedAt IS NOT NULL exclusion when a bound is set).
         clauses = ["e.eventKind = 'AgentSession'"]
         params: dict = {"limit": max(limit * 3, 30)}
         query_lower = query.strip().lower()
@@ -3297,6 +3426,16 @@ class TortoiseSDK:
                 topic_clauses.append(f"${pk} IN e.topics")
                 params[pk] = t
             clauses.append(f"({' OR '.join(topic_clauses)})")
+        if has_bound:
+            # Explicitly drop sessions without startedAt — same outcome as
+            # null-comparison semantics, but self-documenting and robust.
+            clauses.append("e.startedAt IS NOT NULL")
+        if after is not None:
+            clauses.append("e.startedAt >= $after")
+            params["after"] = _to_iso_utc(after)
+        if before is not None:
+            clauses.append("e.startedAt <= $before")
+            params["before"] = _to_iso_utc(before)
         where = " AND ".join(clauses)
         params["offset"] = offset
         rows = proj.g.query(

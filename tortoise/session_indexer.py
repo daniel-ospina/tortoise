@@ -373,6 +373,47 @@ def extract_metadata(content: str, llm_model: str | None = "gpt-5-mini") -> dict
     return extract_keywords_from_frontmatter(content)
 
 
+# ── Session embeddings (#244) ──────────────────────────────────────
+
+
+def session_embedding_text(name: str, summary: str = "",
+                           keywords: list[str] | None = None,
+                           topics: list[str] | None = None) -> str:
+    """Compose the embedding text for an AgentSession Event.
+
+    name + summary + keywords + topics, de-duplicated (preserving order) and
+    whitespace-joined. Shared by the indexers (session_indexer CLI,
+    ingest_corpus) and graph-scripts/backfill_embeddings.py so the semantic
+    surface is identical everywhere.
+    """
+    parts: list[str] = []
+    for p in (name or "", summary or "", *(keywords or []), *(topics or [])):
+        s = str(p).strip() if p else ""
+        if s and s not in parts:
+            parts.append(s)
+    return " ".join(parts).strip()
+
+
+def compute_session_embedding(name: str, summary: str = "",
+                              keywords: list[str] | None = None,
+                              topics: list[str] | None = None) -> list[float] | None:
+    """Compute the 384-dim embedding for an AgentSession Event.
+
+    Degrades gracefully to None when the embedding model is unavailable or the
+    composed text is empty (mirrors tortoise.embeddings.compute_embedding —
+    session indexing must never depend on embeddings). Callers store the result
+    as vecf32 on the Event node.
+    """
+    text = session_embedding_text(name, summary, keywords, topics)
+    if not text:
+        return None
+    try:
+        from tortoise.embeddings import compute_embedding
+        return compute_embedding(text)
+    except Exception:
+        return None
+
+
 # ── File utilities ────────────────────────────────────────────────
 
 def compute_file_hash(file_path: str) -> str | None:
@@ -466,6 +507,15 @@ def main():
             if exists and exists[0][0].get("file_hash") == file_hash:
                 print(json.dumps({"status": "skipped", "reason": "unchanged"}))
             else:
+                # #244: compute the session embedding (name + summary + keywords
+                # + topics) and store as vecf32 — degrades to None when the
+                # model is unavailable (session indexing never depends on it).
+                embedding = compute_session_embedding(
+                    metadata.get("summary", file_path.stem),
+                    metadata.get("summary", ""),
+                    metadata.get("keywords", []),
+                    metadata.get("topics", []),
+                )
                 props = {
                     "name": metadata.get("summary", file_path.stem),
                     "eventKind": "AgentSession",
@@ -489,15 +539,17 @@ def main():
                 }
                 if exists:
                     proj.g.query(
-                        "MATCH (e:Event {eventId: $eid}) SET e += $props",
-                        params={"eid": event_id, "props": props}
+                        "MATCH (e:Event {eventId: $eid}) SET e += $props, "
+                        "e.embedding = CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE e.embedding END",
+                        params={"eid": event_id, "props": props, "embedding": embedding}
                     )
                     print(json.dumps({"status": "updated", "eventId": event_id}))
                 else:
                     props["startedAt"] = __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat()
                     proj.g.query(
-                        "CREATE (e:Event {eventId: $eid}) SET e += $props",
-                        params={"eid": event_id, "props": props}
+                        "CREATE (e:Event {eventId: $eid}) SET e += $props, "
+                        "e.embedding = CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) END",
+                        params={"eid": event_id, "props": props, "embedding": embedding}
                     )
                     print(json.dumps({"status": "ingested", "eventId": event_id}))
                 # Wire INSTANTIATES edges to issue/PR Objects (parity with ingest_corpus)
