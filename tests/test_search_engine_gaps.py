@@ -41,30 +41,44 @@ from tortoise.search_engine import (
 # os.environ, so other test files in the same session are unaffected.
 FALKORDB_AVAILABLE = False
 _WORKING_URI: str | None = None
+
+
+def _probe_falkordb(candidates: list[str | None]) -> tuple[bool, str | None]:
+    """Probe candidate URIs for a live FalkorDB, returning (available, uri).
+
+    #196: if an env-specified URI is unreachable, stop probing — do NOT
+    fall through to localhost defaults (which could be an unrelated DB).
+    """
+    _env_uri = os.environ.get("TORTOISE_DB_URI")
+    for _uri in candidates:
+        if not _uri:
+            continue
+        _proj = None
+        try:
+            from tortoise.projection import FalkorProjection
+            _proj = FalkorProjection.from_uri(_uri)
+            _proj.g.query("RETURN 1")
+            return True, _uri
+        except Exception:
+            if _uri == _env_uri and _uri:
+                # env-specified DB unreachable — don't fall through to localhost (#196)
+                break
+            continue
+        finally:
+            if _proj is not None:
+                try:
+                    _proj.close()
+                except Exception:
+                    pass
+    return False, None
+
+
 _uri_candidates = [
     os.environ.get("TORTOISE_DB_URI"),
     "docker://:falkordb@localhost:6379/tortoise_test_fts125",
     "docker://:@localhost:16379/tortoise_test_fts125",
 ]
-for _uri in _uri_candidates:
-    if not _uri:
-        continue
-    _proj = None
-    try:
-        from tortoise.projection import FalkorProjection
-        _proj = FalkorProjection.from_uri(_uri)
-        _proj.g.query("RETURN 1")
-        _WORKING_URI = _uri
-        FALKORDB_AVAILABLE = True
-        break
-    except Exception:
-        continue
-    finally:
-        if _proj is not None:
-            try:
-                _proj.close()
-            except Exception:
-                pass
+FALKORDB_AVAILABLE, _WORKING_URI = _probe_falkordb(_uri_candidates)
 
 
 def _current_uri() -> str:
@@ -145,6 +159,107 @@ class StrategyControlledGraph:
                 return MockResultSet(result_set or [])
         # Default: empty
         return MockResultSet([])
+
+
+# ── _probe_falkordb unit tests (#196) ───────────────────────────────────────
+
+
+class TestProbeFalkordb:
+    """Unit tests for _probe_falkordb — the FalkorDB availability probe.
+
+    #196: verifies that when TORTOISE_DB_URI is explicitly set but the
+    connection fails, the probe stops and does NOT fall through to
+    localhost defaults (preventing tests from mutating an unrelated DB).
+    """
+
+    def test_env_uri_reachable_returns_true(self, monkeypatch):
+        """#196: when TORTOISE_DB_URI is set and reachable, return (True, uri)."""
+        import tortoise.projection as _tp
+        original_from_uri = _tp.FalkorProjection.from_uri
+
+        good_uri = "docker://:falkordb@test-host:6379/tortoise_test"
+        monkeypatch.setenv("TORTOISE_DB_URI", good_uri)
+
+        # Mock from_uri to simulate a working connection
+        class _FakeProj:
+            class g:
+                @staticmethod
+                def query(_cypher, **_kw):
+                    return None  # RETURN 1 succeeds
+
+            @staticmethod
+            def close():
+                pass
+
+        _tp.FalkorProjection.from_uri = staticmethod(lambda uri: _FakeProj())
+        try:
+            candidates = [
+                os.environ.get("TORTOISE_DB_URI"),
+                "docker://:falkordb@localhost:6379/tortoise_test_fts125",
+                "docker://:@localhost:16379/tortoise_test_fts125",
+            ]
+            available, working_uri = _probe_falkordb(candidates)
+            assert available is True
+            assert working_uri == good_uri
+        finally:
+            _tp.FalkorProjection.from_uri = original_from_uri
+
+    def test_env_uri_unset_falls_through_to_localhost(self, monkeypatch):
+        """When TORTOISE_DB_URI is unset, localhost candidates are still probed.
+
+        Existing behaviour preserved. Since localhost may not have FalkorDB,
+        we just verify the probe doesn't crash and returns a bool.
+        """
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        candidates = [
+            None,  # os.environ.get returns None
+            "docker://:falkordb@localhost:6379/tortoise_test_fts125",
+            "docker://:@localhost:16379/tortoise_test_fts125",
+        ]
+        available, working_uri = _probe_falkordb(candidates)
+        # Either available (if a localhost FalkorDB is running) or not —
+        # the key assertion is that we don't crash and return a proper tuple
+        assert isinstance(available, bool)
+        assert working_uri is None or isinstance(working_uri, str)
+
+    def test_candidates_all_none_skips_gracefully(self):
+        """All-None candidates → (False, None) without any connection attempt."""
+        candidates = [None, None]
+        available, working_uri = _probe_falkordb(candidates)
+        assert available is False
+        assert working_uri is None
+
+    def test_env_uri_gate_matches_exact_uri_only(self, monkeypatch):
+        """#196: the break guard only fires for the exact env URI, not localhost."""
+        env_uri = "docker://:user@some-host:6380/tortoise_test"
+        monkeypatch.setenv("TORTOISE_DB_URI", env_uri)
+
+        import tortoise.projection as _tp
+        original_from_uri = _tp.FalkorProjection.from_uri
+
+        call_order: list[str] = []
+
+        def _fake_from_uri(uri: str):
+            call_order.append(uri)
+            if uri == env_uri:
+                raise ConnectionError("mock unreachable")
+            # localhost URIs should NOT be called (break fires first)
+            raise AssertionError(f"unexpected probe: {uri}")
+
+        _tp.FalkorProjection.from_uri = _fake_from_uri
+        try:
+            candidates = [
+                os.environ.get("TORTOISE_DB_URI"),
+                "docker://:falkordb@localhost:6379/tortoise_test_fts125",
+                "docker://:@localhost:16379/tortoise_test_fts125",
+            ]
+            available, working_uri = _probe_falkordb(candidates)
+            assert available is False
+            assert working_uri is None
+            # Only the env URI was attempted — localhost was never touched
+            assert call_order == [env_uri]
+        finally:
+            _tp.FalkorProjection.from_uri = original_from_uri
 
 
 # ── fallback_tfidf ──────────────────────────────────────────────────────────
