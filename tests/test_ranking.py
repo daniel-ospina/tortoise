@@ -232,33 +232,23 @@ def test_suggest_entry_points_with_graph_ranker():
 
 # ── Contestation flag + demotion (epistemic honesty) ──────────────────────
 
-def test_contested_claim_demoted_in_graph_boost():
-    """Same mean confidence: a contested claim (high posterior variance) gets
-    a LOWER graph boost than an uncontested one — the mean is less reliable
-    when competing evidence destabilizes the posterior."""
+def test_contested_claim_not_penalized_in_graph_boost():
+    """Contestation is SURFACED, not scored: a contested claim gets the SAME
+    graph boost as an uncontested one with the same confidence — ranking stays
+    about relevance + graph structure; epistemic honesty is a flag, not a
+    penalty."""
     ranker = GraphRanker()
     uncontested = ranker.graph_boost({"id": "p"}, {"confidence": 0.9, "variance": 0.0119, "degree": 0})
     contested = ranker.graph_boost({"id": "p"}, {"confidence": 0.9, "variance": 0.05, "contested": True, "degree": 0})
-    assert uncontested > contested
-    # Uncontested: 0.5·0.9 = 0.45; contested at v=0.05: 0.5·(0.9·(1−0.5·0.05/(1/12))) ≈ 0.315
-    assert uncontested == pytest.approx(0.45)
-    assert contested == pytest.approx(0.9 * (1 - 0.5 * min(1, 0.05 / (1 / 12))) * 0.5, abs=1e-4)
-
-
-def test_uncalibrated_not_treated_as_contested():
-    """A point with no persisted α/β (has_ep=False) is NOT contested — its
-    variance defaults to 1/12 but the flag stays off and no demotion applies
-    (unmeasured ≠ contested)."""
-    ranker = GraphRanker()
-    # Simulates _fetch_point_signals output for an uncalibrated point.
     uncalibrated = ranker.graph_boost({"id": "p"}, {"confidence": 0.9, "variance": 1 / 12, "contested": False, "degree": 0})
-    assert uncalibrated == pytest.approx(0.45)  # no demotion
+    # All three identical: 0.5·0.9 = 0.45.
+    assert uncontested == contested == uncalibrated == pytest.approx(0.45)
 
 
-def test_order_by_graph_demotes_contested_same_similarity():
-    """AC: identical similarity + identical persisted confidence — the
-    contested point (high variance α=β=2) ranks below the tight-posterior one
-    (α=β=10) under order_by='graph'."""
+def test_order_by_graph_surfaces_contestation_without_penalty():
+    """Contestation is surfaced as a flag on the result, never used to change
+    the rank: identical similarity + identical confidence → identical ranking,
+    with ep/graph_ranking carrying contested: True/False so the agent KNOWS."""
     import tempfile as _tf
     db_path = os.path.join(_tf.mkdtemp(prefix="tortoise_rankcontest_"), "test.db")
     sdk = TortoiseSDK(db_path)
@@ -277,10 +267,13 @@ def test_order_by_graph_demotes_contested_same_similarity():
         results = sdk.tortoise_fts_query("zebra finch migration", limit=10, order_by="graph")
         ids = [r["id"] for r in results]
         assert pa["id"] in ids and pb["id"] in ids
-        # Tight posterior (α=β=10, uncontested) ranks above contested (α=β=2).
-        assert ids.index(pa["id"]) < ids.index(pb["id"])
+        # Identical similarity + confidence + connectivity → identical graph
+        # boost; contestation must NOT change the rank (no demotion).
+        assert results[0]["graph_ranking"]["graph_boost"] == results[1]["graph_ranking"]["graph_boost"]
         by_id = {r["id"]: r for r in results}
+        # ...but the flag IS surfaced on the result for the agent to see.
         assert by_id[pa["id"]]["graph_ranking"]["contested"] is False
         assert by_id[pb["id"]]["graph_ranking"]["contested"] is True
+        assert by_id[pb["id"]]["graph_ranking"]["variance"] > by_id[pa["id"]]["graph_ranking"]["variance"]
     finally:
         sdk.close()
