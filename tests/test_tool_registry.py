@@ -66,11 +66,12 @@ class TestRegistryEquivalence:
         from tortoise.mcp_auth import HTTP_ALLOWED
 
         derived = frozenset(t.name for t in TOOL_REGISTRY if t.http_policy)
-        # Exact count: 64 tools - 5 excluded (team_create, backfill_v25,
+        # Exact count: 65 tools - 5 excluded (team_create, backfill_v25,
         # ingest_corpus, index_sessions, tortoise_dream — #329 whole-graph EP
-        # is CPU-heavy, tenant HTTP excluded) = 59
-        assert len(HTTP_ALLOWED) == 59, f"Expected 59, got {len(HTTP_ALLOWED)}"
-        assert len(derived) == 59
+        # is CPU-heavy, tenant HTTP excluded) = 60
+        # (incl. 6 onboarding tools #498/#499/#500 + 1 human-approval tool #531)
+        assert len(HTTP_ALLOWED) == 60, f"Expected 60, got {len(HTTP_ALLOWED)}"
+        assert len(derived) == 60
         assert derived == HTTP_ALLOWED, (
             f"Derived HTTP_ALLOWED mismatch:\n"
             f"  In derived but not set: {derived - HTTP_ALLOWED}\n"
@@ -78,9 +79,9 @@ class TestRegistryEquivalence:
         )
 
     def test_registry_count(self):
-        """64 tools — 58 existing + 6 onboarding tools (#498/#499/#500)."""
+        """65 tools — 58 existing + 6 onboarding (#498/#499/#500) + 1 human-approval (#531)."""
         from tortoise.tool_registry import TOOL_REGISTRY
-        assert len(TOOL_REGISTRY) == 64, f"Expected 64, got {len(TOOL_REGISTRY)}"
+        assert len(TOOL_REGISTRY) == 65, f"Expected 65, got {len(TOOL_REGISTRY)}"
         names = {t.name for t in TOOL_REGISTRY}
         onboarding = {"tortoise_onboarding_demo_create", "tortoise_onboarding_state",
                       "tortoise_onboarding_session_recording",
@@ -88,6 +89,7 @@ class TestRegistryEquivalence:
                       "tortoise_onboarding_github_status",
                       "tortoise_onboarding_github_index"}
         assert onboarding <= names, f"Missing onboarding tools: {onboarding - names}"
+        assert "tortoise_file_human_approval" in names, "Missing #531 human-approval tool"
 
     def test_no_duplicate_names(self):
         """No two registry entries share the same name."""

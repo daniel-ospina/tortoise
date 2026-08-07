@@ -12,6 +12,7 @@ import sys
 import tempfile
 
 import pytest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -1451,7 +1452,6 @@ class TestVocabEdgeValidation:
         """create_edge rejects 'instantiates' — Action dissolved in v3.0."""
         if _skip_if_no_falkor():
             return
-        import pytest
         proj = FalkorProjection(_tmp("g.db"), graph_name="test")
         try:
             proj._upsert({"id": "a", "content": "A", "context": "ctx"})
@@ -1649,5 +1649,69 @@ def test_stub_creation_bounded_at_cap(monkeypatch):
             "MATCH (o:Point {id:'op2'})-[r]->() RETURN count(r)"
         ).result_set[0][0]
         assert edges == 0, f"expected no partial edge from op2, got {edges}"
+    finally:
+        proj.close()
+
+
+def test_falkor_rebuild_all_revision_before_add():
+    """#21 regression: a PointRevised in an alphabetically-EARLIER file must be
+    applied to the point whose PointAdded lives in a LATER file. The two-pass
+    rebuild (Pass 1a creates ALL nodes before Pass 1b applies revisions) makes
+    this structurally safe — this test pins it so a future one-pass refactor
+    can't silently re-introduce lost revisions."""
+    if _skip_if_no_falkor():
+        return
+    d = tempfile.mkdtemp(prefix="tortoise_21_")
+    try:
+        # b.jsonl sorts AFTER a.jsonl → PointAdded lands in the later file.
+        log_b = EventLog(os.path.join(d, "b.jsonl"))
+        api_b = EventAPI(log_b, initiated_by="extractor", agent_id="test")
+        prov = provenance("doc.txt", [0, 10], "quote", extracted_by="test@0")
+        pid = api_b.add_point("original content", prov)
+
+        # a.jsonl sorts FIRST → its PointRevised for pid is seen before any
+        # PointAdded when files are read in sorted order.
+        log_a = EventLog(os.path.join(d, "a.jsonl"))
+        api_a = EventAPI(log_a, initiated_by="extractor", agent_id="test")
+        api_a.revise_point(pid, new_content="revised content", corrects=[])
+
+        proj = FalkorProjection(_tmp("g_rebuild_21.db"), graph_name="test")
+        try:
+            proj.rebuild_all(d)
+            r = proj.g.query(
+                "MATCH (n:Point {id:$id}) RETURN n.content",
+                params={"id": pid},
+            ).result_set
+            assert r and r[0][0] == "revised content", \
+                f"revision lost: expected 'revised content', got {r}"
+        finally:
+            proj.close()
+    finally:
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)
+def test_falkor_revise_point_wipes_stale_embedding_on_compute_failure():
+    """#19 regression: PointRevised with a raising compute_embedding must NOT
+    leave the stale embedding — the except block wipes it (embedding = None)
+    so SET overwrites the graph value instead of preserving the old vector."""
+    if _skip_if_no_falkor():
+        return
+    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    try:
+        proj.apply({"type": "PointAdded",
+                     "point": {"id": "p1", "content": "old content", "context": "ctx"}})
+        # Seed a stale embedding as if it had been computed before the failure.
+        proj.g.query(
+            "MATCH (n:Point {id:'p1'}) SET n.embedding = vecf32($emb)",
+            params={"emb": [0.1] * 384},
+        )
+        # PointRevised whose embedding recompute raises → must wipe, not keep.
+        with mock.patch("tortoise.embeddings.compute_embedding",
+                        side_effect=RuntimeError("model load failed")):
+            proj.apply({"type": "PointRevised", "id": "p1", "new_content": "new content"})
+        r = proj.g.query(
+            "MATCH (n:Point {id:'p1'}) RETURN n.content, n.embedding IS NULL"
+        ).result_set
+        assert r[0][0] == "new content"
+        assert r[0][1] is True, "stale embedding survived a failed recompute (#19)"
     finally:
         proj.close()

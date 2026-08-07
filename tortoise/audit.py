@@ -95,7 +95,10 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             severity="medium",
             node_id=str(ev_id),
             detail=f"Evidence '{ev_content}' (from operator {op_id}) has no sourceKind",
-            fix=f"tortoise_annotate_operator('{ev_id}', sourceKind='T4')",
+            # #398: Point-level sourceKind tier annotations are legacy — tier the
+            # SOURCE node instead (source-level inheritance benefits all points).
+            fix=f"tier the source backing this point via "
+                f"tortoise_set_source_tier(url, 'T0'..'T4') or create_source(url, kind, tier=...)",
         ))
 
     # ── 2. missing_sourceDate (low) ─────────────────────────────────

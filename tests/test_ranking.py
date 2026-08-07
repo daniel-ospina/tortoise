@@ -214,8 +214,66 @@ def test_suggest_entry_points_with_graph_ranker():
 
     # Without ranker — substring confidence order (identical lengths → tie).
     plain = sdk.suggest_entry_points("pricing subscription", limit=10)
-    # With ranker — persisted EP confidence breaks the tie.
+    # With ranker — persisted EP confidence breaks the tie. The embedded FTS
+    # gives zero RRF for this query (→ zero-signal fallback returns []), so
+    # mock the hybrid query deterministically with rrf > 0 to exercise the
+    # ranker path (mirrors test_fallback_confidence_scale_invariant_to_rrf).
+    sdk.tortoise_fts_query = lambda q, **kw: [
+        {"id": p_high["id"], "content": "pricing model for premium subscription tiers",
+         "point_kind": "decision", "scores": {"rrf": 0.0164}},
+        {"id": p_low["id"], "content": "subscription pricing tiers model premium",
+         "point_kind": "decision", "scores": {"rrf": 0.0082}},
+    ]
     ranked = sdk.suggest_entry_points("pricing subscription", limit=10, graph_ranker=ranker)
     ids = [r["id"] for r in ranked if r["id"] in (p_high["id"], p_low["id"])]
     assert ids.index(p_high["id"]) < ids.index(p_low["id"])
     assert any("graph_ranking" in r for r in ranked)
+
+
+# ── Contestation flag + demotion (epistemic honesty) ──────────────────────
+
+def test_contested_claim_not_penalized_in_graph_boost():
+    """Contestation is SURFACED, not scored: a contested claim gets the SAME
+    graph boost as an uncontested one with the same confidence — ranking stays
+    about relevance + graph structure; epistemic honesty is a flag, not a
+    penalty."""
+    ranker = GraphRanker()
+    uncontested = ranker.graph_boost({"id": "p"}, {"confidence": 0.9, "variance": 0.0119, "degree": 0})
+    contested = ranker.graph_boost({"id": "p"}, {"confidence": 0.9, "variance": 0.05, "contested": True, "degree": 0})
+    uncalibrated = ranker.graph_boost({"id": "p"}, {"confidence": 0.9, "variance": 1 / 12, "contested": False, "degree": 0})
+    # All three identical: 0.5·0.9 = 0.45.
+    assert uncontested == contested == uncalibrated == pytest.approx(0.45)
+
+
+def test_order_by_graph_surfaces_contestation_without_penalty():
+    """Contestation is surfaced as a flag on the result, never used to change
+    the rank: identical similarity + identical confidence → identical ranking,
+    with ep/graph_ranking carrying contested: True/False so the agent KNOWS."""
+    import tempfile as _tf
+    db_path = os.path.join(_tf.mkdtemp(prefix="tortoise_rankcontest_"), "test.db")
+    sdk = TortoiseSDK(db_path)
+    try:
+        sdk._get_proj().g.query("MATCH (n) DETACH DELETE n")
+        # Identical content → identical FTS/vector similarity.
+        pa = sdk.create_point("statement", "zebra finch migration phenology contested claim")
+        pb = sdk.create_point("statement", "zebra finch migration phenology contested claim")
+        proj = sdk._get_proj()
+        for pid, a, b in [(pa["id"], 10.0, 10.0), (pb["id"], 2.0, 2.0)]:
+            proj.g.query(
+                "MATCH (n:Point {id:$id}) SET n.confidence = 0.9, "
+                "n.ep_alpha = $a, n.ep_beta = $b",
+                params={"id": pid, "a": a, "b": b},
+            )
+        results = sdk.tortoise_fts_query("zebra finch migration", limit=10, order_by="graph")
+        ids = [r["id"] for r in results]
+        assert pa["id"] in ids and pb["id"] in ids
+        # Identical similarity + confidence + connectivity → identical graph
+        # boost; contestation must NOT change the rank (no demotion).
+        assert results[0]["graph_ranking"]["graph_boost"] == results[1]["graph_ranking"]["graph_boost"]
+        by_id = {r["id"]: r for r in results}
+        # ...but the flag IS surfaced on the result for the agent to see.
+        assert by_id[pa["id"]]["graph_ranking"]["contested"] is False
+        assert by_id[pb["id"]]["graph_ranking"]["contested"] is True
+        assert by_id[pb["id"]]["graph_ranking"]["variance"] > by_id[pa["id"]]["graph_ranking"]["variance"]
+    finally:
+        sdk.close()

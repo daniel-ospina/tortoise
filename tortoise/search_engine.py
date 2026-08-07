@@ -33,7 +33,20 @@ class EpEvidence:
 class EpBreakdown:
     confidence_mean: float = 0.0
     evidence: EpEvidence | None = None
+    # Structural ratio nand/(impl+nand) — kept for backward compat. It answers
+    # "how much of the incoming evidence is contradiction" but is NOT a
+    # posterior-stability measure: a claim with 1 IMPL + 1 NAND that EP
+    # converged tightly still reads 0.5.
     contention: float = 0.0
+    # True EP posterior variance v = αβ/((α+β)²(α+β+1)) from the persisted
+    # ep_alpha/ep_beta — the epistemically correct "is this claim destabilized"
+    # signal (same formula as TortoiseEP.get_contested_claims).
+    variance: float = 0.0
+    # variance > CONTESTED_VARIANCE_THRESHOLD → the claim's posterior is
+    # contested: competing evidence is actively destabilizing it. Surface this
+    # as a first-class flag so agents treat the claim as disputed, not merely
+    # high/low probability.
+    contested: bool = False
 
     def __post_init__(self):
         if self.evidence is None:
@@ -113,7 +126,9 @@ def run_fts_query(
     Returns n.url for source (canonical key, #448), n.eventId for event,
     n.id for all other entity types.
 
-    Note: timeout_ms is checked AFTER the query completes (post-hoc).
+    Note: timeout_ms is a POST-HOC latency warning — it no longer discards
+    results (a slow-but-successful query keeps its rows, #561). Real hangs are
+    bounded by the connection-level socket_timeout (FalkorProjection).
     A slow query still consumes DB resources — this is a soft guard,
     not a connection-level kill. For connection-level timeout, set it
     at the FalkorDB driver level. (#18)
@@ -140,7 +155,9 @@ def run_fts_query(
             elapsed = (time.monotonic() - start) * 1000
             if elapsed > timeout_ms:
                 logger.warning("FTS query exceeded timeout: %.0fms > %dms", elapsed, timeout_ms)
-                return []
+                # #561: results we already waited for are returned, not
+                # discarded — the connection-level socket_timeout bounds real
+                # hangs.
             return [(row[0], float(row[1])) for row in rows]
         except Exception as e:
             logger.warning("Operator FTS query failed: %s", e)
@@ -170,7 +187,7 @@ def run_fts_query(
         elapsed = (time.monotonic() - start) * 1000
         if elapsed > timeout_ms:
             logger.warning("FTS query exceeded timeout: %.0fms > %dms", elapsed, timeout_ms)
-            return []
+            # #561: latency warning only — return the results, don't discard.
         return [(row[0], float(row[1])) for row in rows]
     except Exception as e:
         msg = str(e).lower()
@@ -202,7 +219,9 @@ def run_vector_query(
     Operators are Points with is_operator=true — they query the Point label.
     (#172)
 
-    Note: timeout_ms is checked AFTER the query completes (post-hoc).
+    Note: timeout_ms is a POST-HOC latency warning — it no longer discards
+    results (a slow-but-successful query keeps its rows, #561). Real hangs are
+    bounded by the connection-level socket_timeout (FalkorProjection).
     A slow query still consumes DB resources — this is a soft guard,
     not a connection-level kill. (#18)
 
@@ -242,7 +261,7 @@ def run_vector_query(
             elapsed = (time.monotonic() - start) * 1000
             if elapsed > timeout_ms:
                 logger.warning("Vector query exceeded timeout: %.0fms > %dms", elapsed, timeout_ms)
-                return []
+                # #561: latency warning only — continue with the results.
             # Index results are ranked by similarity; assign rank-based scores.
             # RRF fusion uses rank not absolute scores; single-strategy mode
             # gets reasonable descending ordering.
@@ -281,7 +300,7 @@ def run_vector_query(
         elapsed = (time.monotonic() - start) * 1000
         if elapsed > timeout_ms:
             logger.warning("Vector query exceeded timeout: %.0fms > %dms", elapsed, timeout_ms)
-            return []
+            # #561: latency warning only — return the results, don't discard.
         return [(row[0], float(row[1])) for row in rows]
     except Exception as e:
         msg = str(e).lower()
@@ -468,11 +487,30 @@ def degradation_chain(
 
 # ── EP annotation ────────────────────────────────────────────────────────────
 
+# Variance threshold above which a claim's posterior is considered contested.
+# Must match TortoiseEP.get_contested_claims (tortoise/ep.py).
+CONTESTED_VARIANCE_THRESHOLD = 0.04
+
+
+def _beta_variance(alpha: float, beta: float) -> float:
+    """Variance of the Beta(α, β) posterior: αβ/((α+β)²(α+β+1)).
+
+    Max is 1/12 ≈ 0.0833 at α=β=1 (uninformative prior). Same formula as
+    TortoiseEP.get_contested_claims.
+    """
+    s = alpha + beta
+    if s <= 0:
+        return 0.0
+    return (alpha * beta) / (s * s * (s + 1))
+
+
 def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
     """Fetch EP confidence breakdown for a batch of Point IDs.
 
     Single Cypher query — NOT N+1. Returns EpBreakdown per Point ID.
     Points with no EP data get EpBreakdown with confidence_mean=0.0, contention=0.0.
+    variance/contested are computed from the PERSISTED ep_alpha/ep_beta
+    (posterior stability), not from edge ratios.
     """
     if not point_ids:
         return {}
@@ -489,19 +527,27 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
             "  CASE WHEN impl_count + nand_count > 0 "
             "    THEN toFloat(nand_count) / (impl_count + nand_count) "
             "    ELSE 0.0 "
-            "  END AS contention "
+            "  END AS contention, "
+            "  coalesce(n.ep_alpha, 1.0) AS alpha, coalesce(n.ep_beta, 1.0) AS beta, "
+            "  n.ep_alpha IS NOT NULL AS has_ep "
         )
         rows = graph.query(cypher, params={"ids": point_ids}).result_set
 
         breakdowns: dict[str, EpBreakdown] = {}
         for row in rows:
-            pid, impl, nand, contention = row[0], int(row[1]), int(row[2]), float(row[3])
+            pid, impl, nand, contention, alpha, beta, has_ep = row[0], int(row[1]), int(row[2]), float(row[3]), float(row[4]), float(row[5]), row[6]
             total = impl + nand
             confidence_mean = impl / total if total > 0 else 0.0
+            variance = _beta_variance(alpha, beta)
             breakdowns[pid] = EpBreakdown(
                 confidence_mean=confidence_mean,
                 evidence=EpEvidence(impl_count=impl, nand_count=nand, total=total),
                 contention=contention,
+                variance=round(variance, 6),
+                # Contested only when EP actually ran: an uncalibrated point
+                # (no persisted α/β → defaults to 1/1 → v=1/12) is NOT
+                # contested, it's unmeasured.
+                contested=bool(has_ep) and variance > CONTESTED_VARIANCE_THRESHOLD,
             )
 
         # Fill in defaults for IDs with no edges

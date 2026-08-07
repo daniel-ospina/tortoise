@@ -6,7 +6,7 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastmcp import FastMCP
 from mcp.types import ToolAnnotations
@@ -461,8 +461,23 @@ def tortoise_search(query: str | None = None, kind: str | None = None,
     Full-scan mode: omit query, set kind → all Points of kind.
     Best-match mode: provide query → RRF fusion of FTS + vector + structural.
 
-    Point results annotated with EP breakdown (confidence_mean + evidence + contention).
+    Point results annotated with EP breakdown (confidence_mean + variance + contested + contention).
     min_confidence defaults to 0.0 (no filter).
+
+    order_by (#25, #560):
+      - 'relevance' (default): pure RRF fusion order (FTS + vector + structural).
+      - 'confidence': sort by the PERSISTED EP confidence (n.confidence), not the
+        structural edge ratio.
+      - 'graph': graph-informed rerank — weighted fusion of similarity +
+        persisted EP confidence + operator connectivity + 30-day recency decay
+        (tortoise.ranking.GraphRanker). Results annotated with a
+        'graph_ranking' breakdown {similarity, graph_boost, recency_boost,
+        final_score, variance, contested}.
+
+    Contestation is surfaced, never scored: contested claims carry
+    ep.contested=true + ep.variance (real EP posterior variance from persisted
+    α/β) but are ranked exactly like any other claim with the same confidence
+    (#580/#583).
 
     Note: threshold default changed from 0.3 (Phase 0 semantic search) to 0.0.
     RRF scores are rank-based (0.01-0.05 range typical), not cosine similarity (0-1).
@@ -618,6 +633,30 @@ def tortoise_file_decision(options: Any, evidence: Any,
         return {"error": f"file_decision evidence exceeds the cap ({MAX_FILE_DECISION_EVIDENCE})",
                 "code": ERR_QUOTA}
     return _safe(_quota_gated(_get_team_sdk().file_decision, "points"), options, evidence, choice)
+
+
+def tortoise_file_human_approval(approver_id: str, artifact_id: str,
+                                 point_ids: Any,
+                                 decision_content: str | None = None) -> dict:
+    """File a human approval of a planning artifact to the graph (#531).
+
+    Records an Event (eventKind: humanApproval) with full provenance
+    (approver, artifact, approved claims), creates a decision Point
+    (pointKind: humanApproval) that seeds grounding and carries an EP
+    evidence prior, and fans out unidirectional IMPL edges (label
+    approvedBy) from the approval Point to the approved claim Points so
+    dependent claims strengthen.
+
+    approver_id: Subject id of the human approving
+    artifact_id: Object/Document id of the artifact being approved
+    point_ids: claim Point ids being approved
+    decision_content: optional content override for the decision Point
+
+    Returns {event_id, decision_point_id, impl_operator_ids, confidence_delta}.
+    """
+    point_ids = _parse(point_ids)
+    return _safe(_get_team_sdk().file_human_approval, approver_id, artifact_id,
+                 point_ids, decision_content)
 
 
 def tortoise_delete_point(id: str) -> dict:
@@ -957,14 +996,60 @@ def tortoise_create_document(title: str, documentKind: str, props: Any = None) -
     props = _parse(props)
     return _safe(_quota_gated(_get_team_sdk().create_document, "points"), title, documentKind, **(props or {}))
 
-def tortoise_create_source(url: str, sourceKind: str, props: Any = None) -> dict:
+@mcp.tool(annotations=ToolAnnotations(idempotentHint=True))
+def tortoise_create_source(url: str, sourceKind: str, tier: str | None = None,
+                           sourceDate: str | None = None, props: Any = None) -> dict:
     """Create a Source node for provenance (document, web, db, etc.).
 
-    Sources track content origin — url is the permalink key.
-    Points link to Sources via extractedFrom edge (Ontology v2.5).
+    Sources track content origin — url is the permalink key. Points link to
+    Sources via extractedFrom edge (Ontology v2.5). ``tier`` (T0-T4) stores the
+    credibility tier on ``credibilityTier`` (dual-write with tier-form
+    sourceKind); ``sourceDate`` is the evidence-age clock for recency decay.
     """
-    props = _parse(props)
-    return _safe(_quota_gated(_get_team_sdk().create_source, "points"), url, sourceKind, **(props or {}))
+    props = _parse(props) or {}
+    # tier/sourceDate are first-class kwargs (#398) — pop from props if a legacy
+    # caller passed them there (kwarg wins; avoids TypeError on splat).
+    props.pop("tier", None)
+    props.pop("sourceDate", None)
+    return _safe(_quota_gated(_get_team_sdk().create_source, "points"), url, sourceKind,
+                 tier=tier, sourceDate=sourceDate, **props)
+
+
+@mcp.tool()
+def tortoise_get_source_reliability(url: str) -> dict:
+    """Derive a Source's reliability (0-1) — query-time, cache-consistency-checked.
+
+    Reliability is the mean of the same modulated prior EP uses as base weight
+    (tier + recency decay + reputation-weighted agent assessments). Untiered +
+    unassessed → None. NOTE: refreshes the documented reliability cache on the
+    Source node (write-through projection), so this tool is not read-only.
+    """
+    return _safe(_get_team_sdk().get_source_reliability, url)
+
+
+@mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
+def tortoise_assess_source(url: str, assessor: str, score: float,
+                           rationale: str) -> dict:
+    """Record an agent's assessment of a Source (0-1 score + rationale).
+
+    Creates a pointKind='assessment' Statement Point (ontology §2 — evaluations
+    are Points, not edges). Latest assessment per (url, assessor) wins; older
+    are marked outdated. Weighted by the assessor's reputation snapshot
+    (compute_reputation at write time). Feeds the source's reliability factor
+    (clamped [0.1, 2.0]).
+    """
+    return _safe(_get_team_sdk().assess_source, url, assessor, score, rationale)
+
+
+@mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
+def tortoise_set_source_tier(url: str, tier: str) -> dict:
+    """Set (or change) a Source's credibility tier (T0-T4). Non-destructive.
+
+    Writes credibilityTier only — never overwrites sourceKind type strings.
+    Dirty-marks the inheritance gate + clears the reliability cache so EP and
+    reliability reads reflect the new tier promptly.
+    """
+    return _safe(_get_team_sdk().set_source_tier, url, tier)
 
 def tortoise_get_entity(id: str) -> dict:
     """Get any entity by ID, eventId, or url."""
@@ -1150,13 +1235,24 @@ def tortoise_onboarding_github_index(org: str, repo: str | None = None) -> dict:
 
 def create_http_app(*, allowed_origins: list[str] | None = None,
                     rate_limit: int = 100,
-                    _registry_sdk=None) -> Any:
+                    _registry_sdk=None,
+                    auth_mode: Literal["tenant", "static", "none"] = "tenant",
+                    api_key: str | None = None,
+                    tool_group: str | None = None) -> Any:
     """Configured Streamable HTTP app for the hosted platform (#236).
 
     Mounted at /mcp on the existing FastAPI app. Auth + rate limiting +
     security headers + body-size caps live INSIDE this app's middleware
     stack — the parent FastAPI app.mount() does NOT propagate its own
     middleware to mounted sub-apps (verified Starlette behavior).
+
+    auth_mode (additive, default "tenant" = hosted byte-identical):
+      "tenant" → TeamResolutionMiddleware (registry Bearer tt_ keys)
+      "static" → StaticKeyMiddleware (single TORTOISE_API_KEY, self-host LAN)
+      "none"   → no auth middleware (localhost-bound self-host eval)
+
+    tool_group: optional curation-group filter (#523) — role-scoped server
+      (e.g. "memory" exposes only memory tools to the agent).
 
     path="/": the app is mounted at /mcp on the parent FastAPI app, which
     strips the mount prefix before dispatching to this sub-app — so routes
@@ -1166,20 +1262,51 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
     """
     from starlette.middleware import Middleware
     from starlette.responses import JSONResponse
-    from tortoise.mcp_auth import (TeamResolutionMiddleware,
-                                   MCPRateLimitMiddleware,
+    from tortoise.mcp_auth import (MCPRateLimitMiddleware,
                                    SecurityHeadersMiddleware,
                                    RequestBodySizeMiddleware)
     from fastmcp.server.transforms import Transform
 
+    # auth_mode middleware selection. TeamResolutionMiddleware (tenant mode) is
+    # imported here but only ever INSTANTIATED in the tenant branch — static/none
+    # modes never construct it, and hosted_api is only ever lazily imported when
+    # a tenant token is verified (mcp_auth delegates via function-level import).
+    auth_mw = None
+    transport_mw = None
+    group_mw = None
+    if tool_group:
+        from tortoise.mcp_auth import ToolGroupMiddleware
+        group_mw = Middleware(ToolGroupMiddleware, tool_group=tool_group)
+    if auth_mode == "tenant":
+        from tortoise.mcp_auth import TeamResolutionMiddleware
+        auth_mw = Middleware(TeamResolutionMiddleware, registry_sdk=_registry_sdk)
+    elif auth_mode == "static":
+        from tortoise.mcp_auth import StaticKeyMiddleware
+        auth_mw = Middleware(StaticKeyMiddleware, api_key=api_key)
+        from tortoise.mcp_auth import TransportModeMiddleware
+        transport_mw = Middleware(TransportModeMiddleware)
+    elif auth_mode == "none":
+        from tortoise.mcp_auth import TransportModeMiddleware
+        transport_mw = Middleware(TransportModeMiddleware)
+
     class _HTTPToolFilter(Transform):
-        """Hide HTTP-excluded tools from tools/list (D4 — registration-level).
+        """Hide HTTP-excluded tools from tools/list (D4) + optional curation
+        group scoping (#523).
 
         The excluded tools (team_create/backfill_v25/ingest_corpus) remain
         registered on the shared module-level mcp instance for stdio, but are
         filtered out of the HTTP tool listing so tenants can't discover them.
+        When tool_group is set, only that group's tools are listed — role-
+        scoped servers keep the agent's tool-selection surface under ~20.
         """
         async def list_tools(self, tools):
+            from tortoise.mcp_auth import _tool_group
+            group = _tool_group.get()
+            if group:
+                from tortoise.tool_registry import GROUP_BY_NAME
+                return [t for t in tools
+                        if t.name in HTTP_ALLOWED
+                        and GROUP_BY_NAME.get(t.name) == group]
             return [t for t in tools if t.name in HTTP_ALLOWED]
 
     # Guard against transform accumulation: create_http_app() is called at
@@ -1196,16 +1323,32 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
                              "transport": "streamable-http",
                              "endpoint": "/mcp"})
 
+    middleware = [
+        Middleware(SecurityHeadersMiddleware),
+        Middleware(RequestBodySizeMiddleware),
+    ]
+    if auth_mw is not None and auth_mode == "tenant":
+        # Original position: tenant auth sits between body-size and rate-limit
+        # (byte-identical to pre-auth_mode hosted stack).
+        middleware.append(auth_mw)
+    middleware.append(Middleware(MCPRateLimitMiddleware, max_per_minute=rate_limit))
+    if auth_mw is not None and auth_mode != "tenant":
+        # Static mode: rate limiter sits OUTSIDE auth so failed-key attempts are
+        # throttled (code-review P1 — unlimited brute force on a user-chosen key).
+        middleware.append(auth_mw)
+    if transport_mw is not None:
+        # Innermost — runs after auth validated, right before the app:
+        # initializes the transport-mode ContextVars selfhost tools need.
+        middleware.append(transport_mw)
+    if group_mw is not None:
+        # Sets the curation-group ContextVar for the tools/list transform.
+        middleware.append(group_mw)
+
     return mcp.http_app(
         transport="streamable-http",
         stateless_http=True,
         host_origin_protection=True,
         allowed_origins=allowed_origins or [],
         path="/",
-        middleware=[
-            Middleware(SecurityHeadersMiddleware),
-            Middleware(RequestBodySizeMiddleware),
-            Middleware(TeamResolutionMiddleware, registry_sdk=_registry_sdk),
-            Middleware(MCPRateLimitMiddleware, max_per_minute=rate_limit),
-        ],
+        middleware=middleware,
     )

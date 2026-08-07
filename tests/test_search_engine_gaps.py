@@ -306,7 +306,7 @@ class TestFallbackTfidf:
         assert result[0]["scores"]["rrf"] == 0.9
         assert result[0]["scores"]["fts"] is None
         assert result[1]["id"] == "p2"
-        assert result[1]["context"] is None
+        assert "context" not in result[1]  # context field removed (#49)
         assert result[1]["point_kind"] == "question"
 
     def test_search_points_raises_returns_empty(self):
@@ -415,8 +415,8 @@ class TestDegradationChain:
             graph, query="test", kind="stmt", query_vec=None, strategies=only_struct,
         )
 
-        # kind="stmt" with context=None → score=0.5 (kind only)
-        assert result == {"structural": [("s1", 0.5)]}
+        # kind="stmt" → score=1.0 (exact kind match)
+        assert result == {"structural": [("s1", 1.0)]}
         # Verify only structural was queried
         assert len(graph.query_calls) == 1
         assert "pointKind" in graph.query_calls[0][0]
@@ -655,23 +655,25 @@ class TestRunVectorQuery:
 
     # ── Timeout ──────────────────────────────────────────────────────
 
-    def test_brute_force_timeout_returns_empty(self):
-        """Brute-force query exceeds timeout → []."""
+    def test_brute_force_timeout_logs_but_returns_results(self):
+        """#561: brute-force query exceeding timeout_ms returns its results
+        (latency warning only — discarding rows we already waited for threw
+        away good data; real hangs are bounded by socket_timeout)."""
         graph = SimpleMockGraph(result_set=[("a", 0.9)])
 
         with mock.patch("time.monotonic", side_effect=[0.0, 2.0]):
             result = run_vector_query(graph, self.QUERY_VEC, timeout_ms=500, is_embedded=True)
 
-        assert result == []
+        assert result == [("a", 0.9)]
 
-    def test_hnsw_timeout_returns_empty(self):
-        """HNSW query exceeds timeout → [] (no brute-force fallback on timeout)."""
+    def test_hnsw_timeout_logs_but_returns_results(self):
+        """#561: HNSW query exceeding timeout_ms returns its results."""
         graph = SimpleMockGraph(result_set=[("a",)])
 
         with mock.patch("time.monotonic", side_effect=[0.0, 2.0]):
             result = run_vector_query(graph, self.QUERY_VEC, timeout_ms=500, is_embedded=False)
 
-        assert result == []
+        assert result == [("a", 1.0)]
 
     # ── Scoring ──────────────────────────────────────────────────────
 
@@ -754,14 +756,15 @@ class TestRunFtsQuery:
         assert result[1] == ("p2", 0.80)
         assert result[2] == ("p3", 0.60)
 
-    def test_fts_query_timeout_returns_empty(self):
-        """Query exceeds timeout_ms → [] (post-hoc)."""
+    def test_fts_query_timeout_logs_but_returns_results(self):
+        """#561: query exceeding timeout_ms returns its results (latency
+        warning only, not a discard)."""
         graph = SimpleMockGraph(result_set=[("p1", 0.9)])
 
         with mock.patch("time.monotonic", side_effect=[0.0, 2.0]):
             result = run_fts_query(graph, "test", timeout_ms=500)
 
-        assert result == []
+        assert result == [("p1", 0.9)]
 
     def test_entity_type_event_uses_eventid(self):
         """entity_type='event' → Event label + eventId field."""
@@ -858,13 +861,15 @@ class TestRunStructuralQuery:
         assert result[0][1] == 1.0
         assert result[1][1] == 1.0
 
-    def test_kind_only_gives_half_score(self):
-        """Only kind filter → score=0.5."""
+    def test_kind_match_scores_exact(self):
+        """Kind filter → score=1.0 (exact match; structural runs only with a
+        kind — the no-kind broad-scan 0.5 branch is unreachable, the query
+        returns [] when no conditions exist)."""
         graph = SimpleMockGraph(result_set=[("p1",)])
 
         result = run_structural_query(graph, kind="decision")
 
-        assert result[0][1] == 0.5
+        assert result[0][1] == 1.0
 
     def test_no_kind_returns_empty(self):
         """P2 #49: context removed — no kind → [] (no filters to apply)."""
@@ -1009,8 +1014,8 @@ class TestCrossCutting:
             strategies={"fts": False, "vector": False, "structural": True},
         )
 
-        # kind="stmt" with context=None → score=0.5
-        assert result == {"structural": [("p1", 0.5)]}
+        # kind="stmt" → score=1.0 (exact kind match)
+        assert result == {"structural": [("p1", 1.0)]}
 
 
 # ── get_relationships ──────────────────────────────────────────────────────
@@ -1346,3 +1351,50 @@ class TestEntityTypeValidation:
         graph = SimpleMockGraph(result_set=[("p1",)])
         for et in ("point", "event", "subject", "document", "object", "operator", "source"):
             run_structural_query(graph, kind=None, entity_type=et)
+
+# ── EP variance / contestation (#contested-flag) ────────────────────────────
+
+class TestAnnotateEpContestation:
+    def test_variance_and_contested_from_persisted_alpha_beta(self):
+        """annotate_ep_batch computes the TRUE EP posterior variance from
+        persisted ep_alpha/ep_beta (not the structural nand-ratio) and flags
+        contested claims — but only when EP actually ran."""
+        from tortoise.search_engine import annotate_ep_batch, _beta_variance
+        graph = SimpleMockGraph(result_set=[
+            # heavily contested: α=β=2 → v = 4/(16·5) = 0.05 > 0.04
+            ("c1", 2, 2, 0.5, 2.0, 2.0, True),
+            # tight posterior: α=β=10 → v ≈ 0.0119 < 0.04
+            ("c2", 2, 0, 0.0, 10.0, 10.0, True),
+            # uncalibrated (no persisted α/β): defaults 1/1 → v = 1/12, but
+            # has_ep=False → NOT contested (unmeasured ≠ contested)
+            ("c3", 0, 0, 0.0, 1.0, 1.0, False),
+        ])
+        out = annotate_ep_batch(graph, ["c1", "c2", "c3"])
+
+        assert out["c1"].variance == round(_beta_variance(2.0, 2.0), 6) == 0.05
+        assert out["c1"].contested is True
+        # structural ratio is still reported separately (backward compat)
+        assert out["c1"].contention == 0.5
+
+        assert out["c2"].variance == round(_beta_variance(10.0, 10.0), 6)
+        assert out["c2"].contested is False
+
+        # uncalibrated: variance math is computed but the flag stays off
+        assert out["c3"].variance == round(1 / 12, 6)
+        assert out["c3"].contested is False
+
+    def test_search_result_dict_exposes_variance_and_contested(self):
+        """SearchResult.to_dict() surfaces ep.variance + ep.contested so
+        agents get a first-class 'this claim is contested' flag."""
+        from tortoise.search_engine import SearchResult, SearchScores, EpBreakdown, EpEvidence
+        r = SearchResult(
+            id="p1", content="x", point_kind="statement",
+            scores=SearchScores(rrf=0.03),
+            ep=EpBreakdown(confidence_mean=0.6,
+                           evidence=EpEvidence(impl_count=2, nand_count=2, total=4),
+                           contention=0.5, variance=0.05, contested=True),
+        )
+        d = r.to_dict()
+        assert d["ep"]["variance"] == 0.05
+        assert d["ep"]["contested"] is True
+        assert d["ep"]["contention"] == 0.5  # structural ratio still present

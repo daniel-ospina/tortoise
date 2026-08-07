@@ -11,7 +11,8 @@ class _GroundingMixin:
         """Solve (I - lam*M)g = a and write n.grounding on every :Point.
 
         M is the row-normalized adjacency from :IMPL and :NAND edges (symmetric).
-        a_i = 1.0 for resolution-event Points, 0 otherwise.
+        a_i = 1.0 for resolution-event / resolution-vector / humanApproval Points,
+        0 otherwise.
 
         Returns {point_id: grounding_value}."""
         # 1. Read all Point IDs → index mapping
@@ -51,12 +52,13 @@ class _GroundingMixin:
         ).tocsr()
         M = D_inv @ A
 
-        # 4. Activity vector a from resolution events + resolution vectors.
-        #    Exclude operator points — they propagate, they don't originate.
+        # 4. Activity vector a from resolution events, resolution vectors, and
+        #    human approvals (#531). Exclude operator points — they propagate,
+        #    they don't originate.
         #    ponytail: uniform activity (no timestamps to EWMA over); add
         #    EWMA decay (alpha=0.3) when resolution events carry timestamps.
         res = self.g.query(
-            "MATCH (n:Point) WHERE n.pointKind IN ['resolution-event','resolution-vector'] "
+            "MATCH (n:Point) WHERE n.pointKind IN ['resolution-event','resolution-vector','humanApproval'] "
             "AND (n.is_operator IS NULL OR n.is_operator = false) RETURN n.id"
         ).result_set
         a = np.zeros(n)

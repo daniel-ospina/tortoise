@@ -1,18 +1,29 @@
 ---
-title: "Tortoise — Canonical Ontology v3.1"
+title: "Tortoise — Canonical Ontology v3.2"
 type: data
 domain: data
 status: live
 created: 2026-08-05
-updated: 2026-08-06
+updated: 2026-08-07
 ownedBy: epistemic-team
 doc_status: live
 ---
 
-# Tortoise — Canonical Ontology v3.1
+# Tortoise — Canonical Ontology v3.2
 
 > **Status:** LIVE — canonical. Co-located with the code it governs (tortoise repo).
 > **Supersedes:** ONTOLOGY_v2.5.md (eldato repo, deprecated).
+>
+> **Changelog v3.2 (2026-08-07, issue #398 — Source credibility):**
+> - §4.6/§3.4: Source `sourceKind` clarified — it is the extensible source TYPE
+>   vocabulary (connectors write `github_issue`, `slack_message`, `linear_card`);
+>   the T0–T4 credibility TIER is carried by `credibilityTier` (the property the
+>   inheritance adapter reads). Tier-form values written into `sourceKind`
+>   (`create_source(url, "T0")`) mirror to `credibilityTier` (dual-write).
+> - §4.6: Source gains `reliability`/`reliabilityComponents`/`reliability_derived_at`
+>   (documented derivation cache — see §11) and `sourceDate` (evidence-age clock).
+> - §5: pointKind vocabulary gains `assessment` (agent source evaluations).
+> - §10: recency-modulation decision log (per-field/per-sourceType decay deferred).
 > **Convention:** camelCase throughout. `kind` = classification tag on an entity. `predicate` = named edge between entities.
 
 ---
@@ -97,7 +108,7 @@ Per-type edges (chosen over single polymorphic edge — FalkorDB matrix-per-type
 |-----------|-----------|-----------|-------------|--------------------|---------|
 | `references` | Source → Entity | unidirectional | 1→many | — | The source document links to / references this entity. Wired in the ingest path — `_upsert_document` links `(Source {url:doc_id})-[:references]->(Document {id:doc_id})` (#205). |
 
-`(Point)-[:extractedFrom]->(Source)-[:references]->(Entity)` — layered provenance. Source carries `sourceKind` (T0-T4 credibility tier).
+`(Point)-[:extractedFrom]->(Source)-[:references]->(Entity)` — layered provenance. Source carries `sourceKind` (extensible source TYPE vocabulary, e.g. `github_issue`, `slack_message`, `document`) and `credibilityTier` (T0-T4 credibility tier — see §4.6, #398).
 
 ### §3.5 Subject → Event → Object (Procedural)
 
@@ -139,6 +150,16 @@ Per-type edges (chosen over single polymorphic edge — FalkorDB matrix-per-type
 | `uses` | Event → Object | unidirectional | N-ary | `prov:used` | Input consumed |
 | `nextEvent` | Event → Event | unidirectional | 1→1 | — | Sequencing (Graphiti NextEpisode equivalent) — planned |
 | `op: IMPL/NAND` | Event → Point | default bidirectional; optional unidirectional | N-ary | Epistemic | Outcome influence on belief (epistemic) |
+
+> **#531 — canonical Event→Point pattern (`humanApproval`):** a human approval of a planning artifact is recorded as an Event (`eventKind: humanApproval`) + a decision Point (`pointKind: humanApproval`). The Event carries occurrence provenance (approver `performs`, artifact `uses`, claim `aboutPoint`, decision `produces`); the decision Point is a live epistemic claim that seeds the grounding a-vector and receives an EP evidence prior `Beta(10,1)` so dependent claims strengthen. Fan-out is `-[:IMPL {direction: "unidirectional", label: "approvedBy"}]->` per approved claim — deliberately unidirectional so claim weakness never back-propagates into the approval. No stored `approved` status on Objects — approval is derived from the event stream at query time. Worked example (`file_human_approval`, #531):
+>
+> ```
+> (:Subject "Daniel")-[:performs]->(:Event {eventKind:"humanApproval", startedAt:T})
+>   (:Event)-[:uses]->(:Document "Customer Profile CP-001")
+>   (:Event)-[:aboutPoint]->(:Point "CP-001 targets SMB segment")
+>   (:Event)-[:produces]->(:Point {pointKind:"humanApproval", content:"Approved: CP-001"})
+> (:Point "Approved: CP-001")-[:IMPL {direction:unidirectional, label:"approvedBy"}]-> approved claim Points
+> ```
 
 ### §3.9 Valid Predicate Vocabulary (code)
 
@@ -247,12 +268,17 @@ Epistemic edges (operators): `IMPL`, `NAND` (+ semantic label). About edges: `ab
 | Field | Type | Required | ISO/PROV/DC | Impl | Meaning |
 |-------|------|----------|-------------|------|---------|
 | `url` | string | ✅ | `dc:source` / `pav:retrievedFrom` | ✅ | Permalink back to original |
-| `sourceKind` | string | ✅ | — | ✅ | T0-T4 credibility tier |
+| `sourceKind` | string | ✅ | — | ✅ | Extensible source TYPE vocabulary (github_issue, slack_message, linear_card, document...). Tier-form values (T0-T4) mirror to `credibilityTier` (dual-write, #398) |
+| `credibilityTier` | string | — | — | ✅ | T0-T4 credibility tier — the property the inheritance adapter reads (v3.2) |
 | `contentHash` | string | ✅ | `premis:messageDigest` | ✅ | Idempotency anchor — skip re-extraction if unchanged |
 | `title` | string | — | `dc:title` | ⚠️ | Human-readable label. Defaults to url |
 | `ingestedAt` | ISO8601 | ✅ | `pav:importedOn` | ✅ | When Tortoise first saw this source |
 | `updatedAt` | ISO8601 | — | `dc:modified` | ✅ | Last modified (set ON MATCH by `_upsert_source`) |
 | `externalId` | string | — | `dc:identifier` (external) | ⚠️ | System-of-record ID (Slack ts, GitHub issue #) |
+| `sourceDate` | ISO8601 | — | `dc:date` | ⚠️ | Evidence-age clock for recency decay (falls back to `ingestedAt` — the pipeline-arrival proxy, #398) |
+| `reliability` | float 0..1 | — | — | ⚠️ | DERIVED query-time projection (mean of the modulated Beta prior) — documented cache, never authoritative (v3.2, #398) |
+| `reliabilityComponents` | JSON | — | — | ⚠️ | Cache metadata: tier, decay, factor, assessment_count, derivation time (#398) |
+| `reliability_derived_at` | ISO8601 | — | — | ⚠️ | Cache freshness stamp (#398) |
 
 ### §4.7 Cross-Entity Field Map
 
@@ -278,7 +304,8 @@ Epistemic edges (operators): `IMPL`, `NAND` (+ semantic label). About edges: `ab
 ### Point Kind Vocabulary (core)
 
 ```
-statement, decision, vision, strategy, plan, goal, target, observation, hypothesis
+statement, decision, vision, strategy, plan, goal, target, observation, hypothesis,
+humanApproval   # #531: decision Point for a filed human approval
 ```
 
 ### Object Kind Vocabulary (core)
@@ -291,7 +318,7 @@ Project, WorkItem, document, tag, user, skill, tool, agent, workflow, agreement,
 
 ```
 meeting, decision, experiment, deployment, review, friction, extraction,
-documentCreated, roleCreated, pointAdded, sessionCaptured
+documentCreated, roleCreated, pointAdded, sessionCaptured, humanApproval  # #531
 ```
 
 ### Document Kind Vocabulary (core)
@@ -307,11 +334,19 @@ meetingNotes, experimentResults, evidenceLog, handoff, transcript, roadmap, brie
 organization, team, role, legalPerson, naturalPerson, other
 ```
 
-### Source Kind Vocabulary (core)
+### Source Type Vocabulary (core) + Credibility Tier
 
 ```
 T0 (meta-analysis), T1 (peer-reviewed), T2 (expert), T3 (anecdotal), T4 (unverified)
 ```
+
+> **v3.2 (#398):** `sourceKind` is the extensible source TYPE vocabulary — pack-declared
+> kinds (github_issue, slack_message, linear_card, document...) resolve to a tier ONLY
+> via explicit registration (`register_source_kind_default`) or an explicit
+> `credibilityTier` assignment; unknown kinds stay neutral (no inheritance). The
+> T0–T4 tier semantics above live on `credibilityTier`. The Beta-prior mapping
+> (T0=(10,1), T1=(5,1), T2=(3,1), T3=(2,1), T4=(1.1,1)) is the validated model
+> (docs/ep-source-credibility-experiment.md §1.1).
 
 > **Expansion-pack kinds live in the packs, not here.** Pack-declared kinds (dev:epic, product-strategy:product, etc.) are defined in their pack manifests (§9) and registered at load time via the pack registry. This file documents only the core vocabulary; it is not the home for pack kinds.
 
@@ -427,6 +462,49 @@ Packs are loaded via the pack registry (`PackRegistry`) at startup; their kinds 
 
 Evidence aging is **user-configurable with a light default** — NOT blunt time decay. Stable facts stay strong regardless of age. Interacts with sourceKind/credibility tier (T0 direct observation ages differently than T4 speculation). Never auto-deprecates old evidence.
 
+> **Decision log (v3.2, #398 open question):** temporal decay granularity = **deferred**
+> (per-field / per-sourceType decay curves NOT shipped). Retained: the validated
+> `0.95^years` modulation, T0-exempt, keyed on `sourceDate` else `ingestedAt`, recomputed
+> per EP run via provenance-marked inherited baselines (`baseline_source='inherited'`,
+> per-point time gate). Differentiated per-tier aging (§10 "ages differently") is a
+> §10-implied follow-up; the extension point is the source-type registry's per-kind
+> default/tier slot.
+
+---
+
+## §10.5 Cascading Invalidation (Claims 6–7 of the patent)
+
+When an evidence source's confidence changes, downstream propositions that
+depend on it through operator chains are **re-evaluated, not stored-flagged**.
+Invalidation is a *derived* cascade — consistent with the ontology's
+"status is derived, not stored" principle (§2, §11):
+
+```
+supersede_point / invalidate_point          (§3.1: mark old outdated:true,
+                                            create (new)-[:CORRECTS]->(old))
+   → _mark_dirty(affected)                  (sdk.py — dirty roots queued)
+   → EP re-propagation                      (ep.py _affected_claims: reverse
+                                            BFS through IMPL|NAND, max_hops=2)
+   → re-persist confidence to affected      (dream.py runs EP on dirty roots)
+   → contested-claim detection at query     (get_contested_claims(variance),
+     time                                   ep.py — variance from persisted
+                                            α/β; also surfaced per-result as
+                                            ep.contested in search, #580)
+```
+
+**Design decisions (recorded for the patent filing):**
+
+| Question | Decision |
+|----------|----------|
+| Ontology concept vs implementation detail? | **Derived behavior**, documented here; no new stored entity |
+| Dedicated edge type (DEPENDS_ON)? | **No** — reverse traversal of IMPL/NAND operators is sufficient; a stored DEPENDS_ON edge would duplicate structure and drift |
+| Representation of "potentially invalidated"? | **Elevated posterior variance** (v > 0.04 → contested), not a stored `pointStatus` — statuses are `{live, draft, outdated, archived}`; `outdated` is set only by explicit supersession, never auto-inferred |
+| Interaction with CORRECTS? | CORRECTS is the *structural* replacement; cascading invalidation is the *belief-level* consequence — both fire from the same write (`supersede_point` → `_mark_dirty`) |
+
+Direction-aware EP (§3.1, #86) is the prerequisite that makes reverse
+traversal well-defined: IMPL is unidirectional (source→target), NAND
+symmetric, hasPart bidirectional — `_affected_claims` follows these directions.
+
 ---
 
 ## §11. Reputation (derived, not stored)
@@ -441,6 +519,11 @@ subject -[:performs]-> events → outcome operators (Event→Point IMPL/NAND)
 
 - Not stored (would go stale)
 - Bridges procedural history to epistemic belief: "how much weight should this agent's claim carry?"
+- **Derived values may be CACHED, never authoritative (v3.2, #398):** Source
+  `reliability` is a write-through projection of the query-time derivation
+  (recomputed on write events, consistency-checked on read, stamped with
+  `reliability_derived_at`) — the derivation is the truth, the cache is a
+  performance artifact.
 
 ---
 

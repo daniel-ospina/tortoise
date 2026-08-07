@@ -151,6 +151,18 @@ class TestToolIntegration:
         result = tortoise_search("integration test", limit=5)
         assert isinstance(result, list) or isinstance(result.get("error"), str)
 
+
+    def test_search_order_by_graph_and_confidence(self):
+        """#560: order_by flows through the MCP surface — 'graph' (GraphRanker
+        rerank) and 'confidence' (persisted EP) must be accepted by the tool
+        and return result lists (invalid values raise)."""
+        from tortoise.mcp_server import tortoise_search
+        for ob in ("graph", "confidence"):
+            result = tortoise_search("integration test", limit=5, order_by=ob)
+            assert isinstance(result, list) or isinstance(result.get("error"), str), result
+        import pytest
+        with pytest.raises(ValueError):
+            tortoise_search("integration test", order_by="bogus")
     def test_suggest_entry_points(self):
         from tortoise.mcp_server import tortoise_suggest_entry_points
         result = tortoise_suggest_entry_points("integration", limit=3)

@@ -29,6 +29,8 @@ import logging
 import math
 from datetime import datetime, timezone
 
+from .search_engine import _beta_variance, CONTESTED_VARIANCE_THRESHOLD  # noqa: E402
+
 logger = logging.getLogger(__name__)
 
 # Default signal weights — must sum to 1.0.
@@ -151,6 +153,10 @@ class GraphRanker:
                 "recency_boost": round(recency, 4),
                 "final_score": round(final, 4),
             }
+            sig = signals.get(r.get("id"), {})
+            if "variance" in sig:
+                copy["graph_ranking"]["variance"] = round(sig["variance"], 6)
+                copy["graph_ranking"]["contested"] = sig.get("contested", False)
             annotated.append(copy)
 
         annotated.sort(key=lambda r: r["graph_ranking"]["final_score"], reverse=True)
@@ -165,6 +171,12 @@ class GraphRanker:
         (normalized incident IMPL/NAND edge count).
         Events/Sessions: 0.6·INSTANTIATES count (Objects produced) +
         0.4·mean EP confidence of produced Points.
+
+        Contestation is deliberately NOT used as a ranking penalty: a
+        contested claim is a claim the agent should KNOW is contested (the
+        ep.contested flag + variance on the result), not one that is silently
+        ranked lower. Ranking stays about relevance and graph structure;
+        epistemic honesty is surfaced, not scored.
         """
         if signals:
             confidence = signals.get("confidence", 0.0)
@@ -206,16 +218,23 @@ class GraphRanker:
             "MATCH (n:Point) WHERE n.id IN $ids "
             "OPTIONAL MATCH (n)-[r:IMPL|NAND]-(:Point {is_operator: true}) "
             "WITH n, count(r) AS degree "
-            "RETURN n.id, coalesce(n.confidence, 0.5) AS conf, degree, n.createdAt AS created"
+            "RETURN n.id, coalesce(n.confidence, 0.5) AS conf, degree, n.createdAt AS created, "
+            "  coalesce(n.ep_alpha, 1.0) AS alpha, coalesce(n.ep_beta, 1.0) AS beta, "
+            "  n.ep_alpha IS NOT NULL AS has_ep"
         )
         rows = self.projection.g.query(cypher, params={"ids": ids}).result_set
         out = {}
         for row in rows:
             pid = row[0]
+            variance = _beta_variance(float(row[4]), float(row[5]))
+            has_ep = bool(row[6])
             out[pid] = {
                 "confidence": float(row[1]),
                 "degree": int(row[2]),
                 "created": row[3],
+                "variance": variance,
+                # Uncalibrated (no persisted α/β) is NOT contested.
+                "contested": has_ep and variance > CONTESTED_VARIANCE_THRESHOLD,
                 "is_event": False,
             }
         return out
