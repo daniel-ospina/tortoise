@@ -73,6 +73,30 @@ def _content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _save_progress(progress_file: str, directory: str, total: int, processed: int,
+                   ingested: int, updated: int, skipped: int, failed: int,
+                   errors: list[dict],
+                   completed_files: list[str] | None = None) -> None:
+    """Save batch indexing progress for resumability."""
+    from datetime import datetime, timezone
+    try:
+        with open(progress_file, 'w') as f:
+            _json.dump({
+                "started": datetime.now(timezone.utc).isoformat(),
+                "directory": directory,
+                "total_files": total,
+                "processed": processed,
+                "ingested": ingested,
+                "updated": updated,
+                "skipped": skipped,
+                "failed": failed,
+                "completed_files": completed_files or [],
+                "errors": errors[-20:],  # keep last 20 errors
+            }, f, indent=2)
+    except Exception:
+        pass  # progress file is best-effort
+
+
 # Module-level cached registry for kind expansion
 _registry_cache: "PackRegistry | None" = None
 _registry_lock = threading.Lock()
@@ -1561,74 +1585,232 @@ class TortoiseSDK:
             result["namespace"] = self._namespace
         return result
 
-    def ingest_corpus(self, directory: str) -> dict:
-        """Batch document ingestion — walk directory, parse YAML frontmatter,
-        create/update Document nodes. Returns {ingested, updated, skipped}."""
+    def ingest_corpus(self, directory: str, eventKind: str = "DocumentCreated",
+                      extract_metadata: bool = False, llm_model: str | None = "gpt-5-mini",
+                      progress_file: str | None = None) -> dict:
+        """Batch ingestion — walk directory, parse YAML frontmatter,
+        create/update Event nodes. Returns {ingested, updated, skipped, failed, errors}.
+
+        When eventKind='AgentSession' and extract_metadata=True, runs LLM/fallback
+        metadata extraction on session content before creating the Event.
+        """
         import re
+        import json as _json
         from pathlib import Path
         from datetime import datetime, timezone
 
         _FM_RE = re.compile(r'^---\s*\n(.*?)\n---', re.DOTALL)
-        ingested, updated, skipped = 0, 0, 0
+        ingested, updated, skipped, failed = 0, 0, 0, 0
+        errors: list[dict] = []
         now = datetime.now(timezone.utc).isoformat()
         proj = self._get_proj()
 
-        for filepath in Path(directory).rglob("*.md"):
-            text = filepath.read_text(encoding="utf-8")
+        files = sorted(Path(directory).rglob("*.md"))
+
+        # Resume from progress file
+        completed_files: list[str] = []
+        if progress_file:
+            try:
+                with open(progress_file) as pf:
+                    progress = _json.load(pf)
+                    completed_files = progress.get("completed_files", [])
+            except Exception:
+                pass
+        processed_set = set(completed_files)
+
+        for i, filepath in enumerate(files):
+            rel_path = str(filepath)
+            if rel_path in processed_set:
+                skipped += 1
+                continue
+
+            try:
+                text = filepath.read_text(encoding="utf-8")
+            except Exception as e:
+                failed += 1
+                errors.append({"file": rel_path, "error": str(e), "retryable": False})
+                continue
+
             m = _FM_RE.match(text)
-            frontmatter: dict[str, str] = {}
+            frontmatter: dict = {}
             if m:
-                for line in m.group(1).split('\n'):
-                    kv = line.split(':', 1)
-                    if len(kv) != 2:
+                try:
+                    import yaml as _yaml
+                    parsed = _yaml.safe_load(m.group(1))
+                    if isinstance(parsed, dict):
+                        frontmatter = parsed
+                except Exception:
+                    pass  # fallback to empty dict
+
+            if eventKind == "AgentSession":
+                # AgentSession branch — session indexing with metadata extraction
+                session_id = frontmatter.get("sessionId") or frontmatter.get("session_id") or f"file_{filepath.stem}"
+                event_id = f"session_{session_id}"
+                name = frontmatter.get("title", filepath.stem)
+
+                # Check dedup
+                exists_rows = proj.g.query(
+                    "MATCH (e:Event {eventId:$eid}) RETURN properties(e)",
+                    params={"eid": event_id},
+                ).result_set
+
+                import hashlib
+                file_hash = hashlib.sha256(text.encode()).hexdigest()
+
+                if exists_rows:
+                    existing_props = exists_rows[0][0]
+                    # Skip if identical hash AND existing metadata is populated
+                    has_keywords = existing_props.get("keywords") and len(existing_props.get("keywords", [])) > 0
+                    if existing_props.get("file_hash") == file_hash and has_keywords:
+                        skipped += 1
                         continue
-                    k, v = kv[0].strip(), kv[1].strip().strip('"').strip("'")
-                    if k and v:
-                        frontmatter[k] = v
+                    # Always extract keywords (even without LLM)
+                    from .session_indexer import extract_keywords_from_frontmatter as _kw_fallback
+                    if extract_metadata:
+                        from .session_indexer import extract_metadata as _extract
+                        try:
+                            metadata = _extract(text, llm_model)
+                        except Exception:
+                            metadata = _kw_fallback(text)
+                    else:
+                        metadata = _kw_fallback(text)
 
-            doc_id = str(filepath.relative_to(directory))
-            title = frontmatter.get("title", filepath.stem)
-            doc_kind = frontmatter.get("type", frontmatter.get("document_kind", ""))
-            domain = frontmatter.get("domain", frontmatter.get("documentKnowledgeDomain", ""))
+                    merged_keywords = list(dict.fromkeys(
+                        existing_props.get("keywords", []) + metadata.get("keywords", [])
+                    ))[:20]
+                    existing_arc = existing_props.get("content_metadata", "{}")
+                    try:
+                        existing_arc = _json.loads(existing_arc) if isinstance(existing_arc, str) else existing_arc
+                    except Exception:
+                        existing_arc = {}
+                    new_phases = existing_arc.get("narrative_arc", []) + metadata.get("narrative_arc", [])
 
-            # Check if document exists
-            exists = proj.g.query(
-                "MATCH (e:Event {eventId:$eid}) RETURN count(e) > 0",
-                params={"eid": doc_id},
-            ).result_set[0][0]
+                    update_props = {
+                        "name": metadata.get("summary", existing_props.get("name", name)),
+                        "keywords": merged_keywords,
+                        "topics": metadata.get("topics", existing_props.get("topics", [])),
+                        "file_hash": file_hash,
+                        "content_metadata": _json.dumps({
+                            "schema_version": 1,
+                            "summary": metadata.get("summary", ""),
+                            "narrative_arc": new_phases,
+                            "issues": metadata.get("issues", []),
+                            "prs": metadata.get("prs", []),
+                            "critical_decisions": metadata.get("critical_decisions", []),
+                        }),
+                        "message_count": frontmatter.get("message_count", 0),
+                    }
+                    proj.g.query(
+                        "MATCH (e:Event {eventId:$eid}) SET e += $props",
+                        params={"eid": event_id, "props": update_props},
+                    )
+                    updated += 1
+                    completed_files.append(rel_path)
+                    # Connect issue/PR references to Objects
+                    self._connect_issue_objects(event_id, metadata)
+                else:
+                    # New session Event — always extract keywords
+                    from .session_indexer import extract_keywords_from_frontmatter as _kw_fallback
+                    if extract_metadata:
+                        from .session_indexer import extract_metadata as _extract
+                        try:
+                            metadata = _extract(text, llm_model)
+                        except Exception:
+                            metadata = _kw_fallback(text)
+                    else:
+                        metadata = _kw_fallback(text)
 
-            props = {
-                "title": title,
-                "document_kind": doc_kind,
-                "document_knowledge_domain": domain,
-                "authored_by": frontmatter.get("authoredBy", ""),
-                "owned_by": frontmatter.get("ownedBy", ""),
-                "managed_by": frontmatter.get("managedBy", ""),
-                "governing_agreement": frontmatter.get("governedBy", frontmatter.get("governingAgreement", "")),
-                "doc_status": frontmatter.get("doc_status", "draft"),
-                "format": "markdown",
-                "version": frontmatter.get("version", ""),
-                "createdAt": frontmatter.get("created", now),
-                "updatedAt": frontmatter.get("updated", now),
-                "eventKind": "DocumentCreated",
-                "classificationLevel": "internal",
-            }
-
-            if exists:
-                proj.g.query(
-                    "MATCH (e:Event {eventId:$eid}) SET e += $props",
-                    params={"eid": doc_id, "props": props},
-                )
-                updated += 1
+                    props = {
+                        "name": metadata.get("summary", name),
+                        "eventKind": eventKind,
+                        "session_id": session_id,
+                        "agent": frontmatter.get("agent", "pi"),
+                        "source_file": rel_path,
+                        "file_hash": file_hash,
+                        "keywords": metadata.get("keywords", []),
+                        "topics": metadata.get("topics", []),
+                        "message_count": frontmatter.get("message_count", 0),
+                        "startedAt": now,
+                        "content_metadata": _json.dumps({
+                            "schema_version": 1,
+                            "summary": metadata.get("summary", ""),
+                            "narrative_arc": metadata.get("narrative_arc", []),
+                            "issues": metadata.get("issues", []),
+                            "prs": metadata.get("prs", []),
+                            "critical_decisions": metadata.get("critical_decisions", []),
+                        }),
+                        "eventStatus": "completed",
+                        "classificationLevel": "internal",
+                        "format": "markdown",
+                    }
+                    proj.g.query(
+                        "MERGE (e:Event {eventId:$eid}) SET e += $props",
+                        params={"eid": event_id, "props": props},
+                    )
+                    ingested += 1
+                    completed_files.append(rel_path)
+                    # Connect issue/PR references to Objects
+                    self._connect_issue_objects(event_id, metadata)
             else:
-                proj.g.query(
-                    "CREATE (e:Event {eventId:$eid}) SET e += $props",
-                    params={"eid": doc_id, "props": props},
-                )
-                ingested += 1
+                # Original DocumentCreated logic
+                doc_id = str(filepath.relative_to(directory))
+                title = frontmatter.get("title", filepath.stem)
+                doc_kind = frontmatter.get("type", frontmatter.get("document_kind", ""))
+                domain = frontmatter.get("domain", frontmatter.get("documentKnowledgeDomain", ""))
+
+                # Check if document exists
+                exists = proj.g.query(
+                    "MATCH (e:Event {eventId:$eid}) RETURN count(e) > 0",
+                    params={"eid": doc_id},
+                ).result_set[0][0]
+
+                props = {
+                    "title": title,
+                    "document_kind": doc_kind,
+                    "document_knowledge_domain": domain,
+                    "authored_by": frontmatter.get("authoredBy", ""),
+                    "owned_by": frontmatter.get("ownedBy", ""),
+                    "managed_by": frontmatter.get("managedBy", ""),
+                    "governing_agreement": frontmatter.get("governedBy", frontmatter.get("governingAgreement", "")),
+                    "doc_status": frontmatter.get("doc_status", "draft"),
+                    "format": "markdown",
+                    "version": frontmatter.get("version", ""),
+                    "createdAt": frontmatter.get("created", now),
+                    "updatedAt": frontmatter.get("updated", now),
+                    "eventKind": "DocumentCreated",
+                    "classificationLevel": "internal",
+                }
+
+                if exists:
+                    proj.g.query(
+                        "MATCH (e:Event {eventId:$eid}) SET e += $props",
+                        params={"eid": doc_id, "props": props},
+                    )
+                    updated += 1
+                else:
+                    proj.g.query(
+                        "CREATE (e:Event {eventId:$eid}) SET e += $props",
+                        params={"eid": doc_id, "props": props},
+                    )
+                    ingested += 1
+
+            # Progress checkpoint every 100 files
+            if progress_file and (ingested + updated + skipped) % 100 == 0:
+                _save_progress(progress_file, str(directory), len(files),
+                              ingested + updated + skipped + failed,
+                              ingested, updated, skipped, failed, errors,
+                              completed_files=completed_files)
 
         monitoring.record_ingest()
-        return {"ingested": ingested, "updated": updated, "skipped": skipped}
+
+        if progress_file:
+            _save_progress(progress_file, str(directory), len(files),
+                          ingested + updated + skipped + failed,
+                          ingested, updated, skipped, failed, errors,
+                          completed_files=completed_files)
+
+        return {"ingested": ingested, "updated": updated, "skipped": skipped,
+                "failed": failed, "errors": errors}
 
     # ── Entity Resolution (GAP-01 #6987) ──────────────────────
 
@@ -2812,6 +2994,97 @@ class TortoiseSDK:
             if isinstance(about_object, str) and not _is_ulid(about_object):
                 proj._create_about_edges(eid, about_object)
         return result
+
+
+    # ── Session Indexing (AgentSession) ─────────────────────────
+
+    def search_sessions(self, query: str, *, agent: str | None = None,
+                        topics: list[str] | None = None,
+                        limit: int = 10, offset: int = 0) -> list[dict]:
+        """Search indexed agent sessions. Returns Events with metadata snippets."""
+        if not query or not query.strip():
+            return []
+        proj = self._get_proj()
+        clauses = ["e.eventKind = 'AgentSession'"]
+        params: dict = {"limit": max(limit * 3, 30)}
+        query_lower = query.strip().lower()
+        clauses.append("(toLower(e.name) CONTAINS $q OR any(kw IN e.keywords WHERE toLower(kw) CONTAINS $q))")
+        params["q"] = query_lower
+        if agent:
+            clauses.append("e.agent = $agent")
+            params["agent"] = agent
+        if topics:
+            topic_clauses = []
+            for i, t in enumerate(topics):
+                pk = f"topic{i}"
+                topic_clauses.append(f"${pk} IN e.topics")
+                params[pk] = t
+            clauses.append(f"({' OR '.join(topic_clauses)})")
+        where = " AND ".join(clauses)
+        rows = proj.g.query(
+            f"MATCH (e:Event) WHERE {where} "
+            "RETURN properties(e) ORDER BY e.startedAt DESC LIMIT $limit",
+            params=params,
+        ).result_set
+        return [dict(r[0]) for r in rows]
+
+    def get_events(self, eventKind: str | None = None, limit: int = 20) -> list[dict]:
+        """Get recent Events, optionally filtered by eventKind."""
+        proj = self._get_proj()
+        if eventKind:
+            return [r[0] for r in proj.g.query(
+                "MATCH (e:Event {eventKind: $ek}) RETURN properties(e) ORDER BY e.startedAt DESC LIMIT $lim",
+                params={"ek": eventKind, "lim": limit}
+            ).result_set]
+        return [r[0] for r in proj.g.query(
+            "MATCH (e:Event) RETURN properties(e) ORDER BY e.startedAt DESC LIMIT $lim",
+            params={"lim": limit}
+        ).result_set]
+
+    def get_session(self, session_id: str) -> dict | None:
+        """Get a single session Event by session_id (matches snake or camel case)."""
+        if not session_id:
+            return None
+        proj = self._get_proj()
+        rows = proj.g.query(
+            "MATCH (e:Event {eventKind: 'AgentSession'}) "
+            "WHERE e.session_id = $sid OR e.sessionId = $sid RETURN properties(e)",
+            params={"sid": session_id}
+        ).result_set
+        return rows[0][0] if rows else None
+
+    def index_sessions(self, directory: str, extract_metadata: bool = True,
+                       llm_model: str | None = "gpt-5-mini",
+                       progress_file: str | None = None) -> dict:
+        """Index session files as AgentSession Events.
+        Thin wrapper around ingest_corpus with AgentSession defaults."""
+        return self.ingest_corpus(directory, eventKind="AgentSession",
+                                  extract_metadata=extract_metadata,
+                                  llm_model=llm_model,
+                                  progress_file=progress_file)
+
+    def _connect_issue_objects(self, event_id: str, metadata: dict) -> int:
+        """Create INSTANTIATES edges from an AgentSession Event to issue/PR Objects."""
+        proj = self._get_proj()
+        connected = 0
+        for key in ("issues", "prs"):
+            for item in metadata.get(key, []) or []:
+                if isinstance(item, dict):
+                    oid = item.get("id") or item.get("number")
+                    name = item.get("title") or item.get("name") or str(item)
+                else:
+                    oid = None
+                    name = str(item)
+                if not oid:
+                    oid = f"{key.rstrip('s')}_{hash(name) & 0xffffffff:x}"
+                proj.g.query(
+                    "MERGE (o:Object {id:$oid}) SET o.name=$name, o.objectKind='issue' "
+                    "WITH o MATCH (e:Event {eventId:$eid}) MERGE (e)-[:INSTANTIATES]->(o)",
+                    params={"oid": oid, "name": name[:200], "eid": event_id},
+                )
+                connected += 1
+        return connected
+
 
     def create_document(self, title: str, documentKind: str, **props) -> dict:
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
