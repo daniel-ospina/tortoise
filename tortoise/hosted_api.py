@@ -1823,6 +1823,87 @@ async def github_status(team: dict = Depends(get_current_team)):
     return {"connected": True, "org": org, "repos_count": repos_count}
 
 
+
+# ── GitHub indexing endpoints (#499 Task 5) ─────────────────────
+
+_INDEX_JOBS: dict[str, dict] = {}  # job_id -> {status, progress, points_created, error, created_at}
+
+
+class GitHubIndexRequest(BaseModel):
+    org: str
+    repo: str | None = None
+
+
+async def _run_indexing(job_id: str, team_id: str, org: str, repo: str | None) -> None:
+    """Background indexing job: fetch GitHub issues/PRs → Points."""
+    from tortoise.indexer.github_indexer import GitHubIndexer
+    sdk = _make_sdk(namespace="registry")
+    rows = sdk._get_registry().query(
+        "MATCH (t:Team {id: $id}) RETURN t.github_token_enc",
+        params={"id": team_id}).result_set
+    if not rows or not rows[0][0]:
+        _INDEX_JOBS[job_id].update({"status": "failed", "error": "GitHub not connected"})
+        return
+    from tortoise.crypto import decrypt_token
+    try:
+        token = decrypt_token(rows[0][0])
+    except ValueError:
+        _INDEX_JOBS[job_id].update({"status": "failed", "error": "Token undecryptable"})
+        return
+    try:
+        team_sdk = _make_sdk(namespace=team_id)
+        indexer = GitHubIndexer(token)
+        result = await indexer.index_issues(team_sdk, org, repo)
+        _INDEX_JOBS[job_id].update({
+            "status": "completed",
+            "progress": 100,
+            "points_created": result["points_created"],
+            "repos_processed": result["repos_processed"],
+            "error": None,
+        })
+        _update_onboarding_state(team_id, github_indexed=True)
+    except Exception as e:  # noqa: BLE001
+        _INDEX_JOBS[job_id].update({"status": "failed", "error": str(e)})
+    finally:
+        # Evict after 1 hour
+        import asyncio as _asyncio
+        _asyncio.get_event_loop().call_later(
+            3600, lambda: _INDEX_JOBS.pop(job_id, None))
+
+
+@app.post("/v1/index/github")
+async def index_github(body: GitHubIndexRequest, team: dict = Depends(get_current_team)):
+    """Start a background GitHub indexing job (Q2). Returns job_id for polling."""
+    import secrets
+    org = (body.org or "").strip()
+    if not org:
+        raise HTTPException(status_code=400, detail="org is required")
+    # Verify GitHub connected first
+    sdk = _make_sdk(namespace="registry")
+    rows = sdk._get_registry().query(
+        "MATCH (t:Team {id: $id}) RETURN t.github_token_enc",
+        params={"id": team["team_id"]}).result_set
+    if not rows or not rows[0][0]:
+        raise HTTPException(status_code=400, detail="GitHub not connected. Run connect first.")
+    job_id = secrets.token_hex(8)
+    _INDEX_JOBS[job_id] = {"status": "started", "progress": 0,
+                           "points_created": 0, "error": None,
+                           "created_at": time.time()}
+    import asyncio as _asyncio
+    _asyncio.get_event_loop().create_task(
+        _run_indexing(job_id, team["team_id"], org, body.repo))
+    return {"job_id": job_id, "status": "started"}
+
+
+@app.get("/v1/index/github/{job_id}")
+async def index_job_status(job_id: str, team: dict = Depends(get_current_team)):
+    """Poll an indexing job's progress."""
+    job = _INDEX_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"job_id": job_id, **job}
+
+
 # ── MCP mount (#236) ─────────────────────────────────────────────
 # Mount AFTER all route definitions. DO NOT add /mcp to the parent
 # RateLimitMiddleware.SKIP — Starlette's mount already routes /mcp

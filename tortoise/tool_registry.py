@@ -544,6 +544,14 @@ TOOL_REGISTRY: list[ToolDefinition] = [
         rest_spec=RestSpec(method="POST", path="/v1/onboarding/github/connect"),
     ),
     ToolDefinition(
+        name="tortoise_onboarding_github_index",
+        description="Start background GitHub indexing of an org's issues/PRs (Q2).",
+        annotations=_rw(),
+        http_policy=True,
+        sdk_method="",
+        rest_spec=RestSpec(method="POST", path="/v1/index/github"),
+    ),
+    ToolDefinition(
         name="tortoise_onboarding_github_status",
         description="Return GitHub connection status for this team (Q1 verify).",
         annotations=_ro(),

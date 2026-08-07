@@ -949,6 +949,40 @@ def tortoise_onboarding_github_status() -> dict:
     return {"connected": True, "org": reg[0][1], "repos_count": None}
 
 
+@mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
+def tortoise_onboarding_github_index(org: str, repo: str | None = None) -> dict:
+    """Start background GitHub indexing of an org's issues/PRs (Q2).
+
+    Returns {job_id, status} — poll via the REST endpoint or check
+    onboarding state for github_indexed.
+    """
+    team_id = _current_team_id.get()
+    if team_id is None:
+        return {"error": "No team context (HTTP mode required)"}
+    import secrets as _secrets
+    import asyncio as _asyncio
+    from tortoise.hosted_api import _INDEX_JOBS, _run_indexing, _make_sdk as _ha_make_sdk
+    sdk = _ha_make_sdk(namespace="registry")
+    try:
+        rows = sdk._get_registry().query(
+            "MATCH (t:Team {id: $id}) RETURN t.github_token_enc",
+            params={"id": team_id}).result_set
+    except Exception:
+        return {"error": "Registry unavailable"}
+    if not rows or not rows[0][0]:
+        return {"error": "GitHub not connected. Run tortoise_onboarding_github_connect first."}
+    job_id = _secrets.token_hex(8)
+    _INDEX_JOBS[job_id] = {"status": "started", "progress": 0,
+                           "points_created": 0, "error": None,
+                           "created_at": _asyncio.get_event_loop().time()}
+    try:
+        _asyncio.get_event_loop().create_task(
+            _run_indexing(job_id, team_id, org, repo))
+    except RuntimeError:
+        return {"error": "No running event loop"}
+    return {"job_id": job_id, "status": "started"}
+
+
 # ── HTTP Streamable transport (#236) ─────────────────────────────
 
 def create_http_app(*, allowed_origins: list[str] | None = None,
