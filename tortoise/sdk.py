@@ -1182,26 +1182,42 @@ class TortoiseSDK:
     # ── #7045: about edges backfill (Ontology v2.1) ──────────
 
     def backfill_about_entities(self) -> dict:
-        """Keyword-match Points against Subject/Object names → about edges.
+        """Keyword-match Points against Subject/Object/Event/Document names → about edges.
 
-        For each Point (non-operator), checks if its content contains any Subject
-        or Object name. If yes, creates aboutSubject or aboutObject edge.
+        For each Point (non-operator), checks if its content contains any Subject,
+        Object, Event, or Document name/title. If yes, creates the matching about*
+        edge (aboutSubject, aboutObject, aboutEvent, aboutDocument).
         Idempotent — MERGE prevents duplicates.
 
         Returns {scanned, updated, entities_matched}.
         """
         proj = self._get_proj()
-        # Load all entity names → ids
+        # Load all entity names → ids (flat dict for membership check)
         entities: dict[str, str] = {}
-        for label, key in [("Subject", "subjectKind"), ("Object", "objectKind")]:
+        # Subject + Object: matched by name property
+        for label in ("Subject", "Object"):
             rows = proj.g.query(
-                f"MATCH (e:{label}) RETURN e.name, e.id"
+                f"MATCH (e:{label}) WHERE e.name IS NOT NULL RETURN e.name, e.id"
             ).result_set
             for name, eid in rows:
                 if name:
                     entities[name.lower()] = eid
+        # Event: matched by name property (set by create_event)
+        for row in proj.g.query(
+            "MATCH (e:Event) WHERE e.name IS NOT NULL RETURN e.name, e.eventId"
+        ).result_set:
+            name, eid = row[0], row[1]
+            if name:
+                entities[name.lower()] = eid
+        # Document: matched by title (primary display name) or name
+        for row in proj.g.query(
+            "MATCH (d:Document) WHERE d.title IS NOT NULL RETURN d.title, d.id"
+        ).result_set:
+            title, did = row[0], row[1]
+            if title:
+                entities[title.lower()] = did
 
-        # Ontology v2.1: use aboutSubject/aboutObject edges instead of property
+        # Ontology v2.1: use per-type about* edges instead of property
         rows = proj.g.query(
             "MATCH (n:Point) "
             "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
@@ -3132,13 +3148,19 @@ class TortoiseSDK:
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
         """Create an Event node.
 
-        If aboutSubject or aboutObject are provided in **props, they are extracted
-        and wired as graph edges (Event)-[:aboutSubject]->(Subject) and
-        (Event)-[:aboutObject]->(Object), rather than stored as string properties.
+        If aboutSubject, aboutObject, aboutPoint, or aboutDocument are provided
+        in **props, they are extracted and wired as graph edges:
+          (Event)-[:aboutSubject]->(Subject)
+          (Event)-[:aboutObject]->(Object)
+          (Event)-[:aboutPoint]->(Point)
+          (Event)-[:aboutDocument]->(Document)
+        rather than stored as string properties.
         """
         eid = self.ulid()
         about_subject = props.pop("aboutSubject", None)
         about_object = props.pop("aboutObject", None)
+        about_point = props.pop("aboutPoint", None)
+        about_document = props.pop("aboutDocument", None)
         result = self._create_entity("Event", eid, {"eventId": eid, "name": name, "eventKind": eventKind, "eventStatus": "scheduled", **props}, "EventRecorded")
         proj = self._get_proj()
         if about_subject:
@@ -3150,6 +3172,14 @@ class TortoiseSDK:
             proj.create_about_edge(eid, about_object, "aboutObject")
             if isinstance(about_object, str) and not _is_ulid(about_object):
                 proj._create_about_edges(eid, about_object)
+        if about_point:
+            proj.create_about_edge(eid, about_point, "aboutPoint")
+            if isinstance(about_point, str) and not _is_ulid(about_point):
+                proj._create_about_edges(eid, about_point)
+        if about_document:
+            proj.create_about_edge(eid, about_document, "aboutDocument")
+            if isinstance(about_document, str) and not _is_ulid(about_document):
+                proj._create_about_edges(eid, about_document)
         return result
 
 
