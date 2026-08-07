@@ -35,7 +35,7 @@ updated: 2026-07-21
 - [Deprecated SVBP tests](tests/deprecated_svbp/) — Replaced by EP (ep.py)
 
 ## License
-AGPLv3 + CLA — see [LICENSE](LICENSE)
+Business Source License 1.1 (free self-hosted production use under $5M annual revenue; Apache-2.0 conversion after 4 years) — see [LICENSE](LICENSE) and [license notes](docs/license-notes.md)
 
 ## Related Repositories
 - [eldato](https://github.com/daniel-ospina/eldato) — Main El Dato app + canonical ONTOLOGY v2.5
