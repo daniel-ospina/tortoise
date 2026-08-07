@@ -1078,6 +1078,7 @@ def tortoise_onboarding_github_index(org: str, repo: str | None = None) -> dict:
 # ── HTTP Streamable transport (#236) ─────────────────────────────
 
 def create_http_app(*, allowed_origins: list[str] | None = None,
+                    allowed_hosts: list[str] | None = None,
                     rate_limit: int = 100,
                     _registry_sdk=None,
                     auth_mode: Literal["tenant", "static", "none"] = "tenant",
@@ -1193,6 +1194,7 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
         stateless_http=True,
         host_origin_protection=True,
         allowed_origins=allowed_origins or [],
+        allowed_hosts=allowed_hosts or [],
         path="/",
         middleware=middleware,
     )
