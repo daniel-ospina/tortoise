@@ -1052,12 +1052,18 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
     # cross-mode worker reuse). static/none modes never reference hosted
     # machinery.
     auth_mw = None
+    transport_mw = None
     if auth_mode == "tenant":
         from tortoise.mcp_auth import TeamResolutionMiddleware
         auth_mw = Middleware(TeamResolutionMiddleware, registry_sdk=_registry_sdk)
     elif auth_mode == "static":
         from tortoise.mcp_auth import StaticKeyMiddleware
         auth_mw = Middleware(StaticKeyMiddleware, api_key=api_key)
+        from tortoise.mcp_auth import TransportModeMiddleware
+        transport_mw = Middleware(TransportModeMiddleware)
+    elif auth_mode == "none":
+        from tortoise.mcp_auth import TransportModeMiddleware
+        transport_mw = Middleware(TransportModeMiddleware)
 
     class _HTTPToolFilter(Transform):
         """Hide HTTP-excluded tools from tools/list (D4 — registration-level).
@@ -1092,6 +1098,10 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
         # (tenant mode = byte-identical to pre-auth_mode hosted stack).
         middleware.append(auth_mw)
     middleware.append(Middleware(MCPRateLimitMiddleware, max_per_minute=rate_limit))
+    if transport_mw is not None:
+        # Innermost — runs after auth validated, right before the app:
+        # initializes the transport-mode ContextVars selfhost tools need.
+        middleware.append(transport_mw)
 
     return mcp.http_app(
         transport="streamable-http",
