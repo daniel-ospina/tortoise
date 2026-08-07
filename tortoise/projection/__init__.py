@@ -566,6 +566,16 @@ class FalkorProjection(
             seen.add(ident)
             out.append({"label": label, "key": key, "value": value,
                         "properties": dict(props)})
+        # Defense-in-depth (issue #327 security review): consumers interpolate
+        # label/key into Cypher patterns. Fail loudly here if this producer ever
+        # returns anything other than the constant-tuple values — a future
+        # dynamic-label branch must not become query-text injection downstream.
+        allowed_labels = {lbl for lbl, _ in self._RESOLVE_BRANCHES}
+        for r in out:
+            if r["label"] not in allowed_labels or r["key"] not in {"id", "eventId", "url"}:
+                raise RuntimeError(
+                    f"_resolve_entity produced unsafe label/key: "
+                    f"{r['label']!r}/{r['key']!r} (contract: constant tuple only)")
         return out
 
     def _ensure_indexes(self) -> None:

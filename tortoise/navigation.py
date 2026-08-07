@@ -5,6 +5,7 @@ tortoise_traverse: multi-hop traversal following ALL relationship types.
 """
 from __future__ import annotations
 
+import re
 from typing import Any
 
 
@@ -41,10 +42,21 @@ def _resolve_root(g: Any, entity_id: str) -> tuple[str | None, dict]:
     return label, parsed
 
 
+#: Safe label-identifier pattern — fail-closed before interpolating a graph
+#: label into Cypher (issue #327 security review). Node labels are created by
+#: the app's own hardcoded MERGE statements today, but a future data-derived
+#: label must never reach query text.
+_SAFE_LABEL_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
 #: Per-hop frontier-node match: label on the SOURCE side in BOTH directions.
 #: (Verified: `MATCH (n:Point)<-[r]-(m)` -> Index Scan; the neighbor-labeled
 #: form `MATCH (n)<-[r]-(m:Point)` degrades to All Node Scan — the trap.)
-def _hop_query(label: str) -> str:
+def _hop_query(label: str) -> str | None:
+    if not _SAFE_LABEL_RE.match(label or ""):
+        # Unknown label -> no nodes match (legacy behavior: the property-id
+        # lookup matched nothing for labels without an id property).
+        return None
     return (
         f"MATCH (n:{label} {{id:$eid}})-[r]->(m) "
         f"WHERE NOT m.id IN $visited RETURN m, type(r) UNION "
@@ -84,10 +96,9 @@ def entityProfile(
     for _ in range(hops):
         next_frontier: list[tuple[str, str]] = []
         for fid, flabel in frontier:
-            rows = g.query(
-                _hop_query(flabel),
-                params={"eid": fid, "visited": list(visited)},
-            ).result_set
+            hq = _hop_query(flabel)
+            rows = (g.query(hq, params={"eid": fid, "visited": list(visited)})
+                    .result_set if hq else [])
             for row in rows:
                 node = _parse_node(row[0])
                 rel_type = row[1] if len(row) > 1 else None
@@ -157,10 +168,9 @@ def tortoise_traverse(
     for _ in range(max_hops):
         next_frontier: list[tuple[str, str, int]] = []
         for fid, flabel, depth in frontier:
-            rows = g.query(
-                _hop_query(flabel),
-                params={"eid": fid, "visited": list(visited)},
-            ).result_set
+            hq = _hop_query(flabel)
+            rows = (g.query(hq, params={"eid": fid, "visited": list(visited)})
+                    .result_set if hq else [])
             for row in rows:
                 node = _parse_node(row[0])
                 rel_type = row[1] if len(row) > 1 else None
