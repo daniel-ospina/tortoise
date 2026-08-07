@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """License-surface consistency check (#338 T3.3, repo-local).
 
-Asserts all four surfaces declare BSL 1.1 + the $5M AUG + Apache-2.0
+Asserts all four surfaces declare BSL 1.1 + the $5M AUG + MPL 2.0
 conversion, so the pre-#338 tri-state (README=BSL / LICENSE=AGPL /
 pyproject=MIT) cannot re-occur. Root cause of the tri-state: the graph
 licensing decision (DEC-002) was never synced to files — this check is
@@ -24,7 +24,7 @@ SURFACES = {
         "path": ROOT / "LICENSE",
         "required": ["Business Source License 1.1",
                      "$5,000,000",
-                     "Apache License, Version 2.0"],
+                     "Mozilla Public License, Version 2.0"],
     },
     "README.md": {
         "path": ROOT / "README.md",
@@ -61,7 +61,7 @@ def main() -> int:
         print("❌ License surface inconsistent:")
         for e in errors:
             print(f"   - {e}")
-        print("   Fix all four surfaces to declare BSL 1.1 + $5M AUG + Apache-2.0 conversion.")
+        print("   Fix all four surfaces to declare BSL 1.1 + $5M AUG + MPL 2.0 conversion.")
         return 1
     print("✅ License surface consistent: LICENSE / README.md / pyproject.toml / index.md all BSL 1.1.")
     return 0

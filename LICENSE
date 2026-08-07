@@ -8,7 +8,7 @@ Licensed Work:        Tortoise — the Tortoise epistemic graph engine (all vers
                       The Licensed Work is (c) 2026 Premise Labs (Daniel Ospina)
 Additional Use Grant: You may make production use of the Licensed Work for your own organization's internal purposes, provided that the total annual revenue of your organization does not exceed US $5,000,000 (or the equivalent in other currencies) in the most recent twelve-month period. This grant does not permit (a) offering the Licensed Work, or a substantially similar product, to third parties as a hosted or managed service, or (b) use of the Premise Labs hosted Tortoise service under these terms — the hosted service is licensed separately as a commercial product (free tier available).
 Change Date:          Four years from the date the Licensed Work is published.
-Change License:       Apache License, Version 2.0
+Change License:       Mozilla Public License, Version 2.0
 
 For information about alternative licensing arrangements for the Licensed Work,
 please contact licensing@premiselabs.co.
@@ -68,3 +68,28 @@ AN “AS IS” BASIS. LICENSOR HEREBY DISCLAIMS ALL WARRANTIES AND CONDITIONS,
 EXPRESS OR IMPLIED, INCLUDING (WITHOUT LIMITATION) WARRANTIES OF
 MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, NON-INFRINGEMENT, AND
 TITLE.
+
+MariaDB hereby grants you permission to use this License’s text to license
+your works, and to refer to it using the trademark “Business Source License”,
+as long as you comply with the Covenants of Licensor below.
+
+Covenants of Licensor
+
+In consideration of the right to use this License’s text and the “Business
+Source License” name and trademark, Licensor covenants to MariaDB, and to all
+other recipients of the licensed work to be provided by Licensor:
+
+1. To specify as the Change License the GPL Version 2.0 or any later version,
+   or a license that is compatible with GPL Version 2.0 or a later version,
+   where “compatible” means that software provided under the Change License can
+   be included in a program with software provided under GPL Version 2.0 or a
+   later version. Licensor may specify additional Change Licenses without
+   limitation.
+
+2. To either: (a) specify an additional grant of rights to use that does not
+   impose any additional restriction on the right granted in this License, as
+   the Additional Use Grant; or (b) insert the text “None”.
+
+3. To specify a Change Date.
+
+4. Not to modify this License in any other way.

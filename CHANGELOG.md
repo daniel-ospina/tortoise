@@ -22,7 +22,7 @@ run it, connect your tools over MCP.
   `docker-compose.yml` (daemon + FalkorDB sidecar, AOF on) — durable
   self-host reference.
 - **License**: Business Source License 1.1 — free self-hosted production use
-  under $5M annual revenue; Apache-2.0 conversion after 4 years; hosted =
+  under $5M annual revenue; MPL 2.0 conversion after 4 years; hosted =
   commercial with free tier. See `docs/license-notes.md` (clause → precedent).
 - **`.mcp.json`**: tortoise entry points at the daemon (`http://localhost:8000/mcp`).
 

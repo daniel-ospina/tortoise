@@ -91,7 +91,7 @@ Tortoise is **Business Source License 1.1** — see [LICENSE](LICENSE) and the [
 - **Self-hosted:** free production use for organizations under **US $5,000,000** annual revenue (trailing 12 months); above that, a commercial license is required.
 - **Hosted (api.premiselabs.co):** a separate commercial product with a **free tier** — not covered by the BSL grant.
 - **MIT products are never blocked:** connect over MCP/REST and you never import Tortoise — the license boundary sits at the network, so your distribution stays clean.
-- **Apache 2.0 conversion:** every version converts to Apache 2.0 four years after publication.
+- **MPL 2.0 conversion:** every version converts to Mozilla Public License 2.0 (file-level copyleft — enterprise-safe) four years after publication.
 - **Can't offer Tortoise as a service:** the grant never permits reselling Tortoise (or a substantially similar product) to third parties as a hosted/managed service.
 
 ## What's here
