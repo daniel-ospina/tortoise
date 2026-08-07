@@ -94,7 +94,7 @@ of the caller's local timezone or whether they passed ``Z`` or an offset.
     # ISO-8601 string — normalize any timezone/offset to UTC. A naive string
     # (no offset suffix) is treated as UTC, mirroring the naive-datetime
     # branch — NOT as local time (which would shift the filter window by the
-    # caller's offset; #243 review).
+    # caller's offset; #243/#244 review).
     dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
@@ -1976,9 +1976,16 @@ class TortoiseSDK:
                         }),
                         "message_count": frontmatter.get("message_count", 0),
                     }
+                    # #244: (re)compute the session embedding from the merged
+                    # surface and store as vecf32 — None when model unavailable.
+                    embedding = self._session_embedding(
+                        update_props["name"], metadata.get("summary", ""),
+                        merged_keywords, update_props["topics"],
+                    )
                     proj.g.query(
-                        "MATCH (e:Event {eventId:$eid}) SET e += $props",
-                        params={"eid": event_id, "props": update_props},
+                        "MATCH (e:Event {eventId:$eid}) SET e += $props, "
+                        "e.embedding = CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE e.embedding END",
+                        params={"eid": event_id, "props": update_props, "embedding": embedding},
                     )
                     updated += 1
                     completed_files.append(rel_path)
@@ -2019,9 +2026,17 @@ class TortoiseSDK:
                         "classificationLevel": "internal",
                         "format": "markdown",
                     }
+                    # #244: compute the session embedding (name + summary +
+                    # keywords + topics) and store as vecf32 — None when the
+                    # model is unavailable (indexing never depends on it).
+                    embedding = self._session_embedding(
+                        props["name"], metadata.get("summary", ""),
+                        props["keywords"], props["topics"],
+                    )
                     proj.g.query(
-                        "MERGE (e:Event {eventId:$eid}) SET e += $props",
-                        params={"eid": event_id, "props": props},
+                        "MERGE (e:Event {eventId:$eid}) SET e += $props, "
+                        "e.embedding = CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE e.embedding END",
+                        params={"eid": event_id, "props": props, "embedding": embedding},
                     )
                     ingested += 1
                     completed_files.append(rel_path)
@@ -3349,6 +3364,17 @@ class TortoiseSDK:
 
     # ── Session Indexing (AgentSession) ─────────────────────────
 
+    def _session_embedding(self, name: str, summary: str = "",
+                           keywords: list[str] | None = None,
+                           topics: list[str] | None = None) -> list[float] | None:
+        """Compute the embedding for an AgentSession Event (#244).
+
+        name + summary + keywords + topics → 384-dim vector, or None when the
+        model is unavailable (session indexing must never depend on it).
+        """
+        from .session_indexer import compute_session_embedding
+        return compute_session_embedding(name, summary, keywords, topics)
+
     def search_sessions(self, query: str, *, agent: str | None = None,
                         topics: list[str] | None = None,
                         after: "datetime | str | None" = None,
@@ -3356,16 +3382,104 @@ class TortoiseSDK:
                         limit: int = 10, offset: int = 0) -> list[dict]:
         """Search indexed agent sessions. Returns Events with metadata snippets.
 
-        after/before bound the search to sessions whose ``startedAt`` falls in
-        ``[after, before]`` (inclusive). Each may be a ``datetime`` or an
-        ISO-8601 string (``Z`` or offset accepted); both are normalized to UTC
-        ISO-8601 so the lexicographic comparison against stored ``startedAt``
-        values is valid regardless of the caller's timezone. Sessions that lack
-        a ``startedAt`` are EXCLUDED whenever a bound is set.
+        Routes through the hybrid engine (tortoise_fts_query entity_type='event'
+        kind='AgentSession'): RRF fusion of FTS (Event subject+name index),
+        vector (session embeddings computed at index time, #244) and structural
+        (eventKind) strategies. Results are ordered by relevance with startedAt
+        DESC as tiebreak.
+
+        agent/topics post-filter the candidates. after/before bound the search
+        to sessions whose ``startedAt`` falls in ``[after, before]`` (inclusive).
+        Each may be a ``datetime`` or an ISO-8601 string (``Z`` or offset
+        accepted); both are normalized to UTC ISO-8601 so the comparison
+        against stored ``startedAt`` values is valid regardless of the caller's
+        timezone. Sessions that lack a ``startedAt`` are EXCLUDED whenever a
+        bound is set.
+
+        When no semantic strategy contributed (FTS/vector unavailable — e.g.
+        embedded FalkorDBLite without embeddings, prod before #160 deploys),
+        falls back to the legacy keyword CONTAINS surface (name + keywords) so
+        the previous behavior keeps working.
         """
         if not query or not query.strip():
             return []
         proj = self._get_proj()
+        has_bound = after is not None or before is not None
+        after_utc = _to_iso_utc(after) if after is not None else None
+        before_utc = _to_iso_utc(before) if before is not None else None
+
+        # ── Hybrid route: RRF fusion of FTS + vector + structural ──
+        # Generous candidate pool — agent/topics/temporal filters drop rows
+        # post-retrieval, so fetch beyond the caller's limit + offset.
+        candidate_limit = max(limit * 5, 50) + offset
+        hybrid = self.tortoise_fts_query(
+            query, kind="AgentSession", entity_type="event",
+            limit=candidate_limit,
+        )
+        has_semantic = any(
+            r.get("scores")
+            and (r["scores"].get("fts") is not None
+                 or r["scores"].get("vector") is not None)
+            for r in hybrid
+        )
+        if has_semantic and hybrid:
+            # Precision gate (#244 review): rows with NO semantic signal — no
+            # FTS score and no vector score (structural-only; the kind filter
+            # matches ALL AgentSession events with score 1.0) are NOT results,
+            # they only fed the RRF candidate pool. Note: vector-only rows are
+            # deliberately kept — word-distinct semantic recall is the point
+            # of #244 ("port migration" finds a session about changing the
+            # FalkorDB default port); see docstring. The brute-force vector
+            # strategy is threshold-less, so those rows are ranked nearest-
+            # neighbors-first and precision drops when a query has no real
+            # semantic match (documented behavior).
+            ids = [r["id"] for r in hybrid]
+            rows = proj.g.query(
+                "MATCH (e:Event) WHERE e.eventId IN $ids RETURN properties(e)",
+                params={"ids": ids},
+            ).result_set
+            props_by_id = {}
+            for row in rows:
+                props = dict(row[0])
+                if props.get("eventId"):
+                    props_by_id[props["eventId"]] = props
+            ranked = []
+            for r in hybrid:
+                props = props_by_id.get(r["id"])
+                if props is None:
+                    continue
+                if agent and props.get("agent") != agent:
+                    continue
+                if topics:
+                    s_topics = set(props.get("topics") or [])
+                    if not any(t in s_topics for t in topics):
+                        continue
+                if has_bound:
+                    started = props.get("startedAt")
+                    if not started:
+                        continue  # sessions without startedAt excluded when a bound is set
+                    if after_utc is not None and started < after_utc:
+                        continue
+                    if before_utc is not None and started > before_utc:
+                        continue
+                # Precision gate (#244 review): structural-only rows (no FTS,
+                # no vector score) are NOT results — a session that neither
+                # keyword-matches nor semantically matches must not appear.
+                scores = r.get("scores") or {}
+                if scores.get("fts") is None and scores.get("vector") is None:
+                    continue
+                ranked.append((scores.get("rrf") or 0.0, props))
+            # Relevance (RRF) desc, startedAt DESC as tiebreak (missing = last)
+            ranked.sort(
+                key=lambda item: (item[0], item[1].get("startedAt") or ""),
+                reverse=True,
+            )
+            return [props for _, props in ranked[offset:offset + limit]]
+
+        # ── Legacy keyword fallback (no FTS/vector contribution) ──
+        # Preserves the pre-#244 CONTAINS surface (name + keywords) plus the
+        # #243 temporal filters (after/before, ISO-8601 UTC normalization,
+        # startedAt IS NOT NULL exclusion when a bound is set).
         clauses = ["e.eventKind = 'AgentSession'"]
         params: dict = {"limit": max(limit * 3, 30)}
         query_lower = query.strip().lower()
