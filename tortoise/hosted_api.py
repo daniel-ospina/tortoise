@@ -154,7 +154,7 @@ async def _dream_worker(team_id: str) -> None:
 class RateLimitMiddleware(BaseHTTPMiddleware):
     """In-memory token bucket rate limiter. 100 Points/min per API key."""
 
-    SKIP = {"/health", "/docs", "/openapi.json"}
+    SKIP = {"/health", "/docs", "/openapi.json", "/v1/register"}
 
     def __init__(self, app, max_per_minute=100):
         super().__init__(app)
@@ -428,7 +428,7 @@ async def health_security():
 
 # ── Auth Dependency ────────────────────────────────────────────────
 
-SKIP_AUTH = {"/health", "/docs", "/openapi.json"}
+SKIP_AUTH = {"/health", "/docs", "/openapi.json", "/v1/register"}
 
 
 async def _audit_auth_failure(request: Request, reason: str) -> None:
@@ -601,6 +601,123 @@ class KeyListResponse(BaseModel):
 
 class ErrorResponse(BaseModel):
     error: dict
+
+
+# ── Onboarding: Pydantic Models (#498) ────────────────────────────
+
+class RegisterRequest(BaseModel):
+    email: str = Field(..., min_length=5, max_length=254)
+    password: str = Field(..., min_length=8, max_length=128)
+
+    @field_validator("email")
+    @classmethod
+    def valid_email(cls, v: str) -> str:
+        import re
+        if not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', v):
+            raise ValueError("Invalid email format")
+        return v.lower().strip()
+
+
+class RegisterResponse(BaseModel):
+    api_key: str
+    team_id: str
+    graph_name: str
+
+
+class OnboardingStateResponse(BaseModel):
+    onboarding: dict
+
+
+class OnboardingStatePatchRequest(BaseModel):
+    github_connected: bool | None = None
+    github_org: str | None = None
+    github_connected_at: str | None = None
+    github_indexed: bool | None = None
+    github_index_job_id: str | None = None
+    session_recording: bool | None = None
+    demo_created: bool | None = None
+    team_created: bool | None = None
+
+
+# ── Onboarding: Default State ─────────────────────────────────────
+
+DEFAULT_ONBOARDING_STATE = {
+    "github_connected": False,
+    "github_org": None,
+    "github_connected_at": None,
+    "github_indexed": False,
+    "github_index_job_id": None,
+    "session_recording": False,
+    "demo_created": False,
+    "team_created": False,
+    "completed_at": None,
+}
+
+
+# ── IP-based Rate Limiter for /v1/register (#498) ─────────────────
+
+_register_buckets: dict[str, list[float]] = defaultdict(list)
+_register_lock = asyncio.Lock()
+_REGISTER_MAX_PER_HOUR = 3
+
+
+async def _check_register_rate_limit(request: Request) -> None:
+    """IP-based rate limit: 3 registrations per hour per IP."""
+    if os.environ.get("RATE_LIMIT_DISABLED") == "1":
+        return
+    if not request.client or not request.client.host:
+        return
+    ip = request.client.host
+    now = time.time()
+    async with _register_lock:
+        bucket = _register_buckets[ip]
+        bucket[:] = [t for t in bucket if now - t < 3600]
+        if len(bucket) >= _REGISTER_MAX_PER_HOUR:
+            raise HTTPException(
+                status_code=429,
+                detail="Too many registration attempts. Please try again later.",
+                headers={"Retry-After": "3600"},
+            )
+        bucket.append(now)
+
+
+# ── Onboarding: Helpers (#498) ────────────────────────────────────
+
+import json as _json
+
+
+def _get_onboarding_state(team_id: str) -> dict:
+    """Read onboarding_state from Team node in registry graph."""
+    sdk = _make_sdk(namespace="registry")
+    rows = sdk._get_registry().query(
+        "MATCH (t:Team {id: $id}) RETURN t.onboarding_state",
+        params={"id": team_id},
+    ).result_set
+    if not rows or rows[0][0] is None:
+        # Lazy init — set default state on first read
+        _set_onboarding_state(team_id, DEFAULT_ONBOARDING_STATE)
+        return dict(DEFAULT_ONBOARDING_STATE)
+    state = rows[0][0]
+    if isinstance(state, str):
+        state = _json.loads(state)
+    return dict(state)
+
+
+def _set_onboarding_state(team_id: str, state: dict) -> None:
+    """Write onboarding_state to Team node in registry graph."""
+    sdk = _make_sdk(namespace="registry")
+    sdk._get_registry().query(
+        "MATCH (t:Team {id: $id}) SET t.onboarding_state = $state",
+        params={"id": team_id, "state": _json.dumps(state)},
+    )
+
+
+def _update_onboarding_state(team_id: str, **fields) -> dict:
+    """Merge fields into onboarding_state and write back. Returns new state."""
+    current = _get_onboarding_state(team_id)
+    current.update(fields)
+    _set_onboarding_state(team_id, current)
+    return current
 
 
 # ── Endpoints ─────────────────────────────────────────────────────
@@ -781,20 +898,128 @@ async def team_info(team: dict = Depends(get_current_team)):
     )
 
 
-@app.post("/internal/demo")
-async def create_demo_graph(request: Request):
-    """Create a demo graph with sample Points across all 4 ontology layers.
+# ── Onboarding: Self-Service Registration (#498) ──────────────────
 
-    Called by the tenant-provision Edge Function after provisioning to seed
-    demo data so new users see a populated graph immediately.
+@app.post("/v1/register", response_model=RegisterResponse)
+async def register_user(request: Request, response: Response):
+    """Self-service key provisioning — public variant of /internal/provision.
+
+    Creates a Team node + API key + tenant graph in FalkorDB. Does NOT
+    create a Supabase user (that's handled separately by the welcome page
+    via Supabase client-side auth). Rate limited at 3 registrations/hour/IP.
     """
-    _check_internal(request)
+    await _check_register_rate_limit(request)
 
     body = await request.json()
-    team_id = body.get("team_id")
-    if not team_id:
-        raise HTTPException(status_code=400, detail="Missing team_id")
+    try:
+        reg = RegisterRequest.model_validate(body)
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=str(e))
 
+    email = reg.email
+    password = reg.password  # noqa: F841 — validated, not stored (Supabase handles auth)
+
+    # Idempotency: check if email already registered via Team node property
+    sdk_check = _make_sdk(namespace="registry")
+    existing = sdk_check._get_registry().query(
+        "MATCH (t:Team) WHERE t.email = $email RETURN t.id",
+        params={"email": email},
+    ).result_set
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail={"message": "already_registered", "email": email},
+        )
+
+    # Derive team_id from email (slugified)
+    import re
+    team_name = email.split("@")[0]
+    team_name = re.sub(r'[^a-zA-Z0-9_-]', '-', team_name)[:48]
+    team_id = _short_id()
+
+    # Generate API key
+    import uuid
+    from tortoise.auth import hash_api_key
+    api_key = f"tt_{uuid.uuid4().hex}"
+    key_hash = hash_api_key(api_key)
+    sdk = _make_sdk(namespace="registry")
+    now = datetime.now(timezone.utc).isoformat()
+    graph_name = f"team_{team_id}"
+
+    try:
+        # Create Team node with email and default onboarding state
+        sdk._get_registry().query(
+            """
+            CREATE (t:Team {
+                id: $id, name: $name, email: $email, tier: 'free',
+                created_at: $now, backup_enabled: false,
+                max_users: 1, max_teams: 1, max_graphs: 1,
+                onboarding_state: $onboarding_state
+            })
+            """,
+            params={
+                "id": team_id, "name": team_name, "email": email,
+                "now": now, "onboarding_state": _json.dumps(DEFAULT_ONBOARDING_STATE),
+            },
+        )
+
+        # Create APIKey node
+        api_key_id = _short_id()
+        sdk._get_registry().query(
+            """
+            CREATE (k:APIKey {
+                id: $id, team_id: $team_id, key_hash: $hash,
+                key_prefix: $prefix, created_by: $created_by,
+                created_at: $now
+            })
+            """,
+            params={
+                "id": api_key_id,
+                "team_id": team_id,
+                "hash": key_hash,
+                "prefix": team_id[:8],
+                "created_by": email,
+                "now": now,
+            },
+        )
+
+        # Provision FalkorDB namespace for the team
+        team_graph = sdk._get_proj().db.select_graph(graph_name)
+        team_graph.query(
+            "CREATE (:TeamMeta {name: $name, created: $now})",
+            params={"name": team_name, "now": now},
+        )
+
+        # Log audit event
+        await _async_audit(
+            request, team_id, "tenant_register",
+            resource_type="team", resource_id=team_id,
+        )
+
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+
+        return {"api_key": api_key, "team_id": team_id, "graph_name": graph_name}
+
+    except HTTPException:
+        raise
+    except Exception:
+        # Rollback on failure
+        sdk._get_registry().query(
+            "MATCH (t:Team {id: $id}) DETACH DELETE t", params={"id": team_id}
+        )
+        sdk._get_registry().query(
+            "MATCH (k:APIKey {team_id: $id}) DETACH DELETE k", params={"id": team_id}
+        )
+        try:
+            team_graph = sdk._get_proj().db.select_graph(graph_name)
+            team_graph.delete()
+        except Exception:
+            pass
+        raise HTTPException(status_code=500, detail="Registration failed")
+
+
+def _seed_demo_graph(team_id: str) -> dict:
+    """Seed the 4-layer demo graph for a team. Idempotent (sentinel)."""
     sdk = _make_sdk(namespace=team_id)
     proj = sdk._get_proj()
     now = datetime.now(timezone.utc).isoformat()
@@ -959,6 +1184,24 @@ async def create_demo_graph(request: Request):
         },
     }
 
+
+
+
+@app.post("/internal/demo")
+async def create_demo_graph(request: Request):
+    """Create a demo graph with sample Points across all 4 ontology layers.
+
+    Called by the tenant-provision Edge Function after provisioning to seed
+    demo data so new users see a populated graph immediately.
+    """
+    _check_internal(request)
+
+    body = await request.json()
+    team_id = body.get("team_id")
+    if not team_id:
+        raise HTTPException(status_code=400, detail="Missing team_id")
+
+    return _seed_demo_graph(team_id)
 
 @app.post("/v1/team/keys", response_model=CreateKeyResponse)
 async def create_api_key(request: Request, response: Response, team: dict = Depends(get_current_team)):
@@ -1198,6 +1441,174 @@ async def session_context(team: dict = Depends(get_current_team)):
         return sdk.session_context()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Context unavailable: {e}")
+
+
+
+# ── Onboarding endpoints (#498) ─────────────────────────────────
+
+_ONBOARDING_DEFAULT_STATE = {
+    "github_connected": False,
+    "github_indexed": False,
+    "demo_created": False,
+    "session_recording": False,
+    "team_created": False,
+    "prompt_pasted": False,
+    "onboarding_complete": False,
+}
+
+_ALLOWED_STATE_KEYS = set(_ONBOARDING_DEFAULT_STATE.keys())
+
+
+def _get_onboarding_state(team_id: str) -> dict:
+    """Read onboarding_state from the Team node in the registry graph.
+
+    Auto-initializes to defaults if missing (plan Task 3 — missing state
+    auto-initializes on first read).
+    """
+    sdk = _make_sdk(namespace="registry")
+    rows = sdk._get_registry().query(
+        "MATCH (t:Team {id: $id}) RETURN t.onboarding_state",
+        params={"id": team_id},
+    ).result_set
+    if not rows or rows[0][0] is None:
+        state = dict(_ONBOARDING_DEFAULT_STATE)
+        _write_onboarding_state(team_id, state)
+        return state
+    state = dict(_ONBOARDING_DEFAULT_STATE)
+    state.update(rows[0][0])
+    return state
+
+
+def _write_onboarding_state(team_id: str, state: dict) -> None:
+    """Persist onboarding_state on the Team node."""
+    sdk = _make_sdk(namespace="registry")
+    sdk._get_registry().query(
+        "MATCH (t:Team {id: $id}) SET t.onboarding_state = $state",
+        params={"id": team_id, "state": state},
+    )
+
+
+def _update_onboarding_state(team_id: str, **fields) -> dict:
+    """Merge fields into onboarding state and persist. Returns new state."""
+    state = _get_onboarding_state(team_id)
+    for k, v in fields.items():
+        if k in _ALLOWED_STATE_KEYS:
+            state[k] = v
+    _write_onboarding_state(team_id, state)
+    return state
+
+
+class OnboardingStateResponse(BaseModel):
+    onboarding: dict
+
+
+class OnboardingStatePatchRequest(BaseModel):
+    github_connected: bool | None = None
+    github_indexed: bool | None = None
+    demo_created: bool | None = None
+    session_recording: bool | None = None
+    team_created: bool | None = None
+    prompt_pasted: bool | None = None
+    onboarding_complete: bool | None = None
+
+
+@app.get("/v1/onboarding/state", response_model=OnboardingStateResponse)
+async def get_onboarding_state(team: dict = Depends(get_current_team)):
+    """Return the team's onboarding progress."""
+    return {"onboarding": _get_onboarding_state(team["team_id"])}
+
+
+@app.patch("/v1/onboarding/state", response_model=OnboardingStateResponse)
+async def patch_onboarding_state(body: OnboardingStatePatchRequest,
+                                team: dict = Depends(get_current_team)):
+    """Merge provided onboarding fields into the team's state."""
+    updates = {k: v for k, v in body.model_dump().items() if v is not None}
+    state = _update_onboarding_state(team["team_id"], **updates)
+    return {"onboarding": state}
+
+
+@app.post("/v1/onboarding/session-recording", response_model=OnboardingStateResponse)
+async def set_session_recording(body: dict, team: dict = Depends(get_current_team)):
+    """Toggle automatic session recording (Q3)."""
+    enabled = body.get("enabled")
+    if not isinstance(enabled, bool):
+        raise HTTPException(status_code=400, detail="'enabled' must be a boolean")
+    state = _update_onboarding_state(team["team_id"], session_recording=enabled)
+    return {"onboarding": state}
+
+
+@app.post("/v1/onboarding/team")
+async def create_onboarding_team(body: dict, team: dict = Depends(get_current_team)):
+    """Create a sub-team for the user (Q5 hosted equivalent of tortoise_team_create)."""
+    name = (body.get("name") or "").strip()
+    if not name or len(name) > 64:
+        raise HTTPException(status_code=400, detail="name is required (max 64 chars)")
+    import re
+    if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$", name):
+        raise HTTPException(status_code=400, detail="Invalid team name")
+    sdk = _make_sdk(namespace=team["team_id"])
+    try:
+        result = sdk.team_create(name)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Team create failed: {e}")
+    _update_onboarding_state(team["team_id"], team_created=True)
+    return {"team_id": result.get("id"), "name": name,
+            "graph_name": result.get("graph_name")}
+
+
+@app.post("/v1/demo")
+async def public_demo(team: dict = Depends(get_current_team)):
+    """Public demo graph creation (Q4) — auth-gated, team-isolated.
+
+    Reuses the same seeding logic as /internal/demo but requires a Bearer
+    tt_ key instead of the internal key. Idempotent (sentinel check).
+    """
+    sdk = _make_sdk(namespace=team["team_id"])
+    proj = sdk._get_proj()
+    existing = proj.g.query(
+        "MATCH (p:Point {id: '_demo_sentinel'}) RETURN p.id"
+    ).result_set
+    if existing:
+        _update_onboarding_state(team["team_id"], demo_created=True)
+        return {"status": "already_seeded", "team_id": team["team_id"]}
+
+    # Call the shared demo seeder (extracted from /internal/demo)
+    created = _seed_demo_graph(team["team_id"])
+    _update_onboarding_state(team["team_id"], demo_created=True)
+    return {"status": "seeded", "team_id": team["team_id"],
+            "points_created": created}
+
+
+@app.post("/v1/register")
+async def register_tenant(body: dict, request: Request):
+    """Self-service registration (P0). Returns a provisioned API key.
+
+    For MVP this provisions a team + key directly via the registry
+    (Supabase signup integration is #235 follow-up). Idempotent on email.
+    """
+    email = (body.get("email") or "").strip().lower()
+    password = body.get("password") or ""
+    import re
+    if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
+        raise HTTPException(status_code=400, detail="Invalid email")
+    if len(password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be ≥ 8 chars")
+
+    sdk = _make_sdk(namespace="registry")
+    # Idempotent: check existing team by name derived from email
+    team_name = email.split("@")[0][:32] or "user"
+    dup = sdk._get_registry().query(
+        "MATCH (t:Team {name: $name}) RETURN t.id",
+        params={"name": team_name},
+    ).result_set
+    if dup:
+        return {"message": "already_registered", "team_id": dup[0][0]}
+
+    team = sdk.team_create(team_name)
+    key = sdk.apikey_create(team["id"], "self-register")["api_key"]
+    _write_onboarding_state(team["id"], dict(_ONBOARDING_DEFAULT_STATE))
+    return {"api_key": key, "team_id": team["id"],
+            "graph_name": team.get("graph_name")}
 
 
 # ── MCP mount (#236) ─────────────────────────────────────────────
