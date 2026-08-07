@@ -28,7 +28,31 @@ connectors:
       limit: 100
       # GAP-11: webhook (optional — polling is fallback)
       webhook_port: 0  # 0 = disabled; set to e.g. 8080 to enable
-      webhook_secret: ""  # GitHub webhook secret for HMAC-SHA256 verification
+      webhook_secret: ""  # Set GITHUB_WEBHOOK_SECRET env var for HMAC-SHA256 verification (#324)
+
+  slack:
+    name: "Slack Messages & Threads"
+    module: "tortoise.connectors.slack"
+    class: "SlackConnector"
+    active: false
+    config:
+      token: ""  # Set SLACK_BOT_TOKEN env var (xoxb-...) (#324)
+      signing_secret: ""  # Set SLACK_SIGNING_SECRET env var (#324)
+      channel_id: ""
+      limit: 100
+      days: 7
+      webhook_port: 0  # 0 = disabled; set to e.g. 8080 to enable Events API
+
+  linear:
+    name: "Linear Issues & Cycles"
+    module: "tortoise.connectors.linear"
+    class: "LinearConnector"
+    active: false
+    config:
+      api_key: ""  # Set LINEAR_API_KEY env var (lin_api_...) (#324)
+      team_id: ""
+      limit: 100
+      days: 30
 
   supabase_org:
     name: "Supabase Org Data → Tortoise"
@@ -37,4 +61,4 @@ connectors:
     active: true
     config:
       supabase_url: ""   # SUPABASE_URL_ORG_DATA env var
-      supabase_key: ""   # SUPABASE_SERVICE_ROLE_KEY_ORG_DATA env var
+      supabase_key: ""   # Set SUPABASE_SERVICE_KEY env var (#324)
