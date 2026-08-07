@@ -317,6 +317,9 @@ class _EntityHandlers:
         if not eid:
             return
         # Compute embedding from event content/description (#7845)
+        # Stored vecf32 (#244): vec.euclideanDistance rejects plain-list
+        # vectors — a single List-typed embedding poisons brute-force vector
+        # search for the whole Event label. Align with the Point pattern.
         embedding = None
         event_content = " ".join(filter(None, [
             inner.get("subject", ""),
@@ -341,13 +344,11 @@ class _EntityHandlers:
             "classificationLevel": inner.get("classificationLevel", "internal"),
             "format": inner.get("format", "jsonl"),
         }
-        if embedding is not None:
-            props["embedding"] = embedding
         self.g.query(
             "MERGE (e:Event {eventId: $eid}) "
-            "ON CREATE SET e += $props "
-            "ON MATCH SET e += $props",
-            params={"eid": eid, "props": props},
+            "ON CREATE SET e += $props, e.embedding = CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) END "
+            "ON MATCH SET e += $props, e.embedding = CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE e.embedding END",
+            params={"eid": eid, "props": props, "embedding": embedding},
         )
         # ── Auto-create structural edges (#122) ──
         # Subject -[:performs]-> Event

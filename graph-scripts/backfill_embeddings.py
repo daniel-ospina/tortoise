@@ -93,16 +93,44 @@ def _backfill_graph(db, graph_name: str, labels: list[str],
         rows_all: list[tuple] = []
         offset = 0
         while True:
-            rows = g.query(
-                f"MATCH (n:{label}) WHERE n.embedding IS NULL "
-                f"AND n.{text_prop} IS NOT NULL "
-                f"RETURN n.{id_prop}, n.{text_prop} "
-                f"SKIP $skip LIMIT $limit",
-                params={"skip": offset, "limit": batch_size},
-            ).result_set
+            if label == "Event":
+                # #244: AgentSession events carry name/keywords/topics (not
+                # subject) — embed the session surface (same composition as the
+                # index-time path in session_indexer.py). Other event kinds
+                # still embed via subject below (same loop iteration).
+                from tortoise.session_indexer import session_embedding_text
+                rows = g.query(
+                    "MATCH (n:Event) WHERE n.eventKind = 'AgentSession' "
+                    "AND n.embedding IS NULL AND n.name IS NOT NULL "
+                    "RETURN n.eventId, n.name, n.keywords, n.topics, n.content_metadata "
+                    "SKIP $skip LIMIT $limit",
+                    params={"skip": offset, "limit": batch_size},
+                ).result_set
+                if not rows:
+                    rows = g.query(
+                        f"MATCH (n:Event) WHERE n.embedding IS NULL "
+                        f"AND n.{text_prop} IS NOT NULL AND NOT (n.eventKind = 'AgentSession') "
+                        f"RETURN n.{id_prop}, n.{text_prop} "
+                        f"SKIP $skip LIMIT $limit",
+                        params={"skip": offset, "limit": batch_size},
+                    ).result_set
+                rows_all.extend(
+                    (r[0], session_embedding_text(r[1], "", r[2] or [], r[3] or []))
+                    if r[1] is not None and len(r) > 2
+                    else (r[0], r[1])
+                    for r in rows
+                )
+            else:
+                rows = g.query(
+                    f"MATCH (n:{label}) WHERE n.embedding IS NULL "
+                    f"AND n.{text_prop} IS NOT NULL "
+                    f"RETURN n.{id_prop}, n.{text_prop} "
+                    f"SKIP $skip LIMIT $limit",
+                    params={"skip": offset, "limit": batch_size},
+                ).result_set
+                rows_all.extend(rows)
             if not rows:
                 break
-            rows_all.extend(rows)
             offset += len(rows)
             if limit and offset >= limit:
                 break
@@ -139,6 +167,41 @@ def _backfill_graph(db, graph_name: str, labels: list[str],
     return total, updated, skipped
 
 
+
+def _repair_legacy_event_embeddings(g, *, dry_run: bool, limit: int) -> int:
+    """Rewrite plain-list Event embeddings into vecf32 (per-node, idempotent).
+
+    Pre-#244 _upsert_event stored embeddings as plain Python lists;
+    vec.euclideanDistance then fails the whole MATCH ("expected Null or
+    Vectorf32 but was List") — one legacy node poisons Event vector search.
+    vecf32() on an already-vecf32 node errors, so each node is rewritten in a
+    try/except and failures are counted (expected on fully-migrated DBs).
+    """
+    rows = g.query(
+        "MATCH (n:Event) WHERE n.embedding IS NOT NULL "
+        "RETURN n.eventId"
+    ).result_set
+    if not rows:
+        print("repair: no Events with embeddings to check")
+        return 0
+    targets = rows if not limit else rows[:limit]
+    print(f"repair: checking {len(targets)} Event embedding(s)")
+    rewritten = already = 0
+    for (eid,) in targets:
+        if dry_run:
+            continue
+        try:
+            g.query(
+                "MATCH (n:Event {eventId:$eid}) SET n.embedding = vecf32(n.embedding)",
+                params={"eid": eid},
+            )
+            rewritten += 1
+        except Exception:
+            already += 1  # already vecf32 (or unrepairable) — expected on clean DBs
+    print(f"repair: rewritten={rewritten} already_vecf32/skipped={already}")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Backfill embeddings for vector search")
     ap.add_argument("--dry-run", action="store_true", help="report only, no writes")
@@ -149,6 +212,12 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=0, help="0 = all (per-graph cap)")
     ap.add_argument("--batch-size", type=int, default=DEFAULT_BATCH,
                     help="rows per query/compute batch (default: %(default)s)")
+    ap.add_argument(
+        "--repair-embeddings", action="store_true",
+        help="Rewrite Event embeddings stored as plain lists into vecf32 "
+        "(pre-#244 _upsert_event wrote plain lists; a single such node poisons "
+        "brute-force vector search for the whole Event label).",
+    )
     args = ap.parse_args()
 
     db, default_graph = _connect_falkordb(args.uri)
@@ -178,6 +247,11 @@ def main() -> int:
             grand_total += _dry_run(db, graph_name, labels)
         print(f"\nDry run: {grand_total} nodes would be embedded (no writes)")
         return 0
+
+    # ── Repair mode (#244) ───────────────────────────────────────────
+    if args.repair_embeddings:
+        g = db.select_graph(args.graph)
+        return _repair_legacy_event_embeddings(g, dry_run=args.dry_run, limit=args.limit)
 
     # ── Live run ─────────────────────────────────────────────────────
     from tortoise.embeddings import compute_embedding
