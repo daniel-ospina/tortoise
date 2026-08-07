@@ -309,6 +309,8 @@ class _EntityHandlers:
           - (Subject)-[:performs]->(Event) from event.subject
           - (Event)-[:produces]->(Object) from event.object
           - (Event)-[:uses]->(Object) from event.uses (list or single)
+          - (Subject)-[:participatesIn]->(Event) from event.participants,
+            falling back to event.subject when no explicit participants (#212)
         """
         inner = event.get("event", event)  # unwrap nested format
         eid = inner.get("id") or inner.get("eventId")
@@ -421,6 +423,27 @@ class _EntityHandlers:
                         "MERGE (e)-[:uses]->(o)",
                         params={"name": use_name, "eid": eid},
                     )
+        # ── Auto-create participatesIn edges (#212) ──
+        # (Subject)-[:participatesIn]->(Event) for each participant id,
+        # falling back to the event.subject field when no explicit participants.
+        participants = inner.get("participants") or []
+        if isinstance(participants, str):
+            participants = [participants]
+        if participants:
+            for pid in participants:
+                self.g.query(
+                    "MATCH (s:Subject {id: $sid}), (e:Event {eventId: $eid}) "
+                    "MERGE (s)-[:participatesIn]->(e)",
+                    params={"sid": pid, "eid": eid},
+                )
+        elif subj:
+            # Fallback: performer is an implicit participant
+            self.g.query(
+                "MATCH (s:Subject {name: $name}), (e:Event {eventId: $eid}) "
+                "MERGE (s)-[:participatesIn]->(e)",
+                params={"name": subj, "eid": eid},
+            )
+
         # #228: persist arbitrary caller-supplied props (iterate inner dict
         # so nested {event:{...}} and flat formats both work)
         self._persist_extra_props(
