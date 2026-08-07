@@ -3402,7 +3402,7 @@ class TortoiseSDK:
         """Return organisational structure: members, roles, sub-teams."""
         proj = self._get_proj()
         members = proj.g.query(
-            "MATCH (s)-[:hasMember]->(p:Subject) WHERE s.id = $sid OR s.name = $sid RETURN properties(p)",
+            "MATCH (p:Subject)-[:memberOf]->(s) WHERE s.id = $sid OR s.name = $sid RETURN properties(p)",
             params={"sid": subject_id},
         )
         roles = proj.g.query(
