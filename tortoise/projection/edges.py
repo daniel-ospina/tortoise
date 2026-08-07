@@ -225,7 +225,7 @@ class _EdgeHandlers:
         Matches target by id OR eventId (Event nodes use eventId as key)."""
         valid_predicates = {
             'performs', 'produces', 'uses', 'authoredBy', 'ownedBy', 'managedBy',
-            'partOf', 'hasMember', 'holdsRole', 'memberOf', 'reportsTo',
+            'hasMember', 'holdsRole', 'memberOf', 'reportsTo',
             'instantiates', 'participatesIn', 'hasPart', 'related', 'dependsOn', 'references',
             'wasDerivedFrom'
         }
