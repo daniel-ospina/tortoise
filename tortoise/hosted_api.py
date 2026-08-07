@@ -9,6 +9,7 @@ See: docs/epics/2026-08-03-tortoise-hosted-platform/04-plan.md §5, §6.1
 from __future__ import annotations
 
 import asyncio
+import json as _json
 import logging
 import os
 import time
@@ -681,45 +682,6 @@ async def _check_register_rate_limit(request: Request) -> None:
                 headers={"Retry-After": "3600"},
             )
         bucket.append(now)
-
-
-# ── Onboarding: Helpers (#498) ────────────────────────────────────
-
-import json as _json
-
-
-def _get_onboarding_state(team_id: str) -> dict:
-    """Read onboarding_state from Team node in registry graph."""
-    sdk = _make_sdk(namespace="registry")
-    rows = sdk._get_registry().query(
-        "MATCH (t:Team {id: $id}) RETURN t.onboarding_state",
-        params={"id": team_id},
-    ).result_set
-    if not rows or rows[0][0] is None:
-        # Lazy init — set default state on first read
-        _set_onboarding_state(team_id, DEFAULT_ONBOARDING_STATE)
-        return dict(DEFAULT_ONBOARDING_STATE)
-    state = rows[0][0]
-    if isinstance(state, str):
-        state = _json.loads(state)
-    return dict(state)
-
-
-def _set_onboarding_state(team_id: str, state: dict) -> None:
-    """Write onboarding_state to Team node in registry graph."""
-    sdk = _make_sdk(namespace="registry")
-    sdk._get_registry().query(
-        "MATCH (t:Team {id: $id}) SET t.onboarding_state = $state",
-        params={"id": team_id, "state": _json.dumps(state)},
-    )
-
-
-def _update_onboarding_state(team_id: str, **fields) -> dict:
-    """Merge fields into onboarding_state and write back. Returns new state."""
-    current = _get_onboarding_state(team_id)
-    current.update(fields)
-    _set_onboarding_state(team_id, current)
-    return current
 
 
 # ── Endpoints ─────────────────────────────────────────────────────
@@ -1670,7 +1632,10 @@ _GITHUB_AUTHORIZE_URL = "https://github.com/login/oauth/authorize"
 _GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token"
 _GITHUB_API = "https://api.github.com"
 _GITHUB_STATE_TTL_S = 600  # 10 min
-_GITHUB_STATES = {}  # state -> {team_id, org, created_at} (in-memory, single instance)
+_GITHUB_STATES = {}  # state -> {team_id, org, created_at}
+# NOTE (P1): in-memory — single-worker only (hosted_api runs 1 uvicorn worker
+# on Fly, consistent with the auth cache, rate limiter, and _INDEX_JOBS).
+# Multi-worker would need a shared store (Redis/FalkorDB) for CSRF state.
 
 
 class GitHubConnectRequest(BaseModel):
@@ -1841,7 +1806,7 @@ async def _run_indexing(job_id: str, team_id: str, org: str, repo: str | None) -
     finally:
         # Evict after 1 hour
         import asyncio as _asyncio
-        _asyncio.get_event_loop().call_later(
+        _asyncio.get_running_loop().call_later(
             3600, lambda: _INDEX_JOBS.pop(job_id, None))
 
 
@@ -1862,7 +1827,7 @@ async def index_github(body: GitHubIndexRequest, team: dict = Depends(get_curren
     job_id = secrets.token_hex(8)
     _INDEX_JOBS[job_id] = {"status": "started", "progress": 0,
                            "points_created": 0, "error": None,
-                           "created_at": time.time()}
+                           "team_id": team["team_id"], "created_at": time.time()}
     import asyncio as _asyncio
     _asyncio.get_event_loop().create_task(
         _run_indexing(job_id, team["team_id"], org, body.repo))
@@ -1874,6 +1839,9 @@ async def index_job_status(job_id: str, team: dict = Depends(get_current_team)):
     """Poll an indexing job's progress."""
     job = _INDEX_JOBS.get(job_id)
     if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    # Cross-tenant isolation (P2 review fix): only the owning team can poll
+    if job.get("team_id") != team["team_id"]:
         raise HTTPException(status_code=404, detail="Job not found")
     return {"job_id": job_id, **job}
 

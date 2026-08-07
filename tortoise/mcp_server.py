@@ -923,6 +923,12 @@ def tortoise_onboarding_github_connect(org: str | None = None) -> dict:
     if not client_id:
         return {"error": "GitHub OAuth not configured"}
     state = secrets.token_urlsafe(24)
+    # Store CSRF state so the callback can validate it (P2 review fix) —
+    # must be visible to the REST callback handler in the same process.
+    import time as _time
+    from tortoise.hosted_api import _GITHUB_STATES
+    _GITHUB_STATES[state] = {"team_id": team_id, "org": org or team_id,
+                             "created_at": _time.time()}
     callback = _os.environ.get("GITHUB_CALLBACK_URL",
                                "https://api.premiselabs.co/v1/onboarding/github/callback")
     params = {"client_id": client_id, "redirect_uri": callback,
@@ -974,6 +980,7 @@ def tortoise_onboarding_github_index(org: str, repo: str | None = None) -> dict:
     job_id = _secrets.token_hex(8)
     _INDEX_JOBS[job_id] = {"status": "started", "progress": 0,
                            "points_created": 0, "error": None,
+                           "team_id": team_id,
                            "created_at": _asyncio.get_event_loop().time()}
     try:
         _asyncio.get_event_loop().create_task(

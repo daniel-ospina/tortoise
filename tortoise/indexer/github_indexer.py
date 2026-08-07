@@ -19,8 +19,6 @@ logger = logging.getLogger(__name__)
 _GITHUB_API = "https://api.github.com"
 _MAX_BODY_CHARS = 5000
 _MAX_ITEMS_PER_RUN = 500
-_RATE_LIMIT_REMAINING_THRESHOLD = 50
-
 
 class GitHubIndexer:
     """Background indexer: org issues/PRs → Points in a team graph."""
@@ -93,7 +91,11 @@ class GitHubIndexer:
         """Index issues/PRs from an org into the SDK's team graph.
 
         Returns {points_created, repos_processed, errors, total_fetched}.
-        Idempotent: SDK create_point dedup by github_url prop.
+        Idempotent: SDK create_point dedups by content hash — re-running with
+        unchanged issue content produces no new Points (same content hash).
+        Changed issues (edited title/body) create updated Points, which is
+        the desired behavior (each state is a distinct memory). github_url is
+        stored in props for traceability, not used for dedup.
         """
         client = await self._get_client()
         errors: list[str] = []
