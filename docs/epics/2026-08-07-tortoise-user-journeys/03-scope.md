@@ -58,8 +58,10 @@ created: 2026-08-07
 
 13. **Pricing page on tortoise.premiselabs.co** — the tier structure above rendered as a real pricing section:
     - **Component shape:** reuse the El Dato pricing components (DMeer/website `#pricing`): monthly/annual toggle (-20% badge), pricing cards with ✓ included / ✕ excluded feature rows, "Most popular" tag — re-skinned with Tortoise colors (dark slate/cyan/green/gold).
-    - **Hosted cards:** Free / Solo / Pro / Team per `product/pricing.md`, with the "$2 per additional 10k write ops" usage line.
-    - **Self-hosted section (Sentry/Metabase pattern, research-verified):** honest tradeoff framing — "your infra, your ops" vs "managed, zero-ops" — with the "Migrate to cloud anytime" conversion CTA (self-hosted → hosted as zero-loss upgrade). Hosted remains the primary CTA; self-hosted is a clearly-labeled secondary route. No fear-framing (Sentry 2019 "hidden costs" is the anti-pattern).
+    - **Segmented positioning (owner-confirmed):** two value props above the cards — "**Use Tortoise**" (memory for you and your team: connect your agents) and "**Build with Tortoise**" (embedded memory via API for your product) — same pricing cards, segmented framing. Personas P0/P3b (Build) and P1–P5 (Use).
+    - **Hosted cards:** Free / Solo / Pro / Team per `product/pricing.json` (canonical), with the "$5 per additional 10k write ops" usage line and "unlimited integrations" on all cards.
+    - **Self-hosted section (Sentry/Metabase pattern, research-verified):** honest tradeoff framing — "your infra, your ops" vs "managed, zero-ops" — with the "Migrate to cloud anytime" conversion CTA (self-hosted → hosted as zero-loss upgrade). Hosted remains the primary CTA; self-hosted is a clearly-labeled secondary route. No fear-framing (Sentry 2019 "hidden costs" is the anti-pattern). BSL 1.1 + $5M AUG license line per #338 D3.
+    - **"Why hosted?" callout (Vibecoder segment):** no setup, no servers, managed backups, upgrade as you grow — self-host stays visible for P4/P5.
     - **Landing bifurcation:** hero CTA stays hosted ("Connect your agent →"); "Self-hosting docs →" secondary link deepens (already present — extend).
 
 ### Out of Scope
@@ -71,6 +73,8 @@ created: 2026-08-07
 | Stripe billing / payment processing / credit metering | Decoupled team/graph model + tier limits are IN scope (foundation); actual payment collection + write-op metering is a billing epic | Hosted platform epic #296 / future billing epic |
 | Full abuse-prevention system (CAPTCHA, anomaly detection) | Only minimal posture (rate limit, size caps) in scope | Hosted platform #308 |
 | OAuth-based MCP authentication | Bearer `tt_` keys sufficient for v1; OAuth is additive (no login-breaking change); design criteria captured on #524; build AFTER decoupling lands | #524 (OAuth 2.1, complex) |
+| Sub-tenancy (per-end-user isolation for embedders) | Requires the decoupled model first; embedder's end-users become tenants under the embedder's account | **#557 (epic, filed)** |
+| Planned Pro/Team features (per-graph keys, backups, usage dashboard, webhooks, export, audit log, ReBAC) | Declared intent in pricing.md; future work — capacity stays the pricing lever | Future issues (tracked in plan §8.3 1f) |
 | Harness-specific onboarding variants (Pi/Claude/Codex/Cursor) | Filed as follow-up epic after the generalized one-artifact cracks (#235) | **#529 (epic, filed)** |
 | Funnel analytics instrumentation (PostHog) | Filed separately; includes hosted-vs-self-host research gate | **#528 (filed)** |
 | `tortoise onboard` CLI changes | Self-hosted CLI is robust; only journey links in scope | N/A |

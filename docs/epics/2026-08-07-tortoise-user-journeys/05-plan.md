@@ -22,19 +22,41 @@ created: 2026-08-07
 
 ## Personas
 
-| Persona | Description | Primary flow | Secondary flow |
-|---|---|---|---|
-| **P1 — Solo Hacker** | Individual dev evaluating agent memory; technical, wants quick value | Hosted Free → Solo | Self-hosted eval |
-| **P2 — Power User / Freelancer** | Pays for own Pro team; may also be member of client teams | Hosted Pro (multi-graph) | Parallel memberships |
-| **P3 — Team Lead / Agency** | Buys Team tier; invites collaborators; RBAC admin | Hosted Team (invites, RBAC) | — |
-| **P4 — OSS Evaluator** | Wants self-hosted; sovereignty/compliance-minded | Self-hosted (BSL grant) | Hosted free tier |
-| **P5 — Existing Self-Host User** | Already runs tortoise locally; considers hosted for zero-ops | Self-hosted → hosted **CTA** (J-5 step 5) | — |
+Two segments: **Use** (Tortoise as memory product — agents remember for you/your team) and **Build** (Tortoise as dev tool — embedded memory inside your own product). Segmented positioning on the landing/pricing page; the journeys are shared.
+
+| Persona | Segment | Description | Primary flow | Secondary flow |
+|---|---|---|---|---|
+| **P0 — App Builder / Embedder** | Build | Developer embedding Tortoise as memory inside *their own product* (agent apps, copilots, analytics). Aha = **first API call in their app**. Tier driver: Pro (per-team key, usage-based overage scales with their users). | Hosted Pro | Self-host daemon (#338) |
+| **P1 — Solo Hacker** | Use | Technical dev; evaluates agent memory for their own agents; can self-host if needed | Hosted Free → Solo | Self-hosted eval |
+| **P1b — Vibecoder** | Use | Less-professional dev or non-dev freelancer running a few agents; **will NOT self-host** (too complicated); price-sensitive; entry-tier buyer. Starts Free, upgrades to Solo ($9). Self-hosting stays visible but "Why hosted?" callout explains the advantages. | Hosted Free → Solo | — |
+| **P2 — Power User** | Use | Next evolution of P1 — hit Free/Solo caps, needs unlimited graphs + serious usage + multi-team membership | Hosted Pro ($25) | Parallel memberships |
+| **P3 — Team Lead / Agency** | Use | Buys Team tier; invites collaborators; RBAC admin | Hosted Team ($149) | — |
+| **P3b — Build Team / Advanced Embedder** | Build | Company embedding Tortoise at scale: multiple product teams, white-label ambitions, per-end-user isolation. Team tier + sub-tenancy (future epic). | Hosted Team | Sub-tenancy (future) |
+| **P4 — OSS Evaluator** | Use | Wants self-hosted; sovereignty/compliance-minded | Self-hosted (BSL grant) | Hosted free tier |
+| **P5 — Existing Self-Host User** | Use | Already runs tortoise locally; considers hosted for zero-ops | Self-hosted → hosted **CTA** (J-5 step 5) | — |
+
+> **P2 correction (owner-confirmed):** NOT a freelancer — just the next evolution of P1 (hit the caps → upgrade). The upgrade path is the tier-limit soft-block (UX-D4) with segment-aware copy (see upgrade-path design below).
 
 > **P5 migration scope note:** v1 "migrate to cloud anytime" is a **CTA + fresh hosted team + connect**, NOT a data-import migration — no engine changes are in scope. The hosted team starts fresh (optionally demo-seeded); the user re-connects their agents. A real graph-import migration is a future epic.
 
+## Upgrade-path design (from personas — segment-aware soft-block copy)
+
+The tier-limit soft-block (UX-D4) is the upgrade *argument surface*. When a cap is hit, the message is segment-aware:
+
+| Cap hit | Segment | Message |
+|---|---|---|
+| Free 1 graph / 1K ops / 10K nodes | Use (Vibecoder/P1) | "Your agents are working — Solo gives 2 graphs + 10× ops for $9/mo" |
+| Solo 2 graphs / 10K ops | Use (P1→P2) | "Stop hitting caps — Pro: unlimited graphs, 100K ops, multi-team membership" |
+| Pro 2 collaborators | Use (P2→P3) | "More people — Team: invites, RBAC, shared graphs" |
+| App scale (usage) | Build (P0) | "Your app just works — usage-based overage grows with your users; per-graph keys isolate apps" |
+| Org scale | Build (P3b) | "Embedded at scale — Team + sub-tenancy (future)" |
+| Self-host maintenance burden | Use (P4/P5) | "Zero-ops — migrate to cloud anytime" |
+
 ---
 
-## J-1: Hosted Signup → First Memory (PRIMARY FLOW — P1/P2)
+## J-1: Hosted Signup → First Memory (PRIMARY FLOW — P0/P1/P1b/P2)
+
+> **Segment note:** for the Use segment (P1/P1b/P2), step 7's primary action is "Connect your agent"; for the Build segment (P0), the same journey's primary action is the API quickstart (create-point snippet — already API-shaped), with "connect your agent" secondary. The journeys share all plumbing; only the primary-CTA copy segments (UX-D3 + pricing-page segmented positioning).
 
 **Entry:** Visitor on tortoise.premiselabs.co (landing hero: "Connect your agent →")
 **Exit:** First memory created + visible in dashboard; agent connected
@@ -77,7 +99,7 @@ created: 2026-08-07
 | 3 | Dashboard | Logs out | `signOut()` clears parent-domain cookie → logged out everywhere | — |
 | 4 | Dashboard (alt) | No session: pastes API key | API-key login mode coexists (unchanged) | — |
 
-## J-4: Multi-Team + Multi-Graph (decoupling — P2/P3)
+## J-4: Multi-Team + Multi-Graph (decoupling — P2/P0/P3b)
 
 **Entry:** User with >1 team membership (e.g., own Solo team + client's Team team)
 **Exit:** Switches context to the right team/graph; operations scoped correctly
@@ -907,7 +929,7 @@ Each test: **Setup** (concrete preconditions) · **Steps** (verifiable actions) 
 ## E2E-14: Pricing page renders hosted tiers + self-hosted section
 - **Setup:** pricing page live on tortoise.premiselabs.co
 - **Steps:** scroll to pricing; toggle monthly/annual; read self-hosted section
-- **Assertions:** Free/Solo/Pro/Team cards with ✓/✕ rows · toggle swaps prices (annual -20% default) · "$2 per additional 10k write ops" visible · self-hosted section: BSL 1.1 + $5M AUG + Apache-2.0-in-4yrs + "migrate to cloud anytime" CTA · hosted CTA primary
+- **Assertions:** Free/Solo/Pro/Team cards with ✓/✕ rows · toggle swaps prices (annual -20% default) · **"$5 per additional 10k write ops" visible** · **segmented positioning renders — "Use Tortoise" (memory for you/your team) AND "Build with Tortoise" (embedded memory via API) value props** · **integrations "unlimited" visible on all cards** · self-hosted section: BSL 1.1 + $5M AUG + Apache-2.0-in-4yrs + "migrate to cloud anytime" CTA · hosted CTA primary
 - **Negative:** pricing data drift vs **product/pricing.json** (canonical — decision 1d; fail on mismatch, no markdown parsing)
 
 ---
