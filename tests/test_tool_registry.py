@@ -66,10 +66,10 @@ class TestRegistryEquivalence:
         from tortoise.mcp_auth import HTTP_ALLOWED
 
         derived = frozenset(t.name for t in TOOL_REGISTRY if t.http_policy)
-        # Exact count: 58 tools - 4 excluded (team_create, backfill_v25,
-        # ingest_corpus, index_sessions) = 54
-        assert len(HTTP_ALLOWED) == 54, f"Expected 54, got {len(HTTP_ALLOWED)}"
-        assert len(derived) == 54
+        # Exact count: 63 tools - 4 excluded (team_create, backfill_v25,
+        # ingest_corpus, index_sessions) = 59 (incl. 5 onboarding tools #498/#499/#500)
+        assert len(HTTP_ALLOWED) == 59, f"Expected 59, got {len(HTTP_ALLOWED)}"
+        assert len(derived) == 59
         assert derived == HTTP_ALLOWED, (
             f"Derived HTTP_ALLOWED mismatch:\n"
             f"  In derived but not set: {derived - HTTP_ALLOWED}\n"
@@ -77,9 +77,15 @@ class TestRegistryEquivalence:
         )
 
     def test_registry_count(self):
-        """58 tools — same count as @mcp.tool() decorators."""
+        """63 tools — 58 existing + 5 onboarding tools (#498/#499/#500)."""
         from tortoise.tool_registry import TOOL_REGISTRY
-        assert len(TOOL_REGISTRY) == 58, f"Expected 58, got {len(TOOL_REGISTRY)}"
+        assert len(TOOL_REGISTRY) == 63, f"Expected 63, got {len(TOOL_REGISTRY)}"
+        names = {t.name for t in TOOL_REGISTRY}
+        onboarding = {"tortoise_onboarding_demo_create", "tortoise_onboarding_state",
+                      "tortoise_onboarding_session_recording",
+                      "tortoise_onboarding_github_connect",
+                      "tortoise_onboarding_github_status"}
+        assert onboarding <= names, f"Missing onboarding tools: {onboarding - names}"
 
     def test_no_duplicate_names(self):
         """No two registry entries share the same name."""
