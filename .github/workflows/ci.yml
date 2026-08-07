@@ -1,21 +1,40 @@
 name: CI
-# Thin caller — delegates to reusable workflow in agent-infra
-# Budget: PR-only (shared Actions budget under daniel-ospina account)
+# Self-contained CI (fix #555) — no reusable-workflow call (GitHub fails to
+# parse agent-infra/docs-ci.yml@main: "error parsing called workflow") and no
+# `scripts/` symlink (it resolves to a local agent-infra path, broken on the
+# runner). All checks use repo-local scripts.
 
 on:
   pull_request:
 
 jobs:
-  ci:
-    uses: daniel-ospina/agent-infra/.github/workflows/docs-ci.yml@main
-    secrets: inherit
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Get changed markdown files
+        id: changed
+        run: |
+          FILES=$(git diff --name-only "${{ github.event.pull_request.base.sha }}"...HEAD -- '*.md' || true)
+          echo "files=$FILES" >> "$GITHUB_OUTPUT"
+      - name: Markdownlint (changed files)
+        if: steps.changed.outputs.files != ''
+        run: npx markdownlint-cli ${{ steps.changed.outputs.files }}
+      - name: Link check (changed files)
+        if: steps.changed.outputs.files != ''
+        uses: lycheeverse/lychee-action@v2
+        with:
+          args: --no-progress ${{ steps.changed.outputs.files }}
 
   test-isolation:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Check test isolation
-        run: python3 scripts/check-test-isolation.py
+      - name: Check test isolation (repo-local lint)
+        run: bash .ci-checks/check-test-isolation.sh
 
   license-surface:
     runs-on: ubuntu-latest
