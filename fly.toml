@@ -33,8 +33,11 @@ primary_region = "iad"
 [[vm]]
   cpu_kind = "shared"
   cpus = 2
-  memory_mb = 2048
-  # memory_mb bumped 512→2048 for torch (sentence-transformers ~1.5GB loaded model).
+  memory_mb = 4096
+  # memory_mb 512→2048→4096: torch + sentence-transformers + the 90MB model +
+  # the app consistently OOM-crash-loops on 2GB cold boots (#545) — cold
+  # machines died (deploy health-check timeout), warm machines survived,
+  # which is the signature of a marginal-memory kill.
   # cpus bumped 1→2 so vector encoding doesn't starve the API thread during
   # cold starts and backfill. Estimated cost impact: +$1-3/mo (Fly shared-cpu-2x).
 
