@@ -323,9 +323,10 @@ class TestAnalyzeLlmBudget:
         # Team context (HTTP) → budget accounting
         token = _current_team_id.set("team-budget")
         try:
-            # Fill the budget with FRESH timestamps (stale ones are pruned)
-            import time as _t
-            ms._ANALYZE_LLM_BUDGET["team-budget"] = [_t.time()] * MAX_ANALYZE_LLM_PER_MIN
+            # Exercise the ACCUMULATION path: MAX calls allowed, next rejected
+            ms._ANALYZE_LLM_BUDGET.pop("team-budget", None)
+            for _ in range(MAX_ANALYZE_LLM_PER_MIN):
+                assert ms._analyze_llm_budget_available() is True
             assert ms._analyze_llm_budget_available() is False
             # A call beyond budget must not hit the LLM (urlopen never called)
             import urllib.request as _ur

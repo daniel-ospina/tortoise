@@ -177,9 +177,8 @@ def _analyze_llm_budget_available() -> bool:
     now_ts = _t.time()
     bucket = _ANALYZE_LLM_BUDGET.setdefault(team_id, [])
     bucket[:] = [ts for ts in bucket if now_ts - ts < 60]
-    if not bucket:
-        _ANALYZE_LLM_BUDGET.pop(team_id, None)  # evict idle teams (no leak)
-        return True
+    # prune -> check -> append (never pop between check and append — that
+    # orphans the appended timestamp and silently disables the budget)
     if len(bucket) >= MAX_ANALYZE_LLM_PER_MIN:
         return False
     bucket.append(now_ts)

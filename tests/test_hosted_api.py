@@ -1118,13 +1118,17 @@ class TestSessionFloodGate:
 
 class TestDreamBudget:
     def test_full_dream_budget_exhausted_429(self, client):
+        """#329: real sequential full-dream calls accumulate — the budget
+        rejects after MAX_DREAM_FULL_PER_HOUR (accumulation path, not seeding)."""
         import tortoise.hosted_api as ha
         from tortoise.quota import MAX_DREAM_FULL_PER_HOUR
-        import time as _t
-        ha._DREAM_FULL_BUCKETS[TEST_TEAM_ID] = [_t.time()] * MAX_DREAM_FULL_PER_HOUR
+        ha._DREAM_FULL_BUCKETS.pop(TEST_TEAM_ID, None)
         try:
+            for _ in range(MAX_DREAM_FULL_PER_HOUR):
+                r = client.post("/v1/dream?full=true", json={})
+                assert r.status_code == 200, r.text[:200]
             r = client.post("/v1/dream?full=true", json={})
-            assert r.status_code == 429, r.text
+            assert r.status_code == 429, f"expected 429, got {r.status_code}: {r.text[:200]}"
         finally:
             ha._DREAM_FULL_BUCKETS.pop(TEST_TEAM_ID, None)
 

@@ -799,8 +799,8 @@ async def dream(
         now_ts = _t.time()
         bucket = _DREAM_FULL_BUCKETS.setdefault(tid, [])
         bucket[:] = [ts for ts in bucket if now_ts - ts < 3600]
-        if not bucket:
-            _DREAM_FULL_BUCKETS.pop(tid, None)  # evict idle teams (no leak)
+        # prune -> check -> append (never pop between check and append — that
+        # orphans the appended timestamp and silently disables the budget)
         if len(bucket) >= MAX_DREAM_FULL_PER_HOUR:
             raise HTTPException(
                 status_code=429,
@@ -1306,9 +1306,10 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
 
     #329 flood gate: the extraction amplifier creates ~160 nodes/turn via the
     decision/claim regexes (empirically 30 dense turns → 4,832 nodes) and the
-    ``sessions`` count only ever sees the :Session node — Points were unbounded.
-    Bounds (checked in order): per-request turn cap → 400; extraction-aware
-    pre-write estimate vs the points quota → 402; per-turn extraction cap.
+    ``sessions`` quota counts TOTAL nodes (MATCH (n), matching REST's
+    historical semantics) — Points were unbounded. Bounds (checked in order):
+    per-request turn cap → 400; extraction-aware pre-write estimate vs the
+    points quota → 402; per-turn extraction cap (in the loop).
     """
     import uuid, re
     from datetime import datetime, timezone
