@@ -14,6 +14,7 @@ is_dev_mode(), which returns True in hosted production (TORTOISE_API_KEY unset).
 from __future__ import annotations
 
 import asyncio
+import hmac
 import os
 import time
 from collections import OrderedDict, defaultdict
@@ -152,6 +153,61 @@ class TeamResolutionMiddleware(BaseHTTPMiddleware):
         # No .reset() needed: Starlette creates a fresh asyncio task per request;
         # ContextVars are copy-on-write per task (verified by
         # test_contextvar_not_leaked_to_next_request).
+        return await call_next(request)
+
+
+class TransportModeMiddleware(BaseHTTPMiddleware):
+    """Self-host transport init (auth_mode="static" | "none", #338).
+
+    TeamResolutionMiddleware sets these ContextVars for tenant mode; selfhost
+    modes have no tenant resolution, so this middleware initializes them:
+    _transport_mode="http" (passes _safe()'s fail-closed gate — auth was
+    enforced at transport: static key check or localhost-bound none mode) and
+    _current_team_id="selfhost" (isolated team_selfhost graph namespace).
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        _transport_mode.set("http")
+        _current_team_id.set("selfhost")
+        return await call_next(request)
+
+
+class StaticKeyMiddleware(BaseHTTPMiddleware):
+    """Static API-key auth for single-tenant self-host (auth_mode="static").
+
+    Validates a single configured key (TORTOISE_API_KEY) with constant-time
+    compare. Fail-closed: if api_key is None (misconfiguration), all POSTs
+    are rejected 503 — never allow unauthenticated writes.
+    """
+
+    def __init__(self, app, *, api_key: str | None):
+        super().__init__(app)
+        self._api_key = api_key
+
+    async def dispatch(self, request: Request, call_next):
+        # GET metadata route + DELETE (stateless no-op) skip auth, matching
+        # TeamResolutionMiddleware behavior.
+        if request.method != "POST":
+            return await call_next(request)
+        if self._api_key is None:
+            return JSONResponse(
+                {"jsonrpc": "2.0", "error": {"code": -32099, "message": "Static auth misconfigured: no API key set."}, "id": None},
+                status_code=503,
+            )
+        auth = request.headers.get("Authorization", "")
+        if not auth.startswith("Bearer "):
+            return _jsonrpc_error(
+                ERR_UNAUTHORIZED,
+                "Unauthorized: missing Bearer token.",
+                status=401,
+            )
+        token = auth[7:]
+        if not hmac.compare_digest(token.encode(), self._api_key.encode()):
+            return _jsonrpc_error(
+                ERR_UNAUTHORIZED,
+                "Unauthorized: invalid API key.",
+                status=401,
+            )
         return await call_next(request)
 
 

@@ -37,16 +37,9 @@
       }
     },
     "tortoise": {
-      "command": "python3",
-      "args": [
-        "-m",
-        "tortoise.mcp_server"
-      ],
-      "cwd": "/Users/danielospina/Documents/GitHub/tortoise",
-      "env": {
-        "PYTHONPATH": "/Users/danielospina/Documents/GitHub/tortoise",
-        "TORTOISE_DB_URI": "docker://:falkordb@localhost:16379/tortoise"
-      }
+      "type": "http",
+      "url": "http://localhost:8000/mcp",
+      "headers": {}
     }
   }
 }

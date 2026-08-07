@@ -6,7 +6,7 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastmcp import FastMCP
 from mcp.types import ToolAnnotations
@@ -1018,13 +1018,20 @@ def tortoise_onboarding_github_index(org: str, repo: str | None = None) -> dict:
 
 def create_http_app(*, allowed_origins: list[str] | None = None,
                     rate_limit: int = 100,
-                    _registry_sdk=None) -> Any:
+                    _registry_sdk=None,
+                    auth_mode: Literal["tenant", "static", "none"] = "tenant",
+                    api_key: str | None = None) -> Any:
     """Configured Streamable HTTP app for the hosted platform (#236).
 
     Mounted at /mcp on the existing FastAPI app. Auth + rate limiting +
     security headers + body-size caps live INSIDE this app's middleware
     stack — the parent FastAPI app.mount() does NOT propagate its own
     middleware to mounted sub-apps (verified Starlette behavior).
+
+    auth_mode (additive, default "tenant" = hosted byte-identical):
+      "tenant" → TeamResolutionMiddleware (registry Bearer tt_ keys)
+      "static" → StaticKeyMiddleware (single TORTOISE_API_KEY, self-host LAN)
+      "none"   → no auth middleware (localhost-bound self-host eval)
 
     path="/": the app is mounted at /mcp on the parent FastAPI app, which
     strips the mount prefix before dispatching to this sub-app — so routes
@@ -1034,11 +1041,28 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
     """
     from starlette.middleware import Middleware
     from starlette.responses import JSONResponse
-    from tortoise.mcp_auth import (TeamResolutionMiddleware,
-                                   MCPRateLimitMiddleware,
+    from tortoise.mcp_auth import (MCPRateLimitMiddleware,
                                    SecurityHeadersMiddleware,
                                    RequestBodySizeMiddleware)
     from fastmcp.server.transforms import Transform
+
+    # auth_mode middleware selection. TeamResolutionMiddleware (tenant mode) is
+    # imported here but only ever INSTANTIATED in the tenant branch — static/none
+    # modes never construct it, and hosted_api is only ever lazily imported when
+    # a tenant token is verified (mcp_auth delegates via function-level import).
+    auth_mw = None
+    transport_mw = None
+    if auth_mode == "tenant":
+        from tortoise.mcp_auth import TeamResolutionMiddleware
+        auth_mw = Middleware(TeamResolutionMiddleware, registry_sdk=_registry_sdk)
+    elif auth_mode == "static":
+        from tortoise.mcp_auth import StaticKeyMiddleware
+        auth_mw = Middleware(StaticKeyMiddleware, api_key=api_key)
+        from tortoise.mcp_auth import TransportModeMiddleware
+        transport_mw = Middleware(TransportModeMiddleware)
+    elif auth_mode == "none":
+        from tortoise.mcp_auth import TransportModeMiddleware
+        transport_mw = Middleware(TransportModeMiddleware)
 
     class _HTTPToolFilter(Transform):
         """Hide HTTP-excluded tools from tools/list (D4 — registration-level).
@@ -1064,16 +1088,29 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
                              "transport": "streamable-http",
                              "endpoint": "/mcp"})
 
+    middleware = [
+        Middleware(SecurityHeadersMiddleware),
+        Middleware(RequestBodySizeMiddleware),
+    ]
+    if auth_mw is not None and auth_mode == "tenant":
+        # Original position: tenant auth sits between body-size and rate-limit
+        # (byte-identical to pre-auth_mode hosted stack).
+        middleware.append(auth_mw)
+    middleware.append(Middleware(MCPRateLimitMiddleware, max_per_minute=rate_limit))
+    if auth_mw is not None and auth_mode != "tenant":
+        # Static mode: rate limiter sits OUTSIDE auth so failed-key attempts are
+        # throttled (code-review P1 — unlimited brute force on a user-chosen key).
+        middleware.append(auth_mw)
+    if transport_mw is not None:
+        # Innermost — runs after auth validated, right before the app:
+        # initializes the transport-mode ContextVars selfhost tools need.
+        middleware.append(transport_mw)
+
     return mcp.http_app(
         transport="streamable-http",
         stateless_http=True,
         host_origin_protection=True,
         allowed_origins=allowed_origins or [],
         path="/",
-        middleware=[
-            Middleware(SecurityHeadersMiddleware),
-            Middleware(RequestBodySizeMiddleware),
-            Middleware(TeamResolutionMiddleware, registry_sdk=_registry_sdk),
-            Middleware(MCPRateLimitMiddleware, max_per_minute=rate_limit),
-        ],
+        middleware=middleware,
     )
