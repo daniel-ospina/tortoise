@@ -111,7 +111,7 @@ app = FastAPI(title="Tortoise Hosted API", version="0.1.0", lifespan=_lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://premiselabs.co", "https://app.premiselabs.co", "https://tortoise-y4mjjq.fly.dev"],
+    allow_origins=["https://premiselabs.co", "https://app.premiselabs.co", "https://api.premiselabs.co", "https://tortoise-y4mjjq.fly.dev"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
