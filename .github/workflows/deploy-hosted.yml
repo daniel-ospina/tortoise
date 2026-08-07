@@ -27,7 +27,7 @@ jobs:
           fi
       - name: Set all app secrets on Fly.io (keeps in sync with GitHub/Supabase)
         run: |
-          flyctl secrets set \
+          flyctl secrets set --stage \
             FASTAPI_INTERNAL_KEY="${{ secrets.FASTAPI_INTERNAL_KEY }}" \
             TORTOISE_SECRET_PEPPER="${{ secrets.TORTOISE_SECRET_PEPPER }}" \
             FALKORDB_CLOUD_URI="${{ secrets.FALKORDB_CLOUD_URI }}" \
