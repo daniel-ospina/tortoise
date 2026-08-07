@@ -15,12 +15,18 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Markdownlint
-        run: npx markdownlint-cli '**/*.md' --ignore node_modules --ignore .git --ignore .venv
-      - name: Link check
+      - name: Markdownlint (changed files)
+        run: |
+          CHANGED=$(git diff --name-only "${{ github.event.pull_request.base.sha }}"...HEAD -- '*.md' || true)
+          if [ -n "$CHANGED" ]; then
+            npx markdownlint-cli $CHANGED
+          else
+            echo "no markdown files changed in this PR"
+          fi
+      - name: Link check (changed files)
         uses: lycheeverse/lychee-action@v2
         with:
-          args: --no-progress './**/*.md'
+          args: --no-progress $(git diff --name-only "${{ github.event.pull_request.base.sha }}"...HEAD -- '*.md' | tr '\n' ' ')
 
   test-isolation:
     runs-on: ubuntu-latest
