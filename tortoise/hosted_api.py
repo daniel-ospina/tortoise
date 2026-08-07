@@ -620,9 +620,10 @@ class RegisterRequest(BaseModel):
 
 
 class RegisterResponse(BaseModel):
-    api_key: str
-    team_id: str
-    graph_name: str
+    api_key: str | None = None
+    team_id: str | None = None
+    graph_name: str | None = None
+    message: str | None = None  # "already_registered" on duplicate
 
 
 class OnboardingStateResponse(BaseModel):
@@ -1464,8 +1465,10 @@ def _get_onboarding_state(team_id: str) -> dict:
     """Read onboarding_state from the Team node in the registry graph.
 
     Auto-initializes to defaults if missing (plan Task 3 — missing state
-    auto-initializes on first read).
+    auto-initializes on first read). Stored as a JSON string (FalkorDB
+    properties are primitives-only — dicts raise ResponseError).
     """
+    import json as _json
     sdk = _make_sdk(namespace="registry")
     rows = sdk._get_registry().query(
         "MATCH (t:Team {id: $id}) RETURN t.onboarding_state",
@@ -1475,17 +1478,23 @@ def _get_onboarding_state(team_id: str) -> dict:
         state = dict(_ONBOARDING_DEFAULT_STATE)
         _write_onboarding_state(team_id, state)
         return state
+    try:
+        stored = _json.loads(rows[0][0]) if isinstance(rows[0][0], str) else rows[0][0]
+    except (TypeError, ValueError):
+        stored = {}
     state = dict(_ONBOARDING_DEFAULT_STATE)
-    state.update(rows[0][0])
+    state.update(stored)
     return state
 
 
 def _write_onboarding_state(team_id: str, state: dict) -> None:
-    """Persist onboarding_state on the Team node."""
+    """Persist onboarding_state on the Team node (JSON string — #498 fix:
+    FalkorDB node properties must be primitives, not dicts)."""
+    import json as _json
     sdk = _make_sdk(namespace="registry")
     sdk._get_registry().query(
         "MATCH (t:Team {id: $id}) SET t.onboarding_state = $state",
-        params={"id": team_id, "state": state},
+        params={"id": team_id, "state": _json.dumps(state)},
     )
 
 
@@ -1585,41 +1594,6 @@ async def public_demo(team: dict = Depends(get_current_team)):
     _update_onboarding_state(team["team_id"], demo_created=True)
     return {"status": "seeded", "team_id": team["team_id"],
             "points_created": created}
-
-
-@app.post("/v1/register")
-async def register_tenant(body: dict, request: Request):
-    """Self-service registration (P0). Returns a provisioned API key.
-
-    For MVP this provisions a team + key directly via the registry
-    (Supabase signup integration is #235 follow-up). Idempotent on email.
-    """
-    email = (body.get("email") or "").strip().lower()
-    password = body.get("password") or ""
-    import re
-    if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
-        raise HTTPException(status_code=400, detail="Invalid email")
-    if len(password) < 8:
-        raise HTTPException(status_code=400, detail="Password must be ≥ 8 chars")
-
-    sdk = _make_sdk(namespace="registry")
-    # Idempotent: check existing team by name derived from email
-    team_name = email.split("@")[0][:32] or "user"
-    dup = sdk._get_registry().query(
-        "MATCH (t:Team {name: $name}) RETURN t.id",
-        params={"name": team_name},
-    ).result_set
-    if dup:
-        return {"message": "already_registered", "team_id": dup[0][0]}
-
-    team = sdk.team_create(team_name)
-    key = sdk.apikey_create(team["id"], "self-register")["api_key"]
-    _write_onboarding_state(team["id"], dict(_ONBOARDING_DEFAULT_STATE))
-    # Analytics (#501)
-    _track_analytics_event(team["id"], "signup_complete", {"method": "email"})
-    _track_analytics_event(team["id"], "key_provisioned", {})
-    return {"api_key": key, "team_id": team["id"],
-            "graph_name": team.get("graph_name")}
 
 
 # ── Analytics instrumentation (#501) ────────────────────────────
