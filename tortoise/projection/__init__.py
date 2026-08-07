@@ -349,8 +349,16 @@ class FalkorProjection(
         references always resolve regardless of filename sort order.
 
         GAP-19: Full event-type coverage — replays all EventRecorded, SubjectAdded,
-        ObjectRegistered, DocumentCreated, ConfidenceChanged, PointRevised events,
-        not just PointAdded/OperatorAdded/PointRetracted/PointsMerged.
+        ObjectRegistered, DocumentCreated, SourceCreated, ConfidenceChanged,
+        PointRevised events, not just PointAdded/OperatorAdded/PointRetracted/
+        PointsMerged.
+
+        #330 parity guarantee: for logs where SourceCreated precedes the
+        PointAdded events that extract from that source (the canonical ingest
+        order), rebuild produces the SAME Point node properties + edges as
+        replaying through apply(). A reversed order (extractedFrom-bearing
+        point before its SourceCreated) can diverge Source node version/id
+        properties — known, documented limitation.
         """
         import os
         from tortoise.log import EventLog
@@ -408,21 +416,13 @@ class FalkorProjection(
             # ConfidenceChanged: no graph effect (audit-only event)
 
         # Pass 2: create edges for all operators + provenance/entity wiring
+        # (shared _upsert_point_edges — single source of truth with apply, #330).
         for ev in events:
             if ev["type"] in ("PointAdded", "OperatorAdded"):
                 p = ev["point"]
                 if ev.get("projection_version", 0) >= 2:
                     p.pop("context", None)
-                # Provenance chain (Point)-[:extractedFrom]->(Source) — parity
-                # with _upsert (#330): rebuild was dropping provenance edges.
-                if p.get("extractedFrom"):
-                    self._link_source(p["id"], p["extractedFrom"])
-                about = p.get("aboutEntities")
-                if about and isinstance(about, list):
-                    for entity_name in about:
-                        self._create_about_edges(p["id"], str(entity_name))
-                if p.get("operator"):
-                    self._create_edges(p)
+                self._upsert_point_edges(p)
 
         node_count = self.g.query(
             "MATCH (n:Point) RETURN count(n)"

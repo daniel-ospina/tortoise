@@ -144,9 +144,13 @@ class _EntityHandlers:
                 params={"id": p["id"], "sid": prov["source_id"]},
             )
 
-    def _upsert(self, p: dict) -> None:
-        """Upsert a Point: node properties via _upsert_point_props, then edges."""
-        self._upsert_point_props(p)
+    def _upsert_point_edges(self, p: dict) -> None:
+        """Wire all Point edges (provenance + about + operator).
+
+        Single source of truth for Point edge parity between apply() and
+        rebuild_all() pass 2 (#330) — same role as _upsert_point_props for
+        node properties.
+        """
         # Ontology v2.1: link Point → Source via extractedFrom edge
         source_ref = p.get("extractedFrom")
         if source_ref:
@@ -158,6 +162,11 @@ class _EntityHandlers:
                 self._create_about_edges(p["id"], str(entity_name))
         if p.get("operator"):
             self._create_edges(p)
+
+    def _upsert(self, p: dict) -> None:
+        """Upsert a Point: node properties via _upsert_point_props, then edges."""
+        self._upsert_point_props(p)
+        self._upsert_point_edges(p)
 
     def _delete(self, pid: str) -> None:
         self.g.query("MATCH (n:Point {id:$id}) DETACH DELETE n", params={"id": pid})

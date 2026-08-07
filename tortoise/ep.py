@@ -111,8 +111,12 @@ class TortoiseEP:
     # ── Cached read/write ────────────────────────────────────────
 
     def _read_node(self, node_id: str) -> tuple[float, float]:
-        if hasattr(self, '_node_cache') and node_id in self._node_cache:
-            return self._node_cache[node_id]
+        # #330: capture once — a concurrent run() may delattr the cache between
+        # the hasattr check and the read (TOCTOU); a local None falls through
+        # to the graph instead of raising AttributeError.
+        _cache = getattr(self, '_node_cache', None)
+        if _cache is not None and node_id in _cache:
+            return _cache[node_id]
         rows = self.g.query(
             "MATCH (n:Point {id:$id}) "
             "RETURN coalesce(n.ep_alpha, 1.0), coalesce(n.ep_beta, 1.0)",
@@ -121,8 +125,9 @@ class TortoiseEP:
         return (float(rows[0][0]), float(rows[0][1])) if rows else (1.0, 1.0)
 
     def _write_node(self, node_id: str, alpha: float, beta: float) -> None:
-        if hasattr(self, '_node_cache'):
-            self._node_cache[node_id] = (alpha, beta)
+        _cache = getattr(self, '_node_cache', None)
+        if _cache is not None:
+            _cache[node_id] = (alpha, beta)
             return
         # #330: guard degenerate (0,0) params — uniform fallback instead of ZDE
         mean = round(alpha / (alpha + beta), 4) if (alpha + beta) > 0 else 0.5
@@ -135,8 +140,9 @@ class TortoiseEP:
     def _read_message(self, op_id: str, claim_id: str,
                       rel_type: str = "IMPL") -> tuple[float, float]:
         key = (op_id, claim_id, rel_type)
-        if hasattr(self, '_msg_cache') and key in self._msg_cache:
-            return self._msg_cache[key]
+        _cache = getattr(self, '_msg_cache', None)
+        if _cache is not None and key in _cache:
+            return _cache[key]
         rows = self.g.query(
             f"MATCH (o:Point {{id:$oid}})-[r:{rel_type}]->(c:Point {{id:$cid}}) "
             "RETURN coalesce(r.msg_alpha, 0.0), coalesce(r.msg_beta, 0.0)",
@@ -148,8 +154,9 @@ class TortoiseEP:
                        msg_alpha: float, msg_beta: float,
                        rel_type: str = "IMPL") -> None:
         key = (op_id, claim_id, rel_type)
-        if hasattr(self, '_msg_cache'):
-            self._msg_cache[key] = (msg_alpha, msg_beta)
+        _cache = getattr(self, '_msg_cache', None)
+        if _cache is not None:
+            _cache[key] = (msg_alpha, msg_beta)
             return
         self.g.query(
             f"MATCH (o:Point {{id:$oid}})-[r:{rel_type}]->(c:Point {{id:$cid}}) "
@@ -187,8 +194,9 @@ class TortoiseEP:
         is still strong (>= threshold) keeps the source's support unchanged; a
         weakened target triggers a reduction signal to the source.
         """
-        if hasattr(self, "_node_cache") and claim_id in self._node_cache:
-            a, b = self._node_cache[claim_id]
+        _cache = getattr(self, "_node_cache", None)
+        if _cache is not None and claim_id in _cache:
+            a, b = _cache[claim_id]
             mean = a / (a + b) if (a + b) > 0 else 0.5
             return mean >= threshold
         rows = self.g.query(

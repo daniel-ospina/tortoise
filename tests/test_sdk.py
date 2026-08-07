@@ -344,6 +344,15 @@ class TestInvalidateSupersede:
         assert not sdk.get_point(old["id"]).get("outdated")
         assert len(sdk.traverse(old["id"], "CORRECTS", direction="outgoing")) == 0
 
+    def test_supersede_idempotent_corrects_edge(self, sdk):
+        # #330: repeated supersede must not duplicate CORRECTS (1→1 cardinality)
+        old = _make_point(sdk, content="old-sup")
+        new = _make_point(sdk, content="new-sup")
+        sdk.supersede_point(old["id"], new["id"])
+        sdk.supersede_point(old["id"], new["id"])
+        corrected = sdk.traverse(new["id"], "CORRECTS", direction="outgoing")
+        assert len(corrected) == 1, "CORRECTS edge duplicated on re-supersede"
+
     def test_invalidate_idempotent_corrects_edge(self, sdk):
         # #330: re-invalidating the same pair must not duplicate CORRECTS, and
         # the second call re-asserts (both points still exist -> True) without

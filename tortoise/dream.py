@@ -73,7 +73,14 @@ class Dreamer:
             if not operator_ids:
                 return {"iterations": 0, "converged": True, "affected_claims": []}
             ep = self._sdk._get_ep()
-            iterations, converged = ep.run(operator_ids, max_hops=max_hops)
+            # #330: dream must honour the SDK's persistent evidence (baselines)
+            # — hydrate graph-persisted baselines and pass a copy to ep.run.
+            # run() is call-scoped, so the copy cannot leak into later runs.
+            self._sdk._hydrate_evidence()
+            iterations, converged = ep.run(
+                operator_ids, max_hops=max_hops,
+                evidence=dict(self._sdk._evidence),
+            )
             # Persist mean confidence to node property (mirrors compute_confidence).
             # P2 (#85): use the SAME max_hops as the run so the affected set
             # matches what _load_cache/_flush_cache covered.

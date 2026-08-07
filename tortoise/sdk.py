@@ -644,14 +644,15 @@ class TortoiseSDK:
         proj = self._get_proj()
         now = datetime.now(timezone.utc).isoformat()
 
-        # 1. Mark old outdated + create CORRECTS edge (same as invalidate)
+        # 1. Mark old outdated + create CORRECTS edge (same as invalidate;
+        # MERGE keeps the ONTOLOGY §3.1 1→1 cardinality on re-calls, #330).
         proj.g.query(
             "MATCH (n:Point {id:$id}) SET n.outdated = true, n.updatedAt = $now",
             params={"id": old_id, "now": now},
         )
         proj.g.query(
             "MATCH (a:Point {id:$new_id}), (b:Point {id:$old_id}) "
-            "CREATE (a)-[:CORRECTS]->(b)",
+            "MERGE (a)-[:CORRECTS]->(b)",
             params={"new_id": new_id, "old_id": old_id},
         )
 
@@ -1484,13 +1485,7 @@ class TortoiseSDK:
         proj = self._get_proj()
         ep = self._get_ep()
         # Hydrate evidence from graph-persisted baselines (survives SDK restarts)
-        rows = proj.g.query(
-            "MATCH (n:Point) WHERE n.baseline_set = true AND n.ep_alpha IS NOT NULL "
-            "RETURN n.id, n.ep_alpha, n.ep_beta"
-        ).result_set
-        for pid, alpha, beta in rows:
-            if pid not in self._evidence:
-                self._evidence[pid] = (alpha, beta)
+        self._hydrate_evidence()
         # Apply source-based credibility inheritance (with recency modulation #122)
         self._apply_source_inheritance(recency_decay=recency_decay)
         if evidence:
@@ -1547,6 +1542,22 @@ class TortoiseSDK:
                 params={"id": claim_id, "c": conf["mean"], "now": now},
             )
         return {"iterations": iterations, "converged": converged, "confidences": confidences}
+
+    def _hydrate_evidence(self) -> None:
+        """Load graph-persisted baselines (baseline_set=true) into _evidence.
+
+        Idempotent — only adds claim ids not already present. Shared by
+        compute_confidence and the Dreamer (#330) so dream runs honour the
+        same persistent evidence contract as explicit confidence reads.
+        """
+        proj = self._get_proj()
+        rows = proj.g.query(
+            "MATCH (n:Point) WHERE n.baseline_set = true AND n.ep_alpha IS NOT NULL "
+            "RETURN n.id, n.ep_alpha, n.ep_beta"
+        ).result_set
+        for pid, alpha, beta in rows:
+            if pid not in self._evidence:
+                self._evidence[pid] = (alpha, beta)
 
     def set_point_baseline(self, claim_id: str, alpha: float, beta: float) -> dict:
         """Set Beta prior evidence for a claim. Persists to graph immediately."""
@@ -1984,18 +1995,43 @@ class TortoiseSDK:
                     # of unchanged files never grows it unboundedly (and the
                     # state-change comparison below stays deterministic). Arc
                     # entries may be dicts (phase/topic/decisions), so dedup via
-                    # a canonical JSON key, not dict.fromkeys.
+                    # a canonical JSON key (str-sorted to tolerate mixed-type
+                    # keys), not dict.fromkeys.
                     _arc_seen = {}
                     for _phase in (existing_arc.get("narrative_arc", [])
                                    + metadata.get("narrative_arc", [])):
                         _key = _json.dumps(_phase, sort_keys=True, default=str)
                         _arc_seen.setdefault(_key, _phase)
-                    new_phases = list(_arc_seen.values())[:50]
+                    _merged_phases = list(_arc_seen.values())
+                    # Cap while preferring genuinely-new phases: keep existing
+                    # ones first (already-merged), then append new ones up to
+                    # the cap so a full arc never starves fresh phases.
+                    _existing_phases = existing_arc.get("narrative_arc", [])
+                    _new_only = [p for p in _merged_phases
+                                 if _json.dumps(p, sort_keys=True, default=str)
+                                 not in {_json.dumps(e, sort_keys=True, default=str)
+                                         for e in _existing_phases}]
+                    new_phases = (_merged_phases[:len(_existing_phases)]
+                                  + _new_only)[:50]
+
+                    # Normalize topics to a comparable, hashable form (#330):
+                    # LLM output is unvalidated — a list-of-dicts would crash
+                    # set() and abort the whole run.
+                    def _norm_topics(t) -> list:
+                        t = t or []
+                        if not isinstance(t, list):
+                            t = [t]
+                        return [str(x) for x in t]
+                    _new_topics = _norm_topics(metadata.get("topics",
+                                                            existing_props.get("topics", [])))
+                    _stored_topics = _norm_topics(existing_props.get("topics"))
+                    _stored_keywords = _norm_topics(existing_props.get("keywords"))
+                    _new_name = metadata.get("summary", existing_props.get("name", name))
 
                     update_props = {
-                        "name": metadata.get("summary", existing_props.get("name", name)),
+                        "name": _new_name,
                         "keywords": merged_keywords,
-                        "topics": metadata.get("topics", existing_props.get("topics", [])),
+                        "topics": _new_topics,
                         "file_hash": file_hash,
                         "content_metadata": _json.dumps({
                             "schema_version": 1,
@@ -2009,10 +2045,14 @@ class TortoiseSDK:
                     }
                     # #330: unchanged content whose enrichment produced nothing
                     # new counts as skipped, not updated (counter honesty).
+                    # Compare the FULL payload that would be written (keywords,
+                    # normalized topics, name, narrative_arc) so a real change
+                    # in any persisted field is never miscounted as a skip.
                     if existing_props.get("file_hash") == file_hash:
                         changed = (
-                            set(merged_keywords) != set(existing_props.get("keywords") or [])
-                            or set(metadata.get("topics") or []) != set(existing_props.get("topics") or [])
+                            set(_norm_topics(merged_keywords)) != set(_stored_keywords)
+                            or set(_new_topics) != set(_stored_topics)
+                            or _new_name != existing_props.get("name", name)
                             or new_phases != list(existing_arc.get("narrative_arc", []))
                         )
                         if not changed:
