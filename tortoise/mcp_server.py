@@ -854,9 +854,13 @@ def tortoise_create_source(url: str, sourceKind: str, tier: str | None = None,
     credibility tier on ``credibilityTier`` (dual-write with tier-form
     sourceKind); ``sourceDate`` is the evidence-age clock for recency decay.
     """
-    props = _parse(props)
+    props = _parse(props) or {}
+    # tier/sourceDate are first-class kwargs (#398) — pop from props if a legacy
+    # caller passed them there (kwarg wins; avoids TypeError on splat).
+    props.pop("tier", None)
+    props.pop("sourceDate", None)
     return _safe(_get_team_sdk().create_source, url, sourceKind,
-                 tier=tier, sourceDate=sourceDate, **(props or {}))
+                 tier=tier, sourceDate=sourceDate, **props)
 
 
 @mcp.tool()

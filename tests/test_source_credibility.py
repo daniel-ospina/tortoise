@@ -446,3 +446,20 @@ class TestBaselineProvenance:
         sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
         alpha2 = sdk.get_point(p["id"])["ep_alpha"]
         assert alpha2 == alpha1
+
+
+class TestLowFactorFloodBound:
+    def test_low_factor_flood_bounded(self):
+        """A flood of heavily-downweighted sources can't erase evidence below the
+        single-source contribution (pinned behavior — documented design tension
+        from code review: the factor mean is bounded by the [0.1, 2.0] clamp and
+        the log2 growth, so the tier contribution stays O(1) and never zeroes)."""
+        base = aggregate_prior([("T3", FRESH, FRESH, 1.0)], recency_decay=1.0)[0] - 1.0
+        # 100 sources with the 0.1 clamp floor factor
+        flooded = aggregate_prior(
+            [("T3", FRESH, FRESH, 0.1)] * 100, recency_decay=1.0
+        )[0] - 1.0
+        # log2(101) * 0.1 * 1.0 = 6.66 * 0.1 = 0.666 (not zero; bounded by floor)
+        assert flooded > 0.5
+        # Single strong source still beats the diluted flood
+        assert base >= flooded * 0.9

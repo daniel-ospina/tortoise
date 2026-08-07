@@ -3565,10 +3565,11 @@ class TortoiseSDK:
             raise ValueError("url must be a non-empty string")
         from tortoise.source_credibility import TIER_PRIORS, canonical_tier
         if tier is not None:
+            _orig_tier = tier
             tier = canonical_tier(tier)
             if tier is None:
                 raise ValueError(
-                    f"Invalid tier {tier!r} — must be T0..T4 or a legacy alias "
+                    f"Invalid tier {_orig_tier!r} — must be T0..T4 or a legacy alias "
                     f"(gold/high/medium/low/unverified)"
                 )
         if sourceKind in TIER_PRIORS and tier is None:
@@ -3598,10 +3599,13 @@ class TortoiseSDK:
         already a tier-form (keeps the dual-write invariant). Dirty-marks the
         inheritance gate + clears the reliability cache.
         """
-        from tortoise.source_credibility import TIER_PRIORS
-        if tier not in TIER_PRIORS:
+        from tortoise.source_credibility import TIER_PRIORS, canonical_tier
+        _orig = tier
+        tier = canonical_tier(tier)
+        if tier is None:
             raise ValueError(
-                f"Invalid tier {tier!r} — must be one of {sorted(TIER_PRIORS)}"
+                f"Invalid tier {_orig!r} — must be T0..T4 or a legacy alias "
+                f"(gold/high/medium/low/unverified)"
             )
         proj = self._get_proj()
         rows = proj.g.query(
@@ -3688,6 +3692,7 @@ class TortoiseSDK:
         assessments = list(latest.values())
         factor = assessment_factor(assessments)
 
+        from tortoise.source_credibility import decay_factor as _decay_factor
         alpha, beta = aggregate_prior(
             [(tier, sdate, ingested, factor)],
             recency_decay=float(os.environ.get("TORTOISE_EP_RECENCY_DECAY", "0.95")),
@@ -3696,6 +3701,11 @@ class TortoiseSDK:
             "tier": tier,
             "sourceDate": sdate,
             "ingestedAt": ingested,
+            "decay": _decay_factor(
+                sdate, ingested,
+                recency_decay=float(os.environ.get("TORTOISE_EP_RECENCY_DECAY", "0.95")),
+                tier=tier,
+            ),
             "factor": factor,
             "assessment_count": len(assessments),
             "alpha": alpha,
@@ -3727,12 +3737,12 @@ class TortoiseSDK:
         rows = proj.g.query(
             "MATCH (s:Source {url:$url}) "
             "RETURN s.reliability, s.reliabilityComponents, s.reliability_derived_at, "
-            "s.credibilityTier, s.sourceKind, s.sourceDate",
+            "s.credibilityTier, s.sourceKind, s.sourceDate, s.ingestedAt",
             params={"url": url},
         ).result_set
         cached = None
         if rows and rows[0][2]:
-            cached_rel, cached_comp_raw, cached_at, c_tier, c_kind, c_sdate = rows[0]
+            cached_rel, cached_comp_raw, cached_at, c_tier, c_kind, c_sdate, c_ingested = rows[0]
             fresh = False
             try:
                 derived = datetime.fromisoformat(str(cached_at).replace("Z", "+00:00"))
@@ -3745,9 +3755,11 @@ class TortoiseSDK:
                 try:
                     import json as _json
                     cached_comp = _json.loads(cached_comp_raw) if cached_comp_raw else {}
-                    # Inputs unchanged → serve cache
+                    # Inputs unchanged → serve cache (tier, sourceDate, ingestedAt
+                    # are the derivation inputs; assessments clear the cache at write)
                     if (cached_comp.get("tier") == resolve_tier(c_tier, c_kind)
-                            and cached_comp.get("sourceDate") == c_sdate):
+                            and cached_comp.get("sourceDate") == c_sdate
+                            and cached_comp.get("ingestedAt") == rows[0][5]):
                         cached = (cached_rel, cached_comp)
                 except (TypeError, ValueError, KeyError):
                     cached = None
@@ -3763,13 +3775,24 @@ class TortoiseSDK:
             arows = proj.g.query(
                 "MATCH (p:Point {pointKind:'assessment'}) "
                 "WHERE p.targetSource = $url AND (p.outdated IS NULL OR p.outdated = false) "
-                "RETURN p.score, coalesce(p.assessorReputation, 0.5)",
+                "RETURN p.assessor, p.score, coalesce(p.assessorReputation, 0.5), p.createdAt "
+                "ORDER BY p.createdAt",
                 params={"url": url},
             ).result_set
             if arows:
-                rep_sum = sum(float(r[1]) for r in arows)
-                weighted = (sum(float(r[1]) * float(r[0]) for r in arows) / rep_sum
+                # Latest per (url, assessor) — mirrors _compute_source_prior dedup
+                latest: dict[str, tuple[float, float]] = {}
+                for assessor, score, rep, _created in arows:
+                    try:
+                        latest[assessor] = (float(rep), float(score))
+                    except (TypeError, ValueError):
+                        continue
+                reps = [r for r, _s in latest.values()]
+                rep_sum = sum(reps)
+                weighted = (sum(r * s for r, s in latest.values()) / rep_sum
                             if rep_sum else 0.0)
+                if weighted != weighted:  # NaN guard
+                    weighted = 0.0
                 comp = {"tier": None, "reason": "untiered; assessment-only",
                         "assessment_count": len(arows),
                         "assessment_weighted_mean": weighted}
@@ -3784,9 +3807,10 @@ class TortoiseSDK:
         comp = {
             "tier": prior["tier"],
             "sourceDate": prior["sourceDate"],
+            "ingestedAt": prior["ingestedAt"],
             "factor": prior["factor"],
             "assessment_count": prior["assessment_count"],
-            "decay": 1.0,
+            "decay": prior["decay"],
             "mean": mean,
         }
         self._write_reliability_cache(url, mean, comp, now)
@@ -3823,21 +3847,19 @@ class TortoiseSDK:
             raise ValueError("rationale is required")
         if not assessor or not str(assessor).strip():
             raise ValueError("assessor is required")
+        if not url or not str(url).strip():
+            raise ValueError("url is required")
 
         from datetime import datetime, timezone
         rep = self.compute_reputation(str(assessor))["mean"]
         now = datetime.now(timezone.utc).isoformat()
 
-        # Latest-wins: mark older assessments from this assessor outdated FIRST
-        # (idempotent; aggregation filters outdated regardless).
         proj = self._get_proj()
-        proj.g.query(
-            "MATCH (p:Point {pointKind:'assessment'}) "
-            "WHERE p.targetSource = $url AND p.assessor = $assessor "
-            "  AND (p.outdated IS NULL OR p.outdated = false) "
-            "SET p.outdated = true",
-            params={"url": url, "assessor": str(assessor)},
-        )
+        # Create the new assessment FIRST, then mark older ones outdated EXCLUDING
+        # the new point (crash-safe: a failure between the two leaves the new
+        # point active and the old one active — the read path dedupes
+        # latest-per-(url, assessor) by createdAt, so no double-count; a failure
+        # before the mark leaves the previous assessment intact, not orphaned).
         p = self.create_point(
             "assessment", str(rationale).strip(),
             props={
@@ -3847,6 +3869,14 @@ class TortoiseSDK:
                 "assessorReputation": rep,
                 "createdAt": now,
             },
+        )
+        proj.g.query(
+            "MATCH (p:Point {pointKind:'assessment'}) "
+            "WHERE p.targetSource = $url AND p.assessor = $assessor "
+            "  AND p.id <> $new_id "
+            "  AND (p.outdated IS NULL OR p.outdated = false) "
+            "SET p.outdated = true",
+            params={"url": url, "assessor": str(assessor), "new_id": p["id"]},
         )
         # Refresh reliability cache (clear → next read recomputes) + dirty-mark
         # the inheritance gate so EP recomputes promptly.
