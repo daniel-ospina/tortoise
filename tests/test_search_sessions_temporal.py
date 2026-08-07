@@ -137,3 +137,39 @@ def test_search_sessions_temporal_datetime_bounds():
         assert got == {"d1", "d2", "d3"}, got
     finally:
         sdk.close()
+
+
+def test_naive_iso_string_treated_as_utc():
+    """Review fix: a naive ISO string (no Z/offset) must be treated as UTC,
+    matching the naive-datetime branch — NOT local time (fromisoformat +
+    astimezone() previously presumed local, shifting the window by the
+    caller's offset; the MCP surface only accepts strings)."""
+    sdk = _fresh_sdk()
+    try:
+        _index_session(sdk, "j1", _JUL_01)
+        _index_session(sdk, "j2", _JUL_15)
+        # Jul 1 10:00Z stored; after naive "2026-07-01T10:00:00" (= UTC) keeps j1.
+        res = sdk.search_sessions("kw-j1", after="2026-07-01T10:00:00", limit=5)
+        assert "j1" in _ids(res), res
+        # The same bound expressed as a naive datetime keeps j1 (both = UTC).
+        res_dt = sdk.search_sessions("kw-j1", after=datetime(2026, 7, 1, 10, 0, 0), limit=5)
+        assert _ids(res) == _ids(res_dt), (res, res_dt)
+    finally:
+        sdk.close()
+
+
+def test_offset_string_normalized_to_utc():
+    """A non-zero offset string bound must filter on the UTC instant."""
+    sdk = _fresh_sdk()
+    try:
+        _index_session(sdk, "j1", _JUL_01)   # 2026-07-01T10:00:00+00:00
+        _index_session(sdk, "j2", _JUL_15)
+        # 2026-07-01T12:00:00+02:00 == 2026-07-01T10:00:00Z → keeps j1.
+        res = sdk.search_sessions("kw-j1", after="2026-07-01T12:00:00+02:00", limit=5)
+        res_utc = sdk.search_sessions("kw-j1", after="2026-07-01T10:00:00Z", limit=5)
+        assert _ids(res) == _ids(res_utc), (res, res_utc)
+        # 2026-07-01T13:00:00+02:00 == 11:00Z → after j1's 10:00Z → excluded.
+        res_after = sdk.search_sessions("kw-j1", after="2026-07-01T13:00:00+02:00", limit=5)
+        assert "j1" not in _ids(res_after), res_after
+    finally:
+        sdk.close()

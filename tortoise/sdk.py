@@ -91,8 +91,14 @@ of the caller's local timezone or whether they passed ``Z`` or an offset.
         else:
             dt = dt.astimezone(timezone.utc)
         return dt.isoformat()
-    # ISO-8601 string — normalize any timezone/offset to UTC.
-    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc).isoformat()
+    # ISO-8601 string — normalize any timezone/offset to UTC. A naive string
+    # (no offset suffix) is treated as UTC, mirroring the naive-datetime
+    # branch — NOT as local time (which would shift the filter window by the
+    # caller's offset; #243 review).
+    dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).isoformat()
 
 
 def _save_progress(progress_file: str, directory: str, total: int, processed: int,
