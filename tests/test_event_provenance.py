@@ -662,6 +662,212 @@ class TestCreateEventNegative:
         assert ev is not None
 
 
+# ── Negative paths for provenance operations (#145) ─────────────────────
+
+class TestNegativePaths:
+    """Error-path tests for provenance operations lacking negative coverage.
+
+    Each test pins the CURRENT defined behavior — some raise ValueError
+    where validation exists, some return gracefully where documented."""
+
+    # ── create_derivation with bad IDs ────────────────────────────────
+
+    def test_create_derivation_nonexistent_src(self, sdk):
+        """create_derivation with non-existent src returns derived=False."""
+        dst = sdk.create_object("valid-dst", "dataset")
+        result = sdk.create_derivation("nonexistent-src-id", dst["id"])
+        assert result["derived"] is False
+        assert result["src"] == "nonexistent-src-id"
+        assert result["dst"] == dst["id"]
+
+    def test_create_derivation_nonexistent_dst(self, sdk):
+        """create_derivation with non-existent dst returns derived=False."""
+        src = sdk.create_object("valid-src", "dataset")
+        result = sdk.create_derivation(src["id"], "nonexistent-dst-id")
+        assert result["derived"] is False
+        assert result["src"] == src["id"]
+        assert result["dst"] == "nonexistent-dst-id"
+
+    def test_create_derivation_both_nonexistent(self, sdk):
+        """create_derivation with both IDs non-existent returns derived=False."""
+        result = sdk.create_derivation("bad-src", "bad-dst")
+        assert result["derived"] is False
+
+    # ── supersede_point with bad IDs ──────────────────────────────────
+
+    def test_supersede_point_nonexistent_old(self, sdk):
+        """supersede_point with non-existent old_id silently succeeds (0 transfers)."""
+        new_pt = sdk.create_point("statement", "valid new point")
+        result = sdk.supersede_point("nonexistent-old-id", new_pt["id"])
+        assert result["invalidated"] is True
+        assert result["edges_transferred"] == 0
+
+    def test_supersede_point_nonexistent_new(self, sdk):
+        """supersede_point with non-existent new_id silently succeeds (0 transfers)."""
+        old_pt = sdk.create_point("statement", "valid old point")
+        result = sdk.supersede_point(old_pt["id"], "nonexistent-new-id")
+        # The CORRECTS edge won't be created (MATCH fails), but it still runs
+        assert result["invalidated"] is True
+        assert result["edges_transferred"] == 0
+
+    def test_supersede_point_both_nonexistent(self, sdk):
+        """supersede_point with both IDs non-existent silently succeeds."""
+        result = sdk.supersede_point("nonexistent-old", "nonexistent-new")
+        assert result["invalidated"] is True
+        assert result["edges_transferred"] == 0
+
+    def test_supersede_point_same_id(self, sdk):
+        """supersede_point with old==new creates self-CORRECTS edge.
+
+        Current behavior: no guard against self-supersede. Creates a
+        self-referencing CORRECTS edge on the point."""
+        pt = sdk.create_point("statement", "self-superseding point")
+        result = sdk.supersede_point(pt["id"], pt["id"])
+        assert result["invalidated"] is True
+        # Verify self-CORRECTS edge exists
+        proj = sdk._get_proj()
+        r = proj.g.query(
+            "MATCH (p:Point {id:$pid})-[c:CORRECTS]->(p) "
+            "RETURN count(c) > 0",
+            params={"pid": pt["id"]},
+        ).result_set
+        assert r[0][0] is True
+
+    # ── compute_reputation with all-superseded claims ─────────────────
+
+    def test_compute_reputation_all_superseded_returns_neutral(self, sdk):
+        """compute_reputation excludes outdated claims, neutral 0.5 when all superseded."""
+        subj = sdk.create_subject("all-superseded-agent", "analyst")
+        claim = sdk.create_point("statement", "superseded claim")
+        replacement = sdk.create_point("statement", "replacement claim")
+
+        # Agent performs an event that IMPLs the claim
+        proj = sdk._get_proj()
+        proj.apply({
+            "type": "EventRecorded",
+            "id": "ev-sup-all",
+            "eventId": "ev-sup-all",
+            "eventKind": "analysis",
+            "subject": subj["name"],
+        })
+        proj.g.query(
+            "MATCH (e:Event {eventId:'ev-sup-all'}), (p:Point {id:$pid}) "
+            "CREATE (e)-[:IMPL]->(p)",
+            params={"pid": claim["id"]},
+        )
+
+        # Supersede the claim → outdated
+        sdk.supersede_point(claim["id"], replacement["id"])
+
+        # Reputation should be neutral — outdated claim excluded
+        rep = sdk.compute_reputation(subj["id"])
+        assert rep["mean"] == 0.5
+        assert rep["total_events"] == 0
+        assert rep["impl_count"] == 0
+
+    # ── create_operator with part/whole types ─────────────────────────
+
+    def test_create_operator_composed_of_creates_has_part_edges(self, sdk):
+        """create_operator with 'composedOf' is valid and creates hasPart edges."""
+        src = sdk.create_point("statement", "whole concept")
+        t1 = sdk.create_point("statement", "part A")
+        t2 = sdk.create_point("statement", "part B")
+        op = sdk.create_operator("composedOf", src["id"], [t1["id"], t2["id"]])
+        assert op["is_operator"] is True
+        assert op["op_type"] == "composedOf"
+        # Verify hasPart edges exist from operator to all inputs
+        proj = sdk._get_proj()
+        r = proj.g.query(
+            "MATCH (o:Point {id:$oid})-[h:hasPart]->(p:Point) "
+            "RETURN count(h)",
+            params={"oid": op["id"]},
+        ).result_set
+        assert r[0][0] == 3  # source + 2 targets
+
+    def test_create_operator_contains_creates_has_part_edges(self, sdk):
+        """create_operator with 'contains' is valid and creates hasPart edges."""
+        src = sdk.create_point("statement", "container")
+        t1 = sdk.create_point("statement", "contained item")
+        op = sdk.create_operator("contains", src["id"], [t1["id"]])
+        assert op["is_operator"] is True
+        assert op["op_type"] == "contains"
+        proj = sdk._get_proj()
+        r = proj.g.query(
+            "MATCH (o:Point {id:$oid})-[h:hasPart]->(p:Point) "
+            "RETURN count(h)",
+            params={"oid": op["id"]},
+        ).result_set
+        assert r[0][0] == 2  # source + 1 target
+
+    def test_create_operator_wraps_creates_has_part_edges(self, sdk):
+        """create_operator with 'wraps' is valid and creates hasPart edges."""
+        src = sdk.create_point("statement", "wrapper")
+        t1 = sdk.create_point("statement", "wrapped content")
+        op = sdk.create_operator("wraps", src["id"], [t1["id"]])
+        assert op["is_operator"] is True
+        assert op["op_type"] == "wraps"
+        proj = sdk._get_proj()
+        r = proj.g.query(
+            "MATCH (o:Point {id:$oid})-[h:hasPart]->(p:Point) "
+            "RETURN count(h)",
+            params={"oid": op["id"]},
+        ).result_set
+        assert r[0][0] == 2
+
+    def test_create_operator_decomposes_into_creates_has_part_edges(self, sdk):
+        """create_operator with 'decomposesInto' is valid and creates hasPart edges."""
+        src = sdk.create_point("statement", "decomposable whole")
+        t1 = sdk.create_point("statement", "sub-item 1")
+        t2 = sdk.create_point("statement", "sub-item 2")
+        t3 = sdk.create_point("statement", "sub-item 3")
+        op = sdk.create_operator("decomposesInto", src["id"], [t1["id"], t2["id"], t3["id"]])
+        assert op["is_operator"] is True
+        assert op["op_type"] == "decomposesInto"
+        proj = sdk._get_proj()
+        r = proj.g.query(
+            "MATCH (o:Point {id:$oid})-[h:hasPart]->(p:Point) "
+            "RETURN count(h)",
+            params={"oid": op["id"]},
+        ).result_set
+        assert r[0][0] == 4  # source + 3 targets
+
+    def test_create_operator_invalid_type_raises_value_error(self, sdk):
+        """create_operator with unrecognized op_type raises ValueError."""
+        p1 = sdk.create_point("statement", "point 1")
+        p2 = sdk.create_point("statement", "point 2")
+        with pytest.raises(ValueError, match="op_type must be"):
+            sdk.create_operator("invalidType", p1["id"], [p2["id"]])
+
+    def test_create_operator_missing_points_raises_value_error(self, sdk):
+        """create_operator referencing non-existent Points raises ValueError."""
+        p1 = sdk.create_point("statement", "existing point")
+        with pytest.raises(ValueError, match="do not exist"):
+            sdk.create_operator("IMPL", p1["id"], ["nonexistent-point-id"])
+
+    # ── create_event with uses containing empty strings ───────────────
+
+    def test_create_event_uses_with_empty_strings(self, sdk):
+        """create_event with uses containing empty strings skips them gracefully."""
+        ev = sdk.create_event("ev-empty-uses", "analysis",
+                              uses=["", "valid-input", ""],
+                              subject="test-agent")
+        assert ev is not None
+        # Only valid-input should get an Object node + uses edge
+        proj = sdk._get_proj()
+        r = proj.g.query(
+            "MATCH (e:Event {eventId:$eid})-[u:uses]->(o:Object) "
+            "RETURN o.name ORDER BY o.name",
+            params={"eid": ev["eventId"]},
+        ).result_set
+        names = [row[0] for row in r]
+        assert names == ["valid-input"]
+        # Empty-string Objects should NOT exist
+        r2 = proj.g.query(
+            "MATCH (o:Object {name:''}) RETURN count(o)",
+        ).result_set
+        assert r2[0][0] == 0
+
+
 # ── #151: Stub Subject/Object ULID ids ───────────────────────────────────
 
 _ULID_RE = __import__("re").compile(r"^[0-9a-f]+-[0-9a-f]{12}$")
