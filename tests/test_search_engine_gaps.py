@@ -1054,7 +1054,7 @@ class TestFilterByTraversalPredicateEntityType:
 
 
 @pytest.mark.skipif(not FALKORDB_AVAILABLE, reason="FalkorDB not available")
-def test_document_fts_index_created(live_proj_fixture=None):
+def test_document_fts_index_created():
     """#125: Document._searchText FTS index exists after projection init."""
     from tortoise.projection import FalkorProjection
     proj = FalkorProjection.from_uri(_current_uri())
