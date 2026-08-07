@@ -28,6 +28,7 @@ import hmac
 
 from tortoise.sdk import TortoiseSDK, _content_hash
 from tortoise.mcp_server import create_http_app
+from tortoise.hosted_backup import R2Storage, create_backup, list_backups, restore_backup
 
 _logger = logging.getLogger(__name__)
 
@@ -629,6 +630,14 @@ class RegisterResponse(BaseModel):
 
 class OnboardingStateResponse(BaseModel):
     onboarding: dict
+
+
+# ── Backups: Pydantic Models (#305) ──────────────────────────────
+
+class BackupRestoreRequest(BaseModel):
+    """Owner-initiated restore — requires explicit confirm (destructive swap)."""
+    backup_key: str = Field(..., min_length=1)
+    confirm: bool = False
 
 
 class OnboardingStatePatchRequest(BaseModel):
@@ -1854,6 +1863,90 @@ async def index_job_status(job_id: str, team: dict = Depends(get_current_team)):
     if job.get("team_id") != team["team_id"]:
         raise HTTPException(status_code=404, detail="Job not found")
     return {"job_id": job_id, **job}
+
+
+# ── Backups: endpoints (#305) ────────────────────────────────────
+
+
+def _backup_storage() -> R2Storage:
+    """R2 storage from env (R2_ACCOUNT_ID / R2_ACCESS_KEY_ID / ...)."""
+    return R2Storage()
+
+
+def _require_backup_tier(team: dict) -> None:
+    """Backups are a Pro feature (#296 revenue model). Free tier → 402."""
+    if team.get("tier") in (None, "free"):
+        raise HTTPException(
+            status_code=402,
+            detail="Backups are a Pro feature — upgrade to enable daily backups",
+        )
+
+
+@app.get("/backups")
+async def backups_list(team: dict = Depends(get_current_team)):
+    """List this team's backups (newest first) with timestamps + node counts."""
+    team_id = team.get("team_id")
+    if not team_id:
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+    try:
+        return {"backups": list_backups(_backup_storage(), team_id)}
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=f"Backup storage unavailable: {e}")
+
+
+@app.post("/backups", status_code=201)
+async def backups_create(team: dict = Depends(get_current_team)):
+    """Trigger an on-demand backup of the team graph (Pro tier)."""
+    team_id = team.get("team_id")
+    if not team_id:
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+    _require_backup_tier(team)
+    sdk = _make_sdk(namespace=team_id)
+    graph_name = f"team_{team_id}"
+    try:
+        manifest = create_backup(
+            sdk._get_proj(), sdk._get_registry(), _backup_storage(),
+            team_id=team_id, graph_name=graph_name,
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=f"Backup failed: {e}")
+    except Exception as e:
+        _logger.exception("backup failed for team %s", team_id)
+        raise HTTPException(status_code=500, detail=f"Backup failed: {e}")
+    return manifest
+
+
+@app.post("/backups/restore")
+async def backups_restore(body: BackupRestoreRequest, team: dict = Depends(get_current_team)):
+    """Restore the team graph from a backup (Pro tier, Owner confirm required).
+
+    Restores into a temp graph, verifies node count against the manifest, then
+    swaps (delete live → copy temp). The live graph is only touched after the
+    temp graph verifies. ``confirm=true`` is required — this is destructive.
+    """
+    team_id = team.get("team_id")
+    if not team_id:
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+    _require_backup_tier(team)
+    if not body.confirm:
+        raise HTTPException(
+            status_code=400, detail="confirm=true required — restore replaces the live graph"
+        )
+    sdk = _make_sdk(namespace=team_id)
+    graph_name = f"team_{team_id}"
+    try:
+        result = restore_backup(
+            sdk._get_proj().db, sdk._get_registry(), _backup_storage(),
+            body.backup_key, team_id=team_id, graph_name=graph_name,
+        )
+    except (ValueError, KeyError) as e:
+        raise HTTPException(status_code=400, detail=f"Restore rejected: {e}")
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=f"Restore failed: {e}")
+    except Exception as e:
+        _logger.exception("restore failed for team %s", team_id)
+        raise HTTPException(status_code=500, detail=f"Restore failed: {e}")
+    return result
 
 
 # ── MCP mount (#236) ─────────────────────────────────────────────

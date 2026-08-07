@@ -15,7 +15,7 @@ ARG CACHEBUST=1
 COPY tortoise/ tortoise/
 COPY pyproject.toml .
 RUN pip install --no-cache-dir -e . \
-    && pip install --no-cache-dir '.[embeddings]' \
+    && pip install --no-cache-dir '.[embeddings]' '.[backups]' \
     # Both HF_HOME and SENTENCE_TRANSFORMERS_HOME must point at /app/model so
     # the build-time download lands EXACTLY where runtime looks: ST uses
     # SENTENCE_TRANSFORMERS_HOME directly as its cache dir
