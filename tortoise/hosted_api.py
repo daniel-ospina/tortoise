@@ -632,11 +632,16 @@ async def list_points(
         conditions.append("n.pointKind = $kind")
         params["kind"] = kind
     if tag:
-        # Tags are stored as a node property (n.tags = [...]); demo data also
-        # creates TAGGED edges. Match the property (#7883).
-        conditions.append("$tag IN coalesce(n.tags, [])")
+        # Query via TAGGED edges to :Tag nodes (#215)
+        tag_clause = "-[:TAGGED]->(t:Tag {name:$tag})"
         params["tag"] = tag
-    query = "MATCH (n:Point) WHERE " + " AND ".join(conditions) + " RETURN properties(n) ORDER BY n.createdAt DESC LIMIT $limit"
+    else:
+        tag_clause = ""
+    query = (
+        f"MATCH (n:Point){tag_clause} WHERE "
+        + " AND ".join(conditions)
+        + " RETURN properties(n) ORDER BY n.createdAt DESC LIMIT $limit"
+    )
     rows = proj.g.query(query, params=params).result_set
     results = []
     for r in rows:
