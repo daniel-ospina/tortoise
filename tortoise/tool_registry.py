@@ -547,6 +547,13 @@ class FastMCPAdapter:
         """
         from fastmcp.tools import FunctionTool
 
+        missing = [e.name for e in registry if e.name not in handlers]
+        if missing:
+            import logging
+            logging.getLogger(__name__).warning(
+                "FastMCPAdapter: %d registry entries have no handler — skipped: %s",
+                len(missing), ", ".join(sorted(missing)),
+            )
         for entry in registry:
             handler = handlers.get(entry.name)
             if handler is None:

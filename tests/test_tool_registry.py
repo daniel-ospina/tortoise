@@ -57,16 +57,23 @@ class TestRegistryEquivalence:
     """Gate 1: Derived HTTP_ALLOWED == literal HTTP_ALLOWED."""
 
     def test_derived_http_allowed_equals_literal(self):
-        """Every tool with http_policy=True must be in HTTP_ALLOWED, and vice versa."""
+        """HTTP_ALLOWED is derived from the registry with correct size + exclusions.
+
+        (Falsifiable after the literal was replaced by the derived set in #454 —
+        the old literal-vs-derived comparison became tautological.)
+        """
         from tortoise.tool_registry import TOOL_REGISTRY
-        derived = frozenset(
-            t.name for t in TOOL_REGISTRY if t.http_policy
-        )
         from tortoise.mcp_auth import HTTP_ALLOWED
+
+        derived = frozenset(t.name for t in TOOL_REGISTRY if t.http_policy)
+        # Exact count: 58 tools - 4 excluded (team_create, backfill_v25,
+        # ingest_corpus, index_sessions) = 54
+        assert len(HTTP_ALLOWED) == 54, f"Expected 54, got {len(HTTP_ALLOWED)}"
+        assert len(derived) == 54
         assert derived == HTTP_ALLOWED, (
             f"Derived HTTP_ALLOWED mismatch:\n"
-            f"  In derived but not literal: {derived - HTTP_ALLOWED}\n"
-            f"  In literal but not derived: {HTTP_ALLOWED - derived}"
+            f"  In derived but not set: {derived - HTTP_ALLOWED}\n"
+            f"  In set but not derived: {HTTP_ALLOWED - derived}"
         )
 
     def test_registry_count(self):
