@@ -119,6 +119,38 @@ class TestUsesProducesEdges:
         ).result_set
         assert r[0][0] is True
 
+    def test_uses_deduplicates_duplicate_entries(self, sdk):
+        """_upsert_event with uses containing duplicates must not create
+        duplicate edges — MERGE is idempotent on the pattern level (#146)."""
+        proj = sdk._get_proj()
+        proj.apply({
+            "type": "EventRecorded",
+            "id": "ev-005",
+            "eventId": "ev-005",
+            "eventKind": "analysis",
+            "subject": "dedup-tester",
+            "uses": ["a", "a", "b"],
+            "startedAt": "2024-01-01T00:00:00Z",
+        })
+        # Count uses edges from event to each object
+        for name, expected_count in [("a", 1), ("b", 1)]:
+            r = proj.g.query(
+                "MATCH (e:Event {eventId:'ev-005'})-[u:uses]->(o:Object {name:$name}) "
+                "RETURN count(u)",
+                params={"name": name},
+            ).result_set
+            assert r[0][0] == expected_count, (
+                f"Expected {expected_count} uses edge to '{name}', got {r[0][0]}"
+            )
+        # Total uses edges from ev-005 should be exactly 2
+        r_total = proj.g.query(
+            "MATCH (e:Event {eventId:'ev-005'})-[u:uses]->(o:Object) "
+            "RETURN count(u)"
+        ).result_set
+        assert r_total[0][0] == 2, (
+            f"Expected 2 total uses edges, got {r_total[0][0]}"
+        )
+
     def test_create_event_wires_about_subject(self, sdk):
         """create_event with aboutSubject creates aboutSubject edge."""
         subj = sdk.create_subject("dave", "engineer")
