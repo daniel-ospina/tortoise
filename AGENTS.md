@@ -9,7 +9,7 @@ Premise Labs is the internal R&D and strategy hub. It houses:
 - **Tortoise:** Python graph engine for semantic/epistemic agent memory (SDK, MCP server, EP belief propagation)
 - **Strategy docs:** Product strategy, competitive analysis, pricing research
 - **Internal operations:** Agent skills, CI/CD, coordination scripts
-- **Premise Labs landing:** `premise-labs/index.html`
+- **Premise Labs landing:** `website/index.html`
 
 ## Language & Runtime Conventions
 
@@ -58,7 +58,7 @@ Premise Labs is the internal R&D and strategy hub. It houses:
 | `docs/` | Architecture, ontology, legal, strategy docs |
 | `data/` | Event logs, extracted documents, ontology |
 | `product/` | Product strategy, competition, pricing |
-| `premise-labs/` | Landing page (`premise-labs/index.html`) |
+| `website/` | Landing page (`website/index.html`) |
 | `validation/` | Schema validation rules |
 | `skills/` | Agent skill definitions (shared with main repo) |
 | `operations/` | Internal operations and coordination |
