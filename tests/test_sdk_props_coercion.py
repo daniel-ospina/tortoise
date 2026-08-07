@@ -207,8 +207,29 @@ class TestEntityPropsPersisted:
         """None-valued props are skipped (Cypher null sentinel)."""
         obj = sdk.create_object("None Test", "type", keep="yes", drop=None)
         assert obj.get("keep") == "yes"
-        # drop=None should not appear as a node property
-        assert "drop" not in obj or obj.get("drop") is None
+        # drop=None must not appear as a node property
+        assert "drop" not in obj
+
+    def test_create_source_persists_arbitrary_props(self, sdk):
+        src = sdk.create_source(
+            "https://example.com/doc", "report",
+            tier="gold", team="infra",
+        )
+        assert src.get("url") == "https://example.com/doc"
+        assert src.get("sourceKind") == "report"
+        assert src.get("tier") == "gold"
+        assert src.get("team") == "infra"
+
+    def test_meta_keys_not_stored_as_props(self, sdk):
+        """Control keys (edge-wired / structural) never leak as node props."""
+        obj = sdk.create_object(
+            "Control Test", "widget",
+            authoredBy="alice", ownedBy="team-x", managedBy="pm",
+        )
+        assert "authoredBy" not in obj
+        assert "ownedBy" not in obj
+        assert "managedBy" not in obj
+        assert "type" not in obj
 
 
 # ── from_uri scheme normalization ─────────────────────────────────────
