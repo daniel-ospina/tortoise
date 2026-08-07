@@ -268,8 +268,15 @@ Conversation:
 """
 
 
+# Whitelist of known models — llm_model flows from MCP tools / CLI and must
+# not allow arbitrary model injection (could trigger expensive tiers).
+_ALLOWED_LLM_MODELS = {"gpt-5-mini", "gpt-4o-mini", "gpt-4o"}
+
+
 def extract_metadata_with_llm(content: str, model: str = "gpt-5-mini") -> dict | None:
     """Extract metadata using an LLM. Returns None on failure (caller should fall back)."""
+    if model not in _ALLOWED_LLM_MODELS:
+        return {"error": f"llm_model {model!r} not allowed (whitelist: {sorted(_ALLOWED_LLM_MODELS)})"}
     try:
         # Try OpenAI-compatible API
         api_key = os.environ.get("OPENAI_API_KEY")
@@ -493,6 +500,13 @@ def main():
                         params={"eid": event_id, "props": props}
                     )
                     print(json.dumps({"status": "ingested", "eventId": event_id}))
+                # Wire INSTANTIATES edges to issue/PR Objects (parity with ingest_corpus)
+                try:
+                    from tortoise.sdk import TortoiseSDK
+                    _sdk = TortoiseSDK()
+                    _sdk._connect_issue_objects(event_id, metadata)
+                except Exception:
+                    pass  # non-fatal edge wiring
         else:
             content = file_path.read_text()
             metadata = extract_metadata(content, args.model if not args.no_llm else None)

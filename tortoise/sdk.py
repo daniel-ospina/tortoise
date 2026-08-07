@@ -6,6 +6,7 @@ Lazy-opens on first call. Returns structured dicts, never raw FalkorDB result se
 from __future__ import annotations
 
 import hashlib
+import json as _json
 import logging
 import re
 from typing import Any
@@ -1639,6 +1640,13 @@ class TortoiseSDK:
                     parsed = _yaml.safe_load(m.group(1))
                     if isinstance(parsed, dict):
                         frontmatter = parsed
+                        # YAML types (bool/int) must not leak into string fields
+                        # (regression vs old line-by-line parser). Coerce known
+                        # string fields to str.
+                        for _k in ("doc_status", "format", "version", "title",
+                                   "sessionId", "session_id", "agent"):
+                            if _k in frontmatter and frontmatter[_k] is not None:
+                                frontmatter[_k] = str(frontmatter[_k])
                 except Exception:
                     pass  # fallback to empty dict
 
@@ -1795,7 +1803,7 @@ class TortoiseSDK:
                     ingested += 1
 
             # Progress checkpoint every 100 files
-            if progress_file and (ingested + updated + skipped) % 100 == 0:
+            if progress_file and (i + 1) % 100 == 0:
                 _save_progress(progress_file, str(directory), len(files),
                               ingested + updated + skipped + failed,
                               ingested, updated, skipped, failed, errors,
@@ -3021,9 +3029,10 @@ class TortoiseSDK:
                 params[pk] = t
             clauses.append(f"({' OR '.join(topic_clauses)})")
         where = " AND ".join(clauses)
+        params["offset"] = offset
         rows = proj.g.query(
             f"MATCH (e:Event) WHERE {where} "
-            "RETURN properties(e) ORDER BY e.startedAt DESC LIMIT $limit",
+            "RETURN properties(e) ORDER BY e.startedAt DESC SKIP $offset LIMIT $limit",
             params=params,
         ).result_set
         return [dict(r[0]) for r in rows]
@@ -3077,10 +3086,11 @@ class TortoiseSDK:
                     name = str(item)
                 if not oid:
                     oid = f"{key.rstrip('s')}_{hash(name) & 0xffffffff:x}"
+                okind = "pr" if key == "prs" else "issue"
                 proj.g.query(
-                    "MERGE (o:Object {id:$oid}) SET o.name=$name, o.objectKind='issue' "
+                    "MERGE (o:Object {id:$oid}) SET o.name=$name, o.objectKind=$okind "
                     "WITH o MATCH (e:Event {eventId:$eid}) MERGE (e)-[:INSTANTIATES]->(o)",
-                    params={"oid": oid, "name": name[:200], "eid": event_id},
+                    params={"oid": oid, "name": name[:200], "eid": event_id, "okind": okind},
                 )
                 connected += 1
         return connected
