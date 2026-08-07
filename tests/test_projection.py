@@ -1439,3 +1439,75 @@ def test_upsert_document_preserves_doc_status_and_needs_extraction(live_proj):
     assert rows[0][0] == "captured", f"doc_status wiped: {rows[0][0]}"
     assert rows[0][1] is True, f"needs_extraction wiped: {rows[0][1]}"
     assert rows[0][2] == "Renamed"
+
+
+# ── #214: Vocabulary edge cleanup ──────────────────────────────────────
+
+
+class TestVocabEdgeValidation:
+    """#214: instantiates removed; dependsOn/reportsTo/related kept."""
+
+    def test_instantiates_rejected_by_create_edge(self):
+        """create_edge rejects 'instantiates' — Action dissolved in v3.0."""
+        if _skip_if_no_falkor():
+            return
+        import pytest
+        proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+        try:
+            proj._upsert({"id": "a", "content": "A", "context": "ctx"})
+            proj._upsert({"id": "b", "content": "B", "context": "ctx"})
+            with pytest.raises(ValueError, match="Unknown predicate: instantiates"):
+                proj.create_edge("a", "b", "instantiates")
+        finally:
+            proj.close()
+
+    def test_dependsOn_accepted_by_create_edge(self):
+        """create_edge accepts 'dependsOn' — pack-declared, valid predicate."""
+        if _skip_if_no_falkor():
+            return
+        proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+        try:
+            proj._upsert({"id": "a", "content": "A", "context": "ctx"})
+            proj._upsert({"id": "b", "content": "B", "context": "ctx"})
+            ok = proj.create_edge("a", "b", "dependsOn")
+            assert ok is True
+        finally:
+            proj.close()
+
+    def test_reportsTo_accepted_by_create_edge(self):
+        """create_edge accepts 'reportsTo' — org hierarchy, valid predicate."""
+        if _skip_if_no_falkor():
+            return
+        proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+        try:
+            proj._upsert({"id": "a", "content": "A", "context": "ctx"})
+            proj._upsert({"id": "b", "content": "B", "context": "ctx"})
+            ok = proj.create_edge("a", "b", "reportsTo")
+            assert ok is True
+        finally:
+            proj.close()
+
+    def test_related_accepted_by_create_edge(self):
+        """create_edge accepts 'related' — generic catch-all predicate."""
+        if _skip_if_no_falkor():
+            return
+        proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+        try:
+            proj._upsert({"id": "a", "content": "A", "context": "ctx"})
+            proj._upsert({"id": "b", "content": "B", "context": "ctx"})
+            ok = proj.create_edge("a", "b", "related")
+            assert ok is True
+        finally:
+            proj.close()
+
+    def test_valid_predicates_no_longer_contains_instantiates(self):
+        """#214: validate that valid_predicates set no longer includes instantiates."""
+        if _skip_if_no_falkor():
+            return
+        import inspect
+        from tortoise.projection.edges import _EdgeHandlers
+        src = inspect.getsource(_EdgeHandlers.create_edge)
+        assert "'instantiates'" not in src
+        assert "'dependsOn'" in src
+        assert "'reportsTo'" in src
+        assert "'related'" in src
