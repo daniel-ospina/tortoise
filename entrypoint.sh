@@ -14,6 +14,12 @@
 
 set -euo pipefail
 
+# Embedding model cache — pre-downloaded at build time (Dockerfile ENV).
+# Export defensively so it propagates even if the entrypoint is run outside
+# the container image.
+export HF_HOME="${HF_HOME:-/app/model}"
+export SENTENCE_TRANSFORMERS_HOME="${SENTENCE_TRANSFORMERS_HOME:-/app/model}"
+
 if [ -n "${TORTOISE_DB_URI:-}" ]; then
     echo "tortoise: using explicit TORTOISE_DB_URI"
 elif [ -n "${FALKORDB_CLOUD_URI:-}" ]; then
