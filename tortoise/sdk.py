@@ -1353,6 +1353,8 @@ class TortoiseSDK:
                     if t == best_tier and ingested:
                         try:
                             dt = datetime.fromisoformat(ingested.replace("Z", "+00:00"))
+                            if dt.tzinfo is None:
+                                dt = dt.replace(tzinfo=timezone.utc)
                             ts = dt.timestamp()
                             if ingested_ts is None or ts > ingested_ts:
                                 ingested_ts = ts

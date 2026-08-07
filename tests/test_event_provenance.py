@@ -254,6 +254,53 @@ class TestRecencyModulation:
         assert "iterations" in result
         assert "converged" in result
 
+    def test_recency_timezone_naive_ingested_at(self, sdk):
+        """Timezone-naive ingestedAt is interpreted as UTC (#153).
+
+        When ingestedAt has no timezone indicator (e.g. '2024-01-01T00:00:00'),
+        datetime.fromisoformat returns a naive datetime, and .timestamp()
+        would treat it as local time — shifting age by hours.
+
+        This test verifies the guard by computing the expected decay from
+        a known UTC timestamp and asserting the naive path matches.
+        It is NOT zone-dependent — it fails if naive timestamps are
+        interpreted as local time, even in UTC CI.
+        """
+        import calendar
+        import pytest
+        from datetime import datetime, timezone
+
+        url = "https://doi.org/10.9999/tz-naive"
+        ingested_naive = "2024-01-01T00:00:00"
+        recency_decay = 0.95
+
+        # Expected UTC epoch for the ingested instant
+        expected_ts = calendar.timegm((2024, 1, 1, 0, 0, 0))
+
+        # Create point and source with timezone-naive ingestedAt
+        p = sdk.create_point("statement", "tz-naive claim",
+                             extractedFrom=url)
+        proj = sdk._get_proj()
+        proj.g.query(
+            "MATCH (s:Source {url: $url}) "
+            "SET s.credibilityTier = 'T1', s.ingestedAt = $ts",
+            params={"url": url, "ts": ingested_naive}
+        )
+
+        sdk._apply_source_inheritance(recency_decay=recency_decay)
+
+        pt = sdk.get_point(p["id"])
+
+        # Compute expected decay: T1 = (5, 1), alpha' = 1 + (5-1)*decay
+        now_ts = datetime.now(timezone.utc).timestamp()
+        years = max(0, (now_ts - expected_ts) / (365.25 * 86400))
+        expected_decay = recency_decay ** years
+        expected_alpha = 1.0 + (5.0 - 1.0) * expected_decay
+        expected_beta = 1.0  # (1-1)*decay = 0
+
+        assert pt["ep_alpha"] == pytest.approx(expected_alpha, rel=1e-9)
+        assert pt["ep_beta"] == pytest.approx(expected_beta, rel=1e-9)
+
 
 # ── Part 4: compute_reputation ───────────────────────────────────────────
 
