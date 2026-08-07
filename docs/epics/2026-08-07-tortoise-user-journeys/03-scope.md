@@ -69,7 +69,7 @@ created: 2026-08-07
 | Item | Reason | Defer to |
 |------|--------|----------|
 | Welcome page v2 onboarding (yes/no questions, GitHub indexing, guided tour) | #235's Phase 2, gated on user signal; layers ON TOP of this epic's hardened key delivery | Onboarding epic #235 (issues #495–#502) |
-| Server-side Supabase JWT verification (JWKS) on FastAPI | Session-held-key bridge is sufficient for v1; JWT verification is a security hardening | Future epic (security hardening) |
+| Server-side Supabase JWT verification (JWKS) on FastAPI | ~~Session-held-key bridge is sufficient for v1~~ — **SUPERSEDED (owner-confirmed 2026-08-07, epic-verify P1):** the plan's two-tier auth model (§5.3 #2/#2b) requires JWKS verification for ALL session endpoints E1–E8 (the earlier 'only E1' draft self-contradicted). JWKS middleware owned by D1 #568 (JWT→user→membership resolution, KID-miss refetch, issuer/aud/exp, bounded timeout, per-identity rate limit). Session-held-key bridge still applies to the DATA-PLANE (points/search/sessions/MCP use tt_ keys). | **IN SCOPE (D1 #568)** — was deferred; superseded by plan §5.3 #2b |
 | Stripe billing / payment processing / credit metering | Decoupled team/graph model + tier limits are IN scope (foundation); actual payment collection + write-op metering is a billing epic | Hosted platform epic #296 / future billing epic |
 | Full abuse-prevention system (CAPTCHA, anomaly detection) | Only minimal posture (rate limit, size caps) in scope | Hosted platform #308 |
 | OAuth-based MCP authentication | Bearer `tt_` keys sufficient for v1; OAuth is additive (no login-breaking change); design criteria captured on #524; build AFTER decoupling lands | #524 (OAuth 2.1, complex) |
