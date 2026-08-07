@@ -91,8 +91,14 @@ of the caller's local timezone or whether they passed ``Z`` or an offset.
         else:
             dt = dt.astimezone(timezone.utc)
         return dt.isoformat()
-    # ISO-8601 string — normalize any timezone/offset to UTC.
-    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc).isoformat()
+    # ISO-8601 string — normalize any timezone/offset to UTC. A naive string
+    # (no offset suffix) is treated as UTC, mirroring the naive-datetime
+    # branch — NOT as local time (which would shift the filter window by the
+    # caller's offset; #243/#244 review).
+    dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).isoformat()
 
 
 def _save_progress(progress_file: str, directory: str, total: int, processed: int,
@@ -2029,7 +2035,7 @@ class TortoiseSDK:
                     )
                     proj.g.query(
                         "MERGE (e:Event {eventId:$eid}) SET e += $props, "
-                        "e.embedding = CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) END",
+                        "e.embedding = CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE e.embedding END",
                         params={"eid": event_id, "props": props, "embedding": embedding},
                     )
                     ingested += 1
@@ -3370,6 +3376,16 @@ class TortoiseSDK:
             for r in hybrid
         )
         if has_semantic and hybrid:
+            # Precision gate (#244 review): rows with NO semantic signal — no
+            # FTS score and no vector score (structural-only; the kind filter
+            # matches ALL AgentSession events with score 1.0) are NOT results,
+            # they only fed the RRF candidate pool. Note: vector-only rows are
+            # deliberately kept — word-distinct semantic recall is the point
+            # of #244 ("port migration" finds a session about changing the
+            # FalkorDB default port); see docstring. The brute-force vector
+            # strategy is threshold-less, so those rows are ranked nearest-
+            # neighbors-first and precision drops when a query has no real
+            # semantic match (documented behavior).
             ids = [r["id"] for r in hybrid]
             rows = proj.g.query(
                 "MATCH (e:Event) WHERE e.eventId IN $ids RETURN properties(e)",
@@ -3399,7 +3415,13 @@ class TortoiseSDK:
                         continue
                     if before_utc is not None and started > before_utc:
                         continue
-                ranked.append((r["scores"].get("rrf") or 0.0, props))
+                # Precision gate (#244 review): structural-only rows (no FTS,
+                # no vector score) are NOT results — a session that neither
+                # keyword-matches nor semantically matches must not appear.
+                scores = r.get("scores") or {}
+                if scores.get("fts") is None and scores.get("vector") is None:
+                    continue
+                ranked.append((scores.get("rrf") or 0.0, props))
             # Relevance (RRF) desc, startedAt DESC as tiebreak (missing = last)
             ranked.sort(
                 key=lambda item: (item[0], item[1].get("startedAt") or ""),

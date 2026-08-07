@@ -34,12 +34,55 @@ PROP_MAP = {
 }
 
 
+def _repair_legacy_event_embeddings(g, *, dry_run: bool, limit: int) -> int:
+    """Rewrite plain-list Event embeddings into vecf32 (per-node, idempotent).
+
+    Base-main _upsert_event stored embeddings as plain Python lists until #244;
+    vec.euclideanDistance then fails the whole MATCH ("expected Null or
+    Vectorf32 but was List") — one legacy node poisons Event vector search.
+    vecf32() on an already-vecf32 node errors, so each node is rewritten in a
+    try/except and failures are counted (expected for already-correct nodes
+    when running against a fully-migrated DB).
+    """
+    rows = g.query(
+        "MATCH (n:Event) WHERE n.embedding IS NOT NULL "
+        "RETURN n.eventId"
+    ).result_set
+    if not rows:
+        print("repair: no Events with embeddings to check")
+        return 0
+    targets = rows if not limit else rows[:limit]
+    print(f"repair: checking {len(targets)} Event embedding(s)")
+    rewritten = already = failed = 0
+    for (eid,) in targets:
+        if dry_run:
+            continue
+        try:
+            g.query(
+                "MATCH (n:Event {eventId:$eid}) SET n.embedding = vecf32(n.embedding)",
+                params={"eid": eid},
+            )
+            rewritten += 1
+        except Exception:
+            already += 1  # already vecf32 (or unrepairable) — expected on clean DBs
+    print(f"repair: rewritten={rewritten} already_vecf32/skipped={already} (failed counted in skipped)")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Backfill embeddings for vector search")
     ap.add_argument("--dry-run", action="store_true", help="report only, no writes")
     ap.add_argument("--uri", default=os.environ.get("TORTOISE_DB_URI", DEFAULT_URI))
     ap.add_argument("--graph", default="tortoise")
     ap.add_argument("--limit", type=int, default=0, help="0 = all")
+    ap.add_argument(
+        "--repair-embeddings", action="store_true",
+        help="Rewrite Event embeddings stored as plain lists into vecf32. "
+        "Pre-#244 _upsert_event wrote plain-list vectors; a single such node "
+        "poisons brute-force vector search for the whole Event label "
+        "(vec.euclideanDistance rejects List). Per-node, idempotent, skips "
+        "already-vecf32 nodes.",
+    )
     args = ap.parse_args()
 
     from falkordb import FalkorDB
@@ -68,6 +111,9 @@ def main() -> int:
         return 1
 
     g = db.select_graph(graph_name)
+
+    if args.repair_embeddings:
+        return _repair_legacy_event_embeddings(g, dry_run=args.dry_run, limit=args.limit)
     total = updated = skipped = 0
     for label in LABELS:
         if label == "Event":
@@ -75,7 +121,8 @@ def main() -> int:
             # name + summary + keywords + topics (same composition as the
             # index-time path in tortoise/session_indexer.py).
             rows = g.query(
-                "MATCH (n:Event) WHERE n.embedding IS NULL AND n.name IS NOT NULL "
+                "MATCH (n:Event) WHERE n.eventKind = 'AgentSession' "
+                "AND n.embedding IS NULL AND n.name IS NOT NULL "
                 "RETURN n.eventId, n.name, n.keywords, n.topics, n.content_metadata"
             ).result_set
             id_field = "eventId"

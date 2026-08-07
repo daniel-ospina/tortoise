@@ -82,10 +82,10 @@ from tortoise.projection.edges import _EdgeHandlers
 from tortoise.projection.grounding import _GroundingMixin
 from tortoise.projection.propagation import _PropagationMixin
 
-# #244: one-time per-process migration of the legacy subject-only Event FTS
-# index to subject+name (drop+recreate is too expensive to repeat every
-# startup — see _ensure_indexes).
-_EVENT_FTS_MIGRATED = False
+# #244: Event FTS index migration (subject-only → subject+name) is tracked by a
+# persisted DB marker (Meta node 'event_fts_v2'), not a process-local flag — a
+# module-level bool resets every restart and would drop+recreate the index on
+# every boot (churn + crash window on server FalkorDB). See _ensure_indexes.
 
 # ── Module-level helpers ──────────────────────────────────────────────────
 
@@ -559,17 +559,24 @@ class FalkorProjection(
                     if "already" in msg:
                         if label == "Event":
                             # #244: legacy subject-only Event FTS index —
-                            # migrate to include name where dropIndex exists
-                            # (FalkorDB server; FalkorDBLite embedded lacks the
-                            # procedure — leave subject-only, name search still
-                            # covered by the keyword fallback + vector strategies).
+                            # migrate to include name ONCE (persisted DB
+                            # marker, not a per-process flag: a process-local
+                            # bool re-drops+recreates the index on every
+                            # restart/worker, causing churn + a drop→recreate
+                            # crash window where Event FTS degrades).
+                            # FalkorDBLite embedded lacks dropIndex — leave
+                            # subject-only there (name search still covered by
+                            # the keyword fallback + vector strategies).
                             try:
-                                if _EVENT_FTS_MIGRATED:
-                                    pass
-                                else:
-                                    _EVENT_FTS_MIGRATED = True
+                                done = self.g.query(
+                                    "MATCH (m:Meta {key:'event_fts_v2'}) RETURN 1"
+                                ).result_set
+                                if not done:
                                     self.g.query("CALL db.idx.fulltext.dropIndex('Event')")
                                     self.g.query("CALL db.idx.fulltext.createNodeIndex('Event', 'subject', 'name')")
+                                    self.g.query(
+                                        "MERGE (m:Meta {key:'event_fts_v2'}) SET m.v = true"
+                                    )
                             except Exception:
                                 pass
                     else:

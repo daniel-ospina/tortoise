@@ -373,3 +373,131 @@ class TestSearchSessionsLegacyFallback:
             assert _ids(res) == ["k2"], res
         finally:
             sdk.close()
+
+
+# ── 5. Review regressions (#244 plan-review) ───────────────────────────────
+
+def _index_session_plain_list_embedding(sdk, event_id: str, name: str) -> None:
+    """Simulate the pre-#244 _upsert_event shape: embedding stored as a PLAIN
+    Python list (not vecf32). One such node poisons brute-force vector search
+    for the whole Event label (vec.euclideanDistance rejects List)."""
+    vec = [0.1] * 384
+    props = {
+        "eventId": event_id,
+        "eventKind": "AgentSession",
+        "name": name,
+        "session_id": f"s-{event_id}",
+        "keywords": [], "topics": ["general"],
+    }
+    proj = sdk._get_proj()
+    proj.g.query(
+        "CREATE (e:Event {eventId: $eid}) SET e += $props, e.embedding = $vec",
+        params={"eid": event_id, "props": props, "vec": vec},
+    )
+
+
+class TestReviewRegressions:
+    def test_legacy_plain_list_embedding_degrades_gracefully(self):
+        """A pre-#244 plain-list Event embedding must not crash Event vector
+        search — the brute-force query wraps vecf32 and the poison node's
+        label-wide failure is caught, so FTS/semantic search still works."""
+        sdk = _fresh_sdk()
+        try:
+            with patch.object(EmbeddingModel, "get", return_value=_FakeEmbedder()):
+                from tortoise.session_indexer import compute_session_embedding
+                emb = compute_session_embedding(
+                    "FalkorDB port migration", "changed the default port",
+                    ["migration"], ["infrastructure"])
+                assert emb is not None
+                _index_session_with_embedding(sdk, "s1", "FalkorDB port migration",
+                                              keywords=["migration"])
+                _index_session_plain_list_embedding(sdk, "s_legacy", "legacy poison node")
+                # Semantic route must still return the matching session and
+                # must NOT include the unrelated legacy node.
+                res = sdk.search_sessions("port migration", limit=5)
+                ids = _ids(res)
+                assert "s1" in ids, res
+                assert "s_legacy" not in ids, res
+        finally:
+            sdk.close()
+
+    def test_repair_legacy_embeddings_rewrites_plain_lists(self):
+        """--repair-embeddings rewrites plain-list Event embeddings to vecf32
+        (idempotent — second run counts them as already-migrated)."""
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location(
+            "backfill_embeddings",
+            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                         "graph-scripts", "backfill_embeddings.py"),
+        )
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        sdk = _fresh_sdk()
+        try:
+            _index_session_plain_list_embedding(sdk, "legacy1", "old session")
+            proj = sdk._get_proj()
+            # Repair (dry-run first: reports, writes nothing)
+            _mod._repair_legacy_event_embeddings(proj.g, dry_run=True, limit=0)
+            row = proj.g.query(
+                "MATCH (n:Event {eventId:'legacy1'}) RETURN n.embedding"
+            ).result_set
+            assert isinstance(row[0][0], list), "dry-run must not rewrite"
+            _mod._repair_legacy_event_embeddings(proj.g, dry_run=False, limit=0)
+            # After repair, brute-force vector distance works (no type error).
+            import random
+            qv = [random.random() for _ in range(384)]
+            dist = proj.g.query(
+                "MATCH (n:Event {eventId:'legacy1'}) "
+                "WITH vecf32($qv) AS _qv, n "
+                "RETURN vec.euclideanDistance(n.embedding, _qv)",
+                params={"qv": qv},
+            ).result_set
+            assert dist and isinstance(dist[0][0], float), dist
+        finally:
+            sdk.close()
+
+    def test_hybrid_precision_gate_excludes_structural_only_sessions(self):
+        """Rows with NO semantic signal (no FTS, no vector — e.g. a session
+        with no embedding and no keyword overlap) must NOT be returned. The
+        kind-filtered structural strategy matches every AgentSession event at
+        score 1.0; without the gate those would leak into every result set.
+        Vector-only rows are intentionally kept (word-distinct semantic recall
+        is the #244 point — documented in the docstring)."""
+        sdk = _fresh_sdk()
+        try:
+            with patch.object(EmbeddingModel, "get", return_value=_FakeEmbedder()):
+                _index_session_with_embedding(sdk, "s1", "FalkorDB port migration",
+                                              keywords=["migration"])
+                # No embedding, no keyword overlap → structural-only row.
+                _index_session_raw(sdk, "s_unrelated", "quantum espresso tuning",
+                                   keywords=["coffee"])
+                res = sdk.search_sessions("port migration", limit=10)
+                ids = _ids(res)
+                assert "s1" in ids, res
+                assert "s_unrelated" not in ids, f"structural-only session leaked: {ids}"
+        finally:
+            sdk.close()
+
+    def test_reindex_preserves_embedding_when_model_unavailable(self):
+        """Re-indexing an existing session with the model unavailable must keep
+        the stored vecf32 embedding (ON MATCH ... ELSE e.embedding)."""
+        sdk = _fresh_sdk()
+        try:
+            with patch.object(EmbeddingModel, "get", return_value=_FakeEmbedder()):
+                _index_session_with_embedding(sdk, "s1", "FalkorDB port migration")
+            proj = sdk._get_proj()
+            before = proj.g.query(
+                "MATCH (n:Event {eventId:'s1'}) RETURN n.embedding IS NOT NULL"
+            ).result_set
+            assert before[0][0] is True
+            # Re-index via the ingest path with the model unavailable.
+            with patch.object(EmbeddingModel, "get", return_value=None):
+                from tortoise.session_indexer import compute_session_embedding
+                assert compute_session_embedding("FalkorDB port migration") is None
+                _index_session_with_embedding(sdk, "s1", "FalkorDB port migration")
+            after = proj.g.query(
+                "MATCH (n:Event {eventId:'s1'}) RETURN n.embedding IS NOT NULL"
+            ).result_set
+            assert after[0][0] is True, "embedding wiped on re-index with model unavailable"
+        finally:
+            sdk.close()
