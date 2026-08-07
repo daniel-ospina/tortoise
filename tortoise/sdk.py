@@ -2747,14 +2747,28 @@ class TortoiseSDK:
             event["url"] = id_val
         # Apply through projection (writes to JSONL + FalkorDB)
         proj.apply(event)
-        # Wire edges after entity exists in graph
+        # #452: Subject/Object MERGE by name (content-hash dedup).
+        # When the name already exists, the fresh id_val never lands on the
+        # node (ON CREATE never fires).  Re-fetch the canonical id from the
+        # graph so callers get a usable return value — matching create_point
+        # dedup behavior which returns the existing point id.
+        canonical_id = id_val
+        if label in ("Subject", "Object") and "name" in event:
+            name = event["name"]
+            r = proj.g.query(
+                f"MATCH (n:{label} {{name: $name}}) RETURN n.id",
+                params={"name": name},
+            )
+            if r.result_set and r.result_set[0]:
+                canonical_id = r.result_set[0][0]
+        # Wire edges after entity exists in graph (use canonical id)
         if props.get("authoredBy"):
-            proj.create_authored_by(id_val, props["authoredBy"])
+            proj.create_authored_by(canonical_id, props["authoredBy"])
         if props.get("ownedBy"):
-            proj.create_owned_by(id_val, props["ownedBy"])
+            proj.create_owned_by(canonical_id, props["ownedBy"])
         if props.get("managedBy"):
-            proj.create_managed_by(id_val, props["managedBy"])
-        return self._get_entity(id_val)
+            proj.create_managed_by(canonical_id, props["managedBy"])
+        return self._get_entity(canonical_id)
 
     def _get_entity(self, id_val: str) -> dict:
         proj = self._get_proj()
