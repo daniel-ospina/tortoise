@@ -102,7 +102,18 @@ class TestCheckpoint:
     # ── GAP-08: Semantic dedup ──────────────────────────────────
 
     def test_semantic_dedup_catches_near_duplicates(self, sdk):
-        """GAP-08: near-duplicate content with high word overlap is caught by TF-IDF similarity."""
+        """GAP-08: near-duplicate content with high word overlap is caught by TF-IDF similarity.
+
+        Requires sklearn or sentence_transformers for vector similarity.
+        Gracefully skipped when neither is available (embedded dev environments).
+        """
+        try:
+            import sklearn  # noqa: F401
+        except ImportError:
+            try:
+                import sentence_transformers  # noqa: F401
+            except ImportError:
+                pytest.skip("semantic dedup requires sklearn or sentence_transformers — neither available")
         original = "deploy the new feature to production servers tonight"
         sdk.checkpoint([{"content": original}])
         # Near-duplicate: one word changed, same structure
@@ -140,7 +151,7 @@ class TestDiary:
                             topic="general", wing="test_wing")
         assert p["pointKind"] == "diary"
         assert p["authoredBy"] == "pi-agent"
-        assert p["context"] == "test_wing"
+        assert p["wing"] == "test_wing"  # #49: wing replaces context
 
         entries = sdk.diary_read("pi-agent", last_n=10, wing="test_wing")
         assert len(entries) == 1
