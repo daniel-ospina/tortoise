@@ -655,17 +655,21 @@ def test_falkor_neighbors():
                        "operator": {"op_type": "IMPL", "inputs": ["a", "b"]}})
         proj._upsert({"id": "op2", "content": "NAND", "context": "ctx",
                        "operator": {"op_type": "NAND", "inputs": ["a", "c"]}})
-        # 'a' should have neighbors: 'op1' (IMPL), 'op2' (NAND), 'b' (via op1 IMPL)?
-        # The edges are o→s, but _neighbors uses undirected patterns [r:IMPL]-(m:Point)
-        # So from 'a', undirected IMPL edges connect: op1 (r:IMPL reverse direction is INPUT, not IMPL)
-        # Actually, _create_edges creates (o)-[:IMPL]->(s) AND (s)-[:INPUT]->(o).
-        # _neighbors matches [r:IMPL]-(m:Point) which is undirected across IMPL-labeled edges.
-        # From 'a': IMPL edges → none directly (they point from op), but undirected matches op→a,
-        # so 'a' matches op1 via IMPL and op2 via NAND.
+        # _neighbors hops THROUGH operator nodes to reach OTHER points.
+        # Operators are connectors, not neighbors.
+        # After #226: _create_edges creates (op)-[:IMPL]->(src) + (src)-[:INPUT]->(op).
+        # From 'a', _neighbors finds: b (via op1 IMPL), c (via op2 NAND).
         n = proj._neighbors("a")
-        assert "op1" in n
-        assert "op2" in n
-        assert len(n) == 2
+        assert sorted(n) == ["b", "c"]
+        # Verify operators ARE stored and edges ARE directional (op→point).
+        impl_rows = proj.g.query(
+            "MATCH (op:Point {id:'op1'})-[r:IMPL]->(p:Point) RETURN p.id"
+        ).result_set
+        assert sorted(r[0] for r in impl_rows) == ["a", "b"]
+        nand_rows = proj.g.query(
+            "MATCH (op:Point {id:'op2'})-[r:NAND]->(p:Point) RETURN p.id"
+        ).result_set
+        assert sorted(r[0] for r in nand_rows) == ["a", "c"]
     finally:
         proj.close()
 
