@@ -226,7 +226,7 @@ class _EdgeHandlers:
         valid_predicates = {
             'performs', 'produces', 'uses', 'authoredBy', 'ownedBy', 'managedBy',
             'hasMember', 'holdsRole', 'memberOf', 'reportsTo',
-            'instantiates', 'participatesIn', 'hasPart', 'related', 'dependsOn', 'references',
+            'participatesIn', 'hasPart', 'related', 'dependsOn', 'references',
             'wasDerivedFrom'
         }
         if predicate not in valid_predicates:

@@ -146,9 +146,18 @@ All structural edges must use one of (enforced in `_create_edge`):
 
 ```
 performs, produces, uses, authoredBy, ownedBy, managedBy,
-hasMember, holdsRole, reportsTo,
-instantiates, participatesIn, hasPart, related, dependsOn, references,
+hasMember, holdsRole, memberOf, reportsTo,
+participatesIn, hasPart, related, dependsOn, references,
 wasDerivedFrom
+wasDerivedFrom
+
+> **#214 (2026-08-06):** `instantiates` removed — Event→Action legacy from v2.5;
+> Action was dissolved in Ontology v3.0.
+>
+> **Vocabulary-only edges** (valid predicates with zero producers):
+> `reportsTo` (org hierarchy, Subject→Subject), `related` (generic catch-all),
+> `dependsOn` (pack-declared — dev:api dependsOn dev:database; used by `list_relations()`
+> for kind expansion). All three remain valid for `create_edge()`.
 ```
 
 Epistemic edges (operators): `IMPL`, `NAND` (+ semantic label). About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDocument`.
