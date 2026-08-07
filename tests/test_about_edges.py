@@ -219,3 +219,119 @@ class TestAboutEdgesRegression:
             "RETURN count(*) > 0"
         ).result_set
         assert r[0][0] is True
+
+
+# ── proj.apply path: about* keys must NOT persist as node properties ─────
+
+class TestProjApplyAboutMetaKeys:
+    """#486: direct proj.apply consumers must not persist aboutEvent/
+    aboutPoint/aboutDocument as node properties — _META_KEYS must cover
+    all five about* edge types (only aboutSubject/aboutObject did).
+    Edge wiring stays in the SDK create_event layer (pops + create_about_edge);
+    the projection's contract is: never store about* keys as properties."""
+
+    def test_apply_event_with_about_point_not_property(self, sdk):
+        """EventRecorded event dict with aboutPoint → no aboutPoint property
+        on the Event node (edge wiring is SDK-layer, create_event)."""
+        proj = sdk._get_proj()
+        proj.apply({
+            "type": "EventRecorded",
+            "id": "ev-486-a",
+            "event": {
+                "eventId": "ev-486-a",
+                "eventKind": "review",
+                "subject": "agent",
+                "object": "deploy",
+                "startedAt": "2026-08-07T00:00:00Z",
+                "aboutPoint": "pt-486-a",
+            },
+        })
+        r = proj.g.query(
+            "MATCH (e:Event {eventId:$eid}) RETURN exists(e.aboutPoint), e.aboutPoint",
+            params={"eid": "ev-486-a"},
+        ).result_set
+        assert r[0][0] is False, "aboutPoint persisted as node property"
+
+    def test_apply_event_with_about_document_not_property(self, sdk):
+        """EventRecorded event dict with aboutDocument → no aboutDocument
+        property on the Event node."""
+        proj = sdk._get_proj()
+        proj.apply({
+            "type": "EventRecorded",
+            "id": "ev-486-b",
+            "event": {
+                "eventId": "ev-486-b",
+                "eventKind": "review",
+                "subject": "agent",
+                "object": "doc",
+                "startedAt": "2026-08-07T00:00:00Z",
+                "aboutDocument": "doc-486-b",
+            },
+        })
+        r = proj.g.query(
+            "MATCH (e:Event {eventId:$eid}) RETURN exists(e.aboutDocument)",
+            params={"eid": "ev-486-b"},
+        ).result_set
+        assert r[0][0] is False, "aboutDocument persisted as node property"
+
+    def test_apply_event_with_about_event_not_property(self, sdk):
+        """EventRecorded event dict with aboutEvent → no aboutEvent property
+        on the Event node."""
+        proj = sdk._get_proj()
+        proj.apply({
+            "type": "EventRecorded",
+            "id": "ev-486-c",
+            "event": {
+                "eventId": "ev-486-c",
+                "eventKind": "review",
+                "subject": "agent",
+                "object": "target",
+                "startedAt": "2026-08-07T00:00:00Z",
+                "aboutEvent": "target-event-486",
+            },
+        })
+        r = proj.g.query(
+            "MATCH (e:Event {eventId:$eid}) RETURN exists(e.aboutEvent)",
+            params={"eid": "ev-486-c"},
+        ).result_set
+        assert r[0][0] is False, "aboutEvent persisted as node property"
+
+    def test_apply_event_with_about_subject_still_skipped(self, sdk):
+        """Regression: aboutSubject/aboutObject still skipped (pre-existing)."""
+        proj = sdk._get_proj()
+        proj.apply({
+            "type": "EventRecorded",
+            "id": "ev-486-d",
+            "event": {
+                "eventId": "ev-486-d",
+                "eventKind": "review",
+                "subject": "agent",
+                "object": "target",
+                "startedAt": "2026-08-07T00:00:00Z",
+                "aboutSubject": "subj-486-d",
+            },
+        })
+        r = proj.g.query(
+            "MATCH (e:Event {eventId:$eid}) RETURN exists(e.aboutSubject)",
+            params={"eid": "ev-486-d"},
+        ).result_set
+        assert r[0][0] is False, "aboutSubject persisted as node property"
+
+    def test_create_event_wires_about_point_still_works(self, sdk):
+        """SDK create_event still wires aboutPoint edge (regression for #486)."""
+        pt = sdk.create_point("statement", "deploy completed successfully")
+        ev = sdk.create_event("deploy-486", "deployment",
+                              aboutPoint=pt["id"])
+        proj = sdk._get_proj()
+        r = proj.g.query(
+            "MATCH (e:Event {eventId:$eid})-[a:aboutPoint]->(p:Point {id:$pid}) "
+            "RETURN count(a) > 0",
+            params={"eid": ev["eventId"], "pid": pt["id"]},
+        ).result_set
+        assert r[0][0] is True
+        # and no property pollution on the Event node
+        r = proj.g.query(
+            "MATCH (e:Event {eventId:$eid}) RETURN exists(e.aboutPoint)",
+            params={"eid": ev["eventId"]},
+        ).result_set
+        assert r[0][0] is False, "aboutPoint property leaked onto Event node"

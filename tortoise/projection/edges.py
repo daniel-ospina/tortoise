@@ -81,11 +81,13 @@ class _EdgeHandlers:
             "ON CREATE SET s.id=$name, s.subjectKind='other'",
             params={"name": entity_name},
         )
-        self.g.query(
-            "MATCH (n {id:$pid}), (s:Subject {name:$name}) "
-            "MERGE (n)-[:aboutSubject]->(s)",
-            params={"pid": source_id, "name": entity_name},
-        )
+        srcs = self._resolve_entity(source_id, by_id=True)
+        for n in srcs:
+            self.g.query(
+                f"MATCH (n:{n['label']} {{{n['key']}:$pid}}), (s:Subject {{name:$name}}) "
+                f"MERGE (n)-[:aboutSubject]->(s)",
+                params={"pid": n["value"], "name": entity_name},
+            )
 
     def _try_about_edge(self, source_id: str, target_name: str, 
                         label: str, edge_type: str, kind_field: str, kind_default: str) -> bool:
@@ -107,19 +109,20 @@ class _EdgeHandlers:
                 params={"name": target_name},
             ).result_set
         if r:
-            if label == 'Document':
-                self.g.query(
-                    f"MATCH (n {{id:$sid}}), (e:{label}) "
-                    f"WHERE e.name = $name OR e.title = $name "
-                    f"MERGE (n)-[:{edge_type}]->(e)",
-                    params={"sid": source_id, "name": target_name},
-                )
-            else:
-                self.g.query(
-                    f"MATCH (n {{id:$sid}}), (e:{label} {{name:$name}}) "
-                    f"MERGE (n)-[:{edge_type}]->(e)",
-                    params={"sid": source_id, "name": target_name},
-                )
+            for n in self._resolve_entity(source_id, by_id=True):
+                if label == 'Document':
+                    self.g.query(
+                        f"MATCH (n:{n['label']} {{{n['key']}:$sid}}), (e:{label}) "
+                        f"WHERE e.name = $name OR e.title = $name "
+                        f"MERGE (n)-[:{edge_type}]->(e)",
+                        params={"sid": n["value"], "name": target_name},
+                    )
+                else:
+                    self.g.query(
+                        f"MATCH (n:{n['label']} {{{n['key']}:$sid}}), (e:{label} {{name:$name}}) "
+                        f"MERGE (n)-[:{edge_type}]->(e)",
+                        params={"sid": n["value"], "name": target_name},
+                    )
             return True
         return False
 
@@ -137,15 +140,25 @@ class _EdgeHandlers:
         if edge_type not in valid:
             raise ValueError(f"Invalid about edge type: {edge_type}. Must be one of {valid}")
         
-        # Match target by id OR eventId (Event nodes use eventId as key)
-        r = self.g.query(
-            f"MATCH (s {{id:$sid}}) "
-            f"MATCH (t) WHERE t.id = $tid OR t.eventId = $tid "
-            f"MERGE (s)-[:{edge_type}]->(t) "
-            f"RETURN count(*) > 0",
-            params={"sid": source_id, "tid": target_id},
-        )
-        return bool(r.result_set[0][0]) if r.result_set else False
+        # Resolve endpoints via index-backed labeled lookups (issue #327).
+        # Source predicate is id-only; target is id OR eventId (legacy OR-set).
+        sources = self._resolve_entity(source_id, by_id=True)
+        targets = self._resolve_entity(target_id, by_id=True, by_eventId=True)
+        if not sources or not targets:
+            return False
+        created = False
+        for s in sources:
+            for t in targets:
+                r = self.g.query(
+                    f"MATCH (s:{s['label']} {{{s['key']}:$sv}}) "
+                    f"MATCH (t:{t['label']} {{{t['key']}:$tv}}) "
+                    f"MERGE (s)-[:{edge_type}]->(t) "
+                    f"RETURN count(*) > 0",
+                    params={"sv": s["value"], "tv": t["value"]},
+                )
+                if r.result_set and r.result_set[0][0]:
+                    created = True
+        return created
 
     def _link_source(self, point_id: str, source_ref: str, source_kind: str = "document") -> None:
         """Link Point → Source via extractedFrom edge (Ontology v2.5).
@@ -231,21 +244,49 @@ class _EdgeHandlers:
         }
         if predicate not in valid_predicates:
             raise ValueError(f"Unknown predicate: {predicate}")
-        r = self.g.query(
-            f"MATCH (s) WHERE s.id = $sid OR s.eventId = $sid OR s.url = $sid "
-            f"MATCH (t) WHERE t.id = $tid OR t.eventId = $tid "
-            f"MERGE (s)-[:{predicate}]->(t) RETURN count(*) > 0",
-            params={"sid": source_id, "tid": target_id},
-        )
-        return bool(r.result_set[0][0]) if r.result_set else False
+        # Resolve endpoints via index-backed labeled lookups (issue #327).
+        # Source OR-set: id | eventId | url ; target OR-set: id | eventId —
+        # matching the legacy predicates exactly (a url-only stub Source is
+        # therefore NOT a valid target, preserving prior behavior).
+        sources = self._resolve_entity(source_id, by_id=True, by_eventId=True, by_url=True)
+        targets = self._resolve_entity(target_id, by_id=True, by_eventId=True)
+        if not sources or not targets:
+            return False
+        created = False
+        for s in sources:
+            for t in targets:
+                r = self.g.query(
+                    f"MATCH (s:{s['label']} {{{s['key']}:$sv}}) "
+                    f"MATCH (t:{t['label']} {{{t['key']}:$tv}}) "
+                    f"MERGE (s)-[:{predicate}]->(t) RETURN count(*) > 0",
+                    params={"sv": s["value"], "tv": t["value"]},
+                )
+                if r.result_set and r.result_set[0][0]:
+                    created = True
+        return created
 
     def create_owned_by(self, entity_id: str, subject_id: str) -> bool:
         """Create ownedBy edge with circular ownership DAG check."""
-        cycle = self.g.query(
-            "MATCH (s {id:$sid}) MATCH (t {id:$tid}) MATCH path = (s)-[:ownedBy*1..10]->(t) RETURN count(path) > 0",
-            params={"sid": subject_id, "tid": entity_id},
-        )
-        if cycle.result_set and cycle.result_set[0][0]:
+        # Resolve endpoints by id (index-backed, issue #327); the varlen
+        # traversal itself has no index in FalkorDB and is accepted.
+        # All resolved (s, t) pairs are checked (original cartesian semantics).
+        sources = self._resolve_entity(subject_id, by_id=True)
+        targets = self._resolve_entity(entity_id, by_id=True)
+        found_cycle = False
+        for s in sources:
+            for t in targets:
+                cycle = self.g.query(
+                    f"MATCH (s:{s['label']} {{{s['key']}:$sid}}) "
+                    f"MATCH (t:{t['label']} {{{t['key']}:$tid}}) "
+                    f"MATCH path = (s)-[:ownedBy*1..10]->(t) RETURN count(path) > 0",
+                    params={"sid": s["value"], "tid": t["value"]},
+                )
+                if cycle.result_set and cycle.result_set[0][0]:
+                    found_cycle = True
+                    break
+            if found_cycle:
+                break
+        if found_cycle:
             raise ValueError(f"Circular ownership: {subject_id} already owned by {entity_id}")
         return self.create_edge(entity_id, subject_id, 'ownedBy')
 

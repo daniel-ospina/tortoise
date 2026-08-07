@@ -74,6 +74,33 @@ def _content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _to_iso_utc(value) -> str:
+    """Normalize a datetime or ISO-8601 string to UTC ISO-8601 (with +00:00).
+
+    AgentSession startedAt values are stored via
+    ``datetime.now(timezone.utc).isoformat()`` (e.g.
+    ``2026-08-07T01:20:50.123456+00:00``), so a canonical, timezone-stripped-
+to-UTC string keeps ``>=`` / ``<=`` lexicographic comparisons valid regardless
+of the caller's local timezone or whether they passed ``Z`` or an offset.
+    """
+    from datetime import datetime, timezone
+    if isinstance(value, datetime):
+        dt = value
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        else:
+            dt = dt.astimezone(timezone.utc)
+        return dt.isoformat()
+    # ISO-8601 string — normalize any timezone/offset to UTC. A naive string
+    # (no offset suffix) is treated as UTC, mirroring the naive-datetime
+    # branch — NOT as local time (which would shift the filter window by the
+    # caller's offset; #243/#244 review).
+    dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).isoformat()
+
+
 def _save_progress(progress_file: str, directory: str, total: int, processed: int,
                    ingested: int, updated: int, skipped: int, failed: int,
                    errors: list[dict],
@@ -369,7 +396,6 @@ class TortoiseSDK:
             ).result_set
             if existing:
                 pid = existing[0][0]
-                props["updatedAt"] = now
                 # Existing point already stores content_hash — don't re-write it
                 # (would make the `if props:` guard always truthy and bump
                 # updatedAt on every dedup hit, #80 review).
@@ -379,6 +405,11 @@ class TortoiseSDK:
                         "credibility=%r ignored — point %s already exists and dedup=True",
                         credibility, pid)
                 if props:
+                    # Only touch the existing point when the caller passed
+                    # other props — a pure dedup hit (no props) must not bump
+                    # updatedAt or re-trigger EP dirty-marking (#490 review
+                    # P2-1: re-capture would churn confidence for every point).
+                    props["updatedAt"] = now
                     self.update_point(pid, **props)
                 return self.get_point(pid)
 
@@ -2046,13 +2077,11 @@ class TortoiseSDK:
                     # #330: unchanged content whose enrichment produced nothing
                     # new counts as skipped, not updated (counter honesty).
                     # Compare the FULL payload that would be written (keywords,
-                    # normalized topics, name, narrative_arc) so a real change
-                    # in any persisted field is never miscounted as a skip.
+                    # normalized topics, name, narrative_arc, issues/prs/
+                    # critical_decisions — the latter feed _connect_issue_objects)
+                    # so a real change in any persisted field is never
+                    # miscounted as a skip.
                     if existing_props.get("file_hash") == file_hash:
-                        # Compare the FULL payload that would be written: also
-                        # issues/prs/critical_decisions (inside content_metadata,
-                        # feeding _connect_issue_objects) so a re-enrichment
-                        # that finds new references is never miscounted skipped.
                         _old_meta = existing_arc
                         changed = (
                             set(_norm_topics(merged_keywords)) != set(_stored_keywords)
@@ -2067,9 +2096,17 @@ class TortoiseSDK:
                             skipped += 1
                             completed_files.append(rel_path)
                             continue
+
+                    # #244: (re)compute the session embedding from the merged
+                    # surface and store as vecf32 — None when model unavailable.
+                    embedding = self._session_embedding(
+                        update_props["name"], metadata.get("summary", ""),
+                        merged_keywords, update_props["topics"],
+                    )
                     proj.g.query(
-                        "MATCH (e:Event {eventId:$eid}) SET e += $props",
-                        params={"eid": event_id, "props": update_props},
+                        "MATCH (e:Event {eventId:$eid}) SET e += $props, "
+                        "e.embedding = CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE e.embedding END",
+                        params={"eid": event_id, "props": update_props, "embedding": embedding},
                     )
                     updated += 1
                     completed_files.append(rel_path)
@@ -2110,9 +2147,17 @@ class TortoiseSDK:
                         "classificationLevel": "internal",
                         "format": "markdown",
                     }
+                    # #244: compute the session embedding (name + summary +
+                    # keywords + topics) and store as vecf32 — None when the
+                    # model is unavailable (indexing never depends on it).
+                    embedding = self._session_embedding(
+                        props["name"], metadata.get("summary", ""),
+                        props["keywords"], props["topics"],
+                    )
                     proj.g.query(
-                        "MERGE (e:Event {eventId:$eid}) SET e += $props",
-                        params={"eid": event_id, "props": props},
+                        "MERGE (e:Event {eventId:$eid}) SET e += $props, "
+                        "e.embedding = CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE e.embedding END",
+                        params={"eid": event_id, "props": props, "embedding": embedding},
                     )
                     ingested += 1
                     completed_files.append(rel_path)
@@ -2191,12 +2236,16 @@ class TortoiseSDK:
     # ── Entity Resolution (GAP-01 #6987) ──────────────────────
 
     def suggest_entry_points(self, query: str, *, limit: int = 5,
-                             kind_filter: str | None = None) -> list[dict]:
+                             kind_filter: str | None = None,
+                             graph_ranker=None) -> list[dict]:
         """Entity resolution — NL query → matching entities from the graph.
 
         String match on content (Cypher CONTAINS) + embedding fallback.
         Returns [{id, name, kind, confidence}] sorted by confidence DESC.
         kind_filter filters by n.pointKind.
+        graph_ranker: optional GraphRanker (tortoise.ranking) to rerank the
+        results with graph signals (persisted EP confidence, connectivity,
+        recency) — #25. Off by default for backward compatibility.
         """
         if limit < 1:
             raise ValueError(f"limit must be >= 1, got {limit}")
@@ -2231,6 +2280,7 @@ class TortoiseSDK:
             # doc and 0.5 for 5-char in 10-char — not comparable. The 0.5 offset
             # ensures all substring matches score ≥ 0.5, reserving [0, 0.5) for
             # the hybrid fallback path (which has no substring match at all).
+            # The fallback band-normalizes its RRF scores into [0, 0.5) (#22).
             if content.lower() == q_lower:
                 confidence = 1.0
             else:
@@ -2241,12 +2291,38 @@ class TortoiseSDK:
         results.sort(key=lambda r: r["confidence"], reverse=True)
         results = results[:limit]
 
-        # Hybrid fallback if no string matches (Phase 0, #7748)
+        # Hybrid fallback if no string matches (Phase 0, #7748).
+        # Confidence contract (#22): fallback results must live in the [0, 0.5)
+        # band reserved by the substring-match formula above. Raw RRF scores are
+        # NOT comparable to that band — rank-based fusion caps near 0.016 per
+        # ranked list (~0.05 with 3 fused lists) while embedded FTS raw scores
+        # are unbounded above — so `rrf * 0.5` landed anywhere from ~0.008 to
+        # >1.0, tripping downstream conf > 0.3 thresholds. Band-normalize:
+        # scale each RRF score by the set's max so the strongest fallback hit
+        # lands at 0.49 (just under the 0.5 boundary) and weaker hits scale
+        # proportionally. Invariant to the number of fused ranked lists (no
+        # hardcoded multiplier).
         if not results:
             fts_results = self.tortoise_fts_query(q, limit=limit)
-            results = [{"id": r["id"], "name": r.get("content", ""), "kind": r.get("point_kind", ""),
-                        "confidence": round(r.get("scores", {}).get("rrf", 0.0) * 0.5, 4)}
-                       for r in fts_results]
+            results = []
+            max_rrf = max(
+                (r.get("scores", {}).get("rrf", 0.0) for r in fts_results),
+                default=0.0,
+            )
+            for r in fts_results:
+                rrf = r.get("scores", {}).get("rrf", 0.0)
+                if max_rrf > 0:
+                    confidence = round(0.49 * rrf / max_rrf, 4)
+                else:
+                    confidence = 0.0  # no fusion signal — stay at band floor
+                results.append({"id": r["id"], "name": r.get("content", ""),
+                                "kind": r.get("point_kind", ""), "confidence": confidence})
+            results.sort(key=lambda r: r["confidence"], reverse=True)
+
+        # #25: optional graph-informed rerank (persisted EP confidence,
+        # operator connectivity, recency). Off by default (backward compat).
+        if graph_ranker is not None and results:
+            results = graph_ranker.rerank(results, entity_type="point")
 
         return results
 
@@ -2298,6 +2374,7 @@ class TortoiseSDK:
         entity_type: str = "point",
         min_confidence: float = 0.0,
         order_by: str = "relevance",
+        graph_ranker=None,
         limit: int = 10,
         threshold: float = 0.0,
         relationship_filter: str | None = None,
@@ -2333,8 +2410,8 @@ class TortoiseSDK:
             raise ValueError(f"threshold must be 0.0-1.0, got {threshold}")
         if not (0.0 <= min_confidence <= 1.0):
             raise ValueError(f"min_confidence must be 0.0-1.0, got {min_confidence}")
-        if order_by not in ("relevance", "confidence"):
-            raise ValueError(f"order_by must be 'relevance' or 'confidence', got {order_by!r}")
+        if order_by not in ("relevance", "confidence", "graph"):
+            raise ValueError(f"order_by must be 'relevance', 'confidence', or 'graph', got {order_by!r}")
 
         proj = self._get_proj()
         graph = proj.g
@@ -2615,9 +2692,24 @@ class TortoiseSDK:
             results.append(result)
 
         # 9. Order results
+        if order_by == "graph":
+            # #25: graph-informed rerank — weighted fusion of similarity +
+            # persisted EP confidence + operator connectivity + recency decay.
+            # Requires the caller to allow a large enough candidate pool (limit
+            # here is the pool size; final length is capped below).
+            from .ranking import GraphRanker
+            ranker = graph_ranker or GraphRanker(proj)
+            dicts = [r.to_dict() for r in results]
+            return ranker.rerank(dicts, entity_type=entity_type)[:limit]
         if order_by == "confidence":
+            # #25: sort by the PERSISTED EP confidence (n.confidence, written
+            # by compute_confidence), not the structural impl/(impl+nand) proxy
+            # from annotate_ep_batch (which is edge-ratio, not belief).
+            from .ranking import GraphRanker
+            ranker = graph_ranker or GraphRanker(proj)
+            signals = ranker._fetch_signals([r.id for r in results], entity_type)
             results.sort(
-                key=lambda r: r.ep.confidence_mean if r.ep else 0.0,
+                key=lambda r: signals.get(r.id, {}).get("confidence", 0.5),
                 reverse=True,
             )
         # Default: RRF relevance order (already in fused order)
@@ -3329,29 +3421,46 @@ class TortoiseSDK:
         return self._get_entity(canonical_id)
 
     def _get_entity(self, id_val: str) -> dict:
-        proj = self._get_proj()
-        r = proj.g.query(
-            "MATCH (n) WHERE n.id = $id OR n.eventId = $id OR n.url = $id RETURN properties(n) LIMIT 1",
-            params={"id": id_val},
-        )
-        return dict(r.result_set[0][0]) if r.result_set else {}
+        # NOTE (issue #327): Session/APIKey/Team/Tag nodes are intentionally
+        # excluded from entity resolution — only Point/Subject/Object/Document/
+        # Event/Source resolve (index-backed union). On a cross-label id
+        # collision the first _RESOLVE_BRANCHES match wins (Point priority) —
+        # more deterministic than the previous scan-order-arbitrary LIMIT 1.
+        resolved = self._get_proj()._resolve_entity(
+            id_val, by_id=True, by_eventId=True, by_url=True)
+        return resolved[0]["properties"] if resolved else {}
 
     def _update_entity(self, id_val: str, **props) -> dict:
         proj = self._get_proj()
-        for key, val in props.items():
+        # NOTE (issue #327): like _get_entity, entity mutation covers only the
+        # canonical labels (Point/Subject/Object/Document/Source/Event).
+        # Session/APIKey/Team/Tag nodes are intentionally NOT updated — legacy
+        # matched them via id/eventId but no caller relies on it.
+        # Per-label indexed writes (id OR eventId — original predicate; no url).
+        # UNION cannot carry SET, so run each branch sequentially (#327).
+        for label, prop in (("Point", "id"), ("Subject", "id"), ("Object", "id"),
+                            ("Document", "id"), ("Source", "id"), ("Event", "eventId")):
             proj.g.query(
-                "MATCH (n) WHERE n.id = $id OR n.eventId = $id SET n += $p",
-                params={"id": id_val, "p": {key: val}},
+                f"MATCH (n:{label} {{{prop}:$id}}) SET n += $p",
+                params={"id": id_val, "p": props},
             )
         return self._get_entity(id_val)
 
     def _delete_entity(self, id_val: str) -> bool:
         proj = self._get_proj()
-        r = proj.g.query(
-            "MATCH (n) WHERE n.id = $id OR n.eventId = $id DETACH DELETE n RETURN count(n)",
-            params={"id": id_val},
-        )
-        return bool(r.result_set[0][0]) if r.result_set else False
+        # NOTE (issue #327): deletion covers only canonical entity labels —
+        # Session/APIKey/Team/Tag nodes are intentionally NOT deleted (legacy
+        # matched them by id/eventId; no caller relies on it).
+        total = 0
+        for label, prop in (("Point", "id"), ("Subject", "id"), ("Object", "id"),
+                            ("Document", "id"), ("Source", "id"), ("Event", "eventId")):
+            r = proj.g.query(
+                f"MATCH (n:{label} {{{prop}:$id}}) DETACH DELETE n RETURN count(n)",
+                params={"id": id_val},
+            )
+            if r.result_set:
+                total += r.result_set[0][0]
+        return bool(total)
 
     def create_subject(self, name: str, subjectKind: str = "other", **props) -> dict:
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
@@ -3402,13 +3511,122 @@ class TortoiseSDK:
 
     # ── Session Indexing (AgentSession) ─────────────────────────
 
+    def _session_embedding(self, name: str, summary: str = "",
+                           keywords: list[str] | None = None,
+                           topics: list[str] | None = None) -> list[float] | None:
+        """Compute the embedding for an AgentSession Event (#244).
+
+        name + summary + keywords + topics → 384-dim vector, or None when the
+        model is unavailable (session indexing must never depend on it).
+        """
+        from .session_indexer import compute_session_embedding
+        return compute_session_embedding(name, summary, keywords, topics)
+
     def search_sessions(self, query: str, *, agent: str | None = None,
                         topics: list[str] | None = None,
+                        after: "datetime | str | None" = None,
+                        before: "datetime | str | None" = None,
                         limit: int = 10, offset: int = 0) -> list[dict]:
-        """Search indexed agent sessions. Returns Events with metadata snippets."""
+        """Search indexed agent sessions. Returns Events with metadata snippets.
+
+        Routes through the hybrid engine (tortoise_fts_query entity_type='event'
+        kind='AgentSession'): RRF fusion of FTS (Event subject+name index),
+        vector (session embeddings computed at index time, #244) and structural
+        (eventKind) strategies. Results are ordered by relevance with startedAt
+        DESC as tiebreak.
+
+        agent/topics post-filter the candidates. after/before bound the search
+        to sessions whose ``startedAt`` falls in ``[after, before]`` (inclusive).
+        Each may be a ``datetime`` or an ISO-8601 string (``Z`` or offset
+        accepted); both are normalized to UTC ISO-8601 so the comparison
+        against stored ``startedAt`` values is valid regardless of the caller's
+        timezone. Sessions that lack a ``startedAt`` are EXCLUDED whenever a
+        bound is set.
+
+        When no semantic strategy contributed (FTS/vector unavailable — e.g.
+        embedded FalkorDBLite without embeddings, prod before #160 deploys),
+        falls back to the legacy keyword CONTAINS surface (name + keywords) so
+        the previous behavior keeps working.
+        """
         if not query or not query.strip():
             return []
         proj = self._get_proj()
+        has_bound = after is not None or before is not None
+        after_utc = _to_iso_utc(after) if after is not None else None
+        before_utc = _to_iso_utc(before) if before is not None else None
+
+        # ── Hybrid route: RRF fusion of FTS + vector + structural ──
+        # Generous candidate pool — agent/topics/temporal filters drop rows
+        # post-retrieval, so fetch beyond the caller's limit + offset.
+        candidate_limit = max(limit * 5, 50) + offset
+        hybrid = self.tortoise_fts_query(
+            query, kind="AgentSession", entity_type="event",
+            limit=candidate_limit,
+        )
+        has_semantic = any(
+            r.get("scores")
+            and (r["scores"].get("fts") is not None
+                 or r["scores"].get("vector") is not None)
+            for r in hybrid
+        )
+        if has_semantic and hybrid:
+            # Precision gate (#244 review): rows with NO semantic signal — no
+            # FTS score and no vector score (structural-only; the kind filter
+            # matches ALL AgentSession events with score 1.0) are NOT results,
+            # they only fed the RRF candidate pool. Note: vector-only rows are
+            # deliberately kept — word-distinct semantic recall is the point
+            # of #244 ("port migration" finds a session about changing the
+            # FalkorDB default port); see docstring. The brute-force vector
+            # strategy is threshold-less, so those rows are ranked nearest-
+            # neighbors-first and precision drops when a query has no real
+            # semantic match (documented behavior).
+            ids = [r["id"] for r in hybrid]
+            rows = proj.g.query(
+                "MATCH (e:Event) WHERE e.eventId IN $ids RETURN properties(e)",
+                params={"ids": ids},
+            ).result_set
+            props_by_id = {}
+            for row in rows:
+                props = dict(row[0])
+                if props.get("eventId"):
+                    props_by_id[props["eventId"]] = props
+            ranked = []
+            for r in hybrid:
+                props = props_by_id.get(r["id"])
+                if props is None:
+                    continue
+                if agent and props.get("agent") != agent:
+                    continue
+                if topics:
+                    s_topics = set(props.get("topics") or [])
+                    if not any(t in s_topics for t in topics):
+                        continue
+                if has_bound:
+                    started = props.get("startedAt")
+                    if not started:
+                        continue  # sessions without startedAt excluded when a bound is set
+                    if after_utc is not None and started < after_utc:
+                        continue
+                    if before_utc is not None and started > before_utc:
+                        continue
+                # Precision gate (#244 review): structural-only rows (no FTS,
+                # no vector score) are NOT results — a session that neither
+                # keyword-matches nor semantically matches must not appear.
+                scores = r.get("scores") or {}
+                if scores.get("fts") is None and scores.get("vector") is None:
+                    continue
+                ranked.append((scores.get("rrf") or 0.0, props))
+            # Relevance (RRF) desc, startedAt DESC as tiebreak (missing = last)
+            ranked.sort(
+                key=lambda item: (item[0], item[1].get("startedAt") or ""),
+                reverse=True,
+            )
+            return [props for _, props in ranked[offset:offset + limit]]
+
+        # ── Legacy keyword fallback (no FTS/vector contribution) ──
+        # Preserves the pre-#244 CONTAINS surface (name + keywords) plus the
+        # #243 temporal filters (after/before, ISO-8601 UTC normalization,
+        # startedAt IS NOT NULL exclusion when a bound is set).
         clauses = ["e.eventKind = 'AgentSession'"]
         params: dict = {"limit": max(limit * 3, 30)}
         query_lower = query.strip().lower()
@@ -3424,6 +3642,17 @@ class TortoiseSDK:
                 topic_clauses.append(f"${pk} IN e.topics")
                 params[pk] = t
             clauses.append(f"({' OR '.join(topic_clauses)})")
+        has_bound = after is not None or before is not None
+        if has_bound:
+            # Explicitly drop sessions without startedAt — same outcome as
+            # null-comparison semantics, but self-documenting and robust.
+            clauses.append("e.startedAt IS NOT NULL")
+        if after is not None:
+            clauses.append("e.startedAt >= $after")
+            params["after"] = _to_iso_utc(after)
+        if before is not None:
+            clauses.append("e.startedAt <= $before")
+            params["before"] = _to_iso_utc(before)
         where = " AND ".join(clauses)
         params["offset"] = offset
         rows = proj.g.query(
@@ -3610,8 +3839,13 @@ class TortoiseSDK:
     def get_owned_entities(self, subject_id: str) -> list:
         """Return all entities owned by a Subject (governance query)."""
         proj = self._get_proj()
+        # Issue #327: start from the labeled, indexed Subject (both id and name
+        # are RANGE-indexed -> OR uses the index) and traverse ownedBy inward.
+        # Narrowing: ownedBy/memberOf targets are canonically Subject (#216);
+        # non-Subject targets are out of contract.
         r = proj.g.query(
-            "MATCH (e)-[:ownedBy]->(s) WHERE s.id = $sid OR s.name = $sid RETURN properties(e) LIMIT 100",
+            "MATCH (s:Subject) WHERE s.id = $sid OR s.name = $sid "
+            "MATCH (s)<-[:ownedBy]-(e) RETURN properties(e) LIMIT 100",
             params={"sid": subject_id},
         )
         return [dict(row[0]) for row in r.result_set]
@@ -3648,12 +3882,16 @@ class TortoiseSDK:
     def get_org_structure(self, subject_id: str) -> dict:
         """Return organisational structure: members, roles, sub-teams."""
         proj = self._get_proj()
+        # Issue #327: labeled Subject start (id|name OR both indexed -> Index
+        # Scan) then traverse outward; roles filters the source Subject p.
         members = proj.g.query(
-            "MATCH (p:Subject)-[:memberOf]->(s) WHERE s.id = $sid OR s.name = $sid RETURN properties(p)",
+            "MATCH (s:Subject) WHERE s.id = $sid OR s.name = $sid "
+            "MATCH (p:Subject)-[:memberOf]->(s) RETURN properties(p)",
             params={"sid": subject_id},
         )
         roles = proj.g.query(
-            "MATCH (p:Subject)-[:holdsRole]->(r:Subject) WHERE p.id = $sid OR p.name = $sid RETURN properties(r)",
+            "MATCH (p:Subject) WHERE p.id = $sid OR p.name = $sid "
+            "MATCH (p)-[:holdsRole]->(r:Subject) RETURN properties(r)",
             params={"sid": subject_id},
         )
         return {

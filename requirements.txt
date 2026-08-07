@@ -10,9 +10,10 @@ fastapi>=0.100.0
 uvicorn>=0.23.0
 
 
-# NOTE: sentence-transformers intentionally NOT in the deploy requirements.
-# It downloads ~90MB from HuggingFace on first use, which hangs in the
-# sandboxed Fly network and blocks create_point (see fix/embedding-hang).
-# Embeddings are optional (Phase 1A) — enable via the pyproject extra only
-# where the model is reachable (local dev). Vector search falls back to
-# FTS+structural RRF without them.
+# NOTE: sentence-transformers intentionally NOT in the base deploy
+# requirements — keeps the image slim. Dockerfile.hosted installs it via the
+# [embeddings] pyproject extra at BUILD time and pre-downloads
+# all-MiniLM-L6-v2 into /app/model (HF_HOME), so runtime load is pure local
+# I/O with no HuggingFace network access (the runtime download merged in
+# 69aefae hung in Fly's sandboxed network and was reverted in 0da50a0).
+# Vector search without the model falls back to FTS+structural RRF.

@@ -82,6 +82,11 @@ from tortoise.projection.edges import _EdgeHandlers
 from tortoise.projection.grounding import _GroundingMixin
 from tortoise.projection.propagation import _PropagationMixin
 
+# #244: Event FTS index migration (subject-only → subject+name) is tracked by a
+# persisted DB marker (Meta node 'event_fts_v2'), not a process-local flag — a
+# module-level bool resets every restart and would drop+recreate the index on
+# every boot (churn + crash window on server FalkorDB). See _ensure_indexes.
+
 # ── Module-level helpers ──────────────────────────────────────────────────
 
 
@@ -203,7 +208,8 @@ class FalkorProjection(
                  password: str | None = None,
                  graph_name: str = "tortoise",
                  ssl: bool = False,
-                 allow_nonstandard_path: bool = False):
+                 allow_nonstandard_path: bool = False,
+                 skip_health_check: bool = False):
 
         # No-arg construction -> canonical embedded path (plan Task 9: graph-
         # scripts migrated from FalkorProjection('tortoise.db') to no-arg,
@@ -247,6 +253,16 @@ class FalkorProjection(
         self._graph_name = graph_name
         self._skip_guard = False
         self._is_embedded = (path is not None)
+        self._path = path
+        # Ops safety residual (#428): auto health check on open + transparent
+        # corruption recovery. Embedded DBs rebuild from their adjacent JSONL
+        # event log when lost/corrupt; production (FLY_APP_NAME) and server
+        # mode fail loud instead. Runs BEFORE _ensure_indexes so a corrupt
+        # DB is recovered before index creation. skip_health_check is the
+        # escape hatch for the `tortoise rebuild` CLI itself (it IS the
+        # recovery tool — gating it on a healthy DB would be circular).
+        if not skip_health_check:
+            self._auto_health_recover()
         self._falkordb_version = self._get_falkordb_version()
         if self._falkordb_version is not None and self._falkordb_version[0] < 4:
             import logging
@@ -269,6 +285,101 @@ class FalkorProjection(
         self._closed = False
         self._finalizer = _weakref.finalize(self, self.close)
         _atexit.register(self.close)
+
+    # ── Ops safety (#428): health check + transparent recovery ────────────
+
+    def _probe_ok(self) -> bool:
+        """Cheap connectivity probe — does the graph answer queries?"""
+        try:
+            self.g.query("MATCH (n) RETURN count(n) LIMIT 1")
+            return True
+        except Exception:
+            return False
+
+    def _find_local_jsonl_dir(self) -> str | None:
+        """Adjacent JSONL event-log dir (same directory as the embedded DB).
+
+        Recovery only ever rebuilds from a log that lives next to the DB
+        file — a global ~/.tortoise scan could rebuild a dev DB from an
+        unrelated production log. Returns None when no *.jsonl is adjacent.
+        """
+        if not self._path:
+            return None
+        try:
+            db_dir = os.path.dirname(
+                os.path.abspath(os.path.expanduser(self._path)))
+            if any(f.endswith(".jsonl") for f in os.listdir(db_dir)):
+                return db_dir
+        except OSError:
+            return None
+        return None
+
+    def _auto_health_recover(self) -> None:
+        """Health check on open + transparent JSONL recovery (embedded only).
+
+        The event log is the source of truth; the projection a derived view.
+        Two corruption modes are caught:
+          1. Unresponsive graph (open succeeded, queries fail).
+          2. Lost graph — 0 nodes while the adjacent JSONL log has events
+             (redislite starts fresh when its RDB is corrupt, interrupted
+             restore, manual deletion). Rebuilt via recover_from_log.
+
+        Recovery is embedded-only and NEVER runs when FLY_APP_NAME is set
+        (production): there a silent rebuild could mask an infra failure and
+        a remote DB is never rebuilt from a local log. Server/URI mode and
+        production fail loud with an actionable error instead.
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+        is_prod = bool(os.environ.get("FLY_APP_NAME"))
+
+        if not self._probe_ok():
+            if is_prod or not self._is_embedded:
+                raise RuntimeError(
+                    "DB health check failed on open (server/production mode). "
+                    "Recover manually: python -m tortoise rebuild --dir "
+                    "<jsonl-dir> --db <db> — see "
+                    "operations/skills/tortoise-rebuild/SKILL.md")
+            events_dir = self._find_local_jsonl_dir()
+            if not events_dir:
+                raise RuntimeError(
+                    f"DB health check failed on open and no adjacent JSONL "
+                    f"event log was found for recovery ({self._path!r}). "
+                    f"Restore from backup or rebuild manually — see "
+                    f"operations/skills/tortoise-rebuild/SKILL.md")
+            self._recover_or_raise(events_dir)
+            logger.warning("auto-recovered embedded DB from %s", events_dir)
+            return
+
+        # Probe passed. Embedded dev mode: check the lost-graph divergence
+        # (0 nodes + non-empty adjacent log). Server/prod skips — a remote
+        # graph is never rebuilt from a local log.
+        if self._is_embedded and not is_prod:
+            events_dir = self._find_local_jsonl_dir()
+            if events_dir:
+                from tortoise.consistency import recover_from_log
+                result = recover_from_log(events_dir, self)
+                if result.get("recovered"):
+                    logger.warning(
+                        "auto-recovered empty embedded DB from %s (%s events)",
+                        events_dir, result.get("log_points"))
+                elif result.get("reason"):
+                    # Lost-graph case but recovery declined (ambiguous/unreadable
+                    # log) — warn loudly instead of silently continuing with an
+                    # empty DB (ops safety #428: no silent data loss).
+                    logger.warning(
+                        "empty embedded DB not auto-recovered: %s",
+                        result.get("reason"))
+
+    def _recover_or_raise(self, events_dir: str) -> None:
+        """Run recover_from_log and fail loud if it did not recover."""
+        from tortoise.consistency import recover_from_log
+        result = recover_from_log(events_dir, self)
+        if not result.get("recovered"):
+            raise RuntimeError(
+                f"DB health check failed and recovery did not complete: "
+                f"{result.get('reason')}. "
+                f"See operations/skills/tortoise-rebuild/SKILL.md")
 
     @classmethod
     def from_uri(cls, uri: str, graph_name: str | None = None) -> "FalkorProjection":
@@ -493,6 +604,80 @@ class FalkorProjection(
 
         return None
 
+    #: (label, key-property) branches for _resolve_entity — every branch is
+    #: backed by a RANGE index created in _ensure_indexes (issue #327).
+    #: Event matches by eventId (Event.id == eventId for all current writes;
+    #: eventId-only legacy nodes are covered). Source matches by id and/or url
+    #: (url-only ingestion stubs from _link_source have no id).
+    _RESOLVE_BRANCHES = (
+        ("Point", "id"), ("Subject", "id"), ("Object", "id"),
+        ("Document", "id"), ("Source", "id"),
+        ("Event", "eventId"), ("Source", "url"),
+    )
+
+    def _resolve_entity(self, id_val: str, *, by_id: bool = True,
+                        by_eventId: bool = False, by_url: bool = False) -> list[dict]:
+        """Index-backed entity resolution mirroring the legacy
+        `MATCH (n) WHERE n.id=$id OR n.eventId=$id OR n.url=$id` semantics.
+
+        Returns [{label, key, value, properties}, ...] — one entry per matching
+        node, deduped by node identity (a Source with id==url matches two
+        branches). Each branch is a labeled lookup on an indexed property, so
+        the planner uses Node By Index Scan instead of All Node Scan (#327).
+
+        ``by_id`` also covers Events via their eventId branch: Event nodes
+        always carry id == eventId (both set by _upsert_event; eventId-only
+        legacy nodes exist), so matching ``Event {eventId:$id}`` reproduces
+        the legacy ``n.id = $id`` lookup for Events exactly.
+
+        Per-call-site OR-sets (issue #327 scope table):
+        - _get_entity:              id | eventId | url
+        - _update/_delete_entity:   id | eventId
+        - create_edge source:       id | eventId | url ; target: id | eventId
+        - create_about_edge source: id ; target: id | eventId
+        - create_owned_by / about stub links: id only
+        """
+        branches = []
+        for label, prop in self._RESOLVE_BRANCHES:
+            if prop == "id" and not by_id:
+                continue
+            # Event branch: enabled by by_id (Event.id == eventId invariant)
+            # or explicitly by by_eventId.
+            if prop == "eventId" and not (by_id or by_eventId):
+                continue
+            if prop == "url" and not by_url:
+                continue
+            branches.append((label, prop))
+        if not branches:
+            return []
+        union_q = " UNION ".join(
+            f"MATCH (n:{label}) WHERE n.{prop} = $id "
+            f"RETURN '{label}' AS label, '{prop}' AS key, n.{prop} AS value, "
+            f"properties(n) AS props LIMIT 1"
+            for label, prop in branches
+        )
+        rows = self.g.query(union_q, params={"id": id_val}).result_set
+        seen: set[str] = set()
+        out: list[dict] = []
+        for label, key, value, props in rows:
+            ident = props.get("id") or props.get("eventId") or props.get("url")
+            if ident in seen:
+                continue
+            seen.add(ident)
+            out.append({"label": label, "key": key, "value": value,
+                        "properties": dict(props)})
+        # Defense-in-depth (issue #327 security review): consumers interpolate
+        # label/key into Cypher patterns. Fail loudly here if this producer ever
+        # returns anything other than the constant-tuple values — a future
+        # dynamic-label branch must not become query-text injection downstream.
+        allowed_labels = {lbl for lbl, _ in self._RESOLVE_BRANCHES}
+        for r in out:
+            if r["label"] not in allowed_labels or r["key"] not in {"id", "eventId", "url"}:
+                raise RuntimeError(
+                    f"_resolve_entity produced unsafe label/key: "
+                    f"{r['label']!r}/{r['key']!r} (contract: constant tuple only)")
+        return out
+
     def _ensure_indexes(self) -> None:
         """Create indexes on frequently-filtered Point properties.
 
@@ -513,7 +698,7 @@ class FalkorProjection(
                     pass  # expected — index exists from prior startup
                 else:
                     import logging
-                    logging.getLogger(__name__).warning(
+                    logging.getLogger(__name__).error(
                         "Failed to create index on n.%s: %s", prop, e)
 
         # ── Document range indexes (#125 — structural queries filter by kind) ──
@@ -526,25 +711,74 @@ class FalkorProjection(
                     pass
                 else:
                     import logging
-                    logging.getLogger(__name__).warning(
+                    logging.getLogger(__name__).error(
                         "Failed to create index on Document.%s: %s", prop, e)
+
+        # ── Range indexes on canonical entity keys (issue #327) ──
+        # Point/Document are created above; these enable index-backed
+        # _resolve_entity lookups and faster name/url/eventId-keyed MERGE
+        # upserts. Deliberately NO status/op_type/kind-field indexes — a
+        # measured 3.15x write slowdown on Point upserts with status/op_type
+        # outweighs the batch-read benefit (see issue #522).
+        for label, props in (("Subject", ("id", "name")),
+                             ("Object", ("id", "name")),
+                             ("Event", ("eventId",)),
+                             ("Source", ("id", "url"))):
+            for prop in props:
+                try:
+                    self.g.query(f"CREATE INDEX FOR (n:{label}) ON (n.{prop})")
+                except Exception as e:
+                    msg = str(e).lower()
+                    if "already indexed" in msg or "already exists" in msg:
+                        pass
+                    else:
+                        import logging
+                        logging.getLogger(__name__).error(
+                            "Failed to create index on %s.%s: %s", label, prop, e)
 
         # ── Full-text & vector indexes require FalkorDB 4.x+ (#7779) ──
         _ver = getattr(self, '_falkordb_version', None)
         if _ver is None or _ver[0] >= 4:
             # ── Full-text indexes ──
-            for label, field in [("Point", "content"), ("Event", "subject"), ("Subject", "name"),
-                                 ("Document", "_searchText")]:  # #125 Document FTS
+            for label, fields in [("Point", ["content"]),
+                                  # #244: AgentSession events populate name
+                                  # (not subject) — index both so session name
+                                  # matches surface through FTS.
+                                  ("Event", ["subject", "name"]),
+                                  ("Subject", ["name"]),
+                                  ("Document", ["_searchText"])]:  # #125 Document FTS
                 try:
-                    self.g.query(f"CALL db.idx.fulltext.createNodeIndex('{label}', '{field}')")
+                    fields_sql = ", ".join(f"'{f}'" for f in fields)
+                    self.g.query(f"CALL db.idx.fulltext.createNodeIndex('{label}', {fields_sql})")
                 except Exception as e:
                     msg = str(e).lower()
                     if "already" in msg:
-                        pass
+                        if label == "Event":
+                            # #244: legacy subject-only Event FTS index —
+                            # migrate to include name ONCE (persisted DB
+                            # marker, not a per-process flag: a process-local
+                            # bool re-drops+recreates the index on every
+                            # restart/worker, causing churn + a drop→recreate
+                            # crash window where Event FTS degrades).
+                            # FalkorDBLite embedded lacks dropIndex — leave
+                            # subject-only there (name search still covered by
+                            # the keyword fallback + vector strategies).
+                            try:
+                                done = self.g.query(
+                                    "MATCH (m:Meta {key:'event_fts_v2'}) RETURN 1"
+                                ).result_set
+                                if not done:
+                                    self.g.query("CALL db.idx.fulltext.dropIndex('Event')")
+                                    self.g.query("CALL db.idx.fulltext.createNodeIndex('Event', 'subject', 'name')")
+                                    self.g.query(
+                                        "MERGE (m:Meta {key:'event_fts_v2'}) SET m.v = true"
+                                    )
+                            except Exception:
+                                pass
                     else:
                         import logging
                         logging.getLogger(__name__).warning(
-                            "Failed to create fulltext index on %s.%s: %s", label, field, e)
+                            "Failed to create fulltext index on %s.%s: %s", label, fields, e)
 
             # ── Vector index (HNSW) — Docker/server FalkorDB only (#7764) ──
             # Embedded mode (redislite) uses brute-force vec.euclideanDistance instead.
