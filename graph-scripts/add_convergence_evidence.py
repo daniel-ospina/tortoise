@@ -110,5 +110,5 @@ IMPL(q1_unified, q2_single, "unified pipeline aligns with single event stream ph
 
 print(f"\nDone. Log: {LOG_PATH}, DB: {DB_PATH}")
 print("Verify: python3 -c \"from tortoise.projection import FalkorProjection; "
-      "p=FalkorProjection('tortoise.db'); "
+      "p=FalkorProjection('tortoise.db'); "  # noqa: redis-guard — docstring example, not code
       "print(p.g.query('MATCH (n:Point) RETURN count(n)').result_set)\"")

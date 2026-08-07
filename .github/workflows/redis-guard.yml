@@ -1,0 +1,15 @@
+# redis-guard CI gate (issue #176, Task 13)
+# Runs the unified hook; must BLOCK merge (branch protection requires it).
+name: redis-guard
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  redis-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run redis-guard
+        run: python3 tools/redis-guard.py
