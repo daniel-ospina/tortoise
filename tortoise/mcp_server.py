@@ -14,12 +14,9 @@ from tortoise.auth import is_dev_mode as _is_dev_mode
 from tortoise.sdk import TortoiseSDK
 from tortoise import monitoring
 from tortoise.mcp_auth import (_current_team_id, _transport_mode, _get_team_sdk,
-                               _get_base_sdk, HTTP_ALLOWED, _jsonrpc_error,
-                               ERR_EXCLUDED, ERR_UNAUTHORIZED, ERR_RATE_LIMIT,
-                               ERR_ORIGIN, ERR_REGISTRY)
+                               HTTP_ALLOWED, ERR_EXCLUDED)
 
 _log = logging.getLogger(__name__)
-
 
 def _load_dotenv(path: str | None = None) -> None:
     """Tiny .env loader — repo-root .env, KEY=VALUE lines, no new deps.
@@ -161,15 +158,19 @@ def _safe(fn, *args, **kwargs):
         }
     if mode == "http":
         pass  # auth enforced at transport (TeamResolutionMiddleware)
-    elif not _is_dev_mode():
-        return {
-            "error": (
-                "Authentication required. The MCP stdio transport cannot "
-                "carry auth tokens. Use an authenticated HTTP endpoint "
-                "(tortoise health-server) with Authorization: Bearer <key> "
-                "header, or unset TORTOISE_API_KEY for dev mode."
-            )
-        }
+    elif mode == "stdio":
+        if not _is_dev_mode():
+            return {
+                "error": (
+                    "Authentication required. The MCP stdio transport cannot "
+                    "carry auth tokens. Use an authenticated HTTP endpoint "
+                    "(tortoise health-server) with Authorization: Bearer <key> "
+                    "header, or unset TORTOISE_API_KEY for dev mode."
+                )
+            }
+    else:
+        # Unknown transport mode — fail-closed (code-review fix)
+        return {"error": f"Unknown MCP transport mode: {mode!r}"}
     try:
         result = fn(*args, **kwargs)
         return result
@@ -814,7 +815,13 @@ def tortoise_get_session(session_id: str) -> dict:
 
 @mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
 def tortoise_index_sessions(directory: str, extract_metadata: bool = True, llm_model: str | None = None) -> dict:
-    """Index session .md files as AgentSession Events. Returns {ingested, updated, skipped, failed, errors}."""
+    """Index session .md files as AgentSession Events. Returns {ingested, updated, skipped, failed, errors}.
+
+    #236: EXCLUDED from tenant HTTP — walks server filesystem with a
+    user-supplied path (path-traversal vector, same as ingest_corpus). Stdio-only.
+    """
+    if _transport_mode.get() == "http":
+        return _http_excluded_error()
     if not os.path.isdir(directory):
         return {"error": f"Directory not found: {directory!r}. Provide a valid path to a directory containing .md session files."}
     return _safe(_get_team_sdk().index_sessions, directory, extract_metadata=extract_metadata, llm_model=llm_model)
@@ -920,7 +927,13 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
         async def list_tools(self, tools):
             return [t for t in tools if t.name in HTTP_ALLOWED]
 
-    mcp.add_transform(_HTTPToolFilter())
+    # Guard against transform accumulation: create_http_app() is called at
+    # hosted_api import AND in every test fixture — each call would append a
+    # new _HTTPToolFilter to the shared module-level mcp instance (code-review
+    # P2 fix). Register once.
+    if not getattr(mcp, "_http_tool_filter_registered", False):
+        mcp.add_transform(_HTTPToolFilter())
+        mcp._http_tool_filter_registered = True
 
     @mcp.custom_route("/", methods=["GET"])
     async def mcp_metadata(request):

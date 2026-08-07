@@ -30,11 +30,9 @@ from tortoise.sdk import TortoiseSDK
 _current_team_id: ContextVar[str | None] = ContextVar("_current_team_id", default=None)
 _transport_mode: ContextVar[str | None] = ContextVar("_transport_mode", default=None)
 
-# ── Base SDK (delegates to mcp_server._get_sdk; #451 canonical) ────────────
 # mcp_server.py owns lazy SDK init (URI resolution, 3x retry, test-swap
 # pattern). mcp_auth delegates via a function-level import to avoid the
 # circular import (mcp_server imports mcp_auth at module level).
-sdk: TortoiseSDK | None = None
 
 
 def _get_base_sdk() -> TortoiseSDK:
@@ -80,16 +78,13 @@ HTTP_ALLOWED: frozenset[str] = frozenset({
     "tortoise_diary_read", "tortoise_session_context", "tortoise_file_decision",
     "tortoise_get_governance", "tortoise_list_topics", "tortoise_stale",
     "tortoise_provenance", "tortoise_dream", "tortoise_get_events",
-    "tortoise_get_session", "tortoise_index_sessions", "tortoise_list_tags",
+    "tortoise_get_session", "tortoise_list_tags",
     "tortoise_query_points_by_tag", "tortoise_search_sessions",
-    "tortoise_session_context", "tortoise_get_governance",
-    "tortoise_list_topics", "tortoise_stale"
 })
 
 # JSON-RPC error codes (D9)
 ERR_UNAUTHORIZED = -32001
 ERR_RATE_LIMIT = -32002
-ERR_ORIGIN = -32003
 ERR_EXCLUDED = -32004
 ERR_REGISTRY = -32005
 
@@ -127,20 +122,11 @@ class TeamResolutionMiddleware(BaseHTTPMiddleware):
         if self._registry_sdk is None:
             async with self._init_lock:
                 if self._registry_sdk is None:
-                    # Mirror hosted_api._make_sdk: use TORTOISE_DB_URI when set
-                    # (FalkorDB Cloud in prod), else embedded TORTOISE_DB_PATH
-                    # (local/dev/tests). Bare TortoiseSDK(namespace="registry")
-                    # has no DB target and fails in embedded mode.
-                    if os.environ.get("TORTOISE_DB_URI"):
-                        self._registry_sdk = TortoiseSDK(namespace="registry")
-                    else:
-                        db_path = os.environ.get("TORTOISE_DB_PATH", "/data/tortoise.db")
-                        try:
-                            os.makedirs(os.path.dirname(db_path), exist_ok=True)
-                        except OSError:
-                            import tempfile
-                            db_path = os.path.join(tempfile.gettempdir(), "tortoise.db")
-                        self._registry_sdk = TortoiseSDK(db_path=db_path, namespace="registry")
+                    # Delegate to hosted_api._make_sdk (canonical SDK builder —
+                    # handles TORTOISE_DB_URI vs embedded TORTOISE_DB_PATH vs
+                    # /data fallback). Function-level import avoids any cycle.
+                    from tortoise import hosted_api as _ha
+                    self._registry_sdk = _ha._make_sdk(namespace="registry")
         return self._registry_sdk
 
     async def dispatch(self, request: Request, call_next):
@@ -198,6 +184,7 @@ class MCPRateLimitMiddleware(BaseHTTPMiddleware):
         self.max_per_minute = max_per_minute
         self._buckets: dict[str, list[float]] = defaultdict(list)
         self._lock = asyncio.Lock()
+        self._last_cleanup = time.time()
         self._disabled = os.environ.get("RATE_LIMIT_DISABLED") == "1"
 
     async def dispatch(self, request: Request, call_next):
@@ -214,6 +201,13 @@ class MCPRateLimitMiddleware(BaseHTTPMiddleware):
             key_id = f"ip:{ip}"
         now = time.time()
         async with self._lock:
+            # Periodic cleanup: prune empty buckets (code-review P1 fix —
+            # unbounded dict growth under rotating keys/IPs)
+            if now - self._last_cleanup > 60:
+                stale = [k for k, v in self._buckets.items() if not v]
+                for k in stale:
+                    del self._buckets[k]
+                self._last_cleanup = now
             bucket = self._buckets[key_id]
             bucket[:] = [t for t in bucket if now - t < 60]
             if len(bucket) >= self.max_per_minute:
