@@ -111,3 +111,28 @@ class TestSourceEntityType:
         assert hasattr(mcp, "tortoise_create_source"), (
             "tortoise_create_source MCP tool should exist per #121"
         )
+
+
+class TestCreateSourceValidation:
+    """#144: create_source rejects empty/missing/whitespace URLs."""
+
+    def test_empty_url_raises_value_error(self, sdk):
+        """create_source('', 'T1') raises ValueError."""
+        with pytest.raises(ValueError, match="url must be a non-empty string"):
+            sdk.create_source("", "T1")
+
+    def test_none_url_raises_value_error(self, sdk):
+        """create_source(None, 'T1') raises ValueError."""
+        with pytest.raises(ValueError, match="url must be a non-empty string"):
+            sdk.create_source(None, "T1")
+
+    def test_whitespace_url_raises_value_error(self, sdk):
+        """create_source('   ', 'T1') raises ValueError."""
+        with pytest.raises(ValueError, match="url must be a non-empty string"):
+            sdk.create_source("   ", "T1")
+
+    def test_valid_url_still_works(self, sdk):
+        """Valid URL still creates source node."""
+        src = sdk.create_source("https://example.com/valid", "T1")
+        assert src is not None
+        assert src.get("url") == "https://example.com/valid"
