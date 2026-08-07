@@ -1,6 +1,6 @@
 # Tortoise Hosted API — Docker image for Fly.io
 # Uses bookworm variant to avoid Docker Hub anonymous rate limits
-FROM python:3.11-slim-bookworm
+FROM python:3.12-slim-bookworm
 
 WORKDIR /app
 
