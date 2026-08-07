@@ -51,3 +51,41 @@ class TestFastMCPAddToolSpike:
             assert spike.annotations.readOnlyHint is True
 
         asyncio.run(_check())
+
+
+class TestRegistryEquivalence:
+    """Gate 1: Derived HTTP_ALLOWED == literal HTTP_ALLOWED."""
+
+    def test_derived_http_allowed_equals_literal(self):
+        """Every tool with http_policy=True must be in HTTP_ALLOWED, and vice versa."""
+        from tortoise.tool_registry import TOOL_REGISTRY
+        derived = frozenset(
+            t.name for t in TOOL_REGISTRY if t.http_policy
+        )
+        from tortoise.mcp_auth import HTTP_ALLOWED
+        assert derived == HTTP_ALLOWED, (
+            f"Derived HTTP_ALLOWED mismatch:\n"
+            f"  In derived but not literal: {derived - HTTP_ALLOWED}\n"
+            f"  In literal but not derived: {HTTP_ALLOWED - derived}"
+        )
+
+    def test_registry_count(self):
+        """58 tools — same count as @mcp.tool() decorators."""
+        from tortoise.tool_registry import TOOL_REGISTRY
+        assert len(TOOL_REGISTRY) == 58, f"Expected 58, got {len(TOOL_REGISTRY)}"
+
+    def test_no_duplicate_names(self):
+        """No two registry entries share the same name."""
+        from tortoise.tool_registry import TOOL_REGISTRY
+        names = [t.name for t in TOOL_REGISTRY]
+        assert len(names) == len(set(names)), f"Duplicates: {[n for n in names if names.count(n) > 1]}"
+
+    def test_http_policy_exclusions(self):
+        """Known exclusions are http_policy=False."""
+        from tortoise.tool_registry import TOOL_REGISTRY
+        by_name = {t.name: t for t in TOOL_REGISTRY}
+        excluded = {"tortoise_team_create", "tortoise_backfill_v25",
+                     "tortoise_ingest_corpus", "tortoise_index_sessions"}
+        for name in excluded:
+            assert name in by_name, f"Missing tool: {name}"
+            assert by_name[name].http_policy is False, f"{name} should be excluded"
