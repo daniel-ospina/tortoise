@@ -29,16 +29,19 @@ if [ ! -d "${HF_HOME}/models--sentence-transformers--all-MiniLM-L6-v2" ]; then
     exit 1
 fi
 
-# Pre-warm the embedding model at startup so the first request doesn't hit
-# a cold-start timeout (issue #160). Fail-fast ONLY when starting the real
-# server (uvicorn). The Fly.io release_command (a lightweight registry
-# validation) also runs through this entrypoint — the model load may OOM or
-# time out on the release machine, so it must not abort deploys there.
+# Embedding model pre-warm moved into the app: the FastAPI lifespan
+# (tortoise/hosted_api.py _lifespan) spawns a daemon-thread pre-warm, so
+# uvicorn binds 0.0.0.0:8000 IMMEDIATELY and /health passes on cold start.
 #
-# EmbeddingModel._LOAD_TIMEOUT_S (30s) gates this; the model lives on the
-# container filesystem (~90MB). If it can't load during real server start,
-# fail fast — silently degraded embeddings are worse than a crash that Fly
-# restarts.
+# Previous behavior (fail-fast blocking pre-warm, #160) crashed deploys:
+# EmbeddingModel._LOAD_TIMEOUT_S (30s) is shorter than a cold 2-core/2GB VM
+# needs to import torch + sentence-transformers + load the 90MB model, so
+# get() returned None, the assert failed, the entrypoint exited 1, uvicorn
+# never started, and the Fly health check timed out (issue #545).
+#
+# Embeddings are OPTIONAL — FTS + structural RRF work without them
+# (embeddings.py docstring). The model cache existence check above still
+# catches a broken image (missing bake) cheaply.
 _IS_SERVER=0
 for _arg in "$@"; do
     if echo "$_arg" | grep -q "uvicorn"; then
@@ -48,17 +51,7 @@ for _arg in "$@"; do
 done
 
 if [ "$_IS_SERVER" = "1" ]; then
-    if python3 -c "
-from tortoise.embeddings import EmbeddingModel
-m = EmbeddingModel.get()
-assert m is not None, 'Embedding model failed to load'
-print('embeddings: model pre-warmed OK')
-" 2>&1; then
-        echo "tortoise: embedding model ready"
-    else
-        echo "tortoise: FATAL — embedding model pre-warm failed. Check /app/model cache." >&2
-        exit 1
-    fi
+    echo "tortoise: uvicorn server — embedding pre-warm runs in-app (non-blocking, degraded-but-alive)"
 else
     echo "tortoise: skipping embedding pre-warm (non-server command: release check)"
 fi

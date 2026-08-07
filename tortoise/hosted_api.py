@@ -75,8 +75,35 @@ async def _lifespan(app):
 
     mcp_http_app.lifespan(mcp_http_app) is the Starlette Lifespan protocol
     (async context manager) that initializes the StreamableHTTPSessionManager.
+
+    Also spawns a NON-BLOCKING embedding model pre-warm in a daemon thread
+    (#545): uvicorn must bind 0.0.0.0:8000 immediately so /health passes on
+    cold start. The previous entrypoint fail-fast pre-warm crashed deploys
+    when the 30s load timeout was exceeded on a cold 2GB VM. Embeddings are
+    OPTIONAL — if the pre-warm misses its window, EmbeddingModel.get()
+    retries on the next call and search falls back to FTS+structural RRF.
     """
     async with mcp_http_app.lifespan(mcp_http_app):
+        try:
+            import threading
+
+            def _prewarm_embeddings() -> None:
+                try:
+                    from tortoise.embeddings import EmbeddingModel
+                    # Longer window than request paths (30s): cold-start torch
+                    # import on a 2-core/2GB VM can exceed 30s (#545). The
+                    # thread is daemon + background, so it never blocks bind.
+                    model = EmbeddingModel.get(load_timeout=300.0)
+                    _logger.info(
+                        "embeddings: background pre-warm %s",
+                        "ready" if model is not None else "deferred (retries on next call)",
+                    )
+                except Exception as exc:  # noqa: BLE001 — never crash the app
+                    _logger.warning("embeddings: background pre-warm failed: %s", exc)
+
+            threading.Thread(target=_prewarm_embeddings, name="embedding-prewarm", daemon=True).start()
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("embeddings: could not start background pre-warm: %s", exc)
         yield
 
 

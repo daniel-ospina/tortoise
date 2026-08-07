@@ -30,20 +30,28 @@ class EmbeddingModel:
     _LOAD_TIMEOUT_S = 30.0  # generous for cold I/O (model is 90MB on disk; pre-warmed at startup in hosted)
 
     @classmethod
-    def get(cls) -> "EmbeddingModel | None":
+    def get(cls, load_timeout: float | None = None) -> "EmbeddingModel | None":
         """Get or create the singleton. Returns None if model unavailable.
 
         Loads the model in a worker thread with a hard timeout. In the hosted
         Docker image the model is pre-downloaded at build time (Dockerfile.hosted)
-        and pre-warmed at container start (entrypoint.sh), so this path is only
-        hit in dev or if the pre-warm was skipped. Unlike the old implementation,
-        we do NOT permanently self-disable — a transient failure (OOM from a
-        competing process, slow I/O) is retried on the next call.
+        and pre-warmed at startup via the FastAPI lifespan background thread
+        (hosted_api.py _lifespan), so this path is only hit in dev or if the
+        pre-warm was skipped. Unlike the old implementation, we do NOT
+        permanently self-disable — a transient failure (OOM from a competing
+        process, slow I/O) is retried on the next call.
+
+        Args:
+            load_timeout: Override _LOAD_TIMEOUT_S. The lifespan pre-warm
+                passes a longer window (cold-start torch import on a 2GB VM
+                can exceed 30s, #545); request paths keep the default so
+                latency stays bounded.
         """
+        timeout = load_timeout if load_timeout is not None else cls._LOAD_TIMEOUT_S
         if cls._instance is None:
             with cls._lock:
                 if cls._instance is None:
-                    cls._instance = cls()
+                    cls._instance = cls(load_timeout=timeout)
         model = cls._instance._model if (cls._instance and cls._instance._model) else None
         if model is None and cls._instance is not None:
             # Transient load failure (timeout/OOM) — clear the instance so the
@@ -62,7 +70,8 @@ class EmbeddingModel:
             cls._instance = None
             cls._model = None
 
-    def __init__(self):
+    def __init__(self, load_timeout: float | None = None):
+        timeout = load_timeout if load_timeout is not None else self._LOAD_TIMEOUT_S
         result: dict = {"model": None}
 
         def _load():
@@ -75,7 +84,7 @@ class EmbeddingModel:
 
         t = threading.Thread(target=_load, daemon=True)
         t.start()
-        t.join(timeout=self._LOAD_TIMEOUT_S)
+        t.join(timeout=timeout)
         if t.is_alive():
             # Model load timed out — log and return None. Do NOT permanently
             # self-disable: in the hosted container the model is pre-downloaded
