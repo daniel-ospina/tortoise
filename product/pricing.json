@@ -1,0 +1,63 @@
+{
+  "$schema": "pricing-schema-v1",
+  "status": "current",
+  "owner_confirmed": "2026-08-07",
+  "billing": {
+    "model": "per-team",
+    "per_seat": false,
+    "overage_unit": "write_ops",
+    "overage_price_per_10k": 5.00,
+    "overage_tiers": ["pro", "team"],
+    "reads_free": true,
+    "cost_basis": { "falkordb_per_gb": 73.0, "bytes_per_node": 1024, "dedup": "content_hash" }
+  },
+  "tiers": {
+    "free": {
+      "price_usd_monthly": 0,
+      "max_teams_per_owner": 1,
+      "max_graphs_per_team": 1,
+      "max_users_per_team": 1,
+      "included_write_ops_per_month": 1000,
+      "max_graph_nodes": 10000,
+      "max_api_keys": 2,
+      "overage": false,
+      "support": "none"
+    },
+    "solo": {
+      "price_usd_monthly": 9,
+      "max_teams_per_owner": 1,
+      "max_graphs_per_team": 2,
+      "max_users_per_team": 1,
+      "included_write_ops_per_month": 10000,
+      "max_graph_nodes": 25000,
+      "max_api_keys": 5,
+      "overage": false,
+      "support": "none",
+      "loss_leader": true
+    },
+    "pro": {
+      "price_usd_monthly": 25,
+      "max_teams_per_owner": null,
+      "max_graphs_per_team": null,
+      "max_users_per_team": 2,
+      "included_write_ops_per_month": 50000,
+      "max_graph_nodes": 100000,
+      "max_api_keys": 10,
+      "overage": true,
+      "support": "standard",
+      "segments": ["power_user", "app_builder"]
+    },
+    "team": {
+      "price_usd_monthly": 149,
+      "max_teams_per_owner": null,
+      "max_graphs_per_team": null,
+      "max_users_per_team": null,
+      "included_write_ops_per_month": 200000,
+      "max_graph_nodes": 600000,
+      "max_api_keys": 20,
+      "overage": true,
+      "support": "priority",
+      "features": ["invites", "rbac"]
+    }
+  }
+}
