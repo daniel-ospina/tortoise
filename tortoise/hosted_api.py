@@ -1535,6 +1535,9 @@ async def set_session_recording(body: dict, team: dict = Depends(get_current_tea
     if not isinstance(enabled, bool):
         raise HTTPException(status_code=400, detail="'enabled' must be a boolean")
     state = _update_onboarding_state(team["team_id"], session_recording=enabled)
+    _track_onboarding_event(team, "question_answered",
+                            question_id="session_recording",
+                            answer="yes" if enabled else "no")
     return {"onboarding": state}
 
 
@@ -1553,6 +1556,8 @@ async def create_onboarding_team(body: dict, team: dict = Depends(get_current_te
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Team create failed: {e}")
     _update_onboarding_state(team["team_id"], team_created=True)
+    _track_onboarding_event(team, "question_answered",
+                            question_id="create_team", answer="yes")
     return {"team_id": result.get("id"), "name": name,
             "graph_name": result.get("graph_name")}
 
@@ -1571,6 +1576,8 @@ async def public_demo(team: dict = Depends(get_current_team)):
     ).result_set
     if existing:
         _update_onboarding_state(team["team_id"], demo_created=True)
+        _track_onboarding_event(team, "first_memory_created",
+                                source="demo", point_count=15)
         return {"status": "already_seeded", "team_id": team["team_id"]}
 
     # Call the shared demo seeder (extracted from /internal/demo)
@@ -1608,8 +1615,79 @@ async def register_tenant(body: dict, request: Request):
     team = sdk.team_create(team_name)
     key = sdk.apikey_create(team["id"], "self-register")["api_key"]
     _write_onboarding_state(team["id"], dict(_ONBOARDING_DEFAULT_STATE))
+    # Analytics (#501)
+    _track_analytics_event(team["id"], "signup_complete", {"method": "email"})
+    _track_analytics_event(team["id"], "key_provisioned", {})
     return {"api_key": key, "team_id": team["id"],
             "graph_name": team.get("graph_name")}
+
+
+# ── Analytics instrumentation (#501) ────────────────────────────
+
+# Allowed property keys for analytics events — PII-free guarantee (#501).
+# Server-side validation: unknown keys are stripped, never forwarded.
+_ALLOWED_ANALYTICS_PROPS = {
+    "method", "elapsed_from_signup_s", "harness", "section",
+    "elapsed_from_copy_s", "question_id", "answer", "source", "point_count",
+    "session_id", "message_count", "elapsed_time_s", "steps_completed",
+    "questions", "step", "error_type",
+}
+
+_ANALYTICS_FALLBACK_PATH = None
+
+
+def _track_analytics_event(team_id: str, event_name: str,
+                           properties: dict | None = None) -> None:
+    """Record a funnel event. PII-free; graceful when Supabase is unconfigured.
+
+    Writes to Supabase analytics_events when SUPABASE_URL + SUPABASE_SERVICE_KEY
+    are set; otherwise appends to a local JSONL fallback. Never raises — the
+    onboarding flow must not break because analytics failed.
+    """
+    props = {k: v for k, v in (properties or {}).items()
+             if k in _ALLOWED_ANALYTICS_PROPS}
+    event = {
+        "team_id": team_id,
+        "event_name": event_name,
+        "properties": props,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    url = os.environ.get("SUPABASE_URL")
+    key = os.environ.get("SUPABASE_SERVICE_KEY")
+    if url and key:
+        try:
+            import httpx
+            with httpx.Client(timeout=5) as client:
+                client.post(
+                    f"{url}/rest/v1/analytics_events",
+                    json=event,
+                    headers={"apikey": key, "Authorization": f"Bearer {key}",
+                             "Content-Type": "application/json",
+                             "Prefer": "return=minimal"},
+                )
+            return
+        except Exception:
+            pass  # fall through to JSONL
+    # JSONL fallback (~/.tortoise/analytics_fallback.jsonl)
+    global _ANALYTICS_FALLBACK_PATH
+    if _ANALYTICS_FALLBACK_PATH is None:
+        fallback_dir = os.path.join(os.path.expanduser("~"), ".tortoise")
+        os.makedirs(fallback_dir, exist_ok=True)
+        _ANALYTICS_FALLBACK_PATH = os.path.join(fallback_dir, "analytics_fallback.jsonl")
+    try:
+        import json as _json
+        with open(_ANALYTICS_FALLBACK_PATH, "a") as f:
+            f.write(_json.dumps(event) + "\n")
+    except Exception:
+        pass
+
+
+def _track_onboarding_event(team: dict, event_name: str, **props) -> None:
+    """Convenience: track with the current team, swallowing errors."""
+    try:
+        _track_analytics_event(team["team_id"], event_name, props or None)
+    except Exception:
+        pass
 
 
 # ── GitHub OAuth onboarding (#499) ──────────────────────────────
@@ -1664,6 +1742,8 @@ async def github_callback(code: str | None = None, state: str | None = None,
     welcome_url = "https://tortoise.premiselabs.co/welcome.html"
 
     if error:
+        _track_analytics_event("", "onboarding_error",
+                               {"step": "github_connect", "error_type": "oauth_denied"})
         return RedirectResponse(f"{welcome_url}?github=denied", status_code=302)
 
     # Validate state — 404 on missing/invalid (don't leak existence)
@@ -1705,6 +1785,8 @@ async def github_callback(code: str | None = None, state: str | None = None,
         params={"id": team_id, "tok": encrypted, "org": st["org"]},
     )
     _update_onboarding_state(team_id, github_connected=True)
+    _track_analytics_event(team_id, "question_answered",
+                           {"question_id": "github_connect", "answer": "yes"})
     return RedirectResponse(f"{welcome_url}?github=connected", status_code=302)
 
 
