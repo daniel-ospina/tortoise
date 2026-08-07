@@ -89,3 +89,97 @@ class TestRegistryEquivalence:
         for name in excluded:
             assert name in by_name, f"Missing tool: {name}"
             assert by_name[name].http_policy is False, f"{name} should be excluded"
+
+
+class TestFastMCPAdapter:
+    """Gate 2: MCP adapter emits correct tools from registry."""
+
+    def test_adapter_registers_all_tools(self):
+        """Every registry entry becomes a registered MCP tool."""
+        async def _check():
+            from tortoise.tool_registry import TOOL_REGISTRY, FastMCPAdapter
+            from fastmcp import FastMCP
+
+            mcp = FastMCP("test_adapter")
+            adapter = FastMCPAdapter(mcp)
+            # Build a handler map: tool_name → dummy function
+            handlers = {}
+            for entry in TOOL_REGISTRY:
+                # Create a unique callable per tool (no **kwargs — FastMCP rejects it)
+                def _make_handler(name=entry.name):
+                    def _handler(x: int = 0) -> dict:
+                        return {"tool": name}
+                    return _handler
+                handlers[entry.name] = _make_handler()
+
+            adapter.register_all(TOOL_REGISTRY, handlers)
+
+            tools = await mcp._list_tools()
+            registered = {t.name for t in tools}
+            expected = {t.name for t in TOOL_REGISTRY}
+            missing = expected - registered
+            assert not missing, f"Tools not registered: {missing}"
+            extra = registered - expected
+            assert not extra, f"Unexpected tools: {extra}"
+
+        asyncio.run(_check())
+
+    def test_adapter_preserves_annotations(self):
+        """ToolAnnotations from registry appear on registered tools."""
+        async def _check():
+            from tortoise.tool_registry import TOOL_REGISTRY, FastMCPAdapter
+            from fastmcp import FastMCP
+
+            mcp = FastMCP("test_annotations")
+            adapter = FastMCPAdapter(mcp)
+            handlers = {}
+            for entry in TOOL_REGISTRY:
+                def _make_handler():
+                    def _handler(x: int = 0) -> dict:
+                        return {}
+                    return _handler
+                handlers[entry.name] = _make_handler()
+
+            adapter.register_all(TOOL_REGISTRY, handlers)
+
+            # Spot-check: create_point is readOnly=False, idempotentHint=True
+            tools = await mcp._list_tools()
+            by_name = {t.name: t for t in tools}
+            cp = by_name["tortoise_create_point"]
+            assert cp.annotations.readOnlyHint is False
+            assert cp.annotations.idempotentHint is True
+            assert cp.annotations.destructiveHint is False
+
+            # Spot-check: tortoise_query is readOnly=True
+            q = by_name["tortoise_query"]
+            assert q.annotations.readOnlyHint is True
+
+        asyncio.run(_check())
+
+    def test_adapter_excluded_tool_still_registered(self):
+        """Excluded tools (http_policy=False) are still registered in MCP."""
+        async def _check():
+            from tortoise.tool_registry import TOOL_REGISTRY, FastMCPAdapter
+            from fastmcp import FastMCP
+
+            mcp = FastMCP("test_excluded")
+            adapter = FastMCPAdapter(mcp)
+            handlers = {}
+            for entry in TOOL_REGISTRY:
+                def _make_handler():
+                    def _handler(x: int = 0) -> dict:
+                        return {}
+                    return _handler
+                handlers[entry.name] = _make_handler()
+
+            adapter.register_all(TOOL_REGISTRY, handlers)
+
+            tools = await mcp._list_tools()
+            registered = {t.name for t in tools}
+            # Excluded tools should still be registered (HTTP filter handles hiding them)
+            assert "tortoise_team_create" in registered
+            assert "tortoise_backfill_v25" in registered
+            assert "tortoise_ingest_corpus" in registered
+            assert "tortoise_index_sessions" in registered
+
+        asyncio.run(_check())

@@ -512,3 +512,43 @@ TOOL_REGISTRY: list[ToolDefinition] = [
 def get_http_allowed() -> frozenset[str]:
     """Derive HTTP_ALLOWED from registry — zero manual sync."""
     return frozenset(t.name for t in TOOL_REGISTRY if t.http_policy)
+
+
+# ── Adapters ────────────────────────────────────────────────────
+
+class FastMCPAdapter:
+    """Register all TOOL_REGISTRY entries on a FastMCP instance via add_tool().
+
+    Replaces the 58 @mcp.tool() decorators with a single adapter call.
+    Tool function bodies remain in mcp_server.py as module-level callables;
+    this adapter wraps each via FunctionTool.from_function() and registers
+    them through mcp.add_tool().
+
+    Usage (in mcp_server.py):
+        adapter = FastMCPAdapter(mcp)
+        adapter.register_all(TOOL_REGISTRY, _handler_map)
+    """
+
+    def __init__(self, mcp: Any) -> None:
+        self._mcp = mcp
+
+    def register_all(self, registry: list[ToolDefinition], handlers: dict[str, Callable]) -> None:
+        """Register every registry entry as an MCP tool.
+
+        Args:
+            registry: TOOL_REGISTRY list of ToolDefinition entries.
+            handlers: dict mapping tool_name → callable function body.
+        """
+        from fastmcp.tools import FunctionTool
+
+        for entry in registry:
+            handler = handlers.get(entry.name)
+            if handler is None:
+                continue
+            tool = FunctionTool.from_function(
+                handler,
+                name=entry.name,
+                description=entry.description,
+                annotations=entry.annotations,
+            )
+            self._mcp.add_tool(tool)
