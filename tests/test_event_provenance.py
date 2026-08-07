@@ -535,3 +535,100 @@ class TestCreateEventNegative:
         """Event with None subject doesn't crash."""
         ev = sdk.create_event("none-1", "meeting", aboutSubject=None, aboutObject=None)
         assert ev is not None
+
+
+# ── #151: Stub Subject/Object ULID ids ───────────────────────────────────
+
+_ULID_RE = __import__("re").compile(r"^[0-9a-f]+-[0-9a-f]{12}$")
+
+
+class TestStubEntityULID:
+    """#151: _upsert_event must use ULID-based ids for auto-created stub
+    Subject/Object nodes, not the entity name as id."""
+
+    def test_performs_stub_subject_has_ulid_id(self, sdk):
+        """Stub Subject created via performs edge gets ULID id, not name."""
+        proj = sdk._get_proj()
+        proj.apply({
+            "type": "EventRecorded",
+            "id": "ev-ulid-1",
+            "eventId": "ev-ulid-1",
+            "eventKind": "test",
+            "subject": "stub-agent-1",
+            "startedAt": "2024-01-01T00:00:00Z",
+        })
+        r = proj.g.query(
+            "MATCH (s:Subject {name:'stub-agent-1'}) RETURN s.id, s.name"
+        ).result_set
+        assert len(r) == 1
+        sid, name = r[0][0], r[0][1]
+        assert name == "stub-agent-1"
+        assert _ULID_RE.match(sid), f"id={sid!r} is not ULID format"
+        assert sid != name, f"id should be ULID, not name ({sid!r} == {name!r})"
+
+    def test_produces_stub_object_has_ulid_id(self, sdk):
+        """Stub Object created via produces edge gets ULID id, not name."""
+        proj = sdk._get_proj()
+        proj.apply({
+            "type": "EventRecorded",
+            "id": "ev-ulid-2",
+            "eventId": "ev-ulid-2",
+            "eventKind": "build",
+            "subject": "ci-bot",
+            "object": "artifact-stub-1",
+            "startedAt": "2024-01-01T00:00:00Z",
+        })
+        r = proj.g.query(
+            "MATCH (o:Object {name:'artifact-stub-1'}) RETURN o.id, o.name"
+        ).result_set
+        assert len(r) == 1
+        oid, name = r[0][0], r[0][1]
+        assert name == "artifact-stub-1"
+        assert _ULID_RE.match(oid), f"id={oid!r} is not ULID format"
+        assert oid != name, f"id should be ULID, not name ({oid!r} == {name!r})"
+
+    def test_uses_stub_object_has_ulid_id(self, sdk):
+        """Stub Object created via uses edge gets ULID id, not name."""
+        proj = sdk._get_proj()
+        proj.apply({
+            "type": "EventRecorded",
+            "id": "ev-ulid-3",
+            "eventId": "ev-ulid-3",
+            "eventKind": "analysis",
+            "subject": "analyst",
+            "uses": ["input-stub-1"],
+            "startedAt": "2024-01-01T00:00:00Z",
+        })
+        r = proj.g.query(
+            "MATCH (o:Object {name:'input-stub-1'}) RETURN o.id, o.name"
+        ).result_set
+        assert len(r) == 1
+        oid, name = r[0][0], r[0][1]
+        assert name == "input-stub-1"
+        assert _ULID_RE.match(oid), f"id={oid!r} is not ULID format"
+        assert oid != name, f"id should be ULID, not name ({oid!r} == {name!r})"
+
+    def test_stub_preserves_existing_ulid_on_merge(self, sdk):
+        """When Subject already exists via _upsert_subject with a ULID id,
+        the _upsert_event MERGE matches by name and ON CREATE does NOT fire,
+        so the proper ULID id is preserved."""
+        # Create a proper Subject with ULID id via SDK
+        subj = sdk.create_subject("existing-agent", "tester")
+        proj = sdk._get_proj()
+        # Now create an event referencing the same subject name
+        proj.apply({
+            "type": "EventRecorded",
+            "id": "ev-ulid-4",
+            "eventId": "ev-ulid-4",
+            "eventKind": "test",
+            "subject": "existing-agent",
+            "startedAt": "2024-01-01T00:00:00Z",
+        })
+        # The Subject should still have its original ULID id, not overwritten
+        r = proj.g.query(
+            "MATCH (s:Subject {name:'existing-agent'}) RETURN s.id"
+        ).result_set
+        assert len(r) == 1
+        assert r[0][0] == subj["id"], (
+            f"existing ULID should be preserved: {r[0][0]!r} != {subj['id']!r}"
+        )

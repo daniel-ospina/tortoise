@@ -347,10 +347,12 @@ class _EntityHandlers:
         # Subject -[:performs]-> Event
         subj = inner.get("subject", "")
         if subj:
+            from tortoise.ids import ulid
+            stub_id = ulid()
             self.g.query(
                 "MERGE (s:Subject {name:$name}) "
-                "ON CREATE SET s.id=$name, s.subjectKind='other'",
-                params={"name": subj},
+                "ON CREATE SET s.id=$id, s.subjectKind='other'",
+                params={"name": subj, "id": stub_id},
             )
             self.g.query(
                 "MATCH (s:Subject {name:$name}), (e:Event {eventId:$eid}) "
@@ -373,10 +375,12 @@ class _EntityHandlers:
                     params={"id": obj, "eid": eid},
                 )
             else:
+                from tortoise.ids import ulid
+                stub_id = ulid()
                 self.g.query(
                     "MERGE (o:Object {name:$name}) "
-                    "ON CREATE SET o.id=$name, o.objectKind='other'",
-                    params={"name": obj},
+                    "ON CREATE SET o.id=$id, o.objectKind='other'",
+                    params={"name": obj, "id": stub_id},
                 )
                 self.g.query(
                     "MATCH (o:Object {name:$name}), (e:Event {eventId:$eid}) "
@@ -400,11 +404,13 @@ class _EntityHandlers:
                     use_name = str(use_item)
                     use_kind = "other"
                 if use_name:
+                    from tortoise.ids import ulid
+                    stub_id = ulid()
                     self.g.query(
                         "MERGE (o:Object {name:$name}) "
-                        "ON CREATE SET o.id=$name, o.objectKind=$kind "
+                        "ON CREATE SET o.id=$id, o.objectKind=$kind "
                         "ON MATCH SET o.objectKind=$kind",
-                        params={"name": use_name, "kind": use_kind},
+                        params={"name": use_name, "kind": use_kind, "id": stub_id},
                     )
                     self.g.query(
                         "MATCH (o:Object {name:$name}), (e:Event {eventId:$eid}) "
