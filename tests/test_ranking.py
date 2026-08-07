@@ -228,3 +228,59 @@ def test_suggest_entry_points_with_graph_ranker():
     ids = [r["id"] for r in ranked if r["id"] in (p_high["id"], p_low["id"])]
     assert ids.index(p_high["id"]) < ids.index(p_low["id"])
     assert any("graph_ranking" in r for r in ranked)
+
+
+# ── Contestation flag + demotion (epistemic honesty) ──────────────────────
+
+def test_contested_claim_demoted_in_graph_boost():
+    """Same mean confidence: a contested claim (high posterior variance) gets
+    a LOWER graph boost than an uncontested one — the mean is less reliable
+    when competing evidence destabilizes the posterior."""
+    ranker = GraphRanker()
+    uncontested = ranker.graph_boost({"id": "p"}, {"confidence": 0.9, "variance": 0.0119, "degree": 0})
+    contested = ranker.graph_boost({"id": "p"}, {"confidence": 0.9, "variance": 0.05, "contested": True, "degree": 0})
+    assert uncontested > contested
+    # Uncontested: 0.5·0.9 = 0.45; contested at v=0.05: 0.5·(0.9·(1−0.5·0.05/(1/12))) ≈ 0.315
+    assert uncontested == pytest.approx(0.45)
+    assert contested == pytest.approx(0.9 * (1 - 0.5 * min(1, 0.05 / (1 / 12))) * 0.5, abs=1e-4)
+
+
+def test_uncalibrated_not_treated_as_contested():
+    """A point with no persisted α/β (has_ep=False) is NOT contested — its
+    variance defaults to 1/12 but the flag stays off and no demotion applies
+    (unmeasured ≠ contested)."""
+    ranker = GraphRanker()
+    # Simulates _fetch_point_signals output for an uncalibrated point.
+    uncalibrated = ranker.graph_boost({"id": "p"}, {"confidence": 0.9, "variance": 1 / 12, "contested": False, "degree": 0})
+    assert uncalibrated == pytest.approx(0.45)  # no demotion
+
+
+def test_order_by_graph_demotes_contested_same_similarity():
+    """AC: identical similarity + identical persisted confidence — the
+    contested point (high variance α=β=2) ranks below the tight-posterior one
+    (α=β=10) under order_by='graph'."""
+    import tempfile as _tf
+    db_path = os.path.join(_tf.mkdtemp(prefix="tortoise_rankcontest_"), "test.db")
+    sdk = TortoiseSDK(db_path)
+    try:
+        sdk._get_proj().g.query("MATCH (n) DETACH DELETE n")
+        # Identical content → identical FTS/vector similarity.
+        pa = sdk.create_point("statement", "zebra finch migration phenology contested claim")
+        pb = sdk.create_point("statement", "zebra finch migration phenology contested claim")
+        proj = sdk._get_proj()
+        for pid, a, b in [(pa["id"], 10.0, 10.0), (pb["id"], 2.0, 2.0)]:
+            proj.g.query(
+                "MATCH (n:Point {id:$id}) SET n.confidence = 0.9, "
+                "n.ep_alpha = $a, n.ep_beta = $b",
+                params={"id": pid, "a": a, "b": b},
+            )
+        results = sdk.tortoise_fts_query("zebra finch migration", limit=10, order_by="graph")
+        ids = [r["id"] for r in results]
+        assert pa["id"] in ids and pb["id"] in ids
+        # Tight posterior (α=β=10, uncontested) ranks above contested (α=β=2).
+        assert ids.index(pa["id"]) < ids.index(pb["id"])
+        by_id = {r["id"]: r for r in results}
+        assert by_id[pa["id"]]["graph_ranking"]["contested"] is False
+        assert by_id[pb["id"]]["graph_ranking"]["contested"] is True
+    finally:
+        sdk.close()
