@@ -152,3 +152,13 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         if _ALLOW_GRAPH_DELETE_MARK in item.keywords:
             item.add_marker(getattr(pytest.mark, _ALLOW_GRAPH_DELETE_MARK))
+
+
+@pytest.fixture(autouse=True)
+def _set_stdio_transport_mode():
+    """#236: new _safe() gate rejects when _transport_mode is None; stdio tests
+    must run in stdio mode (mirrors main())."""
+    from tortoise.mcp_auth import _transport_mode
+    token = _transport_mode.set("stdio")
+    yield
+    _transport_mode.reset(token)

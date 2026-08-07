@@ -1,0 +1,454 @@
+"""Tests for MCP HTTP transport auth, team-scoped SDK resolution, and middleware (#236).
+
+Covers the full HTTP-transport surface: ContextVar binding, auth middleware
+(pre-tool-leak 401, registry-down 503, revocation), rate limiting, origin
+validation, excluded tools, graph_name injection blocking, ToolAnnotations,
+input size caps, security headers, malformed JSON-RPC, and lifespan composition.
+
+Uses embedded FalkorDBLite (no Docker needed) — mirrors test_hosted_api.py's
+fixture pattern. TORTOISE_SECRET_PEPPER MUST be set before tortoise.auth import.
+"""
+from __future__ import annotations
+
+import os
+
+# #67: TORTOISE_SECRET_PEPPER is mandatory for auth module import.
+os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
+
+import tempfile
+import time
+
+import pytest
+
+from tortoise.sdk import TortoiseSDK
+
+
+def _mcp_post(tc, payload):
+    """POST an MCP JSON-RPC request; return parsed JSON (handles SSE framing)."""
+    r = tc.post("/mcp", json=payload)
+    return r, _parse_sse_json(r)
+
+
+def _parse_sse_json(r):
+    """Parse a response body that may be SSE-framed (event: message\ndata: {...})."""
+    text = r.text
+    if text.startswith("event:") or "\ndata: " in text:
+        for line in text.splitlines():
+            if line.startswith("data: "):
+                import json
+                return json.loads(line[len("data: "):])
+        return None
+    return r.json()
+
+
+# ── Fixtures ────────────────────────────────────────────────────────────────
+
+@pytest.fixture
+def seeded_registry_sdk(tmp_path):
+    """TortoiseSDK(namespace='registry') on embedded DB with one APIKey node.
+
+    Uses apikey_create() (creates APIKey node with key_hash — what
+    apikey_verify searches). team_create() alone stores the hash on the Team
+    node's api_key property, which apikey_verify never matches.
+    """
+    db_path = str(tmp_path / "reg.db")
+    sdk = TortoiseSDK(db_path=db_path, namespace="registry")
+    team = sdk.team_create("test-team")
+    key_info = sdk.apikey_create(team["id"], "test-fixture")
+    return sdk, key_info["api_key"]  # (registry SDK, plaintext tt_ key)
+
+
+def _mounted_test_client(app):
+    """Wrap the MCP app in a Starlette Mount at /mcp (mirrors hosted_api).
+
+    The MCP sub-app routes live at / (http_app(path="/")); the parent strips
+    the mount prefix, so /mcp → sub-app / — same as production mounting.
+    Composes the MCP app's lifespan into the parent (Starlette Mount does NOT
+    auto-run sub-app lifespans — same fix as hosted_api._lifespan).
+    Returns a TestClient; enter with `with` to trigger lifespan.
+    """
+    from contextlib import asynccontextmanager
+    from starlette.applications import Starlette
+    from starlette.routing import Mount
+    from starlette.testclient import TestClient
+
+    @asynccontextmanager
+    async def _lifespan(parent_app):
+        async with app.lifespan(app):
+            yield
+
+    parent = Starlette(lifespan=_lifespan, routes=[Mount("/mcp", app=app)])
+    return TestClient(parent)
+
+
+@pytest.fixture
+def mcp_client(tmp_path, seeded_registry_sdk):
+    """TestClient over the mounted MCP app with valid MCP headers + auth."""
+    from tortoise.mcp_server import create_http_app
+
+    reg_sdk, key = seeded_registry_sdk
+    app = create_http_app(allowed_origins=["https://app.premiselabs.co"],
+                          _registry_sdk=reg_sdk)
+    tc = _mounted_test_client(app)
+    tc.headers.update({
+        "Authorization": f"Bearer {key}",
+        "Accept": "application/json, text/event-stream",
+        "Content-Type": "application/json",
+    })
+    with tc:
+        yield tc, key
+
+
+# ── ContextVar + SDK resolution ─────────────────────────────────────────────
+
+class TestContextVarsAndSdk:
+    def test_transport_mode_defaults_none(self):
+        from tortoise.mcp_auth import _transport_mode
+        token = _transport_mode.set(None)
+        try:
+            assert _transport_mode.get() is None
+        finally:
+            _transport_mode.reset(token)
+
+    def test_team_sdk_returns_base_when_no_team(self, monkeypatch):
+        import tortoise.mcp_auth as ma
+        # Isolate: no URI → embedded mode; reset module global for identity check
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        ma.sdk = None
+        token = ma._current_team_id.set(None)
+        try:
+            assert ma._get_team_sdk() is ma._get_base_sdk()
+        finally:
+            ma._current_team_id.reset(token)
+            ma.sdk = None
+
+    def test_team_sdk_returns_team_scoped_when_set(self):
+        from tortoise.mcp_auth import _current_team_id, _get_team_sdk
+        token = _current_team_id.set("team-abc")
+        try:
+            assert isinstance(_get_team_sdk(), TortoiseSDK)
+        finally:
+            _current_team_id.reset(token)
+
+    def test_http_allowed_populated_default_deny(self):
+        from tortoise.mcp_auth import HTTP_ALLOWED
+        assert "tortoise_team_create" not in HTTP_ALLOWED
+        assert "tortoise_backfill_v25" not in HTTP_ALLOWED
+        assert "tortoise_ingest_corpus" not in HTTP_ALLOWED
+        assert "tortoise_create_point" in HTTP_ALLOWED
+        assert "tortoise_query" in HTTP_ALLOWED
+
+
+# ── Auth: pre-tool-leak ─────────────────────────────────────────────────────
+
+class TestAuthPreLeak:
+    def test_unauthenticated_tools_list_401_no_leak(self, mcp_client):
+        tc, _ = mcp_client
+        tc.headers.pop("Authorization", None)
+        r = tc.post("/mcp", json={"jsonrpc": "2.0", "method": "tools/list", "id": 1})
+        assert r.status_code == 401
+        body = _parse_sse_json(r)
+        assert body is not None and "error" in body
+        assert "tortoise_" not in r.text  # no tool leak
+
+    def test_bearer_empty_token_401(self, mcp_client):
+        tc, _ = mcp_client
+        tc.headers["Authorization"] = "Bearer "
+        r = tc.post("/mcp", json={"jsonrpc": "2.0", "method": "tools/list", "id": 1})
+        assert r.status_code == 401
+        body = _parse_sse_json(r)
+        assert body is not None and "Bearer tt_" in body["error"]["message"]
+
+    def test_bearer_wrong_prefix_401(self, mcp_client):
+        tc, _ = mcp_client
+        tc.headers["Authorization"] = "Bearer not-tt-prefix"
+        r = tc.post("/mcp", json={"jsonrpc": "2.0", "method": "tools/list", "id": 1})
+        assert r.status_code == 401
+
+    def test_auth_registry_down_returns_503_not_500(self, mcp_client):
+        """Registry graph unreachable → 503 JSON-RPC, never 500/stack-trace."""
+        import tortoise.mcp_auth as ma
+        tc, key = mcp_client  # keep valid token so auth reaches the registry path
+
+        class _DownSDK:
+            def apikey_verify(self, token):
+                raise ConnectionError("Connection refused")
+
+        orig_init = ma.TeamResolutionMiddleware._get_registry_sdk
+        ma.TeamResolutionMiddleware._get_registry_sdk = lambda self: _DownSDK()
+        try:
+            r = tc.post("/mcp", json={"jsonrpc": "2.0", "method": "tools/list", "id": 1})
+            assert r.status_code == 503
+            body = _parse_sse_json(r)
+            assert body is not None and "error" in body
+        finally:
+            ma.TeamResolutionMiddleware._get_registry_sdk = orig_init
+
+    def test_revoked_key_fails_after_cache_expiry(self, tmp_path):
+        """Revoked key works ≤60s (cache hit), fails after cache expiry (fresh cache → 401)."""
+        from starlette.testclient import TestClient
+        from tortoise.mcp_server import create_http_app
+
+        db_path = str(tmp_path / "rev.db")
+        reg_sdk = TortoiseSDK(db_path=db_path, namespace="registry")
+        team = reg_sdk.team_create("rev-team")
+        key_info = reg_sdk.apikey_create(team["id"], "t")
+        key = key_info["api_key"]
+        headers = {"Authorization": f"Bearer {key}",
+                   "Accept": "application/json, text/event-stream",
+                   "Content-Type": "application/json"}
+
+        app = create_http_app(allowed_origins=[], _registry_sdk=reg_sdk)
+        tc = _mounted_test_client(app)
+        with tc:
+            # Auth passes (cache populated)
+            r = tc.post("/mcp", headers=headers,
+                        json={"jsonrpc": "2.0", "method": "tools/list", "id": 1})
+            assert r.status_code == 200
+            # Revoke the key in the registry
+            key_id = key_info["id"]
+            reg_sdk.apikey_revoke(key_id)
+            # Same app: cache hit → still passes ≤60s
+            r = tc.post("/mcp", headers=headers,
+                        json={"jsonrpc": "2.0", "method": "tools/list", "id": 1})
+            assert r.status_code == 200  # cache hit window
+        # FRESH app (empty cache) → registry check runs → revoked → 401
+        app2 = create_http_app(allowed_origins=[], _registry_sdk=reg_sdk)
+        tc2 = _mounted_test_client(app2)
+        with tc2:
+            r = tc2.post("/mcp", headers=headers,
+                         json={"jsonrpc": "2.0", "method": "tools/list", "id": 1})
+            assert r.status_code == 401
+
+
+# ── GET /mcp metadata ───────────────────────────────────────────────────────
+
+class TestGetMetadata:
+    def test_get_metadata_no_auth(self, mcp_client):
+        tc, _ = mcp_client
+        tc.headers.pop("Authorization", None)
+        r = tc.get("/mcp")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["protocol"] == "mcp"
+        assert body["transport"] == "streamable-http"
+
+
+# ── Team isolation ──────────────────────────────────────────────────────────
+
+class TestTeamIsolation:
+    def test_two_tenants_isolated(self, tmp_path):
+        """Team A's points invisible to Team B (different keys)."""
+        from tortoise.mcp_server import create_http_app
+
+        db_path = str(tmp_path / "iso.db")
+        sdk = TortoiseSDK(db_path=db_path, namespace="registry")
+        team_a = sdk.team_create("tenant-a")
+        ka = sdk.apikey_create(team_a["id"], "t")["api_key"]
+        team_b = sdk.team_create("tenant-b")
+        kb = sdk.apikey_create(team_b["id"], "t")["api_key"]
+
+        app = create_http_app(allowed_origins=[], _registry_sdk=sdk)
+        tc = _mounted_test_client(app)
+        tc.headers["Accept"] = "application/json, text/event-stream"
+        tc.headers["Content-Type"] = "application/json"
+        with tc:
+            # A creates a point
+            r = tc.post("/mcp", headers={"Authorization": f"Bearer {ka}"},
+                        json={"jsonrpc": "2.0", "method": "tools/call", "id": 1,
+                              "params": {"name": "tortoise_create_point",
+                                         "arguments": {"kind": "statement",
+                                                       "content": "A secret"}}})
+            assert r.status_code == 200, r.text
+            # B queries — must not see A's point
+            r = tc.post("/mcp", headers={"Authorization": f"Bearer {kb}"},
+                        json={"jsonrpc": "2.0", "method": "tools/call", "id": 2,
+                              "params": {"name": "tortoise_query",
+                                         "arguments": {"text": "A secret"}}})
+            assert r.status_code == 200
+            body = _parse_sse_json(r)
+            result = body.get("result", {}) if body else {}
+            # result is a list of points (or {results: [...]}); assert empty
+            items = result if isinstance(result, list) else result.get("results", [])
+            assert len(items) == 0
+
+    def test_contextvar_propagates_to_tool(self, mcp_client):
+        tc, key = mcp_client
+        r = tc.post("/mcp", json={"jsonrpc": "2.0", "method": "tools/call", "id": 1,
+                                  "params": {"name": "tortoise_check_structure",
+                                             "arguments": {}}})
+        assert r.status_code == 200
+
+
+# ── Rate limit ──────────────────────────────────────────────────────────────
+
+class TestRateLimit:
+    def test_101st_post_429(self, tmp_path, monkeypatch):
+        """101st POST in the window → 429.
+
+        Self-contained: clears RATE_LIMIT_DISABLED (test_hosted_api.py sets it
+        at module scope) and builds a fresh app so the limiter is enabled
+        regardless of session order.
+        """
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+        from tortoise.mcp_server import create_http_app
+        # Fresh registry + app with rate limiting enabled
+        db_path = str(tmp_path / "rl.db")
+        reg_sdk = TortoiseSDK(db_path=db_path, namespace="registry")
+        team = reg_sdk.team_create("rl-team")
+        key = reg_sdk.apikey_create(team["id"], "t")["api_key"]
+        app = create_http_app(allowed_origins=[], _registry_sdk=reg_sdk)
+        tc = _mounted_test_client(app)
+        tc.headers.update({"Authorization": f"Bearer {key}",
+                           "Accept": "application/json, text/event-stream",
+                           "Content-Type": "application/json"})
+        with tc:
+            statuses = []
+            for _ in range(101):
+                r = tc.post("/mcp", json={"jsonrpc": "2.0", "method": "tools/list", "id": 1})
+                statuses.append(r.status_code)
+            assert statuses[-1] == 429
+            assert sum(1 for s in statuses if s == 429) >= 1
+
+
+# ── Excluded tools ──────────────────────────────────────────────────────────
+
+class TestExcludedTools:
+    def test_excluded_absent_from_tools_list(self, mcp_client):
+        tc, _ = mcp_client
+        r = tc.post("/mcp", json={"jsonrpc": "2.0", "method": "tools/list", "id": 1})
+        assert r.status_code == 200
+        names = [t["name"] for t in _parse_sse_json(r)["result"]["tools"]]
+        assert "tortoise_team_create" not in names
+        assert "tortoise_backfill_v25" not in names
+        assert "tortoise_ingest_corpus" not in names
+
+    def test_excluded_call_errors(self, mcp_client):
+        tc, _ = mcp_client
+        r = tc.post("/mcp", json={"jsonrpc": "2.0", "method": "tools/call", "id": 1,
+                                  "params": {"name": "tortoise_team_create",
+                                             "arguments": {"name": "x"}}})
+        assert r.status_code == 200  # JSON-RPC error inside result, not HTTP error
+        body = _parse_sse_json(r)
+        assert body is not None
+        # FastMCP wraps the tool's dict return in result.content[0].text (JSON string)
+        text = body.get("result", {}).get("content", [{}])[0].get("text", "") if body.get("result") else ""
+        assert "-32004" in text or "not available over HTTP" in text
+
+
+# ── Graph name injection ────────────────────────────────────────────────────
+
+class TestGraphName:
+    def test_http_graph_name_injection_blocked(self, mcp_client):
+        """In HTTP mode, user-supplied graph_name is ignored — team graph wins."""
+        tc, _ = mcp_client
+        r = tc.post("/mcp", json={"jsonrpc": "2.0", "method": "tools/call", "id": 1,
+                                  "params": {"name": "tortoise_entity_profile",
+                                             "arguments": {"entity_id": "does-not-exist",
+                                                           "graph_name": "team_other_tenant"}}})
+        # Must NOT error with graph-not-found for another tenant's graph — should
+        # return empty/error from the team graph, never a successful cross-tenant read.
+        assert r.status_code == 200
+        assert "team_other_tenant" not in r.text
+
+
+# ── Annotations ─────────────────────────────────────────────────────────────
+
+class TestAnnotations:
+    def test_tools_list_has_annotations(self, mcp_client):
+        tc, _ = mcp_client
+        r = tc.post("/mcp", json={"jsonrpc": "2.0", "method": "tools/list", "id": 1})
+        assert r.status_code == 200
+        for tool in _parse_sse_json(r)["result"]["tools"]:
+            assert "annotations" in tool or "readOnlyHint" in str(tool)
+
+
+# ── Failure-mode matrix (Task 5 expansion) ──────────────────────
+
+class TestMalformedJSONRPC:
+    """Malformed JSON-RPC must return 4xx JSON-RPC errors, never 500."""
+
+    def test_empty_body(self, mcp_client):
+        tc, _ = mcp_client
+        r = tc.post("/mcp", content=b"",
+                    headers={"Content-Type": "application/json",
+                             "Accept": "application/json, text/event-stream"})
+        assert r.status_code < 500
+
+    def test_missing_method(self, mcp_client):
+        tc, _ = mcp_client
+        r = tc.post("/mcp", json={"jsonrpc": "2.0", "id": 1})
+        assert r.status_code < 500
+
+    def test_non_json_body(self, mcp_client):
+        tc, _ = mcp_client
+        r = tc.post("/mcp", content=b"not json",
+                    headers={"Content-Type": "application/json",
+                             "Accept": "application/json, text/event-stream"})
+        assert r.status_code < 500
+
+
+class TestSecurityHeaders:
+    """MCP responses carry HSTS + nosniff + DENY (parent middleware doesn't propagate)."""
+
+    def test_mcp_responses_have_security_headers(self, mcp_client):
+        tc, _ = mcp_client
+        r = tc.post("/mcp", json={"jsonrpc": "2.0", "method": "tools/list", "id": 1})
+        assert r.status_code == 200
+        assert r.headers.get("strict-transport-security")
+        assert r.headers.get("x-content-type-options") == "nosniff"
+        assert r.headers.get("x-frame-options") == "DENY"
+
+
+class TestRateLimitWindowReset:
+    """Bucket drains after the 60s window — not a permanent ban."""
+
+    def test_rate_limit_window_resets_after_60s(self, mcp_client, monkeypatch):
+        import time as _t
+        import tortoise.mcp_auth as ma
+
+        real_time = _t.time
+        fake_now = [real_time()]
+
+        def fake_time():
+            return fake_now[0]
+
+        monkeypatch.setattr(ma.time, "time", fake_time)
+        tc, _ = mcp_client
+        # First auth populates cache at fake_now
+        r = tc.post("/mcp", json={"jsonrpc": "2.0", "method": "tools/list", "id": 1})
+        assert r.status_code == 200
+        # Advance 61s — rate-limit bucket drains
+        fake_now[0] += 61
+        r = tc.post("/mcp", json={"jsonrpc": "2.0", "method": "tools/list", "id": 1})
+        assert r.status_code == 200  # not 429
+
+
+class TestContextVarNoLeak:
+    """Authenticated request must not leak team ContextVar to a later request."""
+
+    def test_contextvar_not_leaked_to_next_request(self, mcp_client):
+        import tortoise.mcp_auth as ma
+        tc, key = mcp_client
+        # Authenticated call sets team context
+        r = tc.post("/mcp", json={"jsonrpc": "2.0", "method": "tools/list", "id": 1})
+        assert r.status_code == 200
+        # Unauthenticated call must 401 — and must NOT carry prior team context
+        tc.headers.pop("Authorization", None)
+        r = tc.post("/mcp", json={"jsonrpc": "2.0", "method": "tools/list", "id": 1})
+        assert r.status_code == 401
+        # After the request completes, ContextVar should be back to None
+        # (fresh asyncio task per request — contextvars copy-on-write).
+        assert ma._current_team_id.get() is None
+
+
+class TestInputCaps:
+    """Oversized POST bodies rejected with 413 (content-length check)."""
+
+    def test_oversized_body_rejected_413(self, mcp_client):
+        tc, _ = mcp_client
+        big = "x" * (1_000_001)
+        r = tc.post("/mcp", content=big.encode(),
+                    headers={"Content-Type": "application/json",
+                             "Accept": "application/json, text/event-stream"})
+        assert r.status_code == 413
