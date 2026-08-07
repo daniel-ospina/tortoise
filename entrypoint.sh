@@ -20,6 +20,15 @@ set -euo pipefail
 export HF_HOME="${HF_HOME:-/app/model}"
 export SENTENCE_TRANSFORMERS_HOME="${SENTENCE_TRANSFORMERS_HOME:-/app/model}"
 
+# Fast-fail if the pre-downloaded model cache is missing (code-review P3, #160)
+# — the build-time bake in Dockerfile.hosted is the ONLY source; a missing
+# cache means a broken image, not a retryable condition.
+if [ ! -d "${HF_HOME}/models--sentence-transformers--all-MiniLM-L6-v2" ]; then
+    echo "tortoise: FATAL — embedding model cache not found at ${HF_HOME}" >&2
+    echo "tortoise: expected ${HF_HOME}/models--sentence-transformers--all-MiniLM-L6-v2" >&2
+    exit 1
+fi
+
 # Pre-warm the embedding model at startup so the first request doesn't hit
 # a cold-start timeout (issue #160). If the pre-downloaded model can't load
 # from /app/model, fail fast — silently degraded embeddings are worse than

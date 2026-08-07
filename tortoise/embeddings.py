@@ -44,7 +44,16 @@ class EmbeddingModel:
             with cls._lock:
                 if cls._instance is None:
                     cls._instance = cls()
-        return cls._instance._model if (cls._instance and cls._instance._model) else None
+        model = cls._instance._model if (cls._instance and cls._instance._model) else None
+        if model is None and cls._instance is not None:
+            # Transient load failure (timeout/OOM) — clear the instance so the
+            # NEXT get() call retries (code-review P2 fix, #160). Previously
+            # the timed-out instance was cached forever, making the failure
+            # permanent despite the docstring claiming retry.
+            with cls._lock:
+                cls._instance = None
+                cls._model = None
+        return model
 
     @classmethod
     def _reset(cls) -> None:

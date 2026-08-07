@@ -53,7 +53,9 @@ def _connect_falkordb(uri: str):
     from tortoise.projection import FalkorProjection
 
     proj = FalkorProjection.from_uri(uri)
-    return proj._db, proj._graph_name  # noqa: SLF001 — backfill needs raw DB for multi-graph access
+    # proj.db (public FalkorDB client) + proj.graph_name (public) — NOT the
+    # private _db/_graph_name (code-review P0 fix: _db doesn't exist).
+    return proj.db, proj.graph_name
 
 
 def _dry_run(db, graph_name: str, labels: list[str]) -> int:
