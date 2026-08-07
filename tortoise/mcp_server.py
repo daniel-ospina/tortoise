@@ -84,6 +84,17 @@ def _get_sdk():
     The module-level ``sdk`` attribute acts as an override (set by
     test_enumeration_surfaces.py swap pattern) — when non-None it is
     returned directly, bypassing lazy init.
+
+    Error surface: exceptions here (connection failure, sys.exit on retry
+    exhaustion) propagate BEFORE _safe() wrapping in tool bodies (call
+    arguments are evaluated first). In normal operation main() calls
+    _get_sdk() before mcp.run(), so failures surface at server startup —
+    equivalent to the pre-#451 import-time behavior. Only callers that
+    invoke mcp.run() directly without main() see an unwrapped error.
+
+    Reset semantics: restoring ``sdk = None`` after a test swap falls
+    through to the CACHED _sdk instance — it does not re-connect. Set
+    both ``sdk`` and ``_sdk`` to None to force re-initialization.
     """
     global _sdk
     # Module-level sdk override (test swap pattern) takes priority
