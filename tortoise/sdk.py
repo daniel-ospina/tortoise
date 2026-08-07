@@ -2064,12 +2064,16 @@ class TortoiseSDK:
     # ── Entity Resolution (GAP-01 #6987) ──────────────────────
 
     def suggest_entry_points(self, query: str, *, limit: int = 5,
-                             kind_filter: str | None = None) -> list[dict]:
+                             kind_filter: str | None = None,
+                             graph_ranker=None) -> list[dict]:
         """Entity resolution — NL query → matching entities from the graph.
 
         String match on content (Cypher CONTAINS) + embedding fallback.
         Returns [{id, name, kind, confidence}] sorted by confidence DESC.
         kind_filter filters by n.pointKind.
+        graph_ranker: optional GraphRanker (tortoise.ranking) to rerank the
+        results with graph signals (persisted EP confidence, connectivity,
+        recency) — #25. Off by default for backward compatibility.
         """
         if limit < 1:
             raise ValueError(f"limit must be >= 1, got {limit}")
@@ -2121,6 +2125,11 @@ class TortoiseSDK:
                         "confidence": round(r.get("scores", {}).get("rrf", 0.0) * 0.5, 4)}
                        for r in fts_results]
 
+        # #25: optional graph-informed rerank (persisted EP confidence,
+        # operator connectivity, recency). Off by default (backward compat).
+        if graph_ranker is not None and results:
+            results = graph_ranker.rerank(results, entity_type="point")
+
         return results
 
     # ── Session Context (#6989) ──────────────────────────────
@@ -2171,6 +2180,7 @@ class TortoiseSDK:
         entity_type: str = "point",
         min_confidence: float = 0.0,
         order_by: str = "relevance",
+        graph_ranker=None,
         limit: int = 10,
         threshold: float = 0.0,
         relationship_filter: str | None = None,
@@ -2206,8 +2216,8 @@ class TortoiseSDK:
             raise ValueError(f"threshold must be 0.0-1.0, got {threshold}")
         if not (0.0 <= min_confidence <= 1.0):
             raise ValueError(f"min_confidence must be 0.0-1.0, got {min_confidence}")
-        if order_by not in ("relevance", "confidence"):
-            raise ValueError(f"order_by must be 'relevance' or 'confidence', got {order_by!r}")
+        if order_by not in ("relevance", "confidence", "graph"):
+            raise ValueError(f"order_by must be 'relevance', 'confidence', or 'graph', got {order_by!r}")
 
         proj = self._get_proj()
         graph = proj.g
@@ -2488,9 +2498,24 @@ class TortoiseSDK:
             results.append(result)
 
         # 9. Order results
+        if order_by == "graph":
+            # #25: graph-informed rerank — weighted fusion of similarity +
+            # persisted EP confidence + operator connectivity + recency decay.
+            # Requires the caller to allow a large enough candidate pool (limit
+            # here is the pool size; final length is capped below).
+            from .ranking import GraphRanker
+            ranker = graph_ranker or GraphRanker(proj)
+            dicts = [r.to_dict() for r in results]
+            return ranker.rerank(dicts, entity_type=entity_type)[:limit]
         if order_by == "confidence":
+            # #25: sort by the PERSISTED EP confidence (n.confidence, written
+            # by compute_confidence), not the structural impl/(impl+nand) proxy
+            # from annotate_ep_batch (which is edge-ratio, not belief).
+            from .ranking import GraphRanker
+            ranker = graph_ranker or GraphRanker(proj)
+            signals = ranker._fetch_signals([r.id for r in results], entity_type)
             results.sort(
-                key=lambda r: r.ep.confidence_mean if r.ep else 0.0,
+                key=lambda r: signals.get(r.id, {}).get("confidence", 0.5),
                 reverse=True,
             )
         # Default: RRF relevance order (already in fused order)
