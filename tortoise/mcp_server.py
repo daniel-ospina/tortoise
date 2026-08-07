@@ -777,8 +777,17 @@ def tortoise_index_sessions(directory: str, extract_metadata: bool = True, llm_m
         return {"error": f"Directory not found: {directory!r}. Provide a valid path to a directory containing .md session files."}
     return _safe(_get_team_sdk().index_sessions, directory, extract_metadata=extract_metadata, llm_model=llm_model)
 
-def tortoise_search_sessions(query: str, agent: str | None = None, topics: Any = None, limit: int = 10, offset: int = 0) -> list[dict]:
-    """Search indexed agent sessions. Returns Events with narrative_arc snippets."""
+def tortoise_search_sessions(query: str, agent: str | None = None, topics: Any = None,
+                             after: str | None = None, before: str | None = None,
+                             limit: int = 10, offset: int = 0) -> list[dict]:
+    """Search indexed agent sessions. Returns Events with narrative_arc snippets.
+
+    after/before bound the search to sessions whose startedAt falls in
+    [after, before] (inclusive). Accept ISO-8601 strings (e.g.
+    '2026-07-01T00:00:00Z' or '2026-07-31T23:59:59+00:00'); values are
+    normalized to UTC. Sessions without startedAt are excluded when a bound
+    is set.
+    """
     topics = _parse(topics)
     if isinstance(topics, str):
         topics_list = [t.strip() for t in topics.split(",") if t.strip()]
@@ -786,7 +795,8 @@ def tortoise_search_sessions(query: str, agent: str | None = None, topics: Any =
         topics_list = topics
     else:
         topics_list = None
-    return _safe(_get_team_sdk().search_sessions, query, agent=agent, topics=topics_list, limit=limit, offset=offset)
+    return _safe(_get_team_sdk().search_sessions, query, agent=agent, topics=topics_list,
+                 after=after, before=before, limit=limit, offset=offset)
 
 def tortoise_create_document(title: str, documentKind: str, props: Any = None) -> dict:
     """Create a Document node (research, planDoc, meetingNotes, etc.)."""
