@@ -74,8 +74,10 @@ class Dreamer:
                 return {"iterations": 0, "converged": True, "affected_claims": []}
             ep = self._sdk._get_ep()
             iterations, converged = ep.run(operator_ids, max_hops=max_hops)
-            # Persist mean confidence to node property (mirrors compute_confidence)
-            affected = ep._affected_claims(operator_ids)
+            # Persist mean confidence to node property (mirrors compute_confidence).
+            # P2 (#85): use the SAME max_hops as the run so the affected set
+            # matches what _load_cache/_flush_cache covered.
+            affected = ep._affected_claims(operator_ids, max_hops=max_hops)
             from datetime import datetime, timezone
             now = datetime.now(timezone.utc).isoformat()
             for claim_id in affected:
@@ -93,12 +95,16 @@ class Dreamer:
     # ── Whole-graph ────────────────────────────────────────────────
 
     def dream_all(self, max_hops: int = 2,
-                  batch_size: int = 2000) -> dict:
+                  batch_size: int = 2000,
+                  max_total_operators: int = 200_000) -> dict:
         """Full-graph EP stabilization from all non-operator Points.
 
-        Memory guard (#85): batches the anchor set so the EP cache never
-        loads the entire graph at once on constrained deployments (512MB
-        hosted VM). Returns {batches, total_affected, converged_all}.
+        Memory + DoS guard (#85, security P1): batches the anchor set so the
+        EP cache never loads the entire graph at once, AND caps the total
+        operators processed across batches so a single request cannot trigger
+        an unbounded whole-graph EP on the hosted deployment.
+
+        Returns {batches, total_affected, converged_all}.
         """
         proj = self._sdk._get_proj()
         rows = proj.g.query(
@@ -112,8 +118,23 @@ class Dreamer:
         total_affected: set[str] = set()
         converged_all = True
         batches = 0
+        total_operators = 0
         for start in range(0, len(anchors), batch_size):
             chunk = anchors[start:start + batch_size]
+            with self._lock:
+                from .analyze import _bfs_select_operators
+                chunk_ops = list(_bfs_select_operators(
+                    proj, chunk, max_hops=max_hops, rel_filter="IMPL|NAND",
+                    direction="both",
+                ))
+            total_operators += len(chunk_ops)
+            if total_operators > max_total_operators:
+                _log.warning(
+                    "dream_all truncated at %d operators (cap %d) — "
+                    "graph larger than budget",
+                    total_operators, max_total_operators,
+                )
+                break
             result = self.dream(chunk, max_hops=max_hops)
             batches += 1
             total_affected.update(result.get("affected_claims", []))

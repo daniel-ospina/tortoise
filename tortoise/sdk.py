@@ -1421,6 +1421,9 @@ class TortoiseSDK:
             "MATCH (n:Point {id: $id}) SET n.ep_alpha = $a, n.ep_beta = $b, n.baseline_set = true",
             params={"id": claim_id, "a": alpha, "b": beta},
         )
+        # Dreaming (#85, P1): a baseline change alters the prior — neighbors
+        # whose confidence derived from this claim are now stale.
+        self._mark_dirty([claim_id])
         return {"claim_id": claim_id, "alpha": alpha, "beta": beta}
 
     def get_confidence(self, claim_id: str) -> dict:

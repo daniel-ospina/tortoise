@@ -198,3 +198,12 @@ class TestConvergenceAfterBatchWrites:
             conf = sdk.get_confidence(claim["id"])
             assert 0 <= conf["mean"] <= 1
             assert conf["effective_n"] >= 1
+
+
+class TestBaselineMarksDirty:
+    def test_set_point_baseline_marks_dirty(self, sdk):
+        """P1 (#85): baseline changes alter priors — must mark dirty."""
+        p = _make_claim(sdk, "baselined")
+        sdk._dirty_roots.clear()
+        sdk.set_point_baseline(p["id"], 8.0, 2.0)
+        assert p["id"] in sdk._dirty_roots

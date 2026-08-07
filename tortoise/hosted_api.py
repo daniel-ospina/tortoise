@@ -70,6 +70,9 @@ _DREAM_QUEUES: dict[str, asyncio.Queue] = {}
 _DREAM_TASKS: dict[str, asyncio.Task] = {}
 _DREAM_DEBOUNCE_S = 0.1
 _DREAM_BATCH_MAX = 200
+# Evict idle tenant queues after this many seconds (security P2, #85) so
+# per-tenant queue/task dicts don't grow unboundedly across many tenants.
+_DREAM_QUEUE_TTL_S = 600
 
 
 def _enqueue_dream(team_id: str, dirty_roots: list[str]) -> None:
@@ -98,6 +101,7 @@ async def _dream_worker(team_id: str) -> None:
             return
         sdk = _make_sdk(namespace=team_id)
         try:
+            # Batch mark once (P3, #85) — one reverse-BFS pair, not N.
             sdk._mark_dirty(roots)
             sdk.dream(dirty_only=True)
         finally:
@@ -111,6 +115,10 @@ async def _dream_worker(team_id: str) -> None:
         # Reschedule if more roots arrived during the drain.
         if not q.empty():
             _DREAM_TASKS[team_id] = asyncio.create_task(_dream_worker(team_id))
+        elif team_id in _DREAM_QUEUES and team_id in _DREAM_TASKS:
+            # Idle: evict the queue (TTL guard) unless a new write re-adds it.
+            _DREAM_QUEUES.pop(team_id, None)
+            _DREAM_TASKS.pop(team_id, None)
 
 
 # ── Rate Limiter ──────────────────────────────────────────────────
