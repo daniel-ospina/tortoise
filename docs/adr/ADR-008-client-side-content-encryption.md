@@ -8,8 +8,9 @@
 ## Decision
 
 Tortoise Cloud shall use **client-side content encryption with clear metadata**
-(Option A from issue #28) for customer content: `Point.content`, `Document.body`,
-and `Session.transcript` are AES-256-GCM encrypted with a **customer-held key**
+(Option A from issue #28) for customer content: `Point.content` and
+`Document.content` (including session transcripts, stored as Documents with
+`documentKind='transcript'`) are AES-256-GCM encrypted with a **customer-held key**
 before reaching our servers. All metadata required for search, EP propagation,
 and graph traversal stays **clear**: titles, kinds, tags/keywords/topics,
 embeddings, confidence scores, timestamps, edge labels, and a derived
@@ -67,8 +68,9 @@ later, reserve the following now:**
 
 ```
 Point { content: <ciphertext blob | plaintext>, _searchText: <clear string>, encryptionVersion: 0|1 }
-Document { body: <ciphertext blob | plaintext>, _searchText: <clear string>, encryptionVersion: 0|1 }
-Event { transcript: <ciphertext blob | plaintext>, name/summary/topics: <clear>, encryptionVersion: 0|1 }
+Document { content: <ciphertext blob | plaintext>, _searchText: <clear string>, encryptionVersion: 0|1 }
+  (session transcripts are Documents with documentKind='transcript' — there is no
+   separate Session/Event.transcript property in the model)
 ```
 
 - `encryptionVersion: 0` = plaintext (current data, pre-enablement),
@@ -97,7 +99,7 @@ Event { transcript: <ciphertext blob | plaintext>, name/summary/topics: <clear>,
 - **Positive**: cryptographically unreadable content (C1, C5) — a real
   differentiator for regulated customers; EP propagation and traversal
   unaffected (confidence + edges clear, C3); implementation reuses the
-  `_searchText` pattern (~300 lines crypto module + write-path wiring, C4).
+  `_searchText` pattern (~250 lines crypto module + write-path wiring, C4).
 - **Negative**: keyword search is metadata-bound (topics/titles/summary still
   semantically rich because session topics are LLM-extracted); content edits
   must re-derive `_searchText`; multi-agent key derivation must be designed
@@ -141,6 +143,6 @@ questionnaire):**
 | C1 Provider cannot read content | Met by design (client-held key) |
 | C2 Search performance parity | Latency parity yes; results parity re-scoped to metadata-bound (documented) |
 | C3 EP propagation unaffected | Met (confidence + topology clear) |
-| C4 Implementation tractability | Met (reuses `_searchText` precedent, ~1 dev cycle) |
+| C4 Implementation tractability | Met (reuses `_searchText` precedent, ~250-line crypto module, ~1 dev cycle) |
 | C5 Customer key control | Met (key never transmitted; wrapped copy for recovery) |
 | C6 Zero UX degradation | Met at v1; key-derivation design needed for multi-agent sessions |
