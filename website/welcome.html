@@ -144,6 +144,17 @@
       user-select: all;
     }
 
+    .harness-tabs { margin-bottom: 0.75rem; display: flex; gap: 0.5rem; flex-wrap: wrap; }
+    .harness-tab {
+      padding: 0.35rem 0.75rem; border-radius: 6px;
+      border: 1px solid var(--border, #333);
+      background: transparent; color: var(--text-dim, #aaa);
+      cursor: pointer; font-size: 0.78rem;
+    }
+    .harness-tab.active {
+      background: var(--accent, #8b5cf6); color: #fff;
+      border-color: var(--accent, #8b5cf6);
+    }
     .btn-copy {
       flex-shrink: 0;
       padding: 0.5rem 0.75rem;
@@ -270,7 +281,15 @@
     .hidden {
       display: none;
     }
-  </style>
+  
+    /* Mobile (#497): single column, full-width buttons, scrollable tabs */
+    @media (max-width: 640px) {
+      .harness-tabs { flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+      .harness-tab { white-space: nowrap; }
+      .snippet pre { font-size: 0.68rem; overflow-x: auto; }
+      .btn-copy, .btn-dashboard { width: 100%; }
+    }
+</style>
 </head>
 <body>
   <div class="topbar">
@@ -336,29 +355,35 @@
         </div>
       </div>
 
-      <div class="card">
-        <div class="card-label">MCP config</div>
+            <div class="card">
+        <div class="card-label">Connect your agent <span style="font-weight:400;font-size:0.72rem;color:var(--text-dim);">(Streamable HTTP — no install needed)</span></div>
+        <div class="harness-tabs" id="harness-tabs" style="display:flex;gap:0.5rem;margin-bottom:0.75rem;flex-wrap:wrap;">
+          <button class="harness-tab active" data-harness="claude" onclick="switchHarness('claude')">Claude Code</button>
+          <button class="harness-tab" data-harness="codex" onclick="switchHarness('codex')">Codex</button>
+          <button class="harness-tab" data-harness="cursor" onclick="switchHarness('cursor')">Cursor</button>
+          <button class="harness-tab" data-harness="pi" onclick="switchHarness('pi')">Pi</button>
+        </div>
         <div class="snippet" id="mcp-snippet">
-          <pre><code>{
-  "mcpServers": {
-    "tortoise": {
-      "command": "python3",
-      "args": ["-m", "tortoise.mcp_server"],
-      "env": {
-        "TORTOISE_API_KEY": "<span id="mcp-snippet-key">tt_YOUR_KEY</span>",
-        "TORTOISE_API_URL": "https://api.premiselabs.co"
-      }
-    }
-  }
-}</code></pre>
+          <pre><code id="mcp-config-text"></code></pre>
         </div>
         <button class="btn-copy" id="btn-copy-mcp" onclick="copyMcpConfig()" style="width:100%;margin-bottom:0.75rem;">
           <span>Copy MCP config</span>
         </button>
+        <div class="snippet" id="prompt-snippet" style="margin-bottom:0.75rem;">
+          <pre><code id="prompt-text"># Onboarding prompt — copied from a stable URL (see below)
+
+Paste this into your agent to start the setup flow. The agent will ask
+you up to 6 yes/no questions and set up your Tortoise memory.
+
+(Loading prompt…)</code></pre>
+        </div>
+        <button class="btn-copy" id="btn-copy-prompt" onclick="copyPrompt()" style="width:100%;margin-bottom:0.75rem;">
+          <span>Copy onboarding prompt</span>
+        </button>
         <p style="font-size:0.72rem;color:var(--text-dim);line-height:1.4;">
-          Paste into <code style="color:var(--accent);">.mcp.json</code> (Claude Code),
-          <code style="color:var(--accent);">.cursor/mcp.json</code> (Cursor),
-          or <code style="color:var(--accent);">claude_desktop_config.json</code> (Claude Desktop).
+          Block A = MCP config (tab per harness). Block B = onboarding prompt.
+          Paste both into your agent: config in the settings/mcp.json, prompt in chat.
+          <!-- TODO(#502): prompt fetched from deployed URL once live; fallback text above -->
         </p>
       </div>
 
@@ -571,6 +596,91 @@ tortoise create-point "Hello world" --kind statement`;
       document.getElementById("error-state").classList.remove("hidden");
       document.getElementById("error-message").textContent = "This page is not configured yet. Please contact support.";
     }
-  </script>
+  
+    // ── Harness configs (Streamable HTTP — #497) ─────────────────────────
+    const HARNESS_CONFIGS = {
+      claude: (key) => JSON.stringify({
+        mcpServers: {
+          tortoise: {
+            type: "streamable-http",
+            url: "https://api.premiselabs.co/mcp",
+            headers: { Authorization: "Bearer " + key }
+          }
+        }
+      }, null, 2),
+      codex: (key) => `# Set your API key (never paste the literal into shell history)
+export TORTOISE_API_KEY=${key}
+
+# Add the MCP server
+codex mcp add tortoise --url https://api.premiselabs.co/mcp --bearer-token-env-var TORTOISE_API_KEY`,
+      cursor: (key) => JSON.stringify({
+        mcpServers: {
+          tortoise: {
+            url: "https://api.premiselabs.co/mcp",
+            headers: { Authorization: "Bearer " + key }
+          }
+        }
+      }, null, 2),
+      pi: (key) => JSON.stringify({
+        mcpServers: {
+          tortoise: {
+            type: "streamable-http",
+            url: "https://api.premiselabs.co/mcp",
+            headers: { Authorization: "Bearer " + key }
+          }
+        }
+      }, null, 2),
+    };
+    let currentHarness = "claude";
+    const PROMPT_URL = "https://tortoise.premiselabs.co/onboarding-prompt.md";
+
+    function switchHarness(name) {
+      currentHarness = name;
+      document.querySelectorAll(".harness-tab").forEach(t =>
+        t.classList.toggle("active", t.dataset.harness === name));
+      renderMcpConfig();
+    }
+
+    function renderMcpConfig() {
+      const key = document.getElementById("api-key").textContent.trim();
+      const text = HARNESS_CONFIGS[currentHarness](key);
+      document.getElementById("mcp-config-text").textContent = text;
+    }
+
+    async function copyMcpConfig() {
+      renderMcpConfig();
+      const text = document.getElementById("mcp-config-text").textContent;
+      await navigator.clipboard.writeText(text);
+      // Analytics: artifact_copied (config)
+      try { fetch("https://api.premiselabs.co/v1/onboarding/state", {method:"PATCH"}); } catch(e) {}
+      flashCopied("btn-copy-mcp");
+    }
+
+    async function copyPrompt() {
+      const el = document.getElementById("prompt-text");
+      let text = el.textContent;
+      if (text.includes("Loading prompt")) {
+        try {
+          const r = await fetch(PROMPT_URL);
+          if (r.ok) text = await r.text();
+        } catch(e) {}
+      }
+      await navigator.clipboard.writeText(text);
+      flashCopied("btn-copy-prompt");
+    }
+
+    function flashCopied(btnId) {
+      const btn = document.getElementById(btnId);
+      const old = btn.textContent;
+      btn.textContent = "Copied!";
+      setTimeout(() => { btn.textContent = old; }, 1500);
+    }
+
+    // Fetch the prompt on load (best-effort; fallback text remains)
+    fetch(PROMPT_URL).then(r => { if (r.ok) return r.text(); })
+      .then(t => { if (t) document.getElementById("prompt-text").textContent = t; })
+      .catch(() => {});
+
+</script>
 </body>
 </html>

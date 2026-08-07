@@ -26,7 +26,9 @@ class TortoiseEP:
     Parameters:
         projection: FalkorProjection instance (provides .g and ._neighbors)
         damping: message damping factor, 0 < λ ≤ 1
-        n_quad: Gauss-Jacobi points per dimension (8 = <0.001% error)
+        n_quad: Gauss-Jacobi points per dimension (8 = 0.03% error at
+            w=50; at w=100 the n_quad=8 error is ~7% — use n_quad=16 for
+            w≥100, which recovers to <0.002% error)
         max_iter: hard cap on EP outer iterations
         tol: convergence threshold (max relative change in α,β)
     """
@@ -69,10 +71,15 @@ class TortoiseEP:
                 self._msg_cache[(oid, cid, rel)] = (float(ma), float(mb))
 
     def _flush_cache(self):
-        """Write all cached data back to FalkorDB in batch."""
-        if self._node_cache:
+        """Write all cached data back to FalkorDB in batch.
+
+        Attribute-safe (#330): caches may be absent (never loaded, or removed
+        by the per-run lifecycle) — flush whatever is present.
+        """
+        if getattr(self, "_node_cache", None):
             params_list = [
-                {"id": cid, "a": a, "b": b, "c": round(a/(a+b), 4)}
+                {"id": cid, "a": a, "b": b,
+                 "c": round(a/(a+b), 4) if (a + b) > 0 else 0.5}
                 for cid, (a, b) in self._node_cache.items()
             ]
             self.g.query(
@@ -82,7 +89,7 @@ class TortoiseEP:
                 params={"params": params_list},
             )
 
-        if self._msg_cache:
+        if getattr(self, "_msg_cache", None):
             for rel in ("IMPL", "NAND"):
                 params_list = [
                     {"oid": oid, "cid": cid, "a": ma, "b": mb}
@@ -97,11 +104,21 @@ class TortoiseEP:
                         params={"params": params_list},
                     )
 
+    def _clear_caches(self) -> None:
+        """Remove the batch caches so post-run reads hit the graph (#330)."""
+        for _attr in ("_node_cache", "_msg_cache"):
+            if hasattr(self, _attr):
+                delattr(self, _attr)
+
     # ── Cached read/write ────────────────────────────────────────
 
     def _read_node(self, node_id: str) -> tuple[float, float]:
-        if hasattr(self, '_node_cache') and node_id in self._node_cache:
-            return self._node_cache[node_id]
+        # #330: capture once — a concurrent run() may delattr the cache between
+        # the hasattr check and the read (TOCTOU); a local None falls through
+        # to the graph instead of raising AttributeError.
+        _cache = getattr(self, '_node_cache', None)
+        if _cache is not None and node_id in _cache:
+            return _cache[node_id]
         rows = self.g.query(
             "MATCH (n:Point {id:$id}) "
             "RETURN coalesce(n.ep_alpha, 1.0), coalesce(n.ep_beta, 1.0)",
@@ -110,10 +127,12 @@ class TortoiseEP:
         return (float(rows[0][0]), float(rows[0][1])) if rows else (1.0, 1.0)
 
     def _write_node(self, node_id: str, alpha: float, beta: float) -> None:
-        if hasattr(self, '_node_cache'):
-            self._node_cache[node_id] = (alpha, beta)
+        _cache = getattr(self, '_node_cache', None)
+        if _cache is not None:
+            _cache[node_id] = (alpha, beta)
             return
-        mean = round(alpha / (alpha + beta), 4)
+        # #330: guard degenerate (0,0) params — uniform fallback instead of ZDE
+        mean = round(alpha / (alpha + beta), 4) if (alpha + beta) > 0 else 0.5
         self.g.query(
             "MATCH (n:Point {id:$id}) "
             "SET n.ep_alpha=$a, n.ep_beta=$b, n.confidence=$c",
@@ -123,8 +142,9 @@ class TortoiseEP:
     def _read_message(self, op_id: str, claim_id: str,
                       rel_type: str = "IMPL") -> tuple[float, float]:
         key = (op_id, claim_id, rel_type)
-        if hasattr(self, '_msg_cache') and key in self._msg_cache:
-            return self._msg_cache[key]
+        _cache = getattr(self, '_msg_cache', None)
+        if _cache is not None and key in _cache:
+            return _cache[key]
         rows = self.g.query(
             f"MATCH (o:Point {{id:$oid}})-[r:{rel_type}]->(c:Point {{id:$cid}}) "
             "RETURN coalesce(r.msg_alpha, 0.0), coalesce(r.msg_beta, 0.0)",
@@ -136,8 +156,9 @@ class TortoiseEP:
                        msg_alpha: float, msg_beta: float,
                        rel_type: str = "IMPL") -> None:
         key = (op_id, claim_id, rel_type)
-        if hasattr(self, '_msg_cache'):
-            self._msg_cache[key] = (msg_alpha, msg_beta)
+        _cache = getattr(self, '_msg_cache', None)
+        if _cache is not None:
+            _cache[key] = (msg_alpha, msg_beta)
             return
         self.g.query(
             f"MATCH (o:Point {{id:$oid}})-[r:{rel_type}]->(c:Point {{id:$cid}}) "
@@ -175,8 +196,9 @@ class TortoiseEP:
         is still strong (>= threshold) keeps the source's support unchanged; a
         weakened target triggers a reduction signal to the source.
         """
-        if hasattr(self, "_node_cache") and claim_id in self._node_cache:
-            a, b = self._node_cache[claim_id]
+        _cache = getattr(self, "_node_cache", None)
+        if _cache is not None and claim_id in _cache:
+            a, b = _cache[claim_id]
             mean = a / (a + b) if (a + b) > 0 else 0.5
             return mean >= threshold
         rows = self.g.query(
@@ -186,7 +208,8 @@ class TortoiseEP:
         if not rows or rows[0][0] is None:
             return False
         a, b = float(rows[0][0]), float(rows[0][1])
-        return a / (a + b) >= threshold
+        # #330: guard degenerate (0,0) params (cache path already guards)
+        return a / (a + b) >= threshold if (a + b) > 0 else False
 
     def _update_factor(self, op_id: str, op_type: str,
                        input_ids: list[str], weight: float = 1.0,
@@ -282,9 +305,12 @@ class TortoiseEP:
                     self._update_factor(op_id, op_type,
                                         [input_ids[i], input_ids[j]], weight, label, direction)
 
-    def _update_claim_posterior(self, claim_id: str) -> None:
-        # Start from evidence prior in natural parameter space
-        ev = self._evidence.get(claim_id)
+    def _update_claim_posterior(self, claim_id: str,
+                                 run_evidence: dict | None = None) -> None:
+        # Start from evidence prior in natural parameter space.
+        # #330: consume the run-scoped evidence (constructor + run-level),
+        # never the instance dict directly.
+        ev = (run_evidence or self._evidence).get(claim_id)
         if ev:
             total_eta1, total_eta2 = ev[0] - 1.0, ev[1] - 1.0
         else:
@@ -395,6 +421,11 @@ class TortoiseEP:
     def compute_confidence(self, claim_id: str) -> dict:
         a, b = self._read_node(claim_id)
         total = a + b
+        if total <= 0:
+            # #330: degenerate stored params (0,0) — uniform Beta(1,1) fallback
+            # instead of ZeroDivisionError.
+            return {"mean": 0.5, "variance": 1/12,
+                    "alpha": a, "beta": b, "effective_n": 0}
         return {
             "mean": a / total,
             "variance": (a * b) / (total * total * (total + 1)),
@@ -425,16 +456,30 @@ class TortoiseEP:
                 merged with any evidence set at construction time.
                 Evidence set at run() overrides per-claim.
         """
+        # Run-level evidence is CALL-SCOPED (#330): merge into a local dict so
+        # self._evidence is never mutated by run() — otherwise a later run()
+        # without evidence would re-apply (and re-write to the graph) stale
+        # run-level priors. Constructor evidence still applies every run.
+        run_evidence = dict(self._evidence)
         if evidence:
-            self._evidence.update(evidence)
+            run_evidence.update(evidence)
+
+        # Cache lifecycle (#330): _node_cache/_msg_cache are a per-run working
+        # set. Remove them at entry (before the evidence pre-write and the
+        # early returns) so a run that exits early never leaves stale cache
+        # behind for public reads (_read_node/_write_node fall through to the
+        # graph when the attribute is absent).
+        for _attr in ("_node_cache", "_msg_cache"):
+            if hasattr(self, _attr):
+                delattr(self, _attr)
 
         # Apply evidence priors to graph before EP iterations.
         # ponytail: direct graph write so evidence is visible even
         # when there are no operators / affected claims.
-        if self._evidence:
+        if run_evidence:
             params_list = [
                 {"id": cid, "a": a, "b": b}
-                for cid, (a, b) in self._evidence.items()
+                for cid, (a, b) in run_evidence.items()
             ]
             self.g.query(
                 "UNWIND $params AS p "
@@ -467,7 +512,7 @@ class TortoiseEP:
                 self._update_factor(op_id, op_type, input_ids, weight, label, direction)
 
             for cid in affected:
-                self._update_claim_posterior(cid)
+                self._update_claim_posterior(cid, run_evidence)
 
             max_change = 0.0
             for cid in affected:
@@ -481,7 +526,9 @@ class TortoiseEP:
 
             if max_change < self.tol:
                 self._flush_cache()
+                self._clear_caches()
                 return iteration + 1, True
 
         self._flush_cache()
+        self._clear_caches()
         return self.max_iter, False

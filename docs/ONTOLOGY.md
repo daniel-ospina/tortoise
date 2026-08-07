@@ -151,6 +151,16 @@ Per-type edges (chosen over single polymorphic edge — FalkorDB matrix-per-type
 | `nextEvent` | Event → Event | unidirectional | 1→1 | — | Sequencing (Graphiti NextEpisode equivalent) — planned |
 | `op: IMPL/NAND` | Event → Point | default bidirectional; optional unidirectional | N-ary | Epistemic | Outcome influence on belief (epistemic) |
 
+> **#531 — canonical Event→Point pattern (`humanApproval`):** a human approval of a planning artifact is recorded as an Event (`eventKind: humanApproval`) + a decision Point (`pointKind: humanApproval`). The Event carries occurrence provenance (approver `performs`, artifact `uses`, claim `aboutPoint`, decision `produces`); the decision Point is a live epistemic claim that seeds the grounding a-vector and receives an EP evidence prior `Beta(10,1)` so dependent claims strengthen. Fan-out is `-[:IMPL {direction: "unidirectional", label: "approvedBy"}]->` per approved claim — deliberately unidirectional so claim weakness never back-propagates into the approval. No stored `approved` status on Objects — approval is derived from the event stream at query time. Worked example (`file_human_approval`, #531):
+>
+> ```
+> (:Subject "Daniel")-[:performs]->(:Event {eventKind:"humanApproval", startedAt:T})
+>   (:Event)-[:uses]->(:Document "Customer Profile CP-001")
+>   (:Event)-[:aboutPoint]->(:Point "CP-001 targets SMB segment")
+>   (:Event)-[:produces]->(:Point {pointKind:"humanApproval", content:"Approved: CP-001"})
+> (:Point "Approved: CP-001")-[:IMPL {direction:unidirectional, label:"approvedBy"}]-> approved claim Points
+> ```
+
 ### §3.9 Valid Predicate Vocabulary (code)
 
 All structural edges must use one of (enforced in `_create_edge`):
@@ -251,6 +261,7 @@ Epistemic edges (operators): `IMPL`, `NAND` (+ semantic label). About edges: `ab
 | `startedAt` / `endedAt` | ISO8601 | — | `prov:startedAtTime` / `schema:startDate` | ✅ | Temporal extent |
 | `subject` | SubjectID | — | `prov:wasAssociatedWith` (inverse) | ✅ | Who performed the event (mirrors `performs` edge) |
 | `object_name` / `object_type` | string | — | `prov:used` | ✅ | What was acted on / produced |
+| `file_hash` | string | — | — | ✅ | SHA-256 of the ingested file's raw bytes — ingest idempotency anchor (`ingest_corpus` skips byte-identical re-ingests; written by the DocumentCreated/AgentSession ingest paths, #330) |
 
 ### §4.6 Source
 
@@ -293,7 +304,8 @@ Epistemic edges (operators): `IMPL`, `NAND` (+ semantic label). About edges: `ab
 ### Point Kind Vocabulary (core)
 
 ```
-statement, decision, vision, strategy, plan, goal, target, observation, hypothesis
+statement, decision, vision, strategy, plan, goal, target, observation, hypothesis,
+humanApproval   # #531: decision Point for a filed human approval
 ```
 
 ### Object Kind Vocabulary (core)
@@ -306,7 +318,7 @@ Project, WorkItem, document, tag, user, skill, tool, agent, workflow, agreement,
 
 ```
 meeting, decision, experiment, deployment, review, friction, extraction,
-documentCreated, roleCreated, pointAdded, sessionCaptured
+documentCreated, roleCreated, pointAdded, sessionCaptured, humanApproval  # #531
 ```
 
 ### Document Kind Vocabulary (core)

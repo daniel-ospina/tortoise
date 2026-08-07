@@ -14,6 +14,7 @@ is_dev_mode(), which returns True in hosted production (TORTOISE_API_KEY unset).
 from __future__ import annotations
 
 import asyncio
+import hmac
 import os
 import time
 from collections import OrderedDict, defaultdict
@@ -55,34 +56,12 @@ def _get_team_sdk() -> TortoiseSDK:
     return TortoiseSDK(namespace=team_id)
 
 
-# ── HTTP tool allow-list (default-deny, #454 TODO) ──────────────────────────
-# New tools are EXCLUDED from the tenant HTTP surface unless added here.
-# Category rules (D11): read tools, idempotent creates, team CRUD, EP tools,
-# navigation, session tools. Excluded: team_create (privilege escalation),
-# backfill_v25 (schema migration), ingest_corpus (path traversal).
-HTTP_ALLOWED: frozenset[str] = frozenset({
-    "tortoise_create_point", "tortoise_query", "tortoise_paginated_query",
-    "tortoise_check_structure", "tortoise_summarize_structure",
-    "tortoise_list_pointkinds", "tortoise_list_sources", "tortoise_list_namespaces",
-    "tortoise_get_point", "tortoise_suggest_entry_points", "tortoise_search",
-    "tortoise_compute_confidence", "tortoise_set_point_baseline",
-    "tortoise_get_confidence", "tortoise_calibrate_summary", "tortoise_update_point",
-    "tortoise_create_operator", "tortoise_annotate_operator", "tortoise_get_operator",
-    "tortoise_mitigate_operator", "tortoise_delete_point", "tortoise_supersede",
-    "tortoise_invalidate", "tortoise_entity_profile", "tortoise_traverse",
-    "tortoise_analyze", "tortoise_create_subject", "tortoise_create_object",
-    "tortoise_create_event", "tortoise_create_document", "tortoise_create_source",
-    "tortoise_get_source_reliability", "tortoise_assess_source",
-    "tortoise_set_source_tier",
-    "tortoise_get_entity", "tortoise_update_entity", "tortoise_delete_entity",
-    "tortoise_create_edge", "tortoise_status", "tortoise_health", "tortoise_taxonomy",
-    "tortoise_list_graphs", "tortoise_checkpoint", "tortoise_diary_write",
-    "tortoise_diary_read", "tortoise_session_context", "tortoise_file_decision",
-    "tortoise_get_governance", "tortoise_list_topics", "tortoise_stale",
-    "tortoise_provenance", "tortoise_dream", "tortoise_get_events",
-    "tortoise_get_session", "tortoise_list_tags",
-    "tortoise_query_points_by_tag", "tortoise_search_sessions",
-})
+# ── HTTP tool allow-list (derived from registry; #454) ────────────────
+# New tools are EXCLUDED from the tenant HTTP surface unless registered with
+# http_policy=True in tool_registry.py. Zero manual sync — see #454.
+from tortoise.tool_registry import get_http_allowed as _get_http_allowed
+HTTP_ALLOWED: frozenset[str] = _get_http_allowed()
+
 
 # JSON-RPC error codes (D9)
 ERR_UNAUTHORIZED = -32001
@@ -175,6 +154,61 @@ class TeamResolutionMiddleware(BaseHTTPMiddleware):
         # No .reset() needed: Starlette creates a fresh asyncio task per request;
         # ContextVars are copy-on-write per task (verified by
         # test_contextvar_not_leaked_to_next_request).
+        return await call_next(request)
+
+
+class TransportModeMiddleware(BaseHTTPMiddleware):
+    """Self-host transport init (auth_mode="static" | "none", #338).
+
+    TeamResolutionMiddleware sets these ContextVars for tenant mode; selfhost
+    modes have no tenant resolution, so this middleware initializes them:
+    _transport_mode="http" (passes _safe()'s fail-closed gate — auth was
+    enforced at transport: static key check or localhost-bound none mode) and
+    _current_team_id="selfhost" (isolated team_selfhost graph namespace).
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        _transport_mode.set("http")
+        _current_team_id.set("selfhost")
+        return await call_next(request)
+
+
+class StaticKeyMiddleware(BaseHTTPMiddleware):
+    """Static API-key auth for single-tenant self-host (auth_mode="static").
+
+    Validates a single configured key (TORTOISE_API_KEY) with constant-time
+    compare. Fail-closed: if api_key is None (misconfiguration), all POSTs
+    are rejected 503 — never allow unauthenticated writes.
+    """
+
+    def __init__(self, app, *, api_key: str | None):
+        super().__init__(app)
+        self._api_key = api_key
+
+    async def dispatch(self, request: Request, call_next):
+        # GET metadata route + DELETE (stateless no-op) skip auth, matching
+        # TeamResolutionMiddleware behavior.
+        if request.method != "POST":
+            return await call_next(request)
+        if self._api_key is None:
+            return JSONResponse(
+                {"jsonrpc": "2.0", "error": {"code": -32099, "message": "Static auth misconfigured: no API key set."}, "id": None},
+                status_code=503,
+            )
+        auth = request.headers.get("Authorization", "")
+        if not auth.startswith("Bearer "):
+            return _jsonrpc_error(
+                ERR_UNAUTHORIZED,
+                "Unauthorized: missing Bearer token.",
+                status=401,
+            )
+        token = auth[7:]
+        if not hmac.compare_digest(token.encode(), self._api_key.encode()):
+            return _jsonrpc_error(
+                ERR_UNAUTHORIZED,
+                "Unauthorized: invalid API key.",
+                status=401,
+            )
         return await call_next(request)
 
 

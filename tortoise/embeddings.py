@@ -15,37 +15,52 @@ logger = logging.getLogger(__name__)
 class EmbeddingModel:
     """Lazy-loaded embedding model singleton.
 
-    Phase 0 stub (#7748): returns None until Phase 1A (#7698) loads all-MiniLM-L6-v2.
+    Loads all-MiniLM-L6-v2 (384-dim) via sentence-transformers. Model loading
+    runs in a worker thread with a 30s timeout. In the hosted Docker image the
+    model is pre-downloaded at build time (Dockerfile.hosted) and pre-warmed at
+    container start (entrypoint.sh), so the first API request never hits a cold
+    start. Failures are NOT permanent — the next get() call creates a fresh
+    instance and retries.
 
-    Model loading runs in a worker thread with a hard timeout (#7871 E2E):
-    SentenceTransformer downloads ~90MB from HuggingFace on first use. In a
-    sandboxed/blocked network this hangs indefinitely, blocking every
-    create_point call. We therefore (1) load in a thread, (2) time-box it,
-    (3) remember failure so we never retry the download per-request.
-    Embeddings are OPTIONAL — point creation must never depend on them.
+    Embeddings are OPTIONAL — point creation and search must never depend on them.
     """
     _instance: "EmbeddingModel | None" = None
     _model = None
-    _load_failed = False
     _lock = threading.Lock()
-    _LOAD_TIMEOUT_S = 10.0
+    _LOAD_TIMEOUT_S = 30.0  # generous for cold I/O (model is 90MB on disk; pre-warmed at startup in hosted)
 
     @classmethod
     def get(cls) -> "EmbeddingModel | None":
-        """Get or create the singleton. Returns None if model unavailable."""
-        if cls._instance is None and not cls._load_failed:
+        """Get or create the singleton. Returns None if model unavailable.
+
+        Loads the model in a worker thread with a hard timeout. In the hosted
+        Docker image the model is pre-downloaded at build time (Dockerfile.hosted)
+        and pre-warmed at container start (entrypoint.sh), so this path is only
+        hit in dev or if the pre-warm was skipped. Unlike the old implementation,
+        we do NOT permanently self-disable — a transient failure (OOM from a
+        competing process, slow I/O) is retried on the next call.
+        """
+        if cls._instance is None:
             with cls._lock:
-                if cls._instance is None and not cls._load_failed:
+                if cls._instance is None:
                     cls._instance = cls()
-        return cls._instance._model if (cls._instance and cls._instance._model) else None
+        model = cls._instance._model if (cls._instance and cls._instance._model) else None
+        if model is None and cls._instance is not None:
+            # Transient load failure (timeout/OOM) — clear the instance so the
+            # NEXT get() call retries (code-review P2 fix, #160). Previously
+            # the timed-out instance was cached forever, making the failure
+            # permanent despite the docstring claiming retry.
+            with cls._lock:
+                cls._instance = None
+                cls._model = None
+        return model
 
     @classmethod
     def _reset(cls) -> None:
-        """Test hook — clear cached instance/failure state."""
+        """Test hook — clear cached instance."""
         with cls._lock:
             cls._instance = None
             cls._model = None
-            cls._load_failed = False
 
     def __init__(self):
         result: dict = {"model": None}
@@ -62,13 +77,16 @@ class EmbeddingModel:
         t.start()
         t.join(timeout=self._LOAD_TIMEOUT_S)
         if t.is_alive():
-            # Download/load hung — give up, remember failure, never retry.
+            # Model load timed out — log and return None. Do NOT permanently
+            # self-disable: in the hosted container the model is pre-downloaded
+            # and pre-warmed at startup (entrypoint.sh), so this path means
+            # transient resource starvation (OOM, competing process). Next call
+            # will create a fresh instance and retry.
             logger.warning(
-                "Embedding model load exceeded %ss — disabling embeddings "
-                "for this process (point creation must not block on it).",
+                "Embedding model load exceeded %ss — returning None "
+                "(retries on next get() call).",
                 self._LOAD_TIMEOUT_S,
             )
-            type(self)._load_failed = True
             self._model = None
             return
         self._model = result["model"]

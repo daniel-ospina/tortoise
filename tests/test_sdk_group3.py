@@ -234,12 +234,101 @@ More content.
         assert result["updated"] == 0
         assert result["skipped"] == 0
 
-    def test_reingest_updates(self, sdk, corpus_dir):
+    def test_reingest_unchanged_skipped(self, sdk, corpus_dir):
+        # #330: byte-identical re-ingest must count as skipped, not updated
         sdk.ingest_corpus(str(corpus_dir))
         result = sdk.ingest_corpus(str(corpus_dir))
-        # All should be updates since docs already exist
-        assert result["updated"] == 3
         assert result["ingested"] == 0
+        assert result["updated"] == 0
+        assert result["skipped"] == 3
+
+    def test_reingest_changed_updates(self, sdk, corpus_dir):
+        # #330: a changed file counts as updated (not skipped)
+        sdk.ingest_corpus(str(corpus_dir))
+        (corpus_dir / "doc1.md").write_text("---\ntitle: Changed\n---\nnew body\n")
+        result = sdk.ingest_corpus(str(corpus_dir))
+        assert result["updated"] == 1
+        assert result["skipped"] == 2
+        assert result["ingested"] == 0
+
+    def test_reingest_new_doc_ingested(self, sdk, corpus_dir):
+        # #330: a genuinely new doc still counts as ingested
+        sdk.ingest_corpus(str(corpus_dir))
+        (corpus_dir / "doc3.md").write_text("---\ntitle: Doc Three\n---\n# Three\n")
+        result = sdk.ingest_corpus(str(corpus_dir))
+        assert result["ingested"] == 1
+        assert result["skipped"] == 3
+        assert result["updated"] == 0
+
+    def test_reingest_legacy_no_hash_backfills(self, sdk, corpus_dir):
+        # #330: legacy events without a stored file_hash must update + backfill
+        # (NOT crash, NOT skip) — simulate pre-upgrade data.
+        sdk.ingest_corpus(str(corpus_dir))
+        proj = sdk._get_proj()
+        proj.g.query(
+            "MATCH (e:Event {eventId:'doc1.md'}) REMOVE e.file_hash"
+        )
+        result = sdk.ingest_corpus(str(corpus_dir))
+        assert result["updated"] == 1, f"legacy no-hash event should update+backfill, got {result}"
+        assert result["skipped"] == 2
+        row = proj.g.query(
+            "MATCH (e:Event {eventId:'doc1.md'}) RETURN e.file_hash"
+        ).result_set[0]
+        assert row[0] is not None, "file_hash was not backfilled"
+
+    def test_agentsession_reingest_unchanged_skipped(self, sdk, tmp_path):
+        # #330: AgentSession mode — identical file counts as skipped
+        p = tmp_path / "s.md"
+        p.write_text("---\ntitle: S1\n---\ncontent here\n")
+        sdk.ingest_corpus(str(tmp_path), eventKind="AgentSession")
+        result = sdk.ingest_corpus(str(tmp_path), eventKind="AgentSession")
+        assert result["skipped"] == 1, f"expected 1 skipped, got {result}"
+        assert result["updated"] == 0
+
+    def test_agentsession_changed_updates_with_arc(self, sdk, tmp_path):
+        # #330: AgentSession mode — changed file counts as updated
+        p = tmp_path / "s.md"
+        p.write_text("---\ntitle: S2\n---\nphase one content\n")
+        sdk.ingest_corpus(str(tmp_path), eventKind="AgentSession")
+        p.write_text("---\ntitle: S2\n---\nphase two content\n")
+        result = sdk.ingest_corpus(str(tmp_path), eventKind="AgentSession")
+        assert result["updated"] == 1, f"expected 1 updated, got {result}"
+        assert result["skipped"] == 0
+
+    def test_agentsession_keywordless_unchanged_is_skipped(self, sdk, tmp_path):
+        # #330: an unchanged file whose stored event lacks keywords must count
+        # as skipped (enrichment is a no-op), not updated. Content is chosen so
+        # keyword extraction returns [] (only 1-char/stopword tokens).
+        content = "a b c d e f g"
+        p = tmp_path / "s.md"
+        p.write_text(content)
+        sdk.ingest_corpus(str(tmp_path), eventKind="AgentSession")
+        proj = sdk._get_proj()
+        import hashlib as _h
+        h = _h.sha256(content.encode()).hexdigest()
+        row = proj.g.query(
+            "MATCH (e:Event) WHERE e.file_hash = $h RETURN e.keywords",
+            params={"h": h},
+        ).result_set
+        assert row and not row[0][0], "fixture failed: event should have no keywords"
+        r2 = sdk.ingest_corpus(str(tmp_path), eventKind="AgentSession")
+        assert r2["skipped"] == 1, f"keyword-less unchanged file should skip, got {r2}"
+        assert r2["updated"] == 0
+
+    def test_ingest_agentsession_progress_resume_skips(self, sdk, tmp_path):
+        # #330: progress-file resume counts completed files as skipped (no re-write)
+        import json as _json
+        p = tmp_path / "s.md"
+        p.write_text("---\ntitle: S3\n---\nresume content\n")
+        prog = str(tmp_path / "progress.json")
+        r1 = sdk.ingest_corpus(str(tmp_path), eventKind="AgentSession", progress_file=prog)
+        assert r1["ingested"] == 1
+        r2 = sdk.ingest_corpus(str(tmp_path), eventKind="AgentSession", progress_file=prog)
+        assert r2["skipped"] == 1, f"resumed files should be skipped, got {r2}"
+        assert r2["updated"] == 0
+        # Progress file still tracks the completed file
+        data = _json.load(open(prog))
+        assert str(p) in data["completed_files"]
 
 
 # ── create_point dedup regression (#80) ─────────────────────────
@@ -269,3 +358,36 @@ def test_create_point_dedup_without_first_dedup(sdk):
     assert point.get("content_hash") == _content_hash(content), (
         "content_hash should be stored on every new point (#80)"
     )
+
+
+# ── #330: checkpoint semantic-dedup failure observability ────────────────
+
+
+class TestCheckpointDedupObservability:
+    """#330: checkpoint() must not swallow semantic-dedup failures silently —
+    log them (INFO for expected missing-deps, WARNING otherwise) while
+    keeping the fail-open hash-only fallback."""
+
+    def test_semantic_dedup_failure_falls_back(self, sdk, monkeypatch):
+        def boom(candidates, threshold):
+            raise RuntimeError("simulated dedup backend failure")
+        monkeypatch.setattr(sdk, "_semantic_dedup", boom)
+        result = sdk.checkpoint(
+            [{"wing": "p", "room": "r", "content": "unique content X"}]
+        )
+        assert result["filed"] == 1      # hash-only fallback worked
+        assert result["duplicates"] == 0
+
+    def test_semantic_dedup_failure_is_logged(self, sdk, monkeypatch, caplog):
+        import logging
+
+        def boom(candidates, threshold):
+            raise RuntimeError("simulated dedup backend failure")
+        monkeypatch.setattr(sdk, "_semantic_dedup", boom)
+        with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
+            sdk.checkpoint(
+                [{"wing": "p", "room": "r", "content": "unique content Y"}]
+            )
+        assert any("dedup" in r.message for r in caplog.records), (
+            "semantic-dedup failure was swallowed silently — no log record"
+        )

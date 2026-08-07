@@ -1,10 +1,12 @@
 ---
-subjects:
-  team: organisation-design-team
+title: "Engineering Wiki — Synthesis"
 type: synthesis
-domain: engineering
+domain: platform
 doc_status: draft
+subjects.team: organisation-design-team
 created: 2026-07-29
+aboutSubjects: tortoise
+aboutObjects: tortoise
 ---
 
 # Engineering Wiki — Synthesis
@@ -31,4 +33,5 @@ El Dato's engineering platform provides the infrastructure for the epistemic gra
 
 ## Recent Research
 
+- 2026-08-07: #338 service-model research — Tortoise already runs as a hosted service (Fly.io, MCP Streamable HTTP at /mcp, 58 tools, tenant tt_ keys); gap is positioning (README/docs library-first) + license consistency (README=BSL vs LICENSE=AGPLv3 vs pyproject=MIT; DEC-002 ranked AGPLv3-dual 0.906 > BSL 0.8875). See `docs/research/2026-08-07-338-service-model.md`.
 - 2026-07-29: EP convergent argument fix evaluation (see log.md INGEST entry)

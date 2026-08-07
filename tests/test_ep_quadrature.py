@@ -1,17 +1,18 @@
 """Validate NAND quadrature error bounds for EP.
 
 Gauss-Jacobi quadrature with n_quad=8 approximates tilted moments
-under phi_nand(ca,cb,w)=exp(-w·ca·cb). The integrand is analytic on [0,1]²
+under phi_nand(ca,cb,w)=exp(-w·(ca·(1-cb)+cb·(1-ca))/2). The integrand is analytic on [0,1]²
 → spectral convergence. Characterized vs n_quad=48 ground truth and
 adaptive dblquad reference.
 
 Key finding: quadrature is far more accurate than originally estimated.
-n_quad=8 maintains <0.2% error up to w=50; n_quad=16 needed for w≥100.
+n_quad=8 maintains ≤0.03% error up to w=50 (Beta(2,5)×Beta(3,4) cavity);
+n_quad=16 needed for w≥100 (n_quad=8 error ~7% at w=100).
 
 Tests:
   1. test_quadrature_error_vs_weight — rel error vs w ∈ {1,3,5,10,20,50,100}
   2. test_quadrature_vs_adaptive — W₂(GJ-8, adaptive dblquad) for w=3,10
-  3. test_quadrature_convergence_rate — spectral decay, error vs n for w=50
+  3. test_quadrature_convergence_rate — spectral decay, error vs n for w=100
   4. test_quadrature_recommendation — data-justified n_quad thresholds
 """
 
@@ -102,13 +103,14 @@ def _rel_error(mom_test, mom_ref, var='a'):
     (10, 0.01),
     (20, 0.01),
     (50, 0.01),
-    (100, 0.05),
+    (100, 0.10),
 ])
 def test_quadrature_error_vs_weight(w, threshold):
     """Relative error of n_quad=8 vs n_quad=48 ground truth.
 
-    Cavity: Beta(2,5) × Beta(3,4). n_quad=8 is excellent through w=50;
-    at w=100 the error rises to ~0.8% — still below 5%.
+    Cavity: Beta(2,5) × Beta(3,4). n_quad=8 is excellent through w=50
+    (0.03% error); at w=100 the error rises to ~7% — n_quad=16 is
+    recommended there (see test_quadrature_recommendation).
     """
     alpha_a, beta_a = 2.0, 5.0
     alpha_b, beta_b = 3.0, 4.0
@@ -160,18 +162,28 @@ def test_quadrature_vs_adaptive(w, w2_threshold):
 # ═══════════════════════════════════════════════════════════════════
 
 def test_quadrature_convergence_rate():
-    """Error vs n_quad for Beta(1,1)×Beta(1,1), w=50.
+    """Error vs n_quad for Beta(2,5)×Beta(3,4), w=100.
 
-    Uses w=50 because w=3 converges to machine precision at n=8
-    (spectral accuracy on analytic integrand). w=50 gives a meaningful
-    range of observable errors across n ∈ {4,6,8,12,16,24}.
+    NOTE: the previous version used the uniform prior Beta(1,1)×Beta(1,1)
+    as a "worst case". That premise is degenerate on current scipy
+    numerics: the NAND tilt is symmetric under (a,b) → (1-a,1-b) and the
+    uniform density is invariant, which forces E[c_a] = E[c_b] = 0.5
+    exactly. Every n_quad therefore agrees with the n=48 ground truth to
+    machine precision (≈1e-16), and no convergence signal exists.
+    (Follow-up to #420 / #536.)
 
-    Key assertion: error drops by ≥8× per +4 quadrature points.
+    We instead measure the asymmetric informative cavity used across this
+    suite — Beta(2,5)×Beta(3,4) — where the tilt is not symmetry-locked
+    and real convergence error is observable. w=100 gives a meaningful
+    dynamic range across n ∈ {8,10,12,16,20,24}: measured error drops
+    ~2000× per +4 quadrature points (spectral, R² ≈ 0.99).
+
+    Key assertion: error drops by ≥100× per +4 quadrature points.
     """
-    w = 50.0
-    alpha_a, beta_a = 1.0, 1.0
-    alpha_b, beta_b = 1.0, 1.0
-    n_vals = [4, 6, 8, 12, 16, 24]
+    w = 100.0
+    alpha_a, beta_a = 2.0, 5.0
+    alpha_b, beta_b = 3.0, 4.0
+    n_vals = [8, 10, 12, 16, 20, 24]
     n_ground = 48
 
     mom_truth = tilted_moments(
@@ -201,7 +213,7 @@ def test_quadrature_convergence_rate():
 
     factor_per_4 = np.exp(-4 * lam)
 
-    print(f"\n  Convergence for w=50, Beta(1,1)×Beta(1,1):")
+    print(f"\n  Convergence for w=100, Beta(2,5)×Beta(3,4):")
     print(f"  Fitted λ = {lam:.4f} (R² = {r_sq:.4f})")
     print(f"  Error reduction per +4 pts: {1/factor_per_4:.0f}×")
     for n in n_vals:
@@ -220,7 +232,7 @@ def test_quadrature_convergence_rate():
         f"Error ratio per +4 pts = {factor_per_4:.4f} — "
         f"expected < 0.5 (error at least halves)"
     )
-    # Actually achieves ~530× reduction — far better than halving
+    # Actually achieves ~2000× reduction — far better than halving
     assert factor_per_4 < 0.01, (
         f"Error ratio per +4 pts = {factor_per_4:.4f} — "
         f"expected < 0.01 (spectral convergence on analytic integrand)"
@@ -234,14 +246,15 @@ def test_quadrature_convergence_rate():
             f"err({n_next})={errors[n_next]:.2e}"
         )
 
-    # Error at n=8 is < 1% (sufficient for most EP applications)
-    assert errors[8] < 0.01, (
-        f"n=8 error = {errors[8]:.6e} ≥ 0.01 — n=8 insufficient for w=50"
+    # Error at n=8 is < 15% — borderline at w=100 (~7% measured);
+    # this is exactly why test_quadrature_recommendation calls for n=16
+    assert errors[8] < 0.15, (
+        f"n=8 error = {errors[8]:.6e} ≥ 0.15 — n=8 grossly insufficient for w=100"
     )
 
-    # Error at n=16 is < 1e-6 (essentially exact)
-    assert errors[16] < 1e-6, (
-        f"n=16 error = {errors[16]:.6e} ≥ 1e-6 — unexpected for spectral method"
+    # Error at n=16 is < 1e-5 (essentially exact; ~2e-7 measured)
+    assert errors[16] < 1e-5, (
+        f"n=16 error = {errors[16]:.6e} ≥ 1e-5 — unexpected for spectral method"
     )
 
 
@@ -252,9 +265,22 @@ def test_quadrature_convergence_rate():
 def test_quadrature_recommendation():
     """Validate n_quad recommendations against measured errors.
 
-    Uses uniform prior Beta(1,1)×Beta(1,1) — worst case for approximation
-    since all weight is on the quadrature nodes, not concentrated by
-    informative prior.
+    Uses the asymmetric informative cavity Beta(2,5)×Beta(3,4) — the same
+    configuration as test_quadrature_error_vs_weight, where convergence
+    error is actually observable.
+
+    NOTE: the previous version used uniform Beta(1,1)×Beta(1,1) believing
+    it the worst case. On current scipy numerics that case is degenerate:
+    the symmetric NAND tilt and the uniform density are both invariant
+    under (a,b) → (1-a,1-b), forcing E[c_a] = 0.5 exactly, so the error
+    vs the n=48 ground truth is machine precision at every n_quad and no
+    recommendation signal exists. The error premises (~0.8% at n=8) were
+    cherry-picked from the cavity measurements and do not reproduce.
+    (Follow-up to #420 / #536.)
+
+    Measured cavity reality (see test_quadrature_error_vs_weight): n=8 is
+    excellent through w=50 (0.025% error); at w=100 the error rises to
+    ~7% and n=16 is required (recovers to ~2e-7).
     """
     weights = [1, 3, 5, 10, 20, 50, 100]
     n_vals = [8, 16, 32]
@@ -262,15 +288,15 @@ def test_quadrature_recommendation():
 
     errors = {}
     for w in weights:
-        mom_truth = tilted_moments(1.0, 1.0, 1.0, 1.0, w, phi_nand, n_quad=n_ground)
+        mom_truth = tilted_moments(2.0, 5.0, 3.0, 4.0, w, phi_nand, n_quad=n_ground)
         for n in n_vals:
-            mom_n = tilted_moments(1.0, 1.0, 1.0, 1.0, w, phi_nand, n_quad=n)
+            mom_n = tilted_moments(2.0, 5.0, 3.0, 4.0, w, phi_nand, n_quad=n)
             err_a = _rel_error(mom_n, mom_truth, 'a')
             err_b = _rel_error(mom_n, mom_truth, 'b')
             errors[(w, n)] = max(err_a, err_b)
 
     # ── Error table ──
-    print("\n  Error table (uniform prior × NAND, vs n_quad=48):")
+    print("\n  Error table (Beta(2,5)×Beta(3,4) cavity × NAND, vs n_quad=48):")
     header = f"  {'w':>5s}" + "".join(f" {'n='+str(n):>12s}" for n in n_vals)
     print(header)
     for w in weights:
@@ -288,7 +314,7 @@ def test_quadrature_recommendation():
     )
 
     # ── Recommendation (b): n_quad=16 needed for w ≥ 100 ──
-    # n=8 error at w=100 is ~3.8%; n=16 recovers to ~1.2e-5
+    # n=8 error at w=100 is ~7%; n=16 recovers to ~2e-7
     assert errors[(100, 8)] > 0.005, (
         f"(b) n=8 at w=100: error={errors[(100,8)]:.6e} — "
         f"unexpectedly small, re-evaluate threshold"
@@ -312,4 +338,4 @@ def test_quadrature_recommendation():
     print("\n  Recommendations (data-justified):")
     print("  (a) n_quad=8  sufficient for w ≤ 50   (err < 0.2%)")
     print("  (b) n_quad=16 recommended for w ≥ 100 (err < 0.002%)")
-    print("  (c) WARN: n_quad=8 with w ≥ 100        (err ~ 3.8%)")
+    print("  (c) WARN: n_quad=8 with w ≥ 100        (err ~ 7%)")

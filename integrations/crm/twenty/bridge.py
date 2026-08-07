@@ -216,58 +216,107 @@ def queue_unmatched_speaker(meeting_id: str, speaker: dict) -> None:
 # --- Tortoise Integration ---
 
 def tortoise_available() -> bool:
-    """Check if Tortoise MCP tools are available."""
+    """Check if the Tortoise daemon is reachable over MCP (#338 T2.2).
+
+    Real connectivity probe (not an import check) — graceful when the
+    daemon is down: scripts skip, never crash.
+    """
     try:
-        from tortoise.sdk import TortoiseSDK
-        return TortoiseSDK() is not None
+        from tortoise.mcp_client import available
+        return available()
     except (ImportError, ValueError):
         return False
 
 
+def _point_id(result) -> tuple[str | None, str | None]:
+    """Extract (point_id, error) from an MCP call_tool result.
+
+    Fail-closed (code-review P1, #338): a rejected engine call surfaces as JSON
+    text with an "error" key (and is_error may be False) — detect it so the
+    caller never reports success for a failed write. Returns (None, error_msg)
+    on failure.
+    """
+    import json as _json
+
+    try:
+        if getattr(result, "is_error", False):
+            return None, "engine_error"
+        if hasattr(result, "content"):
+            for block in result.content:
+                text = getattr(block, "text", None)
+                if text:
+                    parsed = _json.loads(text)
+                    if isinstance(parsed, dict):
+                        if "error" in parsed:
+                            return None, str(parsed.get("error"))[:200]
+                        return parsed.get("id"), None
+        # dict-shaped fallback (some fastmcp versions unwrap)
+        if isinstance(result, dict):
+            if "error" in result:
+                return None, str(result.get("error"))[:200]
+            return result.get("id"), None
+    except (TypeError, ValueError, AttributeError):
+        pass
+    return None, "unparseable_result"
+
+
 def push_to_tortoise(frontmatter: dict) -> dict:
-    """Push meeting data to Tortoise/FalkorDB epistemic graph."""
+    """Push meeting data to Tortoise epistemic graph over MCP (#338 T2.2).
+
+    Connects to the daemon (TORTOISE_MCP_URL, default http://localhost:8000/mcp)
+    — never imports the engine. Idempotency preserved via dedup=True.
+    """
     if not tortoise_available():
         return {"status": "skipped", "reason": "tortoise_unavailable"}
 
     try:
-        from tortoise.sdk import TortoiseSDK
-        sdk = TortoiseSDK()
+        from tortoise.mcp_client import call_tool
 
         point_ids = []
+        failures = []
 
-        meeting_point = sdk.create_point(
-            kind="event",
-            content=f"Meeting: {frontmatter['title']} ({frontmatter['date']})",
-            context="meeting-intelligence",
-            authoredBy="minutes-bridge",
-            dedup=True,
-        )
-        point_ids.append({"type": "meeting", "id": meeting_point.get("id")})
+        meeting_point = call_tool("tortoise_create_point", {
+            "kind": "event",
+            "content": f"Meeting: {frontmatter['title']} ({frontmatter['date']})",
+            "authoredBy": "minutes-bridge",
+            "dedup": True,
+        })
+        mid, merr = _point_id(meeting_point)
+        point_ids.append({"type": "meeting", "id": mid})
+        if merr:
+            failures.append({"type": "meeting", "error": merr})
 
         for idx, decision in enumerate(frontmatter.get("decisions", [])):
             if not decision.get("text"):
                 continue
-            dp = sdk.create_point(
-                kind="decision",
-                content=decision["text"],
-                context="meeting-intelligence",
-                authoredBy="minutes-bridge",
-                dedup=True,
-            )
-            point_ids.append({"type": "decision", "index": idx, "id": dp.get("id")})
+            dp = call_tool("tortoise_create_point", {
+                "kind": "decision",
+                "content": decision["text"],
+                "authoredBy": "minutes-bridge",
+                "dedup": True,
+            })
+            did, derr = _point_id(dp)
+            point_ids.append({"type": "decision", "index": idx, "id": did})
+            if derr:
+                failures.append({"type": "decision", "index": idx, "error": derr})
 
         for idx, commitment in enumerate(frontmatter.get("commitments", [])):
             if not commitment.get("text"):
                 continue
-            cp = sdk.create_point(
-                kind="commitment",
-                content=commitment["text"],
-                context="meeting-intelligence",
-                authoredBy="minutes-bridge",
-                dedup=True,
-            )
-            point_ids.append({"type": "commitment", "index": idx, "id": cp.get("id")})
+            cp = call_tool("tortoise_create_point", {
+                "kind": "commitment",
+                "content": commitment["text"],
+                "authoredBy": "minutes-bridge",
+                "dedup": True,
+            })
+            cid, cerr = _point_id(cp)
+            point_ids.append({"type": "commitment", "index": idx, "id": cid})
+            if cerr:
+                failures.append({"type": "commitment", "index": idx, "error": cerr})
 
+        if failures:
+            return {"status": "error", "reason": "tortoise_push_partial",
+                    "points": point_ids, "failed": failures}
         return {"status": "ok", "points": point_ids}
 
     except Exception:

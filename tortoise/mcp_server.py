@@ -6,7 +6,7 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastmcp import FastMCP
 from mcp.types import ToolAnnotations
@@ -211,7 +211,6 @@ def _parse(v: Any) -> Any:
     return v
 
 
-@mcp.tool(annotations=ToolAnnotations(idempotentHint=True))
 def tortoise_create_point(kind: str, content: str,
                           authoredBy: str | None = None,
                           props: Any = None,
@@ -232,7 +231,6 @@ def tortoise_create_point(kind: str, content: str,
     return _safe(_get_team_sdk().create_point, kind, content, **merged)
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 def tortoise_query(kind: str | None = None,
                    filters: Any = None,
                    text: str | None = None,
@@ -265,7 +263,6 @@ def tortoise_query(kind: str | None = None,
     return result
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 def tortoise_paginated_query(kind: str | None = None,
                              skip: int = 0, limit: int = 20,
                              filters: Any = None) -> dict:
@@ -275,49 +272,41 @@ def tortoise_paginated_query(kind: str | None = None,
                  **(filters or {}))
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 def tortoise_check_structure() -> list[dict]:
     """Check Gate 0→4 chain integrity (orphans, dangling refs)."""
     return _safe(_get_team_sdk().check_structure)
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 def tortoise_summarize_structure() -> dict:
     """Count points per Gate (by pointKind). Returns {gateN_*, total}."""
     return _safe(_get_team_sdk().summarize_structure)
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 def tortoise_list_pointkinds() -> list[dict]:
     """List all pointKinds present in the graph with counts. What EXISTS."""
     return _safe(_get_team_sdk().list_pointkinds)
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 def tortoise_list_sources() -> list[dict]:
     """List all Sources with point counts. Where data came FROM."""
     return _safe(_get_team_sdk().list_sources)
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 def tortoise_list_namespaces() -> list[dict]:
     """List installed pack namespaces."""
     return _safe(_get_team_sdk().list_namespaces)
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 def tortoise_list_tags() -> list[dict]:
     """List all Tag names with count of tagged Points. Where tags are USED."""
     return _safe(_get_team_sdk().list_tags)
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 def tortoise_query_points_by_tag(tag: str) -> list[dict]:
     """Return Points connected to a Tag via TAGGED edge."""
     return _safe(_get_team_sdk().query_points_by_tag, tag)
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 def tortoise_get_point(id: str) -> dict:
     """Get a single Point by ID. Returns all properties, or empty dict."""
     return _safe(_get_team_sdk().get_point, id)
@@ -325,7 +314,6 @@ def tortoise_get_point(id: str) -> dict:
 
 # ── Entity Resolution (GAP-01 #6987) ──────────────────────────
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 def tortoise_suggest_entry_points(query: str, limit: int = 5,
                                   kind_filter: str | None = None) -> list[dict]:
     """Entity resolution — NL query → matching entities from the graph.
@@ -350,7 +338,6 @@ def tortoise_suggest_entry_points(query: str, limit: int = 5,
 
 # ── Semantic Search (#6990) ────────────────────────────────────
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 def tortoise_search(query: str | None = None, kind: str | None = None,
                     threshold: float = 0.0, limit: int = 10,
                     min_confidence: float = 0.0,
@@ -378,7 +365,6 @@ def tortoise_search(query: str | None = None, kind: str | None = None,
 
 # ── EP Belief Propagation (#6908) ────────────────────────────────
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 def tortoise_compute_confidence(factors: Any = None,
                     evidence: Any = None,
                     anchors: Any = None,
@@ -404,25 +390,21 @@ def tortoise_compute_confidence(factors: Any = None,
                  require_calibration=require_calibration)
 
 
-@mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
 def tortoise_set_point_baseline(claim_id: str, alpha: float, beta: float) -> dict:
     """Set Beta prior evidence for a claim."""
     return _safe(_get_team_sdk().set_point_baseline, claim_id, alpha, beta)
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 def tortoise_get_confidence(claim_id: str) -> dict:
     """Get EP confidence for a claim: {mean, variance, alpha, beta}."""
     return _safe(_get_team_sdk().get_confidence, claim_id)
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 def tortoise_calibrate_summary() -> list[dict]:
     """Audit graph calibration state. Returns per-point guidance."""
     return _safe(_get_team_sdk().calibrate_summary)
 
 
-@mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
 def tortoise_dream(full: bool = False, dirty_only: bool = True,
                    max_hops: int = 2) -> dict:
     """Run EP stabilization (dreaming, #85).
@@ -435,13 +417,11 @@ def tortoise_dream(full: bool = False, dirty_only: bool = True,
                  max_hops=max_hops)
 
 
-@mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
 def tortoise_update_point(id: str, props: Any) -> dict:
     """Update properties on a Point. Safe — modifies one Point only."""
     props = _parse(props)
     return _safe(_get_team_sdk().update_point, id, **(props or {}))
 
-@mcp.tool(annotations=ToolAnnotations(idempotentHint=True))
 def tortoise_create_operator(op_type: str, source_id: str, target_ids: Any,
                               direction: str = "bidirectional") -> dict:
     """Create an operator connecting Points.
@@ -460,7 +440,6 @@ def tortoise_create_operator(op_type: str, source_id: str, target_ids: Any,
                  direction=direction)
 
 
-@mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
 def tortoise_annotate_operator(id: str, bias: float, precision: float,
                                 consistency: float, directness: float) -> dict:
     """Annotate an operator Point with structured epistemic dimensions.
@@ -473,7 +452,6 @@ def tortoise_annotate_operator(id: str, bias: float, precision: float,
     return _safe(_get_team_sdk().annotate_operator, id, bias, precision, consistency, directness)
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 def tortoise_get_operator(id: str) -> dict:
     """Get an operator Point by ID. Returns all properties including annotation dimensions.
     Raises error if the Point is not an operator."""
@@ -483,7 +461,6 @@ def tortoise_get_operator(id: str) -> dict:
     return point
 
 
-@mcp.tool(annotations=ToolAnnotations(idempotentHint=True))
 def tortoise_mitigate_operator(id: str, reason: str, strength: float = 0.5) -> dict:
     """Create a mitigation Point that modulates an operator's edge strength.
 
@@ -494,7 +471,6 @@ def tortoise_mitigate_operator(id: str, reason: str, strength: float = 0.5) -> d
     return _safe(_get_team_sdk().mitigate_operator, id, reason, strength)
 
 
-@mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
 def tortoise_file_decision(options: Any, evidence: Any,
                            choice: int) -> dict:
     """File a simple decision directly to the graph.
@@ -514,13 +490,35 @@ def tortoise_file_decision(options: Any, evidence: Any,
     return _safe(_get_team_sdk().file_decision, options, evidence, choice)
 
 
-@mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
+def tortoise_file_human_approval(approver_id: str, artifact_id: str,
+                                 point_ids: Any,
+                                 decision_content: str | None = None) -> dict:
+    """File a human approval of a planning artifact to the graph (#531).
+
+    Records an Event (eventKind: humanApproval) with full provenance
+    (approver, artifact, approved claims), creates a decision Point
+    (pointKind: humanApproval) that seeds grounding and carries an EP
+    evidence prior, and fans out unidirectional IMPL edges (label
+    approvedBy) from the approval Point to the approved claim Points so
+    dependent claims strengthen.
+
+    approver_id: Subject id of the human approving
+    artifact_id: Object/Document id of the artifact being approved
+    point_ids: claim Point ids being approved
+    decision_content: optional content override for the decision Point
+
+    Returns {event_id, decision_point_id, impl_operator_ids, confidence_delta}.
+    """
+    point_ids = _parse(point_ids)
+    return _safe(_get_team_sdk().file_human_approval, approver_id, artifact_id,
+                 point_ids, decision_content)
+
+
 def tortoise_delete_point(id: str) -> dict:
     """Delete a Point. DESTRUCTIVE — requires human confirmation. Cannot be undone."""
     return _safe(_get_team_sdk().delete_point_wrapped, id)
 
 
-@mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
 def tortoise_invalidate(id: str, corrected_by_id: str) -> dict:
     """Mark a Point outdated with a CORRECTS edge from the correcting Point.
 
@@ -530,7 +528,6 @@ def tortoise_invalidate(id: str, corrected_by_id: str) -> dict:
     return _safe(_get_team_sdk().invalidate_point, id, corrected_by_id)
 
 
-@mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
 def tortoise_supersede(old_id: str, new_id: str) -> dict:
     """Atomically replace old Point with new — CORRECTS edge + outdated flag.
 
@@ -544,7 +541,6 @@ def tortoise_supersede(old_id: str, new_id: str) -> dict:
 
 # ── Navigation (#6962, #6963, #6964) ─────────────────────────────
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 def tortoise_entity_profile(entity_id: str, hops: int = 2,
                              graph_name: str = "tortoise",
                              pointKind: str | None = None,
@@ -564,7 +560,6 @@ def tortoise_entity_profile(entity_id: str, hops: int = 2,
                   hops=hops, pointKind=pointKind, confidenceMin=confidenceMin)
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 def tortoise_traverse(entity_id: str, max_hops: int = 2,
                        graph_name: str = "tortoise") -> dict:
     """Multi-hop graph traversal from entity following ALL relationship types.
@@ -607,7 +602,6 @@ if __name__ == "__main__":
 
 # ── P0 Group 3: Checkpoint, Diary, Status, Ingest ──────────────
 
-@mcp.tool(annotations=ToolAnnotations(idempotentHint=True))
 def tortoise_checkpoint(items: Any,
                         agent_name: str = "checkpoint",
                         threshold: float = 0.95) -> dict:
@@ -624,7 +618,6 @@ def tortoise_checkpoint(items: Any,
                  agent_name=agent_name, threshold=threshold)
 
 
-@mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
 def tortoise_diary_write(agent_name: str, entry: str,
                          topic: str | None = None,
                          wing: str | None = None) -> dict:
@@ -634,20 +627,17 @@ def tortoise_diary_write(agent_name: str, entry: str,
     return _safe(_get_team_sdk().diary_write, agent_name, entry, topic=topic, wing=wing)
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 def tortoise_diary_read(agent_name: str, last_n: int = 10,
                         wing: str | None = None) -> list[dict]:
     """Read recent diary entries for an agent, newest first."""
     return _safe(_get_team_sdk().diary_read, agent_name, last_n, wing=wing)
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 def tortoise_list_graphs() -> list[str]:
     """List all graph names in the database. Useful for namespace discovery."""
     return _safe(_get_team_sdk().list_graphs)
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 def tortoise_status() -> dict:
     """Graph health + entity counts + FalkorDB connectivity.
     Returns {connected, counts: {Point, Event, ...}, total_entities}.
@@ -655,7 +645,6 @@ def tortoise_status() -> dict:
     return _safe(_get_team_sdk().status)
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 def tortoise_health() -> dict:
     """Health check + basic metrics: graph_size, last_ingest, error_count, uptime."""
     # #236: route through _safe() so every tool is gated (defense-in-depth;
@@ -663,7 +652,6 @@ def tortoise_health() -> dict:
     return _safe(monitoring.metrics)
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 def tortoise_session_context() -> dict:
     """Return 'what happened last session' — diary entries, recent Points, Events, confidence changes.
     Returns {no_prior_sessions, diary_entries, recent_points, recent_events, confidence_changes}.
@@ -671,7 +659,6 @@ def tortoise_session_context() -> dict:
     return _safe(_get_team_sdk().session_context)
 
 
-@mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
 def tortoise_ingest_corpus(directory: str) -> dict:
     """Batch document ingestion — walk directory, parse YAML frontmatter
     from .md files, create/update Document nodes.
@@ -686,13 +673,11 @@ def tortoise_ingest_corpus(directory: str) -> dict:
 
 # ── Taxonomy ─────────────────────────────────────────────────
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 def tortoise_taxonomy() -> dict[str, int]:
     """Count entities by node label. Returns {Point: N, Event: N, Subject: N, Object: N, Document: N}."""
     return _safe(_get_team_sdk().taxonomy)
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 def tortoise_list_topics(entity_id: str) -> dict:
     """entityProfile lite for an entity. Returns {id, pointKind, neighbors, neighborCounts}."""
     return _safe(_get_team_sdk().list_topics, entity_id)
@@ -700,7 +685,6 @@ def tortoise_list_topics(entity_id: str) -> dict:
 
 # ── Graph Analysis ──────────────────────────────────────────────
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 def tortoise_analyze(question: str,
                     entityId: str | None = None,
                     anchor_ids: Any = None,
@@ -752,13 +736,11 @@ def tortoise_analyze(question: str,
 
 # ── P1-3: Staleness Detection ─────────────────────────────────
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 def tortoise_stale(days: int = 30, limit: int = 50) -> dict:
     """Find Points not updated in N days. Returns {stale, count, cutoff, limit}."""
     return _safe(_get_team_sdk().stale_points, days=days, limit=limit)
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 def tortoise_provenance(point_id: str) -> dict:
     """Provenance chain — "Who decided this?" Follows authoredBy → Subject → delegation."""
     return _safe(_get_team_sdk().provenance, point_id)
@@ -766,7 +748,6 @@ def tortoise_provenance(point_id: str) -> dict:
 
 # ── Multi-tenancy (#7001) ────────────────────────────────────
 
-@mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
 def tortoise_team_create(name: str) -> dict:
     """Create isolated team graph via FalkorDB select_graph.
     Generates a per-team API key. Returns {name, graph_name, api_key, id}.
@@ -784,36 +765,30 @@ def tortoise_team_create(name: str) -> dict:
 
 # ── Entity CRUD (ONTOLOGY v2.5) ───────────────────────────────
 
-@mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
 def tortoise_create_subject(name: str, subjectKind: str, props: Any = None) -> dict:
     """Create a Subject node (team, role, organization, person)."""
     props = _parse(props)
     return _safe(_get_team_sdk().create_subject, name, subjectKind, **(props or {}))
 
-@mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
 def tortoise_create_object(name: str, objectKind: str, props: Any = None) -> dict:
     """Create an Object node (product, customer, skill, etc.)."""
     props = _parse(props)
     return _safe(_get_team_sdk().create_object, name, objectKind, **(props or {}))
 
-@mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
 def tortoise_create_event(name: str, eventKind: str, props: Any = None) -> dict:
     """Create an Event node (meeting, decision, deployment, etc.)."""
     props = _parse(props)
     return _safe(_get_team_sdk().create_event, name, eventKind, **(props or {}))
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 def tortoise_get_events(eventKind: str | None = None, limit: int = 20) -> list[dict]:
     """Get recent Events, optionally filtered by eventKind (e.g. 'AgentSession')."""
     return _safe(_get_team_sdk().get_events, eventKind=eventKind, limit=limit)
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 def tortoise_get_session(session_id: str) -> dict:
     """Get a single agent session Event by session_id."""
     return _safe(_get_team_sdk().get_session, session_id)
 
-@mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
 def tortoise_index_sessions(directory: str, extract_metadata: bool = True, llm_model: str | None = None) -> dict:
     """Index session .md files as AgentSession Events. Returns {ingested, updated, skipped, failed, errors}.
 
@@ -826,9 +801,17 @@ def tortoise_index_sessions(directory: str, extract_metadata: bool = True, llm_m
         return {"error": f"Directory not found: {directory!r}. Provide a valid path to a directory containing .md session files."}
     return _safe(_get_team_sdk().index_sessions, directory, extract_metadata=extract_metadata, llm_model=llm_model)
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
-def tortoise_search_sessions(query: str, agent: str | None = None, topics: Any = None, limit: int = 10, offset: int = 0) -> list[dict]:
-    """Search indexed agent sessions. Returns Events with narrative_arc snippets."""
+def tortoise_search_sessions(query: str, agent: str | None = None, topics: Any = None,
+                             after: str | None = None, before: str | None = None,
+                             limit: int = 10, offset: int = 0) -> list[dict]:
+    """Search indexed agent sessions. Returns Events with narrative_arc snippets.
+
+    after/before bound the search to sessions whose startedAt falls in
+    [after, before] (inclusive). Accept ISO-8601 strings (e.g.
+    '2026-07-01T00:00:00Z' or '2026-07-31T23:59:59+00:00'); values are
+    normalized to UTC. Sessions without startedAt are excluded when a bound
+    is set.
+    """
     topics = _parse(topics)
     if isinstance(topics, str):
         topics_list = [t.strip() for t in topics.split(",") if t.strip()]
@@ -836,9 +819,9 @@ def tortoise_search_sessions(query: str, agent: str | None = None, topics: Any =
         topics_list = topics
     else:
         topics_list = None
-    return _safe(_get_team_sdk().search_sessions, query, agent=agent, topics=topics_list, limit=limit, offset=offset)
+    return _safe(_get_team_sdk().search_sessions, query, agent=agent, topics=topics_list,
+                 after=after, before=before, limit=limit, offset=offset)
 
-@mcp.tool(annotations=ToolAnnotations(idempotentHint=True))
 def tortoise_create_document(title: str, documentKind: str, props: Any = None) -> dict:
     """Create a Document node (research, planDoc, meetingNotes, etc.)."""
     props = _parse(props)
@@ -899,33 +882,27 @@ def tortoise_set_source_tier(url: str, tier: str) -> dict:
     """
     return _safe(_get_team_sdk().set_source_tier, url, tier)
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 def tortoise_get_entity(id: str) -> dict:
     """Get any entity by ID, eventId, or url."""
     return _safe(_get_team_sdk().get_entity, id)
 
-@mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
 def tortoise_update_entity(id: str, props: Any = None) -> dict:
     """Update any entity's properties."""
     props = _parse(props)
     return _safe(_get_team_sdk().update_entity, id, **(props or {}))
 
-@mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
 def tortoise_delete_entity(id: str) -> bool:
     """Delete any entity by ID."""
     return _safe(_get_team_sdk().delete_entity, id)
 
-@mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
 def tortoise_create_edge(source_id: str, target_id: str, predicate: str) -> bool:
     """Create an edge between two entities. Predicate: performs, produces, ownedBy, managedBy, etc."""
     return _safe(_get_team_sdk()._get_proj().create_edge, source_id, target_id, predicate)
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 def tortoise_get_governance(subject_id: str) -> list:
     """Get all entities owned by a Subject."""
     return _safe(_get_team_sdk().get_owned_entities, subject_id)
 
-@mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
 def tortoise_backfill_v25(dry_run: bool = True) -> dict:
     """Backfill database to ONTOLOGY v2.5 schema.
 
@@ -936,17 +913,171 @@ def tortoise_backfill_v25(dry_run: bool = True) -> dict:
     return _safe(_get_team_sdk().backfill_v25, dry_run=dry_run)
 
 
+# ── Tool Registry Adapter (#454) ────────────────────────────────
+# Replaces @mcp.tool() decorators with programmatic registration.
+# Function bodies remain module-level callables; the adapter wraps each
+# via FunctionTool.from_function() and registers them on the shared mcp.
+# Must execute AFTER all tool function definitions (at module bottom).
+from tortoise.tool_registry import TOOL_REGISTRY, FastMCPAdapter
+
+_adapter = FastMCPAdapter(mcp)
+_adapter.register_all(TOOL_REGISTRY, {
+    t.name: globals()[t.name]
+    for t in TOOL_REGISTRY
+    if t.name in globals()
+})
+
+
+
+# ── Onboarding MCP tools (#498/#499/#500) ───────────────────────
+# Wrappers for the hosted onboarding flow. These call the team-scoped SDK
+# directly (same pattern as all tools) — the REST endpoints in hosted_api.py
+# expose the same operations to the welcome page.
+
+def _onboarding_state() -> dict:
+    """Read this team's onboarding progress from the registry Team node."""
+    from tortoise.hosted_api import _get_onboarding_state as _read_state
+    team_id = _current_team_id.get()
+    if team_id is None:
+        return {"error": "No team context (HTTP mode required)"}
+    return _read_state(team_id)
+
+
+@mcp.tool(annotations=ToolAnnotations(idempotentHint=True))
+def tortoise_onboarding_demo_create() -> dict:
+    """Create the demo epistemic graph (4 layers) for this team. Idempotent.
+
+    Q4 — 'Create a demo graph?' — shows what Tortoise memory looks like.
+    """
+    from tortoise.hosted_api import _seed_demo_graph
+    team_id = _current_team_id.get()
+    if team_id is None:
+        return {"error": "No team context (HTTP mode required)"}
+    result = _seed_demo_graph(team_id)
+    # Auto-update onboarding state
+    try:
+        from tortoise.hosted_api import _update_onboarding_state
+        _update_onboarding_state(team_id, demo_created=True)
+    except Exception:
+        pass
+    return result
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+def tortoise_onboarding_state() -> dict:
+    """Return this team's onboarding progress (Q6 verification step)."""
+    return _onboarding_state()
+
+
+@mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
+def tortoise_onboarding_session_recording(enabled: bool) -> dict:
+    """Toggle automatic session recording for this team (Q3)."""
+    team_id = _current_team_id.get()
+    if team_id is None:
+        return {"error": "No team context (HTTP mode required)"}
+    from tortoise.hosted_api import _update_onboarding_state
+    state = _update_onboarding_state(team_id, session_recording=enabled)
+    return {"onboarding": state}
+
+
+@mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
+def tortoise_onboarding_github_connect(org: str | None = None) -> dict:
+    """Initiate GitHub OAuth — returns the authorize URL + CSRF state (Q1)."""
+    team_id = _current_team_id.get()
+    if team_id is None:
+        return {"error": "No team context (HTTP mode required)"}
+    import secrets
+    from urllib.parse import urlencode
+    import os as _os
+    client_id = _os.environ.get("GITHUB_CLIENT_ID")
+    if not client_id:
+        return {"error": "GitHub OAuth not configured"}
+    state = secrets.token_urlsafe(24)
+    # Store CSRF state so the callback can validate it (P2 review fix) —
+    # must be visible to the REST callback handler in the same process.
+    import time as _time
+    from tortoise.hosted_api import _GITHUB_STATES
+    _GITHUB_STATES[state] = {"team_id": team_id, "org": org or team_id,
+                             "created_at": _time.time()}
+    callback = _os.environ.get("GITHUB_CALLBACK_URL",
+                               "https://api.premiselabs.co/v1/onboarding/github/callback")
+    params = {"client_id": client_id, "redirect_uri": callback,
+              "scope": "repo", "state": state}
+    auth_url = f"https://github.com/login/oauth/authorize?{urlencode(params)}"
+    return {"auth_url": auth_url, "state": state}
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+def tortoise_onboarding_github_status() -> dict:
+    """Return GitHub connection status for this team (Q1 verify)."""
+    team_id = _current_team_id.get()
+    if team_id is None:
+        return {"error": "No team context (HTTP mode required)"}
+    sdk = _get_team_sdk()
+    try:
+        reg = sdk._get_registry().query(
+            "MATCH (t:Team {id: $id}) RETURN t.github_token_enc, t.github_org",
+            params={"id": team_id}).result_set
+    except Exception:
+        return {"connected": False, "org": None, "repos_count": None}
+    if not reg or not reg[0][0]:
+        return {"connected": False, "org": None, "repos_count": None}
+    return {"connected": True, "org": reg[0][1], "repos_count": None}
+
+
+@mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
+def tortoise_onboarding_github_index(org: str, repo: str | None = None) -> dict:
+    """Start background GitHub indexing of an org's issues/PRs (Q2).
+
+    Returns {job_id, status} — poll via the REST endpoint or check
+    onboarding state for github_indexed.
+    """
+    team_id = _current_team_id.get()
+    if team_id is None:
+        return {"error": "No team context (HTTP mode required)"}
+    import secrets as _secrets
+    import asyncio as _asyncio
+    from tortoise.hosted_api import _INDEX_JOBS, _run_indexing, _make_sdk as _ha_make_sdk
+    sdk = _ha_make_sdk(namespace="registry")
+    try:
+        rows = sdk._get_registry().query(
+            "MATCH (t:Team {id: $id}) RETURN t.github_token_enc",
+            params={"id": team_id}).result_set
+    except Exception:
+        return {"error": "Registry unavailable"}
+    if not rows or not rows[0][0]:
+        return {"error": "GitHub not connected. Run tortoise_onboarding_github_connect first."}
+    job_id = _secrets.token_hex(8)
+    _INDEX_JOBS[job_id] = {"status": "started", "progress": 0,
+                           "points_created": 0, "error": None,
+                           "team_id": team_id,
+                           "created_at": _asyncio.get_event_loop().time()}
+    try:
+        _asyncio.get_event_loop().create_task(
+            _run_indexing(job_id, team_id, org, repo))
+    except RuntimeError:
+        return {"error": "No running event loop"}
+    return {"job_id": job_id, "status": "started"}
+
+
 # ── HTTP Streamable transport (#236) ─────────────────────────────
 
 def create_http_app(*, allowed_origins: list[str] | None = None,
                     rate_limit: int = 100,
-                    _registry_sdk=None) -> Any:
+                    _registry_sdk=None,
+                    auth_mode: Literal["tenant", "static", "none"] = "tenant",
+                    api_key: str | None = None) -> Any:
     """Configured Streamable HTTP app for the hosted platform (#236).
 
     Mounted at /mcp on the existing FastAPI app. Auth + rate limiting +
     security headers + body-size caps live INSIDE this app's middleware
     stack — the parent FastAPI app.mount() does NOT propagate its own
     middleware to mounted sub-apps (verified Starlette behavior).
+
+    auth_mode (additive, default "tenant" = hosted byte-identical):
+      "tenant" → TeamResolutionMiddleware (registry Bearer tt_ keys)
+      "static" → StaticKeyMiddleware (single TORTOISE_API_KEY, self-host LAN)
+      "none"   → no auth middleware (localhost-bound self-host eval)
 
     path="/": the app is mounted at /mcp on the parent FastAPI app, which
     strips the mount prefix before dispatching to this sub-app — so routes
@@ -956,11 +1087,28 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
     """
     from starlette.middleware import Middleware
     from starlette.responses import JSONResponse
-    from tortoise.mcp_auth import (TeamResolutionMiddleware,
-                                   MCPRateLimitMiddleware,
+    from tortoise.mcp_auth import (MCPRateLimitMiddleware,
                                    SecurityHeadersMiddleware,
                                    RequestBodySizeMiddleware)
     from fastmcp.server.transforms import Transform
+
+    # auth_mode middleware selection. TeamResolutionMiddleware (tenant mode) is
+    # imported here but only ever INSTANTIATED in the tenant branch — static/none
+    # modes never construct it, and hosted_api is only ever lazily imported when
+    # a tenant token is verified (mcp_auth delegates via function-level import).
+    auth_mw = None
+    transport_mw = None
+    if auth_mode == "tenant":
+        from tortoise.mcp_auth import TeamResolutionMiddleware
+        auth_mw = Middleware(TeamResolutionMiddleware, registry_sdk=_registry_sdk)
+    elif auth_mode == "static":
+        from tortoise.mcp_auth import StaticKeyMiddleware
+        auth_mw = Middleware(StaticKeyMiddleware, api_key=api_key)
+        from tortoise.mcp_auth import TransportModeMiddleware
+        transport_mw = Middleware(TransportModeMiddleware)
+    elif auth_mode == "none":
+        from tortoise.mcp_auth import TransportModeMiddleware
+        transport_mw = Middleware(TransportModeMiddleware)
 
     class _HTTPToolFilter(Transform):
         """Hide HTTP-excluded tools from tools/list (D4 — registration-level).
@@ -986,16 +1134,29 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
                              "transport": "streamable-http",
                              "endpoint": "/mcp"})
 
+    middleware = [
+        Middleware(SecurityHeadersMiddleware),
+        Middleware(RequestBodySizeMiddleware),
+    ]
+    if auth_mw is not None and auth_mode == "tenant":
+        # Original position: tenant auth sits between body-size and rate-limit
+        # (byte-identical to pre-auth_mode hosted stack).
+        middleware.append(auth_mw)
+    middleware.append(Middleware(MCPRateLimitMiddleware, max_per_minute=rate_limit))
+    if auth_mw is not None and auth_mode != "tenant":
+        # Static mode: rate limiter sits OUTSIDE auth so failed-key attempts are
+        # throttled (code-review P1 — unlimited brute force on a user-chosen key).
+        middleware.append(auth_mw)
+    if transport_mw is not None:
+        # Innermost — runs after auth validated, right before the app:
+        # initializes the transport-mode ContextVars selfhost tools need.
+        middleware.append(transport_mw)
+
     return mcp.http_app(
         transport="streamable-http",
         stateless_http=True,
         host_origin_protection=True,
         allowed_origins=allowed_origins or [],
         path="/",
-        middleware=[
-            Middleware(SecurityHeadersMiddleware),
-            Middleware(RequestBodySizeMiddleware),
-            Middleware(TeamResolutionMiddleware, registry_sdk=_registry_sdk),
-            Middleware(MCPRateLimitMiddleware, max_per_minute=rate_limit),
-        ],
+        middleware=middleware,
     )

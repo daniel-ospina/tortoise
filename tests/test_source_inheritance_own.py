@@ -795,8 +795,10 @@ class TestMCPAnnotationsContract:
 
         tools = asyncio.run(_get())
         t = tools["tortoise_get_source_reliability"]
-        # No annotations passed → readOnlyHint must not be set (it writes the cache)
-        assert t.annotations is None or not t.annotations.read_only_hint, (
+        # readOnlyHint must NOT be True (it writes the cache) — registered via
+        # tool_registry with _rw() (readOnlyHint=False, destructiveHint=True).
+        ro = getattr(t.annotations, "readOnlyHint", getattr(t.annotations, "read_only_hint", False))
+        assert ro is not True, (
             "get_source_reliability writes the reliability cache — no readOnlyHint"
         )
 

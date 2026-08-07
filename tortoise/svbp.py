@@ -360,6 +360,10 @@ class TortoiseSVBP:
         """Return {mean, variance, alpha, beta} for a claim."""
         a, b = self._get_posterior(claim_id)
         total = a + b
+        if total <= 0:
+            # #330: degenerate posterior (0,0) — uniform Beta(1,1) fallback
+            # instead of ZeroDivisionError.
+            return {"mean": 0.5, "variance": 1/12, "alpha": a, "beta": b}
         return {
             "mean": a / total,
             "variance": (a * b) / (total * total * (total + 1)),

@@ -32,6 +32,9 @@ class _EntityHandlers:
         "managedBy",         # handled as managedBy edge
         "aboutSubject",      # handled as aboutSubject edge
         "aboutObject",       # handled as aboutObject edge
+        "aboutEvent",        # handled as aboutEvent edge
+        "aboutPoint",        # handled as aboutPoint edge
+        "aboutDocument",     # handled as aboutDocument edge
     })
 
     # Keys explicitly handled by each _upsert_* method.
@@ -82,7 +85,13 @@ class _EntityHandlers:
                 params={**match_params, "extra": extra},
             )
 
-    def _upsert(self, p: dict) -> None:
+    def _upsert_point_props(self, p: dict) -> None:
+        """Write all Point node properties (no edges).
+
+        Single source of truth for Point property parity between apply() and
+        rebuild_all() (#330): rebuild pass 1a calls this so a rebuilt graph can
+        never drift from the incrementally-applied graph on node properties.
+        """
         op = p.get("operator")
         prov = p.get("provenance", {})
 
@@ -127,25 +136,40 @@ class _EntityHandlers:
             "MERGE (n:Point {id:$id}) SET " + ", ".join(set_clauses),
             params=params,
         )
-        # Ontology v2.1: link Point → Source via extractedFrom edge
+        # Ontology v2.1: also store extractedFrom as property for query convenience
         source_ref = p.get("extractedFrom")
         if source_ref:
-            self._link_source(p["id"], source_ref)
-            # Also store as property for query convenience
             self.g.query("MATCH (n:Point {id:$id}) SET n.extractedFrom = $ref", params={"id": p["id"], "ref": source_ref})
-        # aboutEntities → per-type about edges (Ontology v2.1 Phase 1)
-        about = p.get("aboutEntities")
-        if about and isinstance(about, list):
-            for entity_name in about:
-                self._create_about_edges(p["id"], str(entity_name))
         # P1-2: Temporal — also store provenance source_id
         if prov.get("source_id"):
             self.g.query(
                 "MATCH (n:Point {id:$id}) SET n.provenanceSource=$sid",
                 params={"id": p["id"], "sid": prov["source_id"]},
             )
-        if op:
+
+    def _upsert_point_edges(self, p: dict) -> None:
+        """Wire all Point edges (provenance + about + operator).
+
+        Single source of truth for Point edge parity between apply() and
+        rebuild_all() pass 2 (#330) — same role as _upsert_point_props for
+        node properties.
+        """
+        # Ontology v2.1: link Point → Source via extractedFrom edge
+        source_ref = p.get("extractedFrom")
+        if source_ref:
+            self._link_source(p["id"], source_ref)
+        # aboutEntities → per-type about edges (Ontology v2.1 Phase 1)
+        about = p.get("aboutEntities")
+        if about and isinstance(about, list):
+            for entity_name in about:
+                self._create_about_edges(p["id"], str(entity_name))
+        if p.get("operator"):
             self._create_edges(p)
+
+    def _upsert(self, p: dict) -> None:
+        """Upsert a Point: node properties via _upsert_point_props, then edges."""
+        self._upsert_point_props(p)
+        self._upsert_point_edges(p)
 
     def _delete(self, pid: str) -> None:
         self.g.query("MATCH (n:Point {id:$id}) DETACH DELETE n", params={"id": pid})
@@ -317,6 +341,9 @@ class _EntityHandlers:
         if not eid:
             return
         # Compute embedding from event content/description (#7845)
+        # Stored vecf32 (#244): vec.euclideanDistance rejects plain-list
+        # vectors — a single List-typed embedding poisons brute-force vector
+        # search for the whole Event label. Align with the Point pattern.
         embedding = None
         event_content = " ".join(filter(None, [
             inner.get("subject", ""),
@@ -341,13 +368,11 @@ class _EntityHandlers:
             "classificationLevel": inner.get("classificationLevel", "internal"),
             "format": inner.get("format", "jsonl"),
         }
-        if embedding is not None:
-            props["embedding"] = embedding
         self.g.query(
             "MERGE (e:Event {eventId: $eid}) "
-            "ON CREATE SET e += $props "
-            "ON MATCH SET e += $props",
-            params={"eid": eid, "props": props},
+            "ON CREATE SET e += $props, e.embedding = CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) END "
+            "ON MATCH SET e += $props, e.embedding = CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE e.embedding END",
+            params={"eid": eid, "props": props, "embedding": embedding},
         )
         # ── Auto-create structural edges (#122) ──
         # Subject -[:performs]-> Event
