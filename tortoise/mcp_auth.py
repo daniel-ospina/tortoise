@@ -72,6 +72,8 @@ HTTP_ALLOWED: frozenset[str] = frozenset({
     "tortoise_invalidate", "tortoise_entity_profile", "tortoise_traverse",
     "tortoise_analyze", "tortoise_create_subject", "tortoise_create_object",
     "tortoise_create_event", "tortoise_create_document", "tortoise_create_source",
+    "tortoise_get_source_reliability", "tortoise_assess_source",
+    "tortoise_set_source_tier",
     "tortoise_get_entity", "tortoise_update_entity", "tortoise_delete_entity",
     "tortoise_create_edge", "tortoise_status", "tortoise_health", "tortoise_taxonomy",
     "tortoise_list_graphs", "tortoise_checkpoint", "tortoise_diary_write",

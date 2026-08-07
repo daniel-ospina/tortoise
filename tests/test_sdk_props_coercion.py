@@ -270,14 +270,16 @@ class TestEntityPropsPersisted:
         assert "drop" not in obj
 
     def test_create_source_persists_arbitrary_props(self, sdk):
+        # tier is a first-class kwarg (#398): legacy alias 'gold' maps to T0 on
+        # credibilityTier; other arbitrary props still persist verbatim.
         src = sdk.create_source(
             "https://example.com/doc", "report",
             tier="gold", team="infra",
         )
         assert src.get("url") == "https://example.com/doc"
         assert src.get("sourceKind") == "report"
-        assert src.get("tier") == "gold"
         assert src.get("team") == "infra"
+        assert src.get("credibilityTier") == "T0"  # alias mapped (dual-write)
 
     def test_meta_keys_not_stored_as_props(self, sdk):
         """Control keys (edge-wired / structural) never leak as node props."""
