@@ -243,6 +243,16 @@ TOOL_REGISTRY: list[ToolDefinition] = [
         http_policy=True,
         sdk_method="file_decision",
     ),
+    ToolDefinition(
+        name="tortoise_file_human_approval",
+        description="File a human approval of a planning artifact to the graph. "
+                    "Creates Event (eventKind: humanApproval) + decision Point "
+                    "(pointKind: humanApproval) + unidirectional IMPL fan-out "
+                    "(label approvedBy) so dependent claims strengthen.",
+        annotations=_rw(),
+        http_policy=True,
+        sdk_method="file_human_approval",
+    ),
     # ── Deletion / Invalidation ───────────────────────────────────
     ToolDefinition(
         name="tortoise_delete_point",
@@ -461,10 +471,38 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ToolDefinition(
         name="tortoise_create_source",
         description="Create a Source node for provenance (document, web, db, etc.). "
-                    "Sources track content origin — url is the permalink key.",
+                    "Sources track content origin — url is the permalink key. "
+                    "tier (T0-T4 / legacy alias) stores the credibility tier; "
+                    "sourceDate is the evidence-age clock.",
         annotations=_idem(),
         http_policy=True,
         sdk_method="create_source",
+    ),
+    ToolDefinition(
+        name="tortoise_get_source_reliability",
+        description="Derive a Source's reliability (0-1) — query-time, "
+                    "cache-consistency-checked. NOTE: refreshes the reliability "
+                    "cache on the Source node (write-through projection), so not read-only.",
+        annotations=_rw(),
+        http_policy=True,
+        sdk_method="get_source_reliability",
+    ),
+    ToolDefinition(
+        name="tortoise_assess_source",
+        description="Record an agent's assessment of a Source (0-1 score + rationale). "
+                    "Creates a pointKind='assessment' Statement Point; latest per "
+                    "(url, assessor) wins; weighted by assessor reputation.",
+        annotations=_rw(),
+        http_policy=True,
+        sdk_method="assess_source",
+    ),
+    ToolDefinition(
+        name="tortoise_set_source_tier",
+        description="Set (or change) a Source's credibility tier (T0-T4). "
+                    "Non-destructive — never overwrites sourceKind type strings.",
+        annotations=_rw(),
+        http_policy=True,
+        sdk_method="set_source_tier",
     ),
     ToolDefinition(
         name="tortoise_get_entity",

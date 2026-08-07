@@ -207,3 +207,36 @@ class TestBaselineMarksDirty:
         sdk._dirty_roots.clear()
         sdk.set_point_baseline(p["id"], 8.0, 2.0)
         assert p["id"] in sdk._dirty_roots
+
+
+# ── #330: dream honours persistent evidence (baselines) ──────────────
+
+
+class TestDreamEvidence:
+    def test_dream_preserves_baseline_evidence(self, sdk):
+        """#330: a dream run must apply the SDK's persistent evidence — it must
+        NOT recompute a baseline'd claim's posterior from messages only and
+        clobber the graph (which would corrupt the baseline_set contract)."""
+        a = _make_claim(sdk, "A-evidence")
+        b = _make_claim(sdk, "B-evidence")
+        sdk.create_operator("IMPL", a["id"], [b["id"]])
+        # Strong baseline on b
+        sdk.set_point_baseline(b["id"], 10.0, 1.0)
+        sdk._dirty_roots.clear()
+
+        sdk.dream([b["id"]], max_hops=2)
+
+        # b's posterior must be evidence-dominated (mean > 0.8), NOT clobbered
+        # to the no-evidence value (~0.5-0.6) by a bare message-passing run.
+        conf = sdk.get_confidence(b["id"])
+        assert conf["mean"] > 0.8, (
+            f"dream clobbered the baseline: b's posterior mean = {conf['mean']} "
+            f"(expected evidence-dominated > 0.8)"
+        )
+        # baseline_set flag must survive the dream
+        proj = sdk._get_proj()
+        row = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.baseline_set",
+            params={"id": b["id"]},
+        ).result_set[0]
+        assert row[0] is True

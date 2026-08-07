@@ -317,6 +317,55 @@ class TestInvalidateSupersede:
         assert len(corrected) == 1
         assert corrected[0]["id"] == old["id"]
 
+    def test_invalidate_missing_old_is_false(self, sdk):
+        # #330: invalidate_point must not report success for a missing old point
+        new = _make_point(sdk, content="new")
+        result = sdk.invalidate_point("missing-old", new["id"])
+        assert result["invalidated"] is False
+        assert result["id"] == "missing-old"
+        assert result["corrected_by"] == new["id"]
+        # No CORRECTS edge was created
+        corrected = sdk.traverse(new["id"], "CORRECTS", direction="outgoing")
+        assert len(corrected) == 0
+
+    def test_invalidate_missing_new_raises(self, sdk):
+        # #330: missing corrected_by would orphan an outdated point — must raise
+        old = _make_point(sdk, content="old")
+        with pytest.raises(ValueError):
+            sdk.invalidate_point(old["id"], "missing-new")
+        # Old point must NOT be marked outdated (no partial write)
+        assert not sdk.get_point(old["id"]).get("outdated")
+
+    def test_invalidate_self_raises(self, sdk):
+        # #330: a self-CORRECTS edge poisons traversal/credibility — must raise
+        old = _make_point(sdk, content="old")
+        with pytest.raises(ValueError):
+            sdk.invalidate_point(old["id"], old["id"])
+        assert not sdk.get_point(old["id"]).get("outdated")
+        assert len(sdk.traverse(old["id"], "CORRECTS", direction="outgoing")) == 0
+
+    def test_supersede_idempotent_corrects_edge(self, sdk):
+        # #330: repeated supersede must not duplicate CORRECTS (1→1 cardinality)
+        old = _make_point(sdk, content="old-sup")
+        new = _make_point(sdk, content="new-sup")
+        sdk.supersede_point(old["id"], new["id"])
+        sdk.supersede_point(old["id"], new["id"])
+        corrected = sdk.traverse(new["id"], "CORRECTS", direction="outgoing")
+        assert len(corrected) == 1, "CORRECTS edge duplicated on re-supersede"
+
+    def test_invalidate_idempotent_corrects_edge(self, sdk):
+        # #330: re-invalidating the same pair must not duplicate CORRECTS, and
+        # the second call re-asserts (both points still exist -> True) without
+        # creating extra edges.
+        old = _make_point(sdk, content="old")
+        new = _make_point(sdk, content="new")
+        r1 = sdk.invalidate_point(old["id"], new["id"])
+        assert r1["invalidated"] is True
+        r2 = sdk.invalidate_point(old["id"], new["id"])
+        assert r2["invalidated"] is True  # present endpoints -> re-assert
+        corrected = sdk.traverse(new["id"], "CORRECTS", direction="outgoing")
+        assert len(corrected) == 1, "CORRECTS edge duplicated on re-invalidate"
+
     def test_supersede_atomically_replaces(self, sdk):
         old = _make_point(sdk, content="old")
         new = _make_point(sdk, content="new")

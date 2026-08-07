@@ -1511,3 +1511,110 @@ class TestVocabEdgeValidation:
         assert "'dependsOn'" in src
         assert "'reportsTo'" in src
         assert "'related'" in src
+
+
+def test_falkor_rebuild_all_parity_with_apply():
+    """#330: rebuild_all must produce the same Point node properties and edges
+    as replaying the same events through apply() — including provenance edges
+    (extractedFrom), about edges, operator edges, SourceCreated replay and
+    PointRevised updatedAt parity."""
+    if _skip_if_no_falkor():
+        return
+    d = tempfile.mkdtemp(prefix="tortoise_rebuild_parity_")
+    try:
+        log_path = os.path.abspath(os.path.join(d, "events.jsonl"))
+        log = EventLog(log_path)
+        now = "2026-08-07T00:00:00.000000+00:00"
+        # Convergent order: SourceCreated BEFORE points carrying extractedFrom
+        # (reversed order would diverge Source version/id — documented).
+        events = [
+            {"event_id": "e0", "ts": now, "type": "IngestStarted",
+             "initiated_by": "extractor", "agent_id": "test", "run_id": "r1",
+             "key": {"kind": "doc", "value": "doc.txt"}, "extractor_version": "1"},
+            {"event_id": "e1", "ts": now, "type": "SourceCreated",
+             "initiated_by": "extractor", "agent_id": "test",
+             "id": "src-1", "url": "https://doc.txt", "sourceKind": "T2",
+             "contentHash": "abc123", "title": "Doc", "externalId": "ext-1"},
+            {"event_id": "e2", "ts": now, "type": "PointAdded",
+             "initiated_by": "extractor", "agent_id": "test", "projection_version": 2,
+             "point": {"id": "p-a", "content": "claim A", "status": "live",
+                       "createdAt": now, "pointKind": "statement",
+                       "authoredBy": "alice", "validFrom": now, "validTo": now,
+                       "confidence": 0.7, "extractedFrom": "https://doc.txt",
+                       "aboutEntities": ["alice"],
+                       "provenance": {"speaker": "bob", "source_id": "s1"}}},
+            {"event_id": "e3", "ts": now, "type": "PointAdded",
+             "initiated_by": "extractor", "agent_id": "test", "projection_version": 2,
+             "point": {"id": "p-b", "content": "claim B", "status": "live",
+                       "createdAt": now, "pointKind": "statement",
+                       "authoredBy": "alice", "validFrom": now, "validTo": now,
+                       "confidence": 0.6, "extractedFrom": "https://doc.txt",
+                       "aboutEntities": ["alice"],
+                       "provenance": {"speaker": "bob", "source_id": "s1"}}},
+            {"event_id": "e4", "ts": now, "type": "OperatorAdded",
+             "initiated_by": "extractor", "agent_id": "test", "projection_version": 2,
+             "point": {"id": "op-1", "content": "IMPL", "status": "live",
+                       "createdAt": now, "pointKind": "operator",
+                       "operator": {"op_type": "IMPL", "inputs": ["p-b", "p-a"]},
+                       "provenance": {"speaker": "bob", "source_id": "s1"}}},
+            {"event_id": "e5", "ts": now, "type": "PointRevised",
+             "initiated_by": "extractor", "agent_id": "test",
+             "id": "p-a", "new_content": "claim A revised"},
+        ]
+        for ev in events:
+            log.append(ev)
+
+        projA = FalkorProjection(_tmp("parity_a.db"), graph_name="test")
+        projB = FalkorProjection(_tmp("parity_b.db"), graph_name="test")
+        try:
+            for ev in log.read_all():
+                projA.apply(ev)
+            projB.rebuild_all(d)
+
+            def node_map(proj):
+                rows = proj.g.query("MATCH (n:Point) RETURN n.id, properties(n)").result_set
+                out = {}
+                for pid, props in rows:
+                    out[pid] = {k: v for k, v in props.items()
+                                if k not in ("updatedAt", "embedding")}
+                return out
+
+            def edge_map(proj):
+                rows = proj.g.query(
+                    "MATCH (a)-[r]->(b) RETURN a.id, type(r), b.id, properties(r)"
+                ).result_set
+                # Sort WITHOUT the props dict (dicts aren't orderable — a
+                # duplicate-edge divergence would TypeError on sorted()).
+                return sorted((r[0], r[1], r[2]) for r in rows)
+
+            na, nb = node_map(projA), node_map(projB)
+            assert na == nb, f"Point node props diverged:\napply: {na}\nrebuild: {nb}"
+            ea, eb = edge_map(projA), edge_map(projB)
+            assert ea == eb, f"edges diverged:\napply: {ea}\nrebuild: {eb}"
+            # Provenance + about edges present in BOTH
+            edge_types_b = {e[1] for e in eb}
+            assert "extractedFrom" in edge_types_b, "extractedFrom edges missing after rebuild"
+            assert "aboutSubject" in edge_types_b, "aboutSubject edges missing after rebuild"
+            assert "IMPL" in edge_types_b and "INPUT" in edge_types_b
+            # Source node parity (selective — ingestedAt differs between write times)
+            for proj in (projA, projB):
+                src = proj.g.query(
+                    "MATCH (s:Source {url:'https://doc.txt'}) RETURN properties(s)"
+                ).result_set[0][0]
+                assert src["version"] == 1, f"Source version {src.get('version')} != 1"
+                # _upsert_source coalesces id from the event's id field
+                assert src["id"] == "src-1"
+                assert src["sourceKind"] == "T2" and src["contentHash"] == "abc123"
+            # PointRevised applied in both (content + updatedAt write)
+            assert na["p-a"]["content"] == "claim A revised"
+            assert nb["p-a"]["content"] == "claim A revised"
+            uat = projB.g.query(
+                "MATCH (n:Point {id:'p-a'}) RETURN n.updatedAt"
+            ).result_set[0][0]
+            assert uat, "PointRevised must write updatedAt on rebuild"
+        finally:
+            projA.close()
+            projB.close()
+    finally:
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)

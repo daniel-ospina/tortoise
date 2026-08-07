@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — service model (#338)
+
+Tortoise is repositioned from a pip library to a **service** (MongoDB-style):
+run it, connect your tools over MCP.
+
+- **Self-host daemon** (`tortoise.selfhost`): thin single-tenant service —
+  MCP Streamable HTTP at `/mcp` + `/health` + `/health/ready`; `auth_mode`
+  param on `create_http_app` (`tenant` default = hosted byte-identical;
+  `static` = API key; `none` = localhost-bound eval); `tortoise-serve http`
+  CLI.
+- **MCP client** (`tortoise.mcp_client`): thin driver over fastmcp's built-in
+  client — zero new deps; graceful degradation (daemon down → skip).
+- **Connectors**: twenty bridge converted SDK→MCP (`integrations/` now has
+  zero engine imports).
+- **Docker**: `Dockerfile.selfhost` + GHCR publish workflow +
+  `docker-compose.yml` (daemon + FalkorDB sidecar, AOF on) — durable
+  self-host reference.
+- **License**: Business Source License 1.1 — free self-hosted production use
+  under $5M annual revenue; MPL 2.0 conversion after 4 years; hosted =
+  commercial with free tier. See `docs/license-notes.md` (clause → precedent).
+- **`.mcp.json`**: tortoise entry points at the daemon (`http://localhost:8000/mcp`).
+
 ### Fixed — redislite embedded process leak (issue #176)
 
 The embedded (redislite) mode leaked one `redis-server` OS process per

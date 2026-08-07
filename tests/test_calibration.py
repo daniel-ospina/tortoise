@@ -8,21 +8,17 @@ from tortoise.exceptions import CalibrationError
 
 @pytest.fixture
 def sdk():
-    """Create a TortoiseSDK connected to an ISOLATED test graph.
+    """Fresh embedded TortoiseSDK on an isolated file DB (no Docker needed).
 
-    Uses ``tortoise_test_calibration`` — never the production graph.
+    Uses the ``TortoiseSDK(db_path)`` embedded pattern (issue #398 Task 3 —
+    migrated from the Docker-bound fixture so the calibration suite runs with
+    falkordblite, per AGENTS.md "no Docker needed").
     """
-    import os
-    os.environ.setdefault(
-        "TORTOISE_DB_URI",
-        "docker://:falkordb@localhost:6379/tortoise_test_calibration"
-    )
-    s = TortoiseSDK()
+    import tempfile
+    db_path = os.path.join(tempfile.mkdtemp(prefix="tt_calib_"), "test.db")
+    s = TortoiseSDK(db_path)
     yield s
-    # Safety guard: refuse to wipe production graphs
-    s.test_guard()
-    # Cleanup: delete ALL nodes (Points + Sources + operators)
-    s._get_proj().g.query("MATCH (n) DETACH DELETE n")
+    s.close()
 
 
 # ── Pipeline E2E ────────────────────────────────────────────────
@@ -151,7 +147,7 @@ def test_set_baseline_persistence(sdk):
 # ── Source inheritance ──────────────────────────────────────────
 
 def test_source_inheritance(sdk):
-    """Source T1 → Point gets Beta(8,2) via inheritance."""
+    """Source T1 → Point gets Beta(5,1) via inheritance (validated model)."""
     # Create Point with extractedFrom — this creates a Source node
     p = sdk.create_point("statement", "Inherited claim", 
                          extractedFrom="https://doi.org/10.1234/peer-reviewed")
@@ -162,15 +158,21 @@ def test_source_inheritance(sdk):
         params={"url": "https://doi.org/10.1234/peer-reviewed"}
     )
     
-    sdk._apply_source_inheritance()
+    sdk._apply_source_inheritance(recency_decay=1.0)
     point = sdk.get_point(p["id"])
-    assert point.get("ep_alpha") == 8
-    assert point.get("ep_beta") == 2
+    # T1 = (5, 1) per docs/ep-source-credibility-experiment.md §1.1 (stale (8,2) removed)
+    assert point.get("ep_alpha") == 5
+    assert point.get("ep_beta") == 1
     assert point.get("baseline_set") is True
+    assert point.get("baseline_source") == "inherited"
 
 
 def test_source_inheritance_multi_source(sdk):
-    """Point with Sources T1 and T3 → gets T1 (highest tier wins)."""
+    """Point with Sources T1 and T3 → log-scale aggregated prior (#398).
+
+    pc = T1: 4.0 * log2(2) + T3: 1.0 * log2(2) = 5.0 → Beta(6, 1).
+    Replaces the old highest-tier-wins behavior (T1 alone → Beta(5,1)).
+    """
     url1 = "https://doi.org/10.1234/peer-reviewed"
     url2 = "https://example.com/anecdotal"
     
@@ -190,10 +192,11 @@ def test_source_inheritance_multi_source(sdk):
         params={"url": url2}
     )
     
-    sdk._apply_source_inheritance()
+    sdk._apply_source_inheritance(recency_decay=1.0)
     point = sdk.get_point(p["id"])
-    assert point.get("ep_alpha") == 8  # T1 = (8, 2), highest tier wins
-    assert point.get("ep_beta") == 2
+    assert point.get("ep_alpha") == 6  # log-scale aggregation: 1 + 4*1 + 1*1
+    assert point.get("ep_beta") == 1
+    assert point.get("baseline_source") == "inherited"
 
 
 # ── baseline_set flag ───────────────────────────────────────────
