@@ -16,7 +16,15 @@ COPY tortoise/ tortoise/
 COPY pyproject.toml .
 RUN pip install --no-cache-dir -e . \
     && pip install --no-cache-dir '.[embeddings]' \
-    && HF_HOME=/app/model python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
+    # Both HF_HOME and SENTENCE_TRANSFORMERS_HOME must point at /app/model so
+    # the build-time download lands EXACTLY where runtime looks: ST uses
+    # SENTENCE_TRANSFORMERS_HOME directly as its cache dir
+    # (/app/model/models--sentence-transformers--all-MiniLM-L6-v2), NOT the
+    # HF_HOME/hub path (fix #160-followup — image booted with a missing cache
+    # and entrypoint exited 1).
+    && HF_HOME=/app/model SENTENCE_TRANSFORMERS_HOME=/app/model python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')" \
+    && test -d /app/model/models--sentence-transformers--all-MiniLM-L6-v2 \
+        || (echo 'FATAL: embedding model cache not at /app/model/models--sentence-transformers--all-MiniLM-L6-v2' >&2; exit 1)
 
 # Embedding model cache — all-MiniLM-L6-v2 is pre-downloaded to /app/model at
 # build time (above) so runtime loading is pure local I/O with no HuggingFace
