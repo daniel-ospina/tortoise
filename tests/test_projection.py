@@ -1415,3 +1415,27 @@ def test_upsert_document_includes_source_path(live_proj):
     ).result_set
     assert rows[0][0] == "/tmp/test.md", f"sourcePath wiped: {rows[0][0]}"
     assert rows[0][1] == "archived"
+
+
+def test_upsert_document_preserves_doc_status_and_needs_extraction(live_proj):
+    """#133 P0: partial update via _upsert_document must NOT wipe
+    doc_status='captured' or needs_extraction=true (coalesce-null sentinel —
+    the add_document non-null-default bug class from #167)."""
+    proj = live_proj
+    proj.apply({"type": "DocumentCreated", "id": "doc-133",
+                "title": "Captured", "doc_status": "captured",
+                "needs_extraction": True})
+    rows = proj.g.query(
+        "MATCH (d:Document {id:'doc-133'}) RETURN d.doc_status, d.needs_extraction"
+    ).result_set
+    assert rows[0][0] == "captured", rows[0][0]
+    assert rows[0][1] is True, rows[0][1]
+
+    # Partial update with neither field — must preserve both
+    proj.apply({"type": "DocumentCreated", "id": "doc-133", "title": "Renamed"})
+    rows = proj.g.query(
+        "MATCH (d:Document {id:'doc-133'}) RETURN d.doc_status, d.needs_extraction, d.title"
+    ).result_set
+    assert rows[0][0] == "captured", f"doc_status wiped: {rows[0][0]}"
+    assert rows[0][1] is True, f"needs_extraction wiped: {rows[0][1]}"
+    assert rows[0][2] == "Renamed"
