@@ -472,6 +472,41 @@ Evidence aging is **user-configurable with a light default** — NOT blunt time 
 
 ---
 
+## §10.5 Cascading Invalidation (Claims 6–7 of the patent)
+
+When an evidence source's confidence changes, downstream propositions that
+depend on it through operator chains are **re-evaluated, not stored-flagged**.
+Invalidation is a *derived* cascade — consistent with the ontology's
+"status is derived, not stored" principle (§2, §11):
+
+```
+supersede_point / invalidate_point          (§3.1: mark old outdated:true,
+                                            create (new)-[:CORRECTS]->(old))
+   → _mark_dirty(affected)                  (sdk.py — dirty roots queued)
+   → EP re-propagation                      (ep.py _affected_claims: reverse
+                                            BFS through IMPL|NAND, max_hops=2)
+   → re-persist confidence to affected      (dream.py runs EP on dirty roots)
+   → contested-claim detection at query     (get_contested_claims(variance),
+     time                                   ep.py — variance from persisted
+                                            α/β; also surfaced per-result as
+                                            ep.contested in search, #580)
+```
+
+**Design decisions (recorded for the patent filing):**
+
+| Question | Decision |
+|----------|----------|
+| Ontology concept vs implementation detail? | **Derived behavior**, documented here; no new stored entity |
+| Dedicated edge type (DEPENDS_ON)? | **No** — reverse traversal of IMPL/NAND operators is sufficient; a stored DEPENDS_ON edge would duplicate structure and drift |
+| Representation of "potentially invalidated"? | **Elevated posterior variance** (v > 0.04 → contested), not a stored `pointStatus` — statuses are `{live, draft, outdated, archived}`; `outdated` is set only by explicit supersession, never auto-inferred |
+| Interaction with CORRECTS? | CORRECTS is the *structural* replacement; cascading invalidation is the *belief-level* consequence — both fire from the same write (`supersede_point` → `_mark_dirty`) |
+
+Direction-aware EP (§3.1, #86) is the prerequisite that makes reverse
+traversal well-defined: IMPL is unidirectional (source→target), NAND
+symmetric, hasPart bidirectional — `_affected_claims` follows these directions.
+
+---
+
 ## §11. Reputation (derived, not stored)
 
 `compute_reputation(subject_id)` is a query-time primitive:
