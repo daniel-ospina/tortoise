@@ -122,12 +122,14 @@ def test_error_message_uses_shared_constant():
         assert str(e) == RELATIVE_PATH_ERROR.format(path="drift.db")
 
 
-def test_sdk_normalizes_env_relative_to_absolute(monkeypatch):
-    """The SDK's resolve_db_path() normalizes a relative TORTOISE_DB_PATH to
-    absolute (so the hard-reject is not triggered for env-configured paths —
-    only for DIRECT relative construction, which the other tests cover)."""
+def test_sdk_rejects_env_relative_path(monkeypatch):
+    """A relative TORTOISE_DB_PATH is REJECTED at config resolution (code-
+    review fix, cycle 3): resolve_db_path()'s _abs() choke-point raises
+    ValueError — relative env paths can't silently become CWD-absolute
+    (Category-3 leak via deployment)."""
     from tortoise.sdk import TortoiseSDK
     monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
     monkeypatch.setenv("TORTOISE_DB_PATH", "./relative.db")
-    sdk = TortoiseSDK()
-    assert os.path.isabs(sdk._db_path), "SDK must normalize env path to absolute"
+    import pytest as _pytest
+    with _pytest.raises(ValueError):
+        TortoiseSDK()
