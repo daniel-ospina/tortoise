@@ -138,3 +138,50 @@ def test_sdk_document_search_returns_metadata():
         assert doc.get("sourcePath") == "/tmp/conv.md", doc.get("sourcePath")
     finally:
         proj.close()
+
+
+# ------------------------------------------------------------------ #198 limit validation
+
+
+class TestTortoiseFtsQueryLimit:
+    """#198: limit validation in tortoise_fts_query — bound at 1-10000."""
+
+    def test_limit_10001_raises_value_error(self):
+        """limit=10001 rejects with clear error."""
+        from tortoise.sdk import TortoiseSDK
+        sdk = TortoiseSDK()
+        with pytest.raises(ValueError, match="limit must be 1-10000"):
+            sdk.tortoise_fts_query("test", limit=10001)
+
+    def test_limit_0_raises_value_error(self):
+        """limit=0 (below floor) still raises."""
+        from tortoise.sdk import TortoiseSDK
+        sdk = TortoiseSDK()
+        with pytest.raises(ValueError, match="limit must be 1-10000"):
+            sdk.tortoise_fts_query("test", limit=0)
+
+    def test_limit_10000_allowed_no_value_error(self):
+        """limit=10000 is allowed — validation passes.
+
+        The call may fail later (no DB connection), but it must not
+        raise ValueError.
+        """
+        from tortoise.sdk import TortoiseSDK
+        sdk = TortoiseSDK()
+        try:
+            sdk.tortoise_fts_query("test", limit=10000)
+        except ValueError:
+            pytest.fail("limit=10000 should not raise ValueError")
+        except Exception:
+            pass  # ConnectionError expected without DB
+
+    def test_default_limit_unaffected(self):
+        """Default limit=10 still works (validation passes)."""
+        from tortoise.sdk import TortoiseSDK
+        sdk = TortoiseSDK()
+        try:
+            sdk.tortoise_fts_query("test", limit=10)
+        except ValueError:
+            pytest.fail("default limit=10 should not raise ValueError")
+        except Exception:
+            pass  # ConnectionError expected without DB

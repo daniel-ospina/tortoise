@@ -1769,8 +1769,8 @@ class TortoiseSDK:
 
         if entity_type not in ("point", "event", "subject", "document", "object", "operator", "source"):
             raise ValueError(f"entity_type must be 'point', 'event', 'subject', 'document', 'object', 'operator', or 'source', got {entity_type!r}")
-        if limit < 1:
-            raise ValueError(f"limit must be >= 1, got {limit}")
+        if limit < 1 or limit > 10000:
+            raise ValueError(f"limit must be 1-10000, got {limit}")
         if not (0.0 <= threshold <= 1.0):
             raise ValueError(f"threshold must be 0.0-1.0, got {threshold}")
         if not (0.0 <= min_confidence <= 1.0):
