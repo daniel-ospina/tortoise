@@ -1263,6 +1263,135 @@ class TortoiseSDK:
             "evidence_ids": evidence_ids,
         }
 
+    def file_human_approval(self, approver_id: str, artifact_id: str,
+                            point_ids: list[str],
+                            decision_content: str | None = None) -> dict:
+        """Record a human approval of a planning artifact (#531).
+
+        Canonical approval pattern (research #421): an Event
+        (eventKind: ``humanApproval``) records the occurrence with full
+        provenance — approver Subject, artifact, approved claim Points — while
+        a decision Point (pointKind: ``humanApproval``) carries the epistemic
+        weight: it seeds the grounding a-vector and receives an EP evidence
+        prior so dependent claims strengthen. Unidirectional IMPL fan-out
+        (label ``approvedBy``) links the approval Point to each approved claim
+        Point — deliberately unidirectional so EP never propagates claim
+        weakness back into the approval.
+
+        Deliberately NOT stored: no ``approved`` status flag on the artifact —
+        approval is derived from the event stream at query time (ONTOLOGY §2).
+
+        Args:
+            approver_id: Subject id (or name) of the human approving.
+            artifact_id: Object/Document id (or name) of the artifact approved.
+            point_ids: claim Point ids the approval covers (non-operator).
+            decision_content: optional content override for the decision Point
+                (default ``"Approved: <artifact>"``).
+
+        Returns {event_id, decision_point_id, impl_operator_ids,
+                 confidence_delta} where confidence_delta maps each approved
+        claim id to its confidence change after the EP run.
+        """
+        from datetime import datetime, timezone
+        proj = self._get_proj()
+
+        # 1. Validate approver Subject exists (fail loudly, not silently)
+        r = proj.g.query(
+            "MATCH (s:Subject) WHERE s.id = $id OR s.name = $id RETURN s.id",
+            params={"id": approver_id},
+        ).result_set
+        if not r:
+            raise ValueError(
+                f"Cannot file human approval: Subject {approver_id!r} does not exist"
+            )
+
+        # 2. Validate artifact exists (Object or Document)
+        r = proj.g.query(
+            "MATCH (n) WHERE (n:Object OR n:Document) "
+            "AND (n.id = $id OR n.name = $id) RETURN labels(n), n.id",
+            params={"id": artifact_id},
+        ).result_set
+        if not r:
+            raise ValueError(
+                f"Cannot file human approval: artifact {artifact_id!r} does not exist"
+            )
+
+        # 3. Validate point_ids exist and are non-operator Points
+        if not point_ids:
+            raise ValueError("Cannot file human approval: at least one claim Point required")
+        r = proj.g.query(
+            "MATCH (n:Point) WHERE n.id IN $ids "
+            "AND (n.is_operator IS NULL OR n.is_operator = false) RETURN n.id",
+            params={"ids": point_ids},
+        ).result_set
+        existing = {row[0] for row in r}
+        missing = [pid for pid in point_ids if pid not in existing]
+        if missing:
+            raise ValueError(
+                f"Cannot file human approval: Points {missing} do not exist or are operators"
+            )
+
+        now = datetime.now(timezone.utc).isoformat()
+
+        # 4. Decision Point (pointKind humanApproval) — epistemic weight carrier
+        content = decision_content or f"Approved: {artifact_id}"
+        decision = self.create_point(
+            "humanApproval",
+            content,
+            status="live",
+            authoredBy=approver_id,
+        )
+        decision_id = decision["id"]
+
+        # 5. Event (eventKind humanApproval) — the occurrence record
+        event = self.create_event(
+            name=f"human approval of {artifact_id}",
+            eventKind="humanApproval",
+            startedAt=now,
+            eventStatus="completed",
+        )
+        event_id = event["eventId"]
+        # Wire provenance: approver performs; uses artifact; aboutPoint each
+        # approved claim; produces the decision Point (design #421).
+        proj.create_edge(approver_id, event_id, "performs")
+        proj.create_edge(event_id, artifact_id, "uses")
+        for pid in point_ids:
+            proj.create_about_edge(event_id, pid, "aboutPoint")
+        proj.create_edge(event_id, decision_id, "produces")
+
+        # 6. Unidirectional IMPL fan-out: approval → each approved claim.
+        #    create_operator defaults to bidirectional — direction must be
+        #    explicit so EP never back-propagates claim weakness into the
+        #    approval point.
+        op = self.create_operator(
+            "IMPL", decision_id, point_ids,
+            label="approvedBy", direction="unidirectional",
+        )
+
+        # 7. EP with evidence prior on the approval Point: Beta(10,1) is a
+        #    strong positive prior — dependents strengthen (issue #531).
+        before = {}
+        for pid in point_ids:
+            p = self.get_point(pid)
+            before[pid] = p.get("confidence", 0.5) if p else 0.5
+        self.compute_confidence(evidence={decision_id: (10, 1)})
+        deltas = {}
+        for pid in point_ids:
+            p = self.get_point(pid)
+            after = p.get("confidence", 0.5) if p else 0.5
+            deltas[pid] = round(after - before[pid], 4)
+
+        # 8. Approval seeds the grounding a-vector — re-compute (api.py pattern)
+        if hasattr(proj, "compute_grounding"):
+            proj.compute_grounding()
+
+        return {
+            "event_id": event_id,
+            "decision_point_id": decision_id,
+            "impl_operator_ids": [op["id"]],
+            "confidence_delta": deltas,
+        }
+
     # ── Lifecycle ─────────────────────────────────────────────────
 
     def list_graphs(self) -> list[str]:
@@ -3779,6 +3908,7 @@ class TortoiseSDK:
             "MATCH (e)-[:IMPL]->(p:Point) "
             "WHERE (p.is_operator IS NULL OR p.is_operator = false) "
             "AND (p.outdated IS NULL OR p.outdated = false) "
+            "AND e.eventKind <> 'humanApproval' "  # #531: no reputation from own approvals
             f"AND {match_clause} "
             "RETURN p.id, p.content, coalesce(p.confidence, 0.5) AS conf",
             params={"sid": subject_id},
@@ -3788,6 +3918,7 @@ class TortoiseSDK:
             "MATCH (e)-[:NAND]->(p:Point) "
             "WHERE (p.is_operator IS NULL OR p.is_operator = false) "
             "AND (p.outdated IS NULL OR p.outdated = false) "
+            "AND e.eventKind <> 'humanApproval' "  # #531: no reputation from own approvals
             f"AND {match_clause} "
             "RETURN p.id, p.content, coalesce(p.confidence, 0.5) AS conf",
             params={"sid": subject_id},

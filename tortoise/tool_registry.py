@@ -243,6 +243,16 @@ TOOL_REGISTRY: list[ToolDefinition] = [
         http_policy=True,
         sdk_method="file_decision",
     ),
+    ToolDefinition(
+        name="tortoise_file_human_approval",
+        description="File a human approval of a planning artifact to the graph. "
+                    "Creates Event (eventKind: humanApproval) + decision Point "
+                    "(pointKind: humanApproval) + unidirectional IMPL fan-out "
+                    "(label approvedBy) so dependent claims strengthen.",
+        annotations=_rw(),
+        http_policy=True,
+        sdk_method="file_human_approval",
+    ),
     # ── Deletion / Invalidation ───────────────────────────────────
     ToolDefinition(
         name="tortoise_delete_point",
