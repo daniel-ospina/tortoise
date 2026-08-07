@@ -15,8 +15,6 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from urllib.parse import urlparse
-
 from tortoise.api import EventAPI, provenance          # noqa: E402
 from tortoise.log import EventLog                       # noqa: E402
 from tortoise.projection import (                        # noqa: E402
@@ -1202,74 +1200,27 @@ def test_rebuild_all_cross_file_references():
 
 
 # --------------------------------------- FalkorProjection.from_uri — #48
+#
+# These tests exercise the REAL code path — _validate_uri_scheme or
+# from_uri itself.  from_uri validates the scheme BEFORE connecting,
+# so error-path tests need no live FalkorDB server.
+#
+# Scheme-acceptance (docker/redis/rediss) is covered in
+# tests/test_sdk_props_coercion.py (TestUriSchemes) — not duplicated here.
 
 
-def test_from_uri_docker_scheme():
-    """docker:// scheme parses correctly."""
-    # This test only validates URI parsing — no FalkorDB connection required.
-    # from_uri does not connect; it just parses args and calls __init__,
-    # which only connects when host is provided. We supply host=None to
-    # test the parse path without requiring a running FalkorDB.
-    uri = "docker://:falkordb@localhost:6379/tortoise"
-    parsed = urlparse(uri)
-    assert parsed.scheme == "docker"
-    assert parsed.hostname == "localhost"
-    assert parsed.port == 6379
-    assert parsed.password == "falkordb"
-    assert parsed.path == "/tortoise"
-
-
-def test_from_uri_redis_scheme_accepted():
-    """redis:// scheme is accepted (alias for docker://)."""
-    uri = "redis://:falkordb@localhost:6379/tortoise"
-    parsed = urlparse(uri)
-    assert parsed.scheme == "redis"
-    assert parsed.hostname == "localhost"
-    assert parsed.port == 6379
-    assert parsed.password == "falkordb"
-    assert parsed.path == "/tortoise"
-
-
-def test_from_uri_defaults():
-    """from_uri fills defaults for missing host/port/graph."""
-    uri = "docker://localhost"
-    parsed = urlparse(uri)
-    assert parsed.scheme == "docker"
-    host = parsed.hostname or "localhost"
-    port = parsed.port or 16379
-    graph = parsed.path.lstrip('/') or "tortoise"
-    assert host == "localhost"
-    assert port == 16379
-    assert graph == "tortoise"
-
-
-def test_from_uri_rejects_garbage_scheme():
-    """Unsupported scheme raises ValueError with actionable message."""
-    uri = "postgresql://localhost:5432/db"
-    parsed = urlparse(uri)
-    if parsed.scheme not in ("docker", "redis"):
-        msg = (
-            f"Unsupported scheme: {parsed.scheme} "
-            f"(expected docker:// or redis://). "
-            f"Example: docker://:password@localhost:6379/tortoise"
-        )
-        assert "Unsupported scheme: postgresql" in msg
-        assert "expected docker:// or redis://" in msg
+def test_from_uri_rejects_unsupported_scheme():
+    """from_uri raises ValueError for unsupported schemes (validates BEFORE connecting)."""
+    with pytest.raises(ValueError,
+                       match="Unsupported scheme: postgresql"):
+        FalkorProjection.from_uri("postgresql://localhost:5432/db")
 
 
 def test_from_uri_rejects_empty_scheme():
-    """Empty/missing scheme raises ValueError."""
-    uri = "localhost:6379"
-    parsed = urlparse(uri)
-    # urlparse treats host:port without scheme as path, so scheme is empty
-    if parsed.scheme not in ("docker", "redis"):
-        msg = (
-            f"Unsupported scheme: {parsed.scheme} "
-            f"(expected docker:// or redis://). "
-            f"Example: docker://:password@localhost:6379/tortoise"
-        )
-        assert "Unsupported scheme:" in msg
-        assert "expected docker:// or redis://" in msg
+    """from_uri raises ValueError for empty/missing scheme (validates BEFORE connecting)."""
+    with pytest.raises(ValueError,
+                       match="Unsupported scheme:"):
+        FalkorProjection.from_uri("localhost:6379")
 
 
 # -------------------------------------------------------- consistency check
