@@ -1081,7 +1081,8 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
                     rate_limit: int = 100,
                     _registry_sdk=None,
                     auth_mode: Literal["tenant", "static", "none"] = "tenant",
-                    api_key: str | None = None) -> Any:
+                    api_key: str | None = None,
+                    tool_group: str | None = None) -> Any:
     """Configured Streamable HTTP app for the hosted platform (#236).
 
     Mounted at /mcp on the existing FastAPI app. Auth + rate limiting +
@@ -1093,6 +1094,9 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
       "tenant" → TeamResolutionMiddleware (registry Bearer tt_ keys)
       "static" → StaticKeyMiddleware (single TORTOISE_API_KEY, self-host LAN)
       "none"   → no auth middleware (localhost-bound self-host eval)
+
+    tool_group: optional curation-group filter (#523) — role-scoped server
+      (e.g. "memory" exposes only memory tools to the agent).
 
     path="/": the app is mounted at /mcp on the parent FastAPI app, which
     strips the mount prefix before dispatching to this sub-app — so routes
@@ -1113,6 +1117,10 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
     # a tenant token is verified (mcp_auth delegates via function-level import).
     auth_mw = None
     transport_mw = None
+    group_mw = None
+    if tool_group:
+        from tortoise.mcp_auth import ToolGroupMiddleware
+        group_mw = Middleware(ToolGroupMiddleware, tool_group=tool_group)
     if auth_mode == "tenant":
         from tortoise.mcp_auth import TeamResolutionMiddleware
         auth_mw = Middleware(TeamResolutionMiddleware, registry_sdk=_registry_sdk)
@@ -1126,13 +1134,23 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
         transport_mw = Middleware(TransportModeMiddleware)
 
     class _HTTPToolFilter(Transform):
-        """Hide HTTP-excluded tools from tools/list (D4 — registration-level).
+        """Hide HTTP-excluded tools from tools/list (D4) + optional curation
+        group scoping (#523).
 
         The excluded tools (team_create/backfill_v25/ingest_corpus) remain
         registered on the shared module-level mcp instance for stdio, but are
         filtered out of the HTTP tool listing so tenants can't discover them.
+        When tool_group is set, only that group's tools are listed — role-
+        scoped servers keep the agent's tool-selection surface under ~20.
         """
         async def list_tools(self, tools):
+            from tortoise.mcp_auth import _tool_group
+            group = _tool_group.get()
+            if group:
+                from tortoise.tool_registry import GROUP_BY_NAME
+                return [t for t in tools
+                        if t.name in HTTP_ALLOWED
+                        and GROUP_BY_NAME.get(t.name) == group]
             return [t for t in tools if t.name in HTTP_ALLOWED]
 
     # Guard against transform accumulation: create_http_app() is called at
@@ -1166,6 +1184,9 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
         # Innermost — runs after auth validated, right before the app:
         # initializes the transport-mode ContextVars selfhost tools need.
         middleware.append(transport_mw)
+    if group_mw is not None:
+        # Sets the curation-group ContextVar for the tools/list transform.
+        middleware.append(group_mw)
 
     return mcp.http_app(
         transport="streamable-http",
