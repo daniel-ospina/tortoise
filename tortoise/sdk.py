@@ -540,9 +540,11 @@ class TortoiseSDK:
                 )
         # Tag sync (#485): keep TAGGED edges consistent with the n.tags
         # property — update_point previously set the property but left edges
-        # stale, so query_points_by_tag missed updated points.
+        # stale, so query_points_by_tag missed updated points. Falsy tag
+        # values (None, "") normalize to [] like create_point, so the
+        # "clear tags" idiom removes edges instead of leaving them stale.
         if "tags" in props:
-            self._sync_tags(proj, id, props["tags"])
+            self._sync_tags(proj, id, props["tags"] or [])
         # Dreaming (#85): property mutations can affect confidence.
         self._mark_dirty([id])
         return self.get_point(id)
@@ -556,11 +558,19 @@ class TortoiseSDK:
         ).result_set[0][0]
         if not exists:
             return False
+        # A tag's edge count can only change for this point's own TAGGED
+        # edges — scope the orphan scan to that case (skips the global tag
+        # scan on every untagged delete; #485).
+        has_tag_edges = proj.g.query(
+            "MATCH (n:Point {id:$id})-[:TAGGED]->() RETURN count(*) > 0",
+            params={"id": id},
+        ).result_set[0][0]
         proj.g.query("MATCH (n:Point {id:$id}) DETACH DELETE n", params={"id": id})
         # Tag GC (#485): delete orphaned :Tag nodes (no incoming TAGGED edges).
-        # Cheap + idempotent — DETACH DELETE leaves count-0 tags behind that
-        # would otherwise accumulate in list_tags.
-        proj.g.query("MATCH (t:Tag) WHERE NOT (t)<-[:TAGGED]-() DELETE t")
+        # Idempotent — DETACH DELETE leaves count-0 tags behind that would
+        # otherwise accumulate in list_tags.
+        if has_tag_edges:
+            proj.g.query("MATCH (t:Tag) WHERE NOT (t)<-[:TAGGED]-() DELETE t")
         # Dreaming (#85): deletion changes the graph structure around neighbors.
         self._mark_dirty([id])
         return True

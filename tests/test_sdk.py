@@ -584,6 +584,50 @@ class TestUpdatePointTags:
         # edges untouched — old edge still there
         assert len(sdk.query_points_by_tag("alpha")) == 1
 
+    def test_update_none_clears_tags(self, sdk):
+        """tags=None normalizes to [] like create_point — clears edges, no stale
+        state left behind by the 'clear' idiom (#485)."""
+        p = sdk.create_point("statement", "clear-none", tags=["alpha"])
+        sdk.update_point(p["id"], tags=None)
+        assert sdk.query_points_by_tag("alpha") == []
+        assert sdk.get_point(p["id"]).get("tags") is None
+
+    def test_update_object_branch_tags(self, sdk):
+        """The :Point:Object branch (SET n += $props whole-dict + version bump)
+        also syncs TAGGED edges (#485)."""
+        p = sdk.create_point("statement", "entity-ish")
+        proj = sdk._get_proj()
+        proj.g.query("MATCH (n:Point {id:$id}) SET n:Object", params={"id": p["id"]})
+        sdk.update_point(p["id"], tags=["objtag"])
+        assert [r["id"] for r in sdk.query_points_by_tag("objtag")] == [p["id"]]
+        assert sdk.get_point(p["id"])["version"] == 1  # Object branch bumps version
+        sdk.update_point(p["id"], tags=[])
+        assert sdk.query_points_by_tag("objtag") == []
+
+    def test_update_nonexistent_point_no_orphan(self, sdk):
+        """update_point on a non-existent id must not create phantom :Tag
+        nodes (empty MATCH short-circuits the MERGEs)."""
+        sdk.update_point("000000000000-000000000000", tags=["phantom"])
+        assert sdk.list_tags() == []
+
+    def test_int_tag_names_roundtrip(self, sdk):
+        """Non-string (int) tag names are param-bound and round-trip."""
+        p = sdk.create_point("statement", "ints", tags=[123])
+        assert [r["id"] for r in sdk.query_points_by_tag(123)] == [p["id"]]
+        names = {t["name"] for t in sdk.list_tags()}
+        assert 123 in names
+
+    def test_update_shared_tag_survives_removal(self, sdk):
+        """Removing a tag from one point leaves the Tag intact if another
+        point still uses it (GC only deletes truly orphaned Tags)."""
+        a = sdk.create_point("statement", "a", tags=["shared"])
+        b = sdk.create_point("statement", "b", tags=["shared"])
+        sdk.update_point(a["id"], tags=[])
+        tags = sdk.list_tags()
+        assert len(tags) == 1
+        assert tags[0]["name"] == "shared"
+        assert tags[0]["count"] == 1
+
     def test_dedup_syncs_tags(self, sdk):
         """create_point(dedup=True) routes through update_point — tags reconcile
         to the latest call (no stale edges from the earlier tags)."""
