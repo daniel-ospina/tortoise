@@ -69,10 +69,15 @@ class TortoiseEP:
                 self._msg_cache[(oid, cid, rel)] = (float(ma), float(mb))
 
     def _flush_cache(self):
-        """Write all cached data back to FalkorDB in batch."""
-        if self._node_cache:
+        """Write all cached data back to FalkorDB in batch.
+
+        Attribute-safe (#330): caches may be absent (never loaded, or removed
+        by the per-run lifecycle) — flush whatever is present.
+        """
+        if getattr(self, "_node_cache", None):
             params_list = [
-                {"id": cid, "a": a, "b": b, "c": round(a/(a+b), 4)}
+                {"id": cid, "a": a, "b": b,
+                 "c": round(a/(a+b), 4) if (a + b) > 0 else 0.5}
                 for cid, (a, b) in self._node_cache.items()
             ]
             self.g.query(
@@ -82,7 +87,7 @@ class TortoiseEP:
                 params={"params": params_list},
             )
 
-        if self._msg_cache:
+        if getattr(self, "_msg_cache", None):
             for rel in ("IMPL", "NAND"):
                 params_list = [
                     {"oid": oid, "cid": cid, "a": ma, "b": mb}
@@ -96,6 +101,12 @@ class TortoiseEP:
                         "SET r.msg_alpha = p.a, r.msg_beta = p.b",
                         params={"params": params_list},
                     )
+
+    def _clear_caches(self) -> None:
+        """Remove the batch caches so post-run reads hit the graph (#330)."""
+        for _attr in ("_node_cache", "_msg_cache"):
+            if hasattr(self, _attr):
+                delattr(self, _attr)
 
     # ── Cached read/write ────────────────────────────────────────
 
@@ -113,7 +124,8 @@ class TortoiseEP:
         if hasattr(self, '_node_cache'):
             self._node_cache[node_id] = (alpha, beta)
             return
-        mean = round(alpha / (alpha + beta), 4)
+        # #330: guard degenerate (0,0) params — uniform fallback instead of ZDE
+        mean = round(alpha / (alpha + beta), 4) if (alpha + beta) > 0 else 0.5
         self.g.query(
             "MATCH (n:Point {id:$id}) "
             "SET n.ep_alpha=$a, n.ep_beta=$b, n.confidence=$c",
@@ -186,7 +198,8 @@ class TortoiseEP:
         if not rows or rows[0][0] is None:
             return False
         a, b = float(rows[0][0]), float(rows[0][1])
-        return a / (a + b) >= threshold
+        # #330: guard degenerate (0,0) params (cache path already guards)
+        return a / (a + b) >= threshold if (a + b) > 0 else False
 
     def _update_factor(self, op_id: str, op_type: str,
                        input_ids: list[str], weight: float = 1.0,
@@ -282,9 +295,12 @@ class TortoiseEP:
                     self._update_factor(op_id, op_type,
                                         [input_ids[i], input_ids[j]], weight, label, direction)
 
-    def _update_claim_posterior(self, claim_id: str) -> None:
-        # Start from evidence prior in natural parameter space
-        ev = self._evidence.get(claim_id)
+    def _update_claim_posterior(self, claim_id: str,
+                                 run_evidence: dict | None = None) -> None:
+        # Start from evidence prior in natural parameter space.
+        # #330: consume the run-scoped evidence (constructor + run-level),
+        # never the instance dict directly.
+        ev = (run_evidence or self._evidence).get(claim_id)
         if ev:
             total_eta1, total_eta2 = ev[0] - 1.0, ev[1] - 1.0
         else:
@@ -395,6 +411,11 @@ class TortoiseEP:
     def compute_confidence(self, claim_id: str) -> dict:
         a, b = self._read_node(claim_id)
         total = a + b
+        if total <= 0:
+            # #330: degenerate stored params (0,0) — uniform Beta(1,1) fallback
+            # instead of ZeroDivisionError.
+            return {"mean": 0.5, "variance": 1/12,
+                    "alpha": a, "beta": b, "effective_n": 0}
         return {
             "mean": a / total,
             "variance": (a * b) / (total * total * (total + 1)),
@@ -425,16 +446,30 @@ class TortoiseEP:
                 merged with any evidence set at construction time.
                 Evidence set at run() overrides per-claim.
         """
+        # Run-level evidence is CALL-SCOPED (#330): merge into a local dict so
+        # self._evidence is never mutated by run() — otherwise a later run()
+        # without evidence would re-apply (and re-write to the graph) stale
+        # run-level priors. Constructor evidence still applies every run.
+        run_evidence = dict(self._evidence)
         if evidence:
-            self._evidence.update(evidence)
+            run_evidence.update(evidence)
+
+        # Cache lifecycle (#330): _node_cache/_msg_cache are a per-run working
+        # set. Remove them at entry (before the evidence pre-write and the
+        # early returns) so a run that exits early never leaves stale cache
+        # behind for public reads (_read_node/_write_node fall through to the
+        # graph when the attribute is absent).
+        for _attr in ("_node_cache", "_msg_cache"):
+            if hasattr(self, _attr):
+                delattr(self, _attr)
 
         # Apply evidence priors to graph before EP iterations.
         # ponytail: direct graph write so evidence is visible even
         # when there are no operators / affected claims.
-        if self._evidence:
+        if run_evidence:
             params_list = [
                 {"id": cid, "a": a, "b": b}
-                for cid, (a, b) in self._evidence.items()
+                for cid, (a, b) in run_evidence.items()
             ]
             self.g.query(
                 "UNWIND $params AS p "
@@ -467,7 +502,7 @@ class TortoiseEP:
                 self._update_factor(op_id, op_type, input_ids, weight, label, direction)
 
             for cid in affected:
-                self._update_claim_posterior(cid)
+                self._update_claim_posterior(cid, run_evidence)
 
             max_change = 0.0
             for cid in affected:
@@ -481,7 +516,9 @@ class TortoiseEP:
 
             if max_change < self.tol:
                 self._flush_cache()
+                self._clear_caches()
                 return iteration + 1, True
 
         self._flush_cache()
+        self._clear_caches()
         return self.max_iter, False

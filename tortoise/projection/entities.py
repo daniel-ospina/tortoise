@@ -82,7 +82,13 @@ class _EntityHandlers:
                 params={**match_params, "extra": extra},
             )
 
-    def _upsert(self, p: dict) -> None:
+    def _upsert_point_props(self, p: dict) -> None:
+        """Write all Point node properties (no edges).
+
+        Single source of truth for Point property parity between apply() and
+        rebuild_all() (#330): rebuild pass 1a calls this so a rebuilt graph can
+        never drift from the incrementally-applied graph on node properties.
+        """
         op = p.get("operator")
         prov = p.get("provenance", {})
 
@@ -127,24 +133,30 @@ class _EntityHandlers:
             "MERGE (n:Point {id:$id}) SET " + ", ".join(set_clauses),
             params=params,
         )
-        # Ontology v2.1: link Point → Source via extractedFrom edge
+        # Ontology v2.1: also store extractedFrom as property for query convenience
         source_ref = p.get("extractedFrom")
         if source_ref:
-            self._link_source(p["id"], source_ref)
-            # Also store as property for query convenience
             self.g.query("MATCH (n:Point {id:$id}) SET n.extractedFrom = $ref", params={"id": p["id"], "ref": source_ref})
-        # aboutEntities → per-type about edges (Ontology v2.1 Phase 1)
-        about = p.get("aboutEntities")
-        if about and isinstance(about, list):
-            for entity_name in about:
-                self._create_about_edges(p["id"], str(entity_name))
         # P1-2: Temporal — also store provenance source_id
         if prov.get("source_id"):
             self.g.query(
                 "MATCH (n:Point {id:$id}) SET n.provenanceSource=$sid",
                 params={"id": p["id"], "sid": prov["source_id"]},
             )
-        if op:
+
+    def _upsert(self, p: dict) -> None:
+        """Upsert a Point: node properties via _upsert_point_props, then edges."""
+        self._upsert_point_props(p)
+        # Ontology v2.1: link Point → Source via extractedFrom edge
+        source_ref = p.get("extractedFrom")
+        if source_ref:
+            self._link_source(p["id"], source_ref)
+        # aboutEntities → per-type about edges (Ontology v2.1 Phase 1)
+        about = p.get("aboutEntities")
+        if about and isinstance(about, list):
+            for entity_name in about:
+                self._create_about_edges(p["id"], str(entity_name))
+        if p.get("operator"):
             self._create_edges(p)
 
     def _delete(self, pid: str) -> None:
