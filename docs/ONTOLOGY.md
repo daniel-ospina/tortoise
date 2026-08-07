@@ -121,7 +121,7 @@ Per-type edges (chosen over single polymorphic edge — FalkorDB matrix-per-type
 | `managedBy` | Entity → Subject | unidirectional | N-ary | RACI Responsible | Operational responsibility |
 | `ownedBy` | Entity → Subject | unidirectional | N-ary | RACI Accountable | Accountability, data boundary |
 
-> **memberOf is canonical.** Code's `hasMember` (org→member, sdk.py:3137) and `holdsRole` (person→role, sdk.py:3141) are **legacy aliases** — the ontology standardizes on `memberOf`; code alignment tracked as follow-up.
+> **memberOf is canonical.** `get_org_structure` queries `memberOf` for membership (Subject→Subject, member→org). `holdsRole` is retained as a distinct concept (person→role is not membership). The legacy `hasMember` predicate (org→member) remains in valid_predicates for backward compatibility with existing graph edges.
 
 ### §3.7 Object ↔ Object
 
