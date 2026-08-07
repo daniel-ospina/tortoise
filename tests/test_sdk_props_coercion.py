@@ -106,16 +106,130 @@ class TestUpdateAndEntityProps:
 
     def test_create_object_accepts_nested_props_dict(self, sdk):
         # Coercion must accept the MCP-style nested dict without raising
-        # ("Property values can only be of primitive types"). Note: entity
-        # projections persist a fixed field set for Object nodes, so arbitrary
-        # props (tier/owner) are dropped by the projection — a pre-existing
-        # entity-handler behavior, separate from props coercion (#218).
+        # ("Property values can only be of primitive types").
         obj = sdk.create_object(
             "Test Product", "product",
             props={"tier": "free", "owner": "pm"},
         )
         assert obj.get("name") == "Test Product"
         assert obj.get("objectKind") == "product"
+
+
+# ── Entity arbitrary props persistence (#228) ─────────────────────────
+
+class TestEntityPropsPersisted:
+    """Regression: entity CRUD must persist arbitrary caller-supplied props."""
+
+    def test_create_object_persists_arbitrary_props(self, sdk):
+        obj = sdk.create_object(
+            "Arbitrary Widget", "widget",
+            tier="premium", owner="alice", region="us-east-1",
+        )
+        assert obj.get("name") == "Arbitrary Widget"
+        assert obj.get("objectKind") == "widget"
+        assert obj.get("tier") == "premium"
+        assert obj.get("owner") == "alice"
+        assert obj.get("region") == "us-east-1"
+
+    def test_create_object_nested_props_dict_persists(self, sdk):
+        """MCP-style nested props= dict also persists arbitrary props (#228)."""
+        obj = sdk.create_object(
+            "Nested Props Widget", "gadget",
+            props={"tier": "free", "owner": "pm", "env": "staging"},
+        )
+        assert obj.get("tier") == "free"
+        assert obj.get("owner") == "pm"
+        assert obj.get("env") == "staging"
+
+    def test_create_subject_persists_arbitrary_props(self, sdk):
+        subj = sdk.create_subject(
+            "charlie", "engineer",
+            level="senior", team="infra", location="remote",
+        )
+        assert subj.get("name") == "charlie"
+        assert subj.get("subjectKind") == "engineer"
+        assert subj.get("level") == "senior"
+        assert subj.get("team") == "infra"
+        assert subj.get("location") == "remote"
+
+    def test_create_document_persists_arbitrary_props(self, sdk):
+        doc = sdk.create_document(
+            "Meeting Notes", "notes",
+            project="tortoise", reviewer="bob", priority=1,
+        )
+        assert doc.get("title") == "Meeting Notes"
+        assert doc.get("documentKind") == "notes"
+        assert doc.get("project") == "tortoise"
+        assert doc.get("reviewer") == "bob"
+        assert doc.get("priority") == 1
+
+    def test_create_event_persists_arbitrary_props(self, sdk):
+        ev = sdk.create_event(
+            "code-review", "review",
+            severity="medium", sprint="S42",
+        )
+        assert ev.get("name") == "code-review"
+        assert ev.get("eventKind") == "review"
+        assert ev.get("severity") == "medium"
+        assert ev.get("sprint") == "S42"
+
+    def test_update_entity_persists_arbitrary_props(self, sdk):
+        obj = sdk.create_object("Updatable", "service")
+        obj_id = obj.get("id") or obj.get("eventId")
+        updated = sdk.update_entity(obj_id, tier="enterprise", sla="99.9")
+        assert updated.get("tier") == "enterprise"
+        assert updated.get("sla") == "99.9"
+
+    def test_roundtrip_get_entity_returns_arbitrary_props(self, sdk):
+        """Props survive full round-trip: create → get_entity."""
+        obj = sdk.create_object("Roundtrip", "test", flavor="spicy", heat=10)
+        obj_id = obj.get("id") or obj.get("eventId")
+        fetched = sdk.get_entity(obj_id)
+        assert fetched.get("flavor") == "spicy"
+        assert fetched.get("heat") == 10
+
+    def test_arbitrary_props_survive_idempotent_create(self, sdk):
+        """Re-creating same entity (content-hash dedup) must not wipe extra props.
+
+        Object/Subject MERGE by name, so a second create_object with the same
+        name matches the existing node.  _create_entity returns the NEW ulid
+        which won't match the MERGE'd node — a pre-existing _create_entity
+        gap (not #228).  We verify the round-trip via the first call's id."""
+        first = sdk.create_object("Dedup Object 2", "type-a", tag="v1")
+        first_id = first.get("id") or first.get("eventId")
+        # Second create with same name hits the MERGE'd node; extra props
+        # are applied via MATCH + SET, so tag gets updated.
+        sdk.create_object("Dedup Object 2", "type-a", tag="v2")
+        fetched = sdk.get_entity(first_id)
+        assert fetched.get("tag") == "v2"  # last write wins via _persist_extra_props
+
+    def test_props_none_value_not_stored(self, sdk):
+        """None-valued props are skipped (Cypher null sentinel)."""
+        obj = sdk.create_object("None Test", "type", keep="yes", drop=None)
+        assert obj.get("keep") == "yes"
+        # drop=None must not appear as a node property
+        assert "drop" not in obj
+
+    def test_create_source_persists_arbitrary_props(self, sdk):
+        src = sdk.create_source(
+            "https://example.com/doc", "report",
+            tier="gold", team="infra",
+        )
+        assert src.get("url") == "https://example.com/doc"
+        assert src.get("sourceKind") == "report"
+        assert src.get("tier") == "gold"
+        assert src.get("team") == "infra"
+
+    def test_meta_keys_not_stored_as_props(self, sdk):
+        """Control keys (edge-wired / structural) never leak as node props."""
+        obj = sdk.create_object(
+            "Control Test", "widget",
+            authoredBy="alice", ownedBy="team-x", managedBy="pm",
+        )
+        assert "authoredBy" not in obj
+        assert "ownedBy" not in obj
+        assert "managedBy" not in obj
+        assert "type" not in obj
 
 
 # ── from_uri scheme normalization ─────────────────────────────────────
