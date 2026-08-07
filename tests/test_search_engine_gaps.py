@@ -655,23 +655,25 @@ class TestRunVectorQuery:
 
     # ── Timeout ──────────────────────────────────────────────────────
 
-    def test_brute_force_timeout_returns_empty(self):
-        """Brute-force query exceeds timeout → []."""
+    def test_brute_force_timeout_logs_but_returns_results(self):
+        """#561: brute-force query exceeding timeout_ms returns its results
+        (latency warning only — discarding rows we already waited for threw
+        away good data; real hangs are bounded by socket_timeout)."""
         graph = SimpleMockGraph(result_set=[("a", 0.9)])
 
         with mock.patch("time.monotonic", side_effect=[0.0, 2.0]):
             result = run_vector_query(graph, self.QUERY_VEC, timeout_ms=500, is_embedded=True)
 
-        assert result == []
+        assert result == [("a", 0.9)]
 
-    def test_hnsw_timeout_returns_empty(self):
-        """HNSW query exceeds timeout → [] (no brute-force fallback on timeout)."""
+    def test_hnsw_timeout_logs_but_returns_results(self):
+        """#561: HNSW query exceeding timeout_ms returns its results."""
         graph = SimpleMockGraph(result_set=[("a",)])
 
         with mock.patch("time.monotonic", side_effect=[0.0, 2.0]):
             result = run_vector_query(graph, self.QUERY_VEC, timeout_ms=500, is_embedded=False)
 
-        assert result == []
+        assert result == [("a", 1.0)]
 
     # ── Scoring ──────────────────────────────────────────────────────
 
@@ -754,14 +756,15 @@ class TestRunFtsQuery:
         assert result[1] == ("p2", 0.80)
         assert result[2] == ("p3", 0.60)
 
-    def test_fts_query_timeout_returns_empty(self):
-        """Query exceeds timeout_ms → [] (post-hoc)."""
+    def test_fts_query_timeout_logs_but_returns_results(self):
+        """#561: query exceeding timeout_ms returns its results (latency
+        warning only, not a discard)."""
         graph = SimpleMockGraph(result_set=[("p1", 0.9)])
 
         with mock.patch("time.monotonic", side_effect=[0.0, 2.0]):
             result = run_fts_query(graph, "test", timeout_ms=500)
 
-        assert result == []
+        assert result == [("p1", 0.9)]
 
     def test_entity_type_event_uses_eventid(self):
         """entity_type='event' → Event label + eventId field."""

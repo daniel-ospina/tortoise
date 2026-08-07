@@ -126,7 +126,9 @@ def run_fts_query(
     Returns n.url for source (canonical key, #448), n.eventId for event,
     n.id for all other entity types.
 
-    Note: timeout_ms is checked AFTER the query completes (post-hoc).
+    Note: timeout_ms is a POST-HOC latency warning — it no longer discards
+    results (a slow-but-successful query keeps its rows, #561). Real hangs are
+    bounded by the connection-level socket_timeout (FalkorProjection).
     A slow query still consumes DB resources — this is a soft guard,
     not a connection-level kill. For connection-level timeout, set it
     at the FalkorDB driver level. (#18)
@@ -148,7 +150,9 @@ def run_fts_query(
             elapsed = (time.monotonic() - start) * 1000
             if elapsed > timeout_ms:
                 logger.warning("FTS query exceeded timeout: %.0fms > %dms", elapsed, timeout_ms)
-                return []
+                # #561: results we already waited for are returned, not
+                # discarded — the connection-level socket_timeout bounds real
+                # hangs.
             return [(row[0], float(row[1])) for row in rows]
         except Exception as e:
             logger.warning("Operator FTS query failed: %s", e)
@@ -178,7 +182,7 @@ def run_fts_query(
         elapsed = (time.monotonic() - start) * 1000
         if elapsed > timeout_ms:
             logger.warning("FTS query exceeded timeout: %.0fms > %dms", elapsed, timeout_ms)
-            return []
+            # #561: latency warning only — return the results, don't discard.
         return [(row[0], float(row[1])) for row in rows]
     except Exception as e:
         msg = str(e).lower()
@@ -210,7 +214,9 @@ def run_vector_query(
     Operators are Points with is_operator=true — they query the Point label.
     (#172)
 
-    Note: timeout_ms is checked AFTER the query completes (post-hoc).
+    Note: timeout_ms is a POST-HOC latency warning — it no longer discards
+    results (a slow-but-successful query keeps its rows, #561). Real hangs are
+    bounded by the connection-level socket_timeout (FalkorProjection).
     A slow query still consumes DB resources — this is a soft guard,
     not a connection-level kill. (#18)
     """
@@ -245,7 +251,7 @@ def run_vector_query(
             elapsed = (time.monotonic() - start) * 1000
             if elapsed > timeout_ms:
                 logger.warning("Vector query exceeded timeout: %.0fms > %dms", elapsed, timeout_ms)
-                return []
+                # #561: latency warning only — continue with the results.
             # Index results are ranked by similarity; assign rank-based scores.
             # RRF fusion uses rank not absolute scores; single-strategy mode
             # gets reasonable descending ordering.
@@ -284,7 +290,7 @@ def run_vector_query(
         elapsed = (time.monotonic() - start) * 1000
         if elapsed > timeout_ms:
             logger.warning("Vector query exceeded timeout: %.0fms > %dms", elapsed, timeout_ms)
-            return []
+            # #561: latency warning only — return the results, don't discard.
         return [(row[0], float(row[1])) for row in rows]
     except Exception as e:
         msg = str(e).lower()
