@@ -8,6 +8,51 @@ from __future__ import annotations
 from typing import Any
 
 
+#: Root-lookup branches for _resolve_root (issue #327). Every branch is a
+#: labeled lookup so the planner uses Node By Index Scan instead of All Node
+#: Scan. Mirrors the legacy `MATCH (n) WHERE n.id = $eid` semantics exactly:
+#: nodes are matched by their property id (Event.id == eventId, so the
+#: eventId branch is equivalent; Source nodes carry id except url-only
+#: ingestion stubs, which the legacy query also never matched). Session
+#: roots are preserved for BFS over CONTAINS edges.
+_ROOT_BRANCHES = (
+    ("Point", "id"), ("Subject", "id"), ("Object", "id"),
+    ("Document", "id"), ("Source", "id"), ("Session", "id"),
+    ("Event", "eventId"),
+)
+
+
+def _resolve_root(g: Any, entity_id: str) -> tuple[str | None, dict]:
+    """Index-backed root lookup: returns (label, properties) or (None, {}).
+
+    One UNION query over labeled branches — each branch index-backed (#327).
+    """
+    union_q = " UNION ".join(
+        f"MATCH (n:{label}) WHERE n.{prop} = $eid "
+        f"RETURN '{label}' AS label, properties(n) AS props LIMIT 1"
+        for label, prop in _ROOT_BRANCHES
+    )
+    rows = g.query(union_q, params={"eid": entity_id}).result_set
+    if not rows:
+        return None, {}
+    label, props = rows[0][0], rows[0][1]
+    parsed = dict(props)
+    parsed["type"] = label
+    return label, parsed
+
+
+#: Per-hop frontier-node match: label on the SOURCE side in BOTH directions.
+#: (Verified: `MATCH (n:Point)<-[r]-(m)` -> Index Scan; the neighbor-labeled
+#: form `MATCH (n)<-[r]-(m:Point)` degrades to All Node Scan — the trap.)
+def _hop_query(label: str) -> str:
+    return (
+        f"MATCH (n:{label} {{id:$eid}})-[r]->(m) "
+        f"WHERE NOT m.id IN $visited RETURN m, type(r) UNION "
+        f"MATCH (n:{label} {{id:$eid}})<-[r]-(m) "
+        f"WHERE NOT m.id IN $visited RETURN m, type(r)"
+    )
+
+
 def entityProfile(
     db: Any,               # FalkorDB client (duck-typed: needs .select_graph())
     graph_name: str,        # e.g. "tortoise", "episodic"
@@ -23,40 +68,36 @@ def entityProfile(
     """
     g = db.select_graph(graph_name)
 
-    # 1. Fetch the root entity
-    root_rows = g.query(
-        "MATCH (n) WHERE n.id = $eid RETURN n",
-        params={"eid": entity_id},
-    ).result_set
-    if not root_rows:
+    # 1. Fetch the root entity (index-backed labeled union, #327)
+    root_label, root = _resolve_root(g, entity_id)
+    if root_label is None:
         return {"entity": {}, "connected": {"points": [], "documents": [],
                "events": [], "subjects": [], "objects": []}}
-    root = _parse_node(root_rows[0][0])
 
-    # 2. BFS — follow all edges for `hops` levels
+    # 2. BFS — follow all edges for `hops` levels. Frontier tracks (id, label);
+    #    the per-hop query binds the frontier node's label on the SOURCE side
+    #    so every hop uses the id range index (issue #327).
     visited: set[str] = {entity_id}
-    frontier: list[str] = [entity_id]
+    frontier: list[tuple[str, str]] = [(entity_id, root_label)]
     connected: list[dict] = []
 
     for _ in range(hops):
-        next_frontier: list[str] = []
-        for fid in frontier:
+        next_frontier: list[tuple[str, str]] = []
+        for fid, flabel in frontier:
             rows = g.query(
-                "MATCH (n)-[r]->(m) WHERE n.id = $eid AND NOT m.id IN $visited "
-                "RETURN m, type(r) UNION "
-                "MATCH (n)<-[r]-(m) WHERE n.id = $eid AND NOT m.id IN $visited "
-                "RETURN m, type(r)",
+                _hop_query(flabel),
                 params={"eid": fid, "visited": list(visited)},
             ).result_set
             for row in rows:
                 node = _parse_node(row[0])
                 rel_type = row[1] if len(row) > 1 else None
                 nid = node.get("id")
+                nlabel = node.get("type")
                 if nid and nid not in visited:
                     node["_relationship"] = rel_type
                     connected.append(node)
                     visited.add(nid)
-                    next_frontier.append(nid)
+                    next_frontier.append((nid, nlabel))
         frontier = next_frontier
 
     # 3. Categorize by label, apply filters
@@ -103,32 +144,28 @@ def tortoise_traverse(
     """
     g = db.select_graph(graph_name)
 
-    # Fetch root
-    root_rows = g.query(
-        "MATCH (n) WHERE n.id = $eid RETURN n",
-        params={"eid": entity_id},
-    ).result_set
-    root = _parse_node(root_rows[0][0]) if root_rows else {}
+    # Fetch root (index-backed labeled union, #327)
+    root_label, root = _resolve_root(g, entity_id)
 
-    # BFS with depth tracking
+    # BFS with depth tracking; frontier carries (id, label, depth) so each
+    # per-hop query can bind the source label for index-backed lookups.
     visited: set[str] = {entity_id}
-    frontier: list[tuple[str, int]] = [(entity_id, 0)]  # (id, depth)
+    frontier: list[tuple[str, str, int]] = (
+        [(entity_id, root_label, 0)] if root_label else [])
     nodes: list[dict] = []
 
     for _ in range(max_hops):
-        next_frontier: list[tuple[str, int]] = []
-        for fid, depth in frontier:
+        next_frontier: list[tuple[str, str, int]] = []
+        for fid, flabel, depth in frontier:
             rows = g.query(
-                "MATCH (n)-[r]->(m) WHERE n.id = $eid AND NOT m.id IN $visited "
-                "RETURN m, type(r) UNION "
-                "MATCH (n)<-[r]-(m) WHERE n.id = $eid AND NOT m.id IN $visited "
-                "RETURN m, type(r)",
+                _hop_query(flabel),
                 params={"eid": fid, "visited": list(visited)},
             ).result_set
             for row in rows:
                 node = _parse_node(row[0])
                 rel_type = row[1] if len(row) > 1 else None
                 nid = node.get("id")
+                nlabel = node.get("type")
                 if nid and nid not in visited:
                     nodes.append({
                         "node": node,
@@ -136,7 +173,7 @@ def tortoise_traverse(
                         "depth": depth + 1,
                     })
                     visited.add(nid)
-                    next_frontier.append((nid, depth + 1))
+                    next_frontier.append((nid, nlabel, depth + 1))
         frontier = next_frontier
 
     return {"entity": root, "nodes": nodes}

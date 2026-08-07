@@ -3295,29 +3295,39 @@ class TortoiseSDK:
         return self._get_entity(canonical_id)
 
     def _get_entity(self, id_val: str) -> dict:
-        proj = self._get_proj()
-        r = proj.g.query(
-            "MATCH (n) WHERE n.id = $id OR n.eventId = $id OR n.url = $id RETURN properties(n) LIMIT 1",
-            params={"id": id_val},
-        )
-        return dict(r.result_set[0][0]) if r.result_set else {}
+        # NOTE (issue #327): Session/APIKey/Team/Tag nodes are intentionally
+        # excluded from entity resolution — only Point/Subject/Object/Document/
+        # Event/Source resolve (index-backed union). On a cross-label id
+        # collision the first _RESOLVE_BRANCHES match wins (Point priority) —
+        # more deterministic than the previous scan-order-arbitrary LIMIT 1.
+        resolved = self._get_proj()._resolve_entity(
+            id_val, by_id=True, by_eventId=True, by_url=True)
+        return resolved[0]["properties"] if resolved else {}
 
     def _update_entity(self, id_val: str, **props) -> dict:
         proj = self._get_proj()
-        for key, val in props.items():
+        # Per-label indexed writes (id OR eventId — original predicate; no url).
+        # UNION cannot carry SET, so run each branch sequentially (#327).
+        for label, prop in (("Point", "id"), ("Subject", "id"), ("Object", "id"),
+                            ("Document", "id"), ("Source", "id"), ("Event", "eventId")):
             proj.g.query(
-                "MATCH (n) WHERE n.id = $id OR n.eventId = $id SET n += $p",
-                params={"id": id_val, "p": {key: val}},
+                f"MATCH (n:{label} {{{prop}:$id}}) SET n += $p",
+                params={"id": id_val, "p": props},
             )
         return self._get_entity(id_val)
 
     def _delete_entity(self, id_val: str) -> bool:
         proj = self._get_proj()
-        r = proj.g.query(
-            "MATCH (n) WHERE n.id = $id OR n.eventId = $id DETACH DELETE n RETURN count(n)",
-            params={"id": id_val},
-        )
-        return bool(r.result_set[0][0]) if r.result_set else False
+        total = 0
+        for label, prop in (("Point", "id"), ("Subject", "id"), ("Object", "id"),
+                            ("Document", "id"), ("Source", "id"), ("Event", "eventId")):
+            r = proj.g.query(
+                f"MATCH (n:{label} {{{prop}:$id}}) DETACH DELETE n RETURN count(n)",
+                params={"id": id_val},
+            )
+            if r.result_set:
+                total += r.result_set[0][0]
+        return bool(total)
 
     def create_subject(self, name: str, subjectKind: str = "other", **props) -> dict:
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
@@ -3696,8 +3706,13 @@ class TortoiseSDK:
     def get_owned_entities(self, subject_id: str) -> list:
         """Return all entities owned by a Subject (governance query)."""
         proj = self._get_proj()
+        # Issue #327: start from the labeled, indexed Subject (both id and name
+        # are RANGE-indexed -> OR uses the index) and traverse ownedBy inward.
+        # Narrowing: ownedBy/memberOf targets are canonically Subject (#216);
+        # non-Subject targets are out of contract.
         r = proj.g.query(
-            "MATCH (e)-[:ownedBy]->(s) WHERE s.id = $sid OR s.name = $sid RETURN properties(e) LIMIT 100",
+            "MATCH (s:Subject) WHERE s.id = $sid OR s.name = $sid "
+            "MATCH (s)<-[:ownedBy]-(e) RETURN properties(e) LIMIT 100",
             params={"sid": subject_id},
         )
         return [dict(row[0]) for row in r.result_set]
@@ -3734,12 +3749,16 @@ class TortoiseSDK:
     def get_org_structure(self, subject_id: str) -> dict:
         """Return organisational structure: members, roles, sub-teams."""
         proj = self._get_proj()
+        # Issue #327: labeled Subject start (id|name OR both indexed -> Index
+        # Scan) then traverse outward; roles filters the source Subject p.
         members = proj.g.query(
-            "MATCH (p:Subject)-[:memberOf]->(s) WHERE s.id = $sid OR s.name = $sid RETURN properties(p)",
+            "MATCH (s:Subject) WHERE s.id = $sid OR s.name = $sid "
+            "MATCH (p:Subject)-[:memberOf]->(s) RETURN properties(p)",
             params={"sid": subject_id},
         )
         roles = proj.g.query(
-            "MATCH (p:Subject)-[:holdsRole]->(r:Subject) WHERE p.id = $sid OR p.name = $sid RETURN properties(r)",
+            "MATCH (p:Subject) WHERE p.id = $sid OR p.name = $sid "
+            "MATCH (p)-[:holdsRole]->(r:Subject) RETURN properties(r)",
             params={"sid": subject_id},
         )
         return {
