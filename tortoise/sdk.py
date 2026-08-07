@@ -614,9 +614,39 @@ class TortoiseSDK:
     # ── Invalidate / Supersede (#6999 GAP-12) ────────────────────
 
     def invalidate_point(self, id: str, corrected_by_id: str) -> dict:
-        """Mark a Point outdated, linked to its replacement via CORRECTS edge."""
+        """Mark a Point outdated, linked to its replacement via CORRECTS edge.
+
+        Validation contract (#330) — all checks run BEFORE any write so a
+        failure can never leave a partial graph state:
+        - id == corrected_by_id → ValueError (a self-CORRECTS edge poisons
+          traversal/credibility chains).
+        - old point missing (never existed or already deleted) →
+          {"invalidated": False} with no writes (retry-friendly).
+        - corrected_by point missing → ValueError (structural failure: would
+          orphan an outdated point with no replacement).
+        Re-invalidating a point that still EXISTS re-asserts (returns True,
+        MERGE keeps a single CORRECTS edge).
+        """
         from datetime import datetime, timezone
         proj = self._get_proj()
+        if id == corrected_by_id:
+            raise ValueError(
+                f"invalidate_point: corrected_by cannot be the point itself ({id!r})"
+            )
+        old_exists = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN count(n) > 0", params={"id": id},
+        ).result_set[0][0]
+        if not old_exists:
+            return {"invalidated": False, "id": id, "corrected_by": corrected_by_id}
+        new_exists = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN count(n) > 0",
+            params={"id": corrected_by_id},
+        ).result_set[0][0]
+        if not new_exists:
+            raise ValueError(
+                f"invalidate_point: corrected_by point {corrected_by_id!r} does not "
+                f"exist — refusing to orphan outdated point {id!r}"
+            )
         now = datetime.now(timezone.utc).isoformat()
         proj.g.query(
             "MATCH (n:Point {id:$id}) SET n.outdated = true, n.updatedAt = $now",
@@ -624,7 +654,7 @@ class TortoiseSDK:
         )
         proj.g.query(
             "MATCH (a:Point {id:$new_id}), (b:Point {id:$old_id}) "
-            "CREATE (a)-[:CORRECTS]->(b)",
+            "MERGE (a)-[:CORRECTS]->(b)",
             params={"new_id": corrected_by_id, "old_id": id},
         )
         # Dreaming (#85): invalidation changes the propagation graph.
@@ -645,14 +675,15 @@ class TortoiseSDK:
         proj = self._get_proj()
         now = datetime.now(timezone.utc).isoformat()
 
-        # 1. Mark old outdated + create CORRECTS edge (same as invalidate)
+        # 1. Mark old outdated + create CORRECTS edge (same as invalidate;
+        # MERGE keeps the ONTOLOGY §3.1 1→1 cardinality on re-calls, #330).
         proj.g.query(
             "MATCH (n:Point {id:$id}) SET n.outdated = true, n.updatedAt = $now",
             params={"id": old_id, "now": now},
         )
         proj.g.query(
             "MATCH (a:Point {id:$new_id}), (b:Point {id:$old_id}) "
-            "CREATE (a)-[:CORRECTS]->(b)",
+            "MERGE (a)-[:CORRECTS]->(b)",
             params={"new_id": new_id, "old_id": old_id},
         )
 
@@ -1485,13 +1516,7 @@ class TortoiseSDK:
         proj = self._get_proj()
         ep = self._get_ep()
         # Hydrate evidence from graph-persisted baselines (survives SDK restarts)
-        rows = proj.g.query(
-            "MATCH (n:Point) WHERE n.baseline_set = true AND n.ep_alpha IS NOT NULL "
-            "RETURN n.id, n.ep_alpha, n.ep_beta"
-        ).result_set
-        for pid, alpha, beta in rows:
-            if pid not in self._evidence:
-                self._evidence[pid] = (alpha, beta)
+        self._hydrate_evidence()
         # Apply source-based credibility inheritance (with recency modulation #122)
         self._apply_source_inheritance(recency_decay=recency_decay)
         if evidence:
@@ -1548,6 +1573,22 @@ class TortoiseSDK:
                 params={"id": claim_id, "c": conf["mean"], "now": now},
             )
         return {"iterations": iterations, "converged": converged, "confidences": confidences}
+
+    def _hydrate_evidence(self) -> None:
+        """Load graph-persisted baselines (baseline_set=true) into _evidence.
+
+        Idempotent — only adds claim ids not already present. Shared by
+        compute_confidence and the Dreamer (#330) so dream runs honour the
+        same persistent evidence contract as explicit confidence reads.
+        """
+        proj = self._get_proj()
+        rows = proj.g.query(
+            "MATCH (n:Point) WHERE n.baseline_set = true AND n.ep_alpha IS NOT NULL "
+            "RETURN n.id, n.ep_alpha, n.ep_beta"
+        ).result_set
+        for pid, alpha, beta in rows:
+            if pid not in self._evidence:
+                self._evidence[pid] = (alpha, beta)
 
     def set_point_baseline(self, claim_id: str, alpha: float, beta: float) -> dict:
         """Set Beta prior evidence for a claim. Persists to graph immediately."""
@@ -1743,8 +1784,22 @@ class TortoiseSDK:
         if threshold < 1.0:
             try:
                 to_file = self._semantic_dedup(to_check, threshold)
-            except Exception:
-                pass  # ponytail: embeddings unavailable → hash-only fallback
+            except ImportError:
+                # Expected in zero-dependency environments — hash-only fallback.
+                # #330: previously a bare `except Exception: pass` swallowed
+                # real failures silently; log the designed fallback at INFO.
+                _logger.info(
+                    "Semantic dedup unavailable (embeddings deps missing) — "
+                    "hash-only fallback"
+                )
+                to_file = to_check
+            except Exception as e:
+                # #330: real dedup backend failures must be observable — a
+                # silent degrade to hash-only dedup would file duplicates.
+                _logger.warning(
+                    "Semantic dedup failed — falling back to hash-only dedup: %s", e
+                )
+                to_file = to_check
 
         duplicates += len(to_check) - len(to_file)
 
@@ -1922,6 +1977,10 @@ class TortoiseSDK:
                 except Exception:
                     pass  # fallback to empty dict
 
+            # #330: content identity hash shared by both modes (hashlib is
+            # module-imported). byte-identical re-ingest -> skipped.
+            file_hash = hashlib.sha256(text.encode()).hexdigest()
+
             if eventKind == "AgentSession":
                 # AgentSession branch — session indexing with metadata extraction
                 session_id = frontmatter.get("sessionId") or frontmatter.get("session_id") or f"file_{filepath.stem}"
@@ -1934,15 +1993,15 @@ class TortoiseSDK:
                     params={"eid": event_id},
                 ).result_set
 
-                import hashlib
-                file_hash = hashlib.sha256(text.encode()).hexdigest()
-
                 if exists_rows:
                     existing_props = exists_rows[0][0]
-                    # Skip if identical hash AND existing metadata is populated
-                    has_keywords = existing_props.get("keywords") and len(existing_props.get("keywords", [])) > 0
+                    # #330: skip unchanged + complete events. has_keywords is the
+                    # sole completeness signal (an eventStatus disjunct would skip
+                    # incomplete sessions that still need enrichment).
+                    has_keywords = bool(existing_props.get("keywords"))
                     if existing_props.get("file_hash") == file_hash and has_keywords:
                         skipped += 1
+                        completed_files.append(rel_path)
                         continue
                     # Always extract keywords (even without LLM)
                     from .session_indexer import extract_keywords_from_frontmatter as _kw_fallback
@@ -1963,12 +2022,47 @@ class TortoiseSDK:
                         existing_arc = _json.loads(existing_arc) if isinstance(existing_arc, str) else existing_arc
                     except Exception:
                         existing_arc = {}
-                    new_phases = existing_arc.get("narrative_arc", []) + metadata.get("narrative_arc", [])
+                    # #330: dedup + cap the narrative arc so repeated enrichment
+                    # of unchanged files never grows it unboundedly (and the
+                    # state-change comparison below stays deterministic). Arc
+                    # entries may be dicts (phase/topic/decisions), so dedup via
+                    # a canonical JSON key (str-sorted to tolerate mixed-type
+                    # keys), not dict.fromkeys.
+                    _arc_seen = {}
+                    for _phase in (existing_arc.get("narrative_arc", [])
+                                   + metadata.get("narrative_arc", [])):
+                        _key = _json.dumps(_phase, sort_keys=True, default=str)
+                        _arc_seen.setdefault(_key, _phase)
+                    _merged_phases = list(_arc_seen.values())
+                    # Cap while preferring genuinely-new phases: keep existing
+                    # ones first (already-merged), then append new ones up to
+                    # the cap so a full arc never starves fresh phases.
+                    _existing_phases = existing_arc.get("narrative_arc", [])
+                    _new_only = [p for p in _merged_phases
+                                 if _json.dumps(p, sort_keys=True, default=str)
+                                 not in {_json.dumps(e, sort_keys=True, default=str)
+                                         for e in _existing_phases}]
+                    new_phases = (_merged_phases[:len(_existing_phases)]
+                                  + _new_only)[:50]
+
+                    # Normalize topics to a comparable, hashable form (#330):
+                    # LLM output is unvalidated — a list-of-dicts would crash
+                    # set() and abort the whole run.
+                    def _norm_topics(t) -> list:
+                        t = t or []
+                        if not isinstance(t, list):
+                            t = [t]
+                        return [str(x) for x in t]
+                    _new_topics = _norm_topics(metadata.get("topics",
+                                                            existing_props.get("topics", [])))
+                    _stored_topics = _norm_topics(existing_props.get("topics"))
+                    _stored_keywords = _norm_topics(existing_props.get("keywords"))
+                    _new_name = metadata.get("summary", existing_props.get("name", name))
 
                     update_props = {
-                        "name": metadata.get("summary", existing_props.get("name", name)),
+                        "name": _new_name,
                         "keywords": merged_keywords,
-                        "topics": metadata.get("topics", existing_props.get("topics", [])),
+                        "topics": _new_topics,
                         "file_hash": file_hash,
                         "content_metadata": _json.dumps({
                             "schema_version": 1,
@@ -1980,6 +2074,29 @@ class TortoiseSDK:
                         }),
                         "message_count": frontmatter.get("message_count", 0),
                     }
+                    # #330: unchanged content whose enrichment produced nothing
+                    # new counts as skipped, not updated (counter honesty).
+                    # Compare the FULL payload that would be written (keywords,
+                    # normalized topics, name, narrative_arc, issues/prs/
+                    # critical_decisions — the latter feed _connect_issue_objects)
+                    # so a real change in any persisted field is never
+                    # miscounted as a skip.
+                    if existing_props.get("file_hash") == file_hash:
+                        _old_meta = existing_arc
+                        changed = (
+                            set(_norm_topics(merged_keywords)) != set(_stored_keywords)
+                            or set(_new_topics) != set(_stored_topics)
+                            or _new_name != existing_props.get("name", name)
+                            or new_phases != list(existing_arc.get("narrative_arc", []))
+                            or _norm_topics(metadata.get("issues", [])) != _norm_topics(_old_meta.get("issues", []))
+                            or _norm_topics(metadata.get("prs", [])) != _norm_topics(_old_meta.get("prs", []))
+                            or _norm_topics(metadata.get("critical_decisions", [])) != _norm_topics(_old_meta.get("critical_decisions", []))
+                        )
+                        if not changed:
+                            skipped += 1
+                            completed_files.append(rel_path)
+                            continue
+
                     # #244: (re)compute the session embedding from the merged
                     # surface and store as vecf32 — None when model unavailable.
                     embedding = self._session_embedding(
@@ -2053,11 +2170,13 @@ class TortoiseSDK:
                 doc_kind = frontmatter.get("type", frontmatter.get("document_kind", ""))
                 domain = frontmatter.get("domain", frontmatter.get("documentKnowledgeDomain", ""))
 
-                # Check if document exists
-                exists = proj.g.query(
-                    "MATCH (e:Event {eventId:$eid}) RETURN count(e) > 0",
+                # #330: three-way on ROW PRESENCE (new doc -> zero rows;
+                # legacy event -> row with file_hash=None). RETURN e.file_hash
+                # so byte-identical re-ingest is counted as skipped.
+                exists_rows = proj.g.query(
+                    "MATCH (e:Event {eventId:$eid}) RETURN e.file_hash",
                     params={"eid": doc_id},
-                ).result_set[0][0]
+                ).result_set
 
                 props = {
                     "title": title,
@@ -2074,20 +2193,27 @@ class TortoiseSDK:
                     "updatedAt": frontmatter.get("updated", now),
                     "eventKind": "DocumentCreated",
                     "classificationLevel": "internal",
+                    "file_hash": file_hash,
                 }
 
-                if exists:
-                    proj.g.query(
-                        "MATCH (e:Event {eventId:$eid}) SET e += $props",
-                        params={"eid": doc_id, "props": props},
-                    )
-                    updated += 1
-                else:
+                if not exists_rows:
+                    # New document
                     proj.g.query(
                         "CREATE (e:Event {eventId:$eid}) SET e += $props",
                         params={"eid": doc_id, "props": props},
                     )
                     ingested += 1
+                elif exists_rows[0][0] == file_hash:
+                    # Byte-identical re-ingest — nothing to do (#330)
+                    skipped += 1
+                else:
+                    # Changed content, or legacy event without a stored hash
+                    # (None) — update and backfill the hash.
+                    proj.g.query(
+                        "MATCH (e:Event {eventId:$eid}) SET e += $props",
+                        params={"eid": doc_id, "props": props},
+                    )
+                    updated += 1
 
             # Progress checkpoint every 100 files
             if progress_file and (i + 1) % 100 == 0:

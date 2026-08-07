@@ -460,8 +460,16 @@ class FalkorProjection(
         references always resolve regardless of filename sort order.
 
         GAP-19: Full event-type coverage — replays all EventRecorded, SubjectAdded,
-        ObjectRegistered, DocumentCreated, ConfidenceChanged, PointRevised events,
-        not just PointAdded/OperatorAdded/PointRetracted/PointsMerged.
+        ObjectRegistered, DocumentCreated, SourceCreated, ConfidenceChanged,
+        PointRevised events, not just PointAdded/OperatorAdded/PointRetracted/
+        PointsMerged.
+
+        #330 parity guarantee: for logs where SourceCreated precedes the
+        PointAdded events that extract from that source (the canonical ingest
+        order), rebuild produces the SAME Point node properties + edges as
+        replaying through apply(). A reversed order (extractedFrom-bearing
+        point before its SourceCreated) can diverge Source node version/id
+        properties — known, documented limitation.
         """
         import os
         from tortoise.log import EventLog
@@ -481,35 +489,13 @@ class FalkorProjection(
             if t in ("PointAdded", "OperatorAdded"):
                 p = ev["point"]
                 # Phase 1 stop-writes: strip context from v2+ events (#49)
+                # (identical to apply() — parity between rebuild and apply)
                 if ev.get("projection_version", 0) >= 2:
                     p.pop("context", None)
-                op = p.get("operator")
-                prov = p.get("provenance", {})
-                # Build SET clauses + params; context is optional (#49)
-                set_clauses = [
-                    "n.content=$content",
-                    "n.is_operator=$isop",
-                    "n.op_type=$opt",
-                    "n.pointKind=coalesce($pk, n.pointKind)",
-                    "n.status=coalesce($st, n.status, 'live')",
-                    "n.confidence=coalesce($cf, n.confidence)",
-                    "n.createdAt=coalesce($ca, n.createdAt, $now)",
-                    "n.updatedAt=$now",
-                ]
-                params = {
-                    "id": p["id"], "content": p["content"],
-                    "isop": bool(op),
-                    "opt": op["op_type"] if op else None,
-                    "pk": p.get("pointKind"),
-                    "st": p.get("status"),
-                    "cf": p.get("confidence"),
-                    "ca": p.get("createdAt") or p.get("created_at"),
-                    "now": _now_iso(),
-                }
-                self.g.query(
-                    "MERGE (n:Point {id:$id}) SET " + ", ".join(set_clauses),
-                    params=params,
-                )
+                # Property parity with apply()/apply_one (#330): the shared
+                # helper writes ALL node properties incl. authoredBy,
+                # embedding, validFrom/To, extractedFrom, provenanceSource.
+                self._upsert_point_props(p)
 
         # Pass 1b: apply revisions + other non-edge events AFTER all nodes exist
         for ev in events:
@@ -525,7 +511,8 @@ class FalkorProjection(
                 # Phase 1: discard new_context for v2+ events (#49)
                 if ev.get("projection_version", 0) >= 2:
                     ev.pop("new_context", None)
-                self._revise_point(ev)
+                # set_updated_at parity with apply() (#330)
+                self._revise_point(ev, set_updated_at=True)
             elif t == "EventRecorded":
                 self._upsert_event(ev)
             elif t == "SubjectAdded":
@@ -534,12 +521,19 @@ class FalkorProjection(
                 self._upsert_object(ev)
             elif t == "DocumentCreated":
                 self._upsert_document(ev)
+            elif t == "SourceCreated":
+                # #330 parity with apply(): SourceCreated was dropped by rebuild.
+                self._upsert_source(ev)
             # ConfidenceChanged: no graph effect (audit-only event)
 
-        # Pass 2: create edges for all operators
+        # Pass 2: create edges for all operators + provenance/entity wiring
+        # (shared _upsert_point_edges — single source of truth with apply, #330).
         for ev in events:
-            if ev["type"] == "OperatorAdded":
-                self._create_edges(ev["point"])
+            if ev["type"] in ("PointAdded", "OperatorAdded"):
+                p = ev["point"]
+                if ev.get("projection_version", 0) >= 2:
+                    p.pop("context", None)
+                self._upsert_point_edges(p)
 
         node_count = self.g.query(
             "MATCH (n:Point) RETURN count(n)"

@@ -240,6 +240,7 @@ Epistemic edges (operators): `IMPL`, `NAND` (+ semantic label). About edges: `ab
 | `startedAt` / `endedAt` | ISO8601 | — | `prov:startedAtTime` / `schema:startDate` | ✅ | Temporal extent |
 | `subject` | SubjectID | — | `prov:wasAssociatedWith` (inverse) | ✅ | Who performed the event (mirrors `performs` edge) |
 | `object_name` / `object_type` | string | — | `prov:used` | ✅ | What was acted on / produced |
+| `file_hash` | string | — | — | ✅ | SHA-256 of the ingested file's raw bytes — ingest idempotency anchor (`ingest_corpus` skips byte-identical re-ingests; written by the DocumentCreated/AgentSession ingest paths, #330) |
 
 ### §4.6 Source
 
