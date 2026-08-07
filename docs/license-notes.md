@@ -50,6 +50,33 @@ The service model is the enabler: adopters **connect** to Tortoise over MCP/REST
 - **"Is the hosted service covered?"** No — hosted (api.premiselabs.co) is a separate commercial product with a free tier. The BSL grant governs self-hosted copies only.
 - **"What happens in 4 years?"** Each version converts to Apache 2.0 on its Change Date. Old versions stay under original terms until their own Change Date (version-specific, per BUSL-1.1).
 
+## 6. Template Fidelity (owner mandate: "template as much as possible, just fill in the name")
+
+The LICENSE file mirrors the **standard BSL adopter template** (MariaDB MaxScale
+`licenses/LICENSE2408.TXT` structure; HashiCorp Terraform formatting) — plain text,
+no Markdown, only the Parameters block customized:
+
+| File element | Source (template, not innovation) |
+|---|---|
+| `License text copyright (c) 2020 MariaDB Corporation Ab...` header | HashiCorp Terraform LICENSE / MariaDB MaxScale LICENSE |
+| `Parameters` block (Licensor / Licensed Work / AUG / Change Date / Change License) | HashiCorp + MariaDB template (fill-in-the-blank) |
+| "For information about alternative licensing arrangements..." contact line | HashiCorp pattern (`licensing@<org>.com`) |
+| `Notice` — "not an Open Source license... eventually made available under an Open Source License" | MariaDB MaxScale LICENSE Notice (verbatim standard text) |
+| `Business Source License 1.1` / `Terms` headings + canonical terms | SPDX BUSL-1.1 canonical text (verbatim) |
+
+**Covenants of Licensor — intentionally omitted.** The SPDX BUSL-1.1 text includes
+a "Covenants of Licensor" section whose covenant #1 requires a **GPL-2.0-compatible
+Change License**. Our owner-chosen Change License is **Apache 2.0**, which is
+GPLv3-compatible but **not** GPLv2-compatible (ASF, FSF, FOSSA). Adopters converting
+to Apache 2.0 (e.g., HashiCorp) ship the LICENSE **without** the Covenants section —
+the canonical Terms + disclaimer remain verbatim. If we ever wanted the full
+canonical text including Covenants, the Change License would need to be GPL-2.0+
+compatible (e.g., MPL 2.0 or GPL 3.0).
+
+**GitHub templates:** GitHub's license picker does NOT offer Business Source License
+(`bsl-1.0` in the picker = Boost Software License 1.0). The template source is the
+MariaDB steward text + adopter files (linked in §2), not GitHub.
+
 ## 5. Known Trade-offs (from research; accepted by owner decision)
 
 - BSL is source-available, not OSI-approved → distro-inclusion blocked during restricted period; some enterprise allowlists exclude it (same class as AGPL/SSPL).
