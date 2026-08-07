@@ -18,12 +18,14 @@ from datetime import datetime, timezone
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
+from contextlib import asynccontextmanager
 
 from tortoise.audit_events import AuditLogger
 from tortoise.auth import hash_api_key
 import hmac
 
 from tortoise.sdk import TortoiseSDK
+from tortoise.mcp_server import create_http_app
 
 _logger = logging.getLogger(__name__)
 
@@ -50,7 +52,33 @@ def _make_sdk(*, namespace: str | None = None) -> TortoiseSDK:
     return TortoiseSDK(db_path=db_path, namespace=namespace)
 
 
-app = FastAPI(title="Tortoise Hosted API", version="0.1.0")
+# ── MCP Streamable HTTP sub-app (#236) ────────────────────────────
+# Built BEFORE _lifespan references it (no unbound reference). Mounted at /mcp
+# — the MCP app carries its own auth/rate-limit/security middleware stack;
+# FastAPI parent middleware does NOT propagate to mounted sub-apps.
+_MCP_ALLOWED_ORIGINS = [
+    "https://premiselabs.co",
+    "https://app.premiselabs.co",
+    "https://tortoise-y4mjjq.fly.dev",
+]
+
+mcp_http_app = create_http_app(allowed_origins=_MCP_ALLOWED_ORIGINS, rate_limit=100)
+
+
+@asynccontextmanager
+async def _lifespan(app):
+    """Compose the FastMCP sub-app's lifespan (session manager init) into
+    the parent FastAPI lifespan. Starlette's Mount does NOT run the mounted
+    app's lifespan automatically — explicit composition required.
+
+    mcp_http_app.lifespan(mcp_http_app) is the Starlette Lifespan protocol
+    (async context manager) that initializes the StreamableHTTPSessionManager.
+    """
+    async with mcp_http_app.lifespan(mcp_http_app):
+        yield
+
+
+app = FastAPI(title="Tortoise Hosted API", version="0.1.0", lifespan=_lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -1170,3 +1198,10 @@ async def session_context(team: dict = Depends(get_current_team)):
         return sdk.session_context()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Context unavailable: {e}")
+
+
+# ── MCP mount (#236) ─────────────────────────────────────────────
+# Mount AFTER all route definitions. DO NOT add /mcp to the parent
+# RateLimitMiddleware.SKIP — Starlette's mount already routes /mcp
+# requests to the sub-app before parent middleware runs.
+app.mount("/mcp", mcp_http_app)

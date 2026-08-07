@@ -938,3 +938,28 @@ class TestSessionEventAlignment:
             params={"eid": eid},
         ).result_set
         assert linked[0][0] >= 1, "no extracted Points linked to Event"
+
+
+# ── MCP sub-app mount (#236) ─────────────────────────────────────
+
+class TestMCPSubAppMount:
+    """/mcp is mounted on the hosted FastAPI app with its own auth."""
+
+    def test_mcp_route_mounted(self, client):
+        """GET /mcp returns transport metadata without auth (self-test)."""
+        r = client.get("/mcp")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["protocol"] == "mcp"
+        assert body["transport"] == "streamable-http"
+
+    def test_mcp_post_401_without_auth(self, client):
+        """MCP POST without tt_ Bearer → 401 (no tool leak)."""
+        r = client.post("/mcp", json={"jsonrpc": "2.0", "method": "tools/list", "id": 1},
+                        headers={"Accept": "application/json, text/event-stream"})
+        assert r.status_code == 401
+
+    def test_health_still_works(self, client):
+        """REST surface unaffected by the /mcp mount."""
+        r = client.get("/health")
+        assert r.status_code == 200
