@@ -1,55 +1,50 @@
 ---
-title: "Premise Labs — AI Lab"
+title: "Tortoise — Semantic + Epistemic + Episodic + Procedural Graph Engine"
 type: readme
-domain:
-status: seedling
-tags: []
-summary: ""
+domain: epistemic
+status: live
 created: 2026-07-24
-updated: 2026-07-30
+updated: 2026-08-06
 ---
 
-# Premise Labs
+# Tortoise
 
-An AI lab building the premises intelligence stands on.
+A graph engine for agent memory: claims are **Points**, relationships are **edges**, and belief scores are computed by propagating evidence through the graph (EP — Evidence Propagation).
 
-**What's here:**
-- Strategy docs, internal processes, research, and financial models
-- The [premise-labs landing page](premise-labs/index.html) (deployed at [premiselabs.co](https://premiselabs.co))
-- Tortoise knowledge graph engine lives in the [tortoise](https://github.com/daniel-ospina/tortoise) repo (public, BSL 1.1)
+A product of [Premise Labs](https://premiselabs.co).
 
-**What lives elsewhere:**
-- **Tortoise SDK & MCP server** → [tortoise](https://github.com/daniel-ospina/tortoise) repo (Business Source License 1.1)
-- **Canonical ontology** (`ONTOLOGY_v2.5.md`) → [eldato/docs/teams/](https://github.com/daniel-ospina/eldato/blob/main/docs/teams/organisation-design-team/domains%20(S1)/data/ONTOLOGY_v2.5.md)
-- **Coordination infrastructure** → `eldato/operations/coordination/` (Organisation Design Team)
-- **Agent infrastructure** → [agent-infra](https://github.com/daniel-ospina/agent-infra) — Pi extensions, skills, scripts
+## What's here
 
-## Structure
+- `tortoise/` — the SDK, MCP server, projection, search engine, backup/restore
+- `premise-labs/` — the hosted product's landing pages + dashboard (deploys to Cloudflare Pages)
+- `docs/ONTOLOGY.md` — **canonical ontology v3.1** (co-located with the code it governs)
+- `tests/` — test suite
 
+## Canonical ontology
+
+`docs/ONTOLOGY.md` is the single source of truth for the entity model (Point, Subject, Object, Event, Source), edge topology (IMPL/NAND/structural/about*), kind vocabularies, and EP semantics. It is **canonical** — product gaps are filed as issues, never added to the ontology as roadmap detail.
+
+## Repo map & issue routing
+
+File issues in the repo that owns the code:
+
+| Repo | Owns | File issues for |
+|---|---|---|
+| **daniel-ospina/tortoise** (this repo) | Tortoise product: SDK, MCP, hosted API, graph engine, ontology | Tortoise product bugs, features, ontology gaps |
+| **daniel-ospina/agent-infra** | Agent infrastructure: Pi extensions, skills, commit-workflow, CI gates, review-enforcer | Skill/pipeline/extension/CI work |
+| **daniel-ospina/premise-labs** | Premise Labs internal ops: meetings recorder, CRM (Twenty), bridge scripts, health checks | Ops tooling, CRM, meeting pipeline |
+| **daniel-ospina/eldato** | El Dato app (eldato.com.mx): scanner, webapp, deals/offers, notifications, ads, SEO | El Dato product work |
+
+**Rule of thumb:** if the issue is about Tortoise code (this repo's `tortoise/` or `premise-labs/` dirs), file it here. If it's about agent tooling, file in agent-infra. If it's about Premise Labs ops (meetings/CRM), file in premise-labs.
+
+## Quickstart
+
+```bash
+pip install -e .            # or: pip install 'tortoise[embeddings]' for vector search
+# Hosted: sign up at tortoise.premiselabs.co, get an API key on the welcome page
+# Self-hosted: see docs/infra-runbook.md
 ```
-premise-labs/
-├── premise-labs/     → Landing page (single-scroll HTML, deploys to Cloudflare Pages)
-├── docs/             → Internal strategy, research, legal docs
-├── data/             → Data index and entity catalog
-├── LICENSE           → Business Source License 1.1
-├── AGENTS.md         → Agent instructions for this repo
-└── CLAUDE.md         → Claude Code project instructions
-```
-
-## Quick Links
-
-- [premiselabs.co](https://premiselabs.co) — Public landing page
-- [Tortoise](https://github.com/daniel-ospina/tortoise) — Knowledge graph engine (public repo)
-- [Agent Infrastructure](https://github.com/daniel-ospina/agent-infra) — Shared agent tooling
-- [ONTOLOGY v2.5](https://github.com/daniel-ospina/eldato/blob/main/docs/teams/organisation-design-team/domains%20(S1)/data/ONTOLOGY_v2.5.md) — Canonical entity model
 
 ## License
 
 Business Source License 1.1 — see [LICENSE](LICENSE)
-
-## Related Repositories
-- [tortoise](https://github.com/daniel-ospina/tortoise) — Knowledge graph engine (public, BSL 1.1)
-- [agent-infra](https://github.com/daniel-ospina/agent-infra) — Shared agent infrastructure
-- [eldato](https://github.com/daniel-ospina/eldato) — El Dato main app + canonical ontology
-- [eldato-outreach](https://github.com/daniel-ospina/eldato-outreach) — B2B WhatsApp outreach
-- [org-data](https://github.com/daniel-ospina/org-data) — Org data (Supabase → Tortoise)
