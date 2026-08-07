@@ -373,6 +373,16 @@ class TortoiseSDK:
             params={"id": pid, "c": content, "k": kind, "st": status, "now": now,
                     "embedding": embedding},
         )
+        # Tag handling: create :Tag nodes + TAGGED edges (#215)
+        tags: list[str] = props.get("tags") or []
+        if isinstance(tags, list):
+            for tag in tags:
+                proj.g.query(
+                    "MATCH (p:Point {id:$pid}) "
+                    "MERGE (t:Tag {name:$tag}) "
+                    "MERGE (p)-[:TAGGED]->(t)",
+                    params={"pid": pid, "tag": tag},
+                )
         for key, val in props.items():
             proj.g.query(
                 "MATCH (n:Point {id:$id}) SET n += $props",
@@ -1030,6 +1040,28 @@ class TortoiseSDK:
             {"url": row[0], "sourceKind": row[1], "points": row[2]}
             for row in rows
         ]
+
+    def list_tags(self) -> list[dict]:
+        """All Tag names with count of tagged Points. Returns [{name, count}]."""
+        proj = self._get_proj()
+        rows = proj.g.query(
+            "MATCH (t:Tag) "
+            "OPTIONAL MATCH (p:Point)-[:TAGGED]->(t) "
+            "RETURN t.name AS name, count(p) AS count "
+            "ORDER BY name"
+        ).result_set
+        return [{"name": row[0], "count": row[1]} for row in rows]
+
+    def query_points_by_tag(self, tag: str) -> list[dict]:
+        """Return Points connected via TAGGED edge to the given Tag name."""
+        proj = self._get_proj()
+        rows = proj.g.query(
+            "MATCH (p:Point)-[:TAGGED]->(t:Tag {name:$tag}) "
+            "RETURN properties(p) "
+            "ORDER BY p.createdAt DESC",
+            params={"tag": tag},
+        ).result_set
+        return [r[0] for r in rows]
 
     def list_namespaces(self) -> list[dict]:
         """Installed pack namespaces with kind counts. Returns [{namespace, name, kind_count}]."""

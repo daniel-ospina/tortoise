@@ -277,6 +277,18 @@ def tortoise_list_namespaces() -> list[dict]:
 
 
 @mcp.tool()
+def tortoise_list_tags() -> list[dict]:
+    """List all Tag names with count of tagged Points. Where tags are USED."""
+    return _safe(_get_sdk().list_tags)
+
+
+@mcp.tool()
+def tortoise_query_points_by_tag(tag: str) -> list[dict]:
+    """Return Points connected to a Tag via TAGGED edge."""
+    return _safe(_get_sdk().query_points_by_tag, tag)
+
+
+@mcp.tool()
 def tortoise_get_point(id: str) -> dict:
     """Get a single Point by ID. Returns all properties, or empty dict."""
     return _safe(_get_sdk().get_point, id)

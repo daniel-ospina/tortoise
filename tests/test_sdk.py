@@ -428,3 +428,91 @@ class TestMitigateOperator:
         op = sdk.create_operator("IMPL", a["id"], [b["id"]])
         result = sdk.mitigate_operator(op["id"], "reason")
         assert result["mitigation_strength"] == 0.5
+
+
+# ── list_tags + query_points_by_tag (#215) ─────────────────────────
+
+class TestListTags:
+    def test_empty_graph(self, sdk):
+        """Empty graph returns empty list."""
+        assert sdk.list_tags() == []
+
+    def test_single_tag(self, sdk):
+        p = sdk.create_point("statement", "tagged content", tags=["alpha"])
+        tags = sdk.list_tags()
+        assert len(tags) == 1
+        assert tags[0]["name"] == "alpha"
+        assert tags[0]["count"] == 1
+
+    def test_multiple_points_same_tag(self, sdk):
+        sdk.create_point("statement", "first", tags=["shared"])
+        sdk.create_point("statement", "second", tags=["shared"])
+        tags = sdk.list_tags()
+        assert len(tags) == 1
+        assert tags[0]["name"] == "shared"
+        assert tags[0]["count"] == 2
+
+    def test_multiple_tags(self, sdk):
+        sdk.create_point("statement", "a", tags=["alpha", "beta"])
+        sdk.create_point("statement", "b", tags=["beta", "gamma"])
+        tags = sdk.list_tags()
+        names = {t["name"] for t in tags}
+        assert names == {"alpha", "beta", "gamma"}
+        # alpha tagged 1 point, beta 2, gamma 1
+        by_name = {t["name"]: t["count"] for t in tags}
+        assert by_name["alpha"] == 1
+        assert by_name["beta"] == 2
+        assert by_name["gamma"] == 1
+
+    def test_untagged_point_not_counted(self, sdk):
+        sdk.create_point("statement", "no tags here")
+        sdk.create_point("statement", "tagged", tags=["solo"])
+        tags = sdk.list_tags()
+        assert len(tags) == 1
+        assert tags[0]["name"] == "solo"
+        assert tags[0]["count"] == 1
+
+
+class TestQueryPointsByTag:
+    def test_no_match(self, sdk):
+        """Querying a non-existent tag returns empty list."""
+        assert sdk.query_points_by_tag("nonexistent") == []
+
+    def test_single_point(self, sdk):
+        p = sdk.create_point("statement", "find me", tags=["alpha"])
+        results = sdk.query_points_by_tag("alpha")
+        assert len(results) == 1
+        assert results[0]["id"] == p["id"]
+        assert results[0]["content"] == "find me"
+
+    def test_multiple_points_same_tag(self, sdk):
+        p1 = sdk.create_point("statement", "first", tags=["shared"])
+        p2 = sdk.create_point("statement", "second", tags=["shared"])
+        results = sdk.query_points_by_tag("shared")
+        assert len(results) == 2
+        ids = {r["id"] for r in results}
+        assert ids == {p1["id"], p2["id"]}
+
+    def test_point_with_multiple_tags(self, sdk):
+        p = sdk.create_point("statement", "multi-tagged", tags=["alpha", "beta"])
+        # Querying alpha returns the point
+        alpha_results = sdk.query_points_by_tag("alpha")
+        assert len(alpha_results) == 1
+        assert alpha_results[0]["id"] == p["id"]
+        # Querying beta also returns the same point
+        beta_results = sdk.query_points_by_tag("beta")
+        assert len(beta_results) == 1
+        assert beta_results[0]["id"] == p["id"]
+
+    def test_mixed_untagged_excluded(self, sdk):
+        sdk.create_point("statement", "untagged")
+        tagged = sdk.create_point("statement", "tagged", tags=["alpha"])
+        results = sdk.query_points_by_tag("alpha")
+        assert len(results) == 1
+        assert results[0]["id"] == tagged["id"]
+
+    def test_tag_case_sensitive(self, sdk):
+        """Tag names are case-sensitive — 'Alpha' != 'alpha'."""
+        sdk.create_point("statement", "x", tags=["Alpha"])
+        assert sdk.query_points_by_tag("alpha") == []
+        assert len(sdk.query_points_by_tag("Alpha")) == 1
