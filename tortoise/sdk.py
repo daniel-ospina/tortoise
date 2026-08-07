@@ -2847,6 +2847,18 @@ class TortoiseSDK:
         Returns {mean, total_events, impl_count, nand_count, alpha, beta, outcomes}.
         """
         proj = self._get_proj()
+        # Try exact id match first, fall back to name if no id match (#152).
+        # Prevents merging outcomes from Subject A (id='alice') with Subject B
+        # (name='alice') when a subject_id collides with another Subject's name.
+        id_check = proj.g.query(
+            "MATCH (s:Subject {id: $sid}) RETURN count(s) > 0",
+            params={"sid": subject_id},
+        ).result_set
+        if id_check and id_check[0][0]:
+            match_clause = "s.id = $sid"
+        else:
+            match_clause = "s.name = $sid"
+
         # Direct: Event connects directly to claim Points via IMPL/NAND
         # (Operators connect ONLY epistemic targets per ONTOLOGY: Event→Point, Point→Point)
         impl_rows = proj.g.query(
@@ -2854,7 +2866,7 @@ class TortoiseSDK:
             "MATCH (e)-[:IMPL]->(p:Point) "
             "WHERE (p.is_operator IS NULL OR p.is_operator = false) "
             "AND (p.outdated IS NULL OR p.outdated = false) "
-            "AND (s.id = $sid OR s.name = $sid) "
+            f"AND {match_clause} "
             "RETURN p.id, p.content, coalesce(p.confidence, 0.5) AS conf",
             params={"sid": subject_id},
         ).result_set
@@ -2863,7 +2875,7 @@ class TortoiseSDK:
             "MATCH (e)-[:NAND]->(p:Point) "
             "WHERE (p.is_operator IS NULL OR p.is_operator = false) "
             "AND (p.outdated IS NULL OR p.outdated = false) "
-            "AND (s.id = $sid OR s.name = $sid) "
+            f"AND {match_clause} "
             "RETURN p.id, p.content, coalesce(p.confidence, 0.5) AS conf",
             params={"sid": subject_id},
         ).result_set

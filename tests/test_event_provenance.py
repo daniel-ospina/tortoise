@@ -424,6 +424,63 @@ class TestComputeReputation:
         for o in rep["outcomes"]:
             assert set(o.keys()) >= {"point_id", "content", "confidence", "outcome"}
 
+    def test_id_takes_precedence_over_name_match(self, sdk):
+        """Exact id match takes precedence when a name collision exists (#152).
+
+        Subject A has id='alice', Subject B has name='alice'.
+        compute_reputation('alice') must only count A's outcomes (id match).
+        """
+        proj = sdk._get_proj()
+
+        # Subject A: id='alice', name='alice-work'
+        sdk._create_entity("Subject", "alice",
+                           {"name": "alice-work", "subjectKind": "analyst", "status": "live"},
+                           "SubjectAdded")
+        # Subject B: id='bob', name='alice' (name collides with A's id)
+        sdk._create_entity("Subject", "bob",
+                           {"name": "alice", "subjectKind": "reviewer", "status": "live"},
+                           "SubjectAdded")
+
+        # Record an IMPL event for Subject A (id='alice')
+        proj.apply({
+            "type": "EventRecorded",
+            "id": "ev-152-a",
+            "eventId": "ev-152-a",
+            "eventKind": "analysis",
+            "subject": "alice-work",
+        })
+        p_a = sdk.create_point("observation", "A's analysis")
+        proj.g.query(
+            "MATCH (e:Event {eventId:'ev-152-a'}), (p:Point {id:$pid}) "
+            "CREATE (e)-[:IMPL]->(p)",
+            params={"pid": p_a["id"]},
+        )
+
+        # Record an IMPL event for Subject B (name='alice')
+        proj.apply({
+            "type": "EventRecorded",
+            "id": "ev-152-b",
+            "eventId": "ev-152-b",
+            "eventKind": "review",
+            "subject": "alice",
+        })
+        p_b = sdk.create_point("observation", "B's review")
+        proj.g.query(
+            "MATCH (e:Event {eventId:'ev-152-b'}), (p:Point {id:$pid}) "
+            "CREATE (e)-[:IMPL]->(p)",
+            params={"pid": p_b["id"]},
+        )
+
+        # compute_reputation('alice') must match by id first → Subject A only
+        rep = sdk.compute_reputation("alice")
+        assert rep["total_events"] == 1
+        assert rep["impl_count"] == 1
+        assert rep["nand_count"] == 0
+        # Verify it's A's outcome, not B's
+        assert len(rep["outcomes"]) == 1
+        assert rep["outcomes"][0]["content"] == "A's analysis"
+        assert rep["mean"] > 0.5  # 1 IMPL on Beta(1,1) prior → Beta(2,1) → 2/3 ≈ 0.6667
+
 
 # ── Review fixes: supersede_point structural transfer + negative cases ──
 
