@@ -8,7 +8,7 @@ sys.path.insert(0, '/Users/home/eldato/negation-game-explorations/tortoise')
 
 from tortoise.projection import FalkorProjection
 
-proj = FalkorProjection('tortoise.db')
+proj = FalkorProjection()
 
 # 1. Reset — clear all confidence
 proj.g.query('MATCH (n:Point) WHERE n.confidence IS NOT NULL SET n.confidence=0.5')

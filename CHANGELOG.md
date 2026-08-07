@@ -1,0 +1,74 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+## [Unreleased]
+
+### Fixed — redislite embedded process leak (issue #176)
+
+The embedded (redislite) mode leaked one `redis-server` OS process per
+connection path — 650+ orphans (~1.7 GB RSS) accumulated on dev machines.
+Root cause: redislite spawns a dedicated server per non-reusable path, and
+orphaned them when parents were SIGKILL'd. Fixed via three layers:
+
+**Reaper (`tortoise.embedded_reaper`)**
+- New `python -m tortoise.embedded_reaper` CLI:
+  - `--no-dry-run` (default is **dry-run** — reports, kills nothing)
+  - `--batch-size N` (limit kills per run)
+  - `--json` (machine-readable output)
+  - `--timeout N` (default 120s; env `TORTOISE_REAPER_TIMEOUT`)
+  - Singleton lock (`~/.tortoise/.reaper.lock`) prevents cron/manual overlap
+  - `TORTOISE_REAPER_MIN_UPTIME` env (default 30s) boot-cooldown
+- Kills ONLY no-path tempdir orphans; path-based servers (stable singleton,
+  CWD leaks) are NEVER touched (dual-signal classification via
+  `redis.config` `dbfilename` + `dir`)
+- Cron/launchd 5-min periodic install: `docs/infra/embedded-reaper-cron.md`
+
+**Stable-path unification (`tortoise.config`)**
+- New `TORTOISE_DB_PATH` env var — the single canonical embedded DB path
+  (default `~/.tortoise/tortoise.db`); `resolve_db_path()` resolves with
+  explicit precedence (`docker://` URI > `TORTOISE_DB_PATH` > non-docker URI
+  as file > default). SDK + mcp_server wired; consumers (session_continuity,
+  migrate_kinds, github_docs, tortoise_client) no longer dead-end on
+  `Set TORTOISE_DB_URI` when only `TORTOISE_DB_PATH` is set.
+- `FalkorProjection()` no-arg now resolves the canonical path (graph-scripts
+  migrated to it)
+
+**Relative-path rejection (breaking)**
+- `FalkorProjection('tortoise.db')` now raises `ValueError` with 3 remedies.
+  Relative paths are NEVER permitted — they silently created per-directory
+  servers (Category-3 leak). Use `allow_nonstandard_path=True` (or env
+  `TORTOISE_ALLOW_NONSTANDARD_PATH=1`) for **absolute** non-canonical paths
+  only (restore/migration tools).
+- `tortoise.FalkorDB` import guard: raises `RuntimeError` for relative paths
+  (best-effort; pre-commit hook is the enforcement — see below)
+
+**Lifecycle hardening**
+- `FalkorProjection` now: context manager (`with ... as p:`), idempotent
+  `close()`, `weakref.finalize` (GC cleanup), `atexit` (normal process exit
+  never orphans). No per-instance signal handlers.
+- `test_ingest.py` close-monkeypatch removed (hang fixed by lifecycle work)
+- Known limitation: redislite's `close()` is inherently slow (~4s); setsid
+  isolation infeasible (no preexec hook in redislite's subprocess spawn)
+
+**Migration CLI**
+- New `python -m tortoise migrate-db [--force]`: data-safe migration of
+  legacy `~/.tortoise/embedded.db` → canonical `tortoise.db`. Backup-first
+  (abort on backup failure), advisory lock, 3-way conflict discriminator,
+  marker written only after verified rebuild, JSONL rebuild (never binary
+  copy; RDB snapshot fallback only when no event log exists).
+- `--force` bypasses the marker / overwrites a conflicting `tortoise.db`
+
+**Regression gates**
+- New `tools/redis-guard.py` pre-commit/CI hook blocks reintroduction of:
+  relative-path `FalkorProjection` calls, direct
+  `redislite.falkordb_client` imports, `redislite.Redis` bypass, and
+  `Path("tortoise.db")` defaults. `# noqa: redis-guard` for documented
+  intentional bypasses (smoke_test). CI job + branch protection require it.
+- `.gitignore` now ignores `*.db`
+
+### Known limitation
+- **Concurrent multi-process WRITERS on one embedded redislite file lose
+  data** (startup race — verified empirically). The safe embedded pattern is
+  single-writer/multi-reader; route concurrent multi-process writes to
+  Docker FalkorDB (`TORTOISE_DB_URI=docker://...`).

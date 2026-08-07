@@ -13,12 +13,12 @@ sys.path.insert(0, '/Users/home/eldato/negation-game-explorations/tortoise')
 from tortoise.log import EventLog
 from tortoise.api import EventAPI, provenance
 from tortoise.projection import FalkorProjection
+from tortoise.config import resolve_db_path
 
 LOG_PATH = "/Users/home/eldato/negation-game-explorations/tortoise/convergence-architecture.jsonl"
-DB_PATH   = "/Users/home/eldato/negation-game-explorations/tortoise/tortoise.db"
 
 log = EventLog(LOG_PATH)
-proj = FalkorProjection(DB_PATH)
+proj = FalkorProjection()
 api = EventAPI(log, initiated_by="user", agent_id="pi@deepseek-v4",
                projection=proj)
 
@@ -108,7 +108,7 @@ IMPL(q4_single, q3_falkor, "single shared instance benefits from graph-native qu
 # Q1 unified + Q2 single form a coherent "simplicity-first" cluster
 IMPL(q1_unified, q2_single, "unified pipeline aligns with single event stream philosophy")
 
-print(f"\nDone. Log: {LOG_PATH}, DB: {DB_PATH}")
+print(f"\nDone. Log: {LOG_PATH}, DB: {resolve_db_path()}")
 print("Verify: python3 -c \"from tortoise.projection import FalkorProjection; "
-      "p=FalkorProjection('tortoise.db'); "
+      "p=FalkorProjection('tortoise.db'); "  # noqa: redis-guard — docstring example, not code
       "print(p.g.query('MATCH (n:Point) RETURN count(n)').result_set)\"")

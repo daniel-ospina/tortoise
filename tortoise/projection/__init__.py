@@ -13,6 +13,7 @@ Backends behind the `Projection` protocol:
 from __future__ import annotations
 
 import re
+import os
 from datetime import datetime, timezone
 from typing import Protocol, runtime_checkable
 
@@ -72,6 +73,8 @@ class _GuardedGraph:
 
     def __getattr__(self, name):
         return getattr(self._g, name)
+
+from tortoise.config import RELATIVE_PATH_ERROR
 
 # ── Mixins ────────────────────────────────────────────────────────────────
 from tortoise.projection.entities import _EntityHandlers
@@ -199,9 +202,33 @@ class FalkorProjection(
                  username: str | None = None,
                  password: str | None = None,
                  graph_name: str = "tortoise",
-                 ssl: bool = False):
+                 ssl: bool = False,
+                 allow_nonstandard_path: bool = False):
+
+        # No-arg construction -> canonical embedded path (plan Task 9: graph-
+        # scripts migrated from FalkorProjection('tortoise.db') to no-arg,
+        # which must resolve to the canonical TORTOISE_DB_PATH).
+        if path is None and host is None:
+            from tortoise.config import resolve_db_path
+            path = resolve_db_path()
 
         if path is not None:
+            # Hard-reject relative paths (plan Task 7, issue #176): a relative
+            # path like 'tortoise.db' resolves per-CWD and silently creates a
+            # per-directory redislite server (Category-3 leak). Relative is
+            # ALWAYS rejected — the escape hatch only permits absolute
+            # non-canonical paths. Env TORTOISE_ALLOW_NONSTANDARD_PATH=1
+            # enables the same escape hatch without the kwarg.
+            if not allow_nonstandard_path and \
+                    os.environ.get("TORTOISE_ALLOW_NONSTANDARD_PATH") == "1":
+                allow_nonstandard_path = True
+            if not os.path.isabs(path) and not path.startswith("~"):
+                raise ValueError(RELATIVE_PATH_ERROR.format(path=path))
+            if path.startswith("~") and not allow_nonstandard_path:
+                # tilde is only valid if expanded to absolute via env;
+                # unexpanded it is relative-like -> reject with hint
+                raise ValueError(RELATIVE_PATH_ERROR.format(path=path))
+
             # Embedded mode (opt-in via path=). Use redislite's FalkorDB client —
             # the plain falkordb.FalkorDB treats a positional path arg as a HOST
             # (IDNA crash: redis tries to resolve the file path as a hostname, #82).
@@ -231,6 +258,17 @@ class FalkorProjection(
             logging.getLogger(__name__).warning(
                 "Could not determine FalkorDB version. FTS and vector indexes may fail.")
         self._ensure_indexes()
+
+        # Lifecycle hardening (plan Task 4):
+        # - _closed flag for idempotent close()
+        # - weakref.finalize so GC cleans up without explicit close
+        # - atexit so normal process exit never orphans the server
+        # - NO per-instance signal handlers (atexit suffices; avoids leaks)
+        import atexit as _atexit
+        import weakref as _weakref
+        self._closed = False
+        self._finalizer = _weakref.finalize(self, self.close)
+        _atexit.register(self.close)
 
     @classmethod
     def from_uri(cls, uri: str, graph_name: str | None = None) -> "FalkorProjection":
@@ -550,7 +588,25 @@ class FalkorProjection(
         return rows[0][0] if rows else 0
 
     def close(self) -> None:
-        self.db.close()
+        """Close the underlying DB connection idempotently.
+
+        Lifecycle hardening (plan Task 4): idempotent (2nd call no-op),
+        registered via weakref.finalize so GC cleans up without explicit
+        close, and atexit-registered so normal process exit never orphans.
+        """
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
+        try:
+            self.db.close()
+        except Exception:
+            pass
+
+    def __enter__(self) -> "FalkorProjection":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
 
     def _revise_point(self, ev: dict, set_updated_at: bool = False) -> None:
         """Apply PointRevised event — update content, context, and re-compute embedding."""

@@ -151,7 +151,7 @@ def status() -> dict:
         chain = {"error": "query failed"}
     return {
         "available": True,
-        "db_uri": os.environ.get("TORTOISE_DB_URI", "not set"),
+        "db_uri": os.environ.get("TORTOISE_DB_URI") or os.environ.get("TORTOISE_DB_PATH", "not set"),
         "chain_status": chain,
     }
 

@@ -278,17 +278,18 @@ def _cmd_init(args):
 
     # 2. Fallback: embedded mode (SQLite-backed)
     if not graph_ready:
-        db_path = args.path or str(Path.home() / ".tortoise" / "embedded.db")
+        from tortoise.config import resolve_db_path
+        db_path = args.path or resolve_db_path()
         try:
-            from redislite.falkordb_client import FalkorDB
-            db = FalkorDB(db_path)
-            db.select_graph("tortoise").query("RETURN 1")
+            from tortoise.projection import FalkorProjection
+            _proj = FalkorProjection(db_path)
+            _proj.g.query("RETURN 1")
             print(f"  ✅ Embedded mode initialized at {db_path}")
             graph_ready = True
         except ImportError:
-            print(f"  ❌ Neither falkordb nor falkordblite installed.")
-            print(f"     pip install falkordb         # for Docker mode")
-            print(f"     pip install falkordblite     # for embedded mode")
+            print(f"  ❌ Neither falkordb nor redislite installed.")
+            print(f"     pip install falkordb       # for Docker mode (FalkorProjection)")
+            print(f"     pip install redislite      # for embedded mode (FalkorProjection)")
             return 1
         except Exception as e:
             print(f"  ❌ Embedded mode init failed: {e}")
@@ -305,7 +306,7 @@ def _cmd_init(args):
                 f"docker://:{docker_pass}@{docker_host}:{docker_port}/tortoise")
             sdk = TortoiseSDK()
         else:
-            sdk = TortoiseSDK(db_path=args.path)
+            sdk = TortoiseSDK(db_path=db_path)
         sdk.create_point(
             kind="observation",
             content="Tortoise graph initialized — file decisions and observations here so your agents remember across sessions.",
@@ -1694,6 +1695,9 @@ def main(argv: list[str] | None = None) -> int:
     bk = sp.add_parser("backup", help="Backup events.jsonl + FalkorDB to timestamped dir")
     bk.add_argument("--db", required=True, help="Path to database file")
     bk.add_argument("--events", default="events.jsonl", help="Path to event log")
+    md = sp.add_parser("migrate-db", help="Migrate legacy embedded.db to canonical tortoise.db (data-safe)")
+    md.add_argument("--force", action="store_true",
+                    help="Bypass marker / overwrite conflicting tortoise.db")
     rs = sp.add_parser("restore", help="Restore from backup directory")
     rs.add_argument("backup_dir", help="Path to backup directory")
     rs.add_argument("--db", required=True, help="Target database path")
@@ -1797,6 +1801,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     elif args.cmd == "verify":
         return _cmd_verify(args)
+    elif args.cmd == "migrate-db":
+        from tortoise.migrate_db import main as _migrate_main
+        return _migrate_main(["--force"] if args.force else [])
     elif args.cmd == "backup":
         from tortoise.backup import backup
         target = backup(db_path=args.db, events_path=args.events)

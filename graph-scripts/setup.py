@@ -959,7 +959,7 @@ def step11e() -> None:
     # ── Seed FalkorDB ──
     try:
         from tortoise.projection import FalkorProjection
-        db_path = str(PROJECT / "tortoise.db")
+        db_path = str(PROJECT.resolve() / "tortoise.db")
         proj = FalkorProjection(db_path)
 
         # Person — Subject (ONTOLOGY_v2.5 §1.1)

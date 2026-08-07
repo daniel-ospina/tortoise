@@ -20,14 +20,10 @@ from tortoise.api import EventAPI, provenance
 from tortoise.projection import FalkorProjection
 
 LOG_PATH = "/Users/home/eldato/negation-game-explorations/tortoise/events.jsonl"
-DB_PATH  = "/Users/home/eldato/negation-game-explorations/tortoise/tortoise.db"
-
-from redislite.falkordb_client import FalkorDB
-db = FalkorDB(DB_PATH)
-g = db.select_graph('tortoise')
 
 log = EventLog(LOG_PATH)
-proj = FalkorProjection(DB_PATH)
+proj = FalkorProjection()
+g = proj.g
 api = EventAPI(log, initiated_by="user", agent_id="fix-6706@pi",
                projection=proj)
 
@@ -123,6 +119,5 @@ n_approaches_grounded = g.query(
 print(f"\n  State: {n_grounded}/{n_total} grounded, {n_approaches_grounded}/6 approaches grounded")
 
 proj.close()
-db.close()
 
 print("\n=== Done (#6706) ===")

@@ -46,7 +46,7 @@ def fetch_closed_issues(limit: int = 20, since: str | None = None
 def main(argv: list[str] | None = None):
     ap = argparse.ArgumentParser(
         description="Create resolution-event Points from closed GitHub issues")
-    ap.add_argument("--db", type=Path, default=Path("tortoise.db"))
+    ap.add_argument("--db", type=str, default=None, help="DB path (default: canonical TORTOISE_DB_PATH)")
     ap.add_argument("--log", type=Path, default=Path("events.jsonl"))
     ap.add_argument("--limit", type=int, default=20,
                     help="max issues to fetch (default: 20)")
@@ -70,7 +70,9 @@ def main(argv: list[str] | None = None):
         return
 
     log = EventLog(args.log)
-    proj = FalkorProjection(str(args.db))
+    from tortoise.config import resolve_db_path
+    db_path = resolve_db_path(str(args.db)) if args.db else resolve_db_path()
+    proj = FalkorProjection(db_path)
     api = EventAPI(log, initiated_by="user", agent_id="resolve-github",
                    projection=proj)
     try:
