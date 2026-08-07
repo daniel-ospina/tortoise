@@ -575,6 +575,39 @@ class TestRunVectorQuery:
         cypher = graph.query_calls[0][0]
         assert "MATCH (n:Object)" in cypher
 
+    # ── Source entity type → url field (#448) ──────────────────────────
+
+    def test_entity_type_source_uses_url_brute_force(self):
+        """#448: entity_type='source' brute-force path → Source label + n.url."""
+        graph = SimpleMockGraph(result_set=[("https://example.com/doc.pdf", 0.9)])
+
+        result = run_vector_query(
+            graph, self.QUERY_VEC, entity_type="source", is_embedded=True,
+        )
+
+        assert len(result) == 1
+        assert result[0][0] == "https://example.com/doc.pdf"
+        cypher = graph.query_calls[0][0]
+        assert "MATCH (n:Source)" in cypher
+        assert "n.url" in cypher
+        assert "vec.euclideanDistance" in cypher
+
+    def test_entity_type_source_uses_url_hnsw(self):
+        """#448: entity_type='source' HNSW path → queryNodes('Source') + node.url."""
+        graph = SimpleMockGraph(result_set=[("https://example.com/doc.pdf",)])
+
+        result = run_vector_query(
+            graph, self.QUERY_VEC, entity_type="source", is_embedded=False,
+        )
+
+        assert len(result) == 1
+        assert result[0][0] == "https://example.com/doc.pdf"
+        cypher = graph.query_calls[0][0]
+        assert "CALL db.idx.vector.queryNodes" in cypher
+        assert "queryNodes('Source'" in cypher
+        assert "node.url" in cypher
+        assert "vec.euclideanDistance" not in cypher
+
     # ── Timeout ──────────────────────────────────────────────────────
 
     def test_brute_force_timeout_returns_empty(self):
@@ -752,8 +785,8 @@ class TestRunFtsQuery:
         assert "queryNodes('Object'" in cypher
         assert "node.id" in cypher
 
-    def test_entity_type_source_uses_source_label(self):
-        """#193: entity_type='source' → queryNodes('Source') + node.id."""
+    def test_entity_type_source_uses_source_label_and_url(self):
+        """#193 + #448: entity_type='source' → queryNodes('Source') + node.url."""
         graph = SimpleMockGraph(result_set=[("src-1", 0.7)])
 
         result = run_fts_query(graph, "test", entity_type="source")
@@ -762,7 +795,7 @@ class TestRunFtsQuery:
         assert result[0][0] == "src-1"
         cypher = graph.query_calls[0][0]
         assert "queryNodes('Source'" in cypher
-        assert "node.id" in cypher
+        assert "node.url" in cypher
 
 
 # ── run_structural_query ────────────────────────────────────────────────────
