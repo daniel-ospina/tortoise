@@ -527,6 +527,48 @@ class TestSessionCapture:
         r = client.post("/v1/sessions", json={})
         assert r.status_code == 422, r.text
 
+    # ── #490: content-hash dedup on the REST path ────────────────────
+
+    def test_capture_session_dedups_identical_content(self, client):
+        """#490: re-capturing the same session content must NOT create
+        duplicate Points — REST path must dedup like MCP create_point."""
+        conv = [
+            {"role": "user", "content": "Let's use PostgreSQL for the backend."},
+        ]
+        r1 = client.post("/v1/sessions", json={"conversation": conv})
+        assert r1.status_code == 200, r1.text
+        r2 = client.post("/v1/sessions", json={"conversation": conv})
+        assert r2.status_code == 200, r2.text
+
+        # Count Points mentioning PostgreSQL in the graph.
+        # Expected: 2 total (1 turn Point + 1 extracted decision Point) —
+        # each deduped across the two captures. Without dedup this would be 4.
+        import tortoise.hosted_api as ha_mod
+        sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+        proj = sdk._get_proj()
+        r = proj.g.query(
+            "MATCH (p:Point) WHERE p.content CONTAINS 'PostgreSQL' RETURN count(p)"
+        ).result_set
+        assert r[0][0] == 2, f"expected 2 deduped Points, got {r[0][0]}"
+
+    def test_capture_session_dedup_returns_same_point_ids(self, client):
+        """#490: second capture returns the same canonical Point ids
+        (no deterministic-id duplicate hazard)."""
+        conv = [
+            {"role": "assistant", "content": "I think Postgres is the right choice."},
+        ]
+        r1 = client.post("/v1/sessions", json={"conversation": conv})
+        r2 = client.post("/v1/sessions", json={"conversation": conv})
+        assert r1.status_code == 200 and r2.status_code == 200
+        p1 = {p["id"] for p in r1.json()["points"]}
+        p2 = {p["id"] for p in r2.json()["points"]}
+        # All extracted point ids must be identical across captures
+        assert p1 == p2, f"dedup failed: {p1} vs {p2}"
+        # And they must be ULIDs (no deterministic session-derived ids)
+        import re as _re
+        for pid in p1:
+            assert _re.match(r"^[0-9a-f]+-[0-9a-f]{12}$", pid), f"non-ULID id: {pid}"
+
 
 class TestSessionList:
     """GET /v1/sessions — list captured sessions."""

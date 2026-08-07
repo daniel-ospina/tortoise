@@ -1103,48 +1103,42 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
     for i, turn in enumerate(body.conversation):
         role = turn.get("role", "unknown")
         content = turn.get("content", "")
-        turn_id = f"{session_id}_t{i}"
 
-        proj.g.query(
-            "CREATE (t:Point {id:$id, content:$c, pointKind:$k, is_operator:false, status:$s, createdAt:$now, updatedAt:$now})",
-            params={"id": turn_id, "c": f"[{role}] {content[:5000]}", "k": "event", "s": "draft", "now": now},
+        # #490: route through sdk.create_point(dedup=True) instead of raw
+        # Cypher CREATE — content-hash dedup matches the MCP create_point
+        # path, and auto-generated ULIDs avoid the old deterministic-id
+        # duplicate hazard ({session_id}_t{i} with CREATE = duplicate nodes
+        # with identical id on re-capture).
+        turn_pt = sdk.create_point(
+            "event", f"[{role}] {content[:5000]}", dedup=True,
         )
+        turn_id = turn_pt["id"]
         proj.g.query(
-            "MATCH (s:Session {id:$sid}), (t:Point {id:$tid}) CREATE (s)-[:CONTAINS]->(t)",
+            "MERGE (s:Session {id:$sid})-[:CONTAINS]->(t:Point {id:$tid})",
             params={"sid": session_id, "tid": turn_id},
         )
 
-        idx = 0
         for pat in decisions:
             for match in re.finditer(pat, content):
-                pid = f"{turn_id}_d{idx}"
                 text = match.group().strip()
+                p = sdk.create_point("decision", text[:5000], dedup=True)
+                pid = p["id"]
                 proj.g.query(
-                    "CREATE (p:Point {id:$id, content:$c, pointKind:$k, is_operator:false, status:$s, createdAt:$now, updatedAt:$now})",
-                    params={"id": pid, "c": text[:5000], "k": "decision", "s": "draft", "now": now},
-                )
-                proj.g.query(
-                    "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) CREATE (s)-[:CONTAINS]->(p)",
+                    "MERGE (s:Session {id:$sid})-[:CONTAINS]->(p:Point {id:$pid})",
                     params={"sid": session_id, "pid": pid},
                 )
                 extracted.append({"id": pid, "kind": "decision", "text": text[:200]})
-                idx += 1
 
-        idx = 0
         for pat in claims:
             for match in re.finditer(pat, content):
-                pid = f"{turn_id}_c{idx}"
                 text = match.group().strip()
+                p = sdk.create_point("statement", text[:5000], dedup=True)
+                pid = p["id"]
                 proj.g.query(
-                    "CREATE (p:Point {id:$id, content:$c, pointKind:$k, is_operator:false, status:$s, createdAt:$now, updatedAt:$now})",
-                    params={"id": pid, "c": text[:5000], "k": "statement", "s": "draft", "now": now},
-                )
-                proj.g.query(
-                    "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) CREATE (s)-[:CONTAINS]->(p)",
+                    "MERGE (s:Session {id:$sid})-[:CONTAINS]->(p:Point {id:$pid})",
                     params={"sid": session_id, "pid": pid},
                 )
                 extracted.append({"id": pid, "kind": "statement", "text": text[:200]})
-                idx += 1
 
     # Ontology v3.1 §4.5/§3.2 (#7882): also create an episodic :Event node
     # (eventKind: sessionCaptured) and link extracted Points to it via
