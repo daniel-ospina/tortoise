@@ -208,6 +208,16 @@ class TestPointsCreate:
         assert body["content"] == "hello world"
         assert body["kind"] == "statement"
 
+    def test_create_point_enqueues_dream(self, client):
+        """#85: create_point triggers the per-tenant dream queue."""
+        import tortoise.hosted_api as ha
+        # Fresh queue state for this test.
+        ha._DREAM_QUEUES.pop(TEST_TEAM_ID, None)
+        r = client.post("/v1/points", json={"content": "dream trigger"})
+        assert r.status_code == 200, r.text
+        assert TEST_TEAM_ID in ha._DREAM_QUEUES
+        assert not ha._DREAM_QUEUES[TEST_TEAM_ID].empty()
+
     def test_create_point_with_explicit_kind(self, client):
         r = client.post(
             "/v1/points", json={"content": "a decision", "kind": "decision"}
@@ -431,6 +441,32 @@ class TestKeysList:
 # ═══════════════════════════════════════════════════════════════════════════════
 # Session Endpoints
 # ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestDreamEndpoint:
+    """POST /v1/dream — trigger EP stabilization (#85)."""
+
+    def test_dream_incremental(self, client):
+        r = client.post("/v1/dream")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert "converged" in body
+        assert "iterations" in body
+
+    def test_dream_full(self, client):
+        r = client.post("/v1/dream?full=true")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert "converged_all" in body or "converged" in body
+
+    def test_dream_after_writes(self, client):
+        """Writes then dream → stabilization without explicit EP (O/I/T #85)."""
+        client.post("/v1/points", json={"content": "claim A"})
+        client.post("/v1/points", json={"content": "claim B"})
+        r = client.post("/v1/dream?full=true")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body.get("converged_all", body.get("converged", False)) is True
 
 
 class TestSessionCapture:
