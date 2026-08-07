@@ -226,7 +226,7 @@ owner invites bob@example.com (member) / carol@example.com (admin)
 user with 0 memberships → "Create your first team" state
   → NEW POST /v1/teams (session-authed; per-user creation rate-limit — NOT a tier limit; multi-team is a user capability per pricing semantics)
   → registry Team node + Membership (owner) + graph namespace
-  → tier limits from pricing.json (canonical — decision 1d; Free: 1 team; Solo: 1; Pro/Team: 1+)
+  → tier limits from pricing.json (canonical — decision 1d; **no teams-per-tier field — per-user team-creation rate limit (abuse posture); '1 team' is pricing-page copy only**) + per-user creation rate limit (429, not a tier block)
 ```
 
 **Automation:** team creation. **Manual:** user triggers.

@@ -70,7 +70,7 @@ This **confirms our epic's framing** (hosted PRIMARY, self-hosted real second pa
 ## Actions taken
 
 1. **`product/pricing.md`** — self-hosted section now carries the BSL 1.1 + $5M AUG license line (per #338 D3), replacing the inaccurate "free OSS" phrasing.
-2. **Scope doc (03-scope.md)** — will note the #338 coordination in the boundary rationale (CP-1/CP-2).
+2. **Scope doc (03-scope.md)** — noted: #338 coordination in the boundary rationale (CP-1/CP-2) ✅ (2026-08-07).
 3. **#524 comment** (already posted) — design criteria align with #338's OAuth direction.
 
 ## Open items

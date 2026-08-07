@@ -108,11 +108,11 @@ The dashboard's Keys/Sessions tabs call `api.premiselabs.co` with bearer `tt_` k
 
 | Pattern | How it works | Pros | Cons | Confidence |
 |---------|-------------|------|------|-----------|
-| **Session-held key (recommended default)** | Welcome/provision response delivers `tt_` key once; dashboard stores it (sessionStorage/in-memory) and uses it for API calls; rotation via dashboard button | Minimal API change; matches hash-only posture | Key lives in browser memory; re-login re-runs provision response or re-fetch | medium |
+| **Session-held key (~~recommended default~~ — SUPERSEDED 2026-08-07)** | Welcome/provision response delivers `tt_` key once; dashboard stores it (sessionStorage/in-memory) and uses it for **DATA-PLANE** API calls (points/search/sessions/MCP); rotation via dashboard button | Minimal API change; matches hash-only posture | Key lives in browser memory; re-login re-runs provision response or re-fetch | medium |
 | **Supabase JWT → FastAPI verification (JWKS)** | FastAPI verifies the Supabase access token (JWKS) and maps `sub` → team via `user_teams` | No `tt_` key in browser at all; true session-auth | FastAPI needs JWKS/issuer config + user_teams lookup per request; larger change | low (unresearched) |
 | **Session → short-lived key exchange** | Dashboard exchanges session for a scoped short-TTL key via a new endpoint | Limited blast radius | New endpoint + key lifecycle | low (unresearched) |
 
-**Validation plan:** prototype the session-held-key bridge first (least change); only if security review demands server-side session verification, invest in JWKS. This decision shapes the dashboard API layer.
+**Validation plan (SUPERSEDED 2026-08-07):** ~~prototype the session-held-key bridge first; only if security review demands, invest in JWKS~~ — owner Option A: **JWKS is IN SCOPE for all session endpoints E1–E8** (plan §5.3 #2b, D1 #568); session-held key applies to the data-plane only.
 
 ---
 
