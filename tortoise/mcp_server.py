@@ -949,8 +949,8 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
         path="/",
         middleware=[
             Middleware(SecurityHeadersMiddleware),
+            Middleware(RequestBodySizeMiddleware),
             Middleware(TeamResolutionMiddleware, registry_sdk=_registry_sdk),
             Middleware(MCPRateLimitMiddleware, max_per_minute=rate_limit),
-            Middleware(RequestBodySizeMiddleware),
         ],
     )

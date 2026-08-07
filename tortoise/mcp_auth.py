@@ -201,10 +201,15 @@ class MCPRateLimitMiddleware(BaseHTTPMiddleware):
             key_id = f"ip:{ip}"
         now = time.time()
         async with self._lock:
-            # Periodic cleanup: prune empty buckets (code-review P1 fix —
-            # unbounded dict growth under rotating keys/IPs)
+            # Periodic cleanup: filter stale timestamps from ALL buckets, then
+            # prune empty ones (code-review fix — mirrors hosted_api's
+            # RateLimitMiddleware pattern; prevents one-off-IP bucket growth)
             if now - self._last_cleanup > 60:
-                stale = [k for k, v in self._buckets.items() if not v]
+                stale = []
+                for k, v in list(self._buckets.items()):
+                    v[:] = [t for t in v if now - t < 60]
+                    if not v:
+                        stale.append(k)
                 for k in stale:
                     del self._buckets[k]
                 self._last_cleanup = now
