@@ -2049,11 +2049,19 @@ class TortoiseSDK:
                     # normalized topics, name, narrative_arc) so a real change
                     # in any persisted field is never miscounted as a skip.
                     if existing_props.get("file_hash") == file_hash:
+                        # Compare the FULL payload that would be written: also
+                        # issues/prs/critical_decisions (inside content_metadata,
+                        # feeding _connect_issue_objects) so a re-enrichment
+                        # that finds new references is never miscounted skipped.
+                        _old_meta = existing_arc
                         changed = (
                             set(_norm_topics(merged_keywords)) != set(_stored_keywords)
                             or set(_new_topics) != set(_stored_topics)
                             or _new_name != existing_props.get("name", name)
                             or new_phases != list(existing_arc.get("narrative_arc", []))
+                            or _norm_topics(metadata.get("issues", [])) != _norm_topics(_old_meta.get("issues", []))
+                            or _norm_topics(metadata.get("prs", [])) != _norm_topics(_old_meta.get("prs", []))
+                            or _norm_topics(metadata.get("critical_decisions", [])) != _norm_topics(_old_meta.get("critical_decisions", []))
                         )
                         if not changed:
                             skipped += 1
