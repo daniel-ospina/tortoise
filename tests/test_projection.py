@@ -1620,6 +1620,42 @@ def test_falkor_rebuild_all_parity_with_apply():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_falkor_rebuild_all_revision_before_add():
+    """#21 regression: a PointRevised in an alphabetically-EARLIER file must be
+    applied to the point whose PointAdded lives in a LATER file. The two-pass
+    rebuild (Pass 1a creates ALL nodes before Pass 1b applies revisions) makes
+    this structurally safe — this test pins it so a future one-pass refactor
+    can't silently re-introduce lost revisions."""
+    if _skip_if_no_falkor():
+        return
+    d = tempfile.mkdtemp(prefix="tortoise_21_")
+    try:
+        # b.jsonl sorts AFTER a.jsonl → PointAdded lands in the later file.
+        log_b = EventLog(os.path.join(d, "b.jsonl"))
+        api_b = EventAPI(log_b, initiated_by="extractor", agent_id="test")
+        prov = provenance("doc.txt", [0, 10], "quote", extracted_by="test@0")
+        pid = api_b.add_point("original content", prov)
+
+        # a.jsonl sorts FIRST → its PointRevised for pid is seen before any
+        # PointAdded when files are read in sorted order.
+        log_a = EventLog(os.path.join(d, "a.jsonl"))
+        api_a = EventAPI(log_a, initiated_by="extractor", agent_id="test")
+        api_a.revise_point(pid, new_content="revised content", corrects=[])
+
+        proj = FalkorProjection(_tmp("g_rebuild_21.db"), graph_name="test")
+        try:
+            proj.rebuild_all(d)
+            r = proj.g.query(
+                "MATCH (n:Point {id:$id}) RETURN n.content",
+                params={"id": pid},
+            ).result_set
+            assert r and r[0][0] == "revised content", \
+                f"revision lost: expected 'revised content', got {r}"
+        finally:
+            proj.close()
+    finally:
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)
 def test_falkor_revise_point_wipes_stale_embedding_on_compute_failure():
     """#19 regression: PointRevised with a raising compute_embedding must NOT
     leave the stale embedding — the except block wipes it (embedding = None)
