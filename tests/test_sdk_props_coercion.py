@@ -403,3 +403,51 @@ class TestLoadDotenv:
         monkeypatch.setenv("EMPTY_OVERRIDE", "")  # explicitly set empty
         _load_dotenv(str(env))
         assert os.environ.get("EMPTY_OVERRIDE") == ""  # .env must NOT win
+
+
+# ── Regression: import-time no-connect (#451) ────────────────────────
+
+class TestNoConnectAtImport:
+    """Importing tortoise.mcp_server must NOT construct TortoiseSDK.
+
+    Regression for #451: the module used to call TortoiseSDK() + 3x
+    Docker retry + sys.exit(1) at import time, breaking any environment
+    without a live FalkorDB server (CI, TestLoadDotenv, clean checkout).
+    """
+
+    def test_import_does_not_construct_tortoisesdk(self, monkeypatch):
+        """Monkeypatch TortoiseSDK, import mcp_server fresh, assert no call."""
+        import importlib
+        import tortoise.sdk
+
+        called = False
+        real_init = tortoise.sdk.TortoiseSDK.__init__
+
+        def fake_init(self, *args, **kwargs):
+            nonlocal called
+            called = True
+            return real_init(self, *args, **kwargs)
+
+        # Patch TortoiseSDK.__init__ globally — _get_sdk() calls
+        # TortoiseSDK() which routes through this class.
+        monkeypatch.setattr(tortoise.sdk.TortoiseSDK, "__init__", fake_init)
+
+        # Remove mcp_server from module cache to force fresh import
+        sys.modules.pop("tortoise.mcp_server", None)
+
+        try:
+            import tortoise.mcp_server as fresh  # noqa: F811
+            assert not called, (
+                "TortoiseSDK() must NOT be called at import time. "
+                "SDK construction is deferred to _get_sdk() on first use (#451)."
+            )
+        finally:
+            tortoise.sdk.TortoiseSDK.__init__ = real_init
+
+    def test_import_preserves_module_api(self):
+        """After import: sdk is None; _get_sdk, tools, _load_dotenv present."""
+        import tortoise.mcp_server as mcp_mod
+        assert mcp_mod.sdk is None, "sdk must be None at import time (#451)"
+        assert callable(mcp_mod._get_sdk), "_get_sdk must be callable"
+        assert callable(mcp_mod._load_dotenv), "_load_dotenv must be callable"
+        assert callable(mcp_mod.tortoise_create_point), "core tool must be importable"

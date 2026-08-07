@@ -424,6 +424,63 @@ class TestComputeReputation:
         for o in rep["outcomes"]:
             assert set(o.keys()) >= {"point_id", "content", "confidence", "outcome"}
 
+    def test_id_takes_precedence_over_name_match(self, sdk):
+        """Exact id match takes precedence when a name collision exists (#152).
+
+        Subject A has id='alice', Subject B has name='alice'.
+        compute_reputation('alice') must only count A's outcomes (id match).
+        """
+        proj = sdk._get_proj()
+
+        # Subject A: id='alice', name='alice-work'
+        sdk._create_entity("Subject", "alice",
+                           {"name": "alice-work", "subjectKind": "analyst", "status": "live"},
+                           "SubjectAdded")
+        # Subject B: id='bob', name='alice' (name collides with A's id)
+        sdk._create_entity("Subject", "bob",
+                           {"name": "alice", "subjectKind": "reviewer", "status": "live"},
+                           "SubjectAdded")
+
+        # Record an IMPL event for Subject A (id='alice')
+        proj.apply({
+            "type": "EventRecorded",
+            "id": "ev-152-a",
+            "eventId": "ev-152-a",
+            "eventKind": "analysis",
+            "subject": "alice-work",
+        })
+        p_a = sdk.create_point("observation", "A's analysis")
+        proj.g.query(
+            "MATCH (e:Event {eventId:'ev-152-a'}), (p:Point {id:$pid}) "
+            "CREATE (e)-[:IMPL]->(p)",
+            params={"pid": p_a["id"]},
+        )
+
+        # Record an IMPL event for Subject B (name='alice')
+        proj.apply({
+            "type": "EventRecorded",
+            "id": "ev-152-b",
+            "eventId": "ev-152-b",
+            "eventKind": "review",
+            "subject": "alice",
+        })
+        p_b = sdk.create_point("observation", "B's review")
+        proj.g.query(
+            "MATCH (e:Event {eventId:'ev-152-b'}), (p:Point {id:$pid}) "
+            "CREATE (e)-[:IMPL]->(p)",
+            params={"pid": p_b["id"]},
+        )
+
+        # compute_reputation('alice') must match by id first → Subject A only
+        rep = sdk.compute_reputation("alice")
+        assert rep["total_events"] == 1
+        assert rep["impl_count"] == 1
+        assert rep["nand_count"] == 0
+        # Verify it's A's outcome, not B's
+        assert len(rep["outcomes"]) == 1
+        assert rep["outcomes"][0]["content"] == "A's analysis"
+        assert rep["mean"] > 0.5  # 1 IMPL on Beta(1,1) prior → Beta(2,1) → 2/3 ≈ 0.6667
+
 
 # ── Review fixes: supersede_point structural transfer + negative cases ──
 
@@ -535,3 +592,100 @@ class TestCreateEventNegative:
         """Event with None subject doesn't crash."""
         ev = sdk.create_event("none-1", "meeting", aboutSubject=None, aboutObject=None)
         assert ev is not None
+
+
+# ── #151: Stub Subject/Object ULID ids ───────────────────────────────────
+
+_ULID_RE = __import__("re").compile(r"^[0-9a-f]+-[0-9a-f]{12}$")
+
+
+class TestStubEntityULID:
+    """#151: _upsert_event must use ULID-based ids for auto-created stub
+    Subject/Object nodes, not the entity name as id."""
+
+    def test_performs_stub_subject_has_ulid_id(self, sdk):
+        """Stub Subject created via performs edge gets ULID id, not name."""
+        proj = sdk._get_proj()
+        proj.apply({
+            "type": "EventRecorded",
+            "id": "ev-ulid-1",
+            "eventId": "ev-ulid-1",
+            "eventKind": "test",
+            "subject": "stub-agent-1",
+            "startedAt": "2024-01-01T00:00:00Z",
+        })
+        r = proj.g.query(
+            "MATCH (s:Subject {name:'stub-agent-1'}) RETURN s.id, s.name"
+        ).result_set
+        assert len(r) == 1
+        sid, name = r[0][0], r[0][1]
+        assert name == "stub-agent-1"
+        assert _ULID_RE.match(sid), f"id={sid!r} is not ULID format"
+        assert sid != name, f"id should be ULID, not name ({sid!r} == {name!r})"
+
+    def test_produces_stub_object_has_ulid_id(self, sdk):
+        """Stub Object created via produces edge gets ULID id, not name."""
+        proj = sdk._get_proj()
+        proj.apply({
+            "type": "EventRecorded",
+            "id": "ev-ulid-2",
+            "eventId": "ev-ulid-2",
+            "eventKind": "build",
+            "subject": "ci-bot",
+            "object": "artifact-stub-1",
+            "startedAt": "2024-01-01T00:00:00Z",
+        })
+        r = proj.g.query(
+            "MATCH (o:Object {name:'artifact-stub-1'}) RETURN o.id, o.name"
+        ).result_set
+        assert len(r) == 1
+        oid, name = r[0][0], r[0][1]
+        assert name == "artifact-stub-1"
+        assert _ULID_RE.match(oid), f"id={oid!r} is not ULID format"
+        assert oid != name, f"id should be ULID, not name ({oid!r} == {name!r})"
+
+    def test_uses_stub_object_has_ulid_id(self, sdk):
+        """Stub Object created via uses edge gets ULID id, not name."""
+        proj = sdk._get_proj()
+        proj.apply({
+            "type": "EventRecorded",
+            "id": "ev-ulid-3",
+            "eventId": "ev-ulid-3",
+            "eventKind": "analysis",
+            "subject": "analyst",
+            "uses": ["input-stub-1"],
+            "startedAt": "2024-01-01T00:00:00Z",
+        })
+        r = proj.g.query(
+            "MATCH (o:Object {name:'input-stub-1'}) RETURN o.id, o.name"
+        ).result_set
+        assert len(r) == 1
+        oid, name = r[0][0], r[0][1]
+        assert name == "input-stub-1"
+        assert _ULID_RE.match(oid), f"id={oid!r} is not ULID format"
+        assert oid != name, f"id should be ULID, not name ({oid!r} == {name!r})"
+
+    def test_stub_preserves_existing_ulid_on_merge(self, sdk):
+        """When Subject already exists via _upsert_subject with a ULID id,
+        the _upsert_event MERGE matches by name and ON CREATE does NOT fire,
+        so the proper ULID id is preserved."""
+        # Create a proper Subject with ULID id via SDK
+        subj = sdk.create_subject("existing-agent", "tester")
+        proj = sdk._get_proj()
+        # Now create an event referencing the same subject name
+        proj.apply({
+            "type": "EventRecorded",
+            "id": "ev-ulid-4",
+            "eventId": "ev-ulid-4",
+            "eventKind": "test",
+            "subject": "existing-agent",
+            "startedAt": "2024-01-01T00:00:00Z",
+        })
+        # The Subject should still have its original ULID id, not overwritten
+        r = proj.g.query(
+            "MATCH (s:Subject {name:'existing-agent'}) RETURN s.id"
+        ).result_set
+        assert len(r) == 1
+        assert r[0][0] == subj["id"], (
+            f"existing ULID should be preserved: {r[0][0]!r} != {subj['id']!r}"
+        )

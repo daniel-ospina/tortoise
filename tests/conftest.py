@@ -12,7 +12,21 @@ TORTOISE_DB_URI env var as long as the graph name starts with
 from __future__ import annotations
 
 import os
+import sys
 import uuid
+
+# ── Embedded-mode dependency guard (#450) ──────────────────────────────────
+# falkordblite (not plain redislite) provides redislite.falkordb_client.
+# Catch the gap early so a fresh checkout doesn't silently fail 69+ tests.
+try:
+    from redislite.falkordb_client import FalkorDB  # noqa: F401
+except ImportError:
+    print(
+        "\n⚠️  falkordblite NOT installed — embedded-mode tests will fail.\n"
+        "    Fix: pip install falkordblite>=0.10\n"
+        "    (plain redislite does NOT include the FalkorDB embedded client)\n",
+        file=sys.stderr,
+    )
 
 # ── Test graph isolation ───────────────────────────────────────────────────
 # Generate a unique graph name per test session so parallel pytest runs
