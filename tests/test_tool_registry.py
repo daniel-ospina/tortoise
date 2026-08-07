@@ -66,22 +66,24 @@ class TestRegistryEquivalence:
         from tortoise.mcp_auth import HTTP_ALLOWED
 
         derived = frozenset(t.name for t in TOOL_REGISTRY if t.http_policy)
-        # Exact count: 65 tools - 5 excluded (team_create, backfill_v25,
-        # ingest_corpus, index_sessions, tortoise_dream — #329 whole-graph EP
-        # is CPU-heavy, tenant HTTP excluded) = 60
-        # (incl. 6 onboarding tools #498/#499/#500 + 1 human-approval tool #531)
-        assert len(HTTP_ALLOWED) == 60, f"Expected 60, got {len(HTTP_ALLOWED)}"
-        assert len(derived) == 60
+        # Derived == literal (no manual sync — #454), and the documented
+        # exclusions hold: team_create, backfill_v25, ingest_corpus,
+        # index_sessions (privilege/schema/path-traversal) and tortoise_dream
+        # (#329 whole-graph EP is CPU-heavy — tenant HTTP excluded).
         assert derived == HTTP_ALLOWED, (
             f"Derived HTTP_ALLOWED mismatch:\n"
             f"  In derived but not set: {derived - HTTP_ALLOWED}\n"
             f"  In set but not derived: {HTTP_ALLOWED - derived}"
         )
+        for excluded in ("tortoise_team_create", "tortoise_backfill_v25",
+                         "tortoise_ingest_corpus", "tortoise_index_sessions",
+                         "tortoise_dream"):
+            assert excluded not in HTTP_ALLOWED, f"{excluded} must be HTTP-excluded"
 
     def test_registry_count(self):
-        """65 tools — 58 existing + 6 onboarding (#498/#499/#500) + 1 human-approval (#531)."""
+        """68 tools — 60 existing + 6 onboarding (#498/#499/#500) + 1 human-approval (#531) + 1 #540."""
         from tortoise.tool_registry import TOOL_REGISTRY
-        assert len(TOOL_REGISTRY) == 65, f"Expected 65, got {len(TOOL_REGISTRY)}"
+        assert len(TOOL_REGISTRY) == 68, f"Expected 68, got {len(TOOL_REGISTRY)}"
         names = {t.name for t in TOOL_REGISTRY}
         onboarding = {"tortoise_onboarding_demo_create", "tortoise_onboarding_state",
                       "tortoise_onboarding_session_recording",
