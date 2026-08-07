@@ -1,10 +1,29 @@
 #!/usr/bin/env python3.14
-"""Tortoise graph audit — checks wiring quality per context."""
-from falkordb import FalkorDB
-import json, sys
+"""Tortoise graph audit — checks wiring quality per context.
 
-DB = FalkorDB(host='localhost', port=6379, password='wz+D5kSSuwvRoO8tv+fyXGTz3XLH7XJV')
-G = DB.select_graph('tortoise')
+HISTORICAL ONE-SHOT — queries the removed context field (see #49);
+connection now env-based (TORTOISE_DB_URI).
+"""
+from falkordb import FalkorDB
+import json, os, sys
+
+
+def _parse_uri(uri: str) -> dict:
+    """Parse docker:// URI into components."""
+    from urllib.parse import urlparse
+    parsed = urlparse(uri)
+    return {
+        "host": parsed.hostname or "localhost",
+        "port": parsed.port or 16379,
+        "password": parsed.password or "",
+        "graph": parsed.path.lstrip("/") or "tortoise",
+    }
+
+
+_uri = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise")
+_cfg = _parse_uri(_uri)
+DB = FalkorDB(host=_cfg["host"], port=_cfg["port"], password=_cfg["password"] or None)
+G = DB.select_graph(_cfg["graph"])
 
 CONTEXTS = [
     'concept|operations|agent',
