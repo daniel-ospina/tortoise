@@ -96,6 +96,11 @@ app.add_middleware(
 )
 app.mount("/mcp", mcp_http_app)
 
+# Self-host REST surface (#525) — registry-aligned /v1 endpoints.
+from tortoise.selfhost_api import router as _rest_router
+
+app.include_router(_rest_router)
+
 
 @app.get("/health")
 async def health():
