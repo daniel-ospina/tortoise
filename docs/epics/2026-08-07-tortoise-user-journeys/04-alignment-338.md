@@ -2,7 +2,7 @@
 title: "Alignment Assessment — Parallel Epic #338"
 type: engineering
 domain: platform
-doc_status: draft
+doc_status: approved
 subjects.team: organisation-design-team
 created: 2026-08-07
 ---

@@ -2,7 +2,7 @@
 title: "Epic Plan — Tortoise Product User Journeys"
 type: engineering
 domain: platform
-doc_status: draft
+doc_status: complete
 subjects.team: organisation-design-team
 created: 2026-08-07
 ---
@@ -896,7 +896,7 @@ Each test: **Setup** (concrete preconditions) · **Steps** (verifiable actions) 
 ## E2E-9: Self-hosted flow — land → install → first memory (no hosted account)
 - **Setup:** fresh machine, no tortoise. **GATED: full daemon assertions (health/MCP/onboard) require parallel epic #338's self-host daemon — v1 asserts smoke-level (docs/GitHub route reachable without hosted account + BSL license line); full daemon assertions land post-#338.**
 - **Steps:** landing → "Self-hosting docs →" → GitHub/docs → `docker compose up` OR pip install → `tortoise onboard`
-- **Assertions:** self-host route reachable without hosted account · daemon /health 200 · MCP connect (`claude mcp add tortoise http://localhost:8000/mcp`) · first local point · BSL license line visible
+- **Assertions (v1, smoke-level):** self-host route reachable without hosted account · BSL license line visible. **Deferred to post-#338 (daemon-dependent):** daemon /health 200 · MCP connect (`claude mcp add tortoise http://localhost:8000/mcp`) · first local point
 - **Negative:** daemon down → tortoise_unavailable graceful
 
 ## E2E-10: User↔team decoupling — one user, two teams in parallel

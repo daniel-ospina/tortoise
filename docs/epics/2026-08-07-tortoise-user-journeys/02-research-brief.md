@@ -2,7 +2,7 @@
 title: "Epic Research Brief — Tortoise Product User Journeys"
 type: engineering
 domain: platform
-doc_status: draft
+doc_status: approved
 subjects.team: organisation-design-team
 created: 2026-08-07
 ---
@@ -171,7 +171,7 @@ Public auto-provisioning (signup → namespace + demo graph per user) has **no r
 | A11 | after_user_created hook fires before email confirmation → teams/keys minted for unconfirmed users | medium | WEB research (auth architecture) | Verify hook timing live; decide lazy-provision vs cleanup |
 | A12 | Funnel analytics via PostHog (JS snippet + Python SDK) fits static CF Pages + FastAPI stack | high | WEB research (PostHog docs, CF Worker proxy) | Implement snippet + server events; verify events land |
 | A13 | **Provision response must deliver the `tt_` key exactly once; welcome renders from the response, not a later DB read** (null-once/hash-only migration would otherwise break the current welcome reveal, which reads plaintext from user_teams via RLS) | high | internal code analysis (welcome.html poll + migration 0001) | Scope the provision-response flow to return the key; welcome stores/renders from that response; `user_teams.api_key` nulled or removed |
-| A14 | Session→API bridge: dashboard holds the `tt_` key from provision response (session-held key) for API calls; no server-side JWT verification in v1 | medium | internal reasoning + candidate patterns | Prototype; security review gate before JWKS investment |
+| A14 | Session→API bridge: dashboard holds the `tt_` key from provision response (session-held key) for API calls; **~~no server-side JWT verification in v1~~ — SUPERSEDED (2026-08-07): JWKS required for session endpoints E1–E8 per plan §5.3 #2b; session-held key applies to the DATA-PLANE only (points/search/sessions/MCP = tt_)** | medium | internal reasoning + candidate patterns | Prototype; security review gate before JWKS investment — **resolved: JWKS IN SCOPE (D1 #568)** |
 
 ---
 

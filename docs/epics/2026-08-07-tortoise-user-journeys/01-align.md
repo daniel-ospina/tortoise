@@ -12,7 +12,7 @@ created: 2026-08-07
 # Strategy Alignment Decision — Tortoise Product User Journeys
 
 **Date:** 2026-08-07
-**Status:** PROCEED (pending review gate)
+**Status:** PROCEED — approved (review gate CLEAN, 2026-08-07)
 **Epic:** Two product flows for Tortoise — **self-hosted** (OSS) and **hosted** (PRIMARY) — with a well-thought-through user journey from landing to first memory.
 **Seed issues:** #518 (no public tenant-provisioning journey) · #519 (dashboard is a non-functional shell)
 

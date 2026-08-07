@@ -2,7 +2,7 @@
 title: "Epic Scope — Tortoise Product User Journeys"
 type: engineering
 domain: platform
-doc_status: draft
+doc_status: approved
 subjects.team: organisation-design-team
 created: 2026-08-07
 ---
@@ -48,7 +48,7 @@ created: 2026-08-07
 11. **User↔Team↔Graph decoupling — PRODUCT ONTOLOGY FOUNDATION (owner-confirmed)** — the many-to-many user↔team and one-to-many team↔graph relationships are critical to the product ontology (not the graph ontology). Concretely:
     - **Supabase `user_teams` 1:1 → M:N junction:** drop `UNIQUE(user_id)`; a user belongs to many teams; a team has many members (role on the membership).
     - **Team→Graph 1:N:** replace the single `team_{id}` namespace assumption with a graph entity per team (create/list/select graphs within a team); `max_graphs` tier limit enforced at graph creation.
-    - **Tier-driven limits:** replace hardcoded `max_users: 1, max_teams: 1, max_graphs: 1` (hosted_api.py:320) with limits from `product/pricing.md` (Free 1/1/1 · Solo 1/2/1 · Pro ∞/∞/1+ · Team ∞/∞/∞).
+    - **Tier-driven limits:** replace hardcoded `max_users: 1, max_teams: 1, max_graphs: 1` (hosted_api.py:320) with limits from `product/pricing.md` (Free graphs/users/keys 1/1/2 · Solo 2/1/5 · Pro ∞/2/10 · Team ∞/∞/20 (max_graphs/max_users/max_api_keys; NO max_teams — user-level)).
     - **Billing is per TEAM, not per user:** a user can be a freelancer paying for their own Solo/Pro team AND a member of a client's Team-tier team in parallel. The subscription attaches to the Team entity; the tier is a Team property.
     - **Invites + RBAC (Team tier):** invitation flow + role-based access (owner/admin/member) — the SDK primitives exist (`membership_create`, `invitation`); the hosted surface (dashboard invite UI, API) is built here.
     - **Key scoping under decoupling:** API keys belong to a team; a user's dashboard session resolves which team(s) they can access and which graph within each.
@@ -81,6 +81,8 @@ created: 2026-08-07
 | PostHog self-hosting / EU-hosted data residency | Research in #528 (hosted-vs-self-host decision) | #528 |
 
 ### Boundary Rationale
+
+**#338 coordination (CP-1/CP-2):** hosted_api.py auth work (ours) vs mcp_server.py auth_mode (#338 T1.1) are independent files — keep PRs reviewable in isolation; the landing/pricing copy must match #338's 'Install → Connect → Query' README story (joint copy review at launch). See 04-alignment-338.md.
 
 **The guiding principle:** the plumbing is mostly built — signup, welcome, edge function, API all exist. This epic makes the journey *real*: verifies it E2E, fixes the chicken-and-egg, gives the dashboard a session, hardens the key reveal, and instruments the funnel. Two owner-confirmed additions raise the ceiling: **(1) user↔team↔graph decoupling is a product-ontology foundation built NOW** (per-team billing, freelancer-in-multiple-teams scenario, tier-driven limits) — not deferred, because every hosted layer hard-encodes 1:1:1 and deferring creates a migration trap; **(2) pricing structure is documented canonically** (survives graph wipes). Everything that is a *new capability* built on a working journey (onboarding wizard, GitHub indexing, payment collection, OAuth-MCP, analytics) is explicitly deferred to its owning epic/issue, most with design criteria captured now.
 
@@ -178,7 +180,7 @@ created: 2026-08-07
 ### E2E-13: Pricing structure documented and enforced
 **Given:** `product/pricing.md` committed
 **When:** The provision path creates a team
-**Then:** The team's tier-driven limits (max_teams/max_graphs/max_users) come from the pricing doc's table
+**Then:** The team's tier-driven limits (max_graphs/max_users) come from the pricing doc's table (no max_teams — user-level capability)
 **And:** `/v1/team` returns the tier + limits, and limit enforcement matches the doc
 
 ### E2E-14: Pricing page renders hosted tiers + self-hosted section
@@ -194,7 +196,7 @@ created: 2026-08-07
 
 ## Epic Scope Ready for Review
 
-**Scope:** 13 in-scope deliverables (hosted E2E verification, key recovery via rotation, reveal-once + storage migration, dashboard session auth, dashboard onboarding surface, security posture, email confirmation handling, dual-flow journey design, self-hosted journey depth, **user↔team↔graph decoupling with tier-driven limits + per-team billing**, **pricing doc**, **pricing page on tortoise.premiselabs.co incl. self-hosted section**). Out of scope: onboarding v2 (#235), JWKS, payment collection/billing epic, full abuse system, OAuth-MCP (#524, design criteria captured), harness variants (**#529 filed**), funnel analytics (**#528 filed**).
+**Scope:** 13 in-scope deliverables (hosted E2E verification, key recovery via rotation, reveal-once + storage migration, dashboard session auth, dashboard onboarding surface, security posture, email confirmation handling, dual-flow journey design, self-hosted journey depth, **user↔team↔graph decoupling with tier-driven limits + per-team billing**, **pricing doc**, **pricing page on tortoise.premiselabs.co incl. self-hosted section**). Out of scope (post-verify): onboarding v2 (#235), payment collection/billing epic, full abuse system, OAuth-MCP (#524, design criteria captured), harness variants (**#529 filed**), funnel analytics (**#528 filed**). ~~JWKS~~ — **superseded: IN SCOPE via D1 #568 (owner Option A 2026-08-07, see §1 OOS row + plan §5.3 #2b)**.
 
 **E2E test cases:** 14 drafted (E2E-1..14) — behavioral, UI-independent.
 
