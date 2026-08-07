@@ -89,17 +89,37 @@ class _EdgeHandlers:
 
     def _try_about_edge(self, source_id: str, target_name: str, 
                         label: str, edge_type: str, kind_field: str, kind_default: str) -> bool:
-        """Try to create an about* edge to a named entity. Returns True if found."""
-        r = self.g.query(
-            f"MATCH (e:{label} {{name:$name}}) RETURN e.name LIMIT 1",
-            params={"name": target_name},
-        ).result_set
+        """Try to create an about* edge to a named entity. Returns True if found.
+
+        For Document nodes, matches against both ``name`` and ``title`` properties
+        (Documents store their display name in ``title`` per _upsert_document).
+        """
+        # Documents use 'title' as their display name (#211)
+        if label == 'Document':
+            r = self.g.query(
+                f"MATCH (e:{label}) WHERE e.name = $name OR e.title = $name "
+                "RETURN coalesce(e.title, e.name, $name) LIMIT 1",
+                params={"name": target_name},
+            ).result_set
+        else:
+            r = self.g.query(
+                f"MATCH (e:{label} {{name:$name}}) RETURN e.name LIMIT 1",
+                params={"name": target_name},
+            ).result_set
         if r:
-            self.g.query(
-                f"MATCH (n {{id:$sid}}), (e:{label} {{name:$name}}) "
-                f"MERGE (n)-[:{edge_type}]->(e)",
-                params={"sid": source_id, "name": target_name},
-            )
+            if label == 'Document':
+                self.g.query(
+                    f"MATCH (n {{id:$sid}}), (e:{label}) "
+                    f"WHERE e.name = $name OR e.title = $name "
+                    f"MERGE (n)-[:{edge_type}]->(e)",
+                    params={"sid": source_id, "name": target_name},
+                )
+            else:
+                self.g.query(
+                    f"MATCH (n {{id:$sid}}), (e:{label} {{name:$name}}) "
+                    f"MERGE (n)-[:{edge_type}]->(e)",
+                    params={"sid": source_id, "name": target_name},
+                )
             return True
         return False
 
