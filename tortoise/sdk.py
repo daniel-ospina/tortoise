@@ -3035,7 +3035,8 @@ class TortoiseSDK:
             "RETURN properties(e) ORDER BY e.startedAt DESC SKIP $offset LIMIT $limit",
             params=params,
         ).result_set
-        return [dict(r[0]) for r in rows]
+        # Fetch a bit extra for scoring headroom, but honor the caller's limit.
+        return [dict(r[0]) for r in rows[:limit]]
 
     def get_events(self, eventKind: str | None = None, limit: int = 20) -> list[dict]:
         """Get recent Events, optionally filtered by eventKind."""
