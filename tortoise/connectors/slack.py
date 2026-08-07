@@ -8,11 +8,15 @@ from __future__ import annotations
 import json
 import hmac
 import hashlib
+import logging
+import os
 import threading
 import time
 from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Any, Callable
+
+logger = logging.getLogger(__name__)
 
 
 def _now_iso() -> str:
@@ -24,15 +28,27 @@ class SlackConnector:
 
     def __init__(self, config: dict[str, Any] | None = None, api=None):
         cfg = config or {}
-        self.token = cfg.get("token", "")
+        # Env vars take precedence over config for secrets (#324)
+        # os.environ.get returns None when not set; explicit None check
+        # so we can distinguish "not set" from "set to empty string"
+        env_token = os.environ.get("SLACK_BOT_TOKEN")
+        self.token = env_token if env_token is not None else cfg.get("token", "")
+        env_signing = os.environ.get("SLACK_SIGNING_SECRET")
+        self.signing_secret = (
+            env_signing if env_signing is not None else cfg.get("signing_secret", "")
+        )
         self.channel_id = cfg.get("channel_id", "")
         self.limit = int(cfg.get("limit", 100))
         self.days = int(cfg.get("days", 7))
         self.webhook_port = int(cfg.get("webhook_port", 0))
-        self.signing_secret = cfg.get("signing_secret", "")
         self.api = api
         self._server: HTTPServer | None = None
         self._thread: threading.Thread | None = None
+        if not self.token:
+            logger.warning(
+                "SLACK_BOT_TOKEN not set — Slack connector will be a no-op. "
+                "Set SLACK_BOT_TOKEN env var or 'token' in connector config."
+            )
 
     def _client(self):
         """Lazy-init Slack WebClient (imports only if used)."""
