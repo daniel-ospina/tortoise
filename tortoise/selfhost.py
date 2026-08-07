@@ -40,6 +40,9 @@ API_KEY = os.environ.get("TORTOISE_API_KEY")
 ALLOWED_ORIGINS = os.environ.get(
     "TORTOISE_ALLOWED_ORIGINS", "http://localhost:8000"
 ).split(",")
+# Role-scoped server (#523): TORTOISE_TOOL_GROUP=memory exposes only that
+# group's tools to the agent (keeps the tool-selection surface under ~20).
+TOOL_GROUP = os.environ.get("TORTOISE_TOOL_GROUP")
 
 
 def _auth_mode() -> str:
@@ -75,6 +78,7 @@ mcp_http_app = create_http_app(
     rate_limit=RATE_LIMIT,
     auth_mode=_auth_mode(),
     api_key=API_KEY,
+    tool_group=TOOL_GROUP,
 )
 
 

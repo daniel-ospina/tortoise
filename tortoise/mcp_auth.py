@@ -30,6 +30,10 @@ from tortoise.sdk import TortoiseSDK
 # ── ContextVars ─────────────────────────────────────────────────────────────
 _current_team_id: ContextVar[str | None] = ContextVar("_current_team_id", default=None)
 _transport_mode: ContextVar[str | None] = ContextVar("_transport_mode", default=None)
+# Curation group for the active MCP app (#523) — set per request by the app's
+# middleware so the shared tools/list transform filters correctly even when
+# multiple apps exist in one process.
+_tool_group: ContextVar[str | None] = ContextVar("_tool_group", default=None)
 
 # mcp_server.py owns lazy SDK init (URI resolution, 3x retry, test-swap
 # pattern). mcp_auth delegates via a function-level import to avoid the
@@ -169,6 +173,23 @@ class TransportModeMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         _transport_mode.set("http")
         _current_team_id.set("selfhost")
+        return await call_next(request)
+
+
+class ToolGroupMiddleware(BaseHTTPMiddleware):
+    """Set the curation group ContextVar per request (#523).
+
+    The tools/list transform is registered ONCE on the shared module-level mcp
+    instance, so per-app group scoping must come from request context — not
+    capture at app construction (which would let the first app win).
+    """
+
+    def __init__(self, app, *, tool_group: str | None):
+        super().__init__(app)
+        self._tool_group = tool_group
+
+    async def dispatch(self, request: Request, call_next):
+        _tool_group.set(self._tool_group)
         return await call_next(request)
 
 
