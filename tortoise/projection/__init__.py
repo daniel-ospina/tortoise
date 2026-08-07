@@ -208,7 +208,8 @@ class FalkorProjection(
                  password: str | None = None,
                  graph_name: str = "tortoise",
                  ssl: bool = False,
-                 allow_nonstandard_path: bool = False):
+                 allow_nonstandard_path: bool = False,
+                 skip_health_check: bool = False):
 
         # No-arg construction -> canonical embedded path (plan Task 9: graph-
         # scripts migrated from FalkorProjection('tortoise.db') to no-arg,
@@ -252,6 +253,16 @@ class FalkorProjection(
         self._graph_name = graph_name
         self._skip_guard = False
         self._is_embedded = (path is not None)
+        self._path = path
+        # Ops safety residual (#428): auto health check on open + transparent
+        # corruption recovery. Embedded DBs rebuild from their adjacent JSONL
+        # event log when lost/corrupt; production (FLY_APP_NAME) and server
+        # mode fail loud instead. Runs BEFORE _ensure_indexes so a corrupt
+        # DB is recovered before index creation. skip_health_check is the
+        # escape hatch for the `tortoise rebuild` CLI itself (it IS the
+        # recovery tool — gating it on a healthy DB would be circular).
+        if not skip_health_check:
+            self._auto_health_recover()
         self._falkordb_version = self._get_falkordb_version()
         if self._falkordb_version is not None and self._falkordb_version[0] < 4:
             import logging
@@ -274,6 +285,101 @@ class FalkorProjection(
         self._closed = False
         self._finalizer = _weakref.finalize(self, self.close)
         _atexit.register(self.close)
+
+    # ── Ops safety (#428): health check + transparent recovery ────────────
+
+    def _probe_ok(self) -> bool:
+        """Cheap connectivity probe — does the graph answer queries?"""
+        try:
+            self.g.query("MATCH (n) RETURN count(n) LIMIT 1")
+            return True
+        except Exception:
+            return False
+
+    def _find_local_jsonl_dir(self) -> str | None:
+        """Adjacent JSONL event-log dir (same directory as the embedded DB).
+
+        Recovery only ever rebuilds from a log that lives next to the DB
+        file — a global ~/.tortoise scan could rebuild a dev DB from an
+        unrelated production log. Returns None when no *.jsonl is adjacent.
+        """
+        if not self._path:
+            return None
+        try:
+            db_dir = os.path.dirname(
+                os.path.abspath(os.path.expanduser(self._path)))
+            if any(f.endswith(".jsonl") for f in os.listdir(db_dir)):
+                return db_dir
+        except OSError:
+            return None
+        return None
+
+    def _auto_health_recover(self) -> None:
+        """Health check on open + transparent JSONL recovery (embedded only).
+
+        The event log is the source of truth; the projection a derived view.
+        Two corruption modes are caught:
+          1. Unresponsive graph (open succeeded, queries fail).
+          2. Lost graph — 0 nodes while the adjacent JSONL log has events
+             (redislite starts fresh when its RDB is corrupt, interrupted
+             restore, manual deletion). Rebuilt via recover_from_log.
+
+        Recovery is embedded-only and NEVER runs when FLY_APP_NAME is set
+        (production): there a silent rebuild could mask an infra failure and
+        a remote DB is never rebuilt from a local log. Server/URI mode and
+        production fail loud with an actionable error instead.
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+        is_prod = bool(os.environ.get("FLY_APP_NAME"))
+
+        if not self._probe_ok():
+            if is_prod or not self._is_embedded:
+                raise RuntimeError(
+                    "DB health check failed on open (server/production mode). "
+                    "Recover manually: python -m tortoise rebuild --dir "
+                    "<jsonl-dir> --db <db> — see "
+                    "operations/skills/tortoise-rebuild/SKILL.md")
+            events_dir = self._find_local_jsonl_dir()
+            if not events_dir:
+                raise RuntimeError(
+                    f"DB health check failed on open and no adjacent JSONL "
+                    f"event log was found for recovery ({self._path!r}). "
+                    f"Restore from backup or rebuild manually — see "
+                    f"operations/skills/tortoise-rebuild/SKILL.md")
+            self._recover_or_raise(events_dir)
+            logger.warning("auto-recovered embedded DB from %s", events_dir)
+            return
+
+        # Probe passed. Embedded dev mode: check the lost-graph divergence
+        # (0 nodes + non-empty adjacent log). Server/prod skips — a remote
+        # graph is never rebuilt from a local log.
+        if self._is_embedded and not is_prod:
+            events_dir = self._find_local_jsonl_dir()
+            if events_dir:
+                from tortoise.consistency import recover_from_log
+                result = recover_from_log(events_dir, self)
+                if result.get("recovered"):
+                    logger.warning(
+                        "auto-recovered empty embedded DB from %s (%s events)",
+                        events_dir, result.get("log_points"))
+                elif result.get("reason"):
+                    # Lost-graph case but recovery declined (ambiguous/unreadable
+                    # log) — warn loudly instead of silently continuing with an
+                    # empty DB (ops safety #428: no silent data loss).
+                    logger.warning(
+                        "empty embedded DB not auto-recovered: %s",
+                        result.get("reason"))
+
+    def _recover_or_raise(self, events_dir: str) -> None:
+        """Run recover_from_log and fail loud if it did not recover."""
+        from tortoise.consistency import recover_from_log
+        result = recover_from_log(events_dir, self)
+        if not result.get("recovered"):
+            raise RuntimeError(
+                f"DB health check failed and recovery did not complete: "
+                f"{result.get('reason')}. "
+                f"See operations/skills/tortoise-rebuild/SKILL.md")
 
     @classmethod
     def from_uri(cls, uri: str, graph_name: str | None = None) -> "FalkorProjection":
