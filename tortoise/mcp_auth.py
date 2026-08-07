@@ -28,6 +28,9 @@ from tortoise.sdk import TortoiseSDK
 
 # ── ContextVars ─────────────────────────────────────────────────────────────
 _current_team_id: ContextVar[str | None] = ContextVar("_current_team_id", default=None)
+# #329: resolved team quota limits (from the registry Team node), cached 60s
+# with the auth cache so MCP write tools enforce the SAME limits REST sees.
+_current_team_limits: ContextVar[dict | None] = ContextVar("_current_team_limits", default=None)
 _transport_mode: ContextVar[str | None] = ContextVar("_transport_mode", default=None)
 
 # mcp_server.py owns lazy SDK init (URI resolution, 3x retry, test-swap
@@ -124,7 +127,7 @@ class TeamResolutionMiddleware(BaseHTTPMiddleware):
         now = time.time()
         cached = self._cache.get(token)
         if cached and now - cached[0] < 60:
-            team = cached[1]
+            team, limits = cached[1], cached[2]
             self._cache.move_to_end(token)  # true LRU
         else:
             try:
@@ -144,10 +147,18 @@ class TeamResolutionMiddleware(BaseHTTPMiddleware):
                     "Expected format: Authorization: Bearer tt_<key>",
                     status=401,
                 )
+            # #329: resolve quota limits (registry Team node) — fail-closed
+            # enforcement still applies with defaults if resolution fails.
+            from tortoise.quota import resolve_team_limits
+            try:
+                limits = resolve_team_limits(team["team_id"])
+            except Exception:
+                limits = {"team_id": team["team_id"]}
             if len(self._cache) >= self._max_cache:
                 self._cache.popitem(last=False)  # evict LRU
-            self._cache[token] = (now, team)
+            self._cache[token] = (now, team, limits)
         _current_team_id.set(team["team_id"])
+        _current_team_limits.set(limits)
         _transport_mode.set("http")
         # No .reset() needed: Starlette creates a fresh asyncio task per request;
         # ContextVars are copy-on-write per task (verified by

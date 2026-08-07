@@ -1049,3 +1049,68 @@ class TestMCPSubAppMount:
         """REST surface unaffected by the /mcp mount."""
         r = client.get("/health")
         assert r.status_code == 200
+
+
+# ── #329: session turn cap + extraction-aware points gate + dream budget ──
+
+class TestSessionFloodGate:
+    def test_turn_cap_rejected(self, client):
+        """> MAX_SESSION_TURNS turns → 400 (checked before any write)."""
+        from tortoise.quota import MAX_SESSION_TURNS
+        conversation = [{"role": "user", "content": "hi"}] * (MAX_SESSION_TURNS + 1)
+        r = client.post("/v1/sessions", json={
+            "session_id": "cap-session", "conversation": conversation,
+        })
+        assert r.status_code == 400, r.text
+        assert "cap" in r.text.lower()
+
+    def test_extraction_amplifier_402_zero_growth(self, client):
+        """Dense decision content → extraction-aware estimate exceeds the
+        points quota → 402 BEFORE any write (zero node growth)."""
+        # est = 2 + Σ_turns(1 + min(decisions,200)) — 5 dense turns × ~300
+        # matches = 2 + 5×201 = 1007 > 1000 (default max_points) → 402.
+        dense = ("we should go. " * 300)  # 4500 chars < 5000 turn limit
+        conversation = [{"role": "user", "content": dense}] * 5
+        r = client.post("/v1/sessions", json={
+            "session_id": "dense-session", "conversation": conversation,
+        })
+        assert r.status_code == 402, r.text[:300]
+        # Zero growth: no Session node created (check the TEAM graph — the
+        # session writes go to namespace team_{team_id})
+        from tortoise.hosted_api import TortoiseSDK as _HASDK
+        rows = _HASDK(namespace=TEST_TEAM_ID)._get_proj().g.query(
+            "MATCH (s:Session {id:$sid}) RETURN count(s)",
+            params={"sid": "dense-session"},
+        ).result_set
+        assert rows[0][0] == 0
+
+    def test_legit_session_still_captures(self, client):
+        """A normal small session still works (no false 402)."""
+        r = client.post("/v1/sessions", json={
+            "session_id": "legit-session",
+            "conversation": [{"role": "user", "content": "hello"},
+                             {"role": "assistant", "content": "we should test this now."}],
+        })
+        assert r.status_code == 200, r.text[:200]
+
+
+class TestDreamBudget:
+    def test_full_dream_budget_exhausted_429(self, client):
+        import tortoise.hosted_api as ha
+        from tortoise.quota import MAX_DREAM_FULL_PER_HOUR
+        import time as _t
+        ha._DREAM_FULL_BUCKETS[TEST_TEAM_ID] = [_t.time()] * MAX_DREAM_FULL_PER_HOUR
+        try:
+            r = client.post("/v1/dream?full=true", json={})
+            assert r.status_code == 429, r.text
+        finally:
+            ha._DREAM_FULL_BUCKETS.pop(TEST_TEAM_ID, None)
+
+    def test_full_dream_within_budget_ok(self, client):
+        import tortoise.hosted_api as ha
+        ha._DREAM_FULL_BUCKETS.pop(TEST_TEAM_ID, None)
+        try:
+            r = client.post("/v1/dream?full=true", json={})
+            assert r.status_code == 200, r.text[:200]
+        finally:
+            ha._DREAM_FULL_BUCKETS.pop(TEST_TEAM_ID, None)

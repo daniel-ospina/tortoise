@@ -117,7 +117,12 @@ def run_fts_query(
     A slow query still consumes DB resources — this is a soft guard,
     not a connection-level kill. For connection-level timeout, set it
     at the FalkorDB driver level. (#18)
+
+    #329: entity_type is interpolated as a Cypher label (structure) —
+    allowlist it in-function (defense-in-depth; the SDK validates upstream).
     """
+    from .security import validate_entity_type
+    validate_entity_type(entity_type)
     if entity_type == "operator":
         # Operators are Points with is_operator=true — match label via CONTAINS
         try:
@@ -200,7 +205,12 @@ def run_vector_query(
     Note: timeout_ms is checked AFTER the query completes (post-hoc).
     A slow query still consumes DB resources — this is a soft guard,
     not a connection-level kill. (#18)
+
+    #329: entity_type is interpolated as a Cypher label (structure) —
+    allowlist it in-function.
     """
+    from .security import validate_entity_type
+    validate_entity_type(entity_type)
     if not query_vec:
         return []
 
@@ -294,7 +304,12 @@ def run_structural_query(
                  'subject' (subjectKind), 'operator' (op_type, Point nodes with is_operator=true),
                  'source' (sourceKind), 'document' (documentKind), 'object' (objectKind).
     Returns matching entities with a score of 1.0 (exact match) or 0.5 (partial match).
+
+    #329: entity_type is interpolated as a Cypher label (structure) —
+    allowlist it in-function.
     """
+    from .security import validate_entity_type
+    validate_entity_type(entity_type)
     if entity_type == "operator":
         # Operators are Points with is_operator=true, kind=op_type
         label_str = "Point"

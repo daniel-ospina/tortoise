@@ -123,3 +123,30 @@ def test_mcp_server_uses_db_path_env(monkeypatch):
     else:
         path = resolve_db_path()
     assert path == "/mcp-canonical.db"
+
+
+# ── #329: Lite-mode path rejection gap-fill ─────────────────────────
+
+def test_resolve_db_path_explicit_relative_rejected():
+    """resolve_db_path('tortoise.db') with an explicit relative arg raises
+    (the shared RELATIVE_PATH_ERROR) — gap-fill for the #329 Lite-mode item."""
+    from tortoise.config import RELATIVE_PATH_ERROR
+    with pytest.raises(ValueError) as exc:
+        resolve_db_path("tortoise.db")
+    assert "Relative" in str(exc.value)
+    assert exc.value.args[0] == RELATIVE_PATH_ERROR.format(path="tortoise.db")
+
+
+def test_resolve_db_path_explicit_absolute_accepted():
+    """Explicit absolute args are still accepted (backward compat)."""
+    import tempfile
+    path = os.path.join(tempfile.mkdtemp(), "abs.db")
+    assert resolve_db_path(path) == os.path.abspath(path)
+
+
+def test_falkorprojection_unexpanded_tilde_rejected():
+    """Unexpanded ~ passed DIRECTLY to FalkorProjection is rejected (the
+    #329 Lite-mode boundary; resolve_db_path tilde expansion is intentional)."""
+    from tortoise.projection import FalkorProjection
+    with pytest.raises(ValueError):
+        FalkorProjection("~/x.db")

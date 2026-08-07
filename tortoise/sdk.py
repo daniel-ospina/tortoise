@@ -29,6 +29,28 @@ POINT_STATUS_VALUES = frozenset({'live', 'draft', 'outdated', 'archived'})
 _logger = logging.getLogger(__name__)
 
 
+def _sanitize_props(props: dict, *, reject_id: bool = False) -> dict:
+    """#329: reject server-managed fields on tenant write surfaces.
+
+    ``sourcePath``/``source_path`` are server-filesystem fields consumed by the
+    operator ``--upgrade-all`` path (projection maps ``source_path`` →
+    ``d.sourcePath`` via ``_DOCUMENT_HANDLED``); a tenant setting them turns the
+    graph into a file-read oracle. ``id`` overrides on entity surfaces mutate
+    node identity / mint tenant-chosen Document ids. Both are rejected with a
+    clear ValueError (fail-closed). ``api.add_document``'s explicit
+    ``source_path`` parameter is UNTOUCHED — this only guards props passthrough.
+    """
+    props = dict(props)
+    for key in ("sourcePath", "source_path"):
+        if key in props:
+            raise ValueError(
+                f"{key!r} is a server-managed field and cannot be set via props."
+            )
+    if reject_id and "id" in props:
+        raise ValueError("'id' is server-managed and cannot be set via props.")
+    return props
+
+
 def _coerce_props(props: dict) -> dict:
     """Flatten a nested 'props' dict into top-level keyword props, in place.
 
@@ -364,6 +386,9 @@ class TortoiseSDK:
         """
         self._validate_kind(kind)
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
+        # #329: server-managed fields rejected on the props passthrough
+        # (the explicit-id path via props.pop("id") below is preserved for operators)
+        props = _sanitize_props(props)
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc).isoformat()
         proj = self._get_proj()
@@ -534,6 +559,8 @@ class TortoiseSDK:
         """
         proj = self._get_proj()
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
+        # #329: id mutation + server-managed fields rejected
+        props = _sanitize_props(props, reject_id=True)
 
         # #49 Phase 2: context is REMOVED — raise TypeError if passed
         if "context" in props:
@@ -675,8 +702,22 @@ class TortoiseSDK:
         proj = self._get_proj()
         now = datetime.now(timezone.utc).isoformat()
 
-        # 1. Mark old outdated + create CORRECTS edge (same as invalidate;
-        # MERGE keeps the ONTOLOGY §3.1 1→1 cardinality on re-calls, #330).
+        # 0. #329: collect + validate ALL edge types BEFORE any mutation.
+        #    The edge types are interpolated into query structure (no params
+        #    possible) — an unvalidated type (e.g. from a crafted edge) is a
+        #    Cypher injection primitive AND would cause a partial transfer.
+        #    Validation strictly precedes the outdated-flag/CORRECTS writes so
+        #    a failure leaves the graph untouched.
+        edges_result = proj.g.query(
+            "MATCH (op:Point {is_operator:true})-[r]->(old:Point {id:$old_id}) "
+            "RETURN op.id, type(r), r.idx",
+            params={"old_id": old_id},
+        )
+        from .security import validate_rel_type
+        for row in edges_result.result_set:
+            validate_rel_type(row[1])  # raises ValueError before any mutation
+
+        # 1. Mark old outdated + create CORRECTS edge (same as invalidate)
         proj.g.query(
             "MATCH (n:Point {id:$id}) SET n.outdated = true, n.updatedAt = $now",
             params={"id": old_id, "now": now},
@@ -688,11 +729,6 @@ class TortoiseSDK:
         )
 
         # 2a. Transfer operator edges (IMPL, NAND, hasPart) — preserve provenance
-        edges_result = proj.g.query(
-            "MATCH (op:Point {is_operator:true})-[r]->(old:Point {id:$old_id}) "
-            "RETURN op.id, type(r), r.idx",
-            params={"old_id": old_id},
-        )
 
         transferred = 0
         for row in edges_result.result_set:
@@ -911,8 +947,12 @@ class TortoiseSDK:
                 for i, k in enumerate(expanded):
                     params[f"kind_{i}"] = k
         for key, val in filters.items():
-            if not key.replace("_", "").isalnum():
-                raise ValueError(f"Invalid filter key: {key!r}")
+            # #329: strict ASCII identifier + reserved-key rejection (the old
+            # isalnum check allowed Unicode keys that broke Cypher params and
+            # filter keys colliding with kind/kind_N/skip/limit silently
+            # overwrote auto-generated parameters).
+            from .security import validate_filter_key
+            validate_filter_key(key)
             clauses.append(f"n.`{key}` = ${key}")
             params[key] = val
         where = " AND ".join(clauses)
@@ -940,8 +980,12 @@ class TortoiseSDK:
                 for i, k in enumerate(expanded):
                     params[f"kind_{i}"] = k
         for key, val in filters.items():
-            if not key.replace("_", "").isalnum():
-                raise ValueError(f"Invalid filter key: {key!r}")
+            # #329: strict ASCII identifier + reserved-key rejection (the old
+            # isalnum check allowed Unicode keys that broke Cypher params and
+            # filter keys colliding with kind/kind_N/skip/limit silently
+            # overwrote auto-generated parameters).
+            from .security import validate_filter_key
+            validate_filter_key(key)
             clauses.append(f"n.`{key}` = ${key}")
             params[key] = val
         where = " AND ".join(clauses)
@@ -968,8 +1012,19 @@ class TortoiseSDK:
         return rows[0][0] if rows else {}
 
     def traverse(self, id: str, relationship_type: str, direction: str = "outgoing") -> list[dict]:
-        """Traverse relationships from a Point. Returns connected point dicts."""
+        """Traverse relationships from a Point. Returns connected point dicts.
+
+        #329: relationship_type is allowlisted (KNOWN_REL_TYPES) — it is
+        interpolated into the query STRUCTURE (``-[:TYPE]->``) where
+        parameterization is impossible; an unvalidated value is a Cypher
+        injection primitive. direction is validated to outgoing/incoming.
+        """
         proj = self._get_proj()
+        # #329: validate before building any Cypher
+        from .security import validate_rel_type
+        validate_rel_type(relationship_type)
+        if direction not in ("outgoing", "incoming"):
+            raise ValueError(f"Invalid direction: {direction!r}. Use 'outgoing' or 'incoming'.")
         pat = (f"(n:Point {{id:$id}})-[:{relationship_type}]->(m:Point)"
                if direction == "outgoing" else
                f"(n:Point {{id:$id}})<-[:{relationship_type}]-(m:Point)")
@@ -1923,9 +1978,36 @@ class TortoiseSDK:
         metadata extraction on session content before creating the Event.
         """
         import re
+        import os as _os
         import json as _json
         from pathlib import Path
         from datetime import datetime, timezone
+
+        # #329: ingest path validation — absolute, no `..`, and under the
+        # optional TORTOISE_INGEST_BASE_DIR base. The stdio/CLI surface is
+        # operator-trusted, but the directory walk reads host files: bound it.
+        from .security import ingest_dir_is_safe, resolve_under_base
+        ingest_base = None
+        raw_base = _os.environ.get("TORTOISE_INGEST_BASE_DIR")
+        if raw_base:
+            ingest_base = _os.path.realpath(_os.path.expanduser(raw_base))
+        if not ingest_dir_is_safe(directory, ingest_base):
+            raise ValueError(
+                f"Unsafe ingest directory: {directory!r}. Directory must be "
+                f"absolute, contain no '..' components, and resolve under "
+                f"TORTOISE_INGEST_BASE_DIR when set ({ingest_base or '<unset>'})."
+            )
+        if progress_file is not None:
+            if not isinstance(progress_file, str) or not progress_file:
+                raise ValueError("progress_file must be a non-empty string.")
+            if not _os.path.isabs(progress_file):
+                raise ValueError(f"progress_file must be absolute: {progress_file!r}")
+            if ".." in Path(progress_file).parts:
+                raise ValueError(f"progress_file contains '..': {progress_file!r}")
+            if ingest_base is not None and resolve_under_base(progress_file, ingest_base) is None:
+                raise ValueError(
+                    f"progress_file {progress_file!r} not under TORTOISE_INGEST_BASE_DIR."
+                )
 
         _FM_RE = re.compile(r'^---\s*\n(.*?)\n---', re.DOTALL)
         ingested, updated, skipped, failed = 0, 0, 0, 0
@@ -2822,6 +2904,10 @@ class TortoiseSDK:
         allowed = {
             "name", "tier", "stripe_customer_id", "subscription_id",
             "backup_enabled", "max_users", "max_teams", "max_graphs",
+            # #329 relief path: quota limits settable via the control plane so
+            # a team at cap can be upgraded (no REST surface exists yet — the
+            # fields are SDK/registry-level; get_current_team honors them).
+            "max_points", "max_api_keys", "max_sessions",
         }
         invalid = set(fields.keys()) - allowed
         if invalid:
@@ -3379,6 +3465,8 @@ class TortoiseSDK:
 
     def _create_entity(self, label: str, id_val: str, props: dict, event_type: str) -> dict:
         """Generic entity creation. Applies to graph via projection (event log + FalkorDB)."""
+        # #329: id + sourcePath/source_path are server-managed — reject
+        props = _sanitize_props(props, reject_id=True)
         proj = self._get_proj()
         # Build event dict
         event = {"type": event_type, "id": id_val, **props}
@@ -3431,6 +3519,8 @@ class TortoiseSDK:
         return resolved[0]["properties"] if resolved else {}
 
     def _update_entity(self, id_val: str, **props) -> dict:
+        # #329: id + sourcePath/source_path are server-managed — reject
+        props = _sanitize_props(props, reject_id=True)
         proj = self._get_proj()
         # NOTE (issue #327): like _get_entity, entity mutation covers only the
         # canonical labels (Point/Subject/Object/Document/Source/Event).

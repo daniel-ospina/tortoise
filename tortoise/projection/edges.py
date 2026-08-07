@@ -18,6 +18,8 @@ class _EdgeHandlers:
         rel_type = {"NAND": "NAND", "IMPL": "IMPL",
                      "composedOf": "hasPart", "decomposesInto": "hasPart",
                      "contains": "hasPart", "wraps": "hasPart"}.get(op["op_type"])
+        import logging as _logging
+        _log = _logging.getLogger(__name__)
         for idx, src in enumerate(op["inputs"]):
             # ponytail: auto-create stub if source Point doesn't exist.
             # Short numeric IDs are orphan refs from cross-file wiring scripts.
@@ -27,12 +29,24 @@ class _EdgeHandlers:
                     params={"sid": src}
                 ).result_set[0][0]
                 if not exists:
+                    # #329: bounded stub auto-creation — at the per-instance cap
+                    # we STOP creating stubs and SKIP the edge to the missing
+                    # node (fail-safe: no partial edge, no crash, warning logged).
+                    if getattr(self, "_autocreated_stubs", 0) >= getattr(
+                            self, "_max_autocreated_stubs", 500):
+                        _log.warning(
+                            "stub auto-creation cap reached (%d) — skipping "
+                            "missing source %r (edge not created)",
+                            getattr(self, "_max_autocreated_stubs", 500), src,
+                        )
+                        continue
                     self.g.query(
                         "CREATE (s:Point {id:$sid}) "
                         "SET s.content='[missing]', "
                         "    s.is_operator=false",
                         params={"sid": src}
                     )
+                    self._autocreated_stubs = getattr(self, "_autocreated_stubs", 0) + 1
             if rel_type is not None:
                 # Known op_type → typed edge + reverse INPUT
                 self.g.query(

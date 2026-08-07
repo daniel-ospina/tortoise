@@ -66,10 +66,11 @@ class TestRegistryEquivalence:
         from tortoise.mcp_auth import HTTP_ALLOWED
 
         derived = frozenset(t.name for t in TOOL_REGISTRY if t.http_policy)
-        # Exact count: 64 tools - 4 excluded (team_create, backfill_v25,
-        # ingest_corpus, index_sessions) = 60 (incl. 6 onboarding tools #498/#499/#500)
-        assert len(HTTP_ALLOWED) == 60, f"Expected 60, got {len(HTTP_ALLOWED)}"
-        assert len(derived) == 60
+        # Exact count: 64 tools - 5 excluded (team_create, backfill_v25,
+        # ingest_corpus, index_sessions, tortoise_dream — #329 whole-graph EP
+        # is CPU-heavy, tenant HTTP excluded) = 59
+        assert len(HTTP_ALLOWED) == 59, f"Expected 59, got {len(HTTP_ALLOWED)}"
+        assert len(derived) == 59
         assert derived == HTTP_ALLOWED, (
             f"Derived HTTP_ALLOWED mismatch:\n"
             f"  In derived but not set: {derived - HTTP_ALLOWED}\n"
