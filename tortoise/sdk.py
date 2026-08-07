@@ -2104,6 +2104,7 @@ class TortoiseSDK:
             # doc and 0.5 for 5-char in 10-char — not comparable. The 0.5 offset
             # ensures all substring matches score ≥ 0.5, reserving [0, 0.5) for
             # the hybrid fallback path (which has no substring match at all).
+            # The fallback band-normalizes its RRF scores into [0, 0.5) (#22).
             if content.lower() == q_lower:
                 confidence = 1.0
             else:
@@ -2114,12 +2115,33 @@ class TortoiseSDK:
         results.sort(key=lambda r: r["confidence"], reverse=True)
         results = results[:limit]
 
-        # Hybrid fallback if no string matches (Phase 0, #7748)
+        # Hybrid fallback if no string matches (Phase 0, #7748).
+        # Confidence contract (#22): fallback results must live in the [0, 0.5)
+        # band reserved by the substring-match formula above. Raw RRF scores are
+        # NOT comparable to that band — rank-based fusion caps near 0.016 per
+        # ranked list (~0.05 with 3 fused lists) while embedded FTS raw scores
+        # are unbounded above — so `rrf * 0.5` landed anywhere from ~0.008 to
+        # >1.0, tripping downstream conf > 0.3 thresholds. Band-normalize:
+        # scale each RRF score by the set's max so the strongest fallback hit
+        # lands at 0.49 (just under the 0.5 boundary) and weaker hits scale
+        # proportionally. Invariant to the number of fused ranked lists (no
+        # hardcoded multiplier).
         if not results:
             fts_results = self.tortoise_fts_query(q, limit=limit)
-            results = [{"id": r["id"], "name": r.get("content", ""), "kind": r.get("point_kind", ""),
-                        "confidence": round(r.get("scores", {}).get("rrf", 0.0) * 0.5, 4)}
-                       for r in fts_results]
+            results = []
+            max_rrf = max(
+                (r.get("scores", {}).get("rrf", 0.0) for r in fts_results),
+                default=0.0,
+            )
+            for r in fts_results:
+                rrf = r.get("scores", {}).get("rrf", 0.0)
+                if max_rrf > 0:
+                    confidence = round(0.49 * rrf / max_rrf, 4)
+                else:
+                    confidence = 0.0  # no fusion signal — stay at band floor
+                results.append({"id": r["id"], "name": r.get("content", ""),
+                                "kind": r.get("point_kind", ""), "confidence": confidence})
+            results.sort(key=lambda r: r["confidence"], reverse=True)
 
         return results
 
