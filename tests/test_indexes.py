@@ -109,8 +109,26 @@ def test_resolve_entity_branches(proj):
 # ── Task 3: sdk entity CRUD parity ───────────────────────────────────────
 
 def test_get_entity_parity_all_types(sdk):
+    """Each canonical entity type resolves via its key (issue #327)."""
     sdk.create_point("statement", "hello world")
+    sdk.create_subject("parity-subj", "role")
+    sdk.create_event("parity-ev", "meeting")
     proj = sdk._get_proj()
+    proj.g.query("CREATE (src:Source {url:'http://parity', id:'http://parity'})")
+    # Point by id
+    pid = [p["id"] for p in sdk.query(kind="statement")
+           if p["content"] == "hello world"][0]
+    ent = sdk.get_entity(pid)
+    assert ent and ent.get("pointKind") == "statement"
+    # Subject by id
+    sid = proj.g.query("MATCH (s:Subject {name:'parity-subj'}) RETURN s.id").result_set[0][0]
+    assert sdk.get_entity(sid).get("name") == "parity-subj"
+    # Event by eventId (covers id==eventId invariant)
+    eid = proj.g.query("MATCH (e:Event {eventKind:'meeting'}) RETURN e.eventId").result_set[0][0]
+    assert sdk.get_entity(eid).get("eventKind") == "meeting"
+    # Source by url
+    assert sdk.get_entity("http://parity").get("url") == "http://parity"
+    # every node in the graph is resolvable by one of id/eventId/url
     rows = proj.g.query(
         "MATCH (n) RETURN n.id, labels(n)[0], n.url, n.eventId").result_set
     assert rows, "no nodes created"

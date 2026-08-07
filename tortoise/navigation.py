@@ -11,11 +11,12 @@ from typing import Any
 
 #: Root-lookup branches for _resolve_root (issue #327). Every branch is a
 #: labeled lookup so the planner uses Node By Index Scan instead of All Node
-#: Scan. Mirrors the legacy `MATCH (n) WHERE n.id = $eid` semantics exactly:
-#: nodes are matched by their property id (Event.id == eventId, so the
-#: eventId branch is equivalent; Source nodes carry id except url-only
-#: ingestion stubs, which the legacy query also never matched). Session
-#: roots are preserved for BFS over CONTAINS edges.
+#: Scan. Mirrors the legacy `MATCH (n) WHERE n.id = $eid` semantics for the
+#: canonical entity labels + Session: nodes are matched by their property id
+#: (Event.id == eventId, so the eventId branch is equivalent; Source nodes
+#: carry id except url-only ingestion stubs, which the legacy query also
+#: never matched). Team/APIKey roots are intentionally out of scope (they
+#: carry id but live in the registry graph / control plane).
 _ROOT_BRANCHES = (
     ("Point", "id"), ("Subject", "id"), ("Object", "id"),
     ("Document", "id"), ("Source", "id"), ("Session", "id"),

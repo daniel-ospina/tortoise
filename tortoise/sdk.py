@@ -3306,6 +3306,10 @@ class TortoiseSDK:
 
     def _update_entity(self, id_val: str, **props) -> dict:
         proj = self._get_proj()
+        # NOTE (issue #327): like _get_entity, entity mutation covers only the
+        # canonical labels (Point/Subject/Object/Document/Source/Event).
+        # Session/APIKey/Team/Tag nodes are intentionally NOT updated — legacy
+        # matched them via id/eventId but no caller relies on it.
         # Per-label indexed writes (id OR eventId — original predicate; no url).
         # UNION cannot carry SET, so run each branch sequentially (#327).
         for label, prop in (("Point", "id"), ("Subject", "id"), ("Object", "id"),
@@ -3318,6 +3322,9 @@ class TortoiseSDK:
 
     def _delete_entity(self, id_val: str) -> bool:
         proj = self._get_proj()
+        # NOTE (issue #327): deletion covers only canonical entity labels —
+        # Session/APIKey/Team/Tag nodes are intentionally NOT deleted (legacy
+        # matched them by id/eventId; no caller relies on it).
         total = 0
         for label, prop in (("Point", "id"), ("Subject", "id"), ("Object", "id"),
                             ("Document", "id"), ("Source", "id"), ("Event", "eventId")):
