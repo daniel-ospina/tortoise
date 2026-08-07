@@ -183,7 +183,7 @@ async def _dream_worker(team_id: str) -> None:
 class RateLimitMiddleware(BaseHTTPMiddleware):
     """In-memory token bucket rate limiter. 100 Points/min per API key."""
 
-    SKIP = {"/health", "/docs", "/openapi.json", "/v1/register"}
+    SKIP = {"/health", "/health/ready", "/docs", "/openapi.json", "/v1/register"}
 
     def __init__(self, app, max_per_minute=100):
         super().__init__(app)
@@ -427,7 +427,19 @@ def _short_id() -> str:
 
 @app.get("/health")
 async def health():
-    """Health check — verifies DB connectivity (not just app liveness)."""
+    """Liveness — process up and serving. NEVER gates on the DB.
+
+    (cold-start fix, #338 follow-up): the previous DB-coupled /health caused
+    deploy failures on cold machines — Fly caps the http_check grace period at
+    60s, and a cold FalkorDB Cloud connection exceeds it. Liveness returns
+    immediately; DB readiness is `/health/ready`.
+    """
+    return {"status": "ok"}
+
+
+@app.get("/health/ready")
+async def health_ready():
+    """Readiness — DB connectivity (what /health used to check)."""
     db_ok = False
     try:
         sdk = _make_sdk(namespace="registry")
@@ -457,7 +469,7 @@ async def health_security():
 
 # ── Auth Dependency ────────────────────────────────────────────────
 
-SKIP_AUTH = {"/health", "/docs", "/openapi.json", "/v1/register"}
+SKIP_AUTH = {"/health", "/health/ready", "/docs", "/openapi.json", "/v1/register"}
 
 
 async def _audit_auth_failure(request: Request, reason: str) -> None:
