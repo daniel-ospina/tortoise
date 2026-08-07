@@ -6,7 +6,8 @@ name: Publish Self-Host Image
 
 on:
   push:
-    tags: ['v*']
+    branches: [main]   # publishes :latest for the README quickstart
+    tags: ['v*']       # publishes semver tags
   workflow_dispatch:
 
 jobs:
@@ -57,9 +58,9 @@ jobs:
       - name: Run self-host image (embedded eval) and verify
         run: |
           set -euo pipefail
-          # Tag the build job actually published (semver, not :latest — latest
-          # only exists on default-branch builds; tag pushes publish semver).
-          IMG="ghcr.io/daniel-ospina/tortoise-selfhost:${GITHUB_REF_NAME#v}"
+          # Use the tag the build job actually published (single source of
+          # truth — works for tag pushes, main pushes, and manual dispatch).
+          IMG="$(echo "${{ needs.build-and-publish.outputs.image }}" | cut -d',' -f1)"
           docker run -d --name tortoise-smoke -p 18000:8000 \
             -e TORTOISE_DB_URI='' \
             -e TORTOISE_DB_PATH=/data/smoke.db \
