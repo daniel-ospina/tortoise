@@ -74,6 +74,27 @@ def _content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _to_iso_utc(value) -> str:
+    """Normalize a datetime or ISO-8601 string to UTC ISO-8601 (with +00:00).
+
+    AgentSession startedAt values are stored via
+    ``datetime.now(timezone.utc).isoformat()`` (e.g.
+    ``2026-08-07T01:20:50.123456+00:00``), so a canonical, timezone-stripped-
+to-UTC string keeps ``>=`` / ``<=`` lexicographic comparisons valid regardless
+of the caller's local timezone or whether they passed ``Z`` or an offset.
+    """
+    from datetime import datetime, timezone
+    if isinstance(value, datetime):
+        dt = value
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        else:
+            dt = dt.astimezone(timezone.utc)
+        return dt.isoformat()
+    # ISO-8601 string — normalize any timezone/offset to UTC.
+    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc).isoformat()
+
+
 def _save_progress(progress_file: str, directory: str, total: int, processed: int,
                    ingested: int, updated: int, skipped: int, failed: int,
                    errors: list[dict],
@@ -3277,8 +3298,18 @@ class TortoiseSDK:
 
     def search_sessions(self, query: str, *, agent: str | None = None,
                         topics: list[str] | None = None,
+                        after: "datetime | str | None" = None,
+                        before: "datetime | str | None" = None,
                         limit: int = 10, offset: int = 0) -> list[dict]:
-        """Search indexed agent sessions. Returns Events with metadata snippets."""
+        """Search indexed agent sessions. Returns Events with metadata snippets.
+
+        after/before bound the search to sessions whose ``startedAt`` falls in
+        ``[after, before]`` (inclusive). Each may be a ``datetime`` or an
+        ISO-8601 string (``Z`` or offset accepted); both are normalized to UTC
+        ISO-8601 so the lexicographic comparison against stored ``startedAt``
+        values is valid regardless of the caller's timezone. Sessions that lack
+        a ``startedAt`` are EXCLUDED whenever a bound is set.
+        """
         if not query or not query.strip():
             return []
         proj = self._get_proj()
@@ -3297,6 +3328,17 @@ class TortoiseSDK:
                 topic_clauses.append(f"${pk} IN e.topics")
                 params[pk] = t
             clauses.append(f"({' OR '.join(topic_clauses)})")
+        has_bound = after is not None or before is not None
+        if has_bound:
+            # Explicitly drop sessions without startedAt — same outcome as
+            # null-comparison semantics, but self-documenting and robust.
+            clauses.append("e.startedAt IS NOT NULL")
+        if after is not None:
+            clauses.append("e.startedAt >= $after")
+            params["after"] = _to_iso_utc(after)
+        if before is not None:
+            clauses.append("e.startedAt <= $before")
+            params["before"] = _to_iso_utc(before)
         where = " AND ".join(clauses)
         params["offset"] = offset
         rows = proj.g.query(
