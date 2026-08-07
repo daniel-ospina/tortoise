@@ -1,3 +1,12 @@
+---
+title: "Canonical Tool Registry — Implementation Plan (#454)"
+type: engineering
+domain: platform
+doc_status: live
+created: 2026-08-08
+subjects.team: epistemic-team
+---
+
 <!-- research-path: docs/epics/2026-08-03-tortoise-hosted-platform/04-plan.md -->
 
 # Canonical Tool Registry — Implementation Plan
@@ -472,8 +481,8 @@ git commit -m "feat: FastAPIRouterAdapter — registry-driven REST routes (Gate 
 
 ### Task 6: Cleanup — remove dead code + final regression
 
-**Intent:** Remove any remaining manual `@mcp.tool()` decorator-created tool bodies (if any were left as comments), verify zero divergence, update the 236-tool-scope-table reference, and run full regression.
-**Acceptance:** `grep -r '@mcp.tool()' tortoise/` returns zero results (or only the registry registration call). `grep -r '@app.(get|post|delete)' tortoise/hosted_api.py` returns only control-plane endpoints. All tests pass. 236-tool-scope-table.md reference updated.
+**Intent:** Remove any remaining manual `@mcp.tool()` decorator-created tool bodies (if any were left as comments), verify zero divergence, update the dangling 236-tool-scope-table reference (see #491), and run full regression.
+**Acceptance:** `grep -r '@mcp.tool()' tortoise/` returns zero results (or only the registry registration call). `grep -r '@app.(get|post|delete)' tortoise/hosted_api.py` returns only control-plane endpoints. All tests pass. Dangling 236-tool-scope-table.md reference updated to point at the real source: `tortoise/tool_registry.py` (`get_http_allowed()`) + `tortoise/mcp_auth.py` (`HTTP_ALLOWED`, registry-derived per #454).
 **Files:**
 - Modify: `tortoise/mcp_server.py`
 - Modify: `tortoise/hosted_api.py`
