@@ -55,32 +55,11 @@ def _get_team_sdk() -> TortoiseSDK:
     return TortoiseSDK(namespace=team_id)
 
 
-# ── HTTP tool allow-list (default-deny, #454 TODO) ──────────────────────────
-# New tools are EXCLUDED from the tenant HTTP surface unless added here.
-# Category rules (D11): read tools, idempotent creates, team CRUD, EP tools,
-# navigation, session tools. Excluded: team_create (privilege escalation),
-# backfill_v25 (schema migration), ingest_corpus (path traversal).
-HTTP_ALLOWED: frozenset[str] = frozenset({
-    "tortoise_create_point", "tortoise_query", "tortoise_paginated_query",
-    "tortoise_check_structure", "tortoise_summarize_structure",
-    "tortoise_list_pointkinds", "tortoise_list_sources", "tortoise_list_namespaces",
-    "tortoise_get_point", "tortoise_suggest_entry_points", "tortoise_search",
-    "tortoise_compute_confidence", "tortoise_set_point_baseline",
-    "tortoise_get_confidence", "tortoise_calibrate_summary", "tortoise_update_point",
-    "tortoise_create_operator", "tortoise_annotate_operator", "tortoise_get_operator",
-    "tortoise_mitigate_operator", "tortoise_delete_point", "tortoise_supersede",
-    "tortoise_invalidate", "tortoise_entity_profile", "tortoise_traverse",
-    "tortoise_analyze", "tortoise_create_subject", "tortoise_create_object",
-    "tortoise_create_event", "tortoise_create_document", "tortoise_create_source",
-    "tortoise_get_entity", "tortoise_update_entity", "tortoise_delete_entity",
-    "tortoise_create_edge", "tortoise_status", "tortoise_health", "tortoise_taxonomy",
-    "tortoise_list_graphs", "tortoise_checkpoint", "tortoise_diary_write",
-    "tortoise_diary_read", "tortoise_session_context", "tortoise_file_decision",
-    "tortoise_get_governance", "tortoise_list_topics", "tortoise_stale",
-    "tortoise_provenance", "tortoise_dream", "tortoise_get_events",
-    "tortoise_get_session", "tortoise_list_tags",
-    "tortoise_query_points_by_tag", "tortoise_search_sessions",
-})
+# ── HTTP tool allow-list (derived from registry; #454) ────────────────
+# New tools are EXCLUDED from the tenant HTTP surface unless registered with
+# http_policy=True in tool_registry.py. Zero manual sync — see #454.
+from tortoise.tool_registry import get_http_allowed as _get_http_allowed
+HTTP_ALLOWED: frozenset[str] = _get_http_allowed()
 
 # JSON-RPC error codes (D9)
 ERR_UNAUTHORIZED = -32001
