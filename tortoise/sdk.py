@@ -172,15 +172,32 @@ class TortoiseSDK:
 
     def _get_proj(self) -> FalkorProjection:
         if self._proj is None:
+            # Resolve the URI's own graph name first (used as the fallback
+            # when no namespace is set — preserves the conftest per-session
+            # test graph, #221).
+            uri_graph: str | None = None
+            if self._db_uri is not None:
+                from urllib.parse import urlparse
+                uri_graph = urlparse(self._db_uri).path.lstrip('/') or "tortoise"
+
             if self._namespace == "registry":
                 # Control-plane SDK: shared registry main graph.
                 graph_name = "registry_tortoise"
             elif self._namespace:
-                # Team SDK: isolated team graph (matches provision's
-                # team_{team_id} namespace creation, #7886).
-                graph_name = f"team_{self._namespace}"
+                if self._namespace.startswith(("test_", "tortoise_test")):
+                    # Test namespace: isolate on a test-prefixed graph so the
+                    # _assert_test_graph guard still passes (#221). Matches the
+                    # historical {ns}_tortoise naming.
+                    graph_name = f"{self._namespace}_tortoise"
+                else:
+                    # Team SDK: isolated team graph (matches provision's
+                    # team_{team_id} namespace creation, #7886).
+                    graph_name = f"team_{self._namespace}"
             else:
-                graph_name = "tortoise"
+                # No namespace: honor the URI's own graph (the conftest
+                # session graph for tests). Fixes #7886 regression that
+                # hardcoded 'tortoise' and clobbered the test graph.
+                graph_name = uri_graph or "tortoise"
             if self._db_uri is not None:
                 # Multi-tenant isolation (#7886): pass the namespaced graph
                 # name so tenants never share the URI's default graph.
