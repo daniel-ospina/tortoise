@@ -1,3 +1,12 @@
+---
+title: "Epic Plan — Hosted Onboarding Journey (#235)"
+type: engineering
+domain: platform
+doc_status: draft
+subjects.team: organisation-design-team
+created: 2026-08-07
+---
+
 <!-- research-path: docs/epics/2026-08-07-hosted-onboarding-235/01-research-brief.md -->
 
 # Hosted Onboarding Journey — Implementation Plan

@@ -1,3 +1,12 @@
+---
+title: "Epic Scope — Hosted Onboarding Journey (#235)"
+type: engineering
+domain: platform
+doc_status: draft
+subjects.team: organisation-design-team
+created: 2026-08-07
+---
+
 # Epic Scope — Hosted Onboarding Journey (#235)
 
 **Date:** 2026-08-07
