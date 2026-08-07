@@ -480,33 +480,6 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
         return {}
 
 
-# ── TF-IDF fallback (in-memory, from embeddings.py) ─────────────────────────
-
-def fallback_tfidf(query: str, points: list[dict], limit: int = 10) -> list[dict]:
-    """Last-resort TF-IDF fallback when all FalkorDB strategies fail.
-
-    points should be dicts with at least 'id', 'content', 'pointKind'.
-    """
-    try:
-        from tortoise.embeddings import search_points
-        meta = {p["id"]: p for p in points if p.get("id")}
-        results = search_points(query, points, threshold=0.0, limit=limit)
-        return [
-            SearchResult(
-                id=r["id"],
-                content=r["content"],
-                point_kind=meta.get(r["id"], {}).get("pointKind", ""),
-                scores=SearchScores(fts=None, vector=None, structural=None, rrf=r["similarity"]),
-                match_source="tfidf",
-                ep=None,
-            ).to_dict()
-            for r in results
-        ]
-    except Exception as e:
-        logger.error("TF-IDF fallback failed: %s", e)
-        return []
-
-
 def get_relationships(graph, point_ids: list[str]) -> dict[str, list[dict]]:
     """Fetch operator-edge relationships for a batch of Point IDs.
 
