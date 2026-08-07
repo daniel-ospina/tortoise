@@ -14,7 +14,28 @@ RUN pip install --no-cache-dir -r requirements.txt
 ARG CACHEBUST=1
 COPY tortoise/ tortoise/
 COPY pyproject.toml .
-RUN pip install --no-cache-dir -e .
+RUN pip install --no-cache-dir -e . \
+    && pip install --no-cache-dir '.[embeddings]' \
+    # Both HF_HOME and SENTENCE_TRANSFORMERS_HOME must point at /app/model so
+    # the build-time download lands EXACTLY where runtime looks: ST uses
+    # SENTENCE_TRANSFORMERS_HOME directly as its cache dir
+    # (/app/model/models--sentence-transformers--all-MiniLM-L6-v2), NOT the
+    # HF_HOME/hub path (fix #160-followup — image booted with a missing cache
+    # and entrypoint exited 1).
+    && HF_HOME=/app/model SENTENCE_TRANSFORMERS_HOME=/app/model python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')" \
+    && test -d /app/model/models--sentence-transformers--all-MiniLM-L6-v2 \
+        || (echo 'FATAL: embedding model cache not at /app/model/models--sentence-transformers--all-MiniLM-L6-v2' >&2; exit 1)
+
+# Embedding model cache — all-MiniLM-L6-v2 is pre-downloaded to /app/model at
+# build time (above) so runtime loading is pure local I/O with no HuggingFace
+# network access (the runtime download in 69aefae hung in Fly's sandboxed
+# network and was reverted in 0da50a0).
+ENV HF_HOME=/app/model
+ENV SENTENCE_TRANSFORMERS_HOME=/app/model
+# Offline mode: never phone home for the model at runtime — the cache is
+# baked into the image at build time (code-review P2, #160). Fail fast with
+# a clean error if the cache is missing, instead of hanging on the network.
+ENV HF_HUB_OFFLINE=1
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

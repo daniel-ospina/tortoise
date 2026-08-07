@@ -25,7 +25,11 @@ class LinearConnector:
 
     def __init__(self, config: dict[str, Any] | None = None, api=None):
         cfg = config or {}
-        self.api_key = cfg.get("api_key", os.environ.get("LINEAR_API_KEY", ""))
+        # Env-first (matches Slack/GitHub pattern #324): distinguish "unset"
+        # from "set to empty" so the loader's stripped config ("api_key": "")
+        # never shadows a real LINEAR_API_KEY env var.
+        env_api_key = os.environ.get("LINEAR_API_KEY")
+        self.api_key = env_api_key if env_api_key is not None else cfg.get("api_key", "")
         self.team_id = cfg.get("team_id", "")
         self.limit = int(cfg.get("limit", 100))
         self.days = int(cfg.get("days", 30))  # lookback window

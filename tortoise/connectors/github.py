@@ -11,10 +11,14 @@ from __future__ import annotations
 import json
 import hmac
 import hashlib
+import logging
+import os
 import subprocess
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Any, Callable
+
+logger = logging.getLogger(__name__)
 
 
 def _now_iso() -> str:
@@ -39,7 +43,11 @@ class GitHubConnector:
         self.state = cfg.get("state", "open")
         self.limit = int(cfg.get("limit", 100))
         self.webhook_port = int(cfg.get("webhook_port", 0))
-        self.webhook_secret = cfg.get("webhook_secret", "")
+        # Env var takes precedence over config for webhook_secret (#324)
+        env_secret = os.environ.get("GITHUB_WEBHOOK_SECRET")
+        self.webhook_secret = (
+            env_secret if env_secret is not None else cfg.get("webhook_secret", "")
+        )
         self.api = api
         self._server: HTTPServer | None = None
         self._thread: threading.Thread | None = None

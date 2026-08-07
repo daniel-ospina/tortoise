@@ -188,6 +188,48 @@ def test_sdk_fts_query_full_scan(sdk=None):
         assert results[0]["match_source"] == "structural"
 
 
+def test_sdk_fts_query_vector_scores_populated():
+    """#160: Verify scores.vector is populated when vector participates.
+
+    Uses a mock degradation_chain that returns vector results, then
+    verifies the SDK correctly populates scores.vector on SearchResult.
+    This is the O/I/T vector indicator — if scores.vector is None when
+    vector participated, the indicator can't verify fusion.
+    """
+    from unittest import mock
+    from tortoise.search_engine import SearchResult, SearchScores
+
+    sdk = _new_sdk()
+    pid = sdk.create_point("statement", "quantum physics research")["id"]
+
+    # Mock degradation_chain to return vector + FTS fusion
+    mock_raw = {
+        "fts": [("other", 0.85)],
+        "vector": [(pid, 0.92), ("other", 0.78)],
+    }
+
+    with mock.patch(
+        "tortoise.search_engine.degradation_chain", return_value=mock_raw
+    ):
+        results = sdk.tortoise_fts_query("quantum")
+
+    assert len(results) >= 1, f"Expected at least 1 result, got {len(results)}"
+    pid_result = next((r for r in results if r["id"] == pid), None)
+    assert pid_result is not None, f"Point {pid} not found in results"
+
+    # O/I/T Indicator 3: verify scores.vector is populated
+    scores = pid_result.get("scores", {})
+    assert scores.get("vector") is not None, (
+        f"scores.vector should be populated when vector participates, "
+        f"got scores={scores}"
+    )
+    # RRF fusion should produce match_source="rrf"
+    assert pid_result["match_source"] == "rrf", (
+        f"Expected match_source='rrf' for FTS+vector fusion, "
+        f"got {pid_result['match_source']}"
+    )
+
+
 # ── runner ───────────────────────────────────────────────────────────
 
 def _run_all():

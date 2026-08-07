@@ -249,10 +249,17 @@ def run_vector_query(
     # Brute-force (embedded mode or index query failed)
     try:
         start = time.monotonic()
+        # #244: vec.euclideanDistance rejects plain-list query params
+        # ("expected Null or Vectorf32 but was List") in embedded FalkorDBLite
+        # and whenever the HNSW index is unavailable — wrap the param in
+        # vecf32() so vector search actually runs. Stored embeddings must be
+        # vecf32-encoded too (a single plain-list node poisons the whole
+        # MATCH — see _upsert_event / session indexers).
         cypher = (
             f"MATCH (n:{label}) "
             "WHERE n.embedding IS NOT NULL "
-            "WITH n, vec.euclideanDistance(n.embedding, $query_vec) AS distance "
+            "WITH vecf32($query_vec) AS _qv, n "
+            "WITH n, vec.euclideanDistance(n.embedding, _qv) AS distance "
             "WHERE distance IS NOT NULL "
             f"RETURN n.{id_field}, 1.0 / (1.0 + distance) AS score "
             "ORDER BY score DESC "
