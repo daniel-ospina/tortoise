@@ -1,4 +1,4 @@
-<!-- pricing-tiers: canonical → owner-confirmed 2026-08-07 (YC application + cost-model + competitor analysis) -->
+<!-- pricing-tiers: canonical → owner-confirmed 2026-08-07 (YC application + cost-model + competitor analysis + feature-inventory revision) -->
 <!-- supersedes: per-seat graph-filed decision (file_pricing_decision.py — historical) -->
 <!-- cost model: FalkorDB Cloud @ $73/GB (conservative Startup rate); ~1KB/node + content-hash dedup -->
 
@@ -17,59 +17,69 @@
 | **Pro** | **$25/mo** | unlimited | **2** | 50,000 | 100,000 (100MB) | 10 | Per team |
 | **Team** | **$149/mo** | unlimited | unlimited (invites + RBAC) | **200,000** | 600,000 (600MB) | 20 | Per team |
 
+### Billing model
+
+- **Billing is PER TEAM, not per user** — no per-seat charges anywhere. The tier is a property of the **Team** entity; limits are per team.
+- **Multi-team is a USER capability, not a tier feature.** Any user may be a member of N teams (freelancer on their own Solo team + member of a client's Team team, in parallel). Each team independently selects its plan; team creation is rate-limited for abuse, not tier-capped.
+- **Integrations are UNLIMITED at every tier** — more integrations (MCP servers, GitHub repos, connectors) mean more usage, which means more value. Abuse is controlled by a connection rate-limit, not by tier caps. (We meter the costly primitive — write ops + storage — and give away the hook.)
+
 ### Usage-based overage
 
 - **$5 per additional 10k write ops** beyond the tier's included allowance (Pro + Team only).
-- Metered on write operations (point/operator/session writes); reads (search, retrieval, context) are **free and unlimited** — we meter what costs us (storage + write throughput), not what the user consumes.
+- Metered on write operations (point/operator/session writes); reads (search, retrieval, context) are **free and unlimited**.
 - Solo is a **hard-stop** (no overage) — it's the loss-leader that funnels to Pro.
-
-### Billing model
-
-- **Billing is PER TEAM, not per user** — no per-seat charges anywhere.
-- A user can be a freelancer paying for their own Solo/Pro team AND a member of a client's Team-tier team in parallel — each billed independently.
-- The tier is a property of the Team entity; limits enforced per team.
+- **How it reads on a bill:** Pro at 62K ops → 50K included + 12K overage (rounded to 2 units of 10k) × $5 = **$35 total**.
 
 ---
 
 ## Included Features by Tier
 
+> Legend: ✓ = included now · **planned** = declared intent, future work (tracked, not built in this epic) · — = not included
+
 ### Free — $0
-- 1 team · 1 graph · 1 collaborator
-- 1,000 write ops/mo · 10,000-node graph
+- 1 team · 1 graph · 1 collaborator · **unlimited integrations**
+- 1,000 write ops/mo · 10,000-node graph · 2 API keys
 - API access: REST (`/v1/*`) + MCP (`/mcp`, 58 tools)
 - Supabase signup (GitHub OAuth / email) · key shown once on welcome
 - Dashboard: overview, API keys, sessions
-- Self-hosted option available under the BSL grant (free <$5M revenue)
+- Self-hosted option under the BSL grant (free <$5M revenue)
 
 ### Solo — $9/mo (loss-leader)
 - Everything in Free, plus:
-- **2 graphs** (the loss-leader cap)
-- 10,000 write ops/mo (10× Free)
-- 25,000-node graph (5× Free)
-- 5 API keys
+- **2 graphs** (the loss-leader cap) · **unlimited integrations**
+- 10,000 write ops/mo (10× Free) · 25,000-node graph · 5 API keys
+- **Usage dashboard (basic)** — see your ops consumption
 - Hard-stop at limits (no overage) — upgrade to Pro to scale
 
 ### Pro — $25/mo (serves Power Users AND App Builders)
 - Everything in Solo, plus:
-- **Unlimited graphs** · **multi-team** (1+ teams per owner)
+- **Unlimited graphs** · **unlimited integrations**
 - **2 collaborators** (owner + 1)
-- 50,000 write ops/mo (5× Solo) · 100,000-node graph
-- 10 API keys
-- **$5 per additional 10k write ops** — the scaling mechanism (usage-based overage)
+- 50,000 write ops/mo (5× Solo) · 100,000-node graph · 10 API keys
+- **$5 per additional 10k write ops** — the scaling mechanism
 - Standard support
-- *The upgrade argument: "stop hitting caps."* Same tier unlocks the Power User's scale (unlimited graphs, 100K ops, multi-team) AND the App Builder's needs (per-team keys, usage overage that scales with their users, 100K-node graphs).
+- **The Pro feature story — "build multiple applications" (Supabase-Pro thinking):**
+  - **Per-graph API keys** *(planned)* — isolate app A's key from app B's graph
+  - **Daily backups + restore** *(planned)* — memory loss is fatal for an embedded app
+  - **Usage dashboard** *(planned)* — ops consumed, overage runway, per-graph breakdown
+  - **Webhooks on memory events** *(planned)* — apps react to new memories
+  - **Data export** *(planned)* — JSONL, no lock-in
+  - Capacity stays the *pricing* lever (ops/size = cost = overage); the feature story is **isolation + reliability + reactivity + observability**
+- *The upgrade argument: "stop hitting caps" + "build on it, don't just use it."*
 
 ### Team — $149/mo (collaboration)
 - Everything in Pro, plus:
-- **Unlimited collaborators** — invites + RBAC (owner/admin/member)
-- 200,000 write ops/mo · 600,000-node graph
-- 20 API keys
+- **Unlimited collaborators** — invites + **RBAC (owner/admin/member)**
+- 200,000 write ops/mo · 600,000-node graph · 20 API keys
 - **$5 per additional 10k write ops**
+- **Audit log** *(planned)* — who did what (the collaboration trust feature)
+- **Per-graph access (ReBAC)** *(future)* — per-graph visibility for agencies (account manager A → client 1's graph); the data model already supports it (Graph BELONGS_TO Team), access-policy layer only
 - Priority support
-- *The upgrade argument: "more people."* Invites, shared graphs, role-based access — the collaboration unlock.
+- *The upgrade argument: "more people."* Invites, shared graphs, role-based access.
 
 ### All tiers
 - API access: REST + MCP (58 tools) · tenant-scoped Bearer `tt_` keys
+- **Unlimited integrations** (rate-limited for abuse, never tier-capped)
 - Demo graph seeded on signup (idempotent, size-capped)
 - Session keys (dashboard plumbing) — not a product limit
 - Self-hosted: BSL 1.1 + $5M AUG, Apache-2.0 conversion in 4 years (see #338)
@@ -105,7 +115,7 @@
 | | Pro | $199/mo | 100K units + compliance | $8/100k, volume discount | usage units |
 | **Letta** | Pro | $20/mo | 20 agents | credits, auto-top-up | flat + usage |
 | | API | $20/mo | unlimited agents | **$0.10/agent/mo + $0.00015/sec exec** | usage |
-| **Honcho** | Pure usage | $0 base | **$100 free credits** | **$2.00/M tokens ingested**; retrieval free | usage tokens |
+| **Honcho** | Pure usage | $0 base | **$100 free credits** | **$2.00/M tokens** ingested; retrieval free | usage tokens |
 | **Hindsight** (Vectorize) | Pure usage | $0 base | credit packages ($10–$100) | **$10/M tokens** Retain · $0.75/M Recall · $0.05/call Reflect | usage tokens |
 | **Supabase** (infra ref) | Pro | $25/mo | 8GB DB | $0.125/GB | usage |
 | **Vercel** (infra ref) | Pro | $20/mo | 1M invocations | $0.60/1M invocations | usage |
@@ -134,24 +144,15 @@ Ours vs usage-based competitors (tokens→ops bridge, ≈300–500 tokens/write 
 ### Findings
 
 1. **The norm is tiered (base + included + overage).** Zep, Langfuse, Mem0, Supabase, Vercel all follow "low flat base + generous-but-bounded quota + small per-unit overage." Free tiers hard-stop; overage exists on paid tiers only. We match this shape.
-
-2. **Meter the costly primitive.** Zep charges 0 credits for retrieval/storage/users; Langfuse includes seats free. We meter **write ops + graph size** (our cost = storage + write throughput) and keep reads free — consistent with the norm and with our actual cost structure (no LLM-at-write for the base path, unlike Honcho/Hindsight).
-
-3. **Curve validation — we are "cheaper to start, not a lot cheaper."**
-   - At 50K ops: $25 (us) vs $125 (Zep) vs $249 (Mem0) — cheapest entry among tiered players. ✅
-   - At 500K ops: $250 (us) vs $249 (Mem0) — **converges to market exactly.** We are NOT "a lot cheaper" for heavy users. ✅
-   - vs Honcho/Hindsight: $5/10k overage sits below Honcho (~$6–8/10k equiv) and far below Hindsight (~$30–40/10k equiv) — cheap per unit without being free.
-   - The $5/10k overage was chosen because $2/10k (earlier draft) made us 2–10× cheaper than market at scale — leaving money on the table for the highest-value users.
-
-4. **Zep is the closest architectural comparable** (FalkorDB KG) but prices 5× higher ($125/50K credits vs our $25/50K ops). Our lower base is the entry hook; the overage curve closes the gap at scale.
-
-5. **Auto-top-up is the emerging agent-memory pattern** (Zep reloads at 20% balance; Letta configurable). Consider for the billing epic — agent workloads burn in bursts and vendors want zero-friction continuation.
-
-6. **Honcho's $100 free credits** is a conversion pattern worth considering for our Free tier (optional — credit-coupon vs hard limit).
+2. **Meter the costly primitive, give away the hook.** Zep charges 0 credits for retrieval/storage/users; Langfuse includes seats free. We meter **write ops + graph size** (our cost = storage + write throughput), keep reads free, and make **integrations unlimited** (they drive the usage we monetize).
+3. **Curve validation — "cheaper to start, not a lot cheaper."** At 50K ops: $25 (us) vs $125 (Zep) vs $249 (Mem0). At 500K: $250 (us) vs $249 (Mem0) — **converges to market exactly.** The $5/10k overage was chosen because $2/10k made us 2–10× cheaper at scale.
+4. **Zep is the closest architectural comparable** (FalkorDB KG) but prices 5× higher ($125/50K credits vs our $25/50K ops).
+5. **Auto-top-up is the emerging agent-memory pattern** (Zep reloads at 20% balance; Letta configurable) — consider for the billing epic.
+6. **Honcho's $100 free credits** is a conversion pattern worth considering for Free (optional).
 
 ### Competitive crossover analysis (where we stop being cheapest)
 
-Beyond the included quota our per-op rate is effectively **$0.0005/op** ($5/10k) on both Pro and Team (the base washes out).
+Beyond the included quota our per-op rate is effectively **$0.0005/op** ($5/10k) on both Pro and Team.
 
 | Competitor | Their curve | Crossover point | Above crossover |
 |---|---|---|---|
@@ -160,22 +161,16 @@ Beyond the included quota our per-op rate is effectively **$0.0005/op** ($5/10k)
 | **Zep Flex $125** | $125 + $0.0025/op | never | We're cheaper at every volume (5×) |
 | **Zep Flex+ $375** | $375 + $0.0019/op | never | We're cheaper at every volume (2×) |
 | **Hindsight** | $0 base, ~$0.003–0.004/op equiv | never | We're cheaper at every volume (6–8×) |
-| **Langfuse Core** | $29 + $0.00008/unit | n/a — different unit (units ≠ write ops) | Not directly comparable |
+| **Langfuse Core** | $29 + $0.00008/unit | n/a — different unit | Not directly comparable |
 
-**Verdict (2026-08-07):** we stop being the cheapest option only at **~$250/mo of spend (~400–500K ops)** and **only against Mem0**. Zep/Hindsight never beat us; Honcho only wins below ~35K ops (tiny-user segment, fine). The crossover is narrow because:
-
-- **Graph-size caps bound the high-volume scenario** — Pro caps at 100K nodes, Team at 600K nodes; a user can't sustain 400K+ ops without pruning. The crossover sits near Team's ceiling.
-- **The affected cohort is the top ~1–2% of users** ($250+/mo), the least price-sensitive, and at that spend the decision is reliability/support/epistemic features, not pure price.
-- **Mem0's flat $249 is a pricing-ladder cliff, not a curve** — they hard-stop at Starter ($19/50K) and force a jump to $249; we offer a smooth curve. We win the 50K–400K band where real users live.
-
-**Decision: keep $5/10k for v1.** A volume-discount band (e.g., $4/10k beyond 500K) is a later billing-epic review item — revisit with real usage data, not guessed today.
+**Verdict (2026-08-07):** we stop being the cheapest option only at **~$250/mo of spend (~400–500K ops)** and **only against Mem0**. The crossover is narrow because graph-size caps bound the high-volume scenario and the affected cohort (top ~1–2%) is the least price-sensitive. **Decision: keep $5/10k for v1.** A volume-discount band is a later billing-epic review item.
 
 ### Our margin model (why the numbers work)
 
 - **Cost basis:** FalkorDB Cloud at **$73/GB** (conservative Startup rate — planned at the worst case); ~1KB/node; `content_hash` dedup means repeated writes don't grow storage.
-- **Margins at cap:** Solo 80% · Pro 71% · Team 71% (at the graph-size cap, which is the cost ceiling — once hit, no new writes).
+- **Margins at cap:** Solo 80% · Pro 71% · Team 71% (at the graph-size cap, the cost ceiling — once hit, no new writes).
 - **Overage margin:** $5 per 10k ops vs ~$0.73 storage cost per 10k fresh nodes → **85%+ margin**; dedup'd writes (majority) are near-100%.
-- **The graph-size cap is the cost ceiling:** worst case per user is bounded ($7.30/mo Pro, $43.80/mo Team at $73/GB), and the write-ops overage on a capped graph is near-pure margin.
+- **The graph-size cap is the cost ceiling:** worst case per user is bounded ($7.30/mo Pro, $43.80/mo Team at $73/GB).
 
 ---
 

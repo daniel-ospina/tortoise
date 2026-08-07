@@ -202,13 +202,13 @@ owner invites bob@example.com (member) / carol@example.com (admin)
 
 ```
 user with 0 memberships → "Create your first team" state
-  → NEW POST /v1/teams (session-authed; tier max_teams check)
+  → NEW POST /v1/teams (session-authed; per-user creation rate-limit — NOT a tier limit; multi-team is a user capability per pricing semantics)
   → registry Team node + Membership (owner) + graph namespace
   → tier limits from pricing.json (canonical — decision 1d; Free: 1 team; Solo: 1; Pro/Team: 1+)
 ```
 
 **Automation:** team creation. **Manual:** user triggers.
-**Failure modes:** max_teams reached → soft-block + upgrade CTA; name collision → idempotency key.
+**Failure modes:** per-user team-creation rate-limit hit → retry later (abuse posture, not a tier block); name collision → idempotency key.
 
 ## W-3: Session Auth Bridge (drives J-3)
 
@@ -228,15 +228,16 @@ Signup on tortoise.premiselabs.co (PKCE) → session cookie Domain=.premiselabs.
 ```
 team_create / graph_create / membership_create / key_mint
   → read Team.tier → limits from pricing.json (canonical — decision 1d; runtime load)
-  → Free: max_teams=1, max_graphs=1, max_users=1
+  → Free: max_graphs=1, max_users=1
   → Solo: max_graphs=2 (loss-leader)
-  → Pro: unlimited graphs, 1+ users
+  → Pro: unlimited graphs, 2 users
   → Team: unlimited, invites+RBAC
   → limit exceeded → inline soft-block + upgrade CTA (UX-D4) — NOT hard error
+  → (multi-team is user-level, NOT a tier field — no max_teams check)
 ```
 
-**Current state (accurate, verified):** `_check_team_limit` (hosted_api.py:503) covers only `points | api_keys | sessions` with flat fallbacks (1000/20/1000); **no `max_graphs`/`max_teams` check exists**; `max_users` enforced only in SDK `membership_create` (sdk.py:2802); provision hardcodes `max_users:1, max_teams:1, max_graphs:1` (hosted_api.py:320).
-**NEW work (tier enforcement):** store tier + limits on Team node; add `max_graphs`/`max_teams` checks; wire membership `max_users` to tier; make key limit tier-driven (not flat 20).
+**Current state (accurate, verified):** `_check_team_limit` (hosted_api.py:503) covers only `points | api_keys | sessions` with flat fallbacks (1000/20/1000); **no `max_graphs` check exists**; `max_users` enforced only in SDK `membership_create` (sdk.py:2802); provision hardcodes `max_users:1, max_graphs:1` (hosted_api.py:320).
+**NEW work (tier enforcement):** store tier + limits on Team node; add `max_graphs` check; wire membership `max_users` to tier; make key limit tier-driven (not flat 20). **No `max_teams` tier field** — team creation is rate-limited per user (abuse posture), not tier-capped (pricing semantics).
 **Automation:** limit checks in SDK/hosted_api (existing `_check_team_limit` extended + new checks). **Manual:** tier assignment (provision defaults to Free; upgrades are future billing).
 **Failure modes:** limit check bypass (race) — enforce at registry level (count query per resource); tier not set on legacy teams → default Free.
 
@@ -524,7 +525,7 @@ GRANT EXECUTE ON FUNCTION public.reveal_api_key TO authenticated;
 **Target Team node:**
 ```
 (:Team { id, name, tier: 'free'|'solo'|'pro'|'team',
-         max_users, max_graphs, max_teams,   ← from pricing.json (canonical, decision 1d), set at create
+         max_users, max_graphs,               ← from pricing.json (canonical, decision 1d), set at create; NO max_teams field (user-level capability)
          ops_allowance, graph_size_cap,      ← NEW (billing-epic constants now; enforcement later)
          created_at, backup_enabled: false })
 ```
@@ -552,21 +553,25 @@ Limits: `max_api_keys` per tier (currently flat 20 via `_check_team_limit` fallb
 | one active invite per (team, email) | DB | partial unique index |
 | team↔graph 1:N | App/registry | count `(:Graph {team_id})` vs `max_graphs` |
 | max_users per team | SDK | `membership_create` (exists) — tier-driven; **invite-accept path uses it too** |
-| max_teams per user | App | count memberships where role=owner vs tier |
+| max_teams per user | App | **NOT a tier limit** — per-user team-creation rate limit (abuse posture); multi-team is a user capability |
 | key scoping | API | `get_current_team` resolves key→team (exists) |
 | API key auth bootstrap (session→team) | NEW API | JWT → user_id → membership → team (W-2 dependency) |
 | api_key null-once | DB/API | `reveal_api_key` RPC (4.1b) |
 
 ## 4.5 Tier limits table (from product/pricing.json — canonical single source, decision 1d; pricing.md is the generated mirror)
 
-| Tier | max_teams/user | max_graphs/team | max_users/team | max_api_keys |
-|------|---------------|-----------------|----------------|--------------|
-| Free | 1 | 1 | 1 | 2 |
-| Solo | 1 | 2 | 1 | 5 |
-| Pro | 1+ | ∞ | 1+ | 10 |
-| Team | 1+ | ∞ | ∞ | 20+ |
+> **Per-team semantics (owner-confirmed 2026-08-07):** the tier describes ONE team's resources. **Multi-team is a USER capability, not a tier feature** — any user may be a member of N teams (rate-limited creation for abuse); each team independently selects its plan. No `max_teams` tier field.
 
-*(ops_allowance + graph_size_cap numeric values = billing-epic constants; points/sessions stay flat 1000/1000 in v1; **api_keys per tier moved into pricing.json** — see decision 1d.)*
+| Tier | max_graphs/team | max_users/team | max_api_keys | included ops/mo | max graph nodes | integrations |
+|------|-----------------|----------------|--------------|-----------------|-----------------|--------------|
+| Free | 1 | 1 | 2 | 1,000 | 10,000 | unlimited |
+| Solo | 2 | 1 | 5 | 10,000 | 25,000 | unlimited |
+| Pro | ∞ | 2 | 10 | 50,000 | 100,000 | unlimited |
+| Team | ∞ | ∞ | 20 | 200,000 | 600,000 | unlimited |
+
+> **Integrations unlimited at ALL tiers (owner-confirmed):** more integrations = more usage = more value; abuse controlled by connection rate-limit, not tier caps.
+
+*(ops_allowance + graph_size_cap numeric values from pricing.json (canonical); points/sessions stay flat 1000/1000 in v1; **planned Pro/Team features — per-graph keys, daily backups, usage dashboard, webhooks, export, audit log, ReBAC — declared intent in pricing.md, tracked as future work, NOT built in this epic**.)*
 
 > **Canonical source (decision 1d):** `product/pricing.json` (machine-parseable tier/limits table incl. max_api_keys) is canonical; `product/pricing.md` is doc-generated from it; the pricing page AND E2E-13/14 assert against the JSON. 4.5 mirrors pricing.json.
 
@@ -671,7 +676,7 @@ Limits: `max_api_keys` per tier (currently flat 20 via `_check_team_limit` fallb
 
 | Endpoint | Method | Auth | Contract |
 |---|---|---|---|
-| /v1/team | GET | tt_ key | `{team_id, tier, max_users, max_graphs, max_teams, point_count}` |
+| /v1/team | GET | tt_ key | `{team_id, tier, max_users, max_graphs, point_count}` — no max_teams (user-level capability) |
 | /v1/team/keys | POST | **tt_ key ONLY (unchanged — see E1 for session mint)** | `{id, key, key_prefix, created_at}` (key shown once) · **gains 402 on tier cap (auth unchanged, additive)** |
 | /v1/team/keys | GET | tt_ key | `[{id, key_prefix, created_at, last_used_at, revoked_at}]` |
 | /v1/team/keys/{id} | DELETE | tt_ key | 204 · **409 "would leave team keyless" (only-key revoke block, J-2)** |
@@ -705,7 +710,7 @@ Body: { team_id?: string, purpose?: 'bootstrap'|'recovery' }   # purpose default
 Auth: Supabase JWT (JWKS-verified) → user_id
 Body: { name: string (1..64, [a-zA-Z0-9 _-]) }
 201: { team_id, graph_name: "team_{team_id}" (default graph, graph.id='default'), tier: 'free' }
-409: name collision · 402: max_teams reached (soft-block → upgrade CTA)
+409: name collision · **429: team-creation rate-limit (abuse posture — not a tier block)**
 ```
 **Purpose:** create-first-team empty state; tier defaults Free (upgrades = billing epic).
 
@@ -896,7 +901,7 @@ Each test: **Setup** (concrete preconditions) · **Steps** (verifiable actions) 
 ## E2E-13: Pricing structure documented and enforced
 - **Setup:** product/pricing.json committed (canonical — decision 1d; pricing.md generated from it); provision path live. **Tier injection:** no user-facing tier path exists in v1 (provision defaults Free; upgrades = billing epic) — the `provision_test_user(tier)` fixture (ADDED to reuse list for E2E-13) writes the Team node's tier + limits directly (FalkorDB registry write or test-only internal endpoint).
 - **Steps:** create team on each tier path (fixture); query /v1/team
-- **Assertions:** tier-driven limits (max_teams/max_graphs/max_users) match **pricing.json** (canonical — decision 1d) · /v1/team returns tier + limits · enforcement matches the JSON (E2/E5 402 paths)
+- **Assertions:** tier-driven limits (max_graphs/max_users) match **pricing.json** (canonical — decision 1d) · /v1/team returns tier + limits (no max_teams — user-level) · enforcement matches the JSON (E2/E5 402 paths)
 - **Negative:** legacy team without tier → defaults Free
 
 ## E2E-14: Pricing page renders hosted tiers + self-hosted section
@@ -986,6 +991,7 @@ Each test: **Setup** (concrete preconditions) · **Steps** (verifiable actions) 
 1c. **`user_teams` → `team_memberships` rename — KEEP (decision):** reviewers flagged it as cosmetic churn creating trigger-recreation risk. Decision: the semantic change (1:1 → M:N junction) is real and the name communicates it; the risk is fully mitigated (trigger re-creation + grep gate + rollback step). Renaming later would be MORE costly (contracts/docs/tests already pin it).
 1d. **Pricing single-source → mechanical (P2):** create `product/pricing.json` (full tier/limits table incl. max_api_keys 2/5/10/20+ and ops/size placeholders) as an EXPLICIT epic deliverable; pricing.md is doc-generated from it; the pricing page AND E2E-13/14 assert against the JSON; **FastAPI/Team-node creation loads limits from pricing.json at runtime (no hand-edited copies in code)**; no markdown parsing in tests.
 1e. **E4 email-match fallback — DROP for v1:** ship token-only accept; document the GitHub-OAuth email gap as a known limitation with manual support path (mirrors deferred invite email delivery).
+1f. **Planned Pro/Team features (declared intent in pricing.md, tracked NOT built):** per-graph API keys, daily backups + restore, usage dashboard (ops consumed / overage runway / per-graph), webhooks on memory events, data export (JSONL), Team audit log, per-graph ReBAC (access-policy layer on existing Graph BELONGS_TO Team + Membership — schema already supports it). Each becomes a future issue; the pricing page shows current vs planned features honestly (no over-promise).
 2. **E1 session-key mint as the single key path** — simplifies the whole auth story; consider making `/v1/team/keys` POST deprecated-in-docs (still tt_-auth, but dashboard uses E1) to reduce surface.
 3. **Demo-seed as idempotent + size-capped** — make the 404 fix also enforce the size cap (abuse posture) in the same change.
 3b. **Custom-graph write path** — deferred in v1 (E2E-11 decision): registry + switcher only, all writes to default graph; revisit when a custom-graph consumer exists.
