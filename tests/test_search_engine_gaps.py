@@ -482,6 +482,37 @@ class TestRunVectorQuery:
         assert result[1][1] == pytest.approx(2.0 / 3.0)
         assert result[2][1] == pytest.approx(1.0 / 3.0)
 
+    def test_entity_type_operator_uses_point_label(self):
+        """#193: entity_type='operator' → label='Point' in vector (brute-force) path."""
+        graph = SimpleMockGraph(result_set=[("op-1", 0.9)])
+
+        result = run_vector_query(
+            graph, self.QUERY_VEC, entity_type="operator", is_embedded=True,
+        )
+
+        assert len(result) == 1
+        assert result[0][0] == "op-1"
+        cypher = graph.query_calls[0][0]
+        assert "MATCH (n:Point)" in cypher
+        assert "vec.euclideanDistance" in cypher
+
+    def test_hnsw_event_entity_type_uses_querynodes_event(self):
+        """#193: HNSW path (is_embedded=False) with entity_type='event'
+        → CALL db.idx.vector.queryNodes('Event', ...)."""
+        graph = SimpleMockGraph(result_set=[("evt-1",)])
+
+        result = run_vector_query(
+            graph, self.QUERY_VEC, entity_type="event", is_embedded=False,
+        )
+
+        assert len(result) == 1
+        assert result[0][0] == "evt-1"
+        cypher = graph.query_calls[0][0]
+        assert "CALL db.idx.vector.queryNodes" in cypher
+        assert "queryNodes('Event'," in cypher
+        assert "node.eventId" in cypher
+        assert "vec.euclideanDistance" not in cypher
+
 
 # ── run_fts_query ───────────────────────────────────────────────────────────
 
@@ -570,6 +601,42 @@ class TestRunFtsQuery:
         result = run_fts_query(graph, "test")
 
         assert result == []
+
+    def test_entity_type_document_uses_document_label(self):
+        """#193: entity_type='document' → queryNodes('Document') + node.id."""
+        graph = SimpleMockGraph(result_set=[("doc-1", 0.9)])
+
+        result = run_fts_query(graph, "test", entity_type="document")
+
+        assert len(result) == 1
+        assert result[0][0] == "doc-1"
+        cypher = graph.query_calls[0][0]
+        assert "queryNodes('Document'" in cypher
+        assert "node.id" in cypher
+
+    def test_entity_type_object_uses_object_label(self):
+        """#193: entity_type='object' → queryNodes('Object') + node.id."""
+        graph = SimpleMockGraph(result_set=[("obj-1", 0.8)])
+
+        result = run_fts_query(graph, "test", entity_type="object")
+
+        assert len(result) == 1
+        assert result[0][0] == "obj-1"
+        cypher = graph.query_calls[0][0]
+        assert "queryNodes('Object'" in cypher
+        assert "node.id" in cypher
+
+    def test_entity_type_source_uses_source_label(self):
+        """#193: entity_type='source' → queryNodes('Source') + node.id."""
+        graph = SimpleMockGraph(result_set=[("src-1", 0.7)])
+
+        result = run_fts_query(graph, "test", entity_type="source")
+
+        assert len(result) == 1
+        assert result[0][0] == "src-1"
+        cypher = graph.query_calls[0][0]
+        assert "queryNodes('Source'" in cypher
+        assert "node.id" in cypher
 
 
 # ── run_structural_query ────────────────────────────────────────────────────
@@ -685,6 +752,20 @@ class TestRunStructuralQuery:
         run_structural_query(graph, kind="statement", limit=5)
 
         assert graph.query_calls[0][1]["limit"] == 5
+
+    def test_entity_type_operator_uses_point_label_and_is_operator(self):
+        """#193: entity_type='operator' → MATCH (n:Point) + is_operator=true + op_type."""
+        graph = SimpleMockGraph(result_set=[("op-1",)])
+
+        result = run_structural_query(graph, kind="IMPL", entity_type="operator")
+
+        assert result[0][0] == "op-1"
+        assert result[0][1] == 1.0
+        cypher = graph.query_calls[0][0]
+        assert "MATCH (n:Point)" in cypher
+        assert "n.is_operator = true" in cypher
+        assert "n.op_type" in cypher
+        assert "RETURN n.id" in cypher
 
 
 # ── Cross-cutting edge cases ────────────────────────────────────────────────
