@@ -221,6 +221,30 @@ class TestWasDerivedFrom:
         ).result_set
         assert r[0][0] == 1
 
+    def test_partof_rejected_no_producer(self, sdk):
+        """#213: partOf has no producer — create_edge with partOf raises ValueError.
+        hasPart is the canonical composition edge; inverse is implicit via
+        reverse traversal (MATCH (child)<-[:hasPart]-(parent))."""
+        src = sdk.create_object("parent-doc-213", "document")
+        child = sdk.create_object("child-section-213", "document")
+        proj = sdk._get_proj()
+        with pytest.raises(ValueError, match="Unknown predicate: partOf"):
+            proj.create_edge(child["id"], src["id"], "partOf")
+
+    def test_haspart_create_edge_still_works(self, sdk):
+        """#213: hasPart via create_edge continues to work — canonical composition."""
+        parent = sdk.create_object("parent-doc-213", "document")
+        child = sdk.create_object("child-section-213", "document")
+        proj = sdk._get_proj()
+        ok = proj.create_edge(parent["id"], child["id"], "hasPart")
+        assert ok is True
+        r = proj.g.query(
+            "MATCH (p:Object {id:$pid})-[h:hasPart]->(c:Object {id:$cid}) "
+            "RETURN count(h)",
+            params={"pid": parent["id"], "cid": child["id"]},
+        ).result_set
+        assert r[0][0] == 1
+
 
 # ── Part 3: Recency modulation ──────────────────────────────────────────
 

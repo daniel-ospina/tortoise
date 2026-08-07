@@ -128,7 +128,7 @@ Per-type edges (chosen over single polymorphic edge — FalkorDB matrix-per-type
 | Predicate | From → To | Direction | Cardinality | Standard alignment | Meaning |
 |-----------|-----------|-----------|-------------|--------------------|---------|
 | `wasDerivedFrom` | Object → Object | unidirectional | N-ary | `prov:wasDerivedFrom` | Derivation |
-| `hasPart` / `partOf` | Object → Object | bidirectional | N-ary | `dcterms:hasPart` | Composition |
+| `hasPart` | Object → Object | bidirectional | N-ary | `dcterms:hasPart` | Composition. Inverse traversal (`<-[:hasPart]-`) covers "part of" — no separate `partOf` edge. |
 
 ### §3.8 Event Edges
 
@@ -146,7 +146,7 @@ All structural edges must use one of (enforced in `_create_edge`):
 
 ```
 performs, produces, uses, authoredBy, ownedBy, managedBy,
-partOf, hasMember, holdsRole, reportsTo,
+hasMember, holdsRole, reportsTo,
 instantiates, participatesIn, hasPart, related, dependsOn, references,
 wasDerivedFrom
 ```
