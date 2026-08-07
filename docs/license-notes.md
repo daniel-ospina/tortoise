@@ -60,7 +60,7 @@ no Markdown, only the Parameters block customized:
 |---|---|
 | `License text copyright (c) 2020 MariaDB Corporation Ab...` header | HashiCorp Terraform LICENSE / MariaDB MaxScale LICENSE |
 | `Parameters` block (Licensor / Licensed Work / AUG / Change Date / Change License) | HashiCorp + MariaDB template (fill-in-the-blank) |
-| "For information about alternative licensing arrangements..." contact line | HashiCorp pattern (`hello@premiselabs.co`) |
+| "For information about alternative licensing arrangements..." contact line | HashiCorp pattern; points to the GitHub repo issues (no company email exists yet — the repo URL cannot go stale) |
 | `Notice` — "not an Open Source license... eventually made available under an Open Source License" | MariaDB MaxScale LICENSE Notice (verbatim standard text) |
 | `Business Source License 1.1` / `Terms` headings + canonical terms | SPDX BUSL-1.1 canonical text (verbatim) |
 
