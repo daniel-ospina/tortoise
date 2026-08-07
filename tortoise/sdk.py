@@ -290,6 +290,46 @@ class TortoiseSDK:
 
     # ── Core CRUD ─────────────────────────────────────────────────
 
+    def _sync_tags(self, proj: FalkorProjection, pid: str, tags) -> None:
+        """Reconcile TAGGED edges for a point against a tags value (#485).
+
+        Idempotent: MERGE creates any missing :Tag nodes + TAGGED edges, and
+        edges to tags no longer in the list are deleted. Only list values are
+        synced — matching create_point's behavior, a non-list tag value is
+        stored as a plain property but gets no edges (and leaves existing
+        edges untouched).
+        """
+        if not isinstance(tags, list):
+            return
+        for tag in tags:
+            proj.g.query(
+                "MATCH (p:Point {id:$pid}) "
+                "MERGE (t:Tag {name:$tag}) "
+                "MERGE (p)-[:TAGGED]->(t)",
+                params={"pid": pid, "tag": tag},
+            )
+        # Delete edges to tags no longer in the list (diff via graph read to
+        # avoid list-parameter IN-clause portability concerns on FalkorDB).
+        stale = proj.g.query(
+            "MATCH (p:Point {id:$pid})-[:TAGGED]->(t:Tag) RETURN t.name",
+            params={"pid": pid},
+        ).result_set
+        removed = 0
+        for row in stale:
+            if row[0] not in tags:
+                proj.g.query(
+                    "MATCH (p:Point {id:$pid})-[r:TAGGED]->(t:Tag {name:$tag}) "
+                    "DELETE r",
+                    params={"pid": pid, "tag": row[0]},
+                )
+                removed += 1
+        # GC orphaned :Tag nodes when the sync actually removed edges — tag
+        # removal can leave a Tag with no TAGGED referrers (#485). Skipped on
+        # create_point (no stale edges there), so new-point creation never pays
+        # the scan.
+        if removed:
+            proj.g.query("MATCH (t:Tag) WHERE NOT (t)<-[:TAGGED]-() DELETE t")
+
     def create_point(self, kind: str, content: str, **props) -> dict:
         """Create a new Point node. Raises ValueError if kind is invalid.
 
@@ -373,16 +413,10 @@ class TortoiseSDK:
             params={"id": pid, "c": content, "k": kind, "st": status, "now": now,
                     "embedding": embedding},
         )
-        # Tag handling: create :Tag nodes + TAGGED edges (#215)
-        tags: list[str] = props.get("tags") or []
+        # Tag handling: create :Tag nodes + TAGGED edges (#215, #485)
+        tags = props.get("tags") or []
         if isinstance(tags, list):
-            for tag in tags:
-                proj.g.query(
-                    "MATCH (p:Point {id:$pid}) "
-                    "MERGE (t:Tag {name:$tag}) "
-                    "MERGE (p)-[:TAGGED]->(t)",
-                    params={"pid": pid, "tag": tag},
-                )
+            self._sync_tags(proj, pid, tags)
         for key, val in props.items():
             proj.g.query(
                 "MATCH (n:Point {id:$id}) SET n += $props",
@@ -504,6 +538,11 @@ class TortoiseSDK:
                     "MATCH (n:Point {id:$id}) SET n += $props",
                     params={"id": id, "props": {key: val}},
                 )
+        # Tag sync (#485): keep TAGGED edges consistent with the n.tags
+        # property — update_point previously set the property but left edges
+        # stale, so query_points_by_tag missed updated points.
+        if "tags" in props:
+            self._sync_tags(proj, id, props["tags"])
         # Dreaming (#85): property mutations can affect confidence.
         self._mark_dirty([id])
         return self.get_point(id)
@@ -518,6 +557,10 @@ class TortoiseSDK:
         if not exists:
             return False
         proj.g.query("MATCH (n:Point {id:$id}) DETACH DELETE n", params={"id": id})
+        # Tag GC (#485): delete orphaned :Tag nodes (no incoming TAGGED edges).
+        # Cheap + idempotent — DETACH DELETE leaves count-0 tags behind that
+        # would otherwise accumulate in list_tags.
+        proj.g.query("MATCH (t:Tag) WHERE NOT (t)<-[:TAGGED]-() DELETE t")
         # Dreaming (#85): deletion changes the graph structure around neighbors.
         self._mark_dirty([id])
         return True
@@ -1042,7 +1085,12 @@ class TortoiseSDK:
         ]
 
     def list_tags(self) -> list[dict]:
-        """All Tag names with count of tagged Points. Returns [{name, count}]."""
+        """All Tag names with count of tagged Points. Returns [{name, count}].
+
+        Orphaned :Tag nodes (no TAGGED edges) are garbage-collected when
+        edges are removed (update_point tag sync + delete_point, #485), so
+        count 0 entries should not normally appear.
+        """
         proj = self._get_proj()
         rows = proj.g.query(
             "MATCH (t:Tag) "

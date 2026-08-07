@@ -516,3 +516,99 @@ class TestQueryPointsByTag:
         sdk.create_point("statement", "x", tags=["Alpha"])
         assert sdk.query_points_by_tag("alpha") == []
         assert len(sdk.query_points_by_tag("Alpha")) == 1
+
+
+# ── update_point tag sync + orphan Tag GC (#485) ──────────────────
+
+class TestUpdatePointTags:
+    """update_point keeps TAGGED edges consistent with the n.tags property
+    (#485). Before the fix, update_point set the property but left edges
+    stale, so query_points_by_tag missed updated points."""
+
+    def test_update_adds_tags_and_query_returns_point(self, sdk):
+        """Updating a point with tags creates TAGGED edges + Tag nodes."""
+        p = sdk.create_point("statement", "tagged later")
+        assert sdk.query_points_by_tag("alpha") == []
+        sdk.update_point(p["id"], tags=["alpha"])
+        results = sdk.query_points_by_tag("alpha")
+        assert len(results) == 1
+        assert results[0]["id"] == p["id"]
+        # n.tags property and list_tags agree
+        assert sdk.get_point(p["id"])["tags"] == ["alpha"]
+        by_name = {t["name"]: t["count"] for t in sdk.list_tags()}
+        assert by_name["alpha"] == 1
+
+    def test_update_removes_tag_deletes_edge(self, sdk):
+        """Removing a tag deletes the TAGGED edge — query stops returning it."""
+        p = sdk.create_point("statement", "multi", tags=["alpha", "beta"])
+        sdk.update_point(p["id"], tags=["alpha"])
+        assert sdk.query_points_by_tag("beta") == []
+        assert [r["id"] for r in sdk.query_points_by_tag("alpha")] == [p["id"]]
+        assert sdk.get_point(p["id"])["tags"] == ["alpha"]
+
+    def test_update_replaces_all_tags(self, sdk):
+        """A full tag swap leaves no stale edges behind."""
+        p = sdk.create_point("statement", "swap", tags=["old1", "old2"])
+        sdk.update_point(p["id"], tags=["new1"])
+        for stale in ("old1", "old2"):
+            assert sdk.query_points_by_tag(stale) == [], f"{stale} edge not removed"
+        assert len(sdk.query_points_by_tag("new1")) == 1
+
+    def test_update_clears_tags_with_empty_list(self, sdk):
+        """tags=[] removes all TAGGED edges for the point."""
+        p = sdk.create_point("statement", "clear", tags=["alpha"])
+        sdk.update_point(p["id"], tags=[])
+        assert sdk.query_points_by_tag("alpha") == []
+        # point still exists, just untagged
+        assert sdk.get_point(p["id"])["id"] == p["id"]
+        assert sdk.get_point(p["id"]).get("tags") == []
+
+    def test_update_nested_props_tags(self, sdk):
+        """MCP-style props={'tags': [...]} shape is synced too (#218)."""
+        p = sdk.create_point("statement", "nested")
+        sdk.update_point(p["id"], props={"tags": ["gamma"]})
+        assert [r["id"] for r in sdk.query_points_by_tag("gamma")] == [p["id"]]
+
+    def test_update_removal_gc_orphan_tag(self, sdk):
+        """Removing a tag's last reference GCs the orphan :Tag node — no
+        count-0 entry lingers in list_tags (#485)."""
+        p = sdk.create_point("statement", "solo", tags=["only"])
+        sdk.update_point(p["id"], tags=[])
+        assert sdk.query_points_by_tag("only") == []
+        assert sdk.list_tags() == []
+
+    def test_update_non_list_tags_no_crash(self, sdk):
+        """Non-list tag values match create_point: property set, no edge sync."""
+        p = sdk.create_point("statement", "scalar", tags=["alpha"])
+        sdk.update_point(p["id"], tags="not-a-list")
+        # edges untouched — old edge still there
+        assert len(sdk.query_points_by_tag("alpha")) == 1
+
+    def test_dedup_syncs_tags(self, sdk):
+        """create_point(dedup=True) routes through update_point — tags reconcile
+        to the latest call (no stale edges from the earlier tags)."""
+        sdk.create_point("statement", "same content", tags=["first"])
+        sdk.create_point("statement", "same content", dedup=True, tags=["second"])
+        assert sdk.query_points_by_tag("first") == []
+        assert len(sdk.query_points_by_tag("second")) == 1
+
+
+class TestOrphanTagGC:
+    """delete_point garbage-collects orphaned :Tag nodes (#485)."""
+
+    def test_delete_gc_orphan_tags(self, sdk):
+        """Deleting the only tagged point removes its Tag from list_tags."""
+        p = sdk.create_point("statement", "only tagged", tags=["alpha"])
+        assert len(sdk.list_tags()) == 1
+        sdk.delete_point(p["id"])
+        assert sdk.list_tags() == []
+
+    def test_delete_keeps_shared_tag(self, sdk):
+        """A tag still used by another point survives GC."""
+        p1 = sdk.create_point("statement", "one", tags=["shared"])
+        sdk.create_point("statement", "two", tags=["shared"])
+        sdk.delete_point(p1["id"])
+        tags = sdk.list_tags()
+        assert len(tags) == 1
+        assert tags[0]["name"] == "shared"
+        assert tags[0]["count"] == 1
