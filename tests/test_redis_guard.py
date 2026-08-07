@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-GUARD = REPO / "scripts" / "redis-guard.py"
+GUARD = REPO / "tools" / "redis-guard.py"
 
 
 def _run_guard(*files):
