@@ -349,8 +349,23 @@ def tortoise_search(query: str | None = None, kind: str | None = None,
     Full-scan mode: omit query, set kind → all Points of kind.
     Best-match mode: provide query → RRF fusion of FTS + vector + structural.
 
-    Point results annotated with EP breakdown (confidence_mean + evidence + contention).
+    Point results annotated with EP breakdown (confidence_mean + variance + contested + contention).
     min_confidence defaults to 0.0 (no filter).
+
+    order_by (#25, #560):
+      - 'relevance' (default): pure RRF fusion order (FTS + vector + structural).
+      - 'confidence': sort by the PERSISTED EP confidence (n.confidence), not the
+        structural edge ratio.
+      - 'graph': graph-informed rerank — weighted fusion of similarity +
+        persisted EP confidence + operator connectivity + 30-day recency decay
+        (tortoise.ranking.GraphRanker). Results annotated with a
+        'graph_ranking' breakdown {similarity, graph_boost, recency_boost,
+        final_score, variance, contested}.
+
+    Contestation is surfaced, never scored: contested claims carry
+    ep.contested=true + ep.variance (real EP posterior variance from persisted
+    α/β) but are ranked exactly like any other claim with the same confidence
+    (#580/#583).
 
     Note: threshold default changed from 0.3 (Phase 0 semantic search) to 0.0.
     RRF scores are rank-based (0.01-0.05 range typical), not cosine similarity (0-1).
