@@ -69,10 +69,13 @@ class TestSearch:
     def test_search_finds_point(self, monkeypatch, tmp_path):
         tc = _client_for_env(monkeypatch, tmp_path)
         with tc:
-            tc.post("/v1/points", json={"content": "unique-searchable-phrase-alpha", "kind": "statement"})
+            tc.post("/v1/points", json={"content": "unique-searchable-phrase-alpha", "kind": "decision"})
             r = tc.get("/v1/search", params={"q": "unique-searchable-phrase-alpha"})
             assert r.status_code == 200
-            assert any("unique-searchable-phrase-alpha" in p["content"] for p in r.json())
+            hits = [p for p in r.json() if "unique-searchable-phrase-alpha" in p["content"]]
+            assert hits
+            # FTS result shape (point_kind) must map to the response kind field
+            assert hits[0]["kind"] == "decision"
 
 
 class TestStaticAuth:

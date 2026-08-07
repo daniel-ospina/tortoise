@@ -233,11 +233,17 @@ class StaticKeyMiddleware(BaseHTTPMiddleware):
 
 
 class MCPRateLimitMiddleware(BaseHTTPMiddleware):
-    """Per-key token bucket for ALL POSTs to /mcp (D8). 429 JSON-RPC -32002."""
+    """Per-key token bucket for ALL POSTs to /mcp (D8). 429 JSON-RPC -32002.
 
-    def __init__(self, app, max_per_minute: int = 100):
+    limit_get=True (parent app / #525): rate-limits GETs too — /v1/* endpoints
+    accept the static key and would otherwise be an unthrottled brute-force
+    surface. The /mcp sub-app keeps the default (GET = metadata/SSE only).
+    """
+
+    def __init__(self, app, max_per_minute: int = 100, limit_get: bool = False):
         super().__init__(app)
         self.max_per_minute = max_per_minute
+        self._limit_get = limit_get
         self._buckets: dict[str, list[float]] = defaultdict(list)
         self._lock = asyncio.Lock()
         self._last_cleanup = time.time()
@@ -246,8 +252,8 @@ class MCPRateLimitMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         if self._disabled:
             return await call_next(request)
-        if request.method != "POST":
-            return await call_next(request)  # GET metadata not rate-limited
+        if request.method != "POST" and not self._limit_get:
+            return await call_next(request)  # GET metadata not rate-limited (unless limit_get)
         auth = request.headers.get("Authorization", "")
         if auth.startswith("Bearer "):
             key_id = auth[7:]

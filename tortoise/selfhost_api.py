@@ -82,10 +82,13 @@ def _sdk():
 
 
 def _point_out(result: dict) -> dict:
+    # Handles raw-property dicts (pointKind/createdAt), registry REST models
+    # (kind/created_at), and FTS SearchResult.to_dict() (point_kind — code-review
+    # P2-1, #525).
     return {
         "id": result.get("id", ""),
         "content": result.get("content", ""),
-        "kind": result.get("pointKind", result.get("kind", "")),
+        "kind": result.get("pointKind", result.get("kind", result.get("point_kind", ""))),
         "created_at": result.get("createdAt", result.get("created_at")),
     }
 
