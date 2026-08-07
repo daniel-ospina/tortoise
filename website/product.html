@@ -56,6 +56,44 @@
 
     /* Specific beats get pointer events for interactive elements */
     #beat-cta { pointer-events: auto; overflow-y: auto; }
+    #beat-pricing { pointer-events: auto; overflow-y: auto; }
+
+    /* Pricing section (El Dato component shape, Tortoise colors) */
+    #beat-pricing { justify-content: flex-start; padding: 5rem 2rem 4rem; }
+    #beat-pricing h2 { font-family: var(--serif); font-size: clamp(1.6rem, 3.5vw, 2.6rem); font-weight: 400; color: var(--text); text-align: center; margin-bottom: 0.4rem; }
+    #beat-pricing .pricing-sub { color: var(--text-dim); text-align: center; max-width: 640px; margin: 0 auto 2rem; font-size: 14px; }
+    .pricing-toggle { display: flex; align-items: center; gap: 0.25rem; background: #0d1a2d; border: 1px solid var(--border, #1e293b); border-radius: 9999px; padding: 0.25rem; margin: 0 auto 2.5rem; width: fit-content; }
+    .pricing-toggle button { padding: 0.375rem 1.25rem; border-radius: 9999px; border: 1px solid #d1d5db; font-size: 0.875rem; font-weight: 500; cursor: pointer; background: transparent; color: var(--text-dim); transition: all 0.15s; font-family: var(--mono); }
+    .pricing-toggle button.active { background: var(--accent); color: #04121a; border-color: var(--accent); }
+    .pricing-toggle .badge { display: inline-block; font-size: 0.625rem; font-weight: 700; padding: 0.125rem 0.375rem; border-radius: 9999px; background: var(--green); color: #04121a; margin-left: 0.375rem; }
+    .pricing-grid { display: flex; justify-content: center; gap: 1.5rem; flex-wrap: wrap; max-width: 1100px; margin: 0 auto; }
+    .pricing-card { background: #0d1a2d; border: 1px solid #1e293b; border-radius: 1rem; padding: 1.75rem; position: relative; max-width: 250px; flex: 1; min-width: 230px; transition: border-color 0.2s; }
+    .pricing-card.popular { border: 2px solid var(--accent); }
+    .popular-tag { position: absolute; top: -0.75rem; left: 50%; transform: translateX(-50%); background: var(--accent); color: #04121a; font-size: 0.75rem; font-weight: 600; padding: 0.25rem 1rem; border-radius: 9999px; white-space: nowrap; }
+    .pricing-card h3 { font-size: 1.1rem; margin-bottom: 0.4rem; color: var(--text); }
+    .price { font-size: 2rem; font-weight: 700; color: var(--text); }
+    .price span { font-size: 0.9rem; font-weight: 400; color: var(--text-dim); }
+    .billing { font-size: 0.8rem; color: var(--text-dim); margin-bottom: 1.25rem; }
+    .features { display: flex; flex-direction: column; gap: 0.55rem; margin-bottom: 1.25rem; }
+    .feature { display: flex; align-items: center; gap: 0.5rem; font-size: 0.8rem; color: var(--text); }
+    .feature svg { width: 0.9rem; height: 0.9rem; flex-shrink: 0; }
+    .feature .x { color: #f87171; opacity: 0.7; margin-right: 0.25rem; }
+    .feature .muted { color: var(--text-dim); opacity: 0.7; }
+    .pricing-card .btn { display: block; text-align: center; background: var(--accent); color: #04121a; padding: 0.6rem 1rem; border-radius: 0.5rem; text-decoration: none; font-weight: 600; font-size: 0.85rem; transition: background 0.2s; }
+    .pricing-card .btn:hover { background: var(--accent-hover, #0891b2); }
+    .pricing-card .btn.secondary { background: #1e293b; color: var(--text); }
+    .pricing-usage { text-align: center; color: var(--text-dim); font-size: 0.85rem; margin: 1.75rem auto 0; }
+    .segmented { display: flex; flex-wrap: wrap; gap: 1rem; justify-content: center; max-width: 900px; margin: 2.5rem auto 0; }
+    .segment { flex: 1; min-width: 300px; background: #0d1a2d; border: 1px solid #1e293b; border-radius: 1rem; padding: 1.25rem; }
+    .segment h4 { color: var(--accent); font-size: 0.95rem; margin-bottom: 0.4rem; }
+    .segment p { color: var(--text); font-size: 0.85rem; }
+    .selfhost { max-width: 900px; margin: 2rem auto 0; background: #0d1a2d; border: 1px solid #1e293b; border-radius: 1rem; padding: 1.5rem; }
+    .selfhost h4 { color: var(--green); font-size: 0.95rem; margin-bottom: 0.5rem; }
+    .selfhost p { color: var(--text); font-size: 0.85rem; margin-bottom: 0.75rem; }
+    .selfhost .license { color: var(--text-dim); font-size: 0.8rem; margin-bottom: 1rem; }
+    .selfhost .actions { display: flex; gap: 1rem; flex-wrap: wrap; }
+    .selfhost a { color: var(--accent); text-decoration: none; font-size: 0.85rem; border: 1px solid var(--accent); padding: 0.5rem 1rem; border-radius: 0.5rem; }
+    .selfhost a:hover { background: var(--accent); color: #04121a; }
 
     #beat-hero { opacity: 1; }
 
@@ -343,6 +381,26 @@
         <code>NAND  c → a    confidence: 0.72</code>
       </div>
     </section>
+    <section id="beat-pricing" class="beat">
+      <h2>Pricing</h2>
+      <p class="pricing-sub">Start free. Scale when your agents do — you pay for usage, not seats.</p>
+
+      <div class="pricing-toggle">
+        <button id="btn-monthly" class="active" onclick="setBilling('monthly')">Monthly</button>
+        <button id="btn-annual" onclick="setBilling('annual')"><span>Annual</span> <span class="badge" id="annual-badge">-20%</span></button>
+      </div>
+
+      <div class="pricing-grid" id="pricing-grid"><!-- cards rendered by pricing.js --></div>
+
+      <p class="pricing-usage" id="pricing-usage-line"></p>
+
+      <div class="segmented">
+        <div class="segment" id="segment-use"></div>
+        <div class="segment" id="segment-build"></div>
+      </div>
+
+      <div class="selfhost" id="selfhost-section"></div>
+    </section>
     <section id="beat-cta" class="beat">
       <a href="/signup" class="cta-start">Connect your agent →</a>
       <p class="cta-subtle">5,000 Points free. No credit card. Start building in minutes.</p>
@@ -511,7 +569,7 @@
     draw();
 
     /* ── Content beats (opacity scrubbed to scroll) ── */
-    const beats = ['beat-hero', 'beat-capture', 'beat-recall', 'beat-reason', 'beat-cta'];
+    const beats = ['beat-hero', 'beat-capture', 'beat-recall', 'beat-reason', 'beat-pricing', 'beat-cta'];
 
     const beatSpan = 0.11;
     const gapSpan = 0.015;
@@ -612,6 +670,98 @@
         document.body.removeChild(textarea);
       }
     }
+
+    // ── Pricing section (data mirror of product/pricing.json — single source) ──
+    const PRICING = {
+      display: {
+        annual_discount_pct: 20,
+        annual_default: true,
+        license_self_hosted: "BSL 1.1 + $5M AUG (free <$5M trailing-12mo revenue); Apache-2.0 conversion after 4 years; hosted excluded from grant",
+        segments: {
+          use: "Use Tortoise — memory for you and your team: connect your agents, remember decisions, MCP integration",
+          build: "Build with Tortoise — embedded memory via API for your product: REST/MCP, per-team keys, usage-based pricing"
+        },
+        why_hosted: "No setup, no servers — your agents just work. Memory backed up and managed for you. Upgrade as you grow.",
+        overage_line: "$5 per additional 10k write ops",
+        integrations_line: "Unlimited integrations at every tier"
+      },
+      tiers: {
+        free: { price: 0, graphs: 1, users: 1, ops: 1000, nodes: 10000, keys: 2, overage: false, popular: false, features: ["1 graph", "1 collaborator", "1,000 write ops/mo", "10,000-node graph", "2 API keys"], excluded: ["Overage"] },
+        solo: { price: 9, graphs: 2, users: 1, ops: 10000, nodes: 25000, keys: 5, overage: false, popular: false, features: ["2 graphs", "1 collaborator", "10,000 write ops/mo", "25,000-node graph", "5 API keys"], excluded: ["Overage"] },
+        pro: { price: 25, graphs: "∞", users: 2, ops: 50000, nodes: 100000, keys: 10, overage: true, popular: true, features: ["Unlimited graphs", "2 collaborators", "50,000 write ops/mo", "100,000-node graph", "10 API keys", "Usage-based overage"], excluded: [] },
+        team: { price: 149, graphs: "∞", users: "∞", ops: 200000, nodes: 600000, keys: 20, overage: true, popular: false, features: ["Unlimited graphs", "Unlimited collaborators (invites + RBAC)", "200,000 write ops/mo", "600,000-node graph", "20 API keys", "Usage-based overage", "Priority support"], excluded: [] }
+      }
+    };
+
+    let currentBilling = 'monthly';
+
+    function fmtPrice(price) {
+      if (currentBilling === 'annual') {
+        const disc = PRICING.display.annual_discount_pct / 100;
+        const annual = Math.round(price * 12 * (1 - disc));
+        return `$${annual}`;
+      }
+      return `$${price}`;
+    }
+
+    function billingSuffix() {
+      return currentBilling === 'annual' ? '/yr (billed annually)' : '/mo';
+    }
+
+    function checkSvg() {
+      return '<svg viewBox="0 0 24 24" fill="none" stroke="#4ade80" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+    }
+
+    function renderPricing() {
+      const grid = document.getElementById('pricing-grid');
+      const names = ['free', 'solo', 'pro', 'team'];
+      grid.innerHTML = names.map((name) => {
+        const t = PRICING.tiers[name];
+        const label = name.charAt(0).toUpperCase() + name.slice(1);
+        const popular = t.popular ? '<span class="popular-tag">Most popular</span>' : '';
+        const features = t.features.map((f) => `<div class="feature">${checkSvg()} <span>${f}</span></div>`).join('');
+        const excluded = t.excluded.map((f) => `<div class="feature"><span class="x">✕</span> <span class="muted">${f}</span></div>`).join('');
+        const cta = name === 'free' ? 'Start free' : 'Get started';
+        return `<div class="pricing-card${t.popular ? ' popular' : ''}">
+          ${popular}
+          <h3>${label}</h3>
+          <div class="price">${fmtPrice(t.price)}<span>${billingSuffix()}</span></div>
+          <p class="billing">${currentBilling === 'annual' ? 'Billed annually' : 'Billed monthly'}</p>
+          <div class="features">${features}${excluded}</div>
+          <a href="/signup" class="btn${name === 'free' ? ' secondary' : ''}">${cta}</a>
+        </div>`;
+      }).join('');
+      document.getElementById('pricing-usage-line').textContent = `${PRICING.display.overage_line} · ${PRICING.display.integrations_line} (Pro + Team)`;
+    }
+
+    function renderSegments() {
+      document.getElementById('segment-use').innerHTML = `<h4>Use Tortoise</h4><p>${PRICING.display.segments.use}</p>`;
+      document.getElementById('segment-build').innerHTML = `<h4>Build with Tortoise</h4><p>${PRICING.display.segments.build}</p>`;
+    }
+
+    function renderSelfHost() {
+      document.getElementById('selfhost-section').innerHTML = `
+        <h4>Self-hosted</h4>
+        <p>Your infrastructure, your ops — full control. Hosted is managed, zero-ops.</p>
+        <p class="license">${PRICING.display.license_self_hosted}</p>
+        <p>${PRICING.display.why_hosted}</p>
+        <div class="actions">
+          <a href="https://github.com/daniel-ospina/tortoise" target="_blank" rel="noopener">Self-host on GitHub →</a>
+          <a href="/signup">Migrate to cloud anytime →</a>
+        </div>`;
+    }
+
+    function setBilling(mode) {
+      currentBilling = mode;
+      document.getElementById('btn-monthly').classList.toggle('active', mode === 'monthly');
+      document.getElementById('btn-annual').classList.toggle('active', mode === 'annual');
+      renderPricing();
+    }
+
+    // Init pricing (annual is default per pricing.json display.annual_default)
+    if (PRICING.display.annual_default) setBilling('annual'); else setBilling('monthly');
+    renderSegments();
+    renderSelfHost();
 
   </script>
 </body>
