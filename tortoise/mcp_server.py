@@ -490,6 +490,30 @@ def tortoise_file_decision(options: Any, evidence: Any,
     return _safe(_get_team_sdk().file_decision, options, evidence, choice)
 
 
+def tortoise_file_human_approval(approver_id: str, artifact_id: str,
+                                 point_ids: Any,
+                                 decision_content: str | None = None) -> dict:
+    """File a human approval of a planning artifact to the graph (#531).
+
+    Records an Event (eventKind: humanApproval) with full provenance
+    (approver, artifact, approved claims), creates a decision Point
+    (pointKind: humanApproval) that seeds grounding and carries an EP
+    evidence prior, and fans out unidirectional IMPL edges (label
+    approvedBy) from the approval Point to the approved claim Points so
+    dependent claims strengthen.
+
+    approver_id: Subject id of the human approving
+    artifact_id: Object/Document id of the artifact being approved
+    point_ids: claim Point ids being approved
+    decision_content: optional content override for the decision Point
+
+    Returns {event_id, decision_point_id, impl_operator_ids, confidence_delta}.
+    """
+    point_ids = _parse(point_ids)
+    return _safe(_get_team_sdk().file_human_approval, approver_id, artifact_id,
+                 point_ids, decision_content)
+
+
 def tortoise_delete_point(id: str) -> dict:
     """Delete a Point. DESTRUCTIVE — requires human confirmation. Cannot be undone."""
     return _safe(_get_team_sdk().delete_point_wrapped, id)

@@ -21,6 +21,8 @@ _BASE_KINDS: set[str] = {
     "jobToBeDone", "useCase", "userJourney", "workflow", "requirement", "issue",
     # Event kinds
     "session", "meeting", "milestone", "incident",
+    # #531: human approval — event kind + decision point kind (approval pattern)
+    "humanApproval",
 }
 
 
