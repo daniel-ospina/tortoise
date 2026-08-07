@@ -489,28 +489,49 @@ class TestSupersedePointStructuralTransfer:
 
     def test_structural_edges_transferred_on_supersede(self, sdk):
         """Old point's aboutSubject edge transfers to new point."""
-        # Create subject + two points
+        proj = sdk._get_proj()
         subj = sdk.create_point("statement", "subject anchor")
         old_pt = sdk.create_point("statement", "old claim")
         new_pt = sdk.create_point("statement", "new claim")
-        # Wire aboutSubject on old point via create_event or direct edge
-        ev = sdk.create_event("meeting-1", "meeting", aboutSubject=subj["id"], aboutObject=old_pt["id"])
-        # Check the old point has the edge (via event aboutObject)
+        # Wire aboutSubject edge FROM old point TO subject (direct edge on the Point)
+        proj.create_about_edge(old_pt["id"], subj["id"], "aboutSubject")
+        # Supersede: edges must transfer from old point to new point
         result = sdk.supersede_point(old_pt["id"], new_pt["id"])
-        assert result.get("edges_transferred", 0) >= 0  # at least runs without error
+        assert result.get("edges_transferred", 0) >= 1
+        # New point now has the aboutSubject edge
+        r = proj.g.query(
+            "MATCH (new:Point {id:$nid})-[a:aboutSubject]->(s:Point {id:$sid}) "
+            "RETURN count(a) > 0",
+            params={"nid": new_pt["id"], "sid": subj["id"]},
+        ).result_set
+        assert r[0][0] is True
+        # Old point no longer has the aboutSubject edge
+        r2 = proj.g.query(
+            "MATCH (old:Point {id:$oid})-[a:aboutSubject]->(s:Point {id:$sid}) "
+            "RETURN count(a)",
+            params={"oid": old_pt["id"], "sid": subj["id"]},
+        ).result_set
+        assert r2[0][0] == 0
 
     def test_supersede_transfer_idempotent_no_duplicates(self, sdk):
         """Running supersede twice must not duplicate edges."""
+        proj = sdk._get_proj()
         subj = sdk.create_point("statement", "subject")
         old_pt = sdk.create_point("statement", "old")
         new_pt = sdk.create_point("statement", "new")
-        sdk.create_event("meeting-1", "meeting", aboutSubject=subj["id"], aboutObject=old_pt["id"])
+        # Wire aboutSubject edge FROM old point TO subject
+        proj.create_about_edge(old_pt["id"], subj["id"], "aboutSubject")
 
         sdk.supersede_point(old_pt["id"], new_pt["id"])
-        # Second supersede on already-superseded should not error
-        # (old is now outdated — edges may be gone; just verify no crash)
-        sdk.supersede_point(old_pt["id"], new_pt["id"])
-        assert True
+        # Second supersede on already-superseded old point — MERGE must prevent duplicates
+        result2 = sdk.supersede_point(old_pt["id"], new_pt["id"])
+        # Verify exactly 1 aboutSubject edge on new point (no duplicates)
+        r = proj.g.query(
+            "MATCH (new:Point {id:$nid})-[a:aboutSubject]->(s:Point {id:$sid}) "
+            "RETURN count(a)",
+            params={"nid": new_pt["id"], "sid": subj["id"]},
+        ).result_set
+        assert r[0][0] == 1
 
     def test_was_derived_from_transferred_on_supersede(self, sdk):
         """wasDerivedFrom edge transfers to the superseding Point (#150)."""
