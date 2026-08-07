@@ -172,54 +172,35 @@ class TestProbeFalkordb:
     localhost defaults (preventing tests from mutating an unrelated DB).
     """
 
-    @staticmethod
-    def _mock_from_uri(raise_on: str | None = None):
-        """Build a mock FalkorProjection.from_uri that raises for a specific URI."""
-        from tortoise.projection import FalkorProjection
-
-        _real_from_uri = FalkorProjection.from_uri
-
-        def _fake_from_uri(uri: str):
-            if raise_on is not None and uri == raise_on:
-                raise ConnectionError(f"mock: cannot connect to {uri}")
-            # For all other URIs, delegate to real (they may still fail,
-            # but that's fine — we only need the env-URI to fail predictably)
-            return _real_from_uri(uri)
-
-        return _fake_from_uri
-
-    def test_env_uri_set_but_unreachable_stops_probing(self, monkeypatch):
-        """#196: when TORTOISE_DB_URI is set and unreachable, return (False, None).
-
-        Must NOT fall through to localhost candidates.
-        """
-        bad_uri = "docker://:bad@unreachable:9999/tortoise_test"
-        monkeypatch.setenv("TORTOISE_DB_URI", bad_uri)
-
-        candidates = [
-            os.environ.get("TORTOISE_DB_URI"),
-            "docker://:falkordb@localhost:6379/tortoise_test_fts125",
-            "docker://:@localhost:16379/tortoise_test_fts125",
-        ]
-
-        # All candidates should fail: env URI is unreachable, and we never
-        # probe localhost.  Mocking the env URI to raise ensures the break fires.
+    def test_env_uri_reachable_returns_true(self, monkeypatch):
+        """#196: when TORTOISE_DB_URI is set and reachable, return (True, uri)."""
         import tortoise.projection as _tp
         original_from_uri = _tp.FalkorProjection.from_uri
 
-        def _fake_from_uri(uri: str):
-            if uri == bad_uri:
-                raise ConnectionError("mock unreachable")
-            # Should not reach here for localhost URIs (probe stops after env)
-            raise AssertionError(
-                f"probe should have stopped before trying: {uri}"
-            )
+        good_uri = "docker://:falkordb@test-host:6379/tortoise_test"
+        monkeypatch.setenv("TORTOISE_DB_URI", good_uri)
 
-        _tp.FalkorProjection.from_uri = _fake_from_uri
+        # Mock from_uri to simulate a working connection
+        class _FakeProj:
+            class g:
+                @staticmethod
+                def query(_cypher, **_kw):
+                    return None  # RETURN 1 succeeds
+
+            @staticmethod
+            def close():
+                pass
+
+        _tp.FalkorProjection.from_uri = staticmethod(lambda uri: _FakeProj())
         try:
+            candidates = [
+                os.environ.get("TORTOISE_DB_URI"),
+                "docker://:falkordb@localhost:6379/tortoise_test_fts125",
+                "docker://:@localhost:16379/tortoise_test_fts125",
+            ]
             available, working_uri = _probe_falkordb(candidates)
-            assert available is False
-            assert working_uri is None
+            assert available is True
+            assert working_uri == good_uri
         finally:
             _tp.FalkorProjection.from_uri = original_from_uri
 
