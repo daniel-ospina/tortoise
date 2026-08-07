@@ -3086,7 +3086,9 @@ class TortoiseSDK:
                     oid = None
                     name = str(item)
                 if not oid:
-                    oid = f"{key.rstrip('s')}_{hash(name) & 0xffffffff:x}"
+                    # Deterministic hash (builtin hash() is salted per-process →
+                    # would create duplicate Objects on every run).
+                    oid = f"{key.rstrip('s')}_{hashlib.sha256(name.encode()).hexdigest()[:8]}"
                 okind = "pr" if key == "prs" else "issue"
                 proj.g.query(
                     "MERGE (o:Object {id:$oid}) SET o.name=$name, o.objectKind=$okind "
