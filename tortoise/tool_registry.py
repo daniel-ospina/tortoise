@@ -60,6 +60,9 @@ TOOL_REGISTRY: list[ToolDefinition] = [
         annotations=_idem(),
         http_policy=True,
         sdk_method="create_point",
+        rest_spec=RestSpec(method="POST", path="/v1/points",
+                           request_model="CreatePointRequest",
+                           response_model="PointResponse"),
     ),
     ToolDefinition(
         name="tortoise_query",
@@ -149,6 +152,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
         annotations=_ro(),
         http_policy=True,
         sdk_method="tortoise_fts_query",
+        rest_spec=RestSpec(method="GET", path="/v1/search"),
     ),
     # ── EP Belief Propagation (#6908) ─────────────────────────────
     ToolDefinition(
@@ -187,6 +191,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
         annotations=_rw(),
         http_policy=True,
         sdk_method="dream",
+        rest_spec=RestSpec(method="POST", path="/v1/dream"),
     ),
     # ── Updates ───────────────────────────────────────────────────
     ToolDefinition(
@@ -331,6 +336,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
         annotations=_ro(),
         http_policy=True,
         sdk_method="session_context",
+        rest_spec=RestSpec(method="GET", path="/v1/context"),
     ),
     # ── Excluded from HTTP ────────────────────────────────────────
     ToolDefinition(
@@ -552,3 +558,27 @@ class FastMCPAdapter:
                 annotations=entry.annotations,
             )
             self._mcp.add_tool(tool)
+
+
+# ── REST endpoint classification (Gate 3 pre-step, #454) ─────────
+# 8 REST tool-ops classified for the FastAPIRouterAdapter:
+#
+# | REST endpoint            | SDK-backed? | Registry entry      | RestSpec            |
+# |--------------------------|-------------|---------------------|---------------------|
+# | POST /v1/points          | YES         | tortoise_create_point | populated above    |
+# | GET  /v1/points          | RAW CYPHER  | (no SDK method)     | — extract list_points |
+# | GET  /v1/points/{id}     | RAW CYPHER  | (differs from sdk.get_point) | — extract |
+# | POST /v1/dream           | YES         | tortoise_dream      | populated above    |
+# | GET  /v1/search          | YES         | tortoise_search     | populated above    |
+# | POST /v1/sessions        | RAW CYPHER  | (content_hash dedup bug — filed as tortoise#490) | — extract capture_session |
+# | GET  /v1/sessions        | RAW CYPHER  | (no SDK method)     | — extract list_sessions |
+# | GET  /v1/context         | YES         | tortoise_session_context | populated above |
+#
+# Raw-Cypher ops are NOT added to the registry (no SDK method to register).
+# Gate 3 pre-step: extract SDK methods for list_points/get_point_by_id/
+# capture_session/list_sessions OR keep them hand-written in hosted_api.py
+# and document the drift (control-plane-style). capture_session dedup bug
+# tracked as tortoise#490.
+#
+# Control-plane endpoints (/internal/*, /v1/team*, /v1/team/keys) stay
+# hand-written — out of registry scope per the epic scope guard.
