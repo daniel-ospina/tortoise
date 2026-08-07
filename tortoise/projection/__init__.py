@@ -363,6 +363,13 @@ class FalkorProjection(
                     logger.warning(
                         "auto-recovered empty embedded DB from %s (%s events)",
                         events_dir, result.get("log_points"))
+                elif result.get("reason"):
+                    # Lost-graph case but recovery declined (ambiguous/unreadable
+                    # log) — warn loudly instead of silently continuing with an
+                    # empty DB (ops safety #428: no silent data loss).
+                    logger.warning(
+                        "empty embedded DB not auto-recovered: %s",
+                        result.get("reason"))
 
     def _recover_or_raise(self, events_dir: str) -> None:
         """Run recover_from_log and fail loud if it did not recover."""
