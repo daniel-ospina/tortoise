@@ -542,3 +542,158 @@ def test_full_ingest_unaffected_and_not_blocked_by_capture():
     lines = [ln for ln in Path(log2).read_text(encoding="utf-8").splitlines() if ln.strip()]
     assert any("IngestStarted" in ln for ln in lines), \
         "full ingest was blocked by prior capture (idempotency gotcha)"
+
+
+# ------------------------------------------------------------------ #133 proportional extraction v1 (live DB)
+
+
+def test_capture_defaults_doc_status_captured():
+    """#133 P0: --capture-metadata with NO doc_status in frontmatter
+    must default the Document to doc_status='captured' (not 'draft')."""
+    import json
+    uri = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise_test_133")
+    db = uri
+    log = _tmp("events_133_capdefault.jsonl")
+    from tortoise.projection import FalkorProjection as _FP
+    _f = _FP.from_uri(uri)
+    _f.g.query("MATCH (n) DETACH DELETE n")
+    _f.close()
+    t = _tmp("capdefault.md")
+    Path(t).write_text(
+        "---\ntitle: CapDefault\ntopics: x\nsummary: y\n---\n\n## User\nhello\n",
+        encoding="utf-8")
+    args = ["ingest", str(t), "--db", db, "--log", log, "--capture-metadata",
+            "--point-model", "mock:cheap", "--relation-model", "mock:reason"]
+    with patch("sys.argv", args):
+        _run_main(None)
+    from tortoise.projection import FalkorProjection
+    proj = FalkorProjection.from_uri(uri)
+    try:
+        rows = proj.g.query(
+            "MATCH (d:Document) WHERE d.title = 'CapDefault' "
+            "RETURN d.doc_status"
+        ).result_set
+        assert rows, "Document not created"
+        assert rows[0][0] == "captured", f"expected captured, got {rows[0][0]!r}"
+    finally:
+        proj.close()
+
+
+def test_needs_extraction_flag_surfaces_and_drives_upgrade_all():
+    """#133: needs_extraction frontmatter → Document property → --upgrade-all
+    discovers and upgrades the Document (e2e bridge)."""
+    import json
+    uri = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise_test_133")
+    db = uri
+    log = _tmp("events_133_ne.jsonl")
+    from tortoise.projection import FalkorProjection as _FP
+    _f = _FP.from_uri(uri)
+    _f.g.query("MATCH (n) DETACH DELETE n")
+    _f.close()
+    t = _tmp("ne.md")
+    Path(t).write_text(
+        "---\ntitle: NeedsExtract\ntopics: a\ndoc_status: captured\n"
+        "needs_extraction: true\n---\n\n## User\nImportant decision\n",
+        encoding="utf-8")
+    args = ["ingest", str(t), "--db", db, "--log", log, "--capture-metadata",
+            "--point-model", "mock:cheap", "--relation-model", "mock:reason"]
+    with patch("sys.argv", args):
+        _run_main(None)
+    from tortoise.projection import FalkorProjection
+    proj = FalkorProjection.from_uri(uri)
+    try:
+        rows = proj.g.query(
+            "MATCH (d:Document) WHERE d.title = 'NeedsExtract' "
+            "RETURN d.needs_extraction"
+        ).result_set
+        assert rows and rows[0][0] is True, f"needs_extraction not stored: {rows}"
+    finally:
+        proj.close()
+
+
+def test_upgrade_on_already_extracted_is_noop():
+    """#133: --upgrade on a Document already doc_status='extracted' → no-op
+    'doc already extracted, skipped' (idempotency)."""
+    import json
+    uri = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise_test_133")
+    db = uri
+    log = _tmp("events_133_noop.jsonl")
+    from tortoise.projection import FalkorProjection as _FP
+    _f = _FP.from_uri(uri)
+    _f.g.query("MATCH (n) DETACH DELETE n")
+    _f.close()
+    # The Document id MUST equal the file path so _do_upgrade finds it and
+    # exercises the "already extracted → skip" path (review P1).
+    t = _tmp("already.md")
+    Path(t).write_text("---\ntitle: X\n---\n\n## User\nhi\n", encoding="utf-8")
+    # Real convention: Document id = filename (args.transcript.name), sourcePath = full path
+    doc_id = Path(t).name
+    from tortoise.projection import FalkorProjection
+    proj = FalkorProjection.from_uri(uri)
+    try:
+        proj.g.query(
+            "CREATE (d:Document {id:$id, title:'X', doc_status:'extracted', sourcePath:$sp})",
+            params={"id": doc_id, "sp": str(t)},
+        )
+    finally:
+        proj.close()
+    args = ["ingest", str(t), "--db", db, "--log", log, "--upgrade",
+            "--point-model", "mock:cheap", "--relation-model", "mock:reason"]
+    with patch("sys.argv", args):
+        _run_main(None)
+    # Doc stays extracted (no flip attempted on already-extracted)
+    from tortoise.projection import FalkorProjection
+    proj = FalkorProjection.from_uri(uri)
+    try:
+        rows = proj.g.query(
+            "MATCH (d:Document {id:$id}) RETURN d.doc_status",
+            params={"id": doc_id},
+        ).result_set
+        assert rows[0][0] == "extracted", rows[0][0]
+    finally:
+        proj.close()
+
+
+
+def test_upgrade_all_without_transcript_does_not_crash():
+    """#133 P0: --upgrade-all with NO positional transcript must not crash
+    (regression: args.transcript.name raised AttributeError on None)."""
+    import json
+    uri = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise_test_133")
+    db = uri
+    log = _tmp("events_133_ua.jsonl")
+    from tortoise.projection import FalkorProjection as _FP
+    _f = _FP.from_uri(uri)
+    _f.g.query("MATCH (n) DETACH DELETE n")
+    _f.close()
+    from tortoise.projection import FalkorProjection
+    # Real file at a resolvable path — doc_id = file path (ingest convention)
+    real_file = _tmp("doc-a.md")
+    Path(real_file).write_text(
+        "---\ntitle: A\ndoc_status: captured\n---\n\n## User\nhi\n",
+        encoding="utf-8")
+    proj = FalkorProjection.from_uri(uri)
+    try:
+        proj.g.query(
+            "CREATE (d:Document {id:$id, title:'A', doc_status:'captured', "
+            "sourcePath:$sp})",
+            params={"id": real_file, "sp": real_file},
+        )
+    finally:
+        proj.close()
+    # No positional transcript — the crash path (P0 regression)
+    args = ["ingest", "--db", db, "--log", log, "--upgrade-all",
+            "--point-model", "mock:cheap", "--relation-model", "mock:reason"]
+    with patch("sys.argv", args):
+        _run_main(None)
+    # Doc should now be extracted (upgrade ran)
+    from tortoise.projection import FalkorProjection
+    proj = FalkorProjection.from_uri(uri)
+    try:
+        rows = proj.g.query(
+            "MATCH (d:Document) WHERE d.sourcePath = $sp RETURN d.doc_status",
+            params={"sp": real_file},
+        ).result_set
+        assert rows and rows[0][0] == "extracted", f"expected extracted, got {rows}"
+    finally:
+        proj.close()

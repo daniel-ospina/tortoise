@@ -247,6 +247,9 @@ class _EntityHandlers:
         sid = ev.get("session_id")
         eid = ev.get("event_id")
         ds = ev.get("doc_status")
+        # #133: needs_extraction — explicit signal for --upgrade-all discovery.
+        # coalesce-null sentinel: None default so partial updates preserve.
+        nx = ev.get("needs_extraction")
         # _searchText computed only when the event carries meaningful text
         has_text = bool(ev.get("title") or summary or topics)
         st = (_build_search_text(ev.get("title", ""), summary, topics)
@@ -265,6 +268,7 @@ class _EntityHandlers:
             "    d.sessionId=coalesce($sid, d.sessionId, ''), "
             "    d.eventId=coalesce($eid, d.eventId, ''), "
             "    d.doc_status=coalesce($ds, d.doc_status, 'draft'), "
+            "    d.needs_extraction=coalesce($nx, d.needs_extraction, false), "
             "    d.sourcePath=coalesce($sp, d.sourcePath), "
             "    d._searchText=coalesce($st, d._searchText, d.title), "
             "    d.embedding=CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE d.embedding END, "
@@ -274,7 +278,7 @@ class _EntityHandlers:
                     "fmt": ev.get("format", "markdown"),
                     "content": ev.get("content"),
                     "topics": topics, "summary": summary, "sid": sid,
-                    "eid": eid, "ds": ds, "st": st, "sp": sp,
+                    "eid": eid, "ds": ds, "nx": nx, "st": st, "sp": sp,
                     "embedding": embedding,
                     "now": _now_iso()},
         )
