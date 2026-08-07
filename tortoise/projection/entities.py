@@ -32,6 +32,9 @@ class _EntityHandlers:
         "managedBy",         # handled as managedBy edge
         "aboutSubject",      # handled as aboutSubject edge
         "aboutObject",       # handled as aboutObject edge
+        "aboutEvent",        # handled as aboutEvent edge
+        "aboutPoint",        # handled as aboutPoint edge
+        "aboutDocument",     # handled as aboutDocument edge
     })
 
     # Keys explicitly handled by each _upsert_* method.
