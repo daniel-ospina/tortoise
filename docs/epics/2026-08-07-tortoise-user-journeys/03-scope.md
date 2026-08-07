@@ -54,7 +54,7 @@ created: 2026-08-07
     - **Key scoping under decoupling:** API keys belong to a team; a user's dashboard session resolves which team(s) they can access and which graph within each.
     - Why now (not deferred): every hosted layer hard-encodes 1:1:1 today. Building Pro-tier on top of the current model would force a user_teams migration + provision-path rework the moment multi-team ships — the painful-later trap the owner's rule forbids.
 
-12. **Pricing structure doc** — create `product/pricing.md` (canonical, survives graph wipes): Free $0 (1 team/1 graph, very restricted, self-hosted + hosted) · Solo $9/mo (max 2 graphs, loss-leader) · Pro $25/mo (unlimited graphs, unlimited agents) · Team $149/mo (collaboration: RBAC, invites) · usage $2 per additional 10k write ops. Per-team billing, no per-seat charges. **Caps align to cost drivers: graphs + collaborators + operations + graph size — NOT agents** (API-access model). Owner-confirmed 2026-08-07 from YC application; supersedes the per-seat graph-filed decision.
+12. **Pricing structure doc** — create `product/pricing.md` (canonical, survives graph wipes): Free $0 (1 team/1 graph, very restricted, self-hosted + hosted) · Solo $9/mo (max 2 graphs, loss-leader) · Pro $25/mo (unlimited graphs, unlimited agents) · Team $149/mo (collaboration: RBAC, invites) · usage $5 per additional 10k write ops. Per-team billing, no per-seat charges. **Caps align to cost drivers: graphs + collaborators + operations + graph size — NOT agents** (API-access model). Owner-confirmed 2026-08-07 from YC application; supersedes the per-seat graph-filed decision.
 
 13. **Pricing page on tortoise.premiselabs.co** — the tier structure above rendered as a real pricing section:
     - **Component shape:** reuse the El Dato pricing components (DMeer/website `#pricing`): monthly/annual toggle (-20% badge), pricing cards with ✓ included / ✕ excluded feature rows, "Most popular" tag — re-skinned with Tortoise colors (dark slate/cyan/green/gold).
@@ -184,7 +184,7 @@ created: 2026-08-07
 ### E2E-14: Pricing page renders hosted tiers + self-hosted section
 **Given:** The pricing page live on tortoise.premiselabs.co
 **When:** A visitor scrolls to pricing
-**Then:** Hosted cards render (Free/Solo/Pro/Team) with monthly/annual toggle and ✓/✕ feature rows, "$2 per additional 10k write ops" visible
+**Then:** Hosted cards render (Free/Solo/Pro/Team) with monthly/annual toggle and ✓/✕ feature rows, "$5 per additional 10k write ops" visible
 **And:** A self-hosted section presents the OSS option with honest tradeoff framing + "migrate to cloud anytime" CTA
 **And:** The hosted CTA is primary; self-hosted is secondary but clearly discoverable
 

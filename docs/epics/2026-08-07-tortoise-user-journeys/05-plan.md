@@ -133,7 +133,7 @@ The tier-limit soft-block (UX-D4) is the upgrade *argument surface*. When a cap 
 | Step | Surface | User action | System behavior | Edge cases |
 |---|---|---|---|---|
 | 1 | Pricing section (tortoise.premiselabs.co) | Toggles monthly/annual (-20%) | Price swap via JS (El Dato component) | Annual default? (research: default annual) |
-| 2 | Pricing cards | Reads Free/Solo/Pro/Team ✓/✕ features | Cards from El Dato shape, Tortoise colors | Usage line: "$2 per additional 10k write ops" |
+| 2 | Pricing cards | Reads Free/Solo/Pro/Team ✓/✕ features | Cards from El Dato shape, Tortoise colors | Usage line: "$5 per additional 10k write ops" |
 | 3 | Self-hosted section | Reads BSL + $5M AUG license + tradeoff | Sentry/Metabase pattern; migrate-to-cloud CTA | — |
 | 4 | CTA | Clicks "Get started" on a tier | → /signup (free) or billing (future) | Billing not built → CTA to signup for now |
 
@@ -372,7 +372,7 @@ GUI surfaces are modifications to existing pages + one new pricing section (El D
 │  │ ✕ invites│ │ ✕ invites│ │ ✕ invites│ │ ✓ invites│    │
 │  │ [Start]  │ │ [Start]  │ │ [Start] │ │ [Start]  │    │
 │  └─────────┘ └─────────┘ └─────────┘ └─────────┘    │
-│  $2 per additional 10k write ops                    │
+│  $5 per additional 10k write ops                    │
 │  ┌──────────────────────────────────────────────┐    │
 │  │ Self-hosted: BSL 1.1, free <$5M rev,         │    │
 │  │ Apache-2.0 in 4 yrs. Your infra, your ops.   │    │
