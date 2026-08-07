@@ -610,6 +610,80 @@ class FalkorProjection(
 
         return None
 
+    #: (label, key-property) branches for _resolve_entity — every branch is
+    #: backed by a RANGE index created in _ensure_indexes (issue #327).
+    #: Event matches by eventId (Event.id == eventId for all current writes;
+    #: eventId-only legacy nodes are covered). Source matches by id and/or url
+    #: (url-only ingestion stubs from _link_source have no id).
+    _RESOLVE_BRANCHES = (
+        ("Point", "id"), ("Subject", "id"), ("Object", "id"),
+        ("Document", "id"), ("Source", "id"),
+        ("Event", "eventId"), ("Source", "url"),
+    )
+
+    def _resolve_entity(self, id_val: str, *, by_id: bool = True,
+                        by_eventId: bool = False, by_url: bool = False) -> list[dict]:
+        """Index-backed entity resolution mirroring the legacy
+        `MATCH (n) WHERE n.id=$id OR n.eventId=$id OR n.url=$id` semantics.
+
+        Returns [{label, key, value, properties}, ...] — one entry per matching
+        node, deduped by node identity (a Source with id==url matches two
+        branches). Each branch is a labeled lookup on an indexed property, so
+        the planner uses Node By Index Scan instead of All Node Scan (#327).
+
+        ``by_id`` also covers Events via their eventId branch: Event nodes
+        always carry id == eventId (both set by _upsert_event; eventId-only
+        legacy nodes exist), so matching ``Event {eventId:$id}`` reproduces
+        the legacy ``n.id = $id`` lookup for Events exactly.
+
+        Per-call-site OR-sets (issue #327 scope table):
+        - _get_entity:              id | eventId | url
+        - _update/_delete_entity:   id | eventId
+        - create_edge source:       id | eventId | url ; target: id | eventId
+        - create_about_edge source: id ; target: id | eventId
+        - create_owned_by / about stub links: id only
+        """
+        branches = []
+        for label, prop in self._RESOLVE_BRANCHES:
+            if prop == "id" and not by_id:
+                continue
+            # Event branch: enabled by by_id (Event.id == eventId invariant)
+            # or explicitly by by_eventId.
+            if prop == "eventId" and not (by_id or by_eventId):
+                continue
+            if prop == "url" and not by_url:
+                continue
+            branches.append((label, prop))
+        if not branches:
+            return []
+        union_q = " UNION ".join(
+            f"MATCH (n:{label}) WHERE n.{prop} = $id "
+            f"RETURN '{label}' AS label, '{prop}' AS key, n.{prop} AS value, "
+            f"properties(n) AS props LIMIT 1"
+            for label, prop in branches
+        )
+        rows = self.g.query(union_q, params={"id": id_val}).result_set
+        seen: set[str] = set()
+        out: list[dict] = []
+        for label, key, value, props in rows:
+            ident = props.get("id") or props.get("eventId") or props.get("url")
+            if ident in seen:
+                continue
+            seen.add(ident)
+            out.append({"label": label, "key": key, "value": value,
+                        "properties": dict(props)})
+        # Defense-in-depth (issue #327 security review): consumers interpolate
+        # label/key into Cypher patterns. Fail loudly here if this producer ever
+        # returns anything other than the constant-tuple values — a future
+        # dynamic-label branch must not become query-text injection downstream.
+        allowed_labels = {lbl for lbl, _ in self._RESOLVE_BRANCHES}
+        for r in out:
+            if r["label"] not in allowed_labels or r["key"] not in {"id", "eventId", "url"}:
+                raise RuntimeError(
+                    f"_resolve_entity produced unsafe label/key: "
+                    f"{r['label']!r}/{r['key']!r} (contract: constant tuple only)")
+        return out
+
     def _ensure_indexes(self) -> None:
         """Create indexes on frequently-filtered Point properties.
 
@@ -630,7 +704,7 @@ class FalkorProjection(
                     pass  # expected — index exists from prior startup
                 else:
                     import logging
-                    logging.getLogger(__name__).warning(
+                    logging.getLogger(__name__).error(
                         "Failed to create index on n.%s: %s", prop, e)
 
         # ── Document range indexes (#125 — structural queries filter by kind) ──
@@ -643,8 +717,30 @@ class FalkorProjection(
                     pass
                 else:
                     import logging
-                    logging.getLogger(__name__).warning(
+                    logging.getLogger(__name__).error(
                         "Failed to create index on Document.%s: %s", prop, e)
+
+        # ── Range indexes on canonical entity keys (issue #327) ──
+        # Point/Document are created above; these enable index-backed
+        # _resolve_entity lookups and faster name/url/eventId-keyed MERGE
+        # upserts. Deliberately NO status/op_type/kind-field indexes — a
+        # measured 3.15x write slowdown on Point upserts with status/op_type
+        # outweighs the batch-read benefit (see issue #522).
+        for label, props in (("Subject", ("id", "name")),
+                             ("Object", ("id", "name")),
+                             ("Event", ("eventId",)),
+                             ("Source", ("id", "url"))):
+            for prop in props:
+                try:
+                    self.g.query(f"CREATE INDEX FOR (n:{label}) ON (n.{prop})")
+                except Exception as e:
+                    msg = str(e).lower()
+                    if "already indexed" in msg or "already exists" in msg:
+                        pass
+                    else:
+                        import logging
+                        logging.getLogger(__name__).error(
+                            "Failed to create index on %s.%s: %s", label, prop, e)
 
         # ── Full-text & vector indexes require FalkorDB 4.x+ (#7779) ──
         _ver = getattr(self, '_falkordb_version', None)

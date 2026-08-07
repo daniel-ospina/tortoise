@@ -58,6 +58,19 @@ def _node(id_, labels, props):
     return FakeNode()
 
 
+def _root_row(label, node):
+    """Convert a FakeNode into a _resolve_root result row [label, props].
+
+    The navigation root lookup now returns (label, properties) per branch
+    (issue #327) instead of the raw node, so mock result sets must provide
+    the new row shape.
+    """
+    props = dict(node.properties)
+    if "id" not in props:
+        props["id"] = str(node.id)
+    return [label, props]
+
+
 # ── entityProfile tests ───────────────────────────────
 
 def test_entity_profile_empty_entity():
@@ -79,7 +92,7 @@ def test_entity_profile_single_hop():
     # Query 0: root lookup. Query 1: BFS from root-1 (one child per direction)
     db = _mock_db({
         "tortoise": [
-            [[root]],                                         # root lookup
+            [_root_row("Point", root)],                     # root lookup
             [[child_p, "IMPL"]],  # BFS from root-1 (outgoing)
         ],
     })
@@ -101,7 +114,7 @@ def test_entity_profile_multi_hop():
 
     db = _mock_db({
         "tortoise": [
-            [[root]],                              # root lookup
+            [_root_row("Point", root)],              # root lookup
             [[child_a, "IMPL"], [child_b, "NAND"]],  # hop 1 from root-1
             [[grandchild, "IMPL"]],                # hop 1 from pt-a
             [],                                     # hop 1 from pt-b
@@ -123,7 +136,7 @@ def test_entity_profile_filter_pointKind():
 
     db = _mock_db({
         "tortoise": [
-            [[root]],
+            [_root_row("Point", root)],
             [[claim, "IMPL"], [decision, "IMPL"]],
         ],
     })
@@ -142,7 +155,7 @@ def test_entity_profile_categorize_types():
 
     db = _mock_db({
         "tortoise": [
-            [[root]],
+            [_root_row("Point", root)],
             [[evt, "childEvents"], [doc, "extractedFrom"], [subj, "aboutEntities"]],
         ],
     })
@@ -163,7 +176,7 @@ def test_tortoise_traverse_basic():
 
     db = _mock_db({
         "tortoise": [
-            [[root]],
+            [_root_row("Point", root)],
             [[child, "IMPL"]],
             [],  # no further hops from child
         ],
@@ -186,7 +199,7 @@ def test_tortoise_traverse_diamond():
 
     db = _mock_db({
         "tortoise": [
-            [[root]],
+            [_root_row("Point", root)],
             [[a, "IMPL"], [b, "NAND"]],  # hop 1: root→a, root→b
             [[c, "IMPL"]],                # hop 1 from a: a→c
             [[c, "INPUT"]],               # hop 1 from b: b→c (same c, visited already)
@@ -254,7 +267,7 @@ def test_tortoise_traverse_returns_public_ids():
 
     db = _mock_db({
         "tortoise": [
-            [[root]],
+            [_root_row("Point", root)],
             [[a, "IMPL"], [b, "NAND"]],
             [],  # no further from a
             [],  # no further from b
@@ -295,7 +308,7 @@ def test_entity_profile_returns_public_ids():
 
     db = _mock_db({
         "tortoise": [
-            [[root]],
+            [_root_row("Point", root)],
             [[child, "IMPL"]],
         ],
     })
