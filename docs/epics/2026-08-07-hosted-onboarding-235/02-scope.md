@@ -14,7 +14,7 @@
 
 2. **One-artifact trigger design** — Decision on what the user copies/pastes to start onboarding. Prototype: MCP config block + onboarding prompt block, presented as a single block on the welcome page. Validate across Claude Code, Codex, Cursor.
 
-3. **Yes/no question set design** — Finalize the 6 questions (GitHub connect, index, sessions, demo, team, context). Define what each "yes" executes and what each "no" skips.
+3. **Yes/no question set design** — Finalize the questions (GitHub connect, index, sessions, demo, team-teaser, verification): 5 yes/no (Q1–Q5) + 1 free-text org prompt (Q1a) + final Verification step (Q6). Q5 (team) is a "coming soon" teaser only — no tool, no endpoint. Define what each "yes" executes and what each "no" skips.
 
 4. **Welcome page flow design** — Wireframe/prototype the updated welcome page that presents the one-artifact and tracks onboarding progress. Includes post-onboarding state ("You're all set! Here's what Tortoise remembers").
 
@@ -31,7 +31,7 @@
 - Self-service key provisioning endpoint
 - GitHub OAuth app + connect flow
 - Background issue/PR indexing via GitHub API
-- Demo graph creation endpoint
+- Demo graph verification (the demo is auto-seeded at signup via the existing tenant-provision edge function → `/internal/demo`, sentinel-idempotent; the flow verifies and shows it — it does not create/overwrite)
 - Onboarding state tracking (API)
 - Welcome page v2 (dynamic, with onboarding progress)
 - Agent onboarding prompt deployment
@@ -46,7 +46,7 @@
 | Role-based memory_filter config (`tortoise setup`) | Hosted simplifies to one default config | Future epic (advanced users) |
 | Harness-specific setup instructions (Pi/Claude/Codex/Cursor) | One artifact should work across all | Future epic (harness-specific optimizations) |
 | OAuth-based MCP authentication | Bearer `tt_` keys sufficient for v1 | Future epic (security hardening) |
-| Progressive tool disclosure (hiding 58 tools) | Onboarding guides first 3-5 tools, but all tools remain accessible | Future epic (tool namespaces/discovery) |
+| Progressive tool disclosure (hiding the full tool surface) | Onboarding guides first 3-5 tools, but all tools remain accessible | Future epic (tool namespaces/discovery) |
 | Multi-team onboarding | Single-team flow only for v1 | Future epic (team management) |
 | In-app dashboard onboarding wizard | Welcome page is the surface for v1 | Future epic (dashboard UX) |
 | White-glove onboarding automation | White-glove is manual for early users, not automated | Future epic (CRM/onboarding automation) |
@@ -66,7 +66,7 @@
 
 | Axis | Rating | Rationale |
 |------|--------|-----------|
-| UX | **medium** | The yes/no flow + one-artifact trigger + welcome page redesign involve multiple interaction surfaces. Agent-driven workflow UX is novel (no established patterns). However, the flow is linear (6 questions) and the design is bounded to one page + one prompt. Prototype complexity is low; polish complexity is medium. |
+| UX | **medium** | The yes/no flow + one-artifact trigger + welcome page redesign involve multiple interaction surfaces. Agent-driven workflow UX is novel (no established patterns). However, the flow is linear (5 yes/no + 1 free-text org + 1 Verification step) and the design is bounded to one page + one prompt. Prototype complexity is low; polish complexity is medium. |
 | Architecture | **high** | Phase 2 build touches: API (key provisioning, indexing, demo endpoints), MCP server (new onboarding tool), GitHub OAuth (external integration), welcome page (frontend), agent prompt (distributed config), analytics pipeline, and onboarding state tracking (new schema). Multiple external dependencies (GitHub API rate limits, OAuth app registration). Phase 1 design is low-architecture (documents only). |
 | Ontology | **low** | No new entity classes needed. Onboarding state may add an `onboarding_status` property on Team or User entities, but no new graph node types. Existing Point, Operator, Team, and APIKey entities cover the domain. |
 | Accessibility | **low** | Welcome page is static HTML (already accessible). Agent prompt is plain text. No complex UI components, no forms beyond OAuth redirect. MCP tools are text-in/text-out. |
@@ -94,9 +94,11 @@
 ### E2E-3: Yes/no flow → GitHub connected
 **Given:** Agent is executing the onboarding prompt (E2E-2 state)
 **When:** User answers "yes" to "Connect GitHub?" and provides their GitHub org/username
-**Then:** The system initiates GitHub OAuth (or accepts a PAT for v1)
+**Then:** The system initiates GitHub OAuth and returns an auth_url
+**And:** The user authorizes in the browser and confirms in chat; the agent **awaits authorization** by polling the GitHub status endpoint (3-min timeout) before moving to the next question
 **And:** On successful authorization, the system records `github_connected: true` in onboarding state
 **And:** The agent confirms: "GitHub connected — found N repositories."
+**And:** If authorization times out, the agent records `github_connected: false, github_error: "oauth not completed"` and continues with the remaining questions
 
 ### E2E-4: Yes/no flow → indexing → first memory written
 **Given:** GitHub is connected (E2E-3 state)
@@ -105,11 +107,11 @@
 **And:** Within the session, at least one Point is created from indexed content
 **And:** The agent can call `tortoise_query(kind="observation")` and see indexed content
 
-### E2E-5: Yes/no flow → demo graph created
+### E2E-5: Yes/no flow → demo graph shown
 **Given:** Agent is executing the onboarding prompt, at least one data source connected
-**When:** User answers "yes" to "Create a demo graph?"
-**Then:** The system creates a curated set of Points and Operators demonstrating the graph structure
-**And:** The agent calls `tortoise_summarize_structure()` and reports graph statistics (N points, M operators)
+**When:** User answers "yes" to "See the demo graph?"
+**Then:** The agent verifies the signup-seeded demo graph (respecting the `_demo_sentinel`; backfills only if missing — never deletes-and-overwrites)
+**And:** The agent calls `tortoise_summarize_structure()` and reports graph statistics (N points, M operators, incl. supports/contradicts/mitigates)
 **And:** The agent explains what the demo graph shows ("You have 3 decisions connected by evidence...")
 
 ### E2E-6: Yes/no flow → session recording enabled
@@ -121,19 +123,20 @@
 
 ### E2E-7: Onboarding complete → memory digest shown
 **Given:** All yes/no questions answered (user may have said "no" to some)
-**When:** The agent reaches the final step of the onboarding prompt
-**Then:** The agent calls `tortoise_diary_read` and `tortoise_context` (or hosted equivalent)
-**And:** A memory digest is displayed showing what Tortoise now remembers
+**When:** The agent reaches the final Verification step of the onboarding prompt
+**Then:** The agent calls `tortoise_health` and `tortoise_context` (MCP tool wrapping `GET /v1/context`)
+**And:** A memory digest is displayed showing what Tortoise now remembers (with a first-memory welcome Point auto-created if the graph is empty)
 **And:** The agent reports: "Onboarding complete. Tortoise remembers [summary]."
-**And:** Funnel event `onboarding_complete` is tracked with elapsed time < 5 min
+**And:** Funnel event `onboarding_complete` is tracked with elapsed time < 5 min — fired server-side once, when `tortoise_onboarding_complete` sets `completed_at`
 
 ### E2E-8: User says "no" to everything → minimal setup
 **Given:** Agent is executing the onboarding prompt
-**When:** User answers "no" to all 6 questions
+**When:** User answers "no" to all 5 yes/no questions
 **Then:** The agent still verifies the connection (`tortoise_health` returns OK)
-**And:** The agent reports: "Tortoise is connected. You can create your first memory with tortoise_create_point()."
-**And:** Onboarding state records all steps as `skipped`
-**And:** The user can still use all 58 MCP tools
+**And:** Every answer is recorded via `tortoise_onboarding_answer` (no answers are never silently dropped)
+**And:** The agent reports: "Tortoise is connected. You can create your first memory with tortoise_create_point()." (a welcome Point is auto-created as the first memory on empty graphs)
+**And:** Onboarding state records all steps as `false`/`skipped` with per-question answers
+**And:** The user can still use all HTTP-visible MCP tools (64 on the streamable-http surface; 4 privilege-bound tools remain excluded)
 
 ---
 
