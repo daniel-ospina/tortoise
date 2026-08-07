@@ -1606,3 +1606,71 @@ class TestCircuitBreakerReviewFixes:
         before = slow.query_calls
         assert run_fts_query(slow, "test", timeout_ms=100) == []
         assert slow.query_calls == before
+
+
+class TestBreakerProbeRecovery:
+    """Regression: HALF_OPEN probes must never latch a strategy (#249 review P1).
+
+    Every exit path after _breaker_allow must record an outcome so _probing
+    clears; a benign degrade is normal completion (records success), not a
+    failure, and never counts toward tripping.
+    """
+
+    QUERY_VEC = [0.1] * 384
+
+    def test_structural_probe_success_recovers(self):
+        """After OPEN, a successful structural probe closes the breaker."""
+        failing = SimpleMockGraph(raise_on_query=RuntimeError("boom"))
+        for _ in range(3):
+            assert run_structural_query(failing, "feature") == []
+        assert _breaker("structural").is_open()
+
+        _breaker("structural")._open_until = time.monotonic() - 1.0  # HALF_OPEN
+        healthy = SimpleMockGraph(result_set=[("s1", 1.0)])
+        assert run_structural_query(healthy, "feature") == [("s1", 1.0)]
+
+        # Probe success recorded -> breaker CLOSED, strategy keeps working
+        assert not _breaker("structural").is_open()
+        assert not _breaker("structural")._probing
+        again = SimpleMockGraph(result_set=[("s2", 1.0)])
+        assert run_structural_query(again, "feature") == [("s2", 1.0)]
+
+    def test_structural_probe_no_conditions_recovers(self):
+        """kind=None early return is normal completion — must not latch."""
+        failing = SimpleMockGraph(raise_on_query=RuntimeError("boom"))
+        for _ in range(3):
+            assert run_structural_query(failing, "feature") == []
+        _breaker("structural")._open_until = time.monotonic() - 1.0
+
+        # kind=None -> no conditions -> early return [] (probe path)
+        assert run_structural_query(SimpleMockGraph(), None) == []
+        assert not _breaker("structural")._probing
+        assert not _breaker("structural").is_open()
+
+    def test_fts_benign_probe_does_not_latch(self):
+        """A HALF_OPEN probe hitting benign index-not-found records success."""
+        failing = SimpleMockGraph(raise_on_query=RuntimeError("boom"))
+        for _ in range(3):
+            assert run_fts_query(failing, "test") == []
+        _breaker("fts")._open_until = time.monotonic() - 1.0
+
+        no_index = SimpleMockGraph(raise_on_query=Exception("FTS index not found"))
+        assert run_fts_query(no_index, "test") == []
+        assert not _breaker("fts")._probing  # probe did NOT latch
+
+        # And benign errors never count toward tripping
+        for _ in range(5):
+            run_fts_query(no_index, "test")
+        assert not _breaker("fts").is_open()
+
+    def test_vector_benign_errors_do_not_trip(self):
+        """Vector index-not-found / no-embeddings degrade without tripping."""
+        no_index = SimpleMockGraph(raise_on_query=Exception("vector index not found"))
+        for _ in range(5):
+            assert run_vector_query(no_index, self.QUERY_VEC, is_embedded=True) == []
+        assert not _breaker("vector").is_open()
+
+        no_emb = SimpleMockGraph(raise_on_query=Exception("embedding is null"))
+        for _ in range(5):
+            assert run_vector_query(no_emb, self.QUERY_VEC, is_embedded=True) == []
+        assert not _breaker("vector").is_open()

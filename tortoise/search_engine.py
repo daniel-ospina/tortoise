@@ -309,6 +309,7 @@ def run_fts_query(
             # tripping the breaker (a healthy deployment with one index-less
             # label must not disable FTS for all labels). (#249 review P1-1)
             logger.info("FTS index not available — skipping FTS strategy")
+            _breaker_record("fts", True)
         else:
             logger.warning("FTS query failed: %s", e)
             _breaker_record("fts", False)
@@ -425,11 +426,13 @@ def run_vector_query(
         msg = str(e).lower()
         if "index" in msg or "not found" in msg or "does not exist" in msg:
             logger.info("Vector index not available — skipping vector strategy")
+            _breaker_record("vector", True)
         elif "embedding" in msg and "null" in msg:
             logger.info("No Points with embeddings — skipping vector strategy")
+            _breaker_record("vector", True)
         else:
             logger.warning("Vector query failed: %s", e)
-        _breaker_record("vector", False)
+            _breaker_record("vector", False)
         return []
 
 
@@ -483,7 +486,10 @@ def run_structural_query(
             params["kind"] = kind
 
         if not conditions:
-            return []  # No filters — caller should use full-scan path instead
+            # No filters — caller should use full-scan path instead. Normal
+            # completion: record success so a HALF_OPEN probe never latches.
+            _breaker_record("structural", True)
+            return []
 
         where_clause = " AND ".join(conditions)
         cypher = (
@@ -501,11 +507,13 @@ def run_structural_query(
             pid = row[0]
             match_score = 1.0 if kind else 0.5
             results.append((pid, match_score))
+        _breaker_record("structural", True)
         return results
     except Exception as e:
         msg = str(e).lower()
         if "index" in msg or "not found" in msg or "does not exist" in msg:
             logger.info("Structural index not available — skipping structural strategy")
+            _breaker_record("structural", True)
         else:
             logger.warning("Structural query failed: %s", e)
             _breaker_record("structural", False)
