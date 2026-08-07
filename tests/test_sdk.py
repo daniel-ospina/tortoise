@@ -228,7 +228,8 @@ class TestTraverse:
         # Operator edges go FROM operator TO points (Ontology v2.1).
         # Traverse outgoing from the operator to find its targets.
         connected = sdk.traverse(op["id"], "IMPL", direction="outgoing")
-        assert len(connected) >= 1
+        # create_operator links the operator to BOTH inputs (a) and outputs (b)
+        assert len(connected) == 2
 
     def test_incoming(self, sdk):
         a, b = _make_point(sdk, content="src"), _make_point(sdk, content="tgt")

@@ -1,4 +1,4 @@
-"""Tests for create_point dedup — #80 (content_hash always persisted) + #93 (context-scoped dedup).
+"""Tests for create_point dedup — #80 (content_hash always persisted) + #49 (context-free dedup by content_hash + pointKind).
 
 Runnable with:
   .venv/bin/python -m pytest tests/test_sdk_dedup.py -v
@@ -57,7 +57,7 @@ class TestCrossContextDedup:
     keying is caught.
     """
 
-    def test_dedup_same_context_returns_existing(self, sdk):
+    def test_dedup_same_content_and_kind_returns_existing(self, sdk):
         """Same content dedup returns existing point (hash + kind match)."""
         content = "The sky is blue"
 
@@ -78,7 +78,7 @@ class TestCrossContextDedup:
         with pytest.raises(TypeError):
             sdk.create_point("statement", content, dedup=True, context=None)
 
-    def test_dedup_no_context_matches_null_context(self, sdk):
+    def test_dedup_plain_points_match_each_other(self, sdk):
         """Points without context dedup against each other (hash + kind match)."""
         content = "Untethered claim"
 
@@ -105,7 +105,7 @@ class TestCrossContextDedup:
             "Same content must dedup to one point — context-like props do not isolate"
         )
 
-    def test_dedup_context_isolation_prevents_cross_contamination(self, sdk):
+    def test_wings_do_not_isolate_dedup(self, sdk):
         """Same content across three 'contexts' yields ONE point (no isolation)."""
         content = "Cross-context contamination test"
 
