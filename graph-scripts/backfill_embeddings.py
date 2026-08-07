@@ -6,9 +6,15 @@ writes them as vecf32 so the HNSW vector index has data to query.
 Idempotent: only nodes where `embedding IS NULL` are touched, so re-running
 after a partial failure is safe and never recomputes existing vectors.
 
+URI support: docker://, redis://, rediss:// (FalkorDB Cloud) via
+FalkorProjection.from_uri().
+
+Multi-tenant: --all-tenants queries the registry graph for team IDs and
+iterates team_{team_id} graphs. Per-tenant backfill, one team at a time.
+
 Usage:
-    python3 scripts/backfill_embeddings.py [--dry-run] [--graph GRAPH]
-        [--uri URI] [--limit N] [--batch-size N]
+    python3 graph-scripts/backfill_embeddings.py [--dry-run] [--graph GRAPH]
+        [--uri URI] [--all-tenants] [--limit N] [--batch-size N]
 
 Defaults to TORTOISE_DB_URI env var (or docker://:falkordb@localhost:16379/tortoise).
 
@@ -24,36 +30,111 @@ import sys
 
 DEFAULT_URI = "docker://:falkordb@localhost:16379/tortoise"
 DEFAULT_BATCH = 500
-LABELS = ("Point", "Label", "Source", "Object", "Subject")
-PROP_MAP = {
-    "Point": "content",
-    "Label": "name",
-    "Source": "name",
-    "Object": "name",
-    "Subject": "name",
+
+# Entity types to embed + their text property (what gets vectorized) and
+# id property (what the MATCH/SET Cypher uses as the node key).
+# #448: Source canonical key is url, not id.
+LABEL_CONFIG: dict[str, dict[str, str]] = {
+    "Point":    {"text_prop": "content", "id_prop": "id"},
+    "Event":    {"text_prop": "subject", "id_prop": "eventId"},
+    "Document": {"text_prop": "title",   "id_prop": "id"},
+    "Source":   {"text_prop": "url",     "id_prop": "url"},
+    "Object":   {"text_prop": "name",    "id_prop": "id"},
+    "Subject":  {"text_prop": "name",    "id_prop": "id"},
 }
 
 
-def connect(uri: str, default_graph: str):
-    """Connect to FalkorDB, returning (graph, resolved_graph_name)."""
-    from falkordb import FalkorDB
+def _connect_falkordb(uri: str):
+    """Connect to FalkorDB via FalkorProjection.from_uri().
 
-    if uri.startswith("docker://"):
-        rest = uri[len("docker://"):]
-        creds, hostport = rest.split("@", 1)
-        user, _, pw = creds.partition(":")
-        host, _, portpath = hostport.rpartition(":")
-        port, _, graph_from_path = portpath.partition("/")
-        graph_name = graph_from_path or default_graph
-        kwargs = {"host": host, "port": int(port)}
-        if user:
-            kwargs["username"] = user
-        if pw:
-            kwargs["password"] = pw
-        db = FalkorDB(**kwargs)
-    else:
-        raise SystemExit(f"Unsupported URI: {uri}")
-    return db.select_graph(graph_name), graph_name
+    Supports docker:// (local), redis:// and rediss:// (FalkorDB Cloud).
+    Returns (FalkorDB client, resolved_graph_name).
+    """
+    from tortoise.projection import FalkorProjection
+
+    proj = FalkorProjection.from_uri(uri)
+    return proj._db, proj._graph_name  # noqa: SLF001 — backfill needs raw DB for multi-graph access
+
+
+def _dry_run(db, graph_name: str, labels: list[str]) -> int:
+    """Count nodes missing embeddings. Returns total count."""
+    g = db.select_graph(graph_name)
+    total = 0
+    for label in labels:
+        cfg = LABEL_CONFIG[label]
+        rows = g.query(
+            f"MATCH (n:{label}) WHERE n.embedding IS NULL "
+            f"AND n.{cfg['text_prop']} IS NOT NULL RETURN count(n)"
+        ).result_set
+        n = rows[0][0] if rows else 0
+        if n:
+            print(f"  {label}: {n} missing embeddings")
+            total += n
+    return total
+
+
+def _backfill_graph(db, graph_name: str, labels: list[str],
+                    limit: int, batch_size: int) -> tuple[int, int, int]:
+    """Backfill one graph. Returns (scanned, updated, skipped)."""
+    g = db.select_graph(graph_name)
+
+    from tortoise.embeddings import compute_embedding
+
+    total = updated = skipped = 0
+    for label in labels:
+        cfg = LABEL_CONFIG[label]
+        text_prop = cfg["text_prop"]
+        id_prop = cfg["id_prop"]
+
+        # Collect (node_id, text) in bounded queries — avoids re-pagination
+        # drift from SET mutating the WHERE predicate mid-scan.
+        rows_all: list[tuple] = []
+        offset = 0
+        while True:
+            rows = g.query(
+                f"MATCH (n:{label}) WHERE n.embedding IS NULL "
+                f"AND n.{text_prop} IS NOT NULL "
+                f"RETURN n.{id_prop}, n.{text_prop} "
+                f"SKIP $skip LIMIT $limit",
+                params={"skip": offset, "limit": batch_size},
+            ).result_set
+            if not rows:
+                break
+            rows_all.extend(rows)
+            offset += len(rows)
+            if limit and offset >= limit:
+                break
+        if limit:
+            rows_all = rows_all[:limit]
+        if not rows_all:
+            continue
+        print(f"  {label}: {len(rows_all)} missing embeddings")
+
+        # Compute + write in batches. UNWIND avoids N+1 SET queries.
+        for start in range(0, len(rows_all), batch_size):
+            chunk = rows_all[start:start + batch_size]
+            batch: list[dict] = []
+            for nid, text in chunk:
+                emb = compute_embedding(str(text))
+                if emb is None:
+                    skipped += 1
+                    continue
+                batch.append({"id": nid, "emb": emb})
+                total += 1
+
+            if batch:
+                g.query(
+                    f"UNWIND $batch AS row "
+                    f"MATCH (n:{label} {{{id_prop}: row.id}}) "
+                    f"SET n.embedding = vecf32(row.emb)",
+                    params={"batch": batch},
+                )
+                updated += len(batch)
+
+            if total % 25 == 0:
+                print(f"    ... {total} processed")
+
+    return total, updated, skipped
 
 
 def main() -> int:
@@ -61,81 +142,80 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true", help="report only, no writes")
     ap.add_argument("--uri", default=os.environ.get("TORTOISE_DB_URI", DEFAULT_URI))
     ap.add_argument("--graph", default="tortoise")
-    ap.add_argument("--limit", type=int, default=0, help="0 = all (total cap)")
+    ap.add_argument("--all-tenants", action="store_true",
+                    help="iterate all team_* graphs from the registry")
+    ap.add_argument("--limit", type=int, default=0, help="0 = all (per-graph cap)")
     ap.add_argument("--batch-size", type=int, default=DEFAULT_BATCH,
                     help="rows per query/compute batch (default: %(default)s)")
     args = ap.parse_args()
 
-    g, graph_name = connect(args.uri, args.graph)
-    print(f"Graph: {graph_name}")
+    db, default_graph = _connect_falkordb(args.uri)
 
-    # ── Dry run — counts only, no model required ─────────────────────────
+    # Resolve which labels to embed — all entity types with embedding support.
+    labels = list(LABEL_CONFIG)
+
+    # ── Dry run ──────────────────────────────────────────────────────
     if args.dry_run:
-        total = 0
-        for label in LABELS:
-            rows = g.query(
-                f"MATCH (n:{label}) WHERE n.embedding IS NULL "
-                f"AND n.{PROP_MAP[label]} IS NOT NULL RETURN count(n)"
+        grand_total = 0
+        if args.all_tenants:
+            print("Dry run: all tenants")
+            reg = db.select_graph("registry")
+            team_rows = reg.query(
+                "MATCH (n:Team) RETURN n.id"
             ).result_set
-            n = rows[0][0] if rows else 0
-            if n:
-                print(f"{label}: {n} missing embeddings")
-                total += n
-        print(f"\nDry run: {total} nodes would be embedded (no writes)")
+            if not team_rows:
+                print("  No teams found in registry")
+            for row in team_rows:
+                team_id = row[0]
+                graph_name = f"team_{team_id}"
+                print(f"\nTeam: {team_id} → {graph_name}")
+                grand_total += _dry_run(db, graph_name, labels)
+        else:
+            graph_name = args.graph
+            print(f"Dry run: {graph_name}")
+            grand_total += _dry_run(db, graph_name, labels)
+        print(f"\nDry run: {grand_total} nodes would be embedded (no writes)")
         return 0
 
+    # ── Live run ─────────────────────────────────────────────────────
     from tortoise.embeddings import compute_embedding
     if compute_embedding("probe") is None:
         print("❌ Embeddings unavailable — install 'tortoise[embeddings]' "
               "(sentence-transformers + scikit-learn).", file=sys.stderr)
         return 1
 
-    total = updated = skipped = 0
-    for label in LABELS:
-        prop = PROP_MAP[label]
-        # Collect (nid, text) in bounded queries first — avoids re-pagination
-        # drift from SET mutating the WHERE predicate mid-scan.
-        rows_all: list = []
-        offset = 0
-        while True:
-            rows = g.query(
-                f"MATCH (n:{label}) WHERE n.embedding IS NULL "
-                f"AND n.{prop} IS NOT NULL "
-                f"RETURN n.id, n.{prop} SKIP $skip LIMIT $limit",
-                params={"skip": offset, "limit": args.batch_size},
-            ).result_set
-            if not rows:
-                break
-            rows_all.extend(rows)
-            offset += len(rows)
-            if args.limit and offset >= args.limit:
-                break
-        if args.limit:
-            rows_all = rows_all[: args.limit]
-        if not rows_all:
-            continue
-        print(f"{label}: {len(rows_all)} missing embeddings")
+    grand_scanned = grand_updated = grand_skipped = 0
 
-        # Compute + write in batches (bounded memory, cheap queries).
-        for start in range(0, len(rows_all), args.batch_size):
-            for nid, text in rows_all[start:start + args.batch_size]:
-                total += 1
-                emb = compute_embedding(str(text))
-                if emb is None:
-                    skipped += 1
-                    continue
-                g.query(
-                    f"MATCH (n:{label} {{id: $id}}) "
-                    f"SET n.embedding = CASE WHEN $emb IS NOT NULL "
-                    f"THEN vecf32($emb) ELSE n.embedding END",
-                    params={"id": nid, "emb": emb},
-                )
-                updated += 1
-                if total % 25 == 0:
-                    print(f"  ... {total} processed")
+    if args.all_tenants:
+        print("Backfill: all tenants")
+        reg = db.select_graph("registry")
+        team_rows = reg.query(
+            "MATCH (n:Team) RETURN n.id"
+        ).result_set
+        if not team_rows:
+            print("  No teams found in registry")
+        for row in team_rows:
+            team_id = row[0]
+            graph_name = f"team_{team_id}"
+            print(f"\n── Team: {team_id} → {graph_name} ──")
+            scanned, updated, skipped = _backfill_graph(
+                db, graph_name, labels, args.limit, args.batch_size,
+            )
+            grand_scanned += scanned
+            grand_updated += updated
+            grand_skipped += skipped
+    else:
+        graph_name = args.graph
+        print(f"Backfill: {graph_name}")
+        scanned, updated, skipped = _backfill_graph(
+            db, graph_name, labels, args.limit, args.batch_size,
+        )
+        grand_scanned += scanned
+        grand_updated += updated
+        grand_skipped += skipped
 
-    print(f"\nDone: {total} scanned, {updated} embedded, "
-          f"{skipped} skipped (embedding unavailable)")
+    print(f"\nDone: {grand_scanned} scanned, {grand_updated} embedded, "
+          f"{grand_skipped} skipped (embedding unavailable)")
     return 0
 
 
