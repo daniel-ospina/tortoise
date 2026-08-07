@@ -110,7 +110,15 @@ app.include_router(_rest_router)
 # static keys). Reuse the MCP token-bucket middleware on the parent app.
 from tortoise.mcp_auth import MCPRateLimitMiddleware
 
-app.add_middleware(MCPRateLimitMiddleware, max_per_minute=RATE_LIMIT, limit_get=True)
+# Scope to /v1 only (code-review P2, #525): /mcp metadata GET, /health, and
+# /docs must never be throttled (healthcheck false-negatives / host-protection
+# interference). /v1 GETs are included (static-key brute-force surface).
+app.add_middleware(
+    MCPRateLimitMiddleware,
+    max_per_minute=RATE_LIMIT,
+    limit_get=True,
+    paths_prefix=("/v1",),
+)
 
 
 @app.get("/health")

@@ -240,10 +240,12 @@ class MCPRateLimitMiddleware(BaseHTTPMiddleware):
     surface. The /mcp sub-app keeps the default (GET = metadata/SSE only).
     """
 
-    def __init__(self, app, max_per_minute: int = 100, limit_get: bool = False):
+    def __init__(self, app, max_per_minute: int = 100, limit_get: bool = False,
+                 paths_prefix: tuple[str, ...] = ()):
         super().__init__(app)
         self.max_per_minute = max_per_minute
         self._limit_get = limit_get
+        self._paths_prefix = paths_prefix
         self._buckets: dict[str, list[float]] = defaultdict(list)
         self._lock = asyncio.Lock()
         self._last_cleanup = time.time()
@@ -252,6 +254,8 @@ class MCPRateLimitMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         if self._disabled:
             return await call_next(request)
+        if self._paths_prefix and not any(request.url.path.startswith(p) for p in self._paths_prefix):
+            return await call_next(request)  # scope to /v1 (code-review P2, #525)
         if request.method != "POST" and not self._limit_get:
             return await call_next(request)  # GET metadata not rate-limited (unless limit_get)
         auth = request.headers.get("Authorization", "")
