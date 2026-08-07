@@ -31,5 +31,5 @@ doc_status: draft
 
 ## Related
 
-- Landing page: `premise-labs/index.html`
+- Landing page: `website/index.html`
 - Waitlist issue: [#7508](https://github.com/daniel-ospina/eldato/issues/7508)
