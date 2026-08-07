@@ -8,7 +8,7 @@ Usage:
     cd tortoise && .venv/bin/python validation/validate_tortoise_ep.py
     # or: .venv/bin/python -m pytest validation/validate_tortoise_ep.py -v
 
-Requires: pip install jax jaxlib numpyro falkordb[redislite] (all in tortoise .venv)
+Requires: pip install jax jaxlib numpyro falkordblite (all in tortoise .venv)
 """
 from __future__ import annotations
 
