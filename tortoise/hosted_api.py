@@ -24,7 +24,7 @@ from tortoise.audit_events import AuditLogger
 from tortoise.auth import hash_api_key
 import hmac
 
-from tortoise.sdk import TortoiseSDK
+from tortoise.sdk import TortoiseSDK, _content_hash
 from tortoise.mcp_server import create_http_app
 
 _logger = logging.getLogger(__name__)
@@ -1103,48 +1103,58 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
     for i, turn in enumerate(body.conversation):
         role = turn.get("role", "unknown")
         content = turn.get("content", "")
-        turn_id = f"{session_id}_t{i}"
 
+        # #490: turn Points are the episodic turn stream OF THIS SESSION —
+        # keyed deterministically by {session_id}_t{i} so re-capturing the
+        # same session is idempotent, but turns from different sessions never
+        # conflate (content-hash dedup would share an empty "[user] " or
+        # repeated "ok" turn team-wide, destroying per-session turn identity
+        # — #490 review P2-2). Node MERGEs run BEFORE the edge MERGE: a full-
+        # path MERGE (s)-[:CONTAINS]->(t) with a missing edge makes FalkorDB
+        # create the whole path from scratch, duplicating the Point node.
+        turn_id = f"{session_id}_t{i}"
+        turn_text = f"[{role}] {content[:5000]}"
         proj.g.query(
-            "CREATE (t:Point {id:$id, content:$c, pointKind:$k, is_operator:false, status:$s, createdAt:$now, updatedAt:$now})",
-            params={"id": turn_id, "c": f"[{role}] {content[:5000]}", "k": "event", "s": "draft", "now": now},
+            "MERGE (t:Point {id:$id}) "
+            "SET t.content=$c, t.pointKind=$k, t.is_operator=false, "
+            "    t.status=coalesce(t.status, $s), "
+            "    t.createdAt=coalesce(t.createdAt, $now), "
+            "    t.updatedAt=$now, t.content_hash=$ch",
+            params={"id": turn_id, "c": turn_text, "k": "event",
+                    "s": "draft", "now": now, "ch": _content_hash(turn_text)},
         )
         proj.g.query(
-            "MATCH (s:Session {id:$sid}), (t:Point {id:$tid}) CREATE (s)-[:CONTAINS]->(t)",
+            "MATCH (s:Session {id:$sid}), (t:Point {id:$tid}) "
+            "MERGE (s)-[:CONTAINS]->(t)",
             params={"sid": session_id, "tid": turn_id},
         )
 
-        idx = 0
         for pat in decisions:
             for match in re.finditer(pat, content):
-                pid = f"{turn_id}_d{idx}"
                 text = match.group().strip()
+                # Extracted decisions/claims ARE cross-session knowledge —
+                # keep content-hash dedup (identical claim in two sessions is
+                # one Point). Dedup by content_hash + pointKind via SDK.
+                p = sdk.create_point("decision", text[:5000], dedup=True)
+                pid = p["id"]
                 proj.g.query(
-                    "CREATE (p:Point {id:$id, content:$c, pointKind:$k, is_operator:false, status:$s, createdAt:$now, updatedAt:$now})",
-                    params={"id": pid, "c": text[:5000], "k": "decision", "s": "draft", "now": now},
-                )
-                proj.g.query(
-                    "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) CREATE (s)-[:CONTAINS]->(p)",
+                    "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
+                    "MERGE (s)-[:CONTAINS]->(p)",
                     params={"sid": session_id, "pid": pid},
                 )
                 extracted.append({"id": pid, "kind": "decision", "text": text[:200]})
-                idx += 1
 
-        idx = 0
         for pat in claims:
             for match in re.finditer(pat, content):
-                pid = f"{turn_id}_c{idx}"
                 text = match.group().strip()
+                p = sdk.create_point("statement", text[:5000], dedup=True)
+                pid = p["id"]
                 proj.g.query(
-                    "CREATE (p:Point {id:$id, content:$c, pointKind:$k, is_operator:false, status:$s, createdAt:$now, updatedAt:$now})",
-                    params={"id": pid, "c": text[:5000], "k": "statement", "s": "draft", "now": now},
-                )
-                proj.g.query(
-                    "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) CREATE (s)-[:CONTAINS]->(p)",
+                    "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
+                    "MERGE (s)-[:CONTAINS]->(p)",
                     params={"sid": session_id, "pid": pid},
                 )
                 extracted.append({"id": pid, "kind": "statement", "text": text[:200]})
-                idx += 1
 
     # Ontology v3.1 §4.5/§3.2 (#7882): also create an episodic :Event node
     # (eventKind: sessionCaptured) and link extracted Points to it via
