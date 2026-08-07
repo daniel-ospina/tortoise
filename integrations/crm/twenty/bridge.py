@@ -216,57 +216,84 @@ def queue_unmatched_speaker(meeting_id: str, speaker: dict) -> None:
 # --- Tortoise Integration ---
 
 def tortoise_available() -> bool:
-    """Check if Tortoise MCP tools are available."""
+    """Check if the Tortoise daemon is reachable over MCP (#338 T2.2).
+
+    Real connectivity probe (not an import check) — graceful when the
+    daemon is down: scripts skip, never crash.
+    """
     try:
-        from tortoise.sdk import TortoiseSDK
-        return TortoiseSDK() is not None
+        from tortoise.mcp_client import available
+        return available()
     except (ImportError, ValueError):
         return False
 
 
+def _point_id(result) -> str | None:
+    """Extract the created Point id from an MCP call_tool result.
+
+    The result carries JSON text content; parse defensively.
+    """
+    import json as _json
+
+    try:
+        if hasattr(result, "content"):
+            for block in result.content:
+                text = getattr(block, "text", None)
+                if text:
+                    parsed = _json.loads(text)
+                    if isinstance(parsed, dict):
+                        return parsed.get("id")
+        # dict-shaped fallback (some fastmcp versions unwrap)
+        if isinstance(result, dict):
+            return result.get("id")
+    except (TypeError, ValueError, AttributeError):
+        pass
+    return None
+
+
 def push_to_tortoise(frontmatter: dict) -> dict:
-    """Push meeting data to Tortoise/FalkorDB epistemic graph."""
+    """Push meeting data to Tortoise epistemic graph over MCP (#338 T2.2).
+
+    Connects to the daemon (TORTOISE_MCP_URL, default http://localhost:8000/mcp)
+    — never imports the engine. Idempotency preserved via dedup=True.
+    """
     if not tortoise_available():
         return {"status": "skipped", "reason": "tortoise_unavailable"}
 
     try:
-        from tortoise.sdk import TortoiseSDK
-        sdk = TortoiseSDK()
+        from tortoise.mcp_client import call_tool
 
         point_ids = []
 
-        meeting_point = sdk.create_point(
-            kind="event",
-            content=f"Meeting: {frontmatter['title']} ({frontmatter['date']})",
-            context="meeting-intelligence",
-            authoredBy="minutes-bridge",
-            dedup=True,
-        )
-        point_ids.append({"type": "meeting", "id": meeting_point.get("id")})
+        meeting_point = call_tool("tortoise_create_point", {
+            "kind": "event",
+            "content": f"Meeting: {frontmatter['title']} ({frontmatter['date']})",
+            "authoredBy": "minutes-bridge",
+            "dedup": True,
+        })
+        point_ids.append({"type": "meeting", "id": _point_id(meeting_point)})
 
         for idx, decision in enumerate(frontmatter.get("decisions", [])):
             if not decision.get("text"):
                 continue
-            dp = sdk.create_point(
-                kind="decision",
-                content=decision["text"],
-                context="meeting-intelligence",
-                authoredBy="minutes-bridge",
-                dedup=True,
-            )
-            point_ids.append({"type": "decision", "index": idx, "id": dp.get("id")})
+            dp = call_tool("tortoise_create_point", {
+                "kind": "decision",
+                "content": decision["text"],
+                    "authoredBy": "minutes-bridge",
+                "dedup": True,
+            })
+            point_ids.append({"type": "decision", "index": idx, "id": _point_id(dp)})
 
         for idx, commitment in enumerate(frontmatter.get("commitments", [])):
             if not commitment.get("text"):
                 continue
-            cp = sdk.create_point(
-                kind="commitment",
-                content=commitment["text"],
-                context="meeting-intelligence",
-                authoredBy="minutes-bridge",
-                dedup=True,
-            )
-            point_ids.append({"type": "commitment", "index": idx, "id": cp.get("id")})
+            cp = call_tool("tortoise_create_point", {
+                "kind": "commitment",
+                "content": commitment["text"],
+                    "authoredBy": "minutes-bridge",
+                "dedup": True,
+            })
+            point_ids.append({"type": "commitment", "index": idx, "id": _point_id(cp)})
 
         return {"status": "ok", "points": point_ids}
 
