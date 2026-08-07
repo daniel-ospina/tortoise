@@ -110,6 +110,8 @@ def run_fts_query(
     entity_type: 'point' (default), 'event', 'subject', 'document', 'object',
     'source', or 'operator'. Document FTS searches the _searchText index
     (#125) which concatenates title+summary+topics.
+    Returns n.url for source (canonical key, #448), n.eventId for event,
+    n.id for all other entity types.
 
     Note: timeout_ms is checked AFTER the query completes (post-hoc).
     A slow query still consumes DB resources — this is a soft guard,
@@ -139,7 +141,14 @@ def run_fts_query(
             logger.warning("Operator FTS query failed: %s", e)
             return []
     label = entity_type.capitalize()  # point→Point, event→Event, subject→Subject
-    id_field = "eventId" if entity_type == "event" else "id"
+    # #448: three-way id_field — source→url (canonical key, #149),
+    # event→eventId, else→id
+    if entity_type == "source":
+        id_field = "url"
+    elif entity_type == "event":
+        id_field = "eventId"
+    else:
+        id_field = "id"
     try:
         start = time.monotonic()
         cypher = (
@@ -183,7 +192,8 @@ def run_vector_query(
     entity_type: 'point' (default), 'event', 'subject', 'document', 'object',
     'source', or 'operator'. The vector index is queried against the label
     matching the entity_type (Event/Subject/Document/Object/...), and results
-    return the entity's id field (eventId for events, id otherwise).
+    return the entity's id field: url for source (canonical key, #448),
+    eventId for event, id for all other entity types.
     Operators are Points with is_operator=true — they query the Point label.
     (#172)
 
@@ -197,7 +207,14 @@ def run_vector_query(
     # Operators are Points with is_operator=true — match the Point label
     # (consistent with run_fts_query / run_structural_query). (#172)
     label = "Point" if entity_type == "operator" else entity_type.capitalize()
-    id_field = "eventId" if entity_type == "event" else "id"
+    # #448: three-way id_field — source→url (canonical key, #149),
+    # event→eventId, else→id
+    if entity_type == "source":
+        id_field = "url"
+    elif entity_type == "event":
+        id_field = "eventId"
+    else:
+        id_field = "id"
 
     # Docker/server mode → try index-accelerated vector search (#7777)
     if not is_embedded:
