@@ -21,6 +21,67 @@ def _build_search_text(title, summary=None, topics=None) -> str:
 class _EntityHandlers:
     """Mixin: entity upsert/delete methods for FalkorProjection."""
 
+    # Event dict keys that are never stored as node properties (#228).
+    _META_KEYS: frozenset = frozenset({
+        "type",              # event type
+        "projection_version",# internal version tracking
+        "version",           # event format version
+        "about_entities",    # handled as graph edges
+        "authoredBy",        # handled as authoredBy edge
+        "ownedBy",           # handled as ownedBy edge
+        "managedBy",         # handled as managedBy edge
+        "aboutSubject",      # handled as aboutSubject edge
+        "aboutObject",       # handled as aboutObject edge
+    })
+
+    # Keys explicitly handled by each _upsert_* method.
+    _SUBJECT_HANDLED: frozenset = frozenset({
+        "id", "name", "subject_kind", "subjectKind", "createdAt", "embedding",
+    })
+    _OBJECT_HANDLED: frozenset = frozenset({
+        "id", "name", "object_kind", "objectKind", "createdAt", "title", "embedding",
+    })
+    _DOCUMENT_HANDLED: frozenset = frozenset({
+        "id", "title", "document_kind", "documentKind", "content",
+        "topics", "summary", "session_id", "event_id", "doc_status",
+        "source_path", "format", "embedding", "updatedAt",
+        "about_entities", "objectKind", "status",
+    })
+    _EVENT_HANDLED: frozenset = frozenset({
+        "id", "eventId", "eventKind", "event",
+        "subject", "object", "startedAt", "endedAt",
+        "parentEvent", "participants", "classificationLevel",
+        "format", "embedding",
+        "aboutSubject", "aboutObject", "objectType", "uses",
+        "childEvents", "scopedFacts",
+        # name / eventStatus / createdAt are intentionally NOT here —
+        # they were historically dropped by the fixed-field MERGE and
+        # are now persisted as arbitrary props via _persist_extra_props.
+    })
+    _SOURCE_HANDLED: frozenset = frozenset({
+        "id", "url", "sourceKind", "contentHash",
+        "title", "ingestedAt", "version", "externalId", "updatedAt",
+    })
+
+    def _persist_extra_props(self, match_clause: str, match_params: dict,
+                              ev: dict, handled_keys: frozenset) -> None:
+        """Persist arbitrary caller-supplied props not explicitly handled.
+
+        Computes the set difference between event dict keys and the union of
+        _META_KEYS + handled_keys, then applies SET n += $extra on the
+        matched node.  Skips the query entirely when there are no extra props.
+
+        None values are excluded — Cypher null semantics in SET maps are
+        unreliable (coalesce-based updates use explicit per-field clauses).
+        """
+        skip = self._META_KEYS | handled_keys
+        extra = {k: v for k, v in ev.items() if k not in skip and v is not None}
+        if extra:
+            self.g.query(
+                match_clause + " SET n += $extra",
+                params={**match_params, "extra": extra},
+            )
+
     def _upsert(self, p: dict) -> None:
         op = p.get("operator")
         prov = p.get("provenance", {})
@@ -115,6 +176,11 @@ class _EntityHandlers:
                     "ca": ev.get("createdAt"), "now": _now_iso(),
                     "embedding": embedding},
         )
+        # #228: persist arbitrary caller-supplied props
+        self._persist_extra_props(
+            "MATCH (n:Subject {name: $name})", {"name": name},
+            ev, self._SUBJECT_HANDLED,
+        )
 
     def _upsert_object(self, ev: dict) -> None:
         """MERGE Object by name (content-hash dedup).
@@ -148,6 +214,11 @@ class _EntityHandlers:
                     "ca": ev.get("createdAt"), "now": _now_iso(),
                     "title": title,
                     "embedding": embedding},
+        )
+        # #228: persist arbitrary caller-supplied props
+        self._persist_extra_props(
+            "MATCH (n:Object {name: $name})", {"name": name},
+            ev, self._OBJECT_HANDLED,
         )
 
     def _upsert_document(self, ev: dict) -> None:
@@ -206,6 +277,12 @@ class _EntityHandlers:
                     "eid": eid, "ds": ds, "st": st, "sp": sp,
                     "embedding": embedding,
                     "now": _now_iso()},
+        )
+        # #228: persist arbitrary caller-supplied props (before edge wiring
+        # so that extra props land on the Document node regardless of edge success)
+        self._persist_extra_props(
+            "MATCH (n:Document {id: $id})", {"id": did},
+            ev, self._DOCUMENT_HANDLED,
         )
         # #205 — wire references edge (Source → Document) for provenance chain.
         # doc_id IS the source url (file path) in the ingest flow, and the
@@ -334,6 +411,12 @@ class _EntityHandlers:
                         "MERGE (e)-[:uses]->(o)",
                         params={"name": use_name, "eid": eid},
                     )
+        # #228: persist arbitrary caller-supplied props (iterate inner dict
+        # so nested {event:{...}} and flat formats both work)
+        self._persist_extra_props(
+            "MATCH (n:Event {eventId: $eid})", {"eid": eid},
+            inner, self._EVENT_HANDLED,
+        )
 
     def _upsert_source(self, ev: dict) -> None:
         """MERGE Source node for layered provenance (Ontology v2.1).
@@ -367,4 +450,9 @@ class _EntityHandlers:
                 "now": _now_iso(),
                 "ext": ev.get("externalId", ""),
             },
+        )
+        # #228: persist arbitrary caller-supplied props
+        self._persist_extra_props(
+            "MATCH (n:Source {url: $url})", {"url": key},
+            ev, self._SOURCE_HANDLED,
         )
