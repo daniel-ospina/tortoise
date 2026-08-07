@@ -12,6 +12,7 @@ import sys
 import tempfile
 
 import pytest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -1451,7 +1452,6 @@ class TestVocabEdgeValidation:
         """create_edge rejects 'instantiates' — Action dissolved in v3.0."""
         if _skip_if_no_falkor():
             return
-        import pytest
         proj = FalkorProjection(_tmp("g.db"), graph_name="test")
         try:
             proj._upsert({"id": "a", "content": "A", "context": "ctx"})
@@ -1618,3 +1618,31 @@ def test_falkor_rebuild_all_parity_with_apply():
     finally:
         import shutil
         shutil.rmtree(d, ignore_errors=True)
+
+
+def test_falkor_revise_point_wipes_stale_embedding_on_compute_failure():
+    """#19 regression: PointRevised with a raising compute_embedding must NOT
+    leave the stale embedding — the except block wipes it (embedding = None)
+    so SET overwrites the graph value instead of preserving the old vector."""
+    if _skip_if_no_falkor():
+        return
+    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    try:
+        proj.apply({"type": "PointAdded",
+                     "point": {"id": "p1", "content": "old content", "context": "ctx"}})
+        # Seed a stale embedding as if it had been computed before the failure.
+        proj.g.query(
+            "MATCH (n:Point {id:'p1'}) SET n.embedding = vecf32($emb)",
+            params={"emb": [0.1] * 384},
+        )
+        # PointRevised whose embedding recompute raises → must wipe, not keep.
+        with mock.patch("tortoise.embeddings.compute_embedding",
+                        side_effect=RuntimeError("model load failed")):
+            proj.apply({"type": "PointRevised", "id": "p1", "new_content": "new content"})
+        r = proj.g.query(
+            "MATCH (n:Point {id:'p1'}) RETURN n.content, n.embedding IS NULL"
+        ).result_set
+        assert r[0][0] == "new content"
+        assert r[0][1] is True, "stale embedding survived a failed recompute (#19)"
+    finally:
+        proj.close()
