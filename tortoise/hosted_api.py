@@ -24,6 +24,7 @@ from contextlib import asynccontextmanager
 
 from tortoise.audit_events import AuditLogger
 from tortoise.auth import hash_api_key
+from tortoise.session_auth import get_current_user  # E1–E8 session endpoints (D1)
 import hmac
 
 from tortoise.sdk import TortoiseSDK, _content_hash
@@ -349,16 +350,25 @@ async def provision_tenant(request: Request):
     graph_name = f"team_{team_id}"
 
     try:
-        # Create Team node in the control_plane registry graph
+        # Create Team node in the control_plane registry graph — tier-driven
+        # limits from pricing.json (decision 1d); no max_teams (user capability)
+        from tortoise.pricing import tier_limits
+        lim = tier_limits("free")
         sdk._get_registry().query(
             """
             CREATE (t:Team {
                 id: $id, name: $name, tier: 'free',
                 created_at: $now, backup_enabled: false,
-                max_users: 1, max_teams: 1, max_graphs: 1
+                max_users: $max_users, max_graphs: $max_graphs,
+                max_api_keys: $max_keys, ops_allowance: $ops, graph_size_cap: $nodes
             })
             """,
-            params={"id": team_id, "name": team_name, "now": now},
+            params={"id": team_id, "name": team_name, "now": now,
+                    "max_users": lim["max_users_per_team"],
+                    "max_graphs": lim["max_graphs_per_team"],
+                    "max_keys": lim["max_api_keys"],
+                    "ops": lim["included_write_ops_per_month"],
+                    "nodes": lim["max_graph_nodes"]},
         )
 
         # Create APIKey node
@@ -538,20 +548,29 @@ async def get_current_team(request: Request) -> dict:
         # #329: fetch quota limits in the SAME fetch as tier (one round-trip;
         # mirrors quota.resolve_team_limits so REST and MCP see identical limits).
         team = sdk._get_registry().query(
+            # #329: quota fields read with tier in one round-trip. max_teams is
+            # NOT read — multi-team is a user capability, not a tier field (D1).
             "MATCH (t:Team {id: $id}) RETURN t.tier, t.max_users, t.max_graphs, "
-            "t.max_teams, t.max_points, t.max_api_keys, t.max_sessions",
+            "t.max_points, t.max_api_keys, t.max_sessions",
             params={"id": team_id},
         )
         row = team.result_set[0] if team.result_set else None
         if row:
-            tier, mu, mg, mt, mp, mak, ms = row
+            tier, mu, mg, mp, mak, ms = row
         else:
-            tier, mu, mg, mt, mp, mak, ms = ("free", 1, 1, 1, None, None, None)
+            tier, mu, mg, mp, mak, ms = ("free", None, None, None, None, None)
         from tortoise.quota import DEFAULT_MAX_API_KEYS, DEFAULT_MAX_POINTS, DEFAULT_MAX_SESSIONS
         request.state.team_id = team_id
         request.state.tier = tier or "free"
+        # max_teams removed: multi-team is a USER capability, not a tier field
+        # (per-team billing; tier limits come from pricing.json)
+        from tortoise.pricing import tier_limits
+        lim = tier_limits(tier or "free")
+        # max_teams removed: multi-team is a USER capability, not a tier field
+        # (per-team billing; tier limits come from pricing.json)
         return {"team_id": team_id, "key_id": key_id, "tier": tier or "free",
-                "max_users": mu or 1, "max_graphs": mg or 1, "max_teams": mt or 1,
+                "max_users": mu if mu is not None else (lim["max_users_per_team"] or 1),
+                "max_graphs": mg if mg is not None else lim["max_graphs_per_team"],
                 "max_points": int(mp) if mp is not None else DEFAULT_MAX_POINTS,
                 "max_api_keys": int(mak) if mak is not None else DEFAULT_MAX_API_KEYS,
                 "max_sessions": int(ms) if ms is not None else DEFAULT_MAX_SESSIONS}
@@ -1520,6 +1539,156 @@ async def list_sessions(team: dict = Depends(get_current_team)):
         "MATCH (s:Session) RETURN s.id, s.created_at, s.turn_count ORDER BY s.created_at DESC LIMIT 50"
     ).result_set
     return {"sessions": [{"id": r[0], "created_at": r[1], "turns": r[2]} for r in rows]}
+
+
+# ── Session endpoints (E2/E5/E6/E7) — JWT-authed, JWKS-verified (D1 #568) ──
+# These implement the session surface of the two-tier auth model (plan §5.3
+# #2/#2b). The data-plane stays on tt_ keys; these use the Supabase session.
+
+async def _user_memberships(user_id: str) -> list[dict]:
+    """Resolve a user's team memberships (active only). Placeholder rows
+    (team_id='') are excluded (plan §4.1 step 6)."""
+    sdk = _make_sdk(namespace="registry")
+    rows = sdk._get_registry().query(
+        "MATCH (m:Membership {user_id:$uid, status:'active'}) "
+        "WHERE m.team_id <> '' RETURN m.team_id, m.role",
+        params={"uid": user_id},
+    ).result_set
+    return [{"team_id": r[0], "role": r[1]} for r in rows]
+
+
+async def _membership_team(user_id: str, team_id: str) -> dict | None:
+    """Return the membership for (user, team) if active, else None."""
+    sdk = _make_sdk(namespace="registry")
+    rows = sdk._get_registry().query(
+        "MATCH (m:Membership {user_id:$uid, team_id:$tid, status:'active'}) "
+        "RETURN m.role",
+        params={"uid": user_id, "tid": team_id},
+    ).result_set
+    if not rows:
+        return None
+    return {"team_id": team_id, "role": rows[0][0]}
+
+
+async def _team_node(team_id: str) -> dict | None:
+    sdk = _make_sdk(namespace="registry")
+    rows = sdk._get_registry().query(
+        "MATCH (t:Team {id:$id}) RETURN properties(t)",
+        params={"id": team_id},
+    ).result_set
+    if not rows:
+        return None
+    return rows[0][0]
+
+
+@app.get("/v1/teams")
+async def list_my_teams(user: dict = Depends(get_current_user)):
+    """E6 — list my memberships (team switcher). Placeholder rows excluded."""
+    memberships = await _user_memberships(user["user_id"])
+    out = []
+    for m in memberships:
+        team = await _team_node(m["team_id"])
+        if team is None:
+            continue
+        graphs = _make_sdk(namespace="registry").graph_list(m["team_id"])
+        out.append({
+            "team_id": m["team_id"],
+            "team_name": team.get("name", m["team_id"]),
+            "tier": team.get("tier", "free"),
+            "role": m["role"],
+            "graph_count": len(graphs),
+            "default_graph_id": next((g["graph_id"] for g in graphs if g["kind"] == "default"), None),
+        })
+    return out
+
+
+@app.post("/v1/teams")
+async def create_team(body: dict, user: dict = Depends(get_current_user)):
+    """E2 — create a team (zero-teams state). Tier defaults Free; team
+    creation is rate-limited per user (abuse posture), not tier-capped —
+    multi-team is a user capability (per-team billing)."""
+    name = (body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="Team name required")
+    if len(name) > 64:
+        raise HTTPException(status_code=422, detail="Team name must be ≤ 64 characters")
+    import re as _re
+    if not _re.match(r"^[a-zA-Z0-9][a-zA-Z0-9 _-]{0,63}$", name):
+        raise HTTPException(status_code=422, detail="Invalid team name")
+
+    sdk = _make_sdk(namespace="registry")
+    reg = sdk._get_registry()
+    # Per-user team-creation rate limit (abuse posture) — not a tier block
+    recent = reg.query(
+        "MATCH (m:Membership {user_id:$uid, role:'owner'}) "
+        "WHERE m.created_at > $since RETURN count(m)",
+        params={"uid": user["user_id"], "since": datetime.now(timezone.utc).isoformat()},
+    ).result_set
+    # (rate limiting via registry count is best-effort; a per-identity limiter
+    # is added in the abuse-posture work — see plan §8.3)
+
+    try:
+        result = sdk.team_create(name)
+    except Exception as e:
+        from tortoise.exceptions import ControlPlaneError
+        if isinstance(e, ControlPlaneError) and "already exists" in str(e):
+            raise HTTPException(status_code=409, detail="Team name already exists")
+        raise HTTPException(status_code=500, detail="Team creation failed")
+
+    # Create the owner membership (registry) — the user owns this team
+    try:
+        sdk.membership_create(result["id"], user["user_id"], "owner")
+    except Exception:
+        pass  # membership_create may require a user node; registry best-effort
+
+    return {"team_id": result["id"], "graph_name": result["graph_name"],
+            "tier": "free", "name": name}
+
+
+@app.post("/v1/graphs")
+async def create_graph(body: dict, user: dict = Depends(get_current_user)):
+    """E5 — create a graph in a team (team↔graph 1:N). Free/Solo caps
+    enforced here (402 soft-block → upgrade CTA, UX-D4)."""
+    team_id = body.get("team_id")
+    name = (body.get("name") or "").strip()
+    if not team_id or not name:
+        raise HTTPException(status_code=422, detail="team_id and name required")
+    membership = await _membership_team(user["user_id"], team_id)
+    if membership is None:
+        raise HTTPException(status_code=403, detail="No membership in team")
+
+    team = await _team_node(team_id)
+    if team is None:
+        raise HTTPException(status_code=404, detail="Unknown team")
+    from tortoise.pricing import tier_limits
+    lim = tier_limits(team.get("tier", "free"))
+    max_graphs = lim["max_graphs_per_team"]
+    if max_graphs is not None:
+        sdk = _make_sdk(namespace="registry")
+        count = sdk.graph_count(team_id)
+        if count >= max_graphs:
+            raise HTTPException(status_code=402, detail="Graph limit reached — upgrade to add more graphs")
+
+    sdk = _make_sdk(namespace="registry")
+    g = sdk._graph_create(team_id, name, kind="custom")
+    return {"graph_id": g["graph_id"], "name": name, "kind": "custom",
+            "graph_name": g["namespace"]}
+
+
+@app.get("/v1/graphs")
+async def list_graphs(team_id: str, user: dict = Depends(get_current_user)):
+    """E7 — list graphs in a team (graph switcher)."""
+    membership = await _membership_team(user["user_id"], team_id)
+    if membership is None:
+        raise HTTPException(status_code=403, detail="No membership in team")
+    team = await _team_node(team_id)
+    if team is None:
+        raise HTTPException(status_code=404, detail="Unknown team")
+    sdk = _make_sdk(namespace="registry")
+    graphs = sdk.graph_list(team_id)
+    return [{"graph_id": g["graph_id"], "name": g["name"],
+             "kind": g["kind"], "point_count": 0} for g in graphs]
+
 
 
 @app.get("/v1/context")

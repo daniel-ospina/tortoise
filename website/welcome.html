@@ -445,10 +445,10 @@ you up to 6 yes/no questions and set up your Tortoise memory.
 
       const userId = session.user.id;
 
-      // Poll the user_teams table until api_key is populated
+      // Poll the team_memberships table until api_key is populated
       for (let attempt = 0; attempt < POLL_MAX_ATTEMPTS; attempt++) {
         const { data, error } = await supabase
-          .from("user_teams")
+          .from("team_memberships")
           .select("team_id, team_name, api_key, graph_name")
           .eq("user_id", userId)
           .single();
@@ -469,7 +469,7 @@ you up to 6 yes/no questions and set up your Tortoise memory.
 
       // Timed out — check one more time
       const { data } = await supabase
-        .from("user_teams")
+        .from("team_memberships")
         .select("team_id, team_name, api_key, graph_name")
         .eq("user_id", userId)
         .single();
