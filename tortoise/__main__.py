@@ -8,7 +8,9 @@ def _cmd_rebuild(args):
     print(f"Rebuilding from {args.dir} → {args.db}")
     try:
         from tortoise.projection import FalkorProjection
-        proj = FalkorProjection(args.db)
+        # skip_health_check: `rebuild` IS the recovery tool — a broken DB must
+        # not block its own rebuild (ops safety #428).
+        proj = FalkorProjection(args.db, skip_health_check=True)
         counts = proj.rebuild_all(args.dir)
         print(f"Done: {counts['nodes']} nodes, {counts['edges']} edges from {counts['events']} events")
     except ImportError as e:
