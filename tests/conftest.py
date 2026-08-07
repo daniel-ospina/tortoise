@@ -32,13 +32,9 @@ try:
     from redislite.falkordb_client import FalkorDB  # noqa: F401
 except ImportError:
     print(
-        "
-⚠️  falkordblite NOT installed — embedded-mode tests will fail.
-"
-        "    Fix: pip install falkordblite>=0.10
-"
-        "    (plain redislite does NOT include the FalkorDB embedded client)
-",
+        "\n⚠️  falkordblite NOT installed — embedded-mode tests will fail.\n"
+        "    Fix: pip install falkordblite>=0.10\n"
+        "    (plain redislite does NOT include the FalkorDB embedded client)\n",
         file=sys.stderr,
     )
 
