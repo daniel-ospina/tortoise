@@ -417,8 +417,8 @@ class TestComputeReputation:
                 params={"eid": event_id, "pid": point_id},
             )
 
-        p1 = sdk.create_point("observation", "market up", context="test")
-        p2 = sdk.create_point("observation", "market down", context="test")
+        p1 = sdk.create_point("observation", "market up")
+        p2 = sdk.create_point("observation", "market down")
 
         # 1 IMPL + 1 NAND → Beta(2, 2) → mean 0.5
         _add_outcome("ev-mix-1", "IMPL", p1["id"])
@@ -436,7 +436,7 @@ class TestComputeReputation:
         assert any(o["outcome"] == "IMPL" for o in rep["outcomes"])
 
         # Add a 2nd IMPL → Beta(3, 2) → mean 0.6
-        p3 = sdk.create_point("observation", "market up again", context="test")
+        p3 = sdk.create_point("observation", "market up again")
         _add_outcome("ev-mix-3", "IMPL", p3["id"])
         rep = sdk.compute_reputation(subj["id"])
         assert rep["impl_count"] == 2
@@ -475,7 +475,7 @@ class TestComputeReputation:
             )
 
         # 1 NAND → Beta(1, 2) → mean 0.3333
-        p1 = sdk.create_point("observation", "false claim", context="test")
+        p1 = sdk.create_point("observation", "false claim")
         _add_outcome("ev-nand-1", "NAND", p1["id"])
         rep = sdk.compute_reputation(subj["id"])
         assert rep["impl_count"] == 0
@@ -488,7 +488,7 @@ class TestComputeReputation:
         assert all(o["outcome"] == "NAND" for o in rep["outcomes"])
 
         # Add a 2nd NAND → Beta(1, 3) → mean 0.25
-        p2 = sdk.create_point("observation", "another false claim", context="test")
+        p2 = sdk.create_point("observation", "another false claim")
         _add_outcome("ev-nand-2", "NAND", p2["id"])
         rep = sdk.compute_reputation(subj["id"])
         assert rep["impl_count"] == 0
@@ -616,9 +616,9 @@ class TestSupersedePointStructuralTransfer:
         """wasDerivedFrom edge transfers to the superseding Point (#150)."""
         proj = sdk._get_proj()
         # Create source point and a derived point
-        src = sdk.create_point("statement", "source data", context="t")
-        derived = sdk.create_point("statement", "derived claim", context="t")
-        new_pt = sdk.create_point("statement", "new derived claim", context="t")
+        src = sdk.create_point("statement", "source data")
+        derived = sdk.create_point("statement", "derived claim")
+        new_pt = sdk.create_point("statement", "new derived claim")
         # Wire wasDerivedFrom on derived point: (derived)-[:wasDerivedFrom]->(src)
         proj.create_edge(derived["id"], src["id"], "wasDerivedFrom")
         # Supersede the derived point
