@@ -995,3 +995,189 @@ class TestStubEntityULID:
         assert r[0][0] == subj["id"], (
             f"existing ULID should be preserved: {r[0][0]!r} != {subj['id']!r}"
         )
+
+
+# ── #212: participatesIn edges ────────────────────────────────────────
+
+
+@pytest.fixture
+def live_sdk_212():
+    """Live FalkorProjection on a test-prefixed graph with test_guard."""
+    old_uri = os.environ.get("TORTOISE_DB_URI")
+    os.environ["TORTOISE_DB_URI"] = (
+        "docker://:@localhost:16379/tortoise_test_212_participates"
+    )
+    try:
+        s = TortoiseSDK()
+        s.test_guard()  # ensures we're not on production
+        # Clean the test graph before each test
+        proj = s._get_proj()
+        proj.g.query("MATCH (n) DETACH DELETE n")
+        yield s
+        s.close()
+    finally:
+        if old_uri is not None:
+            os.environ["TORTOISE_DB_URI"] = old_uri
+        else:
+            os.environ.pop("TORTOISE_DB_URI", None)
+
+
+class TestParticipatesInEdges:
+    """#212: _upsert_event wires (Subject)-[:participatesIn]->(Event)
+    from event.participants list, falling back to event.subject."""
+
+    def test_participants_list_creates_edges(self, live_sdk_212):
+        """Event with participants list → one participatesIn edge per
+        participant id."""
+        sdk = live_sdk_212
+        proj = sdk._get_proj()
+        # Create subjects first (they need id properties)
+        alice = sdk.create_subject("alice", "tester")
+        bob = sdk.create_subject("bob", "reviewer")
+        carol = sdk.create_subject("carol", "observer")
+        # Create event with participants list
+        proj.apply({
+            "type": "EventRecorded",
+            "id": "ev-212-1",
+            "eventId": "ev-212-1",
+            "eventKind": "meeting",
+            "subject": "alice",
+            "participants": [alice["id"], bob["id"], carol["id"]],
+            "startedAt": "2024-01-01T00:00:00Z",
+        })
+        # Verify participatesIn edges exist
+        r = proj.g.query(
+            "MATCH (s:Subject)-[:participatesIn]->(e:Event {eventId:'ev-212-1'}) "
+            "RETURN s.name ORDER BY s.name"
+        ).result_set
+        names = [row[0] for row in r]
+        assert "alice" in names, f"alice missing from participants: {names}"
+        assert "bob" in names, f"bob missing from participants: {names}"
+        assert "carol" in names, f"carol missing from participants: {names}"
+        assert len(names) == 3, f"expected 3 participants, got {len(names)}: {names}"
+
+    def test_participants_edges_idempotent(self, live_sdk_212):
+        """Re-applying same event does not duplicate participatesIn edges."""
+        sdk = live_sdk_212
+        proj = sdk._get_proj()
+        alice = sdk.create_subject("alice", "tester")
+        event = {
+            "type": "EventRecorded",
+            "id": "ev-212-2",
+            "eventId": "ev-212-2",
+            "eventKind": "standup",
+            "subject": "alice",
+            "participants": [alice["id"]],
+            "startedAt": "2024-01-01T00:00:00Z",
+        }
+        proj.apply(event)
+        proj.apply(event)  # idempotent re-apply
+        count = proj.g.query(
+            "MATCH ()-[p:participatesIn]->(e:Event {eventId:'ev-212-2'}) "
+            "RETURN count(p)"
+        ).result_set[0][0]
+        assert count == 1, f"expected 1 edge, got {count}"
+
+    def test_fallback_subject_when_no_participants(self, live_sdk_212):
+        """When participants is empty/missing, fallback to event.subject for
+        a single participatesIn edge."""
+        sdk = live_sdk_212
+        proj = sdk._get_proj()
+        # Create subject first
+        sdk.create_subject("dave", "engineer")
+        proj.apply({
+            "type": "EventRecorded",
+            "id": "ev-212-3",
+            "eventId": "ev-212-3",
+            "eventKind": "commit",
+            "subject": "dave",
+            # no participants key at all
+            "startedAt": "2024-01-01T00:00:00Z",
+        })
+        r = proj.g.query(
+            "MATCH (s:Subject {name:'dave'})-[:participatesIn]->(e:Event {eventId:'ev-212-3'}) "
+            "RETURN count(*) > 0"
+        ).result_set
+        assert r and r[0][0] is True, "fallback participatesIn edge missing"
+
+    def test_no_participants_no_subject_no_edges(self, live_sdk_212):
+        """Event with no participants and no subject → zero participatesIn
+        edges."""
+        sdk = live_sdk_212
+        proj = sdk._get_proj()
+        proj.apply({
+            "type": "EventRecorded",
+            "id": "ev-212-4",
+            "eventId": "ev-212-4",
+            "eventKind": "system",
+            # no subject, no participants
+            "startedAt": "2024-01-01T00:00:00Z",
+        })
+        count = proj.g.query(
+            "MATCH ()-[p:participatesIn]->(e:Event {eventId:'ev-212-4'}) "
+            "RETURN count(p)"
+        ).result_set[0][0]
+        assert count == 0, f"expected 0 edges, got {count}"
+
+    def test_participants_edges_are_bidirectional_queryable(self, live_sdk_212):
+        """participatesIn edges are queryable in both directions."""
+        sdk = live_sdk_212
+        proj = sdk._get_proj()
+        alice = sdk.create_subject("alice-212", "tester")
+        bob = sdk.create_subject("bob-212", "reviewer")
+        proj.apply({
+            "type": "EventRecorded",
+            "id": "ev-212-5",
+            "eventId": "ev-212-5",
+            "eventKind": "review",
+            "subject": "alice-212",
+            "participants": [alice["id"], bob["id"]],
+            "startedAt": "2024-01-01T00:00:00Z",
+        })
+        # Query: which events did alice participate in?
+        r1 = proj.g.query(
+            "MATCH (s:Subject {name:'alice-212'})-[:participatesIn]->(e:Event) "
+            "RETURN e.eventId"
+        ).result_set
+        assert r1 and r1[0][0] == "ev-212-5"
+        # Query: who participated in ev-212-5?
+        r2 = proj.g.query(
+            "MATCH (s:Subject)-[:participatesIn]->(e:Event {eventId:'ev-212-5'}) "
+            "RETURN s.name ORDER BY s.name"
+        ).result_set
+        names = [row[0] for row in r2]
+        assert "alice-212" in names
+        assert "bob-212" in names
+
+    def test_participants_does_not_replace_performs(self, live_sdk_212):
+        """participatesIn edge is separate from performs — both can co-exist."""
+        sdk = live_sdk_212
+        proj = sdk._get_proj()
+        alice = sdk.create_subject("alice-212b", "tester")
+        proj.apply({
+            "type": "EventRecorded",
+            "id": "ev-212-6",
+            "eventId": "ev-212-6",
+            "eventKind": "deploy",
+            "subject": "alice-212b",
+            "participants": [alice["id"]],
+            "startedAt": "2024-01-01T00:00:00Z",
+        })
+        # performs edge should exist
+        r_perf = proj.g.query(
+            "MATCH (s:Subject {name:'alice-212b'})-[:performs]->(e:Event {eventId:'ev-212-6'}) "
+            "RETURN count(*) > 0"
+        ).result_set
+        assert r_perf and r_perf[0][0] is True, "performs edge missing"
+        # participatesIn edge should also exist
+        r_part = proj.g.query(
+            "MATCH (s:Subject {name:'alice-212b'})-[:participatesIn]->(e:Event {eventId:'ev-212-6'}) "
+            "RETURN count(*) > 0"
+        ).result_set
+        assert r_part and r_part[0][0] is True, "participatesIn edge missing"
+        # Total edges from that Subject to the Event should be 2
+        r_total = proj.g.query(
+            "MATCH (s:Subject {name:'alice-212b'})-[r]->(e:Event {eventId:'ev-212-6'}) "
+            "RETURN count(r)"
+        ).result_set
+        assert r_total[0][0] == 2, f"expected 2 edges, got {r_total[0][0]}"
