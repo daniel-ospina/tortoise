@@ -21,8 +21,10 @@ jobs:
       - uses: superfly/flyctl-actions/setup-flyctl@master
       - name: Verify secrets exist
         run: |
-          if [ -z "${{ secrets.FASTAPI_INTERNAL_KEY }}" ] || [ -z "${{ secrets.TORTOISE_SECRET_PEPPER }}" ] || [ -z "${{ secrets.FALKORDB_CLOUD_URI }}" ]; then
-            echo "::error::FASTAPI_INTERNAL_KEY, TORTOISE_SECRET_PEPPER, and FALKORDB_CLOUD_URI must be set in GitHub secrets"
+          if [ -z "${{ secrets.FASTAPI_INTERNAL_KEY }}" ] || [ -z "${{ secrets.TORTOISE_SECRET_PEPPER }}" ] || [ -z "${{ secrets.FALKORDB_CLOUD_URI }}" ] \
+             || [ -z "${{ secrets.TORTOISE_BACKUP_KEY }}" ] || [ -z "${{ secrets.R2_ACCOUNT_ID }}" ] || [ -z "${{ secrets.R2_ACCESS_KEY_ID }}" ] \
+             || [ -z "${{ secrets.R2_SECRET_ACCESS_KEY }}" ] || [ -z "${{ secrets.R2_BUCKET }}" ]; then
+            echo "::error::FASTAPI_INTERNAL_KEY, TORTOISE_SECRET_PEPPER, FALKORDB_CLOUD_URI, TORTOISE_BACKUP_KEY, and R2_* must be set in GitHub secrets"
             exit 1
           fi
       - name: Set all app secrets on Fly.io (keeps in sync with GitHub/Supabase)
@@ -31,6 +33,11 @@ jobs:
             FASTAPI_INTERNAL_KEY="${{ secrets.FASTAPI_INTERNAL_KEY }}" \
             TORTOISE_SECRET_PEPPER="${{ secrets.TORTOISE_SECRET_PEPPER }}" \
             FALKORDB_CLOUD_URI="${{ secrets.FALKORDB_CLOUD_URI }}" \
+            TORTOISE_BACKUP_KEY="${{ secrets.TORTOISE_BACKUP_KEY }}" \
+            R2_ACCOUNT_ID="${{ secrets.R2_ACCOUNT_ID }}" \
+            R2_ACCESS_KEY_ID="${{ secrets.R2_ACCESS_KEY_ID }}" \
+            R2_SECRET_ACCESS_KEY="${{ secrets.R2_SECRET_ACCESS_KEY }}" \
+            R2_BUCKET="${{ secrets.R2_BUCKET }}" \
             --app tortoise-y4mjjq
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}

@@ -31,6 +31,7 @@ import json
 import logging
 import os
 import re
+import secrets
 from datetime import datetime, timezone
 from typing import Protocol
 
@@ -42,6 +43,12 @@ _NONCE_LEN = 12
 _AES_KEY_SIZE = 32  # AES-256
 _LABEL_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _DUMP_ID_PROP = "__dump_id"  # temp internal-id bridge during restore; removed after edges link
+
+
+class RestoreVerificationError(RuntimeError):
+    """Restore was rejected by a verification guard (corrupt/forged/unsafe
+    backup, or an empty backup over live data). Distinct from transient
+    storage/DB failures so the API can map it to 4xx, not 503."""
 
 
 # ── key + encryption (AES-256-GCM) ───────────────────────────────────────────
@@ -59,9 +66,11 @@ def _get_backup_key() -> bytes:
             "python -c \"import base64,secrets; print(base64.b64encode(secrets.token_bytes(32)).decode())\""
         )
     try:
-        key = base64.b64decode(raw)
-    except Exception:
-        key = raw.encode("utf-8")
+        key = base64.b64decode(raw, validate=True)
+    except Exception as e:
+        raise RuntimeError(
+            f"TORTOISE_BACKUP_KEY must be base64-encoded (got {raw[:8]!r}...): {e}"
+        ) from e
     if len(key) != _AES_KEY_SIZE:
         raise RuntimeError(
             f"TORTOISE_BACKUP_KEY must decode to {_AES_KEY_SIZE} bytes (got {len(key)})"
@@ -159,8 +168,6 @@ def restore_graph(g, dump: dict) -> dict:
         if "dump_id" not in n:
             raise ValueError("Dump node missing dump_id")
         labels = n.get("labels") or []
-        if not labels:
-            raise ValueError("Dump node missing labels")
         safe_labels = ":".join(_sanitize_label(l) for l in labels)
         props = dict(n.get("props") or {})
         if _DUMP_ID_PROP in props:
@@ -169,7 +176,19 @@ def restore_graph(g, dump: dict) -> dict:
                 "refusing to clobber it during restore"
             )
         props[_DUMP_ID_PROP] = n["dump_id"]
-        g.query(f"CREATE (n:{safe_labels}) SET n = $p", params={"p": props})
+        if safe_labels:
+            g.query(f"CREATE (n:{safe_labels}) SET n = $p", params={"p": props})
+        else:
+            g.query("CREATE (n) SET n = $p", params={"p": props})  # unlabeled node
+        # Re-encode vector props as vecf32 (the falkordb client decodes them to
+        # plain lists on read; a plain-list embedding would poison vector
+        # search for the whole graph — search_engine.py documents this).
+        if isinstance(props.get("embedding"), list):
+            g.query(
+                f"MATCH (n {{{_DUMP_ID_PROP}:$id}}) "
+                "SET n.embedding = CASE WHEN $v IS NOT NULL THEN vecf32($v) END",
+                params={"id": n["dump_id"], "v": props["embedding"]},
+            )
 
     for e in edges:
         if not all(k in e for k in ("src", "dst", "type")):
@@ -191,7 +210,10 @@ def restore_graph(g, dump: dict) -> dict:
             f"Edge restore incomplete: {actual_edges}/{len(edges)} linked — "
             "dump references missing nodes"
         )
-    return {"nodes": len(nodes), "edges": len(edges)}
+    # ACTUAL node count from the graph (not the dump bookkeeping) — the
+    # verification gate must compare real graph state, mirroring the edge check.
+    actual_nodes = g.query("MATCH (n) RETURN count(n)").result_set[0][0]
+    return {"nodes": int(actual_nodes), "edges": int(actual_edges)}
 
 
 # ── storage (S3-compatible / in-memory) ──────────────────────────────────────
@@ -339,9 +361,11 @@ def create_backup(
     payload = json.dumps(dump).encode("utf-8")
     blob = encrypt_backup(payload, key=key)
     ts = datetime.now(timezone.utc)
-    # Millisecond resolution — two backups for the same team within one second
-    # must not collide on the same object key (silent overwrite of the first).
-    backup_id = f"{team_id}/{ts.strftime('%Y%m%dT%H%M%S')}{ts.microsecond // 1000:03d}Z"
+    # Millisecond + random suffix — two backups for the same team within one
+    # millisecond must not collide on the same object key (silent overwrite).
+    backup_id = (
+        f"{team_id}/{ts.strftime('%Y%m%dT%H%M%S')}{ts.microsecond // 1000:03d}Z_{secrets.token_hex(4)}"
+    )
     manifest = {
         "backup_id": backup_id,
         "team_id": team_id,
@@ -380,13 +404,17 @@ def create_backup(
 
 def list_backups(storage: BackupStorage, team_id: str) -> list[dict]:
     """Return manifests for a team's backups, newest first."""
+    _validate_team_id(team_id)
     out: list[dict] = []
     for key in storage.list(f"backups/{team_id}/"):
         if key.endswith("/manifest.json"):
             try:
                 out.append(json.loads(storage.download(key)))
-            except Exception as e:
+            except (json.JSONDecodeError, ValueError, UnicodeDecodeError) as e:
                 logger.warning("unreadable backup manifest %s: %s", key, e)
+            # Storage/network failures (AccessDenied, timeouts) propagate — a
+            # partial outage must not masquerade as "no backups exist" during
+            # disaster recovery.
     out.sort(key=lambda m: str(m.get("created_at", "")), reverse=True)
     return out
 
@@ -471,10 +499,12 @@ def restore_backup(
         )
 
     ts = datetime.now(timezone.utc)
-    # Millisecond resolution — two restores of the same graph within one second
-    # must not share a staging graph (every team's main graph is "tortoise" on
-    # the same server; a retry racing the original would contaminate counts).
-    temp_name = f"{graph_name}_restore_{ts.strftime('%Y%m%dT%H%M%S')}{ts.microsecond // 1000:03d}Z"
+    # Millisecond + random suffix — two restores of the same graph within one
+    # millisecond must not share a staging graph (a retry racing the original
+    # would contaminate counts).
+    ts_str = f"{ts.strftime('%Y%m%dT%H%M%S')}{ts.microsecond // 1000:03d}Z_{secrets.token_hex(4)}"
+    temp_name = f"{graph_name}_restore_{ts_str}"
+    pre_name = f"{graph_name}_pre_restore_{ts_str}"
     temp_g = db.select_graph(temp_name)
     try:
         counts = restore_graph(temp_g, payload)
@@ -508,26 +538,55 @@ def restore_backup(
             temp_g.delete()
         except Exception:
             pass
-        raise RuntimeError(
+        raise RestoreVerificationError(
             f"Restore verification failed: {counts['nodes']} nodes restored, "
             f"expected {expected_nodes} — live graph untouched"
         )
-    if expected_edges is not None and counts["edges"] != expected_edges:
+    if counts["edges"] != expected_edges:
         try:
             temp_g.delete()
         except Exception:
             pass
-        raise RuntimeError(
+        raise RestoreVerificationError(
             f"Restore verification failed: {counts['edges']} edges restored, "
             f"expected {expected_edges} — live graph untouched"
         )
+
+    # Empty-backup guard (issue #101 class): a backup taken after a wipe (0
+    # nodes) must not silently REPLACE live data on restore — the operator
+    # would see "verified ✓" while the live graph is destroyed again.
+    live_g = db.select_graph(graph_name)
+    try:
+        live_nodes = int(live_g.query("MATCH (n) RETURN count(n)").result_set[0][0])
+    except Exception:
+        live_nodes = 0  # graph missing/empty — nothing to protect
+    if live_nodes > 0 and expected_nodes == 0:
+        try:
+            temp_g.delete()
+        except Exception:
+            pass
+        raise RestoreVerificationError(
+            f"Refusing to restore an empty backup over a live graph with "
+            f"{live_nodes} nodes — live graph untouched"
+        )
+
+    # Pre-restore safety copy: before the destructive delete, snapshot the live
+    # graph so the swap is reversible even if the process dies mid-window
+    # (the 2026-08-05 "wipe followed by any write re-saves the empty state"
+    # failure chain). Best-effort — skipped when live is empty/missing.
+    pre_g = None
+    if live_nodes > 0:
+        try:
+            live_g.copy(pre_name)
+            pre_g = db.select_graph(pre_name)
+        except Exception as e:
+            logger.warning("pre-restore copy failed (continuing): %s", e)
 
     # Swap: delete live graph then promote the verified temp graph. Delete is
     # best-effort: the disaster-recovery path restores into a graph that was
     # DROPPED/lost — a missing graph raises on delete but the copy below seeds
     # it. A genuine delete failure surfaces as a copy failure ("destination key
     # already exists") and the verified temp graph remains intact.
-    live_g = db.select_graph(graph_name)
     try:
         live_g.delete()
     except Exception as e:
@@ -542,10 +601,13 @@ def restore_backup(
         raise RuntimeError(
             f"Restore swap failed — verified temp graph {temp_name} intact: {e}"
         ) from e
-    try:
-        temp_g.delete()
-    except Exception as e:
-        logger.warning("temp graph %s cleanup failed: %s", temp_name, e)
+    # Success: remove the transient staging + pre-restore copies
+    for g in (temp_g, pre_g):
+        if g is not None:
+            try:
+                g.delete()
+            except Exception as e:
+                logger.warning("cleanup of %s failed: %s", getattr(g, "name", "?"), e)
 
     try:
         registry.query(

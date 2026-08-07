@@ -28,7 +28,14 @@ import hmac
 
 from tortoise.sdk import TortoiseSDK, _content_hash
 from tortoise.mcp_server import create_http_app
-from tortoise.hosted_backup import R2Storage, create_backup, list_backups, restore_backup
+from tortoise.hosted_backup import (
+    RestoreVerificationError,
+    R2Storage,
+    create_backup,
+    list_backups,
+    prune_backups,
+    restore_backup,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -1894,6 +1901,13 @@ async def backups_list(team: dict = Depends(get_current_team)):
         raise HTTPException(status_code=503, detail=f"Backup storage unavailable: {e}")
 
 
+def _registry_sdk() -> TortoiseSDK:
+    """Registry-namespaced SDK — Team/Membership nodes live in the canonical
+    registry_control_plane graph, reached only via namespace='registry' (the
+    same resolution every other registry op in this file uses)."""
+    return _make_sdk(namespace="registry")
+
+
 @app.post("/backups", status_code=201)
 async def backups_create(team: dict = Depends(get_current_team)):
     """Trigger an on-demand backup of the team graph (Pro tier)."""
@@ -1901,28 +1915,40 @@ async def backups_create(team: dict = Depends(get_current_team)):
     if not team_id:
         raise HTTPException(status_code=401, detail="Missing Authorization header")
     _require_backup_tier(team)
-    sdk = _make_sdk(namespace=team_id)
     graph_name = f"team_{team_id}"
     try:
-        manifest = create_backup(
-            sdk._get_proj(), sdk._get_registry(), _backup_storage(),
+        sdk = _make_sdk(namespace=team_id)
+        registry = _registry_sdk()._get_registry()
+        storage = _backup_storage()
+        manifest = await asyncio.to_thread(
+            create_backup, sdk._get_proj(), registry, storage,
             team_id=team_id, graph_name=graph_name,
         )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Backup rejected: {e}")
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=f"Backup failed: {e}")
     except Exception as e:
         _logger.exception("backup failed for team %s", team_id)
         raise HTTPException(status_code=500, detail=f"Backup failed: {e}")
+    # Retention: prune after a successful backup so storage stays bounded
+    # (best-effort — a prune failure must not fail the backup).
+    try:
+        prune_backups(storage, team_id)
+    except Exception as e:
+        _logger.warning("prune failed for team %s: %s", team_id, e)
     return manifest
 
 
 @app.post("/backups/restore")
 async def backups_restore(body: BackupRestoreRequest, team: dict = Depends(get_current_team)):
-    """Restore the team graph from a backup (Pro tier, Owner confirm required).
+    """Restore the team graph from a backup (Pro tier; confirm=true required).
 
-    Restores into a temp graph, verifies node count against the manifest, then
-    swaps (delete live → copy temp). The live graph is only touched after the
-    temp graph verifies. ``confirm=true`` is required — this is destructive.
+    Restores into a temp graph, verifies node/edge counts against the payload,
+    then swaps (pre-restore safety copy → delete live → copy temp). The live
+    graph is only touched after the temp graph verifies. ``confirm=true`` is
+    a footgun guard, not role authorization — every team key already has full
+    write access to the team graph.
     """
     team_id = team.get("team_id")
     if not team_id:
@@ -1932,13 +1958,16 @@ async def backups_restore(body: BackupRestoreRequest, team: dict = Depends(get_c
         raise HTTPException(
             status_code=400, detail="confirm=true required — restore replaces the live graph"
         )
-    sdk = _make_sdk(namespace=team_id)
     graph_name = f"team_{team_id}"
     try:
-        result = restore_backup(
-            sdk._get_proj().db, sdk._get_registry(), _backup_storage(),
+        sdk = _make_sdk(namespace=team_id)
+        registry = _registry_sdk()._get_registry()
+        result = await asyncio.to_thread(
+            restore_backup, sdk._get_proj().db, registry, _backup_storage(),
             body.backup_key, team_id=team_id, graph_name=graph_name,
         )
+    except RestoreVerificationError as e:
+        raise HTTPException(status_code=409, detail=f"Restore rejected: {e}")
     except (ValueError, KeyError) as e:
         raise HTTPException(status_code=400, detail=f"Restore rejected: {e}")
     except RuntimeError as e:
@@ -1946,6 +1975,12 @@ async def backups_restore(body: BackupRestoreRequest, team: dict = Depends(get_c
     except Exception as e:
         _logger.exception("restore failed for team %s", team_id)
         raise HTTPException(status_code=500, detail=f"Restore failed: {e}")
+    # Rebuild indexes on the restored live graph (range/FTS/vector) — the
+    # logical dump + GRAPH.COPY restores data, not schema (best-effort).
+    try:
+        sdk._get_proj()._ensure_indexes()
+    except Exception as e:
+        _logger.warning("index rebuild after restore failed for team %s: %s", team_id, e)
     return result
 
 

@@ -22,6 +22,7 @@ from tortoise.hosted_backup import (
     DUMP_FORMAT,
     MemoryStorage,
     R2Storage,
+    RestoreVerificationError,
     create_backup,
     decrypt_backup,
     dump_graph,
@@ -252,12 +253,6 @@ def test_restore_rejects_bad_format_and_labels():
                 "nodes": [{"dump_id": 1, "labels": ["Point; DROP"], "props": {}}],
                 "edges": [],
             })
-        with pytest.raises(ValueError, match="missing labels"):
-            restore_graph(proj.g, {
-                "format": DUMP_FORMAT,
-                "nodes": [{"dump_id": 1, "labels": [], "props": {}}],
-                "edges": [],
-            })
         with pytest.raises(ValueError, match="missing dump_id"):
             restore_graph(proj.g, {
                 "format": DUMP_FORMAT,
@@ -373,6 +368,46 @@ def test_create_backup_list_and_restore_swap(monkeypatch):
         proj.close()
 
 
+def test_dump_restore_unlabeled_node():
+    """FalkorDB allows unlabeled nodes — restore must preserve them."""
+    with tempfile.TemporaryDirectory() as tmp:
+        proj = _make_proj(tmp)
+        proj.g.query("CREATE (n {id:'bare'})")
+        dump = dump_graph(proj.g, graph_name="tortoise")
+        assert dump["node_count"] == 1
+        assert dump["nodes"][0]["labels"] == []
+        proj.close()
+
+        proj2 = _make_proj(tmp, "t2.db")
+        counts = restore_graph(proj2.g, dump)
+        assert counts == {"nodes": 1, "edges": 0}
+        row = proj2.g.query("MATCH (n) RETURN labels(n), n.id").result_set
+        assert row[0][1] == "bare"
+        proj2.close()
+
+
+def test_dump_restore_embedding_prop():
+    """Embedding props survive dump/restore (restore re-encodes vecf32 like the
+    SDK write path — sdk.py SET n.embedding = vecf32($embedding))."""
+    with tempfile.TemporaryDirectory() as tmp:
+        proj = _make_proj(tmp)
+        proj.g.query("CREATE (p:Point {id:'p1'})")
+        proj.g.query(
+            "MATCH (p:Point {id:$i}) SET p.embedding = vecf32($v)",
+            params={"i": "p1", "v": [0.1, 0.2, 0.3]},
+        )
+        dump = dump_graph(proj.g, graph_name="tortoise")
+        proj.close()
+
+        proj2 = _make_proj(tmp, "t2.db")
+        restore_graph(proj2.g, dump)  # must not raise
+        emb = proj2.g.query(
+            "MATCH (p {id:'p1'}) RETURN p.embedding"
+        ).result_set[0][0]
+        assert list(emb) == pytest.approx([0.1, 0.2, 0.3])  # float32 rounding
+        proj2.close()
+
+
 def test_empty_graph_full_pipeline(monkeypatch):
     _set_env_key(monkeypatch)
     with tempfile.TemporaryDirectory() as tmp:
@@ -383,8 +418,6 @@ def test_empty_graph_full_pipeline(monkeypatch):
         manifest = create_backup(proj, registry, store, team_id="team_e", graph_name="tortoise")
         assert manifest["node_count"] == 0
         dump_key = [k for k in store.list("backups/team_e/") if k.endswith("dump.enc")][0]
-        # marker proves the swap executed (empty backup replaces a non-empty live)
-        proj.g.query("CREATE (x:Point {id:'pt-x', content:'marker'})")
         result = restore_backup(
             proj.db, registry, store, dump_key,
             team_id="team_e", graph_name="tortoise",
@@ -392,7 +425,33 @@ def test_empty_graph_full_pipeline(monkeypatch):
         assert result["restored"] == {"nodes": 0, "edges": 0}
         live = proj.db.select_graph("tortoise")
         assert live.query("MATCH (n) RETURN count(n)").result_set[0][0] == 0
-        assert live.query("MATCH (p:Point {id:'pt-x'}) RETURN count(p)").result_set[0][0] == 0
+        assert set(proj.db.list_graphs()) == {"tortoise", "registry_tortoise"}
+        proj.close()
+
+
+def test_restore_empty_backup_over_live_rejected(monkeypatch):
+    """Issue #101 class: an empty backup must never replace live data."""
+    _set_env_key(monkeypatch)
+    with tempfile.TemporaryDirectory() as tmp:
+        proj = _make_proj(tmp)
+        registry = proj.db.select_graph("registry_tortoise")
+        registry.query("CREATE (t:Team {id:'team_e', tier:'pro'})")
+        store = MemoryStorage()
+        # empty backup first
+        create_backup(proj, registry, store, team_id="team_e", graph_name="tortoise")
+        dump_key = [k for k in store.list("backups/team_e/") if k.endswith("dump.enc")][0]
+        # then seed live data
+        _seed(proj.g)
+        proj.g.query("CREATE (x:Point {id:'pt-x', content:'marker'})")
+
+        with pytest.raises(RestoreVerificationError, match="empty backup"):
+            restore_backup(
+                proj.db, registry, store, dump_key,
+                team_id="team_e", graph_name="tortoise",
+            )
+        # live data untouched
+        assert proj.g.query("MATCH (n) RETURN count(n)").result_set[0][0] == 7
+        assert proj.g.query("MATCH (p:Point {id:'pt-x'}) RETURN count(p)").result_set[0][0] == 1
         proj.close()
 
 
@@ -636,8 +695,11 @@ def test_restore_copy_failure_leaves_temp_intact(monkeypatch):
         dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]
 
         def _boom_copy(self, clone):
-            raise RuntimeError("copy boom")
+            if clone == "tortoise":  # only the temp→live promotion fails
+                raise RuntimeError("copy boom")
+            return real_copy(self, clone)
 
+        real_copy = Graph.copy
         monkeypatch.setattr(Graph, "copy", _boom_copy)
         with pytest.raises(RuntimeError, match="copy boom"):
             restore_backup(
@@ -645,13 +707,14 @@ def test_restore_copy_failure_leaves_temp_intact(monkeypatch):
                 team_id="team_x", graph_name="tortoise",
             )
         # live graph is GONE (deleted before copy) and the verified temp graph
-        # survives with full content — the documented recovery copy
+        # survives with full content — the documented recovery copy. The
+        # pre-restore safety copy of the original live graph also survives.
         graphs = proj.db.list_graphs()
         assert "tortoise" not in graphs
-        temps = [g for g in graphs if g != "registry_tortoise"]
-        assert len(temps) == 1
-        temp = proj.db.select_graph(temps[0])
-        assert temp.query("MATCH (n) RETURN count(n)").result_set[0][0] == 6
+        extras = [g for g in graphs if g != "registry_tortoise"]
+        assert len(extras) == 2  # _restore_ (verified) + _pre_restore_ (original)
+        for g in extras:
+            assert proj.db.select_graph(g).query("MATCH (n) RETURN count(n)").result_set[0][0] == 6
         proj.close()
 
 
@@ -819,9 +882,9 @@ def test_create_backup_distinct_ids_within_second(monkeypatch):
         store = MemoryStorage()
         m1 = create_backup(proj, registry, store, team_id="team_x", graph_name="tortoise")
         m2 = create_backup(proj, registry, store, team_id="team_x", graph_name="tortoise")
-        # same second, distinct ids (ms component) — a second-resolution
-        # regression would produce identical ids and this would fail
-        assert m1["backup_id"].split("/")[1][:-3] == m2["backup_id"].split("/")[1][:-3]
+        # same second (timestamp portion before the random suffix), distinct ids
+        assert m1["backup_id"].split("/")[1].split("_")[0][:15] == \
+            m2["backup_id"].split("/")[1].split("_")[0][:15]
         assert m1["backup_id"] != m2["backup_id"]
         dumps = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")]
         assert len(dumps) == 2  # first backup not silently overwritten
@@ -1090,11 +1153,12 @@ def test_restore_live_delete_failure_leaves_recovery_copy(monkeypatch):
                 team_id="team_x", graph_name="tortoise",
             )
         # live graph intact (delete failed → copy onto existing key fails) and
-        # the verified temp recovery copy exists
+        # the verified temp recovery copy + pre-restore snapshot exist
         assert proj.g.query("MATCH (n) RETURN count(n)").result_set[0][0] == 6
-        temps = [g for g in proj.db.list_graphs() if g != "tortoise" and g != "registry_tortoise"]
-        assert len(temps) == 1
-        assert proj.db.select_graph(temps[0]).query("MATCH (n) RETURN count(n)").result_set[0][0] == 6
+        extras = [g for g in proj.db.list_graphs() if g not in ("tortoise", "registry_tortoise")]
+        assert len(extras) == 2  # _restore_ + _pre_restore_
+        for g in extras:
+            assert proj.db.select_graph(g).query("MATCH (n) RETURN count(n)").result_set[0][0] == 6
         proj.close()
 
 
@@ -1155,6 +1219,37 @@ def test_prune_leaves_unpaired_orphan(monkeypatch):
 
     prune_backups(store, team_id)  # no crash
     assert any(k == orphan_key for k in store.list(f"backups/{team_id}/"))
+
+
+def test_registry_stamp_lands_in_canonical_registry(monkeypatch):
+    """The API wiring (registry-namespaced SDK) must stamp the canonical
+    registry_control_plane graph — not a per-team phantom graph. This is the
+    wiring the code-review flagged: team-namespaced sdk._get_registry() resolves
+    to {team}_control_plane, which never contains Team nodes."""
+    from tortoise.sdk import TortoiseSDK
+
+    _set_env_key(monkeypatch)
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = os.path.join(tmp, "t.db")
+        reg_sdk = TortoiseSDK(db_path=db_path, namespace="registry")
+        team_sdk = TortoiseSDK(db_path=db_path, namespace="team_x")
+        # seed a Team node in the canonical registry (as provision does)
+        reg_sdk._get_registry().query("CREATE (t:Team {id:'team_x', tier:'pro'})")
+        _seed(team_sdk._get_proj().g)
+        store = MemoryStorage()
+
+        manifest = create_backup(
+            team_sdk._get_proj(), reg_sdk._get_registry(), store,
+            team_id="team_x", graph_name="team_team_x",
+        )
+        assert manifest["node_count"] == 6
+        # stamp lands in the canonical registry graph
+        row = reg_sdk._get_registry().query(
+            "MATCH (t:Team {id:'team_x'}) RETURN t.backup_latest_at"
+        ).result_set
+        assert row and row[0][0]
+        team_sdk.close()
+        reg_sdk.close()
 
 
 def test_restore_rejects_non_dump_key():
