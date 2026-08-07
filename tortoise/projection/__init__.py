@@ -64,12 +64,12 @@ class _GuardedGraph:
         self._g = g
         self._proj = projection
 
-    def query(self, cypher: str, params=None):
+    def query(self, cypher: str, params=None, timeout=None):
         if _is_bulk_wipe(cypher) and not getattr(self._proj, "_skip_guard", False):
             self._proj._assert_test_graph(
                 "REFUSING to run bulk DETACH DELETE on non-test graph"
             )
-        return self._g.query(cypher, params=params)
+        return self._g.query(cypher, params=params, timeout=timeout)
 
     def __getattr__(self, name):
         return getattr(self._g, name)

@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import time
 import unittest.mock as mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -26,7 +27,23 @@ from tortoise.search_engine import (
     run_fts_query,
     run_vector_query,
     run_structural_query,
+    reset_circuit_breakers,
+    _breaker,
+    _breaker_allow,
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_breakers():
+    """Circuit-breaker state is module-level — isolate every test from it.
+
+    A test that triggers failures (slow query, DB exception) counts toward
+    tripping the per-strategy breaker; without a reset, later tests in the
+    same module would silently short-circuit.
+    """
+    reset_circuit_breakers()
+    yield
+    reset_circuit_breakers()
 
 
 # ── FalkorDB availability check (#174) ─────────────────────────────────────
@@ -107,10 +124,10 @@ class SimpleMockGraph:
     def __init__(self, result_set=None, raise_on_query=None):
         self._result_set = result_set or []
         self._raise_on_query = raise_on_query
-        self.query_calls: list[tuple[str, dict]] = []
+        self.query_calls: list[tuple[str, dict, dict]] = []
 
-    def query(self, cypher, params=None):
-        self.query_calls.append((cypher, params or {}))
+    def query(self, cypher, params=None, timeout=None):
+        self.query_calls.append((cypher, params or {}, {"timeout": timeout}))
         if self._raise_on_query:
             raise self._raise_on_query
         return MockResultSet(self._result_set)
@@ -126,10 +143,10 @@ class MultiCallGraph:
     def __init__(self, call_responses: list):
         self._responses = call_responses
         self._index = 0
-        self.query_calls: list[tuple[str, dict]] = []
+        self.query_calls: list[tuple[str, dict, dict]] = []
 
-    def query(self, cypher, params=None):
-        self.query_calls.append((cypher, params or {}))
+    def query(self, cypher, params=None, timeout=None):
+        self.query_calls.append((cypher, params or {}, {"timeout": timeout}))
         if self._index >= len(self._responses):
             return MockResultSet([])
         result_set, exc = self._responses[self._index]
@@ -148,10 +165,10 @@ class StrategyControlledGraph:
 
     def __init__(self, cypher_map: dict[str, tuple] = None):
         self._map = cypher_map or {}
-        self.query_calls: list[tuple[str, dict]] = []
+        self.query_calls: list[tuple[str, dict, dict]] = []
 
-    def query(self, cypher, params=None):
-        self.query_calls.append((cypher, params or {}))
+    def query(self, cypher, params=None, timeout=None):
+        self.query_calls.append((cypher, params or {}, {"timeout": timeout}))
         for pattern, (result_set, exc) in self._map.items():
             if pattern in cypher:
                 if exc:
@@ -437,7 +454,7 @@ class TestDegradationChain:
         assert "vector" in result
         assert "fts" not in result
         # No fulltext call issued
-        for cypher, _ in graph.query_calls:
+        for cypher, _params, _kw in graph.query_calls:
             assert "fulltext" not in cypher
 
     def test_no_vector_query_vec_skips_vector(self):
@@ -659,7 +676,7 @@ class TestRunVectorQuery:
         """Brute-force query exceeds timeout → []."""
         graph = SimpleMockGraph(result_set=[("a", 0.9)])
 
-        with mock.patch("time.monotonic", side_effect=[0.0, 2.0]):
+        with mock.patch("time.monotonic", side_effect=[0.0, 2.0, 3.0]):
             result = run_vector_query(graph, self.QUERY_VEC, timeout_ms=500, is_embedded=True)
 
         assert result == []
@@ -668,7 +685,7 @@ class TestRunVectorQuery:
         """HNSW query exceeds timeout → [] (no brute-force fallback on timeout)."""
         graph = SimpleMockGraph(result_set=[("a",)])
 
-        with mock.patch("time.monotonic", side_effect=[0.0, 2.0]):
+        with mock.patch("time.monotonic", side_effect=[0.0, 2.0, 3.0]):
             result = run_vector_query(graph, self.QUERY_VEC, timeout_ms=500, is_embedded=False)
 
         assert result == []
@@ -758,7 +775,7 @@ class TestRunFtsQuery:
         """Query exceeds timeout_ms → [] (post-hoc)."""
         graph = SimpleMockGraph(result_set=[("p1", 0.9)])
 
-        with mock.patch("time.monotonic", side_effect=[0.0, 2.0]):
+        with mock.patch("time.monotonic", side_effect=[0.0, 2.0, 3.0]):
             result = run_fts_query(graph, "test", timeout_ms=500)
 
         assert result == []
@@ -1137,7 +1154,7 @@ class TestGetRelationships:
         """Cypher covers IMPL|NAND|hasPart operator edges + ids param."""
         graph = SimpleMockGraph(result_set=[])
         get_relationships(graph, ["p1", "p2"])
-        cypher, params = graph.query_calls[0]
+        cypher, params, _kw = graph.query_calls[0]
         assert params == {"ids": ["p1", "p2"]}
         assert "IMPL|NAND|hasPart" in cypher
         assert "is_operator:true" in cypher
@@ -1367,3 +1384,225 @@ class TestAnnotateEpContestation:
         assert d["ep"]["variance"] == 0.05
         assert d["ep"]["contested"] is True
         assert d["ep"]["contention"] == 0.5  # structural ratio still present
+
+
+# ── #249: connection-level timeout + circuit breaker ────────────────────────
+
+
+class TestConnectionTimeoutAndCircuitBreaker:
+    """#249 — real connection-level timeout + per-strategy circuit breaker."""
+
+    QUERY_VEC = [0.1] * 384
+
+    # ── Driver-level timeout is actually passed ─────────────────────
+
+    def test_fts_query_passes_timeout_to_driver(self):
+        """run_fts_query forwards timeout_ms to graph.query(timeout=...)."""
+        graph = SimpleMockGraph(result_set=[("p1", 0.9)])
+
+        run_fts_query(graph, "test", timeout_ms=500)
+
+        assert len(graph.query_calls) == 1
+        assert graph.query_calls[0][2] == {"timeout": 500}
+
+    def test_vector_query_passes_timeout_to_driver(self):
+        """run_vector_query forwards timeout_ms to graph.query(timeout=...)."""
+        graph = SimpleMockGraph(result_set=[("a",)])
+
+        run_vector_query(graph, self.QUERY_VEC, timeout_ms=500, is_embedded=False)
+
+        assert len(graph.query_calls) == 1
+        assert graph.query_calls[0][2] == {"timeout": 500}
+
+    def test_operator_fts_query_passes_timeout_to_driver(self):
+        """Operator path (Point CONTAINS) also forwards the timeout."""
+        graph = SimpleMockGraph(result_set=[("op-1", 1.0)])
+
+        run_fts_query(graph, "lookup", entity_type="operator", timeout_ms=300)
+
+        assert len(graph.query_calls) == 1
+        assert graph.query_calls[0][2] == {"timeout": 300}
+
+    # ── Breaker trips and short-circuits ────────────────────────────
+
+    def test_breaker_trips_after_three_failures(self):
+        """3 consecutive failures open the breaker; the 4th call never hits DB."""
+        failing = SimpleMockGraph(raise_on_query=RuntimeError("Connection refused"))
+
+        for _ in range(3):
+            assert run_fts_query(failing, "test") == []
+
+        # Breaker OPEN → short-circuit without touching the DB
+        healthy = SimpleMockGraph(result_set=[("p1", 0.9)])
+        result = run_fts_query(healthy, "test")
+        assert result == []
+        assert healthy.query_calls == []
+
+    def test_breaker_allow_returns_false_when_open(self):
+        """_breaker_allow reflects the OPEN state."""
+        failing = SimpleMockGraph(raise_on_query=RuntimeError("boom"))
+        for _ in range(3):
+            run_fts_query(failing, "test")
+        assert _breaker("fts").is_open()
+        assert not _breaker_allow("fts")
+
+    def test_breaker_success_resets_failures(self):
+        """A success clears the failure count — no trip on the 3rd failure."""
+        failing = SimpleMockGraph(raise_on_query=RuntimeError("boom"))
+        run_fts_query(failing, "test")
+        run_fts_query(failing, "test")  # 2 failures
+
+        ok = SimpleMockGraph(result_set=[("p1", 0.9)])
+        assert run_fts_query(ok, "test") == [("p1", 0.9)]  # success resets
+
+        # One more failure is only the 1st of a new streak → still CLOSED
+        assert run_fts_query(failing, "test") == []
+        still_ok = SimpleMockGraph(result_set=[("p2", 0.8)])
+        assert run_fts_query(still_ok, "test") == [("p2", 0.8)]
+
+    def test_breaker_half_open_probe_allowed_after_cooldown(self):
+        """After cooldown expiry a probe query is let through; success closes."""
+        failing = SimpleMockGraph(raise_on_query=RuntimeError("boom"))
+        for _ in range(3):
+            run_fts_query(failing, "test")
+        assert _breaker("fts").is_open()
+
+        # Expire the cooldown → HALF_OPEN → one probe allowed through
+        _breaker("fts")._open_until = time.monotonic() - 1.0
+        assert not _breaker("fts").is_open()
+
+        ok = SimpleMockGraph(result_set=[("p1", 0.9)])
+        assert run_fts_query(ok, "test") == [("p1", 0.9)]
+        assert len(ok.query_calls) == 1  # probe hit the DB
+
+        # Probe success closed the breaker — normal operation resumes
+        more = SimpleMockGraph(result_set=[("p2", 0.7)])
+        assert run_fts_query(more, "test") == [("p2", 0.7)]
+        assert not _breaker("fts").is_open()
+
+    def test_vector_breaker_trips_independently(self):
+        """Vector strategy has its own breaker — FTS failures don't trip it."""
+        failing = SimpleMockGraph(raise_on_query=RuntimeError("boom"))
+        for _ in range(3):
+            assert run_vector_query(failing, self.QUERY_VEC, is_embedded=True) == []
+
+        # vector breaker OPEN, fts breaker still CLOSED
+        assert _breaker("vector").is_open()
+        assert not _breaker("fts").is_open()
+
+        ok = SimpleMockGraph(result_set=[("p1", 0.9)])
+        assert run_fts_query(ok, "test") == [("p1", 0.9)]
+
+
+class TestCircuitBreakerReviewFixes:
+    """Regression tests for the #249 code-review findings (P1-1/P1-2/P1-3, P2-2)."""
+
+    QUERY_VEC = [0.1] * 384
+
+    # ── P1-1: benign index-missing must NOT trip the breaker ─────────
+
+    def test_fts_index_not_found_does_not_trip_breaker(self):
+        """Embedded mode (no FTS index) → benign degrade, breaker stays CLOSED.
+
+        Pre-fix: 3 index-not-found queries opened the breaker permanently,
+        silently disabling FTS for all labels in the default dev mode.
+        """
+        no_index = SimpleMockGraph(raise_on_query=Exception("FTS index not found"))
+        for _ in range(5):
+            assert run_fts_query(no_index, "test") == []
+        assert not _breaker("fts").is_open()
+
+        # A healthy query still works
+        ok = SimpleMockGraph(result_set=[("p1", 0.9)])
+        assert run_fts_query(ok, "test") == [("p1", 0.9)]
+
+    # ── P1-2: one logical query counts at most once ──────────────────
+
+    def test_vector_fallthrough_counts_single_failure(self):
+        """HNSW hard-fail + brute-force fail = ONE failure, not two."""
+        # HNSW raises non-benign, brute-force also raises → both paths fail
+        # (StrategyControlledGraph keeps raising on every call)
+        graph = StrategyControlledGraph({
+            "queryNodes":        (None, RuntimeError("Connection refused")),
+            "euclideanDistance": (None, RuntimeError("Connection refused")),
+        })
+        run_vector_query(graph, self.QUERY_VEC, is_embedded=False)
+        run_vector_query(graph, self.QUERY_VEC, is_embedded=False)
+
+        # 2 logical calls = 2 failures (would be 4 pre-fix) → breaker NOT tripped
+        assert _breaker("vector")._fails == 2
+        assert not _breaker("vector").is_open()
+
+        # Third logical call trips it
+        run_vector_query(graph, self.QUERY_VEC, is_embedded=False)
+        assert _breaker("vector").is_open()
+
+    # ── P1-3: structural strategy is guarded ─────────────────────────
+
+    def test_structural_query_passes_timeout_to_driver(self):
+        """run_structural_query forwards timeout_ms to the driver."""
+        graph = SimpleMockGraph(result_set=[("s1", 1.0)])
+        run_structural_query(graph, "feature", timeout_ms=250)
+        assert len(graph.query_calls) == 1
+        assert graph.query_calls[0][2] == {"timeout": 250}
+
+    def test_structural_breaker_trips_on_hard_failures(self):
+        """Structural strategy short-circuits after consecutive hard failures."""
+        failing = SimpleMockGraph(raise_on_query=RuntimeError("Connection refused"))
+        for _ in range(3):
+            assert run_structural_query(failing, "feature") == []
+        assert _breaker("structural").is_open()
+
+        healthy = SimpleMockGraph(result_set=[("s1", 1.0)])
+        assert run_structural_query(healthy, "feature") == []
+        assert healthy.query_calls == []  # short-circuited, no DB hit
+
+    # ── P2-2: single HALF_OPEN probe ─────────────────────────────────
+
+    def test_half_open_allows_only_one_probe(self):
+        """While one probe is in flight, concurrent callers are blocked."""
+        failing = SimpleMockGraph(raise_on_query=RuntimeError("boom"))
+        for _ in range(3):
+            run_fts_query(failing, "test")
+        _breaker("fts")._open_until = time.monotonic() - 1.0  # cooldown expired
+
+        assert _breaker("fts").allow() is True   # first caller probes
+        assert _breaker("fts").allow() is False  # second caller blocked
+
+    def test_probe_failure_reopens_immediately(self):
+        """A HALF_OPEN probe that fails re-opens the breaker."""
+        failing = SimpleMockGraph(raise_on_query=RuntimeError("boom"))
+        for _ in range(3):
+            run_fts_query(failing, "test")
+        _breaker("fts")._open_until = time.monotonic() - 1.0  # HALF_OPEN
+
+        assert run_fts_query(failing, "test") == []  # probe fails
+        assert _breaker("fts").is_open()              # re-opened
+
+        # Still open — next call short-circuits without touching the DB
+        healthy = SimpleMockGraph(result_set=[("p1", 0.9)])
+        assert run_fts_query(healthy, "test") == []
+        assert healthy.query_calls == []
+
+    # ── Slow-path (timeout) trips the breaker ────────────────────────
+
+    def test_slow_queries_trip_breaker(self):
+        """Post-hoc timeout (no exception) counts as a breaker failure."""
+        class SlowGraph:
+            """Graph whose query() takes 600ms — slower than timeout_ms."""
+            def __init__(self):
+                self.query_calls = 0
+            def query(self, cypher, params=None, timeout=None):
+                self.query_calls += 1
+                time.sleep(0.6)
+                return MockResultSet([("p1", 0.9)])
+
+        slow = SlowGraph()
+        for _ in range(3):
+            assert run_fts_query(slow, "test", timeout_ms=100) == []
+        assert _breaker("fts").is_open()
+
+        # Short-circuit skips the slow DB entirely
+        before = slow.query_calls
+        assert run_fts_query(slow, "test", timeout_ms=100) == []
+        assert slow.query_calls == before
