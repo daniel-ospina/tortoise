@@ -189,7 +189,9 @@ TOOL_REGISTRY: list[ToolDefinition] = [
         description="Run EP stabilization (dreaming, #85). "
                     "Default: incremental dirty subgraph. Set full=True for whole-graph.",
         annotations=_rw(),
-        # #329: whole-graph EP is CPU-heavy — tenant HTTP excluded (stdio/operator only).
+        # #329: whole-graph EP is CPU-heavy — tenant MCP surface excluded
+        # (stdio/operator only). REST /v1/dream remains tenant-reachable but is
+        # separately budgeted at MAX_DREAM_FULL_PER_HOUR (hosted_api).
         http_policy=False,
         sdk_method="dream",
         rest_spec=RestSpec(method="POST", path="/v1/dream"),

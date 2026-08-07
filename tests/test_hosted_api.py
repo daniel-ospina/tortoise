@@ -1093,6 +1093,28 @@ class TestSessionFloodGate:
         })
         assert r.status_code == 200, r.text[:200]
 
+    def test_extraction_cap_bounds_node_growth(self, client):
+        """#329: a single dense turn's extraction is capped at
+        MAX_EXTRACTIONS_PER_TURN per class — the loop-level cap (not just the
+        estimate) must execute, so a turn can never write unbounded Points."""
+        from tortoise.quota import MAX_EXTRACTIONS_PER_TURN
+        # ~900 distinct short sentences (fits the 5000-char turn cap; each
+        # "we should goN." is ~16 chars → ~14.4k matches would fit 5k chars
+        # with ~330 distinct sentences; use max within the limit)
+        dense = " ".join(f"we should go{i}." for i in range(300))
+        assert len(dense) <= 5000, len(dense)
+        r = client.post("/v1/sessions", json={
+            "session_id": "dense-cap-session",
+            "conversation": [{"role": "user", "content": dense}],
+        })
+        assert r.status_code == 200, r.text[:200]
+        from tortoise.hosted_api import TortoiseSDK as _HASDK
+        proj = _HASDK(namespace=TEST_TEAM_ID)._get_proj()
+        rows = proj.g.query(
+            "MATCH (p:Point) WHERE p.pointKind='decision' RETURN count(p)",
+        ).result_set
+        assert rows[0][0] <= MAX_EXTRACTIONS_PER_TURN,             f"extraction cap breached: {rows[0][0]} decision points"
+
 
 class TestDreamBudget:
     def test_full_dream_budget_exhausted_429(self, client):

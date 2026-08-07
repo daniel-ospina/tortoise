@@ -799,6 +799,8 @@ async def dream(
         now_ts = _t.time()
         bucket = _DREAM_FULL_BUCKETS.setdefault(tid, [])
         bucket[:] = [ts for ts in bucket if now_ts - ts < 3600]
+        if not bucket:
+            _DREAM_FULL_BUCKETS.pop(tid, None)  # evict idle teams (no leak)
         if len(bucket) >= MAX_DREAM_FULL_PER_HOUR:
             raise HTTPException(
                 status_code=429,
@@ -1334,7 +1336,9 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
     ]
     est = 2
     for turn in body.conversation:
-        content = turn.get("content", "")[:5000]
+        # #329: estimate scans the SAME full content the extraction loop uses
+        # (must be an upper bound — a truncation mismatch would under-count).
+        content = turn.get("content", "")
         n_dec = sum(len(re.findall(p, content)) for p in decisions)
         n_clm = sum(len(re.findall(p, content)) for p in claims)
         est += 1 + min(n_dec, MAX_EXTRACTIONS_PER_TURN) + min(n_clm, MAX_EXTRACTIONS_PER_TURN)
@@ -1394,8 +1398,14 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
             params={"sid": session_id, "tid": turn_id},
         )
 
+        # #329: per-turn extraction cap (matches the estimate's min() bound —
+        # without it a single dense turn writes thousands of Points).
+        n_dec_extracted = 0
         for pat in decisions:
             for match in re.finditer(pat, content):
+                if n_dec_extracted >= MAX_EXTRACTIONS_PER_TURN:
+                    break
+                n_dec_extracted += 1
                 text = match.group().strip()
                 # Extracted decisions/claims ARE cross-session knowledge —
                 # keep content-hash dedup (identical claim in two sessions is
@@ -1409,8 +1419,12 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
                 )
                 extracted.append({"id": pid, "kind": "decision", "text": text[:200]})
 
+        n_clm_extracted = 0
         for pat in claims:
             for match in re.finditer(pat, content):
+                if n_clm_extracted >= MAX_EXTRACTIONS_PER_TURN:
+                    break
+                n_clm_extracted += 1
                 text = match.group().strip()
                 p = sdk.create_point("statement", text[:5000], dedup=True)
                 pid = p["id"]

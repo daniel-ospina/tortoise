@@ -152,6 +152,8 @@ _QUOTA_GATED: frozenset[str] = frozenset({
     "tortoise_mitigate_operator",
     # edge-creating tools — edge growth is the same graph-flood family
     "tortoise_create_edge", "tortoise_supersede", "tortoise_invalidate",
+    # delegates to hosted_api._seed_demo_graph (creates the 4-layer demo graph)
+    "tortoise_onboarding_demo_create",
 })
 
 
@@ -175,6 +177,9 @@ def _analyze_llm_budget_available() -> bool:
     now_ts = _t.time()
     bucket = _ANALYZE_LLM_BUDGET.setdefault(team_id, [])
     bucket[:] = [ts for ts in bucket if now_ts - ts < 60]
+    if not bucket:
+        _ANALYZE_LLM_BUDGET.pop(team_id, None)  # evict idle teams (no leak)
+        return True
     if len(bucket) >= MAX_ANALYZE_LLM_PER_MIN:
         return False
     bucket.append(now_ts)
@@ -1033,6 +1038,8 @@ def tortoise_onboarding_demo_create() -> dict:
     team_id = _current_team_id.get()
     if team_id is None:
         return {"error": "No team context (HTTP mode required)"}
+    # #329: demo graph creation creates nodes — quota-gate it
+    _enforce_quota("points")
     result = _seed_demo_graph(team_id)
     # Auto-update onboarding state
     try:

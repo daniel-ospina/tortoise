@@ -97,7 +97,7 @@ class TeamResolutionMiddleware(BaseHTTPMiddleware):
         super().__init__(app)
         self._registry_sdk = registry_sdk  # test injection
         self._init_lock = asyncio.Lock()
-        self._cache: OrderedDict[str, tuple[float, dict]] = OrderedDict()
+        self._cache: OrderedDict[str, tuple[float, dict, dict]] = OrderedDict()  # (ts, team, limits)
         self._max_cache = max_cache
 
     async def _get_registry_sdk(self) -> TortoiseSDK:
