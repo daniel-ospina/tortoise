@@ -195,3 +195,85 @@ def test_supersede_then_supersede_again_transfers_zero(sdk):
     r2 = sdk.supersede_point(claim_a["id"], claim_c["id"])
     # A has no operator edges left — nothing to transfer
     assert r2["edges_transferred"] == 0
+
+
+# ── #329: edge-type validation (two-pass, zero mutation on failure) ────
+
+def test_supersede_unknown_edge_type_zero_mutation(sdk):
+    """An unknown (crafted) operator edge type must abort BEFORE any mutation:
+    old point NOT outdated, NO CORRECTS edge, NO edges transferred."""
+    proj = sdk._get_proj()
+    old = _make_point(sdk, content="Old (crafted edge)")
+    new = _make_point(sdk, content="New")
+    # Create a real operator, then craft an unknown-type edge from it
+    sdk.create_operator("IMPL", old["id"], [new["id"]])
+    op_rows = proj.g.query(
+        "MATCH (op:Point {is_operator:true}) RETURN op.id LIMIT 1"
+    ).result_set
+    op_id = op_rows[0][0]
+    proj.g.query(
+        "MATCH (op:Point {id:$oid}), (old:Point {id:$oldid}) "
+        "CREATE (op)-[:EVIL_CRAFTED]->(old)",
+        params={"oid": op_id, "oldid": old["id"]},
+    )
+    with pytest.raises(ValueError, match="Invalid relationship type"):
+        sdk.supersede_point(old["id"], new["id"])
+
+    # Zero mutation: old not outdated, no CORRECTS edge from new
+    old_now = sdk.get_point(old["id"])
+    assert not old_now.get("outdated")
+    rows = proj.g.query(
+        "MATCH (a:Point {id:$nid})-[r:CORRECTS]->(b:Point {id:$oid}) RETURN count(r)",
+        params={"nid": new["id"], "oid": old["id"]},
+    ).result_set
+    assert rows[0][0] == 0
+
+
+def test_supersede_mixed_valid_and_invalid_zero_mutation(sdk):
+    """A valid edge + an invalid edge → still zero mutation (validation is
+    all-or-nothing, hoisted before the transfer)."""
+    proj = sdk._get_proj()
+    a = _make_point(sdk, content="A")
+    ev = _make_point(sdk, content="Evidence")
+    sdk.create_operator("IMPL", ev["id"], [a["id"]])  # valid IMPL edge
+    b = _make_point(sdk, content="B")
+    op_rows = proj.g.query(
+        "MATCH (op:Point {is_operator:true}) RETURN op.id LIMIT 1"
+    ).result_set
+    op_id = op_rows[0][0]
+    proj.g.query(
+        "MATCH (op:Point {id:$oid}), (old:Point {id:$oldid}) "
+        "CREATE (op)-[:EVIL_CRAFTED]->(old)",
+        params={"oid": op_id, "oldid": a["id"]},
+    )
+    with pytest.raises(ValueError):
+        sdk.supersede_point(a["id"], b["id"])
+    a_now = sdk.get_point(a["id"])
+    assert not a_now.get("outdated")
+    # IMPL edge still on old (untouched — zero mutation)
+    impl_rows = proj.g.query(
+        "MATCH (op:Point {is_operator:true})-[:IMPL]->(old:Point {id:$oid}) "
+        "RETURN count(*)",
+        params={"oid": a["id"]},
+    ).result_set
+    assert impl_rows[0][0] == 1
+
+
+def test_supersede_mitigated_point_transfers(sdk):
+    """Points with mitigated_by edges supersede without error (mitigated_by
+    is a known rel type created by the live mitigate_operator feature)."""
+    proj = sdk._get_proj()
+    old = _make_point(sdk, content="Old mitigated")
+    new = _make_point(sdk, content="New")
+    # Create a mitigation Point + mitigated_by edge like mitigate_operator does
+    mit = sdk.create_point("mitigation", "mitigation rationale")
+    proj.g.query(
+        "MATCH (m:Point {id:$mid}), (t:Point {id:$oid}) "
+        "CREATE (m)-[:mitigated_by]->(t)",
+        params={"mid": mit["id"], "oid": old["id"]},
+    )
+    result = sdk.supersede_point(old["id"], new["id"])
+    assert result["invalidated"] is True
+    # mitigated_by edges are not part of the transfer (only operator→old edges
+    # transfer) — but the supersede must not raise
+    assert "edges_transferred" in result

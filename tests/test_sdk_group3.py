@@ -331,6 +331,42 @@ More content.
         assert str(p) in data["completed_files"]
 
 
+# ── #329: ingest path validation ────────────────────────────────────
+
+class TestIngestPathValidation:
+    def test_relative_dir_rejected(self, sdk):
+        with pytest.raises(ValueError, match="Unsafe ingest directory"):
+            sdk.ingest_corpus("relative/corpus")
+
+    def test_dotdot_dir_rejected(self, sdk, tmp_path):
+        with pytest.raises(ValueError, match="Unsafe ingest directory"):
+            sdk.ingest_corpus(str(tmp_path / ".." / "etc"))
+
+    def test_base_dir_enforced(self, sdk, tmp_path, monkeypatch):
+        base = tmp_path / "base"
+        base.mkdir()
+        inside = base / "docs"
+        inside.mkdir()
+        outside = tmp_path / "other"
+        outside.mkdir()
+        monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", str(base))
+        # inside base: ok (no .md files → 0 ingested, no raise)
+        result = sdk.ingest_corpus(str(inside))
+        assert result["ingested"] == 0
+        # outside base: rejected
+        with pytest.raises(ValueError, match="Unsafe ingest directory"):
+            sdk.ingest_corpus(str(outside))
+
+    def test_progress_file_validation(self, sdk, tmp_path, monkeypatch):
+        corpus = tmp_path / "corpus"
+        corpus.mkdir()
+        monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", str(corpus))
+        with pytest.raises(ValueError, match="progress_file"):
+            sdk.ingest_corpus(str(corpus), progress_file="relative.json")
+        with pytest.raises(ValueError, match="progress_file"):
+            sdk.ingest_corpus(str(corpus), progress_file=str(tmp_path / ".." / "x.json"))
+
+
 # ── create_point dedup regression (#80) ─────────────────────────
 
 def test_create_point_dedup_without_first_dedup(sdk):

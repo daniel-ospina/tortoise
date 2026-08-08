@@ -62,11 +62,13 @@ def make_client():
     """Factory returning an entered TestClient for a given auth_mode."""
     created = []
 
-    def _make(auth_mode="tenant", api_key=None, allowed_origins=None):
+    def _make(auth_mode="tenant", api_key=None, allowed_origins=None,
+             tool_group=None):
         app = create_http_app(
             allowed_origins=allowed_origins or ["http://localhost:8000"],
             auth_mode=auth_mode,
             api_key=api_key,
+            tool_group=tool_group,
         )
         tc = _mounted_test_client(app)
         tc.__enter__()
@@ -140,3 +142,32 @@ class TestMetadataRouteUnauthenticated:
     def test_get_metadata_none_mode(self, make_client):
         tc = make_client(auth_mode="none")
         assert tc.get("/mcp").status_code == 200
+
+
+class TestToolGroupFiltering:
+    """Role-scoped server (#523): tool_group filters tools/list."""
+
+    def _list_tool_names(self, tc):
+        import json as _json
+        r = tc.post("/mcp",
+                    json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+                    headers={"Accept": "application/json, text/event-stream",
+                             "Content-Type": "application/json"})
+        # Streamable HTTP returns SSE: "event: message\r\ndata: {...}"
+        data_line = next((ln[6:] for ln in r.text.splitlines() if ln.startswith("data: ")), r.text)
+        body = _json.loads(data_line)
+        return [t["name"] for t in body.get("result", {}).get("tools", [])]
+
+    def test_group_memory_lists_only_memory_tools(self, make_client):
+        from tortoise.tool_registry import GROUP_BY_NAME
+
+        tc = make_client(auth_mode="none", tool_group="memory")
+        names = self._list_tool_names(tc)
+        assert names, "expected tools"
+        assert all(GROUP_BY_NAME.get(n) == "memory" for n in names)
+        assert len(names) <= 17  # memory group size
+
+    def test_no_group_lists_all_http_tools(self, make_client):
+        tc = make_client(auth_mode="none")
+        names = self._list_tool_names(tc)
+        assert len(names) > 30  # full surface when no group filter

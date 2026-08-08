@@ -151,6 +151,18 @@ class TestToolIntegration:
         result = tortoise_search("integration test", limit=5)
         assert isinstance(result, list) or isinstance(result.get("error"), str)
 
+
+    def test_search_order_by_graph_and_confidence(self):
+        """#560: order_by flows through the MCP surface — 'graph' (GraphRanker
+        rerank) and 'confidence' (persisted EP) must be accepted by the tool
+        and return result lists (invalid values raise)."""
+        from tortoise.mcp_server import tortoise_search
+        for ob in ("graph", "confidence"):
+            result = tortoise_search("integration test", limit=5, order_by=ob)
+            assert isinstance(result, list) or isinstance(result.get("error"), str), result
+        import pytest
+        with pytest.raises(ValueError):
+            tortoise_search("integration test", order_by="bogus")
     def test_suggest_entry_points(self):
         from tortoise.mcp_server import tortoise_suggest_entry_points
         result = tortoise_suggest_entry_points("integration", limit=3)
@@ -257,3 +269,89 @@ class TestToolIntegration:
         if "error" not in first and "error" not in second:
             assert first["id"] == second["id"]
             assert second["mitigation_strength"] == 0.7
+
+
+# ── #329: batch caps on node-creating tools ─────────────────────────
+
+class TestBatchCaps:
+    def _tool(self, name, args):
+        import tortoise.mcp_server as ms
+        fn = getattr(ms, name)
+        return fn(**args)
+
+    def test_checkpoint_item_cap(self):
+        import tortoise.mcp_server as ms
+        items = [{"content": f"item {i}"} for i in range(501)]
+        result = ms.tortoise_checkpoint(items)
+        assert "error" in result and "cap" in result["error"]
+
+    def test_file_decision_option_cap(self):
+        import tortoise.mcp_server as ms
+        options = [f"option {i}" for i in range(51)]
+        result = ms.tortoise_file_decision(options, ["evidence"], 0)
+        assert "error" in result and "cap" in result["error"]
+
+    def test_file_decision_evidence_cap(self):
+        import tortoise.mcp_server as ms
+        evidence = [f"evidence {i}" for i in range(101)]
+        result = ms.tortoise_file_decision(["opt"], evidence, 0)
+        assert "error" in result and "cap" in result["error"]
+
+    def test_create_operator_target_cap(self):
+        import tortoise.mcp_server as ms
+        target_ids = [f"t{i}" for i in range(501)]
+        result = ms.tortoise_create_operator("IMPL", "src", target_ids)
+        assert "error" in result and "cap" in result["error"]
+
+    def test_tag_cap_and_value_validation(self):
+        import tortoise.mcp_server as ms
+        tags = [f"tag{i}" for i in range(51)]
+        result = ms.tortoise_create_point("statement", "x", props={"tags": tags})
+        assert "error" in result and "cap" in result["error"]
+        # empty-string tag rejected
+        result2 = ms.tortoise_create_point("statement", "y", props={"tags": [""]})
+        assert "error" in result2 and "invalid tag" in result2["error"]
+        # non-string tag rejected
+        result3 = ms.tortoise_create_point("statement", "z", props={"tags": [123]})
+        assert "error" in result3 and "invalid tag" in result3["error"]
+
+
+# ── #329: analyze LLM budget (per-team per-minute) ──────────────────
+
+class TestAnalyzeLlmBudget:
+    def test_budget_exhausted_disables_llm(self, monkeypatch):
+        """Beyond the per-minute budget, tortoise_analyze skips llm_classify
+        (no outbound call) and degrades to keyword-only."""
+        import tortoise.mcp_server as ms
+        from tortoise.mcp_auth import _current_team_id
+        from tortoise.quota import MAX_ANALYZE_LLM_PER_MIN
+
+        # embedded env (no Docker) so the team SDK resolves
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.setenv("TORTOISE_DB_PATH", "/tmp/tortoise_analyze_budget.db")
+        import tempfile as _tf, os as _os
+        monkeypatch.setenv("TORTOISE_DB_PATH", _os.path.join(_tf.mkdtemp(), "budget.db"))
+
+        # Team context (HTTP) → budget accounting
+        token = _current_team_id.set("team-budget")
+        try:
+            # Exercise the ACCUMULATION path: MAX calls allowed, next rejected
+            ms._ANALYZE_LLM_BUDGET.pop("team-budget", None)
+            for _ in range(MAX_ANALYZE_LLM_PER_MIN):
+                assert ms._analyze_llm_budget_available() is True
+            assert ms._analyze_llm_budget_available() is False
+            # A call beyond budget must not hit the LLM (urlopen never called)
+            import urllib.request as _ur
+            called = []
+            def boom(*a, **kw):
+                called.append(a)
+                raise AssertionError("llm must not be called")
+            monkeypatch.setattr(_ur, "urlopen", boom)
+            monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-x")
+            result = ms.tortoise_analyze("where is the disagreement?")
+            assert not called, "LLM was called beyond budget"
+            # Keyword path still answers
+            assert result.get("pattern") is not None or "disagreement" in str(result.get("answer", ""))
+        finally:
+            _current_team_id.reset(token)
+            ms._ANALYZE_LLM_BUDGET.pop("team-budget", None)

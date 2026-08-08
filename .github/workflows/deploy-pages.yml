@@ -1,0 +1,34 @@
+# Deploy Tortoise landing pages (premiselabs.co / tortoise.premiselabs.co) to Cloudflare Pages
+name: Deploy Landing Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'website/**'
+      - 'tortoise/onboarding/AGENT_ONBOARDING.md'
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Stage onboarding prompt (single source of truth → deployed copy)
+        # tortoise/onboarding/AGENT_ONBOARDING.md is canonical (issues #496/#540).
+        # The welcome page fetches https://tortoise.premiselabs.co/onboarding-prompt.md
+        # at runtime; generate the deployed copy here so the two can't drift.
+        run: |
+          cp tortoise/onboarding/AGENT_ONBOARDING.md website/onboarding-prompt.md
+          test -s website/onboarding-prompt.md
+      - name: Deploy to Cloudflare Pages (premise-labs project)
+        run: |
+          cd website
+          npx --yes wrangler@4 pages deploy . --project-name=premise-labs --branch=main
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: 367c7ecf27e1b1b092d04fe9915a1e56

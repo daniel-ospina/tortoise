@@ -5,7 +5,7 @@ registrations from this registry. HTTP_ALLOWED is derived — zero manual sync.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, replace, field
 from typing import Any, Callable, Optional
 
 from mcp.types import ToolAnnotations
@@ -31,6 +31,7 @@ class ToolDefinition:
     sdk_method: str              # Attribute name on TortoiseSDK, e.g. "create_point"
     handler_override: Optional[Callable] = None  # For raw-Cypher REST ops
     rest_spec: Optional[RestSpec] = None         # For SDK-backed REST ops
+    group: str = "memory"        # Curation group (#523): memory|reasoning|graph|sessions|sources|journal|admin|onboarding
 
 
 # ── Shorthand constructors ────────────────────────────────────────
@@ -189,7 +190,10 @@ TOOL_REGISTRY: list[ToolDefinition] = [
         description="Run EP stabilization (dreaming, #85). "
                     "Default: incremental dirty subgraph. Set full=True for whole-graph.",
         annotations=_rw(),
-        http_policy=True,
+        # #329: whole-graph EP is CPU-heavy — tenant MCP surface excluded
+        # (stdio/operator only). REST /v1/dream remains tenant-reachable but is
+        # separately budgeted at MAX_DREAM_FULL_PER_HOUR (hosted_api).
+        http_policy=False,
         sdk_method="dream",
         rest_spec=RestSpec(method="POST", path="/v1/dream"),
     ),
@@ -716,3 +720,86 @@ class FastAPIRouterAdapter:
                 response_model=entry.rest_spec.response_model,
                 name=entry.name,
             )
+
+
+# ── Tool curation groups (#523) ──────────────────────────────────
+# Role-scoped grouping so agents can be served a curated subset (tool-selection
+# accuracy degrades past ~20 tools). Groups:
+#   memory    — point CRUD, queries, confidence, search
+#   reasoning — structure checks, EP, analysis, taxonomy, provenance
+#   graph     — operators, entities, events, edges
+#   sessions  — session context, indexing, search
+#   sources   — sources, documents, corpus ingestion
+#   journal   — checkpoints, diary, decisions, approvals
+#   admin     — status, health, teams, governance, migrations
+#   onboarding — hosted onboarding flows
+
+GROUP_BY_NAME: dict[str, str] = {
+    # memory
+    "tortoise_create_point": "memory", "tortoise_update_point": "memory",
+    "tortoise_get_point": "memory", "tortoise_query": "memory",
+    "tortoise_paginated_query": "memory", "tortoise_query_points_by_tag": "memory",
+    "tortoise_delete_point": "memory", "tortoise_supersede": "memory",
+    "tortoise_invalidate": "memory", "tortoise_list_tags": "memory",
+    "tortoise_list_pointkinds": "memory", "tortoise_search": "memory",
+    "tortoise_compute_confidence": "memory", "tortoise_get_confidence": "memory",
+    "tortoise_set_point_baseline": "memory", "tortoise_calibrate_summary": "memory",
+    "tortoise_suggest_entry_points": "memory",
+    # reasoning
+    "tortoise_check_structure": "reasoning", "tortoise_summarize_structure": "reasoning",
+    "tortoise_traverse": "reasoning", "tortoise_entity_profile": "reasoning",
+    "tortoise_analyze": "reasoning", "tortoise_taxonomy": "reasoning",
+    "tortoise_list_topics": "reasoning", "tortoise_provenance": "reasoning",
+    "tortoise_stale": "reasoning", "tortoise_dream": "reasoning",
+    # graph
+    "tortoise_create_operator": "graph", "tortoise_annotate_operator": "graph",
+    "tortoise_get_operator": "graph", "tortoise_mitigate_operator": "graph",
+    "tortoise_create_subject": "graph", "tortoise_create_object": "graph",
+    "tortoise_create_event": "graph", "tortoise_get_events": "graph",
+    "tortoise_create_edge": "graph", "tortoise_get_entity": "graph",
+    "tortoise_update_entity": "graph", "tortoise_delete_entity": "graph",
+    "tortoise_list_sources": "sources", "tortoise_create_source": "sources",
+    "tortoise_create_document": "sources", "tortoise_ingest_corpus": "sources",
+    # sessions
+    "tortoise_session_context": "sessions", "tortoise_get_session": "sessions",
+    "tortoise_index_sessions": "sessions", "tortoise_search_sessions": "sessions",
+    "tortoise_list_graphs": "sessions", "tortoise_list_namespaces": "sessions",
+    # journal
+    "tortoise_checkpoint": "journal", "tortoise_diary_write": "journal",
+    "tortoise_diary_read": "journal", "tortoise_file_decision": "journal",
+    "tortoise_file_human_approval": "journal",
+    # admin
+    "tortoise_status": "admin", "tortoise_health": "admin",
+    "tortoise_team_create": "admin", "tortoise_get_governance": "admin",
+    "tortoise_backfill_v25": "admin",
+    # onboarding
+    "tortoise_onboarding_demo_create": "onboarding", "tortoise_onboarding_state": "onboarding",
+    "tortoise_onboarding_session_recording": "onboarding",
+    "tortoise_onboarding_github_connect": "onboarding",
+    "tortoise_onboarding_github_index": "onboarding",
+    "tortoise_onboarding_github_status": "onboarding",
+}
+
+
+def _apply_groups() -> list[ToolDefinition]:
+    """Return the registry with curation groups assigned (frozen dataclass)."""
+    out = []
+    for t in TOOL_REGISTRY:
+        out.append(replace(t, group=GROUP_BY_NAME.get(t.name, "memory")))
+    return out
+
+
+TOOL_REGISTRY = _apply_groups()
+
+
+def tools_by_group(group: str) -> list[ToolDefinition]:
+    """Tools in a curation group (e.g. "memory" — role-scoped server surface)."""
+    return [t for t in TOOL_REGISTRY if t.group == group]
+
+
+def tool_groups() -> dict[str, list[str]]:
+    """Group name → tool names (for docs / surface introspection)."""
+    out: dict[str, list[str]] = {}
+    for t in TOOL_REGISTRY:
+        out.setdefault(t.group, []).append(t.name)
+    return out

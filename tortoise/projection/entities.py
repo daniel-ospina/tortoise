@@ -395,6 +395,11 @@ class _EntityHandlers:
         object_type = inner.get("objectType", "")  # 'Document' | 'Object' | '' (legacy)
         if obj:
             if object_type == "Document":
+                # #329: the minted Document id is tenant-influenced (event
+                # props passthrough) — validate it so it can never be a host
+                # path (the read side also fails closed via resolve_under_base).
+                from tortoise.security import validate_document_id
+                validate_document_id(str(obj))
                 self.g.query(
                     "MERGE (d:Document {id:$id}) "
                     "ON CREATE SET d.title=$id, d.documentKind='transcript'",

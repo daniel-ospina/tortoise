@@ -40,6 +40,9 @@ API_KEY = os.environ.get("TORTOISE_API_KEY")
 ALLOWED_ORIGINS = os.environ.get(
     "TORTOISE_ALLOWED_ORIGINS", "http://localhost:8000"
 ).split(",")
+# Role-scoped server (#523): TORTOISE_TOOL_GROUP=memory exposes only that
+# group's tools to the agent (keeps the tool-selection surface under ~20).
+TOOL_GROUP = os.environ.get("TORTOISE_TOOL_GROUP")
 
 
 def _auth_mode() -> str:
@@ -70,11 +73,15 @@ if not os.environ.get("TORTOISE_DB_URI"):
         "docker-compose reference. See docs/license-notes.md / infra-runbook."
     )
 
+_ALLOWED_HOSTS = [o.split("//")[1].split("/")[0] for o in ALLOWED_ORIGINS if "//" in o]
+
 mcp_http_app = create_http_app(
     allowed_origins=ALLOWED_ORIGINS,
+    allowed_hosts=_ALLOWED_HOSTS,
     rate_limit=RATE_LIMIT,
     auth_mode=_auth_mode(),
     api_key=API_KEY,
+    tool_group=TOOL_GROUP,
 )
 
 
@@ -95,6 +102,26 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.mount("/mcp", mcp_http_app)
+
+# Self-host REST surface (#525) — registry-aligned /v1 endpoints.
+from tortoise.selfhost_api import router as _rest_router
+
+app.include_router(_rest_router)
+
+# Rate limit the REST surface (code-review P2, #525): /mcp has its own limiter
+# inside the sub-app; /v1/* needs the same protection (brute-force throttle on
+# static keys). Reuse the MCP token-bucket middleware on the parent app.
+from tortoise.mcp_auth import MCPRateLimitMiddleware
+
+# Scope to /v1 only (code-review P2, #525): /mcp metadata GET, /health, and
+# /docs must never be throttled (healthcheck false-negatives / host-protection
+# interference). /v1 GETs are included (static-key brute-force surface).
+app.add_middleware(
+    MCPRateLimitMiddleware,
+    max_per_minute=RATE_LIMIT,
+    limit_get=True,
+    paths_prefix=("/v1",),
+)
 
 
 @app.get("/health")

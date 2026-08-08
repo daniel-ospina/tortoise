@@ -18,7 +18,7 @@ Usage:
 
 Defaults to TORTOISE_DB_URI env var (or docker://:falkordb@localhost:16379/tortoise).
 
-Requires the embeddings extra: pip install 'tortoise[embeddings]'
+Requires the embeddings extra: pip install 'tortoise-graph[embeddings]'
 (or sentence-transformers + scikit-learn). --dry-run only reports counts and
 does NOT require the model.
 """
@@ -256,7 +256,7 @@ def main() -> int:
     # ── Live run ─────────────────────────────────────────────────────
     from tortoise.embeddings import compute_embedding
     if compute_embedding("probe") is None:
-        print("❌ Embeddings unavailable — install 'tortoise[embeddings]' "
+        print("❌ Embeddings unavailable — install 'tortoise-graph[embeddings]' "
               "(sentence-transformers + scikit-learn).", file=sys.stderr)
         return 1
 

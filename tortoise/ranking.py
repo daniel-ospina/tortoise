@@ -167,36 +167,26 @@ class GraphRanker:
     def graph_boost(self, result: dict, signals: dict) -> float:
         """Graph-informed boost in [0, 1] for one result.
 
-        Points: 0.5·effective EP confidence + 0.5·operator connectivity
-        (normalized incident IMPL/NAND edge count). The effective confidence
-        demotes CONTESTED claims: a destabilized posterior (high variance,
-        e.g. competing NAND evidence) is a less reliable mean, so it should
-        rank lower without vanishing — effective = mean·(1 − 0.5·v/v_max)
-        where v_max = 1/12 (Beta(1,1)). Uncontested claims are untouched.
+        Points: 0.5·persisted EP confidence + 0.5·operator connectivity
+        (normalized incident IMPL/NAND edge count).
         Events/Sessions: 0.6·INSTANTIATES count (Objects produced) +
         0.4·mean EP confidence of produced Points.
+
+        Contestation is deliberately NOT used as a ranking penalty: a
+        contested claim is a claim the agent should KNOW is contested (the
+        ep.contested flag + variance on the result), not one that is silently
+        ranked lower. Ranking stays about relevance and graph structure;
+        epistemic honesty is surfaced, not scored.
         """
         if signals:
             confidence = signals.get("confidence", 0.0)
-            variance = signals.get("variance", 0.0)
             degree = signals.get("degree", 0)
             instantiates = signals.get("instantiates", 0)
             if instantiates > 0 or signals.get("is_event"):
                 inst_norm = 1.0 - 1.0 / (1.0 + instantiates)
                 return round(0.6 * inst_norm + 0.4 * confidence, 4)
-            # Contestation demotion (Points): ONLY genuinely contested claims
-            # (EP ran AND posterior variance > threshold) get demoted — the
-            # mean of a destabilized posterior is less reliable. Uncontested
-            # claims (including uncalibrated ones, regardless of their raw
-            # variance) are untouched. Variance is bounded by 1/12 (Beta(1,1));
-            # at full destabilization the mean keeps half its weight, at the
-            # 0.04 contested threshold ~76%.
-            demotion = 0.0
-            if signals.get("contested"):
-                demotion = 0.5 * min(1.0, variance / (1.0 / 12.0))
-            effective = confidence * (1.0 - demotion)
             connectivity = 1.0 - 1.0 / (1.0 + (degree or 0))
-            return round(0.5 * effective + 0.5 * connectivity, 4)
+            return round(0.5 * confidence + 0.5 * connectivity, 4)
         # No graph data — degrade to neutral 0.0 (never a penalty).
         return 0.0
 

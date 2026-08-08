@@ -64,10 +64,11 @@ Your agent now has Tortoise's tools — create points, query the graph, check be
 
 ## SDK for local dev / scripting
 
-`pip install tortoise` gives you the **SDK** — a driver for local development, scripting, and power-user access against a running daemon (or embedded mode for experiments). Tortoise is a service: the SDK connects, it doesn't replace the server.
+`pip install tortoise-graph` gives you the **SDK** — a driver for local development, scripting, and power-user access against a running daemon (or embedded mode for experiments). Tortoise is a service: the SDK connects, it doesn't replace the server. (The package is published as `tortoise-graph` on PyPI — the bare `tortoise` name is squatted by an unrelated library, #258.)
 
 ```bash
-pip install -e .            # or: pip install 'tortoise[embeddings]' for vector search
+pip install tortoise-graph   # or: pip install 'tortoise-graph[embeddings]' for vector search
+# from source: pip install -e .
 python -m tortoise.selfhost # run the daemon locally (see env table below)
 ```
 
@@ -81,6 +82,7 @@ python -m tortoise.selfhost # run the daemon locally (see env table below)
 | `TORTOISE_HOST` / `TORTOISE_PORT` | `127.0.0.1` / `8000` | Daemon bind |
 | `TORTOISE_RATE_LIMIT` | `100` | Requests per minute per IP (MCP SSE bursts ≈ 5–10 req/call) |
 | `TORTOISE_ALLOWED_ORIGINS` | `http://localhost:8000` | CORS allowlist (comma-separated) |
+| `TORTOISE_TOOL_GROUP` | unset | Role-scoped MCP surface (#523) — e.g. `memory` exposes only memory tools (tool-selection accuracy degrades past ~20 tools; groups: memory, reasoning, graph, sessions, sources, journal, admin, onboarding) |
 
 Also: `tortoise-serve http [--host] [--port] [--api-key]` (flags override env), and `tortoise-serve` (stdio MCP) for scripting.
 

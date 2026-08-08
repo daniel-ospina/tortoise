@@ -1,0 +1,62 @@
+# Publish tortoise-graph to PyPI (#258)
+#
+# Uses PyPI Trusted Publishing (OIDC) — no password or long-lived token.
+# One-time setup (whoever owns the PyPI account):
+#   1. Create the project "tortoise-graph" on https://pypi.org
+#   2. Add a "pending publisher" for GitHub repo daniel-ospina/tortoise,
+#      workflow "publish-pypi.yml" — see
+#      https://docs.pypi.org/trusted-publishers/
+# After that, every tagged release (v*) publishes automatically; the
+# workflow can also be run manually from the Actions tab.
+
+name: Publish to PyPI
+
+on:
+  workflow_dispatch: {}
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  id-token: write  # PyPI trusted publishing (OIDC)
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build wheel + sdist
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+      - name: Smoke-test the wheel in a clean venv
+        run: |
+          python -m venv /tmp/wheelcheck
+          /tmp/wheelcheck/bin/pip install dist/*.whl --quiet
+          cd /tmp && /tmp/wheelcheck/bin/python -c \
+            "import tortoise; print('import OK:', tortoise.__file__)" && \
+            test -f "/tmp/wheelcheck/lib/python3.12/site-packages/tortoise/__init__.py"
+          /tmp/wheelcheck/bin/tortoise --help >/dev/null 2>&1 \
+            && echo "CLI entrypoint OK"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/

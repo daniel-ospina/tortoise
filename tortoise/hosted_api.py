@@ -69,10 +69,17 @@ def _make_sdk(*, namespace: str | None = None) -> TortoiseSDK:
 _MCP_ALLOWED_ORIGINS = [
     "https://premiselabs.co",
     "https://app.premiselabs.co",
+    "https://api.premiselabs.co",
     "https://tortoise-y4mjjq.fly.dev",
 ]
 
-mcp_http_app = create_http_app(allowed_origins=_MCP_ALLOWED_ORIGINS, rate_limit=100)
+_MCP_ALLOWED_HOSTS = [o.split("//")[1].split("/")[0] for o in _MCP_ALLOWED_ORIGINS if "//" in o]
+
+mcp_http_app = create_http_app(
+    allowed_origins=_MCP_ALLOWED_ORIGINS,
+    allowed_hosts=_MCP_ALLOWED_HOSTS,
+    rate_limit=100,
+)
 
 
 @asynccontextmanager
@@ -83,8 +90,35 @@ async def _lifespan(app):
 
     mcp_http_app.lifespan(mcp_http_app) is the Starlette Lifespan protocol
     (async context manager) that initializes the StreamableHTTPSessionManager.
+
+    Also spawns a NON-BLOCKING embedding model pre-warm in a daemon thread
+    (#545): uvicorn must bind 0.0.0.0:8000 immediately so /health passes on
+    cold start. The previous entrypoint fail-fast pre-warm crashed deploys
+    when the 30s load timeout was exceeded on a cold 2GB VM. Embeddings are
+    OPTIONAL — if the pre-warm misses its window, EmbeddingModel.get()
+    retries on the next call and search falls back to FTS+structural RRF.
     """
     async with mcp_http_app.lifespan(mcp_http_app):
+        try:
+            import threading
+
+            def _prewarm_embeddings() -> None:
+                try:
+                    from tortoise.embeddings import EmbeddingModel
+                    # Longer window than request paths (30s): cold-start torch
+                    # import on a 2-core/2GB VM can exceed 30s (#545). The
+                    # thread is daemon + background, so it never blocks bind.
+                    model = EmbeddingModel.get(load_timeout=300.0)
+                    _logger.info(
+                        "embeddings: background pre-warm %s",
+                        "ready" if model is not None else "deferred (retries on next call)",
+                    )
+                except Exception as exc:  # noqa: BLE001 — never crash the app
+                    _logger.warning("embeddings: background pre-warm failed: %s", exc)
+
+            threading.Thread(target=_prewarm_embeddings, name="embedding-prewarm", daemon=True).start()
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("embeddings: could not start background pre-warm: %s", exc)
         yield
 
 
@@ -92,7 +126,7 @@ app = FastAPI(title="Tortoise Hosted API", version="0.1.0", lifespan=_lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://premiselabs.co", "https://app.premiselabs.co", "https://tortoise-y4mjjq.fly.dev"],
+    allow_origins=["https://premiselabs.co", "https://app.premiselabs.co", "https://api.premiselabs.co", "https://tortoise-y4mjjq.fly.dev"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -105,6 +139,8 @@ app.add_middleware(
 # concurrency natively — this is a cooperative asyncio task, not a thread
 # (no SQLite/redislite single-writer hazard, #6761/#176).
 _DREAM_QUEUES: dict[str, asyncio.Queue] = {}
+# #329: per-team hourly budget for /v1/dream?full=true (CPU DoS bound)
+_DREAM_FULL_BUCKETS: dict[str, list[float]] = {}
 _DREAM_TASKS: dict[str, asyncio.Task] = {}
 _DREAM_DEBOUNCE_S = 0.1
 _DREAM_BATCH_MAX = 200
@@ -164,7 +200,7 @@ async def _dream_worker(team_id: str) -> None:
 class RateLimitMiddleware(BaseHTTPMiddleware):
     """In-memory token bucket rate limiter. 100 Points/min per API key."""
 
-    SKIP = {"/health", "/docs", "/openapi.json", "/v1/register"}
+    SKIP = {"/health", "/health/ready", "/docs", "/openapi.json", "/v1/register"}
 
     def __init__(self, app, max_per_minute=100):
         super().__init__(app)
@@ -413,7 +449,19 @@ def _short_id() -> str:
 
 @app.get("/health")
 async def health():
-    """Health check — verifies DB connectivity (not just app liveness)."""
+    """Liveness — process up and serving. NEVER gates on the DB.
+
+    (cold-start fix, #338 follow-up): the previous DB-coupled /health caused
+    deploy failures on cold machines — Fly caps the http_check grace period at
+    60s, and a cold FalkorDB Cloud connection exceeds it. Liveness returns
+    immediately; DB readiness is `/health/ready`.
+    """
+    return {"status": "ok"}
+
+
+@app.get("/health/ready")
+async def health_ready():
+    """Readiness — DB connectivity (what /health used to check)."""
     db_ok = False
     try:
         sdk = _make_sdk(namespace="registry")
@@ -443,7 +491,7 @@ async def health_security():
 
 # ── Auth Dependency ────────────────────────────────────────────────
 
-SKIP_AUTH = {"/health", "/docs", "/openapi.json", "/v1/register"}
+SKIP_AUTH = {"/health", "/health/ready", "/docs", "/openapi.json", "/v1/register"}
 
 
 async def _audit_auth_failure(request: Request, reason: str) -> None:
@@ -500,15 +548,26 @@ async def get_current_team(request: Request) -> dict:
         if team_id is None:
             await _audit_auth_failure(request, "invalid_key")
             raise HTTPException(status_code=401, detail="Invalid API key")
+        # #329: fetch quota limits in the SAME fetch as tier (one round-trip;
+        # mirrors quota.resolve_team_limits so REST and MCP see identical limits).
         team = sdk._get_registry().query(
-            "MATCH (t:Team {id: $id}) RETURN t.tier, t.max_users, t.max_graphs, t.max_teams",
+            "MATCH (t:Team {id: $id}) RETURN t.tier, t.max_users, t.max_graphs, "
+            "t.max_teams, t.max_points, t.max_api_keys, t.max_sessions",
             params={"id": team_id},
         )
-        tier, mu, mg, mt = team.result_set[0] if team.result_set else ("free", 1, 1, 1)
+        row = team.result_set[0] if team.result_set else None
+        if row:
+            tier, mu, mg, mt, mp, mak, ms = row
+        else:
+            tier, mu, mg, mt, mp, mak, ms = ("free", 1, 1, 1, None, None, None)
+        from tortoise.quota import DEFAULT_MAX_API_KEYS, DEFAULT_MAX_POINTS, DEFAULT_MAX_SESSIONS
         request.state.team_id = team_id
         request.state.tier = tier or "free"
         return {"team_id": team_id, "key_id": key_id, "tier": tier or "free",
-                "max_users": mu or 1, "max_graphs": mg or 1, "max_teams": mt or 1}
+                "max_users": mu or 1, "max_graphs": mg or 1, "max_teams": mt or 1,
+                "max_points": int(mp) if mp is not None else DEFAULT_MAX_POINTS,
+                "max_api_keys": int(mak) if mak is not None else DEFAULT_MAX_API_KEYS,
+                "max_sessions": int(ms) if ms is not None else DEFAULT_MAX_SESSIONS}
     except HTTPException:
         raise
     except Exception:
@@ -519,36 +578,23 @@ def _check_team_limit(team: dict, resource: str) -> None:
     """Enforce per-team limits. Raises 402 (payment required) when at capacity.
 
     resource: 'points' | 'api_keys' | 'sessions'
+
+    #329: delegates to the shared fail-closed quota helper — counting errors
+    now surface as 500 (QuotaCheckError) instead of silently passing, and the
+    limits dict is the authenticated team dict (resolved once by
+    get_current_team), matching MCP semantics.
     """
     team_id = team.get("team_id")
     if not team_id:
         return  # internal/no-team context — skip
-    max_limits = {
-        "points": team.get("max_points") or 1000,
-        "api_keys": team.get("max_api_keys") or 20,
-        "sessions": team.get("max_sessions") or 1000,
-    }
-    limit = max_limits.get(resource, 1000)
+    from tortoise.quota import (QuotaCheckError, QuotaExceededError,
+                                enforce_team_limit)
     try:
-        sdk = _make_sdk(namespace=team_id)
-        if resource == "api_keys":
-            # API keys live in the registry graph, not the team graph
-            sdk = _make_sdk(namespace="registry")
-            count = sdk._get_registry().query(
-                "MATCH (k:APIKey {team_id: $tid}) WHERE k.revoked_at IS NULL RETURN count(k)",
-                params={"tid": team_id},
-            ).result_set[0][0]
-        else:
-            count = sdk._get_proj().g.query(
-                "MATCH (n) RETURN count(n)",
-            ).result_set[0][0]
-    except Exception:
-        return  # if we can't count, don't block writes (fail-open on counting)
-    if count >= limit:
-        raise HTTPException(
-            status_code=402,
-            detail=f"Team {resource} limit reached ({limit}). Upgrade your plan to increase it.",
-        )
+        enforce_team_limit(team, resource)
+    except QuotaExceededError as e:
+        raise HTTPException(status_code=402, detail=str(e))
+    except QuotaCheckError as e:
+        raise HTTPException(status_code=500, detail=f"Quota check failed: {e}")
 
 
 
@@ -810,6 +856,26 @@ async def dream(
     full=True: whole-graph stabilization. Fast-path queries never block on
     this — dreaming is a background maintenance process.
     """
+    # #329: full-graph EP stabilization is CPU-heavy; per-key rate limiting is
+    # NOT the bound (tenants can hold up to max_api_keys keys). Per-team hourly
+    # budget MAX_DREAM_FULL_PER_HOUR for full=True; incremental is cheap.
+    import time as _t
+    from tortoise.quota import MAX_DREAM_FULL_PER_HOUR
+    if full:
+        tid = team["team_id"]
+        now_ts = _t.time()
+        bucket = _DREAM_FULL_BUCKETS.setdefault(tid, [])
+        bucket[:] = [ts for ts in bucket if now_ts - ts < 3600]
+        # prune -> check -> append (never pop between check and append — that
+        # orphans the appended timestamp and silently disables the budget)
+        if len(bucket) >= MAX_DREAM_FULL_PER_HOUR:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Full-graph dream budget exhausted ({MAX_DREAM_FULL_PER_HOUR}/hour). "
+                       "Try incremental dreaming or wait.",
+            )
+        bucket.append(now_ts)
+
     sdk = _make_sdk(namespace=team["team_id"])
     try:
         if full:
@@ -1303,11 +1369,62 @@ class SessionRequest(BaseModel):
 
 @app.post("/v1/sessions")
 async def capture_session(body: SessionRequest, request: Request, team: dict = Depends(get_current_team)):
-    """Capture an agent session and extract turns as episodic Points."""
-    _check_team_limit(team, "sessions")
+    """Capture an agent session and extract turns as episodic Points.
+
+    #329 flood gate: the extraction amplifier creates ~160 nodes/turn via the
+    decision/claim regexes (empirically 30 dense turns → 4,832 nodes) and the
+    ``sessions`` quota counts TOTAL nodes (MATCH (n), matching REST's
+    historical semantics) — Points were unbounded. Bounds (checked in order):
+    per-request turn cap → 400; extraction-aware pre-write estimate vs the
+    points quota → 402; per-turn extraction cap (in the loop).
+    """
     import uuid, re
     from datetime import datetime, timezone
+    from tortoise.quota import (
+        MAX_EXTRACTIONS_PER_TURN, MAX_SESSION_TURNS,
+        QuotaCheckError, QuotaExceededError, enforce_team_limit,
+    )
 
+    if len(body.conversation) > MAX_SESSION_TURNS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Session turn cap exceeded: {len(body.conversation)} > {MAX_SESSION_TURNS}.",
+        )
+
+    # Extraction-aware estimate (pre-write, fail-closed count):
+    #   est = 1 Session + 1 Event + Σ_turns (1 turn Point
+    #         + min(decisions, cap) + min(claims, cap))
+    decisions = [
+        r"(?i)(?:let'?s|we will|we should|I will|I'm going to|decided|decision)\s+[^.!?]+[.!?]",
+        r"(?i)(?:plan is|next steps?:|action item:)\s+[^.!?]+[.!?]",
+    ]
+    claims = [
+        r"(?i)(?:I think|I believe|my understanding is|the problem is|the key insight)\s+[^.!?]+[.!?]",
+        r"(?i)(?:evidence suggests|data shows|we found that|this means)\s+[^.!?]+[.!?]",
+    ]
+    est = 2
+    for turn in body.conversation:
+        # #329: estimate scans the SAME full content the extraction loop uses
+        # (must be an upper bound — a truncation mismatch would under-count).
+        content = turn.get("content", "")
+        n_dec = sum(len(re.findall(p, content)) for p in decisions)
+        n_clm = sum(len(re.findall(p, content)) for p in claims)
+        est += 1 + min(n_dec, MAX_EXTRACTIONS_PER_TURN) + min(n_clm, MAX_EXTRACTIONS_PER_TURN)
+    from tortoise.quota import count_team_usage
+    sdk_team = _make_sdk(namespace=team["team_id"])
+    try:
+        count = count_team_usage(team["team_id"], "points", sdk=sdk_team)
+    except QuotaCheckError as e:
+        raise HTTPException(status_code=500, detail=f"Quota check failed: {e}")
+    max_points = team.get("max_points") or 1000
+    if count + est > max_points:
+        raise HTTPException(
+            status_code=402,
+            detail=f"Team points limit reached: {count} in use + {est} estimated "
+                   f"for this capture exceeds {max_points}. Upgrade your plan.",
+        )
+
+    _check_team_limit(team, "sessions")
     sdk = _make_sdk(namespace=team["team_id"])
     proj = sdk._get_proj()
     session_id = body.session_id or f"session_{uuid.uuid4().hex[:12]}"
@@ -1319,14 +1436,6 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
     )
 
     extracted = []
-    decisions = [
-        r"(?i)(?:let'?s|we will|we should|I will|I'm going to|decided|decision)\s+[^.!?]+[.!?]",
-        r"(?i)(?:plan is|next steps?:|action item:)\s+[^.!?]+[.!?]",
-    ]
-    claims = [
-        r"(?i)(?:I think|I believe|my understanding is|the problem is|the key insight)\s+[^.!?]+[.!?]",
-        r"(?i)(?:evidence suggests|data shows|we found that|this means)\s+[^.!?]+[.!?]",
-    ]
 
     for i, turn in enumerate(body.conversation):
         role = turn.get("role", "unknown")
@@ -1357,8 +1466,14 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
             params={"sid": session_id, "tid": turn_id},
         )
 
+        # #329: per-turn extraction cap (matches the estimate's min() bound —
+        # without it a single dense turn writes thousands of Points).
+        n_dec_extracted = 0
         for pat in decisions:
             for match in re.finditer(pat, content):
+                if n_dec_extracted >= MAX_EXTRACTIONS_PER_TURN:
+                    break
+                n_dec_extracted += 1
                 text = match.group().strip()
                 # Extracted decisions/claims ARE cross-session knowledge —
                 # keep content-hash dedup (identical claim in two sessions is
@@ -1372,8 +1487,12 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
                 )
                 extracted.append({"id": pid, "kind": "decision", "text": text[:200]})
 
+        n_clm_extracted = 0
         for pat in claims:
             for match in re.finditer(pat, content):
+                if n_clm_extracted >= MAX_EXTRACTIONS_PER_TURN:
+                    break
+                n_clm_extracted += 1
                 text = match.group().strip()
                 p = sdk.create_point("statement", text[:5000], dedup=True)
                 pid = p["id"]
