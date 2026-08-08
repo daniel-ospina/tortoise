@@ -2169,8 +2169,8 @@ wheels = [
 ]
 
 [[package]]
-name = "tortoise"
-version = "0.1.0"
+name = "tortoise-graph"
+version = "0.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "falkordb" },
@@ -2201,7 +2201,7 @@ requires-dist = [
     { name = "falkordb", specifier = ">=1.0" },
     { name = "falkordblite", specifier = ">=0.10" },
     { name = "fastapi", specifier = ">=0.100.0" },
-    { name = "fastmcp", specifier = ">=2.0" },
+    { name = "fastmcp", specifier = "==3.4.6" },
     { name = "jax", marker = "extra == 'quadrature'", specifier = ">=0.4" },
     { name = "numpy", specifier = ">=1.24" },
     { name = "prometheus-client", specifier = ">=0.16" },
@@ -2209,7 +2209,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "scikit-learn", marker = "extra == 'embeddings'", specifier = ">=1.0" },
     { name = "scipy", specifier = ">=1.10" },
-    { name = "sentence-transformers", marker = "extra == 'embeddings'", specifier = ">=2.0" },
+    { name = "sentence-transformers", marker = "extra == 'embeddings'", specifier = ">=3,<6" },
     { name = "uvicorn", specifier = ">=0.23.0" },
 ]
 provides-extras = ["embeddings", "quadrature", "postgres"]
