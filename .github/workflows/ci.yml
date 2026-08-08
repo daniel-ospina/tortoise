@@ -60,7 +60,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: pip install playwright pytest-playwright
+      # Install the package (pulls falkordblite/redislite needed by tortoise/__init__)
+      # + the e2e test extras.
+      - run: pip install -e '.[test]'
       - run: python -m playwright install --with-deps chromium
       - name: Run welcome page E2E
         run: python -m pytest tests/e2e/ -q -p no:cacheprovider
