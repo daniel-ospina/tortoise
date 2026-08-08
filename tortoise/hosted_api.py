@@ -61,10 +61,17 @@ def _make_sdk(*, namespace: str | None = None) -> TortoiseSDK:
 _MCP_ALLOWED_ORIGINS = [
     "https://premiselabs.co",
     "https://app.premiselabs.co",
+    "https://api.premiselabs.co",
     "https://tortoise-y4mjjq.fly.dev",
 ]
 
-mcp_http_app = create_http_app(allowed_origins=_MCP_ALLOWED_ORIGINS, rate_limit=100)
+_MCP_ALLOWED_HOSTS = [o.split("//")[1].split("/")[0] for o in _MCP_ALLOWED_ORIGINS if "//" in o]
+
+mcp_http_app = create_http_app(
+    allowed_origins=_MCP_ALLOWED_ORIGINS,
+    allowed_hosts=_MCP_ALLOWED_HOSTS,
+    rate_limit=100,
+)
 
 
 @asynccontextmanager
