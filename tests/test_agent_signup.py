@@ -26,6 +26,18 @@ def client():
 
 
 class TestAgentSignup:
+    def test_minted_key_authenticates_team_info(self, client):
+        # Runs FIRST (fresh IP rate-limit bucket): the minted key must
+        # authenticate AND /v1/team must not 500 (regression: team_info read
+        # team["max_teams"] which no longer exists after D1 — pre-existing
+        # 500 on every call, exposed by signup verification).
+        r = client.post("/v1/agent/signup", json={"identity": f"anon-{uuid.uuid4().hex[:12]}"})
+        assert r.status_code == 200, r.text
+        key = r.json()["key"]
+        r2 = client.get("/v1/team", headers={"Authorization": f"Bearer {key}"})
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["team_id"]
+
     def test_signup_returns_key(self, client):
         r = client.post("/v1/agent/signup", json={"identity": f"anon-{uuid.uuid4().hex[:12]}"})
         assert r.status_code == 200, r.text

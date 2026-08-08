@@ -356,7 +356,9 @@ class TestTeamInfo:
         assert body["tier"] == "free"
         assert body["max_users"] == 1
         assert body["max_graphs"] == 1
-        assert body["max_teams"] == 1
+        # max_teams removed (D1): multi-team is a user capability, not a tier
+        # field — the response omits it (None) rather than a pre-existing 500.
+        assert body["max_teams"] is None
         assert "point_count" in body
         assert isinstance(body["point_count"], int)
 
