@@ -23,7 +23,7 @@ created: 2026-08-08
 | Status | **draft-for-G-gate** |
 | Effective date | `[effective date to be set to the actual deploy date at T8]` (G-gate ① LOCKED) |
 | Controller | Daniel Ospina, individual operating as "Premise Labs" (d/b/a) — natural person, NOT a registered entity (D4 LOCKED) |
-| Jurisdiction of residence | `[jurisdiction of residence to be confirmed by owner at G-gate]` — lowercase-prose placeholder per the pinned convention; owner confirms at G-gate; reissuable via versioned procedure (§15) if it changes |
+| Jurisdiction of residence | Mexico — owner clarification 2026-08-08 (Mexico-based, not incorporated; Delaware governing law kept); reissuable via versioned procedure (§15) if it changes |
 
 ### Step 5 — delete-account capability check (build-time, G-gate ⑧)
 
@@ -35,9 +35,9 @@ created: 2026-08-08
 
 **CHOSEN BRANCH: SCOPED CLAIM** (matches the plan's expected outcome). The policy below does **not** promise an in-product delete button. Primary erasure path = **"request deletion via GitHub issues"** + Art. 12(3) one-month commitment + 2-month extension-with-notice + Art. 12(6) identity verification + redaction guidance. A product follow-up for the self-service delete feature is filed per scope §6.2 #5 (Supabase Auth admin `deleteUser` + dashboard account UI). If the capability lands before deploy, re-run this check and switch §16 to the in-product path (record evidence in this header).
 
-### LFPDPPP note (non-blocking, scope D4 / §5.6)
+### LFPDPPP note (RESOLVED 2026-08-08 — owner clarification)
 
-The controller is a natural person whose residence jurisdiction is unconfirmed. **If** the operator is Mexico-resident, the Mexican Federal Law on the Protection of Personal Data Held by Private Parties (LFPDPPP) may apply, requiring a separate Aviso de Privacidad and ARCO rights procedures in addition to this policy. This is flagged for owner confirmation at the G-gate; it does not block this release. A conditional line is included in §1.
+The operator is Mexico-based (not incorporated; Delaware governing law kept). LFPDPPP therefore APPLIES to personal data of individuals in Mexico: §1 states that LFPDPPP applies, ARCO rights (Access, Rectification, Cancellation, Opposition) are exercised via email hello@premiselabs.co, and a standalone Aviso de Privacidad is noted as a follow-up (to be published; available on request in the meantime).
 
 ### Outline coverage (16 areas per plan T2 Step 1 → sections)
 
@@ -89,13 +89,13 @@ This policy is written in plain English. It describes current practices truthful
 
 Premise Labs is **not a registered legal entity**. The data controller is the natural person named above, acting in their personal capacity.
 
-**Jurisdiction of residence:** [jurisdiction of residence to be confirmed by owner at G-gate]
+**Jurisdiction of residence:** Mexico.
 
 **Contact for privacy matters:** email <hello@premiselabs.co>. This is the controller's designated contact channel for all privacy inquiries and requests.
 
 **EU/EEA representative (GDPR Art. 27):** "We are not currently established in the EU/EEA. If we become subject to GDPR Art. 27, we will designate and disclose an EU representative here."
 
-**LFPDPPP (Mexico):** If the controller is resident in Mexico, the Mexican Federal Law on the Protection of Personal Data Held by Private Parties (LFPDPPP) may apply, and a separate privacy notice (Aviso de Privacidad) will be published and linked from this policy.
+**LFPDPPP (Mexico):** The Mexican Federal Law on the Protection of Personal Data Held by Private Parties (LFPDPPP) applies to personal data of individuals in Mexico. ARCO rights (Access, Rectification, Cancellation, Opposition) are exercised via email <hello@premiselabs.co>. A standalone privacy notice (Aviso de Privacidad) will be published as a follow-up and is available on request in the meantime.
 
 ## 2. Data processed by the service (outline ②)
 
