@@ -14,20 +14,21 @@
  *   - Accept  -> posthog.opt_in_capturing()  (persisted via local_storage)
  *   - Decline -> posthog.opt_out_capturing() (stays opted out)
  *
- * EU Cloud (Frankfurt) is used per the #528 decision; the loader derives
- * https://eu-assets.i.posthog.com/static/array.js from the api_host below.
+ * US Cloud is used (owner decision 2026-08-08 — the controller is US-based);
+ * the loader derives https://us-assets.i.posthog.com/static/array.js from the
+ * api_host below.
  */
 (function () {
   "use strict";
 
-  // USER ACTION REQUIRED: create a PostHog Cloud EU project (region:
-  // Frankfurt) at https://posthog.com and paste its Project API Key here.
+  // USER ACTION REQUIRED: create a PostHog Cloud project (region: US) at
+  // https://posthog.com and paste its Project API Key here.
   // While this is the placeholder value, the banner and PostHog stay fully
   // inert. Do NOT remove the fail-safe guard below when adding the key.
   var POSTHOG_KEY = "__POSTHOG_PROJECT_API_KEY__";
 
   var STORAGE_KEY = "tortoise_consent"; // "granted" | "denied" | absent = undecided
-  var API_HOST = "https://eu.i.posthog.com"; // EU Cloud (Frankfurt)
+  var API_HOST = "https://us.i.posthog.com"; // US Cloud (default — region locked at project creation)
 
   function readConsent() {
     try {
@@ -137,7 +138,7 @@
     }
   }
 
-  // ── posthog-js loader (official snippet logic, EU api_host) — the stub
+  // ── posthog-js loader (official snippet logic, US api_host) — the stub
   //    queues calls until array.js loads, so init + opt in/out may be issued
   //    immediately.
   function loadPostHog() {

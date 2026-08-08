@@ -168,7 +168,7 @@ PINNED_CANONICAL = {
     "art27": "we are not currently established in the eu/eea. if we become subject to gdpr art. 27, we will designate and disclose an eu representative here.",
     "consent-banner": "you can give or withdraw consent at any time via the consent banner",
     "repo-state": "no analytics tools are currently deployed",
-    "posthog-processor": "posthog is a data processor; data is stored in the eu (frankfurt)",
+    "posthog-processor": "posthog is a data processor; data is stored in the united states",
     "meta-ga-conditional": "not deployed yet and may be activated with your consent; consent is managed via the consent banner",
     "purposes": "your email address and account information are used to deliver the service, respond to requests, and manage billing; usage data is used to improve the product",
     "art126": "we may request identity verification before acting on any request",
@@ -932,8 +932,8 @@ def test_consent_js_served_and_banner_present(page: Page) -> None:
         "consent.js missing the POSTHOG_KEY placeholder constant"
     assert "tortoise_consent" in js, "consent.js missing the consent-state storage key"
     assert '"consent-banner"' in js, "consent.js missing the banner markup"
-    assert "eu.i.posthog.com" in js and "-assets.i.posthog.com" in js, \
-        "consent.js missing the EU loader (eu-assets.i.posthog.com/static/array.js)"
+    assert "us.i.posthog.com" in js and "-assets.i.posthog.com" in js, \
+        "consent.js missing the US loader (us-assets.i.posthog.com/static/array.js)"
 
     for path in ("/product.html", "/signup", "/signin", "/welcome"):
         raw = page.request.get(BASE_URL + path, timeout=15_000).text()
