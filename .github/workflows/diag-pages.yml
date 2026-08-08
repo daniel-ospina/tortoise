@@ -1,0 +1,20 @@
+name: Diag Pages
+on: workflow_dispatch
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get project info
+        run: |
+          curl -s "https://api.cloudflare.com/client/v4/accounts/367c7ecf27e1b1b092d04fe9915a1e56/pages/projects/premise-labs" \
+            -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+if not d.get('success'): print('API ERROR:', d); sys.exit(1)
+p=d['result']
+print('production_branch:', p.get('production_branch'))
+print('domains:', p.get('domains'))
+ld=p.get('latest_deployment') or {}
+print('latest_deployment_url:', ld.get('url'))
+print('latest_trigger:', ld.get('trigger',{}).get('type'))
+"
