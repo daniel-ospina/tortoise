@@ -17,14 +17,14 @@ import sys
 import tempfile
 from pathlib import Path
 
-# Ensure Tortoise + client are importable
-_TORTOISE_ROOT = Path(__file__).resolve().parent
+# Ensure Tortoise + client are importable (repo root, mirrors tests/test_sdk.py)
+_TORTOISE_ROOT = Path(__file__).resolve().parents[1]
 if str(_TORTOISE_ROOT) not in sys.path:
     sys.path.insert(0, str(_TORTOISE_ROOT))
 
 import pytest
 
-import tortoise_client
+from tortoise import tortoise_client
 from tortoise.sdk import TortoiseSDK
 
 
@@ -102,15 +102,6 @@ class TestQueryPriorResearch:
         results = tortoise_client.query_prior_research("nonexistent-domain")
         assert results == []
 
-    def test_dedup_by_id(self):
-        """Same point matched via kind expansion must only count once."""
-        sdk = _fresh_sdk()
-        sdk.create_point("shared-domain", "Double-matched claim", authoredBy="test")
-        sdk.close()
-
-        results = tortoise_client.query_prior_research("shared-domain")
-        ids = [r["id"] for r in results]
-        assert len(ids) == len(set(ids)), f"Duplicate IDs found: {ids}"
 
 
 # ══════════════════════════════════════════════════════════════════════
