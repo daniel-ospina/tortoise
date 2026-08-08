@@ -1695,7 +1695,12 @@ def _cmd_doctor(args):
     # 3. Graph health
     try:
         from tortoise.sdk import TortoiseSDK
-        sdk = TortoiseSDK(db_path=args.path)
+        if getattr(args, "db", None):
+            from tortoise.projection import FalkorProjection
+            sdk = TortoiseSDK()
+            sdk._proj = FalkorProjection.from_uri(args.db)
+        else:
+            sdk = TortoiseSDK(db_path=args.path)
         status = sdk.status()
         points = status.get("counts", {}).get("Point", 0)
         total = status.get("total_entities", 0)
@@ -2059,6 +2064,8 @@ def main(argv: list[str] | None = None) -> int:
     setup.add_argument("--team", default=None, help="Team name (used with --role)")
     setup.add_argument("--output", default=None, help="Save config to file instead of stdout")
     doctor = sp.add_parser("doctor", help="Health check — verify Tortoise setup")
+    doctor.add_argument("--path", default=None, help="Path for embedded mode")
+    doctor.add_argument("--db", default=None, help="Docker URI or file path for the graph-health check")
     onboard = sp.add_parser("onboard", help="Guided onboarding: init → index → demo → doctor")
     onboard.add_argument("--path", default=None, help="Path for embedded mode")
     hs = sp.add_parser("health-server", help="Start standalone /health HTTP server")
