@@ -116,7 +116,7 @@ def _tortoise_emulated_locally() -> bool:
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
             body = resp.read().decode("utf-8", "ignore")
-        return "Your agents remember" in body
+        return PRODUCT_ROOT_MARKER in body
     except Exception:
         return False
 
@@ -138,6 +138,8 @@ PRIVACY_DRAFT = DRAFTS_DIR / "2026-08-08-657-privacy-draft.md"
 
 LEGAL_PAGES = ("/privacy", "/tos", "/license", "/dpa")
 FOOTER_LINK_HREFS = ("/privacy", "/tos", "/license", "/dpa")
+PRODUCT_ROOT_MARKER = "Memory that makes your agents"
+PRODUCT_ROOT_MARKER_LOWER = PRODUCT_ROOT_MARKER.lower()
 FOOTER_SELECTOR = "footer, .legal-footer, .footer"
 # The ABSOLUTE canonical Pricing Page URL (reviewer P2): the relative
 # '/#beat-pricing' form breaks on premiselabs.co, where '/' serves index.html
@@ -530,7 +532,7 @@ def test_tortoise_host_footer_half(page: Page) -> None:
     resp = page.request.get(TORTISE_HOST + "/", headers={"Host": spoof}, timeout=15_000)
     assert resp.status == 200, f"tortoise host root returned {resp.status}"
     body = resp.text()
-    assert "Your agents remember" in body, "tortoise root does not serve product.html"
+    assert PRODUCT_ROOT_MARKER in body, "tortoise root does not serve product.html"
     _footer_links_present(body)
 
 
@@ -563,7 +565,7 @@ def test_middleware_root_rewrites(page: Page) -> None:
     t_spoof = t_host if t_host.startswith("tortoise.") else "tortoise.premiselabs.co"
     r = page.request.get(TORTISE_HOST + "/", headers={"Host": t_spoof}, timeout=15_000)
     assert r.status == 200
-    assert "your agents remember why, not just what" in _clean(r.text()), \
+    assert PRODUCT_ROOT_MARKER_LOWER in _clean(r.text()), \
         "tortoise root marker missing (middleware rewrite broken)"
 
     b_host = urlsplit(BASE_URL).hostname or "premiselabs.co"
@@ -762,7 +764,7 @@ def test_crawl_tortoise_root_serves_product(page: Page) -> None:
     resp = page.request.get(TORTISE_HOST + "/", headers={"Host": spoof}, timeout=15_000)
     assert resp.status == 200, f"tortoise root → {resp.status}"
     body = resp.text()
-    assert "Your agents remember" in body
+    assert PRODUCT_ROOT_MARKER in body
     _footer_links_present(body)
 
 
