@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>License — Tortoise (BUSL-1.1)</title>
+  <meta name="description" content="How the Tortoise software is licensed: source-available under the Business Source License 1.1 (BUSL-1.1), with a $5M revenue Additional Use Grant and conversion to MPL 2.0 after four years.">
+  <meta name="theme-color" content="#060b14">
+  <link rel="canonical" href="https://tortoise.premiselabs.co/license">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #060b14;
+      --surface: #0d1a2d;
+      --text: #cbd5e1;
+      --text-dim: #64748b;
+      --accent: #06b6d4;
+      --accent-glow: rgba(6, 182, 212, 0.35);
+      --green: #4ade80;
+      --gold: #f59e0b;
+      --border: #1e293b;
+      --mono: 'SF Mono', 'Cascadia Code', 'Fira Code', 'JetBrains Mono', monospace;
+      --serif: 'Georgia', 'Times New Roman', serif;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--serif);
+      font-size: 16px;
+      line-height: 1.75;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .wrap { max-width: 720px; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
+
+    .topbar {
+      display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 0.5rem 1rem;
+      margin-bottom: 2.5rem; font-family: var(--mono); font-size: 0.78rem;
+    }
+    .topbar a { color: var(--text-dim); text-decoration: none; }
+    .topbar a:hover { color: var(--accent); }
+    .topbar .host { color: var(--text-dim); }
+
+    .doc-type {
+      font-family: var(--mono); font-size: 0.72rem; text-transform: uppercase;
+      letter-spacing: 0.08em; color: var(--accent); margin-bottom: 0.6rem;
+    }
+
+    h1 {
+      font-family: var(--mono); font-size: 1.5rem; font-weight: 600;
+      color: var(--text); line-height: 1.35; letter-spacing: -0.01em;
+    }
+    .lede { color: var(--text-dim); font-size: 0.95rem; margin-top: 0.75rem; }
+
+    .meta {
+      margin: 1.5rem 0 2.75rem; background: var(--surface);
+      border: 1px solid var(--border); border-radius: 0.75rem;
+      padding: 1rem 1.25rem; display: flex; flex-wrap: wrap; gap: 0.9rem 2.25rem;
+    }
+    .meta .label {
+      display: block; font-family: var(--mono); font-size: 0.64rem;
+      text-transform: uppercase; letter-spacing: 0.08em;
+      color: var(--text-dim); margin-bottom: 0.2rem;
+    }
+    .meta .value { font-family: var(--mono); font-size: 0.82rem; color: var(--text); }
+
+    h2 {
+      font-family: var(--mono); font-size: 1.02rem; font-weight: 600; color: var(--text);
+      margin: 2.75rem 0 0.9rem; padding-top: 1.1rem;
+      border-top: 1px solid rgba(30, 41, 59, 0.6);
+    }
+    h2:first-of-type { border-top: none; margin-top: 0; padding-top: 0; }
+
+    p { margin: 0.85rem 0; }
+    strong { color: var(--text); font-weight: 600; }
+    a { color: var(--accent); text-decoration: none; border-bottom: 1px solid rgba(6, 182, 212, 0.25); }
+    a:hover { color: #22d3ee; border-bottom-color: var(--accent); }
+    code { font-family: var(--mono); font-size: 0.82em; color: #a5f3fc; }
+
+    ul, ol { margin: 0.85rem 0; padding-left: 1.35rem; }
+    li { margin: 0.4rem 0; }
+
+    .callout {
+      background: var(--surface); border: 1px solid var(--border);
+      border-left: 3px solid var(--accent); border-radius: 0.6rem;
+      padding: 1rem 1.25rem; margin: 1.25rem 0;
+    }
+    .callout p { margin: 0.25rem 0; }
+
+    .warn {
+      background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.3);
+      border-left: 3px solid var(--gold); border-radius: 0.6rem;
+      padding: 1rem 1.25rem; margin: 1.25rem 0;
+    }
+    .warn p { margin: 0.25rem 0; color: var(--text); }
+
+    table {
+      width: 100%; border-collapse: collapse; margin: 1rem 0;
+      font-family: var(--mono); font-size: 0.78rem;
+    }
+    th, td {
+      border: 1px solid var(--border); padding: 0.5rem 0.7rem;
+      text-align: left; vertical-align: top; word-break: break-word;
+    }
+    th { background: var(--surface); color: var(--accent); font-weight: 600; }
+    td { color: var(--text); }
+
+    footer {
+      margin-top: 3.5rem; padding-top: 1.25rem; border-top: 1px solid var(--border);
+      font-family: var(--mono); font-size: 0.76rem; color: var(--text-dim);
+    }
+    footer p { margin: 0.4rem 0; }
+    footer a { color: var(--text-dim); border-bottom: 1px solid rgba(100, 116, 139, 0.3); }
+    footer a:hover { color: var(--accent); border-bottom-color: var(--accent); }
+
+    @media (max-width: 480px) {
+      .wrap { padding: 1.5rem 1rem 3rem; }
+      h1 { font-size: 1.28rem; }
+      .meta { flex-direction: column; gap: 0.7rem; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <nav class="topbar">
+      <a href="/">← Back to product</a>
+      <span class="host">tortoise.premiselabs.co</span>
+    </nav>
+
+    <header>
+      <p class="doc-type">License</p>
+      <h1>Tortoise License — Business Source License 1.1</h1>
+      <p class="lede">A plain-language explanation of how the Tortoise software is licensed. Tortoise is a source-available project licensed under the Business Source License 1.1 (BUSL-1.1).</p>
+      <div class="meta">
+        <div>
+          <span class="label">Last updated</span>
+          <span class="value">2026-08-08</span>
+        </div>
+        <div>
+          <span class="label">Effective date</span>
+          <span class="value">Effective date: 2026-08-08</span>
+        </div>
+        <div>
+          <span class="label">Version</span>
+          <span class="value">1.0</span>
+        </div>
+      </div>
+    </header>
+
+    <main>
+      <div class="warn">
+        <p><strong>This page is an explanation, not legal advice — the LICENSE file is authoritative.</strong> If there is any difference between this page and the LICENSE file, the LICENSE file controls.</p>
+      </div>
+
+      <h2>1. In short</h2>
+      <p>Tortoise is licensed under the <strong>Business Source License 1.1 (BUSL-1.1)</strong>. BUSL-1.1 is <strong>not an open-source license</strong>; it is a source-available license. The source code is public, and you may copy, modify, create derivative works, redistribute, and make <strong>non-production</strong> use of it freely. Production use is free under the Additional Use Grant described below, within its limits.</p>
+
+      <h2>2. The license parameters</h2>
+      <table>
+        <tbody>
+          <tr>
+            <th>Licensor</th>
+            <td>Premise Labs (Daniel Ospina)</td>
+          </tr>
+          <tr>
+            <th>Licensed Work</th>
+            <td>Tortoise — the Tortoise epistemic graph engine (all versions)</td>
+          </tr>
+          <tr>
+            <th>Additional Use Grant</th>
+            <td>Production use for your own organization's internal purposes, provided that your organization's total annual revenue does not exceed US $5M (or the equivalent in other currencies) in the most recent twelve-month period</td>
+          </tr>
+          <tr>
+            <th>Change Date</th>
+            <td>Four years from the date the Licensed Work is published</td>
+          </tr>
+          <tr>
+            <th>Change License</th>
+            <td>Mozilla Public License 2.0 (MPL 2.0)</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h2>3. The Additional Use Grant ($5M)</h2>
+      <p>The Additional Use Grant (AUG) permits an organization to make <strong>production use of the self-hosted version of Tortoise for its own internal purposes</strong> without a commercial license, provided that the organization's total annual revenue does not exceed <strong>US $5M</strong> (or the equivalent in other currencies) in the most recent twelve-month period.</p>
+      <p>In other words: if you run Tortoise yourself, for your own operations, and your organization's trailing-12-month revenue is at or below US $5M, production use is free. Non-production use (development, testing, evaluation) is always free, regardless of revenue.</p>
+
+      <h2>4. What the grant never permits</h2>
+      <p>The Additional Use Grant never permits <strong>offering Tortoise, or a substantially similar product, to third parties as a hosted or managed service</strong>. The grant also does not permit reselling or sublicensing the Licensed Work. These uses always require a separate commercial license, regardless of revenue.</p>
+
+      <h2>5. The hosted service</h2>
+      <p>The hosted Tortoise service (tortoise.premiselabs.co) is a <strong>separate commercial product</strong> with a free tier. It is <strong>not covered</strong> by the BUSL-1.1 grant. Use of the hosted service is governed by the <a href="/tos">Terms of Service</a>, the <a href="/privacy">Privacy Policy</a>, and the <a href="/dpa">Data Processing Agreement</a>, not by the BUSL-1.1 license.</p>
+
+      <h2>6. When do I need a commercial license?</h2>
+      <p>You need a commercial license if either applies:</p>
+      <ul>
+        <li><strong>Revenue above the threshold:</strong> your organization makes self-hosted <em>production</em> use of Tortoise and its total annual revenue exceeds US $5M (or the equivalent in other currencies) in the most recent twelve-month period; or</li>
+        <li><strong>Hosting as a service:</strong> you offer Tortoise, or a substantially similar product, to third parties as a hosted or managed service — at any revenue level.</li>
+      </ul>
+      <p>For information about commercial licensing, email <a href="mailto:hello@premiselabs.co">hello@premiselabs.co</a>.</p>
+
+      <h2>7. What happens after four years?</h2>
+      <p>On the Change Date — four years after each version of Tortoise is published — that version is made available under the <strong>Mozilla Public License 2.0 (MPL 2.0)</strong>, which is OSI-approved. The Change Date applies separately to each version, so each version converts on its own schedule.</p>
+
+      <h2>8. The full license text</h2>
+      <p>The complete, authoritative license text is available at <a href="https://github.com/daniel-ospina/tortoise/blob/main/LICENSE">https://github.com/daniel-ospina/tortoise/blob/main/LICENSE</a>. If you have questions about the license, open an issue at <a href="https://github.com/daniel-ospina/tortoise/issues">https://github.com/daniel-ospina/tortoise/issues</a>.</p>
+
+      <div class="warn">
+        <p><strong>This page is an explanation, not legal advice — the LICENSE file is authoritative.</strong></p>
+      </div>
+    </main>
+
+    <footer>
+      <h2 style="border-top: none; padding-top: 0; margin-top: 0;">Document history / revisions</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Version</th>
+            <th>Effective date</th>
+            <th>Summary</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>1.0</td>
+            <td>2026-08-08</td>
+            <td>Initial publication of the license explainer.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <p>Premise Labs · Tortoise · <a href="/">Back to product</a></p>
+    </footer>
+  </div>
+</body></html>
