@@ -1712,6 +1712,201 @@ async def list_graphs(team_id: str, user: dict = Depends(get_current_user)):
 
 
 
+# ── E3/E4/E8: invites + RBAC (Team tier, D7 #574) ──
+# Token-only accept in v1 (decision 1e); owner is NOT invitable (single-owner
+# model — invitable roles: admin, member). Free/Solo/Pro: invites disabled
+# (max_users=1 or invite path deferred to billing).
+
+async def _require_owner_admin(user_id: str, team_id: str) -> dict:
+    """Return the membership if the user is owner/admin in the team, else 403."""
+    sdk = _make_sdk(namespace="registry")
+    rows = sdk._get_registry().query(
+        "MATCH (m:Membership {user_id:$uid, team_id:$tid, status:'active'}) "
+        "RETURN m.role",
+        params={"uid": user_id, "tid": team_id},
+    ).result_set
+    if not rows or rows[0][0] not in ("owner", "admin"):
+        raise HTTPException(status_code=403, detail="Requires owner or admin role in team")
+    return {"team_id": team_id, "role": rows[0][0]}
+
+
+@app.post("/v1/invites")
+async def invite_to_team(body: dict, user: dict = Depends(get_current_user)):
+    """E3 — invite a user to the team (admin/member roles; Team tier)."""
+    team_id = (body or {}).get("team_id")
+    email = ((body or {}).get("email") or "").strip().lower()
+    role = (body or {}).get("role", "member")
+    if not team_id or not email or "@" not in email:
+        raise HTTPException(status_code=422, detail="team_id and valid email required")
+    if role not in ("admin", "member"):
+        raise HTTPException(status_code=422, detail="role must be 'admin' or 'member'")
+
+    await _require_owner_admin(user["user_id"], team_id)
+
+    sdk = _make_sdk(namespace="registry")
+    reg = sdk._get_registry()
+    team = reg.query(
+        "MATCH (t:Team {id:$id}) RETURN t.tier, t.max_users",
+        params={"id": team_id},
+    ).result_set
+    tier = team[0][0] if team else "free"
+    if tier != "team":
+        raise HTTPException(status_code=402, detail="Invites require the Team tier")
+
+    # max_users gate (tier-driven; Team = unlimited)
+    from tortoise.pricing import tier_limits
+    lim = tier_limits(tier)
+    max_users = lim["max_users_per_team"]
+    if max_users is not None:
+        count = reg.query(
+            "MATCH (m:Membership {team_id:$tid, status:'active'}) RETURN count(m)",
+            params={"tid": team_id},
+        ).result_set[0][0]
+        if count >= max_users:
+            raise HTTPException(status_code=402, detail="Team at user limit — upgrade to invite more")
+
+    # Invitation node via SDK (token returned once); roles admin/member allowed here
+    import uuid as _uuid
+    from datetime import datetime, timezone as _tz, timedelta
+    from tortoise.auth import hash_api_key as _hash
+
+    dup = reg.query(
+        "MATCH (i:Invitation {team_id:$tid, email:$email}) "
+        "WHERE i.accepted_at IS NULL AND (i.status IS NULL OR i.status <> 'revoked') RETURN count(i)",
+        params={"tid": team_id, "email": email},
+    ).result_set[0][0]
+    if dup:
+        raise HTTPException(status_code=409, detail="Pending invitation already exists for this email")
+
+    token = str(_uuid.uuid4())
+    token_hash = _hash(token)
+    iid = _short_id()
+    now = datetime.now(_tz.utc).isoformat()
+    expires_at = (datetime.now(_tz.utc) + timedelta(days=7)).isoformat()
+    reg.query(
+        "CREATE (i:Invitation {id:$id, team_id:$tid, email:$email, role:$role, "
+        "token_hash:$th, created_by:$cb, created_at:$now, expires_at:$exp, "
+        "accepted_at:null, status:'pending'})",
+        params={"id": iid, "tid": team_id, "email": email, "role": role,
+                "th": token_hash, "cb": user["user_id"], "now": now, "exp": expires_at},
+    )
+    # Also record the invitee row in team_memberships (status='invited') per plan §4.1
+    reg.query(
+        "MERGE (m:Membership {team_id:$tid, user_id:$fake}) "
+        "ON CREATE SET m.role=$role, m.status='invited', m.invited_email=$email, m.created_at=$now",
+        params={"tid": team_id, "fake": f"invite-{iid}", "role": role, "email": email, "now": now},
+    )
+    return {"invite_id": iid, "status": "invited", "token": token,
+            "expires_at": expires_at, "role": role}
+
+
+@app.post("/v1/invites/accept")
+async def accept_invite(body: dict, user: dict = Depends(get_current_user)):
+    """E4 — accept an invite by token (token-only in v1, decision 1e)."""
+    token = (body or {}).get("token")
+    if not token:
+        raise HTTPException(status_code=422, detail="token required")
+    from tortoise.auth import verify_api_key as _verify
+
+    sdk = _make_sdk(namespace="registry")
+    reg = sdk._get_registry()
+    rows = reg.query(
+        "MATCH (i:Invitation) WHERE i.accepted_at IS NULL "
+        "AND (i.status IS NULL OR i.status <> 'revoked') RETURN i.id, i.team_id, i.email, i.role, i.token_hash, i.expires_at",
+    ).result_set
+    invite = None
+    for iid, tid, email, role, th, exp in rows:
+        if _verify(token, th):
+            invite = {"id": iid, "team_id": tid, "email": email, "role": role, "expires_at": exp}
+            break
+    if not invite:
+        raise HTTPException(status_code=400, detail="Invalid or expired invite token")
+    if invite["expires_at"] and invite["expires_at"] < datetime.now(timezone.utc).isoformat():
+        raise HTTPException(status_code=400, detail="Invite token expired")
+
+    # Email match guard (invitee must be the invitee's account)
+    user_email = (user.get("email") or "").lower()
+    if user_email and user_email != invite["email"].lower():
+        raise HTTPException(status_code=403, detail="Invite email does not match this account")
+
+    # Check not already a member
+    existing = reg.query(
+        "MATCH (m:Membership {team_id:$tid, user_id:$uid, status:'active'}) RETURN count(m)",
+        params={"tid": invite["team_id"], "uid": user["user_id"]},
+    ).result_set[0][0]
+    if existing:
+        raise HTTPException(status_code=409, detail="Already a member of this team")
+
+    # Token single-use: mark accepted
+    reg.query(
+        "MATCH (i:Invitation {id:$id}) SET i.accepted_at = $now, i.accepted_by = $uid",
+        params={"id": invite["id"], "now": datetime.now(timezone.utc).isoformat(), "uid": user["user_id"]},
+    )
+    # Create the active membership (route through membership_create for the max_users gate)
+    try:
+        sdk.membership_create(invite["team_id"], user["user_id"], invite["role"])
+    except Exception as e:
+        raise HTTPException(status_code=402, detail=f"Could not join team: {e}")
+    return {"team_id": invite["team_id"], "role": invite["role"]}
+
+
+@app.get("/v1/teams/{team_id}/members")
+async def list_members(team_id: str, user: dict = Depends(get_current_user)):
+    """E8a — list team members."""
+    await _require_owner_admin(user["user_id"], team_id)
+    sdk = _make_sdk(namespace="registry")
+    rows = sdk._get_registry().query(
+        "MATCH (m:Membership {team_id:$tid}) WHERE m.status = 'active' OR m.status = 'invited' "
+        "RETURN m.user_id, m.role, m.status, m.invited_email",
+        params={"tid": team_id},
+    ).result_set
+    return [{"user_id": r[0], "role": r[1], "status": r[2],
+             "email": r[3] or ""} for r in rows]
+
+
+@app.delete("/v1/teams/{team_id}/members/{user_id}")
+async def remove_member(team_id: str, user_id: str, user: dict = Depends(get_current_user)):
+    """E8b — remove a member (owner cannot be removed)."""
+    membership = await _require_owner_admin(user["user_id"], team_id)
+    sdk = _make_sdk(namespace="registry")
+    target = sdk._get_registry().query(
+        "MATCH (m:Membership {team_id:$tid, user_id:$uid}) RETURN m.role",
+        params={"tid": team_id, "uid": user_id},
+    ).result_set
+    if not target:
+        raise HTTPException(status_code=404, detail="Member not found")
+    if target[0][0] == "owner":
+        raise HTTPException(status_code=409, detail="Owner cannot be removed")
+    sdk._get_registry().query(
+        "MATCH (m:Membership {team_id:$tid, user_id:$uid}) SET m.status='removed'",
+        params={"tid": team_id, "uid": user_id},
+    )
+    return {"status": "removed"}
+
+
+@app.patch("/v1/teams/{team_id}/members/{user_id}")
+async def change_member_role(team_id: str, user_id: str, body: dict, user: dict = Depends(get_current_user)):
+    """E8c — change a member's role (admin/member; owner cannot be demoted)."""
+    await _require_owner_admin(user["user_id"], team_id)
+    new_role = (body or {}).get("role")
+    if new_role not in ("admin", "member"):
+        raise HTTPException(status_code=422, detail="role must be 'admin' or 'member'")
+    sdk = _make_sdk(namespace="registry")
+    target = sdk._get_registry().query(
+        "MATCH (m:Membership {team_id:$tid, user_id:$uid}) RETURN m.role",
+        params={"tid": team_id, "uid": user_id},
+    ).result_set
+    if not target:
+        raise HTTPException(status_code=404, detail="Member not found")
+    if target[0][0] == "owner":
+        raise HTTPException(status_code=409, detail="Owner role cannot be changed")
+    sdk._get_registry().query(
+        "MATCH (m:Membership {team_id:$tid, user_id:$uid}) SET m.role=$role",
+        params={"tid": team_id, "uid": user_id, "role": new_role},
+    )
+    return {"user_id": user_id, "role": new_role}
+
+
 @app.post("/v1/session/key")
 async def session_key(body: dict, request: Request, user: dict = Depends(get_current_user)):
     """E1 — session-scoped key mint (the #518 chicken-and-egg fix).
