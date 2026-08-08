@@ -1026,3 +1026,34 @@ The plan is internally consistent, risks identified with mitigations, and ready 
 ---
 
 # PLAN COMPLETE — Ready for epic-decompose
+
+---
+
+# IMPLEMENTATION COMPLETE — 2026-08-08
+
+## Deployed to production
+- Migration 0003 (M:N decoupling, reveal RPC, column security) — applied
+- Edge function tenant-provision — deployed
+- Static pages (signup/welcome/signin JS fix + pricing) — deployed to tortoise-landing-v2
+- Dashboard (session auth + onboarding) — deployed to tortoise-dashboard
+
+## Merged (all 11 child issues)
+| Issue | PR | What |
+|---|---|---|
+| D1 #568 | #615 | Decoupling + migration + JWKS endpoints |
+| D2 #569 | #612 | Signup JS bug fix (#527) |
+| D3 #570 | #618 | Session-key mint (E1, #518 fix) |
+| D4 #571 | #620 | Reveal-once welcome (RPC) |
+| D5 #572 | #623 | Dashboard session auth |
+| D6 #573 | #627 | Dashboard onboarding surface |
+| D7 #574 | #629 | Invites + RBAC |
+| D8 #575 | #594 | Pricing page |
+| D9 #576 | #634 | Email confirmation + reconcile |
+| D10 #577 | #635 | Analytics hooks |
+| D11 #578 | #641 | E2E suite (74 tests) |
+
+## Also shipped
+- Dispatch-infra fix (agent-infra PR #130 — skill_declaration + 660s kill)
+- product/pricing.json + pricing.md (canonical tiers → features → competitive)
+- product/competition/honcho.md (new profile)
+- Follow-ups: #528 (PostHog), #529 (harness onboarding), #557 (sub-tenancy), #524 (MCP OAuth criteria)
