@@ -14,7 +14,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Layer 1: bake the embedding model (90MB) — only rebuilds when pyproject.toml changes.
 # This layer is cached across source-only changes, making deploys incremental.
 COPY pyproject.toml .
-RUN pip install --no-cache-dir '.[embeddings]' \
+RUN pip install --no-cache-dir '.[embeddings]' '.[backups]' \
     # Both HF_HOME and SENTENCE_TRANSFORMERS_HOME must point at /app/model so
     # the build-time download lands EXACTLY where runtime looks: ST uses
     # SENTENCE_TRANSFORMERS_HOME directly as its cache dir

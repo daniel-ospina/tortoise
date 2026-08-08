@@ -29,6 +29,14 @@ import hmac
 
 from tortoise.sdk import TortoiseSDK, _content_hash
 from tortoise.mcp_server import create_http_app
+from tortoise.hosted_backup import (
+    RestoreVerificationError,
+    R2Storage,
+    create_backup,
+    list_backups,
+    prune_backups,
+    restore_backup,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -339,10 +347,15 @@ async def provision_tenant(request: Request):
 
     # Validate team_id and team_name against allowed pattern
     import re
-    _team_pattern = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9 _-]{0,63}$')
-    if not _team_pattern.match(team_id):
+    # team_id flows into graph names + SDK namespaces — strict (aligned with
+    # the SDK namespace regex + hosted_backup._validate_team_id: a space would
+    # pass provision but fail every downstream _make_sdk(namespace=...) call).
+    # team_name is display-only — spaces allowed.
+    _id_pattern = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$')
+    _name_pattern = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9 _-]{0,63}$')
+    if not _id_pattern.match(team_id):
         raise HTTPException(status_code=400, detail="Invalid team_id format")
-    if not _team_pattern.match(team_name):
+    if not _name_pattern.match(team_name):
         raise HTTPException(status_code=400, detail="Invalid team_name format")
 
     sdk = _make_sdk(namespace="registry")
@@ -694,6 +707,14 @@ class RegisterResponse(BaseModel):
 
 class OnboardingStateResponse(BaseModel):
     onboarding: dict
+
+
+# ── Backups: Pydantic Models (#305) ──────────────────────────────
+
+class BackupRestoreRequest(BaseModel):
+    """Owner-initiated restore — requires explicit confirm (destructive swap)."""
+    backup_key: str = Field(..., min_length=1)
+    confirm: bool = False
 
 
 class OnboardingStatePatchRequest(BaseModel):
@@ -2244,6 +2265,153 @@ async def index_job_status(job_id: str, team: dict = Depends(get_current_team)):
     if job.get("team_id") != team["team_id"]:
         raise HTTPException(status_code=404, detail="Job not found")
     return {"job_id": job_id, **job}
+
+
+# ── Backups: endpoints (#305) ────────────────────────────────────
+
+
+def _backup_storage() -> R2Storage:
+    """R2 storage from env (R2_ACCOUNT_ID / R2_ACCESS_KEY_ID / ...)."""
+    return R2Storage()
+
+
+def _require_backup_tier(team: dict) -> None:
+    """Backups are a Pro feature (#296 revenue model). Free tier → 402."""
+    if team.get("tier") in (None, "free"):
+        raise HTTPException(
+            status_code=402,
+            detail="Backups are a Pro feature — upgrade to enable daily backups",
+        )
+
+
+@app.get("/backups")
+async def backups_list(team: dict = Depends(get_current_team)):
+    """List this team's backups (newest first) with timestamps + node counts."""
+    team_id = team.get("team_id")
+    if not team_id:
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+    try:
+        return {"backups": await asyncio.to_thread(list_backups, _backup_storage(), team_id)}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"List rejected: {e}")
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=f"Backup storage unavailable: {e}")
+
+
+def _registry_sdk() -> TortoiseSDK:
+    """Registry-namespaced SDK — Team/Membership nodes live in the canonical
+    registry_control_plane graph, reached only via namespace='registry' (the
+    same resolution every other registry op in this file uses)."""
+    return _make_sdk(namespace="registry")
+
+
+# Per-team restore serialization: the swap (delete live → copy temp) must not
+# interleave with a concurrent same-team restore — a second restore landing in
+# the delete→copy window would recreate the live key and fail the copy, or
+# defeat the empty-backup guard's TOCTOU.
+_BACKUP_RESTORE_LOCKS: dict[str, asyncio.Lock] = {}
+_BACKUP_LOCKS_GUARD = asyncio.Lock()
+
+
+async def _team_restore_lock(team_id: str) -> asyncio.Lock:
+    async with _BACKUP_LOCKS_GUARD:
+        return _BACKUP_RESTORE_LOCKS.setdefault(team_id, asyncio.Lock())
+
+
+@app.post("/backups", status_code=201)
+async def backups_create(team: dict = Depends(get_current_team)):
+    """Trigger an on-demand backup of the team graph (Pro tier)."""
+    team_id = team.get("team_id")
+    if not team_id:
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+    _require_backup_tier(team)
+    graph_name = f"team_{team_id}"
+    sdk = None
+    registry_sdk = None
+    try:
+        sdk = _make_sdk(namespace=team_id)
+        registry_sdk = _registry_sdk()
+        storage = _backup_storage()
+        manifest = await asyncio.to_thread(
+            create_backup, sdk._get_proj(), registry_sdk._get_registry(), storage,
+            team_id=team_id, graph_name=graph_name,
+        )
+        # Retention: prune after a successful backup so storage stays bounded
+        # (best-effort — a prune failure must not fail the backup).
+        try:
+            await asyncio.to_thread(prune_backups, storage, team_id)
+        except Exception as e:
+            _logger.warning("prune failed for team %s: %s", team_id, e)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Backup rejected: {e}")
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=f"Backup failed: {e}")
+    except Exception as e:
+        _logger.exception("backup failed for team %s", team_id)
+        raise HTTPException(status_code=500, detail=f"Backup failed: {e}")
+    finally:
+        if sdk is not None:
+            sdk.close()
+        if registry_sdk is not None:
+            registry_sdk.close()
+    return manifest
+
+
+@app.post("/backups/restore")
+async def backups_restore(body: BackupRestoreRequest, team: dict = Depends(get_current_team)):
+    """Restore the team graph from a backup (Pro tier; confirm=true required).
+
+    Restores into a temp graph, verifies node/edge counts against the payload,
+    then swaps (pre-restore safety copy → delete live → copy temp). The live
+    graph is only touched after the temp graph verifies. ``confirm=true`` is
+    a footgun guard, not role authorization — every team key already has full
+    write access to the team graph.
+    """
+    team_id = team.get("team_id")
+    if not team_id:
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+    _require_backup_tier(team)
+    if not body.confirm:
+        raise HTTPException(
+            status_code=400, detail="confirm=true required — restore replaces the live graph"
+        )
+    graph_name = f"team_{team_id}"
+    lock = await _team_restore_lock(team_id)
+    sdk = None
+    registry_sdk = None
+    async with lock:
+        try:
+            sdk = _make_sdk(namespace=team_id)
+            registry_sdk = _registry_sdk()
+            result = await asyncio.to_thread(
+                restore_backup, sdk._get_proj().db, registry_sdk._get_registry(),
+                _backup_storage(),
+                body.backup_key, team_id=team_id, graph_name=graph_name,
+            )
+            # Rebuild indexes on the restored live graph (range/FTS/vector) —
+            # the logical dump + GRAPH.COPY restores data, not schema. Off the
+            # event loop: a large graph's index build must not stall all tenants.
+            try:
+                await asyncio.to_thread(sdk._get_proj()._ensure_indexes)
+            except Exception as e:
+                _logger.warning(
+                    "index rebuild after restore failed for team %s: %s", team_id, e
+                )
+        except RestoreVerificationError as e:
+            raise HTTPException(status_code=409, detail=f"Restore rejected: {e}")
+        except (ValueError, KeyError) as e:
+            raise HTTPException(status_code=400, detail=f"Restore rejected: {e}")
+        except RuntimeError as e:
+            raise HTTPException(status_code=503, detail=f"Restore failed: {e}")
+        except Exception as e:
+            _logger.exception("restore failed for team %s", team_id)
+            raise HTTPException(status_code=500, detail=f"Restore failed: {e}")
+        finally:
+            if sdk is not None:
+                sdk.close()
+            if registry_sdk is not None:
+                registry_sdk.close()
+    return result
 
 
 # ── MCP mount (#236) ─────────────────────────────────────────────

@@ -32,6 +32,7 @@ tortoise-serve = "tortoise.deployment:serve"
 embeddings = ["sentence-transformers>=3,<6", "scikit-learn>=1.0"]
 quadrature = ["jax>=0.4"]
 postgres = ["psycopg2-binary>=2.9"]
+backups = ["boto3>=1.34", "cryptography>=42"]
 
 [tool.setuptools.packages.find]
 include = ["tortoise*"]

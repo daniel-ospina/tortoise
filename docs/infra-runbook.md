@@ -134,6 +134,11 @@ wrangler pages deploy dist --project-name=tortoise-dashboard
 | FALKORDB_CLOUD_URI | ✅ (set via GitHub secret → Fly) | ✅ (instance creds) | ✅ |
 | FLY_API_TOKEN | — | — | ✅ |
 | CLOUDFLARE_API_TOKEN | — | — | ✅ |
+| TORTOISE_BACKUP_KEY | ✅ (base64 32-byte AES-256-GCM key) | — | ✅ |
+| R2_ACCOUNT_ID | ✅ | — | ✅ |
+| R2_ACCESS_KEY_ID | ✅ | — | ✅ |
+| R2_SECRET_ACCESS_KEY | ✅ | — | ✅ |
+| R2_BUCKET | ✅ (`tortoise-backups`) | — | ✅ |
 
 ## Reproducibility Test
 Can a fresh Fly.io account + Cloudflare account follow §1 from zero and arrive at the same infra?
