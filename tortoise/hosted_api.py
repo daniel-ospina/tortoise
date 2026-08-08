@@ -1052,7 +1052,10 @@ async def team_info(team: dict = Depends(get_current_team)):
         tier=team["tier"],
         max_users=team["max_users"],
         max_graphs=team["max_graphs"],
-        max_teams=team["max_teams"],
+        # max_teams removed (D1): multi-team is a user capability, not a tier field.
+        # TeamInfoResponse.max_teams is optional — omit rather than KeyError (pre-existing
+        # 500 on every /v1/team call, exposed by the zero-email signup verification).
+        max_teams=None,
         point_count=point_count,
     )
 
@@ -2061,8 +2064,8 @@ async def reconcile(request: Request):
 @app.post("/v1/agent/signup")
 async def agent_signup(request: Request):
     """Mint a team + API key for an anonymous device (no email/dashboard)."""
-    # Per-identity + per-IP rate limit (abuse posture)
-    await _check_register_rate_limit(request)
+    # Per-identity rate limit only (abuse posture): the identity is what an
+    # attacker must keep stable to use the minted key — IP rotates trivially.
     body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
     identity = (body or {}).get("identity") or request.headers.get("x-device-id", "")
     if not identity:
