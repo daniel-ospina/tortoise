@@ -64,9 +64,9 @@
     }
 
     /* Pricing section (El Dato component shape, Tortoise colors) */
-    #beat-pricing { text-align: center; }
-    #beat-pricing h2 { font-family: var(--serif); font-size: clamp(1.6rem, 3.5vw, 2.6rem); font-weight: 400; color: var(--text); text-align: center; margin-bottom: 0.4rem; }
-    #beat-pricing .pricing-sub { color: var(--text); text-align: center; max-width: 640px; margin: 0 auto 2rem; font-size: 14px; }
+    #pricing-section { text-align: center; }
+    #pricing-section h2 { font-family: var(--serif); font-size: clamp(1.6rem, 3.5vw, 2.6rem); font-weight: 400; color: var(--text); text-align: center; margin-bottom: 0.4rem; }
+    #pricing-section .pricing-sub { color: var(--text); text-align: center; max-width: 640px; margin: 0 auto 2rem; font-size: 14px; }
     .pricing-toggle { display: flex; align-items: center; gap: 0.25rem; background: #0d1a2d; border: 1px solid var(--border, #1e293b); border-radius: 9999px; padding: 0.25rem; margin: 0 auto 2.5rem; width: fit-content; }
     .pricing-toggle button { padding: 0.375rem 1.25rem; border-radius: 9999px; border: 1px solid #d1d5db; font-size: 0.875rem; font-weight: 500; cursor: pointer; background: transparent; color: var(--text-dim); transition: all 0.15s; font-family: var(--mono); }
     .pricing-toggle button.active { background: var(--accent); color: #04121a; border-color: var(--accent); }
@@ -88,10 +88,7 @@
     .pricing-card .btn:hover { background: var(--accent-hover, #0891b2); }
     .pricing-card .btn.secondary { background: #1e293b; color: var(--text); }
     .pricing-usage { text-align: center; color: var(--text); font-size: 0.85rem; margin: 1.75rem auto 0; }
-    .segmented { display: flex; flex-wrap: wrap; gap: 1rem; justify-content: center; max-width: 900px; margin: 2.5rem auto 0; }
-    .segment { flex: 1; min-width: 300px; background: #0d1a2d; border: 1px solid #1e293b; border-radius: 1rem; padding: 1.25rem; }
-    .segment h4 { color: var(--accent); font-size: 0.95rem; margin-bottom: 0.4rem; }
-    .segment p { color: var(--text); font-size: 0.85rem; }
+
     .selfhost { max-width: 900px; margin: 2rem auto 0; background: #0d1a2d; border: 1px solid #1e293b; border-radius: 1rem; padding: 1.5rem; }
     .selfhost h4 { color: var(--green); font-size: 0.95rem; margin-bottom: 0.5rem; }
     .selfhost p { color: var(--text); font-size: 0.85rem; margin-bottom: 0.75rem; }
@@ -236,14 +233,6 @@
       color: var(--text);
       font-size: 0.8rem;
     }
-    #cta-section .cta-step {
-      margin: 0.35rem 0 0.35rem;
-      color: var(--text);
-      font-size: 0.78rem;
-      text-align: left;
-      width: 100%;
-      max-width: 480px;
-    }
     #cta-section .twitter-link {
       margin-top: 1.5rem;
       color: var(--text);
@@ -331,7 +320,7 @@
   </div>
 
   <!-- Pricing — normal document-flow section (below the scroll narrative) -->
-  <section id="beat-pricing" class="content-section">
+  <section id="pricing-section" class="content-section">
       <h2>Pricing</h2>
       <p class="pricing-sub">Start free. Scale when your agents do — you pay for usage, not seats.</p>
 
@@ -344,20 +333,13 @@
 
       <p class="pricing-usage" id="pricing-usage-line"></p>
 
-      <div class="segmented">
-        <div class="segment" id="segment-use"></div>
-        <div class="segment" id="segment-build"></div>
-      </div>
-
       <div class="selfhost" id="selfhost-section"></div>
   </section>
 
   <!-- CTA — normal document-flow section -->
   <section id="cta-section" class="content-section">
       <a href="/signup" class="cta-start">Connect your agent →</a>
-      <p class="cta-subtle">Free tier available. No credit card. Start building in minutes.</p>
-      <p class="cta-step">Setup is in the docs — the welcome page walks you through MCP and CLI
-      after signup.</p>
+      <p class="cta-subtle">Hosted free tier — 10,000 write ops free. No credit card.</p>
       <div class="cta-links">
         <a class="selfhost-link" href="/docs">Docs</a>
         <a class="selfhost-link" href="https://github.com/daniel-ospina/tortoise" target="_blank" rel="noopener">Self-hosting docs →</a>
@@ -624,18 +606,13 @@
         annual_discount_pct: 20,
         annual_default: true,
         license_self_hosted: "BSL 1.1 + $5M AUG (free <$5M trailing-12mo revenue); Mozilla Public License 2.0 (MPL-2.0) conversion after 4 years; hosted excluded from grant",
-        segments: {
-          use: "Use Tortoise — memory for you and your team: connect your agents, remember decisions, MCP integration",
-          build: "Build with Tortoise — embedded memory via API for your product: REST/MCP, per-team keys, usage-based pricing"
-        },
         overage_line: "$5 per additional 10k write ops",
-        integrations_line: "Unlimited integrations at every tier"
       },
       tiers: {
-        free: { price: 0, graphs: 1, users: 1, ops: 10000, nodes: 10000, keys: 2, overage: false, popular: false, features: ["1 graph", "1 collaborator", "10,000 write ops/mo", "10,000-node graph", "2 API keys"], excluded: ["Overage"] },
-        solo: { price: 9, graphs: 2, users: 1, ops: 10000, nodes: 25000, keys: 5, overage: false, popular: false, features: ["2 graphs", "1 collaborator", "10,000 write ops/mo", "25,000-node graph", "5 API keys"], excluded: ["Overage"] },
-        pro: { price: 25, graphs: "∞", users: 2, ops: 50000, nodes: 100000, keys: 10, overage: true, popular: true, features: ["Unlimited graphs", "2 collaborators", "50,000 write ops/mo", "100,000-node graph", "10 API keys", "Usage-based overage"], excluded: [] },
-        team: { price: 149, graphs: "∞", users: "∞", ops: 200000, nodes: 600000, keys: 20, overage: true, popular: false, features: ["Unlimited graphs", "Unlimited collaborators (invites + RBAC)", "200,000 write ops/mo", "600,000-node graph", "20 API keys", "Usage-based overage", "Priority support"], excluded: [] }
+        free: { price: 0, graphs: 1, users: 1, ops: 10000, nodes: 10000, keys: 2, overage: false, popular: false, features: ["1 graph", "1 collaborator", "10,000 write ops/mo", "10,000-node graph", "2 API keys", "Unlimited integrations"], excluded: ["Overage"] },
+        solo: { price: 9, graphs: 2, users: 1, ops: 10000, nodes: 25000, keys: 5, overage: false, popular: false, features: ["2 graphs", "1 collaborator", "10,000 write ops/mo", "25,000-node graph", "5 API keys", "Unlimited integrations"], excluded: ["Overage"] },
+        pro: { price: 25, graphs: "∞", users: 2, ops: 50000, nodes: 100000, keys: 10, overage: true, popular: true, features: ["Unlimited graphs", "2 collaborators", "50,000 write ops/mo", "100,000-node graph", "10 API keys", "Unlimited integrations", "Usage-based overage"], excluded: [] },
+        team: { price: 149, graphs: "∞", users: "∞", ops: 200000, nodes: 600000, keys: 20, overage: true, popular: false, features: ["Unlimited graphs", "Unlimited collaborators (invites + RBAC)", "200,000 write ops/mo", "600,000-node graph", "20 API keys", "Unlimited integrations", "Usage-based overage", "Priority support"], excluded: [] }
       }
     };
 
@@ -675,12 +652,7 @@
           <a href="/signup" class="btn${name === 'free' ? ' secondary' : ''}">${cta}</a>
         </div>`;
       }).join('');
-      document.getElementById('pricing-usage-line').textContent = `${PRICING.display.overage_line} · ${PRICING.display.integrations_line} (Pro + Team)`;
-    }
-
-    function renderSegments() {
-      document.getElementById('segment-use').innerHTML = `<h4>Use Tortoise</h4><p>${PRICING.display.segments.use}</p>`;
-      document.getElementById('segment-build').innerHTML = `<h4>Build with Tortoise</h4><p>${PRICING.display.segments.build}</p>`;
+      document.getElementById('pricing-usage-line').textContent = `${PRICING.display.overage_line} — applies to Pro and Team`;
     }
 
     function renderSelfHost() {
@@ -703,7 +675,6 @@
 
     // Init pricing (annual is default per pricing.json display.annual_default)
     if (PRICING.display.annual_default) setBilling('annual'); else setBilling('monthly');
-    renderSegments();
     renderSelfHost();
 
   </script>
