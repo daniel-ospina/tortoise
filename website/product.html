@@ -128,7 +128,7 @@
     #beat-hero .hero-sub {
       margin-top: 1.25rem;
       max-width: 560px;
-      color: var(--text-dim);
+      color: var(--text);
       font-size: clamp(0.95rem, 1.6vw, 1.1rem);
       line-height: 1.6;
     }
@@ -154,6 +154,30 @@
     .beat p em { color: var(--accent); font-style: normal; }
 
     /* CTA */
+    /* Hero CTA — same look as the CTA section's button, centered in the beat */
+    #beat-hero .cta-start {
+      display: inline-block;
+      background: var(--accent);
+      color: var(--bg);
+      padding: 0.9rem 2rem;
+      font-family: var(--mono);
+      font-size: 1rem;
+      font-weight: 600;
+      text-decoration: none;
+      cursor: pointer;
+      transition: background 0.2s, transform 0.2s;
+      margin-top: 2.25rem;
+    }
+    #beat-hero .cta-start:hover {
+      background: #0891b2;
+      transform: scale(1.02);
+    }
+    #beat-hero .cta-subtle {
+      margin-top: 0.9rem;
+      color: var(--text-dim);
+      font-size: 0.8rem;
+    }
+    #cta-section { text-align: center; }
     #cta-section .cta-start {
       display: inline-block;
       background: var(--accent);
@@ -165,15 +189,14 @@
       text-decoration: none;
       cursor: pointer;
       transition: background 0.2s, transform 0.2s;
-      margin-bottom: 2rem;
+      margin-bottom: 1.25rem;
     }
     #cta-section .cta-start:hover {
       background: #0891b2;
       transform: scale(1.02);
     }
     #cta-section .cta-subtle {
-      margin-top: 0;
-      margin-bottom: 1rem;
+      margin: 0 0 1rem;
       color: var(--text-dim);
       font-size: 0.8rem;
     }
@@ -231,6 +254,8 @@
       <p class="hero-sub">Tortoise is a computational memory graph. Every relationship expresses how one belief affects another — when new evidence arrives, confidence propagates and your agent&rsquo;s world model updates.</p>
       <p class="hero-sub hero-sub-value">Your agents make better decisions, waste fewer tokens, and their thinking becomes auditable and collaborative.</p>
       <p class="hero-sub hero-sub-overmcp">Over MCP.</p>
+      <a href="/signup" class="cta-start hero-cta">Connect your agent →</a>
+      <p class="cta-subtle hero-cta-subtle">5,000 Points free. No credit card. Start building in minutes.</p>
     </section>
     <section id="beat-capture" class="beat">
       <h2>Capture</h2>
