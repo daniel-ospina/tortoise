@@ -25,25 +25,31 @@ jobs:
         run: |
           cp tortoise/onboarding/AGENT_ONBOARDING.md website/onboarding-prompt.md
           test -s website/onboarding-prompt.md
-      - name: Diag production branch
+      - name: Sync DNS — tortoise.premiselabs.co → premise-labs Pages project
+        # The subdomain previously CNAME'd to the legacy tortoise-landing-v2
+        # Pages project (stale content: welcome v1, no onboarding-prompt.md),
+        # which is why the premise-labs custom-domain attach stayed "pending"
+        # and the welcome page's PROMPT_URL fetch returned HTML (#540).
+        # Ensure the CNAME points at this project's pages.dev host every deploy.
         run: |
-          curl -s "https://api.cloudflare.com/client/v4/accounts/367c7ecf27e1b1b092d04fe9915a1e56/pages/projects/premise-labs" \
-            -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" > /tmp/proj.json
-          echo "production_branch: $(jq -r .result.production_branch /tmp/proj.json)"
-          echo "domains: $(jq -c .result.domains /tmp/proj.json)"
-          echo "latest_deployment_url: $(jq -r .result.latest_deployment.url /tmp/proj.json)"
-          echo "--- deployments (last 3) ---"
-          curl -s "https://api.cloudflare.com/client/v4/accounts/367c7ecf27e1b1b092d04fe9915a1e56/pages/projects/premise-labs/deployments?per_page=3" \
-            -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" | jq -c '.result[] | {url, created_on, trigger: .trigger.type, branch: .deployment_trigger.branch}'
-          echo "--- custom domains ---"
-          curl -s "https://api.cloudflare.com/client/v4/accounts/367c7ecf27e1b1b092d04fe9915a1e56/pages/projects/premise-labs/domains" \
-            -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" | jq -c '.result[] | {name, status}'
-          echo "--- DNS zone records for tortoise.premiselabs.co ---"
           ZONE=$(curl -s "https://api.cloudflare.com/client/v4/zones?name=premiselabs.co" \
             -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" | jq -r '.result[0].id')
           echo "zone: $ZONE"
-          curl -s "https://api.cloudflare.com/client/v4/zones/$ZONE/dns_records?per_page=100" \
-            -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" | jq -c '.result[] | select(.name | contains("tortoise")) | {type, name, content, proxied}'
+          REC=$(curl -s "https://api.cloudflare.com/client/v4/zones/$ZONE/dns_records?name=tortoise.premiselabs.co" \
+            -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}")
+          REC_ID=$(echo "$REC" | jq -r '.result[0].id // empty')
+          CUR=$(echo "$REC" | jq -r '.result[0].content // empty')
+          echo "current: id=$REC_ID content=$CUR"
+          if [ "$CUR" != "premise-labs.pages.dev" ]; then
+            echo "repairing CNAME $CUR → premise-labs.pages.dev"
+            curl -s -X PATCH "https://api.cloudflare.com/client/v4/zones/$ZONE/dns_records/$REC_ID" \
+              -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" \
+              -H "Content-Type: application/json" \
+              -d '{"type":"CNAME","name":"tortoise.premiselabs.co","content":"premise-labs.pages.dev","proxied":true}' \
+              | jq -c '{success, errors: [.errors[].message]}'
+          else
+            echo "CNAME already correct"
+          fi
       - name: Deploy to Cloudflare Pages (premise-labs project)
         run: |
           cd website
