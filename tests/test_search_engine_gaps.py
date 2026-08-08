@@ -672,23 +672,25 @@ class TestRunVectorQuery:
 
     # ── Timeout ──────────────────────────────────────────────────────
 
-    def test_brute_force_timeout_returns_empty(self):
-        """Brute-force query exceeds timeout → []."""
+    def test_brute_force_timeout_logs_but_returns_results(self):
+        """#561: brute-force query exceeding timeout_ms returns its results
+        (latency warning only — discarding rows we already waited for threw
+        away good data; real hangs are bounded by socket_timeout)."""
         graph = SimpleMockGraph(result_set=[("a", 0.9)])
 
         with mock.patch("time.monotonic", side_effect=[0.0, 2.0, 3.0]):
             result = run_vector_query(graph, self.QUERY_VEC, timeout_ms=500, is_embedded=True)
 
-        assert result == []
+        assert result == [("a", 0.9)]
 
-    def test_hnsw_timeout_returns_empty(self):
-        """HNSW query exceeds timeout → [] (no brute-force fallback on timeout)."""
+    def test_hnsw_timeout_logs_but_returns_results(self):
+        """#561: HNSW query exceeding timeout_ms returns its results."""
         graph = SimpleMockGraph(result_set=[("a",)])
 
         with mock.patch("time.monotonic", side_effect=[0.0, 2.0, 3.0]):
             result = run_vector_query(graph, self.QUERY_VEC, timeout_ms=500, is_embedded=False)
 
-        assert result == []
+        assert result == [("a", 1.0)]
 
     # ── Scoring ──────────────────────────────────────────────────────
 
@@ -771,14 +773,15 @@ class TestRunFtsQuery:
         assert result[1] == ("p2", 0.80)
         assert result[2] == ("p3", 0.60)
 
-    def test_fts_query_timeout_returns_empty(self):
-        """Query exceeds timeout_ms → [] (post-hoc)."""
+    def test_fts_query_timeout_logs_but_returns_results(self):
+        """#561: query exceeding timeout_ms returns its results (latency
+        warning only, not a discard)."""
         graph = SimpleMockGraph(result_set=[("p1", 0.9)])
 
         with mock.patch("time.monotonic", side_effect=[0.0, 2.0, 3.0]):
             result = run_fts_query(graph, "test", timeout_ms=500)
 
-        assert result == []
+        assert result == [("p1", 0.9)]
 
     def test_entity_type_event_uses_eventid(self):
         """entity_type='event' → Event label + eventId field."""
@@ -1586,8 +1589,12 @@ class TestCircuitBreakerReviewFixes:
 
     # ── Slow-path (timeout) trips the breaker ────────────────────────
 
-    def test_slow_queries_trip_breaker(self):
-        """Post-hoc timeout (no exception) counts as a breaker failure."""
+    def test_slow_queries_log_but_do_not_trip_breaker(self):
+        """#561: slow-but-successful queries return results and do NOT trip.
+
+        The breaker trips on hard failures (driver-level timeout exceptions,
+        connection errors) — a query that returned rows completed normally.
+        """
         class SlowGraph:
             """Graph whose query() takes 600ms — slower than timeout_ms."""
             def __init__(self):
@@ -1599,13 +1606,20 @@ class TestCircuitBreakerReviewFixes:
 
         slow = SlowGraph()
         for _ in range(3):
-            assert run_fts_query(slow, "test", timeout_ms=100) == []
-        assert _breaker("fts").is_open()
+            result = run_fts_query(slow, "test", timeout_ms=100)
+            assert result == [("p1", 0.9)]  # #561: results kept
+        assert not _breaker("fts").is_open()  # never tripped
 
-        # Short-circuit skips the slow DB entirely
-        before = slow.query_calls
-        assert run_fts_query(slow, "test", timeout_ms=100) == []
-        assert slow.query_calls == before
+    def test_driver_timeout_exception_trips_breaker(self):
+        """A driver-level timeout surfaces as an exception → breaker failure.
+
+        This is the wedge case: graph.query raises (server killed the slow
+        query via the connection-level timeout) → counted toward tripping.
+        """
+        failing = SimpleMockGraph(raise_on_query=TimeoutError("Query timed out"))
+        for _ in range(3):
+            assert run_fts_query(failing, "test") == []
+        assert _breaker("fts").is_open()
 
 
 class TestBreakerProbeRecovery:

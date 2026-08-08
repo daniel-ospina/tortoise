@@ -261,10 +261,13 @@ def run_fts_query(
                 cypher, params={"query": query, "limit": limit}, timeout=timeout_ms
             ).result_set
             elapsed = (time.monotonic() - start) * 1000
-            _breaker_record("fts", elapsed <= timeout_ms)
             if elapsed > timeout_ms:
+                # #561: post-hoc latency warning only — a driver that ignored
+                # the timeout returned rows; keep them (real hangs are killed
+                # server-side by the driver-level timeout, surfacing as an
+                # exception → breaker failure below).
                 logger.warning("FTS query exceeded timeout: %.0fms > %dms", elapsed, timeout_ms)
-                return []
+            _breaker_record("fts", True)
             return [(row[0], float(row[1])) for row in rows]
         except Exception as e:
             logger.warning("Operator FTS query failed: %s", e)
@@ -294,12 +297,13 @@ def run_fts_query(
         rows = graph.query(
             cypher, params={"query": query, "limit": limit}, timeout=timeout_ms
         ).result_set
-        # Post-hoc timeout check (see docstring for rationale)
+        # Post-hoc timeout check (see docstring for rationale) — #561: log
+        # latency, return the results (the driver-level timeout is the real
+        # hang-killer; results received = normal completion for the breaker).
         elapsed = (time.monotonic() - start) * 1000
-        _breaker_record("fts", elapsed <= timeout_ms)
         if elapsed > timeout_ms:
             logger.warning("FTS query exceeded timeout: %.0fms > %dms", elapsed, timeout_ms)
-            return []
+        _breaker_record("fts", True)
         return [(row[0], float(row[1])) for row in rows]
     except Exception as e:
         msg = str(e).lower()
@@ -375,10 +379,10 @@ def run_vector_query(
                 cypher, params={"query_vec": query_vec, "limit": limit}, timeout=timeout_ms
             ).result_set
             elapsed = (time.monotonic() - start) * 1000
-            _breaker_record("vector", elapsed <= timeout_ms)
             if elapsed > timeout_ms:
+                # #561: latency warning only — keep the rows.
                 logger.warning("Vector query exceeded timeout: %.0fms > %dms", elapsed, timeout_ms)
-                return []
+            _breaker_record("vector", True)
             # Index results are ranked by similarity; assign rank-based scores.
             # RRF fusion uses rank not absolute scores; single-strategy mode
             # gets reasonable descending ordering.
@@ -417,10 +421,10 @@ def run_vector_query(
             cypher, params={"query_vec": query_vec, "limit": limit}, timeout=timeout_ms
         ).result_set
         elapsed = (time.monotonic() - start) * 1000
-        _breaker_record("vector", elapsed <= timeout_ms)
         if elapsed > timeout_ms:
+            # #561: latency warning only — return the results.
             logger.warning("Vector query exceeded timeout: %.0fms > %dms", elapsed, timeout_ms)
-            return []
+        _breaker_record("vector", True)
         return [(row[0], float(row[1])) for row in rows]
     except Exception as e:
         msg = str(e).lower()
