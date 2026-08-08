@@ -518,7 +518,11 @@ class FalkorProjection(
             if t in ("PointAdded", "OperatorAdded"):
                 continue  # already handled in pass 1a
             elif t == "PointRetracted":
-                self._delete(ev.get("id") or ev["event_id"])
+                # Graceful id resolution — skip if neither id nor event_id
+                # present (malformed/legacy event, issue #325)
+                rid = ev.get("id") or ev.get("event_id")
+                if rid is not None:
+                    self._delete(rid)
             elif t == "PointsMerged":
                 for mid in ev.get("merge_ids", []):
                     self._delete(mid)
@@ -859,7 +863,10 @@ class FalkorProjection(
         """Apply PointRevised event — update content, context, and re-compute embedding."""
         new_content = ev.get("new_content")
         new_context = ev.get("new_context")
-        pid = ev.get("id") or ev["event_id"]
+        pid = ev.get("id") or ev.get("event_id")
+        if pid is None:
+            # Malformed PointRevised — skip rather than crash (issue #325)
+            return
         params: dict = {"id": pid, "c": new_content}
 
         # Re-compute embedding when content changes (even to empty — wipe stale).

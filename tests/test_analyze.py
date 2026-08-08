@@ -1,4 +1,6 @@
 """Tests for tortoise_analyze."""
+from __future__ import annotations
+
 import sys, os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
@@ -118,6 +120,20 @@ def test_format_chain_three_column_rows():
 def test_format_chain_empty():
     out = _format_chain([])
     assert out == "No evidence chain found."
+
+
+def test_format_chain_non_numeric_confidence():
+    """Review #679-P2: a non-numeric confidence must degrade, not crash."""
+    out = _format_chain([["e1", "claim", "garbage"]])
+    assert "claim" in out  # still renders the content
+    assert "garbage" not in out  # non-numeric confidence not formatted as number
+
+
+def test_format_ranked_non_numeric_confidence():
+    """Review #679-P2: _format_ranked degrades on non-numeric confidence."""
+    from tortoise.analyze import _format_ranked
+    out = _format_ranked([["e1", "claim", "garbage"]], "supporting")
+    assert "claim" in out
 
 
 def test_evidence_chain_end_to_end():
@@ -264,7 +280,13 @@ def test_analyze_error_redacted(monkeypatch):
         proj = FalkorProjection(db_path)
         proj.g.query("CREATE (:Point {id:'c1', content:'AI strategy is working', confidence:0.85})")
         proj.g.query("CREATE (:Point {id:'c2', content:'AI strategy needs revision', confidence:0.65})")
-        proj.g.query("MATCH (a:Point {id:'c1'}), (b:Point {id:'c2'}) CREATE (a)-[:NAND]->(b)")
+        # NAND is operator-mediated (#7801): op {op_type:'NAND', is_operator:true}
+        # connects to both claims — the analyze template matches this shape.
+        proj.g.query(
+            "MATCH (a:Point {id:'c1'}), (b:Point {id:'c2'}) "
+            "CREATE (op:Point {id:'op1', op_type:'NAND', is_operator:true})"
+            "-[:NAND]->(a), (op)-[:NAND]->(b)"
+        )
         # Break the disagreement template by injecting a bad limit param
         import tortoise.analyze as _a
         orig = _a.TEMPLATES["disagreement"]["cypher"]

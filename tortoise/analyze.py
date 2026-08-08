@@ -151,8 +151,12 @@ def _format_ranked(rows: list, label: str) -> str:
         return f"No {label} claims found."
     lines = [f"Top {label} claims:"]
     for i, r in enumerate(rows[:10], 1):
-        conf = r[2] if len(r) > 2 else "?"
-        lines.append(f"  {i}. \"{r[1][:80]}\" (confidence: {float(conf):.2f})")
+        try:
+            conf = float(r[2])
+        except (TypeError, ValueError):
+            conf = None  # non-numeric confidence (legacy/hostile) → degrade, don't crash
+        val = f"  {i}. \"{r[1][:80]}\"" + (f" (confidence: {conf:.2f})" if conf is not None else "")
+        lines.append(val)
     return "\n".join(lines)
 
 
@@ -171,7 +175,12 @@ def _format_chain(rows: list) -> str:
     lines = ["Evidence chain (ordered by confidence):"]
     for r in rows[:10]:
         # evidence_chain template returns 3 columns: id, content, conf
-        lines.append(f"  \"{r[1][:80]}\" (conf: {r[2]:.2f})")
+        try:
+            conf = float(r[2])
+            conf_txt = f" (conf: {conf:.2f})"
+        except (TypeError, ValueError):
+            conf_txt = ""  # non-numeric confidence → degrade, don't crash
+        lines.append(f"  \"{r[1][:80]}\"{conf_txt}")
     return "\n".join(lines)
 
 
@@ -459,12 +468,17 @@ def analyze(question: str, proj=None, *,
             from .security import redact_error
             return {"answer": f"Query error: {redact_error(e)}", "raw": [], "pattern": pattern_name, "query": None}
 
-    # 3. Format
+    # 3. Format (wrapped — a malformed value must degrade, never crash the
+    # whole analyze surface; security: redacted, no raw internals)
     formatter = tmpl.get("format")
-    if formatter:
-        answer = formatter(rows)
-    else:
-        answer = f"Found {len(rows)} results."
+    try:
+        if formatter:
+            answer = formatter(rows)
+        else:
+            answer = f"Found {len(rows)} results."
+    except Exception as e:
+        from .security import redact_error
+        answer = f"Formatting error: {redact_error(e)}"
 
     return {
         "answer": answer,

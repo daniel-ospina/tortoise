@@ -90,12 +90,14 @@ def test_no_confidence_readers():
 
     writers: list[str] = []       # SET n.confidence = ...
     readers: list[str] = []       # RETURN n.confidence (read-only)
-    bfs_internal: list[str] = []  # Inside projection.py propagate_shock path
+    bfs_internal: list[str] = []  # Inside projection/propagation.py propagate_shock path
 
     for line in filtered:
         path_part = line.split(":")[0]
         if "ep.py" in path_part and "SET" in line:
             writers.append(line)
+        # Same stale-path fix as #645, applied to the second filter in this file:
+        # the BFS confidence write lives in projection/propagation.py.
         elif "propagation.py" in path_part or "projection/" in path_part:
             bfs_internal.append(line)
         elif "sdk.py" in path_part and "RETURN" in line:
@@ -111,7 +113,7 @@ def test_no_confidence_readers():
     # value is stored, regardless of whether EP or BFS set it. Not a BFS dependency.
     sdk_reads = [r for r in readers if "sdk.py" in r]
     print(f"  EP writers (ep.py):   {len(writers)}")
-    print(f"  BFS internal (projection.py): {len(bfs_internal)} (includes deprecated propagate_shock)")
+    print(f"  BFS internal (propagation.py/projection/): {len(bfs_internal)} (includes deprecated propagate_shock)")
     print(f"  SDK reads (sdk.py):   {len(sdk_reads)} — field retrieval, not BFS-dependent")
     print(f"  Tests/scripts:        {len(readers) - len(sdk_reads)}")
 
