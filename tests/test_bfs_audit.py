@@ -96,7 +96,7 @@ def test_no_confidence_readers():
         path_part = line.split(":")[0]
         if "ep.py" in path_part and "SET" in line:
             writers.append(line)
-        elif "projection.py" in path_part:
+        elif "propagation.py" in path_part or "projection/" in path_part:
             bfs_internal.append(line)
         elif "sdk.py" in path_part and "RETURN" in line:
             readers.append(line)

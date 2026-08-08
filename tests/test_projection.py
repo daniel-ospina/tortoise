@@ -389,6 +389,77 @@ def test_falkor_apply_points_merged():
         proj.close()
 
 
+def test_falkor_apply_points_merged_nested_format():
+    """Regression #325: a nested-format PointsMerged event (merge_ids inside
+    `point`) must delete merged nodes. The apply() handler used to read the
+    RAW event instead of the normalized one, so nested-format merges were a
+    silent no-op (merged points survived)."""
+    if _skip_if_no_falkor():
+        return
+    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    try:
+        proj.apply({"type": "PointAdded",
+                     "point": {"id": "a", "content": "A", "context": "ctx"}})
+        proj.apply({"type": "PointAdded",
+                     "point": {"id": "b", "content": "B", "context": "ctx"}})
+        # Script/nested format: point subfields wrapped under `point`
+        proj.apply({"type": "PointsMerged",
+                     "point": {"keep_id": "a", "merge_ids": ["b"]}})
+        assert proj.query(
+            "MATCH (n:Point {id:'a'}) RETURN count(n)"
+        ).result_set[0][0] == 1, "keep_id point must survive the merge"
+        assert proj.query(
+            "MATCH (n:Point {id:'b'}) RETURN count(n)"
+        ).result_set[0][0] == 0, "merged point b must be deleted (nested format)"
+    finally:
+        proj.close()
+
+
+def test_norm_handles_non_dict_point():
+    """Regression #325: _norm must not crash when `point` is a non-dict
+    (e.g. a legacy string ID). Old code did `{**ev, **ev["point"]}` on any
+    truthy point → TypeError: 'str' object is not a mapping."""
+    from tortoise.projection import _norm
+
+    # String point → passed through unchanged (no crash)
+    ev = {"type": "PointAdded", "point": "legacy-id-123"}
+    out = _norm(ev)
+    assert out["point"] == "legacy-id-123"
+    # dict point → merged (normal behavior preserved)
+    ev2 = {"type": "PointAdded", "point": {"id": "p1", "content": "x"}}
+    out2 = _norm(ev2)
+    assert out2["id"] == "p1" and out2["content"] == "x"
+    # empty dict point → unchanged
+    ev3 = {"type": "PointAdded", "point": {}}
+    assert _norm(ev3) == ev3
+    # missing point → unchanged
+    ev4 = {"type": "PointRetracted", "id": "p9"}
+    assert _norm(ev4) == ev4
+
+
+def test_falkor_apply_ignores_non_dict_point():
+    """Regression #325: apply() with a non-dict point must skip the event
+    (no crash, no partial write)."""
+    if _skip_if_no_falkor():
+        return
+    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    try:
+        proj.apply({"type": "PointAdded", "point": "legacy-id-123"})
+        # no Point node created, no exception raised
+        n = proj.g.query("MATCH (n:Point) RETURN count(n)").result_set[0][0]
+        assert n == 0, f"expected 0 points after malformed PointAdded, got {n}"
+    finally:
+        proj.close()
+
+
+def test_apply_one_non_dict_point_skipped():
+    """Regression #325: fold()/_apply_one must skip non-dict point events."""
+    from tortoise.projection import _apply_one
+    points: dict[str, dict] = {}
+    _apply_one(points, {"type": "PointAdded", "point": "legacy-id"})
+    assert points == {}
+
+
 def test_falkor_nand_operator():
     if _skip_if_no_falkor():
         return
@@ -784,6 +855,35 @@ def test_falkor_rebuild_all_empty_dir():
             assert result["events"] == 0
             assert result["nodes"] == 0
             assert result["edges"] == 0
+        finally:
+            proj.close()
+    finally:
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_falkor_rebuild_all_ignores_non_dict_point():
+    """Regression #325: rebuild_all must skip (not crash on) a PointAdded with
+    a non-dict point across ALL passes (1a/1b/2) — parity with apply()."""
+    if _skip_if_no_falkor():
+        return
+    d = tempfile.mkdtemp(prefix="tortoise_badpoint_")
+    try:
+        import json
+        log_path = os.path.abspath(os.path.join(d, "events.jsonl"))
+        with open(log_path, "w") as f:
+            f.write(json.dumps({"type": "PointAdded", "point": "legacy-id-123"}) + "\n")
+            f.write(json.dumps({"type": "PointAdded",
+                                "point": {"id": "ok-1", "content": "fine",
+                                          "context": "ctx"}}) + "\n")
+        proj = FalkorProjection(_tmp("g_badpoint.db"), graph_name="test")
+        try:
+            result = proj.rebuild_all(d)
+            assert result["nodes"] == 1, f"expected 1 valid node, got {result['nodes']}"
+            rows = proj.g.query(
+                "MATCH (n:Point {id:'ok-1'}) RETURN count(n)"
+            ).result_set
+            assert rows[0][0] == 1, "valid point must survive rebuild"
         finally:
             proj.close()
     finally:
@@ -1622,15 +1722,19 @@ def test_falkor_rebuild_all_parity_with_apply():
 
 # ── #329: stub-node auto-creation cap ───────────────────────────────
 
-def test_stub_creation_bounded_at_cap(monkeypatch):
+def test_stub_creation_bounded_at_cap():
     """#329: short-ID stub auto-creation stops at the per-instance cap; at-cap
-    behavior is fail-safe (no stub, no partial edge, warning logged)."""
+    behavior is fail-safe (no stub, no partial edge, warning logged).
+
+    The cap is read from the instance attr ``_max_autocreated_stubs`` — the
+    old env-var (TORTOISE_MAX_AUTOCREATED_STUBS) was never wired in code.
+    """
     import tempfile, os
     from tortoise.projection import FalkorProjection
 
-    monkeypatch.setenv("TORTOISE_MAX_AUTOCREATED_STUBS", "2")
     db = os.path.join(tempfile.mkdtemp(prefix="tortoise_stubcap_"), "test.db")
     proj = FalkorProjection(db)
+    proj._max_autocreated_stubs = 2
     try:
         # Three OperatorAdded events referencing three distinct short ids
         for i, sid in enumerate(("s1", "s2", "s3")):

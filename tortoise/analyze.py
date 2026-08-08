@@ -151,7 +151,7 @@ def _format_ranked(rows: list, label: str) -> str:
         return f"No {label} claims found."
     lines = [f"Top {label} claims:"]
     for i, r in enumerate(rows[:10], 1):
-        conf = r[2] if len(r) > 2 else r[2] if len(r) > 2 else "?"
+        conf = r[2] if len(r) > 2 else "?"
         lines.append(f"  {i}. \"{r[1][:80]}\" (confidence: {float(conf):.2f})")
     return "\n".join(lines)
 
@@ -168,9 +168,10 @@ def _format_uncertain(rows: list) -> str:
 def _format_chain(rows: list) -> str:
     if not rows:
         return "No evidence chain found."
-    lines = ["Evidence chain (ordered by proximity):"]
+    lines = ["Evidence chain (ordered by confidence):"]
     for r in rows[:10]:
-        lines.append(f"  [{r[3]} hops] \"{r[1][:80]}\" (conf: {r[2]:.2f})")
+        # evidence_chain template returns 3 columns: id, content, conf
+        lines.append(f"  \"{r[1][:80]}\" (conf: {r[2]:.2f})")
     return "\n".join(lines)
 
 
