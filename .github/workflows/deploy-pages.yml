@@ -38,6 +38,9 @@ jobs:
           echo "--- custom domains ---"
           curl -s "https://api.cloudflare.com/client/v4/accounts/367c7ecf27e1b1b092d04fe9915a1e56/pages/projects/premise-labs/domains" \
             -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" | jq -c '.result[] | {name, status}'
+          echo "--- all projects ---"
+          curl -s "https://api.cloudflare.com/client/v4/accounts/367c7ecf27e1b1b092d04fe9915a1e56/pages/projects?per_page=20" \
+            -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" | jq -c '.result[] | {name, subdomain, domains, production_branch}'
       - name: Deploy to Cloudflare Pages (premise-labs project)
         run: |
           cd website
