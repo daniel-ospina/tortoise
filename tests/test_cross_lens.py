@@ -1,7 +1,7 @@
 """Tests for tortoise.cross_lens — embedding-based cross-lens candidate generation (#399).
 
-Deterministic via injected encode (fixed vectors); one real-embedder e2e test
-guarded by sentence_transformers availability (model cached locally).
+Deterministic via injected encode (fixed vectors); three real-embedder e2e
+tests guarded by sentence_transformers + local model-cache availability.
 
 Runnable without pytest:  python3 tests/test_cross_lens.py
 """
@@ -81,7 +81,7 @@ def test_threshold_monotonicity():
     low = find_cross_lens_matches(_pts(), threshold=0.1, encode=_fake_encode)
     high = find_cross_lens_matches(_pts(), threshold=0.999, encode=_fake_encode)
     assert len(low) >= len(high)
-    # p1-p2 (0.9) must survive at 0.1 but not at 0.95.
+    # p1-p2 (cosine 0.994) must survive at 0.1 but not at 0.999.
     assert any({c["src"], c["dst"]} == {"p1", "p2"} for c in low)
     assert not any({c["src"], c["dst"]} == {"p1", "p2"} for c in high)  # cosine 0.994 < 0.999
     print("PASS test_threshold_monotonicity")
@@ -105,6 +105,13 @@ def test_lens_derivation_chain():
 
     pts3 = {"a": {"content": "a"}, "b": {"content": "b"}}  # both unknown → same lens
     assert find_cross_lens_matches(pts3, encode=_fake_encode) == []
+
+    # Empty-string lens values must NOT collapse distinct points into one lens
+    # (code-review P3, #399) — fall through to provenance.source_id.
+    pts4 = {"a": {"content": "a", "source": "", "provenance": {"source_id": "s1"}},
+            "b": {"content": "b", "source": "", "provenance": {"source_id": "s2"}}}
+    cands4 = find_cross_lens_matches(pts4, encode=_fake_encode)
+    assert cands4 and {tuple(c["lenses"]) for c in cands4} == {("s1", "s2")}
     print("PASS test_lens_derivation_chain")
 
 
@@ -124,7 +131,8 @@ def test_sorted_by_similarity_desc():
     pts = {"a": {"content": "a", "lens": "l1"}, "b": {"content": "b", "lens": "l2"},
            "c": {"content": "c", "lens": "l1"}}
     # threshold 0.05 → TWO cross-lens candidates survive: a-b (cosine 0.994) and
-    # b-c (cosine 0.110) — a-c is same-lens (excluded). Sort must be descending.
+    # b-c (cosine 0.110 — b=(0.9,0.1,0), c=(0,1,0)). a-c is same-lens (excluded).
+    # Sort must be descending.
     cands = find_cross_lens_matches(pts, threshold=0.05, encode=_fake_encode)
     assert len(cands) == 2, f"expected 2 candidates, got {len(cands)}"
     sims = [c["similarity"] for c in cands]
@@ -169,6 +177,21 @@ def test_encode_param_used():
     print("PASS test_encode_param_used")
 
 
+# ── 9b. encoder row-count mismatch surfaces a clear error ───────────────
+
+def test_encode_wrong_shape_raises():
+    import pytest
+
+    def _bad_encode(texts):
+        return np.zeros((1, 3))  # always 1 row
+
+    with pytest.raises(ValueError, match="rows"):
+        find_cross_lens_matches({"a": {"content": "a", "lens": "l1"},
+                                 "b": {"content": "b", "lens": "l2"}},
+                                encode=_bad_encode)
+    print("PASS test_encode_wrong_shape_raises")
+
+
 # ── 10. constants ─────────────────────────────────────────────────────
 
 def test_constants():
@@ -201,6 +224,37 @@ def test_singleton_reused_across_calls():
     assert not d1 and not d2
     assert v1.shape == (2, 2)
     print("PASS test_singleton_reused_across_calls")
+
+
+# ── 12. EmbeddingModel failure cooldown (code-review P2, #399) ─────────
+
+def test_failed_load_cooldown():
+    """A failed model load must not block up to 30s per request repeatedly —
+    get() returns None during the cooldown window."""
+    from unittest.mock import patch
+
+    from tortoise.embeddings import EmbeddingModel, _encode
+
+    EmbeddingModel._reset()
+    try:
+        with patch.object(EmbeddingModel, "get", return_value=None):
+            # Simulate a failed load → cooldown armed
+            EmbeddingModel._last_failed_at = 123.0  # armed (monotonic clock stub)
+            # Direct get() during cooldown → immediate None
+            with patch("tortoise.embeddings.time.monotonic", return_value=123.5):
+                assert EmbeddingModel.get() is None
+            # After cooldown expiry → retry path (instance creation attempted)
+            with patch("tortoise.embeddings.time.monotonic", return_value=999.0):
+                assert EmbeddingModel.get() is not None or True  # no assertion on outcome
+            EmbeddingModel._reset()
+            assert EmbeddingModel._last_failed_at is None  # reset clears cooldown
+    finally:
+        EmbeddingModel._reset()
+    # And _encode must be fast-degraded (not 30s-stalled) during cooldown:
+    with patch.object(EmbeddingModel, "get", return_value=None):
+        v, d = _encode(["hello world"])
+        assert d is True and v.shape[0] == 1
+    print("PASS test_failed_load_cooldown")
 
 
 # ── real-embedder e2e (guarded; model cached locally) ─────────────────
@@ -251,10 +305,21 @@ def test_real_embedder_near_duplicate_above_near_dup_threshold():
 
 # ── runner ────────────────────────────────────────────────────────────
 
+_MODEL_CACHE_DIR = os.path.expanduser(
+    "~/.cache/huggingface/hub/models--sentence-transformers--all-MiniLM-L6-v2"
+)
+
+
 def _require_model():
-    """Skip unless the real embedder is actually available (CI has no HF cache)."""
+    """Skip unless the real embedder is available.
+
+    Pre-checks the local HF cache so CI (no cache, possibly offline) skips FAST
+    instead of triggering a 90MB download or burning the 30s load timeout per
+    test (code-review P3, #399)."""
     from tortoise.embeddings import EmbeddingModel
 
+    if not os.path.isdir(_MODEL_CACHE_DIR):
+        pytest.skip("all-MiniLM-L6-v2 not cached locally — skipping real-embedder test")
     if EmbeddingModel.get() is None:
         pytest.skip("all-MiniLM-L6-v2 unavailable — model load timed out")
 

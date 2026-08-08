@@ -9,6 +9,7 @@ downstream changes when it's swapped in.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import Protocol
 
@@ -21,6 +22,8 @@ _SUPPORT_PHRASES = ("given that",)
 _REFUTE_SINGLE_RE = re.compile(r'\b(but|however|although)\b', re.IGNORECASE)
 _REFUTE_PHRASES = ("not relevant", "doesn't follow", "on the contrary", "except that")
 _PUNC = re.compile(r'[,.!?;:\'\"()\[\]{}]')  # strip before phrase-matching (#8)
+
+logger = logging.getLogger(__name__)
 
 def _has_cue(text: str, single_re: re.Pattern, phrases: tuple[str, ...]) -> bool:
     return bool(single_re.search(text)) or any(p in text for p in phrases)
@@ -171,6 +174,35 @@ def _is_claim(text: str) -> bool:
     return False
 
 
+def _cue_gate_pairs(pairs: list[tuple[str, str, dict]], texts: dict[str, str],
+                   api: EventAPI) -> None:
+    """Apply the cue-word gate over (src, dst, provenance) pairs.
+
+    Support cues (because/since/therefore/...) → IMPL; refute cues
+    (but/however/although/...) → NAND. Pairs without cues create nothing.
+    Similarity gating is the CALLER's responsibility (candidates from
+    find_cross_lens_matches, or none for the all-pairs fallback). #399:
+    candidates never become operators from similarity alone — this is the
+    deterministic verifier; the LLM relation model is the #6306 verifier.
+
+    Direction: deterministic (src → dst as given); operators are
+    bidirectional by default (ONTOLOGY §3.1), so cue-side directionality is
+    left to the #6306 LLM verifier.
+    """
+    for src, dst, prov in pairs:
+        ti_clean = _PUNC.sub('', f" {texts[src]} ")
+        tj_clean = _PUNC.sub('', f" {texts[dst]} ")
+        gate = None
+        if _has_cue(ti_clean, _SUPPORT_SINGLE_RE, _SUPPORT_PHRASES) or \
+           _has_cue(tj_clean, _SUPPORT_SINGLE_RE, _SUPPORT_PHRASES):
+            gate = "IMPL"
+        elif _has_cue(ti_clean, _REFUTE_SINGLE_RE, _REFUTE_PHRASES) or \
+             _has_cue(tj_clean, _REFUTE_SINGLE_RE, _REFUTE_PHRASES):
+            gate = "NAND"
+        if gate:
+            api.add_operator(gate, inputs=[src, dst], provenance=prov)
+
+
 class MockExtractor:
     """Heuristic, deterministic extractor for the M0 spine."""
 
@@ -178,13 +210,14 @@ class MockExtractor:
 
     def run(self, transcript: str, source_id: str, api: EventAPI,
             *, multi_source: bool = False) -> None:
+        # #399: documented #6306 integration point — always present (any mode).
+        self._last_candidates: list[dict] = []
         if multi_source:
             # Multi-source mode: claim extraction → embedding pre-filter → cue-word gate typing.
             # #399: cross-vocabulary matching via lens-keyed candidates (cross_lens module);
             # the old ≥3-shared-content-words semantic-agreement gate is removed (it killed
             # zero-word-overlap pairs by design). Candidates NEVER become operators from
             # similarity alone — the cue-word gate decides IMPL vs NAND direction.
-            self._last_candidates: list[dict] = []
             pids = []
             for speaker, text, span in _utterances(transcript):
                 if not _is_claim(text):
@@ -200,68 +233,61 @@ class MockExtractor:
             try:
                 from tortoise.cross_lens import find_cross_lens_matches
                 # Build points dict from what we collected. #399 root-cause #2: keep the
-                # LENS identity (source_id) — it was dropped before, so cross-source
-                # matching was structurally impossible.
+                # LENS identity — source_id was dropped before. In multi_source mode
+                # the transcript MERGES utterances from different sources, and the
+                # speaker is that source discriminator ("These statements come from
+                # DIFFERENT sources" — LLMExtractor multi_source prompt). So the lens
+                # here is the speaker; the uniform source_id stays for provenance and
+                # for #6306's multi-document fold (lens_key="source" / derivation).
                 all_points = {}
                 for pid_i, ti, pvi in pids:
                     sp = pvi.get('speaker', 'unknown') if isinstance(pvi, dict) else 'unknown'
                     all_points[pid_i] = {"content": ti, "speaker": sp, "source": source_id}
 
-                candidates = find_cross_lens_matches(all_points, lens_key="source")
+                candidates = find_cross_lens_matches(all_points, lens_key="speaker")
                 self._last_candidates = list(candidates)
-                degraded = any(c.get("degraded") for c in candidates)
-                if candidates and not degraded:
-                    # Matched-pairs cue-gate: cue words decide IMPL vs NAND direction.
-                    # Non-cued candidates are recorded (self._last_candidates) for the
-                    # #6306 LLM relation verifier — never operators from similarity alone.
-                    by_pid = {pid: (ti, pvi) for pid, ti, pvi in pids}
-                    for m in candidates:
-                        ti = by_pid[m["src"]][0]
-                        tj = by_pid[m["dst"]][0]
-                        ti_clean = _PUNC.sub('', f" {ti} ")
-                        tj_clean = _PUNC.sub('', f" {tj} ")
-                        gate = None
-                        if _has_cue(ti_clean, _SUPPORT_SINGLE_RE, _SUPPORT_PHRASES) or \
-                           _has_cue(tj_clean, _SUPPORT_SINGLE_RE, _SUPPORT_PHRASES):
-                            gate = "IMPL"
-                        elif _has_cue(ti_clean, _REFUTE_SINGLE_RE, _REFUTE_PHRASES) or \
-                             _has_cue(tj_clean, _REFUTE_SINGLE_RE, _REFUTE_PHRASES):
-                            gate = "NAND"
-                        if gate:
-                            api.add_operator(gate, inputs=[m["src"], m["dst"]],
-                                             provenance=by_pid[m["src"]][1])
+                texts_by_pid = {pid: ti for pid, ti, _ in pids}
+                provs_by_pid = {pid: pv for pid, _, pv in pids}
+                if candidates:
+                    degraded = any(c.get("degraded") for c in candidates)
+                    if degraded:
+                        logger.info(
+                            "multi-source: cross-lens matching degraded to TF-IDF "
+                            "(%d candidates) — candidates remain similarity-gated",
+                            len(candidates),
+                        )
+                    # Similarity-gated cue-gate: candidates (real embeddings or
+                    # TF-IDF degraded) are the embedding pre-filter; cue words
+                    # decide IMPL vs NAND direction. Non-cued candidates stay in
+                    # _last_candidates for the #6306 LLM verifier — never
+                    # operators from similarity alone.
+                    pairs = [(m["src"], m["dst"], provs_by_pid[m["src"]])
+                             for m in candidates]
+                    _cue_gate_pairs(pairs, texts_by_pid, api)
                 else:
-                    # Degraded (TF-IDF) or empty candidates: pre-#399 all-pairs cue-gate.
-                    for i in range(len(pids)):
-                        for j in range(i + 1, len(pids)):
-                            pi, ti, pvi = pids[i]
-                            pj, tj, pvj = pids[j]
-                            gate = None
-                            ti_clean = _PUNC.sub('', f" {ti} ")
-                            tj_clean = _PUNC.sub('', f" {tj} ")
-                            if _has_cue(ti_clean, _SUPPORT_SINGLE_RE, _SUPPORT_PHRASES) or _has_cue(tj_clean, _SUPPORT_SINGLE_RE, _SUPPORT_PHRASES):
-                                gate = "IMPL"
-                            elif _has_cue(ti_clean, _REFUTE_SINGLE_RE, _REFUTE_PHRASES) or _has_cue(tj_clean, _REFUTE_SINGLE_RE, _REFUTE_PHRASES):
-                                gate = "NAND"
-                            if gate:
-                                api.add_operator(gate, inputs=[pi, pj], provenance=pvi)
+                    # No candidates above threshold — keep the similarity gate:
+                    # no operators (pre-#399 success-path semantics; only the
+                    # exception fallback below is all-pairs).
+                    logger.info(
+                        "multi-source: no cross-lens candidates above threshold "
+                        "(%d points, all same lens) — no operators",
+                        len(pids),
+                    )
             except Exception:
                 # Fallback: cue-word only all-pairs (noisy but works)
                 # (catches ImportError for missing dependencies AND runtime errors
                 #  like sklearn ValueError on empty vocabulary)
-                for i in range(len(pids)):
-                    for j in range(i + 1, len(pids)):
-                        pi, ti, pvi = pids[i]
-                        pj, tj, pvj = pids[j]
-                        gate = None
-                        ti_clean = _PUNC.sub('', f" {ti} ")
-                        tj_clean = _PUNC.sub('', f" {tj} ")
-                        if _has_cue(ti_clean, _SUPPORT_SINGLE_RE, _SUPPORT_PHRASES) or _has_cue(tj_clean, _SUPPORT_SINGLE_RE, _SUPPORT_PHRASES):
-                            gate = "IMPL"
-                        elif _has_cue(ti_clean, _REFUTE_SINGLE_RE, _REFUTE_PHRASES) or _has_cue(tj_clean, _REFUTE_SINGLE_RE, _REFUTE_PHRASES):
-                            gate = "NAND"
-                        if gate:
-                            api.add_operator(gate, inputs=[pi, pj], provenance=pvi)
+                logger.warning(
+                    "multi-source: cross-lens matching unavailable — "
+                    "all-pairs cue-gate fallback",
+                    exc_info=True,
+                )
+                texts_by_pid = {pid: ti for pid, ti, _ in pids}
+                provs_by_pid = {pid: pv for pid, _, pv in pids}
+                pairs = [(pids[i][0], pids[j][0], provs_by_pid[pids[i][0]])
+                         for i in range(len(pids))
+                         for j in range(i + 1, len(pids))]
+                _cue_gate_pairs(pairs, texts_by_pid, api)
         else:
             # Sequential mode (original): only connect consecutive utterances
             prev_pid = None

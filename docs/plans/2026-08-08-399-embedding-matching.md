@@ -73,7 +73,7 @@ These measured values are the basis for the default threshold (0.40), the docume
 
 - **`_encode(texts) -> tuple[np.ndarray, bool]`** — (vectors, degraded). Routes through `EmbeddingModel.get()` (singleton, all-MiniLM-L6-v2); on `None` (model unavailable) falls back to deterministic sklearn TF-IDF (`TfidfVectorizer().fit_transform(...)`). **Fixes the real bug:** `find_cross_source_matches` and `search_points` currently call `SentenceTransformer("all-MiniLM-L6-v2")` **fresh per call** (~90MB reload each — measured baseline: `tests/test_tortoise_search.py` alone takes 116s across 16 tests) instead of reusing the singleton `compute_embedding` already uses.
 - **`cosine_similarity_matrix(vectors) -> np.ndarray`** — pure-numpy normalized dot product (the existing inline math extracted).
-- **`find_cross_source_matches(points, threshold=0.75)`** becomes a thin speaker-keyed wrapper over `_encode` + helper with **exact** existing semantics (same signature, same speaker-exclusion, same `{src, dst, similarity, speakers}` shape, same result ordering). All 12 existing `tests/test_embeddings.py` tests stay green (11 byte-identical; test #12 needs a documented 1-line insertion — see D9b).
+- **`find_cross_source_matches(points, threshold=0.75)`** becomes a thin speaker-keyed wrapper over `_encode` + helper with **exact** existing semantics (same signature, same speaker-exclusion, same `{src, dst, similarity, speakers}` shape, same result ordering). All 12 existing `tests/test_embeddings.py` tests stay green (11 byte-identical; test #12 needs a documented 2-line insertion — see D9b).
 - **`search_points`** switches to the shared `_encode` (behavior preserved; TF-IDF now fits on `[query] + texts` — query enters vocab; relative ranking unchanged, verified against existing assertions).
 - **Module docstring** gains the calibration table (near-dup 0.9+, cross-vocab band 0.35–0.51, noise floor ≤0.15, motivating 0.29 boundary).
 
@@ -105,7 +105,13 @@ def find_cross_lens_matches(points, *, threshold=DEFAULT_THRESHOLD,
 1. Build `all_points` **with** `source` — stop dropping `provenance.source_id`:
    `all_points[pid] = {"content": ti, "speaker": sp, "source": source_id}`.
 2. Replace `find_cross_source_matches(all_points, threshold=0.40)` with
-   `find_cross_lens_matches(all_points, lens_key="source")` (threshold default 0.40).
+   `find_cross_lens_matches(all_points, lens_key="speaker")` (threshold default 0.40).
+   `multi_source` transcripts merge utterances from DIFFERENT sources — the speaker IS that
+   source discriminator (matching the LLMExtractor multi_source prompt). The uniform
+   `source_id` stays in the points dict for provenance + #6306's multi-document fold
+   (`lens_key="source"` / derivation chain). Code-review correction: `lens_key="source"`
+   made the branch inert (every point shares the source) and silently removed the
+   embedding similarity gate.
 3. **REMOVE the ≥3 shared-content-words gate** (`extractor.py:228-243`).
 4. Iterate candidates directly (no O(N²) `matched_pairs` scan): existing `_SUPPORT`/`_REFUTE` regexes decide direction — support cue in either text → `IMPL`; else refute cue → `NAND`; **no cue → NO operator** (similarity alone never creates operators) but the candidate **is recorded** in `self._last_candidates`.
 5. **Degraded mode** (encoder degraded to TF-IDF) **or** embeddings import failure → existing all-pairs cue-gate loop (`extractor.py:247-262`) preserved **verbatim** as fallback (byte-compatible with pre-#399 behavior; `test_mock_extractor_multi_source_fallback` must still pass).
@@ -132,7 +138,7 @@ Similarity computation is the expensive part; re-running it inside the #6306 ver
 
 ### D7 — Degraded mode (embeddings optional, extraction never fails)
 Embeddings are explicitly optional infra (documented in `EmbeddingModel`'s docstring: "point creation and search must never depend on them"). Three degradation levels, all backward compatible:
-- ST missing, sklearn present → `_encode` TF-IDF, candidates flagged `degraded=True` → extractor runs the existing all-pairs cue-gate (pre-#399 behavior).
+- ST missing, sklearn present → `_encode` TF-IDF, candidates flagged `degraded=True` → extractor still similarity-gates them via the cue-gate (code-review correction: pre-#399's TF-IDF path was similarity-gated too; the all-pairs cue-gate fired ONLY on exception).
 - ST **and** sklearn missing → `_encode`'s lazy sklearn import raises ImportError → propagates to the extractor's existing `except` → all-pairs cue-gate.
 - Any runtime failure → same `except` path.
 `test_mock_extractor_multi_source_fallback` (which forces ImportError via `builtins.__import__` patch) is the regression proof.
@@ -143,8 +149,8 @@ A dependency-injection verifier protocol (abstract provider + registry) adds int
 ### D9 — Lazy `from tortoise.embeddings import _encode` inside `find_cross_lens_matches` (P0 subtlety)
 `test_mock_extractor_multi_source_fallback` patches `builtins.__import__` to raise on any module name containing `"embeddings"`. pytest imports test files alphabetically → `tests/test_cross_lens.py` runs before `tests/test_extractor.py` → `tortoise.cross_lens` is already cached in `sys.modules`. A **module-level** `from tortoise.embeddings import _encode` in cross_lens would therefore never re-execute under the patch: the extractor's `from tortoise.cross_lens import find_cross_lens_matches` becomes a cache hit (patched `__import__` sees `"tortoise.cross_lens"` — no `"embeddings"` substring — and does not raise), the real embedding path runs, the fallback test's text finds no matches, and the test fails. **The function-level lazy import is what trips the patch inside `find_cross_lens_matches` → ImportError → extractor fallback.** Verified by reading the current test's mechanics.
 
-### D9b — Legacy test #12 (`test_sentence_transformers_path`) requires exactly ONE inserted line
-The test seeds `sys.modules["sentence_transformers"]` with a mock and asserts `mock_st.SentenceTransformer.assert_called_once_with("all-MiniLM-L6-v2")` + `mock_model.encode.assert_called_once()`. Under the singleton refactor, tests #1–11 (same file, same process) warm the singleton with the **real** model first, so test #12's mock is bypassed and both assertions fail. The fix is a 1-line insertion of `EmbeddingModel._reset()` before the mock seeding (the public test hook that already exists at `embeddings.py:69`) — after reset, the singleton is cold, the worker thread's import picks up the seeded mock, and **both existing assertions pass unchanged**. This is the ONLY legacy-test edit in the whole plan; the other 11 tests are byte-identical. (Note: the controller brief said "10 tests"; `tests/test_embeddings.py` actually contains 12 — this plan targets all 12.)
+### D9b — Legacy test #12 (`test_sentence_transformers_path`) requires TWO inserted `_reset()` lines
+The test seeds `sys.modules["sentence_transformers"]` with a mock and asserts `mock_st.SentenceTransformer.assert_called_once_with("all-MiniLM-L6-v2")` + `mock_model.encode.assert_called_once()`. Under the singleton refactor, tests #1–11 (same file, same process) warm the singleton with the **real** model first, so test #12's mock is bypassed and both assertions fail. The fix is a 2-line change: `EmbeddingModel._reset()` before the mock seeding (the public test hook at `embeddings.py:69`) — after reset, the singleton is cold, the worker thread's import picks up the seeded mock, and both existing assertions pass unchanged — PLUS a second `_reset()` in the test's `finally` block so the mock-loaded singleton cannot poison later `search_points`/`_encode` callers in the same process. This is the ONLY legacy-test edit in the whole plan; the other 11 tests are byte-identical. (Note: the controller brief said "10 tests"; `tests/test_embeddings.py` actually contains 12 — this plan targets all 12.)
 
 ## Tasks
 
@@ -225,7 +231,7 @@ def cosine_similarity_matrix(vectors: np.ndarray) -> np.ndarray:
 
 **Step 4:** Refactor `find_cross_source_matches` to use them (identical semantics — same signature, speaker keying, `{src, dst, similarity, speakers}` shape, same loop order) and `search_points` (encode `[query] + texts` via `_encode`, slice, reuse `cosine_similarity_matrix`; snippet/limit logic untouched). Add the calibration table to the module docstring.
 
-**Step 5:** Run `pytest tests/test_embeddings.py -q` → test #12 FAILS (warm singleton bypasses mock — expected, see D9b). Insert the one line (after `import tortoise.embeddings as mod`, which already exists):
+**Step 5:** Run `pytest tests/test_embeddings.py -q` → test #12 FAILS (warm singleton bypasses mock — expected, see D9b). Insert the two `_reset()` lines (before mock seeding and in the `finally`):
 
 ```python
     import tortoise.embeddings as mod
@@ -581,7 +587,7 @@ if multi_source:
             sp = pvi.get('speaker', 'unknown') if isinstance(pvi, dict) else 'unknown'
             # #399: keep the lens identity — source_id was dropped before (root cause #2)
             all_points[pid_i] = {"content": ti, "speaker": sp, "source": source_id}
-        candidates = find_cross_lens_matches(all_points, lens_key="source")
+        candidates = find_cross_lens_matches(all_points, lens_key="speaker")
         self._last_candidates = list(candidates)
         degraded = any(c.get("degraded") for c in candidates)
         if candidates and not degraded:
@@ -672,7 +678,7 @@ Expected: green; note runtime delta vs the pre-change baseline (~7.5 min).
 1. **Deterministic unit tests (bulk):** `tests/test_cross_lens.py` uses an injected fixed-vector `encode` — same-lens exclusion, cross-lens pairing, threshold monotonicity, lens derivation chain (all 5 rungs), explicit `lens_key`, sort order, candidate shape, `encode` param honored. Zero model, zero network, zero randomness.
 2. **Degraded-mode determinism:** TF-IDF fallback is deterministic for fixed inputs; the degraded test patches `EmbeddingModel.get → None` (`importorskip("sklearn")`), asserting `degraded=True` on every candidate. No seeding needed — real MiniLM has no dropout; TF-IDF is exact.
 3. **Real-embedder e2e (one, guarded):** `pytest.importorskip("sentence_transformers")` + locally cached model (`~/.cache/huggingface/hub/...`); asserts against **measured** values with margins — in-band 0.448 pair ≥ 0.35 yields a candidate; noise 0.121 pair yields none; motivating 0.291 pair below default yields none (recall-only boundary). CI installs `.[embeddings]` so it runs there; offline dev envs skip.
-4. **Backward-compat regression battery:** 12 `test_embeddings.py` (11 byte-identical; test #12 +1 line `EmbeddingModel._reset()`), 23 `test_embeddings_filters.py`, 16 `test_tortoise_search.py`, 128+4 search/session tests, 43 `test_extractor.py` (with the one rewritten test + 3 new cue-direction tests). These prove the wrapper semantics and the extractor fallback.
+4. **Backward-compat regression battery:** 12 `test_embeddings.py` (11 byte-identical; test #12 +2 `EmbeddingModel._reset()` lines), 23 `test_embeddings_filters.py`, 16 `test_tortoise_search.py`, 128+4 search/session tests, 43 `test_extractor.py` (with the one rewritten test + 3 new cue-direction tests). These prove the wrapper semantics and the extractor fallback.
 5. **Red-Green-Refactor discipline:** every task starts with the failing test (Task 1's singleton-reuse test fails against today's fresh-per-call code; Task 2's module tests fail on ImportError; Task 3's cue tests fail against the old shared-words gate).
 
 ## Acceptance Criteria (falsifiable)
@@ -722,7 +728,7 @@ Expected: green; note runtime delta vs the pre-change baseline (~7.5 min).
 | `tortoise/cross_lens.py` | **NEW** — `find_cross_lens_matches`, `_lens_of`, `NEAR_DUPLICATE_THRESHOLD`, `DEFAULT_THRESHOLD`, #6306 contract docstring |
 | `tortoise/extractor.py` | MockExtractor multi-source branch: keep `source_id` in `all_points`, call `find_cross_lens_matches(lens_key="source")`, remove shared-words gate, cue-gate direction, `_last_candidates`, degraded/fallback |
 | `tests/test_cross_lens.py` | **NEW** — deterministic fake-encode unit tests + 2 guarded real-embedder e2e tests |
-| `tests/test_embeddings.py` | Test #12 only: insert `EmbeddingModel._reset()` (1 line, D9b) |
+| `tests/test_embeddings.py` | Test #12 only: insert `EmbeddingModel._reset()` (2 lines — pre-seed + finally, D9b) |
 | `tests/test_extractor.py` | Rewrite `test_mock_extractor_multi_source_semantic_agreement`; add refute-cue NAND + no-cue-recorded tests |
 | `docs/plans/2026-08-08-399-embedding-matching.md` | This plan |
 

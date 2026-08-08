@@ -393,12 +393,13 @@ def test_llm_extractor_max_utterances():
 # ── Multi-source with embeddings (success path) ──────────────────────
 
 def test_mock_extractor_multi_source_embedding():
-    """Multi-source mode cue-gate still creates operators for near-identical claims.
+    """Multi-source mode: near-identical claims from different speakers (lenses)
+    produce embedding candidates; the cue-gate creates the operator.
 
-    #399 note: within a single transcript every point shares one source_id, so
-    lens_key="source" yields NO cross-lens candidates → this exercises the
-    all-pairs cue-gate fallback. Real cross-lens candidates require multi-source
-    aggregation (#6306). The mocked tests above pin the candidate path.
+    #399: multi_source transcripts treat speakers as sources (lens_key=
+    "speaker") — the old ≥3-shared-content-words gate is gone; similarity is
+    the candidate gate and cue words decide direction. #6306's multi-document
+    fold will use lens_key="source" / the derivation chain.
     """
     api, log = _api()
     # Near-identical claims from different speakers so TF-IDF cosine > 0.40
@@ -483,9 +484,10 @@ def test_mock_extractor_multi_source_refute_cue_nand():
     print("PASS test_mock_extractor_multi_source_refute_cue_nand")
 
 
-def test_mock_extractor_multi_source_degraded_candidates_fallback():
-    """#399: candidates marked degraded (TF-IDF) → extractor discards them and
-    runs the pre-#399 all-pairs cue-gate (documented degraded semantics)."""
+def test_mock_extractor_multi_source_degraded_candidates_cue_gated():
+    """#399: candidates marked degraded (TF-IDF) are still similarity-gated —
+    cue words decide direction; no-cue degraded candidates are recorded only.
+    (All-pairs cue-gate now fires ONLY on import/runtime failure.)"""
     import tortoise.cross_lens as cl
     api, log = _api()
     text = ("Alice: Growth depends on distribution channels and partnerships but "
@@ -507,28 +509,32 @@ def test_mock_extractor_multi_source_degraded_candidates_fallback():
     finally:
         cl.find_cross_lens_matches = _orig
     ops = [e for e in log.read_all() if e["type"] == "OperatorAdded"]
-    # All-pairs fallback: Alice's "but" cue → NAND against Bob even though the
-    # pair is not a cross-lens candidate (degraded path discards candidates).
+    # Candidate (alice,bob) is cue-gated: Alice's "but" → NAND. Degraded
+    # candidates are NOT discarded — they stay similarity-gated.
     assert len(ops) == 1 and ops[0]["point"]["operator"]["op_type"] == "NAND", \
-        f"degraded path must run all-pairs cue-gate, got {len(ops)} ops"
+        f"degraded candidate path must cue-gate, got {len(ops)} ops"
     assert ex._last_candidates and ex._last_candidates[0]["degraded"] is True
-    print("PASS test_mock_extractor_multi_source_degraded_candidates_fallback")
+    print("PASS test_mock_extractor_multi_source_degraded_candidates_cue_gated")
 
 
-def test_mock_extractor_multi_source_same_source_no_candidates():
-    """Real module, single source: lens_key="source" → all points same lens →
-    no candidates, _last_candidates empty, operators only from cue-gate fallback."""
+def test_mock_extractor_multi_source_same_speaker_no_candidates():
+    """Real module: same-lens pairs (both utterances from one speaker) → no
+    cross-lens candidates → the similarity gate holds → no operators.
+
+    multi_source treats speakers as sources (lens_key="speaker"); the all-pairs
+    cue-gate now fires ONLY on import/runtime failure (pre-#399 fallback).
+    """
     api, log = _api()
     text = ("Alice: Growth depends on distribution channels and partnerships is core.\n"
-            "Bob: Growth depends on distribution channels and partnerships is also "
+            "Alice: Growth depends on distribution channels and partnerships is also "
             "essential for scale.")
     ex = MockExtractor()
     ex.run(text, "test.txt", api, multi_source=True)
-    # Same source → same lens → no cross-lens candidates (documented #6306 gap).
+    # Same speaker → same lens → no cross-lens candidates.
     assert ex._last_candidates == []
     ops = [e for e in log.read_all() if e["type"] == "OperatorAdded"]
-    assert len(ops) >= 0  # operators (if any) come from the cue-gate fallback only
-    print("PASS test_mock_extractor_multi_source_same_source_no_candidates")
+    assert ops == [], f"no candidates must mean no operators, got {len(ops)}"
+    print("PASS test_mock_extractor_multi_source_same_speaker_no_candidates")
 
 
 def test_mock_extractor_multi_source_no_cue_no_operator_but_recorded():

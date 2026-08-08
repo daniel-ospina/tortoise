@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Callable
+import time
 
 import numpy as np
 
@@ -44,6 +44,8 @@ class EmbeddingModel:
     _model = None
     _lock = threading.Lock()
     _LOAD_TIMEOUT_S = 30.0  # generous for cold I/O (model is 90MB on disk; pre-warmed at startup in hosted)
+    _FAIL_COOLDOWN_S = 60.0  # negative cache: skip retry for 60s after a failed load
+    _last_failed_at: float | None = None
 
     @classmethod
     def get(cls, load_timeout: float | None = None) -> "EmbeddingModel | None":
@@ -64,6 +66,14 @@ class EmbeddingModel:
                 latency stays bounded.
         """
         timeout = load_timeout if load_timeout is not None else cls._LOAD_TIMEOUT_S
+        now = time.monotonic()
+        if cls._instance is None and cls._last_failed_at is not None and \
+                (now - cls._last_failed_at) < cls._FAIL_COOLDOWN_S:
+            # Negative cache (code-review P2, #399): a load just failed — return
+            # None immediately instead of blocking up to 30s per request in a
+            # degraded environment (offline dev, cold CI, OOM). Retry after the
+            # cooldown window via the normal "retries on next get()" path.
+            return None
         if cls._instance is None:
             with cls._lock:
                 if cls._instance is None:
@@ -77,14 +87,16 @@ class EmbeddingModel:
             with cls._lock:
                 cls._instance = None
                 cls._model = None
+                cls._last_failed_at = time.monotonic()
         return model
 
     @classmethod
     def _reset(cls) -> None:
-        """Test hook — clear cached instance."""
+        """Test hook — clear cached instance and failure cooldown."""
         with cls._lock:
             cls._instance = None
             cls._model = None
+            cls._last_failed_at = None
 
     def __init__(self, load_timeout: float | None = None):
         timeout = load_timeout if load_timeout is not None else self._LOAD_TIMEOUT_S
@@ -165,9 +177,10 @@ def _encode(texts: list[str]) -> tuple[np.ndarray, bool]:
     try:
         from sklearn.feature_extraction.text import TfidfVectorizer  # lazy: [embeddings] extra
         return TfidfVectorizer().fit_transform(texts).toarray(), True
-    except ValueError:
-        # Empty / stopword-only vocabulary — nothing to match; return a
-        # zero matrix so cosine similarity is 0 and no candidates emerge.
+    except (ValueError, ImportError):
+        # Empty / stopword-only vocabulary or sklearn missing — nothing to
+        # match; return a zero matrix so cosine similarity is 0 and no
+        # candidates emerge. Embeddings stay OPTIONAL (#399 contract).
         return np.zeros((len(texts), 1)), True
 
 
@@ -238,10 +251,24 @@ def search_points(
     texts = [p["content"] for p in points]
 
     # Shared encoder: singleton model with deterministic TF-IDF fallback (#399).
-    # TF-IDF now fits on [query] + texts — query enters vocab; relative
-    # ranking is unchanged (verified against the legacy test battery).
-    vectors, _ = _encode([query] + texts)
-    query_vec, doc_vecs = vectors[0], vectors[1:]
+    vectors, degraded = _encode([query] + texts)
+    if degraded:
+        # Legacy degraded semantics (code-review P2, #399): fit TF-IDF on the
+        # DOCUMENTS ONLY and transform the query separately. Jointly fitting on
+        # [query] + texts lets the query enter the vocabulary, shifting idf and
+        # silently reordering results (verified: ~2% reorders, ~38% threshold
+        # changes at 0.3 on random corpora).
+        try:
+            from sklearn.feature_extraction.text import TfidfVectorizer
+            tv = TfidfVectorizer()
+            doc_vecs = tv.fit_transform(texts).toarray()
+            query_vec = tv.transform([query]).toarray()[0]
+        except (ValueError, ImportError):
+            # Empty/stopword-only vocabulary — nothing to search (legacy:
+            # raised ValueError, caught by fallback_tfidf → []).
+            return []
+    else:
+        query_vec, doc_vecs = vectors[0], vectors[1:]
 
     norms = np.linalg.norm(doc_vecs, axis=1, keepdims=True)
     norms[norms == 0] = 1

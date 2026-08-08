@@ -35,10 +35,13 @@ DEFAULT_THRESHOLD = 0.40
 def _lens_of(point: dict, lens_key: str | None) -> str:
     if lens_key is not None:
         v = point.get(lens_key)
-        return str(v) if v is not None else "unknown"
+        # Truthiness, not is-not-None: an empty string is not a lens identity
+        # (code-review P3, #399) — it must not collapse distinct points into
+        # one "empty" lens.
+        return str(v) if v else "unknown"
     for key in ("lens", "source"):
         v = point.get(key)
-        if v is not None:
+        if v:
             return str(v)
     prov = point.get("provenance")
     if isinstance(prov, dict) and prov.get("source_id") is not None:
@@ -80,6 +83,13 @@ def find_cross_lens_matches(
     degraded = False
     if encode is not None:
         vectors = np.asarray(encode(texts), dtype=np.float64)
+        if vectors.shape[0] != len(texts):
+            # Code-review P4 (#399): an encoder returning the wrong row count
+            # silently masked an IndexError behind the extractor's blanket
+            # except — surface the contract violation instead.
+            raise ValueError(
+                f"encoder returned {vectors.shape[0]} rows for {len(texts)} texts"
+            )
     else:
         # Lazy import (#399 D9): keeps test_mock_extractor_multi_source_fallback
         # (patched builtins.__import__ raising on "embeddings") able to trip the
