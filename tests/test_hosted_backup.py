@@ -1872,5 +1872,7 @@ def test_r2_create_if_not_exists_fallback_head(monkeypatch):
     fake.objects["ops/alerts/Y.json"] = b"original"
     assert store.create_if_not_exists("ops/alerts/Y.json", b"new") is False
     assert fake.objects["ops/alerts/Y.json"] == b"original"
-    # Missing object via fallback → True, created without conditional.
-    assert store.create_if_not_exists("ops/alerts/Z.json", b"new") is True
+    # Ambiguous HEAD (missing object, client without conditionals) → RAISES:
+    # a blind-put would weaken the dedup linearization point (review P3).
+    with pytest.raises(RuntimeError, match="could not confirm absence"):
+        store.create_if_not_exists("ops/alerts/Z.json", b"new")

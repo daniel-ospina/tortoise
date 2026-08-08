@@ -125,7 +125,11 @@ def _backup_team(
     except Exception as e:
         return {"status": "error", "team_id": team_id, "error": str(e)}
 
-    # ── P0 guard: right graph — else the upload never stands. ──
+    # ── P0 guard: the manifest must name the seam-derived graph and carry data.
+    # The graph name is deterministic (team_{id} from the seam enumeration), so
+    # this is a broken-pipeline tripwire rather than an independent wrong-graph
+    # detector — the independent teeth are the non-empty requirement plus the
+    # restore-time isolation checks (review P2-1). ──
     if manifest.get("graph_name") != graph_name:
         backup_id = manifest.get("backup_id", "")
         if backup_id:
@@ -262,10 +266,15 @@ def run_backup_sweep(
     for team_id in sorted(team_ids):
         ctx = lock_for(team_id) if lock_for else nullcontext()
         with ctx:
-            results[team_id] = _backup_team(
-                db=db, registry=registry, storage=storage, config=config,
-                team_id=team_id, now=now, incidents=incidents,
-            )
+            try:
+                results[team_id] = _backup_team(
+                    db=db, registry=registry, storage=storage, config=config,
+                    team_id=team_id, now=now, incidents=incidents,
+                )
+            except Exception as e:  # per-team isolation: one bad team never
+                # aborts the sweep for the others (review P3-2)
+                logger.exception("sweep of %s failed: %s", team_id, e)
+                results[team_id] = {"status": "error", "team_id": team_id, "error": str(e)}
 
     _write_json(
         storage, OPS_STATE_KEY,

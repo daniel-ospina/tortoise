@@ -69,7 +69,7 @@ def _newest_backup_ts(storage, team_id: str) -> datetime | None:
         parts = k.split("/")
         if len(parts) != 4:
             continue
-        ts = parts[2]
+        ts = parts[2].split("_", 1)[0]  # strip the {rnd} suffix (review P1-1)
         for fmt in ("%Y%m%dT%H%M%S%fZ", "%Y%m%dT%H%M%SZ"):
             try:
                 parsed = datetime.strptime(ts, fmt).replace(tzinfo=timezone.utc)
@@ -182,6 +182,8 @@ class BackupWatcher:
         self._kill_switch_off = kill_switch_off or (lambda: False)
         self._now = now or (lambda: datetime.now(timezone.utc))
         self._known_good: bool = False
+        self._known_newest: dict[str, datetime] = {}
+        self._known_state_teams: list[str] = []
         self._last_status: dict[str, Any] = {}
         self._rss_baseline: int | None = None
         self._start_time: datetime = self._now()
@@ -236,18 +238,27 @@ class BackupWatcher:
                 if k.endswith("/state.json") and len(k.split("/")) >= 4
             ]
             r2_ok = True
+            # Cache the last-known-good surface for degraded polls.
+            self._known_newest = newest_by_team
+            self._known_state_teams = state_teams
         except Exception as e:
             logger.warning("R2 read failed (r2_ok=false): %s", e)
             r2_teams, state_teams, newest_by_team, driver_ts, r2_ok = [], [], {}, None, False
             if not self._known_good:
                 self._last_status = {"unknown": True, "r2_ok": False}
                 return self._last_status
-            # Degraded from known-good: reuse the cached surface.
+            # Degraded from known-good: evaluate from the CACHED surface (review
+            # P1-2 — never reclassify from an empty cache; that fabricates stale).
             r2_teams = list(self._last_status.get("per_team", {}).keys())
-            newest_by_team = {}
+            newest_by_team = dict(getattr(self, "_known_newest", {}) or {})
+            state_teams = list(getattr(self, "_known_state_teams", []) or [])
 
         teams = self._teams()
-        simulate_age = self._simulate_age(now)
+        try:
+            simulate_age = self._simulate_age(now)
+        except Exception as e:  # R2 read — fail soft during degraded polls
+            logger.warning("simulate read failed: %s", e)
+            simulate_age = None
         in_grace = (now - self._start_time).total_seconds() < (self._grace_min * 60)
         status = compute_status(
             now=now,
@@ -281,14 +292,26 @@ class BackupWatcher:
                     self._alerts.resolve_incident("NEVER_BACKED_UP", team)
                     self._alerts.resolve_incident("METADATA_LOST", team)
             if status.get("no_teams"):
-                for kind in ("STALE", "NEVER_BACKED_UP", "METADATA_LOST"):
-                    self._alerts.resolve_incident(kind)
+                # Resolve the per-team incidents of the last-known surface
+                # (review P2-4: per-team kinds must close on universe shrink).
+                for team in list(self._last_status.get("per_team", {}).keys()):
+                    for kind in ("STALE", "NEVER_BACKED_UP", "METADATA_LOST"):
+                        self._alerts.resolve_incident(kind, team)
             if status.get("driver_down"):
                 self._alerts.open_incident("DRIVER_DOWN")
             else:
                 self._alerts.resolve_incident("DRIVER_DOWN")
             for team in status.get("backup_set_missing", []):
                 self._alerts.open_incident("BACKUP_SET_MISSING", team)
+            # BACKUP_SET_MISSING resolves when the team's archives reappear.
+            for team in status.get("per_team", {}):
+                if team not in status.get("backup_set_missing", []):
+                    self._alerts.resolve_incident("BACKUP_SET_MISSING", team)
+            # R2_DOWN: emit while degraded-from-known-good, resolve when healthy.
+            if r2_ok is False:
+                self._alerts.open_incident("R2_DOWN")
+            else:
+                self._alerts.resolve_incident("R2_DOWN")
 
         # ── Heartbeat + pending-push retries (R2 writes — safe to skip when down). ──
         try:

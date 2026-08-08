@@ -207,7 +207,17 @@ class TestDrDrill:
         sdk = TortoiseSDK("/tmp/x.db", namespace="registry")
         live = sdk._get_proj().db.select_graph("team_team_x")
         assert live.query("MATCH (n) RETURN count(n)").result_set[0][0] == 2
-        assert body["target_graph"] not in sdk._get_proj().db.list_graphs()
+        graphs = sdk._get_proj().db.list_graphs()
+        assert body["target_graph"] not in graphs
+        # Zero production writes (review P2-8): no registry end-stamp, no
+        # live-named staging/pre-restore scratch graphs.
+        reg = sdk._get_registry()
+        rows = reg.query(
+            "MATCH (t:Team {id:$id}) RETURN t.backup_restored_at",
+            params={"id": "team_x"},
+        ).result_set
+        assert not rows or rows[0][0] is None, "drill must skip the end-stamp"
+        assert not [g for g in graphs if g.startswith("team_team_x") and ("_restore_" in g or "_pre_restore_" in g)]
 
     def test_drill_cooldown(self, client, dr_env, mem_storage):
         _seed_team("team_x", nodes=1)

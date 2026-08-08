@@ -2721,6 +2721,7 @@ _LAST_DRILL_AT: float = 0.0  # in-memory drill cooldown (single-instance, resets
 _DRILL_COOLDOWN_S = 3600
 _SWEEP_TEAM_LOCKS: dict[str, threading.Lock] = {}
 _SWEEP_LOCKS_GUARD = threading.Lock()
+_SWEEP_INFLIGHT = asyncio.Lock()
 
 
 def _backup_config_safe() -> "BackupConfig | None":
@@ -2788,15 +2789,17 @@ def _boot_gc_drill_graphs(db, max_age_hours: float = 6.0) -> None:
         _logger.warning("drill-graph GC: list failed: %s", exc)
         return
     now = datetime.now(timezone.utc)
-    patterns = ("_drill_", "registry_drill_", "_restore_", "_pre_restore_")
+    # Review P1-1: only the drill endpoint's OWN scratch prefix is eligible —
+    # substring patterns could match a legitimately-provisioned team id (e.g.
+    # "team_drill_20240101...") and the GC would delete a LIVE graph. Team
+    # graphs are never eligible.
     for name in graphs:
-        if not any(p in name for p in patterns):
+        if not name.startswith("_drill_"):
+            continue
+        if name.startswith("team_"):
             continue
         try:
             g = db.select_graph(name)
-            # Best-effort age: the graph has no reliable mtime — only sweep
-            # graphs whose name carries a parseable timestamp, else leave for
-            # the runbook's manual cleanup.
             ts_part = name.rsplit("_", 1)[-1]
             created = datetime.strptime(ts_part, "%Y%m%dT%H%M%S%fZ").replace(tzinfo=timezone.utc)
             if (now - created).total_seconds() / 3600.0 > max_age_hours:
@@ -2820,23 +2823,35 @@ async def backups_sweep(request: Request):
     db = reg_sdk._get_proj().db
     storage = _backup_storage()
 
-    def lock_for(team_id: str):
-        return _sweep_team_lock(team_id)
+    # In-flight guard: a concurrent sweep returns 202 (no queueing — the next
+    # hourly run retries). This is what the driver's 202 branch keys on.
+    if _SWEEP_INFLIGHT.locked():
+        return {"status": "already_running", "teams_backed_up": 0}
+    async with _SWEEP_INFLIGHT:
+        def lock_for(team_id: str):
+            return _sweep_team_lock(team_id)
 
-    try:
-        result = await asyncio.to_thread(
-            run_backup_sweep, db=db, registry=registry, storage=storage,
-            config=cfg, lock_for=lock_for,
-        )
-    except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=f"Sweep failed: {e}")
+        try:
+            result = await asyncio.to_thread(
+                run_backup_sweep, db=db, registry=registry, storage=storage,
+                config=cfg, lock_for=lock_for,
+            )
+        except RuntimeError as e:
+            raise HTTPException(status_code=503, detail=f"Sweep failed: {e}")
 
-    alerts = _alert_store_from(cfg)
-    for inc in result.get("incidents", []):
-        await asyncio.to_thread(
-            alerts.open_incident, inc["kind"], inc.get("team_id", ""), inc.get("detail")
-        )
-    return result
+        alerts = _alert_store_from(cfg)
+        alerts_failed = []
+        for inc in result.get("incidents", []):
+            try:
+                await asyncio.to_thread(
+                    alerts.open_incident, inc["kind"], inc.get("team_id", ""), inc.get("detail")
+                )
+            except Exception as e:  # incident-filing must never fail the run (review P3)
+                _logger.warning("incident routing failed for %s: %s", inc.get("kind"), e)
+                alerts_failed.append(inc.get("kind"))
+        if alerts_failed:
+            result["alerts_failed"] = alerts_failed
+        return result
 
 
 @app.get("/v1/internal/backups/status")
@@ -2851,7 +2866,11 @@ async def backups_status(request: Request):
         cfg = load_config()
     except ConfigError:
         cfg = None
-    storage = _backup_storage()
+    try:
+        storage = _backup_storage()
+    except RuntimeError as e:
+        return {"enabled": False, "app_time": datetime.now(timezone.utc).isoformat(),
+                "storage_error": str(e), "per_team": {}, "no_teams": False}
     watcher = _WATCHER
     now = datetime.now(timezone.utc)
     watcher_status = watcher._watcher._last_status if watcher else {}
@@ -2894,7 +2913,6 @@ async def backups_status(request: Request):
             "r2_ok": hb.get("r2_ok"),
         },
         "driver": {"last_heartbeat_at": driver_hb.get("ran_at"), "age_minutes": driver_age_min},
-        "ops_state": read_ops_state(storage),
     }
 
 @app.post("/v1/internal/driver/heartbeat")

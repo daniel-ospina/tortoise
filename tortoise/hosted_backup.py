@@ -331,21 +331,24 @@ class R2Storage:
                     "412",
                 ):
                     return False
+                # Review P3: a non-412 ClientError (403 auth, 5xx, bucket
+                # policy) must NOT fall through to a blind-put — re-raise so
+                # the misconfiguration is loud, never hidden by the fallback.
+                raise
             except ImportError:
                 pass
-            # Fallback: conditional writes unsupported (or non-412 error) →
-            # HEAD-check. Never blind-put over an existing object.
+            # Fallback ONLY for conditional-write-unsupported clients: HEAD-
+            # check, and RAISE on an ambiguous HEAD instead of blind-putting
+            # (an inconclusive read must never weaken the dedup linearization
+            # point).
             try:
                 self._s3().head_object(Bucket=self._bucket, Key=key)
                 return False  # exists → not created
             except Exception:
                 pass
-            # Does not exist (or HEAD unsupported) — safe to create.
-            try:
-                self._s3().put_object(Bucket=self._bucket, Key=key, Body=data)
-                return True
-            except Exception as e2:
-                raise RuntimeError(f"R2 create_if_not_exists failed for {key}: {e2}") from e2
+            raise RuntimeError(
+                f"R2 create_if_not_exists could not confirm absence for {key}: {e}"
+            ) from e
 
     def download(self, key: str) -> bytes:
         try:

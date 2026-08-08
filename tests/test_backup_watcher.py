@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import secrets
 from datetime import datetime, timedelta, timezone
 
 from tortoise.alert_store import AlertStore
@@ -123,8 +124,10 @@ def test_status_backup_set_missing():
 
 
 def _seed_archive(storage, team: str, hours_ago: float) -> None:
+    """Seed with the REAL create_backup key shape: {YYYYMMDD}T{HHMMSSmmm}Z_{rnd}
+    (the random suffix is what the freshness parser must strip — review P1-1)."""
     ts = _ts(hours_ago)
-    key = ts.strftime("%Y%m%dT%H%M%S%fZ")
+    key = f"{ts.strftime('%Y%m%dT%H%M%S')}{ts.microsecond // 1000:03d}Z_{secrets.token_hex(4)}"
     backup_id = f"{team}/{key}"
     manifest = {"backup_id": backup_id, "team_id": team, "graph_name": f"team_{team}",
                 "created_at": ts.isoformat(), "node_count": 1, "edge_count": 0,
@@ -229,3 +232,40 @@ def test_watcher_writes_heartbeat():
     hb = json.loads(storage.download(HEARTBEAT_KEY))
     assert hb["r2_ok"] is True
     assert "team_a" in hb["status"]
+
+
+def test_watcher_degraded_mode_keeps_cached_surface():
+    """R2 read failure after a known-good poll must NOT reclassify ok teams as
+    stale from an empty cache (review P1-2 — degraded evaluates the cached
+    surface, never fabricates)."""
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_archive(storage, "team_a", 1)   # fresh → ok
+    _seed_state(storage, "team_a")
+    w = _watcher(storage, ch)
+    w.poll()
+    assert w._last_status["per_team"]["team_a"] == "ok"
+
+    class _Boom(MemoryStorage):
+        def list(self, prefix):
+            raise ConnectionError("r2 down")
+
+    w._storage = _Boom()
+    status2 = w.poll()
+    # Degraded: the cached surface holds — team_a is NOT reclassified stale.
+    assert status2["per_team"]["team_a"] == "ok"
+    # R2_DOWN is the one incident that SHOULD fire while degraded (neither
+    # fabricate NOR silence); no STALE for the healthy team.
+    assert list(ch.issues.values()) == ["[DR] R2_DOWN"]
+
+
+def test_watcher_production_key_parse():
+    """The freshness parser must handle real create_backup keys (suffix
+    stripped) — regression for review P1-1."""
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_archive(storage, "team_a", 1)  # production-shaped key
+    _seed_state(storage, "team_a")
+    w = _watcher(storage, ch)
+    status = w.poll()
+    assert status["per_team"]["team_a"] == "ok"  # fresh (1h < 90min)

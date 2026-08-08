@@ -96,7 +96,12 @@ class AlertStore:
         self._push = push_telegram
         self._repo = repo
         self._assignee = assignee
-        self._now = now() if callable(now) else (now or datetime.now(timezone.utc))
+        self._now = now or (lambda: datetime.now(timezone.utc))
+
+    def _clock(self) -> datetime:
+        """Current time — evaluated per call so time-based suppression expires
+        correctly on a long-lived store (review P2-6)."""
+        return self._now() if callable(self._now) else self._now
 
     # ── helpers ─────────────────────────────────────────────────────────────
     def _key(self, kind: str, team_id: str) -> str:
@@ -109,7 +114,7 @@ class AlertStore:
         if not until:
             return False
         try:
-            return self._now < datetime.fromisoformat(until)
+            return self._clock() < datetime.fromisoformat(until)
         except ValueError:
             return False
 
@@ -142,7 +147,7 @@ class AlertStore:
             "kind": kind,
             "team_id": team_id,
             "detail": detail,
-            "filed_at": self._now.isoformat(),
+            "filed_at": self._clock().isoformat(),
             "issue_number": None,
             "telegram_pushed": False,
         }
@@ -209,7 +214,7 @@ class AlertStore:
             _write_json(
                 self._storage,
                 f"{_PENDING_PREFIX}{digest}.json",
-                {"key": key, "text": text, "created_at": self._now.isoformat()},
+                {"key": key, "text": text, "created_at": self._clock().isoformat()},
             )
 
     def retry_pending(self) -> int:
