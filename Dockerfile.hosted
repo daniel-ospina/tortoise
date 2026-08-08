@@ -28,6 +28,7 @@ RUN pip install --no-cache-dir '.[embeddings]' '.[backups]' \
 # Layer 2: source code (fast, no model download — reuses Layer 1 cache)
 ARG CACHEBUST=1
 COPY tortoise/ tortoise/
+COPY product/pricing.json product/pricing.json
 RUN pip install --no-cache-dir -e .
 
 # Embedding model cache — all-MiniLM-L6-v2 is pre-downloaded to /app/model at
