@@ -51,20 +51,20 @@ The controller is a natural person whose residence jurisdiction is unconfirmed. 
 4. minimal-PII — "we do not intentionally collect sensitive personal information" (§13)
 5. eligibility — "you must be at least 18 years old" (§2)
 6. Art. 27 — "We are not currently established in the EU/EEA. If we become subject to GDPR Art. 27, we will designate and disclose an EU representative here." (§1)
-7. consent banner — "consent will be obtained via a banner when these tools are activated" (§3)
-8. repo-state — "no analytics tools are currently deployed" (§3)
+7. consent banner — "you can give or withdraw consent at any time via the consent banner" (§3, §4)
+8. deployed PostHog — "PostHog is a data processor; data is stored in the EU (Frankfurt)" (§3, §12) — the former repo-state sentence ("no analytics tools are currently deployed") is REMOVED: the tree now ships consent.js + the PostHog loader (#658)
 9. purposes (passive) — "your email address and account information are used to deliver the service, respond to requests, and manage billing; usage data is used to improve the product" (§4)
 10. expectation — "we expect users not to place sensitive data in the service" (§2)
 11. Art. 12(6) — "we may request identity verification before acting on any request" (§16)
-12. PostHog residency — "PostHog is a data processor; EU residency (Frankfurt) used when configured" (§12)
+12. PostHog residency — "PostHog is a data processor; data is stored in the EU (Frankfurt)" (§12) — config resolved at #528 (Cloud EU, Frankfurt)
 
 ### Drafting-rule compliance (classification rule, pinned)
 
 - Processors, data categories, retention, and transfer statements use **passive/impersonal** phrasing ("data is processed by Supabase for authentication", "account data includes your email address", "data is retained only for as long as needed") — they never match the guard regex `we (use|collect|share|sell|process|retain|store|transfer)\b`.
 - The **only** present-tense guard match in this document is the pinned canonical pair sentence (inventory #3). All other present-tense claims are from the approved pinned set.
-- All analytics disclosures are **conditional/future** ("when you use the hosted service we may use…; activated with your consent") + state current deployment status. No present-tense claims for undeployed instrumentation.
+- Analytics disclosures are **per-tool**: PostHog is deployed (processor, EU Frankfurt) and captures data only with consent via the banner; Meta Pixel and Google Analytics are conditional/future ("not deployed yet and may be activated with your consent; consent is managed via the consent banner"). No present-tense claims for the undeployed tools.
 - The policy body never uses the combined "no sale or sharing" negative-phrase construction; the canonical co-occurrence pair (inventory #2 + #3) is used instead.
-- **Re-check steps at #528 resolution (process, not body text):** when Meta Pixel activates, re-verify the §5 sharing disclosure + joint-controller wording still match reality; when PostHog config resolves, re-verify the §12 residency sentence (mirror pattern, plan P1-4). No dedicated "Do Not Sell or Share My Personal Information" link ships this release (deferred to #658 tooling — no dead link ships).
+- **Re-check steps (process, not body text):** when the Meta Pixel activates, re-verify the §5 sharing disclosure + joint-controller wording still match reality; re-verify the §3/§12 PostHog sentences if the EU Cloud residency ever changes. No dedicated "Do Not Sell or Share My Personal Information" link ships this release (deferred to #658 tooling — no dead link ships).
 
 ---
 
@@ -111,17 +111,18 @@ The service processes the following categories of personal data:
 
 ## 3. Analytics and cookies (outline ③)
 
-**Current deployment status:** no analytics tools are currently deployed.
+**Deployed analytics tool.** The following analytics tool is deployed on the tortoise funnel pages (product, signup, sign-in, and welcome pages), and it captures data only after you give consent via the consent banner:
 
-**Planned tools, disclosed now.** When you use the hosted service we may use the following analytics tools, and they are activated only with your consent:
+- **PostHog** — product analytics (PostHog Inc.). PostHog is a data processor; data is stored in the EU (Frankfurt).
+
+**Planned tools, disclosed now.** The following analytics tools are not deployed yet and may be activated with your consent; consent is managed via the consent banner:
 
 - **Meta Pixel** — advertising measurement and conversion tracking (Meta Platforms, Inc.).
 - **Google Analytics (GA4)** — audience and product analytics (Google LLC).
-- **PostHog** — product analytics (PostHog Inc.).
 
-Cookies and similar technologies are used by these tools when activated. For each tool, consent will be obtained via a banner when these tools are activated. The consent banner is a planned follow-up (issue #658) and will appear only when instrumentation ships.
+Cookies and similar technologies are used by these tools when activated. You can give or withdraw consent at any time via the consent banner.
 
-Until consent is given, none of these tools are loaded and no data is sent to them.
+Until consent is given, PostHog captures no data, the planned tools are not loaded, and no data is sent to them.
 
 ## 4. Purposes of processing and legal bases (outline ④)
 
@@ -134,7 +135,7 @@ Until consent is given, none of these tools are loaded and no data is sent to th
 - **Consent (Art. 6(1)(a)):** analytics tools are activated and process data only after consent is given, as described in §3.
 - **Legal obligation (Art. 6(1)(c)):** billing and transactional records may be processed to comply with tax and accounting obligations, where applicable.
 
-Consent, where given, may be withdrawn at any time with effect for the future. Under ePrivacy rules, non-essential cookies and pixels are subject to the same consent: consent will be obtained via a banner when these tools are activated.
+Consent, where given, may be withdrawn at any time with effect for the future. Under ePrivacy rules, non-essential cookies and pixels are subject to the same consent: you can give or withdraw consent at any time via the consent banner.
 
 ## 5. California — CCPA/CPRA disclosures (outline ⑤)
 
@@ -142,7 +143,7 @@ Consent, where given, may be withdrawn at any time with effect for the future. U
 
 **"Sharing" disclosure for the Meta Pixel (conditional).** If the Meta Pixel is activated, data processed through the Pixel is shared with Meta as an advertising provider, and that may constitute "sharing" for cross-context behavioral advertising under the CPRA. When the Pixel is activated, Meta is a joint controller of personal data processed through the Pixel, and shared data may be used by Meta for its own purposes. Data is shared with Meta only after consent is obtained, as described in §3.
 
-**Opt-out rights.** No dedicated "Do Not Sell or Share My Personal Information" opt-out link is offered at this time, because no sale occurs and no sharing occurs until analytics tools are activated with consent. When consent and opt-out tooling becomes available (planned consent banner, issue #658), a dedicated opt-out control will be added. Until then, opt-out and all other California privacy requests may be submitted through the contact channel in §1.
+**Opt-out rights.** No dedicated "Do Not Sell or Share My Personal Information" opt-out link is offered at this time, because no sale occurs and no sharing occurs until analytics tools are activated with consent. Consent is managed via the consent banner; a dedicated opt-out control will be added if the Meta Pixel is activated. Until then, opt-out and all other California privacy requests may be submitted through the contact channel in §1.
 
 **Shine the Light (Cal. Civ. Code § 1798.83).** California residents may request, once per calendar year, information about personal information disclosed to third parties for their own direct marketing purposes in the preceding calendar year. Requests may be submitted through the contact channel in §1.
 
@@ -206,7 +207,8 @@ Personal data is shared only with the processors and providers listed below, and
 - **Cloudflare** — the website and API are hosted and delivered via Cloudflare. Used today.
 - **GitHub** — sign-in may be completed through the GitHub OAuth identity provider; when you choose that option, identity data is processed by GitHub. Used today.
 - **Google** — sign-in may be completed through the Google OAuth identity provider; when you choose that option, identity data is processed by Google. Used today.
-- **Meta, Google, PostHog** — analytics data is processed by these providers when the corresponding analytics tools are activated with consent (§3). Not deployed today.
+- **PostHog** — analytics data is processed by PostHog when you give consent via the consent banner (§3). Used today.
+- **Meta, Google** — if the corresponding analytics tools are activated with consent, analytics data is processed by these providers (§3). Not deployed today.
 - **Stripe** — when paid plans become available, payment data is processed by Stripe for billing. Not deployed today.
 
 No other sharing of personal data occurs, except as required by law or with your consent.
@@ -224,7 +226,7 @@ Where personal data is transferred from the EU/EEA, the UK, or Switzerland, appr
 - **Data Privacy Framework (DPF):** transfers to processors that participate in the EU–US DPF, the UK Extension, or the Swiss–US DPF rely on those certifications.
 - **Standard Contractual Clauses (SCCs):** where a processor does not rely on the DPF, transfers are protected by SCCs adopted by the European Commission or equivalent safeguards.
 
-**PostHog EU residency (conditional).** PostHog is a data processor; EU residency (Frankfurt) used when configured. If PostHog's EU-resident cloud is configured for EU users, EU-origin analytics data is stored in Frankfurt; this sentence is re-verified when the PostHog configuration is resolved.
+**PostHog EU residency.** PostHog is a data processor; data is stored in the EU (Frankfurt). EU-origin analytics data captured with consent is stored in Frankfurt.
 
 ## 13. Sensitive data (outline ⑬)
 

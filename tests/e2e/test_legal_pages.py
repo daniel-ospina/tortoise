@@ -19,9 +19,10 @@ Covers plan checks #1-#10 (T7 of docs/plans/2026-08-08-657-legal-pages-plan.md):
   #9  mobile render @375px — no horizontal scroll + minimum content + headings
   #10 served-content assertions — revision history, consent-banner sentence,
       repo-state IFF local tree markers, per-tool conditional framing,
-      placeholder-leak regexes (broad + D4-shape), present-tense guard ==
-      pinned expected subset, full-document tag balance + section titles,
-      draft↔render fidelity, effective-date format once per legal page
+      consent.js banner presence, placeholder-leak regexes (broad + D4-shape),
+      present-tense guard == pinned expected subset, full-document tag balance
+      + section titles, draft↔render fidelity, effective-date format once per
+      legal page
 
 Harness contract (cycle-4 P1-1, pinned):
   - RUN_LEGAL_E2E=1 REQUIRED — the FIRST executable statement is a runtime
@@ -165,8 +166,10 @@ PINNED_CANONICAL = {
     "carve-outs": "statutory/gdpr liability, fraud, and willful misconduct are not capped by this limitation of liability section",
     "fees": "we may charge fees for the service based on a combination of subscription, usage-based (metered), and/or per-seat pricing, as defined by the pricing tiers published on the pricing page",
     "art27": "we are not currently established in the eu/eea. if we become subject to gdpr art. 27, we will designate and disclose an eu representative here.",
-    "consent-banner": "consent will be obtained via a banner when these tools are activated",
+    "consent-banner": "you can give or withdraw consent at any time via the consent banner",
     "repo-state": "no analytics tools are currently deployed",
+    "posthog-processor": "posthog is a data processor; data is stored in the eu (frankfurt)",
+    "meta-ga-conditional": "not deployed yet and may be activated with your consent; consent is managed via the consent banner",
     "purposes": "your email address and account information are used to deliver the service, respond to requests, and manage billing; usage data is used to improve the product",
     "art126": "we may request identity verification before acting on any request",
 }
@@ -332,16 +335,20 @@ def _draft_body_lines(draft_path: Path, anchor: str) -> list[str]:
 
 def _scan_instrumentation_markers() -> list[str]:
     """Scan the local website/ tree (excl. apps/) for analytics/consent
-    instrumentation markers. The privacy page's repo-state sentence must
-    match the ACTUAL local state (IFF by construction)."""
+    instrumentation markers — the shared consent.js module (#658) and any
+    page that loads it. The privacy page's repo-state sentence must match
+    the ACTUAL local state (IFF by construction)."""
     markers: list[str] = []
-    for f in sorted(WEBSITE_DIR.glob("*.html")):
+    files = sorted(WEBSITE_DIR.glob("*.html")) + sorted(WEBSITE_DIR.glob("*.js"))
+    for f in files:
         text = f.read_text(encoding="utf-8", errors="replace")
         if re.search(
             r"<script[^>]*src=[\"']https?://(js\.posthog\.com|connect\.facebook\.net|www\.googletagmanager\.com)",
             text, re.I,
         ):
             markers.append(f"{f.name}: analytics script tag")
+        if re.search(r"<script[^>]*src=[\"']/consent\.js", text, re.I):
+            markers.append(f"{f.name}: consent.js script tag")
         if re.search(r"posthog\.init\(|fbq\(|gtag\(", text, re.I):
             markers.append(f"{f.name}: analytics init call")
         if re.search(r"id=[\"']consent-banner|klaro|consent_manager|data-consent", text, re.I):
@@ -877,8 +884,10 @@ def test_privacy_consent_banner_sentence(page: Page) -> None:
 
 def test_privacy_repo_state_matches_local_tree(page: Page) -> None:
     """#10(c1): the repo-state sentence ('no analytics tools are currently
-    deployed') is present IFF the local website/ tree has no instrumentation
-    markers (BOTH-AND — no vacuous pass)."""
+    deployed') is present IFF the local website/ tree has NO instrumentation
+    markers (BOTH-AND — no vacuous pass). With markers present (consent.js +
+    PostHog loader live), /privacy must instead assert the deployed-processor
+    framing for PostHog and the conditional framing for Meta/GA."""
     markers = _scan_instrumentation_markers()
     _goto(page, BASE_URL + "/privacy")
     body = _body_text_clean(page)
@@ -886,6 +895,10 @@ def test_privacy_repo_state_matches_local_tree(page: Page) -> None:
     if markers:
         assert not repo_state_present, \
             "page claims no tools deployed but local tree has instrumentation markers"
+        assert PINNED_CANONICAL["posthog-processor"] in body, \
+            "instrumented tree but /privacy lacks PostHog deployed-processor framing"
+        assert PINNED_CANONICAL["meta-ga-conditional"] in body, \
+            "instrumented tree but /privacy lacks Meta/GA conditional framing"
     else:
         assert repo_state_present, \
             "local tree has no instrumentation but /privacy does not state deployment status"
@@ -905,6 +918,31 @@ def test_privacy_per_tool_conditional_framing(page: Page) -> None:
                 framed = True
                 break
         assert framed, f"tool {tool!r} has no conditional/consent-framed occurrence on /privacy"
+
+
+def test_consent_js_served_and_banner_present(page: Page) -> None:
+    """#10(h): the shared consent module serves 200 with the POSTHOG_KEY
+    fail-safe and the banner markup; every tortoise funnel page loads it
+    (defer); the company landing page (index.html) deliberately does NOT
+    (no analytics per design)."""
+    resp = page.request.get(BASE_URL + "/consent.js", timeout=15_000)
+    assert resp.status == 200, f"/consent.js status {resp.status}"
+    js = resp.text()
+    assert "POSTHOG_KEY" in js and "__POSTHOG_PROJECT_API_KEY__" in js, \
+        "consent.js missing the POSTHOG_KEY placeholder constant"
+    assert "tortoise_consent" in js, "consent.js missing the consent-state storage key"
+    assert '"consent-banner"' in js, "consent.js missing the banner markup"
+    assert "eu.i.posthog.com" in js and "-assets.i.posthog.com" in js, \
+        "consent.js missing the EU loader (eu-assets.i.posthog.com/static/array.js)"
+
+    for path in ("/product.html", "/signup", "/signin", "/welcome"):
+        raw = page.request.get(BASE_URL + path, timeout=15_000).text()
+        assert re.search(r'<script[^>]+src="/consent\.js"[^>]*>', raw, re.I), \
+            f"{path}: missing consent.js script tag"
+
+    raw_index = page.request.get(BASE_URL + "/index.html", timeout=15_000).text()
+    assert "consent.js" not in raw_index, \
+        "index.html must stay analytics-free (company landing — no instrumentation per design)"
 
 
 def test_no_template_placeholders(page: Page) -> None:
