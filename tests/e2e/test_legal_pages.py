@@ -921,15 +921,19 @@ def test_privacy_per_tool_conditional_framing(page: Page) -> None:
 
 
 def test_consent_js_served_and_banner_present(page: Page) -> None:
-    """#10(h): the shared consent module serves 200 with the POSTHOG_KEY
-    fail-safe and the banner markup; every tortoise funnel page loads it
+    """#10(h): the shared consent module serves 200 with the wired PostHog
+    project API key (project 548850, US Cloud) replacing the fail-safe
+    placeholder, plus the banner markup; every tortoise funnel page loads it
     (defer); the company landing page (index.html) deliberately does NOT
     (no analytics per design)."""
     resp = page.request.get(BASE_URL + "/consent.js", timeout=15_000)
     assert resp.status == 200, f"/consent.js status {resp.status}"
     js = resp.text()
-    assert "POSTHOG_KEY" in js and "__POSTHOG_PROJECT_API_KEY__" in js, \
-        "consent.js missing the POSTHOG_KEY placeholder constant"
+    assert "POSTHOG_KEY" in js, "consent.js missing the POSTHOG_KEY constant"
+    assert "__POSTHOG_PROJECT_API_KEY__" not in js, \
+        "consent.js still contains the fail-safe placeholder (must be replaced)"
+    assert "phc_zvBi25UoCxrq79qS7cudZhfAS3XQwEfrzEoZfR2EHkjS" in js, \
+        "consent.js missing the wired PostHog project API key"
     assert "tortoise_consent" in js, "consent.js missing the consent-state storage key"
     assert '"consent-banner"' in js, "consent.js missing the banner markup"
     assert "us.i.posthog.com" in js and "-assets.i.posthog.com" in js, \
