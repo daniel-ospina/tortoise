@@ -2862,10 +2862,12 @@ async def backups_status(request: Request):
     from tortoise.backup_sweep import read_ops_state
     from tortoise.backup_watcher import HEARTBEAT_KEY
 
+    config_error = None
     try:
         cfg = load_config()
-    except ConfigError:
+    except ConfigError as e:
         cfg = None
+        config_error = str(e)
     try:
         storage = _backup_storage()
     except RuntimeError as e:
@@ -2902,6 +2904,7 @@ async def backups_status(request: Request):
 
     return {
         "enabled": bool(cfg and cfg.enabled),
+        "config_error": config_error,
         "app_time": now.isoformat(),
         "per_team": watcher_status.get("per_team", {}),
         "no_teams": watcher_status.get("no_teams", False),
