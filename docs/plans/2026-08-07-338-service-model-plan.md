@@ -119,7 +119,7 @@ LICENSE = committed legal instrument (canonical BUSL-1.1 + parameters + AUG, mac
 | 4 | bridge.py ↔ mcp_client | State mutation | Out | Integration (E2E) | content_hash idempotency preserved; push result shape | daemon unavailable → skip status (existing pattern); duplicate push = no dup points |
 | 5 | `.mcp.json` ↔ daemon | Config | Out | E2E (manual dogfood) | `http://localhost:8000/mcp` reachable; no absolute paths | stale cwd entries; dev pointing at dead endpoint |
 | 6 | GHCR image build → run → health → connect | External infra | Out | E2E (CI smoke) | image boots embedded eval; `/health` 200 | embeddings cache missing (hosted fix #160-followup pattern); entrypoint exit 1 |
-| 7 | License surface (4 files) | Config | Guard | Config (script) | BUSL-1.1 + $5M AUG + Apache-2.0 in LICENSE/README/pyproject/index.md | tri-state regression (root cause: graph unsynced) |
+| 7 | License surface (4 files) | Config | Guard | Config (script) | BUSL-1.1 + $5M AUG + MPL-2.0 in LICENSE/README/pyproject/index.md | tri-state regression (root cause: graph unsynced) |
 
 ### Bug Pattern Flags
 - **Conditional guards** (auth_mode branches): boundary tests for all three modes; both sides of every branch (flag: tenant middleware leaking into static/none).
