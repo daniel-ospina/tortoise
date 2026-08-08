@@ -810,6 +810,18 @@ def test_crawl_external_links_resolve(page: Page) -> None:
     assert not failures, "broken external links:\n  " + "\n  ".join(failures)
 
 
+def test_docs_html_contact_is_mailto(page: Page) -> None:
+    """Scope P3-5 'docs.html contains no mailto' SUPERSEDED (owner decision
+    2026-08-08): the hello@premiselabs.co mailbox now exists — docs.html
+    contact is the mailto (the earlier mailto→GitHub-issues swap is
+    REVERSED). The served /docs.html MUST contain mailto:hello@premiselabs.co
+    in the raw document (docs.html is also in the crawl + mobile-render sets)."""
+    raw = page.request.get(BASE_URL + "/docs.html", timeout=15_000).text()
+    assert "mailto:hello@premiselabs.co" in raw, \
+        "/docs.html must carry the mailto:hello@premiselabs.co contact " \
+        "(mailbox live 2026-08-08 — P3-5 criterion superseded)"
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # #9 mobile render @375px — no horizontal scroll + minimum content + headings
 # ═══════════════════════════════════════════════════════════════════════════

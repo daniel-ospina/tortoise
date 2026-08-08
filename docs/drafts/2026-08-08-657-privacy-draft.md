@@ -91,7 +91,7 @@ Premise Labs is **not a registered legal entity**. The data controller is the na
 
 **Jurisdiction of residence:** [jurisdiction of residence to be confirmed by owner at G-gate]
 
-**Contact for privacy matters:** open an issue at <https://github.com/daniel-ospina/tortoise/issues>. This is the controller's designated contact channel for all privacy inquiries and requests. Please do not include sensitive personal data in a public issue — see §16 for guidance on how to make a request safely.
+**Contact for privacy matters:** email <hello@premiselabs.co>. This is the controller's designated contact channel for all privacy inquiries and requests.
 
 **EU/EEA representative (GDPR Art. 27):** "We are not currently established in the EU/EEA. If we become subject to GDPR Art. 27, we will designate and disclose an EU representative here."
 
@@ -204,7 +204,7 @@ Personal data is shared only with the processors and providers listed below, and
 
 - **Supabase** — authentication and account records are processed by Supabase (the processor that holds account personal data: email/login). Used today.
 - **Cloudflare** — the website and API are hosted and delivered via Cloudflare. Used today.
-- **GitHub** — sign-in may be completed through the GitHub OAuth identity provider; when you choose that option, identity data is processed by GitHub. Used today. GitHub also processes rights-request submissions (see §16).
+- **GitHub** — sign-in may be completed through the GitHub OAuth identity provider; when you choose that option, identity data is processed by GitHub. Used today.
 - **Google** — sign-in may be completed through the Google OAuth identity provider; when you choose that option, identity data is processed by Google. Used today.
 - **Meta, Google, PostHog** — analytics data is processed by these providers when the corresponding analytics tools are activated with consent (§3). Not deployed today.
 - **Stripe** — when paid plans become available, payment data is processed by Stripe for billing. Not deployed today.
@@ -245,15 +245,13 @@ This policy is versioned. When this policy changes, the version number and effec
 
 ## 16. Exercising your rights — deletion and other requests (outline ⑯)
 
-**Primary mechanism: request via GitHub issues.** To request deletion of your account and associated data, or to make any other privacy request (access, correction, export, restriction, objection), open an issue at <https://github.com/daniel-ospina/tortoise/issues>.
-
-**Please protect your privacy when filing:** the issue tracker is **public**. Do not include personal data in the issue body — redact or omit it — and consider filing from a GitHub account that is not connected to your identity. The submission itself (GitHub username, metadata, and issue content) is processed by GitHub as a data processor (see §10).
+**Primary mechanism: email.** To request deletion of your account and associated data, or to make any other privacy request (access, correction, export, restriction, objection), email your request to <hello@premiselabs.co>.
 
 **Response commitment.** Requests are answered within **one month** of receipt, as required by GDPR Art. 12(3). If a request is complex or numerous, the response period may be extended by up to two additional months; you will be informed of any extension within one month of receipt, together with the reasons for the delay.
 
 **Identity verification.** we may request identity verification before acting on any request (GDPR Art. 12(6)). Where a request cannot be verified or is manifestly unfounded or excessive, the request may be refused or a reasonable fee may be charged, as permitted by law.
 
-**What this channel covers.** The GitHub-issues channel covers: (a) account data, (b) non-account data, (c) users who cannot log in to their account, and (d) access, export, and objection requests. It is the general-purpose rights channel for this release.
+**What this channel covers.** The email channel covers: (a) account data, (b) non-account data, (c) users who cannot log in to their account, and (d) access, export, and objection requests. It is the general-purpose rights channel for this release.
 
 **Deletion scope.** When a deletion request is fulfilled, account and associated data is deleted or de-identified, subject to the retention carve-outs in §6 (billing/transactional records retained as required by law; analytics data handled per the analytics section). Deletion does not extend to content you have already shared publicly or to data that others have lawfully obtained.
 
