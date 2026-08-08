@@ -39,7 +39,7 @@
 2. Four-file license tri-state: README=BSL 1.1, LICENSE=AGPL-3.0, pyproject=MIT, index.md=AGPLv3+CLA — blocks MIT products (David Waring).
 3. Nothing is installable as a service (no GHCR, no adopter-facing self-host guide; only the hosted-operator runbook).
 4. Integrations embed engine access: `integrations/crm/twenty/bridge.py` does `from tortoise.sdk import TortoiseSDK` (2 call sites, lines 221, 233).
-5. Owner decision (fixed): MongoDB-style service model — daemon + connect-via-MCP/REST; dual offering self-host (BSL + $5M AUG, Apache-2.0 after 4 years) + hosted (commercial, outside grant).
+5. Owner decision (fixed): MongoDB-style service model — daemon + connect-via-MCP/REST; dual offering self-host (BSL + $5M AUG, MPL-2.0 after 4 years) + hosted (commercial, outside grant).
 
 ---
 
@@ -54,7 +54,7 @@ LICENSE = committed legal instrument (canonical BUSL-1.1 + parameters + AUG, mac
 | Quantitative threshold — "$5M USD trailing 12-month revenue" | MariaDB MaxScale BSL 1.1 AUG (threshold phrasing) |
 | Grant exclusions — hosted-as-a-service excluded, anti-resale | Sentry FSL $5M grant language (licensee revenue cap + service exclusion); CockroachDB BSL (exclusion mechanics) |
 | Parameter block (Licensor / Licensed Work / Additional Use Grant / Change Date) | HashiCorp BSL 1.1 parameter-block formatting |
-| Change Date = 4 years → Apache-2.0 conversion | Redis BSL→Apache 2.0 conversion; Elasticsearch conversion mechanism |
+| Change Date = 4 years → Mozilla Public License 2.0 (MPL-2.0) conversion | Redis BSL→Apache-2.0 conversion (precedent); Elasticsearch conversion mechanism |
 
 **Mechanics:** `LICENSE` (canonical text + filled parameters + AUG, nothing else) + `docs/license-notes.md` (provenance: each clause → precedent URL, parameter rationale, CLA-audit findings, FAQ drafting notes). **Precondition:** CLA/copyright audit (Phase 0) — git history shows a single human author, but exact counts must be reconciled in P0.1: main has ~508 commits = 505 `daniel-ospina` + 1 `Daniel Ospina` (case-variant author string, same human — must be reconciled) + 2 Fly bot commits. Low risk, must be documented.
 
@@ -88,7 +88,7 @@ LICENSE = committed legal instrument (canonical BUSL-1.1 + parameters + AUG, mac
 
 - **T3.1 `LICENSE`** — canonical BUSL-1.1 text + filled parameter block + AUG per §3 mapping. **`docs/license-notes.md`** — provenance split (clause→precedent URLs, rationale, audit findings).
 - **T3.2 `pyproject.toml`** — `license = "BUSL-1.1"`; classifiers: replace MIT classifier with `License :: OSI Approved :: Business Source License 1.1` (fallback `License :: Other/Proprietary License` if classifier absent from PyPI enum — check at implementation time).
-- **T3.3 `validation/check-license-surface.py`** (new; repo-local — `scripts/` is an agent-infra symlink) — asserts all four surfaces (LICENSE/README/pyproject/index.md) declare BSL 1.1 + $5M AUG + Apache-2.0 conversion. **Placement:** repo-local `.ci-checks/check-license-surface.sh` (precedent: `.ci-checks/check-test-isolation.sh`) — do NOT wire into `python-ci.yml`, which is a symlink to agent-infra templates (cross-repo blast radius + agent-infra version-sync pre-commit). **CI activation deferred to T5.3** (README/index not yet converged until Phase 5 — wiring at T3.3 leaves CI red through Phase 3–4). Prevents the tri-state from re-occurring (root cause: graph decision never synced to files).
+- **T3.3 `validation/check-license-surface.py`** (new; repo-local — `scripts/` is an agent-infra symlink) — asserts all four surfaces (LICENSE/README/pyproject/index.md) declare BSL 1.1 + $5M AUG + Mozilla Public License 2.0 (MPL-2.0) conversion. **Placement:** repo-local `.ci-checks/check-license-surface.sh` (precedent: `.ci-checks/check-test-isolation.sh`) — do NOT wire into `python-ci.yml`, which is a symlink to agent-infra templates (cross-repo blast radius + agent-infra version-sync pre-commit). **CI activation deferred to T5.3** (README/index not yet converged until Phase 5 — wiring at T3.3 leaves CI red through Phase 3–4). Prevents the tri-state from re-occurring (root cause: graph decision never synced to files).
 
 ### Phase 4 — Image + compose (D2, the #1 Indicator) — depends on Phase 1; overlaps Phase 2
 **GATE G4:** `docker run` → `/health` 200 → MCP `initialize` handshake in CI; compose variant boots.
@@ -100,7 +100,7 @@ LICENSE = committed legal instrument (canonical BUSL-1.1 + parameters + AUG, mac
 ### Phase 5 — Docs convergence (D4) + graph (D7) — depends on G3 + G4
 **GATE G5:** all acceptance criteria green; code-review gate (commit-workflow) passes.
 
-- **T5.1 `README.md` service-first rewrite** — Install → Connect → Query (MongoDB Atlas pattern); **hosted AND self-host are BOTH first-class quickstart paths — no "coming soon" debt, no pre-launch coordination check. Owner direction (2026-08-07): hosted is being built now (epic #235 + #518/#519/#292) and Tortoise has ZERO external users pre-launch — there is no one to hit a dead end, so both paths ship fully and launch together.** Include an env-var table (`TORTOISE_DB_URI`/`TORTOISE_DB_PATH`, `TORTOISE_API_KEY` footgun, `TORTOISE_HOST/PORT/RATE_LIMIT` = 100 req/min per IP) + operator-tools note (HTTP-hidden, stdio-only) as the daemon's doc home: hosted signup (free tier) OR `docker run`/`docker compose`; `claude mcp add tortoise http://localhost:8000/mcp` / `codex mcp add` / `.mcp.json` snippet; query = MCP tools + REST (#525); `pip install` demoted to "SDK for local dev/scripting"; **License/FAQ block** (D3 content: BSL + $5M AUG self-host; hosted = commercial outside grant; MIT products connect via MCP/REST and never inherit terms; Apache-2.0 conversion in 4 years; BSL-threshold + enterprise-blocklist framing per carried-forward risks).
+- **T5.1 `README.md` service-first rewrite** — Install → Connect → Query (MongoDB Atlas pattern); **hosted AND self-host are BOTH first-class quickstart paths — no "coming soon" debt, no pre-launch coordination check. Owner direction (2026-08-07): hosted is being built now (epic #235 + #518/#519/#292) and Tortoise has ZERO external users pre-launch — there is no one to hit a dead end, so both paths ship fully and launch together.** Include an env-var table (`TORTOISE_DB_URI`/`TORTOISE_DB_PATH`, `TORTOISE_API_KEY` footgun, `TORTOISE_HOST/PORT/RATE_LIMIT` = 100 req/min per IP) + operator-tools note (HTTP-hidden, stdio-only) as the daemon's doc home: hosted signup (free tier) OR `docker run`/`docker compose`; `claude mcp add tortoise http://localhost:8000/mcp` / `codex mcp add` / `.mcp.json` snippet; query = MCP tools + REST (#525); `pip install` demoted to "SDK for local dev/scripting"; **License/FAQ block** (D3 content: BSL + $5M AUG self-host; hosted = commercial outside grant; MIT products connect via MCP/REST and never inherit terms; Mozilla Public License 2.0 (MPL-2.0) conversion in 4 years; BSL-threshold + enterprise-blocklist framing per carried-forward risks).
 - **T5.2 `index.md`** — service-first ordering (MCP server → connectors → SDK) + license statement; `docs/00_index.md` routing updated if present.
 - **T5.3 License-surface CI wiring (moved from T3.3):** enable `check-license-surface` in CI here — only after T5.1/T5.2 converge all four files (README License/FAQ + index.md license line land in Phase 5). Wiring it at T3.3 would leave CI red from Phase 3 to 5 (README/index still BSL-only/AGPL until T5.2), contradicting the parallel-track design.
 - **T5.3b Docs behavioral grep** — no README/docs path instructs importing tortoise into a consumer distribution.
@@ -150,7 +150,7 @@ LICENSE = committed legal instrument (canonical BUSL-1.1 + parameters + AUG, mac
 
 1. **AC1** `docker run`/`docker compose` quickstart yields a working MCP endpoint: `/health` 200 + MCP `initialize` handshake + `tools/list`.
 2. **AC2** No README/docs path instructs a consumer to import tortoise into their distribution (grep gate).
-3. **AC3** LICENSE/README/pyproject/index.md all declare BSL 1.1 + $5M AUG + Apache-2.0 conversion (four-file consistency, CI-enforced).
+3. **AC3** LICENSE/README/pyproject/index.md all declare BSL 1.1 + $5M AUG + Mozilla Public License 2.0 (MPL-2.0) conversion (four-file consistency, CI-enforced).
 4. **AC4** `bridge.py` connects via MCP — zero `from tortoise.sdk import` in `integrations/`.
 5. **AC5** `.mcp.json` points at the self-host daemon (dev) or hosted; no hardcoded absolute paths.
 6. **AC6** Hosted platform unchanged: existing suite green; `auth_mode` default = tenant.
