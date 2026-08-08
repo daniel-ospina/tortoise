@@ -1731,3 +1731,148 @@ def test_list_backups_sorted_newest_first():
     listed = list_backups(store, team_id)
     assert len(listed) == 2
     assert listed[0]["created_at"] > listed[1]["created_at"]
+
+
+def test_prune_keep_hourly_bounded_semantics(monkeypatch):
+    """keep_hourly>0 REPLACES the daily keep-all rule with a bounded retention:
+
+    keep ALL backups younger than keep_hourly hours; one anchor per UTC
+    hour-bucket for ages within the daily horizon; then weekly anchors.
+
+    This is the discriminating test: the stacked keep-all variant (retains
+    every backup < keep_daily days) and the unbounded-anchor variant (one
+    anchor per hour-bucket forever) must BOTH fail it.
+    """
+    _freeze_clock(monkeypatch)
+    from datetime import timedelta as _td
+
+    store = MemoryStorage()
+    team_id = "team_hourly"
+    fixed = datetime(2026, 8, 7, 12, 0, 0, tzinfo=timezone.utc)
+
+    # (hours_ago, minutes_ago). NEGATIVE minutes = created AFTER the hour mark,
+    # keeping both backups inside the SAME (day, hour) bucket — that is what
+    # makes the anchor dedup bite (hour anchors keep one per bucket).
+    seeds = [
+        (1, 0), (23, 0),       # hourly window (< 24h) → kept
+        (25, 0), (25, -5),     # same bucket (Aug 6, 11h) → newest kept, dup deleted
+        (49, 0), (49, -10), (49, -20),  # same bucket (Aug 5, 11h) → newest kept, dups deleted
+        (100, 0),              # hour anchor (< 7d) → kept
+        (200, 0),              # weekly zone (8.3d) → weekly anchor kept
+        (500, 0), (501, 0),    # weekly zone, same ISO week → newest kept
+    ]
+    ids: dict[str, str] = {}
+    for h, m in seeds:
+        created = fixed - _td(hours=h, minutes=m)
+        backup_id = f"{team_id}/{created.strftime('%Y%m%dT%H%M%SZ')}"
+        ids[f"{h}:{m}"] = backup_id
+        manifest = {
+            "backup_id": backup_id,
+            "team_id": team_id,
+            "graph_name": "tortoise",
+            "created_at": created.isoformat(),
+            "node_count": 10,
+            "edge_count": 3,
+            "sha256": "0" * 64,
+        }
+        store.upload(f"backups/{backup_id}/manifest.json", json.dumps(manifest).encode())
+        store.upload(f"backups/{backup_id}/dump.enc", b"x")
+
+    deleted = prune_backups(store, team_id, keep_daily=7, keep_weekly=4, keep_hourly=24)
+
+    assert sorted(deleted) == sorted(
+        [ids["25:0"], ids["49:0"], ids["49:-10"], ids["501:0"]]
+    ), f"deleted={deleted}"
+    remaining = [k for k in store.list(f"backups/{team_id}/") if k.endswith("manifest.json")]
+    assert len(remaining) == 7
+    for h, m in [(1, 0), (23, 0), (25, -5), (49, -20), (100, 0), (200, 0), (500, 0)]:
+        assert any(ids[f"{h}:{m}"] in k for k in remaining), f"{h}:{m} should be kept"
+
+
+def test_prune_keep_hourly_zero_preserves_legacy():
+    """keep_hourly=0 (default) is byte-for-byte the legacy keep-all behavior."""
+    store = MemoryStorage()
+    team_id = "team_legacy"
+    days_ago = [0, 1, 2, 3, 4, 5, 6, 7, 14, 21, 28, 35, 42, 49, 56]
+    ids = _seed_old_backups(store, team_id, days_ago)
+
+    deleted = prune_backups(store, team_id, keep_daily=7, keep_weekly=4, keep_hourly=0)
+    assert sorted(deleted) == sorted([ids[d] for d in (35, 42, 49, 56)])
+    remaining = [k for k in store.list(f"backups/{team_id}/") if k.endswith("manifest.json")]
+    assert len(remaining) == 11
+
+
+def test_memory_create_if_not_exists_once():
+    """Create-once semantics: True on create, False on collision, content kept."""
+    store = MemoryStorage()
+    assert store.create_if_not_exists("ops/alerts/STALE-1.json", b"a") is True
+    assert store.create_if_not_exists("ops/alerts/STALE-1.json", b"b") is False
+    assert store.download("ops/alerts/STALE-1.json") == b"a"  # winner's content wins
+
+
+def test_r2_create_if_not_exists_412_race(monkeypatch):
+    """The 412 race: second creator sees PreconditionFailed → False (adopt)."""
+
+    class _ConditionalS3:
+        def __init__(self):
+            self.objects: dict[str, bytes] = {}
+
+        def put_object(self, Bucket, Key, Body, **kw):
+            if "IfNoneMatch" in kw and Key in self.objects:
+                from botocore.exceptions import ClientError
+
+                raise ClientError(
+                    {"Error": {"Code": "PreconditionFailed", "Message": "exists"}},
+                    "PutObject",
+                )
+            self.objects[Key] = Body
+
+        def head_object(self, Bucket, Key):
+            if Key not in self.objects:
+                raise KeyError(Key)
+            return {}
+
+    fake = _ConditionalS3()
+    monkeypatch.setitem(sys.modules, "boto3", _FakeBoto3(fake))
+    store = R2Storage(
+        endpoint_url="https://acct.r2.cloudflarestorage.com",
+        access_key_id="ak", secret_access_key="sk", bucket="tortoise-backups",
+    )
+    assert store.create_if_not_exists("ops/alerts/X.json", b"1") is True
+    assert store.create_if_not_exists("ops/alerts/X.json", b"2") is False
+    assert fake.objects["ops/alerts/X.json"] == b"1"
+
+
+def test_r2_create_if_not_exists_fallback_head(monkeypatch):
+    """Conditional writes unsupported → HEAD-check fallback (never blind-put)."""
+
+    class _NoConditionalS3:
+        def __init__(self):
+            self.objects: dict[str, bytes] = {}
+            self.put_calls = []
+
+        def put_object(self, Bucket, Key, Body, **kw):
+            if "IfNoneMatch" in kw:
+                raise RuntimeError("IfNoneMatch not supported by this client")
+            self.objects[Key] = Body
+            self.put_calls.append(Key)
+
+        def head_object(self, Bucket, Key):
+            if Key not in self.objects:
+                raise KeyError(Key)
+            return {}
+
+    fake = _NoConditionalS3()
+    monkeypatch.setitem(sys.modules, "boto3", _FakeBoto3(fake))
+    store = R2Storage(
+        endpoint_url="https://acct.r2.cloudflarestorage.com",
+        access_key_id="ak", secret_access_key="sk", bucket="tortoise-backups",
+    )
+    # Existing object via fallback → False, and never overwritten.
+    fake.objects["ops/alerts/Y.json"] = b"original"
+    assert store.create_if_not_exists("ops/alerts/Y.json", b"new") is False
+    assert fake.objects["ops/alerts/Y.json"] == b"original"
+    # Ambiguous HEAD (missing object, client without conditionals) → RAISES:
+    # a blind-put would weaken the dedup linearization point (review P3).
+    with pytest.raises(RuntimeError, match="could not confirm absence"):
+        store.create_if_not_exists("ops/alerts/Z.json", b"new")
