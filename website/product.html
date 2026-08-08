@@ -66,7 +66,7 @@
     /* Pricing section (El Dato component shape, Tortoise colors) */
     #pricing-section { text-align: center; }
     #pricing-section h2 { font-family: var(--serif); font-size: clamp(1.6rem, 3.5vw, 2.6rem); font-weight: 400; color: var(--text); text-align: center; margin-bottom: 0.4rem; }
-    #pricing-section .pricing-sub { color: var(--text-dim); text-align: center; max-width: 640px; margin: 0 auto 2rem; font-size: 14px; }
+    #pricing-section .pricing-sub { color: var(--text); text-align: center; max-width: 640px; margin: 0 auto 2rem; font-size: 14px; }
     .pricing-toggle { display: flex; align-items: center; gap: 0.25rem; background: #0d1a2d; border: 1px solid var(--border, #1e293b); border-radius: 9999px; padding: 0.25rem; margin: 0 auto 2.5rem; width: fit-content; }
     .pricing-toggle button { padding: 0.375rem 1.25rem; border-radius: 9999px; border: 1px solid #d1d5db; font-size: 0.875rem; font-weight: 500; cursor: pointer; background: transparent; color: var(--text-dim); transition: all 0.15s; font-family: var(--mono); }
     .pricing-toggle button.active { background: var(--accent); color: #04121a; border-color: var(--accent); }
@@ -87,7 +87,7 @@
     .pricing-card .btn { display: block; text-align: center; background: var(--accent); color: #04121a; padding: 0.6rem 1rem; border-radius: 0.5rem; text-decoration: none; font-weight: 600; font-size: 0.85rem; transition: background 0.2s; }
     .pricing-card .btn:hover { background: var(--accent-hover, #0891b2); }
     .pricing-card .btn.secondary { background: #1e293b; color: var(--text); }
-    .pricing-usage { text-align: center; color: var(--text-dim); font-size: 0.85rem; margin: 1.75rem auto 0; }
+    .pricing-usage { text-align: center; color: var(--text); font-size: 0.85rem; margin: 1.75rem auto 0; }
     .segmented { display: flex; flex-wrap: wrap; gap: 1rem; justify-content: center; max-width: 900px; margin: 2.5rem auto 0; }
     .segment { flex: 1; min-width: 300px; background: #0d1a2d; border: 1px solid #1e293b; border-radius: 1rem; padding: 1.25rem; }
     .segment h4 { color: var(--accent); font-size: 0.95rem; margin-bottom: 0.4rem; }
@@ -129,6 +129,7 @@
       color: var(--text);
       text-align: center;
     }
+    .beat h2 span { color: var(--accent); }
     .beat h2 + p { margin-top: 1.25rem; }
     #beat-hero h1 {
       font-family: var(--serif);
@@ -161,7 +162,7 @@
     .beat p {
       font-family: var(--mono);
       font-size: clamp(0.85rem, 1.5vw, 1.05rem);
-      color: var(--text-dim);
+      color: var(--text);
       text-align: center;
       max-width: 560px;
       line-height: 1.7;
@@ -188,11 +189,7 @@
       background: #0891b2;
       transform: scale(1.02);
     }
-    #beat-hero .cta-subtle {
-      margin-top: 0.9rem;
-      color: var(--text-dim);
-      font-size: 0.8rem;
-    }
+
     #cta-section { text-align: center; }
     #cta-section .cta-start {
       display: inline-block;
@@ -213,7 +210,7 @@
     }
     #cta-section .cta-subtle {
       margin: 0 0 1rem;
-      color: var(--text-dim);
+      color: var(--text);
       font-size: 0.8rem;
     }
     #cta-section .cta-step {
@@ -226,7 +223,7 @@
     }
     #cta-section .twitter-link {
       margin-top: 1.5rem;
-      color: var(--text-dim);
+      color: var(--text);
       text-decoration: none;
       font-size: 0.8rem;
       transition: color 0.2s;
@@ -244,7 +241,7 @@
     /* Self-hosting link */
     #cta-section .selfhost-link {
       margin-top: 1.25rem;
-      color: var(--text-dim);
+      color: var(--text);
       text-decoration: none;
       font-size: 0.78rem;
       transition: color 0.2s;
@@ -266,14 +263,13 @@
 
   <div id="scroll-wrapper">
     <section id="beat-hero" class="beat">
-      <h1>Memory that makes your agents smarter</h1>
+      <h1>Memory that makes your agents <span>smarter</span></h1>
       <p class="hero-sub">Tortoise is the memory and reasoning system that enables your agents to make complex decisions without losing track of the variables or being swayed by the last message. They don&rsquo;t just recall facts. They understand why decisions were made and reason with auditable world models.</p>
       <a href="/signup" class="cta-start hero-cta">Connect your agent →</a>
-      <p class="cta-subtle hero-cta-subtle">5,000 Points free. No credit card. Start building in minutes.</p>
     </section>
     <section id="beat-how" class="beat">
-      <h2>A computational memory graph</h2>
-      <p>Every relationship expresses how one belief affects another. When new evidence arrives, confidence propagates through the graph and your agent&rsquo;s world model evolves. Every decision becomes auditable and programmable. Your agents build on each other&rsquo;s work instead of wasting tokens reconstructing context.</p>
+      <h2>A <span>computational</span> memory graph</h2>
+      <p>Every relationship expresses how one belief affects another. When new evidence arrives, confidence propagates through the graph and your agent&rsquo;s world model evolves.<br><br>Every decision becomes auditable and programmable. Your agents build on each other&rsquo;s work instead of wasting tokens reconstructing context.</p>
     </section>
     <section id="beat-ingest" class="beat">
       <h2><span class="beat-num">01</span> · Ingest</h2>
@@ -318,7 +314,7 @@
   <!-- CTA — normal document-flow section -->
   <section id="cta-section" class="content-section">
       <a href="/signup" class="cta-start">Connect your agent →</a>
-      <p class="cta-subtle">5,000 Points free. No credit card. Start building in minutes.</p>
+      <p class="cta-subtle">10,000 write ops free. No credit card. Start building in minutes.</p>
       <p class="cta-step">Setup is in the docs — the welcome page walks you through MCP and CLI
       after signup.</p>
       <div class="cta-links">
