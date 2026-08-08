@@ -33,7 +33,7 @@ falkordb-cli -h "$FALKORDB_HOST" -p "$FALKORDB_PORT" --tls \
 
 ## 3. Backfill existing Points (one-time)
 
-Requires the embedding model locally (`pip install 'tortoise[embeddings]'`):
+Requires the embedding model locally (`pip install 'tortoise-graph[embeddings]'`):
 
 ```bash
 TORTOISE_DB_URI="$FALKORDB_CLOUD_URI" \

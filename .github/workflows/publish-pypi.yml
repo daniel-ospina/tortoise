@@ -36,8 +36,9 @@ jobs:
         run: |
           python -m venv /tmp/wheelcheck
           /tmp/wheelcheck/bin/pip install dist/*.whl --quiet
-          /tmp/wheelcheck/bin/python -c \
-            "import tortoise; print('import OK:', tortoise.__file__)"
+          cd /tmp && /tmp/wheelcheck/bin/python -c \
+            "import tortoise; print('import OK:', tortoise.__file__)" && \
+            test -f "/tmp/wheelcheck/lib/python3.12/site-packages/tortoise/__init__.py"
           /tmp/wheelcheck/bin/tortoise --help >/dev/null 2>&1 \
             && echo "CLI entrypoint OK"
       - uses: actions/upload-artifact@v4
