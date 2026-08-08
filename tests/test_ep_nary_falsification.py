@@ -238,6 +238,8 @@ class _RecordingEP(TortoiseEP):
         super().__init__(*args, **kwargs)
         self._node_cache = {}
         self._msg_cache = {}
+        self._final_node_cache: dict = {}
+        self._final_msg_cache: dict = {}
         self.flushed = 0
         self._affected = set()
         self._factors = []
@@ -258,6 +260,12 @@ class _RecordingEP(TortoiseEP):
 
     def _flush_cache(self):
         self.flushed += 1
+
+    def _clear_caches(self) -> None:
+        """Snapshot final posterior state before run() clears caches (#330)."""
+        self._final_node_cache = dict(getattr(self, "_node_cache", {}))
+        self._final_msg_cache = dict(getattr(self, "_msg_cache", {}))
+        super()._clear_caches()
 
 
 def test_run_empty_affected_claims_early_returns():
@@ -304,7 +312,6 @@ def test_run_reports_non_convergence_honestly():
         ("op1", "IMPL", ["a", "b"], 5.0, None, "bidirectional"),
         ("op2", "NAND", ["a", "b"], 5.0, None, "bidirectional"),
     ]
-    ep._node_cache = {"a": (1.0, 1.0), "b": (1.0, 1.0)}
 
     iters, converged = ep.run(["op1", "op2"], max_hops=0)
     assert iters == 10, f"expected max_iter=10 exhausted, got {iters}"
@@ -322,13 +329,13 @@ def test_run_converges_with_gentle_factor():
     ep = _RecordingEP(_stub_proj(), damping=0.5, max_iter=50, tol=1e-3)
     ep._affected = {"a", "b"}
     ep._factors = [("op", "NAND", ["a", "b"], 1.0, None, "bidirectional")]
-    ep._node_cache = {"a": (1.0, 1.0), "b": (1.0, 1.0)}
 
     iters, converged = ep.run(["op"], max_hops=0)
     assert converged is True, f"gentle NAND should converge, got ({iters}, {converged})"
     assert 0 < iters < 50
     assert ep.flushed == 1
     # Posterior moved: message arrived and shifted the Beta posterior away
-    # from the neutral (1,1) prior.
-    a, b = ep._node_cache["a"]
+    # from the neutral (1,1) prior. Read the snapshot taken before run()'s
+    # _clear_caches (#330) — _node_cache is deleted post-run.
+    a, b = ep._final_node_cache["a"]
     assert a != 1.0 or b != 1.0, "posterior should be updated after convergence"
