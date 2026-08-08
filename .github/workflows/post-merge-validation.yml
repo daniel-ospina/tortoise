@@ -41,7 +41,9 @@ jobs:
       - name: Run tests (embedded suite, per-test timeout)
         id: tests
         run: |
-          python -m pytest tests/ -q --timeout=45 2>&1 | tail -25
+          # 90s per-test: embedded redislite EP tests take ~25-40s locally and
+          # slower on CI runners. Still a hang detector — just not a speed gate.
+          python -m pytest tests/ -q --timeout=90 2>&1 | tail -25
           # pytest exits nonzero on failure — capture for the comment step
           exit $?
       - name: Comment result on PR

@@ -12,7 +12,7 @@ doc_status: live
 aboutSubjects: epistemic-team
 aboutObjects: Point, Operator, Mitigation, Source
 ---
-# Implementation Plan: Issue #341 — Mathematical EP validation (source priors monotonic + directionally correct)
+# Scoping Plan: Issue #341 — Mathematical EP validation (source priors monotonic + directionally correct)
 
 **Date:** 2026-08-08 | **Tier:** complex | **Level:** project
 **Scoping:** double diamond + problem-verify (2 cycles, clean) + solution-verify (2 verifiers)

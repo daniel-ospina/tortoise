@@ -312,7 +312,6 @@ def test_run_reports_non_convergence_honestly():
         ("op1", "IMPL", ["a", "b"], 5.0, None, "bidirectional"),
         ("op2", "NAND", ["a", "b"], 5.0, None, "bidirectional"),
     ]
-    ep._node_cache = {"a": (1.0, 1.0), "b": (1.0, 1.0)}
 
     iters, converged = ep.run(["op1", "op2"], max_hops=0)
     assert iters == 10, f"expected max_iter=10 exhausted, got {iters}"
@@ -330,7 +329,6 @@ def test_run_converges_with_gentle_factor():
     ep = _RecordingEP(_stub_proj(), damping=0.5, max_iter=50, tol=1e-3)
     ep._affected = {"a", "b"}
     ep._factors = [("op", "NAND", ["a", "b"], 1.0, None, "bidirectional")]
-    ep._node_cache = {"a": (1.0, 1.0), "b": (1.0, 1.0)}
 
     iters, converged = ep.run(["op"], max_hops=0)
     assert converged is True, f"gentle NAND should converge, got ({iters}, {converged})"
