@@ -52,19 +52,19 @@ The controller is a natural person whose residence jurisdiction is unconfirmed. 
 5. eligibility — "you must be at least 18 years old" (§2)
 6. Art. 27 — "We are not currently established in the EU/EEA. If we become subject to GDPR Art. 27, we will designate and disclose an EU representative here." (§1)
 7. consent banner — "you can give or withdraw consent at any time via the consent banner" (§3, §4)
-8. deployed PostHog — "PostHog is a data processor; data is stored in the EU (Frankfurt)" (§3, §12) — the former repo-state sentence ("no analytics tools are currently deployed") is REMOVED: the tree now ships consent.js + the PostHog loader (#658)
+8. deployed PostHog — "PostHog is a data processor; data is stored in the United States" (§3, §12) — the former repo-state sentence ("no analytics tools are currently deployed") is REMOVED: the tree now ships consent.js + the PostHog loader (#658)
 9. purposes (passive) — "your email address and account information are used to deliver the service, respond to requests, and manage billing; usage data is used to improve the product" (§4)
 10. expectation — "we expect users not to place sensitive data in the service" (§2)
 11. Art. 12(6) — "we may request identity verification before acting on any request" (§16)
-12. PostHog residency — "PostHog is a data processor; data is stored in the EU (Frankfurt)" (§12) — config resolved at #528 (Cloud EU, Frankfurt)
+12. PostHog residency — "PostHog is a data processor; data is stored in the United States" (§12) — config resolved at the #658 region fix (US Cloud, default — owner decision 2026-08-08)
 
 ### Drafting-rule compliance (classification rule, pinned)
 
 - Processors, data categories, retention, and transfer statements use **passive/impersonal** phrasing ("data is processed by Supabase for authentication", "account data includes your email address", "data is retained only for as long as needed") — they never match the guard regex `we (use|collect|share|sell|process|retain|store|transfer)\b`.
 - The **only** present-tense guard match in this document is the pinned canonical pair sentence (inventory #3). All other present-tense claims are from the approved pinned set.
-- Analytics disclosures are **per-tool**: PostHog is deployed (processor, EU Frankfurt) and captures data only with consent via the banner; Meta Pixel and Google Analytics are conditional/future ("not deployed yet and may be activated with your consent; consent is managed via the consent banner"). No present-tense claims for the undeployed tools.
+- Analytics disclosures are **per-tool**: PostHog is deployed (processor, US Cloud) and captures data only with consent via the banner; Meta Pixel and Google Analytics are conditional/future ("not deployed yet and may be activated with your consent; consent is managed via the consent banner"). No present-tense claims for the undeployed tools.
 - The policy body never uses the combined "no sale or sharing" negative-phrase construction; the canonical co-occurrence pair (inventory #2 + #3) is used instead.
-- **Re-check steps (process, not body text):** when the Meta Pixel activates, re-verify the §5 sharing disclosure + joint-controller wording still match reality; re-verify the §3/§12 PostHog sentences if the EU Cloud residency ever changes. No dedicated "Do Not Sell or Share My Personal Information" link ships this release (deferred to #658 tooling — no dead link ships).
+- **Re-check steps (process, not body text):** when the Meta Pixel activates, re-verify the §5 sharing disclosure + joint-controller wording still match reality; re-verify the §3/§12 PostHog sentences if the US Cloud residency ever changes. No dedicated "Do Not Sell or Share My Personal Information" link ships this release (deferred to #658 tooling — no dead link ships).
 
 ---
 
@@ -113,7 +113,7 @@ The service processes the following categories of personal data:
 
 **Deployed analytics tool.** The following analytics tool is deployed on the tortoise funnel pages (product, signup, sign-in, and welcome pages), and it captures data only after you give consent via the consent banner:
 
-- **PostHog** — product analytics (PostHog Inc.). PostHog is a data processor; data is stored in the EU (Frankfurt).
+- **PostHog** — product analytics (PostHog Inc.). PostHog is a data processor; data is stored in the United States.
 
 **Planned tools, disclosed now.** The following analytics tools are not deployed yet and may be activated with your consent; consent is managed via the consent banner:
 
@@ -226,7 +226,7 @@ Where personal data is transferred from the EU/EEA, the UK, or Switzerland, appr
 - **Data Privacy Framework (DPF):** transfers to processors that participate in the EU–US DPF, the UK Extension, or the Swiss–US DPF rely on those certifications.
 - **Standard Contractual Clauses (SCCs):** where a processor does not rely on the DPF, transfers are protected by SCCs adopted by the European Commission or equivalent safeguards.
 
-**PostHog EU residency.** PostHog is a data processor; data is stored in the EU (Frankfurt). EU-origin analytics data captured with consent is stored in Frankfurt.
+**PostHog US residency.** PostHog is a data processor; data is stored in the United States. EU-origin analytics data captured with consent is stored in the United States.
 
 ## 13. Sensitive data (outline ⑬)
 
