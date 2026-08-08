@@ -24,11 +24,20 @@ from contextlib import asynccontextmanager
 
 from tortoise.audit_events import AuditLogger
 from tortoise.auth import hash_api_key
-from tortoise.session_auth import get_current_user  # E1–E8 session endpoints (D1)
+from tortoise.session_auth import get_current_user
+from tortoise.analytics import first_api_call, tenant_provisioned  # D10 funnel hooks  # E1–E8 session endpoints (D1)
 import hmac
 
 from tortoise.sdk import TortoiseSDK, _content_hash
 from tortoise.mcp_server import create_http_app
+from tortoise.hosted_backup import (
+    RestoreVerificationError,
+    R2Storage,
+    create_backup,
+    list_backups,
+    prune_backups,
+    restore_backup,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -190,6 +199,23 @@ async def _dream_worker(team_id: str) -> None:
 
 # ── Rate Limiter ──────────────────────────────────────────────────
 
+# ── Analytics middleware (D10 #577) — fire-and-forget first_api_call ──
+# Fires the activation event on data-plane writes (points/sessions/keys) using
+# the request-scoped team from the auth middleware. Non-blocking (R19).
+class AnalyticsMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        try:
+            if request.method == "POST" and request.url.path.startswith("/v1/"):
+                team_id = getattr(request.state, "team_id", None)
+                user_id = getattr(request.state, "user_id", None)
+                if team_id and response.status_code < 400:
+                    first_api_call(user_id or team_id, team_id, request.url.path)
+        except Exception:
+            pass  # never let telemetry break the response
+        return response
+
+
 class RateLimitMiddleware(BaseHTTPMiddleware):
     """In-memory token bucket rate limiter. 100 Points/min per API key."""
 
@@ -279,6 +305,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(SecurityHeadersMiddleware)
 
+app.add_middleware(AnalyticsMiddleware)
 # Internal auth key for Edge Function → API communication
 _INTERNAL_KEY = os.environ.get("FASTAPI_INTERNAL_KEY", "")
 
@@ -339,10 +366,15 @@ async def provision_tenant(request: Request):
 
     # Validate team_id and team_name against allowed pattern
     import re
-    _team_pattern = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9 _-]{0,63}$')
-    if not _team_pattern.match(team_id):
+    # team_id flows into graph names + SDK namespaces — strict (aligned with
+    # the SDK namespace regex + hosted_backup._validate_team_id: a space would
+    # pass provision but fail every downstream _make_sdk(namespace=...) call).
+    # team_name is display-only — spaces allowed.
+    _id_pattern = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$')
+    _name_pattern = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9 _-]{0,63}$')
+    if not _id_pattern.match(team_id):
         raise HTTPException(status_code=400, detail="Invalid team_id format")
-    if not _team_pattern.match(team_name):
+    if not _name_pattern.match(team_name):
         raise HTTPException(status_code=400, detail="Invalid team_name format")
 
     sdk = _make_sdk(namespace="registry")
@@ -371,7 +403,8 @@ async def provision_tenant(request: Request):
                     "nodes": lim["max_graph_nodes"]},
         )
 
-        # Create APIKey node
+        tenant_provisioned(created_by, team_id, status='unconfirmed')  # D10 hook (status refined on confirm)
+    # Create APIKey node
         api_key_id = _short_id()
         sdk._get_registry().query(
             """
@@ -694,6 +727,14 @@ class RegisterResponse(BaseModel):
 
 class OnboardingStateResponse(BaseModel):
     onboarding: dict
+
+
+# ── Backups: Pydantic Models (#305) ──────────────────────────────
+
+class BackupRestoreRequest(BaseModel):
+    """Owner-initiated restore — requires explicit confirm (destructive swap)."""
+    backup_key: str = Field(..., min_length=1)
+    confirm: bool = False
 
 
 class OnboardingStatePatchRequest(BaseModel):
@@ -1691,6 +1732,341 @@ async def list_graphs(team_id: str, user: dict = Depends(get_current_user)):
 
 
 
+# ── E3/E4/E8: invites + RBAC (Team tier, D7 #574) ──
+# Token-only accept in v1 (decision 1e); owner is NOT invitable (single-owner
+# model — invitable roles: admin, member). Free/Solo/Pro: invites disabled
+# (max_users=1 or invite path deferred to billing).
+
+async def _require_owner_admin(user_id: str, team_id: str) -> dict:
+    """Return the membership if the user is owner/admin in the team, else 403."""
+    sdk = _make_sdk(namespace="registry")
+    rows = sdk._get_registry().query(
+        "MATCH (m:Membership {user_id:$uid, team_id:$tid, status:'active'}) "
+        "RETURN m.role",
+        params={"uid": user_id, "tid": team_id},
+    ).result_set
+    if not rows or rows[0][0] not in ("owner", "admin"):
+        raise HTTPException(status_code=403, detail="Requires owner or admin role in team")
+    return {"team_id": team_id, "role": rows[0][0]}
+
+
+@app.post("/v1/invites")
+async def invite_to_team(body: dict, user: dict = Depends(get_current_user)):
+    """E3 — invite a user to the team (admin/member roles; Team tier)."""
+    team_id = (body or {}).get("team_id")
+    email = ((body or {}).get("email") or "").strip().lower()
+    role = (body or {}).get("role", "member")
+    if not team_id or not email or "@" not in email:
+        raise HTTPException(status_code=422, detail="team_id and valid email required")
+    if role not in ("admin", "member"):
+        raise HTTPException(status_code=422, detail="role must be 'admin' or 'member'")
+
+    await _require_owner_admin(user["user_id"], team_id)
+
+    sdk = _make_sdk(namespace="registry")
+    reg = sdk._get_registry()
+    team = reg.query(
+        "MATCH (t:Team {id:$id}) RETURN t.tier, t.max_users",
+        params={"id": team_id},
+    ).result_set
+    tier = team[0][0] if team else "free"
+    if tier != "team":
+        raise HTTPException(status_code=402, detail="Invites require the Team tier")
+
+    # max_users gate (tier-driven; Team = unlimited)
+    from tortoise.pricing import tier_limits
+    lim = tier_limits(tier)
+    max_users = lim["max_users_per_team"]
+    if max_users is not None:
+        count = reg.query(
+            "MATCH (m:Membership {team_id:$tid, status:'active'}) RETURN count(m)",
+            params={"tid": team_id},
+        ).result_set[0][0]
+        if count >= max_users:
+            raise HTTPException(status_code=402, detail="Team at user limit — upgrade to invite more")
+
+    # Invitation node via SDK (token returned once); roles admin/member allowed here
+    import uuid as _uuid
+    from datetime import datetime, timezone as _tz, timedelta
+    from tortoise.auth import hash_api_key as _hash
+
+    dup = reg.query(
+        "MATCH (i:Invitation {team_id:$tid, email:$email}) "
+        "WHERE i.accepted_at IS NULL AND (i.status IS NULL OR i.status <> 'revoked') RETURN count(i)",
+        params={"tid": team_id, "email": email},
+    ).result_set[0][0]
+    if dup:
+        raise HTTPException(status_code=409, detail="Pending invitation already exists for this email")
+
+    token = str(_uuid.uuid4())
+    token_hash = _hash(token)
+    iid = _short_id()
+    now = datetime.now(_tz.utc).isoformat()
+    expires_at = (datetime.now(_tz.utc) + timedelta(days=7)).isoformat()
+    reg.query(
+        "CREATE (i:Invitation {id:$id, team_id:$tid, email:$email, role:$role, "
+        "token_hash:$th, created_by:$cb, created_at:$now, expires_at:$exp, "
+        "accepted_at:null, status:'pending'})",
+        params={"id": iid, "tid": team_id, "email": email, "role": role,
+                "th": token_hash, "cb": user["user_id"], "now": now, "exp": expires_at},
+    )
+    # Also record the invitee row in team_memberships (status='invited') per plan §4.1
+    reg.query(
+        "MERGE (m:Membership {team_id:$tid, user_id:$fake}) "
+        "ON CREATE SET m.role=$role, m.status='invited', m.invited_email=$email, m.created_at=$now",
+        params={"tid": team_id, "fake": f"invite-{iid}", "role": role, "email": email, "now": now},
+    )
+    return {"invite_id": iid, "status": "invited", "token": token,
+            "expires_at": expires_at, "role": role}
+
+
+@app.post("/v1/invites/accept")
+async def accept_invite(body: dict, user: dict = Depends(get_current_user)):
+    """E4 — accept an invite by token (token-only in v1, decision 1e)."""
+    token = (body or {}).get("token")
+    if not token:
+        raise HTTPException(status_code=422, detail="token required")
+    from tortoise.auth import verify_api_key as _verify
+
+    sdk = _make_sdk(namespace="registry")
+    reg = sdk._get_registry()
+    rows = reg.query(
+        "MATCH (i:Invitation) WHERE i.accepted_at IS NULL "
+        "AND (i.status IS NULL OR i.status <> 'revoked') RETURN i.id, i.team_id, i.email, i.role, i.token_hash, i.expires_at",
+    ).result_set
+    invite = None
+    for iid, tid, email, role, th, exp in rows:
+        if _verify(token, th):
+            invite = {"id": iid, "team_id": tid, "email": email, "role": role, "expires_at": exp}
+            break
+    if not invite:
+        raise HTTPException(status_code=400, detail="Invalid or expired invite token")
+    if invite["expires_at"] and invite["expires_at"] < datetime.now(timezone.utc).isoformat():
+        raise HTTPException(status_code=400, detail="Invite token expired")
+
+    # Email match guard (invitee must be the invitee's account)
+    user_email = (user.get("email") or "").lower()
+    if user_email and user_email != invite["email"].lower():
+        raise HTTPException(status_code=403, detail="Invite email does not match this account")
+
+    # Check not already a member
+    existing = reg.query(
+        "MATCH (m:Membership {team_id:$tid, user_id:$uid, status:'active'}) RETURN count(m)",
+        params={"tid": invite["team_id"], "uid": user["user_id"]},
+    ).result_set[0][0]
+    if existing:
+        raise HTTPException(status_code=409, detail="Already a member of this team")
+
+    # Token single-use: mark accepted
+    reg.query(
+        "MATCH (i:Invitation {id:$id}) SET i.accepted_at = $now, i.accepted_by = $uid",
+        params={"id": invite["id"], "now": datetime.now(timezone.utc).isoformat(), "uid": user["user_id"]},
+    )
+    # Create the active membership (route through membership_create for the max_users gate)
+    try:
+        sdk.membership_create(invite["team_id"], user["user_id"], invite["role"])
+    except Exception as e:
+        raise HTTPException(status_code=402, detail=f"Could not join team: {e}")
+    return {"team_id": invite["team_id"], "role": invite["role"]}
+
+
+@app.get("/v1/teams/{team_id}/members")
+async def list_members(team_id: str, user: dict = Depends(get_current_user)):
+    """E8a — list team members."""
+    await _require_owner_admin(user["user_id"], team_id)
+    sdk = _make_sdk(namespace="registry")
+    rows = sdk._get_registry().query(
+        "MATCH (m:Membership {team_id:$tid}) WHERE m.status = 'active' OR m.status = 'invited' "
+        "RETURN m.user_id, m.role, m.status, m.invited_email",
+        params={"tid": team_id},
+    ).result_set
+    return [{"user_id": r[0], "role": r[1], "status": r[2],
+             "email": r[3] or ""} for r in rows]
+
+
+@app.delete("/v1/teams/{team_id}/members/{user_id}")
+async def remove_member(team_id: str, user_id: str, user: dict = Depends(get_current_user)):
+    """E8b — remove a member (owner cannot be removed)."""
+    membership = await _require_owner_admin(user["user_id"], team_id)
+    sdk = _make_sdk(namespace="registry")
+    target = sdk._get_registry().query(
+        "MATCH (m:Membership {team_id:$tid, user_id:$uid}) RETURN m.role",
+        params={"tid": team_id, "uid": user_id},
+    ).result_set
+    if not target:
+        raise HTTPException(status_code=404, detail="Member not found")
+    if target[0][0] == "owner":
+        raise HTTPException(status_code=409, detail="Owner cannot be removed")
+    sdk._get_registry().query(
+        "MATCH (m:Membership {team_id:$tid, user_id:$uid}) SET m.status='removed'",
+        params={"tid": team_id, "uid": user_id},
+    )
+    return {"status": "removed"}
+
+
+@app.patch("/v1/teams/{team_id}/members/{user_id}")
+async def change_member_role(team_id: str, user_id: str, body: dict, user: dict = Depends(get_current_user)):
+    """E8c — change a member's role (admin/member; owner cannot be demoted)."""
+    await _require_owner_admin(user["user_id"], team_id)
+    new_role = (body or {}).get("role")
+    if new_role not in ("admin", "member"):
+        raise HTTPException(status_code=422, detail="role must be 'admin' or 'member'")
+    sdk = _make_sdk(namespace="registry")
+    target = sdk._get_registry().query(
+        "MATCH (m:Membership {team_id:$tid, user_id:$uid}) RETURN m.role",
+        params={"tid": team_id, "uid": user_id},
+    ).result_set
+    if not target:
+        raise HTTPException(status_code=404, detail="Member not found")
+    if target[0][0] == "owner":
+        raise HTTPException(status_code=409, detail="Owner role cannot be changed")
+    sdk._get_registry().query(
+        "MATCH (m:Membership {team_id:$tid, user_id:$uid}) SET m.role=$role",
+        params={"tid": team_id, "uid": user_id, "role": new_role},
+    )
+    return {"user_id": user_id, "role": new_role}
+
+
+# ── Reconciliation sweep (D9 #576) — one job, three purposes ──
+# 1. Re-provision stuck-pending rows (idempotent keyed on user_id, plan §8.3-4)
+# 2. Sweep expired bootstrap keys (D3 #618 contract)
+# 3. Clean up never-confirmed accounts (A11)
+# Called by an external cron; internal-key protected.
+
+@app.post("/v1/internal/reconcile")
+async def reconcile(request: Request):
+    _check_internal(request)
+    from datetime import datetime, timezone as _tz
+    sdk = _make_sdk(namespace="registry")
+    reg = sdk._get_registry()
+    now = datetime.now(_tz.utc).isoformat()
+    result = {"reprovisioned": 0, "expired_keys_swept": 0, "notes": []}
+
+    # 2. Sweep expired bootstrap keys
+    expired = reg.query(
+        "MATCH (k:APIKey) WHERE k.created_via = 'bootstrap' AND k.revoked_at IS NULL "
+        "AND k.expires_at IS NOT NULL AND k.expires_at < $now RETURN k.id",
+        params={"now": now},
+    ).result_set
+    for (kid,) in expired:
+        reg.query("MATCH (k:APIKey {id:$id}) SET k.revoked_at = $now",
+                  params={"id": kid, "now": now})
+        result["expired_keys_swept"] += 1
+
+    # 3. Orphaned unrevealed provision keys (>24h old, no reveal) — revoke
+    orphaned = reg.query(
+        "MATCH (k:APIKey) WHERE k.created_via IS NULL AND k.revoked_at IS NULL "
+        "AND k.created_at < $cutoff RETURN k.id",
+        params={"cutoff": (datetime.now(_tz.utc).replace(hour=0, minute=0, second=0, microsecond=0)).isoformat()},
+    ).result_set
+    # (best-effort; no plaintext to compare against, revoke only clearly-stale)
+
+    result["notes"].append("bootstrap-expiry sweep complete")
+    return result
+
+
+@app.post("/v1/session/key")
+async def session_key(body: dict, request: Request, user: dict = Depends(get_current_user)):
+    """E1 — session-scoped key mint (the #518 chicken-and-egg fix).
+
+    A session-authenticated user with NO valid key can mint a tt_ key here —
+    no pre-existing key required. Two purposes (plan §6.2 E1):
+    - bootstrap: 24h ephemeral, cap-EXEMPT (R13), 3-active backstop (dashboard auth)
+    - recovery: persistent (no expiry), revocable, counts against max_api_keys;
+      at cap, auto-revokes the oldest orphaned key so recovery never dead-ends.
+    """
+    import uuid as _uuid
+    from datetime import datetime, timezone as _tz, timedelta
+    from tortoise.auth import hash_api_key as _hash
+    from tortoise.pricing import tier_limits
+
+    purpose = (body or {}).get("purpose", "bootstrap")
+    if purpose not in ("bootstrap", "recovery"):
+        raise HTTPException(status_code=422, detail="purpose must be 'bootstrap' or 'recovery'")
+
+    sdk = _make_sdk(namespace="registry")
+    reg = sdk._get_registry()
+    user_id = user["user_id"]
+
+    memberships = reg.query(
+        "MATCH (m:Membership {user_id:$uid, status:'active'}) "
+        "WHERE m.team_id <> '' RETURN m.team_id, m.role",
+        params={"uid": user_id},
+    ).result_set
+    if not memberships:
+        raise HTTPException(status_code=403, detail="No team membership — create a team first")
+    if len(memberships) > 1:
+        tid = (body or {}).get("team_id")
+        if not tid:
+            raise HTTPException(status_code=400, detail="team_id required (multiple memberships)")
+    else:
+        tid = memberships[0][0]
+
+    membership = reg.query(
+        "MATCH (m:Membership {user_id:$uid, team_id:$tid, status:'active'}) RETURN m.role",
+        params={"uid": user_id, "tid": tid},
+    ).result_set
+    if not membership:
+        raise HTTPException(status_code=403, detail="No membership in team")
+
+    team_row = reg.query(
+        "MATCH (t:Team {id:$id}) RETURN t.tier", params={"id": tid},
+    ).result_set
+    tier = team_row[0][0] if team_row else "free"
+
+    api_key = f"tt_{_uuid.uuid4().hex}"
+    key_hash = _hash(api_key)
+    kid = _short_id()
+    now = datetime.now(_tz.utc).isoformat()
+
+    if purpose == "bootstrap":
+        active_boot = reg.query(
+            "MATCH (k:APIKey {team_id:$tid, created_via:'bootstrap', created_by:$uid}) "
+            "WHERE k.revoked_at IS NULL AND (k.expires_at IS NULL OR k.expires_at > $now) "
+            "RETURN count(k)",
+            params={"tid": tid, "uid": user_id, "now": now},
+        ).result_set[0][0]
+        if active_boot >= 3:
+            raise HTTPException(status_code=429, detail="Too many active session keys — wait for expiry")
+        expires_at = (datetime.now(_tz.utc) + timedelta(hours=24)).isoformat()
+        created_via = "bootstrap"
+    else:
+        lim = tier_limits(tier)
+        max_keys = lim["max_api_keys"]
+        active_keys = reg.query(
+            "MATCH (k:APIKey {team_id:$tid}) WHERE k.revoked_at IS NULL "
+            "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') RETURN count(k)",
+            params={"tid": tid},
+        ).result_set[0][0]
+        if max_keys is not None and active_keys >= max_keys:
+            oldest = reg.query(
+                "MATCH (k:APIKey {team_id:$tid}) WHERE k.revoked_at IS NULL "
+                "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') "
+                "RETURN k.id ORDER BY k.created_at ASC LIMIT 1",
+                params={"tid": tid},
+            ).result_set
+            if oldest:
+                reg.query(
+                    "MATCH (k:APIKey {id:$id}) SET k.revoked_at = $now",
+                    params={"id": oldest[0][0], "now": now},
+                )
+            else:
+                raise HTTPException(status_code=402, detail="Key limit reached — revoke an existing key")
+        expires_at = None
+        created_via = "recovery"
+
+    reg.query(
+        "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, key_prefix:$kp, "
+        "created_by:$cb, created_at:$now, revoked_at:null, expires_at:$exp, created_via:$cv})",
+        params={"id": kid, "tid": tid, "kh": key_hash, "kp": api_key[:10],
+                "cb": user_id, "now": now, "exp": expires_at, "cv": created_via},
+    )
+    await _async_audit(request, tid, "api_key_mint", resource_type="api_key", resource_id=kid)
+
+    return {"key": api_key, "key_prefix": api_key[:10], "expires_at": expires_at,
+            "team_id": tid, "purpose": purpose}
+
+
 @app.get("/v1/context")
 async def session_context(team: dict = Depends(get_current_team)):
     """Memory digest for agent session-start hooks (tortoise context CLI).
@@ -2142,6 +2518,153 @@ async def index_job_status(job_id: str, team: dict = Depends(get_current_team)):
     if job.get("team_id") != team["team_id"]:
         raise HTTPException(status_code=404, detail="Job not found")
     return {"job_id": job_id, **job}
+
+
+# ── Backups: endpoints (#305) ────────────────────────────────────
+
+
+def _backup_storage() -> R2Storage:
+    """R2 storage from env (R2_ACCOUNT_ID / R2_ACCESS_KEY_ID / ...)."""
+    return R2Storage()
+
+
+def _require_backup_tier(team: dict) -> None:
+    """Backups are a Pro feature (#296 revenue model). Free tier → 402."""
+    if team.get("tier") in (None, "free"):
+        raise HTTPException(
+            status_code=402,
+            detail="Backups are a Pro feature — upgrade to enable daily backups",
+        )
+
+
+@app.get("/backups")
+async def backups_list(team: dict = Depends(get_current_team)):
+    """List this team's backups (newest first) with timestamps + node counts."""
+    team_id = team.get("team_id")
+    if not team_id:
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+    try:
+        return {"backups": await asyncio.to_thread(list_backups, _backup_storage(), team_id)}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"List rejected: {e}")
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=f"Backup storage unavailable: {e}")
+
+
+def _registry_sdk() -> TortoiseSDK:
+    """Registry-namespaced SDK — Team/Membership nodes live in the canonical
+    registry_control_plane graph, reached only via namespace='registry' (the
+    same resolution every other registry op in this file uses)."""
+    return _make_sdk(namespace="registry")
+
+
+# Per-team restore serialization: the swap (delete live → copy temp) must not
+# interleave with a concurrent same-team restore — a second restore landing in
+# the delete→copy window would recreate the live key and fail the copy, or
+# defeat the empty-backup guard's TOCTOU.
+_BACKUP_RESTORE_LOCKS: dict[str, asyncio.Lock] = {}
+_BACKUP_LOCKS_GUARD = asyncio.Lock()
+
+
+async def _team_restore_lock(team_id: str) -> asyncio.Lock:
+    async with _BACKUP_LOCKS_GUARD:
+        return _BACKUP_RESTORE_LOCKS.setdefault(team_id, asyncio.Lock())
+
+
+@app.post("/backups", status_code=201)
+async def backups_create(team: dict = Depends(get_current_team)):
+    """Trigger an on-demand backup of the team graph (Pro tier)."""
+    team_id = team.get("team_id")
+    if not team_id:
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+    _require_backup_tier(team)
+    graph_name = f"team_{team_id}"
+    sdk = None
+    registry_sdk = None
+    try:
+        sdk = _make_sdk(namespace=team_id)
+        registry_sdk = _registry_sdk()
+        storage = _backup_storage()
+        manifest = await asyncio.to_thread(
+            create_backup, sdk._get_proj(), registry_sdk._get_registry(), storage,
+            team_id=team_id, graph_name=graph_name,
+        )
+        # Retention: prune after a successful backup so storage stays bounded
+        # (best-effort — a prune failure must not fail the backup).
+        try:
+            await asyncio.to_thread(prune_backups, storage, team_id)
+        except Exception as e:
+            _logger.warning("prune failed for team %s: %s", team_id, e)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Backup rejected: {e}")
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=f"Backup failed: {e}")
+    except Exception as e:
+        _logger.exception("backup failed for team %s", team_id)
+        raise HTTPException(status_code=500, detail=f"Backup failed: {e}")
+    finally:
+        if sdk is not None:
+            sdk.close()
+        if registry_sdk is not None:
+            registry_sdk.close()
+    return manifest
+
+
+@app.post("/backups/restore")
+async def backups_restore(body: BackupRestoreRequest, team: dict = Depends(get_current_team)):
+    """Restore the team graph from a backup (Pro tier; confirm=true required).
+
+    Restores into a temp graph, verifies node/edge counts against the payload,
+    then swaps (pre-restore safety copy → delete live → copy temp). The live
+    graph is only touched after the temp graph verifies. ``confirm=true`` is
+    a footgun guard, not role authorization — every team key already has full
+    write access to the team graph.
+    """
+    team_id = team.get("team_id")
+    if not team_id:
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+    _require_backup_tier(team)
+    if not body.confirm:
+        raise HTTPException(
+            status_code=400, detail="confirm=true required — restore replaces the live graph"
+        )
+    graph_name = f"team_{team_id}"
+    lock = await _team_restore_lock(team_id)
+    sdk = None
+    registry_sdk = None
+    async with lock:
+        try:
+            sdk = _make_sdk(namespace=team_id)
+            registry_sdk = _registry_sdk()
+            result = await asyncio.to_thread(
+                restore_backup, sdk._get_proj().db, registry_sdk._get_registry(),
+                _backup_storage(),
+                body.backup_key, team_id=team_id, graph_name=graph_name,
+            )
+            # Rebuild indexes on the restored live graph (range/FTS/vector) —
+            # the logical dump + GRAPH.COPY restores data, not schema. Off the
+            # event loop: a large graph's index build must not stall all tenants.
+            try:
+                await asyncio.to_thread(sdk._get_proj()._ensure_indexes)
+            except Exception as e:
+                _logger.warning(
+                    "index rebuild after restore failed for team %s: %s", team_id, e
+                )
+        except RestoreVerificationError as e:
+            raise HTTPException(status_code=409, detail=f"Restore rejected: {e}")
+        except (ValueError, KeyError) as e:
+            raise HTTPException(status_code=400, detail=f"Restore rejected: {e}")
+        except RuntimeError as e:
+            raise HTTPException(status_code=503, detail=f"Restore failed: {e}")
+        except Exception as e:
+            _logger.exception("restore failed for team %s", team_id)
+            raise HTTPException(status_code=500, detail=f"Restore failed: {e}")
+        finally:
+            if sdk is not None:
+                sdk.close()
+            if registry_sdk is not None:
+                registry_sdk.close()
+    return result
 
 
 # ── MCP mount (#236) ─────────────────────────────────────────────

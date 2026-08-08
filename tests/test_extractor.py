@@ -393,7 +393,14 @@ def test_llm_extractor_max_utterances():
 # ── Multi-source with embeddings (success path) ──────────────────────
 
 def test_mock_extractor_multi_source_embedding():
-    """Multi-source mode with embeddings actually finding cross-source matches."""
+    """Multi-source mode: near-identical claims from different speakers (lenses)
+    produce embedding candidates; the cue-gate creates the operator.
+
+    #399: multi_source transcripts treat speakers as sources (lens_key=
+    "speaker") — the old ≥3-shared-content-words gate is gone; similarity is
+    the candidate gate and cue words decide direction. #6306's multi-document
+    fold will use lens_key="source" / the derivation chain.
+    """
     api, log = _api()
     # Near-identical claims from different speakers so TF-IDF cosine > 0.40
     # Must be >40 chars and contain stance word for _is_claim
@@ -410,37 +417,147 @@ def test_mock_extractor_multi_source_embedding():
     print("PASS test_mock_extractor_multi_source_embedding")
 
 
-def test_mock_extractor_multi_source_semantic_agreement():
-    """Semantic agreement: matched pair without cue words → IMPL if 3+ shared content words."""
-    import tortoise.embeddings as emb
-    api, log = _api()
-    # Use very specific domain words that TF-IDF can vectorize
-    text = (
-        "Alice: The falkordb traversal configuration is essential for parameter "
-        "optimization thresholds and production scaling algorithms.\n"
-        "Bob: The falkordb traversal configuration is critical for parameter "
-        "optimization thresholds and production scaling algorithms."
-    )
-    # Mock find_cross_source_matches to return a controlled match
-    _orig = emb.find_cross_source_matches
-    def _fake_match(points, threshold=0.75):
-        ids = list(points)
-        if len(ids) >= 2:
-            return [{"src": ids[0], "dst": ids[1], "similarity": 0.85,
-                     "speakers": [points[ids[0]].get("speaker", ""),
-                                  points[ids[1]].get("speaker", "")]}]
-        return []
-    emb.find_cross_source_matches = _fake_match
-    try:
-        MockExtractor().run(text, "test.txt", api, multi_source=True)
-    finally:
-        emb.find_cross_source_matches = _orig
+def _mock_cross_lens(points, *, threshold=0.40, lens_key=None, encode=None):
+    """Deterministic stand-in: pair the first two points with similarity 0.45."""
+    import tortoise.cross_lens as cl  # noqa: F401 — ensure module importable
+    ids = list(points)
+    if len(ids) >= 2:
+        return [{"src": ids[0], "dst": ids[1], "similarity": 0.45,
+                 "lenses": [str(points[ids[0]].get("source", "s")),
+                            str(points[ids[1]].get("source", "s"))],
+                 "speakers": [points[ids[0]].get("speaker", "unknown"),
+                              points[ids[1]].get("speaker", "unknown")],
+                 "degraded": False}]
+    return []
 
+
+def test_mock_extractor_multi_source_semantic_agreement():
+    """#399: candidate pair + SUPPORT cue → IMPL; recorded.
+
+    The old ≥3-shared-content-words semantic-agreement gate is removed — a
+    similarity-matched pair (even with few shared words) with a support cue
+    creates an IMPL. (True zero-overlap pairs are covered by the real-embedder
+    tests in test_cross_lens.py.)
+    """
+    import tortoise.cross_lens as cl
+    api, log = _api()
+    text = (
+        "Alice: Winning requires strong go to market and channel partners because "
+        "growth depends on distribution.\n"
+        "Bob: Growth depends on distribution channels and partnerships is core."
+    )
+    _orig = cl.find_cross_lens_matches
+    cl.find_cross_lens_matches = _mock_cross_lens
+    try:
+        ex = MockExtractor()
+        ex.run(text, "test.txt", api, multi_source=True)
+    finally:
+        cl.find_cross_lens_matches = _orig
     events = log.read_all()
     ops = [e for e in events if e["type"] == "OperatorAdded"]
-    # Semantic agreement should create IMPL (shared distinctive words exceed 3)
-    assert len(ops) >= 1, f"expected IMPL from semantic agreement, got {len(ops)} ops"
+    assert len(ops) == 1 and ops[0]["point"]["operator"]["op_type"] == "IMPL", \
+        f"expected exactly 1 IMPL (cue direction, zero shared words), got {len(ops)}"
+    assert ex._last_candidates and ex._last_candidates[0]["similarity"] == 0.45
     print("PASS test_mock_extractor_multisource_semantic_agreement")
+
+
+def test_mock_extractor_multi_source_refute_cue_nand():
+    """#399: cross-vocabulary pair + REFUTE cue → NAND (no support cue present)."""
+    import tortoise.cross_lens as cl
+    api, log = _api()
+    text = ("Alice: Growth depends on distribution channels and partnerships is core.\n"
+            "Bob: Winning requires strong go to market and channel partners but "
+            "the strategy is unproven.")
+    _orig = cl.find_cross_lens_matches
+    cl.find_cross_lens_matches = _mock_cross_lens
+    try:
+        ex = MockExtractor()
+        ex.run(text, "test.txt", api, multi_source=True)
+    finally:
+        cl.find_cross_lens_matches = _orig
+    ops = [e for e in log.read_all() if e["type"] == "OperatorAdded"]
+    assert len(ops) == 1 and ops[0]["point"]["operator"]["op_type"] == "NAND", \
+        f"expected exactly 1 NAND, got {len(ops)}"
+    # Pin the candidate path (not the all-pairs fallback): _last_candidates is
+    # only populated by the cross-lens branch.
+    assert len(ex._last_candidates) == 1 and ex._last_candidates[0]["similarity"] == 0.45
+    print("PASS test_mock_extractor_multi_source_refute_cue_nand")
+
+
+def test_mock_extractor_multi_source_degraded_candidates_cue_gated():
+    """#399: candidates marked degraded (TF-IDF) are still similarity-gated —
+    cue words decide direction; no-cue degraded candidates are recorded only.
+    (All-pairs cue-gate now fires ONLY on import/runtime failure.)"""
+    import tortoise.cross_lens as cl
+    api, log = _api()
+    text = ("Alice: Growth depends on distribution channels and partnerships but "
+            "returns are diminishing.\n"
+            "Bob: Growth depends on distribution channels and partnerships is core.")
+    _orig = cl.find_cross_lens_matches
+
+    def _degraded(points, *, threshold=0.40, lens_key=None, encode=None):
+        ids = list(points)
+        if len(ids) >= 2:
+            return [{"src": ids[0], "dst": ids[1], "similarity": 0.45,
+                     "lenses": ["s", "s"], "speakers": ["a", "b"], "degraded": True}]
+        return []
+
+    cl.find_cross_lens_matches = _degraded
+    try:
+        ex = MockExtractor()
+        ex.run(text, "test.txt", api, multi_source=True)
+    finally:
+        cl.find_cross_lens_matches = _orig
+    ops = [e for e in log.read_all() if e["type"] == "OperatorAdded"]
+    # Candidate (alice,bob) is cue-gated: Alice's "but" → NAND. Degraded
+    # candidates are NOT discarded — they stay similarity-gated.
+    assert len(ops) == 1 and ops[0]["point"]["operator"]["op_type"] == "NAND", \
+        f"degraded candidate path must cue-gate, got {len(ops)} ops"
+    assert ex._last_candidates and ex._last_candidates[0]["degraded"] is True
+    print("PASS test_mock_extractor_multi_source_degraded_candidates_cue_gated")
+
+
+def test_mock_extractor_multi_source_same_speaker_no_candidates():
+    """Real module: same-lens pairs (both utterances from one speaker) → no
+    cross-lens candidates → the similarity gate holds → no operators.
+
+    multi_source treats speakers as sources (lens_key="speaker"); the all-pairs
+    cue-gate now fires ONLY on import/runtime failure (pre-#399 fallback).
+    """
+    api, log = _api()
+    text = ("Alice: Growth depends on distribution channels and partnerships is core.\n"
+            "Alice: Growth depends on distribution channels and partnerships is also "
+            "essential for scale.")
+    ex = MockExtractor()
+    ex.run(text, "test.txt", api, multi_source=True)
+    # Same speaker → same lens → no cross-lens candidates.
+    assert ex._last_candidates == []
+    ops = [e for e in log.read_all() if e["type"] == "OperatorAdded"]
+    assert ops == [], f"no candidates must mean no operators, got {len(ops)}"
+    print("PASS test_mock_extractor_multi_source_same_speaker_no_candidates")
+
+
+def test_mock_extractor_multi_source_no_cue_no_operator_but_recorded():
+    """#399: matched cross-vocab pair WITHOUT cue words → no operator, recorded.
+
+    Candidates never become operators from similarity alone (EP-safety boundary).
+    """
+    import tortoise.cross_lens as cl
+    api, log = _api()
+    text = ("Alice: Growth depends on distribution channels and partnerships is core.\n"
+            "Bob: Winning requires strong go to market and channel partners is "
+            "the winning approach.")
+    _orig = cl.find_cross_lens_matches
+    cl.find_cross_lens_matches = _mock_cross_lens
+    try:
+        ex = MockExtractor()
+        ex.run(text, "test.txt", api, multi_source=True)
+    finally:
+        cl.find_cross_lens_matches = _orig
+    ops = [e for e in log.read_all() if e["type"] == "OperatorAdded"]
+    assert ops == [], f"similarity alone must not create operators, got {len(ops)}"
+    assert len(ex._last_candidates) == 1, "candidate must be recorded for #6306"
+    print("PASS test_mock_extractor_multi_source_no_cue_no_operator_but_recorded")
 
 
 # ── _PointStage.run with list output ────────────────────────────────

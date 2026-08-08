@@ -25,7 +25,7 @@
       "price_usd_monthly": 0,
       "max_graphs_per_team": 1,
       "max_users_per_team": 1,
-      "included_write_ops_per_month": 1000,
+      "included_write_ops_per_month": 10000,
       "max_graph_nodes": 10000,
       "max_api_keys": 2,
       "integrations": "unlimited",

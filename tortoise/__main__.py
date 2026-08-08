@@ -853,6 +853,12 @@ def _cmd_onboard(args) -> int:
     print()
     print("Next: tortoise serve    — start MCP server for agents")
     print("      tortoise setup    — configure per-role memory")
+    print()
+    # #544: reference the canonical onboarding prompt — paste into your agent
+    # after connecting it to the local MCP server to run the same yes/no flow
+    # hosted users get (same tool names over stdio).
+    print("Onboarding prompt — paste this into your agent to complete setup:")
+    print("  https://premiselabs.co/onboarding-prompt.md")
     return 0
 
 

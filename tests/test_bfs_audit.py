@@ -49,7 +49,10 @@ def test_no_propagate_shock_callers():
         path_part = line.split(":")[0]
         full_path = ROOT / path_part
 
-        if "projection.py" in path_part and "def propagate_shock" in line:
+        # #378: projection.py was split into the projection/ package — the
+        # deprecated definition now lives in projection/propagation.py.
+        if ("projection.py" in path_part or "projection/" in path_part) \
+                and "def propagate_shock" in line:
             callers["definition (deprecated)"].append(line)
         elif "/tests/" in path_part:
             callers["test_files"].append(line)

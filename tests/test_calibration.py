@@ -1,9 +1,29 @@
-"""Integration tests for EP calibration pipeline — Issue #7478."""
+"""Integration tests for EP calibration pipeline — Issue #7478.
+
+Requires live FalkorDB (Docker); skips gracefully when unavailable so the
+no-Docker embedded suite stays green (AGENTS.md). Mirrors the probe pattern
+in tests/test_integration_search.py.
+"""
 import os
 
 import pytest
 from tortoise.sdk import TortoiseSDK
 from tortoise.exceptions import CalibrationError
+
+_CAL_URI = "docker://:falkordb@localhost:6379/tortoise_test_calibration"
+FALKORDB_AVAILABLE = False
+try:
+    os.environ.setdefault("TORTOISE_DB_URI", _CAL_URI)
+    _probe_sdk = TortoiseSDK()
+    _probe_sdk._get_proj().g.query("RETURN 1")
+    _probe_sdk.close()
+    FALKORDB_AVAILABLE = True
+except Exception:
+    pass
+
+pytestmark = pytest.mark.skipif(
+    not FALKORDB_AVAILABLE, reason="Live FalkorDB (Docker) not available")
+
 
 
 @pytest.fixture

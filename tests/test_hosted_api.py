@@ -116,7 +116,15 @@ class TestHealthEndpoints:
     """GET /health and GET /health/security."""
 
     def test_health_returns_ok(self, client):
+        """Liveness — process up, no DB dependency (#338 follow-up: the DB
+        check moved to /health/ready to avoid cold-start deploy failures)."""
         r = client.get("/health")
+        assert r.status_code == 200
+        assert r.json() == {"status": "ok"}
+
+    def test_health_ready_reports_db(self, client):
+        """Readiness — DB connectivity (what /health used to check)."""
+        r = client.get("/health/ready")
         assert r.status_code == 200
         assert r.json() == {"status": "ok", "db": "connected"}
 
@@ -1051,6 +1059,98 @@ class TestMCPSubAppMount:
         assert r.status_code == 200
 
 
+# ── Backup endpoints (#305) ─────────────────────────────────────
+
+class TestBackupEndpoints:
+    """Endpoint layer: /backups + /backups/restore wiring (#305).
+
+    Exercises the seam the pipeline unit tests can't reach: auth/tier gating,
+    _registry_sdk() wiring, exception mapping (400/402/409/503), prune-on-
+    create, and the empty-backup-over-live guard through the HTTP surface.
+    """
+
+    @pytest.fixture
+    def pro_client(self, client, monkeypatch):
+        """Client with Pro tier + in-memory backup storage + env key."""
+        import base64 as _b64
+        from tortoise import hosted_api as _ha
+        from tortoise.hosted_backup import MemoryStorage as _MS
+
+        monkeypatch.setenv(
+            "TORTOISE_BACKUP_KEY", _b64.b64encode(os.urandom(32)).decode()
+        )
+        _store = _MS()  # SHARED instance — _backup_storage is called per request
+        monkeypatch.setattr(_ha, "_backup_storage", lambda: _store)
+        app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM, tier="pro")
+        yield client
+        app.dependency_overrides.clear()
+
+    def test_backup_free_tier_402(self, client):
+        """Free tier cannot create/restore backups (402 upgrade prompt)."""
+        r = client.post("/backups")
+        assert r.status_code == 402
+        r = client.post("/backups/restore", json={"backup_key": "x", "confirm": True})
+        assert r.status_code == 402
+
+    def test_backup_create_and_list_pro(self, pro_client):
+        """Pro team: create returns a manifest; list shows it."""
+        r = pro_client.post("/backups")
+        assert r.status_code == 201, r.text
+        manifest = r.json()
+        assert manifest["team_id"] == TEST_TEAM_ID
+        assert manifest["node_count"] == 0
+        assert manifest["backup_id"].startswith(TEST_TEAM_ID + "/")
+
+        r = pro_client.get("/backups")
+        assert r.status_code == 200
+        assert len(r.json()["backups"]) == 1
+
+    def test_restore_requires_confirm(self, pro_client):
+        """Destructive restore requires confirm=true."""
+        r = pro_client.post(
+            "/backups/restore", json={"backup_key": "backups/x/dump.enc", "confirm": False}
+        )
+        assert r.status_code == 400
+        assert "confirm" in r.json()["detail"]
+
+    def test_restore_cross_team_key_400(self, pro_client):
+        """A backup key outside the team's prefix is rejected (400)."""
+        r = pro_client.post(
+            "/backups/restore",
+            json={"backup_key": "backups/other-team/20260101T000000Z/dump.enc", "confirm": True},
+        )
+        assert r.status_code == 400
+        assert "cross-team" in r.json()["detail"]
+
+    def test_restore_missing_object_400(self, pro_client):
+        """Nonexistent backup object → clean 400, not 500."""
+        r = pro_client.post(
+            "/backups/restore",
+            json={"backup_key": f"backups/{TEST_TEAM_ID}/20260101T000000Z/dump.enc", "confirm": True},
+        )
+        assert r.status_code == 400
+        assert "not found" in r.json()["detail"]
+
+    def test_restore_empty_backup_over_live_409(self, pro_client):
+        """Restoring an empty backup over a live graph with data → 409."""
+        # 1. create an empty backup (team graph has no points yet)
+        r = pro_client.post("/backups")
+        assert r.status_code == 201
+        manifest = r.json()
+        backup_key = f"backups/{manifest['backup_id']}/dump.enc"
+        # 2. seed live data via the API
+        r = pro_client.post("/v1/points", json={"content": "a live decision"})
+        assert r.status_code == 200, r.text
+        # 3. restoring the empty backup must be rejected (409, live untouched)
+        r = pro_client.post(
+            "/backups/restore", json={"backup_key": backup_key, "confirm": True}
+        )
+        assert r.status_code == 409
+        assert "empty backup" in r.json()["detail"]
+        # live data still there
+        r = pro_client.get("/v1/points")
+        assert r.status_code == 200
+        assert len(r.json()["points"]) == 1
 # ── #329: session turn cap + extraction-aware points gate + dream budget ──
 
 class TestSessionFloodGate:

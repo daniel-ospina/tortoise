@@ -25,17 +25,43 @@ jobs:
       - uses: superfly/flyctl-actions/setup-flyctl@master
       - name: Verify secrets exist
         run: |
+          # Core secrets are mandatory — the API cannot boot without them.
           if [ -z "${{ secrets.FASTAPI_INTERNAL_KEY }}" ] || [ -z "${{ secrets.TORTOISE_SECRET_PEPPER }}" ] || [ -z "${{ secrets.FALKORDB_CLOUD_URI }}" ]; then
             echo "::error::FASTAPI_INTERNAL_KEY, TORTOISE_SECRET_PEPPER, and FALKORDB_CLOUD_URI must be set in GitHub secrets"
             exit 1
           fi
+          # Backup (TORTOISE_BACKUP_KEY + R2_*) is env-gated at runtime and
+          # Pro-tier-only — missing secrets degrade gracefully (backup
+          # endpoints 402/503), so warn instead of blocking the deploy (#545).
+          if [ -z "${{ secrets.TORTOISE_BACKUP_KEY }}" ]; then
+            echo "::warning::TORTOISE_BACKUP_KEY not set — backups disabled until configured"
+          fi
+          if [ -z "${{ secrets.R2_ACCOUNT_ID }}" ] || [ -z "${{ secrets.R2_BUCKET }}" ]; then
+            echo "::warning::R2_* secrets not fully set — backup storage disabled until configured"
+          fi
       - name: Set all app secrets on Fly.io (keeps in sync with GitHub/Supabase)
         run: |
-          flyctl secrets set --stage \
-            FASTAPI_INTERNAL_KEY="${{ secrets.FASTAPI_INTERNAL_KEY }}" \
-            TORTOISE_SECRET_PEPPER="${{ secrets.TORTOISE_SECRET_PEPPER }}" \
-            FALKORDB_CLOUD_URI="${{ secrets.FALKORDB_CLOUD_URI }}" \
-            --app tortoise-y4mjjq
+          ARGS="FASTAPI_INTERNAL_KEY=${{ secrets.FASTAPI_INTERNAL_KEY }} TORTOISE_SECRET_PEPPER=${{ secrets.TORTOISE_SECRET_PEPPER }} FALKORDB_CLOUD_URI=${{ secrets.FALKORDB_CLOUD_URI }}"
+          # Optional (env-gated at runtime): only pass when set, so unconfigured
+          # backups / GitHub OAuth never fail the deploy.
+          [ -n "${{ secrets.TORTOISE_BACKUP_KEY }}" ] && ARGS="$ARGS TORTOISE_BACKUP_KEY=${{ secrets.TORTOISE_BACKUP_KEY }}"
+          [ -n "${{ secrets.R2_ACCOUNT_ID }}" ] && ARGS="$ARGS R2_ACCOUNT_ID=${{ secrets.R2_ACCOUNT_ID }}"
+          [ -n "${{ secrets.R2_ACCESS_KEY_ID }}" ] && ARGS="$ARGS R2_ACCESS_KEY_ID=${{ secrets.R2_ACCESS_KEY_ID }}"
+          [ -n "${{ secrets.R2_SECRET_ACCESS_KEY }}" ] && ARGS="$ARGS R2_SECRET_ACCESS_KEY=${{ secrets.R2_SECRET_ACCESS_KEY }}"
+          [ -n "${{ secrets.R2_BUCKET }}" ] && ARGS="$ARGS R2_BUCKET=${{ secrets.R2_BUCKET }}"
+          # GitHub OAuth (#542): GITHUB_CLIENT_ID/SECRET + encryption key —
+          # warn-only until the OAuth app is registered and secrets set.
+          if [ -z "${{ secrets.GITHUB_CLIENT_ID }}" ] || [ -z "${{ secrets.GITHUB_CLIENT_SECRET }}" ]; then
+            echo "::warning::GITHUB_CLIENT_ID/GITHUB_CLIENT_SECRET not set — GitHub OAuth disabled until configured (#542)"
+          fi
+          if [ -z "${{ secrets.TORTOISE_ENCRYPTION_KEY }}" ]; then
+            echo "::warning::TORTOISE_ENCRYPTION_KEY not set — token encryption unavailable until configured (#542)"
+          fi
+          [ -n "${{ secrets.GITHUB_CLIENT_ID }}" ] && ARGS="$ARGS GITHUB_CLIENT_ID=${{ secrets.GITHUB_CLIENT_ID }}"
+          [ -n "${{ secrets.GITHUB_CLIENT_SECRET }}" ] && ARGS="$ARGS GITHUB_CLIENT_SECRET=${{ secrets.GITHUB_CLIENT_SECRET }}"
+          [ -n "${{ secrets.GITHUB_CALLBACK_URL }}" ] && ARGS="$ARGS GITHUB_CALLBACK_URL=${{ secrets.GITHUB_CALLBACK_URL }}"
+          [ -n "${{ secrets.TORTOISE_ENCRYPTION_KEY }}" ] && ARGS="$ARGS TORTOISE_ENCRYPTION_KEY=${{ secrets.TORTOISE_ENCRYPTION_KEY }}"
+          flyctl secrets set --stage $ARGS --app tortoise-y4mjjq
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
       - name: Deploy (retry through Fly lease/API races)

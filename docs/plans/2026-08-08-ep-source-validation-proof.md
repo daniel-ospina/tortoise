@@ -1,3 +1,17 @@
+---
+title: "Proof & Audit — Issue #341: EP source priors monotonic + directionally correct"
+type: data
+domain: data
+status: live
+created: 2026-08-08
+updated: 2026-08-08
+ownedBy: epistemic-team
+subjects:
+  team: epistemic-team
+doc_status: live
+aboutSubjects: epistemic-team
+aboutObjects: Point, Operator, Mitigation, Source
+---
 # Mathematical Proof & Audit: Source Priors are Monotonic and Directionally Correct
 
 **Issue:** tortoise #341 | **Date:** 2026-08-08 | **Status:** validated + locked in `tests/test_ep_sources.py`

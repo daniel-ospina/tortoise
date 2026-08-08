@@ -1,3 +1,17 @@
+---
+title: "Implementation Plan — Issue #341: Mathematical EP validation (source priors monotonic + directionally correct)"
+type: data
+domain: data
+status: live
+created: 2026-08-08
+updated: 2026-08-08
+ownedBy: epistemic-team
+subjects:
+  team: epistemic-team
+doc_status: live
+aboutSubjects: epistemic-team
+aboutObjects: Point, Operator, Mitigation, Source
+---
 <!-- research-path: docs/plans/2026-08-08-ep-source-validation-research.md -->
 
 # #341 Implementation Plan: Mathematical EP validation (source priors monotonic + directionally correct)

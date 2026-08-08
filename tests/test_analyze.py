@@ -85,7 +85,13 @@ def test_with_projection():
         # Add some test data
         proj.g.query("CREATE (:Point {id:'c1', content:'AI strategy is working', confidence:0.85})")
         proj.g.query("CREATE (:Point {id:'c2', content:'AI strategy needs revision', confidence:0.65})")
-        proj.g.query("MATCH (a:Point {id:'c1'}), (b:Point {id:'c2'}) CREATE (a)-[:NAND]->(b)")
+        # NAND is operator-mediated (#7801): op {op_type:'NAND', is_operator:true}
+        # connects to both claims — the analyze template matches this shape.
+        proj.g.query(
+            "MATCH (a:Point {id:'c1'}), (b:Point {id:'c2'}) "
+            "CREATE (op:Point {id:'op1', op_type:'NAND', is_operator:true})"
+            "-[:NAND]->(a), (op)-[:NAND]->(b)"
+        )
         
         result = analyze("where is the disagreement?", proj=proj)
         assert result["pattern"] == "disagreement"
@@ -207,7 +213,13 @@ def test_analyze_error_redacted(monkeypatch):
         proj = FalkorProjection(db_path)
         proj.g.query("CREATE (:Point {id:'c1', content:'AI strategy is working', confidence:0.85})")
         proj.g.query("CREATE (:Point {id:'c2', content:'AI strategy needs revision', confidence:0.65})")
-        proj.g.query("MATCH (a:Point {id:'c1'}), (b:Point {id:'c2'}) CREATE (a)-[:NAND]->(b)")
+        # NAND is operator-mediated (#7801): op {op_type:'NAND', is_operator:true}
+        # connects to both claims — the analyze template matches this shape.
+        proj.g.query(
+            "MATCH (a:Point {id:'c1'}), (b:Point {id:'c2'}) "
+            "CREATE (op:Point {id:'op1', op_type:'NAND', is_operator:true})"
+            "-[:NAND]->(a), (op)-[:NAND]->(b)"
+        )
         # Break the disagreement template by injecting a bad limit param
         import tortoise.analyze as _a
         orig = _a.TEMPLATES["disagreement"]["cypher"]

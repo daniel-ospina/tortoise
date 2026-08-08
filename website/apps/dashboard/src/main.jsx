@@ -4,6 +4,49 @@ import './index.css'
 
 const API_BASE = 'https://api.premiselabs.co'
 const KEY_STORAGE = 'tortoise_api_key'
+const SUPABASE_URL = 'https://ybetwichurajbfswfeqa.supabase.co'
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InliZXR3aWNodXJhamJmc3dmZXFhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODUyNzgzNDYsImV4cCI6MjEwMDg1NDM0Nn0.YHysJAebPualDNDQTU5bnGBUHg5guLe8eBadm0LiEiY'
+
+// ── Parent-domain cookie storage (cross-subdomain session, D5 #572) ──
+// supabase-js v2 defaults to localStorage (origin-scoped) — a session created
+// on tortoise.premiselabs.co never reaches app.premiselabs.co. This adapter
+// persists the session token in a cookie scoped to .premiselabs.co so both
+// subdomains share it (plan §5.3 d2: PKCE + parent-domain cookie).
+const COOKIE_NAME = 'sb-tortoise-auth-token'
+const COOKIE_DOMAIN = '.premiselabs.co'
+
+const supabaseStorage = {
+  getItem(key) {
+    try {
+      const m = document.cookie.match(new RegExp('(?:^|; )' + key + '=([^;]*)'))
+      return m ? decodeURIComponent(m[1]) : null
+    } catch { return null }
+  },
+  setItem(key, value) {
+    if (!value) { this.removeItem(key); return }
+    const expires = new Date(Date.now() + 7 * 24 * 3600 * 1000).toUTCString()
+    document.cookie = `${key}=${encodeURIComponent(value)}; Domain=${COOKIE_DOMAIN}; Path=/; SameSite=Lax; Secure; Expires=${expires}`
+  },
+  removeItem(key) {
+    document.cookie = `${key}=; Domain=${COOKIE_DOMAIN}; Path=/; SameSite=Lax; Secure; Max-Age=0`
+  },
+}
+
+let supabaseClient = null
+try {
+  supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+    auth: {
+      flowType: 'pkce',
+      storage: supabaseStorage,
+      storageKey: COOKIE_NAME,
+      persistSession: true,
+      autoRefreshToken: true,
+      detectSessionInUrl: true,
+    },
+  })
+} catch (e) {
+  console.warn('Supabase client init failed:', e)
+}
 
 function App() {
   const [apiKey, setApiKey] = React.useState(() => localStorage.getItem(KEY_STORAGE) || '')
@@ -15,8 +58,17 @@ function App() {
   const [busy, setBusy] = React.useState(false)
   const [newKey, setNewKey] = React.useState(null)
   const [tab, setTab] = React.useState('overview')
+  const [authMode, setAuthMode] = React.useState('session') // 'session' | 'apikey'
+  const [checking, setChecking] = React.useState(true)
+  const sessionTokenRef = React.useRef(null)
+  const [teams, setTeams] = React.useState([])
+  const [graphs, setGraphs] = React.useState([])
+  const [currentTeamId, setCurrentTeamId] = React.useState(null)
+  const [currentGraphId, setCurrentGraphId] = React.useState(null)
+  const [showCreateTeam, setShowCreateTeam] = React.useState(false)
+  const [newTeamName, setNewTeamName] = React.useState('')
 
-  const headers = { Authorization: `Bearer ${apiKey}` }
+  const headers = apiKey ? { Authorization: `Bearer ${apiKey}` } : {}
 
   async function api(path, opts = {}) {
     const res = await fetch(`${API_BASE}${path}`, {
@@ -28,6 +80,59 @@ function App() {
       throw new Error(body.detail || `HTTP ${res.status}`)
     }
     return res.json()
+  }
+
+  // ── Session auth: on load, try the shared cookie session ──
+  React.useEffect(() => {
+    ;(async () => {
+      try {
+        if (!supabaseClient) { setChecking(false); return }
+        const { data: { session }, error } = await supabaseClient.auth.getSession()
+        if (error || !session) { setChecking(false); return }
+        sessionTokenRef.current = session.access_token
+
+        // Session found — mint a data-plane key via E1 (POST /v1/session/key)
+        // using the session access token (JWKS-verified server-side).
+        const res = await fetch(`${API_BASE}/v1/session/key`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${session.access_token}`,
+          },
+          body: JSON.stringify({ purpose: 'bootstrap' }),
+        })
+        if (res.ok) {
+          const data = await res.json()
+          if (data.key) {
+            localStorage.setItem(KEY_STORAGE, data.key)
+            setApiKey(data.key)
+            setAuthMode('session')
+            await completeLogin(data.key)
+          }
+        } else {
+          // No usable session key — fall back to the API-key screen
+          setChecking(false)
+        }
+      } catch (e) {
+        setChecking(false)
+      }
+    })()
+  }, [])
+
+  async function completeLogin(key) {
+    setError('')
+    try {
+      const t = await api('/v1/team', key ? { headers: { Authorization: `Bearer ${key}` } } : {})
+      setTeam(t)
+      setAuthed(true)
+      await Promise.all([loadAll(), loadTeams()])
+    } catch (e) {
+      setError(e.message === 'Invalid API key' ? 'Invalid API key — check your key and try again.' : e.message)
+      setAuthed(false)
+    } finally {
+      setBusy(false)
+      setChecking(false)
+    }
   }
 
   async function login() {
@@ -47,7 +152,7 @@ function App() {
     }
   }
 
-  function logout() {
+  async function logout() {
     localStorage.removeItem(KEY_STORAGE)
     setApiKey('')
     setAuthed(false)
@@ -55,6 +160,7 @@ function App() {
     setKeys([])
     setSessions([])
     setNewKey(null)
+    try { if (supabaseClient) await supabaseClient.auth.signOut() } catch { /* best-effort */ }
   }
 
   async function loadAll() {
@@ -64,6 +170,67 @@ function App() {
       setSessions(Array.isArray(s) ? s : s.sessions || [])
     } catch (e) {
       setError(e.message)
+    }
+  }
+
+  // ── E6/E7: team + graph switcher (session JWT authed) ──
+  async function loadTeams() {
+    const tok = sessionTokenRef.current
+    if (!tok) return
+    try {
+      const res = await fetch(`${API_BASE}/v1/teams`, {
+        headers: { Authorization: `Bearer ${tok}` },
+      })
+      if (res.ok) {
+        const list = await res.json()
+        setTeams(list)
+        if (list.length > 0 && !currentTeamId) {
+          setCurrentTeamId(list[0].team_id)
+        }
+      }
+    } catch { /* best-effort */ }
+  }
+
+  async function switchTeam(teamId) {
+    setCurrentTeamId(teamId)
+    setCurrentGraphId(null)
+    const tok = sessionTokenRef.current
+    if (!tok) return
+    try {
+      const res = await fetch(`${API_BASE}/v1/graphs?team_id=${teamId}`, {
+        headers: { Authorization: `Bearer ${tok}` },
+      })
+      if (res.ok) {
+        const list = await res.json()
+        setGraphs(list)
+        if (list.length > 0) setCurrentGraphId(list[0].graph_id)
+      }
+    } catch { /* best-effort */ }
+  }
+
+  async function createTeamFromUI() {
+    if (!newTeamName.trim()) return
+    setBusy(true)
+    setError('')
+    try {
+      const tok = sessionTokenRef.current
+      if (!tok) throw new Error('No session')
+      const res = await fetch(`${API_BASE}/v1/teams`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tok}` },
+        body: JSON.stringify({ name: newTeamName.trim() }),
+      })
+      if (!res.ok) {
+        const b = await res.json().catch(() => ({}))
+        throw new Error(b.detail || `HTTP ${res.status}`)
+      }
+      setNewTeamName('')
+      setShowCreateTeam(false)
+      await loadTeams()
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setBusy(false)
     }
   }
 
@@ -92,6 +259,32 @@ function App() {
     }
   }
 
+  // ── J-2: key recovery via E1 session mint (the #518 fix) ──
+  async function recoverKey() {
+    setError('')
+    setBusy(true)
+    const tok = sessionTokenRef.current
+    if (!tok) { setError('Sign in with your Tortoise account to recover a key.'); setBusy(false); return }
+    try {
+      const res = await fetch(`${API_BASE}/v1/session/key`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tok}` },
+        body: JSON.stringify({ purpose: 'recovery' }),
+      })
+      if (!res.ok) {
+        const b = await res.json().catch(() => ({}))
+        throw new Error(b.detail || `HTTP ${res.status}`)
+      }
+      const data = await res.json()
+      setNewKey(data.key)
+      await loadAll()
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
   function fmtTime(iso) {
     if (!iso) return '—'
     try {
@@ -101,13 +294,25 @@ function App() {
     }
   }
 
+  if (checking) {
+    return (
+      <div className="auth-wrap">
+        <div className="auth-card">
+          <div className="logo">Tortoise</div>
+          <h1>Dashboard</h1>
+          <p className="dim">Checking your session…</p>
+        </div>
+      </div>
+    )
+  }
+
   if (!authed) {
     return (
       <div className="auth-wrap">
         <div className="auth-card">
           <div className="logo">Tortoise</div>
           <h1>Dashboard</h1>
-          <p className="dim">Enter your API key to manage your team, keys, and sessions.</p>
+          <p className="dim">{authMode === 'session' ? 'Sign in with your Tortoise account.' : 'Enter your API key to manage your team, keys, and sessions.'}</p>
           <input
             type="password"
             placeholder="tt_..."
@@ -135,13 +340,47 @@ function App() {
           <button className={tab === 'keys' ? 'active' : ''} onClick={() => setTab('keys')}>API Keys</button>
           <button className={tab === 'sessions' ? 'active' : ''} onClick={() => setTab('sessions')}>Sessions</button>
         </nav>
+        <div className="switchers">
+          <select
+            value={currentTeamId || ''}
+            onChange={(e) => e.target.value && switchTeam(e.target.value)}
+            aria-label="Team"
+          >
+            {teams.length === 0 && <option value="">No team</option>}
+            {teams.map((t) => (
+              <option key={t.team_id} value={t.team_id}>{t.team_name}</option>
+            ))}
+          </select>
+          <select
+            value={currentGraphId || ''}
+            onChange={(e) => setCurrentGraphId(e.target.value)}
+            aria-label="Graph"
+          >
+            {graphs.length === 0 && <option value="">No graph</option>}
+            {graphs.map((g) => (
+              <option key={g.graph_id} value={g.graph_id}>{g.name}</option>
+            ))}
+          </select>
+        </div>
         <button className="ghost" onClick={logout}>Log out</button>
       </header>
 
       <main>
         {error && <div className="error banner">{error}</div>}
 
-        {tab === 'overview' && team && (
+        {tab === 'overview' && team && (team.point_count ?? 0) === 0 && (
+          <section className="overview empty-state">
+            <h2>Welcome to your Tortoise graph</h2>
+            <p className="dim">Connect your agent so it remembers why, not just what.</p>
+            <div className="empty-actions">
+              <a className="btn-primary" href="https://tortoise.premiselabs.co/welcome" target="_blank" rel="noreferrer">
+                Connect your agent →
+              </a>
+              <span className="dim small">or run: <code>{`curl -X POST https://api.premiselabs.co/v1/points -H "Authorization: Bearer ${apiKey.slice(0, 12)}…" -H "Content-Type: application/json" -d '{"content":"hello graph","kind":"statement"}'`}</code></span>
+            </div>
+          </section>
+        )}
+        {tab === 'overview' && team && (team.point_count ?? 0) > 0 && (
           <section className="overview">
             <h2>Overview</h2>
             <div className="cards">
@@ -167,6 +406,7 @@ function App() {
               <h2>API Keys</h2>
               <button onClick={createKey} disabled={busy}>+ New key</button>
             </div>
+            <p className="dim small">Lost your key? <button className="link" onClick={recoverKey}>Generate a new one</button> — works without an existing key (session-authenticated).</p>
             {newKey && (
               <div className="new-key">
                 <strong>Your new key (shown once):</strong>

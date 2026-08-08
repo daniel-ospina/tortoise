@@ -27,15 +27,21 @@ from tortoise.projection import FalkorProjection
 
 
 def _make_point(i: int) -> dict:
-    """Create a PointAdded event with rich, distinct properties."""
+    """Create a PointAdded event with rich, distinct properties.
+
+    ``context``/``extractedFrom`` are intentionally NOT asserted as node props:
+    context was removed by the Phase 1 stop-writes (#49) and extractedFrom is
+    an edge (Point → Source), not a node property.
+    """
     return {
         "type": "PointAdded",
         "point": {
             "id": f"pt-{i:03d}",
             "content": f"Content for point {i}",
-            "context": f"test-context-{i % 3}",
+            "confidence": round(0.05 * (i + 1), 3),
             "pointKind": ["claim", "observation", "decision"][i % 3],
             "extractedFrom": f"doc-{i % 3}.md",
+            "validFrom": f"2026-07-{(i % 28) + 1:02d}T10:00:00Z",
             "createdAt": f"2026-07-{(i % 28) + 1:02d}T10:00:00Z",
         },
     }
@@ -147,11 +153,11 @@ def test_backup_restore_e2e():
                 expected = points_data[i]["point"]
                 assert props["content"] == expected["content"], \
                     f"{pid}: content mismatch"
-                assert props["context"] == expected["context"], \
-                    f"{pid}: context mismatch"
+                assert props["confidence"] == expected["confidence"], \
+                    f"{pid}: confidence mismatch"
                 assert props["pointKind"] == expected["pointKind"], \
                     f"{pid}: pointKind mismatch"
-                assert props["extractedFrom"] == expected["extractedFrom"], \
-                    f"{pid}: extractedFrom mismatch"
+                assert props["validFrom"] == expected["validFrom"], \
+                    f"{pid}: validFrom mismatch"
         finally:
             proj2.close()
