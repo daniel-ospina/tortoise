@@ -48,7 +48,11 @@ try:
                 _proj = _sdk._get_proj()
                 _proj.g.query("RETURN 1")
                 _is_embedded = getattr(_proj, "_is_embedded", True)
-                if not _is_embedded:
+                _ver = getattr(_proj, "_falkordb_version", None)
+                # HNSW vector index requires FalkorDB >= 4.x (mirrors
+                # projection._ensure_indexes). Older servers skip cleanly.
+                hnsw_capable = _ver is None or _ver[0] >= 4
+                if not _is_embedded and hnsw_capable:
                     FALKORDB_AVAILABLE = True
                     _working_uri = _uri
                 break
@@ -131,23 +135,32 @@ class TestHnswAutoUpdate:
             f"expected hnsw247_a in hits, got {hits}"
 
     def test_set_new_embedding_reflects_in_index(self, _graph):
-        """CORE: SET n.embedding = B (far from A) → index serves B immediately.
+        """CORE: SET n.embedding = B (far from A) -> index serves B immediately.
 
         This is the exact workflow projection uses on PointRevised. If the
-        HNSW index did NOT auto-update, the stale A vector would still match
-        queries near A and miss queries near B.
+        HNSW index did NOT auto-update, the stale A vector would keep
+        matching queries near A and miss queries near B.
+
+        Score semantics: queryNodes YIELD score is a DISTANCE (cosine
+        distance = 1 - cos, [0, 2]; smaller = closer). With one vector in the
+        index, KNN returns it for any query — so the assertions compare the
+        DISTANCE before vs after the SET, not top-k membership.
         """
         g = _graph
         vec_a = _vec([(0, 1.0)])     # cluster at dim 0
         vec_b = _vec([(100, 1.0)])   # far away, cluster at dim 100
         self._create(g, "hnsw247_mut", vec_a)
 
-        # Sanity: before the update, near-A finds it, near-B does not.
-        hits_a = self._query(g, _vec([(0, 0.9)]))
-        assert any(hid == "hnsw247_mut" for hid, _ in hits_a)
-        hits_b = self._query(g, _vec([(100, 0.9)]))
-        assert not any(hid == "hnsw247_mut" for hid, _ in hits_b), \
-            f"stale-A should NOT match near-B, got {hits_b}"
+        def _dist(query_vec) -> float:
+            hits = self._query(g, query_vec)
+            for hid, score in hits:
+                if hid == "hnsw247_mut":
+                    return score
+            return 2.0  # absent == maximally far
+
+        # Sanity (distance semantics): near-A is CLOSE (< 0.5), near-B is FAR.
+        assert _dist(_vec([(0, 0.9)])) < 0.5, "vec_a should be close to near-A"
+        assert _dist(_vec([(100, 0.9)])) >= 0.5, "vec_a should be far from near-B"
 
         # The PointRevised update path: SET a new embedding on the same node.
         g.query(
@@ -155,15 +168,12 @@ class TestHnswAutoUpdate:
             params={"id": "hnsw247_mut", "vec": vec_b},
         )
 
-        # Near-B now finds it; near-A no longer ranks it top.
-        hits_b_after = self._query(g, _vec([(100, 0.9)]))
-        assert any(hid == "hnsw247_mut" for hid, _ in hits_b_after), \
-            f"new embedding not served by index after SET: {hits_b_after}"
-
-        hits_a_after = self._query(g, _vec([(0, 0.9)]))
-        stale = [s for hid, s in hits_a_after if hid == "hnsw247_mut"]
-        assert not stale or stale[0] < 0.5, \
-            f"stale vector still top-ranked after SET: {hits_a_after}"
+        # After the SET the index serves the NEW vector: near-B is now CLOSE
+        # and near-A is now FAR. A stale index would report the opposite.
+        assert _dist(_vec([(100, 0.9)])) < 0.5, \
+            "new embedding not served by index after SET (near-B still far)"
+        assert _dist(_vec([(0, 0.9)])) >= 0.5, \
+            "stale vector still served near-A after SET (index did not update)"
 
     def test_unindexed_embedding_updates_stay_queryable_after_recreate(self, _graph):
         """Documentation of behavior: nodes created BEFORE index creation are
@@ -188,18 +198,23 @@ class TestHnswAutoUpdate:
             "YIELD node, score RETURN node.id",
             params={"vec": _vec([(0, 0.9)])},
         ).result_set
-        # After index creation the pre-existing vector MAY be absent until
-        # touched again — a re-write makes it queryable.
-        g.query(
-            "MATCH (n:Document {id: $id}) SET n.embedding = vecf32($vec)",
-            params={"id": "hnsw247_pre", "vec": _vec([(0, 1.0)])},
-        )
-        hits2 = g.query(
-            f"CALL db.idx.vector.queryNodes('Document', 'embedding', 5, vecf32($vec)) "
-            "YIELD node, score RETURN node.id",
-            params={"vec": _vec([(0, 0.9)])},
-        ).result_set
-        g.query("MATCH (n:Document {id: $id}) DETACH DELETE n",
-                params={"id": "hnsw247_pre"})
-        assert any(r[0] == "hnsw247_pre" for r in hits2), \
-            f"re-write should make vector queryable, got {hits2}"
+        # PIN the caveat: a vector written BEFORE index creation is NOT served
+        # by the index (index is write-maintained from creation time).
+        assert not any(r[0] == "hnsw247_pre" for r in hits), \
+            f"pre-index vector should be absent until re-written, got {hits}"
+        try:
+            # A re-write makes it queryable.
+            g.query(
+                "MATCH (n:Document {id: $id}) SET n.embedding = vecf32($vec)",
+                params={"id": "hnsw247_pre", "vec": _vec([(0, 1.0)])},
+            )
+            hits2 = g.query(
+                f"CALL db.idx.vector.queryNodes('Document', 'embedding', 5, vecf32($vec)) "
+                "YIELD node, score RETURN node.id",
+                params={"vec": _vec([(0, 0.9)])},
+            ).result_set
+            assert any(r[0] == "hnsw247_pre" for r in hits2), \
+                f"re-write should make vector queryable, got {hits2}"
+        finally:
+            g.query("MATCH (n:Document {id: $id}) DETACH DELETE n",
+                    params={"id": "hnsw247_pre"})
