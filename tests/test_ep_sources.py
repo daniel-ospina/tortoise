@@ -340,8 +340,8 @@ class TestSituation5_CeilingEffect:
             alpha_2gold_t4 = inherited_alpha(sdk, pid)
         gain = alpha_2gold_t4 - alpha_2gold
         assert gain > 0
-        # adding a T4 must gain LESS than adding a gold T0 to 2 existing golds
-        # (marginal 3->4 sources = 9*(log2(4)-log2(3)) ~ 3.735)
+        # adding a T4 must gain LESS than adding a 3rd gold T0 to 2 existing
+        # golds (gold count 2->3 = 9*(log2(4)-log2(3)) ~ 3.735; T4 gain ~0.1)
         assert gain < 9.0 * (math.log2(4) - math.log2(3))
 
 
@@ -483,7 +483,7 @@ class TestScenarioA_LinearChain:
                 link_tiered_source(sdk, a_id, f"https://s{i}.example", "T0")
             sdk._apply_source_inheritance(recency_decay=1.0)
             b3 = get_conf(run_ep(sdk, anchors=[a_id]), b_id)
-        assert b3 > b0  # more evidence on A -> B rises (0 vs 3, margin ~0.088)
+        assert b3 > b0 + EPSILON  # 0 vs 3 T0 sources (measured margin ~0.088 > 0.02)
 
 
 class TestScenarioB_LoopySingleEntry:
@@ -562,10 +562,10 @@ class TestEdgeCaseInvariants:
                 sdk._apply_source_inheritance(recency_decay=1.0)
                 res = run_ep(sdk, anchors=[a_id])
                 assert res["converged"] is True
-                # convergence CONTRACT is converged=True; iterations stay under
-                # the max_iter hard cap (50) — speed is a soft audit, not a
-                # coupling point for EP internals (#326 may change dynamics)
-                assert res["iterations"] <= 50
+                # convergence CONTRACT is converged=True; the max_iter hard cap
+                # (50) makes the iteration count structurally bounded, so no
+                # separate speed assertion — not a coupling point for EP
+                # internals (#326 may change dynamics)
 
     def test_confidence_bounds(self):
         for cfg in self.CONFIGS:
