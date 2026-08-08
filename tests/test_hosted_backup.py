@@ -1252,6 +1252,48 @@ def test_registry_stamp_lands_in_canonical_registry(monkeypatch):
         reg_sdk.close()
 
 
+def test_restore_live_check_fail_closed_when_list_graphs_fails(monkeypatch):
+    """Live-count query AND list_graphs both failing → RestoreVerificationError
+    (fail closed), temp graph cleaned, live untouched — never a raw 500."""
+    from falkordb import Graph
+
+    _set_env_key(monkeypatch)
+    with tempfile.TemporaryDirectory() as tmp:
+        proj = _make_proj(tmp)
+        _seed(proj.g)
+        registry = proj.db.select_graph("registry_tortoise")
+        registry.query("CREATE (t:Team {id:'team_x', tier:'pro'})")
+        store = MemoryStorage()
+        create_backup(proj, registry, store, team_id="team_x", graph_name="tortoise")
+        dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]
+
+        real_query = Graph.query
+        real_list = type(proj.db).list_graphs
+
+        def _boom_live_query(self, cypher, *a, **k):
+            if "RETURN count(n)" in cypher and self.name == "tortoise":
+                raise ConnectionError("connection died")
+            return real_query(self, cypher, *a, **k)
+
+        def _boom_list_graphs(self):
+            raise ConnectionError("connection died")
+
+        monkeypatch.setattr(Graph, "query", _boom_live_query)
+        monkeypatch.setattr(type(proj.db), "list_graphs", _boom_list_graphs)
+        with pytest.raises(RestoreVerificationError, match="fail closed"):
+            restore_backup(
+                proj.db, registry, store, dump_key,
+                team_id="team_x", graph_name="tortoise",
+            )
+        # restore the real methods, then assert: live untouched, no staging residue
+        monkeypatch.setattr(Graph, "query", real_query)
+        monkeypatch.setattr(type(proj.db), "list_graphs", real_list)
+        assert "tortoise" in set(proj.db.list_graphs())
+        assert not any("_restore_" in g or "_pre_restore_" in g for g in proj.db.list_graphs())
+        assert proj.g.query("MATCH (n) RETURN count(n)").result_set[0][0] == 6
+        proj.close()
+
+
 def test_restore_rejects_non_dump_key():
     with tempfile.TemporaryDirectory() as tmp:
         proj = _make_proj(tmp)

@@ -46,6 +46,7 @@ _NONCE_LEN = 12
 _AES_KEY_SIZE = 32  # AES-256
 _LABEL_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _DUMP_ID_PROP = "__dump_id"  # temp internal-id bridge during restore; removed after edges link
+_EMBED_BATCH = 400  # rows per UNWIND vecf32 re-encode query (falkordb inlines params)
 
 
 class RestoreVerificationError(RuntimeError):
@@ -184,19 +185,22 @@ def restore_graph(g, dump: dict) -> dict:
         else:
             g.query("CREATE (n) SET n = $p", params={"p": props})  # unlabeled node
 
-    # Re-encode vector props as vecf32 in ONE batched pass (the falkordb client
-    # decodes them to plain lists on read; a plain-list embedding would poison
-    # vector search for the whole graph — search_engine.py documents this).
+    # Re-encode vector props as vecf32 in CHUNKED batches (the falkordb client
+    # inlines params into the query header — a single unbounded UNWIND for a
+    # large embedding-heavy graph would exceed socket_timeout/redis bulk
+    # limits; a plain-list embedding would poison vector search — search_engine
+    # documents this).
     embed_rows = [
         {"id": n["dump_id"], "v": n["props"]["embedding"]}
         for n in nodes
         if isinstance(n.get("props", {}).get("embedding"), list)
     ]
-    if embed_rows:
+    for i in range(0, len(embed_rows), _EMBED_BATCH):
+        chunk = embed_rows[i:i + _EMBED_BATCH]
         g.query(
             f"UNWIND $rows AS r MATCH (n {{{_DUMP_ID_PROP}:r.id}}) "
             "SET n.embedding = vecf32(r.v)",
-            params={"rows": embed_rows},
+            params={"rows": chunk},
         )
 
     for e in edges:
@@ -583,7 +587,15 @@ def restore_backup(
     try:
         live_nodes = int(live_g.query("MATCH (n) RETURN count(n)").result_set[0][0])
     except Exception:
-        if graph_name in set(db.list_graphs()):
+        # Fail closed: only a CONFIRMED-absent graph (via GRAPH.LIST) is safe to
+        # proceed on. A query failure OR a list_graphs failure (dead connection —
+        # exactly the incident-time scenario) aborts with the temp cleaned up;
+        # a read failure must never authorize a destructive delete.
+        try:
+            graph_present = graph_name in set(db.list_graphs())
+        except Exception:
+            graph_present = True  # cannot confirm absence → treat as present
+        if graph_present:
             try:
                 temp_g.delete()
             except Exception:

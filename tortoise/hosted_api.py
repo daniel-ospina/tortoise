@@ -1901,7 +1901,9 @@ async def backups_list(team: dict = Depends(get_current_team)):
     if not team_id:
         raise HTTPException(status_code=401, detail="Missing Authorization header")
     try:
-        return {"backups": list_backups(_backup_storage(), team_id)}
+        return {"backups": await asyncio.to_thread(list_backups, _backup_storage(), team_id)}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"List rejected: {e}")
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=f"Backup storage unavailable: {e}")
 
