@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Data Processing Agreement — Tortoise Hosted Service</title>
+  <meta name="description" content="Data Processing Agreement (GDPR Art. 28) for the hosted Tortoise service operated by Premise Labs at tortoise.premiselabs.co.">
+  <meta name="theme-color" content="#060b14">
+  <link rel="canonical" href="https://tortoise.premiselabs.co/dpa">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #060b14;
+      --surface: #0d1a2d;
+      --text: #cbd5e1;
+      --text-dim: #64748b;
+      --accent: #06b6d4;
+      --accent-glow: rgba(6, 182, 212, 0.35);
+      --green: #4ade80;
+      --gold: #f59e0b;
+      --border: #1e293b;
+      --mono: 'SF Mono', 'Cascadia Code', 'Fira Code', 'JetBrains Mono', monospace;
+      --serif: 'Georgia', 'Times New Roman', serif;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--serif);
+      font-size: 16px;
+      line-height: 1.75;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .wrap { max-width: 720px; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
+
+    .topbar { flex-wrap: wrap;
+      display: flex; justify-content: space-between; align-items: baseline; gap: 1rem;
+      margin-bottom: 2.5rem; font-family: var(--mono); font-size: 0.78rem;
+    }
+    .topbar a { color: var(--text-dim); text-decoration: none; }
+    .topbar a:hover { color: var(--accent); }
+    .topbar .host { color: var(--text-dim); }
+
+    .doc-type {
+      font-family: var(--mono); font-size: 0.72rem; text-transform: uppercase;
+      letter-spacing: 0.08em; color: var(--accent); margin-bottom: 0.6rem;
+    }
+
+    h1 {
+      font-family: var(--mono); font-size: 1.5rem; font-weight: 600;
+      color: var(--text); line-height: 1.35; letter-spacing: -0.01em;
+    }
+    .lede { color: var(--text-dim); font-size: 0.95rem; margin-top: 0.75rem; }
+
+    .meta {
+      margin: 1.5rem 0 2.75rem; background: var(--surface);
+      border: 1px solid var(--border); border-radius: 0.75rem;
+      padding: 1rem 1.25rem; display: flex; flex-wrap: wrap; gap: 0.9rem 2.25rem;
+    }
+    .meta .label {
+      display: block; font-family: var(--mono); font-size: 0.64rem;
+      text-transform: uppercase; letter-spacing: 0.08em;
+      color: var(--text-dim); margin-bottom: 0.2rem;
+    }
+    .meta .value { font-family: var(--mono); font-size: 0.82rem; color: var(--text); }
+
+    h2 {
+      font-family: var(--mono); font-size: 1.02rem; font-weight: 600; color: var(--text);
+      margin: 2.75rem 0 0.9rem; padding-top: 1.1rem;
+      border-top: 1px solid rgba(30, 41, 59, 0.6);
+    }
+    h2:first-of-type { border-top: none; margin-top: 0; padding-top: 0; }
+
+    p { margin: 0.85rem 0; }
+    strong { color: var(--text); font-weight: 600; }
+    a { color: var(--accent); text-decoration: none; border-bottom: 1px solid rgba(6, 182, 212, 0.25); }
+    a:hover { color: #22d3ee; border-bottom-color: var(--accent); }
+    code { font-family: var(--mono); font-size: 0.82em; color: #a5f3fc; }
+
+    ul, ol { margin: 0.85rem 0; padding-left: 1.35rem; }
+    li { margin: 0.4rem 0; }
+
+    .callout {
+      background: var(--surface); border: 1px solid var(--border);
+      border-left: 3px solid var(--accent); border-radius: 0.6rem;
+      padding: 1rem 1.25rem; margin: 1.25rem 0;
+    }
+    .callout p { margin: 0.25rem 0; }
+
+    table {
+      width: 100%; border-collapse: collapse; margin: 1rem 0;
+      font-family: var(--mono); font-size: 0.78rem;
+    }
+    th, td {
+      border: 1px solid var(--border); padding: 0.5rem 0.7rem;
+      text-align: left; vertical-align: top; word-break: break-word;
+    }
+    th { background: var(--surface); color: var(--accent); font-weight: 600; }
+    td { color: var(--text); }
+
+    footer {
+      margin-top: 3.5rem; padding-top: 1.25rem; border-top: 1px solid var(--border);
+      font-family: var(--mono); font-size: 0.76rem; color: var(--text-dim);
+    }
+    footer p { margin: 0.4rem 0; }
+    footer a { color: var(--text-dim); border-bottom: 1px solid rgba(100, 116, 139, 0.3); }
+    footer a:hover { color: var(--accent); border-bottom-color: var(--accent); }
+
+    @media (max-width: 480px) {
+      .wrap { padding: 1.5rem 1rem 3rem; }
+      h1 { font-size: 1.28rem; }
+      .meta { flex-direction: column; gap: 0.7rem; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <nav class="topbar">
+      <a href="/">← Back to product</a>
+      <span class="host">tortoise.premiselabs.co</span>
+    </nav>
+
+    <header>
+      <p class="doc-type">Data Processing Agreement</p>
+      <h1>Data Processing Agreement — Tortoise Hosted Service</h1>
+      <p class="lede">This DPA governs the processing of personal data by Daniel Ospina (d/b/a Premise Labs) on behalf of the customer, in accordance with Article 28 of the GDPR.</p>
+      <div class="meta">
+        <div>
+          <span class="label">Last updated</span>
+          <span class="value">2026-08-08</span>
+        </div>
+        <div>
+          <span class="label">Effective date</span>
+          <span class="value">Effective date: 2026-08-08</span>
+        </div>
+        <div>
+          <span class="label">Version</span>
+          <span class="value">1.0</span>
+        </div>
+      </div>
+    </header>
+
+    <main>
+      <div class="callout">
+        <p><strong>Relationship to other documents.</strong> This Data Processing Agreement ("DPA") supplements the Terms of Service for the hosted Tortoise service and is incorporated into it by reference. In the event of any conflict between this DPA and the Terms of Service, this DPA controls with respect to the processing of Personal Data.</p>
+      </div>
+
+      <h2>1. Parties and roles</h2>
+      <p><strong>Processor ("Provider"):</strong> Daniel Ospina (d/b/a Premise Labs), an individual resident in the United States operating under the assumed business name "Premise Labs". Premise Labs is not a registered legal entity; this DPA is made with Daniel Ospina in his individual capacity.</p>
+      <p><strong>Controller ("Customer"):</strong> the individual or entity that accepts this DPA and the Terms of Service, and that determines the purposes and means of the processing of Personal Data.</p>
+      <p>In situations where Customer is a Controller of the Personal Data, Provider is deemed a Processor that is processing Personal Data on behalf of Customer. In situations where Customer is a Processor of the Personal Data, Provider is deemed a Subprocessor.</p>
+
+      <h2>2. Subject matter, nature, and purpose of processing</h2>
+      <p>The subject matter of the processing is the provision of the hosted Tortoise service (tortoise.premiselabs.co) to Customer under the Terms of Service. The nature and purpose of the processing is to deliver, operate, maintain, secure, and support the Service for Customer, including authentication and account administration, usage measurement, and billing administration, as instructed through Customer's use of the Service and as described in the Privacy Policy.</p>
+
+      <h2>3. Duration of processing</h2>
+      <p>Personal Data is processed for the duration of the agreement between the parties, and is then retained only as long as needed to fulfill the purposes described in this DPA and the Privacy Policy, or as required by applicable law. On termination, Personal Data is deleted or returned in accordance with Section 11.</p>
+
+      <h2>4. Categories of personal data and data subjects</h2>
+      <p><strong>Categories of data subjects:</strong> Customer's end users and account holders, including Customer's employees and other individuals authorized to use the Service.</p>
+      <p><strong>Categories of personal data:</strong></p>
+      <ul>
+        <li>Account data — email address, authentication credentials, and account identifiers;</li>
+        <li>Usage data — API requests made, features used, performance signals, and technical metadata;</li>
+        <li>Analytics data — behavioral and technical signals processed by analytics tools when activated with consent (see Section 8);</li>
+        <li>Billing data — transaction and payment records when paid plans are offered.</li>
+      </ul>
+      <p>Special-category personal data is not processed: Customer must not submit sensitive personal data to the Service (see Section 3.3 of the Terms of Service), and such data is not requested or needed for any feature of the Service.</p>
+
+      <h2>5. Processing instructions</h2>
+      <p>Provider processes Personal Data only on documented instructions from Customer, unless required to do so by applicable law (in which case Provider informs Customer of that legal requirement before processing, unless the law prohibits such information on important grounds of public interest). Customer instructs Provider to process Personal Data (a) to provide and maintain the Service; (b) as further specified through Customer's use of the Service; and (c) as documented in the Terms of Service, the Privacy Policy, and this DPA. Provider immediately informs Customer if, in its opinion, an instruction infringes the GDPR or other applicable data protection law.</p>
+
+      <h2>6. Confidentiality</h2>
+      <p>Provider ensures that persons authorized to process Personal Data on its behalf are committed to confidentiality or are under an appropriate statutory obligation of confidentiality (GDPR Art. 28(3)(b)). Provider limits access to Personal Data to what is necessary to operate and support the Service.</p>
+
+      <h2>7. Security of processing</h2>
+      <p>Provider implements appropriate technical and organizational measures to ensure a level of security appropriate to the risk (GDPR Art. 28(3)(c) and Art. 32), including:</p>
+      <ul>
+        <li>encryption of data in transit using TLS;</li>
+        <li>storage of passwords using salted hashing;</li>
+        <li>restriction of access to production systems to authorized personnel, protected by authentication;</li>
+        <li>limitation of access to personal data to what is necessary to operate and support the Service;</li>
+        <li>periodic review of these measures.</li>
+      </ul>
+      <p>These measures are described in more detail in the Privacy Policy, Section 7. No security measures are absolute, and the security of the internet cannot be guaranteed.</p>
+
+      <h2>8. Subprocessors</h2>
+      <p>Customer generally authorizes Provider to engage the subprocessors listed below (GDPR Art. 28(2) and Art. 28(4)). Each subprocessor is engaged under a contract that imposes the same data-protection obligations as set out in this DPA, and subprocessors act only on documented instructions. Provider will notify Customer, through the contact channel in Section 15, of any intended changes to the list of subprocessors, so that Customer may object.</p>
+      <table>
+        <thead>
+          <tr>
+            <th>Subprocessor</th>
+            <th>Processing task</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Supabase</td>
+            <td>Authentication and account records (email/login); database provider</td>
+            <td>In use</td>
+          </tr>
+          <tr>
+            <td>Cloudflare</td>
+            <td>Hosting and delivery of the website and API</td>
+            <td>In use</td>
+          </tr>
+          <tr>
+            <td>GitHub</td>
+            <td>OAuth sign-in; rights-request submissions</td>
+            <td>In use</td>
+          </tr>
+          <tr>
+            <td>Google</td>
+            <td>OAuth sign-in identity provider</td>
+            <td>In use</td>
+          </tr>
+          <tr>
+            <td>Meta (Meta Pixel)</td>
+            <td>Advertising measurement and conversion tracking</td>
+            <td>When activated with consent</td>
+          </tr>
+          <tr>
+            <td>Google Analytics (GA4)</td>
+            <td>Audience and product analytics</td>
+            <td>When activated with consent</td>
+          </tr>
+          <tr>
+            <td>PostHog</td>
+            <td>Product analytics (EU residency in Frankfurt used when configured)</td>
+            <td>When activated with consent</td>
+          </tr>
+          <tr>
+            <td>Stripe</td>
+            <td>Payment processing for paid plans</td>
+            <td>When billing is live</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h2>9. Assistance with data subject rights</h2>
+      <p>Provider assists Customer in fulfilling Customer's obligations to respond to requests from data subjects exercising their rights under the GDPR (GDPR Art. 28(3)(e)), taking into account the nature of the processing. This includes assistance with access, rectification, erasure, restriction, portability, and objection requests, as described in the Privacy Policy, Section 8 and Section 16.</p>
+
+      <h2>10. Assistance with compliance obligations</h2>
+      <p>Provider assists Customer in ensuring compliance with the obligations set out in GDPR Art. 32 (security of processing), Art. 33 and Art. 34 (personal data breach notification), Art. 35 (data protection impact assessments), and Art. 36 (prior consultation), taking into account the nature of the processing and the information available to Provider (GDPR Art. 28(3)(f)).</p>
+      <p><strong>Personal data breaches.</strong> Provider notifies Customer without undue delay after becoming aware of a personal data breach affecting Personal Data processed under this DPA, providing the information available at that time (GDPR Art. 33(2)).</p>
+
+      <h2>11. Deletion and return on termination</h2>
+      <p>At the end of the provision of the services, and at Customer's choice, Provider deletes or returns all Personal Data processed under this DPA and deletes existing copies, unless applicable law requires retention (GDPR Art. 28(3)(g)). Deletion is carried out subject to the retention carve-outs described in the Privacy Policy, Section 6 (billing and transactional records retained as required by law; data in backups retained for a limited additional period to maintain integrity and not used for any other purpose).</p>
+
+      <h2>12. Audits and information</h2>
+      <p>Provider makes available to Customer all information necessary to demonstrate compliance with the obligations laid down in Article 28 of the GDPR, and allows for and contributes to audits, including inspections, conducted by Customer or another auditor mandated by Customer (GDPR Art. 28(3)(h)). Audit requests are made through the contact channel in Section 15 with reasonable prior notice and at a frequency that is proportionate to the processing.</p>
+
+      <h2>13. International transfers</h2>
+      <p>Where Personal Data is transferred from the EU/EEA, the UK, or Switzerland to a country outside those territories, the transfer is protected by appropriate safeguards, including the EU–US, UK Extension, or Swiss–US Data Privacy Framework certifications where the recipient participates, or Standard Contractual Clauses adopted by the European Commission or equivalent safeguards, as described in the Privacy Policy, Section 12. Where PostHog's EU-resident cloud is configured, EU-origin analytics data is stored in Frankfurt.</p>
+
+      <h2>14. Liability</h2>
+      <p>Each party is liable for damage caused by its processing that infringes the GDPR or this DPA, in accordance with GDPR Art. 82, taking into account the apportionment rules of Art. 82(3), (4), and (5). Nothing in this DPA limits or excludes liability to the extent it cannot be limited or excluded under applicable law.</p>
+
+      <h2>15. Contact</h2>
+      <p>To ask a question, send a notice, or make a request under this DPA, open an issue at <a href="https://github.com/daniel-ospina/tortoise/issues">https://github.com/daniel-ospina/tortoise/issues</a>. This is the designated contact channel for all requests under this DPA, including subprocessor-change notices and audit requests.</p>
+
+      <h2>16. Conflicts and governing law</h2>
+      <p>This DPA is governed by the laws of the State of Delaware, without regard to its conflict-of-laws principles. In the event of any conflict between this DPA and the Terms of Service, this DPA controls with respect to the processing of Personal Data.</p>
+    </main>
+
+    <footer>
+      <h2 style="border-top: none; padding-top: 0; margin-top: 0;">Document history / revisions</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Version</th>
+            <th>Effective date</th>
+            <th>Summary</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>1.0</td>
+            <td>2026-08-08</td>
+            <td>Initial publication of the Data Processing Agreement.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <p>Based on the Common Paper Data Processing Agreement Standard Terms v1.1, CC BY 4.0. The original template is available at <a href="https://commonpaper.com">https://commonpaper.com</a>.</p>
+      <p>Premise Labs · Tortoise · <a href="/">Back to product</a></p>
+    </footer>
+  </div>
+</body></html>
