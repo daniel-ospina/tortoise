@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import sys
+import pytest
 import uuid
 from pathlib import Path
 
@@ -27,6 +28,23 @@ os.environ["TORTOISE_DB_URI"] = (
 from tortoise.sdk import TortoiseSDK
 from tortoise.ep import TortoiseEP
 from tortoise.weights import compute_operator_weight
+
+# Requires live FalkorDB (Docker). Skip gracefully when unavailable so the
+# no-Docker embedded suite stays green (AGENTS.md). Mirrors the probe pattern
+# in tests/test_integration_search.py.
+FALKORDB_AVAILABLE = False
+try:
+    from tortoise.sdk import TortoiseSDK as _ProbeSDK
+    _probe = _ProbeSDK()
+    _probe._get_proj().g.query("RETURN 1")
+    _probe.close()
+    FALKORDB_AVAILABLE = True
+except Exception:
+    pass
+
+pytestmark = pytest.mark.skipif(
+    not FALKORDB_AVAILABLE, reason="Live FalkorDB (Docker) not available")
+
 
 
 # ═══════════════════════════════════════════════════════════════════
