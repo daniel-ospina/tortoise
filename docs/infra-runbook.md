@@ -113,6 +113,23 @@ install defeats the purpose of hosting locally.
   resolves `FALKORDB_CLOUD_URI` → `TORTOISE_DB_URI` at runtime (entrypoint.sh).
 - Restart the MCP server after changing the URI (resolved once at startup).
 
+**Self-hosted authenticated MCP (`serve --http`, #702):** local stdio is
+dev-mode only (no auth tokens on stdio — setting `TORTOISE_API_KEY` disables
+it). For an authenticated local MCP endpoint:
+
+```bash
+tortoise key create                    # bootstrap a local registry team + tt_ key
+TORTOISE_DB_PATH=~/.tortoise/tortoise.db tortoise serve --http   # tenant auth, binds 127.0.0.1:8000
+```
+
+- Client config: `url http://127.0.0.1:8000/mcp`, header `Authorization: Bearer tt_<key>`.
+- HTTP (tenant) mode uses a fresh `team_{id}` namespace — existing stdio data
+  stays in the `tortoise` graph (no automatic migration).
+- `--auth static` (single `TORTOISE_API_KEY`/`--api-key`) and `--auth none`
+  (localhost eval, NO auth) are available; default bind 127.0.0.1.
+- Changing `TORTOISE_SECRET_PEPPER` invalidates all local keys (re-run
+  `tortoise key create`).
+
 Do **not** commit `.env` (gitignored) and do **not** put DB credentials in
 `.mcp.json`.
 

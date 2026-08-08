@@ -2198,7 +2198,149 @@ def _cmd_decide(args) -> int:
     return 0
 
 
+def _cmd_serve_http(args) -> int:
+    """Serve the Tortoise MCP server over HTTP (streamable) for self-hosted use.
+
+    Auth modes (mirrors create_http_app):
+      tenant (default) — registry tt_ keys (bootstrap with `tortoise key create`)
+      static           — single key (--api-key or TORTOISE_API_KEY)
+      none             — no auth, localhost-bound eval only
+    """
+    import os
+    import sys
+
+    from tortoise.sdk import TortoiseSDK
+    from tortoise.config import resolve_db_path
+    from tortoise.mcp_server import create_http_app
+
+    # ── Resolve the DB target (single canonical source; print for diagnostics) ──
+    db_uri = os.environ.get("TORTOISE_DB_URI", "")
+    if db_uri.startswith(("docker://", "redis://", "rediss://")):
+        print(f"serve --http: DB target = {db_uri.split('@')[-1]}")
+        if not db_uri.startswith("docker://"):
+            print("  ⚠️  Remote/cloud DB target — any local process holding a key drives this graph.")
+    else:
+        db_path = os.environ.get("TORTOISE_DB_PATH") or resolve_db_path()
+        print(f"serve --http: DB target = {db_path}")
+
+    # ── Tenant mode: note the fresh-namespace semantics for existing stdio data ──
+    if args.auth == "tenant" and not db_uri.startswith(("docker://", "redis://", "rediss://")):
+        db_path = os.environ.get("TORTOISE_DB_PATH") or resolve_db_path()
+        try:
+            if os.path.exists(db_path):
+                print("  ℹ️  HTTP (tenant) mode uses a fresh team_{id} namespace — existing stdio data")
+                print("      remains in the 'tortoise' graph. See docs/infra-runbook.md §4.5.")
+        except Exception:
+            pass
+
+    origins = ["http://127.0.0.1:*", "http://localhost:*"]
+    if args.auth == "tenant":
+        # Inject the registry SDK built from the SAME canonical DB as the team
+        # SDK (avoids the /data default divergence — #702).
+        registry_sdk = TortoiseSDK(namespace="registry")
+        app = create_http_app(allowed_origins=origins, _registry_sdk=registry_sdk,
+                              auth_mode="tenant")
+        print("serve --http: auth = tenant (Bearer tt_ keys; bootstrap with `tortoise key create`)")
+    elif args.auth == "static":
+        api_key = args.api_key or os.environ.get("TORTOISE_API_KEY")
+        if not api_key:
+            print("❌ serve --http --auth static requires --api-key or TORTOISE_API_KEY", file=sys.stderr)
+            return 1
+        app = create_http_app(allowed_origins=origins, auth_mode="static", api_key=api_key)
+        print("serve --http: auth = static (single key)")
+    else:  # none
+        app = create_http_app(allowed_origins=origins, auth_mode="none")
+        print("serve --http: auth = none (localhost eval — NO auth; do not expose on a network)")
+
+    if args.bind != "127.0.0.1":
+        print(f"⚠️  Non-loopback bind {args.bind} — MCP is reachable on your network; ensure auth is enforced.")
+
+    import uvicorn
+    from fastapi import FastAPI
+    from contextlib import asynccontextmanager
+
+    # FastMCP's StreamableHTTPSessionManager lifespan must be composed into the
+    # parent app (Starlette Mount does not run mounted-app lifespans — same
+    # pattern as hosted_api._lifespan).
+    @asynccontextmanager
+    async def _local_lifespan(_app):
+        async with app.lifespan(app):
+            yield
+
+    # Wrap and mount at /mcp for parity with the hosted endpoint (keeps the
+    # mcp_metadata route truthful and the client URL familiar).
+    wrapper = FastAPI(lifespan=_local_lifespan)
+    wrapper.mount("/mcp", app)
+    print(f"Tortoise MCP (streamable-http) → http://{args.bind}:{args.port}/mcp")
+    uvicorn.run(wrapper, host=args.bind, port=args.port, log_level="info")
+    return 0
+
+
+def _cmd_key_create(args) -> int:
+    """Bootstrap a local registry team + tt_ API key for `serve --http --auth tenant`.
+
+    Mirrors hosted /internal/provision: Team + APIKey nodes in the registry
+    graph, TeamMeta in the team_{team_id} graph. Prints ONLY the apikey_create
+    key (the one apikey_verify actually matches — team_create's returned key
+    is stored on the Team node and never verifies).
+    """
+    import os
+    import sys
+    from datetime import datetime, timezone
+
+    from tortoise.sdk import TortoiseSDK
+
+    db_uri = os.environ.get("TORTOISE_DB_URI", "")
+    if db_uri.startswith(("docker://", "redis://", "rediss://")):
+        print(f"key create: registry at {db_uri.split('@')[-1]}")
+        if not db_uri.startswith("docker://"):
+            print("  ⚠️  Remote/cloud registry — key created on that instance.")
+    else:
+        from tortoise.config import resolve_db_path
+        print(f"key create: registry at {os.environ.get('TORTOISE_DB_PATH') or resolve_db_path()}")
+
+    sdk = TortoiseSDK(namespace="registry")
+    reg = sdk._get_registry()
+
+    # Find an existing team with this name (idempotent re-runs), else create.
+    team_id = None
+    rows = reg.query("MATCH (t:Team) RETURN t.id, t.name").result_set or []
+    for tid, tname in rows:
+        if tname == args.name:
+            team_id = tid
+            print(f"  ℹ️  Team {args.name!r} already exists — reusing.")
+            break
+    if team_id is None:
+        result = sdk.team_create(args.name)
+        team_id = result["id"]
+        print(f"  ✅ Team {args.name!r} created (id {team_id})")
+
+    # Seed the team_{team_id} graph the tools actually resolve (hosted parity).
+    try:
+        now = datetime.now(timezone.utc).isoformat()
+        team_graph = sdk._get_proj().db.select_graph(f"team_{team_id}")
+        team_graph.query(
+            "CREATE (:TeamMeta {name: $name, created: $now})",
+            params={"name": args.name, "now": now},
+        )
+    except Exception as e:
+        print(f"  ⚠️  Could not seed team graph: {e}", file=sys.stderr)
+
+    # Create the verifiable API key and print ONLY this one.
+    key = sdk.apikey_create(team_id, created_by="local-cli")
+    print()
+    print(f"✅ Created API key: {key['api_key']}")
+    print("   Store it securely — the plaintext is shown once.")
+    print()
+    print("Use it with:")
+    print("   tortoise serve --http --auth tenant")
+    print(f"   MCP client url:      http://127.0.0.1:8000/mcp")
+    print("   Authorization header: Bearer <key>")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
+    import os as _os
 
     p = argparse.ArgumentParser(prog="tortoise", exit_on_error=False)
     sp = p.add_subparsers(dest="cmd")
@@ -2229,7 +2371,20 @@ def main(argv: list[str] | None = None) -> int:
     mc.add_argument("transcript", help="Path to transcript file (Speaker: text format)")
     mc.add_argument("--source-id", default=None, help="Source identifier (default: basename of transcript)")
     mc.add_argument("--db", default=None, help="FalkorDB docker:// URI for projection")
-    sr = sp.add_parser("serve", help="Start Tortoise MCP server (stdio)")
+    sr = sp.add_parser("serve", help="Start Tortoise MCP server (stdio, default) or local HTTP (--http)")
+    sr.add_argument("--http", action="store_true",
+                    help="Serve MCP over HTTP (streamable) instead of stdio — self-hosted authenticated mode")
+    sr.add_argument("--bind", default="127.0.0.1", help="HTTP bind address (default 127.0.0.1)")
+    sr.add_argument("--port", type=int, default=8000, help="HTTP port (default 8000)")
+    sr.add_argument("--auth", choices=["tenant", "static", "none"], default="tenant",
+                    help="HTTP auth mode: tenant = registry tt_ keys (default; bootstrap with 'tortoise key create'), "
+                         "static = single key (--api-key or TORTOISE_API_KEY), none = localhost eval (NO auth)")
+    sr.add_argument("--api-key", dest="api_key", default=None,
+                    help="Static auth key (requires --auth static)")
+    kr = sp.add_parser("key", help="API-key management (self-hosted HTTP auth)")
+    key_sp = kr.add_subparsers(dest="key_cmd")
+    kc = key_sp.add_parser("create", help="Create a local registry team + tt_ API key for 'serve --http --auth tenant'")
+    kc.add_argument("--name", default="local", help="Team name (default 'local')")
     init = sp.add_parser("init", help="Auto-detect FalkorDB and create default graph")
     init.add_argument("--path", default=None, help="Path for embedded mode (opt-in)")
     init.add_argument("--yes", "-y", action="store_true", help="Skip prompts, auto-index repo")
@@ -2350,9 +2505,21 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Restored {result['events']} events — {result['status']}")
         return 0
     elif args.cmd == "serve":
+        if getattr(args, "http", False):
+            return _cmd_serve_http(args)
+        # Startup warning for the #702 trap: stdio + TORTOISE_API_KEY rejects
+        # every tool (or crashes at import without a pepper).
+        if _os.environ.get("TORTOISE_API_KEY"):
+            print("⚠️  TORTOISE_API_KEY is set — stdio MCP will reject all tools.", file=sys.stderr)
+            print("    Self-hosted auth: use 'tortoise serve --http' instead. Dev mode: unset TORTOISE_API_KEY.", file=sys.stderr)
         from tortoise.mcp_server import main as serve_main
         serve_main()
         return 0
+    elif args.cmd == "key":
+        if args.key_cmd == "create":
+            return _cmd_key_create(args)
+        print("tortoise key: unknown subcommand. Try: tortoise key create --help", file=sys.stderr)
+        return 1
     elif args.cmd == "mine-conversation":
         return _cmd_mine_conversation(args)
     elif args.cmd == "init":
