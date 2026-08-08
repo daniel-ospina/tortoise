@@ -237,6 +237,7 @@ class BackupStorage(Protocol):
     def download(self, key: str) -> bytes: ...
     def list(self, prefix: str) -> list[str]: ...
     def delete(self, key: str) -> None: ...
+    def create_if_not_exists(self, key: str, data: bytes) -> bool: ...
 
 
 def _r2_endpoint_from_env() -> str:
@@ -303,6 +304,49 @@ class R2Storage:
         except Exception as e:
             raise RuntimeError(f"R2 upload failed for {key}: {e}") from e
 
+    def create_if_not_exists(self, key: str, data: bytes) -> bool:
+        """Create ``key`` ONLY if it does not exist (S3 ``IfNoneMatch='*'``).
+
+        Returns True on create, False if the object already exists. This is the
+        dedup linearization point for the alert store — the R2 object is the
+        authority, so a simultaneous creator/adopter race resolves here.
+
+        Fallback (HEAD-check) applies if the store rejects conditional writes:
+        the dedup authority must never silently degrade to unconditional puts.
+        """
+        try:
+            self._s3().put_object(
+                Bucket=self._bucket, Key=key, Body=data, IfNoneMatch="*"
+            )
+            return True
+        except Exception as e:
+            # 412 PreconditionFailed — the object already exists (the expected
+            # race outcome). boto3 surfaces it as a ClientError.
+            try:
+                from botocore.exceptions import ClientError
+
+                if isinstance(e, ClientError) and str(e.response.get("Error", {}).get("Code", "")) in (
+                    "PreconditionFailed",
+                    "ConditionalRequestConflict",
+                    "412",
+                ):
+                    return False
+            except ImportError:
+                pass
+            # Fallback: conditional writes unsupported (or non-412 error) →
+            # HEAD-check. Never blind-put over an existing object.
+            try:
+                self._s3().head_object(Bucket=self._bucket, Key=key)
+                return False  # exists → not created
+            except Exception:
+                pass
+            # Does not exist (or HEAD unsupported) — safe to create.
+            try:
+                self._s3().put_object(Bucket=self._bucket, Key=key, Body=data)
+                return True
+            except Exception as e2:
+                raise RuntimeError(f"R2 create_if_not_exists failed for {key}: {e2}") from e2
+
     def download(self, key: str) -> bytes:
         try:
             resp = self._s3().get_object(Bucket=self._bucket, Key=key)
@@ -351,6 +395,12 @@ class MemoryStorage:
 
     def delete(self, key: str) -> None:
         self._objects.pop(key, None)
+
+    def create_if_not_exists(self, key: str, data: bytes) -> bool:
+        if key in self._objects:
+            return False
+        self._objects[key] = data
+        return True
 
 
 # ── pipeline ─────────────────────────────────────────────────────────────────
@@ -451,18 +501,32 @@ def restore_backup(
     team_id: str,
     graph_name: str,
     key: bytes | None = None,
+    target_graph: str | None = None,
+    drill: bool = False,
 ) -> dict:
     """Restore a team graph from a stored backup: verify → temp graph → swap.
 
     ``db``: falkordb Connection handle (e.g. ``sdk._get_proj().db``) — temp graph and
     the live graph live on the same server.
-    Flow: restore into ``{graph_name}_restore_{ts}_{rnd}`` → verify node+edge counts
+
+    ``target_graph`` (drill mode): when set, ALL live-phase operations (empty-guard
+    read, pre-restore safety copy, live delete, swap copy) bind to ``target_graph``
+    while the fail-closed graph-ISOLATION checks (manifest + decrypted payload) bind
+    to the canonical ``graph_name``. This is what makes a drill scratch-only: it
+    restores a real team archive into ``_drill_*`` and can never touch the live team
+    graph. Staging/pre-restore names derive from ``target_graph``.
+
+    ``drill``: skips the registry end-stamp (``Team.backup_restored_at``) so a drill
+    performs ZERO production writes.
+
+    Flow: restore into ``{live}_restore_{ts}_{rnd}`` → verify node+edge counts
     against the decrypted payload → empty-backup-over-live guard → pre-restore safety
     copy of the live graph → delete live → GRAPH.COPY temp → live → cleanup staging
     and pre-restore copies. Any failure before the swap leaves the live graph
     untouched; a swap failure leaves the verified temp + pre-restore copies intact.
     """
     _validate_team_id(team_id)
+    live_name = target_graph or graph_name
     if not backup_key.endswith("dump.enc"):
         raise ValueError("backup_key must reference a dump.enc object")
     # Tenant isolation: the backup must belong to the requesting team.
@@ -528,8 +592,8 @@ def restore_backup(
     # millisecond must not share a staging graph (a retry racing the original
     # would contaminate counts).
     ts_str = f"{ts.strftime('%Y%m%dT%H%M%S')}{ts.microsecond // 1000:03d}Z_{secrets.token_hex(4)}"
-    temp_name = f"{graph_name}_restore_{ts_str}"
-    pre_name = f"{graph_name}_pre_restore_{ts_str}"
+    temp_name = f"{live_name}_restore_{ts_str}"
+    pre_name = f"{live_name}_pre_restore_{ts_str}"
     temp_g = db.select_graph(temp_name)
     try:
         counts = restore_graph(temp_g, payload)
@@ -583,7 +647,7 @@ def restore_backup(
     # count read FAILS CLOSED: a query failure is NOT treated as "graph
     # missing" — only a confirmed-absent graph (via list_graphs) is safe to
     # proceed on. A read failure must never authorize a destructive delete.
-    live_g = db.select_graph(graph_name)
+    live_g = db.select_graph(live_name)
     try:
         live_nodes = int(live_g.query("MATCH (n) RETURN count(n)").result_set[0][0])
     except Exception:
@@ -592,7 +656,7 @@ def restore_backup(
         # exactly the incident-time scenario) aborts with the temp cleaned up;
         # a read failure must never authorize a destructive delete.
         try:
-            graph_present = graph_name in set(db.list_graphs())
+            graph_present = live_name in set(db.list_graphs())
         except Exception:
             graph_present = True  # cannot confirm absence → treat as present
         if graph_present:
@@ -636,11 +700,11 @@ def restore_backup(
     except Exception as e:
         logger.warning("live graph delete failed (proceeding to copy): %s", e)
     try:
-        temp_g.copy(graph_name)
+        temp_g.copy(live_name)
     except Exception as e:
         logger.exception(
             "GRAPH.COPY temp→live failed for %s — temp graph %s intact",
-            graph_name, temp_name,
+            live_name, temp_name,
         )
         raise RuntimeError(
             f"Restore swap failed — verified temp graph {temp_name} intact: {e}"
@@ -653,13 +717,14 @@ def restore_backup(
             except Exception as e:
                 logger.warning("cleanup of %s failed: %s", getattr(g, "name", "?"), e)
 
-    try:
-        registry.query(
-            "MATCH (t:Team {id:$id}) SET t.backup_restored_at = $ts",
-            params={"id": team_id, "ts": datetime.now(timezone.utc).isoformat()},
-        )
-    except Exception as e:  # best-effort metadata
-        logger.warning("registry restore stamp failed for %s: %s", team_id, e)
+    if not drill:
+        try:
+            registry.query(
+                "MATCH (t:Team {id:$id}) SET t.backup_restored_at = $ts",
+                params={"id": team_id, "ts": datetime.now(timezone.utc).isoformat()},
+            )
+        except Exception as e:  # best-effort metadata
+            logger.warning("registry restore stamp failed for %s: %s", team_id, e)
 
     return {
         "backup_key": backup_key,
@@ -669,10 +734,25 @@ def restore_backup(
 
 
 def prune_backups(
-    storage: BackupStorage, team_id: str, keep_daily: int = 7, keep_weekly: int = 4
+    storage: BackupStorage,
+    team_id: str,
+    keep_daily: int = 7,
+    keep_weekly: int = 4,
+    *,
+    keep_hourly: int = 0,
 ) -> list[str]:
     """Delete old backups: keep ``keep_daily`` newest, plus ``keep_weekly`` weekly
     anchors (one per ISO week) beyond the daily window. Returns deleted backup_ids.
+
+    ``keep_hourly=0`` (default) preserves the legacy behavior byte-for-byte:
+    keep ALL backups younger than ``keep_daily`` days.
+
+    ``keep_hourly>0`` (sub-daily cadence) REPLACES the daily keep-all rule:
+    keep ALL backups younger than ``keep_hourly`` hours, then one anchor per
+    UTC hour-bucket for ages between ``keep_hourly`` and ``keep_daily`` days
+    (bounded by the daily horizon), then the ``keep_weekly`` weekly anchors.
+    This bounds a team at hourly cadence to ~24 hourly + ~7 daily-anchors + 4
+    weekly instead of ~168 objects/week.
 
     Delete-path trust: objects are keyed by the STORAGE KEY they were found
     under, never by a manifest's self-declared ``backup_id`` — a forged or
@@ -682,6 +762,8 @@ def prune_backups(
     now = datetime.now(timezone.utc)
     deleted: list[str] = []
     kept_weekly: set[tuple[int, int]] = set()
+    kept_hour_buckets: set[tuple[int, int, int, int]] = set()
+    hourly_mode = keep_hourly > 0
 
     # Newest first by the key-derived backup_id (from the listing prefix).
     manifest_keys = sorted(
@@ -712,8 +794,6 @@ def prune_backups(
             created = datetime.fromisoformat(str(created_at))
             if created.tzinfo is None:
                 created = created.replace(tzinfo=timezone.utc)  # naive → assume UTC
-            if (now - created).days < keep_daily:
-                continue  # inside daily window — keep
         except (ValueError, TypeError):
             # corrupt/naive-mismatch timestamps are deleted — a bad date must
             # never abort pruning of the team's other backups
@@ -721,11 +801,30 @@ def prune_backups(
             for suffix in ("dump.enc", "manifest.json"):
                 storage.delete(f"backups/{backup_id}/{suffix}")
             continue
-        iso = created.isocalendar()
-        week = (iso.year, iso.week)
-        if week not in kept_weekly and len(kept_weekly) < keep_weekly:
-            kept_weekly.add(week)
-            continue
+
+        # Hourly window (sub-daily mode): keep everything younger than
+        # keep_hourly hours.
+        if hourly_mode:
+            age_hours = (now - created).total_seconds() / 3600.0
+            if age_hours < keep_hourly:
+                continue
+
+        if (now - created).days < keep_daily:
+            if hourly_mode:
+                # Hour anchor: keep the newest per UTC hour-bucket within the
+                # daily horizon (bounded — no anchors beyond keep_daily days).
+                bucket = (created.year, created.month, created.day, created.hour)
+                if bucket not in kept_hour_buckets:
+                    kept_hour_buckets.add(bucket)
+                    continue
+            else:
+                continue  # inside daily window — keep (legacy keep-all)
+        else:
+            iso = created.isocalendar()
+            week = (iso.year, iso.week)
+            if week not in kept_weekly and len(kept_weekly) < keep_weekly:
+                kept_weekly.add(week)
+                continue
         deleted.append(backup_id)
         for suffix in ("dump.enc", "manifest.json"):
             storage.delete(f"backups/{backup_id}/{suffix}")

@@ -12,9 +12,10 @@ import asyncio
 import json as _json
 import logging
 import os
+import threading
 import time
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import RedirectResponse
@@ -121,6 +122,47 @@ async def _lifespan(app):
             threading.Thread(target=_prewarm_embeddings, name="embedding-prewarm", daemon=True).start()
         except Exception as exc:  # noqa: BLE001
             _logger.warning("embeddings: could not start background pre-warm: %s", exc)
+
+        # Backup watcher (driver-disabled leg, #596): a read-only staleness
+        # daemon that files GitHub issues + pushes Telegram ITSELF, so the
+        # driver-disabled case is covered by construction. Spawned only when
+        # the sweep config validates (fail-closed default keeps TestClient and
+        # misconfigured deploys quiet) and not explicitly disabled for tests.
+        global _WATCHER
+        try:
+            cfg = _backup_config_safe()
+            if cfg and os.environ.get("BACKUP_WATCHER_DISABLED") != "1":
+                from tortoise.backup_sweep import read_team_state
+                from tortoise.backup_watcher import BackupWatcher, WatcherThread
+
+                reg_sdk = _registry_sdk()
+                registry = reg_sdk._get_registry()
+
+                def _sweep_teams() -> list[str]:
+                    from tortoise.backup_sweep import enumerate_teams
+
+                    try:
+                        return enumerate_teams(registry)
+                    except Exception as exc:  # noqa: BLE001 — fail-closed, never crash
+                        _logger.warning("watcher team enumeration failed: %s", exc)
+                        return []
+
+                watcher = BackupWatcher(
+                    _backup_storage(), _alert_store_from(cfg),
+                    team_provider=_sweep_teams,
+                    state_reader=read_team_state,
+                    driver_heartbeat_reader=lambda: _read_driver_heartbeat(),
+                    stale_threshold_min=cfg.stale_threshold_min,
+                    driver_down_threshold_min=cfg.driver_down_threshold_min,
+                    grace_min=cfg.watcher_grace_min,
+                    simulate_enabled=cfg.simulate_enabled,
+                    kill_switch_off=lambda: _backup_config_safe() is None,
+                )
+                _WATCHER = WatcherThread(watcher, interval_seconds=cfg.watcher_poll_seconds)
+                _WATCHER.start()
+                _boot_gc_drill_graphs(reg_sdk._get_proj().db)
+        except Exception as exc:  # noqa: BLE001 — never crash the app
+            _logger.warning("backup watcher could not start: %s", exc)
         yield
 
 
@@ -1376,7 +1418,7 @@ async def revoke_api_key(key_id: str, team: dict = Depends(get_current_team)):
             raise HTTPException(status_code=403, detail="Not your API key")
         if rows[0][1] is not None:
             return {"revoked": True, "already": True, "key_id": key_id}
-        from datetime import datetime, timezone
+        from datetime import datetime, timedelta, timezone
         now = datetime.now(timezone.utc).isoformat()
         sdk._get_registry().query(
             "MATCH (k:APIKey {id: $id}) SET k.revoked_at = $now",
@@ -1418,7 +1460,7 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
     points quota → 402; per-turn extraction cap (in the loop).
     """
     import uuid, re
-    from datetime import datetime, timezone
+    from datetime import datetime, timedelta, timezone
     from tortoise.quota import (
         MAX_EXTRACTIONS_PER_TURN, MAX_SESSION_TURNS,
         QuotaCheckError, QuotaExceededError, enforce_team_limit,
@@ -1787,7 +1829,7 @@ async def invite_to_team(body: dict, user: dict = Depends(get_current_user)):
 
     # Invitation node via SDK (token returned once); roles admin/member allowed here
     import uuid as _uuid
-    from datetime import datetime, timezone as _tz, timedelta
+    from datetime import datetime, timedelta, timezone as _tz, timedelta
     from tortoise.auth import hash_api_key as _hash
 
     dup = reg.query(
@@ -1936,7 +1978,7 @@ async def change_member_role(team_id: str, user_id: str, body: dict, user: dict 
 @app.post("/v1/internal/reconcile")
 async def reconcile(request: Request):
     _check_internal(request)
-    from datetime import datetime, timezone as _tz
+    from datetime import datetime, timedelta, timezone as _tz
     sdk = _make_sdk(namespace="registry")
     reg = sdk._get_registry()
     now = datetime.now(_tz.utc).isoformat()
@@ -1976,7 +2018,7 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
       at cap, auto-revokes the oldest orphaned key so recovery never dead-ends.
     """
     import uuid as _uuid
-    from datetime import datetime, timezone as _tz, timedelta
+    from datetime import datetime, timedelta, timezone as _tz, timedelta
     from tortoise.auth import hash_api_key as _hash
     from tortoise.pricing import tier_limits
 
@@ -2665,6 +2707,311 @@ async def backups_restore(body: BackupRestoreRequest, team: dict = Depends(get_c
             if registry_sdk is not None:
                 registry_sdk.close()
     return result
+
+
+# ── Backup sweep / DR alerting (#596) ──────────────────────────────────
+# Per-team knowledge-graph protection: scheduled sweep driver, dual-watcher
+# alerting (GitHub issue + Telegram), drill-only restore. Fail-closed: every
+# endpoint 503s when the sweep is disabled (config missing or BACKUP_SWEEP_ENABLED
+# not true).
+
+_WATCHER: "BackupWatcher | None" = None  # spawned in _lifespan (driver-disabled leg)
+_DRIVER_HEARTBEAT_KEY = "ops/driver-heartbeat.json"
+_LAST_DRILL_AT: float = 0.0  # in-memory drill cooldown (single-instance, resets on restart)
+_DRILL_COOLDOWN_S = 3600
+_SWEEP_TEAM_LOCKS: dict[str, threading.Lock] = {}
+_SWEEP_LOCKS_GUARD = threading.Lock()
+
+
+def _backup_config_safe() -> "BackupConfig | None":
+    """Sweep config, or None when disabled (fail-closed)."""
+    from tortoise.backup_config import ConfigError, load_config
+
+    try:
+        cfg = load_config()
+    except ConfigError as e:
+        _logger.warning("backup sweep config invalid: %s", e)
+        return None
+    return cfg if cfg.enabled else None
+
+
+def _alert_store_from(cfg) -> "AlertStore":
+    from tortoise import github_issue as gi
+    from tortoise.alert_store import AlertStore, telegram_send
+
+    storage = _backup_storage()
+
+    def file_issue(title: str, body: str) -> int:
+        return gi.create_issue(
+            cfg.gh_repo, cfg.github_issues_pat, title=title, body=body,
+            assignee=cfg.alert_assignee,
+        )
+
+    def close_issue(number: int, comment: str | None = None) -> None:
+        gi.close_issue(cfg.gh_repo, cfg.github_issues_pat, number, comment)
+
+    def search_open(kind: str) -> list[int]:
+        return gi.search_open_incident(cfg.gh_repo, cfg.github_issues_pat, kind)
+
+    def push_telegram(text: str) -> None:
+        telegram_send(cfg.telegram_bot_token, cfg.telegram_chat_id, text)
+
+    return AlertStore(
+        storage, file_issue=file_issue, close_issue=close_issue,
+        search_open=search_open, push_telegram=push_telegram,
+        repo=cfg.gh_repo, assignee=cfg.alert_assignee,
+    )
+
+
+def _sweep_team_lock(team_id: str) -> threading.Lock:
+    with _SWEEP_LOCKS_GUARD:
+        return _SWEEP_TEAM_LOCKS.setdefault(team_id, threading.Lock())
+
+
+def _read_driver_heartbeat() -> dict:
+    try:
+        parsed = _json.loads(_backup_storage().download(_DRIVER_HEARTBEAT_KEY))
+        return parsed if isinstance(parsed, dict) else {}
+    except (KeyError, ValueError):
+        return {}
+
+
+def _boot_gc_drill_graphs(db, max_age_hours: float = 6.0) -> None:
+    """Sweep drill/restore scratch graphs left by a mid-drill crash. A crash
+    mid-drill would otherwise leave a full team snapshot on the production
+    instance under a scratch name (Task 7 acceptance; boot-time GC)."""
+    from datetime import timedelta as _td
+
+    try:
+        graphs = db.list_graphs()
+    except Exception as exc:  # noqa: BLE001
+        _logger.warning("drill-graph GC: list failed: %s", exc)
+        return
+    now = datetime.now(timezone.utc)
+    patterns = ("_drill_", "registry_drill_", "_restore_", "_pre_restore_")
+    for name in graphs:
+        if not any(p in name for p in patterns):
+            continue
+        try:
+            g = db.select_graph(name)
+            # Best-effort age: the graph has no reliable mtime — only sweep
+            # graphs whose name carries a parseable timestamp, else leave for
+            # the runbook's manual cleanup.
+            ts_part = name.rsplit("_", 1)[-1]
+            created = datetime.strptime(ts_part, "%Y%m%dT%H%M%S%fZ").replace(tzinfo=timezone.utc)
+            if (now - created).total_seconds() / 3600.0 > max_age_hours:
+                g.delete()
+                _logger.info("drill-graph GC removed %s", name)
+        except Exception:
+            continue
+
+
+@app.post("/v1/internal/backups/sweep")
+async def backups_sweep(request: Request):
+    """Run the per-team backup sweep (driver's core action). Internal-key only."""
+    _check_internal(request)
+    cfg = _backup_config_safe()
+    if cfg is None:
+        raise HTTPException(status_code=503, detail="Backup sweep disabled")
+    from tortoise.backup_sweep import run_backup_sweep
+
+    reg_sdk = _registry_sdk()
+    registry = reg_sdk._get_registry()
+    db = reg_sdk._get_proj().db
+    storage = _backup_storage()
+
+    def lock_for(team_id: str):
+        return _sweep_team_lock(team_id)
+
+    try:
+        result = await asyncio.to_thread(
+            run_backup_sweep, db=db, registry=registry, storage=storage,
+            config=cfg, lock_for=lock_for,
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=f"Sweep failed: {e}")
+
+    alerts = _alert_store_from(cfg)
+    for inc in result.get("incidents", []):
+        await asyncio.to_thread(
+            alerts.open_incident, inc["kind"], inc.get("team_id", ""), inc.get("detail")
+        )
+    return result
+
+
+@app.get("/v1/internal/backups/status")
+async def backups_status(request: Request):
+    """Operator/driver status — per-team tri-state, watcher + driver liveness."""
+    _check_internal(request)
+    from tortoise.backup_config import ConfigError, load_config
+    from tortoise.backup_sweep import read_ops_state
+    from tortoise.backup_watcher import HEARTBEAT_KEY
+
+    try:
+        cfg = load_config()
+    except ConfigError:
+        cfg = None
+    storage = _backup_storage()
+    watcher = _WATCHER
+    now = datetime.now(timezone.utc)
+    watcher_status = watcher._watcher._last_status if watcher else {}
+    hb = {}
+    try:
+        parsed = _json.loads(storage.download(HEARTBEAT_KEY))
+        hb = parsed if isinstance(parsed, dict) else {}
+    except (KeyError, ValueError):
+        pass
+    driver_hb = {}
+    try:
+        parsed = _json.loads(storage.download(_DRIVER_HEARTBEAT_KEY))
+        driver_hb = parsed if isinstance(parsed, dict) else {}
+    except (KeyError, ValueError):
+        pass
+
+    watcher_age_min = None
+    if hb.get("last_poll_at"):
+        try:
+            watcher_age_min = (now - datetime.fromisoformat(hb["last_poll_at"])).total_seconds() / 60.0
+        except ValueError:
+            pass
+    driver_age_min = None
+    if driver_hb.get("ran_at"):
+        try:
+            driver_age_min = (now - datetime.fromisoformat(driver_hb["ran_at"])).total_seconds() / 60.0
+        except ValueError:
+            pass
+
+    return {
+        "enabled": bool(cfg and cfg.enabled),
+        "app_time": now.isoformat(),
+        "per_team": watcher_status.get("per_team", {}),
+        "no_teams": watcher_status.get("no_teams", False),
+        "unknown": watcher_status.get("unknown", False),
+        "watcher": {
+            "running": bool(watcher and watcher._thread and watcher._thread.is_alive()),
+            "last_poll_at": hb.get("last_poll_at"),
+            "age_minutes": watcher_age_min,
+            "r2_ok": hb.get("r2_ok"),
+        },
+        "driver": {"last_heartbeat_at": driver_hb.get("ran_at"), "age_minutes": driver_age_min},
+        "ops_state": read_ops_state(storage),
+    }
+
+@app.post("/v1/internal/driver/heartbeat")
+async def driver_heartbeat(request: Request, body: dict):
+    """Driver liveness — written through the app so R2 creds stay off GH for
+    this leg; a stale heartbeat is only meaningful when the app is up."""
+    _check_internal(request)
+    storage = _backup_storage()
+    storage.upload(
+        _DRIVER_HEARTBEAT_KEY,
+        _json.dumps({"ran_at": datetime.now(timezone.utc).isoformat(), "body": body or {}}).encode(),
+        content_type="application/json",
+    )
+    return {"ok": True}
+
+
+@app.post("/v1/internal/backups/simulate-stale")
+@app.post("/v1/internal/backups/simulate-recover")
+async def backups_simulate(request: Request):
+    """Simulated-stale hooks (env-gated, fail closed) — prove the detection →
+    filing → dedup path end-to-end in staging."""
+    _check_internal(request)
+    cfg = _backup_config_safe()
+    if cfg is None or not cfg.simulate_enabled:
+        raise HTTPException(status_code=403, detail="simulate disabled (BACKUP_SIMULATE_ENABLED)")
+    storage = _backup_storage()
+    now = datetime.now(timezone.utc)
+    if request.url.path.endswith("simulate-stale"):
+        ts = now.strftime("%Y%m%dT%H%M%S%fZ")
+        storage.upload(
+            f"ops/simulate/stale-{ts}.json",
+            _json.dumps({
+                "age_ts": (now - timedelta(hours=100)).isoformat(),
+                "expires_at": (now + timedelta(hours=2)).isoformat(),
+            }).encode(),
+            content_type="application/json",
+        )
+        return {"status": "simulated_stale"}
+    for k in storage.list("ops/simulate/"):
+        storage.delete(k)
+    return {"status": "simulated_recovered"}
+
+
+@app.post("/v1/internal/backups/re-baseline")
+async def backups_rebaseline(request: Request, body: dict):
+    """Operator re-baseline: acknowledge a fired DATA_LOSS_CANDIDATE by
+    re-persisting the current graph counts (updates team state, closes the
+    incident) — distinct from suppression."""
+    _check_internal(request)
+    team_id = (body or {}).get("team_id", "")
+    if not team_id:
+        raise HTTPException(status_code=400, detail="team_id required")
+    from tortoise.backup_sweep import read_team_state, _write_json
+
+    reg_sdk = _registry_sdk()
+    registry = reg_sdk._get_registry()
+    db = reg_sdk._get_proj().db
+    storage = _backup_storage()
+    try:
+        g = db.select_graph(f"team_{team_id}")
+        count = int(g.query("MATCH (n) RETURN count(n)").result_set[0][0])
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"team graph unavailable: {e}")
+    state = read_team_state(storage, team_id)
+    _write_json(
+        storage, f"ops/teams/{team_id}/state.json",
+        {**state, "node_count": count, "updated_at": datetime.now(timezone.utc).isoformat()},
+    )
+    alerts = _alert_store_from(_backup_config_safe())
+    alerts.resolve_incident("DATA_LOSS_CANDIDATE", team_id)
+    alerts.resolve_incident("SIZE_GUARD_ABORT", team_id)
+    return {"status": "rebaselined", "team_id": team_id, "node_count": count}
+
+
+@app.post("/v1/internal/backups/drill")
+async def backups_drill(request: Request, body: dict):
+    """Drill-only restore: scratch target, internal-key auth, zero production
+    writes (drill:true skips the registry end-stamp; live-phase binds the
+    scratch target). Cooldown ≥1h between drill accepts (in-memory)."""
+    _check_internal(request)
+    global _LAST_DRILL_AT
+    cfg = _backup_config_safe()
+    if cfg is None:
+        raise HTTPException(status_code=503, detail="Backup sweep disabled")
+    body = body or {}
+    team_id = body.get("team_id", "")
+    backup_key = body.get("backup_key", "")
+    if not team_id or not backup_key:
+        raise HTTPException(status_code=400, detail="team_id and backup_key required")
+    import time as _time
+
+    if _time.time() - _LAST_DRILL_AT < _DRILL_COOLDOWN_S:
+        raise HTTPException(status_code=429, detail="drill cooldown — ≥1h between drills")
+    _LAST_DRILL_AT = _time.time()
+
+    from tortoise.hosted_backup import restore_backup
+
+    reg_sdk = _registry_sdk()
+    registry = reg_sdk._get_registry()
+    db = reg_sdk._get_proj().db
+    storage = _backup_storage()
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    target_graph = f"_drill_{ts}"
+    try:
+        result = await asyncio.to_thread(
+            restore_backup, db, registry, storage, backup_key,
+            team_id=team_id, graph_name=f"team_{team_id}",
+            key=cfg.backup_key, target_graph=target_graph, drill=True,
+        )
+    except (ValueError, RuntimeError) as e:
+        raise HTTPException(status_code=409, detail=f"Drill failed: {e}")
+    # Cleanup the scratch graph (best-effort; boot GC is the backstop).
+    try:
+        db.select_graph(target_graph).delete()
+    except Exception:
+        pass
+    return {"status": "drill_ok", "target_graph": target_graph, **result}
 
 
 # ── MCP mount (#236) ─────────────────────────────────────────────

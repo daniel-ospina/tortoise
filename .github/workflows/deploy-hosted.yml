@@ -49,6 +49,21 @@ jobs:
           [ -n "${{ secrets.R2_ACCESS_KEY_ID }}" ] && ARGS="$ARGS R2_ACCESS_KEY_ID=${{ secrets.R2_ACCESS_KEY_ID }}"
           [ -n "${{ secrets.R2_SECRET_ACCESS_KEY }}" ] && ARGS="$ARGS R2_SECRET_ACCESS_KEY=${{ secrets.R2_SECRET_ACCESS_KEY }}"
           [ -n "${{ secrets.R2_BUCKET }}" ] && ARGS="$ARGS R2_BUCKET=${{ secrets.R2_BUCKET }}"
+          # Backup sweep (#596): dual-channel alerting needs the Telegram pair +
+          # the GitHub PAT; BACKUP_SWEEP_ENABLED=true only when ALL required
+          # syncable secrets are present (fail-closed default — a missing
+          # secret keeps the sweep off, never crashes the boot, #545).
+          [ -n "${{ secrets.TELEGRAM_BOT_TOKEN }}" ] && ARGS="$ARGS TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}"
+          [ -n "${{ secrets.TELEGRAM_CHAT_ID }}" ] && ARGS="$ARGS TELEGRAM_CHAT_ID=${{ secrets.TELEGRAM_CHAT_ID }}"
+          [ -n "${{ secrets.GITHUB_ISSUES_PAT }}" ] && ARGS="$ARGS GITHUB_ISSUES_PAT=${{ secrets.GITHUB_ISSUES_PAT }}"
+          [ -n "${{ secrets.BACKUP_ALERT_ASSIGNEE }}" ] && ARGS="$ARGS BACKUP_ALERT_ASSIGNEE=${{ secrets.BACKUP_ALERT_ASSIGNEE }}"
+          [ -n "${{ secrets.BACKUP_SIMULATE_ENABLED }}" ] && ARGS="$ARGS BACKUP_SIMULATE_ENABLED=${{ secrets.BACKUP_SIMULATE_ENABLED }}"
+          if [ -n "${{ secrets.TORTOISE_BACKUP_KEY }}" ] && [ -n "${{ secrets.R2_ACCOUNT_ID }}" ] && [ -n "${{ secrets.R2_ACCESS_KEY_ID }}" ] && [ -n "${{ secrets.R2_SECRET_ACCESS_KEY }}" ] && [ -n "${{ secrets.R2_BUCKET }}" ] && [ -n "${{ secrets.TELEGRAM_BOT_TOKEN }}" ] && [ -n "${{ secrets.TELEGRAM_CHAT_ID }}" ] && [ -n "${{ secrets.GITHUB_ISSUES_PAT }}" ] && [ -n "${{ secrets.BACKUP_ALERT_ASSIGNEE }}" ]; then
+            ARGS="$ARGS BACKUP_SWEEP_ENABLED=true"
+            echo "::notice::BACKUP_SWEEP_ENABLED=true — all backup-sweep secrets present"
+          else
+            echo "::warning::backup sweep secrets incomplete — BACKUP_SWEEP_ENABLED left off (fail-closed)"
+          fi
           # GitHub OAuth (#542): GITHUB_CLIENT_ID/SECRET + encryption key —
           # warn-only until the OAuth app is registered and secrets set.
           if [ -z "${{ secrets.GITHUB_CLIENT_ID }}" ] || [ -z "${{ secrets.GITHUB_CLIENT_SECRET }}" ]; then
