@@ -610,7 +610,6 @@
           use: "Use Tortoise — memory for you and your team: connect your agents, remember decisions, MCP integration",
           build: "Build with Tortoise — embedded memory via API for your product: REST/MCP, per-team keys, usage-based pricing"
         },
-        why_hosted: "No setup, no servers — your agents just work. Memory backed up and managed for you. Upgrade as you grow.",
         overage_line: "$5 per additional 10k write ops",
         integrations_line: "Unlimited integrations at every tier"
       },
@@ -669,9 +668,7 @@
     function renderSelfHost() {
       document.getElementById('selfhost-section').innerHTML = `
         <h4>Self-hosted</h4>
-        <p>Your infrastructure, your ops — full control. Hosted is managed, zero-ops.</p>
         <p class="license">${PRICING.display.license_self_hosted}</p>
-        <p>${PRICING.display.why_hosted}</p>
         <div class="actions">
           <a href="/self-hosted">Self-hosted setup guide →</a>
           <a href="https://github.com/daniel-ospina/tortoise" target="_blank" rel="noopener">Self-host on GitHub →</a>
