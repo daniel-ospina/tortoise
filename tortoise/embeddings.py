@@ -2,14 +2,30 @@
 
 Different sources use different words for the same concepts. Term-index matching
 finds 0 cross-lens connections; embeddings bridge that gap.
+
+Threshold calibration (all-MiniLM-L6-v2, measured 2026-08-07 for #399):
+    near-duplicate paraphrases ....... 0.90+   (NEAR_DUPLICATE_THRESHOLD = 0.75)
+    cross-vocabulary paraphrase band . 0.35-0.51  (DEFAULT_THRESHOLD = 0.40)
+    issue #399 motivating pair ....... 0.29 (boundary: topically similar, NOT
+                                         logically implied — verification decides)
+    unrelated / noise floor ........... <= 0.15
+
+Thresholds are model-specific — recalibrate when swapping the embedder.
 """
 from __future__ import annotations
 
 import logging
 import threading
+import time
+
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+# #399: the issue's proposed 0.75 threshold is a near-duplicate-only setting
+# with all-MiniLM-L6-v2 (cross-vocab paraphrase pairs score 0.35-0.51).
+NEAR_DUPLICATE_THRESHOLD = 0.75
+DEFAULT_THRESHOLD = 0.40
 
 
 class EmbeddingModel:
@@ -28,6 +44,8 @@ class EmbeddingModel:
     _model = None
     _lock = threading.Lock()
     _LOAD_TIMEOUT_S = 30.0  # generous for cold I/O (model is 90MB on disk; pre-warmed at startup in hosted)
+    _FAIL_COOLDOWN_S = 60.0  # negative cache: skip retry for 60s after a failed load
+    _last_failed_at: float | None = None
 
     @classmethod
     def get(cls, load_timeout: float | None = None) -> "EmbeddingModel | None":
@@ -48,6 +66,14 @@ class EmbeddingModel:
                 latency stays bounded.
         """
         timeout = load_timeout if load_timeout is not None else cls._LOAD_TIMEOUT_S
+        now = time.monotonic()
+        if cls._instance is None and cls._last_failed_at is not None and \
+                (now - cls._last_failed_at) < cls._FAIL_COOLDOWN_S:
+            # Negative cache (code-review P2, #399): a load just failed — return
+            # None immediately instead of blocking up to 30s per request in a
+            # degraded environment (offline dev, cold CI, OOM). Retry after the
+            # cooldown window via the normal "retries on next get()" path.
+            return None
         if cls._instance is None:
             with cls._lock:
                 if cls._instance is None:
@@ -61,14 +87,16 @@ class EmbeddingModel:
             with cls._lock:
                 cls._instance = None
                 cls._model = None
+                cls._last_failed_at = time.monotonic()
         return model
 
     @classmethod
     def _reset(cls) -> None:
-        """Test hook — clear cached instance."""
+        """Test hook — clear cached instance and failure cooldown."""
         with cls._lock:
             cls._instance = None
             cls._model = None
+            cls._last_failed_at = None
 
     def __init__(self, load_timeout: float | None = None):
         timeout = load_timeout if load_timeout is not None else self._LOAD_TIMEOUT_S
@@ -127,11 +155,55 @@ def compute_embedding(content: str, max_tokens: int = 512) -> list[float] | None
         return None
 
 
+def _encode(texts: list[str]) -> tuple[np.ndarray, bool]:
+    """Encode texts → (vectors, degraded). degraded=True ⇒ TF-IDF fallback.
+
+    Routes through the EmbeddingModel singleton (all-MiniLM-L6-v2) — never
+    re-instantiates the model per call (#399: find_cross_source_matches and
+    search_points used to reload the 90MB model on EVERY call). Falls back to
+    deterministic sklearn TF-IDF when the model is unavailable. Embeddings stay
+    optional: callers must tolerate degraded output (degraded=True).
+    """
+    if not texts:
+        return np.zeros((0, 0)), False
+    model = EmbeddingModel.get()
+    if model is not None:
+        try:
+            vecs = model.encode(texts, show_progress_bar=False)
+            if vecs is not None and len(vecs) > 0:
+                return np.asarray(vecs, dtype=np.float64), False
+        except Exception:  # noqa: BLE001 — model failures degrade, never raise
+            logger.warning("embedding encode failed — TF-IDF fallback", exc_info=True)
+    try:
+        from sklearn.feature_extraction.text import TfidfVectorizer  # lazy: [embeddings] extra
+        return TfidfVectorizer().fit_transform(texts).toarray(), True
+    except (ValueError, ImportError):
+        # Empty / stopword-only vocabulary or sklearn missing — nothing to
+        # match; return a zero matrix so cosine similarity is 0 and no
+        # candidates emerge. Embeddings stay OPTIONAL (#399 contract).
+        return np.zeros((len(texts), 1)), True
+
+
+def cosine_similarity_matrix(vectors: np.ndarray) -> np.ndarray:
+    """Normalized dot product = cosine similarity. Pure numpy.
+
+    Handles zero-norm rows (all-zero vectors) by leaving them at 0 similarity.
+    """
+    norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    v = vectors / norms
+    return v @ v.T
+
+
 def find_cross_source_matches(
     points: dict[str, dict],
     threshold: float = 0.75,
 ) -> list[dict]:
     """Find points from different speakers that describe the same concept.
+
+    Backward-compatible wrapper (speaker-keyed) over the shared encode +
+    cosine pipeline (#399). Use find_cross_lens_matches (tortoise/cross_lens.py)
+    for lens/source-keyed matching.
 
     Args:
         points: point_id → {content, speaker, ...} from fold()
@@ -144,20 +216,8 @@ def find_cross_source_matches(
     texts = [points[i]["content"] for i in ids]
     speakers = [points[i].get("speaker", "unknown") for i in ids]
 
-    try:
-        from sentence_transformers import SentenceTransformer
-        model = SentenceTransformer("all-MiniLM-L6-v2")
-        vectors = model.encode(texts, show_progress_bar=False)
-    except ImportError:
-        from sklearn.feature_extraction.text import TfidfVectorizer
-        model = TfidfVectorizer()
-        vectors = model.fit_transform(texts).toarray()
-
-    # Normalized dot product = cosine similarity
-    norms = np.linalg.norm(vectors, axis=1, keepdims=True)
-    norms[norms == 0] = 1
-    vectors_n = vectors / norms
-    sim = vectors_n @ vectors_n.T
+    vectors, _ = _encode(texts)
+    sim = cosine_similarity_matrix(vectors)
 
     matches = []
     n = len(ids)
@@ -190,17 +250,30 @@ def search_points(
     ids = [p["id"] for p in points]
     texts = [p["content"] for p in points]
 
-    # ponytail: TF-IDF fallback — sentence_transformers is heavy
-    try:
-        from sentence_transformers import SentenceTransformer
-        model = SentenceTransformer("all-MiniLM-L6-v2")
-        vectors = model.encode([query] + texts, show_progress_bar=False)
-        query_vec, doc_vecs = vectors[0], vectors[1:]
-    except ImportError:
-        from sklearn.feature_extraction.text import TfidfVectorizer
-        model = TfidfVectorizer()
-        doc_vecs = model.fit_transform(texts).toarray()
-        query_vec = model.transform([query]).toarray()[0]
+    # #399: route through the EmbeddingModel singleton (never re-instantiate
+    # the model per call). Degraded mode preserves LEGACY TF-IDF semantics
+    # (code-review P2): fit on DOCUMENTS ONLY, transform the query separately —
+    # jointly fitting on [query] + texts lets the query enter the vocabulary,
+    # shifting idf and silently reordering results (verified: ~2% reorders,
+    # ~38% threshold changes at 0.3 on random corpora).
+    model = EmbeddingModel.get()
+    if model is not None:
+        try:
+            vecs = np.asarray(model.encode([query] + texts, show_progress_bar=False),
+                              dtype=np.float64)
+            query_vec, doc_vecs = vecs[0], vecs[1:]
+        except Exception:  # noqa: BLE001 — model failures degrade, never raise
+            model = None
+    if model is None:
+        try:
+            from sklearn.feature_extraction.text import TfidfVectorizer
+            tv = TfidfVectorizer()
+            doc_vecs = tv.fit_transform(texts).toarray()
+            query_vec = tv.transform([query]).toarray()[0]
+        except (ValueError, ImportError):
+            # Empty/stopword-only vocabulary or sklearn missing — nothing to
+            # search (legacy: raised ValueError, caught by fallback_tfidf → []).
+            return []
 
     norms = np.linalg.norm(doc_vecs, axis=1, keepdims=True)
     norms[norms == 0] = 1
