@@ -459,7 +459,7 @@
     const beats = ['beat-hero', 'beat-how', 'beat-ingest', 'beat-reason', 'beat-recall', 'beat-automate'];
 
     const beatSpan = 0.11;
-    const gapSpan = 0.015;
+    const gapSpan = 0.05;
     const step = beatSpan + gapSpan;
 
     beats.forEach((id, i) => {
@@ -510,15 +510,16 @@
         }
       );
 
-      // Always fade out — including the LAST beat (reason), which fades late
-      // so the pricing/CTA sections below reveal cleanly.
-      const fadeOutStart = i === 1 ? 0.30 : (i === beats.length - 1 ? 0.82 : peak);
+      // Fade out at each beat's natural peak with a fast finish — the gap
+      // (gapSpan 0.05 > fadeOut 0.03) guarantees the NEXT beat fades in only
+      // after THIS beat has fully disappeared.
+      const fadeOutStart = peak;
       gsap.to(el, {
         opacity: 0, y: -20,
         scrollTrigger: {
           trigger: '#scroll-wrapper',
           start: `${fadeOutStart * 100}% top`,
-          end: `${(fadeOutStart + 0.08) * 100}% top`,
+          end: `${(fadeOutStart + 0.03) * 100}% top`,
           scrub: 0.5,
         }
       });
