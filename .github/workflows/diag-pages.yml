@@ -14,6 +14,7 @@ if not d.get('success'): print('API ERROR:', d); sys.exit(1)
 p=d['result']
 print('production_branch:', p.get('production_branch'))
 print('domains:', p.get('domains'))
-print('latest_deployment:', p.get('latest_deployment',{}).get('url') if p.get('latest_deployment') else None)
-print('deployment_trigger:', p.get('latest_deployment',{}).get('trigger',{}).get('type') if p.get('latest_deployment') else None)
+ld=p.get('latest_deployment') or {}
+print('latest_deployment_url:', ld.get('url'))
+print('latest_trigger:', ld.get('trigger',{}).get('type'))
 "
