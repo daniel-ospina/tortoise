@@ -106,11 +106,13 @@ file_alert() { # kind title body dedup_id
 # A failed listing is NEVER confirmed-empty (no STALE/NEVER from a failed
 # read); a broken R2 auth preflight files R2_DOWN loudly (review P3).
 R2_OK=1
-if ! aws s3api list-buckets --endpoint-url "$R2_ENDPOINT" >/dev/null 2>&1; then
+# Bucket-scoped probe (head-bucket) — R2's S3 API does not reliably support
+# the account-level ListBuckets call from an object-scoped access key.
+if ! aws s3api head-bucket --endpoint-url "$R2_ENDPOINT" --bucket "$R2_BUCKET" >/dev/null 2>&1; then
   R2_OK=0
   log "R2 preflight failed — filing R2_DOWN"
   file_alert R2_DOWN "[DR] R2_DOWN — backup storage unreachable" \
-    "R2 preflight (list-buckets) failed from the driver. Runbook: docs/ops/registry-backup-dr.md" "global"
+    "R2 preflight (head-bucket) failed from the driver. Runbook: docs/ops/registry-backup-dr.md" "global"
 fi
 
 if [ "$R2_OK" = "1" ]; then
@@ -160,6 +162,7 @@ fi
 ENABLED="$(printf '%s' "$STATUS" | jq -r '.enabled // false' 2>/dev/null || echo false)"
 STORAGE_ERR="$(printf '%s' "$STATUS" | jq -r '.storage_error // empty' 2>/dev/null || true)"
 log "status: enabled=$ENABLED storage_error=${STORAGE_ERR:-none}"
+log "raw status: $(printf '%s' "$STATUS" | head -c 600)"
 if [ "$ENABLED" != "true" ]; then
   if [ -n "$STORAGE_ERR" ]; then
     log "status reports a storage error — filing R2_DOWN (not a kill-switch)"
