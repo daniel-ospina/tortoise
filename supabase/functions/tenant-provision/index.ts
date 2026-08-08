@@ -82,8 +82,18 @@ Deno.serve(async (req: Request) => {
     const apiKey = `tt_${apiKeyHex}`;
 
     // Call internal FastAPI to provision the namespace
-    const fastApiUrl = Deno.env.get("FASTAPI_URL") || "http://localhost:8000";
+    const fastApiUrl = Deno.env.get("FASTAPI_URL") || "";
     const fastApiKey = Deno.env.get("FASTAPI_INTERNAL_KEY") || "";
+    if (!fastApiUrl) {
+      // localhost:8000 was the old default — it points at the edge
+      // function's own container and threw uncaught (500 "Error invoking
+      // hook"). Fail with a clear, diagnosable error instead (dogfood 2026-08-08).
+      console.error("tenant-provision: FASTAPI_URL is not set in Supabase secrets");
+      return new Response(
+        JSON.stringify({ error: "Provisioning misconfigured (FASTAPI_URL missing). Please contact support." }),
+        { status: 500, headers: { "Content-Type": "application/json" } }
+      );
+    }
 
     // Hash once, reuse for both consumers (each call mints a fresh salt —
     // calling twice would store two different hashes for the same key).
@@ -134,7 +144,7 @@ Deno.serve(async (req: Request) => {
     }
 
     // ── Fix #7854: Trigger demo graph seeding ──────────────────────────
-    await fetch(`${fastApiUrl}/v1/internal/demo`, {
+    await fetch(`${fastApiUrl}/internal/demo`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
