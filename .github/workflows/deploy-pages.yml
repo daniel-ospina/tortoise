@@ -38,9 +38,16 @@ jobs:
           echo "--- custom domains ---"
           curl -s "https://api.cloudflare.com/client/v4/accounts/367c7ecf27e1b1b092d04fe9915a1e56/pages/projects/premise-labs/domains" \
             -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" | jq -c '.result[] | {name, status}'
-          echo "--- all projects ---"
+          echo "--- all projects (name/subdomain/domains) ---"
           curl -s "https://api.cloudflare.com/client/v4/accounts/367c7ecf27e1b1b092d04fe9915a1e56/pages/projects?per_page=20" \
-            -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" | jq -c '.result[] | {name, subdomain, domains, production_branch}'
+            -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" | jq -c '.result[]? | {name, subdomain, domains, production_branch}'
+          echo "--- DNS zone: tortoise record ---"
+          curl -s "https://api.cloudflare.com/client/v4/zones?name=premiselabs.co" \
+            -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" | jq -r '.result[0].id' > /tmp/zoneid.txt
+          ZONE=$(cat /tmp/zoneid.txt)
+          echo "zone_id: $ZONE"
+          curl -s "https://api.cloudflare.com/client/v4/zones/$ZONE/dns_records?name=tortoise.premiselabs.co" \
+            -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" | jq -c '.result[]? | {type, name, content, proxied}'
       - name: Deploy to Cloudflare Pages (premise-labs project)
         run: |
           cd website
