@@ -238,3 +238,24 @@ def test_live_signup_redirects_to_welcome_with_key(page: Page) -> None:
     expect(page).to_have_url(re.compile(r"welcome"), timeout=30_000)
     expect(page.locator("#success")).not_to_be_hidden(timeout=60_000)
     expect(page.locator("#api-key")).to_contain_text("tt_")
+
+
+def test_debug_capture_page_state(page: Page) -> None:
+    """TEMP DEBUG — captures page state + console for CI diagnosis."""
+    logs: list[str] = []
+    page.on("console", lambda m: logs.append(f"{m.type}: {m.text}"))
+    page.on("pageerror", lambda e: logs.append(f"PAGEERROR: {e}"))
+    _mock_supabase_success(page)
+    page.goto(WELCOME_URL, wait_until="domcontentloaded", timeout=30_000)
+    page.wait_for_timeout(5_000)
+    print("=== CONSOLE LOGS ===")
+    print("\n".join(logs) if logs else "(no console output)")
+    print("=== STATE ===")
+    for el in ("#loading", "#success", "#error-state", "#returning-block"):
+        count = page.locator(el).count()
+        hidden = "hidden" in (page.locator(el).get_attribute("class") or "") if count else "n/a"
+        print(f"{el}: count={count} hidden={hidden}")
+    print("=== ERROR MSG ===")
+    print(page.locator("#error-message").inner_text() if page.locator("#error-message").count() else "n/a")
+    print("=== localStorage ===")
+    print(page.evaluate("JSON.stringify(Object.keys(localStorage))"))
