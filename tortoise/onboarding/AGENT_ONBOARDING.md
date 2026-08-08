@@ -1,7 +1,8 @@
 # Tortoise Onboarding — Set up your agent's memory
 
 > **⛔ SINGLE SOURCE OF TRUTH:** This file is the canonical onboarding prompt.
-> Issue #496 finalized question wording. Issue #502 deploys this to a stable URL.
+> Issue #496 finalized question wording. Issue #540 deploys this to a stable URL
+> (tortoise.premiselabs.co/onboarding-prompt.md).
 > Do NOT create divergent copies — always edit this file.
 >
 > **Design doc:** `docs/epics/2026-08-07-hosted-onboarding-235/artifacts/02-question-set.md`
@@ -47,9 +48,10 @@ PRs, so when you ask about past decisions, your agent will know what happened."
    `auth_url` — tell the user to open it in their browser to authorize.
 3. After authorization, call `tortoise_onboarding_github_status()` to confirm.
    Show: "✅ GitHub connected — [N] repos found."
-4. If the tool is not available (Phase 1): "GitHub integration is being built.
-   Visit your dashboard at https://app.premiselabs.co to connect GitHub. I'll
-   skip ahead." Skip Q2, go to Q3.
+4. If the tool errors (e.g. "No team context" — GitHub OAuth is hosted-mode
+   only): "GitHub connect isn't available in this mode. Visit your dashboard
+   at https://app.premiselabs.co to connect GitHub. I'll skip ahead." Skip Q2,
+   go to Q3.
 
 **If no:** "Skipping GitHub. You can connect it later from your dashboard."
 Skip Q2.
@@ -66,8 +68,8 @@ background — you'll see results in your next session."
    `job_id`.
 2. Show: "✅ Indexing started (job: [job_id]). Issues and PRs will appear in your
    memory shortly. I'll continue with the next question."
-3. If the tool is not available: "GitHub indexing is coming soon. I'll skip
-   ahead."
+3. If the tool errors: "Couldn't start indexing right now. You can index later
+   from your dashboard."
 
 **If no:** "Skipping indexing. You can index later."
 
@@ -77,11 +79,12 @@ background — you'll see results in your next session."
 filed as memory so your agent remembers what you've discussed."
 
 **If yes:**
-1. Call `tortoise_diary_write(agent_name="system", entry="Session recording
-   enabled — agent sessions will be filed as memory.", topic="onboarding")`.
+1. Call `tortoise_onboarding_session_recording(enabled=true)`.
 2. Show: "✅ Session recording enabled. Your conversations will be saved as
    memory."
-3. (Phase 2: replace with `tortoise_onboarding_session_recording(enabled=true)`)
+3. If the tool errors (stdio mode): fall back to `tortoise_diary_write(
+   agent_name="system", entry="Session recording enabled — agent sessions will
+   be filed as memory.", topic="onboarding")`.
 
 **If no:** "Skipping session recording. You can enable it later."
 
@@ -91,16 +94,18 @@ filed as memory so your agent remembers what you've discussed."
 looks like — a few decisions connected by evidence and contradictions."
 
 **If yes:**
-1. Create 5 demo points using `tortoise_create_point`:
+1. Create the demo graph with `tortoise_onboarding_demo_create()` — idempotent,
+   builds a 4-layer demo (decisions + evidence + operators).
+2. Call `tortoise_summarize_structure()` to get graph stats.
+3. Show: "✅ Demo graph created — [N] points. This shows how Tortoise models
+   decisions with supporting evidence."
+4. If the tool errors (stdio mode): fall back to creating 5 demo points with
+   `tortoise_create_point`:
    - `tortoise_create_point(kind="decision", content="Use FalkorDB for graph storage", props={"source": "demo"})`
    - `tortoise_create_point(kind="evidence", content="FalkorDB benchmarks show 10x faster graph queries than vanilla Redis", props={"source": "demo"})`
    - `tortoise_create_point(kind="evidence", content="Existing team has Redis expertise — FalkorDB reuses Redis protocol", props={"source": "demo"})`
    - `tortoise_create_point(kind="decision", content="Deploy on Fly.io for edge distribution", props={"source": "demo"})`
    - `tortoise_create_point(kind="evidence", content="Fly.io cold starts are under 500ms for Python apps", props={"source": "demo"})`
-2. Call `tortoise_summarize_structure()` to get graph stats.
-3. Show: "✅ Demo graph created — [N] points. This shows how Tortoise models
-   decisions with supporting evidence."
-4. (Phase 2: replace steps 1-2 with single `tortoise_onboarding_demo_create()`)
 
 **If no:** "Skipping demo graph. You can create one later."
 
@@ -117,7 +122,7 @@ directory of markdown files, I can index them into your memory."
 4. If the tool returns an HTTP-excluded error (hosted users): "Document
    ingestion from a directory requires the CLI. Run `tortoise ingest <directory>`
    from your terminal. I'll skip ahead."
-5. (Phase 2: `POST /v1/ingest/docs` for HTTP-safe ingestion)
+5. (HTTP-transport ingest of a directory is not supported — see error recovery)
 
 **If no:** "Skipping document ingestion. You can ingest docs later."
 
@@ -154,14 +159,17 @@ _(Always runs — regardless of answers to Q1–Q5)_
 
 ## Error recovery
 
-If a tool is not available (not yet implemented):
+If a tool fails at runtime:
 
-- **Q1/Q2 (GitHub tools):** "GitHub integration is being built. Visit your
-  dashboard at https://app.premiselabs.co to connect GitHub. I'll skip ahead."
-- **Q3 (Session recording):** Uses `tortoise_diary_write` today — works. If it
-  fails: "Couldn't enable session recording right now. You can enable it later."
-- **Q4 (Demo graph):** Uses `tortoise_create_point` today — works. If it fails:
-  "Couldn't create the demo graph right now. You can try again later."
+- **Q1/Q2 (GitHub tools):** "GitHub connect/index isn't available in this
+  mode. Visit your dashboard at https://app.premiselabs.co to connect GitHub.
+  I'll skip ahead."
+- **Q3 (Session recording):** Uses `tortoise_onboarding_session_recording` (or
+  `tortoise_diary_write` fallback). If it fails: "Couldn't enable session
+  recording right now. You can enable it later."
+- **Q4 (Demo graph):** Uses `tortoise_onboarding_demo_create` (or
+  `tortoise_create_point` ×5 fallback). If it fails: "Couldn't create the demo
+  graph right now. You can try again later."
 - **Q5 (Docs ingestion):** If HTTP transport: "Document ingestion from a
   directory requires the CLI. Run `tortoise ingest <directory>` from your
   terminal. I'll skip ahead."
@@ -173,25 +181,27 @@ your network and try again."
 
 ## For implementers
 
-**This prompt is the FINALIZED version (#496).** Issue #502 deploys this file
-to a stable URL. The design doc at
+**This prompt is the FINALIZED version (#496).** Issue #540 deploys this file
+to a stable URL (tortoise.premiselabs.co/onboarding-prompt.md) via the
+`deploy-pages` workflow. The design doc at
 `docs/epics/2026-08-07-hosted-onboarding-235/artifacts/02-question-set.md`
-contains the full question specification with execution paths, state tracking,
-and error handling.
+(kept on branch feat/496-onboarding-questions) contains the full question
+specification with execution paths, state tracking, and error handling.
 
-**Tool dependency table** (what needs to exist in Phase 2):
+**Tool dependency table** (all onboarding tools live as of epic #235 delivery):
 
-| Question | Tool (today) | Status | Tool (Phase 2) |
-|----------|-------------|--------|-----------------|
-| Q0 (connection) | `tortoise_health` | ✅ Live | — |
-| Q1 (GitHub connect) | — | 🔜 Phase 2 | `tortoise_onboarding_github_connect` |
-| Q1 (GitHub status) | — | 🔜 Phase 2 | `tortoise_onboarding_github_status` |
-| Q2 (GitHub index) | — | 🔜 Phase 2 | `tortoise_onboarding_github_index` |
-| Q3 (Session recording) | `tortoise_diary_write` | ✅ Live | `tortoise_onboarding_session_recording` |
-| Q4 (Demo graph) | `tortoise_create_point` ×5 | ✅ Live | `tortoise_onboarding_demo_create` |
-| Q5 (Docs ingestion) | `tortoise_ingest_corpus` | ⚠️ Stdio-only | `POST /v1/ingest/docs` |
-| Q6 (Verification) | `tortoise_health`, `tortoise_session_context`, `tortoise_summarize_structure` | ✅ Live | `tortoise_onboarding_state` |
+| Question | Tool (hosted) | Status | Stdio/local fallback |
+|----------|---------------|--------|----------------------|
+| Q0 (connection) | `tortoise_health` | ✅ Live | same |
+| Q1 (GitHub connect) | `tortoise_onboarding_github_connect` | ✅ Live (HTTP) | unavailable (dashboard) |
+| Q1 (GitHub status) | `tortoise_onboarding_github_status` | ✅ Live (HTTP) | unavailable (dashboard) |
+| Q2 (GitHub index) | `tortoise_onboarding_github_index` | ✅ Live (HTTP) | unavailable (dashboard) |
+| Q3 (Session recording) | `tortoise_onboarding_session_recording` | ✅ Live (HTTP) | `tortoise_diary_write` |
+| Q4 (Demo graph) | `tortoise_onboarding_demo_create` | ✅ Live (HTTP) | `tortoise_create_point` ×5 |
+| Q5 (Docs ingestion) | `tortoise_ingest_corpus` | ⚠️ Stdio-only | CLI `tortoise ingest <dir>` |
+| Q6 (Verification) | `tortoise_health`, `tortoise_session_context`, `tortoise_summarize_structure` | ✅ Live | same |
 
-**Fallback behavior:** If a Phase 2 tool is unimplemented, the agent follows
-the error recovery section above. This means the prompt works today — Q0, Q3,
-Q4, and Q6 produce output; Q1, Q2, and Q5 cleanly skip.
+**Fallback behavior:** If a tool fails, the agent follows the error recovery
+section above. GitHub tools require hosted (HTTP) mode — in stdio/local mode
+they return "No team context (HTTP mode required)" and the agent skips ahead
+to the dashboard. Everything else works in both modes.
