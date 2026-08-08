@@ -18,11 +18,17 @@ from tortoise.quadrature import tilted_moments, moments_to_beta, phi_nand
 
 
 def test_finding1_ep_marginal_detectable():
-    """EP marginal from symmetric NAND IS detectably non-unimodal."""
+    """EP marginal from symmetric NAND IS detectably non-unimodal.
+
+    NOTE (2026-08-08): EP deliberately made NAND symmetric (a70341a) — the
+    earlier "preserved asymmetry" claim was falsified by design; the marginal
+    is now symmetric (α≈β) by construction. The finding that matters is
+    detectability via the GMM separation below, not asymmetry.
+    """
     mom_a, mom_b = tilted_moments(1, 1, 1, 1, 3.0, phi_nand, n_quad=12)
     alpha_a, beta_a = moments_to_beta(*mom_a)
-    # Verify: Beta is NOT symmetric (α≠β)
-    assert abs(alpha_a - beta_a) > 0.1, f"EP marginal should be asymmetric: α={alpha_a:.2f} β={beta_a:.2f}"
+    # Symmetric NAND design (a70341a): marginal is symmetric (α≈β).
+    assert abs(alpha_a - beta_a) < 0.05, f"EP marginal should be symmetric by design: α={alpha_a:.2f} β={beta_a:.2f}"
     # GMM separation: 100 trials
     seps = []
     for s in range(100):
