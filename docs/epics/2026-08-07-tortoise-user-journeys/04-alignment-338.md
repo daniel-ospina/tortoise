@@ -29,7 +29,7 @@ No scope conflicts. Both epics are complementary halves of the same product dire
 | #338 item | Our epic's dependency | Coordination needed |
 |---|---|---|
 | **T5.1 README rewrite**: "hosted AND self-host are BOTH first-class quickstart paths… hosted is being built now (epic #235 + #518/#519/#292)" | Our epic IS the hosted quickstart that #338's README promises | Both must ship before launch; neither marks the other "coming soon". #338 already dropped the pre-merge coordination check (owner override) |
-| **D3 license**: BSL 1.1 + $5M AUG (self-host) / hosted = commercial with free tier (outside grant) | Our pricing page self-hosted section must say **"free under BSL grant"** — NOT "free OSS" (BSL is source-available, not OSI open-source) | **FIXED in `product/pricing.md`** (self-hosted section now carries the BSL + $5M AUG + Apache-2.0-in-4-years license line) |
+| **D3 license**: BSL 1.1 + $5M AUG (self-host) / hosted = commercial with free tier (outside grant) | Our pricing page self-hosted section must say **"free under BSL grant"** — NOT "free OSS" (BSL is source-available, not OSI open-source) | **FIXED in `product/pricing.md`** (self-hosted section now carries the BSL + $5M AUG + MPL-2.0-in-4-years license line) |
 | **T5.4 D7 graph supersede** (file BSL decision, supersede DEC-002) | Our `product/pricing.md` supersedes the per-seat graph decision | Distinct decisions (license vs pricing) — no conflict; both reference the wiped-graph history |
 
 ## 2. Coordination points (no conflict, but sequence matters)

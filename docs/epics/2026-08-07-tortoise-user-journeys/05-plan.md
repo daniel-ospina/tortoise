@@ -375,7 +375,7 @@ GUI surfaces are modifications to existing pages + one new pricing section (El D
 │  $5 per additional 10k write ops                    │
 │  ┌──────────────────────────────────────────────┐    │
 │  │ Self-hosted: BSL 1.1, free <$5M rev,         │    │
-│  │ Apache-2.0 in 4 yrs. Your infra, your ops.   │    │
+│  │ MPL-2.0 in 4 yrs. Your infra, your ops.   │    │
 │  │ [GitHub] [Migrate to cloud anytime →]        │    │
 │  └──────────────────────────────────────────────┘    │
 └──────────────────────────────────────────────────────┘
@@ -929,7 +929,7 @@ Each test: **Setup** (concrete preconditions) · **Steps** (verifiable actions) 
 ## E2E-14: Pricing page renders hosted tiers + self-hosted section
 - **Setup:** pricing page live on tortoise.premiselabs.co
 - **Steps:** scroll to pricing; toggle monthly/annual; read self-hosted section
-- **Assertions:** Free/Solo/Pro/Team cards with ✓/✕ rows · toggle swaps prices (annual -20% default, from pricing.json display.annual_discount_pct) · **"$5 per additional 10k write ops" visible (pricing.json display.overage_line)** · **segmented positioning renders — "Use Tortoise" AND "Build with Tortoise" (pricing.json display.segments)** · **integrations "unlimited" visible on all cards (pricing.json display.integrations_line)** · self-hosted section: BSL 1.1 + $5M AUG + Apache-2.0-in-4yrs (pricing.json display.license_self_hosted) + "migrate to cloud anytime" CTA · hosted CTA primary
+- **Assertions:** Free/Solo/Pro/Team cards with ✓/✕ rows · toggle swaps prices (annual -20% default, from pricing.json display.annual_discount_pct) · **"$5 per additional 10k write ops" visible (pricing.json display.overage_line)** · **segmented positioning renders — "Use Tortoise" AND "Build with Tortoise" (pricing.json display.segments)** · **integrations "unlimited" visible on all cards (pricing.json display.integrations_line)** · self-hosted section: BSL 1.1 + $5M AUG + MPL-2.0-in-4yrs (pricing.json display.license_self_hosted) + "migrate to cloud anytime" CTA · hosted CTA primary
 - **Negative:** pricing data drift vs **product/pricing.json** (canonical — decision 1d; fail on mismatch; **static copy sections assert against pricing.json display.* fields, no markdown parsing**)
 
 ---

@@ -82,7 +82,7 @@
 - **Unlimited integrations** (rate-limited for abuse, never tier-capped)
 - Demo graph seeded on signup (idempotent, size-capped)
 - Session keys (dashboard plumbing) — not a product limit
-- Self-hosted: BSL 1.1 + $5M AUG, Apache-2.0 conversion in 4 years (see #338)
+- Self-hosted: BSL 1.1 + $5M AUG, Mozilla Public License 2.0 (MPL-2.0) conversion in 4 years (see #338)
 
 ### Why hosted? (Vibecoder / low-technical segment callout)
 - No setup, no servers — your agents just work
@@ -93,7 +93,7 @@
 ### Display fields (mirror of pricing.json `display.*` — single source)
 - **Monthly/annual:** annual default, **-20%** discount (`display.annual_discount_pct`)
 - **Segments:** "Use Tortoise — memory for you and your team" · "Build with Tortoise — embedded memory via API for your product" (`display.segments`)
-- **License line:** BSL 1.1 + $5M AUG, Apache-2.0 in 4 years (`display.license_self_hosted`)
+- **License line:** BSL 1.1 + $5M AUG, MPL-2.0 in 4 years (`display.license_self_hosted`)
 - **Overage line:** "$5 per additional 10k write ops" · **Integrations line:** "Unlimited integrations at every tier" (`display.overage_line` / `display.integrations_line`)
 
 ---
