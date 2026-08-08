@@ -365,6 +365,57 @@ def _cmd_init(args):
     return 0
 
 
+def _cmd_signup(args) -> int:
+    """Zero-email signup (issue #663): mint a working tt_ key from the CLI.
+
+    No email, no dashboard, no Supabase account — the agent/CLI equivalent
+    of Mem0's 4-command key mint and Hindsight's npx self-install. Saves
+    the config to .tortoise so `tortoise create-point` etc. work immediately.
+    """
+    import json, sys, uuid
+    from pathlib import Path
+    from urllib.request import Request, urlopen
+    from urllib.error import URLError, HTTPError
+
+    api_url = os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co")
+    device_id = f"anon-{uuid.uuid4().hex[:12]}"
+
+    print(f"Signing up for a free hosted team (anonymous, no email)…")
+    try:
+        req = Request(
+            f"{api_url}/v1/agent/signup",
+            data=json.dumps({"identity": device_id}).encode(),
+            headers={"Content-Type": "application/json", "X-Device-Id": device_id},
+            method="POST",
+        )
+        with urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+    except HTTPError as e:
+        body = e.read().decode() if e.fp else ""
+        print(f"Signup failed ({e.code}): {body}", file=sys.stderr)
+        return 1
+    except (URLError, ValueError, json.JSONDecodeError) as e:
+        print(f"Cannot reach API at {api_url}: {e}", file=sys.stderr)
+        return 1
+
+    # Save config so the key works immediately
+    config_path = Path.cwd() / ".tortoise"
+    config = {
+        "api_key": data["key"],
+        "api_url": api_url,
+        "team_id": data["team_id"],
+        "team_name": data["team_name"],
+    }
+    config_path.write_text(json.dumps(config, indent=2) + "\n")
+    os.chmod(config_path, 0o600)
+
+    print(f"✅ Free team created: {data['team_name']}")
+    print(f"   API key: {data['key']}")
+    print(f"   Config saved to {config_path} (shown once — store it)")
+    print(f"   Next: tortoise create-point \"hello world\" --kind statement")
+    return 0
+
+
 def _cmd_team_info(args) -> int:
     """Show team info from Tortoise Cloud API."""
     import json, sys
@@ -1733,6 +1784,8 @@ def main(argv: list[str] | None = None) -> int:
     team = sp.add_parser("team", help="Team management (Tortoise Cloud)")
     team_sp = team.add_subparsers(dest="team_cmd")
     team_info_p = team_sp.add_parser("info", help="Show team info and usage")
+    # tortoise signup — zero-email free-team mint (issue #663)
+    sp.add_parser("signup", help="Mint a free hosted team + API key — no email or dashboard")
     # tortoise index github <url>
     idx = sp.add_parser("index", help="Index content into the graph")
     idx_sp = idx.add_subparsers(dest="index_cmd")
@@ -1841,6 +1894,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Health server on http://{args.bind}:{args.port}/health")
         serve_health(args.port, bind=args.bind)
         return 0
+    elif args.cmd == "signup":
+        return _cmd_signup(args)
     elif args.cmd == "team":
         if args.team_cmd == "info":
             return _cmd_team_info(args)

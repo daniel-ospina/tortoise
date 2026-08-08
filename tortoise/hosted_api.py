@@ -2007,6 +2007,80 @@ async def reconcile(request: Request):
     return result
 
 
+# ── Zero-email agent signup (issue #663) ──
+# Public, rate-limited. An agent or a non-technical user can mint a working
+# tt_ key with ONE command — no email, no dashboard, no Supabase account.
+# Matches the Mem0/Hindsight self-onboarding pattern (competitor research).
+# Anonymous identity = device-generated UUID; per-identity rate limit.
+# The key is shown once; the anonymous identity can attach an email later
+# (future upgrade path).
+
+@app.post("/v1/agent/signup")
+async def agent_signup(request: Request):
+    """Mint a team + API key for an anonymous device (no email/dashboard)."""
+    # Per-identity + per-IP rate limit (abuse posture)
+    await _check_register_rate_limit(request)
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    identity = (body or {}).get("identity") or request.headers.get("x-device-id", "")
+    if not identity:
+        import uuid as _uuid
+        identity = f"anon-{_uuid.uuid4().hex[:12]}"
+    identity = identity[:64]
+
+    # Per-identity rate limit: max 3 signups per identity per hour
+    from datetime import datetime, timezone as _tz, timedelta
+    sdk = _make_sdk(namespace="registry")
+    reg = sdk._get_registry()
+    cutoff = (datetime.now(_tz.utc) - timedelta(hours=1)).isoformat()
+    recent = reg.query(
+        "MATCH (m:Membership {user_id:$uid}) WHERE m.created_at > $cutoff RETURN count(m)",
+        params={"uid": identity, "cutoff": cutoff},
+    ).result_set[0][0]
+    if recent >= 3:
+        raise HTTPException(status_code=429, detail="Too many signups from this device — try again later")
+
+    import re as _re
+    import uuid as _uuid
+    from tortoise.auth import hash_api_key as _hash
+    from tortoise.pricing import tier_limits
+
+    team_id = _uuid.uuid4().hex[:26]
+    team_name = f"agent-{team_id[:6]}"
+    api_key = f"tt_{_uuid.uuid4().hex}"
+    key_hash = _hash(api_key)
+    now = datetime.now(_tz.utc).isoformat()
+    graph_name = f"team_{team_id}"
+    lim = tier_limits("free")
+
+    # Team node
+    reg.query(
+        "CREATE (t:Team {id:$id, name:$name, tier:'free', created_at:$now, backup_enabled:false, "
+        "max_users:$mu, max_graphs:$mg, max_api_keys:$mk, ops_allowance:$ops, graph_size_cap:$nodes})",
+        params={"id": team_id, "name": team_name, "now": now,
+                "mu": lim["max_users_per_team"], "mg": lim["max_graphs_per_team"],
+                "mk": lim["max_api_keys"], "ops": lim["included_write_ops_per_month"],
+                "nodes": lim["max_graph_nodes"]},
+    )
+    # APIKey node
+    kid = _short_id()
+    reg.query(
+        "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, key_prefix:$kp, created_by:$cb, created_at:$now})",
+        params={"id": kid, "tid": team_id, "kh": key_hash, "kp": api_key[:10], "cb": identity, "now": now},
+    )
+    # Anonymous membership (owner)
+    reg.query(
+        "CREATE (m:Membership {team_id:$tid, user_id:$uid, role:'owner', status:'active', created_at:$now})",
+        params={"tid": team_id, "uid": identity, "now": now},
+    )
+    # Default graph node
+    sdk._graph_create(team_id, "default", kind="default", namespace=graph_name)
+
+    await _async_audit(request, team_id, "agent_signup", resource_type="team", resource_id=team_id)
+
+    return {"key": api_key, "team_id": team_id, "team_name": team_name, "graph_name": graph_name,
+            "identity": identity, "tier": "free"}
+
+
 @app.post("/v1/session/key")
 async def session_key(body: dict, request: Request, user: dict = Depends(get_current_user)):
     """E1 — session-scoped key mint (the #518 chicken-and-egg fix).
