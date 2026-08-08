@@ -1324,6 +1324,34 @@ def test_document_structural_topic_any():
         proj.close()
 
 
+# ── #329: entity_type allowlist (in-function validation) ──────────────
+
+class TestEntityTypeValidation:
+    def test_invalid_entity_type_raises(self):
+        from tortoise.search_engine import (
+            run_fts_query, run_vector_query, run_structural_query,
+        )
+        from tests.test_search_engine_gaps import SimpleMockGraph
+        graph = SimpleMockGraph(result_set=[])
+        for fn in (run_fts_query, run_vector_query, run_structural_query):
+            for bad in ("Point", "POINT", "point ", "Point; DETACH", "x", ""):
+                try:
+                    if fn is run_vector_query:
+                        fn(graph, [0.1] * 384, entity_type=bad)
+                    else:
+                        fn(graph, "query", entity_type=bad)
+                except ValueError:
+                    pass
+                else:
+                    raise AssertionError(f"{fn.__name__} accepted entity_type={bad!r}")
+
+    def test_valid_entity_types_accepted(self):
+        from tortoise.search_engine import run_structural_query
+        from tests.test_search_engine_gaps import SimpleMockGraph
+        graph = SimpleMockGraph(result_set=[("p1",)])
+        for et in ("point", "event", "subject", "document", "object", "operator", "source"):
+            run_structural_query(graph, kind=None, entity_type=et)
+
 # ── EP variance / contestation (#contested-flag) ────────────────────────────
 
 class TestAnnotateEpContestation:

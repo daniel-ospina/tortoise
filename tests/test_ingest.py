@@ -655,29 +655,37 @@ def test_upgrade_on_already_extracted_is_noop():
 
 
 
-def test_upgrade_all_without_transcript_does_not_crash():
+def test_upgrade_all_without_transcript_does_not_crash(monkeypatch, tmp_path):
     """#133 P0: --upgrade-all with NO positional transcript must not crash
-    (regression: args.transcript.name raised AttributeError on None)."""
+    (regression: args.transcript.name raised AttributeError on None).
+
+    #329: embedded DB (pre-created file so ingest uses the embedded path)
+    + TORTOISE_INGEST_BASE_DIR set to the corpus root so the operator's own
+    file re-upgrades (fail-closed default would skip it)."""
     import json
-    uri = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise_test_133")
-    db = uri
-    log = _tmp("events_133_ua.jsonl")
-    from tortoise.projection import FalkorProjection as _FP
-    _f = _FP.from_uri(uri)
-    _f.g.query("MATCH (n) DETACH DELETE n")
-    _f.close()
     from tortoise.projection import FalkorProjection
-    # Real file at a resolvable path — doc_id = file path (ingest convention)
-    real_file = _tmp("doc-a.md")
-    Path(real_file).write_text(
+    db = _tmp("db_133_ua.db")
+    # Create a real embedded DB at the path so ingest uses the embedded branch
+    # (Path.exists() gate) instead of falling back to Docker. A bare touch()
+    # breaks redislite (it expects to own the file format).
+    _seed = FalkorProjection(db)
+    _seed.close()
+    log = _tmp("events_133_ua.jsonl")
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", str(corpus))
+    from tortoise.projection import FalkorProjection
+    # Real file under the base — doc sourcePath = file path (ingest convention)
+    real_file = corpus / "doc-a.md"
+    real_file.write_text(
         "---\ntitle: A\ndoc_status: captured\n---\n\n## User\nhi\n",
         encoding="utf-8")
-    proj = FalkorProjection.from_uri(uri)
+    proj = FalkorProjection(db)
     try:
         proj.g.query(
             "CREATE (d:Document {id:$id, title:'A', doc_status:'captured', "
             "sourcePath:$sp})",
-            params={"id": real_file, "sp": real_file},
+            params={"id": str(real_file), "sp": str(real_file)},
         )
     finally:
         proj.close()
@@ -686,14 +694,88 @@ def test_upgrade_all_without_transcript_does_not_crash():
             "--point-model", "mock:cheap", "--relation-model", "mock:reason"]
     with patch("sys.argv", args):
         _run_main(None)
-    # Doc should now be extracted (upgrade ran)
-    from tortoise.projection import FalkorProjection
-    proj = FalkorProjection.from_uri(uri)
+    # Doc should now be extracted (upgrade ran — file is under the base)
+    proj = FalkorProjection(db)
     try:
         rows = proj.g.query(
             "MATCH (d:Document) WHERE d.sourcePath = $sp RETURN d.doc_status",
-            params={"sp": real_file},
+            params={"sp": str(real_file)},
         ).result_set
         assert rows and rows[0][0] == "extracted", f"expected extracted, got {rows}"
+    finally:
+        proj.close()
+
+
+def test_upgrade_all_fail_closed_outside_base(monkeypatch, tmp_path):
+    """#329: upgrade-all with a sourcePath OUTSIDE the base is skipped
+    (fail-closed) — a tenant-set /etc/passwd-style path is never read."""
+    import json
+    from tortoise.projection import FalkorProjection
+    db = _tmp("db_133_fc.db")
+    _seed = FalkorProjection(db)
+    _seed.close()
+    log = _tmp("events_133_fc.jsonl")
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", str(corpus))
+    from tortoise.projection import FalkorProjection
+    # Tenant-crafted Document pointing at a path outside the base
+    proj = FalkorProjection(db)
+    try:
+        proj.g.query(
+            "CREATE (d:Document {id:'doc-evil', title:'Evil', "
+            "doc_status:'captured', sourcePath:$sp})",
+            params={"sp": "/etc/passwd"},
+        )
+    finally:
+        proj.close()
+    args = ["ingest", "--db", db, "--log", log, "--upgrade-all",
+            "--point-model", "mock:cheap", "--relation-model", "mock:reason"]
+    with patch("sys.argv", args):
+        _run_main(None)
+    # Doc NOT extracted — the file was never read
+    proj = FalkorProjection(db)
+    try:
+        rows = proj.g.query(
+            "MATCH (d:Document {id:'doc-evil'}) RETURN d.doc_status",
+        ).result_set
+        assert rows[0][0] == "captured", f"expected captured (fail-closed), got {rows[0][0]}"
+    finally:
+        proj.close()
+
+
+def test_upgrade_all_unset_base_skips_everything(monkeypatch, tmp_path):
+    """#329: TORTOISE_INGEST_BASE_DIR unset → fail-closed skip (nothing read)."""
+    monkeypatch.delenv("TORTOISE_INGEST_BASE_DIR", raising=False)
+    from tortoise.projection import FalkorProjection
+    db = _tmp("db_133_nb.db")
+    _seed = FalkorProjection(db)
+    _seed.close()
+    log = _tmp("events_133_nb.jsonl")
+    # REAL valid markdown doc at an absolute path (would be read+extracted
+    # without containment)
+    real = _tmp("doc-real.md")
+    Path(real).write_text(
+        "---\ntitle: Real\ndoc_status: captured\n---\n\n## User\nreal content\n",
+        encoding="utf-8")
+    proj = FalkorProjection(db)
+    try:
+        proj.g.query(
+            "CREATE (d:Document {id:'doc-x', title:'X', doc_status:'captured', "
+            "sourcePath:$sp})",
+            params={"sp": real},
+        )
+    finally:
+        proj.close()
+    args = ["ingest", "--db", db, "--log", log, "--upgrade-all",
+            "--point-model", "mock:cheap", "--relation-model", "mock:reason"]
+    with patch("sys.argv", args):
+        _run_main(None)
+    proj = FalkorProjection(db)
+    try:
+        rows = proj.g.query(
+            "MATCH (d:Document {id:'doc-x'}) RETURN d.doc_status",
+        ).result_set
+        assert rows[0][0] == "captured"
     finally:
         proj.close()

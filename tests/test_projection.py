@@ -1620,6 +1620,39 @@ def test_falkor_rebuild_all_parity_with_apply():
         shutil.rmtree(d, ignore_errors=True)
 
 
+# ── #329: stub-node auto-creation cap ───────────────────────────────
+
+def test_stub_creation_bounded_at_cap(monkeypatch):
+    """#329: short-ID stub auto-creation stops at the per-instance cap; at-cap
+    behavior is fail-safe (no stub, no partial edge, warning logged)."""
+    import tempfile, os
+    from tortoise.projection import FalkorProjection
+
+    monkeypatch.setenv("TORTOISE_MAX_AUTOCREATED_STUBS", "2")
+    db = os.path.join(tempfile.mkdtemp(prefix="tortoise_stubcap_"), "test.db")
+    proj = FalkorProjection(db)
+    try:
+        # Three OperatorAdded events referencing three distinct short ids
+        for i, sid in enumerate(("s1", "s2", "s3")):
+            proj.apply({
+                "type": "OperatorAdded",
+                "point": {"id": f"op{i}", "content": f"NAND({sid})",
+                          "operator": {"op_type": "NAND", "inputs": [sid]}},
+            })
+        # Only 2 stubs created (cap), 3rd missing source skipped
+        stubs = proj.g.query(
+            "MATCH (s:Point) WHERE s.content='[missing]' RETURN count(s)"
+        ).result_set[0][0]
+        assert stubs == 2, f"expected 2 stubs, got {stubs}"
+        # No partial edge to the skipped source
+        edges = proj.g.query(
+            "MATCH (o:Point {id:'op2'})-[r]->() RETURN count(r)"
+        ).result_set[0][0]
+        assert edges == 0, f"expected no partial edge from op2, got {edges}"
+    finally:
+        proj.close()
+
+
 def test_falkor_rebuild_all_revision_before_add():
     """#21 regression: a PointRevised in an alphabetically-EARLIER file must be
     applied to the point whose PointAdded lives in a LATER file. The two-pass

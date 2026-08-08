@@ -140,8 +140,89 @@ if _is_dev_mode():
     _log.warning("TORTOISE_API_KEY not set — running in dev mode (no auth)")
 
 
+# #329: node/edge-creating MCP write tools that MUST be quota-gated. Completeness
+# is enforced by an introspective test (tests/test_mcp_http.py) that scans every
+# HTTP_ALLOWED tool body for node/edge-creating SDK calls and asserts membership.
+# New node/edge-creating tools MUST be added here.
+_QUOTA_GATED: frozenset[str] = frozenset({
+    "tortoise_create_point", "tortoise_create_operator", "tortoise_create_event",
+    "tortoise_create_subject", "tortoise_create_object", "tortoise_create_document",
+    "tortoise_create_source", "tortoise_checkpoint", "tortoise_file_decision",
+    "tortoise_update_entity", "tortoise_update_point", "tortoise_diary_write",
+    "tortoise_mitigate_operator",
+    # edge-creating tools — edge growth is the same graph-flood family
+    "tortoise_create_edge", "tortoise_supersede", "tortoise_invalidate",
+    # delegates to hosted_api._seed_demo_graph (creates the 4-layer demo graph)
+    "tortoise_onboarding_demo_create",
+})
+
+
+# #329: per-team per-minute LLM-call budget for tortoise_analyze (operator LLM
+# keys back outbound calls; the rate limiter alone is not the bound).
+_ANALYZE_LLM_BUDGET: dict[str, list[float]] = {}
+
+
+def _analyze_llm_budget_available() -> bool:
+    """True if this team still has analyze LLM budget this minute (HTTP only).
+
+    Beyond budget the tool degrades to keyword-only classification (no paid
+    outbound call). Stdio (no team context) is not budgeted.
+    """
+    import time as _t
+    from tortoise.mcp_auth import _current_team_id
+    from tortoise.quota import MAX_ANALYZE_LLM_PER_MIN
+    team_id = _current_team_id.get()
+    if not team_id:
+        return True  # stdio/operator — no team budget accounting
+    now_ts = _t.time()
+    bucket = _ANALYZE_LLM_BUDGET.setdefault(team_id, [])
+    bucket[:] = [ts for ts in bucket if now_ts - ts < 60]
+    # prune -> check -> append (never pop between check and append — that
+    # orphans the appended timestamp and silently disables the budget)
+    if len(bucket) >= MAX_ANALYZE_LLM_PER_MIN:
+        return False
+    bucket.append(now_ts)
+    return True
+
+
+def _enforce_quota(resource: str = "points") -> None:
+    """#329: fail-closed team quota pre-write for MCP write tools.
+
+    HTTP mode: limits come from the middleware-resolved ContextVar (same
+    limits REST sees); fallback resolves from the registry. Stdio mode
+    (no team context) → skip — operator/trusted (batch caps still apply).
+    """
+    from tortoise.mcp_auth import _current_team_id, _current_team_limits
+    from tortoise.quota import enforce_team_limit, resolve_team_limits
+    team_id = _current_team_id.get()
+    if not team_id:
+        return  # stdio/operator — no team context
+    limits = _current_team_limits.get()
+    if limits is None:
+        limits = resolve_team_limits(team_id)
+    # Count on the SAME team SDK the tool writes to (identical connection),
+    # so the count and the write can never target different databases.
+    enforce_team_limit(limits, resource, sdk=_get_team_sdk())
+
+
+def _quota_gated(fn, resource: str = "points"):
+    """Wrap a bound SDK method with a pre-write quota check.
+
+    Preserves the bound-callable style (_safe(_get_team_sdk().name, ...)):
+    the quota check runs INSIDE _safe's try so errors surface as structured
+    error dicts (see _safe's QuotaExceededError/QuotaCheckError mapping).
+    """
+    def _gated(*args, **kwargs):
+        _enforce_quota(resource)
+        return fn(*args, **kwargs)
+    return _gated
+
+
 def _safe(fn, *args, **kwargs):
     """Call fn; return error dict on exception instead of raising.
+
+    #329: QuotaExceededError → {"error", "code": ERR_QUOTA}; QuotaCheckError
+    → {"error", "code": ERR_QUOTA_SERVER} (fail-closed counting).
 
     Transport-aware auth gate (#236). Fail-closed: if _transport_mode is None
     (unset/misconfigured) ALL operations reject. HTTP mode trusts transport-level
@@ -176,12 +257,34 @@ def _safe(fn, *args, **kwargs):
         return result
     except Exception as e:
         monitoring.record_error()
+        from tortoise.quota import QuotaCheckError, QuotaExceededError
+        if isinstance(e, QuotaExceededError):
+            return {"error": str(e), "code": ERR_QUOTA}
+        if isinstance(e, QuotaCheckError):
+            return {"error": str(e), "code": ERR_QUOTA_SERVER}
         msg = str(e)
         # Sanitize: strip hostnames, ports, passwords from error messages (#43)
         import re
         msg = re.sub(r'://[^@]*@', '://***@', msg)  # password in URI
         msg = re.sub(r'(host=|at |to )[\w.-]+(:\d+)?', r'\1***', msg)  # host:port
         return {"error": msg}
+
+
+def _scrub_analyze_answer(answer: str) -> str:
+    """#329: boundary scrub for analyze() answers — strip common internals.
+
+    analyze() already redacts its own error paths; this is defense-in-depth
+    against future regressions (paths, hostnames, credentials).
+    """
+    import re
+    answer = re.sub(r"://[^@\s]*@", "://***@", answer)
+    answer = re.sub(r"(?P<pre>[/\\])\w+\.(?:db|jsonl|log)(?=[\"'\s,)])", r"\g<pre>***", answer)
+    return answer[:2000]
+
+
+# #329: quota error codes (registered alongside the other ERR_* in mcp_auth).
+ERR_QUOTA = -32006
+ERR_QUOTA_SERVER = -32007
 
 
 def _http_excluded_error() -> dict:
@@ -227,8 +330,17 @@ def tortoise_create_point(kind: str, content: str,
     merged = dict(props or {})
     if authoredBy:
         merged["authoredBy"] = authoredBy
+    # #329 tag batch cap + value validation
+    from tortoise.quota import MAX_TAGS_PER_POINT
+    tags = merged.get("tags") or []
+    if isinstance(tags, list):
+        if len(tags) > MAX_TAGS_PER_POINT:
+            return {"error": f"tags exceed the cap ({MAX_TAGS_PER_POINT})", "code": ERR_QUOTA}
+        for t in tags:
+            if not isinstance(t, str) or not t.strip() or len(t) > 200:
+                return {"error": f"invalid tag value: {t!r} (must be a non-empty string ≤ 200 chars)"}
     merged["dedup"] = dedup
-    return _safe(_get_team_sdk().create_point, kind, content, **merged)
+    return _safe(_quota_gated(_get_team_sdk().create_point, "points"), kind, content, **merged)
 
 
 def tortoise_query(kind: str | None = None,
@@ -427,7 +539,12 @@ def tortoise_dream(full: bool = False, dirty_only: bool = True,
     Stabilizes confidence values after batch writes without an explicit
     compute_confidence call. Default: dreams the accumulated dirty subgraph
     (incremental). Set full=True for whole-graph stabilization.
+
+    #329: EXCLUDED from tenant HTTP — whole-graph EP is CPU-heavy
+    (operator/stdio only; REST /v1/dream is separately budgeted).
     """
+    if _transport_mode.get() == "http":
+        return _http_excluded_error()
     return _safe(_get_team_sdk().dream, dirty_only=dirty_only, full=full,
                  max_hops=max_hops)
 
@@ -435,7 +552,7 @@ def tortoise_dream(full: bool = False, dirty_only: bool = True,
 def tortoise_update_point(id: str, props: Any) -> dict:
     """Update properties on a Point. Safe — modifies one Point only."""
     props = _parse(props)
-    return _safe(_get_team_sdk().update_point, id, **(props or {}))
+    return _safe(_quota_gated(_get_team_sdk().update_point, "points"), id, **(props or {}))
 
 def tortoise_create_operator(op_type: str, source_id: str, target_ids: Any,
                               direction: str = "bidirectional") -> dict:
@@ -451,7 +568,12 @@ def tortoise_create_operator(op_type: str, source_id: str, target_ids: Any,
       annotation, mitigation, NAND constraints, veracity vs implication.
     """
     target_ids = _parse(target_ids)
-    return _safe(_get_team_sdk().create_operator, op_type, source_id, target_ids,
+    # #329 batch cap on operator target fan-out
+    from tortoise.quota import MAX_OPERATOR_TARGETS
+    if isinstance(target_ids, list) and len(target_ids) > MAX_OPERATOR_TARGETS:
+        return {"error": f"create_operator target_ids exceed the cap ({MAX_OPERATOR_TARGETS})",
+                "code": ERR_QUOTA}
+    return _safe(_quota_gated(_get_team_sdk().create_operator, "points"), op_type, source_id, target_ids,
                  direction=direction)
 
 
@@ -483,7 +605,7 @@ def tortoise_mitigate_operator(id: str, reason: str, strength: float = 0.5) -> d
     strength: 0-1 — 0=fully neutralized, 1=fully intact (default 0.5).
     Idempotent — second call updates existing mitigation.
     """
-    return _safe(_get_team_sdk().mitigate_operator, id, reason, strength)
+    return _safe(_quota_gated(_get_team_sdk().mitigate_operator, "points"), id, reason, strength)
 
 
 def tortoise_file_decision(options: Any, evidence: Any,
@@ -502,7 +624,15 @@ def tortoise_file_decision(options: Any, evidence: Any,
     """
     options = _parse(options)
     evidence = _parse(evidence)
-    return _safe(_get_team_sdk().file_decision, options, evidence, choice)
+    # #329 batch caps
+    from tortoise.quota import MAX_FILE_DECISION_EVIDENCE, MAX_FILE_DECISION_OPTIONS
+    if isinstance(options, list) and len(options) > MAX_FILE_DECISION_OPTIONS:
+        return {"error": f"file_decision options exceed the cap ({MAX_FILE_DECISION_OPTIONS})",
+                "code": ERR_QUOTA}
+    if isinstance(evidence, list) and len(evidence) > MAX_FILE_DECISION_EVIDENCE:
+        return {"error": f"file_decision evidence exceeds the cap ({MAX_FILE_DECISION_EVIDENCE})",
+                "code": ERR_QUOTA}
+    return _safe(_quota_gated(_get_team_sdk().file_decision, "points"), options, evidence, choice)
 
 
 def tortoise_file_human_approval(approver_id: str, artifact_id: str,
@@ -540,7 +670,7 @@ def tortoise_invalidate(id: str, corrected_by_id: str) -> dict:
     The `corrected_by_id` point CORRECTS the invalidated point.
     Returns {invalidated, id, corrected_by}.
     """
-    return _safe(_get_team_sdk().invalidate_point, id, corrected_by_id)
+    return _safe(_quota_gated(_get_team_sdk().invalidate_point, "points"), id, corrected_by_id)
 
 
 def tortoise_supersede(old_id: str, new_id: str) -> dict:
@@ -550,7 +680,7 @@ def tortoise_supersede(old_id: str, new_id: str) -> dict:
     creates CORRECTS edge from new to old.
     Returns {invalidated, id, corrected_by}.
     """
-    return _safe(_get_team_sdk().supersede_point, old_id, new_id)
+    return _safe(_quota_gated(_get_team_sdk().supersede_point, "points"), old_id, new_id)
 
 
 
@@ -629,7 +759,12 @@ def tortoise_checkpoint(items: Any,
     Returns {filed: N, duplicates: M}.
     """
     items = _parse(items)
-    return _safe(_get_team_sdk().checkpoint, items,
+    # #329 batch cap: a single checkpoint call must not create unbounded nodes
+    from tortoise.quota import MAX_CHECKPOINT_ITEMS
+    if isinstance(items, list) and len(items) > MAX_CHECKPOINT_ITEMS:
+        return {"error": f"checkpoint items exceed the batch cap ({MAX_CHECKPOINT_ITEMS})",
+                "code": ERR_QUOTA}
+    return _safe(_quota_gated(_get_team_sdk().checkpoint, "points"), items,
                  agent_name=agent_name, threshold=threshold)
 
 
@@ -639,7 +774,7 @@ def tortoise_diary_write(agent_name: str, entry: str,
     """Write an agent diary entry (AAAK format suggested).
     Creates a Point with pointKind=diary, authoredBy=agent.
     """
-    return _safe(_get_team_sdk().diary_write, agent_name, entry, topic=topic, wing=wing)
+    return _safe(_quota_gated(_get_team_sdk().diary_write, "points"), agent_name, entry, topic=topic, wing=wing)
 
 
 def tortoise_diary_read(agent_name: str, last_n: int = 10,
@@ -649,8 +784,18 @@ def tortoise_diary_read(agent_name: str, last_n: int = 10,
 
 
 def tortoise_list_graphs() -> list[str]:
-    """List all graph names in the database. Useful for namespace discovery."""
-    return _safe(_get_team_sdk().list_graphs)
+    """List graph names. HTTP: only the calling team's own graphs (exact
+    team_{team_id} equality — no cross-tenant enumeration). Stdio: full list
+    (operator context)."""
+    graphs = _safe(_get_team_sdk().list_graphs)
+    if not isinstance(graphs, list):
+        return graphs
+    if _transport_mode.get() == "http":
+        from tortoise.mcp_auth import _current_team_id
+        team_id = _current_team_id.get()
+        own = f"team_{team_id}" if team_id else None
+        return [g for g in graphs if own is not None and g == own]
+    return graphs
 
 
 def tortoise_status() -> dict:
@@ -741,12 +886,21 @@ def tortoise_analyze(question: str,
         except Exception:
             pass  # fall back to full-graph analysis
 
-    return _safe(analyze, question, _get_team_sdk()._get_proj(),
+    # #329: bound paid outbound LLM calls per team per minute — beyond budget
+    # the tool degrades to keyword-only classification.
+    use_llm = _analyze_llm_budget_available()
+    result = _safe(analyze, question, _get_team_sdk()._get_proj(),
                    entity_subgraph_ids=entity_subgraph_ids,
                    anchor_ids=anchor_ids,
                    max_hops=max_hops,
                    rel_filter=rel_filter,
-                   direction=direction)
+                   direction=direction,
+                   use_llm=use_llm)
+    # #329 defense-in-depth: analyze() self-redacts, but scrub the answer at the
+    # boundary too in case a future error path leaks internals.
+    if isinstance(result, dict) and isinstance(result.get("answer"), str):
+        result["answer"] = _scrub_analyze_answer(result["answer"])
+    return result
 
 
 # ── P1-3: Staleness Detection ─────────────────────────────────
@@ -783,17 +937,17 @@ def tortoise_team_create(name: str) -> dict:
 def tortoise_create_subject(name: str, subjectKind: str, props: Any = None) -> dict:
     """Create a Subject node (team, role, organization, person)."""
     props = _parse(props)
-    return _safe(_get_team_sdk().create_subject, name, subjectKind, **(props or {}))
+    return _safe(_quota_gated(_get_team_sdk().create_subject, "points"), name, subjectKind, **(props or {}))
 
 def tortoise_create_object(name: str, objectKind: str, props: Any = None) -> dict:
     """Create an Object node (product, customer, skill, etc.)."""
     props = _parse(props)
-    return _safe(_get_team_sdk().create_object, name, objectKind, **(props or {}))
+    return _safe(_quota_gated(_get_team_sdk().create_object, "points"), name, objectKind, **(props or {}))
 
 def tortoise_create_event(name: str, eventKind: str, props: Any = None) -> dict:
     """Create an Event node (meeting, decision, deployment, etc.)."""
     props = _parse(props)
-    return _safe(_get_team_sdk().create_event, name, eventKind, **(props or {}))
+    return _safe(_quota_gated(_get_team_sdk().create_event, "points"), name, eventKind, **(props or {}))
 
 
 def tortoise_get_events(eventKind: str | None = None, limit: int = 20) -> list[dict]:
@@ -840,7 +994,7 @@ def tortoise_search_sessions(query: str, agent: str | None = None, topics: Any =
 def tortoise_create_document(title: str, documentKind: str, props: Any = None) -> dict:
     """Create a Document node (research, planDoc, meetingNotes, etc.)."""
     props = _parse(props)
-    return _safe(_get_team_sdk().create_document, title, documentKind, **(props or {}))
+    return _safe(_quota_gated(_get_team_sdk().create_document, "points"), title, documentKind, **(props or {}))
 
 @mcp.tool(annotations=ToolAnnotations(idempotentHint=True))
 def tortoise_create_source(url: str, sourceKind: str, tier: str | None = None,
@@ -857,7 +1011,7 @@ def tortoise_create_source(url: str, sourceKind: str, tier: str | None = None,
     # caller passed them there (kwarg wins; avoids TypeError on splat).
     props.pop("tier", None)
     props.pop("sourceDate", None)
-    return _safe(_get_team_sdk().create_source, url, sourceKind,
+    return _safe(_quota_gated(_get_team_sdk().create_source, "points"), url, sourceKind,
                  tier=tier, sourceDate=sourceDate, **props)
 
 
@@ -904,7 +1058,7 @@ def tortoise_get_entity(id: str) -> dict:
 def tortoise_update_entity(id: str, props: Any = None) -> dict:
     """Update any entity's properties."""
     props = _parse(props)
-    return _safe(_get_team_sdk().update_entity, id, **(props or {}))
+    return _safe(_quota_gated(_get_team_sdk().update_entity, "points"), id, **(props or {}))
 
 def tortoise_delete_entity(id: str) -> bool:
     """Delete any entity by ID."""
@@ -912,7 +1066,7 @@ def tortoise_delete_entity(id: str) -> bool:
 
 def tortoise_create_edge(source_id: str, target_id: str, predicate: str) -> bool:
     """Create an edge between two entities. Predicate: performs, produces, ownedBy, managedBy, etc."""
-    return _safe(_get_team_sdk()._get_proj().create_edge, source_id, target_id, predicate)
+    return _safe(_quota_gated(_get_team_sdk()._get_proj().create_edge, "points"), source_id, target_id, predicate)
 
 def tortoise_get_governance(subject_id: str) -> list:
     """Get all entities owned by a Subject."""
@@ -968,6 +1122,8 @@ def tortoise_onboarding_demo_create() -> dict:
     team_id = _current_team_id.get()
     if team_id is None:
         return {"error": "No team context (HTTP mode required)"}
+    # #329: demo graph creation creates nodes — quota-gate it
+    _enforce_quota("points")
     result = _seed_demo_graph(team_id)
     # Auto-update onboarding state
     try:
