@@ -64,12 +64,12 @@ class _GuardedGraph:
         self._g = g
         self._proj = projection
 
-    def query(self, cypher: str, params=None):
+    def query(self, cypher: str, params=None, timeout=None):
         if _is_bulk_wipe(cypher) and not getattr(self._proj, "_skip_guard", False):
             self._proj._assert_test_graph(
                 "REFUSING to run bulk DETACH DELETE on non-test graph"
             )
-        return self._g.query(cypher, params=params)
+        return self._g.query(cypher, params=params, timeout=timeout)
 
     def __getattr__(self, name):
         return getattr(self._g, name)
@@ -263,14 +263,6 @@ class FalkorProjection(
         # recovery tool — gating it on a healthy DB would be circular).
         if not skip_health_check:
             self._auto_health_recover()
-
-        # #329: per-instance stub-node budget (auto-created short-ID Points in
-        # _create_edges). Bounds the operator-surface stub flood. Env
-        # TORTOISE_MAX_AUTOCREATED_STUBS (default 500); at-cap the stub is NOT
-        # created and edge creation to the missing node is skipped (fail-safe).
-        from tortoise.security import env_int
-        self._autocreated_stubs = 0
-        self._max_autocreated_stubs = env_int("TORTOISE_MAX_AUTOCREATED_STUBS", 500)
         self._falkordb_version = self._get_falkordb_version()
         if self._falkordb_version is not None and self._falkordb_version[0] < 4:
             import logging
