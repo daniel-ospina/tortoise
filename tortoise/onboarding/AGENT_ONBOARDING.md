@@ -47,7 +47,7 @@ PRs, so when you ask about past decisions, your agent will know what happened."
 2. Call `tortoise_onboarding_github_connect(org=<answer>)`. This returns an
    `auth_url` — tell the user to open it in their browser to authorize.
 3. After authorization, call `tortoise_onboarding_github_status()` to confirm.
-   Show: "✅ GitHub connected — [N] repos found."
+   Show: "✅ GitHub connected."
 4. If the tool errors (e.g. "No team context" — GitHub OAuth is hosted-mode
    only): "GitHub connect isn't available in this mode. Visit your dashboard
    at https://app.premiselabs.co to connect GitHub. I'll skip ahead." Skip Q2,
@@ -120,8 +120,10 @@ directory of markdown files, I can index them into your memory."
    `{ingested, updated, skipped}`.
 3. Show: "✅ Ingested [N] documents into memory."
 4. If the tool returns an HTTP-excluded error (hosted users): "Document
-   ingestion from a directory requires the CLI. Run `tortoise ingest <directory>`
-   from your terminal. I'll skip ahead."
+   ingestion from a directory isn't available in hosted mode. Run
+   `tortoise serve` locally and connect your agent to it (stdio) to use
+   `tortoise_ingest_corpus`, or run `tortoise onboard` for the self-hosted
+   setup. I'll skip ahead."
 5. (HTTP-transport ingest of a directory is not supported — see error recovery)
 
 **If no:** "Skipping document ingestion. You can ingest docs later."
@@ -171,8 +173,9 @@ If a tool fails at runtime:
   `tortoise_create_point` ×5 fallback). If it fails: "Couldn't create the demo
   graph right now. You can try again later."
 - **Q5 (Docs ingestion):** If HTTP transport: "Document ingestion from a
-  directory requires the CLI. Run `tortoise ingest <directory>` from your
-  terminal. I'll skip ahead."
+  directory isn't available in hosted mode. Run `tortoise serve` locally and
+  connect your agent to it (stdio) to use `tortoise_ingest_corpus`, or run
+  `tortoise onboard` for the self-hosted setup. I'll skip ahead."
 
 If `tortoise_health` fails at any point: "Lost connection to Tortoise. Check
 your network and try again."
@@ -198,7 +201,7 @@ specification with execution paths, state tracking, and error handling.
 | Q2 (GitHub index) | `tortoise_onboarding_github_index` | ✅ Live (HTTP) | unavailable (dashboard) |
 | Q3 (Session recording) | `tortoise_onboarding_session_recording` | ✅ Live (HTTP) | `tortoise_diary_write` |
 | Q4 (Demo graph) | `tortoise_onboarding_demo_create` | ✅ Live (HTTP) | `tortoise_create_point` ×5 |
-| Q5 (Docs ingestion) | `tortoise_ingest_corpus` | ⚠️ Stdio-only | CLI `tortoise ingest <dir>` |
+| Q5 (Docs ingestion) | `tortoise_ingest_corpus` | ⚠️ Stdio-only | `tortoise serve` locally |
 | Q6 (Verification) | `tortoise_health`, `tortoise_session_context`, `tortoise_summarize_structure` | ✅ Live | same |
 
 **Fallback behavior:** If a tool fails, the agent follows the error recovery
