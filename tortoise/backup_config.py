@@ -157,9 +157,9 @@ def _load_from_env() -> BackupConfig:
     if not alert_assignee:
         raise ConfigError("BACKUP_ALERT_ASSIGNEE required when backup sweep is enabled")
 
-    github_issues_pat = os.environ.get("GITHUB_ISSUES_PAT", "").strip()
+    github_issues_pat = os.environ.get("DR_ISSUES_PAT", "").strip()
     if not github_issues_pat:
-        raise ConfigError("GITHUB_ISSUES_PAT required when backup sweep is enabled")
+        raise ConfigError("DR_ISSUES_PAT required when backup sweep is enabled")
 
     gh_repo = os.environ.get("GH_REPO", "").strip() or _DEFAULT_GH_REPO
 

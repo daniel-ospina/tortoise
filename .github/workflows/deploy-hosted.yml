@@ -55,10 +55,10 @@ jobs:
           # secret keeps the sweep off, never crashes the boot, #545).
           [ -n "${{ secrets.TELEGRAM_BOT_TOKEN }}" ] && ARGS="$ARGS TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}"
           [ -n "${{ secrets.TELEGRAM_CHAT_ID }}" ] && ARGS="$ARGS TELEGRAM_CHAT_ID=${{ secrets.TELEGRAM_CHAT_ID }}"
-          [ -n "${{ secrets.GITHUB_ISSUES_PAT }}" ] && ARGS="$ARGS GITHUB_ISSUES_PAT=${{ secrets.GITHUB_ISSUES_PAT }}"
+          [ -n "${{ secrets.DR_ISSUES_PAT }}" ] && ARGS="$ARGS DR_ISSUES_PAT=${{ secrets.DR_ISSUES_PAT }}"
           [ -n "${{ secrets.BACKUP_ALERT_ASSIGNEE }}" ] && ARGS="$ARGS BACKUP_ALERT_ASSIGNEE=${{ secrets.BACKUP_ALERT_ASSIGNEE }}"
           [ -n "${{ secrets.BACKUP_SIMULATE_ENABLED }}" ] && ARGS="$ARGS BACKUP_SIMULATE_ENABLED=${{ secrets.BACKUP_SIMULATE_ENABLED }}"
-          if [ -n "${{ secrets.TORTOISE_BACKUP_KEY }}" ] && [ -n "${{ secrets.R2_ACCOUNT_ID }}" ] && [ -n "${{ secrets.R2_ACCESS_KEY_ID }}" ] && [ -n "${{ secrets.R2_SECRET_ACCESS_KEY }}" ] && [ -n "${{ secrets.R2_BUCKET }}" ] && [ -n "${{ secrets.TELEGRAM_BOT_TOKEN }}" ] && [ -n "${{ secrets.TELEGRAM_CHAT_ID }}" ] && [ -n "${{ secrets.GITHUB_ISSUES_PAT }}" ] && [ -n "${{ secrets.BACKUP_ALERT_ASSIGNEE }}" ]; then
+          if [ -n "${{ secrets.TORTOISE_BACKUP_KEY }}" ] && [ -n "${{ secrets.R2_ACCOUNT_ID }}" ] && [ -n "${{ secrets.R2_ACCESS_KEY_ID }}" ] && [ -n "${{ secrets.R2_SECRET_ACCESS_KEY }}" ] && [ -n "${{ secrets.R2_BUCKET }}" ] && [ -n "${{ secrets.TELEGRAM_BOT_TOKEN }}" ] && [ -n "${{ secrets.TELEGRAM_CHAT_ID }}" ] && [ -n "${{ secrets.DR_ISSUES_PAT }}" ] && [ -n "${{ secrets.BACKUP_ALERT_ASSIGNEE }}" ]; then
             ARGS="$ARGS BACKUP_SWEEP_ENABLED=true"
             echo "::notice::BACKUP_SWEEP_ENABLED=true — all backup-sweep secrets present"
           else
