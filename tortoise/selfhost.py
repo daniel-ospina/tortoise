@@ -73,8 +73,11 @@ if not os.environ.get("TORTOISE_DB_URI"):
         "docker-compose reference. See docs/license-notes.md / infra-runbook."
     )
 
+_ALLOWED_HOSTS = [o.split("//")[1].split("/")[0] for o in ALLOWED_ORIGINS if "//" in o]
+
 mcp_http_app = create_http_app(
     allowed_origins=ALLOWED_ORIGINS,
+    allowed_hosts=_ALLOWED_HOSTS,
     rate_limit=RATE_LIMIT,
     auth_mode=_auth_mode(),
     api_key=API_KEY,
