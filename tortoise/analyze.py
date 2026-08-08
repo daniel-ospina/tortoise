@@ -153,9 +153,11 @@ def _format_ranked(rows: list, label: str) -> str:
     for i, r in enumerate(rows[:10], 1):
         try:
             conf = float(r[2])
-        except (TypeError, ValueError):
-            conf = None  # non-numeric confidence (legacy/hostile) → degrade, don't crash
-        val = f"  {i}. \"{r[1][:80]}\"" + (f" (confidence: {conf:.2f})" if conf is not None else "")
+            content = r[1][:80] if r[1] is not None else ""
+        except (TypeError, ValueError, IndexError):
+            conf = None  # non-numeric/missing confidence → degrade, don't crash
+            content = (r[1][:80] if len(r) > 1 and r[1] is not None else "")
+        val = f"  {i}. \"{content}\"" + (f" (confidence: {conf:.2f})" if conf is not None else "")
         lines.append(val)
     return "\n".join(lines)
 
@@ -178,9 +180,10 @@ def _format_chain(rows: list) -> str:
         try:
             conf = float(r[2])
             conf_txt = f" (conf: {conf:.2f})"
-        except (TypeError, ValueError):
-            conf_txt = ""  # non-numeric confidence → degrade, don't crash
-        lines.append(f"  \"{r[1][:80]}\"{conf_txt}")
+        except (TypeError, ValueError, IndexError):
+            conf_txt = ""  # non-numeric/missing confidence → degrade, don't crash
+        content = r[1][:80] if len(r) > 1 and r[1] is not None else ""
+        lines.append(f"  \"{content}\"{conf_txt}")
     return "\n".join(lines)
 
 
@@ -477,6 +480,9 @@ def analyze(question: str, proj=None, *,
         else:
             answer = f"Found {len(rows)} results."
     except Exception as e:
+        import logging
+        logging.getLogger(__name__).exception(
+            "analyze formatter failed for pattern %s", pattern_name)
         from .security import redact_error
         answer = f"Formatting error: {redact_error(e)}"
 

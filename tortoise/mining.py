@@ -199,11 +199,12 @@ class ConversationMiner:
         for p in points:
             content = p.get("content", "")
             if p.get("id") not in nand_inputs and self._has_cue(content, _FRICTION_WORDS):
-                # Dedup by content — the same conflict repeated across points
-                # must not flood the log with identical friction events.
-                if content[:100] in seen_friction_content:
+                # Dedup by full content — the same conflict repeated across
+                # points must not flood the log with identical friction events
+                # (a 100-char prefix could collide between distinct conflicts).
+                if content in seen_friction_content:
                     continue
-                seen_friction_content.add(content[:100])
+                seen_friction_content.add(content)
                 events.append(self._make_event(
                     event_id=f"friction-{source_id}-{friction_idx}",
                     event_kind="friction",
