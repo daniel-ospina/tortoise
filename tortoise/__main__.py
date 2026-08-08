@@ -837,6 +837,7 @@ def _cmd_onboard(args) -> int:
     import subprocess as _sp
     import sys as _sys
     from pathlib import Path
+    from tortoise.config import resolve_db_path
 
     step = 0
     total = 5
@@ -876,9 +877,14 @@ def _cmd_onboard(args) -> int:
         md_count = len(list(Path(repo_root).rglob("*.md")))
         if md_count > 0:
             print(f"  Found {md_count} markdown files. Indexing…")
+            # Pass the resolved DB target through (fixes AttributeError on
+            # args.db in embedded-only mode — issue #705): docker:// URI wins,
+            # else canonical embedded path.
+            _uri = os.environ.get("TORTOISE_DB_URI", "")
+            _db_target = _uri if _uri.startswith("docker://") else resolve_db_path()
             idx_args = argparse.Namespace(
                 url=repo_root, background=False, branch="main",
-                index_cmd="github", cmd="index",
+                index_cmd="github", cmd="index", db=_db_target,
             )
             _cmd_index_github(idx_args)
         else:
