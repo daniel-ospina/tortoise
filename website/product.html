@@ -38,7 +38,7 @@
       -webkit-font-smoothing: antialiased;
     }
 
-    #scroll-wrapper { height: 450vh; position: relative; }
+    #scroll-wrapper { height: 630vh; position: relative; }
 
     canvas {
       position: fixed; top: 0; left: 0; width: 100%; height: 100%;
@@ -114,6 +114,22 @@
     }
 
     /* Hero headline */
+    /* Beat number (01 · Ingest, etc.) */
+    .beat-num {
+      font-family: var(--mono);
+      color: var(--accent);
+      font-size: 0.8em;
+      letter-spacing: 0.08em;
+      margin-right: 0.1em;
+    }
+    .beat h2 {
+      font-family: var(--serif);
+      font-size: clamp(1.5rem, 3vw, 2.2rem);
+      font-weight: 400;
+      color: var(--text);
+      text-align: center;
+    }
+    .beat h2 + p { margin-top: 1.25rem; }
     #beat-hero h1 {
       font-family: var(--serif);
       font-size: clamp(1.8rem, 4vw, 3.2rem);
@@ -250,36 +266,30 @@
 
   <div id="scroll-wrapper">
     <section id="beat-hero" class="beat">
-      <h1>Your agents remember <span>why</span>, not just what.</h1>
-      <p class="hero-sub">Tortoise is a computational memory graph. Every relationship expresses how one belief affects another — when new evidence arrives, confidence propagates and your agent&rsquo;s world model updates.</p>
-      <p class="hero-sub hero-sub-value">Your agents make better decisions, waste fewer tokens, and their thinking becomes auditable and collaborative.</p>
-      <p class="hero-sub hero-sub-overmcp">Over MCP.</p>
+      <h1>Memory that makes your agents smarter</h1>
+      <p class="hero-sub">Tortoise is the memory and reasoning system that enables your agents to make complex decisions without losing track of the variables or being swayed by the last message. They don&rsquo;t just recall facts. They understand why decisions were made and reason with auditable world models.</p>
       <a href="/signup" class="cta-start hero-cta">Connect your agent →</a>
       <p class="cta-subtle hero-cta-subtle">5,000 Points free. No credit card. Start building in minutes.</p>
     </section>
-    <section id="beat-capture" class="beat">
-      <h2>Capture</h2>
-      <p>Agent sessions flow into a semantic graph automatically.</p>
-      <div class="cli-snippet">
-        <code>$ tortoise session capture --file chat.json</code>
-        <code>✓ 47 turns → 12 decisions, 8 claims, 3 hypotheses</code>
-      </div>
+    <section id="beat-how" class="beat">
+      <h2>A computational memory graph</h2>
+      <p>Every relationship expresses how one belief affects another. When new evidence arrives, confidence propagates through the graph and your agent&rsquo;s world model evolves. Every decision becomes auditable and programmable. Your agents build on each other&rsquo;s work instead of wasting tokens reconstructing context.</p>
     </section>
-    <section id="beat-recall" class="beat">
-      <h2>Recall</h2>
-      <p>Future agents query the past — and answer from what you decided.</p>
-      <div class="cli-snippet">
-        <code>$ tortoise_suggest_entry_points("database architecture")</code>
-        <code>→ "Last session you decided FalkorDB Cloud (confidence 0.9)"</code>
-      </div>
+    <section id="beat-ingest" class="beat">
+      <h2><span class="beat-num">01</span> · Ingest</h2>
+      <p>Automatically ingest agent sessions, GitHub issues, documents, Slack messages, Linear tasks, or any other data you want to connect. Index files for faster search or extract and organize logical claims to feed your agents&rsquo; world model.</p>
     </section>
     <section id="beat-reason" class="beat">
-      <h2>Reason</h2>
-      <p>Belief propagation surfaces what's true — and what's been contradicted.</p>
-      <div class="cli-snippet">
-        <code>IMPL  a → b    confidence: 0.87</code>
-        <code>NAND  c → a    confidence: 0.72</code>
-      </div>
+      <h2><span class="beat-num">02</span> · Reason</h2>
+      <p>Turn separate facts into a world model. Skills and MCP tools to analyze sources and organize arguments, evidence, alternatives, and decisions into logical graphs. Agents can reason across complex webs of variables while new evidence automatically updates confidence throughout the graph.</p>
+    </section>
+    <section id="beat-recall" class="beat">
+      <h2><span class="beat-num">03</span> · Recall</h2>
+      <p>Retrieve what matters, not just what matches. Combine graph traversal, vector search, and semantic retrieval with controls for time decay, confidence, and contradiction.</p>
+    </section>
+    <section id="beat-automate" class="beat">
+      <h2><span class="beat-num">04</span> · Automate</h2>
+      <p>Set automated actions when confidence changes on a specific node. Use webhooks to trigger workflows, update systems, or coordinate agents as your world model evolves.</p>
     </section>
   </div>
 
@@ -450,7 +460,7 @@
     draw();
 
     /* ── Content beats (opacity scrubbed to scroll) ── */
-    const beats = ['beat-hero', 'beat-capture', 'beat-recall', 'beat-reason'];
+    const beats = ['beat-hero', 'beat-how', 'beat-ingest', 'beat-reason', 'beat-recall', 'beat-automate'];
 
     const beatSpan = 0.11;
     const gapSpan = 0.015;
@@ -506,7 +516,7 @@
 
       // Always fade out — including the LAST beat (reason), which fades late
       // so the pricing/CTA sections below reveal cleanly.
-      const fadeOutStart = i === 1 ? 0.20 : (i === beats.length - 1 ? 0.82 : peak);
+      const fadeOutStart = i === 1 ? 0.30 : (i === beats.length - 1 ? 0.82 : peak);
       gsap.to(el, {
         opacity: 0, y: -20,
         scrollTrigger: {
@@ -567,7 +577,7 @@
         integrations_line: "Unlimited integrations at every tier"
       },
       tiers: {
-        free: { price: 0, graphs: 1, users: 1, ops: 1000, nodes: 10000, keys: 2, overage: false, popular: false, features: ["1 graph", "1 collaborator", "1,000 write ops/mo", "10,000-node graph", "2 API keys"], excluded: ["Overage"] },
+        free: { price: 0, graphs: 1, users: 1, ops: 10000, nodes: 10000, keys: 2, overage: false, popular: false, features: ["1 graph", "1 collaborator", "10,000 write ops/mo", "10,000-node graph", "2 API keys"], excluded: ["Overage"] },
         solo: { price: 9, graphs: 2, users: 1, ops: 10000, nodes: 25000, keys: 5, overage: false, popular: false, features: ["2 graphs", "1 collaborator", "10,000 write ops/mo", "25,000-node graph", "5 API keys"], excluded: ["Overage"] },
         pro: { price: 25, graphs: "∞", users: 2, ops: 50000, nodes: 100000, keys: 10, overage: true, popular: true, features: ["Unlimited graphs", "2 collaborators", "50,000 write ops/mo", "100,000-node graph", "10 API keys", "Usage-based overage"], excluded: [] },
         team: { price: 149, graphs: "∞", users: "∞", ops: 200000, nodes: 600000, keys: 20, overage: true, popular: false, features: ["Unlimited graphs", "Unlimited collaborators (invites + RBAC)", "200,000 write ops/mo", "600,000-node graph", "20 API keys", "Usage-based overage", "Priority support"], excluded: [] }
@@ -577,16 +587,14 @@
     let currentBilling = 'monthly';
 
     function fmtPrice(price) {
+      // Annual: effective PER-MONTH price big, total billed small (common practice).
       if (currentBilling === 'annual') {
         const disc = PRICING.display.annual_discount_pct / 100;
-        const annual = Math.round(price * 12 * (1 - disc));
-        return `$${annual}`;
+        const total = Math.round(price * 12 * (1 - disc));
+        const perMonth = price === 0 ? 0 : Math.round(total / 12);
+        return { big: `$${perMonth}`, total: `$${total} billed annually` };
       }
-      return `$${price}`;
-    }
-
-    function billingSuffix() {
-      return currentBilling === 'annual' ? '/yr (billed annually)' : '/mo';
+      return { big: `$${price}`, total: 'Billed monthly' };
     }
 
     function checkSvg() {
@@ -606,8 +614,8 @@
         return `<div class="pricing-card${t.popular ? ' popular' : ''}">
           ${popular}
           <h3>${label}</h3>
-          <div class="price">${fmtPrice(t.price)}<span>${billingSuffix()}</span></div>
-          <p class="billing">${currentBilling === 'annual' ? 'Billed annually' : 'Billed monthly'}</p>
+          <div class="price">${fmtPrice(t.price).big}<span>/mo</span></div>
+          <p class="billing">${fmtPrice(t.price).total}</p>
           <div class="features">${features}${excluded}</div>
           <a href="/signup" class="btn${name === 'free' ? ' secondary' : ''}">${cta}</a>
         </div>`;
