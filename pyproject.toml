@@ -33,6 +33,7 @@ embeddings = ["sentence-transformers>=3,<6", "scikit-learn>=1.0"]
 quadrature = ["jax>=0.4"]
 postgres = ["psycopg2-binary>=2.9"]
 backups = ["boto3>=1.34", "cryptography>=42"]
+test = ["pytest>=8", "pytest-timeout", "playwright>=1.40", "pytest-playwright>=0.5"]
 
 [tool.setuptools.packages.find]
 include = ["tortoise*"]
