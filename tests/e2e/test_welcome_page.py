@@ -259,3 +259,4 @@ def test_debug_capture_page_state(page: Page) -> None:
     print(page.locator("#error-message").inner_text() if page.locator("#error-message").count() else "n/a")
     print("=== localStorage ===")
     print(page.evaluate("JSON.stringify(Object.keys(localStorage))"))
+    assert False, "TEMP DEBUG: dumping captured state"  # force stdout dump
