@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import os
 import sys
-import tempfile
+import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -22,9 +22,15 @@ from tortoise.sdk import TortoiseSDK
 
 
 @pytest.fixture
-def sdk():
-    db_path = os.path.join(tempfile.mkdtemp(prefix="tortoise_sdkcov_"), "test.db")
-    sdk = TortoiseSDK(db_path)
+def sdk(shared_embedded_db):
+    """One shared embedded FalkorDBLite server for the whole session (#176).
+
+    Per-test isolation via a unique test_* namespace graph (the bulk-wipe
+    guard requires test-prefixed graph names), so the subprocess count stays
+    at 1 instead of one redislite server per test.
+    """
+    ns = f"test_sdkcov_{uuid.uuid4().hex[:8]}"
+    sdk = TortoiseSDK(db_path=shared_embedded_db, namespace=ns)
     yield sdk
     sdk.close()
 
@@ -176,7 +182,7 @@ class TestTeamCreate:
         team_sdk = TortoiseSDK(db_path=sdk._db_path, namespace="team-beta")
         try:
             proj = team_sdk._get_proj()
-            assert proj.graph_name != "tortoise"
+            assert proj.graph_name == "team_team-beta"
         finally:
             team_sdk.close()
 
@@ -195,8 +201,9 @@ class TestBaselineCalibration:
 
         sdk.set_point_baseline(pid, 5.0, 2.0)
 
-        # Persisted to the graph (survives a fresh SDK over the same DB)
-        fresh = TortoiseSDK(db_path=sdk._db_path)
+        # Persisted to the graph (survives a fresh SDK over the same DB,
+        # same namespace graph)
+        fresh = TortoiseSDK(db_path=sdk._db_path, namespace=sdk._namespace)
         try:
             point = fresh.get_point(pid)
             assert point["baseline_set"] is True
@@ -206,7 +213,15 @@ class TestBaselineCalibration:
         finally:
             fresh.close()
 
-    def test_calibrate_summary_returns_list(self, sdk):
-        result = sdk.calibrate_summary()
+    def test_calibrate_summary_reports_calibrated_and_suggested(self, sdk):
+        calibrated = _make_claim(sdk, "calibrated claim")
+        sdk.set_point_baseline(calibrated, 5.0, 2.0)
+        uncalibrated = _make_claim(sdk, "uncalibrated claim")
 
-        assert isinstance(result, list)
+        result = {item["id"]: item for item in sdk.calibrate_summary()}
+
+        assert calibrated in result
+        assert result[calibrated]["calibrated"] is True
+        assert uncalibrated in result
+        assert result[uncalibrated]["calibrated"] is False
+        assert "suggestion" in result[uncalibrated]
