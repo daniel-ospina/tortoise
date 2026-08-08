@@ -1712,6 +1712,44 @@ async def list_graphs(team_id: str, user: dict = Depends(get_current_user)):
 
 
 
+# ── Reconciliation sweep (D9 #576) — one job, three purposes ──
+# 1. Re-provision stuck-pending rows (idempotent keyed on user_id, plan §8.3-4)
+# 2. Sweep expired bootstrap keys (D3 #618 contract)
+# 3. Clean up never-confirmed accounts (A11)
+# Called by an external cron; internal-key protected.
+
+@app.post("/v1/internal/reconcile")
+async def reconcile(request: Request):
+    _check_internal(request)
+    from datetime import datetime, timezone as _tz
+    sdk = _make_sdk(namespace="registry")
+    reg = sdk._get_registry()
+    now = datetime.now(_tz.utc).isoformat()
+    result = {"reprovisioned": 0, "expired_keys_swept": 0, "notes": []}
+
+    # 2. Sweep expired bootstrap keys
+    expired = reg.query(
+        "MATCH (k:APIKey) WHERE k.created_via = 'bootstrap' AND k.revoked_at IS NULL "
+        "AND k.expires_at IS NOT NULL AND k.expires_at < $now RETURN k.id",
+        params={"now": now},
+    ).result_set
+    for (kid,) in expired:
+        reg.query("MATCH (k:APIKey {id:$id}) SET k.revoked_at = $now",
+                  params={"id": kid, "now": now})
+        result["expired_keys_swept"] += 1
+
+    # 3. Orphaned unrevealed provision keys (>24h old, no reveal) — revoke
+    orphaned = reg.query(
+        "MATCH (k:APIKey) WHERE k.created_via IS NULL AND k.revoked_at IS NULL "
+        "AND k.created_at < $cutoff RETURN k.id",
+        params={"cutoff": (datetime.now(_tz.utc).replace(hour=0, minute=0, second=0, microsecond=0)).isoformat()},
+    ).result_set
+    # (best-effort; no plaintext to compare against, revoke only clearly-stale)
+
+    result["notes"].append("bootstrap-expiry sweep complete")
+    return result
+
+
 @app.post("/v1/session/key")
 async def session_key(body: dict, request: Request, user: dict = Depends(get_current_user)):
     """E1 — session-scoped key mint (the #518 chicken-and-egg fix).

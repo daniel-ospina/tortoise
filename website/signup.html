@@ -287,6 +287,20 @@
       <button type="submit" class="btn-submit" id="btn-submit">Create account</button>
     </form>
 
+    <!-- Check-your-inbox state (email confirmation ON, E2E-8) -->
+    <div id="confirmation-required" class="hidden">
+      <div class="checkmark">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/>
+          <polyline points="22,6 12,13 2,6"/>
+        </svg>
+      </div>
+      <h2>Check your inbox</h2>
+      <p class="dim">We sent a confirmation link to <strong id="confirm-email"></strong>. Click it to finish creating your account.</p>
+      <button type="button" class="btn-submit" id="btn-resend" onclick="resendConfirmation()">Resend email</button>
+      <p class="dim small" id="resend-note"></p>
+    </div>
+
     <div class="footer">
       Already have an account? <a href="/signin.html">Sign in</a>
     </div>
@@ -415,9 +429,51 @@
         return;
       }
 
+      // Email confirmation ON: signUp returns no session — show the
+      // check-your-inbox state with resend (E2E-8). The confirmation link
+      // returns the user to /welcome.html where PKCE exchange completes.
+      if (!data?.session) {
+        showConfirmationRequired(email);
+        setLoading(false);
+        return;
+      }
+
       // Redirect to welcome page
       // For email/password signup without email confirmation, the user is already signed in
       window.location.href = WELCOME_URL;
+    }
+
+    // ── Check-your-inbox state (email confirmation ON) ──
+    function showConfirmationRequired(email) {
+      const form = document.getElementById("email-form");
+      const oauthBtns = document.querySelectorAll(".oauth-btn");
+      const confirm = document.getElementById("confirmation-required");
+      if (form) form.classList.add("hidden");
+      oauthBtns.forEach((b) => b.classList.add("hidden"));
+      if (confirm) {
+        confirm.classList.remove("hidden");
+        const el = document.getElementById("confirm-email");
+        if (el) el.textContent = email;
+      }
+    }
+
+    async function resendConfirmation() {
+      const email = document.getElementById("confirm-email").textContent;
+      const btn = document.getElementById("btn-resend");
+      if (!email || !btn) return;
+      btn.disabled = true;
+      try {
+        await supabaseClient.auth.resend({
+          type: 'signup',
+          email: email,
+          options: { emailRedirectTo: window.location.origin + WELCOME_URL },
+        });
+        document.getElementById("resend-note").textContent = "Resent — check your inbox (limit applies).";
+      } catch (e) {
+        document.getElementById("resend-note").textContent = "Could not resend — try again shortly.";
+      } finally {
+        setTimeout(() => { btn.disabled = false; }, 60000); // rate-limit resend
+      }
     }
   </script>
 </body>
