@@ -116,7 +116,15 @@ class TestHealthEndpoints:
     """GET /health and GET /health/security."""
 
     def test_health_returns_ok(self, client):
+        """Liveness — process up, no DB dependency (#338 follow-up: the DB
+        check moved to /health/ready to avoid cold-start deploy failures)."""
         r = client.get("/health")
+        assert r.status_code == 200
+        assert r.json() == {"status": "ok"}
+
+    def test_health_ready_reports_db(self, client):
+        """Readiness — DB connectivity (what /health used to check)."""
+        r = client.get("/health/ready")
         assert r.status_code == 200
         assert r.json() == {"status": "ok", "db": "connected"}
 
