@@ -232,6 +232,34 @@ def _cmd_init(args):
             "api_key": args.api_key,
             "api_url": os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co"),
         }
+
+        # Validate the key against the hosted API BEFORE saving (#707).
+        # 401/403 → hard fail (never silently write an invalid key);
+        # network errors → warn + save (cannot validate offline).
+        from urllib.request import Request, urlopen
+        from urllib.error import URLError, HTTPError
+        try:
+            req = Request(
+                f"{config['api_url']}/v1/team",
+                headers={"Authorization": f"Bearer {args.api_key}"},
+            )
+            with urlopen(req, timeout=10) as resp:
+                _json.loads(resp.read())
+            print("✅ API key validated against Tortoise Cloud")
+        except HTTPError as e:
+            body = ""
+            try:
+                body = e.read().decode()
+            except Exception:
+                pass
+            print(f"❌ API rejected the key ({e.code}): {body.strip() or e.reason}", file=sys.stderr)
+            print(f"   Config NOT saved. Double-check the key or run:", file=sys.stderr)
+            print(f"   tortoise init --api-key tt_<key>", file=sys.stderr)
+            return 1
+        except (URLError, ValueError) as e:
+            reason = getattr(e, "reason", e)
+            print(f"⚠️  Could not reach {config['api_url']} to validate the key ({reason}).")
+            print(f"   Saving config anyway — verify with: tortoise team info")
         config_path.write_text(_json.dumps(config, indent=2) + "\n")
         os.chmod(config_path, 0o600)
         print("Connected to Tortoise Cloud (team will be resolved from API key)")
