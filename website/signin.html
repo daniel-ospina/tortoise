@@ -313,9 +313,9 @@
     // Guard: check if the anon key placeholder was replaced at deploy time
     const isConfigured = supabaseAnonKey && !supabaseAnonKey.includes("{{");
 
-    let supabase = null;
+    let supabaseClient = null;
     if (isConfigured) {
-      supabase = window.supabase.createClient(supabaseUrl, supabaseAnonKey);
+      supabaseClient = window.supabase.createClient(supabaseUrl, supabaseAnonKey);
     } else {
       console.warn("SUPABASE_ANON_KEY not configured — auth disabled");
       document.querySelectorAll("button").forEach(function(btn) { btn.disabled = true; });
@@ -351,11 +351,11 @@
 
     // ── OAuth sign in ──────────────────────────────────────────────────────
     async function signInWithProvider(provider) {
-      if (!supabase) { showError("Auth not configured."); return; }
+      if (!supabaseClient) { showError("Auth not configured."); return; }
       clearError();
       setLoading(true);
 
-      const { data, error } = await supabase.auth.signInWithOAuth({
+      const { data, error } = await supabaseClient.auth.signInWithOAuth({
         provider: provider,
         options: {
           redirectTo: window.location.origin + WELCOME_URL,
@@ -377,7 +377,7 @@
     // ── Email/password sign in ─────────────────────────────────────────────
     async function signInWithEmail(event) {
       event.preventDefault();
-      if (!supabase) { showError("Auth not configured."); return; }
+      if (!supabaseClient) { showError("Auth not configured."); return; }
       clearError();
       setLoading(true);
 
