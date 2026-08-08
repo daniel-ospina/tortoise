@@ -349,6 +349,10 @@
         Team: <strong id="team-name">—</strong> &nbsp;·&nbsp; Tier: <strong>Free</strong>
       </div>
 
+      <p style="font-size:0.82rem;color:var(--text-dim);text-align:center;margin:1rem 0 0.25rem;">
+        Your key is ready. Two ways to use it: connect your agent (MCP) for memory that
+        follows you, or call the API directly to build memory into your own product.
+      </p>
       <div class="card" id="reveal-block">
         <div class="card-label">Your API key</div>
         <div class="api-key-display">
@@ -383,7 +387,7 @@
       </div>
 
             <div class="card">
-        <div class="card-label">Connect your agent <span style="font-weight:400;font-size:0.72rem;color:var(--text-dim);">(Streamable HTTP — no install needed)</span></div>
+        <div class="card-label">Use Tortoise — connect your agent <span style="font-weight:400;font-size:0.72rem;color:var(--text-dim);">(MCP — no install needed)</span></div>
         <div class="harness-tabs" id="harness-tabs" style="display:flex;gap:0.5rem;margin-bottom:0.75rem;flex-wrap:wrap;">
           <button class="harness-tab active" data-harness="claude" onclick="switchHarness('claude')">Claude Code</button>
           <button class="harness-tab" data-harness="codex" onclick="switchHarness('codex')">Codex</button>
@@ -415,7 +419,7 @@ you up to 6 yes/no questions and set up your Tortoise memory.
       </div>
 
       <div class="card">
-        <div class="card-label">Quickstart</div>
+        <div class="card-label">Build with Tortoise — call the API <span style="font-weight:400;font-size:0.72rem;color:var(--text-dim);">(CLI / REST)</span></div>
         <div class="snippet" id="snippet">
           <pre><span class="comment"># Install Tortoise</span>
 <span class="cmd">pip install tortoise-graph</span>
