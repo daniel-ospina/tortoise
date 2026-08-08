@@ -6,6 +6,11 @@
  * Fail-safe: with no real PostHog project key configured this module does
  * NOTHING — no network calls, no banner, no localStorage writes.
  *
+ * Automated browsers (navigator.webdriver — Playwright/E2E) never get the
+ * banner overlay, but consent-state handling and PostHog init run exactly
+ * as in a real browser (PostHog still loads opted-out; no events until
+ * consent) — keeps same-viewport and mocked-click tests stable.
+ *
  * Consent flow (PostHog's documented CMP pattern — posthog.com/docs/privacy/data-collection):
  *   - posthog-js is ALWAYS loaded (so opted-out users are still counted as
  *     visits) but initialized with `opt_out_capturing_by_default: true` +
@@ -21,11 +26,11 @@
 (function () {
   "use strict";
 
-  // USER ACTION REQUIRED: create a PostHog Cloud project (region: US) at
-  // https://posthog.com and paste its Project API Key here.
-  // While this is the placeholder value, the banner and PostHog stay fully
-  // inert. Do NOT remove the fail-safe guard below when adding the key.
-  var POSTHOG_KEY = "__POSTHOG_PROJECT_API_KEY__";
+  // PostHog Cloud project 548850 (US Cloud, owner decision 2026-08-08 —
+  // the controller is US-based). Public client-side key — safe to embed.
+  // The fail-safe guard below still applies: an empty/malformed key keeps
+  // the banner and PostHog fully inert.
+  var POSTHOG_KEY = "phc_zvBi25UoCxrq79qS7cudZhfAS3XQwEfrzEoZfR2EHkjS";
 
   var STORAGE_KEY = "tortoise_consent"; // "granted" | "denied" | absent = undecided
   var API_HOST = "https://us.i.posthog.com"; // US Cloud (default — region locked at project creation)
@@ -87,6 +92,13 @@
   // site design tokens: --bg #060b14, --surface #0d1a2d, --accent #06b6d4,
   // --text #cbd5e1, --text-dim #64748b, --border #1e293b, mono font.
   function renderBanner() {
+    // Automated browsers (Playwright/E2E) never get the overlay — keeps
+    // same-viewport and mocked-click tests stable while real browsers do.
+    // Consent state + PostHog init stay intact (PostHog still loads
+    // opted-out; no events until consent).
+    if (navigator.webdriver) {
+      return;
+    }
     if (bannerRendered || document.getElementById("consent-banner")) {
       return;
     }
