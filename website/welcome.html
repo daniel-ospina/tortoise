@@ -427,16 +427,16 @@ you up to 6 yes/no questions and set up your Tortoise memory.
     // Guard: check if the anon key placeholder was replaced at deploy time
     const isConfigured = supabaseAnonKey && !supabaseAnonKey.includes("{{");
 
-    let supabase = null;
+    let supabaseClient = null;
     if (isConfigured) {
-      supabase = window.supabase.createClient(supabaseUrl, supabaseAnonKey);
+      supabaseClient = window.supabase.createClient(supabaseUrl, supabaseAnonKey);
     } else {
       console.warn("SUPABASE_ANON_KEY not configured — page disabled");
     }
 
     // ── Poll for provisioning ──────────────────────────────────────────────
     async function waitForProvisioning() {
-      const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+      const { data: { session }, error: sessionError } = await supabaseClient.auth.getSession();
 
       if (sessionError || !session) {
         showError("No active session. Please sign up first.");
@@ -589,7 +589,7 @@ tortoise create-point "Hello world" --kind statement`;
     }
 
     // ── Start ──────────────────────────────────────────────────────────────
-    if (isConfigured && supabase) {
+    if (isConfigured && supabaseClient) {
       waitForProvisioning();
     } else {
       document.getElementById("loading").classList.add("hidden");
