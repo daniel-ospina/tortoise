@@ -683,7 +683,11 @@ codex mcp add tortoise --url https://api.premiselabs.co/mcp --bearer-token-env-v
       }, null, 2),
     };
     let currentHarness = "claude";
-    const PROMPT_URL = "https://tortoise.premiselabs.co/onboarding-prompt.md";
+    // Canonical onboarding prompt (#540): served by the premise-labs Pages
+    // project from tortoise/onboarding/AGENT_ONBOARDING.md via deploy-pages.yml.
+    // premiselabs.co is the project's active custom domain (tortoise.premiselabs.co
+    // still CNAMEs to the legacy tortoise-landing-v2 project — see #540).
+    const PROMPT_URL = "https://premiselabs.co/onboarding-prompt.md";
 
     function switchHarness(name) {
       currentHarness = name;

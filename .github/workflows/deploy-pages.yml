@@ -20,36 +20,14 @@ jobs:
       - uses: actions/checkout@v4
       - name: Stage onboarding prompt (single source of truth → deployed copy)
         # tortoise/onboarding/AGENT_ONBOARDING.md is canonical (issues #496/#540).
-        # The welcome page fetches https://tortoise.premiselabs.co/onboarding-prompt.md
+        # The welcome page fetches https://premiselabs.co/onboarding-prompt.md
         # at runtime; generate the deployed copy here so the two can't drift.
+        # (tortoise.premiselabs.co still CNAMEs to the legacy tortoise-landing-v2
+        # Pages project — repoint it at premise-labs.pages.dev to serve the
+        # prompt on that host too. Needs Zone:DNS edit scope, see #540.)
         run: |
           cp tortoise/onboarding/AGENT_ONBOARDING.md website/onboarding-prompt.md
           test -s website/onboarding-prompt.md
-      - name: Sync DNS — tortoise.premiselabs.co → premise-labs Pages project
-        # The subdomain previously CNAME'd to the legacy tortoise-landing-v2
-        # Pages project (stale content: welcome v1, no onboarding-prompt.md),
-        # which is why the premise-labs custom-domain attach stayed "pending"
-        # and the welcome page's PROMPT_URL fetch returned HTML (#540).
-        # Ensure the CNAME points at this project's pages.dev host every deploy.
-        run: |
-          ZONE=$(curl -s "https://api.cloudflare.com/client/v4/zones?name=premiselabs.co" \
-            -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" | jq -r '.result[0].id')
-          echo "zone: $ZONE"
-          REC=$(curl -s "https://api.cloudflare.com/client/v4/zones/$ZONE/dns_records?name=tortoise.premiselabs.co" \
-            -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}")
-          REC_ID=$(echo "$REC" | jq -r '.result[0].id // empty')
-          CUR=$(echo "$REC" | jq -r '.result[0].content // empty')
-          echo "current: id=$REC_ID content=$CUR"
-          if [ "$CUR" != "premise-labs.pages.dev" ]; then
-            echo "repairing CNAME $CUR → premise-labs.pages.dev"
-            curl -s -X PATCH "https://api.cloudflare.com/client/v4/zones/$ZONE/dns_records/$REC_ID" \
-              -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" \
-              -H "Content-Type: application/json" \
-              -d '{"type":"CNAME","name":"tortoise.premiselabs.co","content":"premise-labs.pages.dev","proxied":true}' \
-              | jq -c '{success, errors: [.errors[].message]}'
-          else
-            echo "CNAME already correct"
-          fi
       - name: Deploy to Cloudflare Pages (premise-labs project)
         run: |
           cd website
