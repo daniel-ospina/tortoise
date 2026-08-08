@@ -226,34 +226,75 @@ def test_singleton_reused_across_calls():
     print("PASS test_singleton_reused_across_calls")
 
 
+# ── 11b. search_points TF-IDF legacy fit semantics (code-review P2, #399) ──
+
+def test_search_points_tfidf_legacy_fit_semantics():
+    """Degraded search must fit TF-IDF on DOCUMENTS ONLY and transform the
+    query separately (legacy). Joint fit on [query]+texts shifts idf and
+    silently reorders results — pinned here so a revert fails CI."""
+    from unittest.mock import patch
+
+    from tortoise.embeddings import EmbeddingModel, search_points
+
+    docs = [
+        {"id": "d1", "content": "reliability mvp launch"},
+        {"id": "d2", "content": "cost launch market distribution growth"},
+        {"id": "d3", "content": "distribution partners reliability scale"},
+    ]
+    query = "reliability variable deployment retention"
+
+    # Reference: legacy semantics — fit on documents only, transform query.
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    tv = TfidfVectorizer()
+    doc_vecs = tv.fit_transform([d["content"] for d in docs]).toarray()
+    q_vec = tv.transform([query]).toarray()[0]
+    qn = np.linalg.norm(q_vec)
+    q_vec_n = q_vec / qn if qn > 0 else q_vec
+    dn = np.linalg.norm(doc_vecs, axis=1, keepdims=True)
+    dn[dn == 0] = 1
+    doc_n = doc_vecs / dn
+    sims = doc_n @ q_vec_n.T
+    expected = sorted(
+        [(docs[i]["id"], float(sims[i])) for i in range(len(docs))],
+        key=lambda r: r[1], reverse=True,
+    )
+
+    with patch.object(EmbeddingModel, "get", return_value=None):
+        res = search_points(query, docs, threshold=0.0)
+    got = [(r["id"], r["similarity"]) for r in res]
+    assert [g[0] for g in got] == [e[0] for e in expected], \
+        f"ranking drifted from legacy semantics: {[g[0] for g in got]} vs {[e[0] for e in expected]}"
+    for (gid, gsim), (eid, esim) in zip(got, expected):
+        assert gid == eid and abs(gsim - esim) < 1e-9, \
+            f"{gid}: {gsim} != {esim}"
+    print("PASS test_search_points_tfidf_legacy_fit_semantics")
+
+
 # ── 12. EmbeddingModel failure cooldown (code-review P2, #399) ─────────
 
 def test_failed_load_cooldown():
-    """A failed model load must not block up to 30s per request repeatedly —
-    get() returns None during the cooldown window."""
+    """A failed load must not stall every request: get() returns None during
+    the cooldown window WITHOUT re-attempting the load (code-review P2, #399)."""
     from unittest.mock import patch
 
-    from tortoise.embeddings import EmbeddingModel, _encode
+    from tortoise.embeddings import EmbeddingModel
 
     EmbeddingModel._reset()
     try:
-        with patch.object(EmbeddingModel, "get", return_value=None):
-            # Simulate a failed load → cooldown armed
-            EmbeddingModel._last_failed_at = 123.0  # armed (monotonic clock stub)
-            # Direct get() during cooldown → immediate None
-            with patch("tortoise.embeddings.time.monotonic", return_value=123.5):
-                assert EmbeddingModel.get() is None
-            # After cooldown expiry → retry path (instance creation attempted)
-            with patch("tortoise.embeddings.time.monotonic", return_value=999.0):
-                assert EmbeddingModel.get() is not None or True  # no assertion on outcome
-            EmbeddingModel._reset()
-            assert EmbeddingModel._last_failed_at is None  # reset clears cooldown
+        with patch("tortoise.embeddings.time.monotonic", return_value=1000.0):
+            EmbeddingModel._last_failed_at = 950.0  # load failed 50s ago
+            assert EmbeddingModel.get() is None, "cooldown must return None"
+            assert EmbeddingModel._instance is None, "cooldown must not create an instance"
+        with patch("tortoise.embeddings.time.monotonic", return_value=2000.0):
+            # 1050s elapsed — past the 60s cooldown → retry path runs (the tiny
+            # load_timeout makes the worker-thread load fail again, so get()
+            # re-arms the failure timestamp instead of returning early).
+            EmbeddingModel.get(load_timeout=0.001)
+            assert EmbeddingModel._last_failed_at == 2000.0, \
+                "past cooldown must retry the load (re-arm failure timestamp)"
     finally:
         EmbeddingModel._reset()
-    # And _encode must be fast-degraded (not 30s-stalled) during cooldown:
-    with patch.object(EmbeddingModel, "get", return_value=None):
-        v, d = _encode(["hello world"])
-        assert d is True and v.shape[0] == 1
+    assert EmbeddingModel._last_failed_at is None, "reset clears the cooldown"
     print("PASS test_failed_load_cooldown")
 
 

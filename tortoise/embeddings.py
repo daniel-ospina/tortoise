@@ -250,25 +250,30 @@ def search_points(
     ids = [p["id"] for p in points]
     texts = [p["content"] for p in points]
 
-    # Shared encoder: singleton model with deterministic TF-IDF fallback (#399).
-    vectors, degraded = _encode([query] + texts)
-    if degraded:
-        # Legacy degraded semantics (code-review P2, #399): fit TF-IDF on the
-        # DOCUMENTS ONLY and transform the query separately. Jointly fitting on
-        # [query] + texts lets the query enter the vocabulary, shifting idf and
-        # silently reordering results (verified: ~2% reorders, ~38% threshold
-        # changes at 0.3 on random corpora).
+    # #399: route through the EmbeddingModel singleton (never re-instantiate
+    # the model per call). Degraded mode preserves LEGACY TF-IDF semantics
+    # (code-review P2): fit on DOCUMENTS ONLY, transform the query separately —
+    # jointly fitting on [query] + texts lets the query enter the vocabulary,
+    # shifting idf and silently reordering results (verified: ~2% reorders,
+    # ~38% threshold changes at 0.3 on random corpora).
+    model = EmbeddingModel.get()
+    if model is not None:
+        try:
+            vecs = np.asarray(model.encode([query] + texts, show_progress_bar=False),
+                              dtype=np.float64)
+            query_vec, doc_vecs = vecs[0], vecs[1:]
+        except Exception:  # noqa: BLE001 — model failures degrade, never raise
+            model = None
+    if model is None:
         try:
             from sklearn.feature_extraction.text import TfidfVectorizer
             tv = TfidfVectorizer()
             doc_vecs = tv.fit_transform(texts).toarray()
             query_vec = tv.transform([query]).toarray()[0]
         except (ValueError, ImportError):
-            # Empty/stopword-only vocabulary — nothing to search (legacy:
-            # raised ValueError, caught by fallback_tfidf → []).
+            # Empty/stopword-only vocabulary or sklearn missing — nothing to
+            # search (legacy: raised ValueError, caught by fallback_tfidf → []).
             return []
-    else:
-        query_vec, doc_vecs = vectors[0], vectors[1:]
 
     norms = np.linalg.norm(doc_vecs, axis=1, keepdims=True)
     norms[norms == 0] = 1
