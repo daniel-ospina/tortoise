@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tortoise — Self-Hosted Onboarding</title>
+  <meta name="description" content="Run Tortoise on your own infrastructure — CLI setup, stdio MCP config, and the onboarding prompt.">
+  <meta name="theme-color" content="#060b14">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #060b14; --text: #cbd5e1; --text-dim: #64748b;
+      --accent: #06b6d4; --accent-glow: rgba(6, 182, 212, 0.35);
+      --green: #4ade80; --gold: #f59e0b;
+      --serif: 'Georgia', 'Times New Roman', serif;
+      --mono: 'SF Mono', 'Cascadia Code', 'Fira Code', 'JetBrains Mono', monospace;
+    }
+    body { background: var(--bg); color: var(--text); font-family: var(--serif); line-height: 1.6; }
+    .wrap { max-width: 760px; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
+    a { color: var(--accent); }
+    header { text-align: center; padding: 2rem 0 1.5rem; }
+    header h1 { font-size: 2rem; color: #fff; letter-spacing: -0.02em; }
+    header p { color: var(--text-dim); font-size: 0.95rem; margin-top: 0.5rem; }
+    .tag { display: inline-block; background: var(--accent-glow); color: var(--accent); border: 1px solid var(--accent); border-radius: 999px; padding: 0.15rem 0.75rem; font-size: 0.72rem; font-family: var(--mono); margin-bottom: 1rem; }
+    h2 { color: #fff; font-size: 1.25rem; margin: 2rem 0 0.75rem; display: flex; align-items: center; gap: 0.5rem; }
+    h2 .n { background: var(--accent); color: #04121a; width: 1.6rem; height: 1.6rem; border-radius: 0.4rem; display: inline-flex; align-items: center; justify-content: center; font-size: 0.9rem; font-family: var(--mono); }
+    .card { background: #0d1a2d; border: 1px solid #1e293b; border-radius: 1rem; padding: 1.25rem; margin-bottom: 1rem; }
+    .card p { font-size: 0.9rem; color: var(--text); }
+    .card .dim { color: var(--text-dim); font-size: 0.82rem; }
+    pre { background: #020617; border: 1px solid #1e293b; border-radius: 0.75rem; padding: 1rem; overflow-x: auto; font-family: var(--mono); font-size: 0.8rem; color: #a5f3fc; margin: 0.75rem 0; white-space: pre-wrap; }
+    code { font-family: var(--mono); }
+    .cmd { color: var(--green); }
+    .out { color: var(--text-dim); }
+    .copy-btn { background: var(--accent); color: #04121a; border: none; border-radius: 0.5rem; padding: 0.45rem 1rem; font-family: var(--mono); font-size: 0.78rem; cursor: pointer; margin-top: 0.5rem; }
+    .copy-btn:hover { opacity: 0.9; }
+    .harness-tabs { display: flex; gap: 0.5rem; margin-bottom: 0.75rem; flex-wrap: wrap; }
+    .harness-tab { background: transparent; color: var(--text-dim); border: 1px solid #1e293b; border-radius: 999px; padding: 0.3rem 0.9rem; font-family: var(--mono); font-size: 0.75rem; cursor: pointer; }
+    .harness-tab.active { background: var(--accent); color: #04121a; border-color: var(--accent); }
+    .note { background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.3); border-radius: 0.75rem; padding: 1rem; font-size: 0.85rem; margin: 1.25rem 0; }
+    .note strong { color: var(--gold); }
+    .cta { display: inline-block; margin-top: 1.5rem; background: var(--accent); color: #04121a; text-decoration: none; font-weight: 600; padding: 0.7rem 1.5rem; border-radius: 0.6rem; }
+    .cta.alt { background: transparent; border: 1px solid var(--accent); color: var(--accent); margin-left: 0.75rem; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.85rem; margin: 0.75rem 0; }
+    th, td { text-align: left; padding: 0.5rem 0.75rem; border-bottom: 1px solid #1e293b; }
+    th { color: var(--text-dim); font-weight: 600; }
+    footer { text-align: center; color: var(--text-dim); font-size: 0.78rem; margin-top: 3rem; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <span class="tag">SELF-HOSTED</span>
+    <h1>Tortoise on your own infrastructure</h1>
+    <p>Your data, your ops — the same epistemic memory graph, fully self-managed.<br>Prefer zero-ops? <a href="/signup">Try hosted →</a></p>
+  </header>
+
+  <div class="card">
+    <p><strong>What you get:</strong> a local FalkorDB graph (or embedded), the MCP server over stdio, and the same 5-question onboarding prompt your agent walks you through. The MCP tool names are identical to hosted — only the transport differs (stdio vs Streamable HTTP).</p>
+  </div>
+
+  <h2><span class="n">1</span>Install</h2>
+  <div class="card">
+    <p>Python 3.11+ required. No Docker needed for the embedded mode.</p>
+    <pre id="install-code"><span class="cmd">pip install tortoise-graph</span>   <span class="out"># or: pip install -e . from the repo</span></pre>
+    <button class="copy-btn" onclick="copyText('install-code')">Copy</button>
+  </div>
+
+  <h2><span class="n">2</span>Onboard (5 steps)</h2>
+  <div class="card">
+    <p>Run <code class="cmd">tortoise onboard</code> from your repo — it chains <em>init → index → demo → doctor</em> automatically:</p>
+    <pre><span class="cmd">tortoise onboard</span>
+
+<span class="out">Step 1/5: Ensure Tortoise SDK is installed
+  ✅ Tortoise installed
+Step 2/5: Initialize graph
+  ✅ graph ready
+Step 3/5: Index repository
+  Found 42 markdown files. Indexing…
+Step 4/5: First memory demo
+  ✅ demo points created
+Step 5/5: Health check
+  ✅ doctor OK
+
+Onboarding complete.
+Next: tortoise serve  — start MCP server for agents
+      tortoise setup  — configure per-role memory</span></pre>
+    <p class="dim">Idempotent — re-running skips already-done steps. When it finishes, it prints the canonical onboarding prompt URL — paste that into your agent to complete setup.</p>
+  </div>
+
+  <h2><span class="n">3</span>Start the MCP server (stdio)</h2>
+  <div class="card">
+    <p>Connect your agent over <strong>stdio</strong> (local process) instead of Streamable HTTP. Pick your harness:</p>
+    <div class="harness-tabs" id="harness-tabs">
+      <button class="harness-tab active" data-harness="claude">Claude Code</button>
+      <button class="harness-tab" data-harness="codex">Codex</button>
+      <button class="harness-tab" data-harness="cursor">Cursor</button>
+      <button class="harness-tab" data-harness="pi">Pi</button>
+    </div>
+    <pre id="mcp-config-text"></pre>
+    <button class="copy-btn" onclick="copyText('mcp-config-text')">Copy config</button>
+  </div>
+
+  <h2><span class="n">4</span>Role memory (optional)</h2>
+  <div class="card">
+    <p>Configure how Tortoise filters memory per role:</p>
+    <pre><span class="cmd">tortoise setup --role developer</span>   <span class="out"># researcher | strategist | developer</span></pre>
+    <p class="dim">Or run <code class="cmd">tortoise setup</code> interactively — it walks through episodic / epistemic / semantic / procedural / working memory per role.</p>
+  </div>
+
+  <h2><span class="n">5</span>Docker vs embedded</h2>
+  <div class="card">
+    <table>
+      <tr><th></th><th>Embedded (default)</th><th>Docker / FalkorDB</th></tr>
+      <tr><td><strong>Setup</strong></td><td>Zero deps — <code>tortoise onboard</code> just works</td><td><code>docker run falkordb/falkordb</code></td></tr>
+      <tr><td><strong>Durability</strong></td><td>Single-node, file-backed</td><td>AOF + backups, multi-node</td></tr>
+      <tr><td><strong>Best for</strong></td><td>Solo dev, laptop</td><td>Teams, production</td></tr>
+      <tr><td><strong>Init</strong></td><td><code>tortoise init</code> auto-detects</td><td><code>tortoise init</code> connects to <code>docker://</code> URI</td></tr>
+    </table>
+  </div>
+
+  <div class="note">
+    <strong>Onboarding prompt:</strong> after setup, paste the canonical prompt into your agent — it drives the same 5 yes/no questions (connect sources, record sessions, demo graph, ingest docs, verify) against your local MCP server. Fetch it at
+    <code><a href="https://premiselabs.co/onboarding-prompt.md" target="_blank" rel="noopener">premiselabs.co/onboarding-prompt.md</a></code>
+    or run <code class="cmd">tortoise onboard</code> and copy the URL it prints.
+  </div>
+
+  <a href="/signup" class="cta">Hosted (zero-ops) →</a>
+  <a href="https://github.com/daniel-ospina/tortoise" class="cta alt" target="_blank" rel="noopener">GitHub →</a>
+
+  <footer>Premise Labs · Tortoise · <a href="/">Back to home</a></footer>
+</div>
+
+<script>
+  // ── Harness stdio configs (command + args + env — no Streamable HTTP) ──
+  const HARNESS_CONFIGS = {
+    claude: () => JSON.stringify({
+      mcpServers: {
+        tortoise: {
+          command: "python3",
+          args: ["-m", "tortoise.mcp_server"],
+          env: { TORTOISE_DB_URI: "docker://localhost:6379" }
+        }
+      }
+    }, null, 2),
+    codex: () => `# Add the Tortoise MCP server (stdio)
+codex mcp add tortoise -- python3 -m tortoise.mcp_server`,
+    cursor: () => JSON.stringify({
+      mcpServers: {
+        tortoise: {
+          command: "python3",
+          args: ["-m", "tortoise.mcp_server"],
+          env: { TORTOISE_DB_URI: "docker://localhost:6379" }
+        }
+      }
+    }, null, 2),
+    pi: () => JSON.stringify({
+      mcpServers: {
+        tortoise: {
+          command: "python3",
+          args: ["-m", "tortoise.mcp_server"],
+          env: { TORTOISE_DB_URI: "docker://localhost:6379" }
+        }
+      }
+    }, null, 2),
+  };
+  let currentHarness = "claude";
+
+  function renderMcpConfig() {
+    const text = HARNESS_CONFIGS[currentHarness]();
+    document.getElementById("mcp-config-text").textContent = text;
+  }
+
+  document.querySelectorAll(".harness-tab").forEach(tab => {
+    tab.addEventListener("click", () => {
+      currentHarness = tab.dataset.harness;
+      document.querySelectorAll(".harness-tab").forEach(t =>
+        t.classList.toggle("active", t.dataset.harness === currentHarness));
+      renderMcpConfig();
+    });
+  });
+
+  async function copyText(id) {
+    const el = document.getElementById(id);
+    await navigator.clipboard.writeText(el.textContent);
+    const btn = el.parentElement.querySelector(".copy-btn");
+    if (btn) { const old = btn.textContent; btn.textContent = "Copied!"; setTimeout(() => btn.textContent = old, 1500); }
+  }
+
+  renderMcpConfig();
+</script>
+</body>
+</html>
