@@ -586,7 +586,7 @@ Limits: `max_api_keys` per tier (currently flat 20 via `_check_team_limit` fallb
 
 | Tier | max_graphs/team | max_users/team | max_api_keys | included ops/mo | max graph nodes | integrations |
 |------|-----------------|----------------|--------------|-----------------|-----------------|--------------|
-| Free | 1 | 1 | 2 | 1,000 | 10,000 | unlimited |
+| Free | 1 | 1 | 2 | **10,000** | 10,000 | unlimited |
 | Solo | 2 | 1 | 5 | 10,000 | 25,000 | unlimited |
 | Pro | ∞ | 2 | 10 | 50,000 | 100,000 | unlimited |
 | Team | ∞ | ∞ | 20 | 200,000 | 600,000 | unlimited |

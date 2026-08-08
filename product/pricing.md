@@ -38,7 +38,7 @@
 
 ### Free — $0
 - 1 team · 1 graph · 1 collaborator · **unlimited integrations**
-- 1,000 write ops/mo · 10,000-node graph · 2 API keys
+- 10,000 write ops/mo · 10,000-node graph · 2 API keys
 - API access: REST (`/v1/*`) + MCP (`/mcp`, 58 tools)
 - Supabase signup (GitHub OAuth / email) · key shown once on welcome
 - Dashboard: overview, API keys, sessions
