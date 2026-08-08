@@ -31,8 +31,9 @@ Harness contract (cycle-4 P1-1, pinned):
   - ALLOW_PROD=1 required to point BASE_URL/TORTISE_HOST at https:// URLs
     (no production assertions pre-merge; local runs pass http://127.0.0.1).
   - TORTISE_HOST_CHECK == "1" gates the tortoise.* tests (#4 tortoise-host
-    half, #5, #6, #8) — the CI deploy job sets it only when its DNS preflight
-    is green; a skipped tortoise.* test is GREEN-WITH-ANNOTATION by design.
+    half, #5, #6, #8) — the post-deploy CI job (follow-up #677) sets it only
+    when its DNS preflight is green; a skipped tortoise.* test is
+    GREEN-WITH-ANNOTATION by design.
 
 Run locally against a wrangler pages dev preview:
   cd website && npx wrangler@4 pages dev . --port 8788 --ip 127.0.0.1
@@ -40,7 +41,9 @@ Run locally against a wrangler pages dev preview:
     TORTISE_HOST=http://127.0.0.1:8788 TORTISE_HOST_CHECK=1 \
     python -m pytest tests/e2e/test_legal_pages.py -v
 
-Run against production (post-deploy CI, deploy-pages.yml):
+Run against production (manual post-deploy verification — the repo's
+pages deploy workflow deploy-pages.yml has NO post-deploy job; the CI
+post-deploy job is tracked as follow-up #677):
   RUN_LEGAL_E2E=1 ALLOW_PROD=1 BASE_URL=https://premiselabs.co \
     TORTISE_HOST=https://tortoise.premiselabs.co \
     python -m pytest tests/e2e/test_legal_pages.py -v
@@ -135,6 +138,12 @@ PRIVACY_DRAFT = DRAFTS_DIR / "2026-08-08-657-privacy-draft.md"
 
 LEGAL_PAGES = ("/privacy", "/tos", "/license", "/dpa")
 FOOTER_LINK_HREFS = ("/privacy", "/tos", "/license", "/dpa")
+FOOTER_SELECTOR = "footer, .legal-footer, .footer"
+# The ABSOLUTE canonical Pricing Page URL (reviewer P2): the relative
+# '/#beat-pricing' form breaks on premiselabs.co, where '/' serves index.html
+# with NO pricing content — the id="beat-pricing" anchor exists only in
+# product.html (served at '/' on the tortoise host via the middleware rewrite).
+PRICING_PAGE_URL = "https://tortoise.premiselabs.co/#beat-pricing"
 FOOTER_PAGES = ("/product.html", "/welcome", "/signup", "/signin", "/self-hosted.html")
 CRAWL_PAGES = (
     "/welcome", "/signup", "/signin", "/self-hosted.html", "/docs.html",
@@ -158,16 +167,6 @@ PINNED_CANONICAL = {
     "repo-state": "no analytics tools are currently deployed",
     "purposes": "your email address and account information are used to deliver the service, respond to requests, and manage billing; usage data is used to improve the product",
     "art126": "we may request identity verification before acting on any request",
-}
-
-# Per-page subsets of the pinned canonical set.
-PRIVACY_CANONICAL = {
-    "no-training", "no-sale", "sharing", "minimal-pii",
-    "art27", "consent-banner", "repo-state", "purposes", "art126",
-}
-TOS_CANONICAL = {
-    "no-training", "no-sale", "sharing", "minimal-pii",
-    "eligibility", "carve-outs", "fees",
 }
 
 # ── Negation guards (cycle-4 P1-5 / P2-4, cycle-5 P1-3). ───────────────────
@@ -363,6 +362,8 @@ def _body_text_clean(page: Page) -> str:
 
 
 def _footer_links_present(content: str) -> None:
+    """Raw-HTML half (tortoise-host / crawl tests, no live page): the four
+    legal hrefs appear in the served document."""
     for href in FOOTER_LINK_HREFS:
         assert href in content, f"footer link {href} missing"
 
@@ -446,8 +447,12 @@ def test_tos_200_and_negation_safe_block(page: Page) -> None:
 
 
 def test_tos_pricing_page_hyperlink_resolves(page: Page) -> None:
-    """The 'Pricing Page' phrase must be HYPERLINKED (never bare text) with a
-    resolvable href that is not '#' (G-gate ⑥; T4 Step 6)."""
+    """The 'Pricing Page' phrase must be HYPERLINKED (never bare text) with the
+    ABSOLUTE canonical URL https://tortoise.premiselabs.co/#beat-pricing
+    (reviewer P2: the relative '/#beat-pricing' form breaks on premiselabs.co,
+    where '/' serves index.html with NO pricing content — the anchor exists
+    only in product.html). The fragment target must EXIST in the served
+    product page content, not just return HTTP 200."""
     _goto(page, BASE_URL + "/tos")
     anchors = page.evaluate(
         """() => [...document.querySelectorAll('a')]
@@ -457,10 +462,18 @@ def test_tos_pricing_page_hyperlink_resolves(page: Page) -> None:
     assert anchors, "no anchor with 'Pricing Page' link text found on /tos"
     for a in anchors:
         assert a["href"] and a["href"] != "#", f"Pricing Page href is not resolvable: {a}"
-    # The chosen href (/…#beat-pricing) must resolve — fragment is not sent.
-    first = anchors[0]
-    resp = page.request.get(first["abs"], timeout=15_000)
-    assert resp.ok, f"Pricing Page href {first['abs']} returned {resp.status}"
+        assert a["href"] == PRICING_PAGE_URL, (
+            f"Pricing Page href must be the absolute canonical URL {PRICING_PAGE_URL!r} "
+            f"(the relative '/#beat-pricing' form breaks on premiselabs.co), got {a['href']!r}"
+        )
+    # The fragment target must actually exist in the served product page (the
+    # document the tortoise host serves at '/') — a content assertion, not
+    # just an HTTP-200 status.
+    product = _goto(page, BASE_URL + "/product.html")
+    assert 'id="beat-pricing"' in product, \
+        "served product page is missing the id=\"beat-pricing\" anchor — the Pricing Page href would break"
+    assert "write ops" in product, \
+        "served product page is missing the 'write ops' pricing tier data"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -490,16 +503,21 @@ def test_license_and_dpa_serve_200(page: Page) -> None:
 
 
 def test_footer_legal_links_on_all_site_pages(page: Page) -> None:
-    """UNCONDITIONAL half: the four legal links are present on product.html,
-    welcome.html, signup.html, signin.html, self-hosted.html (G-gate ⑨ link
-    set: Privacy · Terms · License · DPA — all four ship, no conditional)."""
+    """UNCONDITIONAL half: the four legal links are present in the FOOTER
+    element on product.html, welcome.html, signup.html, signin.html,
+    self-hosted.html (G-gate ⑨ link set: Privacy · Terms · License · DPA —
+    all four ship, no conditional). Scoped to the footer element via a real
+    locator (footer, .legal-footer, .footer) — not page-wide substring checks
+    (reviewer P3-5a)."""
     for path in FOOTER_PAGES:
-        content = _goto(page, BASE_URL + path)
-        _footer_links_present(content)
-    # product/welcome carry the dedicated .legal-footer block.
-    for path in ("/product.html", "/welcome"):
-        content = _goto(page, BASE_URL + path)
-        assert 'class="legal-footer"' in content or "legal-footer" in content
+        _goto(page, BASE_URL + path)
+        footer = page.locator(FOOTER_SELECTOR).first
+        expect(footer).to_be_visible()
+        hrefs = footer.evaluate(
+            "el => [...el.querySelectorAll('a[href]')].map(a => a.getAttribute('href'))"
+        )
+        for href in FOOTER_LINK_HREFS:
+            assert href in hrefs, f"footer link {href} missing on {path} (footer hrefs: {hrefs})"
 
 
 @TORTOISE_HOST_SKIP
