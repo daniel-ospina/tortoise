@@ -38,7 +38,7 @@
       -webkit-font-smoothing: antialiased;
     }
 
-    #scroll-wrapper { height: 600vh; position: relative; }
+    #scroll-wrapper { height: 450vh; position: relative; }
 
     canvas {
       position: fixed; top: 0; left: 0; width: 100%; height: 100%;
@@ -54,14 +54,19 @@
       box-sizing: border-box;
     }
 
-    /* Specific beats get pointer events for interactive elements */
-    #beat-cta { pointer-events: auto; overflow-y: auto; }
-    #beat-pricing { pointer-events: auto; overflow-y: auto; }
+    /* Beats are fixed full-viewport crossfade overlays — ONLY for short story
+       beats (hero/capture/recall/reason). Pricing + CTA are NORMAL document-flow
+       sections (real scroll, working links, no clipping) below the narrative. */
+    .content-section {
+      position: relative; z-index: 2; background: var(--bg);
+      opacity: 1; pointer-events: auto;
+      padding: 6rem 2rem 5rem; box-sizing: border-box;
+    }
 
     /* Pricing section (El Dato component shape, Tortoise colors) */
-    #beat-pricing { justify-content: flex-start; padding: 5rem 2rem 4rem; }
-    #beat-pricing h2 { font-family: var(--serif); font-size: clamp(1.6rem, 3.5vw, 2.6rem); font-weight: 400; color: var(--text); text-align: center; margin-bottom: 0.4rem; }
-    #beat-pricing .pricing-sub { color: var(--text-dim); text-align: center; max-width: 640px; margin: 0 auto 2rem; font-size: 14px; }
+    #pricing-section { text-align: center; }
+    #pricing-section h2 { font-family: var(--serif); font-size: clamp(1.6rem, 3.5vw, 2.6rem); font-weight: 400; color: var(--text); text-align: center; margin-bottom: 0.4rem; }
+    #pricing-section .pricing-sub { color: var(--text-dim); text-align: center; max-width: 640px; margin: 0 auto 2rem; font-size: 14px; }
     .pricing-toggle { display: flex; align-items: center; gap: 0.25rem; background: #0d1a2d; border: 1px solid var(--border, #1e293b); border-radius: 9999px; padding: 0.25rem; margin: 0 auto 2.5rem; width: fit-content; }
     .pricing-toggle button { padding: 0.375rem 1.25rem; border-radius: 9999px; border: 1px solid #d1d5db; font-size: 0.875rem; font-weight: 500; cursor: pointer; background: transparent; color: var(--text-dim); transition: all 0.15s; font-family: var(--mono); }
     .pricing-toggle button.active { background: var(--accent); color: #04121a; border-color: var(--accent); }
@@ -149,7 +154,7 @@
     .beat p em { color: var(--accent); font-style: normal; }
 
     /* CTA */
-    #beat-cta .cta-start {
+    #cta-section .cta-start {
       display: inline-block;
       background: var(--accent);
       color: var(--bg);
@@ -162,17 +167,17 @@
       transition: background 0.2s, transform 0.2s;
       margin-bottom: 2rem;
     }
-    #beat-cta .cta-start:hover {
+    #cta-section .cta-start:hover {
       background: #0891b2;
       transform: scale(1.02);
     }
-    #beat-cta .cta-subtle {
+    #cta-section .cta-subtle {
       margin-top: 0;
       margin-bottom: 1rem;
       color: var(--text-dim);
       font-size: 0.8rem;
     }
-    #beat-cta .cta-step {
+    #cta-section .cta-step {
       margin: 0.35rem 0 0.35rem;
       color: var(--text);
       font-size: 0.78rem;
@@ -180,162 +185,35 @@
       width: 100%;
       max-width: 480px;
     }
-    #beat-cta form {
-      display: flex; gap: 0.75rem; max-width: 400px; width: 100%;
-    }
-    #beat-cta input[type="email"] {
-      flex: 1;
-      background: var(--bg);
-      border: 1px solid var(--text-dim);
-      color: var(--text);
-      padding: 0.7rem 1rem;
-      font-family: var(--mono);
-      font-size: 0.85rem;
-      border-radius: 0;
-    }
-    #beat-cta input[type="email"]:focus {
-      outline: none;
-      border-color: var(--accent);
-    }
-    #beat-cta button {
-      background: var(--bg);
-      color: var(--accent);
-      border: 1px solid var(--accent);
-      padding: 0.7rem 1.25rem;
-      font-family: var(--mono);
-      font-size: 0.85rem;
-      cursor: pointer;
-      transition: background 0.2s, color 0.2s;
-    }
-    #beat-cta button:hover {
-      background: var(--accent);
-      color: var(--bg);
-    }
-    #beat-cta .twitter-link {
+    #cta-section .twitter-link {
       margin-top: 1.5rem;
       color: var(--text-dim);
       text-decoration: none;
       font-size: 0.8rem;
       transition: color 0.2s;
     }
-    #beat-cta .twitter-link:hover { color: var(--accent); }
+    #cta-section .twitter-link:hover { color: var(--accent); }
+    #cta-section .cta-links { display: flex; gap: 1.5rem; justify-content: center; flex-wrap: wrap; margin-top: 2rem; }
+    #cta-section .cta-links a { font-size: 0.85rem; }
 
     /* Success state */
-    #beat-cta .success-msg {
-      display: none;
-      color: var(--green);
-      font-size: 0.85rem;
-      text-align: center;
-      margin-top: 0.5rem;
-    }
 
     /* MCP snippet */
-    #beat-cta .mcp-snippet {
-      margin-top: 1.25rem;
-      margin-bottom: 1rem;
-      background: #0d1a2d; /* solid surface — readability */
-      border: 1px solid rgba(6, 182, 212, 0.2);
-      padding: 0.875rem 1rem;
-      border-radius: 4px;
-      text-align: left;
-      max-width: 480px;
-      width: 100%;
-      box-sizing: border-box;
-    }
-    #beat-cta .mcp-snippet .snippet-label {
-      font-size: 0.7rem;
-      text-transform: uppercase;
-      letter-spacing: 0.06em;
-      color: var(--text-dim);
-      margin-bottom: 0.5rem;
-    }
-    #beat-cta .mcp-snippet pre {
-      margin: 0;
-      overflow-x: auto;
-    }
-    #beat-cta .mcp-snippet code {
-      display: block;
-      color: var(--accent);
-      font-family: var(--mono);
-      font-size: 0.72rem;
-      line-height: 1.6;
-      white-space: pre-wrap;
-      word-break: break-word;
-    }
-    #beat-cta .mcp-snippet .snippet-note {
-      margin-top: 0.6rem;
-      font-size: 0.68rem;
-      color: var(--text-dim);
-      line-height: 1.4;
-    }
-    #beat-cta .copy-config-btn {
-      display: inline-block;
-      margin-top: 0.6rem;
-      padding: 0.4rem 0.9rem;
-      background: var(--accent);
-      color: var(--bg);
-      border: none;
-      border-radius: 4px;
-      font-family: var(--mono);
-      font-size: 0.72rem;
-      cursor: pointer;
-      transition: background 0.2s;
-    }
-    #beat-cta .copy-config-btn:hover {
-      background: #0891b2;
-    }
-    #beat-cta .copy-config-btn.copied {
-      background: var(--green);
-    }
 
     /* CLI snippet — demoted below MCP */
-    #beat-cta .cli-snippet {
-      margin-top: 0;
-      margin-bottom: 1.25rem;
-      background: #0a1626; /* solid surface — readability */
-      border: 1px solid rgba(6, 182, 212, 0.12);
-      padding: 0.625rem 1rem;
-      border-radius: 4px;
-      text-align: left;
-      max-width: 420px;
-      width: 100%;
-      box-sizing: border-box;
-      overflow-x: auto;
-    }
-    #beat-cta .cli-snippet .snippet-label {
-      font-size: 0.7rem;
-      text-transform: uppercase;
-      letter-spacing: 0.06em;
-      color: var(--text-dim);
-      margin-bottom: 0.4rem;
-    }
-    #beat-cta .cli-snippet code {
-      display: block;
-      color: var(--accent);
-      font-family: var(--mono);
-      font-size: 0.78rem;
-      line-height: 1.7;
-      white-space: pre-wrap;
-      word-break: break-word;
-    }
 
     /* Self-hosting link */
-    #beat-cta .selfhost-link {
+    #cta-section .selfhost-link {
       margin-top: 1.25rem;
       color: var(--text-dim);
       text-decoration: none;
       font-size: 0.78rem;
       transition: color 0.2s;
     }
-    #beat-cta .selfhost-link:hover { color: var(--accent); }
+    #cta-section .selfhost-link:hover { color: var(--accent); }
 
     /* Mobile */
     @media (max-width: 640px) {
-      #beat-cta form { flex-direction: column; }
-      #beat-cta input[type="email"],
-      #beat-cta button { width: 100%; text-align: center; }
-      #scroll-wrapper { height: 800vh; }
-    }
 
     /* Subtle fade at bottom edges */
     #vignette {
@@ -381,7 +259,10 @@
         <code>NAND  c → a    confidence: 0.72</code>
       </div>
     </section>
-    <section id="beat-pricing" class="beat">
+  </div>
+
+  <!-- Pricing — normal document-flow section (below the scroll narrative) -->
+  <section id="pricing-section" class="content-section">
       <h2>Pricing</h2>
       <p class="pricing-sub">Start free. Scale when your agents do — you pay for usage, not seats.</p>
 
@@ -400,43 +281,21 @@
       </div>
 
       <div class="selfhost" id="selfhost-section"></div>
-    </section>
-    <section id="beat-cta" class="beat">
+  </section>
+
+  <!-- CTA — normal document-flow section -->
+  <section id="cta-section" class="content-section">
       <a href="/signup" class="cta-start">Connect your agent →</a>
       <p class="cta-subtle">5,000 Points free. No credit card. Start building in minutes.</p>
-      <p class="cta-step">1 · Sign up to get your API key, then either:</p>
-      <!-- MCP config — the agent integration path -->
-      <div class="mcp-snippet">
-        <div class="snippet-label">A · Connect your agent (MCP)</div>
-        <pre><code id="mcp-config-code">{
-  "mcpServers": {
-    "tortoise": {
-      "command": "python3",
-      "args": ["-m", "tortoise.mcp_server"],
-      "env": {
-        "TORTOISE_API_KEY": "tt_YOUR_KEY",
-        "TORTOISE_API_URL": "https://api.premiselabs.co"
-      }
-    }
-  }
-}</code></pre>
-        <button class="copy-config-btn" id="btn-copy-config" onclick="copyMcpConfig()"><span>Copy config</span></button>
-        <p class="snippet-note">Paste into <code>.mcp.json</code> (Claude Code), <code>.cursor/mcp.json</code> (Cursor), or <code>claude_desktop_config.json</code> (Claude Desktop). Replace <code>tt_YOUR_KEY</code> with the API key from signup — your agent then reads and writes Tortoise memory automatically.</p>
+      <p class="cta-step">Setup is in the docs — the welcome page walks you through MCP and CLI
+      after signup.</p>
+      <div class="cta-links">
+        <a class="selfhost-link" href="/docs">Docs</a>
+        <a class="selfhost-link" href="https://github.com/daniel-ospina/tortoise" target="_blank" rel="noopener">Self-hosting docs →</a>
+        <a class="selfhost-link" href="https://app.premiselabs.co">Login →</a>
+        <a class="twitter-link" href="https://x.com/premiselabs" target="_blank" rel="noopener">@premiselabs</a>
       </div>
-      <p class="cta-step">2 · For scripting and automation, use the CLI:</p>
-      <div class="cli-snippet">
-        <div class="snippet-label">B · CLI quickstart</div>
-        <code>$ pip install tortoise-graph</code>
-        <code>$ tortoise init --api-key &lt;key&gt;</code>
-        <code>$ tortoise create-point "Hello world" --kind statement</code>
-        <code>$ tortoise session capture --file chat.json</code>
-      </div>
-      <a class="selfhost-link" href="https://github.com/daniel-ospina/tortoise" target="_blank" rel="noopener">Self-hosting docs →</a>
-      <a class="selfhost-link" href="/docs">Docs</a>
-      <a class="selfhost-link" href="https://app.premiselabs.co">Login →</a>
-      <a class="twitter-link" href="https://x.com/premiselabs" target="_blank" rel="noopener">@premiselabs</a>
-    </section>
-  </div>
+  </section>
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/ScrollTrigger.min.js"></script>
@@ -569,7 +428,7 @@
     draw();
 
     /* ── Content beats (opacity scrubbed to scroll) ── */
-    const beats = ['beat-hero', 'beat-capture', 'beat-recall', 'beat-reason', 'beat-pricing', 'beat-cta'];
+    const beats = ['beat-hero', 'beat-capture', 'beat-recall', 'beat-reason'];
 
     const beatSpan = 0.11;
     const gapSpan = 0.015;
@@ -623,21 +482,21 @@
         }
       );
 
-      if (i < beats.length - 1) {
-        const fadeOutStart = i === 1 ? 0.20 : peak;
-        gsap.to(el, {
-          opacity: 0, y: -20,
-          scrollTrigger: {
-            trigger: '#scroll-wrapper',
-            start: `${fadeOutStart * 100}% top`,
-            end: `${(fadeOutStart + 0.04) * 100}% top`,
-            scrub: 0.5,
-          }
-        });
-      }
+      // Always fade out — including the LAST beat (reason), which fades late
+      // so the pricing/CTA sections below reveal cleanly.
+      const fadeOutStart = i === 1 ? 0.20 : (i === beats.length - 1 ? 0.82 : peak);
+      gsap.to(el, {
+        opacity: 0, y: -20,
+        scrollTrigger: {
+          trigger: '#scroll-wrapper',
+          start: `${fadeOutStart * 100}% top`,
+          end: `${(fadeOutStart + 0.08) * 100}% top`,
+          scrub: 0.5,
+        }
+      });
     });
 
-    // ── Copy MCP config ───────────────────────────────────────────
+    // ── (MCP config moved to docs — see /docs and the welcome page) ──
     function copyMcpConfig() {
       const codeEl = document.getElementById("mcp-config-code");
       if (!codeEl) return;
