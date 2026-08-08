@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Privacy Policy — Tortoise Hosted Service</title>
+  <meta name="description" content="Privacy Policy for the hosted Tortoise service operated by Premise Labs at tortoise.premiselabs.co.">
+  <meta name="theme-color" content="#060b14">
+  <link rel="canonical" href="https://tortoise.premiselabs.co/privacy">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #060b14;
+      --surface: #0d1a2d;
+      --text: #cbd5e1;
+      --text-dim: #64748b;
+      --accent: #06b6d4;
+      --accent-glow: rgba(6, 182, 212, 0.35);
+      --green: #4ade80;
+      --gold: #f59e0b;
+      --border: #1e293b;
+      --mono: 'SF Mono', 'Cascadia Code', 'Fira Code', 'JetBrains Mono', monospace;
+      --serif: 'Georgia', 'Times New Roman', serif;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--serif);
+      font-size: 16px;
+      line-height: 1.75;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .wrap { max-width: 720px; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
+
+    .topbar { flex-wrap: wrap;
+      display: flex; justify-content: space-between; align-items: baseline; gap: 1rem;
+      margin-bottom: 2.5rem; font-family: var(--mono); font-size: 0.78rem;
+    }
+    .topbar a { color: var(--text-dim); text-decoration: none; }
+    .topbar a:hover { color: var(--accent); }
+    .topbar .host { color: var(--text-dim); }
+
+    .doc-type {
+      font-family: var(--mono); font-size: 0.72rem; text-transform: uppercase;
+      letter-spacing: 0.08em; color: var(--accent); margin-bottom: 0.6rem;
+    }
+
+    h1 {
+      font-family: var(--mono); font-size: 1.5rem; font-weight: 600;
+      color: var(--text); line-height: 1.35; letter-spacing: -0.01em;
+    }
+    .lede { color: var(--text-dim); font-size: 0.95rem; margin-top: 0.75rem; }
+
+    .meta {
+      margin: 1.5rem 0 2.75rem; background: var(--surface);
+      border: 1px solid var(--border); border-radius: 0.75rem;
+      padding: 1rem 1.25rem; display: flex; flex-wrap: wrap; gap: 0.9rem 2.25rem;
+    }
+    .meta .label {
+      display: block; font-family: var(--mono); font-size: 0.64rem;
+      text-transform: uppercase; letter-spacing: 0.08em;
+      color: var(--text-dim); margin-bottom: 0.2rem;
+    }
+    .meta .value { font-family: var(--mono); font-size: 0.82rem; color: var(--text); }
+
+    h2 {
+      font-family: var(--mono); font-size: 1.02rem; font-weight: 600; color: var(--text);
+      margin: 2.75rem 0 0.9rem; padding-top: 1.1rem;
+      border-top: 1px solid rgba(30, 41, 59, 0.6);
+    }
+    h2:first-of-type { border-top: none; margin-top: 0; padding-top: 0; }
+
+    p { margin: 0.85rem 0; }
+    strong { color: var(--text); font-weight: 600; }
+    a { color: var(--accent); text-decoration: none; border-bottom: 1px solid rgba(6, 182, 212, 0.25); }
+    a:hover { color: #22d3ee; border-bottom-color: var(--accent); }
+    code { font-family: var(--mono); font-size: 0.82em; color: #a5f3fc; }
+
+    ul, ol { margin: 0.85rem 0; padding-left: 1.35rem; }
+    li { margin: 0.4rem 0; }
+
+    .callout {
+      background: var(--surface); border: 1px solid var(--border);
+      border-left: 3px solid var(--accent); border-radius: 0.6rem;
+      padding: 1rem 1.25rem; margin: 1.25rem 0;
+    }
+    .callout p { margin: 0.25rem 0; }
+
+    table {
+      width: 100%; border-collapse: collapse; margin: 1rem 0;
+      font-family: var(--mono); font-size: 0.78rem;
+    }
+    th, td {
+      border: 1px solid var(--border); padding: 0.5rem 0.7rem;
+      text-align: left; vertical-align: top; word-break: break-word;
+    }
+    th { background: var(--surface); color: var(--accent); font-weight: 600; }
+    td { color: var(--text); }
+
+    footer {
+      margin-top: 3.5rem; padding-top: 1.25rem; border-top: 1px solid var(--border);
+      font-family: var(--mono); font-size: 0.76rem; color: var(--text-dim);
+    }
+    footer p { margin: 0.4rem 0; }
+    footer a { color: var(--text-dim); border-bottom: 1px solid rgba(100, 116, 139, 0.3); }
+    footer a:hover { color: var(--accent); border-bottom-color: var(--accent); }
+
+    @media (max-width: 480px) {
+      .wrap { padding: 1.5rem 1rem 3rem; }
+      h1 { font-size: 1.28rem; }
+      .meta { flex-direction: column; gap: 0.7rem; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <nav class="topbar">
+      <a href="/">← Back to product</a>
+      <span class="host">tortoise.premiselabs.co</span>
+    </nav>
+
+    <header>
+      <p class="doc-type">Privacy Policy</p>
+      <h1>Privacy Policy — Tortoise Hosted Service</h1>
+      <p class="lede">This policy describes how personal data is processed in connection with the hosted Tortoise service operated by Premise Labs at tortoise.premiselabs.co.</p>
+      <div class="meta">
+        <div>
+          <span class="label">Last updated</span>
+          <span class="value">2026-08-08</span>
+        </div>
+        <div>
+          <span class="label">Effective date</span>
+          <span class="value">Effective date: 2026-08-08</span>
+        </div>
+        <div>
+          <span class="label">Version</span>
+          <span class="value">1.0</span>
+        </div>
+      </div>
+    </header>
+
+    <main>
+      <h2>Scope of this policy</h2>
+      <p>This Privacy Policy describes how personal data is processed in connection with the <strong>hosted Tortoise service</strong> operated by Premise Labs at <code>tortoise.premiselabs.co</code> (and its API at <code>api.premiselabs.co</code>).</p>
+      <p>This policy does <strong>not</strong> apply to self-hosted deployments of the Tortoise software. In a self-hosted deployment, the operator of that deployment is the data controller for any personal data processed there, and that operator's own policies apply.</p>
+      <p>This policy is written in plain English. It describes current practices truthfully and, where the service may introduce tools in the future (such as analytics instrumentation), it describes those tools now in conditional terms so this document stays accurate when they are activated ("disclose now, instrument later").</p>
+
+      <h2>1. Controller identity and contact</h2>
+      <p><strong>Data controller:</strong> Daniel Ospina, an individual operating the hosted Tortoise service under the name "Premise Labs" (d/b/a "Premise Labs").</p>
+      <p>Premise Labs is <strong>not a registered legal entity</strong>. The data controller is the natural person named above, acting in their personal capacity.</p>
+      <p><strong>Jurisdiction of residence:</strong> United States.</p>
+      <p><strong>Contact for privacy matters:</strong> email <a href="mailto:hello@premiselabs.co">hello@premiselabs.co</a>. This is the controller's designated contact channel for all privacy inquiries and requests.</p>
+      <p><strong>EU/EEA representative (GDPR Art. 27):</strong> "We are not currently established in the EU/EEA. If we become subject to GDPR Art. 27, we will designate and disclose an EU representative here."</p>
+      <p><strong>LFPDPPP (Mexico):</strong> If the controller is resident in Mexico, the Mexican Federal Law on the Protection of Personal Data Held by Private Parties (LFPDPPP) may apply, and a separate privacy notice (Aviso de Privacidad) will be published and linked from this policy.</p>
+
+      <h2>2. Data processed by the service</h2>
+      <p>The service processes the following categories of personal data:</p>
+      <ul>
+        <li><strong>Account data.</strong> Account data includes your email address, authentication credentials, and account identifiers. Authentication is managed through an identity and database provider (Supabase), and sign-in may be completed through the GitHub or Google OAuth identity providers. This category is required for account creation, authentication, and billing.</li>
+        <li><strong>Usage data.</strong> Usage data includes information about how the service is used — for example, API requests made, features used, and performance signals. Usage data is not tied to your identity beyond your account.</li>
+        <li><strong>Analytics data.</strong> Analytics data includes behavioral and technical signals that would be processed by analytics tools (Meta Pixel, Google Analytics (GA4), and PostHog) <strong>when those tools are activated</strong> — see §3.</li>
+      </ul>
+      <p><strong>Sensitive data — expectation.</strong> "we expect users not to place sensitive data in the service" — do not place health data, biometric data, government identifiers, or other sensitive personal data in the service. See §13.</p>
+      <p><strong>Eligibility.</strong> The service is intended for use by adults: you must be at least 18 years old to create an account or use the service. The service is not directed to children.</p>
+
+      <h2>3. Analytics and cookies</h2>
+      <p><strong>Current deployment status:</strong> no analytics tools are currently deployed.</p>
+      <p><strong>Planned tools, disclosed now.</strong> When you use the hosted service we may use the following analytics tools, and they are activated only with your consent:</p>
+      <ul>
+        <li><strong>Meta Pixel</strong> — advertising measurement and conversion tracking (Meta Platforms, Inc.).</li>
+        <li><strong>Google Analytics (GA4)</strong> — audience and product analytics (Google LLC).</li>
+        <li><strong>PostHog</strong> — product analytics (PostHog Inc.).</li>
+      </ul>
+      <p>Cookies and similar technologies are used by these tools when activated. For each tool, consent will be obtained via a banner when these tools are activated. The consent banner is a planned follow-up (issue #658) and will appear only when instrumentation ships.</p>
+      <p>Until consent is given, none of these tools are loaded and no data is sent to them.</p>
+
+      <h2>4. Purposes of processing and legal bases</h2>
+      <p><strong>Purposes of processing:</strong> "your email address and account information are used to deliver the service, respond to requests, and manage billing; usage data is used to improve the product"</p>
+      <p><strong>Legal bases under the GDPR.</strong> Processing is based on the following grounds, as applicable:</p>
+      <ul>
+        <li><strong>Performance of a contract (Art. 6(1)(b)):</strong> account data is processed to deliver the service the user signs up for, including authentication and account administration.</li>
+        <li><strong>Legitimate interests (Art. 6(1)(f)):</strong> usage data is processed to operate, secure, and improve the product, and to prevent abuse.</li>
+        <li><strong>Consent (Art. 6(1)(a)):</strong> analytics tools are activated and process data only after consent is given, as described in §3.</li>
+        <li><strong>Legal obligation (Art. 6(1)(c)):</strong> billing and transactional records may be processed to comply with tax and accounting obligations, where applicable.</li>
+      </ul>
+      <p>Consent, where given, may be withdrawn at any time with effect for the future. Under ePrivacy rules, non-essential cookies and pixels are subject to the same consent: consent will be obtained via a banner when these tools are activated.</p>
+
+      <h2>5. California — CCPA/CPRA disclosures</h2>
+      <p><strong>We do not sell your personal information.</strong> Consistent with the California Consumer Privacy Act (CCPA), as amended by the California Privacy Rights Act (CPRA): we do not sell your personal information, and no personal information has been sold in the preceding 12 months. We share limited data with advertising/analytics providers as disclosed in this policy.</p>
+      <p><strong>"Sharing" disclosure for the Meta Pixel (conditional).</strong> If the Meta Pixel is activated, data processed through the Pixel is shared with Meta as an advertising provider, and that may constitute "sharing" for cross-context behavioral advertising under the CPRA. When the Pixel is activated, Meta is a joint controller of personal data processed through the Pixel, and shared data may be used by Meta for its own purposes. Data is shared with Meta only after consent is obtained, as described in §3.</p>
+      <p><strong>Opt-out rights.</strong> No dedicated California opt-out link is offered at this time, because no sale occurs and no sharing occurs until analytics tools are activated with consent. When consent and opt-out tooling becomes available (planned consent banner, issue #658), a dedicated opt-out control will be added. Until then, opt-out and all other California privacy requests may be submitted through the contact channel in §1.</p>
+      <p><strong>Shine the Light (Cal. Civ. Code § 1798.83).</strong> California residents may request, once per calendar year, information about personal information disclosed to third parties for their own direct marketing purposes in the preceding calendar year. Requests may be submitted through the contact channel in §1.</p>
+      <p><strong>Non-discrimination.</strong> You will not be denied goods or services, charged different prices, or provided a different quality of service for exercising your California privacy rights.</p>
+
+      <h2>6. Retention</h2>
+      <p>Personal data is retained only for as long as needed to deliver the service and to fulfill the purposes described in this policy. When data is no longer needed, it is deleted or de-identified.</p>
+      <p>Retention carve-outs, stated honestly:</p>
+      <ul>
+        <li><strong>Billing and transactional records</strong> are retained as required by applicable law, including tax and accounting obligations (GDPR Art. 17(3) carve-out for legal compliance).</li>
+        <li><strong>Analytics data</strong> is handled in accordance with the analytics section (§3) and the retention terms of each analytics provider; analytics data is not silently claimed to be deleted.</li>
+        <li><strong>Backups</strong> may retain data for a limited additional period after deletion to maintain integrity; data in backups is not used for any other purpose.</li>
+      </ul>
+
+      <h2>7. Security</h2>
+      <p>Reasonable technical and organizational measures are applied to protect personal data:</p>
+      <ul>
+        <li>Data in transit is encrypted using TLS.</li>
+        <li>Passwords are stored using salted hashing.</li>
+        <li>Access to production systems is restricted to authorized personnel and protected by authentication.</li>
+        <li>Access to personal data is limited to what is necessary to operate and support the service.</li>
+      </ul>
+      <p>No security measures are absolute, and the security of the internet cannot be guaranteed. You are responsible for keeping your account credentials confidential.</p>
+
+      <h2>8. Your rights</h2>
+      <p><strong>GDPR rights.</strong> If you are located in the EU/EEA, the UK, or Switzerland, you have the right to:</p>
+      <ul>
+        <li><strong>Access</strong> a copy of your personal data;</li>
+        <li><strong>Rectify</strong> inaccurate personal data;</li>
+        <li><strong>Erasure</strong> ("right to be forgotten");</li>
+        <li><strong>Restrict</strong> processing in certain circumstances;</li>
+        <li><strong>Data portability</strong> — receive personal data you provided in a structured, machine-readable format;</li>
+        <li><strong>Object</strong> to processing based on legitimate interests;</li>
+        <li><strong>Withdraw consent</strong> at any time, where processing is based on consent;</li>
+        <li><strong>Lodge a complaint</strong> with a supervisory authority in your country of residence.</li>
+      </ul>
+      <p><strong>CCPA/CPRA rights.</strong> If you are a California resident, you have the right to:</p>
+      <ul>
+        <li><strong>Know</strong> the categories and specific pieces of personal data processed about you;</li>
+        <li><strong>Delete</strong> personal data, subject to legal exceptions;</li>
+        <li><strong>Correct</strong> inaccurate personal data;</li>
+        <li><strong>Opt out</strong> of the "sale" or "sharing" of personal data — not applicable at this time because no sale or sharing occurs (§5), and exercisable via the contact channel in §1;</li>
+        <li><strong>Non-discrimination</strong> for exercising these rights.</li>
+      </ul>
+      <p>Where rights under different laws overlap or conflict, the applicable law governs. All requests are subject to identity verification as described in §16.</p>
+
+      <h2>9. Data Processing Agreement</h2>
+      <p>A copy of the Data Processing Agreement (DPA) is available at <a href="https://tortoise.premiselabs.co/dpa">https://tortoise.premiselabs.co/dpa</a>.</p>
+      <p>Under GDPR Art. 28(3), a DPA is required whenever a processor relationship exists — regardless of deal size, including for free-tier users. The DPA applies to the processor relationships described in §10 and takes effect when personal data is submitted to the service.</p>
+
+      <h2>10. Processors and third-party sharing</h2>
+      <p>Personal data is shared only with the processors and providers listed below, and only to the extent necessary to operate the service. Each processor is engaged under a data processing agreement that complies with GDPR Art. 28, and processors act only on documented instructions.</p>
+      <ul>
+        <li><strong>Supabase</strong> — authentication and account records are processed by Supabase (the processor that holds account personal data: email/login). Used today.</li>
+        <li><strong>Cloudflare</strong> — the website and API are hosted and delivered via Cloudflare. Used today.</li>
+        <li><strong>GitHub</strong> — sign-in may be completed through the GitHub OAuth identity provider; when you choose that option, identity data is processed by GitHub. Used today.</li>
+        <li><strong>Google</strong> — sign-in may be completed through the Google OAuth identity provider; when you choose that option, identity data is processed by Google. Used today.</li>
+        <li><strong>Meta, Google, PostHog</strong> — analytics data is processed by these providers when the corresponding analytics tools are activated with consent (§3). Not deployed today.</li>
+        <li><strong>Stripe</strong> — when paid plans become available, payment data is processed by Stripe for billing. Not deployed today.</li>
+      </ul>
+      <p>No other sharing of personal data occurs, except as required by law or with your consent.</p>
+
+      <h2>11. AI training</h2>
+      <p><strong>we do not use your content or usage data to train AI models</strong> — at any tier, free or paid, now or in the future under this policy. This is a commitment of the product, not a limitation of a plan.</p>
+
+      <h2>12. International data transfers</h2>
+      <p>Personal data may be transferred to, and processed in, countries other than the country where you reside, including the United States, where the service's infrastructure and processors are located.</p>
+      <p>Where personal data is transferred from the EU/EEA, the UK, or Switzerland, appropriate safeguards are provided:</p>
+      <ul>
+        <li><strong>Data Privacy Framework (DPF):</strong> transfers to processors that participate in the EU–US DPF, the UK Extension, or the Swiss–US DPF rely on those certifications.</li>
+        <li><strong>Standard Contractual Clauses (SCCs):</strong> where a processor does not rely on the DPF, transfers are protected by SCCs adopted by the European Commission or equivalent safeguards.</li>
+      </ul>
+      <p><strong>PostHog EU residency (conditional).</strong> PostHog is a data processor; EU residency (Frankfurt) used when configured. If PostHog's EU-resident cloud is configured for EU users, EU-origin analytics data is stored in Frankfurt; this sentence is re-verified when the PostHog configuration is resolved.</p>
+
+      <h2>13. Sensitive data</h2>
+      <p><strong>we do not intentionally collect sensitive personal information.</strong> Sensitive personal data — such as health data, biometric data, government identifiers, racial or ethnic origin, or other special-category data — is not requested, and is not needed for any feature of the service.</p>
+      <p>As stated in §2, "we expect users not to place sensitive data in the service." If you place sensitive data in the service despite this expectation, that data is processed at your direction in the same way as other content you submit, and you are responsible for ensuring you are entitled to process it.</p>
+
+      <h2>14. (Reserved)</h2>
+      <p>Reserved — see §12.</p>
+
+      <h2>15. Version, effective date, and document history</h2>
+      <p><strong>Current version:</strong> 1.0</p>
+      <p>This policy is versioned. When this policy changes, the version number and effective date are updated, and a new entry is added to the document history below. Material changes are posted before they take effect.</p>
+
+      <h2>16. Exercising your rights — deletion and other requests</h2>
+      <p><strong>Primary mechanism: email.</strong> To request deletion of your account and associated data, or to make any other privacy request (access, correction, export, restriction, objection), email your request to <a href="mailto:hello@premiselabs.co">hello@premiselabs.co</a>.</p>
+      <p><strong>Response commitment.</strong> Requests are answered within <strong>one month</strong> of receipt, as required by GDPR Art. 12(3). If a request is complex or numerous, the response period may be extended by up to two additional months; you will be informed of any extension within one month of receipt, together with the reasons for the delay.</p>
+      <p><strong>Identity verification.</strong> we may request identity verification before acting on any request (GDPR Art. 12(6)). Where a request cannot be verified or is manifestly unfounded or excessive, the request may be refused or a reasonable fee may be charged, as permitted by law.</p>
+      <p><strong>What this channel covers.</strong> The email channel covers: (a) account data, (b) non-account data, (c) users who cannot log in to their account, and (d) access, export, and objection requests. It is the general-purpose rights channel for this release.</p>
+      <p><strong>Deletion scope.</strong> When a deletion request is fulfilled, account and associated data is deleted or de-identified, subject to the retention carve-outs in §6 (billing/transactional records retained as required by law; analytics data handled per the analytics section). Deletion does not extend to content you have already shared publicly or to data that others have lawfully obtained.</p>
+      <p><strong>Self-service deletion (future).</strong> An in-product self-service account deletion feature does not exist at the time of this publication, so this policy does not promise one. If a self-service deletion feature is added to the product, this policy will be updated to describe it.</p>
+    </main>
+
+    <footer>
+      <h2 style="border-top: none; padding-top: 0; margin-top: 0;">Document history / revisions</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Version</th>
+            <th>Effective date</th>
+            <th>Summary</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>1.0</td>
+            <td>2026-08-08</td>
+            <td>Initial publication of the Privacy Policy for the hosted Tortoise service.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <p>Based on the Common Paper Cloud Service Agreement v2.1, CC BY 4.0. The original template is available at <a href="https://commonpaper.com">https://commonpaper.com</a>.</p>
+      <p><em>Questions about this policy may be submitted through the contact channel in §1.</em></p>
+      <p>Premise Labs · Tortoise · <a href="/">Back to product</a></p>
+    </footer>
+  </div>
+</body></html>

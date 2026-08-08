@@ -289,6 +289,24 @@
       .snippet pre { font-size: 0.68rem; overflow-x: auto; }
       .btn-copy, .btn-dashboard { width: 100%; }
     }
+
+    /* Legal footer */
+    .legal-footer {
+      display: flex;
+      justify-content: center;
+      flex-wrap: wrap;
+      gap: 0.5rem 1.5rem;
+      padding: 1.75rem 1.5rem 2.25rem;
+      color: var(--text-dim);
+      font-size: 0.78rem;
+      font-family: var(--mono);
+    }
+    .legal-footer a {
+      color: var(--text-dim);
+      text-decoration: none;
+      transition: color 0.2s;
+    }
+    .legal-footer a:hover { color: var(--accent); }
 </style>
 </head>
 <body>
@@ -741,5 +759,12 @@ codex mcp add tortoise --url https://api.premiselabs.co/mcp --bearer-token-env-v
       .catch(() => {});
 
 </script>
+
+  <footer class="legal-footer">
+    <a href="/privacy">Privacy Policy</a>
+    <a href="/tos">Terms of Service</a>
+    <a href="/license">License</a>
+    <a href="/dpa">DPA</a>
+  </footer>
 </body>
 </html>
