@@ -2877,17 +2877,18 @@ async def backups_status(request: Request):
     now = datetime.now(timezone.utc)
     watcher_status = watcher._watcher._last_status if watcher else {}
     hb = {}
+    storage_error = None
     try:
         parsed = _json.loads(storage.download(HEARTBEAT_KEY))
         hb = parsed if isinstance(parsed, dict) else {}
-    except (KeyError, ValueError):
-        pass
+    except Exception as e:  # R2 hiccup must never 500 /status (live-E2E fix)
+        storage_error = f"heartbeat read: {e}"
     driver_hb = {}
     try:
         parsed = _json.loads(storage.download(_DRIVER_HEARTBEAT_KEY))
         driver_hb = parsed if isinstance(parsed, dict) else {}
-    except (KeyError, ValueError):
-        pass
+    except Exception as e:
+        storage_error = f"{storage_error}; driver-heartbeat read: {e}" if storage_error else f"driver-heartbeat read: {e}"
 
     watcher_age_min = None
     if hb.get("last_poll_at"):
@@ -2902,9 +2903,10 @@ async def backups_status(request: Request):
         except ValueError:
             pass
 
-    return {
+    return {  # noqa: C901
         "enabled": bool(cfg and cfg.enabled),
         "config_error": config_error,
+        "storage_error": storage_error,
         "app_time": now.isoformat(),
         "per_team": watcher_status.get("per_team", {}),
         "no_teams": watcher_status.get("no_teams", False),
