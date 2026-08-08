@@ -49,3 +49,23 @@ jobs:
             exit 1
           fi
           echo "service-first gate OK"
+
+  welcome-e2e:
+    runs-on: ubuntu-latest
+    # Playwright browser tests for the onboarding welcome page (#541).
+    # Runs against the live prod page; Supabase-backed tests need
+    # SUPABASE_URL/SUPABASE_SERVICE_KEY secrets (skipped without them).
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # Install the package (pulls falkordblite/redislite needed by tortoise/__init__)
+      # + the e2e test extras.
+      - run: pip install -e '.[test]'
+      - run: python -m playwright install --with-deps chromium
+      - name: Run welcome page E2E
+        run: python -m pytest tests/e2e/ -q -p no:cacheprovider
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
