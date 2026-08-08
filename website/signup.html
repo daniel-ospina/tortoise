@@ -447,6 +447,15 @@
         return;
       }
 
+      // Analytics (#528): user_signed_up — CLIENT tracking, only when the
+      // consent banner granted it (consent.js defines window.consentState;
+      // window.posthog is a no-op stub until consent). Server-side account
+      // telemetry (tenant_provisioned etc.) is not gated by the banner.
+      if (window.posthog && window.consentState && window.consentState() === "granted") {
+        window.posthog.identify(data.user.id);
+        window.posthog.capture("user_signed_up", { provider: "email" });
+      }
+
       // If email confirmation is enabled, show a message
       if (data?.user?.identities?.length === 0) {
         showError("An account with this email already exists. Please sign in instead.");

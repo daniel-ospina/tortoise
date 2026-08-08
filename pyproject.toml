@@ -21,6 +21,7 @@ dependencies = [
     "pyyaml>=6.0",
     "fastmcp==3.4.6",
     "prometheus-client>=0.16",
+    "posthog>=3.0",
 ]
 
 [project.scripts]
