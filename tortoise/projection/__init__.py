@@ -95,8 +95,12 @@ def _now_iso() -> str:
 
 
 def _norm(ev: dict) -> dict:
-    """Normalize event shape — tolerates API (flat) and script (nested point)."""
-    if ev.get("point"):
+    """Normalize event shape — tolerates API (flat) and script (nested point).
+
+    Only splices point fields when ``point`` is a dict — a non-dict ``point``
+    (e.g. a legacy string ID) must not crash normalization (issue #325).
+    """
+    if isinstance(ev.get("point"), dict):
         return {**ev, **ev["point"]}
     return ev
 
@@ -106,6 +110,9 @@ def _apply_one(points: dict[str, dict], ev: dict) -> None:
     t = ev["type"]
     if t in ("PointAdded", "OperatorAdded"):
         p = ev["point"]
+        if not isinstance(p, dict):
+            # Malformed event (non-dict point) — skip, don't crash (issue #325)
+            return
         # Phase 1 stop-writes: strip context from v2+ events (#49)
         if ev.get("projection_version", 0) >= 2:
             p.pop("context", None)
@@ -412,7 +419,7 @@ class FalkorProjection(
 
     def _norm(self, ev: dict) -> dict:
         """Normalize event shape — tolerates API (flat) and script (nested point)."""
-        if ev.get("point"):
+        if isinstance(ev.get("point"), dict):
             # Script format: id lives inside point
             return {**ev, **ev["point"]}
         return ev
@@ -422,6 +429,9 @@ class FalkorProjection(
         t = ev["type"]
         if t in ("PointAdded", "OperatorAdded"):
             p = ev["point"]
+            if not isinstance(p, dict):
+                # Malformed event (non-dict point) — skip, don't crash (issue #325)
+                return
             # Phase 1 stop-writes: strip context from v2+ events (#49)
             if ev.get("projection_version", 0) >= 2:
                 p.pop("context", None)
@@ -434,7 +444,7 @@ class FalkorProjection(
         elif t == "PointRetracted":
             self._delete(ev["id"])
         elif t == "PointsMerged":
-            for mid in event.get("merge_ids", []):
+            for mid in ev.get("merge_ids", []):
                 self._delete(mid)
         elif t == "EventRecorded":
             self._upsert_event(ev)
@@ -485,9 +495,13 @@ class FalkorProjection(
         # Pass 1a: create all Point/Operator nodes first
         # (skip edges), so cross-file PointRevised always has a node to revise (#21).
         for ev in events:
+            ev = self._norm(ev)
             t = ev["type"]
             if t in ("PointAdded", "OperatorAdded"):
                 p = ev["point"]
+                if not isinstance(p, dict):
+                    # Malformed event (non-dict point) — skip (issue #325)
+                    continue
                 # Phase 1 stop-writes: strip context from v2+ events (#49)
                 # (identical to apply() — parity between rebuild and apply)
                 if ev.get("projection_version", 0) >= 2:
@@ -499,11 +513,16 @@ class FalkorProjection(
 
         # Pass 1b: apply revisions + other non-edge events AFTER all nodes exist
         for ev in events:
+            ev = self._norm(ev)
             t = ev["type"]
             if t in ("PointAdded", "OperatorAdded"):
                 continue  # already handled in pass 1a
             elif t == "PointRetracted":
-                self._delete(ev.get("id") or ev["event_id"])
+                # Graceful id resolution — skip if neither id nor event_id
+                # present (malformed/legacy event, issue #325)
+                rid = ev.get("id") or ev.get("event_id")
+                if rid is not None:
+                    self._delete(rid)
             elif t == "PointsMerged":
                 for mid in ev.get("merge_ids", []):
                     self._delete(mid)
@@ -529,8 +548,12 @@ class FalkorProjection(
         # Pass 2: create edges for all operators + provenance/entity wiring
         # (shared _upsert_point_edges — single source of truth with apply, #330).
         for ev in events:
+            ev = self._norm(ev)
             if ev["type"] in ("PointAdded", "OperatorAdded"):
                 p = ev["point"]
+                if not isinstance(p, dict):
+                    # Malformed event (non-dict point) — skip (issue #325)
+                    continue
                 if ev.get("projection_version", 0) >= 2:
                     p.pop("context", None)
                 self._upsert_point_edges(p)
@@ -840,7 +863,10 @@ class FalkorProjection(
         """Apply PointRevised event — update content, context, and re-compute embedding."""
         new_content = ev.get("new_content")
         new_context = ev.get("new_context")
-        pid = ev.get("id") or ev["event_id"]
+        pid = ev.get("id") or ev.get("event_id")
+        if pid is None:
+            # Malformed PointRevised — skip rather than crash (issue #325)
+            return
         params: dict = {"id": pid, "c": new_content}
 
         # Re-compute embedding when content changes (even to empty — wipe stale).

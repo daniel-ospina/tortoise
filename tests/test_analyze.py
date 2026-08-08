@@ -1,8 +1,10 @@
 """Tests for tortoise_analyze."""
+from __future__ import annotations
+
 import sys, os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from tortoise.analyze import classify, analyze, TEMPLATES
+from tortoise.analyze import classify, analyze, TEMPLATES, _format_chain
 
 
 def test_classify_disagreement():
@@ -82,24 +84,89 @@ def test_with_projection():
     db_path = os.path.join(tmpdir, "test.db")
     try:
         proj = FalkorProjection(db_path)
-        # Add some test data
-        proj.g.query("CREATE (:Point {id:'c1', content:'AI strategy is working', confidence:0.85})")
-        proj.g.query("CREATE (:Point {id:'c2', content:'AI strategy needs revision', confidence:0.65})")
-        # NAND is operator-mediated (#7801): op {op_type:'NAND', is_operator:true}
-        # connects to both claims — the analyze template matches this shape.
-        proj.g.query(
-            "MATCH (a:Point {id:'c1'}), (b:Point {id:'c2'}) "
-            "CREATE (op:Point {id:'op1', op_type:'NAND', is_operator:true})"
-            "-[:NAND]->(a), (op)-[:NAND]->(b)"
-        )
-        
+        # Add test data: the disagreement template matches the operator-node
+        # pattern (a)<-[:NAND]-(op {op_type:"NAND"})-[:NAND]->(b), NOT a direct
+        # (a)-[:NAND]->(b) edge — the old fixture returned zero rows (#325).
+        proj.g.query("CREATE (:Point {id:'c1', content:'AI strategy is working', confidence:0.85, is_operator:false})")
+        proj.g.query("CREATE (:Point {id:'c2', content:'AI strategy needs revision', confidence:0.65, is_operator:false})")
+        proj.g.query("CREATE (:Point {id:'op1', content:'NAND', op_type:'NAND', is_operator:true})")
+        proj.g.query("MATCH (a:Point {id:'c1'}), (op:Point {id:'op1'}), (b:Point {id:'c2'}) CREATE (a)<-[:NAND]-(op)-[:NAND]->(b)")
+
         result = analyze("where is the disagreement?", proj=proj)
         assert result["pattern"] == "disagreement"
-        assert len(result["raw"]) > 0
+        assert len(result["raw"]) > 0, "disagreement query returned no rows"
         assert result["query"] is not None
     finally:
         proj.close()
         shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_format_chain_three_column_rows():
+    """Regression #325: _format_chain must not read a 4th 'hops' column.
+
+    The evidence_chain Cypher returns 3 columns (id, content, conf) but the
+    old formatter read r[3] → IndexError on any non-empty result set.
+    """
+    rows = [
+        ["evt-1", "root evidence for AI strategy", 0.91],
+        ["evt-2", "secondary support", 0.72],
+    ]
+    out = _format_chain(rows)
+    assert "root evidence for AI strategy" in out
+    assert "0.91" in out
+    assert "hops" not in out  # 3-column formatter must not reference a hops column
+
+
+def test_format_chain_empty():
+    out = _format_chain([])
+    assert out == "No evidence chain found."
+
+
+def test_format_chain_non_numeric_confidence():
+    """Review #679-P2: a non-numeric confidence must degrade, not crash."""
+    out = _format_chain([["e1", "claim", "garbage"]])
+    assert "claim" in out  # still renders the content
+    assert "garbage" not in out  # non-numeric confidence not formatted as number
+
+
+def test_format_ranked_non_numeric_confidence():
+    """Review #679-P2: _format_ranked degrades on non-numeric confidence."""
+    from tortoise.analyze import _format_ranked
+    out = _format_ranked([["e1", "claim", "garbage"]], "supporting")
+    assert "claim" in out
+
+
+def test_evidence_chain_end_to_end():
+    """Regression #325: an IMPL chain answer must not raise IndexError."""
+    from tortoise.projection import FalkorProjection
+    import tempfile, shutil
+    tmpdir = tempfile.mkdtemp()
+    db_path = os.path.join(tmpdir, "test.db")
+    try:
+        proj = FalkorProjection(db_path)
+        # evidence <-IMPL- op(IMPL) -IMPL-> target (target content must contain
+        # the entity extracted from the question)
+        proj.g.query("CREATE (:Point {id:'e1', content:'sales data shows growth', confidence:0.8, is_operator:false})")
+        # NOTE: _extract_entity leaves 'evidence' in the entity ('evidence ai strategy'),
+        # so the target content must contain that full phrase for the Cypher to match.
+        proj.g.query("CREATE (:Point {id:'t1', content:'evidence ai strategy is working', confidence:0.9, is_operator:false})")
+        proj.g.query("CREATE (:Point {id:'op1', content:'IMPL', op_type:'IMPL', is_operator:true})")
+        proj.g.query("MATCH (e:Point {id:'e1'}), (op:Point {id:'op1'}), (t:Point {id:'t1'}) CREATE (e)<-[:IMPL]-(op)-[:IMPL]->(t)")
+
+        result = analyze("show me the evidence chain for the AI strategy", proj=proj, use_llm=False)
+        assert result["pattern"] == "evidence_chain"
+        assert result["answer"] != ""  # must not raise IndexError
+    finally:
+        proj.close()
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_analyze_rejects_legacy_context_kwarg():
+    """#49 Phase 2 removed the context param — a legacy caller passing
+    context= must fail loudly (TypeError), not silently ignore scope."""
+    import pytest
+    with pytest.raises(TypeError):
+        analyze("show me evidence for X", proj=None, use_llm=False, context="ctx")
 
 
 if __name__ == "__main__":
