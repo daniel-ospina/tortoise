@@ -112,7 +112,7 @@
   "display": {
     "annual_discount_pct": 20,
     "annual_default": true,
-    "license_self_hosted": "BSL 1.1 + $5M AUG (free <$5M trailing-12mo revenue); Apache-2.0 conversion after 4 years; hosted excluded from grant",
+    "license_self_hosted": "BSL 1.1 + $5M AUG (free <$5M trailing-12mo revenue); Mozilla Public License 2.0 (MPL-2.0) conversion after 4 years; hosted excluded from grant",
     "segments": {
       "use": "Use Tortoise \u2014 memory for you and your team: connect your agents, remember decisions, MCP integration",
       "build": "Build with Tortoise \u2014 embedded memory via API for your product: REST/MCP, per-team keys, usage-based pricing"
