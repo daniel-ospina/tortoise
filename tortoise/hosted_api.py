@@ -24,6 +24,7 @@ from contextlib import asynccontextmanager
 
 from tortoise.audit_events import AuditLogger
 from tortoise.auth import hash_api_key
+from tortoise.session_auth import get_current_user  # E1–E8 session endpoints (D1/D3)
 import hmac
 
 from tortoise.sdk import TortoiseSDK, _content_hash
@@ -524,7 +525,9 @@ async def get_current_team(request: Request) -> dict:
         # token using the embedded salt (verify_api_key). This is O(keys) but
         # the registry is small (teams × keys) and auth happens per-request.
         key_result = sdk._get_registry().query(
-            "MATCH (k:APIKey) WHERE k.revoked_at IS NULL RETURN k.team_id, k.id, k.key_hash"
+            "MATCH (k:APIKey) WHERE k.revoked_at IS NULL "
+            "AND (k.expires_at IS NULL OR k.expires_at > $now) RETURN k.team_id, k.id, k.key_hash",
+            params={"now": datetime.now(timezone.utc).isoformat()},
         ).result_set
         from tortoise.auth import verify_api_key
         team_id = key_id = None
@@ -1520,6 +1523,109 @@ async def list_sessions(team: dict = Depends(get_current_team)):
         "MATCH (s:Session) RETURN s.id, s.created_at, s.turn_count ORDER BY s.created_at DESC LIMIT 50"
     ).result_set
     return {"sessions": [{"id": r[0], "created_at": r[1], "turns": r[2]} for r in rows]}
+
+
+@app.post("/v1/session/key")
+async def session_key(body: dict, request: Request, user: dict = Depends(get_current_user)):
+    """E1 — session-scoped key mint (the #518 chicken-and-egg fix).
+
+    A session-authenticated user with NO valid key can mint a tt_ key here —
+    no pre-existing key required. Two purposes (plan §6.2 E1):
+    - bootstrap: 24h ephemeral, cap-EXEMPT (R13), 3-active backstop (dashboard auth)
+    - recovery: persistent (no expiry), revocable, counts against max_api_keys;
+      at cap, auto-revokes the oldest orphaned key so recovery never dead-ends.
+    """
+    import uuid as _uuid
+    from datetime import datetime, timezone as _tz, timedelta
+    from tortoise.auth import hash_api_key as _hash
+    from tortoise.pricing import tier_limits
+
+    purpose = (body or {}).get("purpose", "bootstrap")
+    if purpose not in ("bootstrap", "recovery"):
+        raise HTTPException(status_code=422, detail="purpose must be 'bootstrap' or 'recovery'")
+
+    sdk = _make_sdk(namespace="registry")
+    reg = sdk._get_registry()
+    user_id = user["user_id"]
+
+    memberships = reg.query(
+        "MATCH (m:Membership {user_id:$uid, status:'active'}) "
+        "WHERE m.team_id <> '' RETURN m.team_id, m.role",
+        params={"uid": user_id},
+    ).result_set
+    if not memberships:
+        raise HTTPException(status_code=403, detail="No team membership — create a team first")
+    if len(memberships) > 1:
+        tid = (body or {}).get("team_id")
+        if not tid:
+            raise HTTPException(status_code=400, detail="team_id required (multiple memberships)")
+    else:
+        tid = memberships[0][0]
+
+    membership = reg.query(
+        "MATCH (m:Membership {user_id:$uid, team_id:$tid, status:'active'}) RETURN m.role",
+        params={"uid": user_id, "tid": tid},
+    ).result_set
+    if not membership:
+        raise HTTPException(status_code=403, detail="No membership in team")
+
+    team_row = reg.query(
+        "MATCH (t:Team {id:$id}) RETURN t.tier", params={"id": tid},
+    ).result_set
+    tier = team_row[0][0] if team_row else "free"
+
+    api_key = f"tt_{_uuid.uuid4().hex}"
+    key_hash = _hash(api_key)
+    kid = _short_id()
+    now = datetime.now(_tz.utc).isoformat()
+
+    if purpose == "bootstrap":
+        # Cap-exempt; 3-active backstop (plan E1 lifecycle)
+        active_boot = reg.query(
+            "MATCH (k:APIKey {team_id:$tid, created_via:'bootstrap', created_by:$uid}) "
+            "WHERE k.revoked_at IS NULL AND (k.expires_at IS NULL OR k.expires_at > $now) "
+            "RETURN count(k)",
+            params={"tid": tid, "uid": user_id, "now": now},
+        ).result_set[0][0]
+        if active_boot >= 3:
+            raise HTTPException(status_code=429, detail="Too many active session keys — wait for expiry")
+        expires_at = (datetime.now(_tz.utc) + timedelta(hours=24)).isoformat()
+        created_via = "bootstrap"
+    else:
+        lim = tier_limits(tier)
+        max_keys = lim["max_api_keys"]
+        active_keys = reg.query(
+            "MATCH (k:APIKey {team_id:$tid}) WHERE k.revoked_at IS NULL "
+            "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') RETURN count(k)",
+            params={"tid": tid},
+        ).result_set[0][0]
+        if max_keys is not None and active_keys >= max_keys:
+            oldest = reg.query(
+                "MATCH (k:APIKey {team_id:$tid}) WHERE k.revoked_at IS NULL "
+                "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') "
+                "RETURN k.id ORDER BY k.created_at ASC LIMIT 1",
+                params={"tid": tid},
+            ).result_set
+            if oldest:
+                reg.query(
+                    "MATCH (k:APIKey {id:$id}) SET k.revoked_at = $now",
+                    params={"id": oldest[0][0], "now": now},
+                )
+            else:
+                raise HTTPException(status_code=402, detail="Key limit reached — revoke an existing key")
+        expires_at = None
+        created_via = "recovery"
+
+    reg.query(
+        "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, key_prefix:$kp, "
+        "created_by:$cb, created_at:$now, revoked_at:null, expires_at:$exp, created_via:$cv})",
+        params={"id": kid, "tid": tid, "kh": key_hash, "kp": api_key[:10],
+                "cb": user_id, "now": now, "exp": expires_at, "cv": created_via},
+    )
+    await _async_audit(request, tid, "api_key_mint", resource_type="api_key", resource_id=kid)
+
+    return {"key": api_key, "key_prefix": api_key[:10], "expires_at": expires_at,
+            "team_id": tid, "purpose": purpose}
 
 
 @app.get("/v1/context")
