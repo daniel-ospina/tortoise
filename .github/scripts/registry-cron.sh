@@ -24,6 +24,11 @@ STALE_MIN="${BACKUP_STALE_THRESHOLD_MIN:-90}"
 REPO="${GH_REPO:-daniel-ospina/tortoise}"
 GH_TOKEN="${GITHUB_TOKEN:-}"
 SIMULATE_APP_DOWN="${SIMULATE_APP_DOWN:-false}"
+# aws CLI reads AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY; the workflow passes
+# the R2_* names — bridge them (plan §3.8). Without this, every aws call fails
+# auth and the direct-R2 leg + driver-side filings silently no-op.
+export AWS_ACCESS_KEY_ID="${R2_ACCESS_KEY_ID:-}"
+export AWS_SECRET_ACCESS_KEY="${R2_SECRET_ACCESS_KEY:-}"
 
 log() { echo "[backup-driver] $*"; }
 fail() { echo "[backup-driver] ERROR: $*" >&2; }

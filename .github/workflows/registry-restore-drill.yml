@@ -10,11 +10,11 @@ on:
     inputs:
       team_id:
         type: string
-        description: Team whose archive to drill-restore (default: newest non-empty across teams)
+        description: "Team whose archive to drill-restore (default: newest non-empty across teams)"
         required: false
       backup_key:
         type: string
-        description: Explicit backup key (backups/{team}/.../dump.enc). Default: newest non-empty.
+        description: "Explicit backup key (backups/{team}/.../dump.enc). Default: newest non-empty."
         required: false
 
 permissions:
