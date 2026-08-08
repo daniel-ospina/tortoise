@@ -24,7 +24,8 @@ from contextlib import asynccontextmanager
 
 from tortoise.audit_events import AuditLogger
 from tortoise.auth import hash_api_key
-from tortoise.session_auth import get_current_user  # E1–E8 session endpoints (D1)
+from tortoise.session_auth import get_current_user
+from tortoise.analytics import first_api_call, tenant_provisioned  # D10 funnel hooks  # E1–E8 session endpoints (D1)
 import hmac
 
 from tortoise.sdk import TortoiseSDK, _content_hash
@@ -198,6 +199,23 @@ async def _dream_worker(team_id: str) -> None:
 
 # ── Rate Limiter ──────────────────────────────────────────────────
 
+# ── Analytics middleware (D10 #577) — fire-and-forget first_api_call ──
+# Fires the activation event on data-plane writes (points/sessions/keys) using
+# the request-scoped team from the auth middleware. Non-blocking (R19).
+class AnalyticsMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        try:
+            if request.method == "POST" and request.url.path.startswith("/v1/"):
+                team_id = getattr(request.state, "team_id", None)
+                user_id = getattr(request.state, "user_id", None)
+                if team_id and response.status_code < 400:
+                    first_api_call(user_id or team_id, team_id, request.url.path)
+        except Exception:
+            pass  # never let telemetry break the response
+        return response
+
+
 class RateLimitMiddleware(BaseHTTPMiddleware):
     """In-memory token bucket rate limiter. 100 Points/min per API key."""
 
@@ -287,6 +305,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(SecurityHeadersMiddleware)
 
+app.add_middleware(AnalyticsMiddleware)
 # Internal auth key for Edge Function → API communication
 _INTERNAL_KEY = os.environ.get("FASTAPI_INTERNAL_KEY", "")
 
@@ -384,7 +403,8 @@ async def provision_tenant(request: Request):
                     "nodes": lim["max_graph_nodes"]},
         )
 
-        # Create APIKey node
+        tenant_provisioned(created_by, team_id, status='unconfirmed')  # D10 hook (status refined on confirm)
+    # Create APIKey node
         api_key_id = _short_id()
         sdk._get_registry().query(
             """
