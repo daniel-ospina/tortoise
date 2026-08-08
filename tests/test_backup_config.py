@@ -21,7 +21,7 @@ def _good_env() -> dict[str, str]:
         "R2_BUCKET": "tortoise-backups",
         "TELEGRAM_BOT_TOKEN": "123:token",
         "TELEGRAM_CHAT_ID": "551595722",
-        "GITHUB_ISSUES_PAT": "ghp_fake",
+        "DR_ISSUES_PAT": "ghp_fake",
         "BACKUP_ALERT_ASSIGNEE": "daniel-ospina",
     }
 

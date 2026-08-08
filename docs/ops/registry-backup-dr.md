@@ -26,7 +26,7 @@
 | BACKUP_SET_MISSING | state exists but no archives (bulk delete/erroneous prune) | Investigate R2; restore from a retained archive if possible |
 | DRIVER_DOWN | driver heartbeat stale (> 4h) — workflow disabled/dead | Re-enable the workflow; GH 60-day auto-disable |
 | R2_DOWN | R2 unreachable (driver-side signal) | Check R2 creds/billing/bucket policy |
-| ALERTER_DOWN | daemon's GitHub PAT dead (`gh_ok: false`) | Rotate `GITHUB_ISSUES_PAT` |
+| ALERTER_DOWN | daemon's GitHub PAT dead (`gh_ok: false`) | Rotate `DR_ISSUES_PAT` |
 | APP_DOWN | app unreachable from the driver | Fly health; cold-start OOM (#545) |
 | WATCHER_DOWN | watcher heartbeat stale (daemon dead) | Check app logs; restart |
 | LIVENESS_NO_WORK | driver ran but did nothing (sweep skipped + reconcile empty) | Verify teams exist; otherwise expected pre-beta |
@@ -44,7 +44,7 @@
 - **Suppression:** write `ops/suppression.json` `{"KIND": {"until": "ISO"}}` to pause a kind.
 - **Re-baseline:** `POST /v1/internal/backups/re-baseline` `{team_id}` after verifying a DATA_LOSS_CANDIDATE is a false positive.
 - **Simulate (staging):** `POST /v1/internal/backups/simulate-stale|recover` (gated on `BACKUP_SIMULATE_ENABLED`) — proves detection→filing→dedup ≤ 2× poll cadence.
-- **Secrets:** `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`/`GITHUB_ISSUES_PAT`/`BACKUP_ALERT_ASSIGNEE` are Fly + GH secrets; the Telegram pair exists in both (daemon-side and driver-side legs). `BACKUP_SWEEP_ENABLED=true` is set by deploy-hosted.yml only when all required secrets are present (fail-closed).
+- **Secrets:** `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`/`DR_ISSUES_PAT`/`BACKUP_ALERT_ASSIGNEE` are Fly + GH secrets; the Telegram pair exists in both (daemon-side and driver-side legs). `BACKUP_SWEEP_ENABLED=true` is set by deploy-hosted.yml only when all required secrets are present (fail-closed).
 
 ## Known residuals (accepted)
 - **App down AND driver disabled simultaneously** — no alert (documented residual; reopen condition: first unattended app-down).

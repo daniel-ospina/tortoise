@@ -23,7 +23,7 @@ GOOD_ENV = {
     "R2_ACCOUNT_ID": "acct", "R2_ACCESS_KEY_ID": "ak",
     "R2_SECRET_ACCESS_KEY": "sk", "R2_BUCKET": "tortoise-backups",
     "TELEGRAM_BOT_TOKEN": "123:t", "TELEGRAM_CHAT_ID": "1",
-    "GITHUB_ISSUES_PAT": "ghp_x", "BACKUP_ALERT_ASSIGNEE": "daniel-ospina",
+    "DR_ISSUES_PAT": "ghp_x", "BACKUP_ALERT_ASSIGNEE": "daniel-ospina",
 }
 
 
