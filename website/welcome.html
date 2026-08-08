@@ -620,35 +620,6 @@ tortoise create-point "Hello world" --kind statement`;
       }, 2000);
     }
 
-    function copyMcpConfig() {
-      const key = document.getElementById("api-key").textContent;
-      const config = `{
-  "mcpServers": {
-    "tortoise": {
-      "command": "python3",
-      "args": ["-m", "tortoise.mcp_server"],
-      "env": {
-        "TORTOISE_API_KEY": "${key}",
-        "TORTOISE_API_URL": "https://api.premiselabs.co"
-      }
-    }
-  }
-}`;
-      copyToClipboard(config);
-
-      const btn = document.getElementById("btn-copy-mcp");
-      const textEl = btn.querySelector("span");
-      const origText = textEl ? textEl.textContent : btn.textContent;
-      btn.classList.add("copied");
-      if (textEl) textEl.textContent = "Copied!";
-      else btn.textContent = "Copied!";
-      setTimeout(() => {
-        btn.classList.remove("copied");
-        if (textEl) textEl.textContent = origText;
-        else btn.textContent = origText;
-      }, 2000);
-    }
-
     async function copyToClipboard(text) {
       try {
         await navigator.clipboard.writeText(text);

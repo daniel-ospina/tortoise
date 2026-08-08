@@ -136,7 +136,7 @@
     <h2 id="quickstart">Quickstart (5 minutes)</h2>
     <div class="card">
       <h3>1. Create an account</h3>
-      <p>Sign up at <a href="https://tortoise.premiselabs.co/signup">tortoise.premiselabs.co/signup</a>. You'll get an API key on the welcome page — copy it. It's shown once.</p>
+      <p>Sign up at <a href="https://tortoise.premiselabs.co/signup">tortoise.premiselabs.co/signup</a>. You'll get an API key on the welcome page — copy it. The welcome page re-displays your key on every visit.</p>
     </div>
     <div class="card">
       <h3>2. Write your first Point</h3>
@@ -165,17 +165,14 @@
       <pre><code>{
   "mcpServers": {
     "tortoise": {
-      "command": "python3",
-      "args": ["-m", "tortoise.mcp_server"],
-      "env": {
-        "TORTOISE_API_KEY": "tt_YOUR_KEY",
-        "TORTOISE_API_URL": "https://api.premiselabs.co"
-      }
+      "type": "streamable-http",
+      "url": "https://api.premiselabs.co/mcp",
+      "headers": { "Authorization": "Bearer tt_YOUR_KEY" }
     }
   }
 }</code></pre>
-      <p>Paste into <code>.mcp.json</code> (Claude Code), <code>.cursor/mcp.json</code> (Cursor), or <code>claude_desktop_config.json</code> (Claude Desktop). Restart your client.</p>
-      <p class="callout">Need <code>python3</code> and <code>tortoise</code> installed where the client runs? <code>pip install tortoise-graph</code> — the MCP server ships with the package.</p>
+      <p>Paste into <code>.mcp.json</code> (Claude Code / Cursor), or add a remote MCP server in Claude Desktop. Restart your client.</p>
+      <p class="callout">Using the CLI instead? <code>pip install git+https://github.com/daniel-ospina/tortoise.git</code> then <code>tortoise init --api-key tt_YOUR_KEY</code>.</p>
     </div>
     <div class="card">
       <h3>What your agent can do</h3>

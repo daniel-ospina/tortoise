@@ -244,9 +244,13 @@ def _safe(fn, *args, **kwargs):
             return {
                 "error": (
                     "Authentication required. The MCP stdio transport cannot "
-                    "carry auth tokens. Use an authenticated HTTP endpoint "
-                    "(tortoise health-server) with Authorization: Bearer <key> "
-                    "header, or unset TORTOISE_API_KEY for dev mode."
+                    "carry auth tokens, so TORTOISE_API_KEY disables stdio. "
+                    "Options: (1) self-hosted authenticated MCP — run "
+                    "'tortoise serve --http' (tenant mode; bootstrap a key with "
+                    "'tortoise key create'); (2) hosted — point your MCP client "
+                    "at https://api.premiselabs.co/mcp with 'Authorization: "
+                    "Bearer <tt_key>'; (3) local stdio dev mode — unset "
+                    "TORTOISE_API_KEY."
                 )
             }
     else:
