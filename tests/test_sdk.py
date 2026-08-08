@@ -170,6 +170,36 @@ class TestQuery:
     def test_empty_results(self, sdk):
         assert sdk.query(kind="nonexistent") == []
 
+    def test_filter_key_injection_rejected(self, sdk):
+        sdk.create_point("statement", "A")
+        # Keys that reach the filters loop (not bound by the signature)
+        payloads = [
+            {"kind_0": "goal"},                       # reserved (expansion prefix)
+            {"x`} DETACH DELETE (n) //": 1},          # backtick breakout
+            {"x' OR 1=1 //": 1},                      # quote injection
+            {"émoji": 1}, {"中": 1},                   # Unicode keys
+        ]
+        for filters in payloads:
+            with pytest.raises(ValueError):
+                sdk.query(**filters)
+
+    def test_filter_key_signature_collision_raises(self, sdk):
+        # kind binds to the method signature — a caller passing it via
+        # **filters together with the named arg gets TypeError at the call
+        # site (MCP path), never a silently-corrupted WHERE.
+        sdk.create_point("statement", "A")
+        with pytest.raises(TypeError):
+            sdk.query(kind="statement", **{"kind": "goal"})
+        with pytest.raises(TypeError):
+            sdk.paginated_query(kind="statement", **{"kind": "goal"})
+
+    def test_filter_key_legit_still_works(self, sdk):
+        sdk.create_point("statement", "A", confidence=0.9)
+        sdk.create_point("statement", "B", confidence=0.1)
+        results = sdk.query(confidence=0.9, status="draft")
+        assert len(results) == 1
+        assert results[0]["content"] == "A"
+
 
 # ── paginated_query ──────────────────────────────────────────────────
 
@@ -192,6 +222,12 @@ class TestPaginatedQuery:
         assert result["total"] == 3
         assert len(result["results"]) == 3
         assert result["hasMore"] is False
+
+    def test_filter_key_reserved_rejected(self, sdk):
+        sdk.create_point("statement", "A")
+        for key in ("kind_0", "kind_7", "x`} DETACH DELETE (n) //", "émoji"):
+            with pytest.raises(ValueError):
+                sdk.paginated_query(kind="statement", **{key: 1})
 
     def test_skip_returns_correct_page(self, sdk):
         for i in range(5):
@@ -238,9 +274,32 @@ class TestTraverse:
         connected = sdk.traverse(b["id"], "IMPL", direction="incoming")
         assert len(connected) >= 1
 
-    def test_no_results(self, sdk):
+    def test_unknown_rel_type_rejected(self, sdk):
+        """#329: rel_type is allowlisted — unknown types raise, no query runs."""
         p = _make_point(sdk)
-        assert sdk.traverse(p["id"], "NONE_SUCH") == []
+        with pytest.raises(ValueError, match="Invalid relationship type"):
+            sdk.traverse(p["id"], "NONE_SUCH")
+
+    def test_injection_payload_rejected(self, sdk):
+        """#329: Cypher injection via rel_type is blocked before any query."""
+        p = _make_point(sdk)
+        payload = "IMPL]->(x:Point {id:'p2'}) DETACH DELETE x //"
+        with pytest.raises(ValueError, match="Invalid relationship type"):
+            sdk.traverse(p["id"], payload)
+
+    def test_known_rel_types_accepted(self, sdk):
+        a = _make_point(sdk, content="src")
+        b = _make_point(sdk, content="tgt")
+        sdk.create_operator("IMPL", a["id"], [b["id"]])
+        # No results but NO raise — known types pass validation
+        assert sdk.traverse(a["id"], "NAND") == []
+        assert sdk.traverse(a["id"], "TAGGED") == []
+        assert sdk.traverse(a["id"], "aboutPoint") == []
+
+    def test_invalid_direction_rejected(self, sdk):
+        p = _make_point(sdk)
+        with pytest.raises(ValueError, match="Invalid direction"):
+            sdk.traverse(p["id"], "IMPL", direction="sideways")
 
 
 # ── verify_chain ─────────────────────────────────────────────────────
@@ -705,3 +764,62 @@ class TestOrphanTagGC:
         assert len(tags) == 1
         assert tags[0]["name"] == "shared"
         assert tags[0]["count"] == 1
+
+
+# ── #329: write-side rejection of server-managed fields ─────────────
+
+class TestSanitizeProps:
+    def test_create_document_rejects_sourcepath_and_id(self, sdk):
+        with pytest.raises(ValueError, match="server-managed"):
+            sdk.create_document("Doc", "planDoc", sourcePath="/etc/passwd")
+        with pytest.raises(ValueError, match="server-managed"):
+            sdk.create_document("Doc", "planDoc", source_path="/etc/passwd")
+        with pytest.raises(ValueError, match="server-managed"):
+            sdk.create_document("Doc", "planDoc", id="/etc/passwd")
+
+    def test_create_document_clean_has_no_sourcepath(self, sdk):
+        """Positive: a clean create_document stores no sourcePath property."""
+        doc = sdk.create_document("Clean", "planDoc")
+        assert "sourcePath" not in doc
+
+    def test_update_entity_rejects_sourcepath_and_id(self, sdk):
+        doc = sdk.create_document("Upd", "planDoc")
+        did = doc["id"]
+        with pytest.raises(ValueError, match="server-managed"):
+            sdk.update_entity(did, sourcePath="/etc/passwd")
+        with pytest.raises(ValueError, match="server-managed"):
+            sdk.update_entity(did, source_path="/etc/passwd")
+        with pytest.raises(ValueError, match="server-managed"):
+            sdk.update_entity(did, id="evil")
+
+    def test_update_point_rejects_id_and_sourcepath(self, sdk):
+        p = sdk.create_point("statement", "A")
+        # id binds to the signature → TypeError at the call site (never
+        # silently mutates node identity)
+        with pytest.raises(TypeError):
+            sdk.update_point(p["id"], **{"id": "evil"})
+        with pytest.raises(ValueError, match="server-managed"):
+            sdk.update_point(p["id"], sourcePath="/etc/passwd")
+        with pytest.raises(ValueError, match="server-managed"):
+            sdk.update_point(p["id"], source_path="/etc/passwd")
+
+    def test_create_event_document_mint_safe_and_unsafe_ids(self, sdk):
+        # Safe basename id mints a Document
+        sdk.create_event("ev1", "meeting", object="session-2026-08-07.md", objectType="Document")
+        rows = sdk._get_proj().g.query(
+            "MATCH (d:Document {id:$id}) RETURN count(d)",
+            params={"id": "session-2026-08-07.md"},
+        ).result_set
+        assert rows[0][0] == 1
+        # Unsafe id → ValueError at write
+        with pytest.raises(ValueError, match="Invalid document id"):
+            sdk.create_event("ev2", "meeting", object="/etc/passwd", objectType="Document")
+        with pytest.raises(ValueError, match="Invalid document id"):
+            sdk.create_event("ev3", "meeting", object="../x", objectType="Document")
+
+    def test_create_point_explicit_id_preserved(self, sdk):
+        """Operator explicit-id path (create_point props.pop('id')) still works."""
+        import uuid
+        pid = f"op-{uuid.uuid4().hex[:8]}"
+        p = sdk.create_point("statement", "Explicit", id=pid)
+        assert p["id"] == pid

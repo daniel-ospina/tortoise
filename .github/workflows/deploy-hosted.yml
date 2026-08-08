@@ -13,6 +13,10 @@ on:
       - 'pyproject.toml'
   workflow_dispatch:
 
+concurrency:
+  group: deploy-hosted
+  cancel-in-progress: true
+
 jobs:
   deploy-api:
     runs-on: ubuntu-latest
@@ -27,13 +31,22 @@ jobs:
           fi
       - name: Set all app secrets on Fly.io (keeps in sync with GitHub/Supabase)
         run: |
-          flyctl secrets set \
+          flyctl secrets set --stage \
             FASTAPI_INTERNAL_KEY="${{ secrets.FASTAPI_INTERNAL_KEY }}" \
             TORTOISE_SECRET_PEPPER="${{ secrets.TORTOISE_SECRET_PEPPER }}" \
             FALKORDB_CLOUD_URI="${{ secrets.FALKORDB_CLOUD_URI }}" \
             --app tortoise-y4mjjq
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-      - run: flyctl deploy --remote-only --wait-timeout 300 --app tortoise-y4mjjq
+      - name: Deploy (retry through Fly lease/API races)
+        run: |
+          for attempt in 1 2 3 4 5; do
+            if flyctl deploy --remote-only --wait-timeout 420 --app tortoise-y4mjjq; then
+              exit 0
+            fi
+            echo "::warning::deploy attempt $attempt failed — waiting 45s before retry (Fly lease/API race)"
+            sleep 45
+          done
+          exit 1
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}

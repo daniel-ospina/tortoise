@@ -17,6 +17,7 @@ Idempotent: re-running the same file at the same extractor version is a no-op.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 from pathlib import Path
 
@@ -210,13 +211,36 @@ def _do_upgrade(transcript, text, source_id, proj, api, args):
     _run_ep_propagation(proj)
 
 
+def _resolve_ingest_base() -> str | None:
+    """#329: base-dir for ingest file reads (TORTOISE_INGEST_BASE_DIR).
+
+    Returns None when unset — callers then FAIL CLOSED (skip reads that are
+    not provably under a configured base). One-time hint is emitted by callers.
+    """
+    raw = os.environ.get("TORTOISE_INGEST_BASE_DIR")
+    if not raw:
+        return None
+    return os.path.realpath(os.path.expanduser(raw))
+
+
 def _do_upgrade_all(proj, api, args):
     """Discover captured/needs_extraction Documents and upgrade each.
 
     Uses inline Cypher via proj.g.query (no SDK method needed — plan §Task 2).
     Loop-safe: each attempt gated by begin_ingest key (content-hash + extractor
     version) so identical content is a no-op on re-run.
+
+    #329 containment: the file read path (d.sourcePath OR d.id — both are
+    tenant-mutable graph state) is resolved strictly under TORTOISE_INGEST_BASE_DIR;
+    anything not provably under base is SKIPPED (fail-closed), never read.
     """
+    from .security import resolve_under_base
+    ingest_base = _resolve_ingest_base()
+    if ingest_base is None:
+        print("  warning: TORTOISE_INGEST_BASE_DIR not set — upgrade-all is fail-closed; "
+              "documents are skipped unless their path resolves under a configured base. "
+              "Set TORTOISE_INGEST_BASE_DIR to your corpus root to enable re-upgrade.")
+
     # Discover matching Documents
     rows = proj.g.query(
         "MATCH (d:Document) "
@@ -235,16 +259,24 @@ def _do_upgrade_all(proj, api, args):
     upgraded = 0
     skipped = 0
     for doc_id, source_path, status, needs_ext in rows:
-        # Resolve file path — try sourcePath first, fall back to id as filename
-        filepath = Path(source_path) if source_path else Path(doc_id)
-        if not filepath.exists():
-            print(f"  skip {doc_id}: file not found ({filepath})")
-            skipped += 1
-            continue
-
         # Already extracted → no-op
         if status == "extracted":
             print(f"  skip {doc_id}: already extracted")
+            skipped += 1
+            continue
+
+        # #329: resolve the candidate (sourcePath OR d.id — BOTH are
+        # tenant-mutable) strictly under the configured base. Fail-closed:
+        # anything not provably under base is skipped, never read.
+        candidate = source_path or doc_id
+        filepath = resolve_under_base(candidate, ingest_base)
+        if filepath is None:
+            print(f"  skip {doc_id}: path {candidate!r} not under TORTOISE_INGEST_BASE_DIR "
+                  f"({ingest_base or '<unset>'}); refusing to read (fail-closed)")
+            skipped += 1
+            continue
+        if not filepath.exists():
+            print(f"  skip {doc_id}: file not found ({filepath})")
             skipped += 1
             continue
 

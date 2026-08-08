@@ -81,6 +81,7 @@ python -m tortoise.selfhost # run the daemon locally (see env table below)
 | `TORTOISE_HOST` / `TORTOISE_PORT` | `127.0.0.1` / `8000` | Daemon bind |
 | `TORTOISE_RATE_LIMIT` | `100` | Requests per minute per IP (MCP SSE bursts ≈ 5–10 req/call) |
 | `TORTOISE_ALLOWED_ORIGINS` | `http://localhost:8000` | CORS allowlist (comma-separated) |
+| `TORTOISE_TOOL_GROUP` | unset | Role-scoped MCP surface (#523) — e.g. `memory` exposes only memory tools (tool-selection accuracy degrades past ~20 tools; groups: memory, reasoning, graph, sessions, sources, journal, admin, onboarding) |
 
 Also: `tortoise-serve http [--host] [--port] [--api-key]` (flags override env), and `tortoise-serve` (stdio MCP) for scripting.
 

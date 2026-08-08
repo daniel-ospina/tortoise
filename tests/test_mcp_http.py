@@ -452,3 +452,214 @@ class TestInputCaps:
                     headers={"Content-Type": "application/json",
                              "Accept": "application/json, text/event-stream"})
         assert r.status_code == 413
+
+
+# ── #329: quota enforcement + introspective completeness ────────────────────
+
+class TestQuotaEnforcement:
+    @pytest.fixture
+    def quota_env(self, tmp_path, monkeypatch):
+        """Shared embedded DB for quota tests (URI unset → embedded mode)."""
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "quota.db"))
+        db = str(tmp_path / "quota.db")
+        reg = TortoiseSDK(db_path=db, namespace="registry")
+        team = reg.team_create("quota-team")
+        key_info = reg.apikey_create(team["id"], "quota-fixture")
+        yield reg, key_info["api_key"], team["id"], db
+        reg.close()
+
+    @pytest.fixture
+    def quota_client(self, quota_env):
+        from tortoise.mcp_server import create_http_app
+        reg, key, tid, db = quota_env
+        app = create_http_app(allowed_origins=["https://app.premiselabs.co"],
+                              _registry_sdk=reg)
+        tc = _mounted_test_client(app)
+        tc.headers.update({
+            "Authorization": f"Bearer {key}",
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+        })
+        with tc:
+            yield tc, reg, key, tid
+
+    def _set_max_points(self, reg_sdk, team_id, value):
+        reg_sdk.team_update(team_id, max_points=value)
+
+    def test_create_point_blocked_at_cap(self, quota_client):
+        """A team at its points cap gets ERR_QUOTA on create_point (HTTP)."""
+        tc, reg_sdk, key, tid = quota_client
+        self._set_max_points(reg_sdk, tid, 0)  # at/over cap
+        payload = {
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "tortoise_create_point",
+                       "arguments": {"kind": "statement", "content": "quota test"}},
+        }
+        r, body = _mcp_post(tc, payload)
+        result = body.get("result", {})
+        content = result.get("content", [])
+        text = "".join(c.get("text", "") for c in content if isinstance(c, dict))
+        assert "limit reached" in text, f"expected quota error, got: {body}"
+
+    def test_create_point_below_cap_succeeds(self, quota_client):
+        """Below cap: the write succeeds (no quota error)."""
+        tc, reg_sdk, key, tid = quota_client
+        payload = {
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "tortoise_create_point",
+                       "arguments": {"kind": "statement", "content": "fine below cap"}},
+        }
+        r, body = _mcp_post(tc, payload)
+        result = body.get("result", {})
+        text = "".join(c.get("text", "") for c in result.get("content", []))
+        assert "limit reached" not in text, f"unexpected quota error: {text}"
+        assert "error" not in text, f"unexpected error: {text}"
+
+    def test_quota_holds_with_rate_limit_disabled(self, quota_client, monkeypatch):
+        """The quota gate HOLDS when the rate limiter is disabled."""
+        monkeypatch.setenv("RATE_LIMIT_DISABLED", "1")
+        tc, reg_sdk, key, tid = quota_client
+        self._set_max_points(reg_sdk, tid, 0)
+        payload = {
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "tortoise_create_point",
+                       "arguments": {"kind": "statement", "content": "x"}},
+        }
+        r, body = _mcp_post(tc, payload)
+        text = "".join(c.get("text", "") for c in body.get("result", {}).get("content", []))
+        assert "limit reached" in text
+
+    def test_cross_team_isolation(self, quota_client):
+        """Team A at cap → blocked; team B below cap → succeeds (same DB)."""
+        tc, reg_sdk, key, tid = quota_client
+        team_b = reg_sdk.team_create("quota-team-b")
+        key_b = reg_sdk.apikey_create(team_b["id"], "quota-fixture-b")["api_key"]
+        self._set_max_points(reg_sdk, tid, 0)  # team A at cap
+
+        payload_a = {
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "tortoise_create_point",
+                       "arguments": {"kind": "statement", "content": "a"}},
+        }
+        r, body_a = _mcp_post(tc, payload_a)
+        text_a = "".join(c.get("text", "") for c in body_a.get("result", {}).get("content", []))
+        assert "limit reached" in text_a, f"team A should be blocked: {text_a}"
+
+        from tortoise.mcp_server import create_http_app
+        app_b = create_http_app(allowed_origins=["https://app.premiselabs.co"],
+                                _registry_sdk=reg_sdk)
+        tc2 = _mounted_test_client(app_b)
+        tc2.headers.update({
+            "Authorization": f"Bearer {key_b}",
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+        })
+        with tc2:
+            payload_b = {
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "tortoise_create_point",
+                           "arguments": {"kind": "statement", "content": "b ok"}},
+            }
+            r, body_b = _mcp_post(tc2, payload_b)
+            text_b = "".join(c.get("text", "") for c in body_b.get("result", {}).get("content", []))
+            assert "limit reached" not in text_b, f"team B should not be blocked: {text_b}"
+            assert "error" not in text_b, f"team B unexpected error: {text_b}"
+
+    def test_dream_removed_from_http(self, quota_client):
+        """tortoise_dream must not be discoverable or callable over HTTP."""
+        tc, *_ = quota_client
+        r, body = _mcp_post(tc, {
+            "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {},
+        })
+        tools = body.get("result", {}).get("tools", [])
+        names = {t.get("name") for t in tools}
+        assert "tortoise_dream" not in names
+        r, body = _mcp_post(tc, {
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "tortoise_dream", "arguments": {}},
+        })
+        # excluded → _http_excluded_error nested in the tool result (code -32004)
+        text = "".join(c.get("text", "") for c in body.get("result", {}).get("content", []))
+        assert "-32004" in text or "not available over HTTP" in text, f"expected excluded error: {body}"
+
+    def test_list_graphs_scoped_to_team(self, quota_client):
+        """HTTP list_graphs returns only the calling team's own graph."""
+        tc, *_ = quota_client
+        r, body = _mcp_post(tc, {
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "tortoise_list_graphs", "arguments": {}},
+        })
+        result = body.get("result", {})
+        text = "".join(c.get("text", "") for c in result.get("content", []))
+        import json as _j
+        try:
+            graphs = _j.loads(text)
+        except Exception:
+            graphs = []
+        assert all(g.startswith("team_") for g in graphs), f"foreign graphs leaked: {graphs}"
+        assert "registry" not in graphs
+
+
+class TestIntrospectiveQuotaCompleteness:
+    def test_every_node_creating_tool_is_quota_gated(self):
+        """#329 structural completeness: every HTTP_ALLOWED tool whose body
+        creates/MERGEs nodes or edges (or calls bulk writers) must be in
+        _QUOTA_GATED — the anti-drift guarantee."""
+        import inspect
+        import tortoise.mcp_auth as ma
+        import tortoise.mcp_server as ms
+
+        gated = ms._QUOTA_GATED
+        scan_patterns = (
+            ".create_point", ".create_operator", ".create_event",
+            ".create_subject", ".create_object", ".create_document",
+            ".create_source", ".checkpoint", ".file_decision",
+            ".diary_write", ".update_point", ".update_entity",
+            ".mitigate_operator", ".create_edge", ".supersede_point",
+            ".invalidate_point", ".ingest_corpus", ".index_sessions",
+            ".backfill_v25",
+        )
+        bulk_only = (".ingest_corpus", ".index_sessions", ".backfill_v25")
+
+        for tool_name in ma.HTTP_ALLOWED:
+            fn = getattr(ms, tool_name, None)
+            if fn is None:
+                continue
+            try:
+                src = inspect.getsource(fn)
+            except (OSError, TypeError):
+                continue
+            creates = any(p in src for p in scan_patterns)
+            # ingest_corpus/index_sessions/backfill_v25 are HTTP-EXCLUDED and
+            # therefore never in HTTP_ALLOWED — the loop cannot reach them;
+            # test_bulk_writers_stay_http_excluded is the dedicated guard.
+            if creates and tool_name not in gated:
+                raise AssertionError(
+                    f"{tool_name} creates/MERGEs nodes but is NOT in _QUOTA_GATED"
+                )
+
+        # Non-vacuous sentinel: the scan patterns must actually match.
+        matched = 0
+        for tool_name in ("tortoise_create_point", "tortoise_supersede",
+                          "tortoise_create_edge"):
+            fn = getattr(ms, tool_name, None)
+            if fn is not None:
+                try:
+                    if any(p in inspect.getsource(fn) for p in scan_patterns):
+                        matched += 1
+                except (OSError, TypeError):
+                    pass
+        assert matched >= 3, f"scan is vacuous: only {matched} tools matched"
+
+    def test_bulk_writers_stay_http_excluded(self, mcp_client):
+        """ingest_corpus / index_sessions / backfill_v25 must remain excluded
+        from HTTP (or be quota-gated if ever added)."""
+        tc, _ = mcp_client
+        r, body = _mcp_post(tc, {
+            "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {},
+        })
+        names = {t.get("name") for t in body.get("result", {}).get("tools", [])}
+        for excluded in ("tortoise_ingest_corpus", "tortoise_index_sessions",
+                         "tortoise_backfill_v25", "tortoise_team_create"):
+            assert excluded not in names, f"{excluded} must stay HTTP-excluded"

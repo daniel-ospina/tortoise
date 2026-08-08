@@ -222,23 +222,48 @@ def _extract_entity(question: str, trigger: str) -> str:
 # LLM Integration (optional — keyword match handles 80% of queries)
 # ═══════════════════════════════════════════════════════════════════
 
+# #329: provider-key pairing — a key is ONLY ever sent to the provider that
+# issued it. (The old code used `OPENAI_API_KEY or DEEPSEEK_API_KEY` and always
+# POSTed to api.deepseek.com — the OpenAI key was exfiltrated to DeepSeek.)
+_LLM_PROVIDERS: dict[str, tuple[str, str]] = {
+    "DEEPSEEK_API_KEY": ("https://api.deepseek.com/v1/chat/completions", "deepseek-chat"),
+    "OPENAI_API_KEY": ("https://api.openai.com/v1/chat/completions", "gpt-4o-mini"),
+}
+# Priority order when multiple keys are set (deepseek first — historical default).
+_LLM_PROVIDER_PRIORITY: tuple[str, ...] = ("DEEPSEEK_API_KEY", "OPENAI_API_KEY")
+
+
 def llm_classify(question: str) -> tuple[str, dict] | None:
-    """Use LLM to classify intent + extract params when keyword match fails."""
-    api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("DEEPSEEK_API_KEY")
-    if not api_key:
+    """Use LLM to classify intent + extract params when keyword match fails.
+
+    #329: picks the provider whose OWN env key is set; an empty-string key is
+    treated as unset. The chosen key is only sent to its own provider's URL.
+    Returns None (keyword-only fallback) when no key is set or the provider
+    request fails — a provider outage never falls through to another provider
+    (that would leak the wrong key too).
+    """
+    import urllib.request
+    api_key = None
+    provider_url = None
+    provider_model = None
+    for env_name in _LLM_PROVIDER_PRIORITY:
+        candidate = os.environ.get(env_name)
+        if candidate:  # non-empty string
+            api_key, (provider_url, provider_model) = candidate, _LLM_PROVIDERS[env_name]
+            break
+    if api_key is None:
         return None  # fall back to keyword only
 
     try:
-        import urllib.request
         body = json.dumps({
-            "model": "deepseek-chat",
+            "model": provider_model,
             "temperature": 0,
             "response_format": {"type": "json_object"},
             "messages": [{"role": "system", "content": LLM_PROMPT},
                          {"role": "user", "content": question}],
         }).encode()
         req = urllib.request.Request(
-            "https://api.deepseek.com/v1/chat/completions",
+            provider_url,
             data=body,
             headers={"Content-Type": "application/json",
                      "Authorization": f"Bearer {api_key}"},
@@ -415,7 +440,8 @@ def analyze(question: str, proj=None, *,
     pattern_name, params = result
     tmpl = TEMPLATES.get(pattern_name)
     if tmpl is None:
-        return {"answer": f"Unknown pattern: {pattern_name}", "raw": [], "pattern": None, "query": None}
+        # #329: pattern_name comes from the LLM (untrusted) — never echo it raw
+        return {"answer": "Unknown pattern requested.", "raw": [], "pattern": None, "query": None}
 
     # 2. Execute Cypher
     cypher = tmpl["cypher"]
@@ -428,7 +454,9 @@ def analyze(question: str, proj=None, *,
         try:
             rows = proj.g.query(cypher, params=params).result_set
         except Exception as e:
-            return {"answer": f"Query error: {e}", "raw": [], "pattern": pattern_name, "query": cypher}
+            # #329: redact — tenants must not see raw DB errors or query text
+            from .security import redact_error
+            return {"answer": f"Query error: {redact_error(e)}", "raw": [], "pattern": pattern_name, "query": None}
 
     # 3. Format
     formatter = tmpl.get("format")

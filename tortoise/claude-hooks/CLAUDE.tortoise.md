@@ -9,6 +9,12 @@
 - Call `mcp__tortoise__tortoise_suggest_entry_points(query)` before answering
   a question that may have been decided before.
 
+## At session end
+- `session-end.sh` (SessionEnd hook) automatically files this session as a
+  memory Event (requires `TORTOISE_API_KEY`/`TORTOISE_API_URL`). If it isn't
+  installed, file durable decisions manually via
+  `mcp__tortoise__tortoise_create_point(kind="decision", ...)`.
+
 ## While working
 - When you make a durable decision (architecture choice, API contract, naming,
   "why X over Y"), file it: `mcp__tortoise__tortoise_create_point(kind="decision", content=...)`.
