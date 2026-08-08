@@ -25,12 +25,16 @@ jobs:
         run: |
           cp tortoise/onboarding/AGENT_ONBOARDING.md website/onboarding-prompt.md
           test -s website/onboarding-prompt.md
-      - name: Sync DNS — tortoise.premiselabs.co → premise-labs Pages project
+      - name: Sync DNS — tortoise.premiselabs.co → premise-labs Pages project (best-effort)
         # The subdomain previously CNAME'd to the legacy tortoise-landing-v2
         # Pages project (stale content: welcome v1, no onboarding-prompt.md),
         # which is why the premise-labs custom-domain attach stayed "pending"
-        # and the welcome page's PROMPT_URL fetch returned HTML (#540).
-        # Ensure the CNAME points at this project's pages.dev host every deploy.
+        # and the old PROMPT_URL fetch returned HTML (#540).
+        # Best-effort: the deploy token may lack Zone:DNS edit scope (auth error
+        # is tolerated — the welcome page now uses premiselabs.co which is
+        # already active). Once the token gains DNS scope this repairs the
+        # subdomain automatically.
+        continue-on-error: true
         run: |
           ZONE=$(curl -s "https://api.cloudflare.com/client/v4/zones?name=premiselabs.co" \
             -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" | jq -r '.result[0].id')
