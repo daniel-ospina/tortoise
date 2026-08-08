@@ -179,7 +179,12 @@ class MockExtractor:
     def run(self, transcript: str, source_id: str, api: EventAPI,
             *, multi_source: bool = False) -> None:
         if multi_source:
-            # Multi-source mode: claim extraction → embedding pre-filter → cue-word gate typing
+            # Multi-source mode: claim extraction → embedding pre-filter → cue-word gate typing.
+            # #399: cross-vocabulary matching via lens-keyed candidates (cross_lens module);
+            # the old ≥3-shared-content-words semantic-agreement gate is removed (it killed
+            # zero-word-overlap pairs by design). Candidates NEVER become operators from
+            # similarity alone — the cue-word gate decides IMPL vs NAND direction.
+            self._last_candidates: list[dict] = []
             pids = []
             for speaker, text, span in _utterances(transcript):
                 if not _is_claim(text):
@@ -190,57 +195,56 @@ class MockExtractor:
                 pid = api.add_point(content=text, provenance=prov,
                                     extractedFrom=source_id)
                 pids.append((pid, text.lower(), prov))
-            
+
             # Use embedding pre-filter if available
             try:
-                from tortoise.embeddings import find_cross_source_matches
-                # Build points dict from API's stored points
-                # We need to reconstruct from the log — simple approach: use what we collected
+                from tortoise.cross_lens import find_cross_lens_matches
+                # Build points dict from what we collected. #399 root-cause #2: keep the
+                # LENS identity (source_id) — it was dropped before, so cross-source
+                # matching was structurally impossible.
                 all_points = {}
                 for pid_i, ti, pvi in pids:
                     sp = pvi.get('speaker', 'unknown') if isinstance(pvi, dict) else 'unknown'
-                    all_points[pid_i] = {"content": ti, "speaker": sp}
-                
-                emb_matches = find_cross_source_matches(all_points, threshold=0.40)
-                matched_pairs = set()
-                for m in emb_matches:
-                    matched_pairs.add((m['src'], m['dst']))
-                
-                # Only create operators for embedding-matched pairs with cue words
-                for i in range(len(pids)):
-                    pi, ti, pvi = pids[i]
-                    for j in range(i + 1, len(pids)):
-                        pj, tj, pvj = pids[j]
-                        if (pi, pj) not in matched_pairs and (pj, pi) not in matched_pairs:
-                            continue
-                        # Check cue words for gate type
-                        gate = None
+                    all_points[pid_i] = {"content": ti, "speaker": sp, "source": source_id}
+
+                candidates = find_cross_lens_matches(all_points, lens_key="source")
+                self._last_candidates = list(candidates)
+                degraded = any(c.get("degraded") for c in candidates)
+                if candidates and not degraded:
+                    # Matched-pairs cue-gate: cue words decide IMPL vs NAND direction.
+                    # Non-cued candidates are recorded (self._last_candidates) for the
+                    # #6306 LLM relation verifier — never operators from similarity alone.
+                    by_pid = {pid: (ti, pvi) for pid, ti, pvi in pids}
+                    for m in candidates:
+                        ti = by_pid[m["src"]][0]
+                        tj = by_pid[m["dst"]][0]
                         ti_clean = _PUNC.sub('', f" {ti} ")
                         tj_clean = _PUNC.sub('', f" {tj} ")
-                        if _has_cue(ti_clean, _SUPPORT_SINGLE_RE, _SUPPORT_PHRASES) or _has_cue(tj_clean, _SUPPORT_SINGLE_RE, _SUPPORT_PHRASES):
+                        gate = None
+                        if _has_cue(ti_clean, _SUPPORT_SINGLE_RE, _SUPPORT_PHRASES) or \
+                           _has_cue(tj_clean, _SUPPORT_SINGLE_RE, _SUPPORT_PHRASES):
                             gate = "IMPL"
-                        elif _has_cue(ti_clean, _REFUTE_SINGLE_RE, _REFUTE_PHRASES) or _has_cue(tj_clean, _REFUTE_SINGLE_RE, _REFUTE_PHRASES):
+                        elif _has_cue(ti_clean, _REFUTE_SINGLE_RE, _REFUTE_PHRASES) or \
+                             _has_cue(tj_clean, _REFUTE_SINGLE_RE, _REFUTE_PHRASES):
                             gate = "NAND"
                         if gate:
-                            api.add_operator(gate, inputs=[pi, pj], provenance=pvi)
-                        elif (pi, pj) in matched_pairs:
-                            # Semantic agreement: similar claims from different sources = IMPL
-                            # But require shared noun phrase to avoid weak thematic connections
-                            words_i = set(ti.split())
-                            words_j = set(tj.split())
-                            shared = words_i & words_j
-                            # Need at least 3 shared content words (not just stopwords)
-                            stopwords = {'the','a','an','is','are','was','were','be','been','being',
-                                        'have','has','had','do','does','did','will','would','could',
-                                        'should','may','might','can','shall','to','of','in','for',
-                                        'on','with','at','by','from','as','into','through','during',
-                                        'and','but','or','nor','not','so','yet','both','either','neither',
-                                        'if','then','else','when','where','why','how','this','that','these','those',
-                                        'it','its','they','them','their','we','our','i','my','you','your',
-                                        'more','less','very','also','just','only','now','still','already'}
-                            shared_content = shared - stopwords
-                            if len(shared_content) >= 3:
-                                api.add_operator("IMPL", inputs=[pi, pj], provenance=pvi)
+                            api.add_operator(gate, inputs=[m["src"], m["dst"]],
+                                             provenance=by_pid[m["src"]][1])
+                else:
+                    # Degraded (TF-IDF) or empty candidates: pre-#399 all-pairs cue-gate.
+                    for i in range(len(pids)):
+                        for j in range(i + 1, len(pids)):
+                            pi, ti, pvi = pids[i]
+                            pj, tj, pvj = pids[j]
+                            gate = None
+                            ti_clean = _PUNC.sub('', f" {ti} ")
+                            tj_clean = _PUNC.sub('', f" {tj} ")
+                            if _has_cue(ti_clean, _SUPPORT_SINGLE_RE, _SUPPORT_PHRASES) or _has_cue(tj_clean, _SUPPORT_SINGLE_RE, _SUPPORT_PHRASES):
+                                gate = "IMPL"
+                            elif _has_cue(ti_clean, _REFUTE_SINGLE_RE, _REFUTE_PHRASES) or _has_cue(tj_clean, _REFUTE_SINGLE_RE, _REFUTE_PHRASES):
+                                gate = "NAND"
+                            if gate:
+                                api.add_operator(gate, inputs=[pi, pj], provenance=pvi)
             except Exception:
                 # Fallback: cue-word only all-pairs (noisy but works)
                 # (catches ImportError for missing dependencies AND runtime errors

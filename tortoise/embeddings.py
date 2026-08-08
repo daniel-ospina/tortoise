@@ -2,14 +2,30 @@
 
 Different sources use different words for the same concepts. Term-index matching
 finds 0 cross-lens connections; embeddings bridge that gap.
+
+Threshold calibration (all-MiniLM-L6-v2, measured 2026-08-07 for #399):
+    near-duplicate paraphrases ....... 0.90+   (NEAR_DUPLICATE_THRESHOLD = 0.75)
+    cross-vocabulary paraphrase band . 0.35-0.51  (DEFAULT_THRESHOLD = 0.40)
+    issue #399 motivating pair ....... 0.29 (boundary: topically similar, NOT
+                                         logically implied — verification decides)
+    unrelated / noise floor ........... <= 0.15
+
+Thresholds are model-specific — recalibrate when swapping the embedder.
 """
 from __future__ import annotations
 
 import logging
 import threading
+from typing import Callable
+
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+# #399: the issue's proposed 0.75 threshold is a near-duplicate-only setting
+# with all-MiniLM-L6-v2 (cross-vocab paraphrase pairs score 0.35-0.51).
+NEAR_DUPLICATE_THRESHOLD = 0.75
+DEFAULT_THRESHOLD = 0.40
 
 
 class EmbeddingModel:
@@ -127,11 +143,54 @@ def compute_embedding(content: str, max_tokens: int = 512) -> list[float] | None
         return None
 
 
+def _encode(texts: list[str]) -> tuple[np.ndarray, bool]:
+    """Encode texts → (vectors, degraded). degraded=True ⇒ TF-IDF fallback.
+
+    Routes through the EmbeddingModel singleton (all-MiniLM-L6-v2) — never
+    re-instantiates the model per call (#399: find_cross_source_matches and
+    search_points used to reload the 90MB model on EVERY call). Falls back to
+    deterministic sklearn TF-IDF when the model is unavailable. Embeddings stay
+    optional: callers must tolerate degraded output (degraded=True).
+    """
+    if not texts:
+        return np.zeros((0, 0)), False
+    model = EmbeddingModel.get()
+    if model is not None:
+        try:
+            vecs = model.encode(texts, show_progress_bar=False)
+            if vecs is not None and len(vecs) > 0:
+                return np.asarray(vecs, dtype=np.float64), False
+        except Exception:  # noqa: BLE001 — model failures degrade, never raise
+            logger.warning("embedding encode failed — TF-IDF fallback", exc_info=True)
+    try:
+        from sklearn.feature_extraction.text import TfidfVectorizer  # lazy: [embeddings] extra
+        return TfidfVectorizer().fit_transform(texts).toarray(), True
+    except ValueError:
+        # Empty / stopword-only vocabulary — nothing to match; return a
+        # zero matrix so cosine similarity is 0 and no candidates emerge.
+        return np.zeros((len(texts), 1)), True
+
+
+def cosine_similarity_matrix(vectors: np.ndarray) -> np.ndarray:
+    """Normalized dot product = cosine similarity. Pure numpy.
+
+    Handles zero-norm rows (all-zero vectors) by leaving them at 0 similarity.
+    """
+    norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    v = vectors / norms
+    return v @ v.T
+
+
 def find_cross_source_matches(
     points: dict[str, dict],
     threshold: float = 0.75,
 ) -> list[dict]:
     """Find points from different speakers that describe the same concept.
+
+    Backward-compatible wrapper (speaker-keyed) over the shared encode +
+    cosine pipeline (#399). Use find_cross_lens_matches (tortoise/cross_lens.py)
+    for lens/source-keyed matching.
 
     Args:
         points: point_id → {content, speaker, ...} from fold()
@@ -144,20 +203,8 @@ def find_cross_source_matches(
     texts = [points[i]["content"] for i in ids]
     speakers = [points[i].get("speaker", "unknown") for i in ids]
 
-    try:
-        from sentence_transformers import SentenceTransformer
-        model = SentenceTransformer("all-MiniLM-L6-v2")
-        vectors = model.encode(texts, show_progress_bar=False)
-    except ImportError:
-        from sklearn.feature_extraction.text import TfidfVectorizer
-        model = TfidfVectorizer()
-        vectors = model.fit_transform(texts).toarray()
-
-    # Normalized dot product = cosine similarity
-    norms = np.linalg.norm(vectors, axis=1, keepdims=True)
-    norms[norms == 0] = 1
-    vectors_n = vectors / norms
-    sim = vectors_n @ vectors_n.T
+    vectors, _ = _encode(texts)
+    sim = cosine_similarity_matrix(vectors)
 
     matches = []
     n = len(ids)
@@ -190,17 +237,11 @@ def search_points(
     ids = [p["id"] for p in points]
     texts = [p["content"] for p in points]
 
-    # ponytail: TF-IDF fallback — sentence_transformers is heavy
-    try:
-        from sentence_transformers import SentenceTransformer
-        model = SentenceTransformer("all-MiniLM-L6-v2")
-        vectors = model.encode([query] + texts, show_progress_bar=False)
-        query_vec, doc_vecs = vectors[0], vectors[1:]
-    except ImportError:
-        from sklearn.feature_extraction.text import TfidfVectorizer
-        model = TfidfVectorizer()
-        doc_vecs = model.fit_transform(texts).toarray()
-        query_vec = model.transform([query]).toarray()[0]
+    # Shared encoder: singleton model with deterministic TF-IDF fallback (#399).
+    # TF-IDF now fits on [query] + texts — query enters vocab; relative
+    # ranking is unchanged (verified against the legacy test battery).
+    vectors, _ = _encode([query] + texts)
+    query_vec, doc_vecs = vectors[0], vectors[1:]
 
     norms = np.linalg.norm(doc_vecs, axis=1, keepdims=True)
     norms[norms == 0] = 1

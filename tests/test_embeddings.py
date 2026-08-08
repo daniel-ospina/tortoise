@@ -249,6 +249,9 @@ def test_sentence_transformers_path():
     # The function does `from sentence_transformers import SentenceTransformer`
     # so we seed sys.modules with a fake module that has that attribute.
     import tortoise.embeddings as mod
+    # #399 (D9b): the singleton refactor warms the real model during tests #1-11;
+    # reset so the worker-thread load picks up the seeded mock below.
+    mod.EmbeddingModel._reset()
     original = sys.modules.get("sentence_transformers")
     sys.modules["sentence_transformers"] = mock_st
     try:
@@ -266,6 +269,10 @@ def test_sentence_transformers_path():
         mock_st.SentenceTransformer.assert_called_once_with("all-MiniLM-L6-v2")
         mock_model.encode.assert_called_once()
     finally:
+        # #399 (D9b): clear the singleton — it may hold the MOCK model loaded
+        # during this test; leaving it warm poisons later search_points calls
+        # (mock.encode returns a fixed 2x2 array for any input).
+        mod.EmbeddingModel._reset()
         if original is None:
             del sys.modules["sentence_transformers"]
         else:
