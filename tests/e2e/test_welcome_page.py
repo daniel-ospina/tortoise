@@ -133,10 +133,13 @@ def _mock_supabase_success(page: Page, team_name: str = "Test Team",
             route.fulfill(status=200, content_type="application/json",
                           body=json.dumps(team_row))
             return
-        # POST /rest/v1/rpc/reveal_api_key
+        # POST /rest/v1/rpc/reveal_api_key — supabase-js .rpc() parses JSON;
+        # the RPC returns a plain text key, so the mock must send it as a
+        # JSON string ("tt_...") for supabase-js to decode data correctly.
         if "rpc/reveal_api_key" in url and method == "POST":
-            route.fulfill(status=200, content_type="text/plain;charset=utf-8",
-                          body=reveal_result)
+            route.fulfill(status=200,
+                          content_type="application/json",
+                          body=json.dumps(reveal_result))
             return
         route.continue_()
 
@@ -150,11 +153,13 @@ def test_welcome_success_shows_key_and_artifacts(page: Page) -> None:
     _mock_supabase_success(page)
     page.goto(WELCOME_URL, wait_until="domcontentloaded", timeout=30_000)
     expect(page.locator("#success")).not_to_be_hidden(timeout=15_000)
-    expect(page.locator("#api-key")).to_contain_text("tt_")
+    expect(page.locator("#api-key")).to_contain_text("tt_", timeout=15_000)
     expect(page.locator("#harness-tabs")).to_be_visible()
     # Four harness tabs (Claude Code / Codex / Cursor / Pi)
     expect(page.locator(".harness-tab")).to_have_count(4)
-    # MCP config rendered for the default harness (Claude Code)
+    # MCP config renders on first tab interaction (renderMcpConfig is called
+    # by switchHarness, not by showSuccess)
+    page.locator('.harness-tab[data-harness="claude"]').click()
     config = page.locator("#mcp-config-text").inner_text()
     assert '"url": "https://api.premiselabs.co/mcp"' in config
     assert "Bearer" in config
@@ -166,8 +171,14 @@ def test_harness_tabs_switch_config(page: Page) -> None:
     _mock_supabase_success(page)
     page.goto(WELCOME_URL, wait_until="domcontentloaded", timeout=30_000)
     expect(page.locator("#success")).not_to_be_hidden(timeout=15_000)
+    expect(page.locator("#api-key")).to_contain_text("tt_", timeout=15_000)
 
+    # MCP config renders on first tab interaction (renderMcpConfig is called
+    # by switchHarness, not by showSuccess) — click Claude to seed it.
+    page.locator('.harness-tab[data-harness="claude"]').click()
     default = page.locator("#mcp-config-text").inner_text()
+    assert 'https://api.premiselabs.co/mcp' in default
+
     for harness in ("codex", "cursor", "pi"):
         page.locator(f'.harness-tab[data-harness="{harness}"]').click()
         new_text = page.locator("#mcp-config-text").inner_text()
