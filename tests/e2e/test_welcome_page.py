@@ -77,7 +77,11 @@ def _fake_user_id() -> str:
 
 def _mock_supabase_success(page: Page, team_name: str = "Test Team",
                             reveal_result: str = "tt_e2e_mock_api_key_1234567890abcdef") -> str:
-    """Route-intercept Supabase to return a valid session + provisioned team.
+    """Drive the welcome page into its success state by (1) seeding a
+    Supabase session in localStorage (supabase-js v2 reads getSession() from
+    localStorage, not the network) and (2) route-intercepting the REST calls
+    (team_memberships poll + reveal_api_key RPC) it makes with that session.
+
     Returns the fake user id used by the session.
 
     reveal_result: the body the reveal_api_key RPC returns — a real tt_ key
@@ -106,19 +110,22 @@ def _mock_supabase_success(page: Page, team_name: str = "Test Team",
         "status": "active",
     }
 
+    # supabase-js v2 stores the session under sb-<project-ref>-auth-token in
+    # localStorage; seed it before the page script runs.
+    page.add_init_script(f"""
+      localStorage.setItem("sb-ybetwichurajbfswfeqa-auth-token", JSON.stringify({{
+        access_token: "fake-access-token",
+        refresh_token: "fake-refresh-token",
+        expires_in: 3600,
+        expires_at: {2**31},
+        token_type: "bearer",
+        user: {{ id: "{user_id}", email: "e2e@premise-labs.dev" }}
+      }}));
+    """)
+
     def _handle(route):
         url = route.request.url
         method = route.request.method
-        # GET /auth/v1/user (called by getSession on some supabase-js versions)
-        if "/auth/v1/user" in url and method == "GET":
-            route.fulfill(status=200, content_type="application/json",
-                          body=json.dumps(session))
-            return
-        # POST /auth/v1/token?grant_type=refresh_token (getSession refresh)
-        if "/auth/v1/token" in url and method == "POST":
-            route.fulfill(status=200, content_type="application/json",
-                          body=json.dumps({"session": session}))
-            return
         # GET /rest/v1/team_memberships?user_id=eq.<id>&select=...
         if "team_memberships" in url and method == "GET":
             route.fulfill(status=200, content_type="application/json",
