@@ -23,9 +23,11 @@ GH_TOKEN="${GITHUB_TOKEN:-}"
 SIMULATE_APP_DOWN="${SIMULATE_APP_DOWN:-false}"
 R2_ENDPOINT="https://${R2_ACCOUNT_ID:-}.r2.cloudflarestorage.com"
 
-# aws CLI reads AWS_* env vars — bridge the R2_* names (review fix).
+# aws CLI reads AWS_* env vars — bridge the R2_* names (review fix) and set
+# the Cloudflare-required region (SigV4 fails without region=auto on R2).
 export AWS_ACCESS_KEY_ID="${R2_ACCESS_KEY_ID:-}"
 export AWS_SECRET_ACCESS_KEY="${R2_SECRET_ACCESS_KEY:-}"
+export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-auto}"
 
 log() { echo "[backup-driver] $*"; }
 fail() { echo "[backup-driver] ERROR: $*" >&2; }
@@ -156,7 +158,13 @@ if [ -z "$STATUS" ]; then
 fi
 
 ENABLED="$(printf '%s' "$STATUS" | jq -r '.enabled // false' 2>/dev/null || echo false)"
+STORAGE_ERR="$(printf '%s' "$STATUS" | jq -r '.storage_error // empty' 2>/dev/null || true)"
+log "status: enabled=$ENABLED storage_error=${STORAGE_ERR:-none}"
 if [ "$ENABLED" != "true" ]; then
+  if [ -n "$STORAGE_ERR" ]; then
+    log "status reports a storage error — filing R2_DOWN (not a kill-switch)"
+    file_alert R2_DOWN "[DR] R2_DOWN — app storage unavailable" "status.storage_error: $STORAGE_ERR" "global"
+  fi
   log "kill-switch: backups disabled — skipping (no filings)"
   exit 0
 fi
