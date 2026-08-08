@@ -17,6 +17,23 @@ import pytest
 
 from tortoise.sdk import TortoiseSDK
 
+# Requires live FalkorDB (Docker). Skip gracefully when unavailable so the
+# no-Docker embedded suite stays green (AGENTS.md). Mirrors the probe pattern
+# in tests/test_integration_search.py.
+FALKORDB_AVAILABLE = False
+try:
+    from tortoise.sdk import TortoiseSDK as _ProbeSDK
+    _probe = _ProbeSDK()
+    _probe._get_proj().g.query("RETURN 1")
+    _probe.close()
+    FALKORDB_AVAILABLE = True
+except Exception:
+    pass
+
+pytestmark = pytest.mark.skipif(
+    not FALKORDB_AVAILABLE, reason="Live FalkorDB (Docker) not available")
+
+
 
 @pytest.fixture
 def sdk():
