@@ -34,7 +34,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.12'   # pyproject requires-python >= 3.12
       - name: Install package + test extras
         # embeddings extra required at COLLECTION time: test_gmm_proofs.py,
         # test_embeddings.py, test_cross_lens.py, test_sdk_group3.py import
