@@ -201,14 +201,53 @@ class AlertStore:
             )
 
     def retry_pending(self) -> int:
-        """Retry parked pushes (daemon calls this each poll). Returns count sent."""
+        """Retry parked pushes (daemon calls this each poll). Returns count sent.
+
+        Safety gates (#673 review P2):
+        - **TTL**: pending pushes older than PENDING_TTL_HOURS are silently
+          discarded — a stale push from a long-resolved incident must never
+          fire and confuse a human.
+        - **Incident check**: before retrying, the referenced dedup object
+          must still exist (the incident is still open).  If it was deleted
+          (incident resolved), discard the pending push — do not resurrect a
+          stale alert.
+        """
+        PENDING_TTL_HOURS = 24
         sent = 0
+        now = self._clock()
         for k in self._storage.list(_PENDING_PREFIX):
             state = _read_json(self._storage, k)
             text = state.get("text")
             if not text:
                 self._storage.delete(k)
                 continue
+            # TTL gate: skip & delete pushes older than the TTL window.
+            created_str = state.get("created_at")
+            if created_str:
+                try:
+                    created = datetime.fromisoformat(created_str)
+                    age_hours = (now - created).total_seconds() / 3600
+                    if age_hours > PENDING_TTL_HOURS:
+                        logger.warning(
+                            "pending push TTL expired (%.1fh > %dh) — discarding: %s",
+                            age_hours, PENDING_TTL_HOURS, k,
+                        )
+                        self._storage.delete(k)
+                        continue
+                except ValueError:
+                    pass  # unparseable timestamp — keep retrying
+            # Incident check: the dedup key MUST still exist; if gone,
+            # the incident was resolved and we must NOT resurrect it.
+            incident_key = state.get("key")
+            if incident_key:
+                existing = _read_json(self._storage, incident_key)
+                if not existing:
+                    logger.warning(
+                        "pending push discarded — incident already resolved: "
+                        "pending=%s incident=%s", k, incident_key,
+                    )
+                    self._storage.delete(k)
+                    continue
             try:
                 self._push(text)
                 self._storage.delete(k)

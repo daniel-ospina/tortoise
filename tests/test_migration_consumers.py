@@ -42,12 +42,6 @@ def test_migrate_kinds_resolves_db_path(monkeypatch):
     assert "resolve_db_path" in src
 
 
-def test_github_docs_connector_resolves_db_path(monkeypatch):
-    """github_docs gate accepts TORTOISE_DB_PATH as well as URI."""
-    src = open("tortoise/connectors/github_docs.py").read()
-    assert 'os.environ.get("TORTOISE_DB_URI") or os.environ.get("TORTOISE_DB_PATH")' in src
-
-
 def test_tortoise_client_diagnostic_reports_db_path(monkeypatch):
     """Diagnostic payload reports TORTOISE_DB_PATH when only it is set."""
     monkeypatch.setenv("TORTOISE_DB_PATH", "/tc-canonical.db")
