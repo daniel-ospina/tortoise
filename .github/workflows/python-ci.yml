@@ -131,39 +131,6 @@ env:
     tests/e2e
     tests/test_agent_signup.py
 
-env:
-  # conftest.py sets a static pepper via setdefault, but pin it here
-  # so the requirement is explicit and the same across surfaces.
-  TORTOISE_SECRET_PEPPER: test-static-pepper
-  # Known-slow files (test time > ~60s each, measured on a clean machine
-  # 2026-08-09 against origin/main; last 6 added by size/test-count proxy
-  # after the 40-min fast-job death, see header). Excluded from the `test`
-  # job and run in parallel in `test-slow` (#798, tracked slow files: #647).
-  SLOW_FILES: >-
-    tests/test_about_edges.py
-    tests/test_control_plane.py
-    tests/test_dream.py
-    tests/test_embedded_concurrency.py
-    tests/test_enumeration_surfaces.py
-    tests/test_event_provenance.py
-    tests/test_hosted_api.py
-    tests/test_hosted_backup.py
-    tests/test_indexes.py
-    tests/test_ingest.py
-    tests/test_mcp_http.py
-    tests/test_migrate_db.py
-    tests/test_projection.py
-    tests/test_search_engine_gaps.py
-    tests/test_billing.py
-    tests/test_source_inheritance_own.py
-    tests/test_sdk.py
-    tests/test_cli_context.py
-  # Env-broken in this job; excluded from `test` (see header, #798 part 0).
-  # Tracked in #647.
-  ENV_BROKEN_FILES: >-
-    tests/e2e
-    tests/test_agent_signup.py
-
 jobs:
   test:
     runs-on: ubuntu-latest
