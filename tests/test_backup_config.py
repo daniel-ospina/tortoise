@@ -12,9 +12,11 @@ from tortoise.backup_config import ConfigError, load_config
 
 def _good_env() -> dict[str, str]:
     key = base64.b64encode(b"k" * 32).decode()
+    stream_key = base64.b64encode(b"s" * 32).decode()
     return {
         "BACKUP_SWEEP_ENABLED": "true",
         "TORTOISE_BACKUP_KEY": key,
+        "REGISTRY_STREAM_KEY": stream_key,
         "R2_ACCOUNT_ID": "acct",
         "R2_ACCESS_KEY_ID": "ak",
         "R2_SECRET_ACCESS_KEY": "sk",
@@ -115,9 +117,8 @@ def test_enabled_loads_full_config(monkeypatch):
 
 def test_env_dict_injection_does_not_leak(monkeypatch):
     """load_config(env=...) must not mutate the real process environment."""
-    key = base64.b64encode(b"k" * 32).decode()
     before = dict(os.environ)
-    cfg = load_config({**_good_env(), "TORTOISE_BACKUP_KEY": key})
+    cfg = load_config(_good_env())
     assert cfg.enabled is True
     assert dict(os.environ) == before
     assert "BACKUP_SWEEP_ENABLED" not in os.environ
