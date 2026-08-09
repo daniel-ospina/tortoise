@@ -148,6 +148,7 @@ class TestMembershipCRUD:
             sdk.membership_create(team["id"], "user-2", "admin")
 
     def test_membership_list_returns_members(self, sdk, team):
+        sdk.team_update(team["id"], max_users=10)  # free tier caps at 1 (#493)
         sdk.membership_create(team["id"], "user-1", "admin")
         sdk.membership_create(team["id"], "user-2", "owner")
         members = sdk.membership_list(team["id"])
