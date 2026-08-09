@@ -643,3 +643,56 @@ class TestCliSecurityAndIndex:
 
         assert rc == 0
         assert seen.get("target") == uri
+
+    # ── Fix 9 (P2): guarded inline index target + decide relative --db ──
+
+    def test_index_github_inline_bad_falkordb_port_clean_error(self, tmp_path, monkeypatch, capsys):
+        """#715 P2 conf 60: the inline `index github` path resolves the DB
+        target through the shared guard — a bad FALKORDB_PORT with no --db
+        surfaces as a clean CLI error, never a ValueError traceback."""
+        import sys as _sys
+        from tortoise import __main__ as m
+
+        # The extraction pipeline does not exist in the real env — stub the
+        # module so the command can reach the DB-target guard.
+        fake_pipeline = mock.Mock()
+        fake_pipeline.ExtractionPipeline = mock.Mock()
+        monkeypatch.setitem(
+            _sys.modules, "tortoise.extraction_pipeline", fake_pipeline)
+
+        (tmp_path / "README.md").write_text("# Hi\n")
+        monkeypatch.setenv("FALKORDB_HOST", "localhost")
+        monkeypatch.setenv("FALKORDB_PORT", "not-an-int")
+        monkeypatch.delenv("FALKORDB_PASSWORD", raising=False)
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+
+        rc = m._cmd_index_github(mock.Mock(
+            url=str(tmp_path), branch="main", background=False, db=None))
+
+        captured = capsys.readouterr()
+        out = captured.out + captured.err
+        assert rc == 1
+        assert "Invalid DB target" in out
+        assert "FALKORDB_PORT" in out
+        assert "Traceback" not in out
+
+    def test_decide_relative_db_clean_error(self, monkeypatch, capsys):
+        """#715 P2 conf 55: `decide --db <relative>` is rejected by
+        _projection_for's RELATIVE_PATH_ERROR — now INSIDE the guarded try,
+        so it surfaces as a clean CLI error, never a traceback."""
+        from tortoise import __main__ as m
+        from tortoise.sdk import TortoiseSDK
+
+        with mock.patch.object(TortoiseSDK, "__init__", return_value=None):
+            rc = m._cmd_decide(mock.Mock(
+                input=None, options='{"opt:a": "Option A"}',
+                criteria=None, findings=None, edges=None,
+                db="relative/path.db"))
+
+        captured = capsys.readouterr()
+        out = captured.out + captured.err
+        assert rc == 1
+        assert "Invalid DB target" in out
+        assert "relative" in out
+        assert "Traceback" not in out

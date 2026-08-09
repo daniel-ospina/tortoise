@@ -314,9 +314,14 @@ def _cmd_init(args):
         if uri_mode:
             # Materialize the decision so later commands resolve to the SAME
             # target (single source of truth). The background index spawn
-            # below ALSO passes --db explicitly (#715, conf 75): index's
-            # --db is required at argparse, so env inheritance alone would
-            # never reach the child — it would die before resolving anything.
+            # below carries the target via the env/argv handoff (#715,
+            # conf 60/85): password-bearing URIs travel through the
+            # TORTOISE_DB_URI env (never argv — a password in `ps` output
+            # leaks the secret); password-less targets travel via --db argv
+            # so the child resolves identically even if the parent env
+            # changes later. index's --db is optional at argparse since the
+            # split, so the child resolves through the shared precedence
+            # either way — never a hardcoded default.
             os.environ.setdefault("TORTOISE_DB_URI", target)
             sdk = TortoiseSDK()
         else:
@@ -1477,7 +1482,15 @@ def _cmd_index_github(args):
     # resolved); standalone falls back to the shared env precedence. No
     # connectivity probing — a reachable local docker must never override the
     # configured target or init and index silently split onto different stores.
-    target = args.db or _resolve_db_target(None)
+    # Guarded like the background branch above (#715): a bad FALKORDB_PORT
+    # (or other env) must surface as a clean CLI error, not a ValueError
+    # traceback — the inline path is the last unguarded _resolve_db_target
+    # call site since --db became optional.
+    try:
+        target = args.db or _resolve_db_target(None)
+    except ValueError as e:
+        print(f"  ❌ Invalid DB target: {e}", file=sys.stderr)
+        return 1
     from tortoise.config import is_db_uri
     try:
         if is_db_uri(target):
@@ -1792,11 +1805,14 @@ def _cmd_decide(args) -> int:
     # paths through the embedded constructor (same parity as init/index).
     try:
         target = getattr(args, "db", None) or _resolve_db_target(None)
+        sdk = TortoiseSDK()
+        # Inside the guard: _projection_for rejects relative --db paths with
+        # the shared RELATIVE_PATH_ERROR (ValueError) — surface it as a
+        # clean CLI error, not a traceback (#715).
+        sdk._proj = _projection_for(target)
     except ValueError as e:
         print(f"  ❌ Invalid DB target: {e}", file=_sys.stderr)
         return 1
-    sdk = TortoiseSDK()
-    sdk._proj = _projection_for(target)
 
     # Track all operator IDs for explicit-factor mode
     all_operator_ids: list[str] = []
@@ -2011,7 +2027,7 @@ def main(argv: list[str] | None = None) -> int:
     dc.add_argument("--edges", help="JSON list of edges, e.g. '[\"crit:1\", \"IMPL\", \"opt:a\"]' or full edge dicts")
     dc.add_argument("--context-free", action="store_true",
                     help="Deprecated no-op — context-free (explicit factors) is the only mode since #49 Phase 2",)
-    dc.add_argument("--db", help="FalkorDB URI override (default: TORTOISE_DB_URI or docker://:@localhost:16379/tortoise)")
+    dc.add_argument("--db", help="DB target override — URI (docker://, redis://, rediss://) or absolute path (default: TORTOISE_DB_URI, else legacy FALKORDB_*, else embedded path)")
     try:
         args = p.parse_args(argv)
     except (argparse.ArgumentError, SystemExit) as e:
