@@ -234,7 +234,7 @@ def test_empty_session_id_with_alt_key_uses_alt(env, sdk):
     on ingest uses session_id ("" is falsy); extract must mirror that and
     derive session_foo, not file_<stem>, or the sweep never converges."""
     f = env / "empty-alt.md"
-    f.write_text("---\nsessionId: ""\nsession_id: foo\ntitle: T\n---\nUser: hi\n")
+    f.write_text('---\nsessionId: ""\nsession_id: foo\ntitle: T\n---\nUser: hi\n')
     sdk.ingest_corpus(str(env), eventKind="AgentSession")
     h = sdk.session_index_health(str(env))
     assert h["unindexed"] == [], f"alt-key not matched: {h}"
@@ -248,7 +248,7 @@ def test_empty_session_id_falls_back_to_file_stem(env, sdk):
     absent, not a session id; otherwise health derives session_'' while
     ingest derives session_file_<stem> and the sweep never converges."""
     f = env / "empty-sid.md"
-    f.write_text("---\nsessionId: ""\ntitle: T\n---\nUser: hi\n")
+    f.write_text('---\nsessionId: ""\ntitle: T\n---\nUser: hi\n')
     sdk.ingest_corpus(str(env), eventKind="AgentSession")
     h = sdk.session_index_health(str(env))
     assert h["unindexed"] == [], f"empty sessionId not matched: {h}"

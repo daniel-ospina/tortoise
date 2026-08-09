@@ -25,16 +25,28 @@ from typing import Any
 
 # ── YAML frontmatter parsing ──────────────────────────────────────
 
+_FM_RE = re.compile(r'^---\s*\n(.*?)\n---', re.DOTALL)
+
+
 def _parse_frontmatter(content: str) -> dict:
-    """Extract YAML frontmatter from markdown content."""
-    if not content.startswith("---"):
-        return {}
-    parts = content.split("---", 2)
-    if len(parts) < 3:
+    """Extract YAML frontmatter from markdown content.
+
+    Uses the SAME boundary regex as ingest_corpus (sdk._FM_RE) so both sides
+    agree on what constitutes frontmatter (review round 5 P2): a file starting
+    ``---sessionId: foo\n---`` must parse as NO frontmatter here, exactly as
+    ingest sees it — otherwise health derives a different event_id and the
+    sweep never converges. Non-dict roots (list/scalar YAML) return {} —
+    a malformed corpus file must degrade to the file-stem fallback, never
+    crash the health check / doctor / sweep (review round 5 P2).
+    """
+    import re as _re
+    m = _FM_RE.match(content)
+    if not m:
         return {}
     try:
         import yaml
-        return yaml.safe_load(parts[1]) or {}
+        parsed = yaml.safe_load(m.group(1))
+        return parsed if isinstance(parsed, dict) else {}
     except Exception:
         return {}
 
