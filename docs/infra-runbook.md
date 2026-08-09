@@ -113,6 +113,35 @@ install defeats the purpose of hosting locally.
   resolves `FALKORDB_CLOUD_URI` → `TORTOISE_DB_URI` at runtime (entrypoint.sh).
 - Restart the MCP server after changing the URI (resolved once at startup).
 
+**Self-hosted authenticated MCP (`serve --http`, #702):** local stdio is
+dev-mode only (no auth tokens on stdio — setting `TORTOISE_API_KEY` disables
+it). For an authenticated local MCP endpoint:
+
+```bash
+tortoise key create                    # bootstrap a local registry team + tt_ key
+TORTOISE_DB_PATH=~/.tortoise/tortoise.db tortoise serve --http   # tenant auth, binds 127.0.0.1:8000
+```
+
+- Client config: `url http://127.0.0.1:8000/mcp`, header `Authorization: Bearer tt_<key>`.
+- HTTP (tenant) mode uses a fresh `team_{id}` namespace — existing stdio data
+  stays in the `tortoise` graph (no automatic migration).
+- `--auth static` (single `TORTOISE_API_KEY`/`--api-key`) and `--auth none`
+  (localhost eval, NO auth) are available; default bind 127.0.0.1.
+- Static-auth first run: `export TORTOISE_SECRET_PEPPER=$(openssl rand -hex 32)`
+  before `serve --http --auth static` — required when the static key comes
+  from the `TORTOISE_API_KEY` env var: the auth import fails on startup in
+  that case. Passing `--api-key` directly does not need it.
+- Changing `TORTOISE_SECRET_PEPPER` invalidates all local keys (re-run
+  `tortoise key create`).
+
+**`--auth none` safety (fail-closed):** `serve --http --auth none` on a
+non-loopback/wildcard `--bind` is **refused (exit non-zero)** unless
+`--allow-insecure-no-auth` is passed — and that override is **UNSAFE**
+(no authentication; trusted networks only). Loopback binds (default
+`127.0.0.1`) with `--auth none` remain allowed. For a LAN-accessible server,
+pass `--allowed-hosts HOST[,HOST...]` (e.g. `--bind 0.0.0.0 --allowed-hosts
+myhost.lan`) so the host guard accepts the hostnames clients use.
+
 Do **not** commit `.env` (gitignored) and do **not** put DB credentials in
 `.mcp.json`.
 

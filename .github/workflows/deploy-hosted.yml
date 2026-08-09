@@ -1,5 +1,15 @@
 # Deploy Tortoise Hosted API to Fly.io
 #
+# Token scoping (#660): the deploy step uses a deploy-only token
+# (FLY_API_TOKEN_DEPLOY, created via `fly tokens create deploy`). The
+# secrets-set step still uses the full FLY_API_TOKEN because `flyctl
+# secrets set` requires full org access. Operator setup:
+#   fly tokens create deploy --app tortoise-y4mjjq
+#   gh secret set FLY_API_TOKEN_DEPLOY --body "<token>"
+# After rotation, remove the old FLY_API_TOKEN from the secrets-set step
+# (create a new full-scope token, set as FLY_API_TOKEN, delete old).
+# See docs/ops/fly-token-hardening.md for full runbook.
+#
 # Stripe billing ops checklist (owner-executed, #310 — see
 # docs/plans/2026-08-08-310-stripe-billing.md §6 Runtime Prerequisites):
 #   1. Register webhook endpoint https://api.premiselabs.co/webhooks/stripe
@@ -93,6 +103,12 @@ jobs:
           if [ -n "${{ secrets.TORTOISE_BACKUP_KEY }}" ] && [ -n "${{ secrets.R2_ACCOUNT_ID }}" ] && [ -n "${{ secrets.R2_ACCESS_KEY_ID }}" ] && [ -n "${{ secrets.R2_SECRET_ACCESS_KEY }}" ] && [ -n "${{ secrets.R2_BUCKET }}" ] && [ -n "${{ secrets.TELEGRAM_BOT_TOKEN }}" ] && [ -n "${{ secrets.TELEGRAM_CHAT_ID }}" ] && [ -n "${{ secrets.DR_ISSUES_PAT }}" ] && [ -n "${{ secrets.BACKUP_ALERT_ASSIGNEE }}" ]; then
             ARGS="$ARGS BACKUP_SWEEP_ENABLED=true"
             echo "::notice::BACKUP_SWEEP_ENABLED=true — all backup-sweep secrets present"
+            # REGISTRY_STREAM_KEY is deliberately NOT synced from GH (#661).
+            # The operator must set it out-of-band on Fly:
+            #   fly secrets set REGISTRY_STREAM_KEY=... --app tortoise-y4mjjq
+            # When BACKUP_SWEEP_ENABLED=true, a missing REGISTRY_STREAM_KEY
+            # fails-closed at config-load time (the app boots but /sweep 503s).
+            echo "::notice::REGISTRY_STREAM_KEY — ensure the operator has set this Fly secret out-of-band (#661)"
           else
             echo "::warning::backup sweep secrets incomplete — BACKUP_SWEEP_ENABLED left off (fail-closed)"
           fi
@@ -115,6 +131,8 @@ jobs:
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
       - name: Deploy (retry through Fly lease/API races)
+        # Uses deploy-scoped token (#660) — cannot run `flyctl secrets set`,
+        # limiting blast radius if the GH secret is compromised.
         run: |
           for attempt in 1 2 3 4 5; do
             if flyctl deploy --remote-only --wait-timeout 420 --app tortoise-y4mjjq; then
@@ -125,4 +143,4 @@ jobs:
           done
           exit 1
         env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN_DEPLOY }}

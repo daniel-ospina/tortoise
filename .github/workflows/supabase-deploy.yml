@@ -44,6 +44,10 @@ jobs:
             --project-ref "$SUPABASE_PROJECT_REF" --no-verify-jwt
       - name: Deploy tenant-provision edge function
         if: env.SUPABASE_ACCESS_TOKEN != '' && env.SUPABASE_DB_URL != ''
+        # --no-verify-jwt is REQUIRED: the after_user_created auth hook sends
+        # no user JWT. Caller auth is enforced inside the function (#802) via
+        # the hook's Standard-Webhooks signature (AUTH_HOOK_SECRET secret)
+        # or a matching user JWT; anon-key calls get 401.
         run: |
           supabase functions deploy tenant-provision \
             --project-ref "$SUPABASE_PROJECT_REF" --no-verify-jwt

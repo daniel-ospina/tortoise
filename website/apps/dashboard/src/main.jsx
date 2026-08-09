@@ -87,6 +87,10 @@ function App() {
   // capped at 3 active per team, so cache the minted key per team_id and
   // reuse on switch instead of re-minting (which would 429 after 3 switches).
   const teamKeysRef = React.useRef({})
+  // #714 (main): session detail view state
+  const [selectedSessionId, setSelectedSessionId] = React.useState(null)
+  const [sessionDetail, setSessionDetail] = React.useState(null)
+  const [detailLoading, setDetailLoading] = React.useState(false)
 
   const headers = apiKey ? { Authorization: `Bearer ${apiKey}` } : {}
 
@@ -955,6 +959,21 @@ function App() {
     return null
   }
 
+  // #714 (main): session detail view
+  async function fetchSessionDetail(sessionId) {
+    setDetailLoading(true)
+    setError('')
+    try {
+      const detail = await api(`/v1/sessions/${sessionId}`)
+      setSessionDetail(detail)
+    } catch (e) {
+      setError(e.message)
+      setSessionDetail(null)
+    } finally {
+      setDetailLoading(false)
+    }
+  }
+
   function fmtTime(iso) {
     if (!iso) return '—'
     try {
@@ -1009,11 +1028,11 @@ function App() {
       <header>
         <div className="logo">Tortoise</div>
         <nav>
-          <button className={tab === 'overview' ? 'active' : ''} onClick={() => setTab('overview')}>Overview</button>
-          <button className={tab === 'keys' ? 'active' : ''} onClick={() => setTab('keys')}>API Keys</button>
+          <button className={tab === 'overview' ? 'active' : ''} onClick={() => { setTab('overview'); setSelectedSessionId(null); setSessionDetail(null); }}>Overview</button>
+          <button className={tab === 'keys' ? 'active' : ''} onClick={() => { setTab('keys'); setSelectedSessionId(null); setSessionDetail(null); }}>API Keys</button>
           <button className={tab === 'graphs' ? 'active' : ''} onClick={() => setTab('graphs')}>Graphs</button>
           <button className={tab === 'members' ? 'active' : ''} onClick={() => setTab('members')}>Members</button>
-          <button className={tab === 'sessions' ? 'active' : ''} onClick={() => setTab('sessions')}>Sessions</button>
+          <button className={tab === 'sessions' ? 'active' : ''} onClick={() => { setTab('sessions'); setSelectedSessionId(null); setSessionDetail(null); }}>Sessions</button>
         </nav>
         <div className="switchers">
           <select
@@ -1243,24 +1262,104 @@ function App() {
           </section>
         )}
 
-        {tab === 'sessions' && (
+        {tab === 'sessions' && !selectedSessionId && (
           <section>
             <h2>Sessions</h2>
             {sessions.length === 0 ? (
               <p className="dim">No sessions yet. Sessions appear when your agents capture conversations.</p>
             ) : (
               <table>
-                <thead><tr><th>ID</th><th>Summary</th><th>Created</th></tr></thead>
+                <thead><tr><th>ID</th><th>Turns / Extracted</th><th>Created</th></tr></thead>
                 <tbody>
                   {sessions.map((s) => (
-                    <tr key={s.id || s.session_id}>
+                    <tr
+                      key={s.id || s.session_id}
+                      className="clickable"
+                      tabIndex={0}
+                      role="button"
+                      aria-label={`View session ${(s.id || s.session_id || '').slice(0, 16)} details`}
+                      onClick={() => {
+                        setSelectedSessionId(s.id || s.session_id)
+                        setSessionDetail(null)
+                        fetchSessionDetail(s.id || s.session_id)
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault()
+                          setSelectedSessionId(s.id || s.session_id)
+                          setSessionDetail(null)
+                          fetchSessionDetail(s.id || s.session_id)
+                        }
+                      }}
+                    >
                       <td><code>{(s.id || s.session_id || '').slice(0, 16)}…</code></td>
-                      <td>{s.summary || s.title || s.metadata?.summary || '—'}</td>
+                      <td>{s.turns != null ? `${s.turns} turn${s.turns !== 1 ? 's' : ''}` : '—'}{s.extracted != null ? ` · ${s.extracted} extracted` : ''}</td>
                       <td>{fmtTime(s.created_at || s.createdAt)}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
+            )}
+          </section>
+        )}
+
+        {tab === 'sessions' && selectedSessionId && (
+          <section>
+            <div className="row">
+              <h2>Session Detail</h2>
+              <button className="ghost" onClick={() => { setSelectedSessionId(null); setSessionDetail(null); }}>← Back to sessions</button>
+            </div>
+            {detailLoading ? (
+              <p className="dim">Loading session…</p>
+            ) : sessionDetail ? (
+              <div className="session-detail">
+                <div className="cards">
+                  <div className="card"><div className="card-val">{sessionDetail.turns ?? 0}</div><div className="card-label">Turns</div></div>
+                  <div className="card"><div className="card-val">{sessionDetail.extracted ?? 0}</div><div className="card-label">Extracted Points</div></div>
+                </div>
+                <p className="dim small">Session ID: <code>{sessionDetail.id}</code> · Created: {fmtTime(sessionDetail.created_at)}</p>
+
+                {sessionDetail.turn_points && sessionDetail.turn_points.length > 0 && (
+                  <div className="session-section">
+                    <h3>Conversation Turns ({sessionDetail.turn_points.length})</h3>
+                    <div className="turn-list">
+                      {sessionDetail.turn_points.map((turn, i) => (
+                        <div key={turn.id || i} className={`turn-item turn-${turn.role}`}>
+                          <div className="turn-header">
+                            <span className="turn-role">{turn.role}</span>
+                            <span className="turn-index">Turn {i + 1}</span>
+                          </div>
+                          <div className="turn-content">{turn.content}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {sessionDetail.extracted_points && sessionDetail.extracted_points.length > 0 && (
+                  <div className="session-section">
+                    <h3>Extracted Points ({sessionDetail.extracted_points.length})</h3>
+                    <div className="extracted-list">
+                      {sessionDetail.extracted_points.map((ep, i) => (
+                        <div key={ep.id || i} className={`extracted-item extracted-${ep.kind}`}>
+                          <div className="extracted-header">
+                            <span className={`kind-badge kind-${ep.kind}`}>{ep.kind}</span>
+                            <span className="dim small">{ep.id ? ep.id.slice(0, 12) + '…' : ''}</span>
+                          </div>
+                          <div className="extracted-content">{ep.content}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {(!sessionDetail.turn_points || sessionDetail.turn_points.length === 0) &&
+                 (!sessionDetail.extracted_points || sessionDetail.extracted_points.length === 0) && (
+                  <p className="dim">No turns or extracted points found for this session.</p>
+                )}
+              </div>
+            ) : (
+              <p className="dim">Could not load session detail.</p>
             )}
           </section>
         )}
