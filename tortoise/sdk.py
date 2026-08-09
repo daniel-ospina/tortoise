@@ -2600,7 +2600,6 @@ class TortoiseSDK:
         When eventKind='AgentSession' and extract_metadata=True, runs LLM/fallback
         metadata extraction on session content before creating the Event.
         """
-        import re
         import os as _os
         import json as _json
         from pathlib import Path
