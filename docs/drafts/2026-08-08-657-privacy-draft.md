@@ -37,7 +37,7 @@ created: 2026-08-08
 
 ### LFPDPPP note (RESOLVED 2026-08-08 — owner clarification)
 
-The operator is Mexico-based (not incorporated; Delaware governing law kept). LFPDPPP therefore APPLIES to personal data of individuals in Mexico: §1 states that LFPDPPP applies, ARCO rights (Access, Rectification, Cancellation, Opposition) are exercised via email hello@premiselabs.co, and a standalone Aviso de Privacidad is noted as a follow-up (to be published; available on request in the meantime).
+The operator is Mexico-based (not incorporated; Delaware governing law kept). LFPDPPP therefore APPLIES to personal data of individuals in Mexico: §1 states that LFPDPPP applies, ARCO rights (Access, Rectification, Cancellation, Opposition) are exercised via email hello@premiselabs.co, and a standalone Aviso de Privacidad in Spanish is published at /aviso-privacidad, linked from §1 (issue #658 deliverable).
 
 ### Outline coverage (16 areas per plan T2 Step 1 → sections)
 
@@ -95,7 +95,7 @@ Premise Labs is **not a registered legal entity**. The data controller is the na
 
 **EU/EEA representative (GDPR Art. 27):** "We are not currently established in the EU/EEA. If we become subject to GDPR Art. 27, we will designate and disclose an EU representative here."
 
-**LFPDPPP (Mexico):** The Mexican Federal Law on the Protection of Personal Data Held by Private Parties (LFPDPPP) applies to personal data of individuals in Mexico. ARCO rights (Access, Rectification, Cancellation, Opposition) are exercised via email <hello@premiselabs.co>. A standalone privacy notice (Aviso de Privacidad) will be published as a follow-up and is available on request in the meantime.
+**LFPDPPP (Mexico):** The Mexican Federal Law on the Protection of Personal Data Held by Private Parties (LFPDPPP) applies to personal data of individuals in Mexico. ARCO rights (Access, Rectification, Cancellation, Opposition) are exercised via email <hello@premiselabs.co>. A standalone privacy notice (Aviso de Privacidad) in Spanish is available at [Aviso de Privacidad (Español)](/aviso-privacidad).
 
 ## 2. Data processed by the service (outline ②)
 
@@ -132,7 +132,7 @@ Until consent is given, PostHog captures no data, the planned tools are not load
 
 - **Performance of a contract (Art. 6(1)(b)):** account data is processed to deliver the service the user signs up for, including authentication and account administration.
 - **Legitimate interests (Art. 6(1)(f)):** usage data is processed to operate, secure, and improve the product, and to prevent abuse.
-- **Consent (Art. 6(1)(a)):** analytics tools are activated and process data only after consent is given, as described in §3.
+- **Consent (Art. 6(1)(a)):** analytics tools are activated and process data only after consent is given, as described in §3; waitlist email addresses are processed to send the requested launch notifications, with consent recorded when the waitlist form is submitted.
 - **Legal obligation (Art. 6(1)(c)):** billing and transactional records may be processed to comply with tax and accounting obligations, where applicable.
 
 Consent, where given, may be withdrawn at any time with effect for the future. Under ePrivacy rules, non-essential cookies and pixels are subject to the same consent: you can give or withdraw consent at any time via the consent banner.

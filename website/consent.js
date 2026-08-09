@@ -74,6 +74,8 @@
       window.posthog.opt_in_capturing();
     }
     hideBanner();
+    // Consent granted — activate the consent-gated GA4/Meta loaders too.
+    loadConsentedAnalytics();
   }
 
   function onDecline() {
@@ -202,6 +204,71 @@
     });
   }
 
+  // ── Consent-gated GA4 + Meta Pixel loaders (placeholder IDs, fail-safe) ─
+  // Create the GA4 property (Google Analytics) + Meta Pixel (Business) →
+  // paste the IDs below → deploy. Until then these loaders are inert: both
+  // IDs are "__..." placeholders and the guards return early, so no network
+  // call is ever made. They load ONLY when consent is "granted" — never on
+  // Decline or undecided.
+  var GA_MEASUREMENT_ID = "__GA4_MEASUREMENT_ID__";
+  var META_PIXEL_ID = "__META_PIXEL_ID__";
+  var ga4Loaded = false;
+  var metaPixelLoaded = false;
+
+  function loadGA4() {
+    if (!GA_MEASUREMENT_ID || GA_MEASUREMENT_ID.indexOf("__") === 0 || ga4Loaded) {
+      return; // fail-safe: placeholder ID or already loaded — stay inert
+    }
+    ga4Loaded = true;
+    window.dataLayer = window.dataLayer || [];
+    window.gtag = window.gtag || function () {
+      window.dataLayer.push(arguments);
+    };
+    window.dataLayer.push({ "gtm.start": new Date().getTime(), event: "gtm.js" });
+    window.gtag("js", new Date());
+    window.gtag("config", GA_MEASUREMENT_ID, { anonymize_ip: true });
+    var s = document.createElement("script");
+    s.async = true;
+    s.src = "https://www.googletagmanager.com/gtag/js?id=" + GA_MEASUREMENT_ID;
+    (document.head || document.documentElement).appendChild(s);
+  }
+
+  function loadMetaPixel() {
+    if (!META_PIXEL_ID || META_PIXEL_ID.indexOf("__") === 0 || metaPixelLoaded) {
+      return; // fail-safe: placeholder ID or already loaded — stay inert
+    }
+    metaPixelLoaded = true;
+    // Meta Pixel base code (official snippet).
+    !function (f, b, e, v, n, t, s) {
+      if (f.fbq) { return; }
+      n = f.fbq = function () {
+        n.callMethod ? n.callMethod.apply(n, arguments) : n.queue.push(arguments);
+      };
+      if (!f._fbq) { f._fbq = n; }
+      n.push = n;
+      n.loaded = !0;
+      n.version = "2.0";
+      n.queue = [];
+      t = b.createElement(e);
+      t.async = !0;
+      t.src = v;
+      s = b.getElementsByTagName(e)[0];
+      s.parentNode.insertBefore(t, s);
+    }(window, document, "script", "https://connect.facebook.net/en_US/fbevents.js");
+    fbq("init", META_PIXEL_ID);
+    fbq("track", "PageView");
+  }
+
+  // Runs after a consent decision — reads the live state and loads the
+  // consented tools only when it is exactly "granted".
+  function loadConsentedAnalytics() {
+    if (window.consentState() !== "granted") {
+      return; // never load on Decline / undecided
+    }
+    loadGA4();
+    loadMetaPixel();
+  }
+
   function init() {
     // Defensive: never double-render if this module were ever loaded twice.
     if (document.getElementById("consent-banner-style")) {
@@ -215,6 +282,8 @@
       if (window.posthog && typeof window.posthog.opt_in_capturing === "function") {
         window.posthog.opt_in_capturing();
       }
+      // Consent already given — activate the consent-gated loaders too.
+      loadConsentedAnalytics();
     } else if (state === "denied") {
       if (window.posthog && typeof window.posthog.opt_out_capturing === "function") {
         window.posthog.opt_out_capturing();
