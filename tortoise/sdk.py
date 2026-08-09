@@ -1059,8 +1059,13 @@ class TortoiseSDK:
     # ── Query ─────────────────────────────────────────────────────
 
     def query(self, kind: str | None = None,
+              *, include_retracted: bool = False,
               **filters) -> list[dict]:
         """Query points by pointKind and/or custom property filters.
+
+        #432 Task 2: retracted points (status='retracted') are EXCLUDED by
+        default — pass include_retracted=True, or an explicit status= filter
+        (e.g. status='retracted'), to surface tombstones.
 
         For confidence-aware queries, use tortoise_fts_query() with query=None
         for full-scan mode with EP annotation.
@@ -1068,6 +1073,10 @@ class TortoiseSDK:
         proj = self._get_proj()
         clauses = ["(n.is_operator IS NULL OR n.is_operator = false)"]
         params: dict[str, Any] = {}
+        # #432 Task 2: retracted exclusion — skipped when the caller explicitly
+        # filters by status (their filter controls visibility).
+        if not include_retracted and "status" not in filters:
+            clauses.append("(n.status IS NULL OR n.status <> 'retracted')")
         if kind:
             expanded = self._expand_kind(kind)
             if len(expanded) == 1:
@@ -1095,12 +1104,22 @@ class TortoiseSDK:
         return [r[0] for r in rows]
 
     def paginated_query(self, kind: str | None = None,
-                         skip: int = 0, limit: int = 20, **filters) -> dict:
+                        skip: int = 0, limit: int = 20,
+                        *, include_retracted: bool = False,
+                        **filters) -> dict:
         """Query points with pagination. Returns {results, total, hasMore}.
+
+        #432 Task 2: retracted points (status='retracted') are EXCLUDED by
+        default — pass include_retracted=True, or an explicit status= filter,
+        to surface tombstones.
         """
         proj = self._get_proj()
         clauses = ["(n.is_operator IS NULL OR n.is_operator = false)"]
         params: dict[str, Any] = {}
+        # #432 Task 2: retracted exclusion — skipped when the caller explicitly
+        # filters by status (their filter controls visibility).
+        if not include_retracted and "status" not in filters:
+            clauses.append("(n.status IS NULL OR n.status <> 'retracted')")
         if kind:
             expanded = self._expand_kind(kind)
             if len(expanded) == 1:

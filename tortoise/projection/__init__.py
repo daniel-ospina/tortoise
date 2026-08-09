@@ -123,7 +123,14 @@ def _apply_one(points: dict[str, dict], ev: dict) -> None:
             if ev.get("new_context") is not None and ev.get("projection_version", 0) < 2:
                 p["context"] = ev["new_context"]
     elif t == "PointRetracted":
-        points.pop(ev["id"], None)
+        # #432 Task 2: retraction is a TOMBSTONE, not a deletion — the point
+        # stays in the projection with status='retracted' (queryable with a
+        # filter) instead of being popped. No-op when the id is absent (e.g.
+        # merged-away points): no KeyError, no phantom resurrection. NOT
+        # version-gated — re-folding a pre-change log under this code yields
+        # tombstones (intended, tested behavior change; #689).
+        if ev["id"] in points:
+            points[ev["id"]]["status"] = "retracted"
     elif t == "PointsMerged":
         for mid in ev.get("merge_ids", []):
             points.pop(mid, None)
@@ -138,9 +145,16 @@ def fold(events: list[dict]) -> dict[str, dict]:
 
 
 def split(points: dict[str, dict]) -> tuple[list[dict], list[dict]]:
-    """Partition into (statement points, operator points)."""
+    """Partition into (statement points, operator points).
+
+    #432 Task 2: retracted points (status='retracted') are EXCLUDED from the
+    statements list — retracted != active statement (default-visible surface
+    stays clean; tombstones remain queryable via fold / inclusion filters).
+    """
     statements, operators = [], []
     for p in points.values():
+        if p.get("status") == "retracted":
+            continue
         (operators if p.get("operator") else statements).append(p)
     return statements, operators
 

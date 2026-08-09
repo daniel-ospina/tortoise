@@ -131,10 +131,13 @@ def test_apply_one_point_revised_missing_id():
 
 
 def test_apply_one_point_retracted():
+    # #432 Task 2: retraction is a TOMBSTONE — the point stays in the
+    # projection with status='retracted' instead of being popped.
     points: dict[str, dict] = {"p1": {"id": "p1", "content": "old"}}
     ev = {"type": "PointRetracted", "id": "p1"}
     _apply_one(points, ev)
-    assert "p1" not in points
+    assert "p1" in points
+    assert points["p1"]["status"] == "retracted"
 
 
 def test_apply_one_point_retracted_missing():
@@ -184,7 +187,7 @@ def test_fold_multiple_events():
         {"type": "PointRetracted", "id": "p1"},
     ]
     result = fold(events)
-    assert "p1" not in result
+    assert result["p1"]["status"] == "retracted"  # #432 Task 2: tombstone kept
     assert result["p2"]["content"] == "two"
 
 
@@ -194,10 +197,57 @@ def test_fold_revise_then_retract():
         {"type": "PointRevised", "id": "p1", "new_content": "b"},
         {"type": "PointRetracted", "id": "p1"},
     ]
-    assert fold(events) == {}
+    result = fold(events)
+    assert result["p1"]["status"] == "retracted"
+    assert result["p1"]["content"] == "b"  # revision retained on the tombstone
 
 
 # -------------------------------------------------------------------- split
+
+def test_fold_retract_tombstones():
+    """#432 Task 2: PointRetracted keeps the point with status='retracted'."""
+    events = [
+        {"type": "PointAdded", "point": {"id": "p1", "content": "x"}},
+        {"type": "PointRetracted", "id": "p1"},
+    ]
+    points = fold(events)
+    assert "p1" in points
+    assert points["p1"]["status"] == "retracted"
+
+
+def test_fold_old_log_now_tombstones():
+    """plan-review P2: re-folding a PRE-change log under new code yields a
+    tombstone (intended, tested behavior change) — not a pop, not version-gated."""
+    points = fold([
+        {"type": "PointAdded", "point": {"id": "p1", "content": "x"}},
+        {"type": "PointRetracted", "id": "p1", "projection_version": 1},
+    ])
+    assert points["p1"]["status"] == "retracted"
+
+
+def test_points_merged_then_retracted_tombstones():
+    """plan-review P2: PointsMerged pops merge_ids; a later PointRetracted for
+    a merged-away id is a NO-OP — no KeyError, no phantom resurrection."""
+    points = fold([
+        {"type": "PointAdded", "point": {"id": "p1", "content": "keep"}},
+        {"type": "PointAdded", "point": {"id": "p2", "content": "merged-away"}},
+        {"type": "PointsMerged", "id": "p1", "merge_ids": ["p2"]},
+        {"type": "PointRetracted", "id": "p2"},
+    ])
+    assert "p2" not in points          # merged-away stays gone
+    assert "p1" in points              # merge target present
+    assert points["p1"]["content"] == "keep"  # no phantom resurrection
+
+
+def test_split_excludes_retracted():
+    """#432 Task 2: split() excludes status='retracted' from the statements
+    list — retracted != active statement (tombstones stay queryable via fold)."""
+    points = {"a": {"operator": None, "status": "live"},
+              "b": {"operator": None, "status": "retracted"}}
+    statements, operators = split(points)
+    assert [p for p in statements] == [{"operator": None, "status": "live"}]
+    assert operators == []
+
 
 def test_split_all_statements():
     points = {
@@ -249,7 +299,8 @@ def test_inmemory_apply():
                 "point": {"id": "p1", "content": "hello", "context": "ctx"}})
     assert proj.points["p1"]["content"] == "hello"
     proj.apply({"type": "PointRetracted", "id": "p1"})
-    assert "p1" not in proj.points
+    # #432 Task 2: tombstone — retracted point stays in the projection
+    assert proj.points["p1"]["status"] == "retracted"
 
 
 def test_inmemory_rebuild():

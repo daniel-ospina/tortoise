@@ -84,3 +84,50 @@ def test_supersede_sets_status_and_keeps_flag(sdk_factory, tmp_path):
     got = sdk.get_point(old["id"])
     assert got["status"] == "superseded"
     assert got.get("outdated") is True
+
+
+# ── Task 2: retraction-as-absence consumer audit ────────────────────────
+
+def test_query_excludes_retracted_by_default(sdk_factory, tmp_path):
+    # #432 Task 2: query() omits retracted points by default; the
+    # include_retracted flag surfaces them (tombstone contract).
+    sdk = sdk_factory(tmp_path)
+    p = sdk.create_point("statement", "gone")
+    sdk.retract_point(p["id"])
+    assert p["id"] not in [q["id"] for q in sdk.query()]
+    assert p["id"] in [q["id"] for q in sdk.query(include_retracted=True)]
+
+
+def test_paginated_query_excludes_retracted_by_default(sdk_factory, tmp_path):
+    sdk = sdk_factory(tmp_path)
+    live = sdk.create_point("statement", "stay")
+    gone = sdk.create_point("statement", "gone")
+    sdk.retract_point(gone["id"])
+    page = sdk.paginated_query(kind="statement")
+    assert [r["id"] for r in page["results"]] == [live["id"]]
+    assert page["total"] == 1
+    page_all = sdk.paginated_query(kind="statement", include_retracted=True)
+    assert {r["id"] for r in page_all["results"]} == {live["id"], gone["id"]}
+    assert page_all["total"] == 2
+
+
+def test_query_explicit_retracted_status_filter(sdk_factory, tmp_path):
+    # tombstone contract: an explicit status='retracted' filter is the
+    # queryable-with-filter path (no include_retracted needed).
+    sdk = sdk_factory(tmp_path)
+    p = sdk.create_point("statement", "gone")
+    sdk.retract_point(p["id"])
+    hits = sdk.query(status="retracted")
+    assert [q["id"] for q in hits] == [p["id"]]
+    assert p["id"] not in [q["id"] for q in sdk.query(status="live")]
+
+
+def test_retracted_point_retrievable_by_id(sdk_factory, tmp_path):
+    # tombstone contract: get_point on a retracted point returns it with
+    # status='retracted' (not {} / 404).
+    sdk = sdk_factory(tmp_path)
+    p = sdk.create_point("statement", "gone")
+    sdk.retract_point(p["id"])
+    got = sdk.get_point(p["id"])
+    assert got["id"] == p["id"]
+    assert got["status"] == "retracted"
