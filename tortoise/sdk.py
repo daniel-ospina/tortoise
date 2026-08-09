@@ -25,45 +25,7 @@ register_kind("option")    # used by file_decision (#133)
 register_kind("evidence")  # used by file_decision (#133)
 
 # Valid status values for Point nodes (used by update_point status validation)
-# #432: claim lifecycle vocabulary — draft → live → retracted → superseded
-# (plus outdated/archived). challenged is a DERIVED condition (NAND operator
-# edge on a live point), NOT a stored status.
-POINT_STATUS_VALUES = frozenset({'draft', 'live', 'retracted', 'superseded', 'outdated', 'archived'})
-
-# #432: declarative spec for the retract/supersede transition guards. NOT
-# consulted by update_point per-call (update_point only promotes draft→live);
-# every claim transition is observable via a Task 3 emit hook, and no
-# transition can slip through update_point unemitted.
-_ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
-    # P2 (code-review): guards allow draft→retracted/superseded (a draft point
-    # can be terminal before ever going live); keep the declarative spec
-    # aligned with the retract/supersede guards.
-    "draft": frozenset({"live", "retracted", "superseded"}),  # promote + terminal
-    "live": frozenset({"retracted", "superseded"}),    # via retract_point / supersede_point
-    "retracted": frozenset(),                            # terminal
-    "superseded": frozenset(),                           # terminal
-    "outdated": frozenset({"retracted"}),               # outdated stays a flag; retract allowed
-    "archived": frozenset(),                             # terminal (reserved — no v1 write path)
-}
-
-
-def _raise_update_point_status_error(proj, id: str) -> None:
-    """#432: error path for the update_point draft→live promote guard.
-
-    Runs a diagnostic existence read ONLY when the guarded SET returned no
-    rows, so the happy path stays a single round trip. Missing point →
-    ValueError matching the historical missing-point behavior; present but
-    not draft → illegal-transition ValueError.
-    """
-    exists = proj.g.query(
-        "MATCH (n:Point {id:$id}) RETURN count(n)", params={"id": id},
-    ).result_set[0][0]
-    if not exists:
-        raise ValueError(f"No point {id!r}")
-    raise ValueError(
-        f"Illegal status transition — update_point only promotes draft→live; "
-        f"use retract_point()/supersede_point() for lifecycle transitions"
-    )
+POINT_STATUS_VALUES = frozenset({'live', 'draft', 'outdated', 'archived', 'retracted'})
 
 _logger = logging.getLogger(__name__)
 
@@ -211,13 +173,17 @@ class TortoiseSDK:
     Args:
         db_path: Optional path to FalkorDBLite database file (None = use TORTOISE_DB_URI env var).
         namespace: Optional namespace for graph-name isolation.
+        event_log_path: Optional path to JSONL event log. When set, SDK write
+            paths append events so rebuild_all can restore SDK-created points (#548).
+            If None, no events are emitted (backward-compatible).
 
     Precedence: an explicitly-provided db_path wins over the TORTOISE_DB_URI
     env var. This lets tests/fixtures force a temp embedded DB even when a
     shared test URI is set in the environment (#139).
     """
 
-    def __init__(self, db_path: str | None = None, *, namespace: str | None = None):
+    def __init__(self, db_path: str | None = None, *, namespace: str | None = None,
+                 event_log_path: str | None = None):
         import os, re
         db_uri = os.environ.get("TORTOISE_DB_URI")
         if db_uri and db_path is None:
@@ -252,6 +218,8 @@ class TortoiseSDK:
                     "Use alphanumeric, hyphens, underscores; max 64 chars."
                 )
         self._namespace = namespace
+        self._event_log_path = event_log_path
+        self._event_log = None  # lazy-init EventLog (#548)
         self._proj: FalkorProjection | None = None
         self._ep = None  # lazy-init TortoiseEP
         self._evidence: dict[str, tuple[float, float]] = {}
@@ -297,6 +265,76 @@ class TortoiseSDK:
             else:
                 self._proj = FalkorProjection(self._db_path, graph_name=graph_name)
         return self._proj
+
+    def _get_event_log(self):
+        """Lazy-init the EventLog for SDK event emission (#548).
+
+        Returns None when no event_log_path was configured — callers MUST
+        handle the None case before appending.
+        """
+        if self._event_log is None and self._event_log_path:
+            from tortoise.log import EventLog
+            self._event_log = EventLog(self._event_log_path)
+        return self._event_log
+
+    def _emit_event(self, type_: str, *, point: dict | None = None,
+                    id: str | None = None, **payload) -> dict | None:
+        """Append an event to the SDK event log for rebuild parity (#548).
+
+        Returns the event dict (for caller inspection), or None when no
+        event log is configured (backward-compatible — no log, no event).
+
+        Events emitted by the SDK use ``initiated_by="sdk"`` to distinguish
+        them from extractor/user events produced by EventAPI.
+
+        The *point* dict should be a complete snapshot of the Point's
+        properties (as returned by :meth:`get_point`) so that replay via
+        :meth:`~tortoise.projection.FalkorProjection.rebuild_all` can
+        reconstruct the node and its edges identically.
+        """
+        log = self._get_event_log()
+        if log is None:
+            return None
+        from .ids import ulid, now_iso
+        event: dict = {
+            "event_id": ulid(),
+            "ts": now_iso(),
+            "type": type_,
+            "initiated_by": "sdk",
+            "projection_version": 2,
+        }
+        if point is not None:
+            # Strip embedding — it is recomputed on replay by
+            # _upsert_point_props (vecf32 serialization is fragile).
+            # content_hash is also stripped — it is derived from content.
+            clean = {k: v for k, v in point.items()
+                     if k not in ("embedding", "content_hash")}
+            # Operators may not store 'content' as a node property (#548);
+            # _upsert_point_props requires it — synthesize a fallback.
+            if "content" not in clean:
+                op_type = clean.get("op_type", "IMPL")
+                op_inputs = (point.get("operator") or {}).get("inputs", [])
+                clean["content"] = f"{op_type}({', '.join(op_inputs)})"
+            # Similarly, operators may lack 'pointKind' — default to empty.
+            if "pointKind" not in clean:
+                clean["pointKind"] = ""
+            event["point"] = clean
+        if id is not None:
+            event["id"] = id
+        event.update(payload)
+        try:
+            log.append(event)
+        except Exception as exc:
+            # The graph mutation already succeeded — a log-write failure must
+            # not crash the caller or pretend the write failed. Rebuild parity
+            # is best-effort here: rebuild_all's graph snapshot catches any
+            # point missing from the log on the next rebuild (#548).
+            _logger.warning(
+                "failed to append %s event to SDK log %s: %s",
+                type_, self._event_log_path, exc,
+            )
+            return None
+        return event
 
     def test_guard(self) -> None:
         """Assert the connected graph is safe for destructive test teardowns.
@@ -363,14 +401,13 @@ class TortoiseSDK:
             return
         indexes = [
             ("Team", "name"),
-            ("Team", "stripe_customer_id"),  # #310 4b: webhook customer↔team bind
             ("Membership", "team_id"),
             ("Membership", "user_id"),
             ("APIKey", "team_id"),
             ("APIKey", "key_hash"),
+            ("APIKey", "key_prefix"),
             ("Invitation", "team_id"),
             ("Invitation", "token_hash"),
-            ("WebhookEvent", "event_id"),  # #310 7: webhook dedup marker lookup
         ]
         for label, prop in indexes:
             try:
@@ -419,128 +456,6 @@ class TortoiseSDK:
         # the scan.
         if removed:
             proj.g.query("MATCH (t:Tag) WHERE NOT (t)<-[:TAGGED]-() DELETE t")
-
-    # ── Events: cursor-based poll (Task 5) ────────────────────────────
-
-    @staticmethod
-    def _encode_cursor(seq: int) -> str:
-        """Opaque cursor: base64url JSON {v:1, seq:N} — ONE format for every
-        cursor incl. the empty graph ({v:1, seq:0}). Plan-review P2."""
-        import base64
-        import json
-
-        raw = json.dumps({"v": 1, "seq": int(seq)}, separators=(",", ":"))
-        return base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
-
-    @staticmethod
-    def _decode_cursor(cursor: str) -> int:
-        """Decode an opaque cursor → seq. Raises ValueError('invalid cursor')."""
-        import base64
-        import json
-
-        try:
-            raw = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4))
-            data = json.loads(raw)
-            if data.get("v") != 1 or "seq" not in data:
-                raise ValueError
-            seq = int(data["seq"])
-            if seq < 0:  # P2 (Qwen): negative cursors must not bypass expiry
-                raise ValueError
-            return seq
-        except Exception:  # noqa: BLE001
-            raise ValueError("invalid cursor") from None
-
-    def events_poll(self, after: str | None = None, types: list[str] | None = None,
-                    limit: int = 100) -> dict:
-        """Poll graph/claim events after a cursor (at-least-once; idempotent on replay).
-
-        Returns {"events": [payload dicts ordered by seq], "next_cursor": opaque}.
-        after=None → tail (oldest retained). Expired cursor → ValueError(
-        'cursor expired — replay from tail'); malformed → ValueError('invalid cursor').
-        Types are validated against the EventCodec registry (unknown → ValueError).
-        Events live in THIS SDK's graph namespace (the team partition).
-        """
-        from .event_store import read_after
-
-        after_seq = 0 if after is None else self._decode_cursor(after)
-        if types:
-            from .shared_state.events import event_types
-
-            registered = event_types()
-            unknown = [t for t in types if t not in registered]
-            if unknown:
-                raise ValueError(f"unknown event type: {unknown[0]}")
-        proj = self._get_proj()
-        # Lazy retention (plan-review P2 / Task 6 readOnlyHint tension):
-        # maintenance purge at most once per TORTOISE_EVENT_RETENTION_INTERVAL
-        # per process, so steady-state polls are read-only. Best-effort — a
-        # purge failure never blocks the poll.
-        self._maybe_purge_events(proj)
-        # Expired-cursor check: a NON-ZERO cursor pointing below the graph's
-        # min seq was purged/compacted. after_seq == 0 is the "from the start"
-        # sentinel (after=None) — it never expires, it just returns all
-        # retained events.
-        if after_seq != 0:
-            # Watermark: first_seq on GraphEventMeta (maintained by purges) —
-            # a cursor below it was purged/compacted → expired (410). Works
-            # even when the graph is empty after a full purge.
-            rows = proj.g.query(
-                "MATCH (m:GraphEventMeta) RETURN m.first_seq"
-            ).result_set
-            first_seq = rows[0][0] if rows and rows[0][0] is not None else None
-            if first_seq is not None and after_seq < int(first_seq):
-                raise ValueError("cursor expired — replay from tail")
-        evs = read_after(proj, after_seq, types=types, limit=limit)
-        last = evs[-1]["seq"] if evs else after_seq
-        return {"events": evs, "next_cursor": self._encode_cursor(last)}
-
-    _EVENT_PURGE_ATTR = "_tortoise_last_purge"
-    _EVENT_PURGE_LAST: float = 0.0  # process-level gate (P1 review fix)
-
-    def _maybe_purge_events(self, proj) -> None:
-        """Best-effort, interval-gated retention purge (see events_poll).
-
-        Runs at most once per TORTOISE_EVENT_RETENTION_INTERVAL seconds per
-        PROCESS (module-global monotonic — NOT per-projection: hosted REST/MCP
-        build a fresh SDK+projection per request, so a per-projection gate
-        would fire the purge on EVERY poll). Reads config via env with
-        defaults (30d retention, 500k cap, 3600s interval).
-        """
-        import os
-        import time
-
-        interval = int(os.environ.get("TORTOISE_EVENT_RETENTION_INTERVAL", "3600"))
-        now = time.monotonic()
-        if now - TortoiseSDK._EVENT_PURGE_LAST < interval:
-            return
-        TortoiseSDK._EVENT_PURGE_LAST = now
-        try:
-            from .event_store import purge_expired, purge_overflow
-
-            days = int(os.environ.get("TORTOISE_EVENT_RETENTION_DAYS", "30"))
-            cap = int(os.environ.get("TORTOISE_EVENT_MAX_PER_TEAM", "500000"))
-            purge_expired(proj, retention_days=days)
-            purge_overflow(proj, max_events=cap)
-        except Exception:  # noqa: BLE001 — best-effort
-            _logger.warning("event retention purge failed — continuing", exc_info=True)
-
-    def _emit_event(self, type_: str, payload: dict) -> None:
-        """Append a durable :GraphEvent for a graph mutation (best-effort).
-
-        #432 Task 3: events land in THIS SDK's graph namespace — the namespace
-        IS the team partition (server-derived via mcp_auth `_get_team_sdk` /
-        hosted `_make_sdk`, never client-supplied). A failed append is logged
-        and swallowed — mutation paths must never fail on event emission.
-        """
-        try:
-            from .event_store import append_event, ensure_event_schema, next_seq
-
-            proj = self._get_proj()
-            ensure_event_schema(proj)
-            seq = next_seq(proj)
-            append_event(proj, seq, type_, payload, self.ulid())
-        except Exception:  # noqa: BLE001 — best-effort
-            _logger.warning("event emission failed for %s — continuing", type_)
 
     def create_point(self, kind: str, content: str, **props) -> dict:
         """Create a new Point node. Raises ValueError if kind is invalid.
@@ -617,10 +532,6 @@ class TortoiseSDK:
         # Points enter as draft, go live when first edge is created (#131)
         status = props.pop("status", "draft")
 
-        # #432 Task 3: durable PointAdded event (append-before-mutation;
-        # phantom on failed mutation is the documented at-least-once tradeoff).
-        self._emit_event("PointAdded", {"id": pid, "kind": kind, "content_hash": ch})
-
         # Compute embedding (Phase 1A, #7698) — stored as Point property
         embedding = None
         try:
@@ -666,6 +577,8 @@ class TortoiseSDK:
         # Dreaming (#85): a new point can carry confidence-affecting props;
         # mark it dirty so the next dream/lazy-read stabilizes it.
         self._mark_dirty([pid])
+        # #548: emit PointAdded event for rebuild parity
+        self._emit_event("PointAdded", point=self.get_point(pid))
         return self.get_point(pid)
 
     def create_or_update_point(self, kind: str, content: str, **props) -> dict:
@@ -908,63 +821,26 @@ class TortoiseSDK:
                 f"Must be one of: {', '.join(sorted(POINT_STATUS_VALUES))}"
             )
 
-        # #432 plan-review P1: update_point is non-status except the draft→live
-        # promote (matches the create_operator promote). Any other status value
-        # is rejected BEFORE the query — lifecycle transitions go through
-        # retract_point()/supersede_point() (which emit events). This keeps
-        # every claim transition observable via an emit hook.
-        if 'status' in props:
-            if props['status'] != 'live':
-                raise ValueError(
-                    "update_point only promotes draft→live — use "
-                    "retract_point()/supersede_point() for lifecycle transitions"
-                )
-
         # Check if node carries :Object label (entity node with version tracking)
         has_object = proj.g.query(
             "MATCH (n:Point:Object {id:$id}) RETURN count(n) > 0",
             params={"id": id},
         ).result_set[0][0]
 
-        from datetime import datetime, timezone
-        now = datetime.now(timezone.utc).isoformat()
-
         if has_object:
-            if 'status' in props:
-                # Promote guard folded INTO the WHERE clause (plan-review P2:
-                # single round trip, no widened write window).
-                res = proj.g.query(
-                    "MATCH (n:Point:Object {id:$id}) "
-                    "WHERE (n.status IS NULL OR n.status = 'draft') "
-                    "SET n.status = 'live', n.updatedAt = $now, "
-                    "n.version = coalesce(n.version, 0) + 1 RETURN n",
-                    params={"id": id, "now": now},
-                )
-                if not res.result_set:
-                    _raise_update_point_status_error(proj, id)
-            else:
-                proj.g.query(
-                    "MATCH (n:Point:Object {id:$id}) "
-                    "SET n += $props, n.version = coalesce(n.version, 0) + 1, n.updatedAt = $now",
-                    params={"id": id, "props": props, "now": now},
-                )
+            from datetime import datetime, timezone
+            now = datetime.now(timezone.utc).isoformat()
+            proj.g.query(
+                "MATCH (n:Point:Object {id:$id}) "
+                "SET n += $props, n.version = coalesce(n.version, 0) + 1, n.updatedAt = $now",
+                params={"id": id, "props": props, "now": now},
+            )
         else:
-            if 'status' in props:
-                # Promote guard folded INTO the WHERE clause (plan-review P2).
-                res = proj.g.query(
-                    "MATCH (n:Point {id:$id}) "
-                    "WHERE (n.status IS NULL OR n.status = 'draft') "
-                    "SET n.status = 'live', n.updatedAt = $now RETURN n",
-                    params={"id": id, "now": now},
+            for key, val in props.items():
+                proj.g.query(
+                    "MATCH (n:Point {id:$id}) SET n += $props",
+                    params={"id": id, "props": {key: val}},
                 )
-                if not res.result_set:
-                    _raise_update_point_status_error(proj, id)
-            else:
-                for key, val in props.items():
-                    proj.g.query(
-                        "MATCH (n:Point {id:$id}) SET n += $props",
-                        params={"id": id, "props": {key: val}},
-                    )
         # Tag sync (#485): keep TAGGED edges consistent with the n.tags
         # property — update_point previously set the property but left edges
         # stale, so query_points_by_tag missed updated points. Falsy tag
@@ -974,7 +850,11 @@ class TortoiseSDK:
             self._sync_tags(proj, id, props["tags"] or [])
         # Dreaming (#85): property mutations can affect confidence.
         self._mark_dirty([id])
-        return self.get_point(id)
+        result = self.get_point(id)
+        # #548: emit PointRevised event for rebuild parity
+        self._emit_event("PointRevised", id=id,
+                         new_content=props.get("content"), **props)
+        return result
 
     def delete_point(self, id: str) -> bool:
         """Delete a Point and its relationships. Returns True if found."""
@@ -993,6 +873,9 @@ class TortoiseSDK:
             params={"id": id},
         ).result_set[0][0]
         proj.g.query("MATCH (n:Point {id:$id}) DETACH DELETE n", params={"id": id})
+        # #548: emit PointRetracted event for rebuild parity (after delete,
+        # so the graph mutation is committed before the event is written)
+        self._emit_event("PointRetracted", id=id)
         # Tag GC (#485): delete orphaned :Tag nodes (no incoming TAGGED edges).
         # Idempotent — DETACH DELETE leaves count-0 tags behind that would
         # otherwise accumulate in list_tags.
@@ -1072,43 +955,6 @@ class TortoiseSDK:
         proj = self._get_proj()
         now = datetime.now(timezone.utc).isoformat()
 
-        # #432: transition guard — old point must exist, be a statement (not
-        # an operator), and not already be terminal (mirrors the retract
-        # guard; supersede is already multi-query so the read is cheap).
-        guard = proj.g.query(
-            "MATCH (n:Point {id:$id}) RETURN n.is_operator, n.status",
-            params={"id": old_id},
-        ).result_set
-        if not guard:
-            raise ValueError(f"No point {old_id!r}")
-        is_op, cur = guard[0][0], guard[0][1]
-        if is_op:
-            raise ValueError(
-                f"Point {old_id!r} is an operator — supersession is for statement points")
-        if cur in ("retracted", "superseded", "archived"):
-            raise ValueError(
-                f"Point {old_id!r} is already terminal ({cur!r}) — supersession is terminal")
-
-        # P1 (Qwen review): validate the NEW point too — it must exist, be a
-        # statement, not be terminal, and differ from the old point. A missing /
-        # self / terminal successor would terminalize the old point with no valid
-        # replacement (phantom PointSuperseded).
-        if old_id == new_id:
-            raise ValueError("supersede_point: old_id and new_id must differ")
-        new_guard = proj.g.query(
-            "MATCH (n:Point {id:$id}) RETURN n.is_operator, n.status",
-            params={"id": new_id},
-        ).result_set
-        if not new_guard:
-            raise ValueError(f"No point {new_id!r}")
-        n_is_op, n_cur = new_guard[0][0], new_guard[0][1]
-        if n_is_op:
-            raise ValueError(
-                f"Point {new_id!r} is an operator — supersession target must be a statement")
-        if n_cur in ("retracted", "superseded", "archived"):
-            raise ValueError(
-                f"Point {new_id!r} is already terminal ({n_cur!r}) — cannot supersede into it")
-
         # 0. #329: collect + validate ALL edge types BEFORE any mutation.
         #    The edge types are interpolated into query structure (no params
         #    possible) — an unvalidated type (e.g. from a crafted edge) is a
@@ -1124,17 +970,32 @@ class TortoiseSDK:
         for row in edges_result.result_set:
             validate_rel_type(row[1])  # raises ValueError before any mutation
 
-        # #432 Task 3: durable PointSuperseded event (append-before-mutation,
-        # AFTER the guard + edge-type validation — P2 review fix: emitting
-        # before validation produced phantoms on corrupt-edge data).
-        self._emit_event("PointSuperseded", {"id": old_id, "new_id": new_id})
+        # 0b. #547: validate both endpoints BEFORE any write (same contract as
+        #    invalidate_point #330).  Missing old → {"invalidated": False} with
+        #    no writes; missing new → ValueError; self-edge → ValueError.
+        if old_id == new_id:
+            raise ValueError(
+                f"supersede_point: new_id cannot be the same as old_id ({old_id!r})"
+            )
+        old_exists = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN count(n) > 0", params={"id": old_id},
+        ).result_set[0][0]
+        if not old_exists:
+            return {"invalidated": False, "id": old_id, "corrected_by": new_id,
+                    "edges_transferred": 0}
+        new_exists = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN count(n) > 0",
+            params={"id": new_id},
+        ).result_set[0][0]
+        if not new_exists:
+            raise ValueError(
+                f"supersede_point: new point {new_id!r} does not exist — "
+                f"refusing to orphan outdated point {old_id!r}"
+            )
 
-        # 1. Mark old superseded + outdated + create CORRECTS edge (same as invalidate)
-        # #432: status='superseded' alongside the legacy outdated=true flag
-        # (back-compat for consumers reading the flag; #690 will consolidate).
+        # 1. Mark old outdated + create CORRECTS edge (same as invalidate)
         proj.g.query(
-            "MATCH (n:Point {id:$id}) SET n.status = 'superseded', "
-            "n.outdated = true, n.updatedAt = $now",
+            "MATCH (n:Point {id:$id}) SET n.outdated = true, n.updatedAt = $now",
             params={"id": old_id, "now": now},
         )
         proj.g.query(
@@ -1200,71 +1061,32 @@ class TortoiseSDK:
             "edges_transferred": transferred,
         }
 
-    def retract_point(self, id: str) -> dict:
-        """Tombstone-retract a Point: status='retracted' (point stays in graph).
-
-        #432: retraction is a TERMINAL state transition, not a deletion — the
-        projection keeps the point with status='retracted' and default query
-        surfaces exclude it (opt-in via include_retracted). Single atomic
-        conditional query on the happy path; diagnostic read only on the error
-        path.
-
-        Raises ValueError if the point is missing, is an operator node, or is
-        already terminal (retracted/superseded/archived).
-        """
-        from datetime import datetime, timezone
-        proj = self._get_proj()
-        # P1 (code-review): validate FIRST, then emit, then mutate — the emit
-        # before the guard produced phantom PointRetracted events on the
-        # NORMAL invalid-input path (missing / operator / terminal), which
-        # poll consumers would see as retractions that never happened.
-        row = proj.g.query(
-            "MATCH (n:Point {id:$id}) RETURN n.is_operator, n.status",
-            params={"id": id}).result_set
-        if not row:
-            raise ValueError(f"No point {id!r}")
-        is_op, cur = row[0][0], row[0][1]
-        if is_op:
-            raise ValueError(
-                f"Point {id!r} is an operator — retraction is for statement points")
-        if cur in ("retracted", "superseded", "archived"):
-            raise ValueError(
-                f"Point {id!r} is already terminal ({cur!r}) — retraction is terminal")
-        # #432 Task 3: durable PointRetracted event (append-before-mutation;
-        # only after the input contract validates).
-        self._emit_event("PointRetracted", {"id": id})
-        # P1 (Qwen review): CAS the SET — the WHERE re-checks terminal state so
-        # a concurrent retract/supersede can't both pass validation and have a
-        # terminal overwrite (retracted overwriting superseded, or vice versa).
-        r = proj.g.query(
-            "MATCH (n:Point {id:$id}) "
-            "WHERE (n.status IS NULL OR NOT (n.status IN $terminal)) "
-            "SET n.status = 'retracted', n.updatedAt = $now RETURN properties(n)",
-            params={"id": id, "now": datetime.now(timezone.utc).isoformat(),
-                    "terminal": ["retracted", "superseded", "archived"]})
-        if not r.result_set:
-            raise ValueError(
-                f"Point {id!r} is already terminal — retraction is terminal")
-        return r.result_set[0][0]  # updated node props (no trailing get_point round trip)
-
     # ── Operators ─────────────────────────────────────────────────
 
     def create_operator(self, op_type: str, source_id: str, target_ids: list[str],
                         label: str | None = None,
-                        direction: str = "bidirectional") -> dict:
+                        direction: str | None = None) -> dict:
         """Create an operator Point with optional semantic label.
 
         Semantic-epistemic edge model (#7801):
           - op_type: IMPL or NAND (epistemic mechanism)
           - label: domain verb — "addresses", "hasPart", "opposes" (semantic layer)
-          - direction: "bidirectional" (default) or "unidirectional" — explicit flag
-            controlling EP back-propagation (ONTOLOGY v3.1 §3.1, §8).
+          - direction: "bidirectional" or "unidirectional" — explicit flag
+            controlling EP back-propagation (ONTOLOGY v3.1 §3.1, §8). Default is
+            per-op-type (#753): NAND → unidirectional (directed attack),
+            IMPL → bidirectional. Pass None (default) to let the SDK resolve.
           - Operator carries the label and direction; IMPL/NAND edges carry confidence via EP.
         """
         if op_type not in ("IMPL", "NAND", "composedOf", "decomposesInto", "contains", "wraps"):
             raise ValueError(
                 f"op_type must be 'IMPL', 'NAND', or a part/whole type, got {op_type!r}"
             )
+        # Direction default (#753 directed-operator redesign): NAND defaults to
+        # unidirectional (directed attack — attacker's truth penalizes the
+        # target, no back-pressure); IMPL keeps bidirectional default. Explicit
+        # bidirectional NAND remains for genuine mutual contradictions.
+        if direction is None:
+            direction = "unidirectional" if op_type == "NAND" else "bidirectional"
         if direction not in ("bidirectional", "unidirectional"):
             raise ValueError(
                 f"direction must be 'bidirectional' or 'unidirectional', got {direction!r}"
@@ -1273,10 +1095,7 @@ class TortoiseSDK:
         inputs = [source_id] + list(target_ids)
         proj = self._get_proj()
 
-        # Validate all source/target Points exist FIRST (fail loudly, not
-        # silently) — then emit, then mutate. P1 (code-review): emitting
-        # before validation produced phantom OperatorAdded events on missing
-        # inputs, visible to subscription poll consumers.
+        # Validate all source/target Points exist (fail loudly, not silently)
         existing = proj.g.query(
             "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id",
             params={"ids": inputs},
@@ -1285,12 +1104,6 @@ class TortoiseSDK:
         missing = [i for i in inputs if i not in existing_ids]
         if missing:
             raise ValueError(f"Cannot create operator: Points {missing} do not exist")
-
-        # #432 Task 3: durable OperatorAdded event (append-before-mutation).
-        self._emit_event("OperatorAdded", {
-            "id": pid, "op_type": op_type, "source_id": source_id,
-            "target_ids": list(target_ids),
-        })
 
         # Build operator node with direction + optional label (context is NOT written — P1 #49)
         extra_props = []
@@ -1312,18 +1125,20 @@ class TortoiseSDK:
                 params={"oid": pid, "sid": inp_id, "i": i},
             )
         # Draft → live lifecycle (#131): source point goes live when first edge created
-        # P1 (code-review): draft → live promote ONLY for draft/null sources —
-        # an unconditional promote resurrected retracted (terminal) sources,
-        # violating the terminal-state contract with no event in the stream.
         proj.g.query(
-            "MATCH (s:Point {id:$sid}) "
-            "WHERE (s.status IS NULL OR s.status = 'draft') "
-            "SET s.status = 'live'",
+            "MATCH (s:Point {id:$sid}) SET s.status = 'live'",
             params={"sid": source_id},
         )
         # Dreaming (#85): new edges change propagation — mark all inputs dirty.
         self._mark_dirty(inputs)
         result = self.get_point(pid)
+        # #548: emit OperatorAdded event for rebuild parity.
+        # The operator.inputs dict must be constructed manually — it is not
+        # stored as a node property but is required by _upsert_point_edges
+        # during replay.
+        event_point = dict(result)
+        event_point["operator"] = {"op_type": op_type, "inputs": list(inputs)}
+        self._emit_event("OperatorAdded", point=event_point)
         return result
 
     def annotate_operator(self, id: str, bias: float, precision: float,
@@ -1348,11 +1163,6 @@ class TortoiseSDK:
                           ("consistency", consistency), ("directness", directness)):
             if not 0 <= val <= 1:
                 raise ValueError(f"{name} must be 0-1, got {val}")
-        # #432 Task 3: durable OperatorAnnotated event (append-before-mutation).
-        self._emit_event("OperatorAnnotated", {
-            "id": id, "bias": bias, "precision": precision,
-            "consistency": consistency, "directness": directness,
-        })
         return self.update_point(id,
             annotator_bias=bias, annotator_precision=precision,
             annotator_consistency=consistency, annotator_directness=directness)
@@ -1403,29 +1213,34 @@ class TortoiseSDK:
         )
         # Dreaming (#85): new mitigation + IMPL edge change propagation.
         self._mark_dirty([mid, id])
+        # #548: emit events for rebuild parity
+        self._emit_event("PointAdded", point=self.get_point(mid))
+        # Emit OperatorAdded so the IMPL edge (mitigation → operator) is
+        # recreated on replay. mitigated_by edges are ancillary and
+        # reconstructed separately via the operator's edge replay.
+        mit_point = self.get_point(mid)
+        mit_point["operator"] = {"op_type": "IMPL", "inputs": [id]}
+        self._emit_event("OperatorAdded", point=mit_point)
         return self.get_point(mid)
 
     # ── Query ─────────────────────────────────────────────────────
 
     def query(self, kind: str | None = None,
-              *, include_retracted: bool = False,
               **filters) -> list[dict]:
         """Query points by pointKind and/or custom property filters.
 
-        #432 Task 2: retracted points (status='retracted') are EXCLUDED by
-        default — pass include_retracted=True, or an explicit status= filter
-        (e.g. status='retracted'), to surface tombstones.
-
         For confidence-aware queries, use tortoise_fts_query() with query=None
         for full-scan mode with EP annotation.
+
+        Retracted points (status='retracted') are excluded. Use a raw Cypher
+        query via proj.g.query() to inspect retracted tombstones.
         """
         proj = self._get_proj()
-        clauses = ["(n.is_operator IS NULL OR n.is_operator = false)"]
+        clauses = [
+            "(n.is_operator IS NULL OR n.is_operator = false)",
+            "(n.status IS NULL OR n.status <> 'retracted')",  # #689: hide retracted
+        ]
         params: dict[str, Any] = {}
-        # #432 Task 2: retracted exclusion — skipped when the caller explicitly
-        # filters by status (their filter controls visibility).
-        if not include_retracted and "status" not in filters:
-            clauses.append("(n.status IS NULL OR n.status <> 'retracted')")
         if kind:
             expanded = self._expand_kind(kind)
             if len(expanded) == 1:
@@ -1453,22 +1268,18 @@ class TortoiseSDK:
         return [r[0] for r in rows]
 
     def paginated_query(self, kind: str | None = None,
-                        skip: int = 0, limit: int = 20,
-                        *, include_retracted: bool = False,
-                        **filters) -> dict:
+                         skip: int = 0, limit: int = 20, **filters) -> dict:
         """Query points with pagination. Returns {results, total, hasMore}.
 
-        #432 Task 2: retracted points (status='retracted') are EXCLUDED by
-        default — pass include_retracted=True, or an explicit status= filter,
-        to surface tombstones.
+        Retracted points (status='retracted') are excluded. Use a raw Cypher
+        query via proj.g.query() to inspect retracted tombstones.
         """
         proj = self._get_proj()
-        clauses = ["(n.is_operator IS NULL OR n.is_operator = false)"]
+        clauses = [
+            "(n.is_operator IS NULL OR n.is_operator = false)",
+            "(n.status IS NULL OR n.status <> 'retracted')",  # #689: hide retracted
+        ]
         params: dict[str, Any] = {}
-        # #432 Task 2: retracted exclusion — skipped when the caller explicitly
-        # filters by status (their filter controls visibility).
-        if not include_retracted and "status" not in filters:
-            clauses.append("(n.status IS NULL OR n.status <> 'retracted')")
         if kind:
             expanded = self._expand_kind(kind)
             if len(expanded) == 1:
@@ -1503,13 +1314,23 @@ class TortoiseSDK:
         return {"results": results, "total": total, "hasMore": skip + limit < total}
 
     def get_point(self, id: str) -> dict:
-        """Get a Point by ID. Returns dict of all properties, or {} if not found."""
+        """Get a Point by ID. Returns dict of all properties, or {} if not found.
+
+        Retracted points (status='retracted') return {} — they are hidden
+        from normal reads but remain queryable via raw Cypher (#689).
+        """
         proj = self._get_proj()
         rows = proj.g.query(
             "MATCH (n:Point {id:$id}) RETURN properties(n)",
             params={"id": id},
         ).result_set
-        return rows[0][0] if rows else {}
+        if not rows:
+            return {}
+        props = rows[0][0]
+        # #689: hide retracted points from normal reads
+        if props.get("status") == "retracted":
+            return {}
+        return props
 
     def traverse(self, id: str, relationship_type: str, direction: str = "outgoing") -> list[dict]:
         """Traverse relationships from a Point. Returns connected point dicts.
@@ -2232,7 +2053,7 @@ class TortoiseSDK:
             factors_data, _ = proj.extract_svbp_factors()
             operator_ids = [f[0] for f in factors_data]
         if not operator_ids:
-            return {"iterations": 0, "converged": True, "confidences": {}}
+            return {"iterations": 0, "converged": True, "confidences": {}, "diagnostic": "no_factors"}
         # Lazy consistency (#85): if dirty roots exist and this is a
         # whole-graph/auto-extract computation, dream the dirty subgraph
         # first so the auto-extracted factors see stabilized values.
@@ -2242,7 +2063,7 @@ class TortoiseSDK:
             factors_data, _ = proj.extract_svbp_factors()
             operator_ids = [f[0] for f in factors_data]
             if not operator_ids:
-                return {"iterations": 0, "converged": True, "confidences": {}}
+                return {"iterations": 0, "converged": True, "confidences": {}, "diagnostic": "no_factors"}
         iterations, converged = ep.run(operator_ids, evidence=self._evidence)
         confidences = {}
         proj = self._get_proj()
@@ -2266,8 +2087,10 @@ class TortoiseSDK:
         same persistent evidence contract as explicit confidence reads.
         """
         proj = self._get_proj()
+        # #689: retracted points must not feed Beta priors into EP.
         rows = proj.g.query(
             "MATCH (n:Point) WHERE n.baseline_set = true AND n.ep_alpha IS NOT NULL "
+            "AND (n.status IS NULL OR n.status <> 'retracted') "
             "RETURN n.id, n.ep_alpha, n.ep_beta"
         ).result_set
         for pid, alpha, beta in rows:
@@ -2462,6 +2285,12 @@ class TortoiseSDK:
                 "n.baseline_set, n.baseline_source, n.inherited_at",
                 params={"id": pid},
             )
+            # Clear the stale prior from in-memory evidence cache (#652).
+            # set_point_baseline writes (alpha, beta) into self._evidence
+            # unconditionally, and _hydrate_evidence is additive-only — so
+            # the stale entry survives the graph-level remove and gets
+            # re-applied by ep.run(evidence=self._evidence).
+            self._evidence.pop(pid, None)
             self._mark_dirty([pid])
 
         for pid, sources in point_sources.items():
@@ -2661,9 +2490,7 @@ class TortoiseSDK:
                 room=item.get("room", ""),
                 content_hash=ch,
             )
-            # GAP-07 (partially closed by #432 _emit_event — graph mutations
-            # now emit :GraphEvent; this EventRecorded path is session-capture
-            # provenance and stays separate)
+            # GAP-07: emit EventRecorded for provenance
             try:
                 proj.apply({
                     "type": "EventRecorded",
@@ -3767,15 +3594,11 @@ class TortoiseSDK:
         from .exceptions import ControlPlaneError
         allowed = {
             "name", "tier", "stripe_customer_id", "subscription_id",
-            "backup_enabled", "max_users", "max_teams", "max_graphs",
+            "backup_enabled", "max_users", "max_graphs",
             # #329 relief path: quota limits settable via the control plane so
             # a team at cap can be upgraded (no REST surface exists yet — the
             # fields are SDK/registry-level; get_current_team honors them).
             "max_points", "max_api_keys", "max_sessions",
-            # #310 (Task 4b): billing mirror fields — the webhook/checkout
-            # paths write these directly; the control plane may also set them.
-            "subscription_status", "current_period_end", "grace_until",
-            "customer_email",
         }
         invalid = set(fields.keys()) - allowed
         if invalid:
@@ -3991,12 +3814,34 @@ class TortoiseSDK:
 
         hash_api_key() embeds a per-key random salt ("salt:hash"), so we can
         NOT look up by exact hash match — the lookup hash would never equal the
-        stored hash (same root cause as #130). Instead fetch all candidate
-        rows of the label and verify each stored hash against the plaintext.
-        The registry is small (teams × keys × invites), so a scan is fine.
+        stored hash (same root cause as #130).
+
+        #687: For APIKey nodes, we short-circuit the O(keys) scan by filtering
+        on key_prefix (key[:10] = "tt_<8 hex chars>"). The key_prefix index
+        (created in _ensure_registry_indexes) makes this O(1) per lookup.
+        Falls back to full scan for legacy provision_tenant keys whose
+        key_prefix was set to team_id[:8] (which won't match token[:10]).
         """
         from tortoise.auth import verify_api_key
         reg = self._get_registry()
+
+        # #687: indexed key_prefix lookup avoids O(keys) PBKDF2 scan
+        if label == "APIKey" and plaintext.startswith("tt_"):
+            prefix = plaintext[:10]
+            rows = reg.query(
+                f"MATCH (n:{label}) WHERE n.key_prefix = $prefix "
+                f"RETURN n.{prop}, properties(n)",
+                params={"prefix": prefix},
+            ).result_set
+            out = []
+            for stored_hash, props in rows:
+                if verify_api_key(plaintext, stored_hash):
+                    out.append(props)
+            if out:
+                return out
+            # Fall through to full scan for legacy provision_tenant keys
+            # (key_prefix = team_id[:8] won't match token[:10] = "tt_<8 hex>")
+
         rows = reg.query(
             f"MATCH (n:{label}) RETURN n.{prop}, properties(n)"
         ).result_set

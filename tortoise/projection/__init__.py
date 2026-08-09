@@ -14,8 +14,12 @@ from __future__ import annotations
 
 import re
 import os
+import logging
+from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Protocol, runtime_checkable
+
+logger = logging.getLogger(__name__)
 
 # P0 guard (#99): bulk graph-wipe classifier. Restored here in #49 Phase 2 —
 # the guard was lost from this (live) module during the v3.0 ontology rewrite
@@ -135,14 +139,14 @@ def _apply_one(points: dict[str, dict], ev: dict) -> None:
             if ev.get("new_context") is not None and ev.get("projection_version", 0) < 2:
                 p["context"] = ev["new_context"]
     elif t == "PointRetracted":
-        # #432 Task 2: retraction is a TOMBSTONE, not a deletion — the point
-        # stays in the projection with status='retracted' (queryable with a
-        # filter) instead of being popped. No-op when the id is absent (e.g.
-        # merged-away points): no KeyError, no phantom resurrection. NOT
-        # version-gated — re-folding a pre-change log under this code yields
-        # tombstones (intended, tested behavior change; #689).
-        if ev["id"] in points:
-            points[ev["id"]]["status"] = "retracted"
+        # #689: tombstone instead of hard delete — retracted content stays
+        # recoverable via raw graph queries. Historical data loss prior to
+        # this change is irreversible (already-hard-deleted points cannot
+        # be reconstructed from the event log alone — the content existed
+        # only in the projection, and the projection deleted it).
+        p = points.get(ev["id"])
+        if p:
+            p["status"] = "retracted"
     elif t == "PointsMerged":
         for mid in ev.get("merge_ids", []):
             points.pop(mid, None)
@@ -157,16 +161,9 @@ def fold(events: list[dict]) -> dict[str, dict]:
 
 
 def split(points: dict[str, dict]) -> tuple[list[dict], list[dict]]:
-    """Partition into (statement points, operator points).
-
-    #432 Task 2: retracted points (status='retracted') are EXCLUDED from the
-    statements list — retracted != active statement (default-visible surface
-    stays clean; tombstones remain queryable via fold / inclusion filters).
-    """
+    """Partition into (statement points, operator points)."""
     statements, operators = [], []
     for p in points.values():
-        if p.get("status") == "retracted":
-            continue
         (operators if p.get("operator") else statements).append(p)
     return statements, operators
 
@@ -461,7 +458,7 @@ class FalkorProjection(
                 ev.pop("new_context", None)
             self._revise_point(ev, set_updated_at=True)
         elif t == "PointRetracted":
-            self._delete(ev["id"])
+            self._retract(ev["id"])
         elif t == "PointsMerged":
             for mid in ev.get("merge_ids", []):
                 self._delete(mid)
@@ -499,13 +496,90 @@ class FalkorProjection(
         replaying through apply(). A reversed order (extractedFrom-bearing
         point before its SourceCreated) can diverge Source node version/id
         properties — known, documented limitation.
+
+        #548 SDK parity: before wiping, snapshot the current graph to preserve
+        SDK-created points that have no corresponding event in any .jsonl file.
+        These are injected as synthetic PointAdded/OperatorAdded events before
+        the JSONL replay so the two-pass logic handles them identically.
         """
         import os
         from tortoise.log import EventLog
+
+        # ── #548: snapshot existing graph BEFORE wiping ──────────────
+        # SDK-created points written via Cypher may have no corresponding
+        # event in the JSONL log. Snapshot them now so they survive the
+        # wipe+replay cycle.
+        synthetic_events: list[dict] = []
+        try:
+            rows = self.g.query(
+                "MATCH (n:Point) RETURN properties(n)"
+            ).result_set
+            existing_points = {}
+            for r in rows:
+                props = r[0]
+                pid = props.get("id")
+                if pid:
+                    existing_points[pid] = props
+            if existing_points:
+                # Collect all JSONL events to find which IDs are already
+                # represented in the log.
+                log_point_ids: set[str] = set()
+                for fname in sorted(os.listdir(log_dir)):
+                    if fname.endswith('.jsonl'):
+                        for ev in EventLog(os.path.join(log_dir, fname)).read_all():
+                            if ev.get("type") in ("PointAdded", "OperatorAdded"):
+                                p = ev.get("point", {})
+                                if isinstance(p, dict) and p.get("id"):
+                                    log_point_ids.add(p["id"])
+                # Generate synthetic events for graph-only points
+                for pid, props in existing_points.items():
+                    if pid in log_point_ids:
+                        continue  # log already covers this point
+                    # Strip volatile properties that are recomputed on replay
+                    clean = {k: v for k, v in props.items()
+                             if k not in ("embedding", "content_hash",
+                                          "updatedAt", "_nid", "_graph_id")}
+                    is_op = bool(props.get("is_operator") or props.get("op_type"))
+                    ev_type = "OperatorAdded" if is_op else "PointAdded"
+                    if is_op:
+                        # Reconstruct operator.inputs from graph edges
+                        inputs: list[str] = []
+                        try:
+                            op_type_val = props.get("op_type", "IMPL")
+                            edge_rel = "hasPart" if op_type_val not in ("IMPL", "NAND") else op_type_val
+                            edge_rows = self.g.query(
+                                f"MATCH (n:Point {{id:$id}})-[r:{edge_rel}]->(m:Point) "
+                                f"RETURN m.id ORDER BY r.idx",
+                                params={"id": pid},
+                            ).result_set
+                            inputs = [er[0] for er in edge_rows]
+                        except Exception:
+                            pass  # edge query may fail on corrupt graphs
+                        clean["operator"] = {"op_type": props.get("op_type", "IMPL"),
+                                             "inputs": inputs}
+                        # Operators may not store 'content' as a node property;
+                        # _upsert_point_props requires it — synthesize fallback.
+                        if "content" not in clean:
+                            clean["content"] = (
+                                f"{props.get('op_type', 'IMPL')}"
+                                f"({', '.join(inputs)})")
+                    # Ensure pointKind is present (operators often lack it)
+                    if "pointKind" not in clean:
+                        clean["pointKind"] = ""
+                    synthetic_events.append({
+                        "type": ev_type,
+                        "point": clean,
+                        "projection_version": 2,
+                    })
+        except Exception:
+            pass  # Graph may be corrupt — skip snapshot; JSONL replay is best-effort
+
+        # ── Wipe + rebuild ──────────────────────────────────────────
         self.g.query("MATCH (n) DETACH DELETE n")
 
-        # Collect all events from all files
-        events = []
+        # Collect all events from all files (synthetic first so their nodes
+        # exist before JSONL events that may reference them)
+        events = list(synthetic_events)
         for fname in sorted(os.listdir(log_dir)):
             if fname.endswith('.jsonl'):
                 events.extend(EventLog(os.path.join(log_dir, fname)).read_all())
@@ -537,11 +611,10 @@ class FalkorProjection(
             if t in ("PointAdded", "OperatorAdded"):
                 continue  # already handled in pass 1a
             elif t == "PointRetracted":
-                # Graceful id resolution — skip if neither id nor event_id
-                # present (malformed/legacy event, issue #325)
+                # #689: tombstone instead of hard delete
                 rid = ev.get("id") or ev.get("event_id")
                 if rid is not None:
-                    self._delete(rid)
+                    self._retract(rid)
             elif t == "PointsMerged":
                 for mid in ev.get("merge_ids", []):
                     self._delete(mid)
@@ -924,23 +997,56 @@ class FalkorProjection(
         Returns (factors, evidence) where:
           factors = [(op_id, op_type, [input_ids], weight), ...]
           evidence = {claim_id: (alpha, beta), ...}
+
+        Uses batch I/O (2 queries regardless of operator count) to avoid
+        the N+1 query pattern that timed out on graphs with 1,800+ operators
+        (#400). Operators with <2 inputs are excluded with a warning.
         """
-        rows = self.g.query(
+        # Query 1: all operator IDs and types (single query, O(1) round-trip).
+        # #689: retracted operators never feed EP factors.
+        op_rows = self.g.query(
             "MATCH (o:Point) WHERE o.is_operator = true "
+            "AND (o.status IS NULL OR o.status <> 'retracted') "
             "RETURN o.id, o.op_type"
         ).result_set
 
+        # Query 2: all inputs for all operators in one batch query (#400)
+        # Avoids the N+1 pattern: previously this was a per-operator loop.
+        # #689: retracted claims never appear as operator inputs (an operator
+        # whose inputs all retract becomes degenerate and is excluded below).
+        input_rows = self.g.query(
+            "MATCH (o:Point)-[r:IMPL|NAND]->(c:Point) "
+            "WHERE o.is_operator = true "
+            "AND (c.status IS NULL OR c.status <> 'retracted') "
+            "RETURN o.id, c.id "
+            "ORDER BY o.id, c.id"
+        ).result_set
+
+        # Aggregate input IDs per operator
+        op_inputs: dict[str, list[str]] = defaultdict(list)
+        op_types: dict[str, str] = {}
+        for op_id, op_type in op_rows:
+            op_types[op_id] = op_type
+        for op_id, claim_id in input_rows:
+            op_inputs[op_id].append(claim_id)
+
         factors = []
-        for op_id, op_type in rows:
-            input_rows = self.g.query(
-                "MATCH (o:Point {id:$oid})-[r:IMPL|NAND]->(c:Point) "
-                "RETURN c.id ORDER BY c.id",
-                params={"oid": op_id},
-            ).result_set
-            input_ids = [r[0] for r in input_rows]
+        degenerate_count = 0
+        for op_id, op_type in op_types.items():
+            input_ids = op_inputs.get(op_id, [])
             if len(input_ids) >= 2:
                 weight = 3.0 if op_type == "NAND" else 1.0
                 factors.append((op_id, op_type, input_ids, weight))
+            else:
+                degenerate_count += 1
+
+        if degenerate_count > 0:
+            logger.warning(
+                "extract_svbp_factors: %d operators with <2 inputs excluded "
+                "from EP (possible silent edge drop). Run operator validation "
+                "to identify affected operators.",
+                degenerate_count,
+            )
 
         return factors, {}
 

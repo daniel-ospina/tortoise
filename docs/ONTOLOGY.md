@@ -73,13 +73,13 @@ Each layer answers a different question. All four are live mechanisms.
 | Predicate | From → To | Direction | Cardinality | Standard alignment | Meaning |
 |-----------|-----------|-----------|-------------|--------------------|---------|
 | `IMPL` | Point → Point | default bidirectional; optional unidirectional | N-ary | Epistemic (EP confidence) | A supports/implies B. Direction is an explicit operator flag — **default bidirectional**, option to declare unidirectional (source→target only). Not inferred from label. |
-| `NAND` | Point → Point | default bidirectional; optional unidirectional | N-ary | Epistemic (EP confidence) | A contradicts B. Same direction model as IMPL — default mutual contradiction (bidirectional), optional unidirectional. |
+| `NAND` | Point → Point | **default unidirectional (directed attack)**; optional bidirectional | N-ary | Epistemic (EP confidence) | A attacks/contradicts B. **Directed by default (#753):** the attacker's truth penalizes the target with no back-pressure (Dung-style attack). Explicit `bidirectional` declares a genuine mutual contradiction. |
 | `hasPart` | Point → Point | bidirectional (composition) | N-ary | Structural via operator label | A contains B (parts/whole cascade). |
 | `CORRECTS` | Point → Point | unidirectional | 1→1 | — | New point **corrects/replaces** an outdated point (supersession). Marks target `outdated: true`; all edges transfer from old to new. Created by `supersede_point` / `invalidate_point` (sdk.py:448-485). |
 
 > **Supersession semantics:** `CORRECTS` is the structural replacement edge. `supersede_point(old, new)` = mark old `outdated:true` + create `(new)-[:CORRECTS]->(old)` + transfer all old edges (IMPL/NAND/hasPart operators + structural edges) to new. `invalidate_point(id, corrected_by)` = mark outdated + CORRECTS only (no edge transfer). Old point retains only the CORRECTS edge as provenance.
 
-> **Direction flag (code note):** operator direction is carried as an explicit flag on the operator Point. Current implementation (ep.py) derives bidirectionality from label (hasPart/partOf → bidirectional; else directional for IMPL; NAND always bidirectional) — this is being migrated to an explicit `direction` flag with default bidirectional. See follow-up issue.
+> **Direction flag (code note):** operator direction is an explicit flag on the operator Point. Creation default is per-op-type (#753): **NAND → `unidirectional` (directed attack)**, IMPL → `bidirectional`. Pre-migration operators lacking the property are read as bidirectional (legacy semantics preserved). Explicit `bidirectional` NAND = mutual contradiction.
 
 ### §3.2 Point ↔ Entity (Cross — Semantic ↔ Epistemic)
 
@@ -149,7 +149,7 @@ Per-type edges (chosen over single polymorphic edge — FalkorDB matrix-per-type
 | `produces` | Event → Object | unidirectional | 1→many | `schema:result` | Output artifact |
 | `uses` | Event → Object | unidirectional | N-ary | `prov:used` | Input consumed |
 | `nextEvent` | Event → Event | unidirectional | 1→1 | — | Sequencing (Graphiti NextEpisode equivalent) — planned |
-| `op: IMPL/NAND` | Event → Point | default bidirectional; optional unidirectional | N-ary | Epistemic | Outcome influence on belief (epistemic) |
+| `op: IMPL/NAND` | Event → Point | default per-op-type: NAND unidirectional (#753), IMPL bidirectional | N-ary | Epistemic | Outcome influence on belief (epistemic) |
 
 > **#531 — canonical Event→Point pattern (`humanApproval`):** a human approval of a planning artifact is recorded as an Event (`eventKind: humanApproval`) + a decision Point (`pointKind: humanApproval`). The Event carries occurrence provenance (approver `performs`, artifact `uses`, claim `aboutPoint`, decision `produces`); the decision Point is a live epistemic claim that seeds the grounding a-vector and receives an EP evidence prior `Beta(10,1)` so dependent claims strengthen. Fan-out is `-[:IMPL {direction: "unidirectional", label: "approvedBy"}]->` per approved claim — deliberately unidirectional so claim weakness never back-propagates into the approval. No stored `approved` status on Objects — approval is derived from the event stream at query time. Worked example (`file_human_approval`, #531):
 >
@@ -418,9 +418,9 @@ Operator:      (op-123)                                   ← mitigation anchor
 | hasPart | IMPL | Bidirectional cascade (parts↔whole) | bidirectional | Epic hasPart Issue |
 | addresses | IMPL | Unidirectional (A supports B) | unidirectional | Feature addresses Need |
 | supports | IMPL | Unidirectional (A supports B) | unidirectional | Evidence supports Claim (CLI default label for IMPL, `__main__.py:81`) |
-| opposes | NAND | Bidirectional by default, optional unidirectional | declared by pack | Feature competesWith Competitor |
+| opposes | NAND | **Unidirectional by default (directed attack)**, optional bidirectional | declared by pack | Feature competesWith Competitor |
 
-> **Direction is an explicit operator flag, default bidirectional.** The table above shows typical pack declarations; any pack may override the default with an explicit `direction: unidirectional` on the relation.
+> **Direction is an explicit operator flag, default per-op-type (#753): NAND → unidirectional (directed attack), IMPL → bidirectional.** The table above shows typical pack declarations; a pack may override with an explicit `direction` value — explicit `bidirectional` NAND declares a genuine mutual contradiction.
 
 ### Pack Relation Declarations
 

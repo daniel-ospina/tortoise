@@ -18,8 +18,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
-from fastapi.responses import JSONResponse, RedirectResponse
-from tortoise.security import redact_error
+from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from contextlib import asynccontextmanager
@@ -35,6 +34,7 @@ from tortoise.analytics import (  # #528 server analytics (fail-safe, no-op with
 )  # E1–E8 session endpoints (D1)
 import hmac
 
+from tortoise.log import EventLog
 from tortoise.sdk import TortoiseSDK, _content_hash
 from tortoise.mcp_server import create_http_app
 from tortoise.hosted_backup import (
@@ -75,10 +75,6 @@ def _make_sdk(*, namespace: str | None = None) -> TortoiseSDK:
 # Built BEFORE _lifespan references it (no unbound reference). Mounted at /mcp
 # — the MCP app carries its own auth/rate-limit/security middleware stack;
 # FastAPI parent middleware does NOT propagate to mounted sub-apps.
-# P1 (code-review): per-team in-flight checkout locks (TOCTOU double-sub guard).
-_CHECKOUT_LOCKS: dict[str, asyncio.Lock] = {}
-
-
 _MCP_ALLOWED_ORIGINS = [
     "https://premiselabs.co",
     "https://app.premiselabs.co",
@@ -93,25 +89,6 @@ mcp_http_app = create_http_app(
     allowed_hosts=_MCP_ALLOWED_HOSTS,
     rate_limit=100,
 )
-
-
-def _iter_registered_teams() -> list[dict]:
-    """List registered teams from the control_plane registry (best-effort).
-
-    Used by the event-retention sweep (#432 Task 7) and boot reconcile.
-    Returns [] on any failure — the sweep is best-effort.
-    Used by the billing boot reconcile (#310 Task 8). Returns [] on failure.
-    """
-    try:
-        from tortoise.sdk import TortoiseSDK
-
-        sdk = TortoiseSDK()
-        rows = sdk._get_registry().query(
-            "MATCH (t:Team) RETURN t.id, t.name"
-        ).result_set
-        return [{"team_id": r[0], "name": r[1] if len(r) > 1 else None} for r in rows]
-    except Exception:  # noqa: BLE001
-        return []
 
 
 @asynccontextmanager
@@ -192,48 +169,6 @@ async def _lifespan(app):
                 _boot_gc_drill_graphs(reg_sdk._get_proj().db)
         except Exception as exc:  # noqa: BLE001 — never crash the app
             _logger.warning("backup watcher could not start: %s", exc)
-
-        # #310 Task 8: boot reconcile — repairs billing-mirror drift for teams
-        # with subscription_id OR stripe_customer_id (missed-first-event blind
-        # spot). NEVER awaited before the lifespan yields (review fix 3, #545
-        # lesson: a delayed bind breaks Fly health-grace/release_command) —
-        # daemon thread + hard wall-clock budget + per-call Stripe timeouts; a
-        # hanging Stripe API must not extend startup. Non-fatal: any failure is
-        # logged (redacted) and the app boots.
-        try:
-            import time as _time
-
-            def _boot_reconcile_billing() -> None:
-                deadline = _time.monotonic() + 20.0  # hard budget
-                try:
-                    from tortoise.billing import reconcile_team
-
-                    teams = _iter_registered_teams()
-                    for team in teams:
-                        if _time.monotonic() > deadline:
-                            _logger.warning(
-                                "billing reconcile: budget exhausted — %d teams skipped", len(teams))
-                            break
-                        try:
-                            summary = reconcile_team(
-                                _make_sdk(namespace="registry"), team["team_id"])
-                            if summary.get("action") not in ("noop", None):
-                                _logger.info(
-                                    "billing reconcile: %s %s",
-                                    team["team_id"], summary.get("action"))
-                        except Exception as exc:  # noqa: BLE001
-                            # Unknown price / outage / config — keep stored
-                            # tier + status; drift repaired on the next event.
-                            _logger.warning(
-                                "billing reconcile: team %s skipped (%s)",
-                                team.get("team_id"), redact_error(exc))
-                except Exception as exc:  # noqa: BLE001
-                    _logger.warning("billing reconcile: pass failed (%s)", redact_error(exc))
-
-            threading.Thread(
-                target=_boot_reconcile_billing, name="billing-reconcile", daemon=True).start()
-        except Exception as exc:  # noqa: BLE001
-            _logger.warning("billing reconcile: could not start (%s)", redact_error(exc))
         yield
 
 
@@ -332,7 +267,7 @@ class AnalyticsMiddleware(BaseHTTPMiddleware):
 class RateLimitMiddleware(BaseHTTPMiddleware):
     """In-memory token bucket rate limiter. 100 Points/min per API key."""
 
-    SKIP = {"/health", "/health/ready", "/docs", "/openapi.json", "/v1/register", "/webhooks/stripe"}
+    SKIP = {"/health", "/health/ready", "/docs", "/openapi.json", "/v1/register"}
 
     def __init__(self, app, max_per_minute=100):
         super().__init__(app)
@@ -451,6 +386,57 @@ async def _async_audit(
     )
 
 
+# ── Per-team Event Log (tenant replay surface, #692) ────────────
+
+
+def _team_events_dir() -> Path:
+    """Base directory for per-team event logs.
+
+    Defaults to ``/data/events``. Override with ``TORTOISE_EVENTS_DIR``.
+    """
+    from pathlib import Path
+    env = os.environ.get("TORTOISE_EVENTS_DIR", "/data/events")
+    return Path(env)
+
+
+def _event_log_for(team_id: str) -> EventLog:
+    """Return the :class:`EventLog` for *team_id*.
+
+    The log lives at ``<events_dir>/<team_id>/events.jsonl``.
+    Directories are created automatically on first append.
+    """
+    return EventLog(_team_events_dir() / team_id / "events.jsonl")
+
+
+def _log_team_event(team_id: str, event_type: str, **payload) -> dict | None:
+    """Append a structured event to the team's event log.
+
+    Every event carries a timestamp, event type, team_id, and an
+    auto-generated event_id.  Returns the event dict that was written,
+    or ``None`` if the write failed (best-effort — never crashes the
+    parent mutation).
+    """
+    from tortoise.ids import now_iso, ulid
+    event = {
+        "event_id": ulid(),
+        "ts": now_iso(),
+        "type": event_type,
+        "team_id": team_id,
+        **payload,
+    }
+    try:
+        _event_log_for(team_id).append(event)
+        return event
+    except OSError:
+        # Best-effort — disk full, events dir not writable, etc.
+        # Never let event-logging failures break the mutation response.
+        _logger.warning(
+            "event log write failed for team %s (type=%s)",
+            team_id, event_type, exc_info=True,
+        )
+        return None
+
+
 def _check_internal(request: Request) -> None:
     """Verify internal auth — only Edge Functions call this."""
     if not _INTERNAL_KEY:
@@ -505,16 +491,13 @@ async def provision_tenant(request: Request):
                 id: $id, name: $name, tier: 'free',
                 created_at: $now, backup_enabled: false,
                 max_users: $max_users, max_graphs: $max_graphs,
-                max_api_keys: $max_keys, max_points: $max_points,
-                max_sessions: $max_sessions, ops_allowance: $ops, graph_size_cap: $nodes
+                max_api_keys: $max_keys, ops_allowance: $ops, graph_size_cap: $nodes
             })
             """,
             params={"id": team_id, "name": team_name, "now": now,
                     "max_users": lim["max_users_per_team"],
                     "max_graphs": lim["max_graphs_per_team"],
                     "max_keys": lim["max_api_keys"],
-                    "max_points": lim["max_graph_nodes"],
-                    "max_sessions": 1000,
                     "ops": lim["included_write_ops_per_month"],
                     "nodes": lim["max_graph_nodes"]},
         )
@@ -646,7 +629,7 @@ async def health_security():
 
 # ── Auth Dependency ────────────────────────────────────────────────
 
-SKIP_AUTH = {"/health", "/health/ready", "/docs", "/openapi.json", "/v1/register", "/webhooks/stripe"}
+SKIP_AUTH = {"/health", "/health/ready", "/docs", "/openapi.json", "/v1/register"}
 
 
 async def _audit_auth_failure(request: Request, reason: str) -> None:
@@ -713,14 +696,39 @@ async def get_current_team(request: Request) -> dict:
         from tortoise.auth import verify_api_key
         team_id = key_id = None
         created_by = None
+        # key_result already holds the prefix-filtered (+ expiry-filtered, #742)
+        # candidate keys from the lookup above — verify each against the token.
         for k_team_id, k_id, stored_hash, k_created_by in key_result:
             if verify_api_key(token, stored_hash):
                 team_id, key_id = k_team_id, k_id
                 created_by = k_created_by
                 break
+        # Fallback: legacy provision_tenant keys (key_prefix=team_id[:8])
+        # won't match the token[:10] prefix. In that case scan all keys.
+        if team_id is None:
+            key_result = sdk._get_registry().query(
+                "MATCH (k:APIKey) WHERE k.revoked_at IS NULL "
+                "RETURN k.team_id, k.id, k.key_hash, k.created_by"
+            ).result_set
+            for k_team_id, k_id, stored_hash, k_created_by in key_result:
+                if verify_api_key(token, stored_hash):
+                    team_id, key_id = k_team_id, k_id
+                    created_by = k_created_by
+                    break
         if team_id is None:
             await _audit_auth_failure(request, "invalid_key")
             raise HTTPException(status_code=401, detail="Invalid API key")
+        # #685: track last_used_at for key hygiene/rotation — write-through on
+        # every successful auth. The registry graph is small (teams × keys) and
+        # a single indexed SET on an already-fetched node adds negligible overhead.
+        # Best-effort only: a telemetry write must never gate authentication.
+        try:
+            sdk._get_registry().query(
+                "MATCH (k:APIKey {id: $id}) SET k.last_used_at = $now",
+                params={"id": key_id, "now": datetime.now(timezone.utc).isoformat()},
+            )
+        except Exception:
+            pass
         # #528: activation telemetry — first successful API auth per team.
         # Dedup is in-process + thread-safe (single-worker caveat noted in
         # tortoise/analytics.py); distinct_id is the key creator's user UUID
@@ -733,47 +741,32 @@ async def get_current_team(request: Request) -> dict:
             )
         # #329: fetch quota limits in the SAME fetch as tier (one round-trip;
         # mirrors quota.resolve_team_limits so REST and MCP see identical limits).
-        # #310: billing mirror fields (subscription_status, current_period_end,
-        # grace_until, customer_email) read in the same round-trip for lazy grace.
         team = sdk._get_registry().query(
             # #329: quota fields read with tier in one round-trip. max_teams is
             # NOT read — multi-team is a user capability, not a tier field (D1).
             "MATCH (t:Team {id: $id}) RETURN t.tier, t.max_users, t.max_graphs, "
-            "t.max_points, t.max_api_keys, t.max_sessions, "
-            "t.subscription_status, t.current_period_end, t.grace_until, t.customer_email",
+            "t.max_points, t.max_api_keys, t.max_sessions",
             params={"id": team_id},
         )
         row = team.result_set[0] if team.result_set else None
         if row:
-            tier, mu, mg, mp, mak, ms, sub_status, period_end, grace_until, customer_email = row
+            tier, mu, mg, mp, mak, ms = row
         else:
-            tier = mu = mg = mp = mak = ms = None
-            sub_status = period_end = grace_until = customer_email = None
-        # #310 lazy grace: past_due past grace_until degrades to free at request
-        # time; never above stored tier (billing.effective_tier).
-        from tortoise.billing import effective_tier
-        eff_tier = effective_tier({"tier": tier or "free",
-                                   "subscription_status": sub_status,
-                                   "grace_until": grace_until})
-        request.state.team_id = team_id
-        request.state.tier = eff_tier
-        # #310 GAP-B (review fix 2): None limits resolve from tier_limits(eff_tier)
-        # — NEVER quota.DEFAULT_MAX_POINTS/API_KEYS (stale 1000/20 consts that
-        # contradicted pricing.json). max_points fallback = max_graph_nodes (the
-        # points quota counter counts graph nodes). REST mirrors
-        # quota.resolve_team_limits so REST and MCP see identical limits.
+            tier, mu, mg, mp, mak, ms = ("free", None, None, None, None, None)
         from tortoise.pricing import tier_limits
-        lim = tier_limits(eff_tier)
-        return {"team_id": team_id, "key_id": key_id, "tier": eff_tier,
-                "max_users": mu if mu is not None else (lim["max_users_per_team"] or 1),
+        request.state.team_id = team_id
+        request.state.tier = tier or "free"
+        lim = tier_limits(tier or "free")
+        # max_teams removed: multi-team is a USER capability, not a tier field
+        # (per-team billing; tier limits come from pricing.json)
+        return {"team_id": team_id, "key_id": key_id, "tier": tier or "free",
+                # max_users: preserve None from pricing (Team tier = unlimited)
+                "max_users": mu if mu is not None else lim["max_users_per_team"],
                 "max_graphs": mg if mg is not None else lim["max_graphs_per_team"],
+                # points counter counts graph nodes → max_graph_nodes (#310 GAP-B)
                 "max_points": int(mp) if mp is not None else lim["max_graph_nodes"],
                 "max_api_keys": int(mak) if mak is not None else lim["max_api_keys"],
-                "max_sessions": int(ms) if ms is not None else 1000,
-                "subscription_status": sub_status,
-                "current_period_end": period_end,
-                "grace_until": grace_until,
-                "customer_email": customer_email}
+                "max_sessions": int(ms) if ms is not None else DEFAULT_MAX_SESSIONS}
     except HTTPException:
         raise
     except Exception:
@@ -783,13 +776,25 @@ async def get_current_team(request: Request) -> dict:
 def _check_team_limit(team: dict, resource: str) -> None:
     """Enforce per-team limits. Raises 402 (payment required) when at capacity.
 
-    resource: 'points' | 'api_keys' | 'sessions'
+    resource: 'points' | 'api_keys' | 'sessions' | 'users' | 'graphs'
 
-    #329: delegates to the shared fail-closed quota helper — counting errors
-    now surface as 500 (QuotaCheckError) instead of silently passing, and the
-    limits dict is the authenticated team dict (resolved once by
-    get_current_team), matching MCP semantics.
-    """
+    Fail-closed decision (#686)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    Counting errors raise HTTP 500 (QuotaCheckError) — never a silent pass.
+
+    Rationale:
+    - Money at stake: fail-open lets free teams exceed paid limits during a DB
+      outage — direct revenue risk.
+    - Fail-closed is the secure default: when you can't verify, don't grant.
+    - Customer harm is bounded: a DB outage that breaks count queries typically
+      also breaks the actual write (same store), so we're failing fast.
+    - Alerting mitigates ops risk: every QuotaCheckError is logged at ERROR
+      level with team_id and resource, visible in production dashboards.
+
+    #329: delegates to the shared fail-closed quota helper.
+    #683: the limits dict is the authenticated team dict (resolved once by
+    get_current_team), matching MCP semantics — includes max_users/max_graphs.
+    #686: explicit decision documentation + ERROR-level alerting on failures.    """
     team_id = team.get("team_id")
     if not team_id:
         return  # internal/no-team context — skip
@@ -800,8 +805,24 @@ def _check_team_limit(team: dict, resource: str) -> None:
     except QuotaExceededError as e:
         raise HTTPException(status_code=402, detail=str(e))
     except QuotaCheckError as e:
+        _logger.error(
+            "quota check failed (fail-closed): team=%s resource=%s error=%s",
+            team_id, resource, str(e),
+        )
         raise HTTPException(status_code=500, detail=f"Quota check failed: {e}")
 
+
+def _record_write_op(team: dict) -> None:
+    """Best-effort write-op metering for overage billing (#681).
+
+    Call AFTER a successful write. Non-fatal — metering failures are logged
+    and swallowed; they never block the caller.
+    """
+    try:
+        from tortoise.metering import record_write_ops
+        record_write_ops(team.get("team_id", ""), tier=team.get("tier"))
+    except Exception:
+        pass  # best-effort — never block the write path
 
 
 
@@ -848,34 +869,12 @@ class TeamInfoResponse(BaseModel):
     max_users: int
     max_graphs: int | None
     max_teams: int | None
-    # #310 (4a/4b): the enforced limits + billing mirror surface for the
-    # dashboard (upgrade CTA, plan/status/limits display).
-    max_api_keys: int | None = None
-    max_points: int | None = None
-    max_sessions: int | None = None
-    subscription_status: str | None = None
-    current_period_end: float | None = None
-    grace_until: float | None = None
-    customer_email: str | None = None
     point_count: int = 0
-    # #310 (Task 9): server-resolved default checkout price (pro monthly) so
-    # the dashboard never hardcodes Stripe price ids (env-driven catalog).
-    checkout_price_id: str | None = None
-
-
-# ── Billing: Checkout + Portal request/response models (#310, Task 5) ───────
-
-class CheckoutRequest(BaseModel):
-    """POST /v1/billing/checkout body — the price id is the only input."""
-    price_id: str = Field(..., min_length=1, max_length=128)
-
-
-class CheckoutResponse(BaseModel):
-    checkout_url: str
-
-
-class PortalResponse(BaseModel):
-    portal_url: str
+    write_ops_used: int = 0
+    write_ops_limit: int = 0
+    write_ops_period: str = ""
+    overage_eligible: bool = False
+    overage_cost_usd: float | None = None
 
 
 class CreateKeyResponse(BaseModel):
@@ -1018,6 +1017,17 @@ async def create_point(body: CreatePointRequest, request: Request, team: dict = 
         request, team["team_id"], "point_create",
         resource_type="point", resource_id=result.get("id"),
     )
+    # Metering (#681): best-effort write-op count for overage billing.
+    _record_write_op(team)
+
+    # Per-team event log for tenant replay (#692)
+    _log_team_event(
+        team["team_id"], "point_created",
+        point_id=result.get("id"),
+        kind=body.kind,
+        content_preview=body.content[:200],
+        tags=body.tags,
+    )
 
     return {
         "id": result["id"],
@@ -1026,37 +1036,6 @@ async def create_point(body: CreatePointRequest, request: Request, team: dict = 
         "created_at": result.get("createdAt", result.get("created_at", "")),
     }
 
-
-@app.get("/v1/events")
-async def events_poll(
-    after: str | None = None,
-    types: str | None = None,
-    limit: int = Query(100, ge=1, le=1000),
-    team: dict = Depends(get_current_team),
-):
-    """Poll graph/claim events after an opaque cursor (at-least-once contract).
-
-    Clients must be idempotent on replay. Expired cursor → 410 (replay from
-    tail); malformed cursor → 400. Team scoping comes from auth + the SDK
-    namespace — never client input.
-    """
-    sdk = _make_sdk(namespace=team["team_id"])
-    type_list = [t.strip() for t in (types or "").split(",") if t.strip()]
-    try:
-        result = sdk.events_poll(after=after, types=type_list or None, limit=limit)
-    except ValueError as e:
-        msg = str(e)
-        if "cursor expired" in msg:
-            raise HTTPException(
-                status_code=410,
-                detail="cursor expired — replay from tail (after= omitted)",
-            )
-        if "invalid cursor" in msg:
-            raise HTTPException(status_code=400, detail="invalid cursor")
-        if "unknown event type" in msg:
-            raise HTTPException(status_code=400, detail=msg)
-        raise HTTPException(status_code=400, detail=str(e))
-    return result
 
 @app.get("/v1/points")
 async def list_points(
@@ -1074,11 +1053,6 @@ async def list_points(
     sdk = _make_sdk(namespace=team["team_id"])
     proj = sdk._get_proj()
     conditions = ["(n.is_operator IS NULL OR n.is_operator = false)"]
-    # #432 Task 2: retracted points (status='retracted') are EXCLUDED from the
-    # default listing surface — tombstone contract: retrievable by id via
-    # GET /v1/points/{id}, not by list. No include param on REST v1 (surface
-    # minimal).
-    conditions.append("(n.status IS NULL OR n.status <> 'retracted')")
     params: dict = {"limit": limit}
     if kind:
         conditions.append("n.pointKind = $kind")
@@ -1089,6 +1063,8 @@ async def list_points(
         params["tag"] = tag
     else:
         tag_clause = ""
+    # #689: exclude retracted (tombstoned) points from the list endpoint.
+    conditions.append("(n.status IS NULL OR n.status <> 'retracted')")
     query = (
         f"MATCH (n:Point){tag_clause} WHERE "
         + " AND ".join(conditions)
@@ -1110,7 +1086,9 @@ async def get_point(point_id: str, team: dict = Depends(get_current_team)):
     sdk = _make_sdk(namespace=team["team_id"])
     proj = sdk._get_proj()
     rows = proj.g.query(
-        "MATCH (p:Point {id: $id}) RETURN properties(p)",
+        "MATCH (p:Point {id: $id}) "
+        "WHERE p.status IS NULL OR p.status <> 'retracted' "
+        "RETURN properties(p)",
         params={"id": point_id},
     ).result_set
     if not rows:
@@ -1215,24 +1193,26 @@ async def team_info(team: dict = Depends(get_current_team)):
         logging.getLogger("tortoise.api").exception("team_info failed")
         raise HTTPException(status_code=500, detail="Internal server error")
 
+    # Metering (#681): fetch write-op usage for the current billing period.
+    from tortoise.metering import get_current_usage
+    usage = get_current_usage(team["team_id"])
+
     return TeamInfoResponse(
         team_id=team["team_id"],
         tier=team["tier"],
         max_users=team["max_users"],
         max_graphs=team["max_graphs"],
-        # D1: multi-team is a user capability, not a tier field — legacy nodes
-        # may lack the property entirely (pre-existing 500, fixed #663-style).
-        max_teams=team.get("max_teams"),
-        # #310 (4a/4b): enforced limits + billing mirror fields.
-        max_api_keys=team.get("max_api_keys"),
-        max_points=team.get("max_points"),
-        max_sessions=team.get("max_sessions"),
-        subscription_status=team.get("subscription_status"),
-        current_period_end=team.get("current_period_end"),
-        grace_until=team.get("grace_until"),
-        customer_email=team.get("customer_email"),
+        # max_teams removed (D1): multi-team is a user capability, not a tier field.
+        # TeamInfoResponse.max_teams is optional — omit rather than KeyError (pre-existing
+        # 500 on every /v1/team call, exposed by the zero-email signup verification).
+        max_teams=None,
         point_count=point_count,
-        checkout_price_id=_default_checkout_price_id(),    )
+        write_ops_used=usage["write_ops_used"],
+        write_ops_limit=usage["write_ops_limit"],
+        write_ops_period=usage["period"],
+        overage_eligible=usage["overage_eligible"],
+        overage_cost_usd=usage["overage_cost_usd"],
+    )
 
 
 # ── Onboarding: Self-Service Registration (#498) ──────────────────
@@ -1285,30 +1265,18 @@ async def register_user(request: Request, response: Response):
 
     try:
         # Create Team node with email and default onboarding state
-        # #310 GAP-A: tier-derived limits from pricing.json — max_api_keys,
-        # max_points (= max_graph_nodes), max_sessions written at CREATE so a
-        # fresh team is capped by pricing, not the stale 20-key DEFAULT leak.
-        from tortoise.pricing import tier_limits
-        free_lim = tier_limits("free")
         sdk._get_registry().query(
             """
             CREATE (t:Team {
                 id: $id, name: $name, email: $email, tier: 'free',
                 created_at: $now, backup_enabled: false,
-                max_users: $max_users, max_teams: 1, max_graphs: $max_graphs,
-                max_api_keys: $max_keys, max_points: $max_points,
-                max_sessions: $max_sessions,
+                max_users: 1, max_graphs: 1,
                 onboarding_state: $onboarding_state
             })
             """,
             params={
                 "id": team_id, "name": team_name, "email": email,
                 "now": now, "onboarding_state": _json.dumps(DEFAULT_ONBOARDING_STATE),
-                "max_users": free_lim["max_users_per_team"],
-                "max_graphs": free_lim["max_graphs_per_team"],
-                "max_keys": free_lim["max_api_keys"],
-                "max_points": free_lim["max_graph_nodes"],
-                "max_sessions": 1000,
             },
         )
 
@@ -1911,6 +1879,8 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
         request, team["team_id"], "session_capture",
         resource_type="session", resource_id=session_id,
     )
+    # Metering (#681): best-effort write-op count for overage billing.
+    _record_write_op(team)
 
     # #722: report the EFFECTIVE method actually used, not the configured
     # policy. The extraction loop above is the deterministic regex path — the
@@ -1972,6 +1942,37 @@ async def _team_node(team_id: str) -> dict | None:
     if not rows:
         return None
     return rows[0][0]
+
+
+def _team_limits_from_node(team_node: dict) -> dict:
+    """Convert raw Team node properties → limits dict for _check_team_limit.
+
+    Used by endpoints that fetch the Team node directly (create_graph,
+    invite_to_team) rather than via get_current_team. Falls back to
+    tier_limits from pricing.json when a stored value is None/missing.
+    """
+    from tortoise.pricing import tier_limits
+    from tortoise.quota import DEFAULT_MAX_SESSIONS
+    tier = team_node.get("tier", "free")
+    lim = tier_limits(tier)
+    # Fetch each field; use `is None` to preserve None (unlimited) and explicit 0.
+    mu = team_node.get("max_users")
+    mg = team_node.get("max_graphs")
+    mp = team_node.get("max_points")
+    mak = team_node.get("max_api_keys")
+    ms = team_node.get("max_sessions")
+    return {
+        "team_id": team_node["id"],
+        "tier": tier,
+        # max_users/max_graphs: preserve None (unlimited, Team tier) and
+        # fall back to tier_limits when missing (also None for Team tier).
+        "max_users": mu if mu is not None else lim["max_users_per_team"],
+        "max_graphs": mg if mg is not None else lim["max_graphs_per_team"],
+        # points counter counts graph nodes → max_graph_nodes (#310 GAP-B)
+        "max_points": mp if mp is not None else lim["max_graph_nodes"],
+        "max_api_keys": mak if mak is not None else lim["max_api_keys"],
+        "max_sessions": ms if ms is not None else DEFAULT_MAX_SESSIONS,
+    }
 
 
 @app.get("/v1/teams")
@@ -2059,14 +2060,10 @@ async def create_graph(body: dict, user: dict = Depends(get_current_user)):
     team = await _team_node(team_id)
     if team is None:
         raise HTTPException(status_code=404, detail="Unknown team")
-    from tortoise.pricing import tier_limits
-    lim = tier_limits(team.get("tier", "free"))
-    max_graphs = lim["max_graphs_per_team"]
-    if max_graphs is not None:
-        sdk = _make_sdk(namespace="registry")
-        count = sdk.graph_count(team_id)
-        if count >= max_graphs:
-            raise HTTPException(status_code=402, detail="Graph limit reached — upgrade to add more graphs")
+
+    # #683: centralized graph-limit enforcement via fail-closed quota
+    limits = _team_limits_from_node(team)
+    _check_team_limit(limits, "graphs")
 
     sdk = _make_sdk(namespace="registry")
     g = sdk._graph_create(team_id, name, kind="custom")
@@ -2123,25 +2120,20 @@ async def invite_to_team(body: dict, user: dict = Depends(get_current_user)):
 
     sdk = _make_sdk(namespace="registry")
     reg = sdk._get_registry()
-    team = reg.query(
-        "MATCH (t:Team {id:$id}) RETURN t.tier, t.max_users",
+    team_row = reg.query(
+        "MATCH (t:Team {id:$id}) RETURN properties(t)",
         params={"id": team_id},
     ).result_set
-    tier = team[0][0] if team else "free"
+    if not team_row:
+        raise HTTPException(status_code=404, detail="Unknown team")
+    team_node = team_row[0][0]
+    tier = team_node.get("tier", "free")
     if tier != "team":
         raise HTTPException(status_code=402, detail="Invites require the Team tier")
 
-    # max_users gate (tier-driven; Team = unlimited)
-    from tortoise.pricing import tier_limits
-    lim = tier_limits(tier)
-    max_users = lim["max_users_per_team"]
-    if max_users is not None:
-        count = reg.query(
-            "MATCH (m:Membership {team_id:$tid, status:'active'}) RETURN count(m)",
-            params={"tid": team_id},
-        ).result_set[0][0]
-        if count >= max_users:
-            raise HTTPException(status_code=402, detail="Team at user limit — upgrade to invite more")
+    # #683: max_users gate via centralized fail-closed quota (Team tier = unlimited)
+    limits = _team_limits_from_node(team_node)
+    _check_team_limit(limits, "users")
 
     # Invitation node via SDK (token returned once); roles admin/member allowed here
     import uuid as _uuid
@@ -2695,8 +2687,6 @@ _ALLOWED_ANALYTICS_PROPS = {
     "elapsed_from_copy_s", "question_id", "answer", "source", "point_count",
     "session_id", "message_count", "elapsed_time_s", "steps_completed",
     "questions", "step", "error_type",
-    # #310 billing events
-    "plan", "tier", "status",
 }
 
 _ANALYTICS_FALLBACK_PATH = None
@@ -2985,8 +2975,15 @@ def _backup_storage() -> R2Storage:
 
 
 def _require_backup_tier(team: dict) -> None:
-    """Backups are a Pro feature (#296 revenue model). Free tier → 402."""
-    if team.get("tier") in (None, "free"):
+    """Backups gated on pricing.json daily_backups feature flag (#656).
+
+    The allowlist is derived from product/pricing.json (NOT hardcoded) so
+    the gate can never drift from the canonical pricing source.
+    """
+    from tortoise.pricing import daily_backups_enabled
+
+    tier = team.get("tier")
+    if not daily_backups_enabled(tier):
         raise HTTPException(
             status_code=402,
             detail="Backups are a Pro feature — upgrade to enable daily backups",
@@ -3152,7 +3149,8 @@ def _backup_config_safe() -> "BackupConfig | None":
 
 def _alert_store_from(cfg) -> "AlertStore":
     from tortoise import github_issue as gi
-    from tortoise.alert_store import AlertStore, telegram_send
+    from tortoise.alert_store import AlertStore
+    from tortoise.telegram_push import send_message
 
     storage = _backup_storage()
 
@@ -3169,7 +3167,7 @@ def _alert_store_from(cfg) -> "AlertStore":
         return gi.search_open_incident(cfg.gh_repo, cfg.github_issues_pat, kind)
 
     def push_telegram(text: str) -> None:
-        telegram_send(cfg.telegram_bot_token, cfg.telegram_chat_id, text)
+        send_message(cfg.telegram_bot_token, cfg.telegram_chat_id, text)
 
     return AlertStore(
         storage, file_issue=file_issue, close_issue=close_issue,
@@ -3455,186 +3453,88 @@ async def backups_drill(request: Request, body: dict):
     return {"status": "drill_ok", "target_graph": target_graph, **result}
 
 
-# ── Billing: Checkout + Portal endpoints (#310, Task 5) ────────────────
-# Duplicate-subscription guard: TWO layers. Layer 1 is the stored mirror
-# (subscription_status in {active, past_due, trialing} → 409). Layer 2 closes
-# the stale-mirror race (review fix 5): even with a clean mirror, ask Stripe
-# (the money authority) whether the customer already has an active sub before
-# minting a Checkout session.
-
-_BILLING_ACTIVE_STATUSES = ("active", "trialing", "past_due")
-_BILLING_DEFAULT_SUCCESS_URL = "https://app.premiselabs.co/team?session_id={CHECKOUT_SESSION_ID}"
-_BILLING_DEFAULT_CANCEL_URL = "https://app.premiselabs.co/team?checkout=cancelled"
-_BILLING_DEFAULT_PORTAL_RETURN = "https://app.premiselabs.co/team"
+# ── Event Replay Surface (#692) ───────────────────────────────────
 
 
-def _billing_error_to_http(exc: Exception) -> HTTPException:
-    """Map billing exceptions to HTTP responses — degrade, never crash.
+@app.get("/v1/events")
+async def list_events(
+    request: Request,
+    cursor: str | None = None,
+    limit: int = Query(50, ge=1, le=500),
+    team: dict = Depends(get_current_team),
+):
+    """Return recent graph-change events for the authenticated team.
 
-    BillingConfigError (missing STRIPE_* env, lazy by design) → 503;
-    BillingError (bad input like an unknown price id) → 400;
-    StripeAPIError (upstream failure) → 502.
+    **Read-only** — tenants can only see their own team's events.
+    Tenant A can never read tenant B's event log: the file path is derived
+    from the authenticated ``team_id`` inside ``get_current_team``.
+
+    Pagination (reverse-chronological, most-recent-first):
+
+    * First request (no cursor): returns the most recent *limit* events.
+    * The response includes a ``cursor`` field.  Pass it back on the next
+      request to get the next page of older events.
+    * ``has_more`` is ``true`` when there are more events before the
+      returned window.
+
+    Cursor tokens are opaque base64-encoded strings.  They are valid only
+    while the underlying JSONL file is not rotated or compacted.
     """
-    from tortoise.billing import BillingConfigError, BillingError, StripeAPIError
-    if isinstance(exc, BillingConfigError):
-        return HTTPException(status_code=503, detail=str(exc))
-    if isinstance(exc, BillingError):
-        return HTTPException(status_code=400, detail=str(exc))
-    if isinstance(exc, StripeAPIError):
-        return HTTPException(status_code=502, detail=str(exc))
-    return HTTPException(status_code=502, detail=str(exc))
+    tid = team["team_id"]
+    log = _event_log_for(tid)
 
-
-def _billing_customer_email(sdk, team: dict) -> str:
-    """Resolve the billing email via the fallback chain (review fix 1):
-
-    1. ``Team.email`` — set at /v1/register (self-service teams).
-    2. ``APIKey.created_by`` — provision-path teams (created via
-       /internal/provision) have no ``Team.email``; the Edge Function stored
-       the creator on the APIKey node instead. Prefer the key used for THIS
-       request, fall back to any team key.
-    3. 400 last resort — clear message, no crash.
-    """
-    team_id = team["team_id"]
-    row = sdk._get_registry().query(
-        "MATCH (t:Team {id:$id}) RETURN t.email", params={"id": team_id}
-    ).result_set
-    if row and row[0][0]:
-        return row[0][0]
-    key_id = team.get("key_id")
-    if key_id:
-        row = sdk._get_registry().query(
-            "MATCH (k:APIKey {id:$id}) RETURN k.created_by", params={"id": key_id}
-        ).result_set
-        if row and row[0][0]:
-            return row[0][0]
-    row = sdk._get_registry().query(
-        "MATCH (k:APIKey {team_id:$tid}) RETURN k.created_by LIMIT 1",
-        params={"tid": team_id},
-    ).result_set
-    if row and row[0][0]:
-        return row[0][0]
-    raise HTTPException(
-        status_code=400,
-        detail="No customer email for this team — register with an email or "
-               "provision via a key carrying created_by",
-    )
-
-
-def _billing_checkout_sync(team: dict, price_id: str) -> dict:
-    """Sync body of POST /v1/billing/checkout (runs in a thread — the Stripe
-    calls + registry writes are blocking).
-
-    Order matters (scoping P1-2, review fix 1): resolve/validate price →
-    stored-mirror guard → resolve email → create-or-reuse Stripe customer →
-    SYNC-PERSIST ``stripe_customer_id`` + ``customer_email`` on the Team node
-    → stale-mirror race guard (list_subscriptions) → create Checkout session.
-    A missed first webhook event leaves a reconcilable mirror (Task 8).
-    """
-    from tortoise.billing import StripeClient
-    team_id = team["team_id"]
-    sdk = _make_sdk(namespace="registry")
-
-    # Layer 1 guard: stored mirror already active → reject before any Stripe call.
-    row = sdk._get_registry().query(
-        "MATCH (t:Team {id:$id}) RETURN t.subscription_status, t.stripe_customer_id",
-        params={"id": team_id},
-    ).result_set
-    status = row[0][0] if row else None
-    stored_customer_id = row[0][1] if row else None
-    if status in _BILLING_ACTIVE_STATUSES:
-        raise HTTPException(status_code=409, detail="team already has an active subscription")
-
-    email = _billing_customer_email(sdk, team)
-    try:
-        client = StripeClient()
-        if stored_customer_id:
-            customer_id = stored_customer_id  # create-or-fetch: reuse the Stripe customer
-        else:
-            customer_id = client.create_customer(email)
-    except Exception as e:  # noqa: BLE001 — _billing_error_to_http maps by type
-        raise _billing_error_to_http(e) from e
-
-    # Sync-persist the customer binding BEFORE the session (survives a missed first event).
-    sdk._get_registry().query(
-        "MATCH (t:Team {id:$id}) SET t.stripe_customer_id=$cid, t.customer_email=$email",
-        params={"id": team_id, "cid": customer_id, "email": email},
-    )
-
-    # Layer 2 guard: stale-mirror race — Stripe is the authority for money.
-    try:
-        subs = client.list_subscriptions(customer_id)
-    except Exception as e:  # noqa: BLE001
-        raise _billing_error_to_http(e) from e
-    for sub in subs:
-        if sub.get("status") in _BILLING_ACTIVE_STATUSES:
-            raise HTTPException(status_code=409, detail="team already has an active subscription")
-
-    try:
-        url = client.create_checkout_session(
-            team_id, price_id, customer_id,
-            os.environ.get("BILLING_SUCCESS_URL", _BILLING_DEFAULT_SUCCESS_URL),
-            os.environ.get("BILLING_CANCEL_URL", _BILLING_DEFAULT_CANCEL_URL),
-        )
-    except Exception as e:  # noqa: BLE001
-        raise _billing_error_to_http(e) from e
-    return {"checkout_url": url}
-
-
-@app.post("/v1/billing/checkout", response_model=CheckoutResponse)
-async def billing_checkout(body: CheckoutRequest, request: Request, team: dict = Depends(get_current_team)):
-    """Start a Stripe Checkout session for a validated price (team auth).
-
-    P1 (code-review): a per-team in-flight asyncio lock serializes concurrent
-    checkouts (two tabs) so only one session can be created per team — closes
-    the TOCTOU double-subscription race between the mirror guard and
-    list_subscriptions (both pass when neither session exists yet).
-    """
-    from tortoise.billing import BillingConfigError, BillingError, PriceCatalog
-    try:
-        # Price validation against the catalog — unknown price_id → 400.
-        PriceCatalog().tier_for_price(body.price_id)
-    except BillingConfigError as e:
-        raise HTTPException(status_code=503, detail=str(e))
-    except BillingError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    team_id = team["team_id"]
-    lock = _CHECKOUT_LOCKS.setdefault(team_id, asyncio.Lock())
-    if lock.locked():
-        raise HTTPException(status_code=409, detail="a checkout is already pending for this team")
-    async with lock:
+    # Validate cursor early (before reading events) so malformed cursors
+    # always produce 400, even on empty logs.
+    if cursor is not None and cursor.strip() == "":
+        cursor = None
+    decoded_cursor: int | None = None
+    if cursor is not None:
         try:
-            return await asyncio.to_thread(_billing_checkout_sync, team, body.price_id)
-        finally:
-            _CHECKOUT_LOCKS.pop(team_id, None)
+            decoded_cursor = EventLog._decode_cursor(cursor)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid cursor: {exc}")
 
+    all_events = log.read_all()
 
-def _billing_portal_sync(team: dict) -> dict:
-    """Sync body of POST /v1/billing/portal — portal session for an existing
-    Stripe customer; 404 when the team never checked out (no customer id)."""
-    from tortoise.billing import StripeClient
-    team_id = team["team_id"]
-    sdk = _make_sdk(namespace="registry")
-    row = sdk._get_registry().query(
-        "MATCH (t:Team {id:$id}) RETURN t.stripe_customer_id", params={"id": team_id}
-    ).result_set
-    customer_id = row[0][0] if row else None
-    if not customer_id:
-        raise HTTPException(status_code=404, detail="no Stripe customer for this team — start a checkout first")
-    try:
-        url = StripeClient().create_portal_session(
-            customer_id,
-            os.environ.get("BILLING_PORTAL_RETURN_URL", _BILLING_DEFAULT_PORTAL_RETURN),
-        )
-    except Exception as e:  # noqa: BLE001
-        raise _billing_error_to_http(e) from e
-    return {"portal_url": url}
+    if not all_events:
+        return {"events": [], "cursor": None, "has_more": False}
 
+    # Cursor semantics:
+    #   cursor encodes the index of the FIRST event in the previously
+    #   returned page.  On the next request, we page backwards from there.
+    #
+    # Example: 5 events at indices [0,1,2,3,4], limit=2
+    #   Page 1 (no cursor): slice [3:5] → events 3,4. cursor := encode(3).
+    #   Page 2 (cursor→3): slice [1:3] → events 1,2. cursor := encode(1).
+    #   Page 3 (cursor→1): slice [0:1] → event 0.   cursor := null.
+    if decoded_cursor is not None:
+        if decoded_cursor < 0:
+            raise HTTPException(status_code=400, detail="Invalid cursor: negative index")
+        # Clamp stale cursors that point beyond the current end (log shrank or
+        # the cursor came from a longer page) — never return a spurious
+        # empty page with has_more=True.
+        end_idx = min(decoded_cursor, len(all_events))
+        start_idx = max(0, end_idx - limit)
+    else:
+        # First page: most recent *limit* events.
+        end_idx = len(all_events)
+        start_idx = max(0, end_idx - limit)
 
-@app.post("/v1/billing/portal", response_model=PortalResponse)
-async def billing_portal(request: Request, team: dict = Depends(get_current_team)):
-    """Customer portal for existing subscribers (team auth)."""
-    return await asyncio.to_thread(_billing_portal_sync, team)
+    page = all_events[start_idx:end_idx]
+    has_more = start_idx > 0
+
+    # Next cursor points to the start of this page (so the next request
+    # pages backwards from there).
+    next_cursor = EventLog._encode_cursor(start_idx) if has_more else None
+
+    # Most-recent-first for the response.
+    page.reverse()
+
+    return {
+        "events": page,
+        "cursor": next_cursor,
+        "has_more": has_more,
+    }
 
 
 # ── MCP mount (#236) ─────────────────────────────────────────────
@@ -3642,282 +3542,3 @@ async def billing_portal(request: Request, team: dict = Depends(get_current_team
 # RateLimitMiddleware.SKIP — Starlette's mount already routes /mcp
 # requests to the sub-app before parent middleware runs.
 app.mount("/mcp", mcp_http_app)
-
-
-# ── Stripe webhook (#310 Task 7) ────────────────────────────────────────────
-
-def _now_iso() -> str:
-    from datetime import datetime, timezone
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _team_id_for_stripe_customer(customer_id: str) -> str | None:
-    """Registry lookup: Team node by stripe_customer_id (subscription events)."""
-    try:
-        sdk = _make_sdk(namespace="registry")
-        rows = sdk._get_registry().query(
-            "MATCH (t:Team {stripe_customer_id:$cid}) RETURN t.id",
-            params={"cid": customer_id},
-        ).result_set
-        return rows[0][0] if rows else None
-    except Exception:  # noqa: BLE001
-        return None
-
-
-def _webhook_apply_event(sdk, team_id: str, event: dict) -> str | None:
-    """Apply one verified Stripe event to the registry mirror (idempotent SETs).
-
-    Returns the ops kind when a notification-worthy transition happened:
-    billing_upgrade | billing_downgrade | billing_payment_failed | billing_cancel.
-    Unknown price ids keep the stored tier + status and fire an ops
-    notification (review fix 7); cancel-at-period-end keeps tier until the end.
-    """
-    import json as _json
-    from tortoise.billing import PriceCatalog, StripeClient, apply_limits
-
-    etype = event.get("type", "")
-    data = event.get("data", {}).get("object", {}) or {}
-    notify_kind = None
-
-    def _set(updates: dict) -> None:
-        _json.dumps(updates)  # sanity: JSON-safe params
-        sdk._get_registry().query(
-            "MATCH (t:Team {id:$id}) SET t += $props",
-            params={"id": team_id, "props": updates},
-        )
-
-    def _price_id_from(sub: dict) -> str | None:
-        """Extract items[0].price.id handling BOTH Stripe shapes: items may be
-        a flat list OR {'data': [...]} (FIXTURE_SUB uses the latter)."""
-        items = sub.get("items") or {}
-        rows = items if isinstance(items, list) else items.get("data") or []
-        return (rows[0].get("price", {}) or {}).get("id") if rows else None
-
-    def _resolve_tier_from_price(price_id: str | None) -> str | None:
-        """price → tier; unknown price → None + ops-notify signal."""
-        nonlocal notify_kind
-        if not price_id:
-            return None
-        try:
-            return PriceCatalog().tier_for_price(price_id)
-        except Exception as e:  # noqa: BLE001
-            _logger.error(
-                "webhook: unknown price %s for team %s (%s)",
-                price_id, team_id, redact_error(e))
-            notify_kind = "billing_downgrade"  # ops alert; stored tier preserved
-            return None
-
-    if etype == "checkout.session.completed":
-        cust = data.get("customer")
-        email = (data.get("customer_details") or {}).get("email")
-        sub_id = data.get("subscription")
-        updates = {"subscription_status": "active", "stripe_customer_id": cust}
-        if email:
-            updates["customer_email"] = email
-        if sub_id:
-            updates["subscription_id"] = sub_id
-        _set(updates)
-        if sub_id:
-            try:
-                sub = StripeClient().get_subscription(sub_id)
-                tier = _resolve_tier_from_price(_price_id_from(sub))
-                if tier:
-                    apply_limits(sdk, team_id, tier)
-                    _set({"tier": tier})
-                    notify_kind = "billing_upgrade"
-            except Exception as e:  # noqa: BLE001 — Stripe fetch failure; .updated confirms later
-                _logger.warning("webhook: subscription fetch failed: %s", redact_error(e))
-        return notify_kind
-
-    if etype == "invoice.payment_failed":
-        from datetime import datetime, timedelta, timezone
-        period_end = None
-        try:
-            period_end = (data.get("lines") or {}).get("data", [{}])[0] \
-                .get("period", {}).get("end")
-        except Exception:  # noqa: BLE001
-            period_end = None
-        now = datetime.now(timezone.utc)
-        grace = (datetime.fromtimestamp(period_end, tz=timezone.utc) + timedelta(hours=72)
-                 if period_end else now + timedelta(hours=72))
-        # P0 (code-review): grace_until must be a UNIX TIMESTAMP —
-        # effective_tier parses float(grace_until); an ISO string would be
-        # unparseable and the grace degrade would silently never fire.
-        _set({"subscription_status": "past_due", "grace_until": grace.timestamp()})
-        return "billing_payment_failed"
-
-    if etype == "customer.subscription.updated":
-        status = data.get("status")
-        updates: dict = {}
-        if data.get("id"):
-            updates["subscription_id"] = data["id"]
-        if data.get("current_period_end"):
-            updates["current_period_end"] = data["current_period_end"]
-        if status:
-            updates["subscription_status"] = status
-        # review fix 11: canceled surfacing via .updated (deleted event may be
-        # dropped) → revert to free, identical to subscription.deleted.
-        # P0 (code-review): unpaid / incomplete_expired are the same class —
-        # non-paying teams must not hold paid limits.
-        if status in ("canceled", "unpaid", "incomplete_expired"):
-            _set({**updates, "tier": "free"})
-            apply_limits(sdk, team_id, "free")
-            return "billing_cancel"
-        # cancel_at_period_end → keep tier until period end (mirror status only).
-        if data.get("cancel_at_period_end"):
-            _set(updates)
-            return None
-        _set(updates)
-        tier = _resolve_tier_from_price(_price_id_from(data))
-        if tier:
-            # P2 (code-review): notify only on an ACTUAL tier change — Stripe
-            # fires .updated on renewals/period-end changes too; ops must not
-            # be spammed monthly per subscriber.
-            prior = sdk._get_registry().query(
-                "MATCH (t:Team {id:$id}) RETURN t.tier", params={"id": team_id}
-            ).result_set
-            prior_tier = prior[0][0] if prior else None
-            if prior_tier != tier:
-                apply_limits(sdk, team_id, tier)
-                _set({"tier": tier})
-                notify_kind = "billing_upgrade"
-        return notify_kind
-
-    if etype == "customer.subscription.deleted":
-        _set({"tier": "free", "subscription_status": "canceled"})
-        apply_limits(sdk, team_id, "free")
-        return "billing_cancel"
-
-    return None  # unhandled event type → 200-ack
-
-
-@app.post("/webhooks/stripe")
-async def webhooks_stripe(request: Request):
-    """Stripe webhook — signature-verified, event-ID dedup, 4-event semantics.
-
-    Public surface (SKIP + SKIP_AUTH): authenticity is the Stripe-Signature
-    HMAC over the RAW body. Idempotency is SET-then-marker: the Team SET is
-    idempotent (replays converge), and the :WebhookEvent marker gates
-    notify/audit/analytics to FIRST processing only (scoping P1-1 retry-drop
-    race: the SET happens regardless, so a retry can never drop an upgrade).
-    """
-    from tortoise.billing import BillingError, BillingConfigError, StripeClient, _scrub_secrets
-    from tortoise.notify import notify_billing_event
-
-
-    def _safe_log(exc: Exception) -> str:
-        """redact_error + scrub known secret values (review fix 9)."""
-        return _scrub_secrets(redact_error(exc))
-
-    raw = await request.body()
-    sig = request.headers.get("stripe-signature")
-    try:
-        event = StripeClient().verify_webhook_signature(raw, sig)
-    except BillingConfigError:
-        return JSONResponse(status_code=500, content={"detail": "webhook not configured"})
-    except BillingError as e:
-        _logger.warning("webhook: rejected (%s)", _safe_log(e))
-        return JSONResponse(status_code=400, content={"detail": "invalid signature"})
-
-    etype = event.get("type", "")
-    event_id = event.get("id") or ""
-    data = event.get("data", {}).get("object", {}) or {}
-    ref_team = data.get("client_reference_id")
-    cust = data.get("customer")
-    cust_team = _team_id_for_stripe_customer(cust) if cust else None
-    # P0 (Qwen review): the CUSTOMER binding is MANDATORY for checkout +
-    # subscription/invoice events. client_reference_id is attacker-controlled
-    # (anyone can complete a Checkout in their own Stripe account with a
-    # victim's team_id) and must NEVER be a fallback for these paths — our
-    # checkout endpoint sync-persists stripe_customer_id BEFORE redirect, so
-    # any genuine event has a resolvable customer→team binding.
-    if etype in ("checkout.session.completed",
-                 "customer.subscription.updated",
-                 "customer.subscription.deleted",
-                 "invoice.payment_failed"):
-        if not cust_team:
-            if ref_team:
-                _logger.warning(
-                    "webhook: %s for unbound customer %s (ref %s) — ignoring (spoof guard)",
-                    etype, cust, ref_team)
-            return JSONResponse(status_code=200, content={"detail": "no team binding"})
-        team_id = cust_team
-        if ref_team and ref_team != cust_team:
-            _logger.warning(
-                "webhook: customer↔ref mismatch (%s vs %s) — trusting customer",
-                ref_team, cust_team)
-    else:
-        team_id = ref_team or cust_team
-    if not team_id:
-        # No team binding — ack so Stripe stops retrying.
-        return JSONResponse(status_code=200, content={"detail": "no team binding"})
-
-    try:
-        # P1 (Qwen review): ALL registry/SDK work runs inside the worker thread
-        # (the SDK is created there, never shared across threads); the async
-        # side only does audit/analytics/notify when the marker claims first
-        # processing.
-        def _process() -> tuple:
-            sdk = _make_sdk(namespace="registry")
-            try:
-                notify_kind = _webhook_apply_event(sdk, team_id, event)
-                # Single-query atomic claim — ON CREATE sets is_first=true, ON
-                # MATCH sets it false, RETURN reports the claim (no separate
-                # REMOVE: a crash between MERGE and REMOVE could re-fire
-                # side-effects under a two-step marker).
-                marker = sdk._get_registry().query(
-                    "MERGE (w:WebhookEvent {event_id:$id}) "
-                    "ON CREATE SET w.first_seen=$now, w.type=$type, w.is_first=true "
-                    "ON MATCH SET w.is_first=false "
-                    "RETURN coalesce(w.is_first, false)",
-                    params={"id": event_id, "now": _now_iso(), "type": etype},
-                ).result_set
-                is_first = bool(marker and marker[0][0])
-                tier = None
-                if is_first:
-                    tier_rows = sdk._get_registry().query(
-                        "MATCH (t:Team {id:$id}) RETURN t.tier", params={"id": team_id}
-                    ).result_set
-                    tier = tier_rows[0][0] if tier_rows else None
-                return is_first, notify_kind, tier
-            finally:
-                try:
-                    sdk.close()
-                except Exception:  # noqa: BLE001
-                    pass
-
-        is_first, notify_kind, tier = await asyncio.to_thread(_process)
-        if is_first and notify_kind:
-            # Audit + analytics + notifications — first processing only.
-            await _async_audit(
-                request, team_id, notify_kind,
-                resource_type="team", resource_id=team_id,
-            )
-            _track_analytics_event(team_id, notify_kind, {
-                "plan": tier, "tier": tier, "status": etype,
-            })
-            notify_billing_event(
-                notify_kind, {"team_id": team_id, "tier": tier},
-                {"subscription_status": etype},
-            )
-        return JSONResponse(status_code=200, content={"detail": "processed"})
-    except Exception as e:  # noqa: BLE001 — 500 → Stripe retries (live up to 3 days)
-        _logger.error("webhook: processing failed (%s)", _safe_log(e))
-        return JSONResponse(status_code=500, content={"detail": "processing failed"})
-
-
-def _default_checkout_price_id() -> str | None:
-    """Server-resolved default checkout price: pro monthly (Task 9).
-
-    The dashboard upgrade CTA uses this so price ids stay env-driven
-    (STRIPE_PRICE_IDS) and never leak into the client. Best-effort — None when
-    the catalog is unconfigured (missing env → lazy BillingConfigError path).
-    """
-    try:
-        from tortoise.billing import PriceCatalog
-
-        catalog = PriceCatalog()
-        price_id = catalog.price_for("pro", "monthly")
-        return price_id or None
-    except Exception:  # noqa: BLE001
-        return None

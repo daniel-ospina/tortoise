@@ -8,6 +8,40 @@ on:
   pull_request:
 
 jobs:
+  pricing-artifact:
+    # #682: canonical pricing must exist on main and stay in sync with the
+    # tier_limits() table — a missing/renamed product/pricing.json fails CI.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install package (parity check imports tortoise.pricing)
+        run: pip install -e . --quiet
+      - name: pricing.json present
+        run: test -f product/pricing.json || { echo "product/pricing.json missing — canonical pricing artifact (#682)"; exit 1; }
+      - name: parity (billing table == pricing.json)
+        run: |
+          python3 - <<'EOF'
+          import json, sys
+          sys.path.insert(0, '.')
+          from tortoise.pricing import tier_limits, all_tiers
+          pricing = json.load(open('product/pricing.json'))['tiers']
+          problems = []
+          for tier in all_tiers():
+              lim = tier_limits(tier)
+              spec = pricing.get(tier, {})
+              if lim['included_write_ops_per_month'] != spec.get('included_write_ops_per_month'):
+                  problems.append(f"{tier}: tier_limits={lim['included_write_ops_per_month']} vs pricing.json={spec.get('included_write_ops_per_month')}")
+              if lim['max_api_keys'] != spec.get('max_api_keys'):
+                  problems.append(f"{tier}: max_api_keys={lim['max_api_keys']} vs pricing.json={spec.get('max_api_keys')}")
+          if problems:
+              print('PRICING DRIFT:', *problems, sep='\n  ')
+              sys.exit(1)
+          print('pricing parity OK')
+          EOF
+
   docs:
     runs-on: ubuntu-latest
     steps:

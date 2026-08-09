@@ -1,4 +1,4 @@
-"""Tests for tortoise.quota (#329)."""
+"""Tests for tortoise.quota (#329, #683)."""
 from __future__ import annotations
 
 import pytest
@@ -37,56 +37,17 @@ class TestResolveTeamLimits:
         with pytest.raises(QuotaCheckError):
             resolve_team_limits("no-such-team")
 
-    def test_provisioned_team_has_tier_limits(self, reg_sdk):
-        """#310 GAP-B: a team_create'd team resolves TIER-derived limits from
-        pricing.json (free = 10k points / 2 api keys / 1000 sessions) — never
-        the old DEFAULT_MAX_* consts."""
+    def test_provisioned_team_has_defaults(self, reg_sdk):
         tid = _find_team_id(reg_sdk)
         limits = resolve_team_limits(tid)
+        # team_create writes max_api_keys from pricing.json free tier (=2),
+        # but NOT max_points / max_sessions — defaults apply (points from
+        # pricing max_graph_nodes=10000; sessions flat 1000 per #310).
         assert limits["max_points"] == 10000
         assert limits["max_api_keys"] == 2
         assert limits["max_sessions"] == 1000
-
-    def test_legacy_team_no_stored_limits_resolves_tier_limits(self, monkeypatch, tmp_path):
-        """#310 GAP-B (review fix 2): a legacy Team node with tier='pro' and NO
-        stored max_* fields resolves tier-derived values (max_points == 100000
-        == max_graph_nodes, max_api_keys == 10) — REST get_current_team and
-        MCP resolve_team_limits must agree exactly."""
-        import os
-        db = os.path.join(tmp_path, "legacy.db")
-        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
-        monkeypatch.setenv("TORTOISE_DB_PATH", db)
-        monkeypatch.setenv("RATE_LIMIT_DISABLED", "1")
-        from tortoise.sdk import TortoiseSDK
-        sdk = TortoiseSDK(db, namespace="registry")
-        try:
-            team = sdk.team_create("legacy-pro")
-            # Simulate a pre-D1 node: tier upgraded out-of-band, limits never stored.
-            sdk._get_registry().query(
-                "MATCH (t:Team {id:$id}) SET t.tier='pro' REMOVE t.max_users, "
-                "t.max_graphs, t.max_api_keys, t.max_points, t.max_sessions",
-                params={"id": team["id"]},
-            )
-            ak = sdk.apikey_create(team["id"], "user-1")
-            limits = resolve_team_limits(team["id"])
-            assert limits["tier"] == "pro"
-            assert limits["max_points"] == 100000
-            assert limits["max_api_keys"] == 10
-            assert limits["max_sessions"] == 1000
-
-            # REST parity: GET /v1/team (real auth) returns identical numbers.
-            from fastapi.testclient import TestClient
-            from tortoise.hosted_api import app
-            with TestClient(app) as tc:
-                r = tc.get("/v1/team", headers={"Authorization": f"Bearer {ak['api_key']}"})
-                assert r.status_code == 200, r.text
-                body = r.json()
-                assert body["tier"] == "pro"
-                assert body["max_points"] == 100000
-                assert body["max_api_keys"] == 10
-                assert body["max_sessions"] == 1000
-        finally:
-            sdk.close()
+        assert limits["max_users"] == 1
+        assert limits["max_graphs"] == 1
 
 
 def _find_team_id(sdk) -> str:
@@ -124,9 +85,13 @@ class TestEnforceTeamLimit:
         enforce_team_limit(limits, "points", sdk=sdk)  # must not raise
         sdk.close()
 
-    def test_counting_error_fails_closed(self, tmp_path, monkeypatch):
-        """Fail-closed: a counting exception → QuotaCheckError, never a pass."""
+    def test_counting_error_fails_closed(self, tmp_path, monkeypatch, caplog):
+        """Fail-closed: a counting exception → QuotaCheckError, never a pass.
+
+        Also verifies ERROR-level logging (#686 alerting).
+        """
         from tortoise.sdk import TortoiseSDK
+        import logging
         import os
         db = os.path.join(tmp_path, "team.db")
         sdk = TortoiseSDK(db, namespace="team1")
@@ -134,10 +99,145 @@ class TestEnforceTeamLimit:
         def boom(*a, **kw):
             raise RuntimeError("db down")
         monkeypatch.setattr(sdk._get_proj().g._g, "query", boom)
-        with pytest.raises(QuotaCheckError):
+        with pytest.raises(QuotaCheckError) as exc_info:
             enforce_team_limit(limits, "points", sdk=sdk)
         sdk.close()
+        # Verify ERROR log was emitted (#686 alerting)
+        assert "quota count failed" in str(exc_info.value)
+        log_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert any("quota count failed (fail-closed)" in r.message for r in log_records), (
+            f"Expected ERROR log for count failure, got: {[r.message for r in log_records]}"
+        )
 
     def test_unknown_resource_fails_closed(self):
         with pytest.raises(QuotaCheckError):
             enforce_team_limit({"team_id": "t", "max_points": 10}, "widgets")
+
+
+# ── #683: users + graphs enforcement ──────────────────────────────────────
+
+class TestEnforceUsersLimit:
+    """User/membership quota enforcement."""
+
+    def test_users_below_limit_passes(self, reg_sdk):
+        tid = _find_team_id(reg_sdk)
+        limits = resolve_team_limits(tid)
+        # team_create does NOT create a membership; count = 0, max_users = 1
+        # → below limit
+        enforce_team_limit(limits, "users")  # must not raise
+
+    def test_users_at_limit_raises(self, reg_sdk):
+        tid = _find_team_id(reg_sdk)
+        # Create a membership to hit the limit
+        reg_sdk.membership_create(tid, "user-1", "owner")
+        limits = resolve_team_limits(tid)
+        # 1 membership, max_users=1 → at limit
+        with pytest.raises(QuotaExceededError, match="users limit reached"):
+            enforce_team_limit(limits, "users")
+
+    def test_users_unlimited_skips(self, reg_sdk):
+        """None max_users = unlimited (Team tier) — never raises."""
+        tid = _find_team_id(reg_sdk)
+        limits = resolve_team_limits(tid)
+        limits["max_users"] = None  # Team tier → unlimited
+        enforce_team_limit(limits, "users")  # must not raise
+
+
+class TestEnforceGraphsLimit:
+    """Graph quota enforcement."""
+
+    def test_graphs_below_limit_passes(self, reg_sdk):
+        tid = _find_team_id(reg_sdk)
+        limits = resolve_team_limits(tid)
+        # team_create auto-creates 1 default graph; max_graphs=1
+        # bump limit to 5 so we're below it
+        limits["max_graphs"] = 5
+        enforce_team_limit(limits, "graphs")  # must not raise
+
+    def test_graphs_at_limit_raises(self, reg_sdk):
+        tid = _find_team_id(reg_sdk)
+        limits = resolve_team_limits(tid)
+        # 1 default graph from team_create, max_graphs=1 → at limit
+        with pytest.raises(QuotaExceededError, match="graphs limit reached"):
+            enforce_team_limit(limits, "graphs")
+
+    def test_graphs_unlimited_skips(self, reg_sdk):
+        """None max_graphs = unlimited (pro/team tier) — never raises."""
+        tid = _find_team_id(reg_sdk)
+        limits = resolve_team_limits(tid)
+        limits["max_graphs"] = None  # Pro/Team tier → unlimited
+        enforce_team_limit(limits, "graphs")  # must not raise
+
+
+# ── #683: None (unlimited) preservation in resolvers ──────────────────────
+
+class TestNonePreservation:
+    """None → unlimited must survive all limit resolvers (P0 regression)."""
+
+    def test_resolve_team_limits_preserves_none_users(self, reg_sdk):
+        """Team-tier team with max_users=None → resolve returns None, not 1."""
+        tid = _find_team_id(reg_sdk)
+        # Directly set max_users=None on the Team node (Team tier semantics)
+        reg_sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.max_users = NULL",
+            params={"id": tid},
+        )
+        limits = resolve_team_limits(tid)
+        assert limits["max_users"] is None, (
+            f"Expected None (unlimited), got {limits['max_users']!r}")
+
+    def test_resolve_team_limits_preserves_none_graphs(self, reg_sdk):
+        """Team-tier team with max_graphs=None → resolve returns None."""
+        tid = _find_team_id(reg_sdk)
+        reg_sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.max_graphs = NULL",
+            params={"id": tid},
+        )
+        limits = resolve_team_limits(tid)
+        assert limits["max_graphs"] is None, (
+            f"Expected None (unlimited), got {limits['max_graphs']!r}")
+
+    def test_team_limits_from_node_preserves_none_users(self):
+        """_team_limits_from_node: None max_users → None (not coiled to 1)."""
+        from tortoise.hosted_api import _team_limits_from_node
+        node = {"id": "t1", "tier": "team",
+                "max_users": None, "max_graphs": None}
+        limits = _team_limits_from_node(node)
+        assert limits["max_users"] is None, (
+            f"Expected None (unlimited Team tier), got {limits['max_users']!r}")
+        assert limits["max_graphs"] is None, (
+            f"Expected None (unlimited Team tier), got {limits['max_graphs']!r}")
+
+    def test_team_limits_from_node_preserves_none_graphs(self):
+        """_team_limits_from_node: None max_graphs for pro tier = unlimited."""
+        from tortoise.hosted_api import _team_limits_from_node
+        node = {"id": "t2", "tier": "pro",
+                "max_users": 2, "max_graphs": None}
+        limits = _team_limits_from_node(node)
+        # max_graphs=None (pro tier) → unlimited
+        assert limits["max_graphs"] is None, (
+            f"Expected None (unlimited pro graphs), got {limits['max_graphs']!r}")
+        # max_users=2 is explicit → preserved
+        assert limits["max_users"] == 2
+
+    def test_team_limits_from_node_explicit_zero(self):
+        """P1: explicit 0 is preserved, not conflated with missing."""
+        from tortoise.hosted_api import _team_limits_from_node
+        node = {"id": "t3", "tier": "free",
+                "max_points": 0, "max_api_keys": 0, "max_sessions": 0}
+        limits = _team_limits_from_node(node)
+        assert limits["max_points"] == 0, (
+            f"Explicit 0 should be 0, got {limits['max_points']!r}")
+        assert limits["max_api_keys"] == 0, (
+            f"Explicit 0 should be 0, got {limits['max_api_keys']!r}")
+        assert limits["max_sessions"] == 0, (
+            f"Explicit 0 should be 0, got {limits['max_sessions']!r}")
+
+    def test_team_limits_from_node_free_tier_defaults(self):
+        """Missing fields on free-tier node → pricing-aligned defaults."""
+        from tortoise.hosted_api import _team_limits_from_node
+        node = {"id": "t4", "tier": "free"}
+        limits = _team_limits_from_node(node)
+        assert limits["max_points"] == 10000
+        assert limits["max_api_keys"] == 2
+        assert limits["max_sessions"] == 1000

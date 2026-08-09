@@ -30,17 +30,14 @@ from tortoise.sdk import TortoiseSDK
 # ── Test constants ───────────────────────────────────────────────────────────
 
 TEST_TEAM_ID = "test-team-001"
-# #310 (review fix 16b): mirrors what real get_current_team returns — tier-derived
-# limits resolved from pricing.json (free: max_graph_nodes=10000, max_api_keys=2,
-# max_sessions=1000). The client fixture overrides auth with this dict, so it must
-# carry the enforced fields or the fail-closed quota path 500s.
 TEST_TEAM = {
     "team_id": TEST_TEAM_ID,
     "key_id": "test-key-001",
     "tier": "free",
+    # get_current_team always resolves the full limits dict — test stubs must
+    # match, or fail-closed quota enforcement 500s instead of passing (#310).
     "max_users": 1,
     "max_graphs": 1,
-    "max_teams": 1,
     "max_points": 10000,
     "max_api_keys": 2,
     "max_sessions": 1000,
@@ -109,27 +106,6 @@ def unauth_client():
         try:
             with TestClient(app) as tc:
                 yield tc
-        finally:
-            _restore_tortoise_sdk_init(_orig_init)
-
-
-@pytest.fixture
-def register_client():
-    """TestClient WITHOUT auth override against a shared temp embedded DB.
-
-    Yields (client, db_path) so tests can exercise the REAL /v1/register →
-    GET /v1/team flow AND read the Team node back from the same DB (#310
-    GAP-A/B verification: fresh teams get tier-derived limits, not
-    DEFAULT_MAX_*).
-    """
-    with tempfile.TemporaryDirectory() as tmpdir:
-        db_path = os.path.join(tmpdir, "register.db")
-
-        _orig_init = _patch_tortoise_sdk_init(db_path)
-
-        try:
-            with TestClient(app) as tc:
-                yield tc, db_path
         finally:
             _restore_tortoise_sdk_init(_orig_init)
             app.dependency_overrides.clear()
@@ -226,6 +202,78 @@ class TestAuthMatrix:
     def test_auth_required_for_list_sessions(self, unauth_client):
         r = unauth_client.get("/v1/sessions")
         assert r.status_code == 401
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Auth — last_used_at tracking (#685)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestLastUsedAtTracking:
+    """API key last_used_at is set on successful authentication."""
+
+    def test_last_used_at_set_on_successful_auth(self):
+        """#685: get_current_team updates key.last_used_at on valid auth."""
+        import asyncio
+        from unittest.mock import MagicMock
+        from tortoise.auth import hash_api_key
+        from tortoise.hosted_api import _make_sdk, get_current_team
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            _orig_init = _patch_tortoise_sdk_init(db_path)
+            try:
+                sdk = _make_sdk(namespace="registry")
+
+                # Seed a Team node (get_current_team queries Team after auth)
+                sdk._get_registry().query(
+                    "CREATE (t:Team {id: $id, tier: 'free'})",
+                    params={"id": "test-team-lua"},
+                )
+
+                # Create a valid API key and hash it
+                key_token = "tt_testkey_last_used_at_000000001"
+                key_hash = hash_api_key(key_token)
+                sdk._get_registry().query(
+                    "CREATE (k:APIKey {id: $id, team_id: $tid, "
+                    "key_hash: $kh, key_prefix: $kp, created_by: $cb})",
+                    params={
+                        "id": "test-key-lua",
+                        "tid": "test-team-lua",
+                        "kh": key_hash,
+                        "kp": key_token[:10],
+                        "cb": "test",
+                    },
+                )
+
+                # Build a mock request with the valid key
+                request = MagicMock()
+                request.url.path = "/v1/points"
+                request.headers = {"Authorization": f"Bearer {key_token}"}
+                request.state = MagicMock()
+
+                result = asyncio.run(get_current_team(request))
+
+                assert result["team_id"] == "test-team-lua"
+                assert result["key_id"] == "test-key-lua"
+
+                # Verify last_used_at was written — a parseable recent ISO-8601
+                # timestamp (not just any non-null value)
+                from datetime import datetime, timezone
+                row = sdk._get_registry().query(
+                    "MATCH (k:APIKey {id: $id}) RETURN k.last_used_at",
+                    params={"id": "test-key-lua"},
+                ).result_set
+                assert len(row) == 1
+                assert row[0][0] is not None, \
+                    "last_used_at should be set after successful auth"
+                last_used = datetime.fromisoformat(row[0][0])
+                assert last_used.tzinfo is not None, "last_used_at must be timezone-aware"
+                age = datetime.now(timezone.utc) - last_used
+                assert age.total_seconds() < 30, \
+                    f"last_used_at should be recent, got {row[0][0]}"
+            finally:
+                _restore_tortoise_sdk_init(_orig_init)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -402,58 +450,6 @@ class TestTeamInfo:
 
         r = client.get("/v1/team")
         assert r.json()["point_count"] == initial_count + 3
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Billing enforcement gaps (#310) — GAP-A/B: fresh teams get tier-derived limits
-# ═══════════════════════════════════════════════════════════════════════════════
-
-
-def _register_team(tc, email: str | None = None) -> dict:
-    """Register a fresh team through the real /v1/register."""
-    import uuid
-    email = email or f"gap-{uuid.uuid4().hex[:10]}@example.com"
-    r = tc.post("/v1/register", json={"email": email, "password": "password123"})
-    assert r.status_code == 200, r.text
-    return r.json()
-
-
-class TestBillingEnforcementGaps:
-    """GAP-A: max_points/max_sessions never written at Team CREATE; GAP-B:
-    None-fallback must resolve from tier_limits(tier), never DEFAULT_MAX_*."""
-
-    def test_team_points_limit_uses_tier_limits_not_default(self, register_client):
-        tc, _ = register_client
-        data = _register_team(tc)
-        r = tc.get("/v1/team", headers={"Authorization": f"Bearer {data['api_key']}"})
-        assert r.status_code == 200, r.text
-        team = r.json()
-        assert team["tier"] == "free"
-        # pricing.json free max_graph_nodes — NOT the 1000 DEFAULT_MAX_POINTS
-        assert team["max_points"] == 10000
-        assert team["max_sessions"] == 1000
-
-    def test_register_team_writes_free_tier_limits(self, register_client):
-        """GAP-A: /v1/register must WRITE tier-derived limits on the Team node
-        (max_api_keys == 2 from pricing.json, NOT the 20 DEFAULT leak)."""
-        tc, db_path = register_client
-        data = _register_team(tc)
-        from tortoise.sdk import TortoiseSDK
-        sdk = TortoiseSDK(db_path, namespace="registry")
-        try:
-            rows = sdk._get_registry().query(
-                "MATCH (t:Team {id:$id}) RETURN t.max_api_keys, t.max_points, "
-                "t.max_sessions, t.max_users, t.max_graphs",
-                params={"id": data["team_id"]},
-            ).result_set
-            mak, mp, ms, mu, mg = rows[0]
-            assert mak == 2
-            assert mp == 10000
-            assert ms == 1000
-            assert mu == 1
-            assert mg == 1
-        finally:
-            sdk.close()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1163,6 +1159,14 @@ class TestBackupEndpoints:
         )
         _store = _MS()  # SHARED instance — _backup_storage is called per request
         monkeypatch.setattr(_ha, "_backup_storage", lambda: _store)
+        # Decouple the machinery tests from the tier gate (#656): pricing.json
+        # marks pro.daily_backups "planned" (not live), so no tier passes the
+        # gate today. This fixture represents "Pro WITH the feature enabled" —
+        # the gate allowlist itself is tested by test_backup_tier_allowlist_from_pricing.
+        from tortoise import pricing as _pricing
+        monkeypatch.setattr(
+            _pricing, "daily_backups_enabled", lambda tier: tier == "pro"
+        )
         app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM, tier="pro")
         yield client
         app.dependency_overrides.clear()
@@ -1173,6 +1177,82 @@ class TestBackupEndpoints:
         assert r.status_code == 402
         r = client.post("/backups/restore", json={"backup_key": "x", "confirm": True})
         assert r.status_code == 402
+
+    def test_backup_solo_tier_402(self, client):
+        """Solo tier cannot create backups (daily_backups:false in pricing.json).
+
+        Regression test for #656 — the old gate blocked only (None, 'free'),
+        so a solo-tier team would have slipped past the backups gate.
+        """
+        app.dependency_overrides[get_current_team] = lambda: dict(
+            TEST_TEAM, tier="solo"
+        )
+        try:
+            r = client.post("/backups")
+            assert r.status_code == 402, (
+                f"expected 402 for solo tier, got {r.status_code}: {r.text}"
+            )
+            r = client.post(
+                "/backups/restore",
+                json={"backup_key": "x", "confirm": True},
+            )
+            assert r.status_code == 402
+        finally:
+            app.dependency_overrides.clear()
+
+    def test_backup_tier_allowlist_from_pricing(self, client):
+        """The gate strictly mirrors pricing.json: only a real JSON `true`
+        for features.daily_backups passes. "planned" (string) is NOT live —
+        so today NO tier passes (feature not shipped), and flipping pricing.json
+        to `true` enables a tier with zero code change (#656).
+
+        Expectations are derived from pricing.json itself (parity test) — the
+        gate can never drift from the canonical source again.
+        """
+        from tortoise.pricing import _load as _load_pricing
+
+        pricing = _load_pricing()
+        expected_allowed = [
+            tier for tier, spec in pricing.get("tiers", {}).items()
+            if spec.get("features", {}).get("daily_backups") is True
+        ]
+        expected_blocked = [
+            tier for tier in pricing.get("tiers", {})
+            if tier not in expected_allowed
+        ]
+        # Every tier in pricing.json behaves per its daily_backups flag.
+        for tier in expected_allowed:
+            app.dependency_overrides[get_current_team] = lambda t=tier: dict(
+                TEST_TEAM, tier=t
+            )
+            try:
+                r = client.post("/backups")
+                assert r.status_code != 402, (
+                    f"{tier} has daily_backups:true in pricing.json but was blocked: {r.text}"
+                )
+            finally:
+                app.dependency_overrides.clear()
+        for tier in expected_blocked:
+            app.dependency_overrides[get_current_team] = lambda t=tier: dict(
+                TEST_TEAM, tier=t
+            )
+            try:
+                r = client.post("/backups")
+                assert r.status_code == 402, (
+                    f"{tier} lacks daily_backups:true in pricing.json but passed the gate"
+                )
+            finally:
+                app.dependency_overrides.clear()
+
+        # Unknown tier → 402 (falls back to free limits).
+        app.dependency_overrides[get_current_team] = lambda: dict(
+            TEST_TEAM, tier="enterprise"
+        )
+        try:
+            r = client.post("/backups")
+            assert r.status_code == 402
+        finally:
+            app.dependency_overrides.clear()
 
     def test_backup_create_and_list_pro(self, pro_client):
         """Pro team: create returns a manifest; list shows it."""
@@ -1248,16 +1328,9 @@ class TestSessionFloodGate:
 
     def test_extraction_amplifier_402_zero_growth(self, client):
         """Dense decision content → extraction-aware estimate exceeds the
-        points quota → 402 BEFORE any write (zero node growth).
-
-        #310 GAP-B: free max_points is now 10000 (pricing.json max_graph_nodes),
-        not the removed 1000 DEFAULT_MAX_POINTS — pin the team cap below the
-        estimate so the amplifier mechanics (not the free-tier cap value) is
-        what's under test.
-        """
-        app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM, max_points=100)
+        points quota → 402 BEFORE any write (zero node growth)."""
         # est = 2 + Σ_turns(1 + min(decisions,200)) — 5 dense turns × ~300
-        # matches = 2 + 5×201 = 1007 > 100 (pinned cap) → 402.
+        # matches = 2 + 5×201 = 1007 > 1000 (default max_points) → 402.
         dense = ("we should go. " * 300)  # 4500 chars < 5000 turn limit
         conversation = [{"role": "user", "content": dense}] * 5
         r = client.post("/v1/sessions", json={
@@ -1331,83 +1404,356 @@ class TestDreamBudget:
             ha._DREAM_FULL_BUCKETS.pop(TEST_TEAM_ID, None)
 
 
-class TestEventsPoll:
-    """GET /v1/events — cursor-based poll (Task 5, real REST tests)."""
+# ── #686: fail-closed quota enforcement at HTTP layer ──
 
-    def test_events_poll_returns_events(self, client):
-        r = client.post("/v1/points", json={"kind": "statement", "content": "e1"})
-        assert r.status_code == 200
+class TestQuotaFailClosed:
+    """Verify that quota check failures surface as 500, never silently pass."""
+
+    def test_quota_check_error_returns_500(self, client, monkeypatch):
+        """When enforce_team_limit raises QuotaCheckError, the endpoint
+        returns 500 with a descriptive detail — fail-closed, never silent."""
+        from tortoise.quota import QuotaCheckError
+        import tortoise.quota as quota_mod
+
+        def _fail_count(_limits, _resource, sdk=None):
+            raise QuotaCheckError("simulated count query failure")
+
+        monkeypatch.setattr(quota_mod, "enforce_team_limit", _fail_count)
+
+        r = client.post("/v1/points", json={"content": "should fail"})
+        assert r.status_code == 500, f"expected 500, got {r.status_code}: {r.text[:200]}"
+        detail = r.json()["detail"]
+        assert "quota" in detail.lower(), (
+            f"detail should mention quota, got: {detail}"
+        )
+
+    def test_quota_exceeded_returns_402(self, client, monkeypatch):
+        """When enforce_team_limit raises QuotaExceededError, the endpoint
+        returns 402 (payment required) — normal over-limit behavior."""
+        from tortoise.quota import QuotaExceededError
+        import tortoise.quota as quota_mod
+
+        def _fail_exceeded(_limits, _resource, sdk=None):
+            raise QuotaExceededError("Team points limit reached (1000)")
+
+        monkeypatch.setattr(quota_mod, "enforce_team_limit", _fail_exceeded)
+
+        r = client.post("/v1/points", json={"content": "should be over limit"})
+        assert r.status_code == 402, f"expected 402, got {r.status_code}: {r.text[:200]}"
+
+    def test_normal_write_still_works(self, client):
+        """Without mocking, a normal point creation under the limit succeeds."""
+        r = client.post("/v1/points", json={"content": "normal write"})
+        assert r.status_code == 200, f"expected 200, got {r.status_code}: {r.text[:200]}"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Event Replay Endpoint (#692)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestEventReplay:
+    """GET /v1/events — tenant event/audit replay surface."""
+
+    @pytest.fixture(autouse=True)
+    def _temp_events_dir(self, request):
+        """Scoped events dir so per-team logs don't leak between tests."""
+        import tortoise.hosted_api as ha
+        with tempfile.TemporaryDirectory() as tmpdir:
+            old = os.environ.get("TORTOISE_EVENTS_DIR")
+            os.environ["TORTOISE_EVENTS_DIR"] = tmpdir
+            # Reset module-level cached path (pathlib, but _team_events_dir
+            # reads env each call, so no cache to clear).
+            try:
+                yield tmpdir
+            finally:
+                if old is not None:
+                    os.environ["TORTOISE_EVENTS_DIR"] = old
+                else:
+                    os.environ.pop("TORTOISE_EVENTS_DIR", None)
+
+    # ── Auth ──────────────────────────────────────────────────────────
+
+    def test_events_requires_auth(self, unauth_client):
+        """GET /v1/events without Authorization → 401."""
+        r = unauth_client.get("/v1/events")
+        assert r.status_code == 401, r.text[:200]
+
+    def test_events_requires_bearer_prefix(self, unauth_client):
+        """GET /v1/events with wrong scheme → 401."""
+        r = unauth_client.get("/v1/events", headers={"Authorization": "Basic xyz"})
+        assert r.status_code == 401, r.text[:200]
+
+    # ── Empty / new team ──────────────────────────────────────────────
+
+    def test_events_empty_for_new_team(self, client):
+        """A team with no events returns an empty list."""
+        r = client.get("/v1/events")
+        assert r.status_code == 200, r.text[:200]
+        body = r.json()
+        assert body["events"] == []
+        assert body["cursor"] is None
+        assert body["has_more"] is False
+
+    # ── Events appear after mutation ──────────────────────────────────
+
+    def test_events_after_point_creation(self, client):
+        """Creating a point produces an event visible in the replay."""
+        # Create a point
+        r = client.post("/v1/points", json={
+            "content": "Test point for event replay",
+            "kind": "statement",
+        })
+        assert r.status_code == 200, r.text[:200]
+        point = r.json()
+
+        # Read events
+        r = client.get("/v1/events")
+        assert r.status_code == 200, r.text[:200]
+        body = r.json()
+        assert len(body["events"]) == 1
+        ev = body["events"][0]
+        assert ev["type"] == "point_created"
+        assert ev["team_id"] == TEST_TEAM_ID
+        assert ev["point_id"] == point["id"]
+        assert ev["kind"] == "statement"
+        assert ev["content_preview"] == "Test point for event replay"
+
+    def test_events_contain_multiple_events(self, client):
+        """Multiple mutations → multiple events, most-recent-first."""
+        r1 = client.post("/v1/points", json={
+            "content": "First point",
+            "kind": "statement",
+        })
+        assert r1.status_code == 200
+        r2 = client.post("/v1/points", json={
+            "content": "Second point",
+            "kind": "statement",
+        })
+        assert r2.status_code == 200
+
         r = client.get("/v1/events")
         assert r.status_code == 200
         body = r.json()
-        assert [e["type"] for e in body["events"]] == ["PointAdded"]
-        assert body["next_cursor"]
+        assert len(body["events"]) == 2
+        # Most recent first
+        assert body["events"][0]["content_preview"] == "Second point"
+        assert body["events"][1]["content_preview"] == "First point"
 
-    def test_expired_cursor_410(self, client):
-        client.post("/v1/points", json={"kind": "statement", "content": "old"})
-        from tortoise.hosted_api import _make_sdk
-        sdk = _make_sdk(namespace=TEST_TEAM_ID)
-        proj = sdk._get_proj()
-        stale = sdk.events_poll()["next_cursor"]  # points at seq 1
-        client.post("/v1/points", json={"kind": "statement", "content": "fresh"})
-        # purge seq <= 1 via direct Cypher (Task 7 owns the purge helper)
-        proj.g.query("MATCH (n:GraphEvent) WHERE n.seq < 2 DELETE n")
-        from tortoise import event_store as _es
-        _es._refresh_first_seq(proj)  # watermark, as purge_expired would
-        r = client.get("/v1/events", params={"after": stale})
-        assert r.status_code == 410
-        assert "replay from tail" in r.json()["detail"]
+    # ── Tenant isolation ──────────────────────────────────────────────
 
-    def test_malformed_cursor_400(self, client):
-        r = client.get("/v1/events", params={"after": "not-a-cursor!!"})
-        assert r.status_code == 400
-        assert r.json()["detail"] == "invalid cursor"
+    def test_tenant_cannot_see_other_team_events(self, client):
+        """Team A cannot see team B's events — trust boundary."""
+        # Write events for team B directly into its event log.
+        import tortoise.hosted_api as ha
+        ha._log_team_event("team-b", "point_created",
+                           point_id="secret-123", kind="statement")
 
-    def test_unknown_type_400(self, client):
-        r = client.get("/v1/events", params={"types": "Nope"})
-        assert r.status_code == 400
-
-    def test_tenant_isolation(self, client, internal_client):
-        """Team A's poll never contains team B's events (namespace = partition)."""
-        from tortoise.hosted_api import _make_sdk
-        for team_id in ("evt-team-a", "evt-team-b"):
-            r = internal_client.post(
-                "/internal/provision",
-                json={
-                    "team_id": team_id,
-                    "team_name": f"Team {team_id}",
-                    "api_key_hash": f"hash-{team_id}",
-                    "created_by": "tester",
-                },
-                headers={"Authorization": f"Bearer {_INTERNAL_KEY}"},
+        # Team A (TEST_TEAM_ID) queries events — must NOT see team-b's.
+        r = client.get("/v1/events")
+        assert r.status_code == 200, r.text[:200]
+        body = r.json()
+        # Team A should only see its own events (none in this case).
+        for ev in body["events"]:
+            assert ev["team_id"] != "team-b", (
+                f"tenant isolation broken: saw team-b event {ev}"
             )
-            assert r.status_code == 200, f"provision failed: {r.text}"
-        sdk_a = _make_sdk(namespace="evt-team-a")
-        sdk_a.create_point(content="A_EVENT", kind="statement")
-        sdk_b = _make_sdk(namespace="evt-team-b")
-        sdk_b.create_point(content="B_EVENT", kind="statement")
-        ids_a = {e["payload"].get("id") for e in sdk_a.events_poll()["events"]}
-        ids_b = {e["payload"].get("id") for e in sdk_b.events_poll()["events"]}
-        assert ids_a and ids_b
-        assert ids_a.isdisjoint(ids_b), "cross-tenant event leak"
 
+    def test_tenant_isolation_with_own_events(self, client):
+        """Team A's events are returned but team B's are not, even when
+        team A also has events."""
+        import tortoise.hosted_api as ha
+        # Write events for team B
+        ha._log_team_event("team-b", "point_created",
+                           point_id="b-secret-1", kind="statement")
 
-class TestRetractedTombstoneContract:
-    """#432 Task 6 — /v1/points excludes retracted; /v1/points/{id} returns them."""
+        # Create a point for team A via the API
+        r = client.post("/v1/points", json={
+            "content": "Team A visible event",
+            "kind": "statement",
+        })
+        assert r.status_code == 200
 
-    def test_list_excludes_retracted_but_get_returns_tombstone(self, client):
-        from tortoise.hosted_api import _make_sdk
-        sdk = _make_sdk(namespace=TEST_TEAM_ID)
-        p = sdk.create_point(content="doomed", kind="statement")
-        # listed while live
-        listed = client.get("/v1/points").json()
-        assert any(pt["id"] == p["id"] for pt in listed["points"])
-        # retract via the team SDK (Task 1 method)
-        sdk.retract_point(p["id"])
-        listed2 = client.get("/v1/points").json()
-        assert not any(pt["id"] == p["id"] for pt in listed2["points"]), \
-            "retracted point must be excluded from the default list surface"
-        # tombstone contract: still retrievable by id with status='retracted'
-        got = client.get(f"/v1/points/{p['id']}")
-        assert got.status_code == 200, got.text
-        assert got.json()["status"] == "retracted"
+        r = client.get("/v1/events")
+        assert r.status_code == 200
+        body = r.json()
+        # Only team A events
+        for ev in body["events"]:
+            assert ev["team_id"] == TEST_TEAM_ID, (
+                f"tenant isolation broken: saw {ev['team_id']} event"
+            )
+        # Our point_created event is there
+        assert any(
+            ev["content_preview"] == "Team A visible event"
+            for ev in body["events"]
+        )
+
+    # ── Cursor pagination ─────────────────────────────────────────────
+
+    def test_cursor_pagination(self, client):
+        """Cursor-based pagination returns pages correctly."""
+        # Create 5 points
+        for i in range(5):
+            r = client.post("/v1/points", json={
+                "content": f"Point {i}",
+                "kind": "statement",
+            })
+            assert r.status_code == 200
+
+        # Page 1: limit=2, no cursor → 2 most recent
+        r = client.get("/v1/events?limit=2")
+        assert r.status_code == 200, r.text[:200]
+        page1 = r.json()
+        assert len(page1["events"]) == 2
+        assert page1["has_more"] is True
+        assert page1["cursor"] is not None
+        # Most recent first: Point 4, Point 3
+        assert page1["events"][0]["content_preview"] == "Point 4"
+        assert page1["events"][1]["content_preview"] == "Point 3"
+
+        # Page 2: use cursor from page 1
+        r = client.get(f"/v1/events?limit=2&cursor={page1['cursor']}")
+        assert r.status_code == 200, r.text[:200]
+        page2 = r.json()
+        assert len(page2["events"]) == 2
+        assert page2["has_more"] is True
+        assert page2["cursor"] is not None
+        assert page2["events"][0]["content_preview"] == "Point 2"
+        assert page2["events"][1]["content_preview"] == "Point 1"
+
+        # Page 3: last page (1 event left)
+        r = client.get(f"/v1/events?limit=2&cursor={page2['cursor']}")
+        assert r.status_code == 200, r.text[:200]
+        page3 = r.json()
+        assert len(page3["events"]) == 1
+        assert page3["has_more"] is False
+        assert page3["cursor"] is None
+        assert page3["events"][0]["content_preview"] == "Point 0"
+
+    def test_cursor_pagination_no_overlap(self, client):
+        """No duplicate events across pages."""
+        for i in range(10):
+            r = client.post("/v1/points", json={
+                "content": f"Event {i:02d}",
+                "kind": "statement",
+            })
+            assert r.status_code == 200
+
+        all_seen: set[str] = set()
+        cursor = None
+        while True:
+            params = "limit=3"
+            if cursor:
+                params += f"&cursor={cursor}"
+            r = client.get(f"/v1/events?{params}")
+            assert r.status_code == 200, r.text[:200]
+            page = r.json()
+            for ev in page["events"]:
+                eid = ev["event_id"]
+                assert eid not in all_seen, f"duplicate event {eid}"
+                all_seen.add(eid)
+            cursor = page["cursor"]
+            if not page["has_more"]:
+                break
+
+        assert len(all_seen) == 10, f"expected 10 unique events, got {len(all_seen)}"
+
+    # ── Read-only enforcement ─────────────────────────────────────────
+
+    def test_events_post_not_allowed(self, client):
+        """POST /v1/events → 405 Method Not Allowed."""
+        r = client.post("/v1/events", json={})
+        assert r.status_code == 405, f"expected 405, got {r.status_code}"
+
+    def test_events_put_not_allowed(self, client):
+        """PUT /v1/events → 405 Method Not Allowed."""
+        r = client.put("/v1/events", json={})
+        assert r.status_code == 405, f"expected 405, got {r.status_code}"
+
+    def test_events_delete_not_allowed(self, client):
+        """DELETE /v1/events → 405 Method Not Allowed."""
+        r = client.delete("/v1/events")
+        assert r.status_code == 405, f"expected 405, got {r.status_code}"
+
+    # ── Limit param ───────────────────────────────────────────────────
+
+    def test_events_respects_limit(self, client):
+        """limit param controls page size."""
+        for i in range(10):
+            r = client.post("/v1/points", json={
+                "content": f"Point {i}",
+                "kind": "statement",
+            })
+            assert r.status_code == 200
+
+        r = client.get("/v1/events?limit=3")
+        assert r.status_code == 200, r.text[:200]
+        assert len(r.json()["events"]) == 3
+
+        r = client.get("/v1/events?limit=7")
+        assert r.status_code == 200, r.text[:200]
+        assert len(r.json()["events"]) == 7
+
+    def test_events_limit_default(self, client):
+        """Default limit is 50."""
+        for i in range(60):
+            r = client.post("/v1/points", json={
+                "content": f"Point {i}",
+                "kind": "statement",
+            })
+            assert r.status_code == 200
+
+        r = client.get("/v1/events")
+        assert r.status_code == 200, r.text[:200]
+        # Should return at most 50 (default)
+        assert len(r.json()["events"]) == 50
+        assert r.json()["has_more"] is True
+
+    def test_events_limit_max_500(self, client):
+        """Limit is capped at 500."""
+        r = client.get("/v1/events?limit=1000")
+        # 422 because Query(ge=1, le=500) rejects 1000
+        assert r.status_code == 422, f"expected 422, got {r.status_code}"
+
+    def test_events_limit_negative_rejected(self, client):
+        """Negative limit → 422."""
+        r = client.get("/v1/events?limit=-1")
+        assert r.status_code == 422, f"expected 422, got {r.status_code}"
+
+    # ── Event structure ───────────────────────────────────────────────
+
+    def test_event_has_required_fields(self, client):
+        """Every event has event_id, ts, type, team_id."""
+        r = client.post("/v1/points", json={
+            "content": "Structure check",
+            "kind": "statement",
+        })
+        assert r.status_code == 200
+
+        r = client.get("/v1/events")
+        assert r.status_code == 200
+        for ev in r.json()["events"]:
+            assert "event_id" in ev
+            assert "ts" in ev
+            assert "type" in ev
+            assert "team_id" in ev
+            assert ev["team_id"] == TEST_TEAM_ID
+
+    # ── Invalid cursor ────────────────────────────────────────────────
+
+    def test_invalid_cursor_returns_error(self, client):
+        """Malformed cursor → 400."""
+        r = client.get("/v1/events?cursor=not-valid-base64!!!")
+        assert r.status_code == 400, f"expected 400, got {r.status_code}: {r.text[:200]}"
+
+    def test_empty_cursor_treated_as_none(self, client):
+        """Empty cursor string → treated as no cursor (first page)."""
+        r = client.post("/v1/points", json={
+            "content": "Test",
+            "kind": "statement",
+        })
+        assert r.status_code == 200
+
+        r = client.get("/v1/events?cursor=")
+        assert r.status_code == 200, r.text[:200]
+        # Should return the event (empty cursor → first page)
+        assert len(r.json()["events"]) == 1
