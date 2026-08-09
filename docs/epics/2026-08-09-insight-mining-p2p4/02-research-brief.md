@@ -12,7 +12,8 @@ aboutObjects: tortoise
 # Epic Research Brief — #264 (re-scope): Mine Agent Conversations for Insights — Phases 2–4
 
 **Date:** 2026-08-09
-**Status:** draft
+**Status:** draft — reviewed.
+**Review record:** research brief reviewed for depth + ontology alignment as part of the scope review gate (commit 0f054d3: "address review gate" — findings cross-referenced research-brief sections) and re-verified by decompose per-issue reviewers (research alignment confirmed: brief §3.1/§3.3 dedup chain → #783; §2.2 INSTANTIATES removal → #781; §2.3 _semantic_dedup reuse → #784). No open findings.
 **Research depth:** deep (epic scope)
 **Domain:** engineering + ontology
 **Decision context:** CONDITIONAL PROCEED (align, 01-align.md) — execution gated on Gate A (#320 STABLE) + Gate B (calibration milestone).

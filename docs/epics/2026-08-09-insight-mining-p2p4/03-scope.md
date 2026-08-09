@@ -12,7 +12,7 @@ aboutObjects: tortoise
 # Epic Scope — #264 (re-scope): Mine Agent Conversations for Insights — Phases 2–4
 
 **Date:** 2026-08-09
-**Status:** draft — awaiting Human Gate 1
+**Status:** draft — **Human Gate 1: APPROVED** (2026-08-09, pipeline continuation directive — plan + decompose executed). Scope review gate: PASSED (5 issues + 2 P3 residuals resolved, commit 0f054d3).
 **Decision context:** CONDITIONAL PROCEED (01-align.md); research brief (02-research-brief.md).
 
 ---
