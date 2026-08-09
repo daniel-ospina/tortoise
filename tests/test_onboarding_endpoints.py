@@ -26,6 +26,7 @@ def client(tmp_path):
     orig_init = TortoiseSDK.__init__
 
     def _patched(self, db_path_arg=None, *, namespace=None, **kw):
+        kw.pop("db_path", None)
         orig_init(self, db_path=db_path if db_path_arg is None else db_path_arg,
                   namespace=namespace, **kw)
 
@@ -48,6 +49,7 @@ def unauth_client(tmp_path):
     orig_init = TortoiseSDK.__init__
 
     def _patched(self, db_path_arg=None, *, namespace=None, **kw):
+        kw.pop("db_path", None)
         orig_init(self, db_path=db_path if db_path_arg is None else db_path_arg,
                   namespace=namespace, **kw)
 

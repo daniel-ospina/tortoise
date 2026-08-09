@@ -41,7 +41,7 @@ class TestResolveTeamLimits:
         tid = _find_team_id(reg_sdk)
         limits = resolve_team_limits(tid)
         assert limits["max_points"] == 1000
-        assert limits["max_api_keys"] == 20
+        assert limits["max_api_keys"] == 2  # free tier from pricing.json
         assert limits["max_sessions"] == 1000
 
 

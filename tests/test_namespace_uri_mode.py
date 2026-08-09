@@ -11,6 +11,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import os
 import pytest
 from tortoise.sdk import TortoiseSDK
 
@@ -20,12 +21,19 @@ from tortoise.sdk import TortoiseSDK
 FALKORDB_AVAILABLE = False
 try:
     from tortoise.sdk import TortoiseSDK as _ProbeSDK
+    _old_uri = os.environ.get("TORTOISE_DB_URI")
+    os.environ["TORTOISE_DB_URI"] = "docker://:falkordb@localhost:6379/tortoise_test_221_namespace"
     _probe = _ProbeSDK()
     _probe._get_proj().g.query("RETURN 1")
     _probe.close()
     FALKORDB_AVAILABLE = True
 except Exception:
-    pass
+    FALKORDB_AVAILABLE = False
+finally:
+    if _old_uri is not None:
+        os.environ["TORTOISE_DB_URI"] = _old_uri
+    else:
+        os.environ.pop("TORTOISE_DB_URI", None)
 
 pytestmark = pytest.mark.skipif(
     not FALKORDB_AVAILABLE, reason="Live FalkorDB (Docker) not available")
