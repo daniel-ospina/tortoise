@@ -206,15 +206,30 @@ def _enforce_quota(resource: str = "points") -> None:
 
 
 def _quota_gated(fn, resource: str = "points"):
-    """Wrap a bound SDK method with a pre-write quota check.
+    """Wrap a bound SDK method with a pre-write quota check + metering.
 
     Preserves the bound-callable style (_safe(_get_team_sdk().name, ...)):
     the quota check runs INSIDE _safe's try so errors surface as structured
     error dicts (see _safe's QuotaExceededError/QuotaCheckError mapping).
+
+    #681: after a successful write (fn returns without raising), records a
+    write op for overage metering. Best-effort — metering failures are
+    swallowed and never block the tool.
     """
     def _gated(*args, **kwargs):
         _enforce_quota(resource)
-        return fn(*args, **kwargs)
+        result = fn(*args, **kwargs)
+        # Metering (#681): best-effort, after successful write
+        try:
+            from tortoise.mcp_auth import _current_team_id, _current_team_limits
+            team_id = _current_team_id.get()
+            if team_id:
+                limits = _current_team_limits.get() or {}
+                from tortoise.metering import record_write_ops
+                record_write_ops(team_id, tier=limits.get("tier"))
+        except Exception:
+            pass  # best-effort — never block the tool
+        return result
     return _gated
 
 

@@ -1,0 +1,289 @@
+"""Per-team write-op metering for overage billing (#681).
+
+Design
+~~~~~~
+Metering records live as ``:MeteringRecord`` nodes in the FalkorDB **registry**
+namespace (not team-specific graphs), keyed by ``(team_id, billing_period)``
+where ``billing_period`` is a calendar-month string ``"YYYY-MM"``.
+
+Why the registry graph?
+- All billing state (Team nodes, subscription fields, WebhookEvent) already
+  lives in the registry — metering is billing infrastructure, not user data.
+- Lift-and-shift to Supabase (#669) is straightforward: one node label →
+  one table.
+- No cross-namespace queries needed — a single ``MERGE … SET …`` writes the
+  record, and the dashboard/usage endpoint reads from the same namespace.
+
+Period rollover is **lazy** (no cron): when a write arrives in a new month,
+the period key changes → a new ``:MeteringRecord`` is MERGEd and incremented.
+Previous-period records are frozen (no further increments). This avoids a
+scheduler dependency while keeping the write path simple.
+
+Increment semantics
+~~~~~~~~~~~~~~~~~~~
+Each successful **write API call** = 1 write op. We count calls, not nodes
+created — a ``create_point`` that internally creates 1 node and a
+``capture_session`` that creates thousands both count as 1 write op. This
+matches the pricing page's "$5 per additional 10k write ops" — a write op
+is one API call, not one graph element.
+
+Storage
+~~~~~~~
+::
+
+    (:MeteringRecord {
+        team_id:   "team_abc123",
+        period:    "2026-08",
+        write_ops: 42,
+        updated_at: "2026-08-09T14:31:00.123Z"
+    })
+
+Atomic increment via FalkorDB Cypher::
+
+    MERGE (m:MeteringRecord {team_id: $tid, period: $period})
+    SET m.write_ops = coalesce(m.write_ops, 0) + $n,
+        m.updated_at = $now
+
+Threshold events
+~~~~~~~~~~~~~~~~
+When a team crosses 80% or 100% of its ``included_write_ops_per_month``
+(from ``product/pricing.json``), a structured log event is emitted at
+WARNING (80%) or ERROR (100%). This feeds into the existing alerting
+pipeline (Resend + Telegram — see #310 billing notifications).
+
+Thresholds are checked **post-increment** on every write for teams on
+overage-eligible tiers (pro, team). Free and Solo tiers have no overage
+and never trigger threshold events — they simply hit the hard quota limit.
+
+Usage exposure
+~~~~~~~~~~~~~~
+``get_current_usage(team_id)`` returns ``{write_ops_used, write_ops_limit,
+period, overage_eligible}`` for the current billing period. Wired into
+``GET /v1/team`` (see ``TeamInfoResponse`` extension).
+
+MCP writes
+~~~~~~~~~~
+MCP write tools call ``_safe`` which runs the write inside a try/except.
+Metering is recorded **after** a successful write (no exception) and only
+for quota-gated tools (the ``_QUOTA_GATED`` set). Stdio/selfhost mode
+(with no team context) skips metering entirely.
+"""
+from __future__ import annotations
+
+import logging
+import os
+import tempfile
+from datetime import datetime, timezone
+
+_logger = logging.getLogger(__name__)
+
+# ── Period helpers ───────────────────────────────────────────────────────────
+
+def _current_period() -> str:
+    """Calendar month as ``"YYYY-MM"`` in UTC."""
+    now = datetime.now(timezone.utc)
+    return f"{now.year}-{now.month:02d}"
+
+
+# ── Pricing integration ─────────────────────────────────────────────────────
+
+def _ops_allowance(tier: str) -> int:
+    """Return included_write_ops_per_month for a tier (pricing.json)."""
+    from tortoise.pricing import tier_limits
+    lim = tier_limits(tier)
+    return int(lim.get("included_write_ops_per_month", 0))
+
+
+def _overage_eligible(tier: str) -> bool:
+    """True if this tier is billed for overage."""
+    from tortoise.pricing import has_overage
+    return has_overage(tier)
+
+
+# ── Registry SDK helper ─────────────────────────────────────────────────────
+
+def _reg_sdk():
+    """Build a TortoiseSDK pointing at the registry namespace.
+
+    Same precedence as ``quota._make_sdk``: URI mode when TORTOISE_DB_URI is
+    set; else embedded via TORTOISE_DB_PATH with tempfile fallback.
+    """
+    from tortoise.sdk import TortoiseSDK
+    if os.environ.get("TORTOISE_DB_URI"):
+        return TortoiseSDK(namespace="registry")
+    db_path = os.environ.get("TORTOISE_DB_PATH", "/data/tortoise.db")
+    try:
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    except OSError:
+        db_path = os.path.join(tempfile.gettempdir(), "tortoise.db")
+    return TortoiseSDK(db_path=db_path, namespace="registry")
+
+
+# ── Core increment ──────────────────────────────────────────────────────────
+
+def record_write_ops(team_id: str, tier: str | None = None, n: int = 1) -> dict | None:
+    """Increment the write-op counter for *team_id* in the current billing period.
+
+    Args:
+        team_id: Team identifier (required).
+        tier: Team tier — used to determine overage eligibility and allowance
+            for threshold events. If None, threshold checks are skipped (e.g.
+            when called from a context where tier isn't readily available).
+        n: Number of write ops to record (default 1).
+
+    Returns:
+        ``{write_ops, period, ops_allowance, overage_eligible}`` for threshold
+        checking, or None if the registry is unreachable (non-fatal — metering
+        failures never block the write).
+
+    Raises:
+        Nothing — metering is best-effort. Failures are logged and swallowed.
+    """
+    if not team_id:
+        return None
+    period = _current_period()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    try:
+        sdk = _reg_sdk()
+        reg = sdk._get_registry()
+        reg.query(
+            "MERGE (m:MeteringRecord {team_id: $tid, period: $period}) "
+            "SET m.write_ops = coalesce(m.write_ops, 0) + $n, "
+            "    m.updated_at = $now",
+            params={"tid": team_id, "period": period, "n": n, "now": now_iso},
+        )
+        rows = reg.query(
+            "MATCH (m:MeteringRecord {team_id: $tid, period: $period}) "
+            "RETURN m.write_ops",
+            params={"tid": team_id, "period": period},
+        ).result_set
+        write_ops = int(rows[0][0]) if rows else n
+    except Exception as e:
+        _logger.warning(
+            "metering increment failed (non-fatal): team=%s period=%s error=%s",
+            team_id, period, e,
+        )
+        return None
+
+    result = {
+        "write_ops": write_ops,
+        "period": period,
+        "ops_allowance": _ops_allowance(tier) if tier else 0,
+        "overage_eligible": _overage_eligible(tier) if tier else False,
+    }
+
+    # Threshold events
+    _check_thresholds(team_id, tier, result)
+
+    return result
+
+
+# ── Threshold events ────────────────────────────────────────────────────────
+
+_THRESHOLD_PCT = [80, 100]
+
+# Track which thresholds have already been crossed to avoid duplicate events
+# per period. In-memory only — resets on process restart (acceptable for v1;
+# a duplicate alert on restart is better than missing an alert entirely).
+_thresholds_fired: set[tuple[str, str, int]] = set()
+
+
+def _check_thresholds(
+    team_id: str,
+    tier: str | None,
+    result: dict,
+) -> None:
+    """Emit log events if write_ops crossed an 80% or 100% threshold.
+
+    Only fires for overage-eligible tiers (pro, team). Each threshold fires
+    at most once per (team_id, period, pct) per process lifetime.
+    """
+    if not tier or not result.get("overage_eligible"):
+        return
+    allowance = result.get("ops_allowance", 0)
+    if allowance <= 0:
+        return
+    write_ops = result.get("write_ops", 0)
+    period = result.get("period", "")
+
+    for pct in _THRESHOLD_PCT:
+        threshold = int(allowance * pct / 100)
+        # Crossed the threshold THIS increment (was below, now at or above)
+        previous = write_ops - 1  # n is always 1 currently
+        if previous < threshold <= write_ops:
+            key = (team_id, period, pct)
+            if key in _thresholds_fired:
+                continue
+            _thresholds_fired.add(key)
+            level = logging.WARNING if pct == 80 else logging.ERROR
+            _logger.log(
+                level,
+                "write-op threshold %d%% reached: team=%s period=%s count=%d/%d",
+                pct, team_id, period, write_ops, allowance,
+            )
+
+
+def _reset_thresholds_for_tests() -> None:
+    """Clear the in-memory threshold tracker (test helper only)."""
+    _thresholds_fired.clear()
+
+
+# ── Usage query ─────────────────────────────────────────────────────────────
+
+def get_current_usage(team_id: str) -> dict:
+    """Return write-op usage for *team_id* in the current billing period.
+
+    Returns:
+        ``{write_ops_used: int, write_ops_limit: int, period: str,
+           overage_eligible: bool, overage_cost_usd: float | None}``
+
+    ``overage_cost_usd`` is the cost of ops BEYOND the included allowance
+    (rounded up to the nearest 10k block, $5/block). None if under allowance
+    or not eligible.
+    """
+    period = _current_period()
+    ops_used = 0
+    try:
+        sdk = _reg_sdk()
+        reg = sdk._get_registry()
+        rows = reg.query(
+            "MATCH (m:MeteringRecord {team_id: $tid, period: $period}) "
+            "RETURN m.write_ops",
+            params={"tid": team_id, "period": period},
+        ).result_set
+        if rows:
+            ops_used = int(rows[0][0])
+    except Exception as e:
+        _logger.warning(
+            "metering usage query failed: team=%s period=%s error=%s",
+            team_id, period, e,
+        )
+
+    # Determine tier from the Team node for allowance
+    try:
+        sdk2 = _reg_sdk()
+        reg2 = sdk2._get_registry()
+        trows = reg2.query(
+            "MATCH (t:Team {id: $tid}) RETURN t.tier",
+            params={"tid": team_id},
+        ).result_set
+        tier = trows[0][0] if trows else "free"
+    except Exception:
+        tier = "free"
+
+    ops_limit = _ops_allowance(tier)
+    eligible = _overage_eligible(tier)
+
+    overage_cost = None
+    if eligible and ops_used > ops_limit:
+        from tortoise.pricing import overage_price_per_10k
+        overage_units = (ops_used - ops_limit + 9999) // 10000
+        overage_cost = overage_units * overage_price_per_10k()
+
+    return {
+        "write_ops_used": ops_used,
+        "write_ops_limit": ops_limit,
+        "period": period,
+        "overage_eligible": eligible,
+        "overage_cost_usd": overage_cost,
+    }
