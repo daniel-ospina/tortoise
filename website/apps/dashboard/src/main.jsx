@@ -67,6 +67,12 @@ function App() {
   const [currentGraphId, setCurrentGraphId] = React.useState(null)
   const [showCreateTeam, setShowCreateTeam] = React.useState(false)
   const [newTeamName, setNewTeamName] = React.useState('')
+  const [members, setMembers] = React.useState(null) // null = not loaded / no access
+  const [inviteEmail, setInviteEmail] = React.useState('')
+  const [inviteRole, setInviteRole] = React.useState('member')
+  const [backupInfo, setBackupInfo] = React.useState(null)
+  const [newGraphName, setNewGraphName] = React.useState('')
+  const teamIdRef = React.useRef(null)
 
   const headers = apiKey ? { Authorization: `Bearer ${apiKey}` } : {}
 
@@ -234,6 +240,157 @@ function App() {
     }
   }
 
+  // ── #300: graphs + members + backups (session JWT authed) ──
+  function myRole() {
+    const t = teams.find((x) => x.team_id === currentTeamId)
+    return t ? t.role : ''
+  }
+  const isOwnerAdmin = myRole() === 'owner' || myRole() === 'admin'
+
+  async function loadGraphs(teamId) {
+    const tok = sessionTokenRef.current
+    if (!tok || !teamId) return
+    try {
+      const res = await fetch(`${API_BASE}/v1/graphs?team_id=${teamId}`, {
+        headers: { Authorization: `Bearer ${tok}` },
+      })
+      if (!res.ok) return
+      const list = await res.json()
+      if (teamIdRef.current === teamId) setGraphs(list)
+    } catch { /* best-effort */ }
+  }
+
+  async function createGraph() {
+    if (busy || !newGraphName.trim()) return
+    setBusy(true)
+    setError('')
+    try {
+      const tok = sessionTokenRef.current
+      if (!tok) throw new Error('No session')
+      const res = await fetch(`${API_BASE}/v1/graphs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tok}` },
+        body: JSON.stringify({ team_id: currentTeamId, name: newGraphName.trim() }),
+      })
+      if (!res.ok) {
+        const b = await res.json().catch(() => ({}))
+        if (res.status === 402) {
+          setError('Graph limit reached for this tier — upgrade to add more graphs.')
+          setBusy(false)
+          return
+        }
+        throw new Error(b.detail || `HTTP ${res.status}`)
+      }
+      setNewGraphName('')
+      await Promise.all([loadGraphs(currentTeamId), loadTeams()])
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function loadMembers() {
+    const tok = sessionTokenRef.current
+    if (!tok || !currentTeamId) return
+    try {
+      const res = await fetch(`${API_BASE}/v1/teams/${currentTeamId}/members`, {
+        headers: { Authorization: `Bearer ${tok}` },
+      })
+      if (res.ok) setMembers(await res.json())
+      else if (res.status === 403) setMembers(null) // not owner/admin — cannot view
+    } catch { setMembers(null) }
+  }
+
+  async function inviteMember() {
+    if (!inviteEmail.includes('@')) return
+    setBusy(true)
+    setError('')
+    try {
+      const tok = sessionTokenRef.current
+      if (!tok) throw new Error('No session')
+      const res = await fetch(`${API_BASE}/v1/invites`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tok}` },
+        body: JSON.stringify({ team_id: currentTeamId, email: inviteEmail.trim(), role: inviteRole }),
+      })
+      if (!res.ok) {
+        const b = await res.json().catch(() => ({}))
+        if (res.status === 402) {
+          setError('Invites require the Team tier — upgrade to invite teammates.')
+          setBusy(false)
+          return
+        }
+        throw new Error(b.detail || `HTTP ${res.status}`)
+      }
+      setInviteEmail('')
+      await loadMembers()
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function removeMember(userId) {
+    if (!confirm('Remove this member from the team?')) return
+    setError('')
+    try {
+      const tok = sessionTokenRef.current
+      if (!tok) throw new Error('No session')
+      const res = await fetch(`${API_BASE}/v1/teams/${currentTeamId}/members/${userId}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${tok}` },
+      })
+      if (!res.ok) {
+        const b = await res.json().catch(() => ({}))
+        throw new Error(b.detail || `HTTP ${res.status}`)
+      }
+      await loadMembers()
+    } catch (e) {
+      setError(e.message)
+    }
+  }
+
+  async function changeRole(userId, role) {
+    setError('')
+    try {
+      const tok = sessionTokenRef.current
+      if (!tok) throw new Error('No session')
+      const res = await fetch(`${API_BASE}/v1/teams/${currentTeamId}/members/${userId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tok}` },
+        body: JSON.stringify({ role }),
+      })
+      if (!res.ok) {
+        const b = await res.json().catch(() => ({}))
+        throw new Error(b.detail || `HTTP ${res.status}`)
+      }
+      await loadMembers()
+    } catch (e) {
+      setError(e.message)
+    }
+  }
+
+  async function loadBackups() {
+    try {
+      const b = await api('/backups')
+      const list = b.backups || []
+      setBackupInfo(list.length ? { latest: list[0], count: list.length } : { count: 0 })
+    } catch { /* tier-gated (Pro) — leave null */ }
+  }
+
+  // Load team-scoped data whenever the active team changes.
+  React.useEffect(() => {
+    if (currentTeamId) {
+      teamIdRef.current = currentTeamId
+      loadMembers()
+      loadGraphs(currentTeamId)
+      loadBackups()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentTeamId])
+
   async function createKey() {
     setError('')
     setBusy(true)
@@ -338,6 +495,8 @@ function App() {
         <nav>
           <button className={tab === 'overview' ? 'active' : ''} onClick={() => setTab('overview')}>Overview</button>
           <button className={tab === 'keys' ? 'active' : ''} onClick={() => setTab('keys')}>API Keys</button>
+          <button className={tab === 'graphs' ? 'active' : ''} onClick={() => setTab('graphs')}>Graphs</button>
+          <button className={tab === 'members' ? 'active' : ''} onClick={() => setTab('members')}>Members</button>
           <button className={tab === 'sessions' ? 'active' : ''} onClick={() => setTab('sessions')}>Sessions</button>
         </nav>
         <div className="switchers">
@@ -362,6 +521,14 @@ function App() {
             ))}
           </select>
         </div>
+        {team && team.tier !== 'team' && (
+          <a className="tier-badge" href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">
+            {team.tier} tier · Upgrade
+          </a>
+        )}
+        {team && team.tier === 'team' && (
+          <span className="tier-badge tier-team">Team tier</span>
+        )}
         <button className="ghost" onClick={logout}>Log out</button>
       </header>
 
@@ -385,10 +552,14 @@ function App() {
             <h2>Overview</h2>
             <div className="cards">
               <div className="card"><div className="card-val">{team.point_count ?? 0}</div><div className="card-label">Points</div></div>
-              <div className="card"><div className="card-val">{keys.length}</div><div className="card-label">API Keys</div></div>
-              <div className="card"><div className="card-val">{sessions.length}</div><div className="card-label">Sessions</div></div>
+              <div className="card"><div className="card-val">{graphs.length}</div><div className="card-label">Graphs</div></div>
+              <div className="card"><div className="card-val">{members === null ? '—' : members.length}</div><div className="card-label">Users</div></div>
+              <div className="card"><div className="card-val">{backupInfo ? (backupInfo.count || 'none') : '—'}</div><div className="card-label">Backups</div></div>
               <div className="card"><div className="card-val">{team.tier || 'free'}</div><div className="card-label">Tier</div></div>
             </div>
+            {team.tier === 'free' && (
+              <p className="dim small">Upgrade for more graphs, backups, and team members — <a href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">see pricing</a>.</p>
+            )}
             <p className="dim small">Team ID: <code>{team.team_id}</code></p>
             <div className="quickstart">
               <h3>Your first point</h3>
@@ -426,6 +597,99 @@ function App() {
                     <td>{!k.revoked_at && <button className="ghost small" onClick={() => revokeKey(k.id)}>Revoke</button>}</td>
                   </tr>
                 ))}
+              </tbody>
+            </table>
+          </section>
+        )}
+
+        {tab === 'graphs' && (
+          <section>
+            {authMode !== 'session' && (
+              <p className="dim small">Graphs are session-authenticated — sign in with your Tortoise account to view and create them.</p>
+            )}
+            <div className="row">
+              <h2>Graphs</h2>
+              <div className="inline-form">
+                <input
+                  placeholder="New graph name"
+                  value={newGraphName}
+                  onChange={(e) => setNewGraphName(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && createGraph()}
+                />
+                <button onClick={createGraph} disabled={busy || !newGraphName.trim()}>+ Create</button>
+              </div>
+            </div>
+            <table>
+              <thead><tr><th>Name</th><th>Kind</th><th>Graph ID</th></tr></thead>
+              <tbody>
+                {graphs.length === 0 && <tr><td colSpan="3" className="dim">No graphs yet — create your first one above.</td></tr>}
+                {graphs.map((g) => (
+                  <tr key={g.graph_id}>
+                    <td><code>{g.name}</code></td>
+                    <td>{g.kind}</td>
+                    <td><code>{g.graph_id}</code></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </section>
+        )}
+
+        {tab === 'members' && (
+          <section>
+            <div className="row">
+              <h2>Members</h2>
+              {isOwnerAdmin && (
+                <div className="inline-form">
+                  <input
+                    type="email"
+                    placeholder="teammate@example.com"
+                    value={inviteEmail}
+                    onChange={(e) => setInviteEmail(e.target.value)}
+                  />
+                  <select value={inviteRole} onChange={(e) => setInviteRole(e.target.value)} aria-label="Invite role">
+                    <option value="member">member</option>
+                    <option value="admin">admin</option>
+                  </select>
+                  <button onClick={inviteMember} disabled={busy || !inviteEmail.includes('@')}>Invite</button>
+                </div>
+              )}
+            </div>
+            {!isOwnerAdmin && (
+              <p className="dim small">Only owners and admins can manage members.</p>
+            )}
+            {authMode !== 'session' && (
+              <p className="dim small">Members are session-authenticated — sign in with your Tortoise account to view them.</p>
+            )}
+            {team && team.tier !== 'team' && isOwnerAdmin && (
+              <p className="dim small">Invites require the Team tier — <a href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">upgrade to add teammates</a>.</p>
+            )}
+            <table>
+              <thead><tr><th>Email / User</th><th>Role</th><th>Status</th><th></th></tr></thead>
+              <tbody>
+                {members === null && <tr><td colSpan="4" className="dim">Member list is only visible to owners and admins.</td></tr>}
+                {members !== null && members.length === 0 && <tr><td colSpan="4" className="dim">No members yet.</td></tr>}
+                {members !== null && members.map((m) => {
+                  const invited = m.status === 'invited'
+                  return (
+                    <tr key={m.user_id || m.email}>
+                      <td><code>{m.email || m.user_id}</code></td>
+                      <td>
+                        {m.role}
+                        {isOwnerAdmin && !invited && m.role !== 'owner' && (
+                          <button
+                            className="ghost small"
+                            onClick={() => changeRole(m.user_id, m.role === 'admin' ? 'member' : 'admin')}
+                          >
+                            {m.role === 'admin' ? '→ member' : '→ admin'}
+                          </button>
+                        )}
+                      </td>
+                      <td>{invited ? <span className="revoked">pending invite</span> : <span className="live">active</span>}</td>
+                      <td>{isOwnerAdmin && !invited && m.role !== 'owner' && <button className="ghost small" onClick={() => removeMember(m.user_id)}>Remove</button>}</td>
+                    </tr>
+                  )
+                })}
               </tbody>
             </table>
           </section>
