@@ -103,7 +103,10 @@ def test_no_per_instance_signal_handlers():
     import signal
     from tortoise.projection import FalkorProjection
     before = signal.getsignal(signal.SIGTERM)
-    for i in range(100):
+    # 20 instances is ample: per-instance handler registration grows the
+    # count within the first few instances. (100 redislite subprocess spawns
+    # at ~3-5s each blew CI's per-test budget, #493.)
+    for i in range(20):
         path = _tmp_db(f"sig{i}.db")
         proj = FalkorProjection(path)
         proj.close()
