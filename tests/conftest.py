@@ -57,3 +57,20 @@ def provision_test_user():
 @pytest.fixture
 def test_user(provision_test_user):
     return provision_test_user(tier="free", demo_seed=True)
+
+
+@pytest.fixture(scope="session")
+def shared_embedded_db():
+    """One shared embedded FalkorDBLite DB for the whole session (#221 R5).
+
+    R5 mitigation for the redislite process leak (#176): tests that need an
+    embedded (redislite) DB create ONE server per session instead of one per
+    test. Each test wipes the graph on its own (or the per-test graph name
+    isolates it), so state never leaks across tests while the subprocess
+    count stays at 1.
+
+    # TODO(#176): stopgap — remove when the redislite root-cause fix lands.
+    """
+    import tempfile as _tf
+    db_path = os.path.join(_tf.mkdtemp(prefix="tortoise_shared_embedded_"), "shared.db")
+    yield db_path
