@@ -752,6 +752,21 @@ class TeamInfoResponse(BaseModel):
     point_count: int = 0
 
 
+# ── Billing: Checkout + Portal request/response models (#310, Task 5) ───────
+
+class CheckoutRequest(BaseModel):
+    """POST /v1/billing/checkout body — the price id is the only input."""
+    price_id: str = Field(..., min_length=1, max_length=128)
+
+
+class CheckoutResponse(BaseModel):
+    checkout_url: str
+
+
+class PortalResponse(BaseModel):
+    portal_url: str
+
+
 class CreateKeyResponse(BaseModel):
     id: str
     key: str  # plaintext — shown once
@@ -3078,6 +3093,174 @@ async def backups_drill(request: Request, body: dict):
     except Exception:
         pass
     return {"status": "drill_ok", "target_graph": target_graph, **result}
+
+
+# ── Billing: Checkout + Portal endpoints (#310, Task 5) ────────────────
+# Duplicate-subscription guard: TWO layers. Layer 1 is the stored mirror
+# (subscription_status in {active, past_due, trialing} → 409). Layer 2 closes
+# the stale-mirror race (review fix 5): even with a clean mirror, ask Stripe
+# (the money authority) whether the customer already has an active sub before
+# minting a Checkout session.
+
+_BILLING_ACTIVE_STATUSES = ("active", "trialing", "past_due")
+_BILLING_DEFAULT_SUCCESS_URL = "https://app.premiselabs.co/team?session_id={CHECKOUT_SESSION_ID}"
+_BILLING_DEFAULT_CANCEL_URL = "https://app.premiselabs.co/team?checkout=cancelled"
+_BILLING_DEFAULT_PORTAL_RETURN = "https://app.premiselabs.co/team"
+
+
+def _billing_error_to_http(exc: Exception) -> HTTPException:
+    """Map billing exceptions to HTTP responses — degrade, never crash.
+
+    BillingConfigError (missing STRIPE_* env, lazy by design) → 503;
+    BillingError (bad input like an unknown price id) → 400;
+    StripeAPIError (upstream failure) → 502.
+    """
+    from tortoise.billing import BillingConfigError, BillingError, StripeAPIError
+    if isinstance(exc, BillingConfigError):
+        return HTTPException(status_code=503, detail=str(exc))
+    if isinstance(exc, BillingError):
+        return HTTPException(status_code=400, detail=str(exc))
+    if isinstance(exc, StripeAPIError):
+        return HTTPException(status_code=502, detail=str(exc))
+    return HTTPException(status_code=502, detail=str(exc))
+
+
+def _billing_customer_email(sdk, team: dict) -> str:
+    """Resolve the billing email via the fallback chain (review fix 1):
+
+    1. ``Team.email`` — set at /v1/register (self-service teams).
+    2. ``APIKey.created_by`` — provision-path teams (created via
+       /internal/provision) have no ``Team.email``; the Edge Function stored
+       the creator on the APIKey node instead. Prefer the key used for THIS
+       request, fall back to any team key.
+    3. 400 last resort — clear message, no crash.
+    """
+    team_id = team["team_id"]
+    row = sdk._get_registry().query(
+        "MATCH (t:Team {id:$id}) RETURN t.email", params={"id": team_id}
+    ).result_set
+    if row and row[0][0]:
+        return row[0][0]
+    key_id = team.get("key_id")
+    if key_id:
+        row = sdk._get_registry().query(
+            "MATCH (k:APIKey {id:$id}) RETURN k.created_by", params={"id": key_id}
+        ).result_set
+        if row and row[0][0]:
+            return row[0][0]
+    row = sdk._get_registry().query(
+        "MATCH (k:APIKey {team_id:$tid}) RETURN k.created_by LIMIT 1",
+        params={"tid": team_id},
+    ).result_set
+    if row and row[0][0]:
+        return row[0][0]
+    raise HTTPException(
+        status_code=400,
+        detail="No customer email for this team — register with an email or "
+               "provision via a key carrying created_by",
+    )
+
+
+def _billing_checkout_sync(team: dict, price_id: str) -> dict:
+    """Sync body of POST /v1/billing/checkout (runs in a thread — the Stripe
+    calls + registry writes are blocking).
+
+    Order matters (scoping P1-2, review fix 1): resolve/validate price →
+    stored-mirror guard → resolve email → create-or-reuse Stripe customer →
+    SYNC-PERSIST ``stripe_customer_id`` + ``customer_email`` on the Team node
+    → stale-mirror race guard (list_subscriptions) → create Checkout session.
+    A missed first webhook event leaves a reconcilable mirror (Task 8).
+    """
+    from tortoise.billing import StripeClient
+    team_id = team["team_id"]
+    sdk = _make_sdk(namespace="registry")
+
+    # Layer 1 guard: stored mirror already active → reject before any Stripe call.
+    row = sdk._get_registry().query(
+        "MATCH (t:Team {id:$id}) RETURN t.subscription_status, t.stripe_customer_id",
+        params={"id": team_id},
+    ).result_set
+    status = row[0][0] if row else None
+    stored_customer_id = row[0][1] if row else None
+    if status in _BILLING_ACTIVE_STATUSES:
+        raise HTTPException(status_code=409, detail="team already has an active subscription")
+
+    email = _billing_customer_email(sdk, team)
+    try:
+        client = StripeClient()
+        if stored_customer_id:
+            customer_id = stored_customer_id  # create-or-fetch: reuse the Stripe customer
+        else:
+            customer_id = client.create_customer(email)
+    except Exception as e:  # noqa: BLE001 — _billing_error_to_http maps by type
+        raise _billing_error_to_http(e) from e
+
+    # Sync-persist the customer binding BEFORE the session (survives a missed first event).
+    sdk._get_registry().query(
+        "MATCH (t:Team {id:$id}) SET t.stripe_customer_id=$cid, t.customer_email=$email",
+        params={"id": team_id, "cid": customer_id, "email": email},
+    )
+
+    # Layer 2 guard: stale-mirror race — Stripe is the authority for money.
+    try:
+        subs = client.list_subscriptions(customer_id)
+    except Exception as e:  # noqa: BLE001
+        raise _billing_error_to_http(e) from e
+    for sub in subs:
+        if sub.get("status") in _BILLING_ACTIVE_STATUSES:
+            raise HTTPException(status_code=409, detail="team already has an active subscription")
+
+    try:
+        url = client.create_checkout_session(
+            team_id, price_id, customer_id,
+            os.environ.get("BILLING_SUCCESS_URL", _BILLING_DEFAULT_SUCCESS_URL),
+            os.environ.get("BILLING_CANCEL_URL", _BILLING_DEFAULT_CANCEL_URL),
+        )
+    except Exception as e:  # noqa: BLE001
+        raise _billing_error_to_http(e) from e
+    return {"checkout_url": url}
+
+
+@app.post("/v1/billing/checkout", response_model=CheckoutResponse)
+async def billing_checkout(body: CheckoutRequest, request: Request, team: dict = Depends(get_current_team)):
+    """Start a Stripe Checkout session for a validated price (team auth)."""
+    from tortoise.billing import BillingConfigError, BillingError, PriceCatalog
+    try:
+        # Price validation against the catalog — unknown price_id → 400.
+        PriceCatalog().tier_for_price(body.price_id)
+    except BillingConfigError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except BillingError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return await asyncio.to_thread(_billing_checkout_sync, team, body.price_id)
+
+
+def _billing_portal_sync(team: dict) -> dict:
+    """Sync body of POST /v1/billing/portal — portal session for an existing
+    Stripe customer; 404 when the team never checked out (no customer id)."""
+    from tortoise.billing import StripeClient
+    team_id = team["team_id"]
+    sdk = _make_sdk(namespace="registry")
+    row = sdk._get_registry().query(
+        "MATCH (t:Team {id:$id}) RETURN t.stripe_customer_id", params={"id": team_id}
+    ).result_set
+    customer_id = row[0][0] if row else None
+    if not customer_id:
+        raise HTTPException(status_code=404, detail="no Stripe customer for this team — start a checkout first")
+    try:
+        url = StripeClient().create_portal_session(
+            customer_id,
+            os.environ.get("BILLING_PORTAL_RETURN_URL", _BILLING_DEFAULT_PORTAL_RETURN),
+        )
+    except Exception as e:  # noqa: BLE001
+        raise _billing_error_to_http(e) from e
+    return {"portal_url": url}
+
+
+@app.post("/v1/billing/portal", response_model=PortalResponse)
+async def billing_portal(request: Request, team: dict = Depends(get_current_team)):
+    """Customer portal for existing subscribers (team auth)."""
+    return await asyncio.to_thread(_billing_portal_sync, team)
 
 
 # ── MCP mount (#236) ─────────────────────────────────────────────
