@@ -497,68 +497,81 @@ def main():
             content = file_path.read_text()
             metadata = extract_metadata(content, llm)
             session_id = extract_session_id(str(file_path))
-            file_hash = compute_file_hash(str(file_path))
-            event_id = f"session_{session_id}" if session_id else f"file_{file_path.stem}"
-            proj = sdk._get_proj()
-            exists = proj.g.query(
-                "MATCH (e:Event {eventId: $eid}) RETURN properties(e)",
-                params={"eid": event_id}
-            ).result_set
-            if exists and exists[0][0].get("file_hash") == file_hash:
-                print(json.dumps({"status": "skipped", "reason": "unchanged"}))
-            else:
-                # #244: compute the session embedding (name + summary + keywords
-                # + topics) and store as vecf32 — degrades to None when the
-                # model is unavailable (session indexing never depends on it).
-                embedding = compute_session_embedding(
-                    metadata.get("summary", file_path.stem),
-                    metadata.get("summary", ""),
-                    metadata.get("keywords", []),
-                    metadata.get("topics", []),
-                )
-                props = {
-                    "name": metadata.get("summary", file_path.stem),
-                    "eventKind": "AgentSession",
-                    "session_id": session_id or f"file_{file_path.stem}",
-                    "agent": "pi",
-                    "source_file": str(file_path),
-                    "file_hash": file_hash,
-                    "keywords": metadata.get("keywords", []),
-                    "topics": metadata.get("topics", []),
-                    "message_count": _count_messages(content),
-                    "content_metadata": json.dumps({
-                        "schema_version": 1,
-                        "summary": metadata.get("summary", ""),
-                        "narrative_arc": metadata.get("narrative_arc", []),
-                        "issues": metadata.get("issues", []),
-                        "prs": metadata.get("prs", []),
-                        "critical_decisions": metadata.get("critical_decisions", []),
-                    }),
-                    "eventStatus": "completed",
-                    "classificationLevel": "internal",
-                }
-                if exists:
-                    proj.g.query(
-                        "MATCH (e:Event {eventId: $eid}) SET e += $props, "
-                        "e.embedding = CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE e.embedding END",
-                        params={"eid": event_id, "props": props, "embedding": embedding}
-                    )
-                    print(json.dumps({"status": "updated", "eventId": event_id}))
+            # #280: per-session flock — the session-end hook is fire-and-forget;
+            # a concurrent hook/sweep must not race this MATCH->SET read-modify-write.
+            from .index_lock import SessionIndexLock
+            _lock = SessionIndexLock(session_id or f"file_{file_path.stem}")
+            _lock_status = _lock.acquire()
+            if _lock_status == "held":
+                # ALWAYS exit 0 — never block session close; the holder wins.
+                print(json.dumps({"status": "locked",
+                                  "reason": f"session lock held: {_lock.detail}"}))
+                return
+            try:
+                file_hash = compute_file_hash(str(file_path))
+                event_id = f"session_{session_id}" if session_id else f"file_{file_path.stem}"
+                proj = sdk._get_proj()
+                exists = proj.g.query(
+                    "MATCH (e:Event {eventId: $eid}) RETURN properties(e)",
+                    params={"eid": event_id}
+                ).result_set
+                if exists and exists[0][0].get("file_hash") == file_hash:
+                    print(json.dumps({"status": "skipped", "reason": "unchanged"}))
                 else:
-                    props["startedAt"] = __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat()
-                    proj.g.query(
-                        "CREATE (e:Event {eventId: $eid}) SET e += $props, "
-                        "e.embedding = CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) END",
-                        params={"eid": event_id, "props": props, "embedding": embedding}
+                    # #244: compute the session embedding (name + summary + keywords
+                    # + topics) and store as vecf32 — degrades to None when the
+                    # model is unavailable (session indexing never depends on it).
+                    embedding = compute_session_embedding(
+                        metadata.get("summary", file_path.stem),
+                        metadata.get("summary", ""),
+                        metadata.get("keywords", []),
+                        metadata.get("topics", []),
                     )
-                    print(json.dumps({"status": "ingested", "eventId": event_id}))
-                # Wire INSTANTIATES edges to issue/PR Objects (parity with ingest_corpus)
-                try:
-                    from tortoise.sdk import TortoiseSDK
-                    _sdk = TortoiseSDK()
-                    _sdk._connect_issue_objects(event_id, metadata)
-                except Exception:
-                    pass  # non-fatal edge wiring
+                    props = {
+                        "name": metadata.get("summary", file_path.stem),
+                        "eventKind": "AgentSession",
+                        "session_id": session_id or f"file_{file_path.stem}",
+                        "agent": "pi",
+                        "source_file": str(file_path),
+                        "file_hash": file_hash,
+                        "keywords": metadata.get("keywords", []),
+                        "topics": metadata.get("topics", []),
+                        "message_count": _count_messages(content),
+                        "content_metadata": json.dumps({
+                            "schema_version": 1,
+                            "summary": metadata.get("summary", ""),
+                            "narrative_arc": metadata.get("narrative_arc", []),
+                            "issues": metadata.get("issues", []),
+                            "prs": metadata.get("prs", []),
+                            "critical_decisions": metadata.get("critical_decisions", []),
+                        }),
+                        "eventStatus": "completed",
+                        "classificationLevel": "internal",
+                    }
+                    if exists:
+                        proj.g.query(
+                            "MATCH (e:Event {eventId: $eid}) SET e += $props, "
+                            "e.embedding = CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE e.embedding END",
+                            params={"eid": event_id, "props": props, "embedding": embedding}
+                        )
+                        print(json.dumps({"status": "updated", "eventId": event_id}))
+                    else:
+                        props["startedAt"] = __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat()
+                        proj.g.query(
+                            "CREATE (e:Event {eventId: $eid}) SET e += $props, "
+                            "e.embedding = CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) END",
+                            params={"eid": event_id, "props": props, "embedding": embedding}
+                        )
+                        print(json.dumps({"status": "ingested", "eventId": event_id}))
+                    # Wire INSTANTIATES edges to issue/PR Objects (parity with ingest_corpus)
+                    try:
+                        from tortoise.sdk import TortoiseSDK
+                        _sdk = TortoiseSDK()
+                        _sdk._connect_issue_objects(event_id, metadata)
+                    except Exception:
+                        pass  # non-fatal edge wiring
+            finally:
+                _lock.release()
         else:
             content = file_path.read_text()
             metadata = extract_metadata(content, args.model if not args.no_llm else None)

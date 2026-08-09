@@ -1,0 +1,264 @@
+"""Per-session indexing lock — flock+PID hybrid (#280 item 1).
+
+Protects the LOCAL session-indexing read-modify-write cycle
+(MATCH → compute merged state → SET, which is NOT MERGE-atomic) from
+concurrent writers on the same session file: the fire-and-forget
+session-end hook, a manual `session_indexer` CLI run, and the
+reconciliation sweep.
+
+Mechanism (align decision P3, issue #280):
+  - fcntl.flock (non-blocking) on ``~/.tortoise/index-{session_id}.pid`` —
+    kernel auto-releases on holder death incl. SIGKILL.
+  - PID + timestamp written into the same file for observability
+    (E2E-13: stale-lock recovery must be observable).
+  - kill-0 liveness probe on the recorded PID, with the 10-minute file
+    age as *attribution fallback* when the PID is unreadable: a lock
+    whose holder is gone (or unidentifiable for > 10 min) is force-
+    released and re-acquired. Live holders are NEVER evicted — a lock
+    that is merely old but held by a live process reports as held.
+
+The path contract from the issue is ``index-{session_id}.pid``, which
+composes without collision against the extension's ``capture-{sid}.pid``.
+"""
+from __future__ import annotations
+
+import os
+import re
+import time
+from pathlib import Path
+
+# 10 minutes — force-release threshold for stale locks (issue #280 item 1).
+STALE_AGE_SECONDS = 600
+
+# Session IDs may come from untrusted frontmatter — never let them escape
+# the lock directory (path traversal). Anything outside the safe alphabet
+# becomes "_" (mirrors the ingest path-validation discipline of #329).
+_SAFE_SID_RE = re.compile(r"[^A-Za-z0-9_.-]")
+
+
+def sanitize_session_id(session_id: str) -> str:
+    """Sanitize a session ID for use in a lock filename.
+
+    Rejects empty/whitespace (falls back to ``"session"``), strips
+    path separators / traversal tokens so the ID cannot escape
+    ``~/.tortoise``, and caps the length so a hostile frontmatter
+    ``sessionId`` cannot raise ENAMETOOLONG from ``open()`` inside
+    ``acquire()`` (which would abort the batch sweep / crash the
+    session-end hook — violating the fire-and-forget exit-0 contract).
+    """
+    cleaned = _SAFE_SID_RE.sub("_", (session_id or "").strip())
+    cleaned = cleaned.lstrip("._")  # no hidden files, no ".." traversal
+    cleaned = cleaned[:128]
+    return cleaned or "session"
+
+
+def lock_path_for(session_id: str, lock_dir: str | os.PathLike | None = None) -> Path:
+    """Resolve the per-session lock file path.
+
+    Default directory: ``~/.tortoise`` (canonical local store). Honors
+    ``TORTOISE_INDEX_LOCK_DIR`` for tests / non-home setups.
+    """
+    if lock_dir is None:
+        lock_dir = os.environ.get("TORTOISE_INDEX_LOCK_DIR", "") or (
+            Path.home() / ".tortoise")
+    return Path(lock_dir) / f"index-{sanitize_session_id(session_id)}.pid"
+
+
+def _pid_alive(pid: int) -> bool:
+    """kill-0 liveness probe. Returns False for dead or permission-denied."""
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Exists but owned by another user — treat as alive (conservative).
+        return True
+    except OSError:
+        return False
+
+
+class SessionIndexLock:
+    """Exclusive per-session index lock (flock + PID hybrid).
+
+    Usage::
+
+        lock = SessionIndexLock(session_id)
+        status = lock.acquire()      # "acquired" | "held" | "stale-recovered"
+        if status in ("acquired", "stale-recovered"):
+            try:
+                ... read-compute-write ...
+            finally:
+                lock.release()
+
+    Also usable as a context manager (``with SessionIndexLock(sid) as st:``).
+    """
+
+    def __init__(self, session_id: str, lock_dir: str | os.PathLike | None = None,
+                 stale_age_seconds: int = STALE_AGE_SECONDS):
+        self.session_id = sanitize_session_id(session_id)
+        self.path = lock_path_for(session_id, lock_dir)
+        self.stale_age_seconds = stale_age_seconds
+        self._fh = None
+        self._status: str | None = None
+        self._detail: str | None = None
+
+    # ── introspection ──────────────────────────────────────────────
+
+    def held_by(self) -> dict:
+        """Attribution read of the lock file (best-effort).
+
+        Returns {pid, started_at, age_seconds, alive, stale} — never raises;
+        missing/corrupt files yield empty fields.
+        """
+        info: dict = {"pid": None, "started_at": None, "age_seconds": None,
+                      "alive": None, "stale": False}
+        try:
+            raw = self.path.read_text().strip()
+        except Exception:
+            return info
+        parts = raw.split()
+        try:
+            info["pid"] = int(parts[0]) if parts else None
+        except ValueError:
+            info["pid"] = None
+        if len(parts) > 1:
+            info["started_at"] = parts[1]
+        try:
+            mtime = self.path.stat().st_mtime
+            info["age_seconds"] = max(0, int(time.time() - mtime))
+        except Exception:
+            pass
+        if info["pid"] is not None:
+            info["alive"] = _pid_alive(info["pid"])
+        age = info["age_seconds"]
+        # Stale: a dead recorded holder is stale regardless of age (kernel
+        # released its flock); an UNREADABLE attribution is stale only past
+        # the age threshold (attribution fallback, align P3).
+        info["stale"] = bool(
+            (info["pid"] is not None and info["alive"] is False)
+            or (info["pid"] is None
+                and age is not None and age > self.stale_age_seconds)
+        )
+        return info
+
+    # ── acquire / release ──────────────────────────────────────────
+
+    def acquire(self) -> str:
+        """Acquire the per-session lock.
+
+        Returns one of:
+          - ``"acquired"``         — lock taken; caller owns the session file.
+          - ``"stale-recovered"``  — a stale lock (dead/unidentifiable holder
+                                     past the age threshold) was force-released
+                                     and this caller now owns it.
+          - ``"held"``             — a live holder owns the lock; DO NOT write.
+        """
+        import fcntl
+
+        os.makedirs(self.path.parent, exist_ok=True)
+        self._fh = open(self.path, "a+")
+
+        # Fast path: if the flock is free, the file is ours. Report
+        # "stale-recovered" when the previous attribution was stale (dead
+        # holder / unreadable-and-old) — the observable E2E-13 signal.
+        try:
+            fcntl.flock(self._fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            info = self.held_by()
+            self._write_owner()
+            self._status = "stale-recovered" if info["stale"] else "acquired"
+            self._detail = (
+                f"stale lock recovered (attribution: {info})" if info["stale"]
+                else None)
+            return self._status
+        except OSError:
+            pass  # fall through to attribution probe
+
+        # Not acquired — attribute the holder. flock can only be held by a
+        # LIVE process (kernel releases on death), so a failed lock + dead PID
+        # means the holder died mid-contention: retry once (its fd is gone).
+        info = self.held_by()
+        if info["pid"] is not None and info["alive"]:
+            age = info["age_seconds"]
+            self._status = "held"
+            self._detail = (f"pid {info['pid']} alive"
+                            + (f" ({age}s old)" if age is not None else ""))
+            self._close_fh()
+            return self._status
+
+        # Holder unidentifiable or dead — retry once (flock released on death).
+        try:
+            fcntl.flock(self._fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self._write_owner()
+            self._status = "stale-recovered"
+            self._detail = f"stale lock recovered (attribution: {info})"
+            return self._status
+        except OSError:
+            # Still contended by a live-but-unattributed holder — respect it.
+            self._status = "held"
+            self._detail = "held by live process (no pid attribution)"
+            self._close_fh()
+            return self._status
+
+    def release(self) -> None:
+        """Release the lock (idempotent)."""
+        import fcntl
+
+        if self._fh:
+            try:
+                fcntl.flock(self._fh, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            self._fh.close()
+            self._fh = None
+
+    @property
+    def status(self) -> str | None:
+        return self._status
+
+    @property
+    def detail(self) -> str | None:
+        return self._detail
+
+    def force_release(self) -> bool:
+        """Explicit force-release: remove a stale lock file.
+
+        Only safe when the holder is dead — a live holder's flock survives
+        file removal and would keep writing to an unlinked inode, defeating
+        the lock. Used by ops tooling (E2E-13 observability surface).
+        """
+        info = self.held_by()
+        if info["pid"] is not None and info["alive"]:
+            return False
+        try:
+            self.path.unlink(missing_ok=True)
+            return True
+        except OSError:
+            return False
+
+    # ── internals ──────────────────────────────────────────────────
+
+    def _write_owner(self) -> None:
+        self._fh.seek(0)
+        self._fh.truncate()
+        self._fh.write(f"{os.getpid()} {time.time():.0f}\n")
+        self._fh.flush()
+
+    def _close_fh(self) -> None:
+        if self._fh:
+            try:
+                self._fh.close()
+            except OSError:
+                pass
+            self._fh = None
+
+    # ── context manager ────────────────────────────────────────────
+
+    def __enter__(self) -> "SessionIndexLock":
+        self.acquire()
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.release()

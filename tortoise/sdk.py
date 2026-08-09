@@ -2531,183 +2531,197 @@ class TortoiseSDK:
                 session_id = frontmatter.get("sessionId") or frontmatter.get("session_id") or f"file_{filepath.stem}"
                 event_id = f"session_{session_id}"
                 name = frontmatter.get("title", filepath.stem)
+                # #280: per-session flock — serialize against the session-end hook's
+                # single-file writer and concurrent sweeps (MATCH->SET is not MERGE-atomic).
+                # A live holder -> skip WITHOUT marking the file complete (retried later).
+                from .index_lock import SessionIndexLock
+                _lock = SessionIndexLock(session_id)
+                if _lock.acquire() == "held":
+                    skipped += 1
+                    errors.append({"file": rel_path,
+                                   "error": f"session lock held: {_lock.detail}",
+                                   "retryable": True})
+                    continue
+                try:
 
-                # Check dedup
-                exists_rows = proj.g.query(
-                    "MATCH (e:Event {eventId:$eid}) RETURN properties(e)",
-                    params={"eid": event_id},
-                ).result_set
-
-                if exists_rows:
-                    existing_props = exists_rows[0][0]
-                    # #330: skip unchanged + complete events. has_keywords is the
-                    # sole completeness signal (an eventStatus disjunct would skip
-                    # incomplete sessions that still need enrichment).
-                    has_keywords = bool(existing_props.get("keywords"))
-                    if existing_props.get("file_hash") == file_hash and has_keywords:
-                        skipped += 1
-                        completed_files.append(rel_path)
-                        continue
-                    # Always extract keywords (even without LLM)
-                    from .session_indexer import extract_keywords_from_frontmatter as _kw_fallback
-                    if extract_metadata:
-                        from .session_indexer import extract_metadata as _extract
-                        try:
-                            metadata = _extract(text, llm_model)
-                        except Exception:
-                            metadata = _kw_fallback(text)
-                    else:
-                        metadata = _kw_fallback(text)
-
-                    merged_keywords = list(dict.fromkeys(
-                        existing_props.get("keywords", []) + metadata.get("keywords", [])
-                    ))[:20]
-                    existing_arc = existing_props.get("content_metadata", "{}")
-                    try:
-                        existing_arc = _json.loads(existing_arc) if isinstance(existing_arc, str) else existing_arc
-                    except Exception:
-                        existing_arc = {}
-                    # #330: dedup + cap the narrative arc so repeated enrichment
-                    # of unchanged files never grows it unboundedly (and the
-                    # state-change comparison below stays deterministic). Arc
-                    # entries may be dicts (phase/topic/decisions), so dedup via
-                    # a canonical JSON key (str-sorted to tolerate mixed-type
-                    # keys), not dict.fromkeys.
-                    _arc_seen = {}
-                    for _phase in (existing_arc.get("narrative_arc", [])
-                                   + metadata.get("narrative_arc", [])):
-                        _key = _json.dumps(_phase, sort_keys=True, default=str)
-                        _arc_seen.setdefault(_key, _phase)
-                    _merged_phases = list(_arc_seen.values())
-                    # Cap while preferring genuinely-new phases: keep existing
-                    # ones first (already-merged), then append new ones up to
-                    # the cap so a full arc never starves fresh phases.
-                    _existing_phases = existing_arc.get("narrative_arc", [])
-                    _new_only = [p for p in _merged_phases
-                                 if _json.dumps(p, sort_keys=True, default=str)
-                                 not in {_json.dumps(e, sort_keys=True, default=str)
-                                         for e in _existing_phases}]
-                    new_phases = (_merged_phases[:len(_existing_phases)]
-                                  + _new_only)[:50]
-
-                    # Normalize topics to a comparable, hashable form (#330):
-                    # LLM output is unvalidated — a list-of-dicts would crash
-                    # set() and abort the whole run.
-                    def _norm_topics(t) -> list:
-                        t = t or []
-                        if not isinstance(t, list):
-                            t = [t]
-                        return [str(x) for x in t]
-                    _new_topics = _norm_topics(metadata.get("topics",
-                                                            existing_props.get("topics", [])))
-                    _stored_topics = _norm_topics(existing_props.get("topics"))
-                    _stored_keywords = _norm_topics(existing_props.get("keywords"))
-                    _new_name = metadata.get("summary", existing_props.get("name", name))
-
-                    update_props = {
-                        "name": _new_name,
-                        "keywords": merged_keywords,
-                        "topics": _new_topics,
-                        "file_hash": file_hash,
-                        "content_metadata": _json.dumps({
-                            "schema_version": 1,
-                            "summary": metadata.get("summary", ""),
-                            "narrative_arc": new_phases,
-                            "issues": metadata.get("issues", []),
-                            "prs": metadata.get("prs", []),
-                            "critical_decisions": metadata.get("critical_decisions", []),
-                        }),
-                        "message_count": frontmatter.get("message_count", 0),
-                    }
-                    # #330: unchanged content whose enrichment produced nothing
-                    # new counts as skipped, not updated (counter honesty).
-                    # Compare the FULL payload that would be written (keywords,
-                    # normalized topics, name, narrative_arc, issues/prs/
-                    # critical_decisions — the latter feed _connect_issue_objects)
-                    # so a real change in any persisted field is never
-                    # miscounted as a skip.
-                    if existing_props.get("file_hash") == file_hash:
-                        _old_meta = existing_arc
-                        changed = (
-                            set(_norm_topics(merged_keywords)) != set(_stored_keywords)
-                            or set(_new_topics) != set(_stored_topics)
-                            or _new_name != existing_props.get("name", name)
-                            or new_phases != list(existing_arc.get("narrative_arc", []))
-                            or _norm_topics(metadata.get("issues", [])) != _norm_topics(_old_meta.get("issues", []))
-                            or _norm_topics(metadata.get("prs", [])) != _norm_topics(_old_meta.get("prs", []))
-                            or _norm_topics(metadata.get("critical_decisions", [])) != _norm_topics(_old_meta.get("critical_decisions", []))
-                        )
-                        if not changed:
+                    # Check dedup
+                    exists_rows = proj.g.query(
+                        "MATCH (e:Event {eventId:$eid}) RETURN properties(e)",
+                        params={"eid": event_id},
+                    ).result_set
+    
+                    if exists_rows:
+                        existing_props = exists_rows[0][0]
+                        # #330: skip unchanged + complete events. has_keywords is the
+                        # sole completeness signal (an eventStatus disjunct would skip
+                        # incomplete sessions that still need enrichment).
+                        has_keywords = bool(existing_props.get("keywords"))
+                        if existing_props.get("file_hash") == file_hash and has_keywords:
                             skipped += 1
                             completed_files.append(rel_path)
                             continue
-
-                    # #244: (re)compute the session embedding from the merged
-                    # surface and store as vecf32 — None when model unavailable.
-                    embedding = self._session_embedding(
-                        update_props["name"], metadata.get("summary", ""),
-                        merged_keywords, update_props["topics"],
-                    )
-                    proj.g.query(
-                        "MATCH (e:Event {eventId:$eid}) SET e += $props, "
-                        "e.embedding = CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE e.embedding END",
-                        params={"eid": event_id, "props": update_props, "embedding": embedding},
-                    )
-                    updated += 1
-                    completed_files.append(rel_path)
-                    # Connect issue/PR references to Objects
-                    self._connect_issue_objects(event_id, metadata)
-                else:
-                    # New session Event — always extract keywords
-                    from .session_indexer import extract_keywords_from_frontmatter as _kw_fallback
-                    if extract_metadata:
-                        from .session_indexer import extract_metadata as _extract
-                        try:
-                            metadata = _extract(text, llm_model)
-                        except Exception:
+                        # Always extract keywords (even without LLM)
+                        from .session_indexer import extract_keywords_from_frontmatter as _kw_fallback
+                        if extract_metadata:
+                            from .session_indexer import extract_metadata as _extract
+                            try:
+                                metadata = _extract(text, llm_model)
+                            except Exception:
+                                metadata = _kw_fallback(text)
+                        else:
                             metadata = _kw_fallback(text)
+    
+                        merged_keywords = list(dict.fromkeys(
+                            existing_props.get("keywords", []) + metadata.get("keywords", [])
+                        ))[:20]
+                        existing_arc = existing_props.get("content_metadata", "{}")
+                        try:
+                            existing_arc = _json.loads(existing_arc) if isinstance(existing_arc, str) else existing_arc
+                        except Exception:
+                            existing_arc = {}
+                        # #330: dedup + cap the narrative arc so repeated enrichment
+                        # of unchanged files never grows it unboundedly (and the
+                        # state-change comparison below stays deterministic). Arc
+                        # entries may be dicts (phase/topic/decisions), so dedup via
+                        # a canonical JSON key (str-sorted to tolerate mixed-type
+                        # keys), not dict.fromkeys.
+                        _arc_seen = {}
+                        for _phase in (existing_arc.get("narrative_arc", [])
+                                       + metadata.get("narrative_arc", [])):
+                            _key = _json.dumps(_phase, sort_keys=True, default=str)
+                            _arc_seen.setdefault(_key, _phase)
+                        _merged_phases = list(_arc_seen.values())
+                        # Cap while preferring genuinely-new phases: keep existing
+                        # ones first (already-merged), then append new ones up to
+                        # the cap so a full arc never starves fresh phases.
+                        _existing_phases = existing_arc.get("narrative_arc", [])
+                        _new_only = [p for p in _merged_phases
+                                     if _json.dumps(p, sort_keys=True, default=str)
+                                     not in {_json.dumps(e, sort_keys=True, default=str)
+                                             for e in _existing_phases}]
+                        new_phases = (_merged_phases[:len(_existing_phases)]
+                                      + _new_only)[:50]
+    
+                        # Normalize topics to a comparable, hashable form (#330):
+                        # LLM output is unvalidated — a list-of-dicts would crash
+                        # set() and abort the whole run.
+                        def _norm_topics(t) -> list:
+                            t = t or []
+                            if not isinstance(t, list):
+                                t = [t]
+                            return [str(x) for x in t]
+                        _new_topics = _norm_topics(metadata.get("topics",
+                                                                existing_props.get("topics", [])))
+                        _stored_topics = _norm_topics(existing_props.get("topics"))
+                        _stored_keywords = _norm_topics(existing_props.get("keywords"))
+                        _new_name = metadata.get("summary", existing_props.get("name", name))
+    
+                        update_props = {
+                            "name": _new_name,
+                            "keywords": merged_keywords,
+                            "topics": _new_topics,
+                            "file_hash": file_hash,
+                            "content_metadata": _json.dumps({
+                                "schema_version": 1,
+                                "summary": metadata.get("summary", ""),
+                                "narrative_arc": new_phases,
+                                "issues": metadata.get("issues", []),
+                                "prs": metadata.get("prs", []),
+                                "critical_decisions": metadata.get("critical_decisions", []),
+                            }),
+                            "message_count": frontmatter.get("message_count", 0),
+                        }
+                        # #330: unchanged content whose enrichment produced nothing
+                        # new counts as skipped, not updated (counter honesty).
+                        # Compare the FULL payload that would be written (keywords,
+                        # normalized topics, name, narrative_arc, issues/prs/
+                        # critical_decisions — the latter feed _connect_issue_objects)
+                        # so a real change in any persisted field is never
+                        # miscounted as a skip.
+                        if existing_props.get("file_hash") == file_hash:
+                            _old_meta = existing_arc
+                            changed = (
+                                set(_norm_topics(merged_keywords)) != set(_stored_keywords)
+                                or set(_new_topics) != set(_stored_topics)
+                                or _new_name != existing_props.get("name", name)
+                                or new_phases != list(existing_arc.get("narrative_arc", []))
+                                or _norm_topics(metadata.get("issues", [])) != _norm_topics(_old_meta.get("issues", []))
+                                or _norm_topics(metadata.get("prs", [])) != _norm_topics(_old_meta.get("prs", []))
+                                or _norm_topics(metadata.get("critical_decisions", [])) != _norm_topics(_old_meta.get("critical_decisions", []))
+                            )
+                            if not changed:
+                                skipped += 1
+                                completed_files.append(rel_path)
+                                continue
+    
+                        # #244: (re)compute the session embedding from the merged
+                        # surface and store as vecf32 — None when model unavailable.
+                        embedding = self._session_embedding(
+                            update_props["name"], metadata.get("summary", ""),
+                            merged_keywords, update_props["topics"],
+                        )
+                        proj.g.query(
+                            "MATCH (e:Event {eventId:$eid}) SET e += $props, "
+                            "e.embedding = CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE e.embedding END",
+                            params={"eid": event_id, "props": update_props, "embedding": embedding},
+                        )
+                        updated += 1
+                        completed_files.append(rel_path)
+                        # Connect issue/PR references to Objects
+                        self._connect_issue_objects(event_id, metadata)
                     else:
-                        metadata = _kw_fallback(text)
-
-                    props = {
-                        "name": metadata.get("summary", name),
-                        "eventKind": eventKind,
-                        "session_id": session_id,
-                        "agent": frontmatter.get("agent", "pi"),
-                        "source_file": rel_path,
-                        "file_hash": file_hash,
-                        "keywords": metadata.get("keywords", []),
-                        "topics": metadata.get("topics", []),
-                        "message_count": frontmatter.get("message_count", 0),
-                        "startedAt": now,
-                        "content_metadata": _json.dumps({
-                            "schema_version": 1,
-                            "summary": metadata.get("summary", ""),
-                            "narrative_arc": metadata.get("narrative_arc", []),
-                            "issues": metadata.get("issues", []),
-                            "prs": metadata.get("prs", []),
-                            "critical_decisions": metadata.get("critical_decisions", []),
-                        }),
-                        "eventStatus": "completed",
-                        "classificationLevel": "internal",
-                        "format": "markdown",
-                    }
-                    # #244: compute the session embedding (name + summary +
-                    # keywords + topics) and store as vecf32 — None when the
-                    # model is unavailable (indexing never depends on it).
-                    embedding = self._session_embedding(
-                        props["name"], metadata.get("summary", ""),
-                        props["keywords"], props["topics"],
-                    )
-                    proj.g.query(
-                        "MERGE (e:Event {eventId:$eid}) SET e += $props, "
-                        "e.embedding = CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE e.embedding END",
-                        params={"eid": event_id, "props": props, "embedding": embedding},
-                    )
-                    ingested += 1
-                    completed_files.append(rel_path)
-                    # Connect issue/PR references to Objects
-                    self._connect_issue_objects(event_id, metadata)
+                        # New session Event — always extract keywords
+                        from .session_indexer import extract_keywords_from_frontmatter as _kw_fallback
+                        if extract_metadata:
+                            from .session_indexer import extract_metadata as _extract
+                            try:
+                                metadata = _extract(text, llm_model)
+                            except Exception:
+                                metadata = _kw_fallback(text)
+                        else:
+                            metadata = _kw_fallback(text)
+    
+                        props = {
+                            "name": metadata.get("summary", name),
+                            "eventKind": eventKind,
+                            "session_id": session_id,
+                            "agent": frontmatter.get("agent", "pi"),
+                            "source_file": rel_path,
+                            "file_hash": file_hash,
+                            "keywords": metadata.get("keywords", []),
+                            "topics": metadata.get("topics", []),
+                            "message_count": frontmatter.get("message_count", 0),
+                            "startedAt": now,
+                            "content_metadata": _json.dumps({
+                                "schema_version": 1,
+                                "summary": metadata.get("summary", ""),
+                                "narrative_arc": metadata.get("narrative_arc", []),
+                                "issues": metadata.get("issues", []),
+                                "prs": metadata.get("prs", []),
+                                "critical_decisions": metadata.get("critical_decisions", []),
+                            }),
+                            "eventStatus": "completed",
+                            "classificationLevel": "internal",
+                            "format": "markdown",
+                        }
+                        # #244: compute the session embedding (name + summary +
+                        # keywords + topics) and store as vecf32 — None when the
+                        # model is unavailable (indexing never depends on it).
+                        embedding = self._session_embedding(
+                            props["name"], metadata.get("summary", ""),
+                            props["keywords"], props["topics"],
+                        )
+                        proj.g.query(
+                            "MERGE (e:Event {eventId:$eid}) SET e += $props, "
+                            "e.embedding = CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE e.embedding END",
+                            params={"eid": event_id, "props": props, "embedding": embedding},
+                        )
+                        ingested += 1
+                        completed_files.append(rel_path)
+                        # Connect issue/PR references to Objects
+                        self._connect_issue_objects(event_id, metadata)
+                finally:
+                    _lock.release()
             else:
                 # Original DocumentCreated logic
                 doc_id = str(filepath.relative_to(directory))
