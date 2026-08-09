@@ -601,6 +601,40 @@ class TestQuotaEnforcement:
         text = "".join(c.get("text", "") for c in content if isinstance(c, dict))
         assert "limit reached" in text, f"expected quota error, got: {body}"
 
+    def test_file_human_approval_blocked_at_cap(self, quota_client):
+        """#684: tortoise_file_human_approval is quota-gated — blocked at cap."""
+        tc, reg_sdk, key, tid = quota_client
+        self._set_max_points(reg_sdk, tid, 0)  # at/over cap
+        payload = {
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "tortoise_file_human_approval",
+                       "arguments": {"approver_id": "subj-1",
+                                     "artifact_id": "doc-1",
+                                     "point_ids": ["p-1"],
+                                     "decision_content": "approved"}},
+        }
+        r, body = _mcp_post(tc, payload)
+        result = body.get("result", {})
+        content = result.get("content", [])
+        text = "".join(c.get("text", "") for c in content if isinstance(c, dict))
+        assert "limit reached" in text, f"expected quota error, got: {body}"
+
+    def test_file_human_approval_below_cap_succeeds(self, quota_client):
+        """#684: tortoise_file_human_approval works below the cap."""
+        tc, reg_sdk, key, tid = quota_client
+        payload = {
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "tortoise_file_human_approval",
+                       "arguments": {"approver_id": "subj-1",
+                                     "artifact_id": "doc-1",
+                                     "point_ids": ["p-1"],
+                                     "decision_content": "approved"}},
+        }
+        r, body = _mcp_post(tc, payload)
+        result = body.get("result", {})
+        text = "".join(c.get("text", "") for c in result.get("content", []))
+        assert "limit reached" not in text, f"unexpected quota error: {text}"
+
     def test_assess_source_below_cap_succeeds(self, quota_client):
         """#684: tortoise_assess_source below cap succeeds (no quota error)."""
         tc, reg_sdk, key, tid = quota_client
