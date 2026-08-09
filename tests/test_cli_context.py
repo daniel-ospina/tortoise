@@ -207,3 +207,65 @@ class TestCliOnboardDbTarget:
         assert rc == 1
         assert "Embedded mode initialized" not in out
         assert "Traceback" not in out
+
+    def test_init_background_spawn_carries_resolved_db(self, tmp_path, monkeypatch):
+        """conf 75: init --yes's background index spawn must carry the resolved
+        --db target. index's --db is argparse-required, so an env-only spawn
+        dies before resolving anything and "Indexing in background" would be
+        a lie — the child would never index."""
+        db_path = str(tmp_path / "init.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        repo_root = tmp_path / "repo"
+        repo_root.mkdir()
+        (repo_root / "README.md").write_text("# readme", encoding="utf-8")
+
+        from tortoise import __main__ as m
+
+        with mock.patch("subprocess.run") as fake_run, \
+             mock.patch("subprocess.Popen") as fake_popen, \
+             mock.patch("tortoise.projection.FalkorProjection"), \
+             mock.patch("tortoise.sdk.TortoiseSDK") as fake_sdk:
+            fake_run.return_value.returncode = 0  # git repo detected
+            fake_run.return_value.stdout = str(repo_root)
+            fake_sdk.return_value.status.return_value = {"counts": {"Point": 1}}
+            rc = m._cmd_init(mock.Mock(path=None, cmd="init", yes=True, api_key=None))
+
+        assert rc == 0
+        assert fake_popen.called
+        args = fake_popen.call_args.args[0]
+        # spawn is: python -m tortoise index github <repo> --db <target>
+        assert args[:3] == [sys.executable, "-m", "tortoise"]
+        assert args[-4] == "github"
+        assert "--db" in args
+        assert args[args.index("--db") + 1] == db_path
+        assert args[-1] != "tortoise.db"  # never the canonical default
+
+    def test_init_prompted_spawn_carries_resolved_db(self, tmp_path, monkeypatch):
+        """conf 75: the interactive (non --yes) init path's background spawn
+        must carry --db too — same argparse-required failure otherwise."""
+        db_path = str(tmp_path / "init.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        repo_root = tmp_path / "repo"
+        repo_root.mkdir()
+        (repo_root / "README.md").write_text("# readme", encoding="utf-8")
+
+        from tortoise import __main__ as m
+
+        with mock.patch("subprocess.run") as fake_run, \
+             mock.patch("subprocess.Popen") as fake_popen, \
+             mock.patch("tortoise.projection.FalkorProjection"), \
+             mock.patch("tortoise.sdk.TortoiseSDK") as fake_sdk, \
+             mock.patch("builtins.input", return_value="y"):
+            fake_run.return_value.returncode = 0
+            fake_run.return_value.stdout = str(repo_root)
+            fake_sdk.return_value.status.return_value = {"counts": {"Point": 1}}
+            rc = m._cmd_init(mock.Mock(path=None, cmd="init", yes=False, api_key=None))
+
+        assert rc == 0
+        assert fake_popen.called
+        args = fake_popen.call_args.args[0]
+        assert args[:3] == [sys.executable, "-m", "tortoise"]
+        assert "--db" in args
+        assert args[args.index("--db") + 1] == db_path

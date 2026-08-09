@@ -311,13 +311,17 @@ def _cmd_init(args):
     try:
         from tortoise.sdk import TortoiseSDK
         if docker_detected:
-            # Materialize the decision so spawned index children and later
-            # commands resolve to the SAME target (single source of truth).
+            # Materialize the decision so later commands resolve to the SAME
+            # target (single source of truth). The background index spawn
+            # below ALSO passes --db explicitly (#715, conf 75): index's
+            # --db is required at argparse, so env inheritance alone would
+            # never reach the child — it would die before resolving anything.
             os.environ.setdefault("TORTOISE_DB_URI", target)
             sdk = TortoiseSDK()
         else:
-            # Embedded: record the resolved path so child processes (e.g. the
-            # background indexer) hit the same DB init wrote to.
+            # Embedded: record the resolved path so later commands hit the
+            # same DB init wrote to. The spawn below passes --db explicitly
+            # so the child resolves identically (same precedence, conf 60).
             os.environ.setdefault("TORTOISE_DB_PATH", db_path)
             sdk = TortoiseSDK(db_path=db_path)
         sdk.create_point(
@@ -355,8 +359,12 @@ def _cmd_init(args):
             if auto_index:
                 print(f"\nFound {md_count} markdown files in this repo. Auto-indexing…")
                 log_f = open(str(Path(tempfile.gettempdir()) / "tortoise-init-index.log"), 'w')
+                # #715: pass the resolved DB target explicitly — index's --db
+                # is required, so without it the child dies at argparse and
+                # "Indexing in background" would be a lie.
                 _sp.Popen(
-                    [_sys.executable, "-m", "tortoise", "index", "github", repo_root],
+                    [_sys.executable, "-m", "tortoise", "index", "github",
+                     repo_root, "--db", target],
                     stdout=log_f, stderr=_sp.STDOUT,
                     start_new_session=True,
                 )
@@ -367,8 +375,11 @@ def _cmd_init(args):
                 if yn != "n":
                     print("Launching indexer in background…")
                     log_f = open(str(Path(tempfile.gettempdir()) / "tortoise-init-index.log"), 'a')
+                    # #715: same as the --yes path — carry the resolved --db
+                    # target so the child indexes the DB init just wrote to.
                     _sp.Popen(
-                        [_sys.executable, "-m", "tortoise", "index", "github", repo_root],
+                        [_sys.executable, "-m", "tortoise", "index", "github",
+                         repo_root, "--db", target],
                         stdout=log_f, stderr=_sp.STDOUT,
                         start_new_session=True,
                     )
