@@ -2060,9 +2060,9 @@ def test_falkor_rebuild_all_eventapi_regression():
                 projA.apply(ev)
             result = projB.rebuild_all(d)
 
-            # p-reg-1 survives, p-reg-2 was retracted (deleted)
+            # p-reg-1 survives, p-reg-2 was retracted (tombstone per #689)
             assert result["nodes"] >= 1, (
-                f"Expected at least 1 node (p-reg-1 survives, p-reg-2 retracted), "
+                f"Expected at least 1 node (p-reg-1 survives, p-reg-2 tombstone), "
                 f"got {result['nodes']}")
 
             # Both graphs should have p-reg-1
@@ -2075,13 +2075,15 @@ def test_falkor_rebuild_all_eventapi_regression():
                 assert rows[0][0] == "regression claim A"
                 assert rows[0][1] == 0.7
 
-            # p-reg-2 was retracted — deleted in both (apply and rebuild)
+            # p-reg-2 was retracted — a tombstone (status='retracted') survives
+            # in both apply and rebuild paths (#689: no more hard deletes).
             for proj in (projA, projB):
                 rows = proj.g.query(
-                    "MATCH (n:Point {id:'p-reg-2'}) RETURN count(n)"
+                    "MATCH (n:Point {id:'p-reg-2'}) RETURN n.status"
                 ).result_set
-                assert rows[0][0] == 0, (
-                    "p-reg-2 should be deleted after retraction")
+                assert len(rows) == 1, "p-reg-2 tombstone must exist"
+                assert rows[0][0] == "retracted", (
+                    "p-reg-2 should be a retracted tombstone, not hard-deleted (#689)")
         finally:
             projA.close()
             projB.close()
