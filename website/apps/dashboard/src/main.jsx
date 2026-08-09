@@ -78,6 +78,7 @@ function App() {
   const checkoutResetTimerRef = React.useRef(null) // Round-16: popup-flow fallback reset
   const apiKeyRef = React.useRef(null) // Round-21: live apiKey for staleness checks (state is closure-stale)
   const [checkoutPending, setCheckoutPending] = React.useState(false)
+  const [billingPending, setBillingPending] = React.useState(false) // Round-25: double-click guard
   // P5 (code-review): distinguish 'loading' / 'ok' / 'denied' / 'error' so
   // loading and network failures never masquerade as an RBAC denial.
   const [membersStatus, setMembersStatus] = React.useState('loading')
@@ -139,6 +140,8 @@ function App() {
   }
 
   async function manageBilling() {
+    if (billingPending) return // Round-25: double-click guard — no duplicate portal tabs
+    setBillingPending(true)
     try {
       const { portal_url } = await api('/v1/billing/portal', { method: 'POST' })
       // Round-14: mirror upgrade() — async-fetch-then-open is popup-blocked in
@@ -148,6 +151,8 @@ function App() {
       }
     } catch (err) {
       setError(err.message)
+    } finally {
+      setBillingPending(false)
     }
   }
 
@@ -671,8 +676,8 @@ function App() {
 
   async function removeMember(userId) {
     const _teamAtCall = currentTeamId // Round-16: mutation identity guard — a switch mid-flight must not act on the previous team
+    if (busy) return // Round-24/25: double-click guard BEFORE confirm (a second click must not re-pop the dialog)
     if (!confirm('Remove this member from the team?')) return
-    if (busy) return // Round-24: double-click guard
     setBusy(true)
     setError('')
     try {
@@ -1104,7 +1109,7 @@ function App() {
               <h2>API Keys</h2>
               <button onClick={createKey} disabled={busy}>+ New key</button>
             </div>
-            <p className="dim small">Lost your key? <button className="link" onClick={recoverKey}>Generate a new one</button> — works without an existing key (session-authenticated).</p>
+            <p className="dim small">Lost your key? <button className="link" onClick={recoverKey} disabled={busy}>Generate a new one</button> — works without an existing key (session-authenticated).</p>
             {newKey && (
               <div className="new-key">
                 <strong>Your new key (shown once):</strong>
