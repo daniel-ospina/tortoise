@@ -163,6 +163,7 @@ function App() {
         } catch { /* webhook may not have landed yet */ }
         if (tries >= 5) {
           clearInterval(poll)
+          setCheckoutPending(false) // Round-15: popup flow never returns the param to this tab — don't stay stuck
           params.delete('session_id')
           window.history.replaceState({}, '', `${window.location.pathname}${params.toString() ? `?${params}` : ''}`)
         }
@@ -696,9 +697,20 @@ function App() {
     setError('')
     setBusy(true)
     try {
-      const k = await api('/v1/team/keys', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+      // Round-15 (P2): resolve the ACTIVE team's key explicitly — during a
+      // mid-switch window apiKey state is still the previous team's key, and
+      // a key created with it lands on the wrong team.
+      const activeKey = currentTeamId ? (teamKeysRef.current[currentTeamId] || apiKey) : apiKey
+      const k = await api('/v1/team/keys', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(activeKey ? { Authorization: `Bearer ${activeKey}` } : {}) },
+        body: '{}',
+      })
       setNewKey(k.api_key || k.key || k)
-      await loadAll()
+      // Identity guard: a team switch during the POST must not land the
+      // previous team's key table under the new selection.
+      if (teamIdRef.current !== currentTeamId) return
+      await loadAll(activeKey)
     } catch (e) {
       setError(e.message)
     } finally {
