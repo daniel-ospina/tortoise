@@ -2696,7 +2696,20 @@ class TortoiseSDK:
                 # A live holder -> skip WITHOUT marking the file complete (retried later).
                 from .index_lock import SessionIndexLock
                 _lock = SessionIndexLock(session_id)
-                if _lock.acquire() == "held":
+                try:
+                    _lock_status = _lock.acquire()
+                except OSError as _lock_err:
+                    # #280 review P2 (robustness): an unusable lock path must
+                    # never abort the batch sweep — unwritable/blocked lock dir
+                    # (EACCES/EROFS/ENOSPC/EMFILE) or a planted symlink (ELOOP
+                    # from O_NOFOLLOW) is recorded as a retryable error and the
+                    # sweep continues (same as the held path).
+                    skipped += 1
+                    errors.append({"file": rel_path,
+                                   "error": f"session lock unavailable: {_lock_err}",
+                                   "retryable": True})
+                    continue
+                if _lock_status == "held":
                     skipped += 1
                     errors.append({"file": rel_path,
                                    "error": f"session lock held: {_lock.detail}",

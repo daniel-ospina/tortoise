@@ -141,6 +141,49 @@ def test_ingest_skips_locked_session(env, sdk):
 # ── doctor surface (#280 item 2) ────────────────────────────────────
 
 
+def test_ingest_continues_on_symlink_lock_path(env, sdk):
+    """Robustness (#280 review P2): a planted symlink at one session's lock
+    path must not abort the batch sweep — that file is skipped with a
+    retryable error, the remaining files still index, and the symlink target
+    is never truncated."""
+    victim = env.parent / "victim.txt"
+    victim.write_text("precious data")
+    _write_session(env, "sess-bad")
+    _write_session(env, "sess-good")
+    # Plant a symlink at the lock path of sess-bad (attacker-controlled).
+    lock = SessionIndexLock("sess-bad",
+                            lock_dir=os.environ["TORTOISE_INDEX_LOCK_DIR"])
+    lock.path.symlink_to(victim)
+
+    rep = _ingest(sdk, env)  # must not raise / abort the batch
+    assert rep["ingested"] == 1          # good file still indexed
+    assert victim.read_text() == "precious data"  # never truncated
+    bad = [e for e in rep["errors"] if "sess-bad" in e["file"]]
+    assert len(bad) == 1 and bad[0]["retryable"] is True
+    assert "lock" in bad[0]["error"].lower()
+
+
+def test_ingest_continues_on_unusable_lock_dir(env, sdk, monkeypatch, tmp_path):
+    """Robustness (#280 review P2): an unusable lock dir (EACCES/EROFS/
+    EMFILE-class failure — here a non-directory blocking the path) must not
+    abort the batch sweep: every file is recorded with a retryable error and
+    the sweep continues (no traceback, exit-0 contract preserved)."""
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("x")
+    monkeypatch.setenv("TORTOISE_INDEX_LOCK_DIR", str(blocker / "locks"))
+    _write_session(env, "sess-a")
+    _write_session(env, "sess-b")
+
+    rep = _ingest(sdk, env)
+    assert rep["ingested"] == 0
+    assert len(rep["errors"]) == 2
+    assert all(e["retryable"] for e in rep["errors"])
+    assert all("lock" in e["error"].lower() for e in rep["errors"])
+
+
+# ── doctor surface (#280 item 2) ────────────────────────────────────
+
+
 def test_reconcile_converges_on_crlf_files(env, sdk):
     """Regression (#280 review P1): file hashing must be text-mode normalized
     so CRLF files are not perpetually hash-stale (sweep never converging)."""

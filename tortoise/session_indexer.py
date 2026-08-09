@@ -568,7 +568,15 @@ def main():
             # a concurrent hook/sweep must not race this MATCH->SET read-modify-write.
             from .index_lock import SessionIndexLock
             _lock = SessionIndexLock(session_id or f"file_{file_path.stem}")
-            _lock_status = _lock.acquire()
+            try:
+                _lock_status = _lock.acquire()
+            except OSError as _lock_err:
+                # #280 review P2 (robustness): an unusable lock path (unwritable
+                # lock dir / planted symlink) must not crash the CLI — surface it
+                # as a retryable failure and exit 0 (never block the caller).
+                print(json.dumps({"status": "error",
+                                  "reason": f"session lock unavailable: {_lock_err}"}))
+                return
             if _lock_status == "held":
                 # ALWAYS exit 0 — never block session close; the holder wins.
                 print(json.dumps({"status": "locked",
