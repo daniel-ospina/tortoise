@@ -187,3 +187,25 @@ def test_capture_session_non_string_content_coerced(sdk):
     assert rows[0][0] == "[user] 12345", "int content stored as its str() form"
     assert rows[1][0] == "[assistant] {'text': 'we decided to ship v2'}", \
         "dict content stored as its str() form"
+
+
+def test_capture_session_falsy_non_string_content_not_swallowed(sdk):
+    """Falsy non-strings (0/False/{}/[]) survive coercion — no `or ""` swallow."""
+    conv = [
+        {"role": "user", "content": 0},
+        {"role": "assistant", "content": False},
+        {"role": "user", "content": {}},
+        {"role": "assistant", "content": []},
+        {"role": "user", "content": None},
+    ]
+    res = sdk.capture_session(conv)
+    assert res["turns"] == 5, "all turns must complete — no partial session left"
+    rows = sdk._get_proj().g.query(
+        "MATCH (t:Point {pointKind:'event'}) RETURN t.content ORDER BY t.id"
+    ).result_set
+    assert rows[0][0] == "[user] 0", "0 stored as its str() form, not swallowed"
+    assert rows[1][0] == "[assistant] False", \
+        "False stored as its str() form, not swallowed"
+    assert rows[2][0] == "[user] {}", "{} stored as its str() form, not swallowed"
+    assert rows[3][0] == "[assistant] []", "[] stored as its str() form, not swallowed"
+    assert rows[4][0] == "[user] ", "None degrades to empty string"

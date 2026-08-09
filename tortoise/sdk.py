@@ -608,13 +608,13 @@ class TortoiseSDK:
         extracted = []
         for i, turn in enumerate(conversation):
             role = turn.get("role") or "unknown"
-            content = turn.get("content") or ""
-            if not isinstance(content, str):
-                # #721: defensive coercion — non-string content (numbers,
-                # dicts, lists) would crash content[:5000] mid-write, leaving
-                # a partial session in the graph. Coerce BEFORE the write so
-                # the episodic point and the extraction loop share one value.
-                content = str(content)
+            raw = turn.get("content")
+            # #721: defensive coercion — check isinstance FIRST so falsy
+            # non-strings (0, False, {}, []) are not swallowed to "" by an
+            # `or ""` fallback, then coerce via str() (0 -> "0", False ->
+            # "False", [] -> "[]") before the write so the episodic point and
+            # the extraction loop share one value. Only None maps to "".
+            content = raw if isinstance(raw, str) else ("" if raw is None else str(raw))
 
             # Episodic turn point — deterministic id, structured speaker tag
             # (delta 5), content hash, session-scoped (never conflated across
