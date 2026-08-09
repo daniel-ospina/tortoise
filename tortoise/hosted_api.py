@@ -498,13 +498,16 @@ async def provision_tenant(request: Request):
                 id: $id, name: $name, tier: 'free',
                 created_at: $now, backup_enabled: false,
                 max_users: $max_users, max_graphs: $max_graphs,
-                max_api_keys: $max_keys, ops_allowance: $ops, graph_size_cap: $nodes
+                max_api_keys: $max_keys, max_points: $max_points,
+                max_sessions: $max_sessions, ops_allowance: $ops, graph_size_cap: $nodes
             })
             """,
             params={"id": team_id, "name": team_name, "now": now,
                     "max_users": lim["max_users_per_team"],
                     "max_graphs": lim["max_graphs_per_team"],
                     "max_keys": lim["max_api_keys"],
+                    "max_points": lim["max_graph_nodes"],
+                    "max_sessions": 1000,
                     "ops": lim["included_write_ops_per_month"],
                     "nodes": lim["max_graph_nodes"]},
         )
@@ -723,33 +726,47 @@ async def get_current_team(request: Request) -> dict:
             )
         # #329: fetch quota limits in the SAME fetch as tier (one round-trip;
         # mirrors quota.resolve_team_limits so REST and MCP see identical limits).
+        # #310: billing mirror fields (subscription_status, current_period_end,
+        # grace_until, customer_email) read in the same round-trip for lazy grace.
         team = sdk._get_registry().query(
             # #329: quota fields read with tier in one round-trip. max_teams is
             # NOT read — multi-team is a user capability, not a tier field (D1).
             "MATCH (t:Team {id: $id}) RETURN t.tier, t.max_users, t.max_graphs, "
-            "t.max_points, t.max_api_keys, t.max_sessions",
+            "t.max_points, t.max_api_keys, t.max_sessions, "
+            "t.subscription_status, t.current_period_end, t.grace_until, t.customer_email",
             params={"id": team_id},
         )
         row = team.result_set[0] if team.result_set else None
         if row:
-            tier, mu, mg, mp, mak, ms = row
+            tier, mu, mg, mp, mak, ms, sub_status, period_end, grace_until, customer_email = row
         else:
-            tier, mu, mg, mp, mak, ms = ("free", None, None, None, None, None)
-        from tortoise.quota import DEFAULT_MAX_API_KEYS, DEFAULT_MAX_POINTS, DEFAULT_MAX_SESSIONS
+            tier = mu = mg = mp = mak = ms = None
+            sub_status = period_end = grace_until = customer_email = None
+        # #310 lazy grace: past_due past grace_until degrades to free at request
+        # time; never above stored tier (billing.effective_tier).
+        from tortoise.billing import effective_tier
+        eff_tier = effective_tier({"tier": tier or "free",
+                                   "subscription_status": sub_status,
+                                   "grace_until": grace_until})
         request.state.team_id = team_id
-        request.state.tier = tier or "free"
-        # max_teams removed: multi-team is a USER capability, not a tier field
-        # (per-team billing; tier limits come from pricing.json)
+        request.state.tier = eff_tier
+        # #310 GAP-B (review fix 2): None limits resolve from tier_limits(eff_tier)
+        # — NEVER quota.DEFAULT_MAX_POINTS/API_KEYS (stale 1000/20 consts that
+        # contradicted pricing.json). max_points fallback = max_graph_nodes (the
+        # points quota counter counts graph nodes). REST mirrors
+        # quota.resolve_team_limits so REST and MCP see identical limits.
         from tortoise.pricing import tier_limits
-        lim = tier_limits(tier or "free")
-        # max_teams removed: multi-team is a USER capability, not a tier field
-        # (per-team billing; tier limits come from pricing.json)
-        return {"team_id": team_id, "key_id": key_id, "tier": tier or "free",
+        lim = tier_limits(eff_tier)
+        return {"team_id": team_id, "key_id": key_id, "tier": eff_tier,
                 "max_users": mu if mu is not None else (lim["max_users_per_team"] or 1),
                 "max_graphs": mg if mg is not None else lim["max_graphs_per_team"],
-                "max_points": int(mp) if mp is not None else DEFAULT_MAX_POINTS,
-                "max_api_keys": int(mak) if mak is not None else DEFAULT_MAX_API_KEYS,
-                "max_sessions": int(ms) if ms is not None else DEFAULT_MAX_SESSIONS}
+                "max_points": int(mp) if mp is not None else lim["max_graph_nodes"],
+                "max_api_keys": int(mak) if mak is not None else lim["max_api_keys"],
+                "max_sessions": int(ms) if ms is not None else 1000,
+                "subscription_status": sub_status,
+                "current_period_end": period_end,
+                "grace_until": grace_until,
+                "customer_email": customer_email}
     except HTTPException:
         raise
     except Exception:
@@ -1227,18 +1244,30 @@ async def register_user(request: Request, response: Response):
 
     try:
         # Create Team node with email and default onboarding state
+        # #310 GAP-A: tier-derived limits from pricing.json — max_api_keys,
+        # max_points (= max_graph_nodes), max_sessions written at CREATE so a
+        # fresh team is capped by pricing, not the stale 20-key DEFAULT leak.
+        from tortoise.pricing import tier_limits
+        free_lim = tier_limits("free")
         sdk._get_registry().query(
             """
             CREATE (t:Team {
                 id: $id, name: $name, email: $email, tier: 'free',
                 created_at: $now, backup_enabled: false,
-                max_users: 1, max_teams: 1, max_graphs: 1,
+                max_users: $max_users, max_teams: 1, max_graphs: $max_graphs,
+                max_api_keys: $max_keys, max_points: $max_points,
+                max_sessions: $max_sessions,
                 onboarding_state: $onboarding_state
             })
             """,
             params={
                 "id": team_id, "name": team_name, "email": email,
                 "now": now, "onboarding_state": _json.dumps(DEFAULT_ONBOARDING_STATE),
+                "max_users": free_lim["max_users_per_team"],
+                "max_graphs": free_lim["max_graphs_per_team"],
+                "max_keys": free_lim["max_api_keys"],
+                "max_points": free_lim["max_graph_nodes"],
+                "max_sessions": 1000,
             },
         )
 
