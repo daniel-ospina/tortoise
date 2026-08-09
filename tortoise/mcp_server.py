@@ -192,11 +192,15 @@ def _enforce_quota(resource: str = "points") -> None:
     limits REST sees); fallback resolves from the registry. Stdio mode
     (no team context) → skip — operator/trusted (batch caps still apply).
     """
-    from tortoise.mcp_auth import _current_team_id, _current_team_limits
+    from tortoise.mcp_auth import SELFHOST_TEAM_ID, _current_team_id, _current_team_limits
     from tortoise.quota import enforce_team_limit, resolve_team_limits
     team_id = _current_team_id.get()
     if not team_id:
         return  # stdio/operator — no team context
+    if team_id == SELFHOST_TEAM_ID:
+        # Selfhost transport placeholder (#338): no tenant registry exists —
+        # quota is N/A (selfhost has no billing). Batch caps still apply.
+        return
     limits = _current_team_limits.get()
     if limits is None:
         limits = resolve_team_limits(team_id)

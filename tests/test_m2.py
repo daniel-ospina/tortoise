@@ -118,7 +118,7 @@ def test_overlap_guard_rejects_mismap():
     LLMExtractor(_MismapModel(), MockModel("r")).run(text, "s",
         EventAPI(log, initiated_by="extractor"))
     stmts, _ = split(fold(log.read_all()))
-    first = min(stmts, key=lambda p: p["created_at"])
+    first = min(stmts, key=lambda p: p["createdAt"])
     # mis-mapped content rejected → fell back to the verbatim utterance
     assert first["content"] == first["provenance"]["quote"]
     print("PASS test_overlap_guard_rejects_mismap")
