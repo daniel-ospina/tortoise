@@ -1071,8 +1071,10 @@ class TortoiseSDK:
         Semantic-epistemic edge model (#7801):
           - op_type: IMPL or NAND (epistemic mechanism)
           - label: domain verb — "addresses", "hasPart", "opposes" (semantic layer)
-          - direction: "bidirectional" (default) or "unidirectional" — explicit flag
-            controlling EP back-propagation (ONTOLOGY v3.1 §3.1, §8).
+          - direction: "bidirectional" or "unidirectional" — explicit flag
+            controlling EP back-propagation (ONTOLOGY v3.1 §3.1, §8). Default is
+            per-op-type (#753): NAND → unidirectional (directed attack),
+            IMPL → bidirectional. Pass None (default) to let the SDK resolve.
           - Operator carries the label and direction; IMPL/NAND edges carry confidence via EP.
         """
         if op_type not in ("IMPL", "NAND", "composedOf", "decomposesInto", "contains", "wraps"):
