@@ -25,6 +25,9 @@ def client(tmp_path):
     orig_init = TortoiseSDK.__init__
 
     def _patched(self, db_path_arg=None, *, namespace=None, **kw):
+        # Callers may pass db_path as a keyword (lands in **kw) — pop it so
+        # it never conflicts with the explicit kwarg (#493).
+        kw.pop("db_path", None)
         orig_init(self, db_path=db_path if db_path_arg is None else db_path_arg,
                   namespace=namespace, **kw)
 
@@ -46,6 +49,9 @@ def unauth_client(tmp_path):
     orig_init = TortoiseSDK.__init__
 
     def _patched(self, db_path_arg=None, *, namespace=None, **kw):
+        # Callers may pass db_path as a keyword (lands in **kw) — pop it so
+        # it never conflicts with the explicit kwarg (#493).
+        kw.pop("db_path", None)
         orig_init(self, db_path=db_path if db_path_arg is None else db_path_arg,
                   namespace=namespace, **kw)
 

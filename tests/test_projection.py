@@ -17,6 +17,26 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tortoise.api import EventAPI, provenance          # noqa: E402
+from tortoise.api import EventAPI, provenance          # noqa: E402
+
+# ── Live-FalkorDB availability (mirrors tests/test_hnsw_vector_index.py) ──
+# The live_proj fixture connects to docker://localhost:16379 (live FalkorDB).
+# Probe at module load so its tests skip gracefully in embedded-only CI (#493).
+FALKORDB_AVAILABLE = False
+try:
+    _old_uri = os.environ.get("TORTOISE_DB_URI")
+    os.environ["TORTOISE_DB_URI"] = "docker://:@localhost:16379/tortoise_test_proj125"
+    from tortoise.projection import FalkorProjection as _FP  # noqa: E402
+    _probe = _FP.from_uri(os.environ["TORTOISE_DB_URI"])
+    _probe.close()
+    FALKORDB_AVAILABLE = True
+except Exception:
+    FALKORDB_AVAILABLE = False
+finally:
+    if _old_uri is not None:
+        os.environ["TORTOISE_DB_URI"] = _old_uri
+    else:
+        os.environ.pop("TORTOISE_DB_URI", None)
 from tortoise.log import EventLog                       # noqa: E402
 from tortoise.projection import (                        # noqa: E402
     _apply_one, fold, split,
@@ -1393,6 +1413,8 @@ if __name__ == "__main__":
 @pytest.fixture
 def live_proj():
     """Live FalkorProjection on a test-prefixed graph (safe via test_guard)."""
+    if not FALKORDB_AVAILABLE:
+        pytest.skip("Live FalkorDB (Docker) not available")
     uri = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise_test_proj125")
     proj = FalkorProjection.from_uri(uri)
     # Clean the test graph (test-prefixed — test_guard permits; production blocked)

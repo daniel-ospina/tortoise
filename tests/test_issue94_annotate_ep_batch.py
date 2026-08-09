@@ -50,7 +50,7 @@ class TestAnnotateEpBatchIssue94:
     """EP batch annotation: no-evidence vs all-NAND distinction."""
 
     def test_isolated_point_has_no_evidence(self, sdk):
-        """Point with zero edges → has_evidence=False, confidence_mean=0.5."""
+        """Point with zero edges → evidence.total=0, confidence_mean=0.0."""
         # Create an isolated point (no operators)
         point = sdk.create_point("statement", "Isolated claim with no evidence")
         pid = point["id"]
@@ -62,10 +62,10 @@ class TestAnnotateEpBatchIssue94:
 
         assert pid in result
         ep = result[pid]
-        assert ep.has_evidence is False, \
-            f"Isolated point should have has_evidence=False, got {ep.has_evidence}"
-        assert ep.confidence_mean == 0.5, \
-            f"Isolated point should have confidence_mean=0.5 (neutral), got {ep.confidence_mean}"
+        assert ep.evidence.total == 0, \
+            f"Isolated point should have evidence.total=0, got {ep.evidence}"
+        assert ep.confidence_mean == 0.0, \
+            f"Isolated point should have confidence_mean=0.0 (no edges), got {ep.confidence_mean}"
         assert ep.evidence.impl_count == 0
         assert ep.evidence.nand_count == 0
         assert ep.evidence.total == 0
@@ -90,8 +90,8 @@ class TestAnnotateEpBatchIssue94:
 
         assert claim_id in result
         ep = result[claim_id]
-        assert ep.has_evidence is True, \
-            f"NANDed point should have has_evidence=True, got {ep.has_evidence}"
+        assert ep.evidence.total > 0, \
+            f"NANDed point should have evidence.total > 0, got {ep.evidence}"
         # With 0 IMPL, 2 NAND: confidence_mean should be 0.0 or close
         assert ep.confidence_mean < 0.5, \
             f"NANDed point should have confidence_mean < 0.5, got {ep.confidence_mean}"
@@ -120,8 +120,8 @@ class TestAnnotateEpBatchIssue94:
 
         assert claim_id in result
         ep = result[claim_id]
-        assert ep.has_evidence is True, \
-            f"Point with edges should have has_evidence=True, got {ep.has_evidence}"
+        assert ep.evidence.total > 0, \
+            f"Point with edges should have evidence.total > 0, got {ep.evidence}"
         # 1 IMPL, 1 NAND → confidence_mean = 1/2 = 0.5
         assert ep.confidence_mean == 0.5, \
             f"Mixed point should have confidence_mean=0.5, got {ep.confidence_mean}"
@@ -147,10 +147,10 @@ class TestAnnotateEpBatchIssue94:
 
         # Isolated
         iso_ep = result[isolated_id]
-        assert iso_ep.has_evidence is False
-        assert iso_ep.confidence_mean == 0.5
+        assert iso_ep.evidence.total == 0
+        assert iso_ep.confidence_mean == 0.0
 
         # NANDed
         claim_ep = result[claim_id]
-        assert claim_ep.has_evidence is True
+        assert claim_ep.evidence.total > 0
         assert claim_ep.confidence_mean == 0.0  # 0 IMPL / 1 total

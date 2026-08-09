@@ -433,10 +433,13 @@ def main(argv=None):
         raise ValueError(RELATIVE_PATH_ERROR.format(path=args.db))
     if args.db.startswith("docker://"):
         proj = FalkorProjection.from_uri(args.db)
-    elif Path(args.db).exists():
+    elif args.db:
+        # Embedded mode — FalkorDBLite creates the file on first connect.
+        # (#493: the #176 migration added a "file must exist" gate here that
+        # broke fresh embedded DBs by falling through to the Docker default.)
         proj = FalkorProjection(args.db)
     else:
-        # DB file doesn't exist — try Docker default as fallback
+        # No --db given — try Docker default as fallback
         # (Docker mode doesn't use a file, data lives in the container)
         import os
         docker_host = os.environ.get("FALKORDB_HOST", "localhost")

@@ -105,7 +105,7 @@ def test_ingest_main_guard():
                     "Bob: But however the coverage needs improvement.\n")
 
         subprocess.run(
-            [sys.executable, "-m", "tortoise.tortoise.ingest", transcript,
+            [sys.executable, "-m", "tortoise.ingest", transcript,
              "--point-model", "mock:cheap",
              "--relation-model", "mock:reason",
              "--out", out_path, "--log", log_path, "--db", db_path],

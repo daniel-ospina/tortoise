@@ -2573,6 +2573,7 @@ test = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "jax" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-timeout" },
@@ -2607,6 +2608,7 @@ provides-extras = ["embeddings", "quadrature", "postgres", "backups", "test"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "jax", specifier = ">=0.4" },
     { name = "pytest", specifier = ">=8" },
     { name = "pytest-asyncio" },
     { name = "pytest-timeout" },

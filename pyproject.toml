@@ -39,7 +39,7 @@ test = ["pytest>=8", "pytest-timeout", "playwright>=1.40", "pytest-playwright>=0
 # Canonical dev/test tooling (#492, #493) — installed via `uv sync --group dev`.
 # The `test` extra above is the CI/live E2E path (pip install -e '.[test]').
 [dependency-groups]
-dev = ["pytest>=8", "pytest-timeout", "pytest-asyncio", "scikit-learn>=1.0", "requests>=2.31"]
+dev = ["pytest>=8", "pytest-timeout", "pytest-asyncio", "scikit-learn>=1.0", "requests>=2.31", "jax>=0.4"]
 
 [tool.setuptools.packages.find]
 include = ["tortoise*"]
