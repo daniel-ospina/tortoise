@@ -4,7 +4,7 @@
 **Root cause:** All Tortoise ranked-result surfaces (`tortoise_search`, `tortoise_suggest_entry_points`) use one-dimensional ranking — pure cosine similarity or string-match heuristics. Graph topology (EP confidences, operator edges, entity relationships) — which is Tortoise's unique structural advantage — is invisible to ranking. The session-entry-point use case is the most acute pain point: agents calling `suggest_entry_points("pricing")` get results ordered by keyword overlap, not by which sessions produced well-reasoned, high-confidence knowledge.
 
 This is not just a session problem — it affects every ranked result. But sessions are the right MVP scope because:
-1. The INSTANTIATES edge (Session→Object) is a graph-native signal no competitor has
+1. The aboutObject edge (Event→Object) is a graph-native signal no competitor has
 2. Session ranking is the most common agent query pattern
 3. The solution architecture (a composable `GraphRanker`) generalizes to Point search when ready
 
@@ -67,8 +67,8 @@ class GraphRanker:
         - Operator connectivity: log(1 + inbound_edges + outbound_edges)
         - Grounding value (if computed): n.grounding
         
-        For sessions (future, via INSTANTIATES edges):
-        - Number of INSTANTIATES edges (Objects produced)
+        For sessions (via aboutObject edges):
+        - Number of aboutObject edges (Objects referenced)
         - EP confidence of connected Points
         - Number of Points produced
         
@@ -83,7 +83,7 @@ class GraphRanker:
 
 | Signal | Source | Weight | Rationale |
 |--------|--------|--------|-----------|
-| **INSTANTIATES count** | `MATCH (s:Session)-[:INSTANTIATES]->(o:Object) RETURN count(o)` | 0.4 | Sessions that produced Objects are valuable — they created reusable knowledge |
+| **aboutObject count** | `MATCH (e:Event)-[:aboutObject]->(o:Object) RETURN count(o)` | 0.6·inst_norm where inst_norm = 1−1/(1+n) | Sessions that reference Objects are valuable — they created reusable knowledge |
 | **EP confidence of connected Points** | `MATCH (s)-[:PRODUCES]->(p:Point) RETURN avg(p.confidence)` | 0.4 | High-confidence claims = well-reasoned session output |
 | **Recency decay** | `e^(-λ·days_ago)` with λ=ln(2)/30 | 0.2 | Recent sessions are more relevant; 30-day half-life |
 
@@ -105,7 +105,7 @@ class GraphRanker:
 - Same backward-compatible pattern
 
 **Step 4: Graph signal queries in `tortoise/projection.py` (~40 lines)**
-- `get_session_object_count(session_id)` — INSTANTIATES edge count
+- `get_session_object_count(session_id)` — aboutObject edge count
 - `get_session_point_confidence(session_id)` — avg EP confidence of connected Points
 - These become the data sources for `GraphRanker.graph_boost()`
 
@@ -117,7 +117,7 @@ class GraphRanker:
 ### Acceptance Criteria
 
 1. **AC1:** `tortoise_search` results with graph boost rank high-EP-confidence Points above low-confidence Points with identical similarity scores
-2. **AC2:** `tortoise_suggest_entry_points` results with graph boost rank sessions with INSTANTIATES edges above sessions without, all else equal
+2. **AC2:** `tortoise_suggest_entry_points` results with graph boost rank sessions with aboutObject edges above sessions without, all else equal
 3. **AC3:** Recency decay correctly demotes old results: a 60-day-old result with same similarity+graph_score as a 1-day-old result ranks lower
 4. **AC4:** Backward-compatible: when `graph_ranker=None`, behavior is identical to current
 5. **AC5:** All three weights (α, β, γ) are configurable at construction time
@@ -126,12 +126,12 @@ class GraphRanker:
 ### Testing Strategy
 - **Unit:** `test_ranking.py` — test `rerank()` with mock results dicts, verify score math
 - **Integration:** `test_tortoise_search.py` — seed Points with varying EP confidences, verify ranking order
-- **Integration:** `test_suggest_entry_points.py` — seed sessions with/without INSTANTIATES edges, verify ranking order
+- **Integration:** ranking tests (tests/test_ranking.py) — seed sessions with/without aboutObject edges, verify ranking order
 - **Regression:** Existing search/suggest tests must pass unchanged
 
 ### Runtime Prerequisites
 - EP confidence must be computed before graph boost is meaningful (uncalibrated Points get neutral boost of 0.0)
-- INSTANTIATES edges must exist (this is a dependency on the session→Object linking from #7740 or equivalent)
+- aboutObject edges must exist (this is a dependency on the session→Object linking from session indexing; `_connect_issue_objects` wires them per ONTOLOGY v3.2 §3.2)
 - No new dependencies required (all graph traversal uses existing FalkorDB Cypher queries)
 
 ## Rejected Alternatives
@@ -157,12 +157,12 @@ class GraphRanker:
 | `tortoise/ep.py:TortoiseEP.compute_confidence()` | Data source | Already exists, used by graph_boost | ✅ |
 | `tortoise/mcp_server.py:tortoise_search` | MCP tool | Pass-through — no changes needed | ✅ |
 | `tortoise/mcp_server.py:tortoise_suggest_entry_points` | MCP tool | Pass-through — no changes needed | ✅ |
-| INSTANTIATES edges | Graph schema | Dependency on #7740 or session linking | ⚠️ Requires coordination |
+| aboutObject edges | Graph schema | Wired by session indexing (`_connect_issue_objects`) | ✅ Shipped |
 | EP confidence values on Points | Data | Already persisted via `compute_confidence()` | ✅ |
 | `createdAt` field on Points | Data | Already exists, used by recency_decay | ✅ |
 | sentence-transformers | External dep | Already imported, no change | ✅ |
 
-**⚠️ Dependency note:** The INSTANTIATES edge (Session→Object) doesn't exist in the codebase yet. GraphRanker should be designed to gracefully handle missing edges (return 0.0 boost when no INSTANTIATES edges found). This decouples the ranker from the session wiring — it works immediately for Point EP confidence boost, and gets session boosts "for free" when #7740 lands.
+**⚠️ Dependency note:** The aboutObject edge (Event→Object) exists via session indexing (`_connect_issue_objects`, ONTOLOGY v3.2 §3.2). GraphRanker handles missing edges gracefully via OPTIONAL MATCH: on the is_event branch the boost degrades to 0.4·confidence (never 0.0). This decouples the ranker from the session wiring — it works immediately for Point EP confidence boost, and session boosts scale with aboutObject edge count.
 
 ## Review Cycle Log
 
@@ -178,7 +178,7 @@ class GraphRanker:
 |--------|--------|
 | Tier | **Standard** (upgraded from Micro — touches `tortoise/sdk.py`, `tortoise/embeddings.py`, shared infrastructure) |
 | UX_RATING | low — no UI changes |
-| ONTOLOGY_RATING | low — uses existing INSTANTIATES edges (planned), no new entity types |
+| ONTOLOGY_RATING | low — uses existing aboutObject edges, no new entity types |
 | ARCH_RATING | medium — new module (`ranking.py`), new abstraction (GraphRanker), touches 4 existing files |
 
 ## Discovery: Adjacent Issues to File
