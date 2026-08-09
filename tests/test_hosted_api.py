@@ -253,7 +253,9 @@ class TestLastUsedAtTracking:
                 assert result["team_id"] == "test-team-lua"
                 assert result["key_id"] == "test-key-lua"
 
-                # Verify last_used_at was written
+                # Verify last_used_at was written — a parseable recent ISO-8601
+                # timestamp (not just any non-null value)
+                from datetime import datetime, timezone
                 row = sdk._get_registry().query(
                     "MATCH (k:APIKey {id: $id}) RETURN k.last_used_at",
                     params={"id": "test-key-lua"},
@@ -261,6 +263,11 @@ class TestLastUsedAtTracking:
                 assert len(row) == 1
                 assert row[0][0] is not None, \
                     "last_used_at should be set after successful auth"
+                last_used = datetime.fromisoformat(row[0][0])
+                assert last_used.tzinfo is not None, "last_used_at must be timezone-aware"
+                age = datetime.now(timezone.utc) - last_used
+                assert age.total_seconds() < 30, \
+                    f"last_used_at should be recent, got {row[0][0]}"
             finally:
                 _restore_tortoise_sdk_init(_orig_init)
 
