@@ -598,3 +598,215 @@ class TestCheckoutPortal:
     def test_portal_404_no_customer(self, billing_client):
         r = billing_client["client"].post("/v1/billing/portal", headers=billing_client["headers"])
         assert r.status_code == 404, r.text
+
+
+class TestWebhook:
+    """POST /webhooks/stripe — 4-event semantics, dedup, security (Task 7)."""
+
+    @staticmethod
+    def _post(client, event, sig="t=1700000000,v1=deadbeef"):
+        return client.post(
+            "/webhooks/stripe",
+            content=json.dumps(event),
+            headers={"stripe-signature": sig},
+        )
+
+    @staticmethod
+    def _verify(event):
+        from tortoise import billing as bl
+
+        def fake_verify(self, payload, sig_header):
+            return event
+
+        return fake_verify
+
+    def _mirror(self, billing_client, team_id=None):
+        sdk = billing_client["sdk"]
+        tid = team_id or billing_client["team_id"]
+        rows = sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) RETURN t.tier, t.subscription_status, "
+            "t.stripe_customer_id, t.subscription_id, t.grace_until",
+            params={"id": tid},
+        ).result_set
+        return rows[0] if rows else None
+
+    def test_checkout_completed_activates_team(self, monkeypatch, billing_client):
+        from tortoise import billing as bl
+        team_id = billing_client["team_id"]
+        monkeypatch.setattr(bl.StripeClient, "verify_webhook_signature", self._verify({
+            "type": "checkout.session.completed", "id": "evt_c1",
+            "data": {"object": {"client_reference_id": team_id, "customer": "cus_1",
+                                "customer_details": {"email": "o@e.com"},
+                                "subscription": "sub_1"}}}))
+        monkeypatch.setattr(bl.StripeClient, "get_subscription",
+                            lambda self, sid: FIXTURE_SUB)
+        r = self._post(billing_client["client"], {})
+        assert r.status_code == 200, r.text
+        tier, status, cust, sub_id, _ = self._mirror(billing_client)
+        assert (tier, status, cust, sub_id) == ("pro", "active", "cus_1", "sub_1")
+
+    def test_webhook_replay_dedup_single_processing(self, monkeypatch, billing_client):
+        from tortoise import billing as bl
+        from tortoise import notify as nt
+        team_id = billing_client["team_id"]
+        calls = []
+        monkeypatch.setattr(nt, "notify_billing_event",
+                            lambda *a, **k: calls.append(a))
+        monkeypatch.setattr(bl.StripeClient, "verify_webhook_signature", self._verify({
+            "type": "checkout.session.completed", "id": "evt_dedup",
+            "data": {"object": {"client_reference_id": team_id, "customer": "cus_2",
+                                "subscription": "sub_2"}}}))
+        monkeypatch.setattr(bl.StripeClient, "get_subscription",
+                            lambda self, sid: FIXTURE_SUB)
+        for _ in range(2):  # Stripe retry
+            r = self._post(billing_client["client"], {})
+            assert r.status_code == 200
+        assert len(calls) == 1, "notifications must fire once on replay"
+
+    def test_webhook_bad_signature_400(self, monkeypatch, billing_client):
+        from tortoise import billing as bl
+        monkeypatch.setattr(bl.StripeClient, "verify_webhook_signature",
+                            lambda self, p, s: (_ for _ in ()).throw(
+                                bl.BillingError("bad")))
+        r = self._post(billing_client["client"], {"type": "x"})
+        assert r.status_code == 400
+
+    def test_webhook_expired_timestamp_400(self, monkeypatch, billing_client):
+        from tortoise import billing as bl
+        monkeypatch.setattr(bl.StripeClient, "verify_webhook_signature",
+                            lambda self, p, s: (_ for _ in ()).throw(
+                                bl.BillingError("outside tolerance")))
+        r = self._post(billing_client["client"], {"type": "x"})
+        assert r.status_code == 400
+
+    def test_webhook_payment_failed_sets_grace(self, monkeypatch, billing_client):
+        from tortoise import billing as bl
+        team_id = billing_client["team_id"]
+        monkeypatch.setattr(bl.StripeClient, "verify_webhook_signature", self._verify({
+            "type": "invoice.payment_failed", "id": "evt_pf",
+            "data": {"object": {"client_reference_id": team_id,
+                                "customer": "cus_1",
+                                "lines": {"data": [{"period": {"end": 4102444800}}]}}}}))
+        r = self._post(billing_client["client"], {})
+        assert r.status_code == 200
+        _, status, _, _, grace = self._mirror(billing_client)
+        assert status == "past_due" and grace
+
+    def test_webhook_cancel_at_period_end_keeps_tier(self, monkeypatch, billing_client):
+        from tortoise import billing as bl
+        team_id = billing_client["team_id"]
+        # set the team to pro first (simulate active sub)
+        billing_client["sdk"]._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.tier='pro', t.subscription_status='active'",
+            params={"id": team_id})
+        monkeypatch.setattr(bl.StripeClient, "verify_webhook_signature", self._verify({
+            "type": "customer.subscription.updated", "id": "evt_cae",
+            "data": {"object": {"client_reference_id": team_id, "id": "sub_1",
+                                "customer": "cus_1", "status": "active",
+                                "cancel_at_period_end": True}}}))
+        r = self._post(billing_client["client"], {})
+        assert r.status_code == 200
+        tier, status, *_ = self._mirror(billing_client)
+        assert tier == "pro", "cancel_at_period_end must keep tier until period end"
+
+    def test_webhook_subscription_updated_canceled_reverts(self, monkeypatch, billing_client):
+        """review fix 11: status='canceled' via .updated (deleted event dropped)."""
+        from tortoise import billing as bl
+        team_id = billing_client["team_id"]
+        billing_client["sdk"]._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.tier='team', t.subscription_status='active'",
+            params={"id": team_id})
+        monkeypatch.setattr(bl.StripeClient, "verify_webhook_signature", self._verify({
+            "type": "customer.subscription.updated", "id": "evt_canc",
+            "data": {"object": {"client_reference_id": team_id, "id": "sub_1",
+                                "customer": "cus_1", "status": "canceled",
+                                "cancel_at_period_end": False}}}))
+        r = self._post(billing_client["client"], {})
+        assert r.status_code == 200
+        tier, status, *_ = self._mirror(billing_client)
+        assert tier == "free" and status == "canceled"
+
+    def test_webhook_unknown_price_keeps_tier_and_notifies(self, monkeypatch, billing_client):
+        """review fix 7: price not in STRIPE_PRICE_IDS → keep tier + ops notify."""
+        from tortoise import billing as bl
+        from tortoise import notify as nt
+        team_id = billing_client["team_id"]
+        billing_client["sdk"]._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.tier='pro', t.subscription_status='active'",
+            params={"id": team_id})
+        notified = []
+        monkeypatch.setattr(nt, "notify_billing_event",
+                            lambda *a, **k: notified.append(a))
+        monkeypatch.setattr(bl.StripeClient, "verify_webhook_signature", self._verify({
+            "type": "checkout.session.completed", "id": "evt_unk",
+            "data": {"object": {"client_reference_id": team_id, "customer": "cus_3",
+                                "subscription": "sub_3"}}}))
+        monkeypatch.setattr(bl.StripeClient, "get_subscription",
+                            lambda self, sid: {"items": [{"price": {"id": "price_UNKNOWN"}}]})
+        r = self._post(billing_client["client"], {})
+        assert r.status_code == 200
+        tier, status, *_ = self._mirror(billing_client)
+        assert tier == "pro", "unknown price must NOT downgrade an active sub"
+        assert notified, "ops notification must fire on unknown price"
+
+    def test_webhook_deleted_reverts_free(self, monkeypatch, billing_client):
+        from tortoise import billing as bl
+        team_id = billing_client["team_id"]
+        billing_client["sdk"]._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.tier='team', t.subscription_status='active'",
+            params={"id": team_id})
+        monkeypatch.setattr(bl.StripeClient, "verify_webhook_signature", self._verify({
+            "type": "customer.subscription.deleted", "id": "evt_del",
+            "data": {"object": {"client_reference_id": team_id, "customer": "cus_1"}}}))
+        r = self._post(billing_client["client"], {})
+        assert r.status_code == 200
+        tier, status, *_ = self._mirror(billing_client)
+        assert tier == "free" and status == "canceled"
+
+    def test_webhook_unhandled_type_200(self, monkeypatch, billing_client):
+        from tortoise import billing as bl
+        monkeypatch.setattr(bl.StripeClient, "verify_webhook_signature", self._verify({
+            "type": "charge.succeeded", "id": "evt_other",
+            "data": {"object": {"client_reference_id": billing_client["team_id"]}}}))
+        r = self._post(billing_client["client"], {})
+        assert r.status_code == 200
+
+    def test_webhook_no_team_binding_200(self, monkeypatch, billing_client):
+        from tortoise import billing as bl
+        monkeypatch.setattr(bl.StripeClient, "verify_webhook_signature", self._verify({
+            "type": "checkout.session.completed", "id": "evt_noteam",
+            "data": {"object": {"customer": "cus_x", "subscription": "sub_x"}}}))
+        r = self._post(billing_client["client"], {})
+        assert r.status_code == 200
+        assert r.json()["detail"] == "no team binding"
+
+    def test_webhook_audit_recorded(self, monkeypatch, billing_client):
+        import tortoise.hosted_api as ha
+        from tortoise import billing as bl
+        team_id = billing_client["team_id"]
+        audited = []
+
+        async def fake_audit(*a, **k):
+            audited.append(a)
+
+        monkeypatch.setattr(ha, "_async_audit", fake_audit)
+        monkeypatch.setattr(bl.StripeClient, "verify_webhook_signature", self._verify({
+            "type": "customer.subscription.deleted", "id": "evt_audit",
+            "data": {"object": {"client_reference_id": team_id, "customer": "cus_1"}}}))
+        r = self._post(billing_client["client"], {})
+        assert r.status_code == 200
+        ops = [a[2] for a in audited if len(a) > 2]  # (request, team_id, operation)
+        assert "billing_cancel" in ops, "billing_cancel audit event must be recorded"
+
+    def test_webhook_failure_log_redacts_secret(self, monkeypatch, billing_client, caplog):
+        """review fix 9: no secret value leaks into webhook error logs."""
+        import logging
+        from tortoise import billing as bl
+        monkeypatch.setattr(bl.StripeClient, "verify_webhook_signature",
+                            lambda self, p, s: (_ for _ in ()).throw(
+                                bl.BillingError("whsec_test leaked in message")))
+        with caplog.at_level(logging.WARNING):
+            r = self._post(billing_client["client"], {"type": "x"})
+        assert r.status_code == 400
+        joined = "\n".join(r.message for r in caplog.records)
+        assert "whsec_test" not in joined
