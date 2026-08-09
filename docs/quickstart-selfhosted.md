@@ -77,7 +77,7 @@ To index an existing repo's markdown files:
 tortoise index github https://github.com/your/repo --db <path-or-uri>
 ```
 
-`index github` clones the repo (or accepts a local path), extracts deterministically with offline mock models, and writes Points/Operators to the graph — idempotent across runs. For richer LLM-based extraction, use `tortoise ingest` instead. `tortoise onboard` runs the full init → index → demo → doctor flow and passes the same resolved DB target to each step, so it works in embedded-only mode too (it used to crash; fixed in #705).
+`index github` clones the repo (or accepts a local path), extracts deterministically with offline mock models, and writes Points/Operators to the graph — idempotent across runs. For richer LLM-based extraction, use the standalone ingest CLI instead — `tortoise-ingest transcript.txt --db <path-or-uri>` (or `python -m tortoise.ingest`). It ingests a transcript file, requires `--db`, and defaults to offline mock models; pass `--point-model`/`--relation-model` (e.g. `ollama:llama3.2:3b`) to use a real LLM. `tortoise onboard` runs the full init → index → demo → doctor flow and passes the same resolved DB target to each step, so it works in embedded-only mode too (it used to crash; fixed in #705).
 
 ## 5. Connect your agent (MCP, stdio)
 
