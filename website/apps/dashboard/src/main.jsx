@@ -82,6 +82,7 @@ function App() {
   // P5 (code-review): distinguish 'loading' / 'ok' / 'denied' / 'error' so
   // loading and network failures never masquerade as an RBAC denial.
   const [membersStatus, setMembersStatus] = React.useState('loading')
+  const [graphsLoaded, setGraphsLoaded] = React.useState(false) // Round-26: graphs card shows '—' until first load
   // P1/P2 (code-review): per-team data-plane key cache. Bootstrap mints are
   // capped at 3 active per team, so cache the minted key per team_id and
   // reuse on switch instead of re-minting (which would 429 after 3 switches).
@@ -568,6 +569,7 @@ function App() {
       const list = await res.json()
       if (teamIdRef.current === teamId) {
         setGraphs(list)
+        setGraphsLoaded(true) // Round-26
         // Fix E (review round 2): auto-select first graph so the dropdown
         // shows a selection after switch; Round-3: only when nothing is
         // selected yet (don't clobber a manual pick on re-load).
@@ -854,6 +856,7 @@ function App() {
   async function recoverKey() {
     // Round-18 (P2): the last mutation that writes the ACTIVE key + localStorage
     // — capture team at call time; bail before any write if the user switched.
+    if (busy) return // Round-26: in-function double-click guard (button disabled is click-path only)
     const _teamAtCall = currentTeamId || fallbackTeamIdRef.current
     setError('')
     setBusy(true)
@@ -984,7 +987,7 @@ function App() {
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
               autoFocus
-              autoComplete="new-password" // Round-19: one-shot secret — drives password-manager hints
+              autoComplete="one-time-code" // Round-26: one-shot secret — accurate hint, silences the username-field heuristic
             />
             <button type="submit" disabled={busy || !apiKey.trim()}>
               {busy ? 'Connecting…' : 'Connect'}
@@ -1032,7 +1035,7 @@ function App() {
         </div>
         {team && team.tier !== 'team' && (
           <a className="tier-badge" href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">
-            {team.tier} tier · Upgrade
+            {team.tier || 'free'} tier · Upgrade
           </a>
         )}
         {team && team.tier === 'team' && (
@@ -1070,7 +1073,7 @@ function App() {
             <h2>Overview</h2>
             <div className="cards">
               <div className="card"><div className="card-val">{team.point_count ?? 0}</div><div className="card-label">Points</div></div>
-              <div className="card"><div className="card-val">{authMode === 'session' ? graphs.length : '—'}</div><div className="card-label">Graphs</div></div>
+              <div className="card"><div className="card-val">{authMode === 'session' && graphsLoaded ? graphs.length : '—'}</div><div className="card-label">Graphs</div></div>
               <div className="card"><div className="card-val">{membersStatus === 'ok' ? members.length : '—'}</div><div className="card-label">Users</div></div>
               <div className="card"><div className="card-val">{backupInfo ? (backupInfo.count || 'none') : '—'}</div><div className="card-label">Backups</div></div>
               <div className="card"><div className="card-val">{keys.length}</div><div className="card-label">API Keys</div></div>
