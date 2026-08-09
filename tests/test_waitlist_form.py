@@ -39,6 +39,12 @@ CONFIG_TOML = SUPABASE_DIR / "config.toml"
 
 FUNCTION_URL = "https://ybetwichurajbfswfeqa.supabase.co/functions/v1/waitlist-subscribe"
 
+# The endpoint is derived from the Supabase project ref (config.toml project_id
+# + the documented supabase function host convention). This pins the page to
+# the SAME source of truth as config.toml so a future project migration is
+# caught at CI time instead of silently breaking the form (regression guard
+# for the prior hardcoded-URL incident, PR #55).
+
 
 # ── Normalizer mirror (tests/e2e/test_legal_pages.py `_clean`) ─────────────
 def _clean(text: str) -> str:
@@ -104,6 +110,14 @@ def test_config_toml_verify_jwt_false() -> None:
     section = section.split("[functions.", 1)[0]
     assert re.search(r"verify_jwt\s*=\s*false", section), \
         "waitlist-subscribe must have verify_jwt=false (browser POSTs carry no JWT)"
+    # Endpoint single-source-of-truth: index.html URL must match config.toml's
+    # project_id (regression guard for hardcoded-URL drift, PR #55 class).
+    project_ref = re.search(r"project_id\s*=\s*[\"']([^\"']+)[\"']", CONFIG_TOML.read_text(encoding="utf-8"))
+    assert project_ref, "config.toml must declare project_id"
+    expected_url = f"https://{project_ref.group(1)}.supabase.co/functions/v1/waitlist-subscribe"
+    index = INDEX_HTML.read_text(encoding="utf-8")
+    assert expected_url in index, f"index.html endpoint {expected_url} != config.toml project_id"
+    assert expected_url == FUNCTION_URL
 
 
 # ── Indicator 1b: migration 0005 defines the table ──────────────────────────

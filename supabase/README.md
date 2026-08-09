@@ -29,23 +29,28 @@ migrations and function changes as production operations.
 
 Responses:
 
-| Case                  | Response                                    |
-|-----------------------|---------------------------------------------|
-| Fresh subscribe       | 200 {ok:true} + confirmation email          |
-| Already subscribed    | 200 {ok:true, message:"Already subscribed"} |
-| Honeypot filled (bot) | 200 {ok:true} silently, nothing stored      |
-| Rate limited          | 429 with Retry-After                        |
-| Captcha failed        | 400                                         |
-| Invalid email / body  | 400                                         |
-| Bad origin / method   | 403 / 405                                   |
+| Case                     | Response                                    |
+|--------------------------|---------------------------------------------|
+| Fresh subscribe          | 200 {ok:true} + confirmation email          |
+| Already subscribed       | 200 {ok:true, message:"Already subscribed"} |
+| Honeypot filled (bot)    | 200 {ok:true} silently, nothing stored      |
+| Rate limited             | 429 with Retry-After                        |
+| Captcha failed / missing | 400 (when TURNSTILE_SECRET_KEY set)         |
+| Invalid email / body     | 400                                         |
+| Bad origin / method      | 403 / 405                                   |
 
 CORS: allowlist echoes premiselabs.co, tortoise.premiselabs.co,
 premise-labs.pages.dev (+ *.premise-labs.pages.dev previews, localhost:8788),
 with `Vary: Origin`, on every response path.
 
-Anti-abuse: Turnstile (server-verified only when both the secret key and a
-token are present — fail-open), in-memory IP rate limit (10/hr per first
-`x-forwarded-for` entry, skipped when absent), honeypot field.
+Anti-abuse:
+
+- Turnstile — when `TURNSTILE_SECRET_KEY` is set a valid token is REQUIRED
+  (no token = 400); fail-open only while the secret is unprovisioned
+- IP rate limit (10/hr, keyed on the gateway-appended XFF entry,
+  best-effort per-isolate)
+- per-email rate limit (5/hr, email-bomb guard)
+- honeypot field
 
 Storage: `waitlist_subscribers` (migration 0005) — `email` UNIQUE (dedup via
 `?on_conflict=email` + `Prefer: resolution=ignore-duplicates`), `source`,
@@ -82,9 +87,16 @@ supabase functions deploy waitlist-subscribe \
 
 ## Post-deploy smoke checklist (#373)
 
-1. Confirm `TURNSTILE_SECRET_KEY` is set (else captcha is silently off) and
-   `TURNSTILE_SITE_KEY` is populated in `website/index.html`.
-2. Submit a test email from the live landing page -> success state shown.
-3. Verify the row in Supabase Studio (`waitlist_subscribers`).
-4. Verify the confirmation email arrives within 30s (Resend dashboard log).
-5. Resubmit the same email -> "Already subscribed" message, no second email.
+1. Confirm `TURNSTILE_SECRET_KEY` is set (captcha is REQUIRED once set —
+   the form blocks submit until a token exists) and `TURNSTILE_SITE_KEY` is
+   populated in `website/index.html`.
+2. First `supabase db push`: confirm the project's `supabase_migrations`
+   history covers 0001-0004 (`supabase migration list`); if not, baseline
+   with `supabase migration repair --status reverted 0001..0004` first so
+   the chain cannot abort mid-replay on a pre-existing project.
+3. Submit a test email from the live landing page -> success state shown.
+4. Verify the row in Supabase Studio (`waitlist_subscribers`).
+5. Verify the confirmation email arrives within 30s (Resend dashboard log).
+6. Resubmit the same email -> "Already subscribed" message, no second email.
+7. Unsubscribe is a mailto (`hello@premiselabs.co`) processed manually —
+   the operator removes the row / excludes the address from launch sends.

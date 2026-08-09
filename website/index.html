@@ -279,6 +279,13 @@
       #scroll-wrapper { height: 800vh; }
     }
 
+    /* Short viewports: #beat-cta is a fixed full-height beat — allow the
+       form stack to scroll instead of clipping the email input / links */
+    @media (max-height: 520px) {
+      #beat-cta { justify-content: flex-start; overflow-y: auto; }
+      #beat-cta .cta-start { margin-top: 0.5rem; }
+    }
+
     /* Subtle fade at bottom edges */
     #vignette {
       position: fixed; top: 0; left: 0; width: 100%; height: 100%;
@@ -540,15 +547,15 @@
       function showMsg(text) {
         err.classList.remove('visible');
         err.textContent = '';
-        msg.textContent = text;
         msg.classList.add('visible');
+        msg.textContent = text;   // live region must be rendered before content
       }
 
       function showError(text) {
         msg.classList.remove('visible');
         msg.textContent = '';
-        err.textContent = text;
         err.classList.add('visible');
+        err.textContent = text;
       }
 
       function resetStates() {
@@ -556,32 +563,53 @@
         err.classList.remove('visible');
       }
 
-      // Turnstile widget — injected only when a site key is configured
+      // Turnstile widget — injected only when a site key is configured.
+      // Widget config lives on the .cf-turnstile div (script data-* attrs are
+      // ignored); callbacks clear the token on expiry/error so stale tokens
+      // can't 400 real users.
       if (TURNSTILE_SITE_KEY) {
         const widget = document.createElement('div');
         widget.className = 'cf-turnstile';
         widget.setAttribute('data-sitekey', TURNSTILE_SITE_KEY);
+        widget.setAttribute('data-callback', 'onTurnstileToken');
+        widget.setAttribute('data-expired-callback', 'onTurnstileExpired');
+        widget.setAttribute('data-error-callback', 'onTurnstileError');
         form.appendChild(widget);
         const script = document.createElement('script');
         script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js';
         script.async = true;
         script.defer = true;
-        script.setAttribute('data-callback', 'onTurnstileToken');
         document.head.appendChild(script);
         window.onTurnstileToken = function (token) { turnstileToken = token; };
+        window.onTurnstileExpired = function () { turnstileToken = null; };
+        window.onTurnstileError = function () { turnstileToken = null; };
       }
+
+      let submitting = false;
 
       form.addEventListener('submit', async function (e) {
         e.preventDefault();
+        if (submitting) return;
         resetStates();
 
         const email = emailInput.value.trim();
         if (!email) {
           showError('Please enter your email address.');
+          emailInput.focus();
+          return;
+        }
+        if (!emailInput.checkValidity()) {
+          showError('Please enter a valid email address.');
+          emailInput.focus();
+          return;
+        }
+        if (TURNSTILE_SITE_KEY && !turnstileToken) {
+          showError('Please complete the verification check first.');
           return;
         }
 
-        button.disabled = true;
+        submitting = true;
+        form.setAttribute('aria-busy', 'true');
         button.textContent = 'Sending…';
 
         const payload = {
@@ -613,8 +641,17 @@
         } catch (networkErr) {
           showError('Something went wrong — please try again.');
         } finally {
-          button.disabled = false;
+          submitting = false;
+          form.removeAttribute('aria-busy');
           button.textContent = 'Stay in touch';
+          // Turnstile tokens are single-use — clear + re-render after submit
+          if (TURNSTILE_SITE_KEY) {
+            turnstileToken = null;
+            if (window.turnstile) {
+              try { window.turnstile.reset(); } catch (e) { /* widget may be mid-render */ }
+            }
+          }
+          emailInput.focus();
         }
       });
     })();

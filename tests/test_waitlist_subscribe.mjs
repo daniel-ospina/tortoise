@@ -10,13 +10,16 @@
 
 import { handle, __resetRateLimit } from "../supabase/functions/waitlist-subscribe/handle.ts";
 
+// NOTE: no TURNSTILE_SECRET_KEY in the base fixture — captcha is fail-open
+// until provisioned (matches production default). Captcha cases set it
+// explicitly; when set, a token becomes REQUIRED.
 const ENV = {
   SUPABASE_URL: "https://ybetwichurajbfswfeqa.supabase.co",
   SUPABASE_SERVICE_ROLE_KEY: "svc_key",
   RESEND_API_KEY: "re_test",
   RESEND_FROM_EMAIL: "Premise Labs <noreply@premiselabs.co>",
-  TURNSTILE_SECRET_KEY: "0xsecret",
 };
+const ENV_CAPTCHA = { ...ENV, TURNSTILE_SECRET_KEY: "0xsecret" };
 
 let failures = 0;
 let calls = []; // recorded fetch calls
@@ -175,7 +178,7 @@ stubFetch((call) => {
 });
 {
   // token + secret → verified (fails here) → 400, no insert/email
-  const res = await handle(post({ email: "cap@example.com", "cf-turnstile-response": "tok123" }, { headers: { "x-forwarded-for": "198.51.100.9" } }), ENV);
+  const res = await handle(post({ email: "cap@example.com", "cf-turnstile-response": "tok123" }, { headers: { "x-forwarded-for": "198.51.100.9" } }), ENV_CAPTCHA);
   assert(res.status === 400, "failed siteverify → 400");
   assert(findCall("/rest/v1/") === undefined && findCall("api.resend.com") === undefined,
     "failed captcha → zero insert/email");
@@ -187,17 +190,27 @@ stubFetch((call) => {
   return jsonResponse(201, [{ id: "x" }]);
 });
 {
-  const res = await handle(post({ email: "cap2@example.com", "cf-turnstile-response": "tok123" }), ENV);
+  const res = await handle(post({ email: "cap2@example.com", "cf-turnstile-response": "tok123" }), ENV_CAPTCHA);
   assert(res.status === 200, "successful siteverify → 200");
 }
 reset();
 stubFetch(() => jsonResponse(201, [{ id: "x" }]));
 {
-  // token WITHOUT secret → skip verify, proceed
+  // token WITHOUT secret → skip verify, proceed (fail-open only on misconfig)
   const res = await handle(post({ email: "nosk@example.com", "cf-turnstile-response": "tok123" }),
     { ...ENV, TURNSTILE_SECRET_KEY: undefined });
-  assert(res.status === 200, "token without secret → skip verify (both-keys rule)");
+  assert(res.status === 200, "token without secret → skip verify");
   assert(findCall("siteverify") === undefined, "no siteverify call when secret missing");
+}
+reset();
+stubFetch(() => jsonResponse(201, [{ id: "x" }]));
+{
+  // secret set but NO token → 400 (captcha is REQUIRED when configured)
+  const res = await handle(post({ email: "notok@example.com" }), ENV_CAPTCHA);
+  assert(res.status === 400 && (await res.json()).error === "Captcha verification failed",
+    "secret without token → 400 (no bypass)");
+  assert(findCall("/rest/v1/") === undefined && findCall("api.resend.com") === undefined,
+    "missing token → zero insert/email");
 }
 
 // ── 8. Bad JSON / invalid email / GET → 400/400/405 with ACAO ─────────────
@@ -240,7 +253,33 @@ stubFetch(() => jsonResponse(201, [{ id: "x" }]));
   assert(cres.status === 200, "no Origin (curl) allowed");
 }
 
-// ── 10. Supabase failure → 500; oversize body → 400 ───────────────────────
+// ── 10. Type-confused fields → clean 400 (no uncaught TypeError) ──────────
+reset();
+stubFetch(() => jsonResponse(201, [{ id: "x" }]));
+{
+  const bad = post({ email: 123 });
+  const res = await handle(bad, ENV);
+  assert(res.status === 400 && res.headers.get("access-control-allow-origin"),
+    "email: 123 → 400 + ACAO");
+  const bad2 = post({ email: [], hp: {} });
+  const res2 = await handle(bad2, ENV);
+  assert(res2.status === 400, "email: [] / hp: {} → 400");
+  assert(calls.length === 0, "type-confused inputs → zero outbound calls");
+}
+
+// ── 11. Per-email rate limit (email-bomb guard) ───────────────────────────
+reset();
+stubFetch(() => jsonResponse(201, [{ id: "x" }]));
+{
+  let last = 0;
+  for (let i = 0; i < 6; i++) {
+    const req = post({ email: "bomb@example.com" });
+    last = (await handle(req, ENV)).status;
+  }
+  assert(last === 429, "6th submission for same email → 429");
+}
+
+// ── 12. Supabase failure → 500; oversize body → 400 ───────────────────────
 reset();
 stubFetch(() => { throw new Error("supabase down"); });
 {

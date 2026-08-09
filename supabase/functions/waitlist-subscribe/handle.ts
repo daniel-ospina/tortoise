@@ -1,14 +1,14 @@
 // Waitlist subscription handler for the premiselabs.co landing page (#373).
 //
 // Pure module — ZERO imports (only globals fetch/Request/Response/URLSearchParams/
-// AbortSignal). This keeps it runnable under `node --experimental-strip-types`
+// AbortSignal/TextEncoder). This keeps it runnable under `node --experimental-strip-types`
 // for behavioral tests (tests/test_waitlist_subscribe.mjs) and inside the
 // Deno edge runtime via the thin serve() wrapper in index.ts.
 //
 // Pipeline: method gate → CORS/origin allowlist → body cap + JSON parse →
-// email validation → honeypot → IP rate limit → Turnstile (both-keys rule) →
-// PostgREST insert with on_conflict dedup → best-effort Resend confirmation
-// email (fresh inserts only, 2s timeout).
+// email validation → honeypot → IP + per-email rate limits → Turnstile
+// (secret set ⇒ token REQUIRED) → PostgREST insert with on_conflict dedup →
+// best-effort Resend confirmation email (fresh inserts only, 2s timeout).
 
 const ALLOWED_ORIGINS = [
   "https://premiselabs.co",
@@ -20,8 +20,9 @@ const LOCAL_ORIGINS = ["http://localhost:8788", "http://127.0.0.1:8788"];
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const MAX_BODY_BYTES = 8192; // Turnstile tokens can reach 2048 chars
-const RATE_LIMIT_MAX = 10; // requests per IP per window
+const RATE_LIMIT_MAX = 10; // requests per IP per window (best-effort baseline)
 const RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000; // 1 hour
+const EMAIL_RATE_LIMIT_MAX = 5; // submissions per email per window (email-bomb guard)
 const RESEND_TIMEOUT_MS = 2000;
 
 const TURNSTILE_VERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify";
@@ -30,31 +31,34 @@ const RESEND_API_URL = "https://api.resend.com/emails";
 export type Env = Record<string, string | undefined>;
 
 interface SubscribeBody {
-  email?: string;
-  hp?: string;
+  email?: unknown;
+  hp?: unknown;
   "cf-turnstile-response"?: string;
 }
 
-// ── In-memory IP rate limit (best-effort baseline — Turnstile is the real
-//    gate; documented as per-instance, keyed on the FIRST x-forwarded-for
-//    entry, skipped when the header is absent so no global bucket forms) ──
+// ── In-memory rate limits (best-effort, per-isolate; Turnstile is the real
+//    gate once configured). IP keyed on the LAST x-forwarded-for entry (the
+//    value appended by the platform gateway — the first entry is
+//    client-suppliable/spoofable). Also a per-email cap so an attacker cannot
+//    email-bomb arbitrary third-party addresses or burn Resend quota. ──
 const rateLimitHits = new Map<string, number[]>();
+const emailRateLimitHits = new Map<string, number[]>();
 
 export function __resetRateLimit(): void {
   rateLimitHits.clear();
+  emailRateLimitHits.clear();
 }
 
-function rateLimited(ip: string, now: number): boolean {
-  const hits = (rateLimitHits.get(ip) ?? []).filter((t) => now - t < RATE_LIMIT_WINDOW_MS);
-  if (hits.length >= RATE_LIMIT_MAX) {
-    rateLimitHits.set(ip, hits);
+function limited(map: Map<string, number[]>, key: string, max: number, now: number): boolean {
+  const hits = (map.get(key) ?? []).filter((t) => now - t < RATE_LIMIT_WINDOW_MS);
+  if (hits.length >= max) {
+    map.set(key, hits);
     return true;
   }
   hits.push(now);
-  rateLimitHits.set(ip, hits);
-  // Opportunistic prune so the Map never grows unbounded in long-lived isolates
-  for (const [key, times] of rateLimitHits) {
-    if (times.every((t) => now - t >= RATE_LIMIT_WINDOW_MS)) rateLimitHits.delete(key);
+  map.set(key, hits);
+  for (const [k, times] of map) {
+    if (times.every((t) => now - t >= RATE_LIMIT_WINDOW_MS)) map.delete(k);
   }
   return false;
 }
@@ -62,7 +66,9 @@ function rateLimited(ip: string, now: number): boolean {
 function clientIp(req: Request): string | undefined {
   const xff = req.headers.get("x-forwarded-for");
   if (!xff) return undefined;
-  return xff.split(",")[0].trim() || undefined;
+  const entries = xff.split(",").map((s) => s.trim()).filter(Boolean);
+  // Last entry = appended by the gateway (trusted); first = client-controlled.
+  return entries.length > 0 ? entries[entries.length - 1] : undefined;
 }
 
 // ── CORS / origin handling ─────────────────────────────────────────────────
@@ -125,11 +131,13 @@ async function sendConfirmationEmail(
   }
 }
 
-// ── Turnstile verification (both-keys rule: verify only when the secret AND
-//    a token are both present — no 400s on misconfiguration) ───────────────
+// ── Turnstile verification. Fail-open ONLY on operator misconfiguration
+//    (secret unset). When the secret IS configured, a token is REQUIRED —
+//    an attacker omitting the token must not bypass the captcha. ───────────
 async function verifyTurnstile(env: Env, token: string | undefined, ip: string | undefined): Promise<boolean> {
   const secret = env.TURNSTILE_SECRET_KEY;
-  if (!secret || !token) return true; // skip (fail-open)
+  if (!secret) return true; // operator misconfiguration — skip (logged at call site)
+  if (!token) return false; // secret set but no token → require the captcha
   try {
     const params = new URLSearchParams({ secret, response: token });
     if (ip) params.set("remoteip", ip);
@@ -177,14 +185,14 @@ export async function handle(req: Request, env: Env): Promise<Response> {
     return json({ error: "Origin not allowed" }, 403, corsOrigin);
   }
 
-  // Body cap + JSON parse (read once)
+  // Body cap + JSON parse (read once; byte-accurate cap via TextEncoder)
   let raw: string;
   try {
     raw = await req.text();
   } catch {
     return json({ error: "Invalid request" }, 400, corsOrigin);
   }
-  if (raw.length > MAX_BODY_BYTES) {
+  if (new TextEncoder().encode(raw).byteLength > MAX_BODY_BYTES) {
     return json({ error: "Request too large" }, 400, corsOrigin);
   }
   let body: SubscribeBody;
@@ -194,20 +202,35 @@ export async function handle(req: Request, env: Env): Promise<Response> {
     return json({ error: "Invalid JSON body" }, 400, corsOrigin);
   }
 
-  // Email validation
-  const email = (body.email ?? "").trim().toLowerCase();
+  // Email validation — guard non-string types before coercion (a type-confused
+  // field must 400 cleanly with CORS, not throw an uncaught TypeError)
+  const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
   if (!EMAIL_RE.test(email)) {
     return json({ error: "Invalid email address" }, 400, corsOrigin);
   }
 
   // Honeypot — filled by bots; silent success, nothing stored, no email
-  if (body.hp && body.hp.trim() !== "") {
+  const hp = typeof body.hp === "string" ? body.hp.trim() : "";
+  if (hp !== "") {
     return json({ ok: true }, 200, corsOrigin);
   }
 
-  // IP rate limit (best-effort)
+  // Rate limits (best-effort). IP limit keyed on the gateway-appended XFF
+  // entry; per-email limit guards third-party email-bombing + Resend quota.
   const ip = clientIp(req);
-  if (ip && rateLimited(ip, Date.now())) {
+  const now = Date.now();
+  if (ip && limited(rateLimitHits, `ip:${ip}`, RATE_LIMIT_MAX, now)) {
+    return new Response(JSON.stringify({ error: "Too many requests" }), {
+      status: 429,
+      headers: {
+        "Content-Type": "application/json",
+        "Retry-After": "3600",
+        "Access-Control-Allow-Origin": corsOrigin ?? ALLOWED_ORIGINS[0],
+        "Vary": "Origin",
+      },
+    });
+  }
+  if (limited(emailRateLimitHits, `email:${email}`, EMAIL_RATE_LIMIT_MAX, now)) {
     return new Response(JSON.stringify({ error: "Too many requests" }), {
       status: 429,
       headers: {
@@ -219,7 +242,7 @@ export async function handle(req: Request, env: Env): Promise<Response> {
     });
   }
 
-  // Turnstile (both-keys rule)
+  // Turnstile — when the secret is configured, a valid token is REQUIRED
   const captchaOk = await verifyTurnstile(env, body["cf-turnstile-response"], ip);
   if (!captchaOk) {
     return json({ error: "Captcha verification failed" }, 400, corsOrigin);

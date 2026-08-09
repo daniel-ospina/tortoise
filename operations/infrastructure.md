@@ -45,15 +45,16 @@ doc_status: draft
 The waitlist endpoint is public by design (`verify_jwt=false`). Abuse is
 contained by:
 
-- Cloudflare Turnstile captcha (server-verified when the secret key and a
-  token are both present)
-- IP rate limit (best-effort, keyed on the first `x-forwarded-for` entry)
+- Cloudflare Turnstile captcha — when `TURNSTILE_SECRET_KEY` is set, a valid
+  token is REQUIRED (no token = 400); fail-open only while unprovisioned
+- IP rate limit (10/hr, gateway-appended XFF entry, best-effort per-isolate)
+- per-email rate limit (5/hr, guards email-bombing third parties)
 - honeypot field
 
-These are the real gates — the CORS origin allowlist only restricts browser
-callers. Deploy checklist: confirm `TURNSTILE_SECRET_KEY` and the
-`TURNSTILE_SITE_KEY` constant are set in production before launch, or
-captcha is silently off.
+The CORS origin allowlist only restricts browser callers. Deploy checklist:
+confirm `TURNSTILE_SECRET_KEY` + the `TURNSTILE_SITE_KEY` constant are set in
+production before launch, or captcha stays disabled (rate limits + honeypot
+remain as defense-in-depth).
 
 ## Related
 
