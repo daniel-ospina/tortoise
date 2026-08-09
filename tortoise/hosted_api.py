@@ -766,6 +766,18 @@ def _check_team_limit(team: dict, resource: str) -> None:
         raise HTTPException(status_code=500, detail=f"Quota check failed: {e}")
 
 
+def _record_write_op(team: dict) -> None:
+    """Best-effort write-op metering for overage billing (#681).
+
+    Call AFTER a successful write. Non-fatal — metering failures are logged
+    and swallowed; they never block the caller.
+    """
+    try:
+        from tortoise.metering import record_write_ops
+        record_write_ops(team.get("team_id", ""), tier=team.get("tier"))
+    except Exception:
+        pass  # best-effort — never block the write path
+
 
 
 # ── Pydantic Models ───────────────────────────────────────────────
@@ -812,6 +824,11 @@ class TeamInfoResponse(BaseModel):
     max_graphs: int | None
     max_teams: int | None
     point_count: int = 0
+    write_ops_used: int = 0
+    write_ops_limit: int = 0
+    write_ops_period: str = ""
+    overage_eligible: bool = False
+    overage_cost_usd: float | None = None
 
 
 class CreateKeyResponse(BaseModel):
@@ -954,6 +971,8 @@ async def create_point(body: CreatePointRequest, request: Request, team: dict = 
         request, team["team_id"], "point_create",
         resource_type="point", resource_id=result.get("id"),
     )
+    # Metering (#681): best-effort write-op count for overage billing.
+    _record_write_op(team)
 
     return {
         "id": result["id"],
@@ -1119,6 +1138,10 @@ async def team_info(team: dict = Depends(get_current_team)):
         logging.getLogger("tortoise.api").exception("team_info failed")
         raise HTTPException(status_code=500, detail="Internal server error")
 
+    # Metering (#681): fetch write-op usage for the current billing period.
+    from tortoise.metering import get_current_usage
+    usage = get_current_usage(team["team_id"])
+
     return TeamInfoResponse(
         team_id=team["team_id"],
         tier=team["tier"],
@@ -1129,6 +1152,11 @@ async def team_info(team: dict = Depends(get_current_team)):
         # 500 on every /v1/team call, exposed by the zero-email signup verification).
         max_teams=None,
         point_count=point_count,
+        write_ops_used=usage["write_ops_used"],
+        write_ops_limit=usage["write_ops_limit"],
+        write_ops_period=usage["period"],
+        overage_eligible=usage["overage_eligible"],
+        overage_cost_usd=usage["overage_cost_usd"],
     )
 
 
@@ -1796,6 +1824,8 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
         request, team["team_id"], "session_capture",
         resource_type="session", resource_id=session_id,
     )
+    # Metering (#681): best-effort write-op count for overage billing.
+    _record_write_op(team)
 
     # #722: report the EFFECTIVE method actually used, not the configured
     # policy. The extraction loop above is the deterministic regex path — the
