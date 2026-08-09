@@ -482,7 +482,7 @@ async def provision_tenant(request: Request):
             """
             CREATE (m:Membership {
                 id: $id, user_id: $user_id, team_id: $team_id,
-                role: 'owner', joined_at: $now
+                role: 'owner', status: 'active', joined_at: $now
             })
             """,
             params={
@@ -617,15 +617,30 @@ async def get_current_team(request: Request) -> dict:
         raise HTTPException(status_code=401, detail="Invalid API key format")
     try:
         sdk = _make_sdk(namespace="registry")
+        from datetime import datetime as _dt, timezone as _tz
+        now_iso = _dt.now(_tz.utc).isoformat()
         # API keys are stored as "salt:hash" (per-key random salt). hash_api_key()
         # generates a NEW random salt per call, so we CANNOT look up by exact
         # match. Instead fetch all non-revoked keys and verify each against the
-        # token using the embedded salt (verify_api_key). This is O(keys) but
-        # the registry is small (teams × keys) and auth happens per-request.
+        # token using the embedded salt (verify_api_key). #750.3: pre-filter by
+        # key_prefix (token[:10] == stored kp) so auth is O(prefix) not
+        # O(keys)×PBKDF2; fall back to a full scan when no prefix matches
+        # (provision keys store team_id[:8] prefixes). #742: expired bootstrap
+        # keys must NOT authenticate — filter expires_at on both paths.
         key_result = sdk._get_registry().query(
-            "MATCH (k:APIKey) WHERE k.revoked_at IS NULL "
-            "RETURN k.team_id, k.id, k.key_hash, k.created_by"
+            "MATCH (k:APIKey) WHERE k.key_prefix = $prefix "
+            "AND k.revoked_at IS NULL "
+            "AND (k.expires_at IS NULL OR k.expires_at > $now) "
+            "RETURN k.team_id, k.id, k.key_hash, k.created_by",
+            params={"prefix": token[:10], "now": now_iso},
         ).result_set
+        if not key_result:
+            key_result = sdk._get_registry().query(
+                "MATCH (k:APIKey) WHERE k.revoked_at IS NULL "
+                "AND (k.expires_at IS NULL OR k.expires_at > $now) "
+                "RETURN k.team_id, k.id, k.key_hash, k.created_by",
+                params={"now": now_iso},
+            ).result_set
         from tortoise.auth import verify_api_key
         team_id = key_id = None
         created_by = None
@@ -857,6 +872,13 @@ async def _check_register_rate_limit(request: Request) -> None:
                 headers={"Retry-After": "3600"},
             )
         bucket.append(now)
+        # #750.2: bound memory growth — when the dict exceeds 10k IPs, drop
+        # buckets whose entries are all older than the 1h window (dead weight).
+        if len(_register_buckets) > 10_000:
+            stale = [ip for ip, b in _register_buckets.items()
+                     if not any(now - t < 3600 for t in b)]
+            for ip in stale:
+                del _register_buckets[ip]
 
 
 # ── Endpoints ─────────────────────────────────────────────────────
@@ -1742,19 +1764,25 @@ async def create_team(body: dict, user: dict = Depends(get_current_user)):
     if len(name) > 64:
         raise HTTPException(status_code=422, detail="Team name must be ≤ 64 characters")
     import re as _re
-    if not _re.match(r"^[a-zA-Z0-9][a-zA-Z0-9 _-]{0,63}$", name):
+    # #750.6: align with sdk.team_create — spaces are rejected there, so accept
+    # them here too (stricter wins; surface as 422 not a 500 ControlPlaneError).
+    if not _re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$", name):
         raise HTTPException(status_code=422, detail="Invalid team name")
 
     sdk = _make_sdk(namespace="registry")
     reg = sdk._get_registry()
-    # Per-user team-creation rate limit (abuse posture) — not a tier block
+    # Per-user team-creation rate limit (abuse posture) — not a tier block.
+    # #743(b): the count was never checked, `since` was `now` (always 0), and
+    # membership_create never wrote `created_at` — all three fixed here.
     recent = reg.query(
         "MATCH (m:Membership {user_id:$uid, role:'owner'}) "
         "WHERE m.created_at > $since RETURN count(m)",
-        params={"uid": user["user_id"], "since": datetime.now(timezone.utc).isoformat()},
-    ).result_set
-    # (rate limiting via registry count is best-effort; a per-identity limiter
-    # is added in the abuse-posture work — see plan §8.3)
+        params={"uid": user["user_id"],
+                "since": (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()},
+    ).result_set[0][0]
+    if recent >= 3:
+        raise HTTPException(status_code=429,
+                            detail="Too many teams created — try again later")
 
     try:
         result = sdk.team_create(name)
@@ -2041,13 +2069,10 @@ async def reconcile(request: Request):
                   params={"id": kid, "now": now})
         result["expired_keys_swept"] += 1
 
-    # 3. Orphaned unrevealed provision keys (>24h old, no reveal) — revoke
-    orphaned = reg.query(
-        "MATCH (k:APIKey) WHERE k.created_via IS NULL AND k.revoked_at IS NULL "
-        "AND k.created_at < $cutoff RETURN k.id",
-        params={"cutoff": (datetime.now(_tz.utc).replace(hour=0, minute=0, second=0, microsecond=0)).isoformat()},
-    ).result_set
-    # (best-effort; no plaintext to compare against, revoke only clearly-stale)
+    # #750.7: the former step-3 orphan sweep (created_via IS NULL keys) selected
+    # rows it never used — dead code AND a footgun (it matched every
+    # agent_signup/register key). Removed; the bootstrap-expiry sweep above is
+    # the correct expiry path.
 
     result["notes"].append("bootstrap-expiry sweep complete")
     return result
@@ -2064,14 +2089,14 @@ async def reconcile(request: Request):
 @app.post("/v1/agent/signup")
 async def agent_signup(request: Request):
     """Mint a team + API key for an anonymous device (no email/dashboard)."""
-    # Per-identity rate limit only (abuse posture): the identity is what an
-    # attacker must keep stable to use the minted key — IP rotates trivially.
+    # #741(a): identity is ALWAYS server-side — client-supplied identity and
+    # x-device-id are ignored (a client-chosen identity trivially bypasses the
+    # per-identity rate limit). The CLI generates its own identity server-side.
     body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
-    identity = (body or {}).get("identity") or request.headers.get("x-device-id", "")
-    if not identity:
-        import uuid as _uuid
-        identity = f"anon-{_uuid.uuid4().hex[:12]}"
-    identity = identity[:64]
+    if not isinstance(body, dict):
+        body = {}
+    import uuid as _uuid
+    identity = f"anon-{_uuid.uuid4().hex[:12]}"
 
     # Per-identity rate limit: max 3 signups per identity per hour
     from datetime import datetime, timezone as _tz, timedelta
@@ -2085,8 +2110,6 @@ async def agent_signup(request: Request):
     if recent >= 3:
         raise HTTPException(status_code=429, detail="Too many signups from this device — try again later")
 
-    import re as _re
-    import uuid as _uuid
     from tortoise.auth import hash_api_key as _hash
     from tortoise.pricing import tier_limits
 
@@ -2097,31 +2120,50 @@ async def agent_signup(request: Request):
     now = datetime.now(_tz.utc).isoformat()
     graph_name = f"team_{team_id}"
     lim = tier_limits("free")
+    # #750.8: .get() so a pricing.json key drift never 500s signup (pricing.py
+    # validates required keys at load; this is belt-and-braces).
+    mu = lim.get("max_users_per_team")
+    mg = lim.get("max_graphs_per_team")
+    mk = lim.get("max_api_keys")
+    ops = lim.get("included_write_ops_per_month")
+    nodes = lim.get("max_graph_nodes")
 
-    # Team node
-    reg.query(
-        "CREATE (t:Team {id:$id, name:$name, tier:'free', created_at:$now, backup_enabled:false, "
-        "max_users:$mu, max_graphs:$mg, max_api_keys:$mk, ops_allowance:$ops, graph_size_cap:$nodes})",
-        params={"id": team_id, "name": team_name, "now": now,
-                "mu": lim["max_users_per_team"], "mg": lim["max_graphs_per_team"],
-                "mk": lim["max_api_keys"], "ops": lim["included_write_ops_per_month"],
-                "nodes": lim["max_graph_nodes"]},
-    )
-    # APIKey node
-    kid = _short_id()
-    reg.query(
-        "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, key_prefix:$kp, created_by:$cb, created_at:$now})",
-        params={"id": kid, "tid": team_id, "kh": key_hash, "kp": api_key[:10], "cb": identity, "now": now},
-    )
-    # Anonymous membership (owner)
-    reg.query(
-        "CREATE (m:Membership {team_id:$tid, user_id:$uid, role:'owner', status:'active', created_at:$now})",
-        params={"tid": team_id, "uid": identity, "now": now},
-    )
-    # Default graph node
-    sdk._graph_create(team_id, "default", kind="default", namespace=graph_name)
+    try:
+        # Team node
+        reg.query(
+            "CREATE (t:Team {id:$id, name:$name, tier:'free', created_at:$now, backup_enabled:false, "
+            "max_users:$mu, max_graphs:$mg, max_api_keys:$mk, ops_allowance:$ops, graph_size_cap:$nodes})",
+            params={"id": team_id, "name": team_name, "now": now,
+                    "mu": mu, "mg": mg, "mk": mk, "ops": ops, "nodes": nodes},
+        )
+        # APIKey node
+        kid = _short_id()
+        reg.query(
+            "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, key_prefix:$kp, created_by:$cb, created_at:$now})",
+            params={"id": kid, "tid": team_id, "kh": key_hash, "kp": api_key[:10], "cb": identity, "now": now},
+        )
+        # Anonymous membership (owner)
+        reg.query(
+            "CREATE (m:Membership {team_id:$tid, user_id:$uid, role:'owner', status:'active', created_at:$now})",
+            params={"tid": team_id, "uid": identity, "now": now},
+        )
+        # Default graph node
+        sdk._graph_create(team_id, "default", kind="default", namespace=graph_name)
 
-    await _async_audit(request, team_id, "agent_signup", resource_type="team", resource_id=team_id)
+        await _async_audit(request, team_id, "agent_signup", resource_type="team", resource_id=team_id)
+    except HTTPException:
+        raise
+    except Exception:
+        # #741(c): rollback on partial failure — mirror register_user: DETACH
+        # DELETE Team + APIKey + Membership, drop the graph namespace.
+        reg.query("MATCH (t:Team {id:$id}) DETACH DELETE t", params={"id": team_id})
+        reg.query("MATCH (k:APIKey {team_id:$id}) DETACH DELETE k", params={"id": team_id})
+        reg.query("MATCH (m:Membership {team_id:$id}) DETACH DELETE m", params={"id": team_id})
+        try:
+            sdk._get_proj().db.select_graph(graph_name).delete()
+        except Exception:
+            pass
+        raise HTTPException(status_code=500, detail="Agent signup failed")
 
     return {"key": api_key, "team_id": team_id, "team_name": team_name, "graph_name": graph_name,
             "identity": identity, "tier": "free"}
@@ -2194,18 +2236,24 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
         created_via = "bootstrap"
     else:
         lim = tier_limits(tier)
-        max_keys = lim["max_api_keys"]
+        # #750.8: .get() so a pricing.json key drift never 500s the mint
+        # (pricing.py validates required keys at load; belt-and-braces).
+        max_keys = lim.get("max_api_keys")
         active_keys = reg.query(
             "MATCH (k:APIKey {team_id:$tid}) WHERE k.revoked_at IS NULL "
             "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') RETURN count(k)",
             params={"tid": tid},
         ).result_set[0][0]
         if max_keys is not None and active_keys >= max_keys:
+            # #750.10: never auto-revoke a key the current user created
+            # (created_by = their user_id) — recovery must not dead-end by
+            # killing the user's own session key. Oldest OTHER key wins.
             oldest = reg.query(
                 "MATCH (k:APIKey {team_id:$tid}) WHERE k.revoked_at IS NULL "
                 "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') "
+                "AND k.created_by <> $uid "
                 "RETURN k.id ORDER BY k.created_at ASC LIMIT 1",
-                params={"tid": tid},
+                params={"tid": tid, "uid": user_id},
             ).result_set
             if oldest:
                 reg.query(
@@ -2239,8 +2287,10 @@ async def session_context(team: dict = Depends(get_current_team)):
     sdk = _make_sdk(namespace=team["team_id"])
     try:
         return sdk.session_context()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Context unavailable: {e}")
+    except Exception:
+        # #750.5: never leak internals to the client — log, return generic.
+        logging.getLogger("tortoise.api").exception("session_context failed")
+        raise HTTPException(status_code=500, detail="Context unavailable")
 
 
 
