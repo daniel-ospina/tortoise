@@ -29,6 +29,31 @@ jobs:
         with:
           args: --no-progress ${{ steps.changed.outputs.files }}
 
+  python-tests:
+    # Full Python suite, embedded FalkorDBLite (no Docker). uv is the
+    # canonical dev package manager (#492): the committed uv.lock is the
+    # enforcement loop, so `uv lock --check` + `uv sync --frozen` gate on
+    # lockfile/pyproject drift and `uv run pytest` gates on the suite.
+    # Self-contained (no reusable-workflow call — agent-infra@main calls
+    # fail to parse on GitHub, fix #555). Replaces the dead python-ci.yml
+    # symlink (agent-infra template is pip-based, Python 3.11 default;
+    # tortoise requires >=3.12 — kept repo-local instead).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv (Python 3.12)
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: '3.12'
+      - name: Lockfile coherence check (uv.lock vs pyproject.toml)
+        run: uv lock --check
+      - name: Install deps, frozen (dev group)
+        run: uv sync --frozen --group dev
+      - name: Run test suite (embedded FalkorDBLite)
+        # E2E welcome/legal page tests run in the dedicated welcome-e2e job
+        # (they need Playwright browsers); unit/integration suite here.
+        run: uv run pytest tests/ --ignore=tests/e2e -x -q -p no:cacheprovider --timeout=120
+
   test-isolation:
     runs-on: ubuntu-latest
     steps:
