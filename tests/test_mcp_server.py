@@ -16,6 +16,26 @@ except Exception:
     FALKORDB_AVAILABLE = False
 
 
+@pytest.fixture(autouse=True)
+def _transport_context():
+    """MCP tools require an initialized transport mode (#236 auth gate).
+
+    These tests exercise _safe / tools directly (no HTTP middleware), so they
+    run in stdio mode: dev-mode auth (TORTOISE_API_KEY unset) and no team
+    context (quota skipped). Restore after each test.
+    """
+    from tortoise.mcp_auth import (
+        _current_team_id, _current_team_limits, _transport_mode,
+    )
+    _transport_mode.set("stdio")
+    _current_team_id.set(None)
+    _current_team_limits.set(None)
+    yield
+    _transport_mode.set(None)
+    _current_team_id.set(None)
+    _current_team_limits.set(None)
+
+
 class TestSafeWrapper:
     """Tests for the _safe function that wraps all MCP tools."""
     def test_safe_returns_result_on_success(self):
@@ -155,14 +175,16 @@ class TestToolIntegration:
     def test_search_order_by_graph_and_confidence(self):
         """#560: order_by flows through the MCP surface — 'graph' (GraphRanker
         rerank) and 'confidence' (persisted EP) must be accepted by the tool
-        and return result lists (invalid values raise)."""
+        and return result lists (invalid values surface as structured errors,
+        per the _safe wrapper contract)."""
         from tortoise.mcp_server import tortoise_search
         for ob in ("graph", "confidence"):
             result = tortoise_search("integration test", limit=5, order_by=ob)
             assert isinstance(result, list) or isinstance(result.get("error"), str), result
-        import pytest
-        with pytest.raises(ValueError):
-            tortoise_search("integration test", order_by="bogus")
+        # Invalid order_by → structured error dict (SDK raises ValueError,
+        # _safe converts it to {"error": ...}).
+        result = tortoise_search("integration test", order_by="bogus")
+        assert isinstance(result, dict) and "error" in result, result
     def test_suggest_entry_points(self):
         from tortoise.mcp_server import tortoise_suggest_entry_points
         result = tortoise_suggest_entry_points("integration", limit=3)
