@@ -189,6 +189,13 @@ class PriceCatalog:
     def price_ids(self) -> list[str]:
         return list(self._prices.keys())
 
+    def price_for(self, tier: str, interval: str) -> str | None:
+        """Reverse lookup: the price id for (tier, interval). None if absent."""
+        for pid, (t, iv) in self._prices.items():
+            if t == tier and iv == interval:
+                return pid
+        return None
+
     def tiers(self) -> list[str]:
         return list(self._tiers.keys())
 
