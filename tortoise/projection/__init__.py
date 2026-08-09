@@ -480,13 +480,90 @@ class FalkorProjection(
         replaying through apply(). A reversed order (extractedFrom-bearing
         point before its SourceCreated) can diverge Source node version/id
         properties — known, documented limitation.
+
+        #548 SDK parity: before wiping, snapshot the current graph to preserve
+        SDK-created points that have no corresponding event in any .jsonl file.
+        These are injected as synthetic PointAdded/OperatorAdded events before
+        the JSONL replay so the two-pass logic handles them identically.
         """
         import os
         from tortoise.log import EventLog
+
+        # ── #548: snapshot existing graph BEFORE wiping ──────────────
+        # SDK-created points written via Cypher may have no corresponding
+        # event in the JSONL log. Snapshot them now so they survive the
+        # wipe+replay cycle.
+        synthetic_events: list[dict] = []
+        try:
+            rows = self.g.query(
+                "MATCH (n:Point) RETURN properties(n)"
+            ).result_set
+            existing_points = {}
+            for r in rows:
+                props = r[0]
+                pid = props.get("id")
+                if pid:
+                    existing_points[pid] = props
+            if existing_points:
+                # Collect all JSONL events to find which IDs are already
+                # represented in the log.
+                log_point_ids: set[str] = set()
+                for fname in sorted(os.listdir(log_dir)):
+                    if fname.endswith('.jsonl'):
+                        for ev in EventLog(os.path.join(log_dir, fname)).read_all():
+                            if ev.get("type") in ("PointAdded", "OperatorAdded"):
+                                p = ev.get("point", {})
+                                if isinstance(p, dict) and p.get("id"):
+                                    log_point_ids.add(p["id"])
+                # Generate synthetic events for graph-only points
+                for pid, props in existing_points.items():
+                    if pid in log_point_ids:
+                        continue  # log already covers this point
+                    # Strip volatile properties that are recomputed on replay
+                    clean = {k: v for k, v in props.items()
+                             if k not in ("embedding", "content_hash",
+                                          "updatedAt", "_nid", "_graph_id")}
+                    is_op = bool(props.get("is_operator") or props.get("op_type"))
+                    ev_type = "OperatorAdded" if is_op else "PointAdded"
+                    if is_op:
+                        # Reconstruct operator.inputs from graph edges
+                        inputs: list[str] = []
+                        try:
+                            op_type_val = props.get("op_type", "IMPL")
+                            edge_rel = "hasPart" if op_type_val not in ("IMPL", "NAND") else op_type_val
+                            edge_rows = self.g.query(
+                                f"MATCH (n:Point {{id:$id}})-[r:{edge_rel}]->(m:Point) "
+                                f"RETURN m.id ORDER BY r.idx",
+                                params={"id": pid},
+                            ).result_set
+                            inputs = [er[0] for er in edge_rows]
+                        except Exception:
+                            pass  # edge query may fail on corrupt graphs
+                        clean["operator"] = {"op_type": props.get("op_type", "IMPL"),
+                                             "inputs": inputs}
+                        # Operators may not store 'content' as a node property;
+                        # _upsert_point_props requires it — synthesize fallback.
+                        if "content" not in clean:
+                            clean["content"] = (
+                                f"{props.get('op_type', 'IMPL')}"
+                                f"({', '.join(inputs)})")
+                    # Ensure pointKind is present (operators often lack it)
+                    if "pointKind" not in clean:
+                        clean["pointKind"] = ""
+                    synthetic_events.append({
+                        "type": ev_type,
+                        "point": clean,
+                        "projection_version": 2,
+                    })
+        except Exception:
+            pass  # Graph may be corrupt — skip snapshot; JSONL replay is best-effort
+
+        # ── Wipe + rebuild ──────────────────────────────────────────
         self.g.query("MATCH (n) DETACH DELETE n")
 
-        # Collect all events from all files
-        events = []
+        # Collect all events from all files (synthetic first so their nodes
+        # exist before JSONL events that may reference them)
+        events = list(synthetic_events)
         for fname in sorted(os.listdir(log_dir)):
             if fname.endswith('.jsonl'):
                 events.extend(EventLog(os.path.join(log_dir, fname)).read_all())
