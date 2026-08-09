@@ -35,7 +35,10 @@ POINT_STATUS_VALUES = frozenset({'draft', 'live', 'retracted', 'superseded', 'ou
 # every claim transition is observable via a Task 3 emit hook, and no
 # transition can slip through update_point unemitted.
 _ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
-    "draft": frozenset({"live"}),                        # promote via update_point/create_operator
+    # P2 (code-review): guards allow draft→retracted/superseded (a draft point
+    # can be terminal before ever going live); keep the declarative spec
+    # aligned with the retract/supersede guards.
+    "draft": frozenset({"live", "retracted", "superseded"}),  # promote + terminal
     "live": frozenset({"retracted", "superseded"}),    # via retract_point / supersede_point
     "retracted": frozenset(),                            # terminal
     "superseded": frozenset(),                           # terminal
@@ -487,23 +490,25 @@ class TortoiseSDK:
         return {"events": evs, "next_cursor": self._encode_cursor(last)}
 
     _EVENT_PURGE_ATTR = "_tortoise_last_purge"
+    _EVENT_PURGE_LAST: float = 0.0  # process-level gate (P1 review fix)
 
     def _maybe_purge_events(self, proj) -> None:
         """Best-effort, interval-gated retention purge (see events_poll).
 
         Runs at most once per TORTOISE_EVENT_RETENTION_INTERVAL seconds per
-        process. Reads config via env with defaults (30d retention, 500k cap,
-        3600s interval).
+        PROCESS (module-global monotonic — NOT per-projection: hosted REST/MCP
+        build a fresh SDK+projection per request, so a per-projection gate
+        would fire the purge on EVERY poll). Reads config via env with
+        defaults (30d retention, 500k cap, 3600s interval).
         """
         import os
         import time
 
         interval = int(os.environ.get("TORTOISE_EVENT_RETENTION_INTERVAL", "3600"))
         now = time.monotonic()
-        last = getattr(proj, self._EVENT_PURGE_ATTR, 0.0)
-        if now - last < interval:
+        if now - TortoiseSDK._EVENT_PURGE_LAST < interval:
             return
-        setattr(proj, self._EVENT_PURGE_ATTR, now)
+        TortoiseSDK._EVENT_PURGE_LAST = now
         try:
             from .event_store import purge_expired, purge_overflow
 
@@ -1079,9 +1084,6 @@ class TortoiseSDK:
             raise ValueError(
                 f"Point {old_id!r} is already terminal ({cur!r}) — supersession is terminal")
 
-        # #432 Task 3: durable PointSuperseded event (append-before-mutation).
-        self._emit_event("PointSuperseded", {"id": old_id, "new_id": new_id})
-
         # 0. #329: collect + validate ALL edge types BEFORE any mutation.
         #    The edge types are interpolated into query structure (no params
         #    possible) — an unvalidated type (e.g. from a crafted edge) is a
@@ -1096,6 +1098,11 @@ class TortoiseSDK:
         from .security import validate_rel_type
         for row in edges_result.result_set:
             validate_rel_type(row[1])  # raises ValueError before any mutation
+
+        # #432 Task 3: durable PointSuperseded event (append-before-mutation,
+        # AFTER the guard + edge-type validation — P2 review fix: emitting
+        # before validation produced phantoms on corrupt-edge data).
+        self._emit_event("PointSuperseded", {"id": old_id, "new_id": new_id})
 
         # 1. Mark old superseded + outdated + create CORRECTS edge (same as invalidate)
         # #432: status='superseded' alongside the legacy outdated=true flag
@@ -1182,29 +1189,31 @@ class TortoiseSDK:
         """
         from datetime import datetime, timezone
         proj = self._get_proj()
+        # P1 (code-review): validate FIRST, then emit, then mutate — the emit
+        # before the guard produced phantom PointRetracted events on the
+        # NORMAL invalid-input path (missing / operator / terminal), which
+        # poll consumers would see as retractions that never happened.
+        row = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.is_operator, n.status",
+            params={"id": id}).result_set
+        if not row:
+            raise ValueError(f"No point {id!r}")
+        is_op, cur = row[0][0], row[0][1]
+        if is_op:
+            raise ValueError(
+                f"Point {id!r} is an operator — retraction is for statement points")
+        if cur in ("retracted", "superseded", "archived"):
+            raise ValueError(
+                f"Point {id!r} is already terminal ({cur!r}) — retraction is terminal")
         # #432 Task 3: durable PointRetracted event (append-before-mutation;
-        # a guard-failure phantom is the documented at-least-once tradeoff).
+        # only after the input contract validates).
         self._emit_event("PointRetracted", {"id": id})
         r = proj.g.query(
             "MATCH (n:Point {id:$id}) "
-            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
-            "AND (n.status IS NULL OR NOT (n.status IN $terminal)) "
             "SET n.status = 'retracted', n.updatedAt = $now RETURN properties(n)",
-            params={"id": id, "now": datetime.now(timezone.utc).isoformat(),
-                    "terminal": ["retracted", "superseded", "archived"]})
+            params={"id": id, "now": datetime.now(timezone.utc).isoformat()})
         if not r.result_set:
-            # diagnostic read ONLY on the error path — happy path stays 1 round trip
-            row = proj.g.query(
-                "MATCH (n:Point {id:$id}) RETURN n.is_operator, n.status",
-                params={"id": id}).result_set
-            if not row:
-                raise ValueError(f"No point {id!r}")
-            is_op, cur = row[0][0], row[0][1]
-            if is_op:
-                raise ValueError(
-                    f"Point {id!r} is an operator — retraction is for statement points")
-            raise ValueError(
-                f"Point {id!r} is already terminal ({cur!r}) — retraction is terminal")
+            raise ValueError(f"No point {id!r}")
         return r.result_set[0][0]  # updated node props (no trailing get_point round trip)
 
     # ── Operators ─────────────────────────────────────────────────
@@ -1233,13 +1242,10 @@ class TortoiseSDK:
         inputs = [source_id] + list(target_ids)
         proj = self._get_proj()
 
-        # #432 Task 3: durable OperatorAdded event (append-before-mutation).
-        self._emit_event("OperatorAdded", {
-            "id": pid, "op_type": op_type, "source_id": source_id,
-            "target_ids": list(target_ids),
-        })
-
-        # Validate all source/target Points exist (fail loudly, not silently)
+        # Validate all source/target Points exist FIRST (fail loudly, not
+        # silently) — then emit, then mutate. P1 (code-review): emitting
+        # before validation produced phantom OperatorAdded events on missing
+        # inputs, visible to subscription poll consumers.
         existing = proj.g.query(
             "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id",
             params={"ids": inputs},
@@ -1248,6 +1254,12 @@ class TortoiseSDK:
         missing = [i for i in inputs if i not in existing_ids]
         if missing:
             raise ValueError(f"Cannot create operator: Points {missing} do not exist")
+
+        # #432 Task 3: durable OperatorAdded event (append-before-mutation).
+        self._emit_event("OperatorAdded", {
+            "id": pid, "op_type": op_type, "source_id": source_id,
+            "target_ids": list(target_ids),
+        })
 
         # Build operator node with direction + optional label (context is NOT written — P1 #49)
         extra_props = []
@@ -1269,8 +1281,13 @@ class TortoiseSDK:
                 params={"oid": pid, "sid": inp_id, "i": i},
             )
         # Draft → live lifecycle (#131): source point goes live when first edge created
+        # P1 (code-review): draft → live promote ONLY for draft/null sources —
+        # an unconditional promote resurrected retracted (terminal) sources,
+        # violating the terminal-state contract with no event in the stream.
         proj.g.query(
-            "MATCH (s:Point {id:$sid}) SET s.status = 'live'",
+            "MATCH (s:Point {id:$sid}) "
+            "WHERE (s.status IS NULL OR s.status = 'draft') "
+            "SET s.status = 'live'",
             params={"sid": source_id},
         )
         # Dreaming (#85): new edges change propagation — mark all inputs dirty.

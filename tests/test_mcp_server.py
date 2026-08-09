@@ -419,3 +419,15 @@ class TestEventsTools:
         finally:
             _transport_mode.reset(token)
         assert result.get("status") == "retracted"
+
+
+class TestEventsHttpSurface:
+    """#432 Task 6 review fix — explicit HTTP_ALLOWED membership for the two
+    new tools (the plan's required assertion; previously only registry
+    http_policy was tested, not the derived allow-list)."""
+
+    def test_events_tools_in_http_allowed(self):
+        from tortoise.mcp_auth import HTTP_ALLOWED
+
+        assert "tortoise_events_poll" in HTTP_ALLOWED
+        assert "tortoise_retract_point" in HTTP_ALLOWED
