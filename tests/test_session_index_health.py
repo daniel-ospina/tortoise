@@ -229,6 +229,19 @@ def test_falsy_session_id_coerces_to_match_ingest(env, sdk):
     h2 = sdk.session_index_health(str(env))
     assert h2["up_to_date"], h2
 
+def test_empty_session_id_with_alt_key_uses_alt(env, sdk):
+    """Review round 4 P2: sessionId: "" + session_id: foo — the or-collapse
+    on ingest uses session_id ("" is falsy); extract must mirror that and
+    derive session_foo, not file_<stem>, or the sweep never converges."""
+    f = env / "empty-alt.md"
+    f.write_text("---\nsessionId: ""\nsession_id: foo\ntitle: T\n---\nUser: hi\n")
+    sdk.ingest_corpus(str(env), eventKind="AgentSession")
+    h = sdk.session_index_health(str(env))
+    assert h["unindexed"] == [], f"alt-key not matched: {h}"
+    h2 = sdk.session_index_health(str(env))
+    assert h2["up_to_date"], h2
+
+
 def test_empty_session_id_falls_back_to_file_stem(env, sdk):
     """Review round 3 P2: sessionId: "" must fall back to file_<stem> on BOTH
     sides (extract_session_id and ingest's or-collapse) — an empty string is

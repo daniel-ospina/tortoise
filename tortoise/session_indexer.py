@@ -504,16 +504,20 @@ def extract_session_id(file_path: str) -> str | None:
     # scalars (0, 0.0, false). Coerce to str to match ingest (sdk.py coerces
     # sessionId before use) so health derives the SAME event_id as
     # ingest_corpus — otherwise the sweep never converges (review round 2 P2).
-    sid = fm.get("sessionId")
-    if sid is None:
-        sid = fm.get("session_id")
-    if sid is not None:
-        sid = str(sid)
-        if sid != "":
-            return sid
-    # empty-string (or None) sessionId → file fallback, mirroring ingest's
-    # `or` collapse — otherwise health derives a DIFFERENT event_id than
-    # ingest and the sweep never converges (review round 3 P2).
+    def _coerce(v):
+        return str(v) if v is not None else None
+
+    # Mirror ingest's str-coerced `or`-collapse EXACTLY (review round 4 P2):
+    # sessionId or session_id or file_<stem> — an empty-string sessionId is
+    # falsy and must fall through to the alternate key, not straight to the
+    # file stem. Otherwise health derives a DIFFERENT event_id than ingest
+    # and the sweep never converges.
+    sid = _coerce(fm.get("sessionId"))
+    if not sid:
+        sid = _coerce(fm.get("session_id"))
+    if sid:
+        return sid
+    # empty-string/None both keys → file fallback (matches ingest's or-collapse)
     
     # Fallback: derive from filename
     stem = Path(file_path).stem
