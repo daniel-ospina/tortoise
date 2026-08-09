@@ -61,3 +61,85 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: 367c7ecf27e1b1b092d04fe9915a1e56
+
+  # ── Post-deploy verification: legal pages E2E suite (#677) ───────────
+  verify-legal:
+    needs: deploy
+    runs-on: ubuntu-latest
+    steps:
+      # Step 1: Deploy-completion poll — after the deploy step, poll
+      # https://premiselabs.co/privacy → 200 (retry ~30s × 5–10 min).
+      - name: Poll deploy completion (premiselabs.co/privacy → 200)
+        run: |
+          MAX_ATTEMPTS=20
+          for i in $(seq 1 $MAX_ATTEMPTS); do
+            STATUS=$(curl -s -o /dev/null -w '%{http_code}' https://premiselabs.co/privacy)
+            if [ "$STATUS" = "200" ]; then
+              echo "deploy complete — premiselabs.co/privacy returned 200 (attempt $i)"
+              break
+            fi
+            if [ "$i" -eq "$MAX_ATTEMPTS" ]; then
+              echo "::error::deploy did not complete after $MAX_ATTEMPTS attempts (~$((MAX_ATTEMPTS * 30 / 60)) min)"
+              exit 1
+            fi
+            echo "attempt $i/$MAX_ATTEMPTS: status $STATUS, retrying in 30s..."
+            sleep 30
+          done
+
+      # Step 2: DNS preflight — dig +short tortoise.premiselabs.co CNAME
+      # target == premise-labs.pages.dev + root-marker curl; green ⇒ set
+      # TORTISE_HOST_CHECK=1 (tortoise.* tests run); stale ⇒ leave unset
+      # (skip — green-with-annotation; the premiselabs.co half remains
+      # the green signal).
+      - name: DNS preflight (tortoise.premiselabs.co CNAME + root-marker)
+        run: |
+          CNAME=$(dig +short tortoise.premiselabs.co CNAME || true)
+          echo "tortoise.premiselabs.co CNAME target: ${CNAME:-<none>}"
+          # Accept trailing dot (standard dig output).
+          if [ "$CNAME" = "premise-labs.pages.dev." ] || [ "$CNAME" = "premise-labs.pages.dev" ]; then
+            ROOT_MARKER=$(curl -s https://tortoise.premiselabs.co/ 2>/dev/null || true)
+            if echo "$ROOT_MARKER" | grep -qF "Memory that makes your agents"; then
+              echo "TORTISE_HOST_CHECK=1" >> "$GITHUB_ENV"
+              echo "DNS preflight green — tortoise.* tests enabled"
+            else
+              echo "::warning::tortoise host serves root but root-marker absent — tortoise.* tests skipped"
+            fi
+          else
+            echo "::warning::tortoise.premiselabs.co CNAME stale (got '${CNAME:-<none>}', expected premise-labs.pages.dev) — tortoise.* tests skipped"
+          fi
+
+      # Step 3: pytest — mirroring welcome-e2e conventions from ci.yml
+      # (checkout → setup-python 3.12 → pip install -e '.[test]' →
+      # playwright install --with-deps chromium → pytest).
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -e '.[test]'
+      - run: python -m playwright install --with-deps chromium
+      - name: Run legal pages E2E suite
+        run: python -m pytest tests/e2e/test_legal_pages.py -v
+        env:
+          RUN_LEGAL_E2E: '1'
+          ALLOW_PROD: '1'
+          BASE_URL: https://premiselabs.co
+          TORTISE_HOST: https://tortoise.premiselabs.co
+
+      # Step 4: Warn-only effective-date comparison — served
+      # "Effective date: YYYY-MM-DD" vs deploy-commit date
+      # (git log -1 --format=%cs); if either is unavailable ⇒
+      # warn + skip, never fail.
+      - name: Effective-date comparison (warn-only)
+        if: always()
+        run: |
+          SERVED_DATE=$(curl -s https://premiselabs.co/privacy | grep -oP 'Effective date:\s*\K\d{4}-\d{2}-\d{2}' || true)
+          DEPLOY_DATE=$(git log -1 --format=%cs 2>/dev/null || true)
+          echo "served effective date: ${SERVED_DATE:-<not found>}"
+          echo "deploy commit date:   ${DEPLOY_DATE:-<not found>}"
+          if [ -z "$SERVED_DATE" ] || [ -z "$DEPLOY_DATE" ]; then
+            echo "::warning::cannot compare effective dates (served='${SERVED_DATE:-}' deploy='${DEPLOY_DATE:-}') — skipping"
+          elif [ "$SERVED_DATE" != "$DEPLOY_DATE" ]; then
+            echo "::warning::served effective date ($SERVED_DATE) != deploy commit date ($DEPLOY_DATE)"
+          else
+            echo "effective date matches deploy commit date ($SERVED_DATE)"
+          fi

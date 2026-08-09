@@ -21,7 +21,7 @@ with the R2 create-once object as the dedup LINEARIZATION POINT:
 
 The store is decoupled from HTTP: the caller injects ``file_issue`` /
 ``close_issue`` / ``search_open`` / ``push_telegram`` callables (real impls in
-``github_issue.py`` + a small urllib Telegram client), so tests use fakes and
+``github_issue.py`` + ``telegram_push.py``), so tests use fakes and
 MemoryStorage.
 """
 
@@ -43,23 +43,6 @@ FileIssue = Callable[[str, str], int]      # (title, body) -> issue number
 CloseIssue = Callable[[int, str | None], None]
 SearchOpen = Callable[[str], list[int]]    # kind -> open issue numbers
 PushTelegram = Callable[[str], None]
-
-
-def telegram_send(bot_token: str, chat_id: str, text: str, timeout: float = 15.0) -> None:
-    """Minimal Telegram Bot API sendMessage via stdlib urllib."""
-    import urllib.parse
-    import urllib.request
-
-    url = (
-        f"https://api.telegram.org/bot{bot_token}/sendMessage"
-        f"?chat_id={urllib.parse.quote(str(chat_id))}"
-        f"&text={urllib.parse.quote(text)}"
-    )
-    try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp:
-            resp.read()
-    except Exception as e:
-        raise RuntimeError(f"telegram send failed: {e}") from e
 
 
 def _read_json(storage, key: str) -> dict[str, Any]:

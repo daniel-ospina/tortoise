@@ -232,6 +232,74 @@ def _cmd_init(args):
             "api_key": args.api_key,
             "api_url": os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co"),
         }
+
+        # Validate the key against the hosted API BEFORE saving (#707).
+        # 401/403 → key rejected → hard fail (never silently write an invalid key);
+        # 404 → misconfigured URL → hard fail with distinct message;
+        # 5xx/429/408 → transient server error → retry once, then warn + save;
+        # non-JSON 200 → unvalidated (captive portal/proxy) → hard fail;
+        # network errors → warn + save (cannot validate offline).
+        from urllib.request import Request, urlopen
+        from urllib.error import URLError, HTTPError
+        from http.client import HTTPException as _HTTPException
+        from json import JSONDecodeError as _JSONDecodeError
+        import time as _time
+
+        # Normalize base URL: a trailing slash would produce `//v1/team` → 404.
+        base_url = config["api_url"].rstrip("/")
+        config["api_url"] = base_url
+
+        def _validate_key() -> None:
+            req = Request(
+                f"{base_url}/v1/team",
+                headers={"Authorization": f"Bearer {args.api_key}"},
+            )
+            with urlopen(req, timeout=10) as resp:
+                _json.loads(resp.read())
+
+        try:
+            for attempt in range(2):
+                try:
+                    _validate_key()
+                    print("✅ API key validated against Tortoise Cloud")
+                    break
+                except HTTPError as e:
+                    if e.code in (401, 403):
+                        # Only these mean the key itself was rejected.
+                        body = ""
+                        try:
+                            body = e.read().decode()
+                        except Exception:
+                            pass
+                        print(f"❌ API rejected the key ({e.code}): {body.strip() or e.reason}", file=sys.stderr)
+                        print(f"   Config NOT saved. Double-check the key or run:", file=sys.stderr)
+                        print(f"   tortoise init --api-key tt_<key>", file=sys.stderr)
+                        return 1
+                    if e.code == 404:
+                        print(f"❌ API URL appears misconfigured — got 404 from {base_url}/v1/team.", file=sys.stderr)
+                        print(f"   Check TORTOISE_API_URL. Config NOT saved.", file=sys.stderr)
+                        return 1
+                    if e.code in (408, 429) or 500 <= e.code <= 599:
+                        # Transient server-side failure — a valid key may be fine.
+                        if attempt == 0:
+                            _time.sleep(1)
+                            continue
+                        print(f"⚠️  Tortoise Cloud returned {e.code} while validating the key (transient error).")
+                        print(f"   Saving config anyway — verify with: tortoise team info")
+                        break
+                    print(f"⚠️  Unexpected status {e.code} from Tortoise Cloud while validating the key.")
+                    print(f"   Saving config anyway — verify with: tortoise team info")
+                    break
+        except _JSONDecodeError:
+            # 200 with a non-JSON body (captive portal / proxy) — unvalidated.
+            print(f"❌ Tortoise Cloud returned a non-JSON response — key NOT validated.", file=sys.stderr)
+            print(f"   (Possible captive portal or proxy intercepting the request.)", file=sys.stderr)
+            print(f"   Config NOT saved. Check your network / TORTOISE_API_URL and retry.", file=sys.stderr)
+            return 1
+        except (URLError, _HTTPException, ValueError) as e:
+            reason = getattr(e, "reason", e)
+            print(f"⚠️  Could not reach {base_url} to validate the key ({reason}).")
+            print(f"   Saving config anyway — verify with: tortoise team info")
         config_path.write_text(_json.dumps(config, indent=2) + "\n")
         os.chmod(config_path, 0o600)
         print("Connected to Tortoise Cloud (team will be resolved from API key)")
@@ -297,9 +365,12 @@ def _cmd_init(args):
             print(f"  ✅ Embedded mode initialized at {db_path}")
             graph_ready = True
         except ImportError:
-            print(f"  ❌ Neither falkordb nor redislite installed.")
-            print(f"     pip install falkordb       # for Docker mode (FalkorProjection)")
-            print(f"     pip install redislite      # for embedded mode (FalkorProjection)")
+            # Reachable when falkordblite is actually missing: tortoise/__init__
+            # no longer crashes at import time (issue #716). falkordb Docker
+            # mode is handled earlier, so this fires only for the embedded gap.
+            print(f"  ❌ Embedded mode unavailable — falkordblite not installed.")
+            print(f"     pip install falkordb        # for Docker mode (FalkorProjection)")
+            print(f"     pip install falkordblite    # for embedded mode (FalkorProjection)")
             return 1
         except Exception as e:
             print(f"  ❌ Embedded mode init failed: {e}")
@@ -1402,23 +1473,9 @@ def _cmd_index_github(args):
     from pathlib import Path
 
     from tortoise.api import EventAPI
+    from tortoise.extractor import MockModel, extract_from_document
     from tortoise.log import EventLog
     from tortoise.projection import FalkorProjection
-
-    # #713: the extraction pipeline module does not exist yet. An unguarded
-    # import turns EVERY `tortoise index github` into a raw ModuleNotFoundError
-    # traceback. Fail with a clear, actionable message instead (#715 P1 conf
-    # 95) — exit non-zero, no traceback.
-    try:
-        from tortoise.extraction_pipeline import ExtractionPipeline
-    except ModuleNotFoundError as e:
-        if e.name == "tortoise.extraction_pipeline":
-            print(
-                "The extraction pipeline is not installed (missing module "
-                "tortoise.extraction_pipeline) — see issue #713",
-                file=sys.stderr)
-            return 1
-        raise
 
     url = args.url
     branch = args.branch or "main"
@@ -1457,6 +1514,10 @@ def _cmd_index_github(args):
         print(f"Indexing local repo: {repo_path}")
     else:
         # Clone repo
+        import shutil as _shutil
+        if _shutil.which("git") is None:
+            print("git is required to index GitHub repos but was not found on PATH", file=sys.stderr)
+            return 1
         tmpdir = tempfile.mkdtemp(prefix="tortoise-index-")
         atexit.register(lambda: __import__("shutil").rmtree(tmpdir, ignore_errors=True))
 
@@ -1493,8 +1554,7 @@ def _cmd_index_github(args):
     # configured target or init and index silently split onto different stores.
     # Guarded like the background branch above (#715): a bad FALKORDB_PORT
     # (or other env) must surface as a clean CLI error, not a ValueError
-    # traceback — the inline path is the last unguarded _resolve_db_target
-    # call site since --db became optional.
+    # traceback.
     try:
         target = args.db or _resolve_db_target(None)
     except ValueError as e:
@@ -1529,13 +1589,16 @@ def _cmd_index_github(args):
         except Exception:
             pass
 
-    pipeline = ExtractionPipeline(enrich=False)
+    # Use deterministic mock models by default (offline, self-hosted friendly).
+    # Users can swap to LLM models via tortoise ingest for richer extraction.
+    point_model = MockModel("cheap")
+    relation_model = MockModel("reason")
     indexed, skipped, errors = 0, 0, 0
 
     for i, fp in enumerate(md_files, 1):
         rel = fp.relative_to(repo_path)
         raw_text = fp.read_text(encoding="utf-8")
-        # ponytail: strip frontmatter before hashing — pipeline may add
+        # ponytail: strip frontmatter before hashing — extractor may add
         # frontmatter, which would change the hash on the next run.
         text_for_hash = raw_text
         if raw_text.startswith('---'):
@@ -1549,11 +1612,21 @@ def _cmd_index_github(args):
             continue
         print(f"  [{i}/{total}] {rel}…", end=" ", flush=True)
         try:
-            stats = pipeline.process_file(fp, api)
+            stats = extract_from_document(
+                raw_text, str(rel), api,
+                point_model=point_model,
+                relation_model=relation_model,
+                authored_by="github-indexer",
+            )
             if stats.get("points", 0) > 0:
                 indexed += 1
                 indexed_hashes.add(content_hash)
-                print(f"✓ ({stats['points']} pts, {stats['operators']} ops, kind={stats['documentKind']})")
+                # Persist incrementally — avoid duplicate Points on crash
+                try:
+                    hash_file.write_text(_json.dumps(sorted(indexed_hashes)))
+                except Exception:
+                    pass
+                print(f"✓ ({stats['points']} pts, {stats['operators']} ops, {stats['sections']} sections)")
             else:
                 skipped += 1
                 print("⊙ (skipped — no claims found)")

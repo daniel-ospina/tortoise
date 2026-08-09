@@ -32,9 +32,9 @@ def _api(projection=None):
 def _build(api, source="doc.txt"):
     """Two statements + one IMPL operator between them."""
     prov = provenance(source, [0, 10], "quote", extracted_by="test@0")
-    a = api.add_point("we should raise B slowly", "ctx", prov)
-    b = api.add_point("fast raises wreck early buyers", "ctx", prov)
-    op = api.add_operator("IMPL", [b, a], "ctx", prov)
+    a = api.add_point("we should raise B slowly", prov)
+    b = api.add_point("fast raises wreck early buyers", prov)
+    op = api.add_operator("IMPL", [b, a], prov)
     return a, b, op
 
 
@@ -54,15 +54,17 @@ def test_reprocess_new_version_supersedes():
     api, log = _api()
     text = "hello world"
     api.begin_ingest("doc.txt", "mock@0", document_key(text))
-    old = api.add_point("old extraction", "ctx",
+    old = api.add_point("old extraction",
                         provenance("doc.txt", [0, 3], "hel"))
     # same content, NEW extractor version → supersede the old run
     r = api.begin_ingest("doc.txt", "mock@1", document_key(text))
     assert not r.skip
-    new = api.add_point("new extraction", "ctx",
+    new = api.add_point("new extraction",
                         provenance("doc.txt", [0, 3], "hel"))
     points = fold(log.read_all())
-    assert old not in points, "superseded run's points must be retracted"
+    # #689: tombstone — retracted point exists with status='retracted'
+    assert old in points
+    assert points[old].get("status") == "retracted"
     assert new in points
     print("PASS test_reprocess_new_version_supersedes")
 
@@ -82,7 +84,7 @@ def test_incremental_matches_batch():
 def test_full_mutation_set():
     api, log = _api()
     a, b, op = _build(api)
-    api.revise_point(a, new_content="edited", new_context=None, corrects=op)
+    api.revise_point(a, new_content="edited", corrects=op)
     api.merge_points(keep_id=a, merge_ids=[b], corrects=None)
     points = fold(log.read_all())
     assert points[a]["content"] == "edited"

@@ -3,8 +3,14 @@
 Extracts narrative_arc, summary, keywords, topics, issues, PRs, and
 critical_decisions from session markdown files via LLM or keyword fallback.
 
+Model specs follow the `provider:model` convention from ingest.build_model:
+    ollama:MODEL    → local Ollama endpoint (http://localhost:11434, no key)
+                      — PII-safe: content never leaves the machine
+    gpt-5-mini / gpt-4o-mini / gpt-4o → OpenAI (OPENAI_API_KEY)
+
 Usage:
     python -m tortoise.session_indexer <file_path>
+    python -m tortoise.session_indexer --model ollama:llama3.2:3b <file_path>
     python -m tortoise.session_indexer --dir <directory> --batch
 """
 from __future__ import annotations
@@ -241,6 +247,11 @@ def _count_messages(content: str) -> int:
 
 # ── LLM extraction ────────────────────────────────────────────────
 
+EXTRACTION_SYSTEM_PROMPT = (
+    "You extract structured metadata from agent conversations. "
+    "Return only valid JSON, no markdown fences."
+)
+
 EXTRACTION_PROMPT = """Analyze this AI agent conversation. Return JSON only, no markdown:
 
 {
@@ -267,43 +278,17 @@ Conversation:
 """
 
 
-# Whitelist of known models — llm_model flows from MCP tools / CLI and must
+# Whitelist of known OpenAI models — llm_model flows from MCP tools / CLI and must
 # not allow arbitrary model injection (could trigger expensive tiers).
+# `ollama:MODEL` specs bypass this whitelist: they route to the LOCAL Ollama
+# endpoint (no cost tier, content never leaves the machine) — mirroring how
+# ingest.build_model() treats the ollama provider outside _PROVIDERS.
 _ALLOWED_LLM_MODELS = {"gpt-5-mini", "gpt-4o-mini", "gpt-4o"}
 
 
-def extract_metadata_with_llm(content: str, model: str = "gpt-5-mini") -> dict | None:
-    """Extract metadata using an LLM. Returns None on failure (caller should fall back)."""
-    if model not in _ALLOWED_LLM_MODELS:
-        return {"error": f"llm_model {model!r} not allowed (whitelist: {sorted(_ALLOWED_LLM_MODELS)})"}
+def _parse_llm_json(text: str) -> dict | None:
+    """Parse + type-validate LLM JSON output. Returns None on malformed output."""
     try:
-        # Try OpenAI-compatible API
-        api_key = os.environ.get("OPENAI_API_KEY")
-        if not api_key:
-            return None
-        
-        import requests
-        response = requests.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": "You extract structured metadata from agent conversations. Return only valid JSON, no markdown fences."},
-                    {"role": "user", "content": EXTRACTION_PROMPT + content[:16000]},  # ~12K token limit
-                ],
-                "temperature": 0.3,
-                "max_tokens": 2000,
-            },
-            timeout=30,
-        )
-        response.raise_for_status()
-        result = response.json()
-        text = result["choices"][0]["message"]["content"]
-        
         # Strip markdown fences if present
         text = text.strip()
         if text.startswith("```"):
@@ -311,8 +296,10 @@ def extract_metadata_with_llm(content: str, model: str = "gpt-5-mini") -> dict |
             if text.endswith("```"):
                 text = text[:-3]
         text = text.strip()
-        
+
         result = json.loads(text)
+        if not isinstance(result, dict):
+            return None
         # Validate types to prevent downstream crashes
         if not isinstance(result.get("narrative_arc"), list):
             result["narrative_arc"] = []
@@ -323,6 +310,67 @@ def extract_metadata_with_llm(content: str, model: str = "gpt-5-mini") -> dict |
         if not isinstance(result.get("prs"), list):
             result["prs"] = []
         return result
+    except Exception:
+        return None
+
+
+def extract_metadata_with_llm(content: str, model: str = "gpt-5-mini") -> dict | None:
+    """Extract metadata using an LLM. Returns None on failure (caller should fall back).
+
+    Model specs follow the `provider:model` convention from ingest.build_model:
+      - ``ollama:MODEL`` → local Ollama endpoint (http://localhost:11434, no API
+        key, PII-safe: content never leaves the machine)
+      - otherwise → OpenAI whitelist (gpt-5-mini / gpt-4o-mini / gpt-4o)
+    """
+    # Ollama local mode — PII-sensitive extraction. Exempt from the OpenAI
+    # whitelist because there is no external cost tier to protect against.
+    if model.startswith("ollama:"):
+        model_id = model.split(":", 1)[1]
+        if not model_id:
+            return {"error": f"llm_model {model!r} missing model part "
+                             f"(expected ollama:MODEL)"}
+        try:
+            from .models import OllamaModel
+            llm = OllamaModel(id=model_id, timeout=30)  # match OpenAI-path timeout
+            text = llm.complete(
+                system=EXTRACTION_SYSTEM_PROMPT,
+                user=EXTRACTION_PROMPT + content[:16000],  # ~12K token limit
+            )
+            return _parse_llm_json(text)
+        except Exception as e:
+            print(f"[session_indexer] Ollama extraction failed: {e}", file=sys.stderr)
+            return None
+
+    if model not in _ALLOWED_LLM_MODELS:
+        return {"error": f"llm_model {model!r} not allowed "
+                         f"(whitelist: {sorted(_ALLOWED_LLM_MODELS)}; use ollama:MODEL for local)"}
+    try:
+        # Try OpenAI-compatible API
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            return None
+
+        import requests
+        response = requests.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": EXTRACTION_SYSTEM_PROMPT},
+                    {"role": "user", "content": EXTRACTION_PROMPT + content[:16000]},  # ~12K token limit
+                ],
+                "temperature": 0.3,
+                "max_tokens": 2000,
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+        result = response.json()
+        return _parse_llm_json(result["choices"][0]["message"]["content"])
     except Exception as e:
         print(f"[session_indexer] LLM extraction failed: {e}", file=sys.stderr)
         return None
@@ -470,7 +518,8 @@ def main():
     parser.add_argument("--dir", action="store_true", help="Path is a directory")
     parser.add_argument("--batch", action="store_true", help="Batch process (with --dir)")
     parser.add_argument("--no-llm", action="store_true", help="Skip LLM, use keyword-only")
-    parser.add_argument("--model", default="gpt-5-mini", help="LLM model name")
+    parser.add_argument("--model", default="gpt-5-mini",
+                        help="LLM model spec (provider:model — e.g. ollama:llama3.2:3b for local PII-safe extraction)")
     parser.add_argument("--db", default=None, help="Tortoise DB URI (docker://host:port/graph). When set, indexes into FalkorDB instead of printing to stdout.")
     args = parser.parse_args()
     

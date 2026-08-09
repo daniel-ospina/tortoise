@@ -317,8 +317,9 @@ def test_haspart_nand_affects_whole():
     print(f"  ✅ Part refuted: {p_mean:.4f} < 0.80")
 
     # Whole should be reduced by the hasPart back-message. The reduction
-    # signal is bounded by phi_nand coupling (T0-vs-T0 ~ 0.637 = "moderate
-    # dampening" per quadrature docs) so the whole settles just at/under its
+    # uses the NAND contradiction potential phi_nand = exp(-w*ca*cb) which
+    # penalizes agreement — at weight=1.0 (default operator weight),
+    # T0-vs-T0 coupling is ~0.44 so the whole settles just at/under its
     # prior rather than cratering. Assert the DIRECTIONAL effect: without the
     # back-message the whole stays at ~0.914 (weak positive agreement push);
     # with it, it is pulled down to/under the prior (~0.910). The regression
@@ -374,12 +375,12 @@ def test_nand_symmetric():
     print(f"\n  Claim A: mean={a_mean:.4f}")
     print(f"  Claim B: mean={b_mean:.4f}")
 
-    # Both should show symmetric NAND coupling. NOTE: phi_nand(T0,T0) ~ 0.637
-    # gives "moderate dampening" per quadrature docs, and the cavity/boost
-    # mechanics can hold strong priors near their baseline — the assertion is
-    # that BOTH move together (symmetry preserved) and stay in a sane band,
-    # not that they crater toward 50% (which the documented coupling doesn't
-    # produce for two T0 claims). Symmetry is the regression guard for #86.
+    # Both should show symmetric NAND coupling. phi_nand = exp(-w*ca*cb) is
+    # a contradiction potential — it penalizes agreement (both high) and
+    # is compatible with disagreement (one high, one low). With weight=1.0
+    # (default operator weight) and EP damping, symmetric NAND drives both
+    # claims downward from their T0 priors while preserving symmetry.
+    # Symmetry is the regression guard for #86.
     assert abs(a_mean - b_mean) < 0.01, (
         f"❌ NAND not symmetric: A={a_mean:.4f} B={b_mean:.4f}"
     )

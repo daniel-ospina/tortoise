@@ -2,6 +2,12 @@
 
 Used by TortoiseEP for numerical moment projection of NAND/IMPL factors.
 
+phi_nand = exp(-w * ca * cb): contradiction potential — penalizes both
+claims being simultaneously true, compatible with NAND semantics.
+
+phi_impl = exp(w * ca * cb): agreement potential — transmits confidence
+from strong to weak claims via product coupling.
+
 scipy.special.roots_jacobi uses weight (1-x)^a * (1+x)^b on [-1,1].
 For Beta(α,β) weight x^(α-1)*(1-x)^(β-1) on [0,1]:
   Transform: x_01 = (x_jac + 1) / 2, w_01 = w_jac / 2
@@ -66,18 +72,25 @@ def moments_to_beta(m1, m2):
 
 
 def phi_nand(ca, cb, w=8.0):
-    """Symmetric NAND: equal-quality contradiction returns to ~50%.
+    """NAND contradiction factor: penalizes both claims being simultaneously true.
 
-    Uses averaged mirrored product coupling:
-    exp(-w * (ca*(1-cb) + cb*(1-ca)) / 2)
+    Uses product coupling in the exponent:
+    exp(-w * ca * cb)
 
+    Interpreted as a probabilistic NAND potential: configurations where
+    BOTH claims have high confidence are heavily penalized (φ → 0),
+    while configurations where at least one claim has low confidence
+    are compatible with the contradiction relation (φ → 1).
     Symmetric in (ca, cb) — result is independent of argument order.
-    When both T0(0.91): phi ≈ 0.637 — moderate dampening per message.
-    When both baseline(0.5): phi ≈ 0.064 — strong contradiction push.
-    Previously exp(-w * ca * (1-cb)) was asymmetric, causing 3-8× difference
-    depending on which claim was assigned to argument position ca.
+
+    Examples at default w=8.0:
+    - Both T0 (0.91, 0.91): phi ≈ 0.0013 — strong NAND penalty
+    - Both baseline (0.5, 0.5): phi ≈ 0.1353 — moderate penalty
+    - (T0, baseline): (0.91, 0.5): phi ≈ 0.0263 — mostly penalized
+    - Contradiction satisfied (1, 0) or (0, 1): phi = 1.0 — compatible
+    - Both false (0, 0): phi = 1.0 — compatible with NAND
     """
-    return np.exp(-w * (ca * (1 - cb) + cb * (1 - ca)) / 2)
+    return np.exp(-w * ca * cb)
 
 
 def phi_impl(ca, cb, w=8.0):

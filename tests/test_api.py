@@ -62,9 +62,10 @@ def test_reprocess_retracts_superseded_points():
         f"retracted ids {retracted_ids} should contain {p1}"
     )
 
-    # Verify fold: old point gone
+    # Verify fold: old point is a tombstone (status='retracted'), not hard-deleted (#689)
     points = fold(events)
-    assert p1 not in points, "superseded point must not survive fold"
+    assert p1 in points, "superseded point tombstone must survive fold (#689)"
+    assert points[p1].get("status") == "retracted"
 
     print("PASS test_reprocess_retracts_superseded_points")
 
@@ -92,7 +93,10 @@ def test_reprocess_retracts_only_old_run_points():
 
     points = fold(events)
     assert new_c in points
-    assert old_a not in points and old_b not in points
+    # #689: old points are tombstones, not hard-deleted
+    assert old_a in points and old_b in points
+    assert points[old_a].get("status") == "retracted"
+    assert points[old_b].get("status") == "retracted"
 
     print("PASS test_reprocess_retracts_only_old_run_points")
 
@@ -273,7 +277,9 @@ def test_begin_ingest_force():
     assert r2.run_id != r1.run_id, "force=True must produce a new run_id"
 
     points = fold(log.read_all())
-    assert old not in points, "forced reprocess must retract old points"
+    # #689: tombstone — old point exists with status='retracted'
+    assert old in points, "forced reprocess must leave tombstone (#689)"
+    assert points[old].get("status") == "retracted"
     print("PASS test_begin_ingest_force")
 
 

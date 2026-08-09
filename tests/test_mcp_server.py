@@ -16,6 +16,26 @@ except Exception:
     FALKORDB_AVAILABLE = False
 
 
+@pytest.fixture(autouse=True)
+def _transport_context():
+    """MCP tools require an initialized transport mode (#236 auth gate).
+
+    These tests exercise _safe / tools directly (no HTTP middleware), so they
+    run in stdio mode: dev-mode auth (TORTOISE_API_KEY unset) and no team
+    context (quota skipped). Restore after each test.
+    """
+    from tortoise.mcp_auth import (
+        _current_team_id, _current_team_limits, _transport_mode,
+    )
+    _transport_mode.set("stdio")
+    _current_team_id.set(None)
+    _current_team_limits.set(None)
+    yield
+    _transport_mode.set(None)
+    _current_team_id.set(None)
+    _current_team_limits.set(None)
+
+
 class TestSafeWrapper:
     """Tests for the _safe function that wraps all MCP tools."""
     def test_safe_returns_result_on_success(self):
@@ -155,14 +175,16 @@ class TestToolIntegration:
     def test_search_order_by_graph_and_confidence(self):
         """#560: order_by flows through the MCP surface — 'graph' (GraphRanker
         rerank) and 'confidence' (persisted EP) must be accepted by the tool
-        and return result lists (invalid values raise)."""
+        and return result lists (invalid values surface as structured errors,
+        per the _safe wrapper contract)."""
         from tortoise.mcp_server import tortoise_search
         for ob in ("graph", "confidence"):
             result = tortoise_search("integration test", limit=5, order_by=ob)
             assert isinstance(result, list) or isinstance(result.get("error"), str), result
-        import pytest
-        with pytest.raises(ValueError):
-            tortoise_search("integration test", order_by="bogus")
+        # Invalid order_by → structured error dict (SDK raises ValueError,
+        # _safe converts it to {"error": ...}).
+        result = tortoise_search("integration test", order_by="bogus")
+        assert isinstance(result, dict) and "error" in result, result
     def test_suggest_entry_points(self):
         from tortoise.mcp_server import tortoise_suggest_entry_points
         result = tortoise_suggest_entry_points("integration", limit=3)
@@ -355,3 +377,79 @@ class TestAnalyzeLlmBudget:
         finally:
             _current_team_id.reset(token)
             ms._ANALYZE_LLM_BUDGET.pop("team-budget", None)
+
+
+class TestEventsTools:
+    """#432 Task 6 — tortoise_events_poll + tortoise_retract_point tool functions."""
+
+    def test_tools_exist_and_registered(self):
+        from tortoise.mcp_server import tortoise_events_poll, tortoise_retract_point
+        from tortoise.tool_registry import TOOL_REGISTRY
+
+        assert callable(tortoise_events_poll) and callable(tortoise_retract_point)
+        names = {t.name for t in TOOL_REGISTRY}
+        assert "tortoise_events_poll" in names
+        assert "tortoise_retract_point" in names
+        ev = next(t for t in TOOL_REGISTRY if t.name == "tortoise_events_poll")
+        rt = next(t for t in TOOL_REGISTRY if t.name == "tortoise_retract_point")
+        assert ev.http_policy is True and rt.http_policy is True
+        assert ev.annotations.readOnlyHint is True
+        assert rt.annotations.destructiveHint is True
+
+    def test_events_poll_returns_same_shape_as_sdk(self, monkeypatch, tmp_path):
+        import os
+        from tortoise.mcp_server import tortoise_events_poll, _transport_mode
+        from tortoise.sdk import TortoiseSDK
+
+        db = os.path.join(str(tmp_path), "evt.db")
+        sdk = TortoiseSDK(db)
+        sdk.create_point("statement", "hello from mcp")
+        monkeypatch.setattr("tortoise.mcp_server._get_team_sdk", lambda: sdk)
+        token = _transport_mode.set("stdio")
+        try:
+            result = tortoise_events_poll()
+        finally:
+            _transport_mode.reset(token)
+        assert result["events"] and result["events"][0]["type"] == "PointAdded"
+        assert result["next_cursor"]
+
+    def test_events_poll_unknown_type_error(self, monkeypatch, tmp_path):
+        import os
+        from tortoise.mcp_server import tortoise_events_poll, _transport_mode
+        from tortoise.sdk import TortoiseSDK
+
+        sdk = TortoiseSDK(os.path.join(str(tmp_path), "evt2.db"))
+        monkeypatch.setattr("tortoise.mcp_server._get_team_sdk", lambda: sdk)
+        token = _transport_mode.set("stdio")
+        try:
+            result = tortoise_events_poll(types=["Nope"])
+        finally:
+            _transport_mode.reset(token)
+        assert result.get("error")  # _safe structured error, not a crash
+
+    def test_retract_point_returns_sdk_result(self, monkeypatch, tmp_path):
+        import os
+        from tortoise.mcp_server import tortoise_retract_point, _transport_mode
+        from tortoise.sdk import TortoiseSDK
+
+        sdk = TortoiseSDK(os.path.join(str(tmp_path), "evt3.db"))
+        p = sdk.create_point("statement", "retract me")
+        monkeypatch.setattr("tortoise.mcp_server._get_team_sdk", lambda: sdk)
+        token = _transport_mode.set("stdio")
+        try:
+            result = tortoise_retract_point(p["id"])
+        finally:
+            _transport_mode.reset(token)
+        assert result.get("status") == "retracted"
+
+
+class TestEventsHttpSurface:
+    """#432 Task 6 review fix — explicit HTTP_ALLOWED membership for the two
+    new tools (the plan's required assertion; previously only registry
+    http_policy was tested, not the derived allow-list)."""
+
+    def test_events_tools_in_http_allowed(self):
+        from tortoise.mcp_auth import HTTP_ALLOWED
+
+        assert "tortoise_events_poll" in HTTP_ALLOWED
+        assert "tortoise_retract_point" in HTTP_ALLOWED
