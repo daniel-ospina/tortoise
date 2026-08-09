@@ -23,8 +23,13 @@ on:
   pull_request:
 
 concurrency:
-  group: python-ci-${{ github.ref }}
-  cancel-in-progress: true
+  # Per-PR cancel only: on `pull_request` github.ref is refs/pull/N/merge so
+  # a new commit cancels that PR's stale run (desired). On `push` to main the
+  # ref is shared by ALL pushes — cancel-in-progress there would kill the
+  # in-flight full suite every time another PR merges, so main runs must not
+  # cancel each other (they queue via the shared group instead).
+  group: python-ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:
