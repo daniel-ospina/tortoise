@@ -436,6 +436,38 @@ class TestInvalidateSupersede:
         new_after = sdk.get_point(new["id"])
         assert not new_after.get("outdated")
 
+    def test_supersede_missing_old_is_false(self, sdk):
+        # #547: supersede_point must not report success for a missing old point
+        new = _make_point(sdk, content="new")
+        result = sdk.supersede_point("missing-old", new["id"])
+        assert result["invalidated"] is False
+        assert result["id"] == "missing-old"
+        assert result["corrected_by"] == new["id"]
+        assert result["edges_transferred"] == 0
+        # No CORRECTS edge was created
+        corrected = sdk.traverse(new["id"], "CORRECTS", direction="outgoing")
+        assert len(corrected) == 0
+        # New point not outdated
+        assert not sdk.get_point(new["id"]).get("outdated")
+
+    def test_supersede_missing_new_raises(self, sdk):
+        # #547: missing new point would orphan an outdated old — must raise
+        old = _make_point(sdk, content="old")
+        with pytest.raises(ValueError):
+            sdk.supersede_point(old["id"], "missing-new")
+        # Old point must NOT be marked outdated (no partial write)
+        assert not sdk.get_point(old["id"]).get("outdated")
+        # No CORRECTS edge
+        assert len(sdk.traverse(old["id"], "CORRECTS", direction="outgoing")) == 0
+
+    def test_supersede_self_raises(self, sdk):
+        # #547: a self-CORRECTS edge poisons traversal — must raise
+        old = _make_point(sdk, content="old")
+        with pytest.raises(ValueError):
+            sdk.supersede_point(old["id"], old["id"])
+        assert not sdk.get_point(old["id"]).get("outdated")
+        assert len(sdk.traverse(old["id"], "CORRECTS", direction="outgoing")) == 0
+
 
 class TestClose:
     def test_no_crash(self, sdk):
