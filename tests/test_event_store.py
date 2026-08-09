@@ -145,3 +145,59 @@ def test_seq_is_monotonic_under_concurrency(sdk_factory, tmp_path):
     proj = sdk_factory(tmp_path)._get_proj()
     seqs = [e["seq"] for e in _events(proj)]
     assert sorted(seqs) == seqs and len(set(seqs)) == len(seqs)
+
+
+def test_purge_expired_removes_old_events(sdk_factory, tmp_path):
+    """Task 7: events older than retention_days are purged (ts cutoff)."""
+    from datetime import datetime, timedelta, timezone
+    from tortoise import event_store
+    sdk = sdk_factory(tmp_path)
+    proj = sdk._get_proj()
+    event_store.ensure_event_schema(proj)
+    now = datetime.now(timezone.utc)
+    old = (now - timedelta(days=31)).isoformat()
+    fresh = (now - timedelta(days=1)).isoformat()
+    event_store.append_event(proj, 1, "PointAdded", {"id": "a"}, "ev-old", ts=old)
+    event_store.append_event(proj, 2, "PointAdded", {"id": "b"}, "ev-fresh", ts=fresh)
+    deleted = event_store.purge_expired(proj, retention_days=30)
+    assert deleted == 1
+    evs = event_store.read_after(proj, 0)
+    assert [e["event_id"] for e in evs] == ["ev-fresh"]
+
+
+def test_purge_overflow_caps_per_team(sdk_factory, tmp_path):
+    """Task 7: size cap drops the OLDEST events (by seq)."""
+    from tortoise import event_store
+    sdk = sdk_factory(tmp_path)
+    proj = sdk._get_proj()
+    event_store.ensure_event_schema(proj)
+    for i in range(1, 4):
+        event_store.append_event(proj, i, "PointAdded", {"id": str(i)}, f"ev-{i}")
+    deleted = event_store.purge_overflow(proj, max_events=2)
+    assert deleted == 1
+    evs = event_store.read_after(proj, 0)
+    assert [e["seq"] for e in evs] == [2, 3]  # oldest (seq 1) dropped
+
+
+def test_purged_seq_cursor_expires(sdk_factory, tmp_path):
+    """Task 7: after purge, a cursor pointing at a purged seq → expired (410)."""
+    from datetime import datetime, timedelta, timezone
+    from tortoise import event_store
+    sdk = sdk_factory(tmp_path)
+    proj = sdk._get_proj()
+    now = datetime.now(timezone.utc)
+    event_store.ensure_event_schema(proj)
+    event_store.next_seq(proj)  # creates GraphEventMeta (first_seq=1)
+    # 1. a FRESH event is pollable → cursor points at seq 1
+    event_store.append_event(proj, 1, "PointAdded", {"id": "a"}, "ev-1", ts=now.isoformat())
+    stale = sdk.events_poll()["next_cursor"]
+    # 2. time passes: backdate the event past retention, purge it (refreshes
+    #    the first_seq watermark to last_seq+1 = 2)
+    proj.g.query("MATCH (e:GraphEvent) SET e.ts = $old_ts",
+                 params={"old_ts": (now - timedelta(days=31)).isoformat()})
+    deleted = event_store.purge_expired(proj, retention_days=30)
+    assert deleted == 1
+    # 3. the stale cursor (seq 1) is now below the watermark → expired
+    import pytest
+    with pytest.raises(ValueError, match="cursor expired"):
+        sdk.events_poll(after=stale)

@@ -1265,6 +1265,8 @@ class TestEventsPoll:
         client.post("/v1/points", json={"kind": "statement", "content": "fresh"})
         # purge seq <= 1 via direct Cypher (Task 7 owns the purge helper)
         proj.g.query("MATCH (n:GraphEvent) WHERE n.seq < 2 DELETE n")
+        from tortoise import event_store as _es
+        _es._refresh_first_seq(proj)  # watermark, as purge_expired would
         r = client.get("/v1/events", params={"after": stale})
         assert r.status_code == 410
         assert "replay from tail" in r.json()["detail"]

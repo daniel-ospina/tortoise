@@ -463,18 +463,56 @@ class TortoiseSDK:
             if unknown:
                 raise ValueError(f"unknown event type: {unknown[0]}")
         proj = self._get_proj()
+        # Lazy retention (plan-review P2 / Task 6 readOnlyHint tension):
+        # maintenance purge at most once per TORTOISE_EVENT_RETENTION_INTERVAL
+        # per process, so steady-state polls are read-only. Best-effort — a
+        # purge failure never blocks the poll.
+        self._maybe_purge_events(proj)
         # Expired-cursor check: a NON-ZERO cursor pointing below the graph's
         # min seq was purged/compacted. after_seq == 0 is the "from the start"
         # sentinel (after=None) — it never expires, it just returns all
         # retained events.
         if after_seq != 0:
-            min_row = proj.g.query("MATCH (n:GraphEvent) RETURN min(n.seq)").result_set
-            min_seq = min_row[0][0] if min_row and min_row[0][0] is not None else None
-            if min_seq is not None and after_seq < min_seq:
+            # Watermark: first_seq on GraphEventMeta (maintained by purges) —
+            # a cursor below it was purged/compacted → expired (410). Works
+            # even when the graph is empty after a full purge.
+            rows = proj.g.query(
+                "MATCH (m:GraphEventMeta) RETURN m.first_seq"
+            ).result_set
+            first_seq = rows[0][0] if rows and rows[0][0] is not None else None
+            if first_seq is not None and after_seq < int(first_seq):
                 raise ValueError("cursor expired — replay from tail")
         evs = read_after(proj, after_seq, types=types, limit=limit)
         last = evs[-1]["seq"] if evs else after_seq
         return {"events": evs, "next_cursor": self._encode_cursor(last)}
+
+    _EVENT_PURGE_ATTR = "_tortoise_last_purge"
+
+    def _maybe_purge_events(self, proj) -> None:
+        """Best-effort, interval-gated retention purge (see events_poll).
+
+        Runs at most once per TORTOISE_EVENT_RETENTION_INTERVAL seconds per
+        process. Reads config via env with defaults (30d retention, 500k cap,
+        3600s interval).
+        """
+        import os
+        import time
+
+        interval = int(os.environ.get("TORTOISE_EVENT_RETENTION_INTERVAL", "3600"))
+        now = time.monotonic()
+        last = getattr(proj, self._EVENT_PURGE_ATTR, 0.0)
+        if now - last < interval:
+            return
+        setattr(proj, self._EVENT_PURGE_ATTR, now)
+        try:
+            from .event_store import purge_expired, purge_overflow
+
+            days = int(os.environ.get("TORTOISE_EVENT_RETENTION_DAYS", "30"))
+            cap = int(os.environ.get("TORTOISE_EVENT_MAX_PER_TEAM", "500000"))
+            purge_expired(proj, retention_days=days)
+            purge_overflow(proj, max_events=cap)
+        except Exception:  # noqa: BLE001 — best-effort
+            _logger.warning("event retention purge failed — continuing", exc_info=True)
 
     def _emit_event(self, type_: str, payload: dict) -> None:
         """Append a durable :GraphEvent for a graph mutation (best-effort).
