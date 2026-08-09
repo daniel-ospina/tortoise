@@ -1,18 +1,26 @@
 ---
-title: "Tortoise — Canonical Ontology v3.2"
+title: "Tortoise — Canonical Ontology v3.4"
 type: data
 domain: data
 status: live
 created: 2026-08-05
-updated: 2026-08-07
+updated: 2026-08-10
 ownedBy: epistemic-team
 doc_status: live
 ---
 
-# Tortoise — Canonical Ontology v3.2
+# Tortoise — Canonical Ontology v3.4
 
 > **Status:** LIVE — canonical. Co-located with the code it governs (tortoise repo).
 > **Supersedes:** ONTOLOGY_v2.5.md (eldato repo, deprecated).
+>
+> **Changelog v3.4 (2026-08-10, issue #690 — status vocabulary reconciliation):**
+> - §5: Point status vocabulary upgraded from narrative note to canonical table
+>   (six statuses: draft, live, retracted, superseded, outdated, archived).
+>   Every status has a defined write path, allowed transitions, and EP semantics.
+>   Parity decision: SDK + EventAPI + CLI share a single vocabulary
+>   (`POINT_STATUS_VALUES` in `sdk.py`). `challenged` remains a derived
+>   condition, not a stored status.
 >
 > **Changelog v3.2 (2026-08-07, issue #398 — Source credibility):**
 > - §4.6/§3.4: Source `sourceKind` clarified — it is the extensible source TYPE
@@ -73,13 +81,13 @@ Each layer answers a different question. All four are live mechanisms.
 | Predicate | From → To | Direction | Cardinality | Standard alignment | Meaning |
 |-----------|-----------|-----------|-------------|--------------------|---------|
 | `IMPL` | Point → Point | default bidirectional; optional unidirectional | N-ary | Epistemic (EP confidence) | A supports/implies B. Direction is an explicit operator flag — **default bidirectional**, option to declare unidirectional (source→target only). Not inferred from label. |
-| `NAND` | Point → Point | default bidirectional; optional unidirectional | N-ary | Epistemic (EP confidence) | A contradicts B. Same direction model as IMPL — default mutual contradiction (bidirectional), optional unidirectional. |
+| `NAND` | Point → Point | default bidirectional; optional unidirectional | N-ary | Epistemic (EP confidence) | A contradicts B (logically mutual — "A and B can't both be true"). Default bidirectional; an agent may declare `unidirectional` for a directed attack (attacker's truth penalizes the target, no back-pressure — #753). |
 | `hasPart` | Point → Point | bidirectional (composition) | N-ary | Structural via operator label | A contains B (parts/whole cascade). |
 | `CORRECTS` | Point → Point | unidirectional | 1→1 | — | New point **corrects/replaces** an outdated point (supersession). Marks target `outdated: true`; all edges transfer from old to new. Created by `supersede_point` / `invalidate_point` (sdk.py:448-485). |
 
 > **Supersession semantics:** `CORRECTS` is the structural replacement edge. `supersede_point(old, new)` = mark old `outdated:true` + create `(new)-[:CORRECTS]->(old)` + transfer all old edges (IMPL/NAND/hasPart operators + structural edges) to new. `invalidate_point(id, corrected_by)` = mark outdated + CORRECTS only (no edge transfer). Old point retains only the CORRECTS edge as provenance.
 
-> **Direction flag (code note):** operator direction is carried as an explicit flag on the operator Point. Current implementation (ep.py) derives bidirectionality from label (hasPart/partOf → bidirectional; else directional for IMPL; NAND always bidirectional) — this is being migrated to an explicit `direction` flag with default bidirectional. See follow-up issue.
+> **Direction flag (code note):** operator direction is an explicit flag on the operator Point. Creation default is **bidirectional** for all op types (#753 — NAND is logically mutual; `unidirectional` is the agent-declared directed attack). Pre-migration operators lacking the property are read as bidirectional (legacy semantics preserved).
 
 ### §3.2 Point ↔ Entity (Cross — Semantic ↔ Epistemic)
 
@@ -351,7 +359,25 @@ T0 (meta-analysis), T1 (peer-reviewed), T2 (expert), T3 (anecdotal), T4 (unverif
 
 > **Expansion-pack kinds live in the packs, not here.** Pack-declared kinds (dev:epic, product-strategy:product, etc.) are defined in their pack manifests (§9) and registered at load time via the pack registry. This file documents only the core vocabulary; it is not the home for pack kinds.
 
-> **#432 — Claim lifecycle vocabulary (v3.3).** Point `status` is `draft → live → retracted → superseded` (plus `outdated`/`archived`; `archived` is a reserved terminal state with no v1 SDK write path). **`challenged` is NOT a state** — it is a DERIVED condition emerging from the presence of a NAND operator edge on a live point, queryable as such (e.g. `MATCH (p:Point {status:'live'})<-[:NAND]-(:Point {is_operator:true})`). Retraction is a TOMBSTONE (status change to `retracted`), not a deletion — the point stays in the graph, default query surfaces exclude it, `get_point` still returns it. The `:GraphEvent` label is RESERVED for the #432 change-log stream (`{seq, ts, type, payload, event_id}`, zero relationships — graph islands) — distinct from the `:Event` ontology entity with `eventId` (§3.4). See docs/event-catalog.md.
+### Point Status Vocabulary (canonical, #432/#690)
+
+| Status | Kind | Write path | Transitions to | Notes |
+|--------|------|------------|----------------|-------|
+| `draft` | initial | `create_point`, `EventAPI._point` | `live` | Inert for EP computation; promoted on first operator edge |
+| `live` | active | `create_operator` (auto-promote source), `update_point` (status='live') | `retracted`, `superseded` | Full EP participation |
+| `retracted` | terminal | `retract_point`, `EventAPI.retract_point` | *(none)* | Tombstone — stays in graph, `get_point` returns, `query`/`paginated_query` exclude by default |
+| `superseded` | terminal | `supersede_point` (sets alongside `outdated:true`) | *(none)* | Structural replacement via CORRECTS edge + edge transfer |
+| `outdated` | legacy flag | `invalidate_point`, `supersede_point` (legacy flag) | `retracted` | Back-compat boolean; co-exists with `status` |
+| `archived` | terminal (reserved) | *(no v1 SDK write path)* | *(none)* | Reserved for future lifecycle operations |
+
+> **`challenged` is NOT a state** — it is a DERIVED condition emerging from the presence of a NAND operator edge on a live point, queryable as such:
+> ```cypher
+> MATCH (p:Point {status:'live'})<-[:NAND]-(:Point {is_operator:true}) RETURN p
+> ```
+>
+> **Tombstone contract:** Retracted points stay in the graph (`get_point` returns them with `status='retracted'`). Default query surfaces (`query`, `paginated_query`) exclude them; pass `include_retracted=True` or an explicit `status='retracted'` filter to surface them. Deletion via `delete_point` hard-deletes (no tombstone).
+>
+> **Parity decision (#690):** SDK + EventAPI + CLI share a single status vocabulary (`POINT_STATUS_VALUES` in `sdk.py`). EventAPI births `draft` (same as SDK); CLI backfill promotes NULL-status legacy points to `live` (migration-only, not a drift). The `:GraphEvent` label is RESERVED for the #432 change-log stream (`{seq, ts, type, payload, event_id}`, zero relationships — graph islands) — distinct from the `:Event` ontology entity with `eventId` (§3.4). See docs/event-catalog.md.
 
 ---
 
@@ -418,9 +444,9 @@ Operator:      (op-123)                                   ← mitigation anchor
 | hasPart | IMPL | Bidirectional cascade (parts↔whole) | bidirectional | Epic hasPart Issue |
 | addresses | IMPL | Unidirectional (A supports B) | unidirectional | Feature addresses Need |
 | supports | IMPL | Unidirectional (A supports B) | unidirectional | Evidence supports Claim (CLI default label for IMPL, `__main__.py:81`) |
-| opposes | NAND | Bidirectional by default, optional unidirectional | declared by pack | Feature competesWith Competitor |
+| opposes | NAND | Bidirectional by default, optional unidirectional (directed attack) | declared by pack | Feature competesWith Competitor |
 
-> **Direction is an explicit operator flag, default bidirectional.** The table above shows typical pack declarations; any pack may override the default with an explicit `direction: unidirectional` on the relation.
+> **Direction is an explicit operator flag, default bidirectional.** The table above shows typical pack declarations; a pack (or agent) may declare `direction: unidirectional` for a directed attack.
 
 ### Pack Relation Declarations
 

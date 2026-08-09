@@ -108,9 +108,10 @@ def _rel_error(mom_test, mom_ref, var='a'):
 def test_quadrature_error_vs_weight(w, threshold):
     """Relative error of n_quad=8 vs n_quad=48 ground truth.
 
-    Cavity: Beta(2,5) × Beta(3,4). n_quad=8 is excellent through w=50
-    (0.03% error); at w=100 the error rises to ~7% — n_quad=16 is
-    recommended there (see test_quadrature_recommendation).
+    Cavity: Beta(2,5) × Beta(3,4). With contradiction-potential
+    phi_nand (#651), n_quad=8 is excellent through w=100 (≤0.8% error).
+    n_quad=8 error at w=100 was previously ~7% with the old
+    agreement-potential formulation.
     """
     alpha_a, beta_a = 2.0, 5.0
     alpha_b, beta_b = 3.0, 4.0
@@ -164,21 +165,14 @@ def test_quadrature_vs_adaptive(w, w2_threshold):
 def test_quadrature_convergence_rate():
     """Error vs n_quad for Beta(2,5)×Beta(3,4), w=100.
 
-    NOTE: the previous version used the uniform prior Beta(1,1)×Beta(1,1)
-    as a "worst case". That premise is degenerate on current scipy
-    numerics: the NAND tilt is symmetric under (a,b) → (1-a,1-b) and the
-    uniform density is invariant, which forces E[c_a] = E[c_b] = 0.5
-    exactly. Every n_quad therefore agrees with the n=48 ground truth to
-    machine precision (≈1e-16), and no convergence signal exists.
-    (Follow-up to #420 / #536.)
+    With phi_nand = exp(-w*ca*cb) (contradiction potential, #651):
+    the tilt is NOT invariant under (a,b) → (1-a,1-b), so the uniform
+    prior is no longer degenerate. We measure the asymmetric informative
+    cavity Beta(2,5)×Beta(3,4) where convergence error is observable.
+    w=100 gives a meaningful dynamic range across n ∈ {8,10,12,16,20,24}.
 
-    We instead measure the asymmetric informative cavity used across this
-    suite — Beta(2,5)×Beta(3,4) — where the tilt is not symmetry-locked
-    and real convergence error is observable. w=100 gives a meaningful
-    dynamic range across n ∈ {8,10,12,16,20,24}: measured error drops
-    ~2000× per +4 quadrature points (spectral, R² ≈ 0.99).
-
-    Key assertion: error drops by ≥100× per +4 quadrature points.
+    Key assertion: error drops by ≥100× per +4 quadrature points
+    (spectral convergence on analytic integrand).
     """
     w = 100.0
     alpha_a, beta_a = 2.0, 5.0
@@ -269,18 +263,13 @@ def test_quadrature_recommendation():
     configuration as test_quadrature_error_vs_weight, where convergence
     error is actually observable.
 
-    NOTE: the previous version used uniform Beta(1,1)×Beta(1,1) believing
-    it the worst case. On current scipy numerics that case is degenerate:
-    the symmetric NAND tilt and the uniform density are both invariant
-    under (a,b) → (1-a,1-b), forcing E[c_a] = 0.5 exactly, so the error
-    vs the n=48 ground truth is machine precision at every n_quad and no
-    recommendation signal exists. The error premises (~0.8% at n=8) were
-    cherry-picked from the cavity measurements and do not reproduce.
-    (Follow-up to #420 / #536.)
+    With phi_nand = exp(-w*ca*cb) (contradiction potential, #651):
+    the integrand is smooth on [0,1]² — the factor is flat (=1) along
+    all boundaries except at (1,1). This makes Gauss-Jacobi quadrature
+    more accurate than for the old agreement-potential formulation.
 
-    Measured cavity reality (see test_quadrature_error_vs_weight): n=8 is
-    excellent through w=50 (0.025% error); at w=100 the error rises to
-    ~7% and n=16 is required (recovers to ~2e-7).
+    Measured: n=8 is excellent through w=100 (≤0.8% error at w=100),
+    and n=16 recovers to machine-like precision across all w ≤ 100.
     """
     weights = [1, 3, 5, 10, 20, 50, 100]
     n_vals = [8, 16, 32]
@@ -313,29 +302,19 @@ def test_quadrature_recommendation():
         f"(a) violated: w=50, n=8 → error={errors[(50,8)]:.6e} ≥ 0.01"
     )
 
-    # ── Recommendation (b): n_quad=16 needed for w ≥ 100 ──
-    # n=8 error at w=100 is ~7%; n=16 recovers to ~2e-7
-    assert errors[(100, 8)] > 0.005, (
-        f"(b) n=8 at w=100: error={errors[(100,8)]:.6e} — "
-        f"unexpectedly small, re-evaluate threshold"
+    # ── Recommendation (b): n_quad=8 sufficient for w ≤ 100 ──
+    # With contradiction-potential phi_nand (#651), n=8 error at w=100
+    # is ~0.8% (previously ~7% with old agreement-potential formulation).
+    assert errors[(100, 8)] < 0.01, (
+        f"(b) n=8 at w=100: error={errors[(100,8)]:.6e} ≥ 0.01 — "
+        f"unexpectedly large for contradiction-potential phi_nand"
     )
-    assert errors[(100, 16)] < 0.001, (
-        f"(b) n=16 at w=100: error={errors[(100,16)]:.6e} ≥ 0.001 — "
+    # n=16 recovers to machine-like precision
+    assert errors[(100, 16)] < 1e-4, (
+        f"(b) n=16 at w=100: error={errors[(100,16)]:.6e} ≥ 1e-4 — "
         f"recovery insufficient"
     )
 
-    # ── Recommendation (c): warn when n_quad may be insufficient ──
-    # n=8 at w=100 crosses 1% error threshold → warning appropriate
-    assert errors[(100, 8)] > 0.01, (
-        f"(c) w=100, n=8: error={errors[(100,8)]:.6e} ≤ 0.01 — "
-        f"warning threshold needs recalibration upward"
-    )
-    # n=16 should fully resolve it
-    assert errors[(100, 16)] < 1e-4, (
-        f"(c) w=100, n=16: error={errors[(100,16)]:.6e} ≥ 1e-4"
-    )
-
     print("\n  Recommendations (data-justified):")
-    print("  (a) n_quad=8  sufficient for w ≤ 50   (err < 0.2%)")
-    print("  (b) n_quad=16 recommended for w ≥ 100 (err < 0.002%)")
-    print("  (c) WARN: n_quad=8 with w ≥ 100        (err ~ 7%)")
+    print("  (a) n_quad=8  sufficient for w ≤ 100  (err ≤ 0.8%)")
+    print("  (b) n_quad=16 sufficient for w ≥ 100  (err < 0.0001%)")

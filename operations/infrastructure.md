@@ -31,8 +31,13 @@ doc_status: draft
 
 | Function           | Purpose                         | verify_jwt        |
 |--------------------|---------------------------------|-------------------|
-| tenant-provision   | Auth hook (after_user_created)  | false             |
+| tenant-provision   | Auth hook (after_user_created)  | false (self-auth) |
 | waitlist-subscribe | Landing waitlist capture (#373) | false (anon POST) |
+
+`verify_jwt=false` on tenant-provision is required (auth hooks send no user
+JWT); caller auth is enforced inside the function (#802): the hook's
+Standard-Webhooks signature (`AUTH_HOOK_SECRET`) or a user JWT matching the
+provisioning target. Bare anon-key calls → 401.
 
 ## Supabase Tables
 

@@ -189,9 +189,21 @@ RUN_STATUS="$(printf '%s' "$RUN" | jq -r '.status // "error"' 2>/dev/null || ech
 log "sweep status: $RUN_STATUS"
 
 # ── 4. reconcile ride-along (#654) — skipped when the sweep returned 202 ────
+# Non-2xx is a hard failure (the cron driver MUST NOT blind the pipeline —
+# a silently skipped reconcile step is the same class of silent-no-op that
+# left this endpoint uninvoked before #654). We track the failure and exit
+# AFTER heartbeat + self-heal so the driver still files health signals.
+RECONCILE_FAILED=0
 if [ "$RUN_STATUS" != "already_running" ]; then
-  curl -sS -m 120 -X POST -H "Authorization: Bearer $KEY" \
-    "${API}/v1/internal/reconcile" >/dev/null 2>&1 || log "reconcile ride-along failed (best-effort)"
+  RECONCILE_CODE="$(curl -sS -o /dev/null -w '%{http_code}' -m 120 -X POST \
+    -H "Authorization: Bearer $KEY" \
+    "${API}/v1/internal/reconcile" 2>/dev/null || echo '000')"
+  if [ "$RECONCILE_CODE" -ge 200 ] 2>/dev/null && [ "$RECONCILE_CODE" -lt 300 ]; then
+    log "reconcile ride-along OK ($RECONCILE_CODE)"
+  else
+    log "reconcile ride-along FAILED (HTTP $RECONCILE_CODE)"
+    RECONCILE_FAILED=1
+  fi
 else
   log "sweep returned 202 (lock held) — skipping reconcile to avoid racing a restore"
 fi
@@ -210,5 +222,9 @@ if [ "$RUN_STATUS" = "backed_up" ] || [ "$RUN_STATUS" = "no_teams" ]; then
   log "self-heal: closed open incidents for a healthy run"
 fi
 
+if [ "$RECONCILE_FAILED" = "1" ]; then
+  fail "reconcile ride-along failed — investigate"
+  exit 1
+fi
 log "done"
 exit 0

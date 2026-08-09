@@ -20,6 +20,9 @@ INTERNAL_HEADERS = {"Authorization": f"Bearer {_INTERNAL_KEY}"}
 GOOD_ENV = {
     "BACKUP_SWEEP_ENABLED": "true",
     "TORTOISE_BACKUP_KEY": base64.b64encode(b"k" * 32).decode(),
+    # #661: sweep archives encrypt with the Fly-only registry stream key —
+    # fail-closed when missing, so the DR test env must provide it.
+    "REGISTRY_STREAM_KEY": base64.b64encode(b"s" * 32).decode(),
     "R2_ACCOUNT_ID": "acct", "R2_ACCESS_KEY_ID": "ak",
     "R2_SECRET_ACCESS_KEY": "sk", "R2_BUCKET": "tortoise-backups",
     "TELEGRAM_BOT_TOKEN": "123:t", "TELEGRAM_CHAT_ID": "1",
@@ -88,7 +91,8 @@ class TestDrAuth:
     def test_internal_endpoints_reject_bad_key(self, client, mem_storage):
         for path, method in (("/v1/internal/backups/sweep", "post"),
                             ("/v1/internal/backups/status", "get"),
-                            ("/v1/internal/backups/drill", "post")):
+                            ("/v1/internal/backups/drill", "post"),
+                            ("/v1/internal/reconcile", "post")):
             r = getattr(client, method)(
                 path, headers={"Authorization": "Bearer wrong"},
                 **({"json": {}} if method == "post" else {}),
@@ -237,3 +241,112 @@ class TestDrDrill:
             json={"team_id": "team_x", "backup_key": backup_key},
         )
         assert r2.status_code == 429
+
+
+class TestReconcile:
+    """POST /v1/internal/reconcile — expired-key sweep (#654)."""
+
+    def _seed_keys(self, sdk, entries: list[dict]) -> None:
+        """Insert APIKey nodes directly into the registry graph."""
+        reg = sdk._get_registry()
+        for e in entries:
+            reg.query(
+                "CREATE (k:APIKey {id:$id, key_prefix:$prefix, hash:'test', "
+                "team_id:$tid, created_by:$by, created_at:$now, "
+                "revoked_at:$rev, expires_at:$exp, created_via:$via})",
+                params={
+                    "id": e["id"],
+                    "prefix": e.get("prefix", "tt_test"),
+                    "tid": e.get("team_id", "team-reconcile"),
+                    "by": "test",
+                    "now": "2025-01-01T00:00:00+00:00",
+                    "rev": e.get("revoked_at"),
+                    "exp": e.get("expires_at"),
+                    "via": e.get("created_via", "bootstrap"),
+                },
+            )
+
+    def test_reconcile_rejects_bad_key(self, client):
+        r = client.post(
+            "/v1/internal/reconcile",
+            headers={"Authorization": "Bearer wrong"},
+        )
+        assert r.status_code == 401
+
+    def test_reconcile_rejects_missing_auth(self, client):
+        r = client.post("/v1/internal/reconcile")
+        assert r.status_code == 401
+
+    def test_reconcile_no_expired_keys(self, client):
+        r = client.post("/v1/internal/reconcile", headers=INTERNAL_HEADERS)
+        assert r.status_code == 200
+        body = r.json()
+        assert body["expired_keys_swept"] == 0
+        assert "bootstrap-expiry sweep complete" in body["notes"]
+
+    def test_reconcile_sweeps_expired_bootstrap_keys(self, client):
+        sdk = TortoiseSDK("/tmp/x.db", namespace="registry")
+        self._seed_keys(sdk, [
+            {"id": "expired-1", "expires_at": "2024-01-01T00:00:00+00:00"},
+            {"id": "expired-2", "expires_at": "2024-06-15T00:00:00+00:00"},
+        ])
+        r = client.post("/v1/internal/reconcile", headers=INTERNAL_HEADERS)
+        assert r.status_code == 200
+        body = r.json()
+        assert body["expired_keys_swept"] == 2
+        # Verify keys are now revoked
+        reg = sdk._get_registry()
+        rows = reg.query(
+            "MATCH (k:APIKey) WHERE k.id IN ['expired-1','expired-2'] RETURN k.revoked_at"
+        ).result_set
+        assert len(rows) == 2
+        assert all(r[0] is not None for r in rows), "expired keys must be revoked"
+
+    def test_reconcile_preserves_active_keys(self, client):
+        sdk = TortoiseSDK("/tmp/x.db", namespace="registry")
+        future = "2099-01-01T00:00:00+00:00"
+        self._seed_keys(sdk, [
+            {"id": "active-1", "expires_at": future},
+            {"id": "active-2", "expires_at": future},
+        ])
+        r = client.post("/v1/internal/reconcile", headers=INTERNAL_HEADERS)
+        assert r.status_code == 200
+        assert r.json()["expired_keys_swept"] == 0
+        reg = sdk._get_registry()
+        rows = reg.query(
+            "MATCH (k:APIKey {id:'active-1'}) RETURN k.revoked_at"
+        ).result_set
+        assert rows[0][0] is None, "active key must not be revoked"
+
+    def test_reconcile_ignores_non_bootstrap_keys(self, client):
+        sdk = TortoiseSDK("/tmp/x.db", namespace="registry")
+        self._seed_keys(sdk, [
+            {"id": "non-boot-1", "expires_at": "2024-01-01T00:00:00+00:00",
+             "created_via": "provision"},
+        ])
+        r = client.post("/v1/internal/reconcile", headers=INTERNAL_HEADERS)
+        assert r.status_code == 200
+        assert r.json()["expired_keys_swept"] == 0
+        reg = sdk._get_registry()
+        rows = reg.query(
+            "MATCH (k:APIKey {id:'non-boot-1'}) RETURN k.revoked_at"
+        ).result_set
+        assert rows[0][0] is None, "non-bootstrap key must not be touched"
+
+    def test_reconcile_skips_already_revoked(self, client):
+        sdk = TortoiseSDK("/tmp/x.db", namespace="registry")
+        self._seed_keys(sdk, [
+            {"id": "already-revoked", "expires_at": "2024-01-01T00:00:00+00:00",
+             "revoked_at": "2024-02-01T00:00:00+00:00"},
+        ])
+        r = client.post("/v1/internal/reconcile", headers=INTERNAL_HEADERS)
+        assert r.status_code == 200
+        assert r.json()["expired_keys_swept"] == 0
+
+    def test_reconcile_returns_reprovisioned_stub(self, client):
+        """The reprovisioned field is a stub (returns 0) — verify shape."""
+        r = client.post("/v1/internal/reconcile", headers=INTERNAL_HEADERS)
+        assert r.status_code == 200
+        body = r.json()
+        assert body["reprovisioned"] == 0
+        assert isinstance(body["notes"], list)

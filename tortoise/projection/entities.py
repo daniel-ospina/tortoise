@@ -174,6 +174,23 @@ class _EntityHandlers:
     def _delete(self, pid: str) -> None:
         self.g.query("MATCH (n:Point {id:$id}) DETACH DELETE n", params={"id": pid})
 
+    def _retract(self, pid: str) -> None:
+        """Mark a Point as retracted instead of hard-deleting (#689).
+
+        Retracted points are hidden from normal reads (get_point, query,
+        paginated_query all filter status='retracted') but remain queryable via
+        raw Cypher. This preserves data integrity — retraction is reversible.
+
+        Historical note: prior to #689, retraction hard-deleted points via
+        DETACH DELETE. Points retracted before this change are irrecoverably
+        lost (the content existed only in the projection, and the projection
+        deleted it). Future retractions leave this tombstone.
+        """
+        self.g.query(
+            "MATCH (n:Point {id:$id}) SET n.status = 'retracted', n.updatedAt = $now",
+            params={"id": pid, "now": _now_iso()},
+        )
+
     # ── Entity nodes ───────────────────────────────────────────────
 
     def _upsert_subject(self, ev: dict) -> None:

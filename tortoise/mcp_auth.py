@@ -28,6 +28,10 @@ from starlette.responses import JSONResponse
 from tortoise.sdk import TortoiseSDK
 
 # ── ContextVars ─────────────────────────────────────────────────────────────
+# Reserved placeholder team id for selfhost transports (auth_mode "static"/"none",
+# #338): no tenant resolution happens, and the graph namespace is isolated under
+# team_selfhost. Quota is N/A for this placeholder — selfhost has no billing.
+SELFHOST_TEAM_ID = "selfhost"
 _current_team_id: ContextVar[str | None] = ContextVar("_current_team_id", default=None)
 # #329: resolved team quota limits (from the registry Team node), cached 60s
 # with the auth cache so MCP write tools enforce the SAME limits REST sees.
@@ -184,7 +188,7 @@ class TransportModeMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
         _transport_mode.set("http")
-        _current_team_id.set("selfhost")
+        _current_team_id.set(SELFHOST_TEAM_ID)
         return await call_next(request)
 
 

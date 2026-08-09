@@ -27,10 +27,12 @@ _SECRET_PEPPER = os.environ.get("TORTOISE_SECRET_PEPPER", "")
 if not _SECRET_PEPPER:
     if os.environ.get("TORTOISE_API_KEY"):
         raise RuntimeError(
-            "TORTOISE_SECRET_PEPPER is not set. "
-            "Set TORTOISE_SECRET_PEPPER in production to ensure API key hashes "
-            "survive process restart. API key hashes cannot be verified without "
-            "a stable pepper value."
+            "TORTOISE_API_KEY is the hosted/cloud key — it is not used by local "
+            "stdio MCP and causes this startup error. For local stdio, UNSET "
+            "TORTOISE_API_KEY (dev mode). For authenticated local MCP, run "
+            "'tortoise serve --http' (needs TORTOISE_SECRET_PEPPER for key "
+            "hashing; set a stable value, e.g. openssl rand -hex 32). "
+            "API key hashes cannot be verified without a stable pepper value."
         )
     _logger.warning(
         "TORTOISE_SECRET_PEPPER not set — using dev-mode pepper. "

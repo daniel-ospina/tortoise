@@ -282,6 +282,65 @@ class TestCliOnboardDbTarget:
         assert "Index failed" in out
         assert "Onboarding complete." not in out
 
+    def test_onboard_forwards_path_to_doctor(self, tmp_path, monkeypatch):
+        """#720 conf 80: Step 5 must pass onboard's resolved target into
+        doctor — `onboard --path X` health-checks X (same graph onboard
+        wrote to), never the default graph."""
+        db_path = str(tmp_path / "explicit.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "env.db"))
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        repo_root = tmp_path / "repo"
+        repo_root.mkdir()
+        (repo_root / "README.md").write_text("# readme", encoding="utf-8")
+
+        from tortoise import __main__ as m
+
+        seen: dict = {}
+        with mock.patch.object(m, "_cmd_init", return_value=0), \
+             mock.patch.object(m, "_cmd_demo", return_value=0), \
+             mock.patch.object(m, "_cmd_doctor",
+                               side_effect=lambda a: seen.update(doctor=a) or 0), \
+             mock.patch("subprocess.run") as fake_run, \
+             mock.patch.object(m, "_cmd_index_github",
+                               side_effect=lambda a: seen.update(idx=a) or 0):
+            fake_run.return_value.returncode = 0
+            fake_run.return_value.stdout = str(repo_root)
+            rc = m._cmd_onboard(mock.Mock(path=db_path, cmd="onboard"))
+
+        assert rc == 0
+        doctor = seen["doctor"]
+        assert doctor.path == db_path  # --path forwarded, not the default
+        assert doctor.db is None
+
+    def test_onboard_forwards_uri_to_doctor(self, tmp_path, monkeypatch):
+        """#720 conf 80: URI targets are forwarded to doctor via args.db."""
+        uri = "docker://:pw@localhost:16379/tortoise"
+        monkeypatch.setenv("TORTOISE_DB_URI", uri)
+        monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+        _delenv_falkordb(monkeypatch)
+        repo_root = tmp_path / "repo"
+        repo_root.mkdir()
+        (repo_root / "README.md").write_text("# readme", encoding="utf-8")
+
+        from tortoise import __main__ as m
+
+        seen: dict = {}
+        with mock.patch.object(m, "_cmd_init", return_value=0), \
+             mock.patch.object(m, "_cmd_demo", return_value=0), \
+             mock.patch.object(m, "_cmd_doctor",
+                               side_effect=lambda a: seen.update(doctor=a) or 0), \
+             mock.patch("subprocess.run") as fake_run, \
+             mock.patch.object(m, "_cmd_index_github",
+                               side_effect=lambda a: seen.update(idx=a) or 0):
+            fake_run.return_value.returncode = 0
+            fake_run.return_value.stdout = str(repo_root)
+            rc = m._cmd_onboard(mock.Mock(path=None, cmd="onboard"))
+
+        assert rc == 0
+        doctor = seen["doctor"]
+        assert doctor.db == uri
+        assert doctor.path is None
+
     def test_onboard_relative_path_clean_error(self, capsys):
         """onboard --path rel.db must fail cleanly at init (rc 1, no
         traceback, index never called) — #715: resolve_db_path's _abs
@@ -382,9 +441,9 @@ class TestCliOnboardDbTarget:
 
 
 class TestCliSecurityAndIndex:
-    """#715 P1/P2 fixes: extraction-pipeline error surfacing, password
-    hygiene in warnings/argv, blank FALKORDB_* guard, single-index onboard,
-    and URI routing parity for decide/list-kinds/list-sources."""
+    """#715 P1/P2 fixes: password hygiene in warnings/argv, blank
+    FALKORDB_* guard, single-index onboard, and URI routing parity for
+    decide/list-kinds/list-sources."""
 
     @staticmethod
     def _fake_pipeline_module(monkeypatch):
@@ -402,29 +461,6 @@ class TestCliSecurityAndIndex:
 
         fake.ExtractionPipeline = ExtractionPipeline
         monkeypatch.setitem(sys.modules, "tortoise.extraction_pipeline", fake)
-
-    # ── Fix 1 (P1): clear error when extraction pipeline is missing ──
-
-    def test_index_github_missing_pipeline_clear_error(self, monkeypatch, capsys):
-        """#715 P1 conf 95: with no tortoise.extraction_pipeline module,
-        `index github` exits rc 1 with the actionable issue #713 message —
-        never a raw ModuleNotFoundError traceback."""
-        import importlib
-        with pytest.raises(ModuleNotFoundError):
-            importlib.import_module("tortoise.extraction_pipeline")  # real state
-
-        from tortoise import __main__ as m
-        rc = m._cmd_index_github(mock.Mock(
-            url="https://github.com/daniel-ospina/tortoise",
-            branch="main", background=False, db=None))
-
-        captured = capsys.readouterr()
-        out = captured.out + captured.err
-        assert rc == 1
-        assert "The extraction pipeline is not installed" in out
-        assert "missing module tortoise.extraction_pipeline" in out
-        assert "issue #713" in out
-        assert "Traceback" not in out
 
     # ── Fix 2 (P2): FALKORDB_* warning masks the password ──
 
@@ -722,3 +758,55 @@ class TestCliSecurityAndIndex:
         assert "Invalid DB target" in out
         assert "relative" in out
         assert "Traceback" not in out
+
+    # ── Fix 10 (P2): no credential at ANY non-doctor catch site ──
+
+    @pytest.mark.parametrize("command", ["init", "list-kinds", "index", "decide"])
+    def test_mask_applied_at_non_doctor_catch_sites(self, command, monkeypatch, capsys, tmp_path):
+        """#720 P2 conf 55: the userinfo mask must be applied at every
+        non-doctor catch site, not just doctor. A bolt:// (unsupported-
+        scheme) URI with a credential falls into RELATIVE_PATH_ERROR with
+        the RAW URI embedded in the message — whichever command surfaces
+        it, the secret must never reach stdout/stderr and the masked URI
+        (host/path intact) must appear instead."""
+        from tortoise import __main__ as m
+
+        uri = "bolt://user:sup3rsekrit@host:7687/g"
+        (tmp_path / "README.md").write_text("# repo\n", encoding="utf-8")
+
+        if command == "init":
+            # catch site __main__.py:331 — explicit --path that is not a
+            # supported-scheme URI → relative-path reject embeds the raw URI
+            rc = m._cmd_init(mock.Mock(path=uri, cmd="init", yes=True,
+                                       api_key=None))
+        elif command == "list-kinds":
+            # catch site __main__.py:1867 — env TORTOISE_DB_URI with an
+            # unsupported scheme falls through to the path branch → reject
+            monkeypatch.setenv("TORTOISE_DB_URI", uri)
+            monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+            _delenv_falkordb(monkeypatch)
+            rc = m._cmd_list_kinds(mock.Mock(cmd="list-kinds"))
+        elif command == "index":
+            # catch site __main__.py:1596 — standalone `index github` with
+            # no --db resolves the shared env target → reject
+            monkeypatch.setenv("TORTOISE_DB_URI", uri)
+            monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+            _delenv_falkordb(monkeypatch)
+            rc = m._cmd_index_github(mock.Mock(
+                url=str(tmp_path), branch="main", background=False, db=None))
+        elif command == "decide":
+            # catch site __main__.py:1995 — decide --db with an unsupported-
+            # scheme URI → _projection_for's hard-reject embeds the raw URI
+            from tortoise.sdk import TortoiseSDK
+            with mock.patch.object(TortoiseSDK, "__init__", return_value=None):
+                rc = m._cmd_decide(mock.Mock(
+                    input=None, options='{"opt:a": "Option A"}',
+                    criteria=None, findings=None, edges=None, db=uri))
+
+        captured = capsys.readouterr()
+        out = captured.out + captured.err
+        assert rc == 1
+        assert "Invalid DB" in out  # clean CLI error, actionable prefix
+        assert "Traceback" not in out
+        assert "sup3rsekrit" not in out  # credential never reaches output
+        assert "bolt://:***@host:7687/g" in out  # masked, host/path intact

@@ -71,6 +71,45 @@ def test_mcp_endpoint_rejects_unauthenticated(page: Page) -> None:
 # reveal_api_key RPC → success state with harness tabs + artifacts.
 
 
+def test_welcome_callback_session_in_url_reaches_success(page: Page) -> None:
+    """Email-confirmation / OAuth callback simulation (#527): the session
+    arrives via the URL fragment (implicit flow) and supabase-js parses it
+    asynchronously (GET /auth/v1/user round-trip). The page must WAIT for the
+    session (defensive waitForSession) and reach the success state — it must
+    NOT bounce to 'No active session' while the parse is in flight."""
+    user_id = _fake_user_id()
+
+    def handle(route):
+        url = route.request.url
+        method = route.request.method
+        if "auth/v1/user" in url and method == "GET":
+            route.fulfill(status=200, content_type="application/json", body=json.dumps({
+                "id": user_id, "aud": "authenticated", "role": "authenticated",
+                "email": "e2e@premise-labs.dev",
+                "app_metadata": {"provider": "email"},
+                "user_metadata": {"email": "e2e@premise-labs.dev"},
+            }))
+            return
+        if "team_memberships" in url and method == "GET":
+            route.fulfill(status=200, content_type="application/json", body=json.dumps({
+                "team_id": f"team_{user_id[:8]}", "team_name": "Test Team",
+                "graph_name": f"team_{user_id[:8]}", "status": "active",
+            }))
+            return
+        if "rpc/reveal_api_key" in url and method == "POST":
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps("tt_e2e_mock_api_key_1234567890abcdef"))
+            return
+        route.continue_()
+
+    page.route("**/*", handle)
+    # Implicit-flow callback: session params in the URL fragment.
+    page.goto(WELCOME_URL + "#access_token=fake-at&refresh_token=fake-rt&expires_in=3600&token_type=bearer",
+              wait_until="domcontentloaded", timeout=30_000)
+    expect(page.locator("#success")).not_to_be_hidden(timeout=15_000)
+    expect(page.locator("#api-key")).to_contain_text("tt_", timeout=15_000)
+
+
 def _fake_user_id() -> str:
     return str(uuid.uuid4())
 
