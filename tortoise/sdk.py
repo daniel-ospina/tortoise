@@ -4332,6 +4332,90 @@ class TortoiseSDK:
                                   llm_model=llm_model,
                                   progress_file=progress_file)
 
+    def session_index_health(self, directory: str | None = None) -> dict:
+        """Compare session .md files against indexed AgentSession Events.
+
+        #280 item 2 — the ``tortoise doctor`` health surface. Scans the
+        canonical corpus (``~/.tortoise/docs/conversations/`` by default,
+        ``TORTOISE_SESSION_CORPUS`` override) and matches each file to its
+        expected Event by session_id + file_hash.
+
+        Returns ``{directory, file_count, indexed_events, matched, unindexed,
+        stale, up_to_date}`` — ``stale`` = Event exists but hash differs
+        (re-index needed); ``unindexed`` = no Event at all.
+        """
+        from pathlib import Path
+        from .session_indexer import (
+            compute_file_hash, extract_session_id, session_corpus_dir,
+        )
+
+        dir_path = Path(directory or session_corpus_dir())
+        if not dir_path.is_dir():
+            return {"directory": str(dir_path), "file_count": 0,
+                    "indexed_events": 0, "matched": 0,
+                    "unindexed": [], "stale": [], "up_to_date": []}
+
+        proj = self._get_proj()
+        rows = proj.g.query(
+            "MATCH (e:Event {eventKind:'AgentSession'}) "
+            "RETURN e.eventId, e.file_hash"
+        ).result_set
+        by_event = {r[0]: r[1] for r in rows}
+
+        files = sorted(dir_path.rglob("*.md"))
+        unindexed: list[str] = []
+        stale: list[str] = []
+        up_to_date: list[str] = []
+        for f in files:
+            session_id = extract_session_id(str(f))
+            event_id = f"session_{session_id}"
+            file_hash = compute_file_hash(str(f))
+            existing = by_event.get(event_id)
+            if existing is None:
+                unindexed.append(str(f))
+            elif existing == file_hash:
+                up_to_date.append(str(f))
+            else:
+                stale.append(str(f))
+        return {"directory": str(dir_path),
+                "file_count": len(files),
+                "indexed_events": len(by_event),
+                "matched": len(up_to_date),
+                "unindexed": unindexed,
+                "stale": stale,
+                "up_to_date": up_to_date}
+
+    def reconcile_sessions(self, directory: str | None = None,
+                           extract_metadata: bool = False,
+                           llm_model: str | None = "gpt-5-mini") -> dict:
+        """Reconciliation sweep (#280 item 3) — scan for unindexed session
+        files and re-index them.
+
+        Scan-then-replay: ``session_index_health()`` computes the delta
+        (unindexed + hash-stale files), then ``ingest_corpus()`` replays the
+        directory — its dedup skips everything up-to-date and the per-session
+        flock (#280 item 1) serializes against concurrent hook writers. No
+        cron infra needed: the sweep triggers from the same hook/CLI surface
+        (align decision) — run it manually via ``tortoise index sessions`` or
+        from session-end.sh.
+
+        ``extract_metadata`` defaults to False so sweeps use the cheap
+        keyword fallback — never burn LLM tokens on bulk retry.
+        """
+        from pathlib import Path
+        from .session_indexer import session_corpus_dir
+
+        directory = str(Path(directory or session_corpus_dir()).resolve())
+        health = self.session_index_health(directory)
+        result: dict = {}
+        if health["unindexed"] or health["stale"]:
+            result = self.ingest_corpus(
+                directory, eventKind="AgentSession",
+                extract_metadata=extract_metadata, llm_model=llm_model,
+            )
+        return {**health, "reindex": result}
+
+
     def _connect_issue_objects(self, event_id: str, metadata: dict) -> int:
         """Create INSTANTIATES edges from an AgentSession Event to issue/PR Objects."""
         proj = self._get_proj()

@@ -91,6 +91,19 @@ sys.path.insert(0, '$TORTOISE_MODULE')
 from tortoise.__main__ import main
 raise SystemExit(main(['session', 'capture', '--file', '$TMP']))
 " 2>/dev/null || exit 0
+
+  # #280 item 3: reconciliation sweep — periodically scan the local corpus
+  # (~/.tortoise/docs/conversations/) for unindexed/stale session files and
+  # re-index them. Backgrounded + ALWAYS exits 0 (never block session close);
+  # the per-session flock serializes against this hook's own capture and any
+  # manual CLI run. No cron infra in-tree — the session-end hook is the
+  # periodic surface (align decision).
+  nohup "$PYTHON_BIN" -c "
+import sys
+sys.path.insert(0, '$TORTOISE_MODULE')
+from tortoise.__main__ import main
+raise SystemExit(main(['index', 'sessions']))
+" >/dev/null 2>&1 &
 else
   tortoise session capture --file "$TMP" 2>/dev/null || exit 0
 fi

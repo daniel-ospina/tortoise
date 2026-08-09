@@ -1621,8 +1621,14 @@ def _cmd_doctor(args):
 
     # 3. Graph health
     try:
+        # Resolve the same target init/index/list-kinds use (env URI > legacy
+        # FALKORDB_* trio > embedded path) so the session-indexing delta
+        # below is measured against the SAME graph `tortoise index sessions`
+        # would fix (#280 P2 review).
         from tortoise.sdk import TortoiseSDK
-        sdk = TortoiseSDK(db_path=args.path)
+        target = _resolve_db_target(getattr(args, "path", None))
+        sdk = TortoiseSDK()
+        sdk._proj = _projection_for(target)
         status = sdk.status()
         points = status.get("counts", {}).get("Point", 0)
         total = status.get("total_entities", 0)
@@ -1633,7 +1639,33 @@ def _cmd_doctor(args):
     except Exception as e:
         results.append(("Graph: health", "❌", str(e)[:60]))
 
-    # 4. MCP server
+    # 4. Session indexing health (#280 item 2): corpus .md count vs indexed
+    # AgentSession Events. Reuses the SDK instance from check 3 so both
+    # checks observe the same DB target.
+    try:
+        _sdk = locals().get("sdk")
+        if _sdk is None:
+            raise RuntimeError("graph unreachable (check 3 failed)")
+        health = _sdk.session_index_health()
+        fc = health["file_count"]
+        if fc == 0:
+            results.append(("Session indexing", "⚠️",
+                            "corpus empty — nothing indexed (expected for new setups)"))
+        else:
+            delta = len(health["unindexed"]) + len(health["stale"])
+            if delta == 0:
+                results.append(("Session indexing", "✅",
+                                f"{fc} corpus files all indexed "
+                                f"({health['indexed_events']} AgentSession Events total)"))
+            else:
+                results.append(("Session indexing", "❌",
+                                f"{fc} files vs {health['indexed_events']} Events — {delta} unindexed/stale "
+                                f"(run `tortoise index sessions`)"))
+    except Exception as e:
+        results.append(("Session indexing", "⚠️",
+                        f"check unavailable: {str(e)[:60]}"))
+
+    # 5. MCP server
     mcp_running = False
     try:
         import subprocess
@@ -1649,7 +1681,7 @@ def _cmd_doctor(args):
     else:
         results.append(("MCP server", "⚠️", "not running — tortoise serve"))
 
-    # 5. Harness detection
+    # 6. Harness detection
     home = Path.home()
     detections: list[str] = []
     if (home / ".pi" / "agent" / "extensions" / "tortoise-context").exists():
@@ -1746,6 +1778,58 @@ def _cmd_list_sources(args) -> int:
         if sdk._proj:
             sdk._proj.close()
     return 0
+
+
+def _cmd_index_sessions(args) -> int:
+    """Reconciliation sweep — index unindexed/stale session files (#280 item 3).
+
+    tortoise index sessions [--dir DIR] [--db URI] [--metadata]
+
+    Scan-then-replay: reports the corpus-vs-graph delta, re-indexes
+    missing/hash-stale files via the SDK (dedup + per-session flock), and
+    prints the report. The sweep is the "periodic scan + retry" surface —
+    trigger it manually, from cron, or from session-end.sh (align decision:
+    no cron infra in-tree).
+    """
+    import sys as _sys
+
+    from tortoise.sdk import TortoiseSDK
+
+    # #715 P2 conf 75: resolve the same target init/index use (env URI >
+    # FALKORDB_* > embedded path).
+    try:
+        target = _resolve_db_target(args.db)
+    except ValueError as e:
+        print(f"  ❌ Invalid DB target: {e}", file=_sys.stderr)
+        return 1
+    sdk = TortoiseSDK()
+    sdk._proj = _projection_for(target)
+    try:
+        report = sdk.reconcile_sessions(directory=args.dir,
+                                        extract_metadata=args.metadata)
+    finally:
+        if sdk._proj:
+            sdk._proj.close()
+
+    print(f"Session corpus: {report['directory']}")
+    print(f"  .md files:          {report['file_count']}")
+    print(f"  AgentSession Events: {report['indexed_events']}")
+    print(f"  up-to-date:         {report['matched']}")
+    print(f"  unindexed:          {len(report['unindexed'])}")
+    print(f"  stale (hash drift): {len(report['stale'])}")
+    for f in report["unindexed"]:
+        print(f"    - {f}")
+    for f in report["stale"]:
+        print(f"    ~ {f}")
+    if report.get("reindex"):
+        r = report["reindex"]
+        print(f"Re-index: {r.get('ingested', 0)} ingested, "
+              f"{r.get('updated', 0)} updated, "
+              f"{r.get('skipped', 0)} skipped, "
+              f"{r.get('failed', 0)} failed")
+    else:
+        print("Re-index: nothing to do (corpus fully indexed)")
+    return 1 if (report.get("reindex") or {}).get("failed") else 0
 
 
 def _cmd_decide(args) -> int:
@@ -2009,6 +2093,14 @@ def main(argv: list[str] | None = None) -> int:
                          "(default: TORTOISE_DB_URI / FALKORDB_* / embedded path)")
     ig.add_argument("--branch", default="main", help="Git branch to index")
     ig.add_argument("--background", action="store_true", help="Run in background")
+    # tortoise index sessions — reconciliation sweep (#280 item 3)
+    isess = idx_sp.add_parser("sessions", help="Reconciliation sweep: index unindexed/stale session files")
+    isess.add_argument("--dir", default=None,
+                       help="Session corpus directory (default: ~/.tortoise/docs/conversations)")
+    isess.add_argument("--db", default=None,
+                       help="DB target override (default: TORTOISE_DB_URI / FALKORDB_* / embedded path)")
+    isess.add_argument("--metadata", action="store_true",
+                       help="Run LLM metadata extraction (default: keyword-only — sweep never burns LLM tokens)")
     # tortoise create-point <content> --kind <kind>
     cp = sp.add_parser("create-point", help="Create a Point via Tortoise Cloud API")
     cp.add_argument("content", help="Point content (text)")
@@ -2123,6 +2215,8 @@ def main(argv: list[str] | None = None) -> int:
     elif args.cmd == "index":
         if args.index_cmd == "github":
             return _cmd_index_github(args)
+        elif args.index_cmd == "sessions":
+            return _cmd_index_sessions(args)
         idx.print_help()
         return 1
     elif args.cmd == "list-kinds":

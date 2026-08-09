@@ -75,8 +75,7 @@ def _build_idf(corpus_paths: list[str] | None = None, force: bool = False) -> di
     from pathlib import Path
     
     if corpus_paths is None:
-        docs_dir = Path.home() / '.tortoise' / 'docs' / 'conversations'
-        corpus_paths = [str(p) for p in docs_dir.glob('*.md')]
+        corpus_paths = [str(p) for p in session_corpus_dir().glob("*.md")]
     
     df = {}  # document frequency: term → how many docs contain it
     doc_count = 0
@@ -416,11 +415,30 @@ def compute_session_embedding(name: str, summary: str = "",
 
 # ── File utilities ────────────────────────────────────────────────
 
+def session_corpus_dir() -> Path:
+    """Canonical session corpus directory (local indexer path).
+
+    Default: ``~/.tortoise/docs/conversations/`` — the canonical store for
+    the local indexer path (align decision, #280 items 2-3). Honors
+    ``TORTOISE_SESSION_CORPUS`` for non-home setups / tests.
+    """
+    env = os.environ.get("TORTOISE_SESSION_CORPUS", "")
+    if env:
+        return Path(env).expanduser()
+    return Path.home() / ".tortoise" / "docs" / "conversations"
+
+
 def compute_file_hash(file_path: str) -> str | None:
-    """SHA256 hash of file contents. Returns None on error."""
+    """SHA256 of file contents — text-mode (universal newlines) normalized.
+
+    MUST match ``ingest_corpus``'s file_hash derivation exactly (both hash
+    ``read_text(encoding="utf-8").encode()``): a raw-bytes read would diverge
+    on CRLF files, permanently classifying them as hash-stale in the health
+    check / reconciliation sweep (non-convergent). Returns None on error.
+    """
     try:
-        with open(file_path, "rb") as f:
-            return hashlib.sha256(f.read()).hexdigest()
+        with open(file_path, encoding="utf-8") as f:
+            return hashlib.sha256(f.read().encode()).hexdigest()
     except Exception:
         return None
 
