@@ -696,12 +696,8 @@ async def get_current_team(request: Request) -> dict:
         from tortoise.auth import verify_api_key
         team_id = key_id = None
         created_by = None
-        key_result = sdk._get_registry().query(
-            "MATCH (k:APIKey) WHERE k.revoked_at IS NULL "
-            "AND k.key_prefix = $prefix "
-            "RETURN k.team_id, k.id, k.key_hash, k.created_by",
-            params={"prefix": key_prefix},
-        ).result_set
+        # key_result already holds the prefix-filtered (+ expiry-filtered, #742)
+        # candidate keys from the lookup above — verify each against the token.
         for k_team_id, k_id, stored_hash, k_created_by in key_result:
             if verify_api_key(token, stored_hash):
                 team_id, key_id = k_team_id, k_id
