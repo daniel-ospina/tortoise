@@ -68,10 +68,18 @@ class SessionContinuity:
 if __name__ == "__main__":
     # Demo — requires TORTOISE_DB_URI or pass db_path explicitly
     import os, sys
-    from tortoise.config import resolve_db_path
-    db_path = resolve_db_path()  # canonical path; respects TORTOISE_DB_PATH
-    print(f"Using embedded DB at {db_path} (set TORTOISE_DB_PATH or TORTOISE_DB_URI docker:// to override)")
-    sc = SessionContinuity(db_path=db_path)
+    from tortoise.config import resolve_db_path, is_db_uri
+    _uri = os.environ.get("TORTOISE_DB_URI", "")
+    if is_db_uri(_uri):
+        # #715 P2 conf 75: a supported URI must route through the SDK's URI
+        # mode (from_uri) — resolve_db_path() would silently fall back to the
+        # embedded default while the URI points elsewhere (split graph).
+        print("Using DB URI (TORTOISE_DB_URI set)")
+        sc = SessionContinuity(db_path=None)
+    else:
+        db_path = resolve_db_path()  # canonical path; respects TORTOISE_DB_PATH
+        print(f"Using embedded DB at {db_path} (set TORTOISE_DB_PATH or TORTOISE_DB_URI to override)")
+        sc = SessionContinuity(db_path=db_path)
     session_id = sc.start("Researching React auth libraries")
     
     # Simulate findings during session

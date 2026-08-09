@@ -11,6 +11,7 @@ from tortoise.config import (
     DEFAULT_DB_PATH,
     resolve_db_path,
     is_docker_uri,
+    is_db_uri,
 )
 
 
@@ -62,6 +63,27 @@ def test_docker_uri_never_resolved_to_file(monkeypatch):
     monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pass@host:6379/tortoise")
     # resolve_db_path falls through to default (does not treat docker:// as a path)
     assert resolve_db_path() == DEFAULT_DB_PATH
+
+
+def test_redis_uris_never_resolved_to_file(monkeypatch):
+    """#715 P2 conf 65: redis:// and rediss:// TORTOISE_DB_URI must also never
+    be resolved to a file path (previously only docker:// was recognized, so
+    rediss:// was treated as a path and rejected as 'Relative DB path')."""
+    for uri in ("redis://:pw@host:6379/tortoise", "rediss://:pw@host:6379/tortoise"):
+        monkeypatch.setenv("TORTOISE_DB_URI", uri)
+        assert resolve_db_path() == DEFAULT_DB_PATH
+
+
+def test_is_db_uri():
+    """#715: is_db_uri recognizes every documented TORTOISE_DB_URI scheme and
+    nothing else — docker://, redis://, rediss:// are URIs; paths are not."""
+    assert is_db_uri("docker://:pass@host:6379/tortoise") is True
+    assert is_db_uri("redis://:pass@host:6379/tortoise") is True
+    assert is_db_uri("rediss://:pass@host:6379/tortoise") is True
+    assert is_db_uri("/file.db") is False
+    assert is_db_uri("tortoise.db") is False
+    assert is_db_uri(None) is False
+    assert is_db_uri("") is False
 
 
 def test_invalid_db_path_env_falls_through_to_default(monkeypatch, caplog):
@@ -135,6 +157,23 @@ def test_resolve_db_path_explicit_relative_rejected():
         resolve_db_path("tortoise.db")
     assert "Relative" in str(exc.value)
     assert exc.value.args[0] == RELATIVE_PATH_ERROR.format(path="tortoise.db")
+
+
+def test_resolve_db_path_explicit_uri_rejected():
+    """#715 P2 conf 75: a supported URI passed as the explicit path must
+    raise a clear error (route via FalkorProjection.from_uri), never be
+    mangled into a "path" that silently misses the real target."""
+    from tortoise.config import RELATIVE_PATH_ERROR
+    for uri in ("docker://:pw@host:6379/tortoise",
+                "redis://:pw@host:6379/tortoise",
+                "rediss://:pw@host:6379/tortoise"):
+        with pytest.raises(ValueError, match="from_uri"):
+            resolve_db_path(uri)
+        # the scheme in the message must not leak the password
+        try:
+            resolve_db_path(uri)
+        except ValueError as exc:
+            assert "pw@" not in str(exc)
 
 
 def test_resolve_db_path_explicit_absolute_accepted():
