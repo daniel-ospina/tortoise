@@ -1,7 +1,11 @@
-/* Tortoise consent manager — issue #658.
+/* Tortoise consent manager — issues #658 / #736.
  *
  * Single consent state gating PostHog (deployed on the tortoise funnel
- * pages) and, when activated later, Meta Pixel / Google Analytics.
+ * pages) and the Google Tag Manager container (GTM-WQR34GSC — the single
+ * tag container for GA4 and, when their tags are added, X / LinkedIn).
+ * GTM loads ONLY on "granted"; on decline/undecided it never loads, so no
+ * ad/analytics tags can fire. The Meta Pixel loader is a dormant stub
+ * (placeholder ID, fail-safe) until a real pixel ID exists.
  *
  * Fail-safe: with no real PostHog project key configured this module does
  * NOTHING — no network calls, no banner, no localStorage writes.
@@ -43,7 +47,7 @@
     }
   }
 
-  // Public getter for future Meta Pixel / GA4 loaders — they must check
+  // Public getter for the GTM / Meta Pixel loaders — they must check
   // `window.consentState() === "granted"` before loading.
   window.consentState = function () {
     return readConsent();
@@ -74,7 +78,8 @@
       window.posthog.opt_in_capturing();
     }
     hideBanner();
-    // Consent granted — activate the consent-gated GA4/Meta loaders too.
+    // Consent granted — activate the consent-gated GTM container + Meta
+    // loader too (GTM carries GA4; X/LinkedIn tags when they are added).
     loadConsentedAnalytics();
   }
 
@@ -204,32 +209,37 @@
     });
   }
 
-  // ── Consent-gated GA4 + Meta Pixel loaders (placeholder IDs, fail-safe) ─
-  // Create the GA4 property (Google Analytics) + Meta Pixel (Business) →
-  // paste the IDs below → deploy. Until then these loaders are inert: both
-  // IDs are "__..." placeholders and the guards return early, so no network
-  // call is ever made. They load ONLY when consent is "granted" — never on
-  // Decline or undecided.
-  var GA_MEASUREMENT_ID = "__GA4_MEASUREMENT_ID__";
-  var META_PIXEL_ID = "__META_PIXEL_ID__";
-  var ga4Loaded = false;
+  // ── Consent-gated Google Tag Manager loader + Meta Pixel stub ───────────
+  // GTM is the SINGLE tag container (owner decision, #736): GA4 and, when
+  // their tags are added, X (Twitter) + LinkedIn all fire from container
+  // GTM-WQR34GSC. The container loads ONLY when consent is "granted" —
+  // never on Decline or undecided — so if GTM never loads, none of those
+  // tags can fire. The container ID is public (it appears in page source).
+  //
+  // GA4 is now delivered VIA GTM — the former direct gtag loader
+  // (GA_MEASUREMENT_ID "__GA4_MEASUREMENT_ID__") was removed at #736; the
+  // GA4 config tag lives in container GTM-WQR34GSC (Google tag id
+  // G-QP6D2BGC2B, stream "Tortoise landing").
+  var GTM_CONTAINER_ID = "GTM-WQR34GSC";
+  var META_PIXEL_ID = "__META_PIXEL_ID__"; // dormant stub (fail-safe)
+  var gtmLoaded = false;
   var metaPixelLoaded = false;
 
-  function loadGA4() {
-    if (!GA_MEASUREMENT_ID || GA_MEASUREMENT_ID.indexOf("__") === 0 || ga4Loaded) {
+  // Standard GTM loader (official snippet logic — dataLayer initialized
+  // BEFORE the gtm.js request). Fail-safe: placeholder ID stays inert.
+  function loadGTM() {
+    if (!GTM_CONTAINER_ID || GTM_CONTAINER_ID.indexOf("__") === 0 || gtmLoaded) {
       return; // fail-safe: placeholder ID or already loaded — stay inert
     }
-    ga4Loaded = true;
+    gtmLoaded = true;
     window.dataLayer = window.dataLayer || [];
-    window.gtag = window.gtag || function () {
-      window.dataLayer.push(arguments);
-    };
-    window.dataLayer.push({ "gtm.start": new Date().getTime(), event: "gtm.js" });
-    window.gtag("js", new Date());
-    window.gtag("config", GA_MEASUREMENT_ID, { anonymize_ip: true });
+    window.dataLayer.push({
+      "gtm.start": new Date().getTime(),
+      event: "gtm.js",
+    });
     var s = document.createElement("script");
     s.async = true;
-    s.src = "https://www.googletagmanager.com/gtag/js?id=" + GA_MEASUREMENT_ID;
+    s.src = "https://www.googletagmanager.com/gtm.js?id=" + GTM_CONTAINER_ID;
     (document.head || document.documentElement).appendChild(s);
   }
 
@@ -265,7 +275,7 @@
     if (window.consentState() !== "granted") {
       return; // never load on Decline / undecided
     }
-    loadGA4();
+    loadGTM();
     loadMetaPixel();
   }
 

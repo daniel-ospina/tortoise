@@ -52,7 +52,7 @@ The operator is Mexico-based (not incorporated; Delaware governing law kept). LF
 5. eligibility — "you must be at least 18 years old" (§2)
 6. Art. 27 — "We are not currently established in the EU/EEA. If we become subject to GDPR Art. 27, we will designate and disclose an EU representative here." (§1)
 7. consent banner — "you can give or withdraw consent at any time via the consent banner" (§3, §4)
-8. deployed PostHog — "PostHog is a data processor; data is stored in the United States" (§3, §12) — the former repo-state sentence ("no analytics tools are currently deployed") is REMOVED: the tree now ships consent.js + the PostHog loader (#658)
+8. deployed PostHog — "PostHog is a data processor; data is stored in the United States" (§3, §12) — the former repo-state sentence ("no analytics tools are currently deployed") is REMOVED: the tree now ships consent.js + the PostHog loader (#658). GA4 is ALSO deployed — delivered via the Google Tag Manager container (GTM-WQR34GSC, owner decision #736), consent-gated at the GTM load.
 9. purposes (passive) — "your email address and account information are used to deliver the service, respond to requests, and manage billing; usage data is used to improve the product" (§4)
 10. expectation — "we expect users not to place sensitive data in the service" (§2)
 11. Art. 12(6) — "we may request identity verification before acting on any request" (§16)
@@ -62,9 +62,9 @@ The operator is Mexico-based (not incorporated; Delaware governing law kept). LF
 
 - Processors, data categories, retention, and transfer statements use **passive/impersonal** phrasing ("data is processed by Supabase for authentication", "account data includes your email address", "data is retained only for as long as needed") — they never match the guard regex `we (use|collect|share|sell|process|retain|store|transfer)\b`.
 - The **only** present-tense guard match in this document is the pinned canonical pair sentence (inventory #3). All other present-tense claims are from the approved pinned set.
-- Analytics disclosures are **per-tool**: PostHog is deployed (processor, US Cloud) and captures data only with consent via the banner; Meta Pixel and Google Analytics are conditional/future ("not deployed yet and may be activated with your consent; consent is managed via the consent banner"). No present-tense claims for the undeployed tools.
+- Analytics disclosures are **per-tool**: PostHog and Google Analytics (GA4) are deployed (GA4 via the consent-gated Google Tag Manager container, GTM-WQR34GSC) and capture data only with consent via the banner; Meta Pixel, X (Twitter), and LinkedIn are conditional/future ("not deployed yet and may be activated with your consent; consent is managed via the consent banner"). No present-tense claims for the undeployed tools.
 - The policy body never uses the combined "no sale or sharing" negative-phrase construction; the canonical co-occurrence pair (inventory #2 + #3) is used instead.
-- **Re-check steps (process, not body text):** when the Meta Pixel activates, re-verify the §5 sharing disclosure + joint-controller wording still match reality; re-verify the §3/§12 PostHog sentences if the US Cloud residency ever changes. No dedicated "Do Not Sell or Share My Personal Information" link ships this release (deferred to #658 tooling — no dead link ships).
+- **Re-check steps (process, not body text):** when the Meta Pixel, X, or LinkedIn tags activate, re-verify the §5 sharing disclosure + joint-controller wording still match reality; re-verify the §3/§12 PostHog sentences if the US Cloud residency ever changes; re-verify the GA4-via-GTM sentence if the container is ever removed or the measurement ID changes. No dedicated "Do Not Sell or Share My Personal Information" link ships this release (deferred to #658 tooling — no dead link ships).
 
 ---
 
@@ -103,7 +103,7 @@ The service processes the following categories of personal data:
 
 - **Account data.** Account data includes your email address, authentication credentials, and account identifiers. Authentication is managed through an identity and database provider (Supabase), and sign-in may be completed through the GitHub or Google OAuth identity providers. This category is required for account creation, authentication, and billing.
 - **Usage data.** Usage data includes information about how the service is used — for example, API requests made, features used, and performance signals. Usage data is not tied to your identity beyond your account.
-- **Analytics data.** Analytics data includes behavioral and technical signals that would be processed by analytics tools (Meta Pixel, Google Analytics (GA4), and PostHog) **when those tools are activated** — see §3.
+- **Analytics data.** Analytics data includes behavioral and technical signals processed by the analytics tools (PostHog and Google Analytics (GA4)) when you give consent via the consent banner, and by planned tools (Meta Pixel, X (Twitter), and LinkedIn) when those tools are activated — see §3.
 
 **Sensitive data — expectation.** "we expect users not to place sensitive data in the service" — do not place health data, biometric data, government identifiers, or other sensitive personal data in the service. See §13.
 
@@ -111,18 +111,20 @@ The service processes the following categories of personal data:
 
 ## 3. Analytics and cookies (outline ③)
 
-**Deployed analytics tool.** The following analytics tool is deployed on the tortoise funnel pages (product, signup, sign-in, and welcome pages), and it captures data only after you give consent via the consent banner:
+**Deployed analytics tools.** The following analytics tools are deployed on the tortoise funnel pages (product, signup, sign-in, and welcome pages), and they capture data only after you give consent via the consent banner:
 
 - **PostHog** — product analytics (PostHog Inc.). PostHog is a data processor; data is stored in the United States.
+- **Google Analytics (GA4)** — audience and product analytics (Google LLC), delivered through Google Tag Manager. GA4 loads only after you give consent via the consent banner.
 
 **Planned tools, disclosed now.** The following analytics tools are not deployed yet and may be activated with your consent; consent is managed via the consent banner:
 
 - **Meta Pixel** — advertising measurement and conversion tracking (Meta Platforms, Inc.).
-- **Google Analytics (GA4)** — audience and product analytics (Google LLC).
+- **X (Twitter)** — advertising and conversion tracking (X Corp.).
+- **LinkedIn** — advertising and conversion tracking (LinkedIn Corporation).
 
 Cookies and similar technologies are used by these tools when activated. You can give or withdraw consent at any time via the consent banner.
 
-Until consent is given, PostHog captures no data, the planned tools are not loaded, and no data is sent to them.
+Until consent is given, PostHog captures no data, the planned tools are not loaded, and no data is sent to them. Google Tag Manager itself is loaded only after consent, so GA4 and any other tags it contains cannot fire before consent is given.
 
 ## 4. Purposes of processing and legal bases (outline ④)
 
@@ -208,7 +210,11 @@ Personal data is shared only with the processors and providers listed below, and
 - **GitHub** — sign-in may be completed through the GitHub OAuth identity provider; when you choose that option, identity data is processed by GitHub. Used today.
 - **Google** — sign-in may be completed through the Google OAuth identity provider; when you choose that option, identity data is processed by Google. Used today.
 - **PostHog** — analytics data is processed by PostHog when you give consent via the consent banner (§3). Used today.
-- **Meta, Google** — if the corresponding analytics tools are activated with consent, analytics data is processed by these providers (§3). Not deployed today.
+- **Google Tag Manager** — the consent-gated tag container that delivers GA4 and, when activated, the X and LinkedIn tags; it is loaded only after consent via the consent banner (§3). Used today.
+- **Google Analytics (GA4)** — analytics data is processed by Google when you give consent via the consent banner (§3). Used today, delivered via Google Tag Manager.
+- **X (Twitter)** — if the X advertising tag is activated with consent, data is processed by X Corp. (§3). Not deployed today.
+- **LinkedIn** — if the LinkedIn Insight Tag is activated with consent, data is processed by LinkedIn Corporation (§3). Not deployed today.
+- **Meta** — if the Meta Pixel is activated with consent, data is processed by Meta Platforms, Inc. (§3). Not deployed today.
 - **Stripe** — when paid plans become available, payment data is processed by Stripe for billing. Not deployed today.
 
 No other sharing of personal data occurs, except as required by law or with your consent.
