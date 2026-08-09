@@ -103,7 +103,10 @@ def _iter_registered_teams() -> list[dict]:
         rows = sdk._get_registry().query(
             "MATCH (t:Team) RETURN t.id, t.name"
         ).result_set
-        return [{"team_id": r[0], "name": r[1] if len(r) > 1 else None} for r in rows]
+        # P2 (Qwen): skip rows with falsy team_id — namespace=None would sweep
+        # the default/shared graph.
+        return [{"team_id": r[0], "name": r[1] if len(r) > 1 else None}
+                for r in rows if r and r[0]]
     except Exception:  # noqa: BLE001
         return []
 
@@ -223,7 +226,8 @@ async def _lifespan(app):
             _retention_task = asyncio.get_event_loop().create_task(_event_retention_loop())
             app.state._event_retention_task = _retention_task
         except Exception as exc:  # noqa: BLE001
-            _logger.warning("event retention loop not started: %s", exc)        yield
+            _logger.warning("event retention loop not started: %s", exc)
+        yield
 
 
 app = FastAPI(title="Tortoise Hosted API", version="0.1.0", lifespan=_lifespan)
@@ -986,7 +990,7 @@ async def events_poll(
     namespace — never client input.
     """
     sdk = _make_sdk(namespace=team["team_id"])
-    type_list = [t for t in (types or "").split(",") if t]
+    type_list = [t.strip() for t in (types or "").split(",") if t.strip()]
     try:
         result = sdk.events_poll(after=after, types=type_list or None, limit=limit)
     except ValueError as e:
