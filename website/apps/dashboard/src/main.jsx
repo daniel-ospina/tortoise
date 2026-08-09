@@ -118,13 +118,16 @@ function App() {
   React.useEffect(() => {
     const params = new URLSearchParams(window.location.search)
     const sessionId = params.get('session_id')
-    const cancelled = params.get('checkout_cancelled') === 'true'
+    const cancelled = params.get('checkout') === 'cancelled'
     if (sessionId) {
       let tries = 0
       const poll = setInterval(async () => {
         tries += 1
-        try { await jl() } catch { /* webhook may not have landed yet */ }
-        if ((team && ACTIVE_STATUSES.includes(team.subscription_status)) || tries >= 5) {
+        try {
+          const t = await refreshTeam()
+          if (t && ACTIVE_STATUSES.includes(t.subscription_status)) { tries = 5 }
+        } catch { /* webhook may not have landed yet */ }
+        if (tries >= 5) {
           clearInterval(poll)
           params.delete('session_id')
           window.history.replaceState({}, '', `${window.location.pathname}${params.toString() ? `?${params}` : ''}`)
@@ -134,7 +137,7 @@ function App() {
     }
     if (cancelled) {
       setCheckoutPending(false)
-      params.delete('checkout_cancelled')
+      params.delete('checkout')
       window.history.replaceState({}, '', `${window.location.pathname}${params.toString() ? `?${params}` : ''}`)
     }
   }, [team?.subscription_status])
@@ -175,6 +178,14 @@ function App() {
       }
     })()
   }, [])
+
+  async function refreshTeam() {
+    // P1 (code-review): extracted team refetch — the success-return poll loop
+    // used an undefined `jl` (dead code); this is the real refetch.
+    const t = await api('/v1/team')
+    setTeam(t)
+    return t
+  }
 
   async function completeLogin(key) {
     setError('')

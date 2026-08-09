@@ -451,11 +451,19 @@ def mirror_subscription(sdk, team_id: str, sub: dict, *,
 
     Returns {"tier", "interval", "status"} for audit/analytics.
     """
-    tier, interval = subscription_plan(sub)
+    status = sub.get("status") or "active"
+    # P0 (code-review): gate the tier on subscription status — Stripe keeps
+    # items[].price on canceled/unpaid/incomplete_expired subs, so an
+    # ungated mirror re-applies paid limits at every boot/reconcile. Terminal
+    # or unpaid statuses revert to free (matching the webhook semantics).
+    if status in ("canceled", "unpaid", "incomplete_expired", "incomplete"):
+        tier, interval = "free", "monthly"
+    else:
+        tier, interval = subscription_plan(sub)
     apply_limits(sdk, team_id, tier)
     params: dict = {
         "id": team_id,
-        "status": sub.get("status") or "active",
+        "status": status,
         "period_end": sub.get("current_period_end"),
         "cancel_at_period_end": bool(sub.get("cancel_at_period_end")),
     }
@@ -472,7 +480,7 @@ def mirror_subscription(sdk, team_id: str, sub: dict, *,
     sdk._get_registry().query(
         f"MATCH (t:Team {{id:$id}}) {set_fields}", params=params
     )
-    return {"tier": tier, "interval": interval, "status": sub.get("status") or "active"}
+    return {"tier": tier, "interval": interval, "status": status}
 
 
 def reconcile_team(sdk, team_id: str, force: bool = False) -> dict:
@@ -503,7 +511,7 @@ def reconcile_team(sdk, team_id: str, force: bool = False) -> dict:
     client = StripeClient()
     if sub_id:
         sub = client.get_subscription(sub_id)
-        summary = mirror_subscription(sdk, team_id, sub)
+        summary = mirror_subscription(sdk, team_id, sub)  # gates tier on status
         return {"team_id": team_id, "action": "mirror_subscription", **summary}
     subs = client.list_subscriptions(customer_id)
     for sub in subs:
