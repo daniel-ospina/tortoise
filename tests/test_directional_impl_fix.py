@@ -19,8 +19,11 @@ import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-# Isolated test graph — never the production graph
-os.environ["TORTOISE_DB_URI"] = "docker://:falkordb@localhost:6379/tortoise_test_dir_impl_fix"
+# Isolated test graph — never the production graph. Set inside the probe
+# and per-test via autouse fixture — NEVER at module level (#493: a
+# collection-time env set leaked docker:// into the whole suite, breaking
+# tests that read TORTOISE_DB_URI at call time, e.g. test_agent_signup).
+_TEST_URI = "docker://:falkordb@localhost:6379/tortoise_test_dir_impl_fix"
 
 from tortoise.sdk import TortoiseSDK
 from tortoise.ep import TortoiseEP
@@ -32,12 +35,25 @@ from tortoise.weights import compute_operator_weight
 FALKORDB_AVAILABLE = False
 try:
     from tortoise.sdk import TortoiseSDK as _ProbeSDK
+    _old_uri = os.environ.get("TORTOISE_DB_URI")
+    os.environ["TORTOISE_DB_URI"] = _TEST_URI
     _probe = _ProbeSDK()
     _probe._get_proj().g.query("RETURN 1")
     _probe.close()
     FALKORDB_AVAILABLE = True
 except Exception:
-    pass
+    FALKORDB_AVAILABLE = False
+finally:
+    if _old_uri is not None:
+        os.environ["TORTOISE_DB_URI"] = _old_uri
+    else:
+        os.environ.pop("TORTOISE_DB_URI", None)
+
+
+@pytest.fixture(autouse=True)
+def _set_test_uri(monkeypatch):
+    """Point SDK constructions at the isolated docker test graph per-test."""
+    monkeypatch.setenv("TORTOISE_DB_URI", _TEST_URI)
 
 pytestmark = pytest.mark.skipif(
     not FALKORDB_AVAILABLE, reason="Live FalkorDB (Docker) not available")
