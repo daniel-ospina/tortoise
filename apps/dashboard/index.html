@@ -4,35 +4,16 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Tortoise Dashboard</title>
-  <style>
-    :root {
-      --bg: #060b14;
-      --text: #cbd5e1;
-      --text-dim: #64748b;
-      --accent: #06b6d4;
-      --mono: 'SF Mono', 'Cascadia Code', monospace;
-    }
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      background: var(--bg);
-      color: var(--text);
-      font-family: var(--mono);
-      font-size: 14px;
-      display: flex; align-items: center; justify-content: center;
-      min-height: 100vh;
-    }
-    .placeholder {
-      text-align: center;
-      padding: 2rem;
-    }
-    .placeholder h1 { color: var(--accent); font-size: 1.5rem; margin-bottom: 1rem; }
-    .placeholder p { color: var(--text-dim); font-size: 0.85rem; }
-  </style>
+  <!--
+    Legacy placeholder — the real dashboard is the React/Vite SPA at
+    website/apps/dashboard/ (deployed to the tortoise-dashboard Cloudflare
+    Pages project via website/apps/dashboard/deploy.sh). This shell exists
+    only to redirect stale references; it is NOT deployed.
+  -->
+  <meta http-equiv="refresh" content="0; url=https://app.premiselabs.co">
+  <script>location.replace('https://app.premiselabs.co')</script>
 </head>
 <body>
-  <div class="placeholder">
-    <h1>Tortoise Dashboard</h1>
-    <p>Coming soon — team management, graph explorer, API keys.</p>
-  </div>
+  <p><a href="https://app.premiselabs.co">Tortoise Dashboard → app.premiselabs.co</a></p>
 </body>
 </html>

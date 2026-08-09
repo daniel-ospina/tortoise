@@ -41,8 +41,8 @@ fly certs create api.premiselabs.co
 ### Cloudflare Pages (Dashboard)
 ```bash
 # Create project in Cloudflare dashboard: "tortoise-dashboard"
-# Deploy placeholder:
-wrangler pages deploy apps/dashboard --project-name=tortoise-dashboard
+# Deploy the React/Vite SPA (source of truth):
+./website/apps/dashboard/deploy.sh   # npm run build + wrangler pages deploy dist
 # Custom domain: app.premiselabs.co → tortoise-dashboard.pages.dev
 ```
 
