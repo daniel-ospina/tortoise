@@ -159,6 +159,23 @@ def test_resolve_db_path_explicit_relative_rejected():
     assert exc.value.args[0] == RELATIVE_PATH_ERROR.format(path="tortoise.db")
 
 
+def test_resolve_db_path_explicit_uri_rejected():
+    """#715 P2 conf 75: a supported URI passed as the explicit path must
+    raise a clear error (route via FalkorProjection.from_uri), never be
+    mangled into a "path" that silently misses the real target."""
+    from tortoise.config import RELATIVE_PATH_ERROR
+    for uri in ("docker://:pw@host:6379/tortoise",
+                "redis://:pw@host:6379/tortoise",
+                "rediss://:pw@host:6379/tortoise"):
+        with pytest.raises(ValueError, match="from_uri"):
+            resolve_db_path(uri)
+        # the scheme in the message must not leak the password
+        try:
+            resolve_db_path(uri)
+        except ValueError as exc:
+            assert "pw@" not in str(exc)
+
+
 def test_resolve_db_path_explicit_absolute_accepted():
     """Explicit absolute args are still accepted (backward compat)."""
     import tempfile

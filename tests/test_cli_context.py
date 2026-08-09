@@ -379,3 +379,267 @@ class TestCliOnboardDbTarget:
         assert args[:3] == [sys.executable, "-m", "tortoise"]
         assert "--db" in args
         assert args[args.index("--db") + 1] == db_path
+
+
+class TestCliSecurityAndIndex:
+    """#715 P1/P2 fixes: extraction-pipeline error surfacing, password
+    hygiene in warnings/argv, blank FALKORDB_* guard, single-index onboard,
+    and URI routing parity for decide/list-kinds/list-sources."""
+
+    @staticmethod
+    def _fake_pipeline_module(monkeypatch):
+        """The real tortoise.extraction_pipeline does not exist (#713) — for
+        code paths AFTER the guarded import we need to fake it in sys.modules."""
+        import types
+        fake = types.ModuleType("tortoise.extraction_pipeline")
+
+        class ExtractionPipeline:
+            def __init__(self, *a, **k):
+                pass
+
+            def process_file(self, fp, api):
+                return {"points": 1, "operators": 0, "documentKind": "md"}
+
+        fake.ExtractionPipeline = ExtractionPipeline
+        monkeypatch.setitem(sys.modules, "tortoise.extraction_pipeline", fake)
+
+    # ── Fix 1 (P1): clear error when extraction pipeline is missing ──
+
+    def test_index_github_missing_pipeline_clear_error(self, monkeypatch, capsys):
+        """#715 P1 conf 95: with no tortoise.extraction_pipeline module,
+        `index github` exits rc 1 with the actionable issue #713 message —
+        never a raw ModuleNotFoundError traceback."""
+        import importlib
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module("tortoise.extraction_pipeline")  # real state
+
+        from tortoise import __main__ as m
+        rc = m._cmd_index_github(mock.Mock(
+            url="https://github.com/daniel-ospina/tortoise",
+            branch="main", background=False, db=None))
+
+        captured = capsys.readouterr()
+        out = captured.out + captured.err
+        assert rc == 1
+        assert "The extraction pipeline is not installed" in out
+        assert "missing module tortoise.extraction_pipeline" in out
+        assert "issue #713" in out
+        assert "Traceback" not in out
+
+    # ── Fix 2 (P2): FALKORDB_* warning masks the password ──
+
+    def test_falkordb_warning_masks_password(self, monkeypatch, capsys):
+        """#715 P2 conf 95: the legacy FALKORDB_* warning must print a masked
+        URI (docker://:***@host) — never the raw password."""
+        from tortoise.__main__ import _resolve_db_target
+        monkeypatch.setenv("FALKORDB_HOST", "db.internal")
+        monkeypatch.setenv("FALKORDB_PORT", "6380")
+        monkeypatch.setenv("FALKORDB_PASSWORD", "s3cret-hunter2")
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+
+        target = _resolve_db_target(None)
+
+        # the RETURNED URI keeps the real password (used to connect)…
+        assert target == "docker://:s3cret-hunter2@db.internal:6380/tortoise"
+        # …but the printed warning never leaks it.
+        out = capsys.readouterr().out
+        assert ":***@" in out
+        assert "s3cret-hunter2" not in out
+
+    # ── Fix 5 (P2): blank FALKORDB_* counts as unset ──
+
+    def test_falkordb_blank_values_treated_as_unset(self, monkeypatch):
+        """#715 P2 conf 68: FALKORDB_PORT='' (and friends) count as UNSET —
+        no int('') crash; a clean trio keeps the embedded default."""
+        from tortoise.__main__ import _resolve_db_target
+        monkeypatch.setenv("FALKORDB_HOST", "")
+        monkeypatch.setenv("FALKORDB_PORT", "")
+        monkeypatch.setenv("FALKORDB_PASSWORD", "")
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+
+        assert _resolve_db_target(None) == os.path.expanduser(
+            "~/.tortoise/tortoise.db")
+
+        # Mixed: host set, PORT blank → legacy honored with default port,
+        # no int('') ValueError.
+        monkeypatch.setenv("FALKORDB_HOST", "db.internal")
+        assert _resolve_db_target(None) == "docker://:@db.internal:16379/tortoise"
+
+    # ── Fix 3 (P2): password-bearing targets go via env, never argv ──
+
+    def test_init_spawn_uri_password_uses_env_not_argv(self, tmp_path, monkeypatch):
+        """#715 P2 conf 85: with a password-bearing TORTOISE_DB_URI, init's
+        background index spawn must NOT carry --db in argv (ps leak) — the
+        child gets TORTOISE_DB_URI via env instead."""
+        uri = "docker://:hunter2@localhost:16379/tortoise"
+        monkeypatch.setenv("TORTOISE_DB_URI", uri)
+        monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+        _delenv_falkordb(monkeypatch)
+        repo_root = tmp_path / "repo"
+        repo_root.mkdir()
+        (repo_root / "README.md").write_text("# readme", encoding="utf-8")
+
+        from tortoise import __main__ as m
+
+        with mock.patch("subprocess.run") as fake_run, \
+             mock.patch("subprocess.Popen") as fake_popen, \
+             mock.patch("tortoise.projection.FalkorProjection"), \
+             mock.patch("tortoise.sdk.TortoiseSDK") as fake_sdk:
+            fake_run.return_value.returncode = 0  # git repo detected
+            fake_run.return_value.stdout = str(repo_root)
+            fake_sdk.return_value.status.return_value = {"counts": {"Point": 1}}
+            rc = m._cmd_init(mock.Mock(path=None, cmd="init", yes=True,
+                                       api_key=None))
+
+        assert rc == 0
+        assert fake_popen.called
+        argv = fake_popen.call_args.args[0]
+        assert "--db" not in argv  # secret never in argv
+        env = fake_popen.call_args.kwargs.get("env") or {}
+        assert env.get("TORTOISE_DB_URI") == uri
+
+    # ── Fix 4 (P2): index github --background re-spawn carries the target ──
+
+    def test_index_github_background_respawn_carries_db(self, tmp_path, monkeypatch):
+        """#715 P2 conf 90: `index github --background` re-spawn must pass the
+        resolved DB target to the child (was omitted entirely → child could
+        index a different store)."""
+        from tortoise import __main__ as m
+        self._fake_pipeline_module(monkeypatch)
+        db_path = str(tmp_path / "idx.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        _delenv_falkordb(monkeypatch)
+
+        with mock.patch("subprocess.Popen") as fake_popen:
+            rc = m._cmd_index_github(mock.Mock(
+                url="https://github.com/daniel-ospina/tortoise",
+                branch="main", background=True, db=None))
+
+        assert rc == 0
+        assert fake_popen.called
+        argv = fake_popen.call_args.args[0]
+        assert "--db" in argv
+        assert argv[argv.index("--db") + 1] == db_path
+        assert fake_popen.call_args.kwargs.get("env") is None
+
+    def test_index_github_background_respawn_password_env(self, monkeypatch):
+        """#715 P2 conf 85+90: password-bearing URI → the background re-spawn
+        hands TORTOISE_DB_URI via env, never --db argv."""
+        from tortoise import __main__ as m
+        self._fake_pipeline_module(monkeypatch)
+        uri = "redis://:hunter2@db.example.com:6379/tortoise"
+        monkeypatch.setenv("TORTOISE_DB_URI", uri)
+        monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+        _delenv_falkordb(monkeypatch)
+
+        with mock.patch("subprocess.Popen") as fake_popen:
+            rc = m._cmd_index_github(mock.Mock(
+                url="https://github.com/daniel-ospina/tortoise",
+                branch="main", background=True, db=None))
+
+        assert rc == 0
+        assert fake_popen.called
+        argv = fake_popen.call_args.args[0]
+        assert "--db" not in argv
+        env = fake_popen.call_args.kwargs.get("env") or {}
+        assert env.get("TORTOISE_DB_URI") == uri
+
+    # ── Fix 7 (P2): onboard indexes exactly once ──
+
+    def test_onboard_indexes_once(self, tmp_path, monkeypatch):
+        """#715 P2 conf 70: onboard must index exactly ONCE (inline step 3) —
+        init is invoked with no_index=True so its background auto-index spawn
+        never fires (previously: double index of the same repo)."""
+        db_path = str(tmp_path / "onboard.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        _delenv_falkordb(monkeypatch)
+        repo_root = tmp_path / "repo"
+        repo_root.mkdir()
+        (repo_root / "README.md").write_text("# readme", encoding="utf-8")
+
+        from tortoise import __main__ as m
+        seen = {"init_args": None, "index_calls": 0}
+
+        def fake_init(a):
+            seen["init_args"] = a
+            return 0
+
+        with mock.patch.object(m, "_cmd_init", side_effect=fake_init), \
+             mock.patch.object(m, "_cmd_demo", return_value=0), \
+             mock.patch.object(m, "_cmd_doctor", return_value=0), \
+             mock.patch("subprocess.run") as fake_run, \
+             mock.patch.object(
+                 m, "_cmd_index_github",
+                 side_effect=lambda a: seen.__setitem__(
+                     "index_calls", seen["index_calls"] + 1) or 0):
+            fake_run.return_value.returncode = 0  # git repo detected
+            fake_run.return_value.stdout = str(repo_root)
+            rc = m._cmd_onboard(mock.Mock(path=None, cmd="onboard"))
+
+        assert rc == 0
+        assert getattr(seen["init_args"], "no_index", False) is True
+        assert seen["index_calls"] == 1
+
+    # ── Fix 8 (P2): decide/list-kinds/list-sources route the shared target ──
+
+    def test_list_kinds_routes_embedded_path(self, tmp_path, monkeypatch):
+        """#715 P2 conf 75: list-kinds must NOT hardcode docker://localhost —
+        a TORTOISE_DB_PATH target resolves to the embedded path."""
+        from tortoise import __main__ as m
+        from tortoise.sdk import TortoiseSDK
+        db_path = str(tmp_path / "kinds.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        _delenv_falkordb(monkeypatch)
+
+        with mock.patch.object(TortoiseSDK, "__init__", return_value=None), \
+             mock.patch.object(TortoiseSDK, "list_pointkinds", return_value=[]), \
+             mock.patch("tortoise.projection.FalkorProjection") as FP:
+            rc = m._cmd_list_kinds(mock.Mock(cmd="list-kinds"))
+
+        assert rc == 0
+        assert FP.from_uri.called is False  # never the localhost hardcode
+        assert FP.call_args.kwargs.get("path") == db_path
+
+    def test_list_sources_routes_embedded_path(self, tmp_path, monkeypatch):
+        """#715 P2 conf 75: list-sources routes the shared target too."""
+        from tortoise import __main__ as m
+        from tortoise.sdk import TortoiseSDK
+        db_path = str(tmp_path / "sources.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        _delenv_falkordb(monkeypatch)
+
+        with mock.patch.object(TortoiseSDK, "__init__", return_value=None), \
+             mock.patch.object(TortoiseSDK, "list_sources", return_value=[]), \
+             mock.patch("tortoise.projection.FalkorProjection") as FP:
+            rc = m._cmd_list_sources(mock.Mock(cmd="list-sources"))
+
+        assert rc == 0
+        assert FP.from_uri.called is False
+        assert FP.call_args.kwargs.get("path") == db_path
+
+    def test_decide_routes_uri_target(self, monkeypatch):
+        """#715 P2 conf 75: decide resolves --db or env through the shared
+        target resolution — a TORTOISE_DB_URI is routed via from_uri, never
+        the hardcoded docker://localhost default."""
+        from tortoise import __main__ as m
+        uri = "redis://:pw@db.example.com:6379/tortoise"
+        monkeypatch.setenv("TORTOISE_DB_URI", uri)
+        monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+        _delenv_falkordb(monkeypatch)
+
+        seen: dict = {}
+        with mock.patch.object(m, "_projection_for",
+                               side_effect=lambda t: seen.update(
+                                   target=t) or mock.Mock()):
+            rc = m._cmd_decide(mock.Mock(
+                input=None, options='{"opt:a": "Option A"}',
+                criteria=None, findings=None, edges=None, db=None))
+
+        assert rc == 0
+        assert seen.get("target") == uri

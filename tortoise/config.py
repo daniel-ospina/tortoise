@@ -67,6 +67,16 @@ def resolve_db_path(explicit: str | None = None) -> str:
     default on empty/whitespace env values.
     """
     if explicit:
+        # #715 P2 conf 75: a supported URI is NOT a path — resolving it as
+        # one mangles the string into a garbage "path" and the caller
+        # silently misses the real target. Route URIs through
+        # FalkorProjection.from_uri() instead (this pre-check keeps the
+        # failure loud, never silent).
+        if is_db_uri(explicit):
+            raise ValueError(
+                f"{explicit.split('://', 1)[0]}:// DB URI passed to "
+                f"resolve_db_path — route it through "
+                f"FalkorProjection.from_uri() instead")
         return _abs(explicit)
 
     # 2. TORTOISE_DB_PATH env -> file path
