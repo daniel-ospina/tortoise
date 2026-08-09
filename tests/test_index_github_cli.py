@@ -83,20 +83,7 @@ def test_index_github_local_extracts_points(markdown_repo, embedded_db_path, mon
     fake_home = tempfile.mkdtemp(prefix="tortoise-test-home-")
     monkeypatch.setattr(Path, "home", lambda: Path(fake_home))
 
-    # Prevent live FalkorDB connection — force fallback to embedded path DB
-    monkeypatch.setenv("FALKORDB_HOST", "127.0.0.1")
-    monkeypatch.setenv("FALKORDB_PORT", "19999")
-
-    # Also mock subprocess.run so git clone doesn't happen for local paths
-    import subprocess
-    orig_run = subprocess.run
-
-    def _mock_run(cmd, **kwargs):
-        if isinstance(cmd, list) and "clone" in str(cmd):
-            return orig_run(cmd, **kwargs)
-        raise Exception("mock: Docker unreachable")
-
-    monkeypatch.setattr(subprocess, "run", _mock_run)
+    # --db is a file path → embedded directly; no Docker connection attempted
 
     args = Args(url=markdown_repo, db=embedded_db_path)
     exit_code = _cmd_index_github(args)
@@ -119,9 +106,6 @@ def test_index_github_no_markdown_graceful(embedded_db_path, tmp_path, monkeypat
     fake_home = tempfile.mkdtemp(prefix="tortoise-test-home-")
     monkeypatch.setattr(Path, "home", lambda: Path(fake_home))
 
-    import subprocess
-    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: (_ for _ in ()).throw(Exception("mock")))
-
     empty_dir = tmp_path / "empty-repo"
     empty_dir.mkdir()
 
@@ -134,12 +118,6 @@ def test_index_github_idempotent(markdown_repo, embedded_db_path, monkeypatch):
     """Re-running index github on the same content skips already-indexed files."""
     fake_home = tempfile.mkdtemp(prefix="tortoise-test-home-")
     monkeypatch.setattr(Path, "home", lambda: Path(fake_home))
-
-    monkeypatch.setenv("FALKORDB_HOST", "127.0.0.1")
-    monkeypatch.setenv("FALKORDB_PORT", "19999")
-
-    import subprocess
-    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: (_ for _ in ()).throw(Exception("mock")))
 
     args = Args(url=markdown_repo, db=embedded_db_path)
 

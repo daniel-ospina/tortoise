@@ -1240,7 +1240,7 @@ def _cmd_index_github(args):
 
     # Background mode: detach and return immediately
     if args.background:
-        cmd = [sys.executable, "-m", "tortoise", "index", "github", url, "--db", args.db]
+        cmd = [sys.executable, "-m", "tortoise", "index", "github", url, "--db", getattr(args, 'db', '')]
         if branch != "main":
             cmd.extend(["--branch", branch])
         pid_file = Path(tempfile.gettempdir()) / f"tortoise-index-{Path(url).stem}.pid"
@@ -1266,6 +1266,10 @@ def _cmd_index_github(args):
         print(f"Indexing local repo: {repo_path}")
     else:
         # Clone repo
+        import shutil as _shutil
+        if _shutil.which("git") is None:
+            print("git is required to index GitHub repos but was not found on PATH", file=sys.stderr)
+            return 1
         tmpdir = tempfile.mkdtemp(prefix="tortoise-index-")
         atexit.register(lambda: __import__("shutil").rmtree(tmpdir, ignore_errors=True))
 
@@ -1295,27 +1299,38 @@ def _cmd_index_github(args):
 
     print(f"Found {total} markdown files. Indexing…")
 
-    # Set up projection + API (same detection as _cmd_init)
+    # Set up projection + API.  --db is authoritative:
+    #   docker://… → route via from_uri
+    #   file path   → embedded directly (no Docker auto-detection)
+    #   not set     → try Docker first, fail with guidance
     proj = None
-    # Try Docker FalkorDB first
-    try:
-        host = os.environ.get("FALKORDB_HOST", "localhost")
-        port = int(os.environ.get("FALKORDB_PORT", "16379"))
-        password = os.environ.get("FALKORDB_PASSWORD", "")
-        from falkordb import FalkorDB as FDB
-        db = FDB(host=host, port=port, password=password or None)
-        db.select_graph("tortoise").query("RETURN 1")
-        proj = FalkorProjection(host=host, port=port, password=password or None)
-    except Exception:
-        # Fallback: embedded mode (SQLite-backed) or docker:// URI
+    db_arg = getattr(args, 'db', '')
+    if db_arg and db_arg.startswith("docker://"):
         try:
-            if args.db.startswith("docker://"):
-                proj = FalkorProjection.from_uri(args.db)
-            else:
-                proj = FalkorProjection(path=args.db)
+            proj = FalkorProjection.from_uri(db_arg)
         except Exception as e:
             print(f"tortoise index: Cannot connect to database: {e}", file=sys.stderr)
-            print("Set --db to a Docker URI or ensure FalkorDB is running.", file=sys.stderr)
+            return 1
+    elif db_arg:
+        # Explicit file path — use embedded directly
+        try:
+            proj = FalkorProjection(path=db_arg)
+        except Exception as e:
+            print(f"tortoise index: Cannot connect to database: {e}", file=sys.stderr)
+            return 1
+    else:
+        # No explicit --db: auto-detect (Docker first, then fail with guidance)
+        try:
+            host = os.environ.get("FALKORDB_HOST", "localhost")
+            port = int(os.environ.get("FALKORDB_PORT", "16379"))
+            password = os.environ.get("FALKORDB_PASSWORD", "")
+            from falkordb import FalkorDB as FDB
+            db = FDB(host=host, port=port, password=password or None)
+            db.select_graph("tortoise").query("RETURN 1")
+            proj = FalkorProjection(host=host, port=port, password=password or None)
+        except Exception as e:
+            print(f"tortoise index: Cannot connect to database: {e}", file=sys.stderr)
+            print("Set --db to a Docker URI or file path, or ensure FalkorDB is running.", file=sys.stderr)
             return 1
 
     log_path = Path(tempfile.gettempdir()) / f"tortoise-index-{repo_name}.jsonl"
@@ -1368,6 +1383,11 @@ def _cmd_index_github(args):
             if stats.get("points", 0) > 0:
                 indexed += 1
                 indexed_hashes.add(content_hash)
+                # Persist incrementally — avoid duplicate Points on crash
+                try:
+                    hash_file.write_text(_json.dumps(sorted(indexed_hashes)))
+                except Exception:
+                    pass
                 print(f"✓ ({stats['points']} pts, {stats['operators']} ops, {stats['sections']} sections)")
             else:
                 skipped += 1
