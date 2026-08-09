@@ -124,9 +124,15 @@ jobs:
           tail -50 /tmp/wrangler.log || true
           exit 1
       - name: Run legal pages E2E suite (#657)
+        # LEGAL_E2E_SKIP_EXTERNAL_CRAWL=1: the third-party external-link
+        # crawl fetches unauthenticated production URLs (github.com/LICENSE,
+        # …) that rate-limit shared CI runner IPs (429 outlives the test's
+        # single retry) → nondeterministic gate. Skip-with-annotation, same
+        # pattern as the tortoise-host deferral; full crawl runs locally.
         run: >
           RUN_LEGAL_E2E=1 BASE_URL=http://127.0.0.1:8788
           TORTISE_HOST=http://127.0.0.1:8788 TORTISE_HOST_CHECK=1
+          LEGAL_E2E_SKIP_EXTERNAL_CRAWL=1
           python -m pytest tests/e2e/test_legal_pages.py -q -p no:cacheprovider
       - name: Stop wrangler dev server
         if: always()
