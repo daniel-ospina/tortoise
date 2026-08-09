@@ -1757,3 +1757,93 @@ class TestEventReplay:
         assert r.status_code == 200, r.text[:200]
         # Should return the event (empty cursor → first page)
         assert len(r.json()["events"]) == 1
+
+    # ── Cursor namespace (#692 review P2) ──────────────────────────────
+
+    def test_read_after_cursor_rejected_by_replay(self, client):
+        """A cursor from EventLog.read_after (v=1, last-seen) passed to
+        /v1/events must fail with 400 — cross-surface cursors silently
+        mispaginate when the encoding format is reused (#692)."""
+        import base64
+        import json
+        import tortoise.hosted_api as ha
+
+        # Create an event so there's something to page.
+        r = client.post("/v1/points", json={
+            "content": "Cursor namespace test",
+            "kind": "statement",
+        })
+        assert r.status_code == 200
+
+        # Construct a read_after-style cursor (v=1, no src field).
+        read_after_cursor = base64.urlsafe_b64encode(
+            json.dumps({"v": 1, "i": 0}).encode("ascii")
+        ).decode("ascii")
+
+        r = client.get(f"/v1/events?cursor={read_after_cursor}")
+        assert r.status_code == 400, (
+            f"read_after cursor should be rejected (400), got {r.status_code}: {r.text[:200]}"
+        )
+        assert "surface mismatch" in r.text.lower()
+
+    def test_replay_cursor_rejected_by_eventlog_read_after(self, client):
+        """A replay cursor (v=2, src=replay) passed to EventLog.read_after
+        must fail — the format mismatch ensures cross-surface cursors fail
+        loudly on BOTH sides."""
+        from tortoise.log import EventLog
+        import tortoise.hosted_api as ha
+
+        # Construct a replay cursor using the replay encoder.
+        replay_cursor = ha._encode_replay_cursor(42)
+
+        # EventLog._decode_cursor must reject it (v!=1).
+        with pytest.raises(ValueError, match="Unsupported cursor version"):
+            EventLog._decode_cursor(replay_cursor)
+
+    # ── Reserved-field guard (#692 review P2) ───────────────────────────
+
+    def test_payload_cannot_shadow_reserved_fields(self, client, caplog):
+        """_log_team_event must strip reserved keys (event_id, ts, type,
+        team_id) from payload so callers cannot corrupt the log (#692).
+
+        ``team_id`` is also an explicit parameter so a direct keyword
+        collision raises TypeError at the call site (Python guards it).
+        We test ``event_id``, ``ts``, and ``type``; ``team_id`` is tested
+        defensively via dict unpack below."""
+        import logging
+        import tortoise.hosted_api as ha
+
+        # First: explicit keyword collisions on the non-parameter reserved keys.
+        with caplog.at_level(logging.WARNING, logger="tortoise.hosted_api"):
+            result = ha._log_team_event(
+                TEST_TEAM_ID, "point_created",
+                point_id="legit",
+                event_id="evil-injected-id",  # should be stripped
+                ts="1970-01-01",              # should be stripped
+                type="fake-type",             # should be stripped
+            )
+
+        assert result is not None
+        # Reserved keys must NOT have been overwritten by payload.
+        assert result["event_id"] != "evil-injected-id"
+        assert result["ts"] != "1970-01-01"
+        assert result["type"] == "point_created"
+        assert result["team_id"] == TEST_TEAM_ID
+        # Non-reserved field passed through.
+        assert result["point_id"] == "legit"
+        # Warning logged for each collision.
+        warnings = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any("shadows reserved keys" in m for m in warnings), (
+            f"expected warning about reserved key collision, got: {warnings}"
+        )
+
+    def test_dict_unpack_payload_reserved_team_id_raises_typeerror(self):
+        """Payload dict unpacking with 'team_id' key raises TypeError at the
+        call site (Python enforces no duplicate keyword arguments).  This is
+        the correct behavior — the guard in _log_team_event handles the
+        non-parameter reserved keys (event_id, ts, type)."""
+        import tortoise.hosted_api as ha
+
+        payload = {"point_id": "x", "team_id": "evil"}
+        with pytest.raises(TypeError, match="multiple values"):
+            ha._log_team_event(TEST_TEAM_ID, "point_created", **payload)

@@ -417,6 +417,18 @@ def _log_team_event(team_id: str, event_type: str, **payload) -> dict | None:
     parent mutation).
     """
     from tortoise.ids import now_iso, ulid
+    # Guard reserved keys: payload must never shadow event_id, ts, type,
+    # or team_id (#692 review P2).  Log a warning on collision so callers
+    # notice the bug, but strip so the log stays well-formed.
+    _RESERVED = {"event_id", "ts", "type", "team_id"}
+    collision_keys = _RESERVED & set(payload)
+    if collision_keys:
+        _logger.warning(
+            "_log_team_event payload shadows reserved keys %s — stripped (team=%s, type=%s)",
+            sorted(collision_keys), team_id, event_type,
+        )
+        for k in collision_keys:
+            del payload[k]
     event = {
         "event_id": ulid(),
         "ts": now_iso(),
@@ -805,7 +817,9 @@ def _check_team_limit(team: dict, resource: str) -> None:
     except QuotaExceededError as e:
         raise HTTPException(status_code=402, detail=str(e))
     except QuotaCheckError as e:
-        _logger.error(
+        # quota._count_resource already logged at ERROR level (#686);
+        # avoid double-logging — this site only records the HTTP context.
+        _logger.debug(
             "quota check failed (fail-closed): team=%s resource=%s error=%s",
             team_id, resource, str(e),
         )
@@ -3455,6 +3469,52 @@ async def backups_drill(request: Request, body: dict):
 
 # ── Event Replay Surface (#692) ───────────────────────────────────
 
+# Replay cursor helpers (#692 review P2): the replay endpoint uses its OWN
+# cursor namespace (v=2, src=replay) so a cursor from EventLog.read_after
+# (v=1, last-seen semantics) passed here fails loudly (400).  Likewise,
+# passing a replay cursor to EventLog.read_after fails because read_after
+# rejects v≠1.  The semantic mismatch is "first-index-of-page" (replay) vs
+# "last-seen" (EventLog) — cross-surface cursors must never silently
+# mispaginate.
+
+import base64 as _b64
+
+_REPLAY_CURSOR_VERSION = 2
+_REPLAY_CURSOR_SRC = "replay"
+
+
+def _encode_replay_cursor(idx: int) -> str:
+    """Encode a 0-based line index as a replay-specific opaque cursor."""
+    payload = _json.dumps(
+        {"v": _REPLAY_CURSOR_VERSION, "src": _REPLAY_CURSOR_SRC, "i": idx},
+        separators=(",", ":"),
+    )
+    return _b64.urlsafe_b64encode(payload.encode("ascii")).decode("ascii")
+
+
+def _decode_replay_cursor(cursor: str) -> int:
+    """Decode a replay cursor token to a 0-based line index.
+
+    Raises :exc:`ValueError` if the token is malformed, has an unsupported
+    version, or belongs to a different surface (e.g. EventLog cursor).
+    """
+    try:
+        raw = _b64.urlsafe_b64decode(cursor.encode("ascii"))
+        payload = _json.loads(raw)
+    except (ValueError, _json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ValueError(f"Invalid cursor token: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"Invalid cursor token: expected JSON object")
+    if payload.get("v") != _REPLAY_CURSOR_VERSION or payload.get("src") != _REPLAY_CURSOR_SRC:
+        raise ValueError(
+            f"Cursor is not a replay cursor (surface mismatch): "
+            f"v={payload.get('v')!r} src={payload.get('src')!r}"
+        )
+    idx = payload.get("i")
+    if not isinstance(idx, int):
+        raise ValueError(f"Invalid cursor payload: missing index")
+    return idx
+
 
 @app.get("/v1/events")
 async def list_events(
@@ -3490,7 +3550,7 @@ async def list_events(
     decoded_cursor: int | None = None
     if cursor is not None:
         try:
-            decoded_cursor = EventLog._decode_cursor(cursor)
+            decoded_cursor = _decode_replay_cursor(cursor)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=f"Invalid cursor: {exc}")
 
@@ -3525,7 +3585,7 @@ async def list_events(
 
     # Next cursor points to the start of this page (so the next request
     # pages backwards from there).
-    next_cursor = EventLog._encode_cursor(start_idx) if has_more else None
+    next_cursor = _encode_replay_cursor(start_idx) if has_more else None
 
     # Most-recent-first for the response.
     page.reverse()

@@ -279,3 +279,55 @@ def test_telegram_and_github_independent_resolve():
     # Dedup object is deleted even if issue close failed (delete-to-resolve
     # runs regardless).
     assert store2._storage.list("ops/alerts/STALE/") == []
+
+
+# ── #673 review P2: pending-push TTL + incident check ─────────────────────
+
+def test_stale_pending_push_discarded_on_ttl():
+    """A pending push older than 24h is discarded, not retried (#673 P2)."""
+    from datetime import datetime, timedelta, timezone
+
+    ch = _FakeChannels()
+    storage = MemoryStorage()
+    # park a push at 25h ago
+    old_ts = datetime.now(timezone.utc) - timedelta(hours=25)
+    import hashlib
+    digest = hashlib.sha256(b"ops/alerts/STALE/_.json").hexdigest()[:16]
+    storage.upload(
+        f"ops/pending-push/{digest}.json",
+        json.dumps({
+            "key": "ops/alerts/STALE/_.json",
+            "text": "stale alert",
+            "created_at": old_ts.isoformat(),
+        }).encode(),
+    )
+    store = _store(ch, storage)
+    # retry_pending must discard it (TTL expired), not push.
+    assert store.retry_pending() == 0
+    assert ch.telegram == []
+    assert storage.list("ops/pending-push/") == []
+
+
+def test_resolved_incident_pending_push_not_fired():
+    """A pending push whose incident dedup key is gone (resolved) is
+    discarded, not fired (#673 P2)."""
+    from datetime import datetime, timezone
+
+    ch = _FakeChannels()
+    storage = MemoryStorage()
+    # park a fresh push referencing an incident key that does NOT exist
+    import hashlib
+    digest = hashlib.sha256(b"ops/alerts/STALE/team_x.json").hexdigest()[:16]
+    storage.upload(
+        f"ops/pending-push/{digest}.json",
+        json.dumps({
+            "key": "ops/alerts/STALE/team_x.json",
+            "text": "orphan push",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }).encode(),
+    )
+    store = _store(ch, storage)
+    # retry_pending must discard it (incident resolved), not push.
+    assert store.retry_pending() == 0
+    assert ch.telegram == []
+    assert storage.list("ops/pending-push/") == []
