@@ -740,6 +740,15 @@ class TeamInfoResponse(BaseModel):
     max_users: int
     max_graphs: int | None
     max_teams: int | None
+    # #310 (4a/4b): the enforced limits + billing mirror surface for the
+    # dashboard (upgrade CTA, plan/status/limits display).
+    max_api_keys: int | None = None
+    max_points: int | None = None
+    max_sessions: int | None = None
+    subscription_status: str | None = None
+    current_period_end: float | None = None
+    grace_until: float | None = None
+    customer_email: str | None = None
     point_count: int = 0
 
 
@@ -1042,7 +1051,17 @@ async def team_info(team: dict = Depends(get_current_team)):
         tier=team["tier"],
         max_users=team["max_users"],
         max_graphs=team["max_graphs"],
-        max_teams=team["max_teams"],
+        # D1: multi-team is a user capability, not a tier field — legacy nodes
+        # may lack the property entirely (pre-existing 500, fixed #663-style).
+        max_teams=team.get("max_teams"),
+        # #310 (4a/4b): enforced limits + billing mirror fields.
+        max_api_keys=team.get("max_api_keys"),
+        max_points=team.get("max_points"),
+        max_sessions=team.get("max_sessions"),
+        subscription_status=team.get("subscription_status"),
+        current_period_end=team.get("current_period_end"),
+        grace_until=team.get("grace_until"),
+        customer_email=team.get("customer_email"),
         point_count=point_count,
     )
 
