@@ -331,6 +331,7 @@ class TortoiseSDK:
             ("APIKey", "key_hash"),
             ("Invitation", "team_id"),
             ("Invitation", "token_hash"),
+            ("WebhookEvent", "event_id"),  # #310 7: webhook dedup marker lookup
         ]
         for label, prop in indexes:
             try:
