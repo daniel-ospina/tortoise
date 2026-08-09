@@ -80,9 +80,13 @@ class TestEnforceTeamLimit:
         enforce_team_limit(limits, "points", sdk=sdk)  # must not raise
         sdk.close()
 
-    def test_counting_error_fails_closed(self, tmp_path, monkeypatch):
-        """Fail-closed: a counting exception → QuotaCheckError, never a pass."""
+    def test_counting_error_fails_closed(self, tmp_path, monkeypatch, caplog):
+        """Fail-closed: a counting exception → QuotaCheckError, never a pass.
+
+        Also verifies ERROR-level logging (#686 alerting).
+        """
         from tortoise.sdk import TortoiseSDK
+        import logging
         import os
         db = os.path.join(tmp_path, "team.db")
         sdk = TortoiseSDK(db, namespace="team1")
@@ -90,9 +94,15 @@ class TestEnforceTeamLimit:
         def boom(*a, **kw):
             raise RuntimeError("db down")
         monkeypatch.setattr(sdk._get_proj().g._g, "query", boom)
-        with pytest.raises(QuotaCheckError):
+        with pytest.raises(QuotaCheckError) as exc_info:
             enforce_team_limit(limits, "points", sdk=sdk)
         sdk.close()
+        # Verify ERROR log was emitted (#686 alerting)
+        assert "quota count failed" in str(exc_info.value)
+        log_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert any("quota count failed (fail-closed)" in r.message for r in log_records), (
+            f"Expected ERROR log for count failure, got: {[r.message for r in log_records]}"
+        )
 
     def test_unknown_resource_fails_closed(self):
         with pytest.raises(QuotaCheckError):

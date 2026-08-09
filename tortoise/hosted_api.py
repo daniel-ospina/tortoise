@@ -687,10 +687,21 @@ def _check_team_limit(team: dict, resource: str) -> None:
 
     resource: 'points' | 'api_keys' | 'sessions'
 
-    #329: delegates to the shared fail-closed quota helper — counting errors
-    now surface as 500 (QuotaCheckError) instead of silently passing, and the
-    limits dict is the authenticated team dict (resolved once by
-    get_current_team), matching MCP semantics.
+    Fail-closed decision (#686)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    Counting errors raise HTTP 500 (QuotaCheckError) — never a silent pass.
+
+    Rationale:
+    - Money at stake: fail-open lets free teams exceed paid limits during a DB
+      outage — direct revenue risk.
+    - Fail-closed is the secure default: when you can't verify, don't grant.
+    - Customer harm is bounded: a DB outage that breaks count queries typically
+      also breaks the actual write (same store), so we're failing fast.
+    - Alerting mitigates ops risk: every QuotaCheckError is logged at ERROR
+      level with team_id and resource, visible in production dashboards.
+
+    #329: delegates to the shared fail-closed quota helper.
+    #686: explicit decision documentation + ERROR-level alerting on failures.
     """
     team_id = team.get("team_id")
     if not team_id:
@@ -702,6 +713,10 @@ def _check_team_limit(team: dict, resource: str) -> None:
     except QuotaExceededError as e:
         raise HTTPException(status_code=402, detail=str(e))
     except QuotaCheckError as e:
+        _logger.error(
+            "quota check failed (fail-closed): team=%s resource=%s error=%s",
+            team_id, resource, str(e),
+        )
         raise HTTPException(status_code=500, detail=f"Quota check failed: {e}")
 
 
