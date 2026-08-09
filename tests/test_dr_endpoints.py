@@ -20,6 +20,9 @@ INTERNAL_HEADERS = {"Authorization": f"Bearer {_INTERNAL_KEY}"}
 GOOD_ENV = {
     "BACKUP_SWEEP_ENABLED": "true",
     "TORTOISE_BACKUP_KEY": base64.b64encode(b"k" * 32).decode(),
+    # #661: sweep archives encrypt with the Fly-only registry stream key —
+    # fail-closed when missing, so the DR test env must provide it.
+    "REGISTRY_STREAM_KEY": base64.b64encode(b"s" * 32).decode(),
     "R2_ACCOUNT_ID": "acct", "R2_ACCESS_KEY_ID": "ak",
     "R2_SECRET_ACCESS_KEY": "sk", "R2_BUCKET": "tortoise-backups",
     "TELEGRAM_BOT_TOKEN": "123:t", "TELEGRAM_CHAT_ID": "1",
