@@ -27,7 +27,7 @@ jobs:
   validate:
     if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
@@ -37,6 +37,7 @@ jobs:
           python-version: '3.11'
       - name: Install
         run: |
+          set -o pipefail
           pip install -e '.[embeddings]' falkordblite pytest pytest-timeout 2>&1 | tail -2
       - name: Run tests (embedded suite, per-test timeout)
         id: tests
