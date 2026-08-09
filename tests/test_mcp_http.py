@@ -685,12 +685,8 @@ class TestIntrospectiveQuotaCompleteness:
             ".create_source", ".checkpoint", ".file_decision",
             ".diary_write", ".update_point", ".update_entity",
             ".mitigate_operator", ".create_edge", ".supersede_point",
-<<<<<<< HEAD
             ".invalidate_point", ".file_human_approval", ".assess_source",
             ".ingest_corpus", ".index_sessions",
-=======
-            ".retract_point", ".invalidate_point", ".ingest_corpus", ".index_sessions",
->>>>>>> origin/main
             ".backfill_v25",
         )
         bulk_only = (".ingest_corpus", ".index_sessions", ".backfill_v25")

@@ -18,7 +18,6 @@ def sdk(tmp_path):
 
 
 @pytest.fixture
-
 def team(sdk):
     """Pre-created team fixture.
 
@@ -31,54 +30,6 @@ def team(sdk):
         sdk.team_delete(result["id"], confirmation="test-team")
     except Exception:
         pass  # best-effort cleanup
-
-
-@pytest.fixture
-def team_api_client():
-    """TestClient with get_current_team overridden to a billing-rich team dict.
-
-    #310 4b: GET /v1/team must surface the 7 billing fields (max_api_keys,
-    max_points, max_sessions, subscription_status, current_period_end,
-    grace_until, customer_email) to the dashboard — TeamInfoResponse is the
-    REST contract. Uses a temp embedded DB so point_count counts cleanly.
-    """
-    import os
-    import tempfile
-    from fastapi.testclient import TestClient
-    from tortoise.hosted_api import app, get_current_team
-
-    _BILING_TEAM = {
-        "team_id": "billing-team-001",
-        "key_id": "billing-key-001",
-        "tier": "pro",
-        "max_users": 2,
-        "max_graphs": None,
-        "max_teams": None,
-        "max_api_keys": 10,
-        "max_points": 100000,
-        "max_sessions": 1000,
-        "subscription_status": "active",
-        "current_period_end": 1814400000.0,
-        "grace_until": None,
-        "customer_email": "owner@example.com",
-    }
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        db_path = os.path.join(tmpdir, "billing.db")
-        import tortoise.hosted_api as ha_mod
-        _orig_init = ha_mod.TortoiseSDK.__init__
-
-        def _patched_init(self, db_path_arg=None, *, namespace=None, **kwargs):
-            _orig_init(self, db_path, namespace=namespace)
-
-        ha_mod.TortoiseSDK.__init__ = _patched_init
-        app.dependency_overrides[get_current_team] = lambda: dict(_BILING_TEAM)
-        try:
-            with TestClient(app) as tc:
-                yield tc, dict(_BILING_TEAM)
-        finally:
-            ha_mod.TortoiseSDK.__init__ = _orig_init
-            app.dependency_overrides.clear()
 
 
 class TestTeamCRUD:
@@ -197,14 +148,7 @@ class TestMembershipCRUD:
             sdk.membership_create(team["id"], "user-2", "admin")
 
     def test_membership_list_returns_members(self, sdk, team):
-<<<<<<< HEAD
         sdk.team_update(team["id"], max_users=10)
-=======
-        # #310 Task 11 cleanup (pre-existing main failure): free tier caps at
-        # max_users=1 (#329 enforcement); raise the cap so the list semantics
-        # (not the limit gate) is what's under test.
-        sdk.team_update(team["id"], max_users=2)
->>>>>>> origin/main
         sdk.membership_create(team["id"], "user-1", "admin")
         sdk.membership_create(team["id"], "user-2", "owner")
         members = sdk.membership_list(team["id"])
@@ -413,47 +357,3 @@ class TestInvitationCRUD:
     def test_invitation_create_rejects_invalid_role(self, sdk, team):
         with pytest.raises(ControlPlaneError, match="Invalid role"):
             sdk.invitation_create(team["id"], "bad@test.com", "bogus", "user-1")
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# #310 Task 4b — billing fields: TeamInfoResponse surface + team_update allowlist
-# ═══════════════════════════════════════════════════════════════════════════════
-
-
-class TestBillingTeamInfo:
-    """GET /v1/team returns the extended billing fields for the dashboard."""
-
-    def test_team_info_returns_billing_fields(self, team_api_client):
-        tc, billing_team = team_api_client
-        r = tc.get("/v1/team")
-        assert r.status_code == 200, r.text
-        body = r.json()
-        assert body["max_api_keys"] == 10
-        assert body["max_points"] == 100000
-        assert body["max_sessions"] == 1000
-        assert body["subscription_status"] == "active"
-        assert body["current_period_end"] == 1814400000.0
-        assert body["grace_until"] is None
-        assert body["customer_email"] == "owner@example.com"
-
-
-class TestBillingTeamUpdate:
-    """team_update allowlist accepts the billing mirror fields."""
-
-    def test_team_update_allowlist_billing_fields(self, sdk, team):
-        sdk.team_update(
-            team["id"],
-            subscription_status="past_due",
-            current_period_end=1814400000.0,
-            grace_until=1815000000.0,
-            customer_email="owner@example.com",
-        )
-        updated = sdk.team_get(team["id"])
-        assert updated["subscription_status"] == "past_due"
-        assert updated["current_period_end"] == 1814400000.0
-        assert updated["grace_until"] == 1815000000.0
-        assert updated["customer_email"] == "owner@example.com"
-
-    def test_team_update_still_rejects_unknown_fields(self, sdk, team):
-        with pytest.raises(ControlPlaneError, match="Invalid team fields"):
-            sdk.team_update(team["id"], bogus_billing_field=123)
