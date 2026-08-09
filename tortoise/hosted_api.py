@@ -18,7 +18,8 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
+from tortoise.security import redact_error
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from contextlib import asynccontextmanager
@@ -261,7 +262,7 @@ class AnalyticsMiddleware(BaseHTTPMiddleware):
 class RateLimitMiddleware(BaseHTTPMiddleware):
     """In-memory token bucket rate limiter. 100 Points/min per API key."""
 
-    SKIP = {"/health", "/health/ready", "/docs", "/openapi.json", "/v1/register"}
+    SKIP = {"/health", "/health/ready", "/docs", "/openapi.json", "/v1/register", "/webhooks/stripe"}
 
     def __init__(self, app, max_per_minute=100):
         super().__init__(app)
@@ -566,7 +567,7 @@ async def health_security():
 
 # ── Auth Dependency ────────────────────────────────────────────────
 
-SKIP_AUTH = {"/health", "/health/ready", "/docs", "/openapi.json", "/v1/register"}
+SKIP_AUTH = {"/health", "/health/ready", "/docs", "/openapi.json", "/v1/register", "/webhooks/stripe"}
 
 
 async def _audit_auth_failure(request: Request, reason: str) -> None:
@@ -2346,6 +2347,8 @@ _ALLOWED_ANALYTICS_PROPS = {
     "elapsed_from_copy_s", "question_id", "answer", "source", "point_count",
     "session_id", "message_count", "elapsed_time_s", "steps_completed",
     "questions", "step", "error_type",
+    # #310 billing events
+    "plan", "tier", "status",
 }
 
 _ANALYTICS_FALLBACK_PATH = None
@@ -3268,3 +3271,218 @@ async def billing_portal(request: Request, team: dict = Depends(get_current_team
 # RateLimitMiddleware.SKIP — Starlette's mount already routes /mcp
 # requests to the sub-app before parent middleware runs.
 app.mount("/mcp", mcp_http_app)
+
+
+# ── Stripe webhook (#310 Task 7) ────────────────────────────────────────────
+
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _team_id_for_stripe_customer(customer_id: str) -> str | None:
+    """Registry lookup: Team node by stripe_customer_id (subscription events)."""
+    try:
+        sdk = _make_sdk(namespace="registry")
+        rows = sdk._get_registry().query(
+            "MATCH (t:Team {stripe_customer_id:$cid}) RETURN t.id",
+            params={"cid": customer_id},
+        ).result_set
+        return rows[0][0] if rows else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _webhook_apply_event(sdk, team_id: str, event: dict) -> str | None:
+    """Apply one verified Stripe event to the registry mirror (idempotent SETs).
+
+    Returns the ops kind when a notification-worthy transition happened:
+    billing_upgrade | billing_downgrade | billing_payment_failed | billing_cancel.
+    Unknown price ids keep the stored tier + status and fire an ops
+    notification (review fix 7); cancel-at-period-end keeps tier until the end.
+    """
+    import json as _json
+    from tortoise.billing import PriceCatalog, StripeClient, apply_limits
+
+    etype = event.get("type", "")
+    data = event.get("data", {}).get("object", {}) or {}
+    notify_kind = None
+
+    def _set(updates: dict) -> None:
+        _json.dumps(updates)  # sanity: JSON-safe params
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t += $props",
+            params={"id": team_id, "props": updates},
+        )
+
+    def _price_id_from(sub: dict) -> str | None:
+        """Extract items[0].price.id handling BOTH Stripe shapes: items may be
+        a flat list OR {'data': [...]} (FIXTURE_SUB uses the latter)."""
+        items = sub.get("items") or {}
+        rows = items if isinstance(items, list) else items.get("data") or []
+        return (rows[0].get("price", {}) or {}).get("id") if rows else None
+
+    def _resolve_tier_from_price(price_id: str | None) -> str | None:
+        """price → tier; unknown price → None + ops-notify signal."""
+        nonlocal notify_kind
+        if not price_id:
+            return None
+        try:
+            return PriceCatalog().tier_for_price(price_id)
+        except Exception as e:  # noqa: BLE001
+            _logger.error(
+                "webhook: unknown price %s for team %s (%s)",
+                price_id, team_id, redact_error(e))
+            notify_kind = "billing_downgrade"  # ops alert; stored tier preserved
+            return None
+
+    if etype == "checkout.session.completed":
+        cust = data.get("customer")
+        email = (data.get("customer_details") or {}).get("email")
+        sub_id = data.get("subscription")
+        updates = {"subscription_status": "active", "stripe_customer_id": cust}
+        if email:
+            updates["customer_email"] = email
+        if sub_id:
+            updates["subscription_id"] = sub_id
+        _set(updates)
+        if sub_id:
+            try:
+                sub = StripeClient().get_subscription(sub_id)
+                tier = _resolve_tier_from_price(_price_id_from(sub))
+                if tier:
+                    apply_limits(sdk, team_id, tier)
+                    _set({"tier": tier})
+                    notify_kind = "billing_upgrade"
+            except Exception as e:  # noqa: BLE001 — Stripe fetch failure; .updated confirms later
+                _logger.warning("webhook: subscription fetch failed: %s", redact_error(e))
+        return notify_kind
+
+    if etype == "invoice.payment_failed":
+        from datetime import datetime, timedelta, timezone
+        period_end = None
+        try:
+            period_end = (data.get("lines") or {}).get("data", [{}])[0] \
+                .get("period", {}).get("end")
+        except Exception:  # noqa: BLE001
+            period_end = None
+        now = datetime.now(timezone.utc)
+        grace = (datetime.fromtimestamp(period_end, tz=timezone.utc) + timedelta(hours=72)
+                 if period_end else now + timedelta(hours=72))
+        _set({"subscription_status": "past_due", "grace_until": grace.isoformat()})
+        return "billing_payment_failed"
+
+    if etype == "customer.subscription.updated":
+        status = data.get("status")
+        updates: dict = {}
+        if data.get("id"):
+            updates["subscription_id"] = data["id"]
+        if data.get("current_period_end"):
+            updates["current_period_end"] = data["current_period_end"]
+        if status:
+            updates["subscription_status"] = status
+        # review fix 11: canceled surfacing via .updated (deleted event may be
+        # dropped) → revert to free, identical to subscription.deleted.
+        if status == "canceled":
+            _set({**updates, "tier": "free"})
+            apply_limits(sdk, team_id, "free")
+            return "billing_cancel"
+        # cancel_at_period_end → keep tier until period end (mirror status only).
+        if data.get("cancel_at_period_end"):
+            _set(updates)
+            return None
+        _set(updates)
+        tier = _resolve_tier_from_price(_price_id_from(data))
+        if tier:
+            apply_limits(sdk, team_id, tier)
+            _set({"tier": tier})
+            notify_kind = "billing_upgrade"
+        return notify_kind
+
+    if etype == "customer.subscription.deleted":
+        _set({"tier": "free", "subscription_status": "canceled"})
+        apply_limits(sdk, team_id, "free")
+        return "billing_cancel"
+
+    return None  # unhandled event type → 200-ack
+
+
+@app.post("/webhooks/stripe")
+async def webhooks_stripe(request: Request):
+    """Stripe webhook — signature-verified, event-ID dedup, 4-event semantics.
+
+    Public surface (SKIP + SKIP_AUTH): authenticity is the Stripe-Signature
+    HMAC over the RAW body. Idempotency is SET-then-marker: the Team SET is
+    idempotent (replays converge), and the :WebhookEvent marker gates
+    notify/audit/analytics to FIRST processing only (scoping P1-1 retry-drop
+    race: the SET happens regardless, so a retry can never drop an upgrade).
+    """
+    from tortoise.billing import BillingError, BillingConfigError, StripeClient, _scrub_secrets
+    from tortoise.notify import notify_billing_event
+
+
+    def _safe_log(exc: Exception) -> str:
+        """redact_error + scrub known secret values (review fix 9)."""
+        return _scrub_secrets(redact_error(exc))
+
+    raw = await request.body()
+    sig = request.headers.get("stripe-signature")
+    try:
+        event = StripeClient().verify_webhook_signature(raw, sig)
+    except BillingConfigError:
+        return JSONResponse(status_code=500, content={"detail": "webhook not configured"})
+    except BillingError as e:
+        _logger.warning("webhook: rejected (%s)", _safe_log(e))
+        return JSONResponse(status_code=400, content={"detail": "invalid signature"})
+
+    etype = event.get("type", "")
+    event_id = event.get("id") or ""
+    data = event.get("data", {}).get("object", {}) or {}
+    team_id = data.get("client_reference_id")
+    if not team_id and etype in ("customer.subscription.updated", "customer.subscription.deleted",
+                                 "invoice.payment_failed"):
+        cust = data.get("customer")
+        if cust:
+            team_id = _team_id_for_stripe_customer(cust)
+    if not team_id:
+        # No team binding — ack so Stripe stops retrying.
+        return JSONResponse(status_code=200, content={"detail": "no team binding"})
+
+    sdk = _make_sdk(namespace="registry")
+    try:
+        # Idempotent apply (SETs converge on replay).
+        notify_kind = await asyncio.to_thread(_webhook_apply_event, sdk, team_id, event)
+        # Marker: first-seen detection (SET-then-marker — the apply ran
+        # regardless, so a retry cannot drop the upgrade; only side-effects
+        # are dedup'd).
+        seen_rows = sdk._get_registry().query(
+            "MATCH (w:WebhookEvent {event_id:$id}) RETURN w.first_seen",
+            params={"id": event_id},
+        ).result_set
+        is_first = not seen_rows
+        if is_first:
+            sdk._get_registry().query(
+                "CREATE (w:WebhookEvent {event_id:$id, first_seen:$now, type:$type})",
+                params={"id": event_id, "now": _now_iso(), "type": etype},
+            )
+        if is_first and notify_kind:
+            # Audit + analytics + notifications — first processing only.
+            tier_rows = sdk._get_registry().query(
+                "MATCH (t:Team {id:$id}) RETURN t.tier", params={"id": team_id}
+            ).result_set
+            tier = tier_rows[0][0] if tier_rows else None
+            await _async_audit(
+                request, team_id, notify_kind,
+                resource_type="team", resource_id=team_id,
+            )
+            _track_analytics_event(team_id, notify_kind, {
+                "plan": tier, "tier": tier, "status": etype,
+            })
+            notify_billing_event(
+                notify_kind, {"team_id": team_id, "tier": tier},
+                {"subscription_status": etype},
+            )
+        return JSONResponse(status_code=200, content={"detail": "processed"})
+    except Exception as e:  # noqa: BLE001 — 500 → Stripe retries (live up to 3 days)
+        _logger.error("webhook: processing failed (%s)", _safe_log(e))
+        return JSONResponse(status_code=500, content={"detail": "processing failed"})
