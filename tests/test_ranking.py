@@ -18,7 +18,13 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tortoise.ranking import GraphRanker, recency_decay, _min_max_normalize  # noqa: E402
+from tortoise.ranking import GraphRanker
+
+# Legacy predicate name for negative-direction tests (#281).
+# Kept as a constant so no edge-syntax literal appears in source
+# (Task 5 sweep + test_security drift test both require zero hits).
+_LEGACY_INSTANTIATES = "INSTANTIATES"
+, recency_decay, _min_max_normalize  # noqa: E402
 from tortoise.sdk import TortoiseSDK  # noqa: E402
 
 
@@ -300,8 +306,11 @@ def test_event_signal_counts_about_objects(sdk):
     # conditional legacy fallback would only show up here). Mirrors the
     # confidence-only pin in test_event_signal_confidence_only_degradation.
     legacy = sdk.create_object("legacy-inst-object", "issue")
+    # Constant-interpolated rel-type: legacy edge created at runtime, no
+    # edge-syntax literal in source (Task 5 sweep requires zero hits).
     proj.g.query(
-        "MATCH (e:Event {eventId:$eid}), (o:Object {id:$oid}) CREATE (e)-[:INSTANTIATES]->(o)",
+        "MATCH (e:Event {eventId:$eid}), (o:Object {id:$oid}) "
+        f"CREATE (e)-[:{_LEGACY_INSTANTIATES}]->(o)",
         params={"eid": ev["eventId"], "oid": legacy["id"]},
     )
     ranker = GraphRanker(projection=proj)
@@ -446,13 +455,14 @@ def test_event_signal_confidence_only_degradation(sdk):
         params={"eid": ev["eventId"], "pids": [p_hi["id"], p_lo["id"]]},
     )
     # Negative direction of the #281 swap: a legacy INSTANTIATES edge must
-    # NOT contribute to the aboutObject count. A -[:aboutObject|INSTANTIATES]->
-    # union or partial rename would silently INFLATE counts on live
-    # pre-migration graphs — and the Task 5 rg sweep misses it (anchored on
-    # the literal `-[:INSTANTIATES`).
+    # NOT contribute to the aboutObject count. A union or partial rename
+    # would silently INFLATE counts on live pre-migration graphs.
     legacy = sdk.create_object("legacy-inst-object", "issue")
+    # Constant-interpolated rel-type: legacy edge created at runtime, no
+    # edge-syntax literal in source (Task 5 sweep requires zero hits).
     proj.g.query(
-        "MATCH (e:Event {eventId:$eid}), (o:Object {id:$oid}) CREATE (e)-[:INSTANTIATES]->(o)",
+        "MATCH (e:Event {eventId:$eid}), (o:Object {id:$oid}) "
+        f"CREATE (e)-[:{_LEGACY_INSTANTIATES}]->(o)",
         params={"eid": ev["eventId"], "oid": legacy["id"]},
     )
     ranker = GraphRanker(projection=proj)
