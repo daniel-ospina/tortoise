@@ -2365,15 +2365,24 @@ def _cmd_serve_http(args) -> int:
         if _db_uri_remote(db_uri):
             print("  ⚠️  Remote/cloud DB target — any local process holding a key drives this graph.")
     else:
-        db_path = os.environ.get("TORTOISE_DB_PATH") or resolve_db_path()
+        # Tilde-expand the raw TORTOISE_DB_PATH: the env shortcut bypasses
+        # resolve_db_path() (which expands), and the quickstart documents the
+        # literal ~/.tortoise/tortoise.db form — the diagnostic must show the
+        # real path, not a shell-unescaped '~' (fixes the exists-check miss).
+        db_path = os.path.expanduser(os.environ.get("TORTOISE_DB_PATH") or resolve_db_path())
         print(f"serve --http: DB target = {db_path}")
 
-    # ── Tenant mode: note the fresh-namespace semantics for existing stdio data ──
-    if args.auth == "tenant" and not is_db_uri(db_uri):
-        db_path = os.environ.get("TORTOISE_DB_PATH") or resolve_db_path()
+    # ── HTTP mode: note the fresh-namespace semantics for existing stdio data ──
+    # EVERY HTTP auth mode serves an isolated namespace, never the stdio
+    # 'tortoise' graph: tenant → team_{id}; static/none → team_selfhost
+    # (SELFHOST_TEAM_ID, see tortoise/mcp_auth.py). A stdio → static-auth LAN
+    # switch would otherwise land on a silently empty graph — say it out loud.
+    if not is_db_uri(db_uri):
+        db_path = os.path.expanduser(os.environ.get("TORTOISE_DB_PATH") or resolve_db_path())
         try:
             if os.path.exists(db_path):
-                print("  ℹ️  HTTP (tenant) mode uses a fresh team_{id} namespace — existing stdio data")
+                namespace = "team_{id}" if args.auth == "tenant" else "team_selfhost"
+                print(f"  ℹ️  HTTP ({args.auth}) mode uses a fresh {namespace} namespace — existing stdio data")
                 print("      remains in the 'tortoise' graph. See docs/infra-runbook.md §4.5.")
         except Exception:
             pass

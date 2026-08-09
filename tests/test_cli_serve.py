@@ -223,6 +223,44 @@ def test_serve_http_main_dispatch_tenant(monkeypatch, tmp_path):
         "tenant mode registry SDK must resolve the canonical TORTOISE_DB_PATH (#702)"
 
 
+@pytest.mark.parametrize("auth_args,namespace", [
+    (["--auth", "tenant"], "team_{id}"),
+    (["--auth", "static", "--api-key", "tt_x"], "team_selfhost"),
+    (["--auth", "none"], "team_selfhost"),
+])
+def test_serve_http_namespace_note_all_modes_tilde_expansion(monkeypatch, capsys, auth_args, namespace):
+    """#719 P2: the fresh-namespace isolation note must fire for EVERY HTTP auth
+    mode (tenant → team_{id}; static/none → team_selfhost — SELFHOST_TEAM_ID),
+    and a tilde-form TORTOISE_DB_PATH (~/.tortoise/tortoise.db, the quickstart's
+    documented form) must be expanduser'd so the exists-check fires and the
+    diagnostic prints the EXPANDED path instead of a shell-unescaped '~'."""
+    import tortoise.mcp_server as mcp_mod
+    import uvicorn
+
+    from tortoise.__main__ import main
+
+    monkeypatch.setattr(mcp_mod, "create_http_app", lambda **kw: object())
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **kw: None)
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+
+    db_file = Path.home() / f"tortoise_fix719_ns_{namespace.replace('{', '').replace('}', '')}.db"
+    db_file.write_text("")  # must exist so the note fires (tilde path must resolve)
+    try:
+        monkeypatch.setenv("TORTOISE_DB_PATH", f"~/{db_file.name}")
+        rc = main(["serve", "--http"] + auth_args + ["--port", "8123"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert namespace in out, \
+            f"isolation note must name {namespace} for auth={auth_args}"
+        assert f"DB target = {db_file}" in out, \
+            "diagnostic must print the EXPANDED db path, not a literal '~'"
+        target_line = out.split("DB target")[1].splitlines()[0]
+        assert "~/" not in target_line, \
+            f"unexpanded tilde leaked into the diagnostic: {target_line!r}"
+    finally:
+        db_file.unlink(missing_ok=True)
+
+
 def test_serve_http_allowed_hosts_flag(monkeypatch, tmp_path):
     """--allowed-hosts feeds the Host guard verbatim (arbitrary hostnames /
     DNS names clients use that aren't the bind address)."""
