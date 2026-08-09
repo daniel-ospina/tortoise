@@ -29,3 +29,32 @@ def test_onboard_completion_prints_prompt_url(capsys):
     captured = capsys.readouterr()
     assert "Onboarding complete." in captured.out
     assert "https://premiselabs.co/onboarding-prompt.md" in captured.out
+
+
+def test_init_missing_falkordblite_prints_install_guidance(capsys):
+    """`tortoise init` with no embedded backend must print actionable install
+    guidance naming falkordblite (anti-regression: #450 fixed it, #442's
+    automated fixer reverted it, #706 re-fixed — issue #716).
+
+    Simulates the missing-dep environment: falkordb unimportable (Docker
+    branch passes) and FalkorProjection raising ImportError (falkordblite
+    absent). The guidance must be reachable — not shadowed by an import-time
+    crash in tortoise/__init__.py — and must name the real package.
+    """
+    from tortoise import __main__ as m
+
+    class _Args:
+        path = None
+        api_key = None
+
+    with mock.patch.dict(sys.modules, {"falkordb": None}), \
+         mock.patch("tortoise.projection.FalkorProjection",
+                    side_effect=ImportError("falkordblite missing")):
+        rc = m._cmd_init(_Args())
+
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "falkordblite" in out
+    assert "pip install falkordb" in out
+    assert "pip install falkordblite" in out
+    assert "pip install redislite" not in out  # stale guidance must not regress

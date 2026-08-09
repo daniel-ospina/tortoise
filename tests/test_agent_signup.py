@@ -24,6 +24,7 @@ from fastapi.testclient import TestClient
 
 import tortoise.hosted_api as ha_mod
 from tortoise.hosted_api import app
+from tortoise.session_auth import get_current_user
 
 _INTERNAL_KEY = "test-internal-shared-secret-xyz"
 
@@ -109,19 +110,22 @@ class TestProvisionMembershipStatus:
             assert r.status_code == 200, r.text
             team_id = r.json()["team_id"]
 
-            # E6 (GET /v1/teams) is session-JWT gated — stub the JWKS verify
-            # to the provisioned user (get_current_user resolves the module
-            # global at call time).
-            async def fake_verify(request):
-                return {"user_id": "user-740-provision", "email": "prov@test.dev"}
-
-            monkeypatch.setattr("tortoise.session_auth.verify_session_jwt", fake_verify)
-
-            r2 = client.get("/v1/teams")
-            assert r2.status_code == 200, r2.text
-            teams = r2.json()
-            assert any(t["team_id"] == team_id for t in teams), (
-                f"provisioned team {team_id} missing from E6 listing: {teams}"
-            )
+            # E6 (GET /v1/teams) is session-JWT gated — override the FastAPI
+            # dependency with the provisioned user (the established pattern in
+            # test_hosted_api.py; not timing-sensitive like monkeypatching the
+            # underlying verify_session_jwt, which flakes under load).
+            app.dependency_overrides[get_current_user] = lambda: {
+                "user_id": "user-740-provision",
+                "email": "prov@test.dev",
+            }
+            try:
+                r2 = client.get("/v1/teams")
+                assert r2.status_code == 200, r2.text
+                teams = r2.json()
+                assert any(t["team_id"] == team_id for t in teams), (
+                    f"provisioned team {team_id} missing from E6 listing: {teams}"
+                )
+            finally:
+                app.dependency_overrides.pop(get_current_user, None)
         finally:
             ha_mod._INTERNAL_KEY = old_key

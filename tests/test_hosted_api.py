@@ -30,6 +30,10 @@ from tortoise.sdk import TortoiseSDK
 # ── Test constants ───────────────────────────────────────────────────────────
 
 TEST_TEAM_ID = "test-team-001"
+# #310 (review fix 16b): mirrors what real get_current_team returns — tier-derived
+# limits resolved from pricing.json (free: max_graph_nodes=10000, max_api_keys=2,
+# max_sessions=1000). The client fixture overrides auth with this dict, so it must
+# carry the enforced fields or the fail-closed quota path 500s.
 TEST_TEAM = {
     "team_id": TEST_TEAM_ID,
     "key_id": "test-key-001",
@@ -37,6 +41,9 @@ TEST_TEAM = {
     "max_users": 1,
     "max_graphs": 1,
     "max_teams": 1,
+    "max_points": 10000,
+    "max_api_keys": 2,
+    "max_sessions": 1000,
 }
 
 
@@ -102,6 +109,27 @@ def unauth_client():
         try:
             with TestClient(app) as tc:
                 yield tc
+        finally:
+            _restore_tortoise_sdk_init(_orig_init)
+
+
+@pytest.fixture
+def register_client():
+    """TestClient WITHOUT auth override against a shared temp embedded DB.
+
+    Yields (client, db_path) so tests can exercise the REAL /v1/register →
+    GET /v1/team flow AND read the Team node back from the same DB (#310
+    GAP-A/B verification: fresh teams get tier-derived limits, not
+    DEFAULT_MAX_*).
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = os.path.join(tmpdir, "register.db")
+
+        _orig_init = _patch_tortoise_sdk_init(db_path)
+
+        try:
+            with TestClient(app) as tc:
+                yield tc, db_path
         finally:
             _restore_tortoise_sdk_init(_orig_init)
             app.dependency_overrides.clear()
@@ -374,6 +402,58 @@ class TestTeamInfo:
 
         r = client.get("/v1/team")
         assert r.json()["point_count"] == initial_count + 3
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Billing enforcement gaps (#310) — GAP-A/B: fresh teams get tier-derived limits
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _register_team(tc, email: str | None = None) -> dict:
+    """Register a fresh team through the real /v1/register."""
+    import uuid
+    email = email or f"gap-{uuid.uuid4().hex[:10]}@example.com"
+    r = tc.post("/v1/register", json={"email": email, "password": "password123"})
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+class TestBillingEnforcementGaps:
+    """GAP-A: max_points/max_sessions never written at Team CREATE; GAP-B:
+    None-fallback must resolve from tier_limits(tier), never DEFAULT_MAX_*."""
+
+    def test_team_points_limit_uses_tier_limits_not_default(self, register_client):
+        tc, _ = register_client
+        data = _register_team(tc)
+        r = tc.get("/v1/team", headers={"Authorization": f"Bearer {data['api_key']}"})
+        assert r.status_code == 200, r.text
+        team = r.json()
+        assert team["tier"] == "free"
+        # pricing.json free max_graph_nodes — NOT the 1000 DEFAULT_MAX_POINTS
+        assert team["max_points"] == 10000
+        assert team["max_sessions"] == 1000
+
+    def test_register_team_writes_free_tier_limits(self, register_client):
+        """GAP-A: /v1/register must WRITE tier-derived limits on the Team node
+        (max_api_keys == 2 from pricing.json, NOT the 20 DEFAULT leak)."""
+        tc, db_path = register_client
+        data = _register_team(tc)
+        from tortoise.sdk import TortoiseSDK
+        sdk = TortoiseSDK(db_path, namespace="registry")
+        try:
+            rows = sdk._get_registry().query(
+                "MATCH (t:Team {id:$id}) RETURN t.max_api_keys, t.max_points, "
+                "t.max_sessions, t.max_users, t.max_graphs",
+                params={"id": data["team_id"]},
+            ).result_set
+            mak, mp, ms, mu, mg = rows[0]
+            assert mak == 2
+            assert mp == 10000
+            assert ms == 1000
+            assert mu == 1
+            assert mg == 1
+        finally:
+            sdk.close()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1168,9 +1248,16 @@ class TestSessionFloodGate:
 
     def test_extraction_amplifier_402_zero_growth(self, client):
         """Dense decision content → extraction-aware estimate exceeds the
-        points quota → 402 BEFORE any write (zero node growth)."""
+        points quota → 402 BEFORE any write (zero node growth).
+
+        #310 GAP-B: free max_points is now 10000 (pricing.json max_graph_nodes),
+        not the removed 1000 DEFAULT_MAX_POINTS — pin the team cap below the
+        estimate so the amplifier mechanics (not the free-tier cap value) is
+        what's under test.
+        """
+        app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM, max_points=100)
         # est = 2 + Σ_turns(1 + min(decisions,200)) — 5 dense turns × ~300
-        # matches = 2 + 5×201 = 1007 > 1000 (default max_points) → 402.
+        # matches = 2 + 5×201 = 1007 > 100 (pinned cap) → 402.
         dense = ("we should go. " * 300)  # 4500 chars < 5000 turn limit
         conversation = [{"role": "user", "content": dense}] * 5
         r = client.post("/v1/sessions", json={
@@ -1242,3 +1329,85 @@ class TestDreamBudget:
             assert r.status_code == 200, r.text[:200]
         finally:
             ha._DREAM_FULL_BUCKETS.pop(TEST_TEAM_ID, None)
+
+
+class TestEventsPoll:
+    """GET /v1/events — cursor-based poll (Task 5, real REST tests)."""
+
+    def test_events_poll_returns_events(self, client):
+        r = client.post("/v1/points", json={"kind": "statement", "content": "e1"})
+        assert r.status_code == 200
+        r = client.get("/v1/events")
+        assert r.status_code == 200
+        body = r.json()
+        assert [e["type"] for e in body["events"]] == ["PointAdded"]
+        assert body["next_cursor"]
+
+    def test_expired_cursor_410(self, client):
+        client.post("/v1/points", json={"kind": "statement", "content": "old"})
+        from tortoise.hosted_api import _make_sdk
+        sdk = _make_sdk(namespace=TEST_TEAM_ID)
+        proj = sdk._get_proj()
+        stale = sdk.events_poll()["next_cursor"]  # points at seq 1
+        client.post("/v1/points", json={"kind": "statement", "content": "fresh"})
+        # purge seq <= 1 via direct Cypher (Task 7 owns the purge helper)
+        proj.g.query("MATCH (n:GraphEvent) WHERE n.seq < 2 DELETE n")
+        from tortoise import event_store as _es
+        _es._refresh_first_seq(proj)  # watermark, as purge_expired would
+        r = client.get("/v1/events", params={"after": stale})
+        assert r.status_code == 410
+        assert "replay from tail" in r.json()["detail"]
+
+    def test_malformed_cursor_400(self, client):
+        r = client.get("/v1/events", params={"after": "not-a-cursor!!"})
+        assert r.status_code == 400
+        assert r.json()["detail"] == "invalid cursor"
+
+    def test_unknown_type_400(self, client):
+        r = client.get("/v1/events", params={"types": "Nope"})
+        assert r.status_code == 400
+
+    def test_tenant_isolation(self, client, internal_client):
+        """Team A's poll never contains team B's events (namespace = partition)."""
+        from tortoise.hosted_api import _make_sdk
+        for team_id in ("evt-team-a", "evt-team-b"):
+            r = internal_client.post(
+                "/internal/provision",
+                json={
+                    "team_id": team_id,
+                    "team_name": f"Team {team_id}",
+                    "api_key_hash": f"hash-{team_id}",
+                    "created_by": "tester",
+                },
+                headers={"Authorization": f"Bearer {_INTERNAL_KEY}"},
+            )
+            assert r.status_code == 200, f"provision failed: {r.text}"
+        sdk_a = _make_sdk(namespace="evt-team-a")
+        sdk_a.create_point(content="A_EVENT", kind="statement")
+        sdk_b = _make_sdk(namespace="evt-team-b")
+        sdk_b.create_point(content="B_EVENT", kind="statement")
+        ids_a = {e["payload"].get("id") for e in sdk_a.events_poll()["events"]}
+        ids_b = {e["payload"].get("id") for e in sdk_b.events_poll()["events"]}
+        assert ids_a and ids_b
+        assert ids_a.isdisjoint(ids_b), "cross-tenant event leak"
+
+
+class TestRetractedTombstoneContract:
+    """#432 Task 6 — /v1/points excludes retracted; /v1/points/{id} returns them."""
+
+    def test_list_excludes_retracted_but_get_returns_tombstone(self, client):
+        from tortoise.hosted_api import _make_sdk
+        sdk = _make_sdk(namespace=TEST_TEAM_ID)
+        p = sdk.create_point(content="doomed", kind="statement")
+        # listed while live
+        listed = client.get("/v1/points").json()
+        assert any(pt["id"] == p["id"] for pt in listed["points"])
+        # retract via the team SDK (Task 1 method)
+        sdk.retract_point(p["id"])
+        listed2 = client.get("/v1/points").json()
+        assert not any(pt["id"] == p["id"] for pt in listed2["points"]), \
+            "retracted point must be excluded from the default list surface"
+        # tombstone contract: still retrievable by id with status='retracted'
+        got = client.get(f"/v1/points/{p['id']}")
+        assert got.status_code == 200, got.text
+        assert got.json()["status"] == "retracted"

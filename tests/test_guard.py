@@ -92,3 +92,49 @@ def test_guard_is_subclass_not_monkeypatch():
     assert issubclass(Guarded, rfc.FalkorDB)
     # redislite module untouched
     assert rfc.FalkorDB is not Guarded
+
+
+def test_placeholder_branch_raises_clear_import_error():
+    """Forces the dep-missing branch of the import guard (issue #716).
+
+    In a dep-installed CI environment the `except ModuleNotFoundError` branch
+    of tortoise/__init__.py is dead code — reverting the guard to a bare
+    import would pass every test. Hide redislite in sys.modules (None raises
+    ImportError on import) and reload tortoise: the placeholder FalkorDB must
+    raise the clear ImportError that `_cmd_init` catches to print install
+    guidance. Reload once more after the patch to restore the guarded
+    subclass, so no test pollution leaks into the rest of the suite.
+    """
+    import importlib
+    import sys
+    from unittest import mock
+
+    import tortoise
+    import redislite.falkordb_client as rfc
+
+    # Sanity: in this (dep-installed) env the real guarded subclass is loaded,
+    # not the placeholder — proving the placeholder is dead code here.
+    assert issubclass(tortoise.FalkorDB, rfc.FalkorDB)
+
+    try:
+        with mock.patch.dict(
+            sys.modules,
+            {
+                # None in sys.modules makes import raise, forcing the guard's
+                # dep-missing branch. The child module is cached from earlier
+                # tests, so it (not just the parent) must be hidden too.
+                "redislite": None,
+                "redislite.falkordb_client": None,
+                "falkordblite": None,
+            },
+        ):
+            importlib.reload(tortoise)
+            with pytest.raises(ImportError, match="falkordblite is not installed"):
+                tortoise.FalkorDB()
+    finally:
+        # sys.modules restored by patch.dict on exit; reload to rebuild the
+        # real guarded subclass before any other test imports tortoise.
+        importlib.reload(tortoise)
+
+    # Restored: the guarded subclass is back and constructible.
+    assert issubclass(tortoise.FalkorDB, rfc.FalkorDB)

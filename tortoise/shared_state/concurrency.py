@@ -9,7 +9,7 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 
 def locked_append(path: Path, record: dict[str, Any],
