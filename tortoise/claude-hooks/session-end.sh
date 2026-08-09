@@ -106,4 +106,11 @@ raise SystemExit(main(['index', 'sessions']))
 " >/dev/null 2>&1 &
 else
   tortoise session capture --file "$TMP" 2>/dev/null || exit 0
+
+  # #280 item 3 (review P2): the reconciliation sweep previously fired ONLY
+  # in the repo-checkout fallback branch — pip-install users (the common
+  # path) NEVER auto-triggered it. Fire it in BOTH branches: backgrounded +
+  # ALWAYS exits 0 (never block session close); the per-session flock
+  # serializes against this hook's own capture and any manual CLI run.
+  nohup "$TORTOISE_BIN" index sessions >/dev/null 2>&1 &
 fi
