@@ -282,6 +282,65 @@ class TestCliOnboardDbTarget:
         assert "Index failed" in out
         assert "Onboarding complete." not in out
 
+    def test_onboard_forwards_path_to_doctor(self, tmp_path, monkeypatch):
+        """#720 conf 80: Step 5 must pass onboard's resolved target into
+        doctor — `onboard --path X` health-checks X (same graph onboard
+        wrote to), never the default graph."""
+        db_path = str(tmp_path / "explicit.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "env.db"))
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        repo_root = tmp_path / "repo"
+        repo_root.mkdir()
+        (repo_root / "README.md").write_text("# readme", encoding="utf-8")
+
+        from tortoise import __main__ as m
+
+        seen: dict = {}
+        with mock.patch.object(m, "_cmd_init", return_value=0), \
+             mock.patch.object(m, "_cmd_demo", return_value=0), \
+             mock.patch.object(m, "_cmd_doctor",
+                               side_effect=lambda a: seen.update(doctor=a) or 0), \
+             mock.patch("subprocess.run") as fake_run, \
+             mock.patch.object(m, "_cmd_index_github",
+                               side_effect=lambda a: seen.update(idx=a) or 0):
+            fake_run.return_value.returncode = 0
+            fake_run.return_value.stdout = str(repo_root)
+            rc = m._cmd_onboard(mock.Mock(path=db_path, cmd="onboard"))
+
+        assert rc == 0
+        doctor = seen["doctor"]
+        assert doctor.path == db_path  # --path forwarded, not the default
+        assert doctor.db is None
+
+    def test_onboard_forwards_uri_to_doctor(self, tmp_path, monkeypatch):
+        """#720 conf 80: URI targets are forwarded to doctor via args.db."""
+        uri = "docker://:pw@localhost:16379/tortoise"
+        monkeypatch.setenv("TORTOISE_DB_URI", uri)
+        monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+        _delenv_falkordb(monkeypatch)
+        repo_root = tmp_path / "repo"
+        repo_root.mkdir()
+        (repo_root / "README.md").write_text("# readme", encoding="utf-8")
+
+        from tortoise import __main__ as m
+
+        seen: dict = {}
+        with mock.patch.object(m, "_cmd_init", return_value=0), \
+             mock.patch.object(m, "_cmd_demo", return_value=0), \
+             mock.patch.object(m, "_cmd_doctor",
+                               side_effect=lambda a: seen.update(doctor=a) or 0), \
+             mock.patch("subprocess.run") as fake_run, \
+             mock.patch.object(m, "_cmd_index_github",
+                               side_effect=lambda a: seen.update(idx=a) or 0):
+            fake_run.return_value.returncode = 0
+            fake_run.return_value.stdout = str(repo_root)
+            rc = m._cmd_onboard(mock.Mock(path=None, cmd="onboard"))
+
+        assert rc == 0
+        doctor = seen["doctor"]
+        assert doctor.db == uri
+        assert doctor.path is None
+
     def test_onboard_relative_path_clean_error(self, capsys):
         """onboard --path rel.db must fail cleanly at init (rc 1, no
         traceback, index never called) — #715: resolve_db_path's _abs

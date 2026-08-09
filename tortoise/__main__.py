@@ -1133,8 +1133,24 @@ def _cmd_onboard(args) -> int:
     _cmd_demo(argparse.Namespace(cmd="demo"))
 
     # Step 5: Doctor — health check (informational, don't fail on warnings)
+    # #720 conf 80: forward the SAME resolved target onboard wrote to
+    # (--path, TORTOISE_DB_URI, FALKORDB_* or TORTOISE_DB_PATH) into doctor
+    # — previously doctor re-resolved with a bare Namespace and health-
+    # checked the DEFAULT graph, not the one onboard just initialized and
+    # indexed (single-source violation, #715). Passed as args.db for URI
+    # targets / args.path for embedded paths so doctor probes and checks
+    # exactly the graph onboard wrote to.
     banner("Health check")
-    _cmd_doctor(argparse.Namespace(cmd="doctor"))
+    try:
+        db_target = _resolve_db_target(getattr(args, 'path', None))
+    except ValueError as e:
+        print(f"  ❌ Invalid DB target: {e}", file=_sys.stderr)
+        return 1
+    from tortoise.config import is_db_uri
+    if is_db_uri(db_target):
+        _cmd_doctor(argparse.Namespace(cmd="doctor", db=db_target, path=None))
+    else:
+        _cmd_doctor(argparse.Namespace(cmd="doctor", db=None, path=db_target))
 
     print(f"\n{'='*50}")
     print("Onboarding complete.")
@@ -1658,7 +1674,6 @@ def _cmd_index_github(args):
 def _cmd_doctor(args):
     """Health check — verify Tortoise setup is healthy."""
     import importlib
-    import os
     from pathlib import Path
 
     print("Tortoise Doctor — Health Check")
@@ -1673,43 +1688,60 @@ def _cmd_doctor(args):
         except ImportError:
             results.append((f"Python: {pkg}", "⚠️", f"not installed — pip install {pkg}"))
 
-    # 2. Docker / FalkorDB
-    # #715 conf 65: empty-string FALKORDB_* values count as UNSET (same
-    # semantics as the shared _resolve_db_target) — FALKORDB_PORT="" must
-    # fall through to the default port, not raise int('').
-    docker_host = os.environ.get("FALKORDB_HOST") or "localhost"
-    try:
-        docker_port = int(os.environ.get("FALKORDB_PORT") or "16379")
-    except (ValueError, TypeError):
-        results.append(("Graph: FalkorDB", "❌", f"Invalid FALKORDB_PORT: {os.environ.get('FALKORDB_PORT')!r}"))
-        docker_port = 6379
-    try:
-        from falkordb import FalkorDB
-        docker_pass = os.environ.get("FALKORDB_PASSWORD") or ""
-        db = FalkorDB(host=docker_host, port=docker_port,
-                      password=docker_pass or None)
-        db.select_graph("tortoise").query("RETURN 1")
-        results.append(("Graph: FalkorDB", "✅", f"connected at {docker_host}:{docker_port}"))
-    except ImportError:
-        results.append(("Graph: FalkorDB", "⚠️", "falkordb package not installed"))
-    except Exception as e:
-        results.append(("Graph: FalkorDB", "❌", str(e)[:60]))
-
-    # 3. Graph health — SAME single-source resolution as init/index
-    # (#705/#715, conf 88): explicit --db (URI → from_uri, plain path →
-    # embedded) > --path > TORTOISE_DB_URI > FALKORDB_* trio >
+    # Resolve the DB target ONCE — shared by Step 2 (Docker probe) and
+    # Step 3 (graph health) (#720 conf 78). Step 2 previously probed a
+    # hardcoded FALKORDB_*/localhost:16379 while Step 3 used the resolved
+    # target, so `doctor --db docker://<healthy-remote>` reported
+    # "FalkorDB ❌ localhost:16379" + exit 1 while "Graph: health ✅"
+    # confirmed the configured target — a self-contradictory verdict.
+    # Precedence (#705/#715, conf 88): explicit --db (URI → from_uri, plain
+    # path → embedded) > --path > TORTOISE_DB_URI > FALKORDB_* trio >
     # TORTOISE_DB_PATH > canonical EMBEDDED default (conf 70 — no local
     # docker://localhost default). Routes through the shared
     # _resolve_db_target(explicit) + config.is_db_uri; attributes read via
     # getattr so bare Namespace(cmd="doctor") callers never raise (#703).
     from tortoise.config import is_db_uri
+    db = getattr(args, "db", None)
+    path = getattr(args, "path", None)
     try:
-        db = getattr(args, "db", None)
-        path = getattr(args, "path", None)
         target = db if (db and is_db_uri(db)) else _resolve_db_target(db or path)
     except ValueError as e:
         results.append(("Graph: health", "❌", str(e)[:60]))
         target = None
+
+    # 2. Docker / FalkorDB — probe the RESOLVED target, never a hardcoded
+    # localhost (#720 conf 78): URI targets get a live connect probe at
+    # their OWN host/port (host/port/password/ssl parsed from the URI — the
+    # same parse from_uri uses, so the probe and the health check can never
+    # disagree); embedded targets have no Docker server to probe.
+    if target is not None and is_db_uri(target):
+        from urllib.parse import urlparse
+        parsed = urlparse(target)
+        probe_host = parsed.hostname or "localhost"
+        probe_port = parsed.port or 16379
+        probe_user = parsed.username or None
+        probe_pass = parsed.password or None
+        try:
+            from falkordb import FalkorDB
+            dbc = FalkorDB(host=probe_host, port=probe_port,
+                           username=probe_user, password=probe_pass,
+                           ssl=(parsed.scheme == "rediss"),
+                           socket_connect_timeout=5, socket_timeout=10)
+            dbc.select_graph("tortoise").query("RETURN 1")
+            results.append(("Graph: FalkorDB", "✅", f"connected at {probe_host}:{probe_port}"))
+        except ImportError:
+            results.append(("Graph: FalkorDB", "⚠️", "falkordb package not installed"))
+        except Exception as e:
+            results.append(("Graph: FalkorDB", "❌", f"{probe_host}:{probe_port} — {str(e)[:60]}"))
+    elif target is not None:
+        # Embedded mode (resolved to a file path) — no Docker server to
+        # probe. ⚠️ (not ❌) keeps embedded setups healthy; the graph-health
+        # check below verifies the actual DB.
+        results.append(("Graph: FalkorDB", "⚠️", f"embedded mode ({target}) — no Docker probe"))
+
+    # 3. Graph health — verify the SAME resolved target above (probe + check
+    # can never diverge, #720 conf 78). URI → from_uri projection, plain
+    # path → embedded projection via _projection_for.
     if target is not None:
         try:
             from tortoise.sdk import TortoiseSDK

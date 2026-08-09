@@ -98,6 +98,31 @@ class TestDoctorPath:
         assert "Relative DB path 'relative.db' rejected" in line
         assert "Traceback" not in out
 
+    def test_doctor_db_uri_probe_uses_resolved_target(self, clear_db_env, capsys):
+        """#720 conf 78: the Step 2 Docker probe must probe the RESOLVED
+        --db target's host/port — never a hardcoded localhost:16379. Both
+        the probe line and the health line must report the same target."""
+        rc = _run_doctor(["--db", "docker://:@127.0.0.1:59998/tortoise"])
+        out = capsys.readouterr().out
+
+        assert rc == 1
+        probe = next(line for line in out.splitlines() if "Graph: FalkorDB" in line)
+        assert "127.0.0.1:59998" in probe  # probe targeted the --db host/port
+        assert "localhost:16379" not in probe  # not the old hardcoded default
+        assert "127.0.0.1:59998" in _health_line(out)  # same target as health
+
+    def test_doctor_embedded_target_skips_docker_probe(self, clear_db_env, tmp_path, capsys):
+        """#720 conf 78: embedded target → probe reports embedded mode
+        instead of attempting a fake localhost:16379 connection."""
+        db_path = os.path.join(str(tmp_path), "embedded_probe.db")
+        rc = _run_doctor(["--db", db_path])
+        out = capsys.readouterr().out
+
+        assert rc in (0, 1)
+        probe = next(line for line in out.splitlines() if "Graph: FalkorDB" in line)
+        assert "embedded mode" in probe
+        assert "localhost:16379" not in probe
+
 
 class TestDoctorDefaultResolution:
     def test_no_flags_defaults_to_embedded(self, clear_db_env, capsys):
