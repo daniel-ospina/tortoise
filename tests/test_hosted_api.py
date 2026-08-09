@@ -1242,3 +1242,316 @@ class TestDreamBudget:
             assert r.status_code == 200, r.text[:200]
         finally:
             ha._DREAM_FULL_BUCKETS.pop(TEST_TEAM_ID, None)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Event Replay Endpoint (#692)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestEventReplay:
+    """GET /v1/events — tenant event/audit replay surface."""
+
+    @pytest.fixture(autouse=True)
+    def _temp_events_dir(self, request):
+        """Scoped events dir so per-team logs don't leak between tests."""
+        import tortoise.hosted_api as ha
+        with tempfile.TemporaryDirectory() as tmpdir:
+            old = os.environ.get("TORTOISE_EVENTS_DIR")
+            os.environ["TORTOISE_EVENTS_DIR"] = tmpdir
+            # Reset module-level cached path (pathlib, but _team_events_dir
+            # reads env each call, so no cache to clear).
+            try:
+                yield tmpdir
+            finally:
+                if old is not None:
+                    os.environ["TORTOISE_EVENTS_DIR"] = old
+                else:
+                    os.environ.pop("TORTOISE_EVENTS_DIR", None)
+
+    # ── Auth ──────────────────────────────────────────────────────────
+
+    def test_events_requires_auth(self, unauth_client):
+        """GET /v1/events without Authorization → 401."""
+        r = unauth_client.get("/v1/events")
+        assert r.status_code == 401, r.text[:200]
+
+    def test_events_requires_bearer_prefix(self, unauth_client):
+        """GET /v1/events with wrong scheme → 401."""
+        r = unauth_client.get("/v1/events", headers={"Authorization": "Basic xyz"})
+        assert r.status_code == 401, r.text[:200]
+
+    # ── Empty / new team ──────────────────────────────────────────────
+
+    def test_events_empty_for_new_team(self, client):
+        """A team with no events returns an empty list."""
+        r = client.get("/v1/events")
+        assert r.status_code == 200, r.text[:200]
+        body = r.json()
+        assert body["events"] == []
+        assert body["cursor"] is None
+        assert body["has_more"] is False
+
+    # ── Events appear after mutation ──────────────────────────────────
+
+    def test_events_after_point_creation(self, client):
+        """Creating a point produces an event visible in the replay."""
+        # Create a point
+        r = client.post("/v1/points", json={
+            "content": "Test point for event replay",
+            "kind": "statement",
+        })
+        assert r.status_code == 200, r.text[:200]
+        point = r.json()
+
+        # Read events
+        r = client.get("/v1/events")
+        assert r.status_code == 200, r.text[:200]
+        body = r.json()
+        assert len(body["events"]) == 1
+        ev = body["events"][0]
+        assert ev["type"] == "point_created"
+        assert ev["team_id"] == TEST_TEAM_ID
+        assert ev["point_id"] == point["id"]
+        assert ev["kind"] == "statement"
+        assert ev["content_preview"] == "Test point for event replay"
+
+    def test_events_contain_multiple_events(self, client):
+        """Multiple mutations → multiple events, most-recent-first."""
+        r1 = client.post("/v1/points", json={
+            "content": "First point",
+            "kind": "statement",
+        })
+        assert r1.status_code == 200
+        r2 = client.post("/v1/points", json={
+            "content": "Second point",
+            "kind": "statement",
+        })
+        assert r2.status_code == 200
+
+        r = client.get("/v1/events")
+        assert r.status_code == 200
+        body = r.json()
+        assert len(body["events"]) == 2
+        # Most recent first
+        assert body["events"][0]["content_preview"] == "Second point"
+        assert body["events"][1]["content_preview"] == "First point"
+
+    # ── Tenant isolation ──────────────────────────────────────────────
+
+    def test_tenant_cannot_see_other_team_events(self, client):
+        """Team A cannot see team B's events — trust boundary."""
+        # Write events for team B directly into its event log.
+        import tortoise.hosted_api as ha
+        ha._log_team_event("team-b", "point_created",
+                           point_id="secret-123", kind="statement")
+
+        # Team A (TEST_TEAM_ID) queries events — must NOT see team-b's.
+        r = client.get("/v1/events")
+        assert r.status_code == 200, r.text[:200]
+        body = r.json()
+        # Team A should only see its own events (none in this case).
+        for ev in body["events"]:
+            assert ev["team_id"] != "team-b", (
+                f"tenant isolation broken: saw team-b event {ev}"
+            )
+
+    def test_tenant_isolation_with_own_events(self, client):
+        """Team A's events are returned but team B's are not, even when
+        team A also has events."""
+        import tortoise.hosted_api as ha
+        # Write events for team B
+        ha._log_team_event("team-b", "point_created",
+                           point_id="b-secret-1", kind="statement")
+
+        # Create a point for team A via the API
+        r = client.post("/v1/points", json={
+            "content": "Team A visible event",
+            "kind": "statement",
+        })
+        assert r.status_code == 200
+
+        r = client.get("/v1/events")
+        assert r.status_code == 200
+        body = r.json()
+        # Only team A events
+        for ev in body["events"]:
+            assert ev["team_id"] == TEST_TEAM_ID, (
+                f"tenant isolation broken: saw {ev['team_id']} event"
+            )
+        # Our point_created event is there
+        assert any(
+            ev["content_preview"] == "Team A visible event"
+            for ev in body["events"]
+        )
+
+    # ── Cursor pagination ─────────────────────────────────────────────
+
+    def test_cursor_pagination(self, client):
+        """Cursor-based pagination returns pages correctly."""
+        # Create 5 points
+        for i in range(5):
+            r = client.post("/v1/points", json={
+                "content": f"Point {i}",
+                "kind": "statement",
+            })
+            assert r.status_code == 200
+
+        # Page 1: limit=2, no cursor → 2 most recent
+        r = client.get("/v1/events?limit=2")
+        assert r.status_code == 200, r.text[:200]
+        page1 = r.json()
+        assert len(page1["events"]) == 2
+        assert page1["has_more"] is True
+        assert page1["cursor"] is not None
+        # Most recent first: Point 4, Point 3
+        assert page1["events"][0]["content_preview"] == "Point 4"
+        assert page1["events"][1]["content_preview"] == "Point 3"
+
+        # Page 2: use cursor from page 1
+        r = client.get(f"/v1/events?limit=2&cursor={page1['cursor']}")
+        assert r.status_code == 200, r.text[:200]
+        page2 = r.json()
+        assert len(page2["events"]) == 2
+        assert page2["has_more"] is True
+        assert page2["cursor"] is not None
+        assert page2["events"][0]["content_preview"] == "Point 2"
+        assert page2["events"][1]["content_preview"] == "Point 1"
+
+        # Page 3: last page (1 event left)
+        r = client.get(f"/v1/events?limit=2&cursor={page2['cursor']}")
+        assert r.status_code == 200, r.text[:200]
+        page3 = r.json()
+        assert len(page3["events"]) == 1
+        assert page3["has_more"] is False
+        assert page3["cursor"] is None
+        assert page3["events"][0]["content_preview"] == "Point 0"
+
+    def test_cursor_pagination_no_overlap(self, client):
+        """No duplicate events across pages."""
+        for i in range(10):
+            r = client.post("/v1/points", json={
+                "content": f"Event {i:02d}",
+                "kind": "statement",
+            })
+            assert r.status_code == 200
+
+        all_seen: set[str] = set()
+        cursor = None
+        while True:
+            params = "limit=3"
+            if cursor:
+                params += f"&cursor={cursor}"
+            r = client.get(f"/v1/events?{params}")
+            assert r.status_code == 200, r.text[:200]
+            page = r.json()
+            for ev in page["events"]:
+                eid = ev["event_id"]
+                assert eid not in all_seen, f"duplicate event {eid}"
+                all_seen.add(eid)
+            cursor = page["cursor"]
+            if not page["has_more"]:
+                break
+
+        assert len(all_seen) == 10, f"expected 10 unique events, got {len(all_seen)}"
+
+    # ── Read-only enforcement ─────────────────────────────────────────
+
+    def test_events_post_not_allowed(self, client):
+        """POST /v1/events → 405 Method Not Allowed."""
+        r = client.post("/v1/events", json={})
+        assert r.status_code == 405, f"expected 405, got {r.status_code}"
+
+    def test_events_put_not_allowed(self, client):
+        """PUT /v1/events → 405 Method Not Allowed."""
+        r = client.put("/v1/events", json={})
+        assert r.status_code == 405, f"expected 405, got {r.status_code}"
+
+    def test_events_delete_not_allowed(self, client):
+        """DELETE /v1/events → 405 Method Not Allowed."""
+        r = client.delete("/v1/events")
+        assert r.status_code == 405, f"expected 405, got {r.status_code}"
+
+    # ── Limit param ───────────────────────────────────────────────────
+
+    def test_events_respects_limit(self, client):
+        """limit param controls page size."""
+        for i in range(10):
+            r = client.post("/v1/points", json={
+                "content": f"Point {i}",
+                "kind": "statement",
+            })
+            assert r.status_code == 200
+
+        r = client.get("/v1/events?limit=3")
+        assert r.status_code == 200, r.text[:200]
+        assert len(r.json()["events"]) == 3
+
+        r = client.get("/v1/events?limit=7")
+        assert r.status_code == 200, r.text[:200]
+        assert len(r.json()["events"]) == 7
+
+    def test_events_limit_default(self, client):
+        """Default limit is 50."""
+        for i in range(60):
+            r = client.post("/v1/points", json={
+                "content": f"Point {i}",
+                "kind": "statement",
+            })
+            assert r.status_code == 200
+
+        r = client.get("/v1/events")
+        assert r.status_code == 200, r.text[:200]
+        # Should return at most 50 (default)
+        assert len(r.json()["events"]) == 50
+        assert r.json()["has_more"] is True
+
+    def test_events_limit_max_500(self, client):
+        """Limit is capped at 500."""
+        r = client.get("/v1/events?limit=1000")
+        # 422 because Query(ge=1, le=500) rejects 1000
+        assert r.status_code == 422, f"expected 422, got {r.status_code}"
+
+    def test_events_limit_negative_rejected(self, client):
+        """Negative limit → 422."""
+        r = client.get("/v1/events?limit=-1")
+        assert r.status_code == 422, f"expected 422, got {r.status_code}"
+
+    # ── Event structure ───────────────────────────────────────────────
+
+    def test_event_has_required_fields(self, client):
+        """Every event has event_id, ts, type, team_id."""
+        r = client.post("/v1/points", json={
+            "content": "Structure check",
+            "kind": "statement",
+        })
+        assert r.status_code == 200
+
+        r = client.get("/v1/events")
+        assert r.status_code == 200
+        for ev in r.json()["events"]:
+            assert "event_id" in ev
+            assert "ts" in ev
+            assert "type" in ev
+            assert "team_id" in ev
+            assert ev["team_id"] == TEST_TEAM_ID
+
+    # ── Invalid cursor ────────────────────────────────────────────────
+
+    def test_invalid_cursor_returns_error(self, client):
+        """Malformed cursor → 400."""
+        r = client.get("/v1/events?cursor=not-valid-base64!!!")
+        assert r.status_code == 400, f"expected 400, got {r.status_code}: {r.text[:200]}"
+
+    def test_empty_cursor_treated_as_none(self, client):
+        """Empty cursor string → treated as no cursor (first page)."""
+        r = client.post("/v1/points", json={
+            "content": "Test",
+            "kind": "statement",
+        })
+        assert r.status_code == 200
+
+        r = client.get("/v1/events?cursor=")
+        assert r.status_code == 200, r.text[:200]
+        # Should return the event (empty cursor → first page)
+        assert len(r.json()["events"]) == 1

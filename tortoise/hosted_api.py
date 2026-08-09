@@ -34,6 +34,7 @@ from tortoise.analytics import (  # #528 server analytics (fail-safe, no-op with
 )  # E1–E8 session endpoints (D1)
 import hmac
 
+from tortoise.log import EventLog
 from tortoise.sdk import TortoiseSDK, _content_hash
 from tortoise.mcp_server import create_http_app
 from tortoise.hosted_backup import (
@@ -383,6 +384,57 @@ async def _async_audit(
         ip_address=ip,
         user_agent=ua,
     )
+
+
+# ── Per-team Event Log (tenant replay surface, #692) ────────────
+
+
+def _team_events_dir() -> Path:
+    """Base directory for per-team event logs.
+
+    Defaults to ``/data/events``. Override with ``TORTOISE_EVENTS_DIR``.
+    """
+    from pathlib import Path
+    env = os.environ.get("TORTOISE_EVENTS_DIR", "/data/events")
+    return Path(env)
+
+
+def _event_log_for(team_id: str) -> EventLog:
+    """Return the :class:`EventLog` for *team_id*.
+
+    The log lives at ``<events_dir>/<team_id>/events.jsonl``.
+    Directories are created automatically on first append.
+    """
+    return EventLog(_team_events_dir() / team_id / "events.jsonl")
+
+
+def _log_team_event(team_id: str, event_type: str, **payload) -> dict | None:
+    """Append a structured event to the team's event log.
+
+    Every event carries a timestamp, event type, team_id, and an
+    auto-generated event_id.  Returns the event dict that was written,
+    or ``None`` if the write failed (best-effort — never crashes the
+    parent mutation).
+    """
+    from tortoise.ids import now_iso, ulid
+    event = {
+        "event_id": ulid(),
+        "ts": now_iso(),
+        "type": event_type,
+        "team_id": team_id,
+        **payload,
+    }
+    try:
+        _event_log_for(team_id).append(event)
+        return event
+    except OSError:
+        # Best-effort — disk full, events dir not writable, etc.
+        # Never let event-logging failures break the mutation response.
+        _logger.warning(
+            "event log write failed for team %s (type=%s)",
+            team_id, event_type, exc_info=True,
+        )
+        return None
 
 
 def _check_internal(request: Request) -> None:
@@ -885,6 +937,15 @@ async def create_point(body: CreatePointRequest, request: Request, team: dict = 
     await _async_audit(
         request, team["team_id"], "point_create",
         resource_type="point", resource_id=result.get("id"),
+    )
+
+    # Per-team event log for tenant replay (#692)
+    _log_team_event(
+        team["team_id"], "point_created",
+        point_id=result.get("id"),
+        kind=body.kind,
+        content_preview=body.content[:200],
+        tags=body.tags,
     )
 
     return {
@@ -3159,6 +3220,85 @@ async def backups_drill(request: Request, body: dict):
     except Exception:
         pass
     return {"status": "drill_ok", "target_graph": target_graph, **result}
+
+
+# ── Event Replay Surface (#692) ───────────────────────────────────
+
+
+@app.get("/v1/events")
+async def list_events(
+    request: Request,
+    cursor: str | None = None,
+    limit: int = Query(50, ge=1, le=500),
+    team: dict = Depends(get_current_team),
+):
+    """Return recent graph-change events for the authenticated team.
+
+    **Read-only** — tenants can only see their own team's events.
+    Tenant A can never read tenant B's event log: the file path is derived
+    from the authenticated ``team_id`` inside ``get_current_team``.
+
+    Pagination (reverse-chronological, most-recent-first):
+
+    * First request (no cursor): returns the most recent *limit* events.
+    * The response includes a ``cursor`` field.  Pass it back on the next
+      request to get the next page of older events.
+    * ``has_more`` is ``true`` when there are more events before the
+      returned window.
+
+    Cursor tokens are opaque base64-encoded strings.  They are valid only
+    while the underlying JSONL file is not rotated or compacted.
+    """
+    tid = team["team_id"]
+    log = _event_log_for(tid)
+
+    # Validate cursor early (before reading events) so malformed cursors
+    # always produce 400, even on empty logs.
+    if cursor is not None and cursor.strip() == "":
+        cursor = None
+    decoded_cursor: int | None = None
+    if cursor is not None:
+        try:
+            decoded_cursor = EventLog._decode_cursor(cursor)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid cursor: {exc}")
+
+    all_events = log.read_all()
+
+    if not all_events:
+        return {"events": [], "cursor": None, "has_more": False}
+
+    # Cursor semantics:
+    #   cursor encodes the index of the FIRST event in the previously
+    #   returned page.  On the next request, we page backwards from there.
+    #
+    # Example: 5 events at indices [0,1,2,3,4], limit=2
+    #   Page 1 (no cursor): slice [3:5] → events 3,4. cursor := encode(3).
+    #   Page 2 (cursor→3): slice [1:3] → events 1,2. cursor := encode(1).
+    #   Page 3 (cursor→1): slice [0:1] → event 0.   cursor := null.
+    if decoded_cursor is not None:
+        end_idx = decoded_cursor
+        start_idx = max(0, end_idx - limit)
+    else:
+        # First page: most recent *limit* events.
+        end_idx = len(all_events)
+        start_idx = max(0, end_idx - limit)
+
+    page = all_events[start_idx:end_idx]
+    has_more = start_idx > 0
+
+    # Next cursor points to the start of this page (so the next request
+    # pages backwards from there).
+    next_cursor = EventLog._encode_cursor(start_idx) if has_more else None
+
+    # Most-recent-first for the response.
+    page.reverse()
+
+    return {
+        "events": page,
+        "cursor": next_cursor,
+        "has_more": has_more,
+    }
 
 
 # ── MCP mount (#236) ─────────────────────────────────────────────
