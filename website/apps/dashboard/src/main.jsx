@@ -184,6 +184,9 @@ function App() {
       })
       if (teamsRes.ok) {
         const list = await teamsRes.json()
+        // Round-9: SIGNED_OUT (cross-tab broadcast / expiry) during the teams
+        // fetch must not resurrect teams or mint with a revoked JWT.
+        if (sessionTokenRef.current !== tok) throw new Error('No session')
         if (list.length) {
           setTeams(list)
           mintedTeamId = list[0].team_id
@@ -248,6 +251,7 @@ function App() {
                 key = storedKey
                 teamKeysRef.current[t.team_id] = storedKey
                 setCurrentTeamId(t.team_id)
+                teamIdRef.current = t.team_id // Round-9: sync — loadTeams must not clobber
               }
             }
           } catch { /* fall through to mint */ }
@@ -264,6 +268,9 @@ function App() {
             return
           }
         }
+        // Round-9: a SIGNED_OUT during the mint must not complete the login
+        // with a fresh key on the tab the user just signed out of.
+        if (!sessionTokenRef.current) { setChecking(false); return }
         if (!key) { setChecking(false); return }
         localStorage.setItem(KEY_STORAGE, key)
         setApiKey(key)
@@ -342,6 +349,10 @@ function App() {
     fallbackTeamIdRef.current = null    // Round-5: no stale team adoption across users
     teamIdRef.current = null            // Round-5: hygiene (inert, but consistent)
     setCheckoutPending(false)           // Round-6: no stuck 'Opening checkout…' for the next user
+    setInviteEmail('')                  // Round-9: no half-typed invite from the previous user
+    setInviteRole('member')
+    setNewGraphName('')
+    setNewTeamName('')
     // Round-7: onAuthStateChange returns {data:{subscription}} with .unsubscribe() —
     // client.auth.removeChannel doesn't exist on GoTrueClient (was a silent no-op).
     if (authSubRef.current) { authSubRef.current.unsubscribe?.(); authSubRef.current = null }
@@ -419,6 +430,8 @@ function App() {
       if (teamIdRef.current !== teamId) return // stale — user switched again
       localStorage.setItem(KEY_STORAGE, key)
       setApiKey(key)
+      setAuthMode('session') // Round-9: a session-minted key IS session auth — no more
+                             // 'sign in required' notices beside live session data
       await refreshTeam(key)
       if (teamIdRef.current !== teamId) return
       await Promise.all([loadAll(key), loadBackups(key)])
