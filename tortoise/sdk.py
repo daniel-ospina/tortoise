@@ -721,6 +721,29 @@ class TortoiseSDK:
         for row in edges_result.result_set:
             validate_rel_type(row[1])  # raises ValueError before any mutation
 
+        # 0b. #547: validate both endpoints BEFORE any write (same contract as
+        #    invalidate_point #330).  Missing old → {"invalidated": False} with
+        #    no writes; missing new → ValueError; self-edge → ValueError.
+        if old_id == new_id:
+            raise ValueError(
+                f"supersede_point: new_id cannot be the same as old_id ({old_id!r})"
+            )
+        old_exists = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN count(n) > 0", params={"id": old_id},
+        ).result_set[0][0]
+        if not old_exists:
+            return {"invalidated": False, "id": old_id, "corrected_by": new_id,
+                    "edges_transferred": 0}
+        new_exists = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN count(n) > 0",
+            params={"id": new_id},
+        ).result_set[0][0]
+        if not new_exists:
+            raise ValueError(
+                f"supersede_point: new point {new_id!r} does not exist — "
+                f"refusing to orphan outdated point {old_id!r}"
+            )
+
         # 1. Mark old outdated + create CORRECTS edge (same as invalidate)
         proj.g.query(
             "MATCH (n:Point {id:$id}) SET n.outdated = true, n.updatedAt = $now",
