@@ -85,6 +85,19 @@ if [ -z "$TORTOISE_BIN" ]; then
   fi
   PYTHON_BIN="$(command -v python3 || true)"
   [ -z "$PYTHON_BIN" ] && exit 0
+  # #280 item 3: reconciliation sweep — periodically scan the local corpus
+  # (~/.tortoise/docs/conversations/) for unindexed/stale session files and
+  # re-index them. Fired BEFORE capture (Round-10 P3): a hosted-capture
+  # failure (missing API key, network down) must not disable local
+  # auto-reindexing — the sweep targets the local graph, independent of
+  # capture. Backgrounded + ALWAYS exits 0 (never block session close);
+  # the per-session flock serializes against capture and manual CLI runs.
+  nohup "$PYTHON_BIN" -c "
+import sys
+sys.path.insert(0, '$TORTOISE_MODULE')
+from tortoise.__main__ import main
+raise SystemExit(main(['index', 'sessions']))
+" >/dev/null 2>&1 &
   "$PYTHON_BIN" -c "
 import sys
 sys.path.insert(0, '$TORTOISE_MODULE')
@@ -92,5 +105,7 @@ from tortoise.__main__ import main
 raise SystemExit(main(['session', 'capture', '--file', '$TMP']))
 " 2>/dev/null || exit 0
 else
+  # Round-10 P3: sweep first (capture failure must not disable reindexing).
+  nohup "$TORTOISE_BIN" index sessions >/dev/null 2>&1 &
   tortoise session capture --file "$TMP" 2>/dev/null || exit 0
 fi

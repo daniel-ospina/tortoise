@@ -44,17 +44,23 @@ After confirming deploys succeed with `FLY_API_TOKEN_DEPLOY`:
 
 ### E2E verification
 
-A deploy-scoped token cannot run `flyctl secrets set`:
+**Scope reality (verified 2026-08-09):** an app-scoped deploy token (`fly tokens
+create deploy --app <app>`) is restricted to a SINGLE app — it cannot touch other
+apps or the org — but it CAN manage that app's own secrets (`flyctl secrets set`).
+The security win over the old org-wide personal token is the app-scoping
+(org-wide blast radius → one app), NOT secrets isolation. Keep the full-scope
+`FLY_API_TOKEN` secret for the secrets-set step and never share it beyond GH.
 
 ```bash
-# This SHOULD fail with a permission error:
+# App management (deploy, status, secrets) on THE ONE app — works:
 FLY_API_TOKEN="$FLY_API_TOKEN_DEPLOY_VALUE" \
-  flyctl secrets set TEST=1 --app tortoise-y4mjjq
-# Expected: "Error: ..." (authz failure)
-
-# This SHOULD succeed:
+  flyctl status --app tortoise-y4mjjq
 FLY_API_TOKEN="$FLY_API_TOKEN_DEPLOY_VALUE" \
   flyctl deploy --remote-only --app tortoise-y4mjjq
+
+# Org-wide / other apps — fails (token is app-scoped):
+FLY_API_TOKEN="$FLY_API_TOKEN_DEPLOY_VALUE" \
+  flyctl apps list
 ```
 
 ## Part 2: main branch protection
