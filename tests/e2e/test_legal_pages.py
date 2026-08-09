@@ -143,10 +143,10 @@ PRODUCT_ROOT_MARKER = "Memory that makes your agents"
 PRODUCT_ROOT_MARKER_LOWER = PRODUCT_ROOT_MARKER.lower()
 FOOTER_SELECTOR = "footer, .legal-footer, .footer"
 # The ABSOLUTE canonical Pricing Page URL (reviewer P2): the relative
-# '/#beat-pricing' form breaks on premiselabs.co, where '/' serves index.html
-# with NO pricing content — the id="beat-pricing" anchor exists only in
+# '/#pricing-section' form breaks on premiselabs.co, where '/' serves index.html
+# with NO pricing content — the id="pricing-section" anchor exists only in
 # product.html (served at '/' on the tortoise host via the middleware rewrite).
-PRICING_PAGE_URL = "https://tortoise.premiselabs.co/#beat-pricing"
+PRICING_PAGE_URL = "https://tortoise.premiselabs.co/#pricing-section"
 FOOTER_PAGES = ("/product.html", "/welcome", "/signup", "/signin", "/self-hosted.html")
 CRAWL_PAGES = (
     "/welcome", "/signup", "/signin", "/self-hosted.html", "/docs.html",
@@ -461,8 +461,8 @@ def test_tos_200_and_negation_safe_block(page: Page) -> None:
 
 def test_tos_pricing_page_hyperlink_resolves(page: Page) -> None:
     """The 'Pricing Page' phrase must be HYPERLINKED (never bare text) with the
-    ABSOLUTE canonical URL https://tortoise.premiselabs.co/#beat-pricing
-    (reviewer P2: the relative '/#beat-pricing' form breaks on premiselabs.co,
+    ABSOLUTE canonical URL https://tortoise.premiselabs.co/#pricing-section
+    (reviewer P2: the relative '/#pricing-section' form breaks on premiselabs.co,
     where '/' serves index.html with NO pricing content — the anchor exists
     only in product.html). The fragment target must EXIST in the served
     product page content, not just return HTTP 200."""
@@ -477,14 +477,14 @@ def test_tos_pricing_page_hyperlink_resolves(page: Page) -> None:
         assert a["href"] and a["href"] != "#", f"Pricing Page href is not resolvable: {a}"
         assert a["href"] == PRICING_PAGE_URL, (
             f"Pricing Page href must be the absolute canonical URL {PRICING_PAGE_URL!r} "
-            f"(the relative '/#beat-pricing' form breaks on premiselabs.co), got {a['href']!r}"
+            f"(the relative '/#pricing-section' form breaks on premiselabs.co), got {a['href']!r}"
         )
     # The fragment target must actually exist in the served product page (the
     # document the tortoise host serves at '/') — a content assertion, not
     # just an HTTP-200 status.
     product = _goto(page, BASE_URL + "/product.html")
-    assert 'id="beat-pricing"' in product, \
-        "served product page is missing the id=\"beat-pricing\" anchor — the Pricing Page href would break"
+    assert 'id="pricing-section"' in product, \
+        "served product page is missing the id=\"pricing-section\" anchor — the Pricing Page href would break"
     assert "write ops" in product, \
         "served product page is missing the 'write ops' pricing tier data"
 
