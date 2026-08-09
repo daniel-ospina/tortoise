@@ -90,6 +90,27 @@ mcp_http_app = create_http_app(
 )
 
 
+def _iter_registered_teams() -> list[dict]:
+    """List registered teams from the control_plane registry (best-effort).
+
+    Used by the event-retention sweep (#432 Task 7) and boot reconcile.
+    Returns [] on any failure — the sweep is best-effort.
+    """
+    try:
+        from tortoise.sdk import TortoiseSDK
+
+        sdk = TortoiseSDK()
+        rows = sdk._get_registry().query(
+            "MATCH (t:Team) RETURN t.id, t.name"
+        ).result_set
+        # P2 (Qwen): skip rows with falsy team_id — namespace=None would sweep
+        # the default/shared graph.
+        return [{"team_id": r[0], "name": r[1] if len(r) > 1 else None}
+                for r in rows if r and r[0]]
+    except Exception:  # noqa: BLE001
+        return []
+
+
 @asynccontextmanager
 async def _lifespan(app):
     """Compose the FastMCP sub-app's lifespan (session manager init) into
@@ -168,6 +189,44 @@ async def _lifespan(app):
                 _boot_gc_drill_graphs(reg_sdk._get_proj().db)
         except Exception as exc:  # noqa: BLE001 — never crash the app
             _logger.warning("backup watcher could not start: %s", exc)
+        # #432 Task 7: event retention — boot purge + interval task. Best-effort
+        # and non-fatal (like the pre-warm): a purge failure never blocks bind.
+        # Per-team graphs get purged by the SDK lazy hook too (embedded/stdio);
+        # here we sweep once at boot and then on an asyncio interval.
+        try:
+            import asyncio
+            import os
+
+            def _sweep_events() -> None:
+                try:
+                    from tortoise.event_store import purge_expired, purge_overflow
+                    from tortoise.registry import registry_sdk  # noqa: F401  (not used; teams via loop below)
+                    days = int(os.environ.get("TORTOISE_EVENT_RETENTION_DAYS", "30"))
+                    cap = int(os.environ.get("TORTOISE_EVENT_MAX_PER_TEAM", "500000"))
+                    # Sweep every registered team's graph (registry Team nodes).
+                    for team in _iter_registered_teams():
+                        try:
+                            sdk = _make_sdk(namespace=team["team_id"])
+                            proj = sdk._get_proj()
+                            purge_expired(proj, retention_days=days)
+                            purge_overflow(proj, max_events=cap)
+                        except Exception:  # noqa: BLE001
+                            _logger.debug("event retention sweep skipped for %s", team.get("team_id"))
+                except Exception as exc:  # noqa: BLE001
+                    _logger.warning("event retention sweep failed: %s", exc)
+
+            _sweep_events()  # boot sweep
+            interval = int(os.environ.get("TORTOISE_EVENT_RETENTION_INTERVAL", "3600"))
+
+            async def _event_retention_loop() -> None:
+                while True:
+                    await asyncio.sleep(interval)
+                    _sweep_events()
+
+            _retention_task = asyncio.get_event_loop().create_task(_event_retention_loop())
+            app.state._event_retention_task = _retention_task
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("event retention loop not started: %s", exc)
         yield
 
 
@@ -917,6 +976,37 @@ async def create_point(body: CreatePointRequest, request: Request, team: dict = 
     }
 
 
+@app.get("/v1/events")
+async def events_poll(
+    after: str | None = None,
+    types: str | None = None,
+    limit: int = Query(100, ge=1, le=1000),
+    team: dict = Depends(get_current_team),
+):
+    """Poll graph/claim events after an opaque cursor (at-least-once contract).
+
+    Clients must be idempotent on replay. Expired cursor → 410 (replay from
+    tail); malformed cursor → 400. Team scoping comes from auth + the SDK
+    namespace — never client input.
+    """
+    sdk = _make_sdk(namespace=team["team_id"])
+    type_list = [t.strip() for t in (types or "").split(",") if t.strip()]
+    try:
+        result = sdk.events_poll(after=after, types=type_list or None, limit=limit)
+    except ValueError as e:
+        msg = str(e)
+        if "cursor expired" in msg:
+            raise HTTPException(
+                status_code=410,
+                detail="cursor expired — replay from tail (after= omitted)",
+            )
+        if "invalid cursor" in msg:
+            raise HTTPException(status_code=400, detail="invalid cursor")
+        if "unknown event type" in msg:
+            raise HTTPException(status_code=400, detail=msg)
+        raise HTTPException(status_code=400, detail=str(e))
+    return result
+
 @app.get("/v1/points")
 async def list_points(
     kind: str | None = None,
@@ -933,6 +1023,11 @@ async def list_points(
     sdk = _make_sdk(namespace=team["team_id"])
     proj = sdk._get_proj()
     conditions = ["(n.is_operator IS NULL OR n.is_operator = false)"]
+    # #432 Task 2: retracted points (status='retracted') are EXCLUDED from the
+    # default listing surface — tombstone contract: retrievable by id via
+    # GET /v1/points/{id}, not by list. No include param on REST v1 (surface
+    # minimal).
+    conditions.append("(n.status IS NULL OR n.status <> 'retracted')")
     params: dict = {"limit": limit}
     if kind:
         conditions.append("n.pointKind = $kind")

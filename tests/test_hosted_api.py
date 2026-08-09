@@ -1242,3 +1242,85 @@ class TestDreamBudget:
             assert r.status_code == 200, r.text[:200]
         finally:
             ha._DREAM_FULL_BUCKETS.pop(TEST_TEAM_ID, None)
+
+
+class TestEventsPoll:
+    """GET /v1/events — cursor-based poll (Task 5, real REST tests)."""
+
+    def test_events_poll_returns_events(self, client):
+        r = client.post("/v1/points", json={"kind": "statement", "content": "e1"})
+        assert r.status_code == 200
+        r = client.get("/v1/events")
+        assert r.status_code == 200
+        body = r.json()
+        assert [e["type"] for e in body["events"]] == ["PointAdded"]
+        assert body["next_cursor"]
+
+    def test_expired_cursor_410(self, client):
+        client.post("/v1/points", json={"kind": "statement", "content": "old"})
+        from tortoise.hosted_api import _make_sdk
+        sdk = _make_sdk(namespace=TEST_TEAM_ID)
+        proj = sdk._get_proj()
+        stale = sdk.events_poll()["next_cursor"]  # points at seq 1
+        client.post("/v1/points", json={"kind": "statement", "content": "fresh"})
+        # purge seq <= 1 via direct Cypher (Task 7 owns the purge helper)
+        proj.g.query("MATCH (n:GraphEvent) WHERE n.seq < 2 DELETE n")
+        from tortoise import event_store as _es
+        _es._refresh_first_seq(proj)  # watermark, as purge_expired would
+        r = client.get("/v1/events", params={"after": stale})
+        assert r.status_code == 410
+        assert "replay from tail" in r.json()["detail"]
+
+    def test_malformed_cursor_400(self, client):
+        r = client.get("/v1/events", params={"after": "not-a-cursor!!"})
+        assert r.status_code == 400
+        assert r.json()["detail"] == "invalid cursor"
+
+    def test_unknown_type_400(self, client):
+        r = client.get("/v1/events", params={"types": "Nope"})
+        assert r.status_code == 400
+
+    def test_tenant_isolation(self, client, internal_client):
+        """Team A's poll never contains team B's events (namespace = partition)."""
+        from tortoise.hosted_api import _make_sdk
+        for team_id in ("evt-team-a", "evt-team-b"):
+            r = internal_client.post(
+                "/internal/provision",
+                json={
+                    "team_id": team_id,
+                    "team_name": f"Team {team_id}",
+                    "api_key_hash": f"hash-{team_id}",
+                    "created_by": "tester",
+                },
+                headers={"Authorization": f"Bearer {_INTERNAL_KEY}"},
+            )
+            assert r.status_code == 200, f"provision failed: {r.text}"
+        sdk_a = _make_sdk(namespace="evt-team-a")
+        sdk_a.create_point(content="A_EVENT", kind="statement")
+        sdk_b = _make_sdk(namespace="evt-team-b")
+        sdk_b.create_point(content="B_EVENT", kind="statement")
+        ids_a = {e["payload"].get("id") for e in sdk_a.events_poll()["events"]}
+        ids_b = {e["payload"].get("id") for e in sdk_b.events_poll()["events"]}
+        assert ids_a and ids_b
+        assert ids_a.isdisjoint(ids_b), "cross-tenant event leak"
+
+
+class TestRetractedTombstoneContract:
+    """#432 Task 6 — /v1/points excludes retracted; /v1/points/{id} returns them."""
+
+    def test_list_excludes_retracted_but_get_returns_tombstone(self, client):
+        from tortoise.hosted_api import _make_sdk
+        sdk = _make_sdk(namespace=TEST_TEAM_ID)
+        p = sdk.create_point(content="doomed", kind="statement")
+        # listed while live
+        listed = client.get("/v1/points").json()
+        assert any(pt["id"] == p["id"] for pt in listed["points"])
+        # retract via the team SDK (Task 1 method)
+        sdk.retract_point(p["id"])
+        listed2 = client.get("/v1/points").json()
+        assert not any(pt["id"] == p["id"] for pt in listed2["points"]), \
+            "retracted point must be excluded from the default list surface"
+        # tombstone contract: still retrievable by id with status='retracted'
+        got = client.get(f"/v1/points/{p['id']}")
+        assert got.status_code == 200, got.text
+        assert got.json()["status"] == "retracted"

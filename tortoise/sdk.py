@@ -25,7 +25,45 @@ register_kind("option")    # used by file_decision (#133)
 register_kind("evidence")  # used by file_decision (#133)
 
 # Valid status values for Point nodes (used by update_point status validation)
-POINT_STATUS_VALUES = frozenset({'live', 'draft', 'outdated', 'archived'})
+# #432: claim lifecycle vocabulary — draft → live → retracted → superseded
+# (plus outdated/archived). challenged is a DERIVED condition (NAND operator
+# edge on a live point), NOT a stored status.
+POINT_STATUS_VALUES = frozenset({'draft', 'live', 'retracted', 'superseded', 'outdated', 'archived'})
+
+# #432: declarative spec for the retract/supersede transition guards. NOT
+# consulted by update_point per-call (update_point only promotes draft→live);
+# every claim transition is observable via a Task 3 emit hook, and no
+# transition can slip through update_point unemitted.
+_ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
+    # P2 (code-review): guards allow draft→retracted/superseded (a draft point
+    # can be terminal before ever going live); keep the declarative spec
+    # aligned with the retract/supersede guards.
+    "draft": frozenset({"live", "retracted", "superseded"}),  # promote + terminal
+    "live": frozenset({"retracted", "superseded"}),    # via retract_point / supersede_point
+    "retracted": frozenset(),                            # terminal
+    "superseded": frozenset(),                           # terminal
+    "outdated": frozenset({"retracted"}),               # outdated stays a flag; retract allowed
+    "archived": frozenset(),                             # terminal (reserved — no v1 write path)
+}
+
+
+def _raise_update_point_status_error(proj, id: str) -> None:
+    """#432: error path for the update_point draft→live promote guard.
+
+    Runs a diagnostic existence read ONLY when the guarded SET returned no
+    rows, so the happy path stays a single round trip. Missing point →
+    ValueError matching the historical missing-point behavior; present but
+    not draft → illegal-transition ValueError.
+    """
+    exists = proj.g.query(
+        "MATCH (n:Point {id:$id}) RETURN count(n)", params={"id": id},
+    ).result_set[0][0]
+    if not exists:
+        raise ValueError(f"No point {id!r}")
+    raise ValueError(
+        f"Illegal status transition — update_point only promotes draft→live; "
+        f"use retract_point()/supersede_point() for lifecycle transitions"
+    )
 
 _logger = logging.getLogger(__name__)
 
@@ -380,6 +418,128 @@ class TortoiseSDK:
         if removed:
             proj.g.query("MATCH (t:Tag) WHERE NOT (t)<-[:TAGGED]-() DELETE t")
 
+    # ── Events: cursor-based poll (Task 5) ────────────────────────────
+
+    @staticmethod
+    def _encode_cursor(seq: int) -> str:
+        """Opaque cursor: base64url JSON {v:1, seq:N} — ONE format for every
+        cursor incl. the empty graph ({v:1, seq:0}). Plan-review P2."""
+        import base64
+        import json
+
+        raw = json.dumps({"v": 1, "seq": int(seq)}, separators=(",", ":"))
+        return base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
+
+    @staticmethod
+    def _decode_cursor(cursor: str) -> int:
+        """Decode an opaque cursor → seq. Raises ValueError('invalid cursor')."""
+        import base64
+        import json
+
+        try:
+            raw = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4))
+            data = json.loads(raw)
+            if data.get("v") != 1 or "seq" not in data:
+                raise ValueError
+            seq = int(data["seq"])
+            if seq < 0:  # P2 (Qwen): negative cursors must not bypass expiry
+                raise ValueError
+            return seq
+        except Exception:  # noqa: BLE001
+            raise ValueError("invalid cursor") from None
+
+    def events_poll(self, after: str | None = None, types: list[str] | None = None,
+                    limit: int = 100) -> dict:
+        """Poll graph/claim events after a cursor (at-least-once; idempotent on replay).
+
+        Returns {"events": [payload dicts ordered by seq], "next_cursor": opaque}.
+        after=None → tail (oldest retained). Expired cursor → ValueError(
+        'cursor expired — replay from tail'); malformed → ValueError('invalid cursor').
+        Types are validated against the EventCodec registry (unknown → ValueError).
+        Events live in THIS SDK's graph namespace (the team partition).
+        """
+        from .event_store import read_after
+
+        after_seq = 0 if after is None else self._decode_cursor(after)
+        if types:
+            from .shared_state.events import event_types
+
+            registered = event_types()
+            unknown = [t for t in types if t not in registered]
+            if unknown:
+                raise ValueError(f"unknown event type: {unknown[0]}")
+        proj = self._get_proj()
+        # Lazy retention (plan-review P2 / Task 6 readOnlyHint tension):
+        # maintenance purge at most once per TORTOISE_EVENT_RETENTION_INTERVAL
+        # per process, so steady-state polls are read-only. Best-effort — a
+        # purge failure never blocks the poll.
+        self._maybe_purge_events(proj)
+        # Expired-cursor check: a NON-ZERO cursor pointing below the graph's
+        # min seq was purged/compacted. after_seq == 0 is the "from the start"
+        # sentinel (after=None) — it never expires, it just returns all
+        # retained events.
+        if after_seq != 0:
+            # Watermark: first_seq on GraphEventMeta (maintained by purges) —
+            # a cursor below it was purged/compacted → expired (410). Works
+            # even when the graph is empty after a full purge.
+            rows = proj.g.query(
+                "MATCH (m:GraphEventMeta) RETURN m.first_seq"
+            ).result_set
+            first_seq = rows[0][0] if rows and rows[0][0] is not None else None
+            if first_seq is not None and after_seq < int(first_seq):
+                raise ValueError("cursor expired — replay from tail")
+        evs = read_after(proj, after_seq, types=types, limit=limit)
+        last = evs[-1]["seq"] if evs else after_seq
+        return {"events": evs, "next_cursor": self._encode_cursor(last)}
+
+    _EVENT_PURGE_ATTR = "_tortoise_last_purge"
+    _EVENT_PURGE_LAST: float = 0.0  # process-level gate (P1 review fix)
+
+    def _maybe_purge_events(self, proj) -> None:
+        """Best-effort, interval-gated retention purge (see events_poll).
+
+        Runs at most once per TORTOISE_EVENT_RETENTION_INTERVAL seconds per
+        PROCESS (module-global monotonic — NOT per-projection: hosted REST/MCP
+        build a fresh SDK+projection per request, so a per-projection gate
+        would fire the purge on EVERY poll). Reads config via env with
+        defaults (30d retention, 500k cap, 3600s interval).
+        """
+        import os
+        import time
+
+        interval = int(os.environ.get("TORTOISE_EVENT_RETENTION_INTERVAL", "3600"))
+        now = time.monotonic()
+        if now - TortoiseSDK._EVENT_PURGE_LAST < interval:
+            return
+        TortoiseSDK._EVENT_PURGE_LAST = now
+        try:
+            from .event_store import purge_expired, purge_overflow
+
+            days = int(os.environ.get("TORTOISE_EVENT_RETENTION_DAYS", "30"))
+            cap = int(os.environ.get("TORTOISE_EVENT_MAX_PER_TEAM", "500000"))
+            purge_expired(proj, retention_days=days)
+            purge_overflow(proj, max_events=cap)
+        except Exception:  # noqa: BLE001 — best-effort
+            _logger.warning("event retention purge failed — continuing", exc_info=True)
+
+    def _emit_event(self, type_: str, payload: dict) -> None:
+        """Append a durable :GraphEvent for a graph mutation (best-effort).
+
+        #432 Task 3: events land in THIS SDK's graph namespace — the namespace
+        IS the team partition (server-derived via mcp_auth `_get_team_sdk` /
+        hosted `_make_sdk`, never client-supplied). A failed append is logged
+        and swallowed — mutation paths must never fail on event emission.
+        """
+        try:
+            from .event_store import append_event, ensure_event_schema, next_seq
+
+            proj = self._get_proj()
+            ensure_event_schema(proj)
+            seq = next_seq(proj)
+            append_event(proj, seq, type_, payload, self.ulid())
+        except Exception:  # noqa: BLE001 — best-effort
+            _logger.warning("event emission failed for %s — continuing", type_)
+
     def create_point(self, kind: str, content: str, **props) -> dict:
         """Create a new Point node. Raises ValueError if kind is invalid.
 
@@ -454,6 +614,10 @@ class TortoiseSDK:
             pid = ulid()
         # Points enter as draft, go live when first edge is created (#131)
         status = props.pop("status", "draft")
+
+        # #432 Task 3: durable PointAdded event (append-before-mutation;
+        # phantom on failed mutation is the documented at-least-once tradeoff).
+        self._emit_event("PointAdded", {"id": pid, "kind": kind, "content_hash": ch})
 
         # Compute embedding (Phase 1A, #7698) — stored as Point property
         embedding = None
@@ -742,26 +906,63 @@ class TortoiseSDK:
                 f"Must be one of: {', '.join(sorted(POINT_STATUS_VALUES))}"
             )
 
+        # #432 plan-review P1: update_point is non-status except the draft→live
+        # promote (matches the create_operator promote). Any other status value
+        # is rejected BEFORE the query — lifecycle transitions go through
+        # retract_point()/supersede_point() (which emit events). This keeps
+        # every claim transition observable via an emit hook.
+        if 'status' in props:
+            if props['status'] != 'live':
+                raise ValueError(
+                    "update_point only promotes draft→live — use "
+                    "retract_point()/supersede_point() for lifecycle transitions"
+                )
+
         # Check if node carries :Object label (entity node with version tracking)
         has_object = proj.g.query(
             "MATCH (n:Point:Object {id:$id}) RETURN count(n) > 0",
             params={"id": id},
         ).result_set[0][0]
 
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+
         if has_object:
-            from datetime import datetime, timezone
-            now = datetime.now(timezone.utc).isoformat()
-            proj.g.query(
-                "MATCH (n:Point:Object {id:$id}) "
-                "SET n += $props, n.version = coalesce(n.version, 0) + 1, n.updatedAt = $now",
-                params={"id": id, "props": props, "now": now},
-            )
-        else:
-            for key, val in props.items():
-                proj.g.query(
-                    "MATCH (n:Point {id:$id}) SET n += $props",
-                    params={"id": id, "props": {key: val}},
+            if 'status' in props:
+                # Promote guard folded INTO the WHERE clause (plan-review P2:
+                # single round trip, no widened write window).
+                res = proj.g.query(
+                    "MATCH (n:Point:Object {id:$id}) "
+                    "WHERE (n.status IS NULL OR n.status = 'draft') "
+                    "SET n.status = 'live', n.updatedAt = $now, "
+                    "n.version = coalesce(n.version, 0) + 1 RETURN n",
+                    params={"id": id, "now": now},
                 )
+                if not res.result_set:
+                    _raise_update_point_status_error(proj, id)
+            else:
+                proj.g.query(
+                    "MATCH (n:Point:Object {id:$id}) "
+                    "SET n += $props, n.version = coalesce(n.version, 0) + 1, n.updatedAt = $now",
+                    params={"id": id, "props": props, "now": now},
+                )
+        else:
+            if 'status' in props:
+                # Promote guard folded INTO the WHERE clause (plan-review P2).
+                res = proj.g.query(
+                    "MATCH (n:Point {id:$id}) "
+                    "WHERE (n.status IS NULL OR n.status = 'draft') "
+                    "SET n.status = 'live', n.updatedAt = $now RETURN n",
+                    params={"id": id, "now": now},
+                )
+                if not res.result_set:
+                    _raise_update_point_status_error(proj, id)
+            else:
+                for key, val in props.items():
+                    proj.g.query(
+                        "MATCH (n:Point {id:$id}) SET n += $props",
+                        params={"id": id, "props": {key: val}},
+                    )
         # Tag sync (#485): keep TAGGED edges consistent with the n.tags
         # property — update_point previously set the property but left edges
         # stale, so query_points_by_tag missed updated points. Falsy tag
@@ -869,6 +1070,43 @@ class TortoiseSDK:
         proj = self._get_proj()
         now = datetime.now(timezone.utc).isoformat()
 
+        # #432: transition guard — old point must exist, be a statement (not
+        # an operator), and not already be terminal (mirrors the retract
+        # guard; supersede is already multi-query so the read is cheap).
+        guard = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.is_operator, n.status",
+            params={"id": old_id},
+        ).result_set
+        if not guard:
+            raise ValueError(f"No point {old_id!r}")
+        is_op, cur = guard[0][0], guard[0][1]
+        if is_op:
+            raise ValueError(
+                f"Point {old_id!r} is an operator — supersession is for statement points")
+        if cur in ("retracted", "superseded", "archived"):
+            raise ValueError(
+                f"Point {old_id!r} is already terminal ({cur!r}) — supersession is terminal")
+
+        # P1 (Qwen review): validate the NEW point too — it must exist, be a
+        # statement, not be terminal, and differ from the old point. A missing /
+        # self / terminal successor would terminalize the old point with no valid
+        # replacement (phantom PointSuperseded).
+        if old_id == new_id:
+            raise ValueError("supersede_point: old_id and new_id must differ")
+        new_guard = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.is_operator, n.status",
+            params={"id": new_id},
+        ).result_set
+        if not new_guard:
+            raise ValueError(f"No point {new_id!r}")
+        n_is_op, n_cur = new_guard[0][0], new_guard[0][1]
+        if n_is_op:
+            raise ValueError(
+                f"Point {new_id!r} is an operator — supersession target must be a statement")
+        if n_cur in ("retracted", "superseded", "archived"):
+            raise ValueError(
+                f"Point {new_id!r} is already terminal ({n_cur!r}) — cannot supersede into it")
+
         # 0. #329: collect + validate ALL edge types BEFORE any mutation.
         #    The edge types are interpolated into query structure (no params
         #    possible) — an unvalidated type (e.g. from a crafted edge) is a
@@ -884,9 +1122,17 @@ class TortoiseSDK:
         for row in edges_result.result_set:
             validate_rel_type(row[1])  # raises ValueError before any mutation
 
-        # 1. Mark old outdated + create CORRECTS edge (same as invalidate)
+        # #432 Task 3: durable PointSuperseded event (append-before-mutation,
+        # AFTER the guard + edge-type validation — P2 review fix: emitting
+        # before validation produced phantoms on corrupt-edge data).
+        self._emit_event("PointSuperseded", {"id": old_id, "new_id": new_id})
+
+        # 1. Mark old superseded + outdated + create CORRECTS edge (same as invalidate)
+        # #432: status='superseded' alongside the legacy outdated=true flag
+        # (back-compat for consumers reading the flag; #690 will consolidate).
         proj.g.query(
-            "MATCH (n:Point {id:$id}) SET n.outdated = true, n.updatedAt = $now",
+            "MATCH (n:Point {id:$id}) SET n.status = 'superseded', "
+            "n.outdated = true, n.updatedAt = $now",
             params={"id": old_id, "now": now},
         )
         proj.g.query(
@@ -952,6 +1198,53 @@ class TortoiseSDK:
             "edges_transferred": transferred,
         }
 
+    def retract_point(self, id: str) -> dict:
+        """Tombstone-retract a Point: status='retracted' (point stays in graph).
+
+        #432: retraction is a TERMINAL state transition, not a deletion — the
+        projection keeps the point with status='retracted' and default query
+        surfaces exclude it (opt-in via include_retracted). Single atomic
+        conditional query on the happy path; diagnostic read only on the error
+        path.
+
+        Raises ValueError if the point is missing, is an operator node, or is
+        already terminal (retracted/superseded/archived).
+        """
+        from datetime import datetime, timezone
+        proj = self._get_proj()
+        # P1 (code-review): validate FIRST, then emit, then mutate — the emit
+        # before the guard produced phantom PointRetracted events on the
+        # NORMAL invalid-input path (missing / operator / terminal), which
+        # poll consumers would see as retractions that never happened.
+        row = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.is_operator, n.status",
+            params={"id": id}).result_set
+        if not row:
+            raise ValueError(f"No point {id!r}")
+        is_op, cur = row[0][0], row[0][1]
+        if is_op:
+            raise ValueError(
+                f"Point {id!r} is an operator — retraction is for statement points")
+        if cur in ("retracted", "superseded", "archived"):
+            raise ValueError(
+                f"Point {id!r} is already terminal ({cur!r}) — retraction is terminal")
+        # #432 Task 3: durable PointRetracted event (append-before-mutation;
+        # only after the input contract validates).
+        self._emit_event("PointRetracted", {"id": id})
+        # P1 (Qwen review): CAS the SET — the WHERE re-checks terminal state so
+        # a concurrent retract/supersede can't both pass validation and have a
+        # terminal overwrite (retracted overwriting superseded, or vice versa).
+        r = proj.g.query(
+            "MATCH (n:Point {id:$id}) "
+            "WHERE (n.status IS NULL OR NOT (n.status IN $terminal)) "
+            "SET n.status = 'retracted', n.updatedAt = $now RETURN properties(n)",
+            params={"id": id, "now": datetime.now(timezone.utc).isoformat(),
+                    "terminal": ["retracted", "superseded", "archived"]})
+        if not r.result_set:
+            raise ValueError(
+                f"Point {id!r} is already terminal — retraction is terminal")
+        return r.result_set[0][0]  # updated node props (no trailing get_point round trip)
+
     # ── Operators ─────────────────────────────────────────────────
 
     def create_operator(self, op_type: str, source_id: str, target_ids: list[str],
@@ -978,7 +1271,10 @@ class TortoiseSDK:
         inputs = [source_id] + list(target_ids)
         proj = self._get_proj()
 
-        # Validate all source/target Points exist (fail loudly, not silently)
+        # Validate all source/target Points exist FIRST (fail loudly, not
+        # silently) — then emit, then mutate. P1 (code-review): emitting
+        # before validation produced phantom OperatorAdded events on missing
+        # inputs, visible to subscription poll consumers.
         existing = proj.g.query(
             "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id",
             params={"ids": inputs},
@@ -987,6 +1283,12 @@ class TortoiseSDK:
         missing = [i for i in inputs if i not in existing_ids]
         if missing:
             raise ValueError(f"Cannot create operator: Points {missing} do not exist")
+
+        # #432 Task 3: durable OperatorAdded event (append-before-mutation).
+        self._emit_event("OperatorAdded", {
+            "id": pid, "op_type": op_type, "source_id": source_id,
+            "target_ids": list(target_ids),
+        })
 
         # Build operator node with direction + optional label (context is NOT written — P1 #49)
         extra_props = []
@@ -1008,8 +1310,13 @@ class TortoiseSDK:
                 params={"oid": pid, "sid": inp_id, "i": i},
             )
         # Draft → live lifecycle (#131): source point goes live when first edge created
+        # P1 (code-review): draft → live promote ONLY for draft/null sources —
+        # an unconditional promote resurrected retracted (terminal) sources,
+        # violating the terminal-state contract with no event in the stream.
         proj.g.query(
-            "MATCH (s:Point {id:$sid}) SET s.status = 'live'",
+            "MATCH (s:Point {id:$sid}) "
+            "WHERE (s.status IS NULL OR s.status = 'draft') "
+            "SET s.status = 'live'",
             params={"sid": source_id},
         )
         # Dreaming (#85): new edges change propagation — mark all inputs dirty.
@@ -1039,6 +1346,11 @@ class TortoiseSDK:
                           ("consistency", consistency), ("directness", directness)):
             if not 0 <= val <= 1:
                 raise ValueError(f"{name} must be 0-1, got {val}")
+        # #432 Task 3: durable OperatorAnnotated event (append-before-mutation).
+        self._emit_event("OperatorAnnotated", {
+            "id": id, "bias": bias, "precision": precision,
+            "consistency": consistency, "directness": directness,
+        })
         return self.update_point(id,
             annotator_bias=bias, annotator_precision=precision,
             annotator_consistency=consistency, annotator_directness=directness)
@@ -1094,8 +1406,13 @@ class TortoiseSDK:
     # ── Query ─────────────────────────────────────────────────────
 
     def query(self, kind: str | None = None,
+              *, include_retracted: bool = False,
               **filters) -> list[dict]:
         """Query points by pointKind and/or custom property filters.
+
+        #432 Task 2: retracted points (status='retracted') are EXCLUDED by
+        default — pass include_retracted=True, or an explicit status= filter
+        (e.g. status='retracted'), to surface tombstones.
 
         For confidence-aware queries, use tortoise_fts_query() with query=None
         for full-scan mode with EP annotation.
@@ -1103,6 +1420,10 @@ class TortoiseSDK:
         proj = self._get_proj()
         clauses = ["(n.is_operator IS NULL OR n.is_operator = false)"]
         params: dict[str, Any] = {}
+        # #432 Task 2: retracted exclusion — skipped when the caller explicitly
+        # filters by status (their filter controls visibility).
+        if not include_retracted and "status" not in filters:
+            clauses.append("(n.status IS NULL OR n.status <> 'retracted')")
         if kind:
             expanded = self._expand_kind(kind)
             if len(expanded) == 1:
@@ -1130,12 +1451,22 @@ class TortoiseSDK:
         return [r[0] for r in rows]
 
     def paginated_query(self, kind: str | None = None,
-                         skip: int = 0, limit: int = 20, **filters) -> dict:
+                        skip: int = 0, limit: int = 20,
+                        *, include_retracted: bool = False,
+                        **filters) -> dict:
         """Query points with pagination. Returns {results, total, hasMore}.
+
+        #432 Task 2: retracted points (status='retracted') are EXCLUDED by
+        default — pass include_retracted=True, or an explicit status= filter,
+        to surface tombstones.
         """
         proj = self._get_proj()
         clauses = ["(n.is_operator IS NULL OR n.is_operator = false)"]
         params: dict[str, Any] = {}
+        # #432 Task 2: retracted exclusion — skipped when the caller explicitly
+        # filters by status (their filter controls visibility).
+        if not include_retracted and "status" not in filters:
+            clauses.append("(n.status IS NULL OR n.status <> 'retracted')")
         if kind:
             expanded = self._expand_kind(kind)
             if len(expanded) == 1:
@@ -2328,7 +2659,9 @@ class TortoiseSDK:
                 room=item.get("room", ""),
                 content_hash=ch,
             )
-            # GAP-07: emit EventRecorded for provenance
+            # GAP-07 (partially closed by #432 _emit_event — graph mutations
+            # now emit :GraphEvent; this EventRecorded path is session-capture
+            # provenance and stays separate)
             try:
                 proj.apply({
                     "type": "EventRecorded",
