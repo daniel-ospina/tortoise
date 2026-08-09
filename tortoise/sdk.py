@@ -321,7 +321,18 @@ class TortoiseSDK:
         if id is not None:
             event["id"] = id
         event.update(payload)
-        log.append(event)
+        try:
+            log.append(event)
+        except Exception as exc:
+            # The graph mutation already succeeded — a log-write failure must
+            # not crash the caller or pretend the write failed. Rebuild parity
+            # is best-effort here: rebuild_all's graph snapshot catches any
+            # point missing from the log on the next rebuild (#548).
+            _logger.warning(
+                "failed to append %s event to SDK log %s: %s",
+                type_, self._event_log_path, exc,
+            )
+            return None
         return event
 
     def test_guard(self) -> None:
