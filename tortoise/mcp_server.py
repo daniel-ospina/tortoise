@@ -154,6 +154,9 @@ _QUOTA_GATED: frozenset[str] = frozenset({
     "tortoise_create_edge", "tortoise_supersede", "tortoise_invalidate",
     # delegates to hosted_api._seed_demo_graph (creates the 4-layer demo graph)
     "tortoise_onboarding_demo_create",
+    # #684: node-creating tools that were missed in the original #329 audit
+    "tortoise_file_human_approval",  # creates Event + decision Point + IMPL edges
+    "tortoise_assess_source",        # creates assessment Point
 })
 
 
@@ -655,8 +658,8 @@ def tortoise_file_human_approval(approver_id: str, artifact_id: str,
     Returns {event_id, decision_point_id, impl_operator_ids, confidence_delta}.
     """
     point_ids = _parse(point_ids)
-    return _safe(_get_team_sdk().file_human_approval, approver_id, artifact_id,
-                 point_ids, decision_content)
+    return _safe(_quota_gated(_get_team_sdk().file_human_approval, "points"),
+                 approver_id, artifact_id, point_ids, decision_content)
 
 
 def tortoise_delete_point(id: str) -> dict:
@@ -1038,7 +1041,8 @@ def tortoise_assess_source(url: str, assessor: str, score: float,
     (compute_reputation at write time). Feeds the source's reliability factor
     (clamped [0.1, 2.0]).
     """
-    return _safe(_get_team_sdk().assess_source, url, assessor, score, rationale)
+    return _safe(_quota_gated(_get_team_sdk().assess_source, "points"),
+                 url, assessor, score, rationale)
 
 
 @mcp.tool(annotations=ToolAnnotations(destructiveHint=True))

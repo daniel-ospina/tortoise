@@ -583,6 +583,40 @@ class TestQuotaEnforcement:
         text = "".join(c.get("text", "") for c in body.get("result", {}).get("content", []))
         assert "-32004" in text or "not available over HTTP" in text, f"expected excluded error: {body}"
 
+    def test_assess_source_blocked_at_cap(self, quota_client):
+        """#684: tortoise_assess_source is quota-gated — blocked at cap."""
+        tc, reg_sdk, key, tid = quota_client
+        self._set_max_points(reg_sdk, tid, 0)  # at/over cap
+        payload = {
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "tortoise_assess_source",
+                       "arguments": {"url": "https://example.com",
+                                     "assessor": "test-agent",
+                                     "score": 0.5,
+                                     "rationale": "quota test"}},
+        }
+        r, body = _mcp_post(tc, payload)
+        result = body.get("result", {})
+        content = result.get("content", [])
+        text = "".join(c.get("text", "") for c in content if isinstance(c, dict))
+        assert "limit reached" in text, f"expected quota error, got: {body}"
+
+    def test_assess_source_below_cap_succeeds(self, quota_client):
+        """#684: tortoise_assess_source below cap succeeds (no quota error)."""
+        tc, reg_sdk, key, tid = quota_client
+        payload = {
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "tortoise_assess_source",
+                       "arguments": {"url": "https://example.com",
+                                     "assessor": "test-agent",
+                                     "score": 0.5,
+                                     "rationale": "below cap test"}},
+        }
+        r, body = _mcp_post(tc, payload)
+        result = body.get("result", {})
+        text = "".join(c.get("text", "") for c in result.get("content", []))
+        assert "limit reached" not in text, f"unexpected quota error: {text}"
+
     def test_list_graphs_scoped_to_team(self, quota_client):
         """HTTP list_graphs returns only the calling team's own graph."""
         tc, *_ = quota_client
@@ -617,7 +651,8 @@ class TestIntrospectiveQuotaCompleteness:
             ".create_source", ".checkpoint", ".file_decision",
             ".diary_write", ".update_point", ".update_entity",
             ".mitigate_operator", ".create_edge", ".supersede_point",
-            ".invalidate_point", ".ingest_corpus", ".index_sessions",
+            ".invalidate_point", ".file_human_approval", ".assess_source",
+            ".ingest_corpus", ".index_sessions",
             ".backfill_v25",
         )
         bulk_only = (".ingest_corpus", ".index_sessions", ".backfill_v25")
