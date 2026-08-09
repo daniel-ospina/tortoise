@@ -1886,11 +1886,18 @@ def _cmd_index_sessions(args) -> int:
     except ValueError as e:
         print(f"  ❌ Invalid DB target: {e}", file=_sys.stderr)
         return 1
-    sdk = TortoiseSDK()
-    sdk._proj = _projection_for(target)
+    # Round-9: an unreachable graph (dead host, down DB) must produce a clean
+    # CLI error, not a raw ConnectionError traceback — mirroring doctor
+    # check-3's pattern. The hook fires this on every session end, so a down
+    # DB would otherwise spawn one noisy failing process per close.
     try:
+        sdk = TortoiseSDK()
+        sdk._proj = _projection_for(target)
         report = sdk.reconcile_sessions(directory=args.dir,
                                         extract_metadata=args.metadata)
+    except Exception as e:
+        print(f"  ❌ graph unreachable: {e}", file=_sys.stderr)
+        return 1
     finally:
         if sdk._proj:
             sdk._proj.close()
