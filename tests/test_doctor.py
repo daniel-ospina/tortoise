@@ -137,6 +137,33 @@ class TestDoctorPath:
         assert "bad port" in probe
         assert "docker://:***@127.0.0.1:notaport" in probe  # masked, target intact
 
+    def test_doctor_db_uri_password_with_at_sign_never_leaks(self, clear_db_env, capsys):
+        """#720 conf 65: a password containing a raw @ must not leak —
+        urlparse splits userinfo at the LAST @, so the mask must consume
+        everything up to the host separator (docker://:p@ss@host must not
+        print the ':ss@' tail)."""
+        rc = _run_doctor(["--db", "docker://:p@ss@127.0.0.1:notaport/tortoise"])
+        out = capsys.readouterr().out
+
+        assert rc == 1
+        assert "p@ss" not in out  # full credential (incl. @) never reaches stdout
+        probe = next(line for line in out.splitlines() if "Graph: FalkorDB" in line)
+        assert "bad port" in probe
+        assert "docker://:***@127.0.0.1:notaport" in probe  # masked, target intact
+
+    def test_mask_uri_userinfo_masks_at_containing_password(self):
+        """Unit-level: mask consumes up to the LAST @ (host boundary),
+        never the first — @ inside a password stays hidden."""
+        from tortoise.__main__ import _mask_uri_userinfo
+
+        assert _mask_uri_userinfo("docker://:p@ss@127.0.0.1:7687/tortoise") == \
+            "docker://:***@127.0.0.1:7687/tortoise"
+        assert _mask_uri_userinfo("docker://user:p@ss@host:7687/g") == \
+            "docker://:***@host:7687/g"
+        # no userinfo → unchanged (plain target stays visible for debuggability)
+        assert _mask_uri_userinfo("docker://127.0.0.1:7687/tortoise") == \
+            "docker://127.0.0.1:7687/tortoise"
+
     def test_doctor_db_uri_probe_uses_uri_graph_name(self, clear_db_env, monkeypatch, capsys):
         """#720 P2 conf 62: the Step 2 probe must select the graph from the
         URI path — the same derivation from_uri uses in Step 3 — never a

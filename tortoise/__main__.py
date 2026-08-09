@@ -1022,7 +1022,7 @@ def _mask_uri_userinfo(target: str) -> str:
     the FALKORDB_* legacy display mask, conf 95).
     """
     import re
-    return re.sub(r"://[^@/]*@", "://:***@", target)
+    return re.sub(r"://[^/]*@", "://:***@", target)
 
 
 def _index_github_child_cmd(target: str, repo_root: str,
