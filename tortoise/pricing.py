@@ -94,4 +94,7 @@ def daily_backups_enabled(tier: str | None) -> bool:
         return False
     data = _load()
     t = data.get("tiers", {}).get(tier, {})
-    return bool(t.get("features", {}).get("daily_backups", False))
+    # Strict boolean check: pricing.json uses the string "planned" to mark
+    # features that are not yet live. bool("planned") is True, which would
+    # wrongly enable the feature — only a real JSON `true` unlocks it.
+    return t.get("features", {}).get("daily_backups", False) is True

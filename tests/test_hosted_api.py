@@ -1083,6 +1083,14 @@ class TestBackupEndpoints:
         )
         _store = _MS()  # SHARED instance — _backup_storage is called per request
         monkeypatch.setattr(_ha, "_backup_storage", lambda: _store)
+        # Decouple the machinery tests from the tier gate (#656): pricing.json
+        # marks pro.daily_backups "planned" (not live), so no tier passes the
+        # gate today. This fixture represents "Pro WITH the feature enabled" —
+        # the gate allowlist itself is tested by test_backup_tier_allowlist_from_pricing.
+        from tortoise import pricing as _pricing
+        monkeypatch.setattr(
+            _pricing, "daily_backups_enabled", lambda tier: tier == "pro"
+        )
         app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM, tier="pro")
         yield client
         app.dependency_overrides.clear()
@@ -1117,35 +1125,45 @@ class TestBackupEndpoints:
             app.dependency_overrides.clear()
 
     def test_backup_tier_allowlist_from_pricing(self, client):
-        """Only tiers with truthy daily_backups in pricing.json pass the gate.
+        """The gate strictly mirrors pricing.json: only a real JSON `true`
+        for features.daily_backups passes. "planned" (string) is NOT live —
+        so today NO tier passes (feature not shipped), and flipping pricing.json
+        to `true` enables a tier with zero code change (#656).
 
-        Pro (daily_backups: 'planned') → gate passes (not 402).
-        Team (daily_backups: 'planned') → gate passes (not 402).
-        Unknown tier → 402 (falls back to free, daily_backups:false).
-
-        We only assert the gate response (402 = blocked, not-402 = passed);
-        the actual backup operation needs R2 storage which is tested via
-        the pro_client fixture elsewhere.
+        Expectations are derived from pricing.json itself (parity test) — the
+        gate can never drift from the canonical source again.
         """
-        allowed_tiers = ["pro", "team"]
-        for tier in allowed_tiers:
+        from tortoise.pricing import _load as _load_pricing
+
+        pricing = _load_pricing()
+        expected_allowed = [
+            tier for tier, spec in pricing.get("tiers", {}).items()
+            if spec.get("features", {}).get("daily_backups") is True
+        ]
+        expected_blocked = [
+            tier for tier in pricing.get("tiers", {})
+            if tier not in expected_allowed
+        ]
+        # Every tier in pricing.json behaves per its daily_backups flag.
+        for tier in expected_allowed:
             app.dependency_overrides[get_current_team] = lambda t=tier: dict(
                 TEST_TEAM, tier=t
             )
             try:
                 r = client.post("/backups")
                 assert r.status_code != 402, (
-                    f"{tier} tier should pass the backups gate "
-                    f"(daily_backups is truthy in pricing.json), "
-                    f"but got 402: {r.text}"
+                    f"{tier} has daily_backups:true in pricing.json but was blocked: {r.text}"
                 )
-                # restore endpoint too
-                r = client.post(
-                    "/backups/restore",
-                    json={"backup_key": "x", "confirm": True},
-                )
-                assert r.status_code != 402, (
-                    f"{tier} tier should pass the backups restore gate"
+            finally:
+                app.dependency_overrides.clear()
+        for tier in expected_blocked:
+            app.dependency_overrides[get_current_team] = lambda t=tier: dict(
+                TEST_TEAM, tier=t
+            )
+            try:
+                r = client.post("/backups")
+                assert r.status_code == 402, (
+                    f"{tier} lacks daily_backups:true in pricing.json but passed the gate"
                 )
             finally:
                 app.dependency_overrides.clear()
