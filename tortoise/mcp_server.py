@@ -197,6 +197,12 @@ def _enforce_quota(resource: str = "points") -> None:
     team_id = _current_team_id.get()
     if not team_id:
         return  # stdio/operator — no team context
+    if team_id == "selfhost":
+        # #493: selfhost transport (auth_mode static|none) is operator/trusted —
+        # no Team node exists in the registry (virtual team_selfhost namespace),
+        # so resolve_team_limits would fail-closed on every write. Same
+        # semantics as stdio mode: skip team quota (batch caps still apply).
+        return
     limits = _current_team_limits.get()
     if limits is None:
         limits = resolve_team_limits(team_id)

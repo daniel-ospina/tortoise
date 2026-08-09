@@ -16,6 +16,21 @@ except Exception:
     FALKORDB_AVAILABLE = False
 
 
+@pytest.fixture(autouse=True)
+def _http_transport_mode():
+    """#493: _safe and tools fail closed without a transport mode (#236).
+
+    These tests predate the transport-aware auth gate and call _safe/tools
+    directly; the gate is satisfied by the HTTP transport path in real
+    deployments (TeamResolutionMiddleware), so set it here for parity.
+    """
+    from tortoise.mcp_auth import _transport_mode
+
+    token = _transport_mode.set("http")
+    yield
+    _transport_mode.reset(token)
+
+
 class TestSafeWrapper:
     """Tests for the _safe function that wraps all MCP tools."""
     def test_safe_returns_result_on_success(self):
@@ -144,7 +159,11 @@ class TestToolIntegration:
     def test_query_returns_list(self):
         from tortoise.mcp_server import tortoise_query
         result = tortoise_query(kind="observation")
-        assert isinstance(result, list) or isinstance(result.get("error"), str)
+        # Empty-graph queries return {'results': [...], 'suggestion': ...} (#493:
+        # matches the query_suggestions contract documented on the tool).
+        assert (isinstance(result, list)
+                or isinstance(result.get("results"), list)
+                or isinstance(result.get("error"), str))
 
     def test_search_returns_list(self):
         from tortoise.mcp_server import tortoise_search
@@ -159,10 +178,13 @@ class TestToolIntegration:
         from tortoise.mcp_server import tortoise_search
         for ob in ("graph", "confidence"):
             result = tortoise_search("integration test", limit=5, order_by=ob)
-            assert isinstance(result, list) or isinstance(result.get("error"), str), result
-        import pytest
-        with pytest.raises(ValueError):
-            tortoise_search("integration test", order_by="bogus")
+            assert (isinstance(result, list)
+                    or isinstance(result.get("results"), list)
+                    or isinstance(result.get("error"), str)), result
+        # Invalid order_by surfaces as a structured error dict — the _safe
+        # wrapper never raises on the MCP surface (#493).
+        bad = tortoise_search("integration test", order_by="bogus")
+        assert isinstance(bad, dict) and isinstance(bad.get("error"), str)
     def test_suggest_entry_points(self):
         from tortoise.mcp_server import tortoise_suggest_entry_points
         result = tortoise_suggest_entry_points("integration", limit=3)
