@@ -925,11 +925,20 @@ def _uri_has_password(target: str) -> bool:
     #715 P2 conf 85: password-bearing targets must be handed to child
     processes via the TORTOISE_DB_URI env var, never via --db argv — argv
     leaks the secret into `ps` output.
+
+    #715 P2 conf 75: a URI without userinfo has no `@` in its authority, so
+    it cannot carry a password — docker://host:6379/db's ":6379" is a
+    host:port, not a credential. Requiring the `@` separator prevents false
+    password-bearing classification (which would route the target to the env
+    handoff instead of the documented --db argv branch).
     """
     from tortoise.config import is_db_uri
     if not is_db_uri(target):
         return False
-    userinfo = target.split("://", 1)[1].split("@", 1)[0]
+    authority = target.split("://", 1)[1]
+    if "@" not in authority:
+        return False
+    userinfo = authority.split("@", 1)[0]
     return ":" in userinfo and userinfo.rsplit(":", 1)[1] != ""
 
 

@@ -114,7 +114,7 @@ Next: tortoise serve  — start MCP server for agents
       <tr><td><strong>Setup</strong></td><td>Zero deps — <code>tortoise onboard</code> uses the embedded default when no URI is configured</td><td><code>docker run falkordb/falkordb</code> + set <code>TORTOISE_DB_URI</code></td></tr>
       <tr><td><strong>Durability</strong></td><td>Single-node, file-backed</td><td>AOF + backups, multi-node</td></tr>
       <tr><td><strong>Best for</strong></td><td>Solo dev, laptop</td><td>Teams, production</td></tr>
-      <tr><td><strong>Init</strong></td><td><code>tortoise init</code> resolves: <code>TORTOISE_DB_URI</code> (<code>docker://</code> / <code>redis://</code> / <code>rediss://</code>) → <code>--path</code> → <code>TORTOISE_DB_PATH</code> → legacy <code>FALKORDB_*</code> → embedded default</td><td><code>tortoise init</code> connects to the <code>docker://</code> / <code>redis://</code> / <code>rediss://</code> URI from <code>TORTOISE_DB_URI</code></td></tr>
+      <tr><td><strong>Init</strong></td><td><code>tortoise init</code> resolves: <code>--path</code> → <code>TORTOISE_DB_URI</code> (<code>docker://</code> / <code>redis://</code> / <code>rediss://</code>) → legacy <code>FALKORDB_*</code> → <code>TORTOISE_DB_PATH</code> → embedded default</td><td><code>tortoise init</code> connects to the <code>docker://</code> / <code>redis://</code> / <code>rediss://</code> URI from <code>TORTOISE_DB_URI</code></td></tr>
     </table>
   </div>
 

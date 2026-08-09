@@ -547,6 +547,32 @@ class TestCliSecurityAndIndex:
         env = fake_popen.call_args.kwargs.get("env") or {}
         assert env.get("TORTOISE_DB_URI") == uri
 
+    def test_uri_has_password_requires_userinfo(self):
+        """#715 P2 conf 75: a URI without `@` in its authority has no
+        userinfo and therefore no password — docker://host:6379/db's ":6379"
+        is a host:port, not a credential. Only userinfo-bearing URIs
+        (:pw@ or user:pw@) classify as password-bearing."""
+        from tortoise.__main__ import _uri_has_password
+
+        # No `@` → no userinfo → NOT password-bearing (previously True: the
+        # ":6379" host:port was misread as a credential, routing the target
+        # to the env handoff instead of the documented --db argv branch).
+        assert _uri_has_password("docker://host:6379/db") is False
+        assert _uri_has_password("redis://db.example.com:6379/tortoise") is False
+        assert _uri_has_password("rediss://db.example.com/tortoise") is False
+
+        # Userinfo with a password → password-bearing.
+        assert _uri_has_password("docker://:pass@host:6379/db") is True
+        assert _uri_has_password("docker://user:pass@host") is True
+        assert _uri_has_password("redis://:hunter2@db.example.com:6379/tortoise") is True
+
+        # Userinfo WITHOUT a password → not password-bearing.
+        assert _uri_has_password("docker://user@host:6379/db") is False
+
+        # Non-URI targets are never password-bearing.
+        assert _uri_has_password("/abs/path/tortoise.db") is False
+        assert _uri_has_password("~/.tortoise/tortoise.db") is False
+
     # ── Fix 7 (P2): onboard indexes exactly once ──
 
     def test_onboard_indexes_once(self, tmp_path, monkeypatch):
