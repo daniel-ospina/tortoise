@@ -134,7 +134,9 @@ def test_apply_one_point_retracted():
     points: dict[str, dict] = {"p1": {"id": "p1", "content": "old"}}
     ev = {"type": "PointRetracted", "id": "p1"}
     _apply_one(points, ev)
-    assert "p1" not in points
+    # #689: tombstone, not hard delete — point exists with status='retracted'
+    assert "p1" in points
+    assert points["p1"]["status"] == "retracted"
 
 
 def test_apply_one_point_retracted_missing():
@@ -184,7 +186,9 @@ def test_fold_multiple_events():
         {"type": "PointRetracted", "id": "p1"},
     ]
     result = fold(events)
-    assert "p1" not in result
+    # #689: tombstone — p1 exists with status='retracted', p2 is live
+    assert "p1" in result
+    assert result["p1"]["status"] == "retracted"
     assert result["p2"]["content"] == "two"
 
 
@@ -194,7 +198,10 @@ def test_fold_revise_then_retract():
         {"type": "PointRevised", "id": "p1", "new_content": "b"},
         {"type": "PointRetracted", "id": "p1"},
     ]
-    assert fold(events) == {}
+    result = fold(events)
+    # #689: tombstone — p1 exists with status='retracted'
+    assert "p1" in result
+    assert result["p1"]["status"] == "retracted"
 
 
 # -------------------------------------------------------------------- split
@@ -249,7 +256,9 @@ def test_inmemory_apply():
                 "point": {"id": "p1", "content": "hello", "context": "ctx"}})
     assert proj.points["p1"]["content"] == "hello"
     proj.apply({"type": "PointRetracted", "id": "p1"})
-    assert "p1" not in proj.points
+    # #689: tombstone — point exists with status='retracted'
+    assert "p1" in proj.points
+    assert proj.points["p1"]["status"] == "retracted"
 
 
 def test_inmemory_rebuild():
@@ -363,8 +372,10 @@ def test_falkor_apply_point_retracted():
         proj.apply({"type": "PointAdded",
                      "point": {"id": "p1", "content": "hello", "context": "ctx"}})
         proj.apply({"type": "PointRetracted", "id": "p1"})
-        r = proj.query("MATCH (n:Point {id:'p1'}) RETURN count(n)").result_set
-        assert r[0][0] == 0
+        # #689: tombstone — node exists with status='retracted'
+        r = proj.query("MATCH (n:Point {id:'p1'}) RETURN n.status").result_set
+        assert len(r) == 1
+        assert r[0][0] == "retracted"
     finally:
         proj.close()
 
@@ -907,9 +918,9 @@ def test_falkor_rebuild_all_with_retractions():
         proj = FalkorProjection(_tmp("g_retract.db"), graph_name="test")
         try:
             result = proj.rebuild_all(d)
-            # b was retracted after being added
+            # b was retracted — leaves a tombstone (#689)
             node_count = proj.query("MATCH (n:Point) RETURN count(n)").result_set[0][0]
-            assert node_count == 2  # a + op, b was retracted
+            assert node_count == 3  # a + op + b tombstone
         finally:
             proj.close()
     finally:
@@ -1817,5 +1828,102 @@ def test_falkor_revise_point_wipes_stale_embedding_on_compute_failure():
         ).result_set
         assert r[0][0] == "new content"
         assert r[0][1] is True, "stale embedding survived a failed recompute (#19)"
+    finally:
+        proj.close()
+
+
+# ── #689: retraction tombstone semantics ───────────────────────────────────
+
+def test_retract_tombstone_inmemory():
+    """PointRetracted leaves a tombstone (status='retracted') instead of hard-deleting."""
+    from tortoise.projection import _apply_one
+    points: dict[str, dict] = {"p1": {"id": "p1", "content": "hello", "pointKind": "statement"}}
+    _apply_one(points, {"type": "PointRetracted", "id": "p1"})
+    # Tombstone present
+    assert "p1" in points
+    assert points["p1"]["status"] == "retracted"
+    # Original content preserved for recovery
+    assert points["p1"]["content"] == "hello"
+
+
+def test_retract_tombstone_falkor():
+    """FalkorProjection retraction leaves a node with status='retracted'."""
+    if _skip_if_no_falkor():
+        return
+    proj = FalkorProjection(_tmp("g_tombstone.db"), graph_name="test")
+    try:
+        proj.apply({"type": "PointAdded",
+                     "point": {"id": "p1", "content": "hello", "pointKind": "statement"}})
+        proj.apply({"type": "PointRetracted", "id": "p1"})
+        # Tombstone exists in raw graph
+        r = proj.query(
+            "MATCH (n:Point {id:'p1'}) RETURN n.status, n.content"
+        ).result_set
+        assert len(r) == 1
+        assert r[0][0] == "retracted"
+        assert r[0][1] == "hello"  # content preserved
+    finally:
+        proj.close()
+
+
+def test_retract_tombstone_get_point_hidden():
+    """SDK get_point returns {} for retracted points (hidden from normal reads)."""
+    if _skip_if_no_falkor():
+        return
+    from tortoise.sdk import TortoiseSDK
+    sdk = TortoiseSDK(db_path=_tmp("g_sdk_retracted.db"))
+    try:
+        p = sdk.create_point("statement", "visible at first")
+        pid = p["id"]
+        assert sdk.get_point(pid) != {}
+        # Apply retraction via the projection raw path (simulates event replay)
+        sdk._get_proj().apply({"type": "PointRetracted", "id": pid})
+        # get_point hides the retracted point
+        assert sdk.get_point(pid) == {}
+        # But raw query can still find it
+        r = sdk._get_proj().query(
+            "MATCH (n:Point {id:$id}) RETURN n.status", id=pid
+        ).result_set
+        assert len(r) == 1
+        assert r[0][0] == "retracted"
+    finally:
+        sdk.close()
+
+
+def test_retract_tombstone_skipped_in_query():
+    """SDK query/paginated_query skip retracted points."""
+    if _skip_if_no_falkor():
+        return
+    from tortoise.sdk import TortoiseSDK
+    sdk = TortoiseSDK(db_path=_tmp("g_sdk_query_ret.db"))
+    try:
+        p1 = sdk.create_point("statement", "keep me")
+        p2 = sdk.create_point("statement", "retract me")
+        # Retract p2
+        sdk._get_proj().apply({"type": "PointRetracted", "id": p2["id"]})
+        # query should only return p1
+        results = sdk.query(kind="statement")
+        ids = {r["id"] for r in results}
+        assert p1["id"] in ids
+        assert p2["id"] not in ids, "retracted point must not appear in query"
+        # paginated_query same
+        page = sdk.paginated_query(kind="statement")
+        page_ids = {r["id"] for r in page["results"]}
+        assert p1["id"] in page_ids
+        assert p2["id"] not in page_ids
+    finally:
+        sdk.close()
+
+
+def test_retract_missing_point_noop():
+    """Retracting a non-existent point is a no-op (idempotent)."""
+    if _skip_if_no_falkor():
+        return
+    proj = FalkorProjection(_tmp("g_noop.db"), graph_name="test")
+    try:
+        proj.apply({"type": "PointRetracted", "id": "nonexistent"})
+        # No crash, no stray nodes created
+        r = proj.query("MATCH (n) RETURN count(n)").result_set
+        assert r[0][0] == 0
     finally:
         proj.close()

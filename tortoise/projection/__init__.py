@@ -130,7 +130,14 @@ def _apply_one(points: dict[str, dict], ev: dict) -> None:
             if ev.get("new_context") is not None and ev.get("projection_version", 0) < 2:
                 p["context"] = ev["new_context"]
     elif t == "PointRetracted":
-        points.pop(ev["id"], None)
+        # #689: tombstone instead of hard delete — retracted content stays
+        # recoverable via raw graph queries. Historical data loss prior to
+        # this change is irreversible (already-hard-deleted points cannot
+        # be reconstructed from the event log alone — the content existed
+        # only in the projection, and the projection deleted it).
+        p = points.get(ev["id"])
+        if p:
+            p["status"] = "retracted"
     elif t == "PointsMerged":
         for mid in ev.get("merge_ids", []):
             points.pop(mid, None)
@@ -442,7 +449,7 @@ class FalkorProjection(
                 ev.pop("new_context", None)
             self._revise_point(ev, set_updated_at=True)
         elif t == "PointRetracted":
-            self._delete(ev["id"])
+            self._retract(ev["id"])
         elif t == "PointsMerged":
             for mid in ev.get("merge_ids", []):
                 self._delete(mid)
@@ -518,11 +525,10 @@ class FalkorProjection(
             if t in ("PointAdded", "OperatorAdded"):
                 continue  # already handled in pass 1a
             elif t == "PointRetracted":
-                # Graceful id resolution — skip if neither id nor event_id
-                # present (malformed/legacy event, issue #325)
+                # #689: tombstone instead of hard delete
                 rid = ev.get("id") or ev.get("event_id")
                 if rid is not None:
-                    self._delete(rid)
+                    self._retract(rid)
             elif t == "PointsMerged":
                 for mid in ev.get("merge_ids", []):
                     self._delete(mid)
