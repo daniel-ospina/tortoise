@@ -34,9 +34,13 @@ TEST_TEAM = {
     "team_id": TEST_TEAM_ID,
     "key_id": "test-key-001",
     "tier": "free",
+    # get_current_team always resolves the full limits dict — test stubs must
+    # match, or fail-closed quota enforcement 500s instead of passing (#310).
     "max_users": 1,
     "max_graphs": 1,
-    "max_teams": 1,
+    "max_points": 10000,
+    "max_api_keys": 2,
+    "max_sessions": 1000,
 }
 
 
