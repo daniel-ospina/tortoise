@@ -423,7 +423,6 @@ def main(argv=None):
                              build_model(args.relation_model, reasoning=True))
 
     log = EventLog(args.log)
-    # Check DB accessibility before trying to connect.
     # Hard-reject relative paths cleanly (issue #176): a relative --db would
     # otherwise fall through to 'Docker unreachable' instead of the clear
     # hard-reject error (shared RELATIVE_PATH_ERROR).
@@ -433,21 +432,15 @@ def main(argv=None):
         raise ValueError(RELATIVE_PATH_ERROR.format(path=args.db))
     if args.db.startswith("docker://"):
         proj = FalkorProjection.from_uri(args.db)
-    elif Path(args.db).exists():
-        proj = FalkorProjection(args.db)
     else:
-        # DB file doesn't exist — try Docker default as fallback
-        # (Docker mode doesn't use a file, data lives in the container)
-        import os
-        docker_host = os.environ.get("FALKORDB_HOST", "localhost")
-        docker_port = int(os.environ.get("FALKORDB_PORT", "16379"))
-        docker_pass = os.environ.get("FALKORDB_PASSWORD") or None
-        try:
-            proj = FalkorProjection(host=docker_host, port=docker_port, password=docker_pass)
-        except Exception:
-            print(f"tortoise.ingest: No DB found at {args.db} and Docker unreachable. Run tortoise init first.")
-            import sys
-            sys.exit(0)
+        # Embedded mode: redislite creates the DB server at the given path on
+        # first use (the file materializes on close — a fresh path NEVER
+        # satisfies a pre-.exists() check). The .exists() gate + Docker
+        # fallback added in #26 made first-run `tortoise ingest --db <new>`
+        # silently no-op (sys.exit(0)) instead of creating the DB, breaking
+        # the create-if-absent contract the CLI had before #26 and that
+        # `tortoise init` still honors. Restored: unconditional construction.
+        proj = FalkorProjection(args.db)
     api = EventAPI(log, initiated_by="extractor", agent_id=extractor.version,
                    projection=proj)
     try:
