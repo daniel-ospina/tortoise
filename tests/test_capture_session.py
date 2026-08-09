@@ -171,3 +171,19 @@ def test_capture_session_none_role_content(sdk):
         "MATCH (t:Point {pointKind:'event'}) RETURN t.speaker"
     ).result_set
     assert rows[0][0] == "unknown", "None role normalizes to 'unknown'"
+
+
+def test_capture_session_non_string_content_coerced(sdk):
+    """Non-string content (numbers/dicts) is coerced, never crashes mid-write."""
+    conv = [
+        {"role": "user", "content": 12345},
+        {"role": "assistant", "content": {"text": "we decided to ship v2"}},
+    ]
+    res = sdk.capture_session(conv)
+    assert res["turns"] == 2, "all turns must complete — no partial session left"
+    rows = sdk._get_proj().g.query(
+        "MATCH (t:Point {pointKind:'event'}) RETURN t.content ORDER BY t.id"
+    ).result_set
+    assert rows[0][0] == "[user] 12345", "int content stored as its str() form"
+    assert rows[1][0] == "[assistant] {'text': 'we decided to ship v2'}", \
+        "dict content stored as its str() form"

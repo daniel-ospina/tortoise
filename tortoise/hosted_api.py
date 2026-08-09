@@ -1626,9 +1626,11 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
     extracted = []
 
     # NOTE: this extraction loop is duplicated from tortoise/sdk.py
-    # capture_session. Divergence: hosted adds quota/auth bounds + a pre-write
-    # estimate; the SDK variant adds a `speaker` property on turn Points
-    # (delta 5) that hosted does not write. Keep the two in sync.
+    # capture_session. Divergences: hosted adds quota/auth bounds + a
+    # pre-write estimate; the SDK variant adds a `speaker` property on turn
+    # Points (delta 5) that hosted does not write. Hosted rejects turn content
+    # > 5000 chars with 400, the SDK truncates silently; role=None stays None
+    # in hosted, the SDK normalizes it to "unknown". Keep the two in sync.
     for i, turn in enumerate(body.conversation):
         role = turn.get("role", "unknown")
         content = turn.get("content", "")

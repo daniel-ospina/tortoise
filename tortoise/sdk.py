@@ -599,14 +599,22 @@ class TortoiseSDK:
         ]
 
         # NOTE: this extraction loop (regexes + per-turn caps) is duplicated
-        # from tortoise/hosted_api.py POST /v1/sessions. Divergence: the SDK
+        # from tortoise/hosted_api.py POST /v1/sessions. Divergences: the SDK
         # variant writes a `speaker` property on turn Points (delta 5) while
-        # hosted adds quota/auth bounds; hosted has no speaker tag. Keep the
-        # two in sync when touching either.
+        # hosted adds quota/auth bounds; hosted has no speaker tag. SDK
+        # TRUNCATES turn content > 5000 chars silently, hosted rejects it with
+        # 400; role=None normalizes to "unknown" in the SDK, hosted stores
+        # None as-is. Keep the two in sync when touching either.
         extracted = []
         for i, turn in enumerate(conversation):
             role = turn.get("role") or "unknown"
             content = turn.get("content") or ""
+            if not isinstance(content, str):
+                # #721: defensive coercion — non-string content (numbers,
+                # dicts, lists) would crash content[:5000] mid-write, leaving
+                # a partial session in the graph. Coerce BEFORE the write so
+                # the episodic point and the extraction loop share one value.
+                content = str(content)
 
             # Episodic turn point — deterministic id, structured speaker tag
             # (delta 5), content hash, session-scoped (never conflated across
