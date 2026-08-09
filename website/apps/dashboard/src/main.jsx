@@ -74,6 +74,7 @@ function App() {
   const [newGraphName, setNewGraphName] = React.useState('')
   const teamIdRef = React.useRef(null)
   const fallbackTeamIdRef = React.useRef(null) // Round-4: team auto-selected by recoverKey 400-fallback
+  const authSubRef = React.useRef(null) // Round-6: supabase onAuthStateChange subscription
   const [checkoutPending, setCheckoutPending] = React.useState(false)
   // P5 (code-review): distinguish 'loading' / 'ok' / 'denied' / 'error' so
   // loading and network failures never masquerade as an RBAC denial.
@@ -209,6 +210,14 @@ function App() {
         const { data: { session }, error } = await supabaseClient.auth.getSession()
         if (error || !session) { setChecking(false); return }
         sessionTokenRef.current = session.access_token
+        // Round-6 (P2): supabase-js auto-refreshes the access token (~1h) into
+        // the cookie — keep the ref in sync so JWT-scoped calls never die with
+        // a stale token while the dashboard still looks logged in.
+        const { data: authSub } = supabaseClient.auth.onAuthStateChange((_evt, s) => {
+          if (s?.access_token) sessionTokenRef.current = s.access_token
+          else if (_evt === 'SIGNED_OUT') { sessionTokenRef.current = null; setTeams([]) }
+        })
+        authSubRef.current = authSub.subscription
 
         // List memberships up front so the mint targets a concrete team
         // (P1: multi-membership users cannot mint without team_id).
@@ -316,6 +325,7 @@ function App() {
     localStorage.removeItem(KEY_STORAGE)
     setApiKey('')
     setAuthed(false)
+    setAuthMode('apikey') // Round-6 (P3): card offers only the key input after logout
     setTeam(null)
     setKeys([])
     setSessions([])
@@ -331,6 +341,8 @@ function App() {
     setBackupInfo(null)                 // Round-5: no cross-session backup data leak
     fallbackTeamIdRef.current = null    // Round-5: no stale team adoption across users
     teamIdRef.current = null            // Round-5: hygiene (inert, but consistent)
+    setCheckoutPending(false)           // Round-6: no stuck 'Opening checkout…' for the next user
+    if (authSubRef.current) { supabaseClient?.auth?.removeChannel?.(authSubRef.current); authSubRef.current = null }
     teamKeysRef.current = {}
     try { if (supabaseClient) await supabaseClient.auth.signOut() } catch { /* best-effort */ }
   }
@@ -708,6 +720,9 @@ function App() {
         throw new Error(b.detail || `HTTP ${res.status}`)
       }
       const data = await res.json()
+      // Round-6 (P3): a logout during the in-flight recovery must not resurrect
+      // the team + key for the signed-out user.
+      if (sessionTokenRef.current !== tok) return
       setNewKey(data.key)
       // Round-4: if the 400-fallback auto-selected the first membership,
       // persist it so graphs/members load and the key is cached (otherwise
@@ -872,7 +887,7 @@ function App() {
             <h2>Overview</h2>
             <div className="cards">
               <div className="card"><div className="card-val">{team.point_count ?? 0}</div><div className="card-label">Points</div></div>
-              <div className="card"><div className="card-val">{graphs.length}</div><div className="card-label">Graphs</div></div>
+              <div className="card"><div className="card-val">{authMode === 'session' ? graphs.length : '—'}</div><div className="card-label">Graphs</div></div>
               <div className="card"><div className="card-val">{membersStatus === 'ok' ? members.length : '—'}</div><div className="card-label">Users</div></div>
               <div className="card"><div className="card-val">{backupInfo ? (backupInfo.count || 'none') : '—'}</div><div className="card-label">Backups</div></div>
               <div className="card"><div className="card-val">{keys.length}</div><div className="card-label">API Keys</div></div>
