@@ -644,11 +644,29 @@ async def get_current_team(request: Request) -> dict:
         from tortoise.auth import verify_api_key
         team_id = key_id = None
         created_by = None
+        key_result = sdk._get_registry().query(
+            "MATCH (k:APIKey) WHERE k.revoked_at IS NULL "
+            "AND k.key_prefix = $prefix "
+            "RETURN k.team_id, k.id, k.key_hash, k.created_by",
+            params={"prefix": key_prefix},
+        ).result_set
         for k_team_id, k_id, stored_hash, k_created_by in key_result:
             if verify_api_key(token, stored_hash):
                 team_id, key_id = k_team_id, k_id
                 created_by = k_created_by
                 break
+        # Fallback: legacy provision_tenant keys (key_prefix=team_id[:8])
+        # won't match the token[:10] prefix. In that case scan all keys.
+        if team_id is None:
+            key_result = sdk._get_registry().query(
+                "MATCH (k:APIKey) WHERE k.revoked_at IS NULL "
+                "RETURN k.team_id, k.id, k.key_hash, k.created_by"
+            ).result_set
+            for k_team_id, k_id, stored_hash, k_created_by in key_result:
+                if verify_api_key(token, stored_hash):
+                    team_id, key_id = k_team_id, k_id
+                    created_by = k_created_by
+                    break
         if team_id is None:
             await _audit_auth_failure(request, "invalid_key")
             raise HTTPException(status_code=401, detail="Invalid API key")

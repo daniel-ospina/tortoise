@@ -405,6 +405,7 @@ class TortoiseSDK:
             ("Membership", "user_id"),
             ("APIKey", "team_id"),
             ("APIKey", "key_hash"),
+            ("APIKey", "key_prefix"),
             ("Invitation", "team_id"),
             ("Invitation", "token_hash"),
         ]
@@ -3805,12 +3806,34 @@ class TortoiseSDK:
 
         hash_api_key() embeds a per-key random salt ("salt:hash"), so we can
         NOT look up by exact hash match — the lookup hash would never equal the
-        stored hash (same root cause as #130). Instead fetch all candidate
-        rows of the label and verify each stored hash against the plaintext.
-        The registry is small (teams × keys × invites), so a scan is fine.
+        stored hash (same root cause as #130).
+
+        #687: For APIKey nodes, we short-circuit the O(keys) scan by filtering
+        on key_prefix (key[:10] = "tt_<8 hex chars>"). The key_prefix index
+        (created in _ensure_registry_indexes) makes this O(1) per lookup.
+        Falls back to full scan for legacy provision_tenant keys whose
+        key_prefix was set to team_id[:8] (which won't match token[:10]).
         """
         from tortoise.auth import verify_api_key
         reg = self._get_registry()
+
+        # #687: indexed key_prefix lookup avoids O(keys) PBKDF2 scan
+        if label == "APIKey" and plaintext.startswith("tt_"):
+            prefix = plaintext[:10]
+            rows = reg.query(
+                f"MATCH (n:{label}) WHERE n.key_prefix = $prefix "
+                f"RETURN n.{prop}, properties(n)",
+                params={"prefix": prefix},
+            ).result_set
+            out = []
+            for stored_hash, props in rows:
+                if verify_api_key(plaintext, stored_hash):
+                    out.append(props)
+            if out:
+                return out
+            # Fall through to full scan for legacy provision_tenant keys
+            # (key_prefix = team_id[:8] won't match token[:10] = "tt_<8 hex>")
+
         rows = reg.query(
             f"MATCH (n:{label}) RETURN n.{prop}, properties(n)"
         ).result_set
