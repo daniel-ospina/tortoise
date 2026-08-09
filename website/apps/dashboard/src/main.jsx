@@ -132,7 +132,11 @@ function App() {
   async function manageBilling() {
     try {
       const { portal_url } = await api('/v1/billing/portal', { method: 'POST' })
-      window.open(portal_url, '_blank')
+      // Round-14: mirror upgrade() — async-fetch-then-open is popup-blocked in
+      // Firefox/Safari; surface it instead of silently no-opping.
+      if (!window.open(portal_url, '_blank')) {
+        setError('Popup blocked — allow popups for app.premiselabs.co and try again.')
+      }
     } catch (err) {
       setError(err.message)
     }
@@ -305,10 +309,15 @@ function App() {
     // the overview cards + header tier badge read /v1/team, which resolves
     // the team from the API key.
     const t = await api('/v1/team', key ? { headers: { Authorization: `Bearer ${key}` } } : {})
-    // Round-13 (P2): the checkout poll pins the team at poll start — if the
-    // user switched teams mid-poll, never land the old team's data under the
-    // new team's switcher/header.
+    // Round-13/14 (P2): never land a team's data under a different team's
+    // selection. Two guards:
+    //  - expectedTeamId (checkout poll pin): null on Stripe-return loads
+    //    (poll effect runs before bootstrap sets teamIdRef), so also...
+    //  - response-identity: t.team_id vs teamIdRef.current — catches the
+    //    null-pin case AND a stale closure key (poll captured team A's key,
+    //    user switched to B → /v1/team with A's key returns A's data).
     if (expectedTeamId != null && teamIdRef.current !== expectedTeamId) return t
+    if (t?.team_id && teamIdRef.current && t.team_id !== teamIdRef.current) return t
     setTeam(t)
     return t
   }
