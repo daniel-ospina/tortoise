@@ -15,6 +15,7 @@ from .domain_loader import known_kinds, register_kind
 from .ids import ulid
 from . import monitoring
 from .projection import FalkorProjection
+from .quota import MAX_EXTRACTIONS_PER_TURN, MAX_SESSION_TURNS
 import threading
 
 # P0 Group 3: register custom kinds for diary + checkpoint
@@ -554,7 +555,13 @@ class TortoiseSDK:
 
         return None
 
-    def capture_session(self, conversation, session_id=None, *, max_turns=200) -> dict:
+    def capture_session(
+        self,
+        conversation: list[dict[str, str]],
+        session_id: str | None = None,
+        *,
+        max_turns: int = MAX_SESSION_TURNS,
+    ) -> dict:
         """Capture an agent session into the graph (#312 delta 4).
 
         Mirrors the hosted POST /v1/sessions logic minus quota/auth:
@@ -566,11 +573,8 @@ class TortoiseSDK:
         ``conversation`` is a list of {"role", "content"} dicts. Returns
         {"session_id", "turns", "extracted", "points": [...]}.
         """
-        import re
         import uuid
         from datetime import datetime, timezone
-
-        from tortoise.quota import MAX_EXTRACTIONS_PER_TURN
 
         proj = self._get_proj()
         now = datetime.now(timezone.utc).isoformat()
@@ -594,10 +598,15 @@ class TortoiseSDK:
             r"(?i)(?:evidence suggests|data shows|we found that|this means)\s+[^.!?]+[.!?]",
         ]
 
+        # NOTE: this extraction loop (regexes + per-turn caps) is duplicated
+        # from tortoise/hosted_api.py POST /v1/sessions. Divergence: the SDK
+        # variant writes a `speaker` property on turn Points (delta 5) while
+        # hosted adds quota/auth bounds; hosted has no speaker tag. Keep the
+        # two in sync when touching either.
         extracted = []
         for i, turn in enumerate(conversation):
-            role = turn.get("role", "unknown")
-            content = turn.get("content", "")
+            role = turn.get("role") or "unknown"
+            content = turn.get("content") or ""
 
             # Episodic turn point — deterministic id, structured speaker tag
             # (delta 5), content hash, session-scoped (never conflated across
@@ -663,8 +672,14 @@ class TortoiseSDK:
             event_id = event.get("id") or event.get("eventId")
             for p in extracted:
                 proj.create_about_edge(p["id"], event_id, "aboutEvent")
-        except Exception:
-            pass  # non-fatal — mirrors hosted behavior
+        except Exception as e:
+            # Non-fatal — mirrors hosted behavior, but surface the failure so
+            # silent event-log loss is visible (#721).
+            _logger.warning(
+                "capture_session: sessionCaptured Event/EventRecorded write "
+                "failed (non-fatal) for session %s: %s", session_id, e,
+                exc_info=True,
+            )
 
         return {
             "session_id": session_id,
