@@ -1494,6 +1494,55 @@ class SessionRequest(BaseModel):
     metadata: dict | None = None
 
 
+# ── Session extraction mode (#312 delta 1) ─────────────────────────────────
+
+_SESSION_EXTRACTION_MODES = ("auto", "required", "regex")
+
+def _llm_provider_keys() -> tuple[str, ...]:
+    """Env keys for LLM providers the hosted extraction path ACTUALLY consumes.
+
+    Derived from the real provider registries (``tortoise.ingest._PROVIDERS`` /
+    ``tortoise.analyze._LLM_PROVIDERS``) so availability always matches what
+    the code can really use. ANTHROPIC_API_KEY is deliberately NOT included —
+    no tortoise provider reads it, so its presence from unrelated host tooling
+    would fail the ``required`` gate open (degrading silently to regex) #722.
+    """
+    from tortoise.analyze import _LLM_PROVIDERS
+    from tortoise.ingest import _PROVIDERS
+
+    keys = {key for _url, key in _PROVIDERS.values() if key}
+    keys.update(_LLM_PROVIDERS)
+    return tuple(sorted(keys))
+
+
+# Provider env keys the hosted deployment can use for LLM-grade extraction.
+# The provider/model choice is a product decision (deploy-time) — this module
+# only reports availability so `auto`/`required` modes behave correctly.
+_LLM_PROVIDER_KEYS: tuple[str, ...] = _llm_provider_keys()
+
+
+def _session_extraction_mode() -> str:
+    """Resolve TORTOISE_SESSION_EXTRACTION (auto|required|regex).
+
+    auto (default): LLM extraction when a provider key is configured, else
+        the deterministic regex path (capture always works).
+    required: fail-closed — capture errors when no LLM provider is configured.
+    regex: always the deterministic regex path (never calls an LLM).
+    Unknown values fall back to ``auto`` with a warning (never break capture).
+    """
+    import logging
+    raw = os.environ.get("TORTOISE_SESSION_EXTRACTION", "auto").strip().lower()
+    if raw in _SESSION_EXTRACTION_MODES:
+        return raw
+    logging.getLogger("tortoise.api").warning(
+        "unknown TORTOISE_SESSION_EXTRACTION=%r — falling back to 'auto'", raw)
+    return "auto"
+
+
+def _llm_provider_available() -> bool:
+    return any(os.environ.get(k) for k in _LLM_PROVIDER_KEYS)
+
+
 @app.post("/v1/sessions")
 async def capture_session(body: SessionRequest, request: Request, team: dict = Depends(get_current_team)):
     """Capture an agent session and extract turns as episodic Points.
@@ -1511,6 +1560,18 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
         MAX_EXTRACTIONS_PER_TURN, MAX_SESSION_TURNS,
         QuotaCheckError, QuotaExceededError, enforce_team_limit,
     )
+
+    # #312 delta 1: extraction mode semantics. `required` fails closed when
+    # no LLM provider is configured; `auto`/`regex` keep the deterministic
+    # regex path as the always-works baseline (LLM upgrade lands with the
+    # provider decision — deploy-time).
+    mode = _session_extraction_mode()
+    if mode == "required" and not _llm_provider_available():
+        raise HTTPException(
+            status_code=503,
+            detail="Session extraction mode 'required' but no LLM provider key is "
+                   f"configured (set {' / '.join(_LLM_PROVIDER_KEYS)}).",
+        )
 
     if len(body.conversation) > MAX_SESSION_TURNS:
         raise HTTPException(
@@ -1656,7 +1717,15 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
         resource_type="session", resource_id=session_id,
     )
 
-    return {"session_id": session_id, "turns": len(body.conversation), "extracted": len(extracted), "points": extracted}
+    # #722: report the EFFECTIVE method actually used, not the configured
+    # policy. The extraction loop above is the deterministic regex path — the
+    # loop never branches on mode today, so `auto`/`required` with a key would
+    # otherwise report LLM-intent while regex ran. Mode branching (LLM-grade
+    # extraction) is pending (#312 delta 2); until it lands, reflect what ran.
+    effective_mode = "regex"
+    return {"session_id": session_id, "turns": len(body.conversation),
+            "extracted": len(extracted), "points": extracted,
+            "extraction_mode": effective_mode}
 
 
 @app.get("/v1/sessions")

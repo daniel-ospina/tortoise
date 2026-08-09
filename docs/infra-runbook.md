@@ -140,6 +140,12 @@ wrangler pages deploy dist --project-name=tortoise-dashboard
 | R2_SECRET_ACCESS_KEY | ✅ | — | ✅ |
 | R2_BUCKET | ✅ (`tortoise-backups`) | — | ✅ |
 
+### Runtime Config (non-secret)
+
+| Var | Default | Effect |
+|-----|---------|--------|
+| `TORTOISE_SESSION_EXTRACTION` | `auto` | `/v1/sessions` extraction mode (`auto\|required\|regex`). `required` fails closed: **all** session captures return 503 when no LLM provider key (`OPENROUTER/DEEPSEEK/OPENAI/GEMINI_API_KEY`) is set — do not enable it until a provider key is deployed. Unknown values fall back to `auto`. |
+
 ## Reproducibility Test
 Can a fresh Fly.io account + Cloudflare account follow §1 from zero and arrive at the same infra?
 - [ ] FalkorDB Cloud instance provisioned, FALKORDB_CLOUD_URI secret set
