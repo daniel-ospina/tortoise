@@ -93,7 +93,12 @@ function App() {
     })
     if (!res.ok) {
       const body = await res.json().catch(() => ({}))
-      throw new Error(body.detail || `HTTP ${res.status}`)
+      // Round-11: attach the HTTP status — hosted_api.py returns detail strings
+      // ('Invalid API key', 'Unauthorized', …), never '401', so status-based
+      // checks (switchTeam re-mint) must read e.status, not message content.
+      const err = new Error(body.detail || `HTTP ${res.status}`)
+      err.status = res.status
+      throw err
     }
     return res.json()
   }
@@ -370,6 +375,7 @@ function App() {
     const h = key ? { headers: { Authorization: `Bearer ${key}` } } : {}
     try {
       const [k, s] = await Promise.all([api('/v1/team/keys', h), api('/v1/sessions', h)])
+      if (teamIdRef.current !== _teamAtCall) return // stale switch response — don't land B's keys under C
       setKeys(Array.isArray(k) ? k : k.keys || [])
       setSessions(Array.isArray(s) ? s : s.sessions || [])
     } catch (e) {
@@ -438,9 +444,11 @@ function App() {
       try {
         await refreshTeam(key)
       } catch (e) {
-        // Round-10: a cached ephemeral key may have expired (24h) or been
+        // Round-10/11: a cached ephemeral key may have expired (24h) or been
         // revoked — drop it and re-mint once before falling back to revert.
-        if (teamIdRef.current === teamId && String(e.message || '').includes('401')) {
+        // Trigger on e.status (api() attaches it) — the message is a detail
+        // string like 'Invalid API key', never '401'.
+        if (teamIdRef.current === teamId && e?.status === 401) {
           delete teamKeysRef.current[teamId]
           const minted = await mintSessionKey('bootstrap', teamId)
           key = minted.key
