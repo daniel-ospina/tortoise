@@ -99,7 +99,14 @@ def verify_api_key(key: str, stored: str) -> bool:
             return False
     except (ValueError, AttributeError):
         return False
-    per_key_salt = bytes.fromhex(salt_hex)
+    # #750.1: a non-hex salt (corrupt/garbage stored value) must fail closed
+    # with False, not raise ValueError → 500.
+    try:
+        per_key_salt = bytes.fromhex(salt_hex)
+    except ValueError:
+        return False
+    if len(per_key_salt) != 32:
+        return False
     key_material = key.encode() + _PEPPER_BYTES
     computed = hashlib.pbkdf2_hmac(
         "sha256", key_material, per_key_salt, 100_000

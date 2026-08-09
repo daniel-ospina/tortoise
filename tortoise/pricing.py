@@ -22,6 +22,17 @@ _PRICING_PATH = os.environ.get(
 
 _cache: dict | None = None
 
+# Keys tier_limits must expose; a tier missing any of these is a config drift
+# bug and must fail loudly (KeyError), not silently degrade to None/unlimited
+# (#750.8).
+_REQUIRED_LIMIT_KEYS = (
+    "max_graphs_per_team",
+    "max_users_per_team",
+    "max_api_keys",
+    "included_write_ops_per_month",
+    "max_graph_nodes",
+)
+
 
 def _load() -> dict:
     global _cache
@@ -42,11 +53,18 @@ def tier_limits(tier: str) -> dict:
     """Return the limits dict for a tier (empty dict if unknown).
 
     Unknown tiers default to the Free limits so a legacy/missing tier never
-    grants more than the baseline.
+    grants more than the baseline. #750.8: a loaded tier that is MISSING a
+    required key raises KeyError at lookup time instead of silently returning
+    None (= unlimited) on config drift.
     """
     data = _load()
     tiers = data.get("tiers", {})
     t = tiers.get(tier) or tiers.get("free", {})
+    missing = [k for k in _REQUIRED_LIMIT_KEYS if k not in t]
+    if missing:
+        raise KeyError(
+            f"pricing.json tier {tier!r} missing required limit keys: {missing}"
+        )
     return {
         "max_graphs_per_team": t.get("max_graphs_per_team"),  # None = unlimited
         "max_users_per_team": t.get("max_users_per_team"),

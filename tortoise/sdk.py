@@ -3387,9 +3387,9 @@ class TortoiseSDK:
         from datetime import datetime, timezone
         from .exceptions import ControlPlaneError
 
-        if role not in ("owner", "admin"):
+        if role not in ("owner", "admin", "member"):
             raise ControlPlaneError(
-                f"Invalid role {role!r}. Must be 'owner' or 'admin'."
+                f"Invalid role {role!r}. Must be 'owner', 'admin', or 'member'."
             )
 
         team = self.team_get(team_id)
@@ -3401,7 +3401,8 @@ class TortoiseSDK:
         if max_users is not None:
             reg = self._get_registry()
             count = reg.query(
-                "MATCH (m:Membership {team_id:$tid}) RETURN count(m)",
+                "MATCH (m:Membership {team_id:$tid}) "
+                "WHERE m.status = 'active' RETURN count(m)",
                 params={"tid": team_id},
             ).result_set[0][0]
             if count >= max_users:
@@ -3414,7 +3415,7 @@ class TortoiseSDK:
         reg = self._get_registry()
         reg.query(
             "CREATE (m:Membership {id:$id, user_id:$uid, team_id:$tid, "
-            "role:$role, joinedAt:$now})",
+            "role:$role, status:'active', joinedAt:$now, created_at:$now})",
             params={"id": mid, "uid": user_id, "tid": team_id,
                     "role": role, "now": now},
         )
@@ -3451,9 +3452,9 @@ class TortoiseSDK:
                                 new_role: str) -> dict:
         """Update a membership's role."""
         from .exceptions import ControlPlaneError
-        if new_role not in ("owner", "admin"):
+        if new_role not in ("owner", "admin", "member"):
             raise ControlPlaneError(
-                f"Invalid role {new_role!r}. Must be 'owner' or 'admin'."
+                f"Invalid role {new_role!r}. Must be 'owner', 'admin', or 'member'."
             )
         m = self.membership_get(membership_id)
         if m is None:
