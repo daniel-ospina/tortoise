@@ -438,10 +438,12 @@ class TestSituation7_AddRemoveIdempotent:
             # EP path must also see the revert — no stale prior:
             res = sdk.compute_confidence(recency_decay=1.0, anchors=[a_id], max_hops=2)
             conf = get_conf(res, a_id)
-            # After revert without evidence, EP dynamics from the IMPL operator
-            # alone may produce a confidence near but not exactly 0.5.
-            # Key assertion: confidence is NOT elevated by the stale prior.
-            assert abs(conf - 0.5) < 0.05
+            # The measured post-revert confidence is 0.499997 (effectively
+            # exactly 0.5 — the IMPL operator does not shift the anchor's own
+            # confidence in this topology). Margin 0.01 is calibrated to catch
+            # the stale-prior resurrection (~0.024 from neutral) while allowing
+            # unrelated EP dynamics headroom.
+            assert abs(conf - 0.5) < 0.01
 
 
 # ═══════════════════════════════════════════════════════════════════
