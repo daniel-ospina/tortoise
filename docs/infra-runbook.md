@@ -130,6 +130,14 @@ TORTOISE_DB_PATH=~/.tortoise/tortoise.db tortoise serve --http   # tenant auth, 
 - Changing `TORTOISE_SECRET_PEPPER` invalidates all local keys (re-run
   `tortoise key create`).
 
+**`--auth none` safety (fail-closed):** `serve --http --auth none` on a
+non-loopback/wildcard `--bind` is **refused (exit non-zero)** unless
+`--allow-insecure-no-auth` is passed — and that override is **UNSAFE**
+(no authentication; trusted networks only). Loopback binds (default
+`127.0.0.1`) with `--auth none` remain allowed. For a LAN-accessible server,
+pass `--allowed-hosts HOST[,HOST...]` (e.g. `--bind 0.0.0.0 --allowed-hosts
+myhost.lan`) so the host guard accepts the hostnames clients use.
+
 Do **not** commit `.env` (gitignored) and do **not** put DB credentials in
 `.mcp.json`.
 
