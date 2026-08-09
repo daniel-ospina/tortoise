@@ -1809,18 +1809,27 @@ def _cmd_doctor(args):
     # Docker server to probe.
     if target is not None and is_db_uri(target):
         from urllib.parse import urlparse
-        parsed = urlparse(target)
-        probe_host = parsed.hostname or "localhost"
-        probe_user = parsed.username or None
-        probe_pass = parsed.password or None
-        # Same graph derivation from_uri uses (parsed.path.lstrip('/') or
-        # "tortoise") — probe the URI path's graph, never a hardcoded
-        # "tortoise" (#720 P2 conf 62): a non-default graph name must be
-        # probed, and a remote server must not get a stray "tortoise" graph
-        # created by the probe.
-        graph_name = parsed.path.lstrip("/") or "tortoise"
+        # urlparse raises ValueError on malformed URIs (e.g. dangling IPv6
+        # bracket `docker://:pw@[abc`) — keep ALL parsing inside the guard
+        # so it surfaces as a clean ❌ + rc 1, never a traceback (#720 P2
+        # conf 95). Sentinel: parsed stays None when urlparse itself fails.
+        parsed = None
+        probe_host = "localhost"
+        probe_user = None
+        probe_pass = None
+        graph_name = "tortoise"
         probe_port = None
         try:
+            parsed = urlparse(target)
+            probe_host = parsed.hostname or "localhost"
+            probe_user = parsed.username or None
+            probe_pass = parsed.password or None
+            # Same graph derivation from_uri uses (parsed.path.lstrip('/') or
+            # "tortoise") — probe the URI path's graph, never a hardcoded
+            # "tortoise" (#720 P2 conf 62): a non-default graph name must be
+            # probed, and a remote server must not get a stray "tortoise" graph
+            # created by the probe.
+            graph_name = parsed.path.lstrip("/") or "tortoise"
             # parsed.port raises ValueError on a non-numeric port — keep it
             # inside the guard so `doctor --db docker://host:notaport/...`
             # surfaces as a clean ❌ + rc 1, never a traceback (#720 P2 conf 75).
@@ -1835,7 +1844,11 @@ def _cmd_doctor(args):
         except ImportError:
             results.append(("Graph: FalkorDB", "⚠️", "falkordb package not installed"))
         except Exception as e:
-            if probe_port is None:
+            if parsed is None:
+                # Malformed URI — urlparse never completed; mask userinfo so
+                # a credential in --db never reaches the terminal.
+                results.append(("Graph: FalkorDB", "❌", f"bad URI '{_mask_uri_userinfo(target)}': {str(e)[:60]}"))
+            elif probe_port is None:
                 # Non-numeric port — probe never reached the client.
                 results.append(("Graph: FalkorDB", "❌", f"bad port in URI '{_mask_uri_userinfo(target)}': {str(e)[:60]}"))
             else:
