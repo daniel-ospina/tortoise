@@ -227,6 +227,12 @@ class TortoiseEP:
         alpha_a, beta_a = self._beta_from_natural(*cav_eta_a)
         alpha_b, beta_b = self._beta_from_natural(*cav_eta_b)
 
+        # NAND uses the symmetric contradiction potential for the target
+        # message; DIRECTEDNESS is enforced by the back-message guard below
+        # (for unidirectional operators the source/attacker receives no
+        # message — the Dung-style directed attack; the default for new
+        # NANDs is unidirectional per #753). φ_directed(ca,cb)=exp(w·ca)·φ_nand
+        # is message-equivalent on the target, so the potential is shared.
         phi = phi_nand if op_type == "NAND" else phi_impl
         mom_a, mom_b = tilted_moments(
             alpha_a, beta_a, alpha_b, beta_b, weight, phi, self.n_quad
