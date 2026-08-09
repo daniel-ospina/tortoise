@@ -64,8 +64,11 @@ def _boot_tenant_app(db_path):
 
 
 @pytest.fixture()
-def local_db(tmp_path):
+def local_db(tmp_path, monkeypatch):
     """A canonical embedded DB + a bootstrap key via the real CLI."""
+    # Pin to the tmp embedded DB — a TORTOISE_DB_URI in the host env would
+    # otherwise steer the CLI and the roundtrip tests at a live DB.
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
     db = tmp_path / "t.db"
     env = {**os.environ, "TORTOISE_DB_PATH": str(db)}
     proc = subprocess.run(
@@ -132,21 +135,27 @@ def _patch_serve_runtime(monkeypatch, tmp_path):
     return calls
 
 
-def test_serve_http_main_dispatch_static_nonloopback_bind(monkeypatch, tmp_path):
+def test_serve_http_main_dispatch_static_nonloopback_bind(monkeypatch, tmp_path, capsys):
     """Real main() dispatch: `serve --http --auth static --bind <LAN-IP>`
     reaches uvicorn with that bind AND passes the bind through to the fastmcp
     Host guard via allowed_hosts (fixes the 421 Misdirected Request — #719 P1:
-    a non-loopback bind is unreachable for LAN clients otherwise)."""
+    a non-loopback bind is unreachable for LAN clients otherwise). The
+    non-loopback warning (auth != none branch) must also fire."""
     from tortoise.__main__ import main
 
     calls = _patch_serve_runtime(monkeypatch, tmp_path)
     rc = main(["serve", "--http", "--auth", "static", "--api-key", "tt_x",
                "--bind", "192.168.1.50", "--port", "8123"])
     assert rc == 0
+    assert calls["uvicorn"] is not None, "uvicorn.run was not invoked"
     assert calls["uvicorn"]["host"] == "192.168.1.50"
     assert calls["uvicorn"]["port"] == 8123
     app_kw = calls["create_http_app"]
     assert app_kw["auth_mode"] == "static"
+    out = capsys.readouterr().out
+    assert "reachable on your network" in out, \
+        "non-loopback static bind must still warn"
+    assert "ensure auth is enforced" in out
     assert app_kw["api_key"] == "tt_x"
     assert "192.168.1.50" in app_kw["allowed_hosts"], \
         "non-loopback --bind must be passed as an allowed host"
@@ -165,7 +174,8 @@ def test_serve_http_main_dispatch_none_loopback(monkeypatch, tmp_path):
     app_kw = calls["create_http_app"]
     assert app_kw["auth_mode"] == "none"
     # loopback needs no extra host entries — the guard's DEFAULT_HOSTS covers it
-    assert not app_kw["allowed_hosts"]
+    assert app_kw["allowed_hosts"] == [], \
+        "loopback needs no extra host entries — the guard's DEFAULT_HOSTS covers it"
 
 
 def test_serve_http_main_dispatch_tenant(monkeypatch, tmp_path):
@@ -180,6 +190,10 @@ def test_serve_http_main_dispatch_tenant(monkeypatch, tmp_path):
     assert app_kw["auth_mode"] == "tenant"
     assert app_kw["_registry_sdk"] is not None, \
         "tenant mode must build the registry SDK from the canonical DB"
+    assert app_kw["_registry_sdk"]._namespace == "registry", \
+        "tenant mode registry SDK must target the registry namespace (#702)"
+    assert app_kw["_registry_sdk"]._db_path == str(tmp_path / "t.db"), \
+        "tenant mode registry SDK must resolve the canonical TORTOISE_DB_PATH (#702)"
 
 
 def test_serve_http_allowed_hosts_flag(monkeypatch, tmp_path):
@@ -195,20 +209,222 @@ def test_serve_http_allowed_hosts_flag(monkeypatch, tmp_path):
     assert "mybox.local" in hosts and "10.0.0.7" in hosts
 
 
-def test_serve_http_any_interface_bind_derives_machine_hosts(monkeypatch, tmp_path):
-    """0.0.0.0 bind: clients reach us by the machine's hostname/LAN address,
-    not the wildcard — the guard must be seeded with the machine's own
-    identity so the 'reachable on your network' warning is actually TRUE."""
+@pytest.mark.parametrize("flag", ["MyBox.LOCAL.,mybox.local, 10.0.0.7,", " mybox.local ,mybox.local, 10.0.0.7 "])
+def test_serve_http_allowed_hosts_normalizes_and_dedups(monkeypatch, tmp_path, flag):
+    """--allowed-hosts values are normalized (strip / lowercase / trailing
+    dot removed) and deduped — 'MyBox.LOCAL.' and 'mybox.local' collapse to
+    one entry (#719)."""
+    from tortoise.__main__ import main
+
+    calls = _patch_serve_runtime(monkeypatch, tmp_path)
+    rc = main(["serve", "--http", "--auth", "static", "--api-key", "tt_x",
+               "--allowed-hosts", flag])
+    assert rc == 0
+    hosts = calls["create_http_app"]["allowed_hosts"]
+    assert set(hosts) == {"mybox.local", "10.0.0.7"}, \
+        "allowed-hosts must be normalized (strip/lowercase/trailing-dot) and deduped"
+    assert "MyBox.LOCAL." not in hosts and not any(h.endswith(".") for h in hosts), \
+        "normalization must lowercase and strip trailing dots"
+
+
+def test_serve_http_wildcard_bind_merges_allowed_hosts(monkeypatch, tmp_path):
+    """#719 P1 scenario: --bind 0.0.0.0 + --allowed-hosts — the guard gets
+    BOTH the derived machine hostname AND the extra hostnames, so LAN clients
+    using a DNS name aren't 421'd."""
     import socket
 
     from tortoise.__main__ import main
 
     calls = _patch_serve_runtime(monkeypatch, tmp_path)
-    rc = main(["serve", "--http", "--auth", "none", "--bind", "0.0.0.0"])
+    rc = main(["serve", "--http", "--auth", "static", "--api-key", "tt_x",
+               "--bind", "0.0.0.0", "--allowed-hosts", "mybox.local"])
     assert rc == 0
     hosts = calls["create_http_app"]["allowed_hosts"]
-    assert socket.gethostname().lower() in hosts, \
-        "any-interface bind must auto-derive the machine hostname"
+    assert "mybox.local" in hosts
+    assert socket.gethostname().lower().rstrip(".") in hosts, \
+        "wildcard bind must still auto-derive the machine hostname"
+
+
+@pytest.mark.parametrize("bind", ["0.0.0.0", "::"])
+def test_serve_http_any_interface_bind_derives_machine_hosts(monkeypatch, tmp_path, bind, capsys):
+    """any-interface bind (0.0.0.0 / ::): clients reach us by the machine's
+    hostname/LAN address, not the wildcard — the guard must be seeded with the
+    machine's own identity so the 'reachable on your network' warning is
+    actually TRUE. hostname/getaddrinfo are patched so the LAN-address seeding
+    branch is exercised deterministically (a real hostname may resolve only to
+    loopback on CI)."""
+    import socket
+
+    from tortoise.__main__ import main
+
+    # Deterministic machine identity: hostname 'mybox' + one non-loopback LAN
+    # address, so the getaddrinfo seeding branch always runs.
+    monkeypatch.setattr(socket, "gethostname", lambda: "mybox")
+    monkeypatch.setattr(
+        socket, "getaddrinfo",
+        lambda *a, **kw: [(socket.AF_INET, socket.SOCK_STREAM, 6, "",
+                           ("192.168.50.7", 0))],
+    )
+
+    calls = _patch_serve_runtime(monkeypatch, tmp_path)
+    # auth=none + wildcard bind is refused by default (P2 security) — the
+    # override opts in so this test exercises the host-derivation logic.
+    rc = main(["serve", "--http", "--auth", "none", "--bind", bind,
+               "--allow-insecure-no-auth"])
+    assert rc == 0
+    assert calls["uvicorn"] is not None, "uvicorn.run was not invoked"
+    hosts = calls["create_http_app"]["allowed_hosts"]
+    assert "mybox" in hosts, "any-interface bind must auto-derive the machine hostname"
+    assert "192.168.50.7" in hosts, \
+        "any-interface bind must seed non-loopback LAN addresses into the guard"
+    # The user-visible promise: the warning's 'Host guard allows: ...' line
+    # names the machine's own identity.
+    out = capsys.readouterr().out
+    assert "reachable on your network" in out, \
+        "wildcard binds are genuinely network-reachable — the warning MUST fire"
+    guard_line = next((ln for ln in out.splitlines() if "Host guard allows:" in ln), None)
+    assert guard_line is not None, \
+        "wildcard-bind warning must print a 'Host guard allows:' line"
+    assert "mybox" in guard_line and "192.168.50.7" in guard_line, \
+        "guard line must name the machine hostname and its LAN address"
+
+
+@pytest.mark.parametrize("bind", ["localhost", "LOCALHOST", "::1", "127.0.0.1", "127.0.0.2", "::ffff:127.0.0.1"])
+def test_serve_http_loopback_aliases_no_network_warning(monkeypatch, tmp_path, capsys, bind):
+    """Loopback binds — the 'reachable on your network' warning must NOT fire
+    (only genuinely non-loopback binds warn; the old `bind != "127.0.0.1"`
+    check false-alarmed on loopback aliases like localhost / ::1 / 127.0.0.2 /
+    the IPv4-mapped ::ffff:127.0.0.1, #719 P2)."""
+    from tortoise.__main__ import main
+
+    calls = _patch_serve_runtime(monkeypatch, tmp_path)
+    rc = main(["serve", "--http", "--auth", "none", "--bind", bind])
+    assert rc == 0
+    assert calls["uvicorn"] is not None, "uvicorn.run was not invoked"
+    assert calls["uvicorn"]["host"] == bind
+    # Loopback aliases need no extra guard entries (DEFAULT_HOSTS covers them).
+    assert calls["create_http_app"]["allowed_hosts"] == [], \
+        f"loopback alias {bind} must not seed extra Host-guard entries"
+    captured = capsys.readouterr()
+    assert "reachable on your network" not in captured.out, \
+        f"loopback alias {bind} must not trigger the network warning"
+    assert "reachable on your network" not in captured.err, \
+        f"loopback alias {bind} must not trigger the network warning (stderr)"
+
+
+def test_is_loopback_bind_ipv4_mapped_loopback_guarded(monkeypatch):
+    """The ipv4_mapped normalization in _is_loopback_bind must classify
+    ::ffff:127.0.0.1 as loopback and ::ffff:<LAN-IP> as non-loopback even on
+    CPython builds where IPv6Address.is_loopback reports False for IPv4-mapped
+    loopbacks (pre-gh-117566 — <3.12.7 / <3.11.13). Patching is_loopback to
+    False makes the normalization the only path to True, so this test fails if
+    that normalization regresses (#719)."""
+    import ipaddress
+
+    from tortoise.__main__ import _is_loopback_bind
+
+    monkeypatch.setattr(ipaddress.IPv6Address, "is_loopback", property(lambda self: False))
+    assert _is_loopback_bind("::ffff:127.0.0.1") is True, \
+        "IPv4-mapped loopback must stay loopback regardless of CPython patch level"
+    assert _is_loopback_bind("::ffff:192.168.1.50") is False, \
+        "IPv4-mapped LAN address must never classify as loopback"
+
+
+def test_bind_allowed_hosts_ipv4_mapped_normalized(monkeypatch):
+    """_bind_allowed_hosts must apply the same ipv4_mapped normalization as
+    _is_loopback_bind: ::ffff:127.0.0.1 stays loopback (no Host-guard
+    entries) and ::ffff:<LAN-IP> seeds the plain embedded IPv4 — the address
+    clients actually send in the Host header — even on CPython builds where
+    IPv6Address.is_loopback reports False for mapped addresses
+    (pre-gh-117566 — <3.12.7 / <3.11.13). Without normalization the guard
+    would hold '::ffff:192.168.1.50', which never matches a client's
+    '192.168.1.50' Host header → 421 despite the #719 Host-guard fix."""
+    import ipaddress
+
+    from tortoise.__main__ import _bind_allowed_hosts
+
+    monkeypatch.setattr(ipaddress.IPv6Address, "is_loopback", property(lambda self: False))
+    assert _bind_allowed_hosts("::ffff:127.0.0.1", None) == [], \
+        "mapped loopback must not seed Host-guard entries"
+    assert _bind_allowed_hosts("::ffff:192.168.1.50", None) == ["192.168.1.50"], \
+        "mapped LAN bind must seed the embedded IPv4, not the ::ffff: form"
+
+
+@pytest.mark.parametrize("bind", ["0.0.0.0", "192.168.1.50", "::", "mybox.local", "::ffff:192.168.1.50"])
+def test_serve_http_none_nonloopback_refused_without_override(monkeypatch, tmp_path, capsys, bind):
+    """--auth none + non-loopback/wildcard bind is REFUSED (exit 1) unless
+    --allow-insecure-no-auth — there is no auth to enforce, so the old
+    warning-only path could expose full MCP access (P2 security). mybox.local
+    exercises the unresolvable-hostname branch of _is_loopback_bind;
+    ::ffff:192.168.1.50 the IPv4-mapped non-loopback half of the mapping."""
+    import tortoise.mcp_server as mcp_mod
+    import uvicorn
+
+    from tortoise.__main__ import main
+
+    def _boom(**kw):
+        raise AssertionError("create_http_app must not run for refused insecure serve")
+
+    monkeypatch.setattr(mcp_mod, "create_http_app", _boom)
+    # uvicorn is patched too so a refusal regression fails loudly instead of
+    # falling through to a real socket bind / CI hang.
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **kw: None)
+    monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "t.db"))
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+
+    rc = main(["serve", "--http", "--auth", "none", "--bind", bind])
+    assert rc == 1, f"auth=none + {bind} must be refused (exit 1) without the override"
+    err = capsys.readouterr().err
+    assert "allow-insecure-no-auth" in err
+    assert bind in err
+
+
+@pytest.mark.parametrize("bind", ["192.168.1.50", "mybox.local", "::ffff:192.168.1.50"])
+def test_serve_http_none_nonloopback_override_works(monkeypatch, tmp_path, capsys, bind):
+    """--allow-insecure-no-auth explicitly opts into auth=none on a
+    non-loopback bind (LAN IP, unresolvable hostname, or IPv4-mapped LAN
+    address) — starts (rc 0), warns loudly, passes auth_mode=none."""
+    from tortoise.__main__ import main
+
+    calls = _patch_serve_runtime(monkeypatch, tmp_path)
+    rc = main(["serve", "--http", "--auth", "none", "--bind", bind,
+               "--allow-insecure-no-auth", "--port", "8124"])
+    assert rc == 0
+    assert calls["uvicorn"] is not None, "uvicorn.run was not invoked"
+    assert calls["uvicorn"]["host"] == bind
+    assert calls["uvicorn"]["port"] == 8124
+    app_kw = calls["create_http_app"]
+    assert app_kw["auth_mode"] == "none"
+    # IPv4-mapped binds normalize to the embedded IPv4 — the address clients
+    # actually send in the Host header (#719 review fix).
+    expected_host = bind.removeprefix("::ffff:")
+    assert expected_host in app_kw["allowed_hosts"]
+    out = capsys.readouterr().out
+    assert "reachable on your network" in out
+    # The none-mode warning is distinct — auth is NOT enforced, so the text
+    # must say so (a regression back to the generic 'ensure auth is enforced'
+    # wording would be unfulfillable in none mode — #719 P2).
+    assert "NOT enforced" in out
+
+
+def test_serve_http_static_hostname_bind_seeds_guard(monkeypatch, tmp_path, capsys):
+    """Hostname bind (mybox.local) auto-seeds the Host guard with the bind
+    itself (the `elif bind != "localhost"` branch of _bind_allowed_hosts) —
+    the #719 P1 421 fix for clients connecting via a DNS name. auth=static so
+    it takes the passing path (auth=none + non-loopback is refused)."""
+    from tortoise.__main__ import main
+
+    calls = _patch_serve_runtime(monkeypatch, tmp_path)
+    rc = main(["serve", "--http", "--auth", "static", "--api-key", "tt_x",
+               "--bind", "mybox.local"])
+    assert rc == 0
+    assert calls["uvicorn"] is not None, "uvicorn.run was not invoked"
+    app_kw = calls["create_http_app"]
+    assert app_kw["auth_mode"] == "static"
+    assert "mybox.local" in app_kw["allowed_hosts"], \
+        "hostname bind must seed the Host guard with the bind itself"
+    out = capsys.readouterr().out
+    assert "reachable on your network" in out
 
 
 def test_serve_http_static_missing_key_error_path(monkeypatch, tmp_path, capsys):

@@ -2198,6 +2198,28 @@ def _cmd_decide(args) -> int:
     return 0
 
 
+def _parse_bind_ip(bind: str):
+    """Parse `--bind` as an IP address, normalizing IPv4-mapped IPv6
+    (::ffff:x.x.x.x) to the embedded IPv4.
+
+    CPython only reports is_loopback=True for mapped addresses on
+    3.11.13+/3.12.7+ (gh-117566 backports); normalizing first gives every
+    supported Python the same classification — and lets `_bind_allowed_hosts`
+    seed the plain embedded IPv4 (e.g. 192.168.1.50) into the Host guard,
+    which is what clients actually send in the Host header. Returns None for
+    hostnames/non-IP values (#719).
+    """
+    import ipaddress
+
+    try:
+        ip = ipaddress.ip_address(bind)
+    except ValueError:
+        return None
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return ip
+
+
 def _bind_allowed_hosts(bind: str, extra: str | None) -> list[str]:
     """Host values fastmcp's Host guard must accept for `serve --http --bind ...`.
 
@@ -2225,10 +2247,7 @@ def _bind_allowed_hosts(bind: str, extra: str | None) -> list[str]:
     for part in (extra or "").split(","):
         _add(part)
 
-    try:
-        ip = ipaddress.ip_address(bind)
-    except ValueError:
-        ip = None
+    ip = _parse_bind_ip(bind)
 
     if ip is not None:
         if ip.is_unspecified:
@@ -2249,11 +2268,30 @@ def _bind_allowed_hosts(bind: str, extra: str | None) -> list[str]:
                 pass
         elif not ip.is_loopback:
             _add(str(ip))
-    elif bind != "localhost":
+    elif bind.strip().lower().rstrip(".") != "localhost":
         # Hostname bind (e.g. mybox.local) — honor it directly.
         _add(bind)
 
     return hosts
+
+
+def _is_loopback_bind(bind: str) -> bool:
+    """True when `--bind` exposes only the loopback interface.
+
+    Covers the explicit loopback aliases — 127.0.0.1, localhost, ::1, the
+    whole 127.0.0.0/8 range, and the IPv4-mapped ::ffff:127.0.0.1. Anything
+    else — a LAN/cloud IP, a real hostname, or the 0.0.0.0/:: any-interface
+    wildcards (which ARE reachable beyond the local machine) — returns False
+    so the "reachable on your network" warning and the auth=none refusal fire
+    only when they are actually true (#719).
+    """
+    if bind.strip().lower().rstrip(".") == "localhost":
+        return True
+    ip = _parse_bind_ip(bind)
+    if ip is None:
+        # Unknown hostname — assume it resolves to something reachable.
+        return False
+    return ip.is_loopback
 
 
 def _cmd_serve_http(args) -> int:
@@ -2262,7 +2300,8 @@ def _cmd_serve_http(args) -> int:
     Auth modes (mirrors create_http_app):
       tenant (default) — registry tt_ keys (bootstrap with `tortoise key create`)
       static           — single key (--api-key or TORTOISE_API_KEY)
-      none             — no auth, localhost-bound eval only
+      none             — no auth, localhost-bound eval only; a non-loopback
+                         --bind is REFUSED unless --allow-insecure-no-auth
     """
     import os
     import sys
@@ -2297,6 +2336,22 @@ def _cmd_serve_http(args) -> int:
     # Request. Loopback is allowed by default, but a non-loopback --bind is
     # not — pass the derived hosts so LAN clients actually work.
     allowed_hosts = _bind_allowed_hosts(args.bind, args.allowed_hosts)
+    bind_loopback = _is_loopback_bind(args.bind)
+
+    # P2 #719 (security): --auth none on a non-loopback bind would expose full
+    # MCP access with no auth to enforce — the old code only warned with text
+    # that was unfulfillable in none mode. Refuse (exit non-zero) unless the
+    # user explicitly opts into the insecure setup. Loopback stays allowed.
+    if args.auth == "none" and not bind_loopback and not args.allow_insecure_no_auth:
+        print(
+            f"❌ serve --http --auth none refuses non-loopback --bind {args.bind}: "
+            "there is no auth to enforce, so anyone who can reach the port would "
+            "get full MCP access. Bind a loopback address (127.0.0.1/localhost/::1) "
+            "or pass --allow-insecure-no-auth to override (UNSAFE — trusted networks only).",
+            file=sys.stderr,
+        )
+        return 1
+
     if args.auth == "tenant":
         # Inject the registry SDK built from the SAME canonical DB as the team
         # SDK (avoids the /data default divergence — #702).
@@ -2318,8 +2373,12 @@ def _cmd_serve_http(args) -> int:
                               auth_mode="none")
         print("serve --http: auth = none (localhost eval — NO auth; do not expose on a network)")
 
-    if args.bind != "127.0.0.1":
-        print(f"⚠️  Non-loopback bind {args.bind} — MCP is reachable on your network; ensure auth is enforced.")
+    if not bind_loopback:
+        if args.auth == "none":
+            # Only reachable here with the --allow-insecure-no-auth override.
+            print(f"⚠️  Non-loopback bind {args.bind} — MCP is reachable on your network and auth=none is NOT enforced; anyone who can reach the port has full access.")
+        else:
+            print(f"⚠️  Non-loopback bind {args.bind} — MCP is reachable on your network; ensure auth is enforced.")
         if allowed_hosts:
             note = ""
             if args.bind in ("0.0.0.0", "::"):
@@ -2449,7 +2508,8 @@ def main(argv: list[str] | None = None) -> int:
     sr.add_argument("--port", type=int, default=8000, help="HTTP port (default 8000)")
     sr.add_argument("--auth", choices=["tenant", "static", "none"], default="tenant",
                     help="HTTP auth mode: tenant = registry tt_ keys (default; bootstrap with 'tortoise key create'), "
-                         "static = single key (--api-key or TORTOISE_API_KEY), none = localhost eval (NO auth)")
+                         "static = single key (--api-key or TORTOISE_API_KEY), "
+                         "none = localhost eval (NO auth; non-loopback --bind refused unless --allow-insecure-no-auth)")
     sr.add_argument("--api-key", dest="api_key", default=None,
                     help="Static auth key (requires --auth static)")
     sr.add_argument("--allowed-hosts", dest="allowed_hosts", default=None, metavar="HOST[,HOST...]",
@@ -2457,6 +2517,10 @@ def main(argv: list[str] | None = None) -> int:
                          "clients connect via a hostname/IP that differs from --bind (e.g. --bind "
                          "0.0.0.0 with clients using the machine's LAN name) — without this the "
                          "fastmcp Host guard answers 421 Misdirected Request (#719).")
+    sr.add_argument("--allow-insecure-no-auth", action="store_true",
+                    help="DANGER: allow --auth none on a non-loopback --bind. Refused by default because "
+                         "there is no auth to enforce — anyone who can reach the port gets full MCP "
+                         "access. Only for trusted networks.")
     kr = sp.add_parser("key", help="API-key management (self-hosted HTTP auth)")
     key_sp = kr.add_subparsers(dest="key_cmd")
     kc = key_sp.add_parser("create", help="Create a local registry team + tt_ API key for 'serve --http --auth tenant'")
