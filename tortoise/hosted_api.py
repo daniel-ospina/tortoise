@@ -1494,6 +1494,41 @@ class SessionRequest(BaseModel):
     metadata: dict | None = None
 
 
+# ── Session extraction mode (#312 delta 1) ─────────────────────────────────
+
+_SESSION_EXTRACTION_MODES = ("auto", "required", "regex")
+
+# Provider env keys the hosted deployment can use for LLM-grade extraction.
+# The provider/model choice is a product decision (deploy-time) — this module
+# only reports availability so `auto`/`required` modes behave correctly.
+_LLM_PROVIDER_KEYS = (
+    "OPENROUTER_API_KEY", "DEEPSEEK_API_KEY",
+    "OPENAI_API_KEY", "GEMINI_API_KEY", "ANTHROPIC_API_KEY",
+)
+
+
+def _session_extraction_mode() -> str:
+    """Resolve TORTOISE_SESSION_EXTRACTION (auto|required|regex).
+
+    auto (default): LLM extraction when a provider key is configured, else
+        the deterministic regex path (capture always works).
+    required: fail-closed — capture errors when no LLM provider is configured.
+    regex: always the deterministic regex path (never calls an LLM).
+    Unknown values fall back to ``auto`` with a warning (never break capture).
+    """
+    import logging
+    raw = os.environ.get("TORTOISE_SESSION_EXTRACTION", "auto").strip().lower()
+    if raw in _SESSION_EXTRACTION_MODES:
+        return raw
+    logging.getLogger("tortoise.api").warning(
+        "unknown TORTOISE_SESSION_EXTRACTION=%r — falling back to 'auto'", raw)
+    return "auto"
+
+
+def _llm_provider_available() -> bool:
+    return any(os.environ.get(k) for k in _LLM_PROVIDER_KEYS)
+
+
 @app.post("/v1/sessions")
 async def capture_session(body: SessionRequest, request: Request, team: dict = Depends(get_current_team)):
     """Capture an agent session and extract turns as episodic Points.
@@ -1511,6 +1546,19 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
         MAX_EXTRACTIONS_PER_TURN, MAX_SESSION_TURNS,
         QuotaCheckError, QuotaExceededError, enforce_team_limit,
     )
+
+    # #312 delta 1: extraction mode semantics. `required` fails closed when
+    # no LLM provider is configured; `auto`/`regex` keep the deterministic
+    # regex path as the always-works baseline (LLM upgrade lands with the
+    # provider decision — deploy-time).
+    mode = _session_extraction_mode()
+    if mode == "required" and not _llm_provider_available():
+        raise HTTPException(
+            status_code=503,
+            detail="Session extraction mode 'required' but no LLM provider key is "
+                   "configured (set OPENROUTER_API_KEY / DEEPSEEK_API_KEY / "
+                   "OPENAI_API_KEY / GEMINI_API_KEY / ANTHROPIC_API_KEY).",
+        )
 
     if len(body.conversation) > MAX_SESSION_TURNS:
         raise HTTPException(
@@ -1656,7 +1704,9 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
         resource_type="session", resource_id=session_id,
     )
 
-    return {"session_id": session_id, "turns": len(body.conversation), "extracted": len(extracted), "points": extracted}
+    return {"session_id": session_id, "turns": len(body.conversation),
+            "extracted": len(extracted), "points": extracted,
+            "extraction_mode": mode}
 
 
 @app.get("/v1/sessions")
