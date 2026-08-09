@@ -602,10 +602,13 @@ class TortoiseSDK:
         # from tortoise/hosted_api.py POST /v1/sessions. Divergences: the SDK
         # variant writes a `speaker` property on turn Points (delta 5) while
         # hosted adds quota/auth bounds; hosted has no speaker tag. SDK
-        # TRUNCATES turn content > 5000 chars silently, hosted rejects it with
-        # 422 (Pydantic field_validator failure); role=None normalizes to
-        # "unknown" in the SDK, hosted stores None as-is. Keep the two in sync
-        # when touching either.
+        # TRUNCATES turn content > 5000 chars silently AND extracts from the
+        # truncated text (stored-source parity — a phrase past the cut has no
+        # home in any stored turn), hosted rejects > 5000 with 422 (Pydantic
+        # field_validator failure) so its loop always sees <= 5000 chars:
+        # extraction inputs align. role=None normalizes to "unknown" in the
+        # SDK, hosted stores None as-is. Keep the two in sync when touching
+        # either.
         extracted = []
         for i, turn in enumerate(conversation):
             # #721: same isinstance-first pattern as content below — an `or
@@ -648,10 +651,18 @@ class TortoiseSDK:
                 params={"sid": session_id, "tid": turn_id},
             )
 
-            # Epistemic extraction (regex, same bounds as hosted).
+            # Epistemic extraction (regex, same bounds as hosted). #721:
+            # scan the STORED (truncated) turn text — the turn Point above
+            # stores content[:5000], so the regexes must run on that same
+            # slice. Scanning the full content would extract phrases past the
+            # cut into session-wired Points whose source text exists in no
+            # stored turn (broken provenance). Hosted can't hit this (422 on
+            # content > 5000 before the loop); this keeps extraction input
+            # aligned with what is actually stored.
+            scan = content[:5000]
             n_dec = 0
             for pat in decisions:
-                for match in re.finditer(pat, content):
+                for match in re.finditer(pat, scan):
                     if n_dec >= MAX_EXTRACTIONS_PER_TURN:
                         break
                     n_dec += 1
@@ -667,7 +678,7 @@ class TortoiseSDK:
 
             n_clm = 0
             for pat in claims:
-                for match in re.finditer(pat, content):
+                for match in re.finditer(pat, scan):
                     if n_clm >= MAX_EXTRACTIONS_PER_TURN:
                         break
                     n_clm += 1

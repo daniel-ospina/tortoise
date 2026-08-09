@@ -239,6 +239,41 @@ def test_capture_session_non_string_content_coerced(sdk):
         "dict content stored as its str() form"
 
 
+def test_capture_session_long_turn_extracts_only_stored_text(sdk):
+    """#721 provenance: extraction scans the STORED (truncated) turn text.
+    A turn > 5000 chars stores content[:5000]; a phrase past the cut must NOT
+    be extracted — its source text exists in no stored turn. Every extracted
+    phrase must be present in the stored turn text."""
+    # One claim inside the 5000-char window (positive control) + trigger-free
+    # padding to push a second claim past the cut. Padding must not match any
+    # decision/claim regex so the past-cut claim is the only candidate for the
+    # claims patterns (the per-turn cap would otherwise eat it — #721).
+    lead = "I believe the root cause is known. "
+    pad = "plain filler text without triggers. "
+    assert not re.search(r"(?:let'?s|we will|we should|I will|I'm going to|decided|decision|I think|I believe|my understanding is|the problem is|the key insight|evidence suggests|data shows|we found that|this means|plan is|next steps?:|action item:)", pad, re.I)
+    before = lead + pad * 145  # 5113 chars > 5000
+    assert len(before) > 5000
+    past_cut = "evidence suggests the fix landed."
+    content = before + past_cut
+    res = sdk.capture_session([{"role": "user", "content": content}])
+    proj = sdk._get_proj()
+    turn = proj.g.query(
+        "MATCH (t:Point {pointKind:'event'}) RETURN t.content"
+    ).result_set[0][0]
+    assert turn == "[user] " + content[:5000], \
+        "stored turn text is the truncated 5000 chars"
+    # Extraction still runs on the stored window (positive control).
+    assert any("root cause is known" in p["text"] for p in res["points"]), \
+        "claims inside the 5000-char window must still be extracted"
+    # Provenance holds: every extracted phrase exists within the stored turn.
+    for p in res["points"]:
+        assert p["text"] in turn, \
+            f"extracted {p['text']!r} not present in stored (truncated) turn"
+    # The phrase past the 5000-char cut is NOT extracted (old code did).
+    assert not any("fix landed" in p["text"] for p in res["points"]), \
+        "phrases past the 5000-char cut must not be extracted"
+
+
 def test_capture_session_falsy_non_string_content_not_swallowed(sdk):
     """Falsy non-strings (0/False/{}/[]) survive coercion — no `or ""` swallow."""
     conv = [

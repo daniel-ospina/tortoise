@@ -1630,8 +1630,9 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
     # pre-write estimate; the SDK variant adds a `speaker` property on turn
     # Points (delta 5) that hosted does not write. Hosted rejects turn content
     # > 5000 chars with 422 (Pydantic field_validator failure), the SDK
-    # truncates silently; role=None stays None in hosted, the SDK normalizes
-    # it to "unknown". Keep the two in sync.
+    # truncates to 5000 and extracts from the truncated text — extraction
+    # inputs align (both loops see <= 5000 chars); role=None stays None in
+    # hosted, the SDK normalizes it to "unknown". Keep the two in sync.
     for i, turn in enumerate(body.conversation):
         role = turn.get("role", "unknown")
         content = turn.get("content", "")
