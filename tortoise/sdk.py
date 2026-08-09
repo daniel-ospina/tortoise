@@ -15,6 +15,7 @@ from .domain_loader import known_kinds, register_kind
 from .ids import ulid
 from . import monitoring
 from .projection import FalkorProjection
+from .quota import MAX_EXTRACTIONS_PER_TURN, MAX_SESSION_TURNS
 import threading
 
 # P0 Group 3: register custom kinds for diary + checkpoint
@@ -553,6 +554,168 @@ class TortoiseSDK:
                 return self.get_point(rows[0][0])
 
         return None
+
+    def capture_session(
+        self,
+        conversation: list[dict[str, str]],
+        session_id: str | None = None,
+        *,
+        max_turns: int = MAX_SESSION_TURNS,
+    ) -> dict:
+        """Capture an agent session into the graph (#312 delta 4).
+
+        Mirrors the hosted POST /v1/sessions logic minus quota/auth:
+        turns become episodic Points keyed {session_id}_t{i} (deterministic +
+        idempotent), decisions/claims become epistemic Points (content-hash
+        dedup), plus a :Session node and an ontology-compliant
+        :Event {eventKind:'sessionCaptured'} with aboutEvent edges.
+
+        ``conversation`` is a list of {"role", "content"} dicts. Returns
+        {"session_id", "turns", "extracted", "points": [...]}.
+        """
+        import uuid
+        from datetime import datetime, timezone
+
+        proj = self._get_proj()
+        now = datetime.now(timezone.utc).isoformat()
+        session_id = session_id or f"session_{uuid.uuid4().hex[:12]}"
+
+        if len(conversation) > max_turns:
+            raise ValueError(
+                f"Session turn cap exceeded: {len(conversation)} > {max_turns}")
+
+        proj.g.query(
+            "MERGE (s:Session {id:$sid}) SET s.created_at=$now, s.turn_count=$tc",
+            params={"sid": session_id, "now": now, "tc": len(conversation)},
+        )
+
+        decisions = [
+            r"(?i)(?:let'?s|we will|we should|I will|I'm going to|decided|decision)\s+[^.!?]+[.!?]",
+            r"(?i)(?:plan is|next steps?:|action item:)\s+[^.!?]+[.!?]",
+        ]
+        claims = [
+            r"(?i)(?:I think|I believe|my understanding is|the problem is|the key insight)\s+[^.!?]+[.!?]",
+            r"(?i)(?:evidence suggests|data shows|we found that|this means)\s+[^.!?]+[.!?]",
+        ]
+
+        # NOTE: this extraction loop (regexes + per-turn caps) is duplicated
+        # from tortoise/hosted_api.py POST /v1/sessions. Divergences: the SDK
+        # variant writes a `speaker` property on turn Points (delta 5) while
+        # hosted adds quota/auth bounds; hosted has no speaker tag. SDK
+        # TRUNCATES turn content > 5000 chars silently AND extracts from the
+        # truncated text (stored-source parity — a phrase past the cut has no
+        # home in any stored turn), hosted rejects > 5000 with 422 (Pydantic
+        # field_validator failure) so its loop always sees <= 5000 chars:
+        # extraction inputs align. role=None normalizes to "unknown" in the
+        # SDK, hosted stores None as-is. Keep the two in sync when touching
+        # either.
+        extracted = []
+        for i, turn in enumerate(conversation):
+            # #721: same isinstance-first pattern as content below — an `or
+            # "unknown"` fallback only fixes falsy roles, but TRUTHY non-string
+            # roles (123, {"a": 1}) would pass raw and be stored as a
+            # non-string `speaker` (contradicting the `speaker | string`
+            # ontology row) — and a dict role could fail the Cypher write
+            # mid-loop, leaving a partial session. Coerce via str() so the
+            # speaker property is always a string; only None maps to "unknown".
+            raw_role = turn.get("role")
+            role = raw_role if isinstance(raw_role, str) else (
+                "unknown" if raw_role is None else str(raw_role))
+            raw = turn.get("content")
+            # #721: defensive coercion — check isinstance FIRST so falsy
+            # non-strings (0, False, {}, []) are not swallowed to "" by an
+            # `or ""` fallback, then coerce via str() (0 -> "0", False ->
+            # "False", [] -> "[]") before the write so the episodic point and
+            # the extraction loop share one value. Only None maps to "".
+            content = raw if isinstance(raw, str) else ("" if raw is None else str(raw))
+
+            # Episodic turn point — deterministic id, structured speaker tag
+            # (delta 5), content hash, session-scoped (never conflated across
+            # sessions — #490).
+            turn_id = f"{session_id}_t{i}"
+            turn_text = f"[{role}] {content[:5000]}"
+            proj.g.query(
+                "MERGE (t:Point {id:$id}) "
+                "SET t.content=$c, t.pointKind=$k, t.is_operator=false, "
+                "    t.speaker=$speaker, "
+                "    t.status=coalesce(t.status, $s), "
+                "    t.createdAt=coalesce(t.createdAt, $now), "
+                "    t.updatedAt=$now, t.content_hash=$ch",
+                params={"id": turn_id, "c": turn_text, "k": "event",
+                        "speaker": role, "s": "draft", "now": now,
+                        "ch": _content_hash(turn_text)},
+            )
+            proj.g.query(
+                "MATCH (s:Session {id:$sid}), (t:Point {id:$tid}) "
+                "MERGE (s)-[:CONTAINS]->(t)",
+                params={"sid": session_id, "tid": turn_id},
+            )
+
+            # Epistemic extraction (regex, same bounds as hosted). #721:
+            # scan the STORED (truncated) turn text — the turn Point above
+            # stores content[:5000], so the regexes must run on that same
+            # slice. Scanning the full content would extract phrases past the
+            # cut into session-wired Points whose source text exists in no
+            # stored turn (broken provenance). Hosted can't hit this (422 on
+            # content > 5000 before the loop); this keeps extraction input
+            # aligned with what is actually stored.
+            scan = content[:5000]
+            n_dec = 0
+            for pat in decisions:
+                for match in re.finditer(pat, scan):
+                    if n_dec >= MAX_EXTRACTIONS_PER_TURN:
+                        break
+                    n_dec += 1
+                    text = match.group().strip()
+                    p = self.create_point("decision", text[:5000], dedup=True)
+                    pid = p["id"]
+                    proj.g.query(
+                        "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
+                        "MERGE (s)-[:CONTAINS]->(p)",
+                        params={"sid": session_id, "pid": pid},
+                    )
+                    extracted.append({"id": pid, "kind": "decision", "text": text[:200]})
+
+            n_clm = 0
+            for pat in claims:
+                for match in re.finditer(pat, scan):
+                    if n_clm >= MAX_EXTRACTIONS_PER_TURN:
+                        break
+                    n_clm += 1
+                    text = match.group().strip()
+                    p = self.create_point("statement", text[:5000], dedup=True)
+                    pid = p["id"]
+                    proj.g.query(
+                        "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
+                        "MERGE (s)-[:CONTAINS]->(p)",
+                        params={"sid": session_id, "pid": pid},
+                    )
+                    extracted.append({"id": pid, "kind": "statement", "text": text[:200]})
+
+        # Ontology episodic model (v3.1 §4.5/§3.2): Event + aboutEvent edges.
+        try:
+            event = self.create_event(
+                f"session_{session_id}", "sessionCaptured",
+                startedAt=now, endedAt=now, sessionId=session_id,
+            )
+            event_id = event.get("id") or event.get("eventId")
+            for p in extracted:
+                proj.create_about_edge(p["id"], event_id, "aboutEvent")
+        except Exception as e:
+            # Non-fatal — mirrors hosted behavior, but surface the failure so
+            # silent event-log loss is visible (#721).
+            _logger.warning(
+                "capture_session: sessionCaptured Event/EventRecorded write "
+                "failed (non-fatal) for session %s: %s", session_id, e,
+                exc_info=True,
+            )
+
+        return {
+            "session_id": session_id,
+            "turns": len(conversation),
+            "extracted": len(extracted),
+            "points": extracted,
+        }
 
     def update_point(self, id: str, **props) -> dict:
         """Update properties on an existing Point. Returns updated point dict.
