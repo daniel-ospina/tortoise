@@ -197,20 +197,31 @@ def test_mcp_tool_nand_resolves_directed(sdk, tmp_path):
     """The MCP tool surface must inherit the SDK's directed NAND default
     (P1 review fix — the tool previously hard-coded bidirectional)."""
     import os
+    _prev_db = os.environ.get("TORTOISE_DB_PATH")
     os.environ["TORTOISE_DB_PATH"] = str(tmp_path / "t.db")  # align tool SDK with fixture
     from tortoise.mcp_auth import _current_team_id, _transport_mode
-    _transport_mode.set("stdio")
-    _current_team_id.set(None)
-    from tortoise.mcp_server import tortoise_create_operator
-    a = make_point(sdk, "a")
-    b = make_point(sdk, "b")
-    # route through the MCP tool handler with NO direction (default None)
-    res = tortoise_create_operator("NAND", a["id"], [b["id"]])
-    op_id = res["id"]
-    d = sdk._get_proj().g.query(
-        "MATCH (o:Point {id:$id}) RETURN o.direction", params={"id": op_id}
-    ).result_set[0][0]
-    assert d == "unidirectional", "MCP-created NAND must be directed by default"
+    tok_mode = _transport_mode.set("stdio")
+    tok_team = _current_team_id.set(None)
+    try:
+        from tortoise.mcp_server import tortoise_create_operator
+        a = make_point(sdk, "a")
+        b = make_point(sdk, "b")
+        # route through the MCP tool handler with NO direction (default None)
+        res = tortoise_create_operator("NAND", a["id"], [b["id"]])
+        op_id = res["id"]
+        d = sdk._get_proj().g.query(
+            "MATCH (o:Point {id:$id}) RETURN o.direction", params={"id": op_id}
+        ).result_set[0][0]
+        assert d == "unidirectional", "MCP-created NAND must be directed by default"
+    finally:
+        _transport_mode.reset(tok_mode)
+        _current_team_id.reset(tok_team)
+        import tortoise.mcp_server as _mcp
+        _mcp._sdk = None  # clear module-level SDK cache (bound to this test's DB)
+        if _prev_db is None:
+            os.environ.pop("TORTOISE_DB_PATH", None)
+        else:
+            os.environ["TORTOISE_DB_PATH"] = _prev_db
 
 
 def test_directed_nary_nand_source_to_targets_only(sdk):
