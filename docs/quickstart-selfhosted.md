@@ -79,7 +79,9 @@ tortoise index github https://github.com/your/repo --db <path-or-uri>
 
 (Do **not** use `tortoise onboard` — it crashes in embedded-only mode; tracked as #705.)
 
-> ⚠️ **Known issue on this release:** `tortoise index github` fails with `ModuleNotFoundError: No module named 'tortoise.extraction_pipeline'` — the markdown extraction pipeline it calls was removed from the codebase and the command hasn't been rewired. Until it's fixed, add points through your agent once it's connected (step 5) via the `tortoise_create_point` MCP tool, or use the hosted CLI (`tortoise create-point`, see quickstart-cloud.md).
+> ⚠️ **Known issues on this release:**
+> - `tortoise index github` fails with `ModuleNotFoundError: No module named 'tortoise.extraction_pipeline'` — the markdown extraction pipeline it calls was removed from the codebase and the command hasn't been rewired (tracked as [issue #713](https://github.com/daniel-ospina/tortoise/issues/713); it now exits cleanly with that message instead of a traceback). Until it's fixed, add points through your agent once it's connected (step 5) via the `tortoise_create_point` MCP tool, or use the hosted CLI (`tortoise create-point`, see quickstart-cloud.md).
+> - `tortoise init --yes` silently spawns that same broken indexer in the background when you're inside a repo with markdown files — the `index github` child crashes with the #713 error and only its log (`$TMPDIR/tortoise-init-index.log`) shows it. Prefer plain `tortoise init` (it asks before indexing) or index nothing and add points via your agent.
 
 ## 5. Connect your agent (MCP, stdio)
 

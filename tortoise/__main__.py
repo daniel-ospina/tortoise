@@ -2198,6 +2198,64 @@ def _cmd_decide(args) -> int:
     return 0
 
 
+def _bind_allowed_hosts(bind: str, extra: str | None) -> list[str]:
+    """Host values fastmcp's Host guard must accept for `serve --http --bind ...`.
+
+    fastmcp's HostOriginGuardMiddleware only admits loopback hosts
+    (DEFAULT_HOSTS) unless allowed_hosts is configured — a non-loopback bind is
+    therefore 421 Misdirected Request for LAN clients unless the address they
+    actually connect to is in the allowlist (#719). Returns the bind address
+    itself (non-loopback only), plus any --allowed-hosts entries, plus the
+    machine's own hostname/LAN addresses when bind is an any-interface
+    wildcard (0.0.0.0/::) where clients use an address we can't infer from the
+    bind value alone.
+    """
+    import ipaddress
+    import socket
+
+    hosts: list[str] = []
+    seen: set[str] = set()
+
+    def _add(h: str) -> None:
+        h = h.strip().lower().rstrip(".")
+        if h and h not in seen:
+            seen.add(h)
+            hosts.append(h)
+
+    for part in (extra or "").split(","):
+        _add(part)
+
+    try:
+        ip = ipaddress.ip_address(bind)
+    except ValueError:
+        ip = None
+
+    if ip is not None:
+        if ip.is_unspecified:
+            # 0.0.0.0 / :: — any interface: clients reach us by the machine's
+            # hostname or a LAN address, not by the wildcard. Seed the guard
+            # with the machine's own identity so the "reachable on your
+            # network" warning is actually TRUE.
+            _add(socket.gethostname())
+            try:
+                for info in socket.getaddrinfo(socket.gethostname(), None):
+                    cand = info[4][0]
+                    try:
+                        if not ipaddress.ip_address(cand).is_loopback:
+                            _add(cand)
+                    except ValueError:
+                        _add(cand)
+            except OSError:
+                pass
+        elif not ip.is_loopback:
+            _add(str(ip))
+    elif bind != "localhost":
+        # Hostname bind (e.g. mybox.local) — honor it directly.
+        _add(bind)
+
+    return hosts
+
+
 def _cmd_serve_http(args) -> int:
     """Serve the Tortoise MCP server over HTTP (streamable) for self-hosted use.
 
@@ -2234,11 +2292,17 @@ def _cmd_serve_http(args) -> int:
             pass
 
     origins = ["http://127.0.0.1:*", "http://localhost:*"]
+    # P1 #719: fastmcp's Host guard (host_origin_protection=True → strict mode)
+    # rejects any Host header outside its allowlist with 421 Misdirected
+    # Request. Loopback is allowed by default, but a non-loopback --bind is
+    # not — pass the derived hosts so LAN clients actually work.
+    allowed_hosts = _bind_allowed_hosts(args.bind, args.allowed_hosts)
     if args.auth == "tenant":
         # Inject the registry SDK built from the SAME canonical DB as the team
         # SDK (avoids the /data default divergence — #702).
         registry_sdk = TortoiseSDK(namespace="registry")
-        app = create_http_app(allowed_origins=origins, _registry_sdk=registry_sdk,
+        app = create_http_app(allowed_origins=origins, allowed_hosts=allowed_hosts,
+                              _registry_sdk=registry_sdk,
                               auth_mode="tenant")
         print("serve --http: auth = tenant (Bearer tt_ keys; bootstrap with `tortoise key create`)")
     elif args.auth == "static":
@@ -2246,14 +2310,21 @@ def _cmd_serve_http(args) -> int:
         if not api_key:
             print("❌ serve --http --auth static requires --api-key or TORTOISE_API_KEY", file=sys.stderr)
             return 1
-        app = create_http_app(allowed_origins=origins, auth_mode="static", api_key=api_key)
+        app = create_http_app(allowed_origins=origins, allowed_hosts=allowed_hosts,
+                              auth_mode="static", api_key=api_key)
         print("serve --http: auth = static (single key)")
     else:  # none
-        app = create_http_app(allowed_origins=origins, auth_mode="none")
+        app = create_http_app(allowed_origins=origins, allowed_hosts=allowed_hosts,
+                              auth_mode="none")
         print("serve --http: auth = none (localhost eval — NO auth; do not expose on a network)")
 
     if args.bind != "127.0.0.1":
         print(f"⚠️  Non-loopback bind {args.bind} — MCP is reachable on your network; ensure auth is enforced.")
+        if allowed_hosts:
+            note = ""
+            if args.bind in ("0.0.0.0", "::"):
+                note = " — add more with --allowed-hosts"
+            print(f"    Host guard allows: {', '.join(allowed_hosts)}{note}")
 
     import uvicorn
     from fastapi import FastAPI
@@ -2381,6 +2452,11 @@ def main(argv: list[str] | None = None) -> int:
                          "static = single key (--api-key or TORTOISE_API_KEY), none = localhost eval (NO auth)")
     sr.add_argument("--api-key", dest="api_key", default=None,
                     help="Static auth key (requires --auth static)")
+    sr.add_argument("--allowed-hosts", dest="allowed_hosts", default=None, metavar="HOST[,HOST...]",
+                    help="Extra Host-header values the MCP guard accepts (comma-separated). Use when "
+                         "clients connect via a hostname/IP that differs from --bind (e.g. --bind "
+                         "0.0.0.0 with clients using the machine's LAN name) — without this the "
+                         "fastmcp Host guard answers 421 Misdirected Request (#719).")
     kr = sp.add_parser("key", help="API-key management (self-hosted HTTP auth)")
     key_sp = kr.add_subparsers(dest="key_cmd")
     kc = key_sp.add_parser("create", help="Create a local registry team + tt_ API key for 'serve --http --auth tenant'")

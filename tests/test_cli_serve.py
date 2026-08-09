@@ -3,7 +3,11 @@
 Covers the self-hosted authenticated-MCP story end-to-end:
   1. stdio-refusal message names the real alternatives (no health-server)
   2. auth.py import-crash message tells users to UNSET TORTOISE_API_KEY locally
-  3. `serve --http` CLI wiring exists (parser + dispatch)
+  3. `serve --http` CLI wiring — real main() dispatch (parser + routing to
+     _cmd_serve_http) for tenant/static/none auth modes, including the #719
+     allowed_hosts wiring that fixes the 421 Misdirected Request on
+     non-loopback binds, the --allowed-hosts flag, and the static-mode
+     missing-key error path
   4. local HTTP roundtrip: key create → tenant app → 401 no-auth → tools/list
      with key → write lands in the canonical team_{team_id} graph → Origin
      header accepted
@@ -101,36 +105,144 @@ def test_auth_import_crash_message_guides_unset():
     assert "health-server" not in src
 
 
-# ── 3. CLI wiring ──────────────────────────────────────────────────────────
+# ── 3. CLI wiring — real main() dispatch (no fake Namespace) ──────────────
 
-def test_serve_http_cli_wiring():
-    """serve parser exposes --http/--bind/--port/--auth; dispatch routes to
-    _cmd_serve_http; key create subcommand exists."""
-    from tortoise.__main__ import _cmd_serve_http, _cmd_key_create, main
-    assert callable(_cmd_serve_http)
-    assert callable(_cmd_key_create)
+def _patch_serve_runtime(monkeypatch, tmp_path):
+    """Patch uvicorn.run + create_http_app so `serve --http` can run through
+    the REAL main() → _cmd_serve_http path all the way to the uvicorn call
+    without binding a socket or starting a server. Returns a calls dict that
+    captures the create_http_app kwargs and the uvicorn.run kwargs."""
+    import tortoise.mcp_server as mcp_mod
+    import uvicorn
 
-    argv = ["serve", "--http", "--auth", "static", "--api-key", "tt_x"]
-    import argparse
-    p = argparse.ArgumentParser(prog="tortoise")
-    # reuse the real parser: build via main's subparser is internal — just
-    # verify the flag parses on a fresh minimal parser mirroring the CLI
-    from tortoise.__main__ import _cmd_serve_http  # noqa: F811
-    ns = argparse.Namespace(http=True, bind="127.0.0.1", port=8000,
-                            auth="static", api_key="tt_x")
-    assert ns.auth in ("tenant", "static", "none")
+    calls = {"create_http_app": None, "uvicorn": None}
+
+    def fake_create_http_app(**kw):
+        calls["create_http_app"] = kw
+        return object()
+
+    def fake_uvicorn_run(*a, **kw):
+        calls["uvicorn"] = kw
+
+    monkeypatch.setattr(mcp_mod, "create_http_app", fake_create_http_app)
+    monkeypatch.setattr(uvicorn, "run", fake_uvicorn_run)
+    # deterministic embedded DB target (env auto-restored by monkeypatch)
+    monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "t.db"))
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    return calls
+
+
+def test_serve_http_main_dispatch_static_nonloopback_bind(monkeypatch, tmp_path):
+    """Real main() dispatch: `serve --http --auth static --bind <LAN-IP>`
+    reaches uvicorn with that bind AND passes the bind through to the fastmcp
+    Host guard via allowed_hosts (fixes the 421 Misdirected Request — #719 P1:
+    a non-loopback bind is unreachable for LAN clients otherwise)."""
+    from tortoise.__main__ import main
+
+    calls = _patch_serve_runtime(monkeypatch, tmp_path)
+    rc = main(["serve", "--http", "--auth", "static", "--api-key", "tt_x",
+               "--bind", "192.168.1.50", "--port", "8123"])
+    assert rc == 0
+    assert calls["uvicorn"]["host"] == "192.168.1.50"
+    assert calls["uvicorn"]["port"] == 8123
+    app_kw = calls["create_http_app"]
+    assert app_kw["auth_mode"] == "static"
+    assert app_kw["api_key"] == "tt_x"
+    assert "192.168.1.50" in app_kw["allowed_hosts"], \
+        "non-loopback --bind must be passed as an allowed host"
+
+
+def test_serve_http_main_dispatch_none_loopback(monkeypatch, tmp_path):
+    """Real main() dispatch: auth=none (localhost eval) reaches uvicorn with
+    the default loopback bind and passes auth_mode=none (no registry SDK)."""
+    from tortoise.__main__ import main
+
+    calls = _patch_serve_runtime(monkeypatch, tmp_path)
+    rc = main(["serve", "--http", "--auth", "none", "--port", "9000"])
+    assert rc == 0
+    assert calls["uvicorn"]["host"] == "127.0.0.1"
+    assert calls["uvicorn"]["port"] == 9000
+    app_kw = calls["create_http_app"]
+    assert app_kw["auth_mode"] == "none"
+    # loopback needs no extra host entries — the guard's DEFAULT_HOSTS covers it
+    assert not app_kw["allowed_hosts"]
+
+
+def test_serve_http_main_dispatch_tenant(monkeypatch, tmp_path):
+    """Real main() dispatch: default tenant mode reaches uvicorn with
+    auth_mode=tenant and a registry SDK built from the same canonical DB."""
+    from tortoise.__main__ import main
+
+    calls = _patch_serve_runtime(monkeypatch, tmp_path)
+    rc = main(["serve", "--http"])
+    assert rc == 0
+    app_kw = calls["create_http_app"]
+    assert app_kw["auth_mode"] == "tenant"
+    assert app_kw["_registry_sdk"] is not None, \
+        "tenant mode must build the registry SDK from the canonical DB"
+
+
+def test_serve_http_allowed_hosts_flag(monkeypatch, tmp_path):
+    """--allowed-hosts feeds the Host guard verbatim (arbitrary hostnames /
+    DNS names clients use that aren't the bind address)."""
+    from tortoise.__main__ import main
+
+    calls = _patch_serve_runtime(monkeypatch, tmp_path)
+    rc = main(["serve", "--http", "--auth", "none",
+               "--allowed-hosts", "mybox.local,10.0.0.7"])
+    assert rc == 0
+    hosts = calls["create_http_app"]["allowed_hosts"]
+    assert "mybox.local" in hosts and "10.0.0.7" in hosts
+
+
+def test_serve_http_any_interface_bind_derives_machine_hosts(monkeypatch, tmp_path):
+    """0.0.0.0 bind: clients reach us by the machine's hostname/LAN address,
+    not the wildcard — the guard must be seeded with the machine's own
+    identity so the 'reachable on your network' warning is actually TRUE."""
+    import socket
+
+    from tortoise.__main__ import main
+
+    calls = _patch_serve_runtime(monkeypatch, tmp_path)
+    rc = main(["serve", "--http", "--auth", "none", "--bind", "0.0.0.0"])
+    assert rc == 0
+    hosts = calls["create_http_app"]["allowed_hosts"]
+    assert socket.gethostname().lower() in hosts, \
+        "any-interface bind must auto-derive the machine hostname"
+
+
+def test_serve_http_static_missing_key_error_path(monkeypatch, tmp_path, capsys):
+    """--auth static without --api-key / TORTOISE_API_KEY → exit 1 with a
+    clear message, and create_http_app must never be called."""
+    import tortoise.mcp_server as mcp_mod
+
+    from tortoise.__main__ import main
+
+    monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "t.db"))
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+
+    def _boom(**kw):
+        raise AssertionError("create_http_app must not run without a key")
+
+    monkeypatch.setattr(mcp_mod, "create_http_app", _boom)
+    rc = main(["serve", "--http", "--auth", "static"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "--api-key" in err and "TORTOISE_API_KEY" in err
 
 
 # ── 4+5. local HTTP roundtrip with the bootstrap key ──────────────────────
 
-def test_local_http_roundtrip_lands_in_team_graph(local_db):
+def test_local_http_roundtrip_lands_in_team_graph(local_db, monkeypatch):
     """key create → tenant app: no-auth 401; tools/list with the key works;
     a write lands in the canonical team_{team_id} graph (not an empty or
     orphaned namespace); Origin header accepted."""
     from fastapi.testclient import TestClient
 
     db, key, env = local_db
-    os.environ["TORTOISE_DB_PATH"] = str(db)
+    # env mutation restored even on failure (monkeypatch = pytest try/finally)
+    monkeypatch.setenv("TORTOISE_DB_PATH", str(db))
 
     # team id from the registry
     sdk = TortoiseSDK(namespace="registry")
@@ -180,8 +292,6 @@ def test_local_http_roundtrip_lands_in_team_graph(local_db):
         r = c.post("/mcp", json={"jsonrpc": "2.0", "id": 4, "method": "tools/list"},
                    headers={**headers, "Origin": "http://127.0.0.1:8000"})
         assert r.status_code == 200
-
-    os.environ.pop("TORTOISE_DB_PATH", None)
 
 
 def test_bootstrap_key_persists_and_verifies(local_db):
