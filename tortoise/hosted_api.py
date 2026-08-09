@@ -35,6 +35,7 @@ from tortoise.analytics import (  # #528 server analytics (fail-safe, no-op with
 import hmac
 
 from tortoise.log import EventLog
+from tortoise.quota import DEFAULT_MAX_SESSIONS
 from tortoise.sdk import TortoiseSDK, _content_hash
 from tortoise.mcp_server import create_http_app
 from tortoise.hosted_backup import (
@@ -47,6 +48,17 @@ from tortoise.hosted_backup import (
 )
 
 _logger = logging.getLogger(__name__)
+
+
+# Embedded-fallback keep-alive: the LAST fallback SDK per namespace, held
+# so its redislite server is not GC'd between requests. Without this, each
+# request spawned a fresh SDK on the shared fallback path; when the previous
+# request's SDK was garbage-collected its server died, and the next request
+# opened a NEW server on the same path — losing the previous request's writes
+# (signup minted a team+key, then /v1/team 500 "Auth error" — #493). Holding
+# the reference keeps the server alive; redislite socket-sharing lets new
+# SDKs read the same data. One entry per namespace — bounded, never reused.
+_FALLBACK_KEEPALIVE: dict[str, "TortoiseSDK"] = {}
 
 
 def _make_sdk(*, namespace: str | None = None) -> TortoiseSDK:
@@ -68,7 +80,9 @@ def _make_sdk(*, namespace: str | None = None) -> TortoiseSDK:
         # fall back to a temp file so provisioning still works.
         import tempfile
         db_path = os.path.join(tempfile.gettempdir(), "tortoise.db")
-    return TortoiseSDK(db_path=db_path, namespace=namespace)
+    sdk = TortoiseSDK(db_path=db_path, namespace=namespace)
+    _FALLBACK_KEEPALIVE[namespace or ""] = sdk
+    return sdk
 
 
 # ── MCP Streamable HTTP sub-app (#236) ────────────────────────────

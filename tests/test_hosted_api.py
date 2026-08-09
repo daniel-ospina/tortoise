@@ -1329,10 +1329,11 @@ class TestSessionFloodGate:
     def test_extraction_amplifier_402_zero_growth(self, client):
         """Dense decision content → extraction-aware estimate exceeds the
         points quota → 402 BEFORE any write (zero node growth)."""
-        # est = 2 + Σ_turns(1 + min(decisions,200)) — 5 dense turns × ~300
-        # matches = 2 + 5×201 = 1007 > 1000 (default max_points) → 402.
+        # est = 2 + Σ_turns(1 + min(decisions,cap)) — dense turns × 201 each.
+        # TEST_TEAM max_points = 10000 (#310 GAP-B: points count maps to
+        # max_graph_nodes); 51 turns → est = 2 + 51×201 = 10253 > 10000 → 402.
         dense = ("we should go. " * 300)  # 4500 chars < 5000 turn limit
-        conversation = [{"role": "user", "content": dense}] * 5
+        conversation = [{"role": "user", "content": dense}] * 51
         r = client.post("/v1/sessions", json={
             "session_id": "dense-session", "conversation": conversation,
         })
