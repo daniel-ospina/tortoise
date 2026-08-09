@@ -191,3 +191,57 @@ def test_reinstatement(sdk):
         f"reinstatement failed: A without C={a_without_reinst:.3f}, "
         f"A with C attacking B={a_with_reinst:.3f}"
     )
+
+
+def test_mcp_tool_nand_resolves_directed(sdk, tmp_path):
+    """The MCP tool surface must inherit the SDK's directed NAND default
+    (P1 review fix — the tool previously hard-coded bidirectional)."""
+    import os
+    os.environ["TORTOISE_DB_PATH"] = str(tmp_path / "t.db")  # align tool SDK with fixture
+    from tortoise.mcp_auth import _current_team_id, _transport_mode
+    _transport_mode.set("stdio")
+    _current_team_id.set(None)
+    from tortoise.mcp_server import tortoise_create_operator
+    a = make_point(sdk, "a")
+    b = make_point(sdk, "b")
+    # route through the MCP tool handler with NO direction (default None)
+    res = tortoise_create_operator("NAND", a["id"], [b["id"]])
+    op_id = res["id"]
+    d = sdk._get_proj().g.query(
+        "MATCH (o:Point {id:$id}) RETURN o.direction", params={"id": op_id}
+    ).result_set[0][0]
+    assert d == "unidirectional", "MCP-created NAND must be directed by default"
+
+
+def test_directed_nary_nand_source_to_targets_only(sdk):
+    """Directed N-ary NAND must emit source→each-target attacks ONLY — no
+    arbitrary target↔target directed attacks (review P2 fix)."""
+    src = make_point(sdk, "src")
+    t1 = make_point(sdk, "t1")
+    t2 = make_point(sdk, "t2")
+    s = make_point(sdk, "support")
+    for pid in (src["id"], t1["id"], t2["id"], s["id"]):
+        set_evidence(sdk, pid, 5.0, 1.0)
+    make_operator(sdk, s["id"], src["id"], "IMPL")
+    make_operator(sdk, s["id"], t1["id"], "IMPL")
+    make_operator(sdk, s["id"], t2["id"], "IMPL")
+    # directed n-ary NAND: src attacks both targets
+    sdk.create_operator("NAND", src["id"], [t1["id"], t2["id"]])
+
+    from tortoise.ep import TortoiseEP
+    proj = sdk._get_proj()
+    rows = proj.g.query("MATCH (o:Point) WHERE o.is_operator = true RETURN o.id").result_set
+    op_ids = [r[0] for r in rows] if rows else []
+    ev = {r[0]: (r[1], r[2]) for r in (proj.g.query(
+        "MATCH (n:Point) WHERE n.baseline_set=true AND n.ep_alpha IS NOT NULL "
+        "RETURN n.id,n.ep_alpha,n.ep_beta").result_set or [])}
+    TortoiseEP(proj, damping=0.5, n_quad=12, max_iter=50, tol=1e-3,
+               evidence=ev).run(op_ids, max_hops=2)
+
+    # t1 must NOT receive an attack message from t2 (and vice versa) — only
+    # from src. Check no message exists on a t1→t2 NAND edge.
+    msgs = proj.g.query(
+        "MATCH (:Point {id:$t1})-[r:NAND]->(:Point {id:$t2}) "
+        "RETURN count(r)", params={"t1": t1["id"], "t2": t2["id"]}
+    ).result_set
+    assert msgs[0][0] == 0, "directed n-ary NAND must not create target↔target attacks"

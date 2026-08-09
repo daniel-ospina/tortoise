@@ -149,7 +149,7 @@ Per-type edges (chosen over single polymorphic edge — FalkorDB matrix-per-type
 | `produces` | Event → Object | unidirectional | 1→many | `schema:result` | Output artifact |
 | `uses` | Event → Object | unidirectional | N-ary | `prov:used` | Input consumed |
 | `nextEvent` | Event → Event | unidirectional | 1→1 | — | Sequencing (Graphiti NextEpisode equivalent) — planned |
-| `op: IMPL/NAND` | Event → Point | default bidirectional; optional unidirectional | N-ary | Epistemic | Outcome influence on belief (epistemic) |
+| `op: IMPL/NAND` | Event → Point | default per-op-type: NAND unidirectional (#753), IMPL bidirectional | N-ary | Epistemic | Outcome influence on belief (epistemic) |
 
 > **#531 — canonical Event→Point pattern (`humanApproval`):** a human approval of a planning artifact is recorded as an Event (`eventKind: humanApproval`) + a decision Point (`pointKind: humanApproval`). The Event carries occurrence provenance (approver `performs`, artifact `uses`, claim `aboutPoint`, decision `produces`); the decision Point is a live epistemic claim that seeds the grounding a-vector and receives an EP evidence prior `Beta(10,1)` so dependent claims strengthen. Fan-out is `-[:IMPL {direction: "unidirectional", label: "approvedBy"}]->` per approved claim — deliberately unidirectional so claim weakness never back-propagates into the approval. No stored `approved` status on Objects — approval is derived from the event stream at query time. Worked example (`file_human_approval`, #531):
 >
@@ -418,7 +418,7 @@ Operator:      (op-123)                                   ← mitigation anchor
 | supports | IMPL | Unidirectional (A supports B) | unidirectional | Evidence supports Claim (CLI default label for IMPL, `__main__.py:81`) |
 | opposes | NAND | **Unidirectional by default (directed attack)**, optional bidirectional | declared by pack | Feature competesWith Competitor |
 
-> **Direction is an explicit operator flag, default bidirectional.** The table above shows typical pack declarations; any pack may override the default with an explicit `direction: unidirectional` on the relation.
+> **Direction is an explicit operator flag, default per-op-type (#753): NAND → unidirectional (directed attack), IMPL → bidirectional.** The table above shows typical pack declarations; a pack may override with an explicit `direction` value — explicit `bidirectional` NAND declares a genuine mutual contradiction.
 
 ### Pack Relation Declarations
 
