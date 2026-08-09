@@ -227,12 +227,12 @@ class TortoiseEP:
         alpha_a, beta_a = self._beta_from_natural(*cav_eta_a)
         alpha_b, beta_b = self._beta_from_natural(*cav_eta_b)
 
-        # NAND uses the symmetric contradiction potential for the target
-        # message; DIRECTEDNESS is enforced by the back-message guard below
-        # (for unidirectional operators the source/attacker receives no
-        # message — the Dung-style directed attack; the default for new
-        # NANDs is unidirectional per #753). φ_directed(ca,cb)=exp(w·ca)·φ_nand
-        # is message-equivalent on the target, so the potential is shared.
+        # NAND uses the standard symmetric contradiction potential for the
+        # target message. DIRECTEDNESS is enforced structurally by the
+        # back-message guard below: for unidirectional operators the
+        # source/attacker receives NO factor message (Dung-style directed
+        # attack). New NANDs default to unidirectional per #753; explicit
+        # bidirectional NAND keeps mutual-contradiction semantics.
         phi = phi_nand if op_type == "NAND" else phi_impl
         mom_a, mom_b = tilted_moments(
             alpha_a, beta_a, alpha_b, beta_b, weight, phi, self.n_quad
@@ -298,10 +298,20 @@ class TortoiseEP:
                             label: str | None = None,
                             direction: str = "bidirectional") -> None:
         # input_ids are sorted by idx (source=0, targets=1..N).
-        # For IMPL: only create source→target pairs (skip target↔target).
-        # For NAND: create all pairwise combinations (full mutual contradiction).
+        # IMPL: source→target pairs only (skip target↔target).
+        # NAND bidirectional: all pairwise combinations (mutual contradiction —
+        # at-most-one-true over all members).
+        # NAND unidirectional (directed, the #753 default): source→each-target
+        # attacks ONLY — target↔target pairwise edges would otherwise create
+        # arbitrary directed attacks between targets (review P2, #795).
         if op_type == "IMPL" and len(input_ids) >= 2:
             # Source is input_ids[0] (idx=0). Targets are input_ids[1:].
+            for j in range(1, len(input_ids)):
+                self._update_factor(op_id, op_type,
+                                    [input_ids[0], input_ids[j]], weight, label, direction)
+        elif op_type == "NAND" and direction != "bidirectional":
+            # Directed NAND: the source attacks each target; targets do not
+            # attack each other.
             for j in range(1, len(input_ids)):
                 self._update_factor(op_id, op_type,
                                     [input_ids[0], input_ids[j]], weight, label, direction)
@@ -378,7 +388,9 @@ class TortoiseEP:
                     params={"cid": claim_id},
                 ).result_set
                 for op_id, op_type, label, direction in rows:
-                    # Defensive: pre-migration operators without direction default to bidirectional
+                    # Read-path fallback for LEGACY/pre-migration operators lacking a
+                    # direction property: preserve the old bidirectional semantics.
+                    # (Creation default is op-dependent per #753: NAND→unidirectional.)
                     if direction is None:
                         direction = "bidirectional"
                         logger.warning(

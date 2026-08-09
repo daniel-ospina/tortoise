@@ -3,11 +3,12 @@
 The symmetric phi_nand potential was measured to behave as an "agreement
 coupling" — in configurations it INVERTED attacks (a strong attacker
 RAISED the target, dense attacks strengthened it). The fix:
-  1. Directed NAND potential (phi_nand_directed): attacker's truth
-     penalizes the target only.
-  2. NAND defaults to unidirectional (directed attack); explicit
-     bidirectional NAND keeps mutual-contradiction semantics.
-  3. Back-pressure to the attacker is removed for directed NAND.
+  1. NAND creation defaults to unidirectional (directed attack): the
+     attacker's truth penalizes the target, and the back-message guard in
+     ep.py ensures the attacker receives NO factor message.
+  2. Explicit bidirectional NAND keeps mutual-contradiction semantics.
+  3. N-ary directed NAND decomposes as source→each-target (no arbitrary
+     target↔target directed attacks).
 """
 import pytest
 
@@ -77,12 +78,13 @@ def test_directed_attack_lowers_target(sdk):
     b1 = make_point(sdk, "target attacked")
     b2 = make_point(sdk, "target control")
     s = make_point(sdk, "support")
-    set_evidence(sdk, a["id"], 10.0, 1.0)   # T0-class attacker
+    set_evidence(sdk, a["id"], 12.0, 1.0)   # strong T0-class attacker
     set_evidence(sdk, b1["id"], 5.0, 1.0)   # moderate targets
     set_evidence(sdk, b2["id"], 5.0, 1.0)
     set_evidence(sdk, s["id"], 8.0, 1.0)
     make_operator(sdk, s["id"], a["id"], "IMPL")   # activate subgraph
-    make_operator(sdk, s["id"], b2["id"], "IMPL")  # control in subgraph
+    make_operator(sdk, s["id"], b1["id"], "IMPL")  # matched twin support (review P2)
+    make_operator(sdk, s["id"], b2["id"], "IMPL")  # matched twin support
     make_operator(sdk, a["id"], b1["id"], "NAND")  # directed attack on b1 only
 
     res = run_ep(sdk)
@@ -92,8 +94,13 @@ def test_directed_attack_lowers_target(sdk):
     )
 
 
-def test_no_back_pressure_on_attacker(sdk):
-    """Directed attack must NOT change the attacker's own confidence."""
+def test_no_direct_back_pressure_on_attacker(sdk):
+    """Directed attack must not send a DIRECT factor message back to the
+    attacker (no back-pressure through the NAND factor).
+
+    Note: indirect coupling through shared support (the #86 bidirectional-IMPL
+    path) can still move the attacker in other topologies; this test asserts
+    the direct factor-level immunity, not global invariance."""
     a = make_point(sdk, "attacker")
     b = make_point(sdk, "target")
     s = make_point(sdk, "support")
