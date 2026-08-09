@@ -552,7 +552,7 @@ def main():
                         params={"eid": event_id, "props": props, "embedding": embedding}
                     )
                     print(json.dumps({"status": "ingested", "eventId": event_id}))
-                # Wire INSTANTIATES edges to issue/PR Objects (parity with ingest_corpus)
+                # Wire aboutObject edges to issue/PR Objects (parity with ingest_corpus)
                 try:
                     from tortoise.sdk import TortoiseSDK
                     _sdk = TortoiseSDK()
