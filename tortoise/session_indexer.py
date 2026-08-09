@@ -31,7 +31,8 @@ _FM_RE = re.compile(r'^---\s*\n(.*?)\n---', re.DOTALL)
 def _parse_frontmatter(content: str) -> dict:
     """Extract YAML frontmatter from markdown content.
 
-    Uses the SAME boundary regex as ingest_corpus (sdk._FM_RE) so both sides
+    Uses the canonical boundary regex (this module's ``_FM_RE``), imported by
+    ``ingest_corpus`` so both sides
     agree on what constitutes frontmatter (review round 5 P2): a file starting
     ``---sessionId: foo\n---`` must parse as NO frontmatter here, exactly as
     ingest sees it — otherwise health derives a different event_id and the

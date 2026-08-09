@@ -2632,7 +2632,10 @@ class TortoiseSDK:
                     f"progress_file {progress_file!r} not under TORTOISE_INGEST_BASE_DIR."
                 )
 
-        _FM_RE = re.compile(r'^---\s*\n(.*?)\n---', re.DOTALL)
+        # Canonical boundary regex lives in session_indexer (#280 review round 6):
+        # hoisted so extract/health/ingest can never drift apart again (the round-5
+        # bug was exactly two copies diverging → permanent sweep non-convergence).
+        from .session_indexer import _FM_RE
         ingested, updated, skipped, failed = 0, 0, 0, 0
         errors: list[dict] = []
         now = datetime.now(timezone.utc).isoformat()
