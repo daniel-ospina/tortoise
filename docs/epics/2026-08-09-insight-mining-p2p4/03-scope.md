@@ -25,12 +25,12 @@ aboutObjects: tortoise
 - Entity extraction stage in the conversation-mining pipeline: extract entities (issues, PRs, tools, concepts, domain objects) from session transcripts/documents, mapped to `objectKind` vocabulary (Project, WorkItem, document, tag, user, skill, tool, agent, workflow, agreement, standard, other).
 - Cross-session entity resolution (short-circuit chain): exact (normalized string) → fuzzy (edit distance, pre-filtered by mention detection) → semantic (embedding cosine with thresholds). v1 = fuzzy+semantic; perfect resolution is v2 non-goal.
 - Object writes: `create_object` MERGE by deterministic canonical id (sha256 of canonical name — mirrors production `_connect_issue_objects` pattern); no auto-created duplicate Objects.
-- Wiring: `(Point)-[:aboutObject]->(Object)` and `(Event)-[:aboutObject]->(Object)` for extracted entities.
+- Wiring: `(Point)-[:aboutObject]->(Object)` and `(Event)-[:aboutObject]->(Object)` for extracted entities. **Extracted-entity wiring uses deliberate `create_object`/`aboutObject` resolution ONLY — the legacy `_create_about_edges` auto-detect path (projection/edges.py:69-111, Subject-stub fallback) is bypassed for extraction so no stub `Subject` nodes are created for extracted entities.**
 - Content dedup ("we already decided this"): semantic similarity across extracted `decision`-kind Points using the production `_semantic_dedup` two-tier pattern (content-hash + embedding-cosine); candidates surface for review, no auto-merge.
 - **Drift fix:** replace `INSTANTIATES` Event→Object wiring with `aboutObject` in `_connect_issue_objects` (sdk.py:4340) + `session_indexer.py:555`; update `ranking.py` session graph_boost query (lines 172, 245) to the new edge; sync `security.py:84` whitelist.
 
 **Phase 4 — Cross-ontology integration**
-- about*/structural wiring on extracted content: Event→Object `produces`/`uses` per §3.5 (the Phase-3 replacement — actions are events, not nodes); Point→Event `aboutEvent` where a Point describes a session occurrence.
+- about*/structural wiring on extracted content: **`produces`/`uses` are Event→Object for artifacts and tools per §3.5** (e.g., session Event `uses` Object for the tool/artifact); **decision/claim Points are wired `(Event)-[:produces]->(:Point)` per the canonical #531 pattern** (the decision Event produces the decision Point); Point→Event `aboutEvent` where a Point describes a session occurrence.
 - EP propagation on extracted Points **gated**: extracted Points created `status: draft`; no auto-promotion to `live` on extraction wiring (SDK #131 default change or explicit flag); EP excludes draft Points (`ep.py` change); no auto-mitigation (NAND/IMPL) wiring from extraction until review.
 - Temporal belief tracking: extracted Points carry `validFrom` = real session date (read from session frontmatter, not ingest time); NAND operators link contradictory cross-session decisions; belief-over-time query ("decided X on D1, contradicted on D2"); reuse `supersede_point`/CORRECTS for explicit replacement.
 
@@ -73,14 +73,15 @@ The cut principle is **conversation-driven extraction with provenance, gated for
 **When:** the Phase-2 entity extraction runs on the session
 **Then:** an Object node exists for each referenced entity with `objectKind` matching its class (tool/workitem/other)
 **And:** each Object is connected via `aboutObject` to the extracted Points that mention it
-**And:** each Object traces to the source session Event (provenance chain intact)
+**And:** each Object traces to the source session Event (provenance chain intact — Point `extractedFrom` Source `references` Document/Event; extracted Points describing a session occurrence also carry `aboutEvent` to the session Event)
+**And:** no stub `Subject` node is created for any extracted entity (legacy auto-detect bypassed)
 
 ### E2E-2: Cross-session entity dedup (same entity, two sessions)
 **Given:** session A mentions "port migration" and session B (different day) mentions "port 16379 change" referring to the same effort
 **When:** both sessions run through Phase-2 resolution
 **Then:** exactly ONE Object node exists for the entity (no duplicate)
 **And:** both sessions' Points wire to the same Object via `aboutObject`
-**And:** the resolution decision (merge) is recorded/auditable
+**And:** the merge is auditable via a deterministic artifact — a `dedupe` event in the event log OR a `canonical_id`/`resolved_from` property on the surviving Object (assert the artifact's existence)
 
 ### E2E-3: Content dedup — "we already decided this"
 **Given:** a new session restates a decision already extracted from a prior session ("change default port to 16379")
@@ -93,14 +94,16 @@ The cut principle is **conversation-driven extraction with provenance, gated for
 **When:** the extraction batch completes
 **Then:** every extraction-created Point has `status: draft`
 **And:** no extraction-created Point auto-wires IMPL/NAND operators or auto-promotes to `live` (SDK #131 lifecycle overridden for extraction)
-**And:** EP propagation excludes draft Points (mean grounding of live Points unchanged — within Gate B tolerance)
+**And:** EP propagation excludes draft Points — snapshot mean grounding of all `live` Points changes ≤2% (mean absolute) vs the pre-batch snapshot
 
-### E2E-5: Event→Object procedural wiring (produces/uses)
-**Given:** a session where a decision "port 16379" was reached and a config file `redis.conf` was edited
-**When:** Phase-4 structural wiring runs on the session
+### E2E-5: Event→Object procedural wiring (produces/uses) + INSTANTIATES drift removal
+**Given:** a session where a decision "port 16379" was reached and a config file `redis.conf` was edited; and an issue/PR-referencing session goes through the full ingest path (`ingest_corpus` / MCP `tortoise_index_sessions`)
+**When:** Phase-4 structural wiring runs on the mined session AND the full session ingest path runs for the issue/PR-bearing session
 **Then:** the decision Event `produces` the decision Point
 **And:** the session Event `uses` the Object for the edited artifact / tool used
-**And:** no `instantiates` edge exists anywhere in the resulting graph (drift removed)
+**And:** no `instantiates` edge exists anywhere in the resulting graph (drift removed — checked on BOTH the mined-session path and the ingest path, covering `_connect_issue_objects` + `session_indexer.py`)
+**And:** an aboutObject-connected session still receives graph boost in ranking output (ranking.py boost query migrated — no silent search-quality regression)
+**And:** the predicate whitelist (security.py) no longer permits `INSTANTIATES` writes
 
 ### E2E-6: Temporal belief tracking across sessions
 **Given:** session D1 states "use port 16379" and session D2 (later) states "revert to 16380, 16379 was wrong"
@@ -108,6 +111,7 @@ The cut principle is **conversation-driven extraction with provenance, gated for
 **Then:** the D1 and D2 decision Points are linked by NAND (contradiction)
 **And:** both Points carry `validFrom` set to their real session dates
 **And:** a belief-over-time query returns "port decision: 16379 (D1) → contradicted 16380 (D2)" with both dated
+**And (replacement branch):** when D2 explicitly supersedes D1 ("replace the old decision"), a `CORRECTS` edge + `outdated: true` on D1 is created via `supersede_point` instead of (or in addition to) NAND
 
 ### E2E-7: Gate gating — child work cannot start before gates
 **Given:** #320 is not STABLE or the calibration milestone has not passed
