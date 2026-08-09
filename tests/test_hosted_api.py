@@ -1314,3 +1314,46 @@ class TestDreamBudget:
             assert r.status_code == 200, r.text[:200]
         finally:
             ha._DREAM_FULL_BUCKETS.pop(TEST_TEAM_ID, None)
+
+
+# ── #686: fail-closed quota enforcement at HTTP layer ──
+
+class TestQuotaFailClosed:
+    """Verify that quota check failures surface as 500, never silently pass."""
+
+    def test_quota_check_error_returns_500(self, client, monkeypatch):
+        """When enforce_team_limit raises QuotaCheckError, the endpoint
+        returns 500 with a descriptive detail — fail-closed, never silent."""
+        from tortoise.quota import QuotaCheckError
+        import tortoise.quota as quota_mod
+
+        def _fail_count(_limits, _resource, sdk=None):
+            raise QuotaCheckError("simulated count query failure")
+
+        monkeypatch.setattr(quota_mod, "enforce_team_limit", _fail_count)
+
+        r = client.post("/v1/points", json={"content": "should fail"})
+        assert r.status_code == 500, f"expected 500, got {r.status_code}: {r.text[:200]}"
+        detail = r.json()["detail"]
+        assert "quota" in detail.lower(), (
+            f"detail should mention quota, got: {detail}"
+        )
+
+    def test_quota_exceeded_returns_402(self, client, monkeypatch):
+        """When enforce_team_limit raises QuotaExceededError, the endpoint
+        returns 402 (payment required) — normal over-limit behavior."""
+        from tortoise.quota import QuotaExceededError
+        import tortoise.quota as quota_mod
+
+        def _fail_exceeded(_limits, _resource, sdk=None):
+            raise QuotaExceededError("Team points limit reached (1000)")
+
+        monkeypatch.setattr(quota_mod, "enforce_team_limit", _fail_exceeded)
+
+        r = client.post("/v1/points", json={"content": "should be over limit"})
+        assert r.status_code == 402, f"expected 402, got {r.status_code}: {r.text[:200]}"
+
+    def test_normal_write_still_works(self, client):
+        """Without mocking, a normal point creation under the limit succeeds."""
+        r = client.post("/v1/points", json={"content": "normal write"})
+        assert r.status_code == 200, f"expected 200, got {r.status_code}: {r.text[:200]}"

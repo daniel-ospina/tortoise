@@ -1,10 +1,25 @@
-"""Per-team quota enforcement shared by REST and MCP (#329).
+"""Per-team quota enforcement shared by REST and MCP (#329, #686).
 
 Design: limits are resolved ONCE by the authenticated caller
 (``hosted_api.get_current_team`` / MCP ``TeamResolutionMiddleware``) via
 ``resolve_team_limits`` and passed to ``enforce_team_limit`` — never re-fetched
-per write. Counting is fail-closed: any counting exception raises
+per write.
+
+Fail-closed decision (#686)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Counting is **fail-closed**: any counting exception raises
 ``QuotaCheckError`` (server error), never a silent pass.
+
+Rationale:
+- **Money at stake.** Fail-open would let free-tier teams exceed paid limits
+  undetected during a DB outage — direct revenue risk and abuse vector.
+- **Fail-closed is the secure default.** When you can't verify, don't grant.
+- **Customer harm from fail-closed is bounded.** A DB outage that breaks
+  count queries typically also breaks the actual write (same store) — we're
+  failing fast, not adding net-new unavailability.
+- **Alerting mitigates ops risk.** Every count failure is logged at ERROR
+  level with team_id and resource, so operators see the outage immediately
+  and can decide whether to temporarily disable enforcement.
 
 Import topology: stdlib-only at module level; ``tortoise.sdk`` imported
 function-level inside the helpers to avoid any cycle (hosted_api → mcp_server
@@ -16,8 +31,11 @@ Batch caps are unconditional in both modes.
 """
 from __future__ import annotations
 
+import logging
 import os
 import tempfile
+
+_logger = logging.getLogger(__name__)
 
 
 def _make_sdk(*, namespace: str | None = None):
@@ -128,7 +146,12 @@ def _count_resource(team_id: str, resource: str, sdk=None) -> int:
         raise
     except Exception as e:
         from .security import redact_error
-        raise QuotaCheckError(f"quota count failed for {resource}: {redact_error(e)}") from e
+        redacted = redact_error(e)
+        _logger.error(
+            "quota count failed (fail-closed): team=%s resource=%s error=%s",
+            team_id, resource, redacted,
+        )
+        raise QuotaCheckError(f"quota count failed for {resource}: {redacted}") from e
 
 
 def enforce_team_limit(limits: dict | None, resource: str, sdk=None) -> None:
