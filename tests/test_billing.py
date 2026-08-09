@@ -620,6 +620,15 @@ class TestWebhook:
 
         return fake_verify
 
+    def _bind_customer(self, billing_client, customer_id, team_id=None):
+        """Persist the stripe_customer_id binding (the checkout endpoint does
+        this BEFORE redirect — webhook events are customer-bound, never ref-bound
+        (Qwen review P0: client_reference_id is attacker-controlled)."""
+        tid = team_id or billing_client["team_id"]
+        billing_client["sdk"]._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.stripe_customer_id=$cid",
+            params={"id": tid, "cid": customer_id})
+
     def _mirror(self, billing_client, team_id=None):
         sdk = billing_client["sdk"]
         tid = team_id or billing_client["team_id"]
@@ -633,6 +642,7 @@ class TestWebhook:
     def test_checkout_completed_activates_team(self, monkeypatch, billing_client):
         from tortoise import billing as bl
         team_id = billing_client["team_id"]
+        self._bind_customer(billing_client, "cus_1")
         monkeypatch.setattr(bl.StripeClient, "verify_webhook_signature", self._verify({
             "type": "checkout.session.completed", "id": "evt_c1",
             "data": {"object": {"client_reference_id": team_id, "customer": "cus_1",
@@ -652,6 +662,7 @@ class TestWebhook:
         calls = []
         monkeypatch.setattr(nt, "notify_billing_event",
                             lambda *a, **k: calls.append(a))
+        self._bind_customer(billing_client, "cus_2")
         monkeypatch.setattr(bl.StripeClient, "verify_webhook_signature", self._verify({
             "type": "checkout.session.completed", "id": "evt_dedup",
             "data": {"object": {"client_reference_id": team_id, "customer": "cus_2",
@@ -682,6 +693,7 @@ class TestWebhook:
     def test_webhook_payment_failed_sets_grace(self, monkeypatch, billing_client):
         from tortoise import billing as bl
         team_id = billing_client["team_id"]
+        self._bind_customer(billing_client, "cus_1")
         monkeypatch.setattr(bl.StripeClient, "verify_webhook_signature", self._verify({
             "type": "invoice.payment_failed", "id": "evt_pf",
             "data": {"object": {"client_reference_id": team_id,
@@ -699,6 +711,7 @@ class TestWebhook:
         billing_client["sdk"]._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.tier='pro', t.subscription_status='active'",
             params={"id": team_id})
+        self._bind_customer(billing_client, "cus_1")
         monkeypatch.setattr(bl.StripeClient, "verify_webhook_signature", self._verify({
             "type": "customer.subscription.updated", "id": "evt_cae",
             "data": {"object": {"client_reference_id": team_id, "id": "sub_1",
@@ -716,6 +729,7 @@ class TestWebhook:
         billing_client["sdk"]._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.tier='team', t.subscription_status='active'",
             params={"id": team_id})
+        self._bind_customer(billing_client, "cus_1")
         monkeypatch.setattr(bl.StripeClient, "verify_webhook_signature", self._verify({
             "type": "customer.subscription.updated", "id": "evt_canc",
             "data": {"object": {"client_reference_id": team_id, "id": "sub_1",
@@ -737,6 +751,7 @@ class TestWebhook:
         notified = []
         monkeypatch.setattr(nt, "notify_billing_event",
                             lambda *a, **k: notified.append(a))
+        self._bind_customer(billing_client, "cus_3")
         monkeypatch.setattr(bl.StripeClient, "verify_webhook_signature", self._verify({
             "type": "checkout.session.completed", "id": "evt_unk",
             "data": {"object": {"client_reference_id": team_id, "customer": "cus_3",
@@ -755,6 +770,7 @@ class TestWebhook:
         billing_client["sdk"]._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.tier='team', t.subscription_status='active'",
             params={"id": team_id})
+        self._bind_customer(billing_client, "cus_1")
         monkeypatch.setattr(bl.StripeClient, "verify_webhook_signature", self._verify({
             "type": "customer.subscription.deleted", "id": "evt_del",
             "data": {"object": {"client_reference_id": team_id, "customer": "cus_1"}}}))
@@ -790,6 +806,7 @@ class TestWebhook:
             audited.append(a)
 
         monkeypatch.setattr(ha, "_async_audit", fake_audit)
+        self._bind_customer(billing_client, "cus_1")
         monkeypatch.setattr(bl.StripeClient, "verify_webhook_signature", self._verify({
             "type": "customer.subscription.deleted", "id": "evt_audit",
             "data": {"object": {"client_reference_id": team_id, "customer": "cus_1"}}}))

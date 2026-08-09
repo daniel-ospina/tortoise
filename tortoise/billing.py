@@ -71,6 +71,8 @@ def _scrub_secrets(text: str) -> str:
     out = text
     for pattern in _SECRET_PATTERNS:
         out = pattern.sub("***", out)
+    # P2 (Qwen review): catch keys with underscores/hyphens (e.g. re_test_...)
+    out = re.sub(r"(?<![A-Za-z0-9])(?:sk|rk|whsec|re)_[A-Za-z0-9_-]{8,}", "***", out)
     return out[:200]
 
 
@@ -155,7 +157,12 @@ class PriceCatalog:
             return raw, None
         if isinstance(raw, dict) and isinstance(raw.get("id"), str):
             amount = raw.get("amount_usd")
-            return raw["id"], (float(amount) if amount is not None else None)
+            try:
+                return raw["id"], (float(amount) if amount is not None else None)
+            except (TypeError, ValueError) as e:  # P2 (Qwen): malformed env degrades, not 500
+                raise BillingConfigError(
+                    f"STRIPE_PRICE_IDS[{tier!r}][{interval!r}] amount_usd is not numeric"
+                ) from e
         raise BillingError(
             f"STRIPE_PRICE_IDS[{tier!r}][{interval!r}] must be a price id string "
             "or {'id': ..., 'amount_usd': ...}"
