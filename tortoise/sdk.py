@@ -603,11 +603,21 @@ class TortoiseSDK:
         # variant writes a `speaker` property on turn Points (delta 5) while
         # hosted adds quota/auth bounds; hosted has no speaker tag. SDK
         # TRUNCATES turn content > 5000 chars silently, hosted rejects it with
-        # 400; role=None normalizes to "unknown" in the SDK, hosted stores
-        # None as-is. Keep the two in sync when touching either.
+        # 422 (Pydantic field_validator failure); role=None normalizes to
+        # "unknown" in the SDK, hosted stores None as-is. Keep the two in sync
+        # when touching either.
         extracted = []
         for i, turn in enumerate(conversation):
-            role = turn.get("role") or "unknown"
+            # #721: same isinstance-first pattern as content below — an `or
+            # "unknown"` fallback only fixes falsy roles, but TRUTHY non-string
+            # roles (123, {"a": 1}) would pass raw and be stored as a
+            # non-string `speaker` (contradicting the `speaker | string`
+            # ontology row) — and a dict role could fail the Cypher write
+            # mid-loop, leaving a partial session. Coerce via str() so the
+            # speaker property is always a string; only None maps to "unknown".
+            raw_role = turn.get("role")
+            role = raw_role if isinstance(raw_role, str) else (
+                "unknown" if raw_role is None else str(raw_role))
             raw = turn.get("content")
             # #721: defensive coercion — check isinstance FIRST so falsy
             # non-strings (0, False, {}, []) are not swallowed to "" by an

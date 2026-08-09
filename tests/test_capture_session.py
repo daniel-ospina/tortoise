@@ -144,6 +144,56 @@ def test_capture_session_contains_edges_when_speaker_repeats(sdk):
     assert all(r[1] == "user" for r in rows)
 
 
+def test_capture_session_contains_edges_to_extractions(sdk):
+    """Extraction-side CONTAINS edges: decision/statement points must be wired
+    to the session, and extraction actually creates decision/statement nodes."""
+    res = sdk.capture_session(CONV)
+    assert res["extracted"] >= 2, "CONV must trigger at least one extraction each"
+    sid = res["session_id"]
+    proj = sdk._get_proj()
+    # At least one extraction created a decision/statement node
+    kinds = proj.g.query(
+        "MATCH (p:Point) WHERE p.pointKind IN ['decision','statement'] "
+        "RETURN p.pointKind, count(p)"
+    ).result_set
+    total = sum(r[1] for r in kinds)
+    assert total >= 2, "extraction loop must create decision/statement nodes"
+    assert set(r[0] for r in kinds) == {"decision", "statement"}, \
+        f"CONV should extract both kinds, got {[r[0] for r in kinds]}"
+    # Every extracted point is CONTAINS-connected to this session
+    connected = proj.g.query(
+        "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
+        "WHERE p.pointKind IN ['decision','statement'] RETURN collect(p.id)",
+        params={"sid": sid},
+    ).result_set[0][0]
+    assert len(connected) == res["extracted"], \
+        f"expected {res['extracted']} extraction edges, got {len(connected)}"
+    extracted_ids = {p["id"] for p in res["points"]}
+    assert set(connected) == extracted_ids, \
+        "CONTAINS edges must cover exactly the extracted points"
+
+
+def test_capture_session_role_coerced_to_string(sdk):
+    """Truthy non-string roles (123, dict) are stored as str() — never raw
+    (contradicting the `speaker | string` ontology row) and never crash the
+    write mid-loop into a partial session."""
+    conv = [
+        {"role": 123, "content": "I think the top issue is auth."},
+        {"role": {"a": 1}, "content": "we decided to ship serve --http."},
+    ]
+    res = sdk.capture_session(conv)
+    assert res["turns"] == 2, "all turns must complete — no partial session left"
+    proj = sdk._get_proj()
+    rows = proj.g.query(
+        "MATCH (t:Point {pointKind:'event'}) RETURN t.speaker ORDER BY t.id"
+    ).result_set
+    assert [r[0] for r in rows] == ["123", "{'a': 1}"], \
+        "non-string roles stored as their str() form"
+    # Speaker values are strings (ontology `speaker | string`), extraction still ran
+    assert all(isinstance(r[0], str) for r in rows)
+    assert res["extracted"] >= 2
+
+
 def test_capture_session_exactly_at_cap(sdk):
     """len(conversation) == max_turns is accepted (boundary, not an overflow)."""
     conv = [{"role": "user", "content": "x"}] * 3
