@@ -41,27 +41,36 @@ class TestProvenance:
                              extractedFrom="doc/01-research.md")
         assert p["extractedFrom"] == "doc/01-research.md"
 
-    def test_extracted_from_creates_document_link(self, sdk):
+    def test_extracted_from_stored_not_fabricated_document(self, sdk):
+        """create_point persists extractedFrom as a property; it does NOT
+        fabricate a Document node (documents come from DocumentCreated
+        events via the ingest flow, #125)."""
         proj = sdk._get_proj()
         p = sdk.create_point("statement", "linked claim",
                              extractedFrom="doc/02-design.md")
-        # Verify Document node exists
+        assert p["extractedFrom"] == "doc/02-design.md"
         docs = proj.g.query(
             "MATCH (d:Document {id:$did}) RETURN count(d) > 0",
             params={"did": "doc/02-design.md"},
         ).result_set
-        assert docs[0][0] is True
+        assert docs[0][0] is False
 
-    def test_extracted_from_edge_exists(self, sdk):
+    def test_document_event_creates_document_node(self, sdk, tmp_path):
+        """DocumentCreated event → Document node in the projection (#493)."""
+        from tortoise.api import EventAPI
+        from tortoise.log import EventLog
+
+        log = EventLog(str(tmp_path / "p1_events.jsonl"))
+        api = EventAPI(log, initiated_by="extractor",
+                       projection=sdk._get_proj())
+        api.add_document("doc/03-notes.md", "Notes",
+                         doc_status="captured")
         proj = sdk._get_proj()
-        p = sdk.create_point("statement", "edge claim",
-                             extractedFrom="doc/03-notes.md")
-        edges = proj.g.query(
-            "MATCH (n:Point {id:$pid})-[r:EXTRACTED_FROM]->(d:Document) "
-            "RETURN count(r) > 0",
-            params={"pid": p["id"]},
+        docs = proj.g.query(
+            "MATCH (d:Document {id:$did}) RETURN count(d) > 0",
+            params={"did": "doc/03-notes.md"},
         ).result_set
-        assert edges[0][0] is True
+        assert docs[0][0] is True
 
 
 # ── P1-2: Temporal — validFrom/validTo ──────────────────────────
@@ -122,25 +131,25 @@ class TestStaleness:
 
 class TestEntityLinking:
     def test_create_subject(self, sdk):
-        sub = sdk.create_subject("Max", subject_kind="person")
+        sub = sdk.create_subject("Max", subjectKind="person")
         assert sub["name"] == "Max"
         assert sub["subjectKind"] == "person"
         assert "id" in sub
 
     def test_subject_dedup_by_name(self, sdk):
-        sub1 = sdk.create_subject("Alice", subject_kind="person")
-        sub2 = sdk.create_subject("Alice", subject_kind="person")
+        sub1 = sdk.create_subject("Alice", subjectKind="person")
+        sub2 = sdk.create_subject("Alice", subjectKind="person")
         # Same name → merged; IDs may differ in SDK (MERGE uses name key, but we return what exists)
         assert sub1["name"] == sub2["name"]
 
     def test_create_object(self, sdk):
-        obj = sdk.create_object("Chess", object_kind="game")
+        obj = sdk.create_object("Chess", objectKind="game")
         assert obj["name"] == "Chess"
         assert obj["objectKind"] == "game"
 
     def test_object_dedup_by_name(self, sdk):
         obj1 = sdk.create_object("Python")
-        obj2 = sdk.create_object("Python", object_kind="language")
+        obj2 = sdk.create_object("Python", objectKind="language")
         assert obj1["name"] == obj2["name"]
 
 
@@ -159,7 +168,7 @@ class TestEntityProjection:
 
     def test_object_registered_propagates_to_graph(self, sdk):
         proj = sdk._get_proj()
-        obj = sdk.create_object("FalkorDB", object_kind="technology")
+        obj = sdk.create_object("FalkorDB", objectKind="technology")
         rows = proj.g.query(
             "MATCH (o:Object {name:'FalkorDB'}) RETURN o.name, o.objectKind"
         ).result_set
@@ -189,7 +198,7 @@ class TestStubs:
 class TestProvenanceChain:
     def test_provenance_with_matching_subject(self, sdk):
         """Point authoredBy matches a Subject → returns full chain."""
-        sdk.create_subject("pi-agent", subject_kind="agent")
+        sdk.create_subject("pi-agent", subjectKind="agent")
         p = sdk.create_point("statement", "A claim", authoredBy="pi-agent")
         result = sdk.provenance(p["id"])
         assert "error" not in result
@@ -199,7 +208,7 @@ class TestProvenanceChain:
 
     def test_provenance_case_insensitive_match(self, sdk):
         """Case-insensitive authoredBy → Subject matching."""
-        sdk.create_subject("El Dato Team", subject_kind="team")
+        sdk.create_subject("El Dato Team", subjectKind="team")
         p = sdk.create_point("statement", "B claim", authoredBy="el dato team")
         result = sdk.provenance(p["id"])
         assert result["subject"] is not None
@@ -226,7 +235,7 @@ class TestProvenanceChain:
     def test_provenance_delegation_chain(self, sdk):
         """Subject with outgoing relationships → delegation list."""
         proj = sdk._get_proj()
-        sub = sdk.create_subject("Alice", subject_kind="person")
+        sub = sdk.create_subject("Alice", subjectKind="person")
         # ponytail: manually create related nodes for delegation test
         proj.g.query(
             "CREATE (r:Role {title:'Engineer'}) "
