@@ -1922,7 +1922,7 @@ class TortoiseSDK:
             factors_data, _ = proj.extract_svbp_factors()
             operator_ids = [f[0] for f in factors_data]
         if not operator_ids:
-            return {"iterations": 0, "converged": True, "confidences": {}}
+            return {"iterations": 0, "converged": True, "confidences": {}, "diagnostic": "no_factors"}
         # Lazy consistency (#85): if dirty roots exist and this is a
         # whole-graph/auto-extract computation, dream the dirty subgraph
         # first so the auto-extracted factors see stabilized values.
@@ -1932,7 +1932,7 @@ class TortoiseSDK:
             factors_data, _ = proj.extract_svbp_factors()
             operator_ids = [f[0] for f in factors_data]
             if not operator_ids:
-                return {"iterations": 0, "converged": True, "confidences": {}}
+                return {"iterations": 0, "converged": True, "confidences": {}, "diagnostic": "no_factors"}
         iterations, converged = ep.run(operator_ids, evidence=self._evidence)
         confidences = {}
         proj = self._get_proj()
