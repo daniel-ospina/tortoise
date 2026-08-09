@@ -826,6 +826,25 @@ def _cmd_session_view(args, api_key: str, api_url: str) -> int:
     return 0
 
 
+def _resolve_db_target(explicit: str | None = None) -> str:
+    """Resolve the DB target used by onboarding's index step (#705).
+
+    Mirrors _cmd_init's resolution so init and index operate on the SAME
+    database: TORTOISE_DB_URI with a docker:// prefix selects docker mode
+    (URI wins, matching init's docker-first detection); otherwise the
+    embedded path falls back through resolve_db_path(explicit), whose
+    precedence is explicit --path > TORTOISE_DB_PATH / TORTOISE_DB_URI
+    (non-docker, backward compat) > canonical default.
+    """
+    import os
+    from tortoise.config import resolve_db_path
+
+    uri = os.environ.get("TORTOISE_DB_URI", "")
+    if uri.startswith("docker://"):
+        return uri
+    return resolve_db_path(explicit)
+
+
 def _cmd_onboard(args) -> int:
     """Guided onboarding: init → index → demo → doctor.
 
@@ -833,11 +852,9 @@ def _cmd_onboard(args) -> int:
     Non-interactive — skips prompts, just runs.
     Idempotent — re-running skips already-done steps.
     """
-    import os
     import subprocess as _sp
     import sys as _sys
     from pathlib import Path
-    from tortoise.config import resolve_db_path
 
     step = 0
     total = 5
@@ -877,16 +894,18 @@ def _cmd_onboard(args) -> int:
         md_count = len(list(Path(repo_root).rglob("*.md")))
         if md_count > 0:
             print(f"  Found {md_count} markdown files. Indexing…")
-            # Pass the resolved DB target through (fixes AttributeError on
-            # args.db in embedded-only mode — issue #705): docker:// URI wins,
-            # else canonical embedded path.
-            _uri = os.environ.get("TORTOISE_DB_URI", "")
-            _db_target = _uri if _uri.startswith("docker://") else resolve_db_path()
+            # #705: pass the SAME resolved DB target init used (docker:// URI
+            # or embedded path honoring --path / TORTOISE_DB_PATH) so index
+            # never silently writes to the default DB.
             idx_args = argparse.Namespace(
                 url=repo_root, background=False, branch="main",
-                index_cmd="github", cmd="index", db=_db_target,
+                index_cmd="github", cmd="index",
+                db=_resolve_db_target(getattr(args, 'path', None)),
             )
-            _cmd_index_github(idx_args)
+            rc_index = _cmd_index_github(idx_args)
+            if rc_index != 0:
+                print("  ❌ Index failed — see messages above")
+                return rc_index
         else:
             print("  ⊙ No markdown files found — skipping index.")
     else:

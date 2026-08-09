@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -70,3 +71,106 @@ class TestCliContext:
         captured = capsys.readouterr()
         assert "no prior sessions" in captured.out
         assert "no prior sessions" not in captured.err
+
+
+class TestCliOnboardDbTarget:
+    """#705: the index step of `tortoise onboard` must receive the SAME DB
+    target init resolved — embedded path (env or --path) or docker:// URI —
+    and index failures must surface instead of a false 'Onboarding complete.'
+    """
+
+    @staticmethod
+    def _stub_onboard(repo_root, index_rc=0):
+        """Run _cmd_onboard with sub-steps stubbed; return (rc, idx_args)."""
+        from tortoise import __main__ as m
+
+        seen: dict = {}
+
+        def fake_index(idx_args):
+            seen["idx"] = idx_args
+            return index_rc
+
+        with mock.patch.object(m, "_cmd_init", return_value=0), \
+             mock.patch.object(m, "_cmd_demo", return_value=0), \
+             mock.patch.object(m, "_cmd_doctor", return_value=0), \
+             mock.patch("subprocess.run") as fake_run, \
+             mock.patch.object(m, "_cmd_index_github", side_effect=fake_index):
+            fake_run.return_value.returncode = 0  # git repo detected
+            fake_run.return_value.stdout = str(repo_root)
+            rc = m._cmd_onboard(mock.Mock(path=None, cmd="onboard"))
+        return rc, seen["idx"]
+
+    def test_index_receives_resolved_embedded_path(self, tmp_path, monkeypatch):
+        """Embedded-only mode: index gets the TORTOISE_DB_PATH target — not the
+        canonical ~/.tortoise default (#705 regression guard)."""
+        db_path = str(tmp_path / "onboard.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        repo_root = tmp_path / "repo"
+        repo_root.mkdir()
+        (repo_root / "README.md").write_text("# readme", encoding="utf-8")
+
+        rc, idx = self._stub_onboard(repo_root)
+
+        assert rc == 0
+        assert idx.url == str(repo_root)
+        assert idx.db == db_path
+        assert idx.db != "tortoise.db"  # never silently fall to the default
+        # Issue 4 guard: every attr _cmd_index_github reads must be present.
+        for attr in ("url", "branch", "background", "db"):
+            assert hasattr(idx, attr)
+
+    def test_index_receives_docker_uri(self, tmp_path, monkeypatch):
+        """TORTOISE_DB_URI=docker:// selects URI mode for the index step."""
+        uri = "docker://:pw@localhost:16379/tortoise"
+        monkeypatch.setenv("TORTOISE_DB_URI", uri)
+        monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+        repo_root = tmp_path / "repo"
+        repo_root.mkdir()
+        (repo_root / "README.md").write_text("# readme", encoding="utf-8")
+
+        rc, idx = self._stub_onboard(repo_root)
+
+        assert rc == 0
+        assert idx.db == uri
+
+    def test_explicit_path_beats_env(self, tmp_path, monkeypatch):
+        """onboard --path /custom.db must win over TORTOISE_DB_PATH (#715 bug:
+        index silently targeted the default instead of --path)."""
+        explicit = str(tmp_path / "explicit.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "env.db"))
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        repo_root = tmp_path / "repo"
+        repo_root.mkdir()
+        (repo_root / "README.md").write_text("# readme", encoding="utf-8")
+
+        from tortoise import __main__ as m
+
+        seen: dict = {}
+        with mock.patch.object(m, "_cmd_init", return_value=0), \
+             mock.patch.object(m, "_cmd_demo", return_value=0), \
+             mock.patch.object(m, "_cmd_doctor", return_value=0), \
+             mock.patch("subprocess.run") as fake_run, \
+             mock.patch.object(m, "_cmd_index_github",
+                               side_effect=lambda a: seen.update(idx=a) or 0):
+            fake_run.return_value.returncode = 0
+            fake_run.return_value.stdout = str(repo_root)
+            rc = m._cmd_onboard(mock.Mock(path=explicit, cmd="onboard"))
+
+        assert rc == 0
+        assert seen["idx"].db == explicit
+
+    def test_index_failure_surfaces_rc(self, tmp_path, monkeypatch, capsys):
+        """Graceful index failure must exit non-zero, not claim success."""
+        monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "onboard.db"))
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        repo_root = tmp_path / "repo"
+        repo_root.mkdir()
+        (repo_root / "README.md").write_text("# readme", encoding="utf-8")
+
+        rc, _ = self._stub_onboard(repo_root, index_rc=1)
+        out = capsys.readouterr().out
+
+        assert rc == 1
+        assert "Index failed" in out
+        assert "Onboarding complete." not in out
