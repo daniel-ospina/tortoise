@@ -91,6 +91,23 @@ mcp_http_app = create_http_app(
 )
 
 
+def _iter_registered_teams() -> list[dict]:
+    """List registered teams from the control_plane registry (best-effort).
+
+    Used by the billing boot reconcile (#310 Task 8). Returns [] on failure.
+    """
+    try:
+        from tortoise.sdk import TortoiseSDK
+
+        sdk = TortoiseSDK()
+        rows = sdk._get_registry().query(
+            "MATCH (t:Team) RETURN t.id, t.name"
+        ).result_set
+        return [{"team_id": r[0], "name": r[1] if len(r) > 1 else None} for r in rows]
+    except Exception:  # noqa: BLE001
+        return []
+
+
 @asynccontextmanager
 async def _lifespan(app):
     """Compose the FastMCP sub-app's lifespan (session manager init) into
@@ -169,6 +186,48 @@ async def _lifespan(app):
                 _boot_gc_drill_graphs(reg_sdk._get_proj().db)
         except Exception as exc:  # noqa: BLE001 — never crash the app
             _logger.warning("backup watcher could not start: %s", exc)
+
+        # #310 Task 8: boot reconcile — repairs billing-mirror drift for teams
+        # with subscription_id OR stripe_customer_id (missed-first-event blind
+        # spot). NEVER awaited before the lifespan yields (review fix 3, #545
+        # lesson: a delayed bind breaks Fly health-grace/release_command) —
+        # daemon thread + hard wall-clock budget + per-call Stripe timeouts; a
+        # hanging Stripe API must not extend startup. Non-fatal: any failure is
+        # logged (redacted) and the app boots.
+        try:
+            import time as _time
+
+            def _boot_reconcile_billing() -> None:
+                deadline = _time.monotonic() + 20.0  # hard budget
+                try:
+                    from tortoise.billing import reconcile_team
+
+                    teams = _iter_registered_teams()
+                    for team in teams:
+                        if _time.monotonic() > deadline:
+                            _logger.warning(
+                                "billing reconcile: budget exhausted — %d teams skipped", len(teams))
+                            break
+                        try:
+                            summary = reconcile_team(
+                                _make_sdk(namespace="registry"), team["team_id"])
+                            if summary.get("action") not in ("noop", None):
+                                _logger.info(
+                                    "billing reconcile: %s %s",
+                                    team["team_id"], summary.get("action"))
+                        except Exception as exc:  # noqa: BLE001
+                            # Unknown price / outage / config — keep stored
+                            # tier + status; drift repaired on the next event.
+                            _logger.warning(
+                                "billing reconcile: team %s skipped (%s)",
+                                team.get("team_id"), redact_error(exc))
+                except Exception as exc:  # noqa: BLE001
+                    _logger.warning("billing reconcile: pass failed (%s)", redact_error(exc))
+
+            threading.Thread(
+                target=_boot_reconcile_billing, name="billing-reconcile", daemon=True).start()
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("billing reconcile: could not start (%s)", redact_error(exc))
         yield
 
 
