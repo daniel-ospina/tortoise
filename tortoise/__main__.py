@@ -1655,80 +1655,6 @@ def _cmd_index_github(args):
     return 0 if errors == 0 else 1
 
 
-_URI_SCHEMES = ("docker://", "redis://", "rediss://")
-
-
-def _is_uri_scheme(value: str) -> bool:
-    """True for connection URIs (docker://, redis://, rediss://) vs plain paths."""
-    return value.startswith(_URI_SCHEMES)
-
-
-def _abs_db_path(path: str) -> str:
-    """Expand ~ and absolutize; reject relative paths (mirrors config._abs).
-
-    Relative paths are rejected BEFORE the projection sees them so doctor
-    reports a clean error instead of silently creating a per-directory
-    redislite server (plan Task 7 / issue #176).
-    """
-    import os
-    from tortoise.config import RELATIVE_PATH_ERROR
-
-    expanded = os.path.expanduser(path)
-    if not os.path.isabs(expanded):
-        raise ValueError(RELATIVE_PATH_ERROR.format(path=path))
-    return os.path.abspath(expanded)
-
-
-def _resolve_db_target(args) -> tuple[str | None, str | None]:
-    """Resolve doctor's graph-health target → (uri, path); exactly one non-None.
-
-    Mirrors the shared CLI resolution — env URI > FALKORDB_* > TORTOISE_DB_PATH
-    > default (Docker at localhost:16379, like the rest of the CLI):
-
-      1. explicit --db: URI schemes (docker/redis/rediss) → from_uri; plain
-         file paths → embedded constructor (help text matches behavior)
-      2. explicit --path → embedded constructor
-      3. TORTOISE_DB_URI env with a URI scheme → from_uri
-      4. FALKORDB_HOST/PORT/PASSWORD env → Docker URI (defaults localhost:16379)
-      5. TORTOISE_DB_PATH env (or legacy non-scheme TORTOISE_DB_URI) →
-         embedded via config.resolve_db_path()
-      6. default → docker://:@localhost:16379/tortoise
-
-    Both attributes are read via getattr so callers that construct a bare
-    Namespace (e.g. _cmd_onboard → _cmd_doctor(Namespace(cmd="doctor")))
-    never raise AttributeError (#703 follow-up).
-    """
-    import os
-    from tortoise.config import resolve_db_path
-
-    db = getattr(args, "db", None)
-    path = getattr(args, "path", None)
-
-    if db:
-        if _is_uri_scheme(db):
-            return db, None
-        return None, _abs_db_path(db)
-
-    if path:
-        return None, _abs_db_path(path)
-
-    env_uri = os.environ.get("TORTOISE_DB_URI")
-    if env_uri and _is_uri_scheme(env_uri):
-        return env_uri, None
-
-    if any(k in os.environ for k in ("FALKORDB_HOST", "FALKORDB_PORT", "FALKORDB_PASSWORD")):
-        host = os.environ.get("FALKORDB_HOST", "localhost")
-        port = os.environ.get("FALKORDB_PORT", "16379")
-        password = os.environ.get("FALKORDB_PASSWORD", "")
-        return f"docker://:{password}@{host}:{port}/tortoise", None
-
-    if os.environ.get("TORTOISE_DB_PATH", "").strip() or (env_uri and env_uri.strip()):
-        return None, resolve_db_path()
-
-    # Rest of the CLI defaults to Docker — no-flag doctor must match.
-    return "docker://:@localhost:16379/tortoise", None
-
-
 def _cmd_doctor(args):
     """Health check — verify Tortoise setup is healthy."""
     import importlib
@@ -1748,15 +1674,18 @@ def _cmd_doctor(args):
             results.append((f"Python: {pkg}", "⚠️", f"not installed — pip install {pkg}"))
 
     # 2. Docker / FalkorDB
-    docker_host = os.environ.get("FALKORDB_HOST", "localhost")
+    # #715 conf 65: empty-string FALKORDB_* values count as UNSET (same
+    # semantics as the shared _resolve_db_target) — FALKORDB_PORT="" must
+    # fall through to the default port, not raise int('').
+    docker_host = os.environ.get("FALKORDB_HOST") or "localhost"
     try:
-        docker_port = int(os.environ.get("FALKORDB_PORT", "16379"))
+        docker_port = int(os.environ.get("FALKORDB_PORT") or "16379")
     except (ValueError, TypeError):
         results.append(("Graph: FalkorDB", "❌", f"Invalid FALKORDB_PORT: {os.environ.get('FALKORDB_PORT')!r}"))
         docker_port = 6379
     try:
         from falkordb import FalkorDB
-        docker_pass = os.environ.get("FALKORDB_PASSWORD", "")
+        docker_pass = os.environ.get("FALKORDB_PASSWORD") or ""
         db = FalkorDB(host=docker_host, port=docker_port,
                       password=docker_pass or None)
         db.select_graph("tortoise").query("RETURN 1")
@@ -1766,25 +1695,41 @@ def _cmd_doctor(args):
     except Exception as e:
         results.append(("Graph: FalkorDB", "❌", str(e)[:60]))
 
-    # 3. Graph health
+    # 3. Graph health — SAME single-source resolution as init/index
+    # (#705/#715, conf 88): explicit --db (URI → from_uri, plain path →
+    # embedded) > --path > TORTOISE_DB_URI > FALKORDB_* trio >
+    # TORTOISE_DB_PATH > canonical EMBEDDED default (conf 70 — no local
+    # docker://localhost default). Routes through the shared
+    # _resolve_db_target(explicit) + config.is_db_uri; attributes read via
+    # getattr so bare Namespace(cmd="doctor") callers never raise (#703).
+    from tortoise.config import is_db_uri
     try:
-        from tortoise.sdk import TortoiseSDK
-        uri, path = _resolve_db_target(args)
-        if uri is not None:
-            from tortoise.projection import FalkorProjection
-            sdk = TortoiseSDK()
-            sdk._proj = FalkorProjection.from_uri(uri)
-        else:
-            sdk = TortoiseSDK(db_path=path)
-        status = sdk.status()
-        points = status.get("counts", {}).get("Point", 0)
-        total = status.get("total_entities", 0)
-        if points > 0:
-            results.append(("Graph: health", "✅", f"{points} Points, {total} entities"))
-        else:
-            results.append(("Graph: health", "⚠️", "0 Points — graph is empty (expected for new setups)"))
-    except Exception as e:
+        db = getattr(args, "db", None)
+        path = getattr(args, "path", None)
+        target = db if (db and is_db_uri(db)) else _resolve_db_target(db or path)
+    except ValueError as e:
         results.append(("Graph: health", "❌", str(e)[:60]))
+        target = None
+    if target is not None:
+        try:
+            from tortoise.sdk import TortoiseSDK
+            sdk = TortoiseSDK()
+            sdk._proj = _projection_for(target)
+            try:
+                status = sdk.status()
+                points = status.get("counts", {}).get("Point", 0)
+                total = status.get("total_entities", 0)
+                if points > 0:
+                    results.append(("Graph: health", "✅", f"{points} Points, {total} entities"))
+                else:
+                    results.append(("Graph: health", "⚠️", "0 Points — graph is empty (expected for new setups)"))
+            finally:
+                # conf 52: close the projection in BOTH branches — the URI
+                # branch's from_uri projection must not leak.
+                if sdk._proj:
+                    sdk._proj.close()
+        except Exception as e:
+            results.append(("Graph: health", "❌", str(e)[:60]))
 
     # 4. MCP server
     mcp_running = False

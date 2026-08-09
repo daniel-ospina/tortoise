@@ -7,7 +7,8 @@ Covers the four review findings:
   - P2: --db now routes URI schemes through from_uri and plain file paths
     through the embedded constructor (help text matches behavior).
   - P2: no-flag doctor follows the shared CLI resolution — env URI >
-    FALKORDB_* > TORTOISE_DB_PATH > default (Docker at localhost:16379).
+    FALKORDB_* > TORTOISE_DB_PATH > canonical embedded default (same as
+    init/index; #720 conf 70 — no local docker://localhost default).
 
 Runnable with: uv run python -m pytest tests/test_doctor.py -v
 """
@@ -99,16 +100,18 @@ class TestDoctorPath:
 
 
 class TestDoctorDefaultResolution:
-    def test_no_flags_defaults_to_docker(self, clear_db_env, capsys):
-        """No flags, no env → shared default resolution (Docker localhost:16379),
-        like the rest of the CLI — not the embedded default."""
+    def test_no_flags_defaults_to_embedded(self, clear_db_env, capsys):
+        """No flags, no env → shared default resolution (canonical embedded
+        path), like init/index — NOT a local docker://localhost default
+        (#720 conf 70). Graph health must report the embedded graph, never
+        a docker connection failure."""
         rc = _run_doctor([])
         out = capsys.readouterr().out
 
-        assert rc == 1
+        assert rc in (0, 1)  # docker probe may fail without a live FalkorDB
         line = _health_line(out)
-        assert "❌" in line
-        assert "localhost:16379" in line  # default docker:// URI was attempted
+        assert "Points" in line
+        assert "❌" not in line  # embedded resolution must not fail
 
     def test_no_flags_uses_env_uri(self, monkeypatch, clear_db_env, capsys):
         """TORTOISE_DB_URI env wins over embedded defaults."""
