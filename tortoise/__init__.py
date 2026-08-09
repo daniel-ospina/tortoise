@@ -6,6 +6,8 @@ and the eval loop are later milestones.
 
 GAP-15 / #7003: Conversation mining pipeline (mining.py) now wired.
 
+
+__version__ = "0.2.0"  # mirrors pyproject.toml; programmatic access for SDK clients
 Import-time loud-fail guard (issue #176, plan Task 8):
   `tortoise.FalkorDB` SUBCLASSES `redislite.falkordb_client.FalkorDB` and
   raises RuntimeError on relative paths. BEST-EFFORT: only code importing
