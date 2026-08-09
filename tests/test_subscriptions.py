@@ -78,6 +78,8 @@ def test_expired_cursor_raises_valueerror(sdk_factory, tmp_path):
     # and the cursor (1) is below it → expired. (Plan snippet said seq < 1,
     # which deletes nothing since events start at seq 1 — corrected.)
     proj.g.query("MATCH (n:GraphEvent) WHERE n.seq < 2 DELETE n")
+    from tortoise import event_store as _es
+    _es._refresh_first_seq(proj)  # watermark, as purge_expired would
     with pytest.raises(ValueError, match="cursor expired"):
         sdk.events_poll(after=old_cursor)
 

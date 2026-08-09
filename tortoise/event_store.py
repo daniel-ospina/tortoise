@@ -70,7 +70,7 @@ def next_seq(proj) -> int:
     """
     rows = proj.g.query(
         "MERGE (m:GraphEventMeta) "
-        "ON CREATE SET m.last_seq = 1 "
+        "ON CREATE SET m.last_seq = 1, m.first_seq = 1 "
         "ON MATCH SET m.last_seq = m.last_seq + 1 "
         "RETURN m.last_seq"
     ).result_set
@@ -152,3 +152,60 @@ def read_after(proj, after_seq: int, types: list[str] | None = None,
                 pass
         out.append(props)
     return out
+
+
+def purge_expired(proj, retention_days: int = 30) -> int:
+    """Delete :GraphEvent nodes older than `retention_days` (ISO8601 ts cutoff).
+
+    Per-graph = per-team — no team_id filter (plan-review P2). Idempotent.
+    Returns the number of deleted nodes.
+    """
+    from datetime import timedelta
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=int(retention_days))).isoformat()
+    rows = proj.g.query(
+        "MATCH (n:GraphEvent) WHERE n.ts < $cutoff "
+        "WITH n LIMIT 10000 DETACH DELETE n RETURN count(*)",
+        params={"cutoff": cutoff},
+    ).result_set
+    deleted = int(rows[0][0]) if rows and rows[0][0] is not None else 0
+    _refresh_first_seq(proj)
+    return deleted
+
+
+def purge_overflow(proj, max_events: int) -> int:
+    """Enforce a per-team size cap: delete the OLDEST events over `max_events`.
+
+    Returns the number of deleted nodes.
+    """
+    rows = proj.g.query("MATCH (n:GraphEvent) RETURN count(n)").result_set
+    total = int(rows[0][0]) if rows and rows[0][0] is not None else 0
+    overflow = total - int(max_events)
+    if overflow <= 0:
+        return 0
+    del_rows = proj.g.query(
+        "MATCH (n:GraphEvent) WITH n ORDER BY n.seq ASC LIMIT $overflow "
+        "DETACH DELETE n RETURN count(*)",
+        params={"overflow": overflow},
+    ).result_set
+    deleted = int(del_rows[0][0]) if del_rows and del_rows[0][0] is not None else 0
+    _refresh_first_seq(proj)
+    return deleted
+
+
+def _refresh_first_seq(proj) -> None:
+    """Update the GraphEventMeta first_seq watermark after a purge.
+
+    first_seq = min surviving seq, or last_seq + 1 when the graph is empty
+    (every cursor below the next write is then expired). Lets events_poll
+    return 410 even when the graph has been fully purged.
+    """
+    try:
+        proj.g.query(
+            "MATCH (m:GraphEventMeta) "
+            "OPTIONAL MATCH (e:GraphEvent) "
+            "WITH m, min(e.seq) AS mn "
+            "SET m.first_seq = coalesce(mn, m.last_seq + 1)"
+        )
+    except Exception:  # noqa: BLE001
+        pass  # best-effort watermark
