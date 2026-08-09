@@ -2985,7 +2985,8 @@ def _backup_config_safe() -> "BackupConfig | None":
 
 def _alert_store_from(cfg) -> "AlertStore":
     from tortoise import github_issue as gi
-    from tortoise.alert_store import AlertStore, telegram_send
+    from tortoise.alert_store import AlertStore
+    from tortoise.telegram_push import send_message
 
     storage = _backup_storage()
 
@@ -3002,7 +3003,7 @@ def _alert_store_from(cfg) -> "AlertStore":
         return gi.search_open_incident(cfg.gh_repo, cfg.github_issues_pat, kind)
 
     def push_telegram(text: str) -> None:
-        telegram_send(cfg.telegram_bot_token, cfg.telegram_chat_id, text)
+        send_message(cfg.telegram_bot_token, cfg.telegram_chat_id, text)
 
     return AlertStore(
         storage, file_issue=file_issue, close_issue=close_issue,
