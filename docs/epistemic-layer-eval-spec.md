@@ -5,7 +5,9 @@
 > guard: unidirectional operators skip the source message). **Product-owner
 > decision (2026-08-09): NAND stays BIDIRECTIONAL by default (logical mutual);
 > `unidirectional` is the agent-declared directed attack.** 5 property tests landed (directed-attack-lowers-target, no-back-
-> pressure, bidirectional-is-mutual, reinstatement, default-is-directed). The
+> pressure, bidirectional-is-mutual, reinstatement,
+> test_nand_defaults_to_bidirectional, test_mcp_tool_honors_direction,
+> test_directed_nary_nand_source_to_targets_only). The
 > §1 potential-replacement recommendation is superseded by the default flip;
 > the remaining known weakness is weak mutual-contradiction coupling (+0.0024).
 
