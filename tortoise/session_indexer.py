@@ -506,7 +506,11 @@ def compute_file_hash(file_path: str) -> str | None:
 def extract_session_id(file_path: str) -> str | None:
     """Extract session ID from frontmatter or filename."""
     try:
-        with open(file_path) as f:
+        # Round-10: explicit utf-8 — ingest (sdk.py) and compute_file_hash both
+        # use it; under a non-UTF-8 locale (LC_ALL=C in cron/systemd) the
+        # default encoding would throw UnicodeDecodeError → None → a different
+        # event_id than ingest → permanent sweep non-convergence.
+        with open(file_path, encoding="utf-8") as f:
             content = f.read()
     except Exception:
         return None

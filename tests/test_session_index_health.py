@@ -229,6 +229,20 @@ def test_falsy_session_id_coerces_to_match_ingest(env, sdk):
     h2 = sdk.session_index_health(str(env))
     assert h2["up_to_date"], h2
 
+def test_extract_session_id_utf8_under_c_locale(env, sdk):
+    """Review round 10 P2: extract_session_id must read UTF-8 explicitly —
+    under LC_ALL=C (cron/systemd) the locale default encoding would throw
+    UnicodeDecodeError → None → a different event_id than ingest → permanent
+    sweep non-convergence."""
+    f = env / "utf8-sess.md"
+    f.write_bytes("---\nsessionId: utf8-s\ntitle: caf\u00e9\n---\nUser: hi\n".encode("utf-8"))
+    sdk.ingest_corpus(str(env), eventKind="AgentSession")
+    h = sdk.session_index_health(str(env))
+    assert h["unindexed"] == [], f"utf-8 session not matched: {h}"
+    h2 = sdk.session_index_health(str(env))
+    assert h2["up_to_date"], h2
+
+
 def test_empty_session_id_with_alt_key_uses_alt(env, sdk):
     """Review round 4 P2: sessionId: "" + session_id: foo — the or-collapse
     on ingest uses session_id ("" is falsy); extract must mirror that and

@@ -183,6 +183,7 @@ class SessionIndexLock:
         # of truncating an attacker-chosen file via the a+ open.
         try:
             os.makedirs(self.path.parent, mode=0o700, exist_ok=True)
+            os.chmod(self.path.parent, 0o700)  # Round-10: tighten pre-existing dirs
             self._fh = os.fdopen(
                 os.open(self.path,
                         os.O_CREAT | os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW),

@@ -1890,8 +1890,11 @@ def _cmd_index_sessions(args) -> int:
     # CLI error, not a raw ConnectionError traceback — mirroring doctor
     # check-3's pattern. The hook fires this on every session end, so a down
     # DB would otherwise spawn one noisy failing process per close.
+    # Round-10: hoist sdk above the try — the finally must never see an
+    # unbound sdk (TortoiseSDK() constructor can raise, e.g. the FLY_APP_NAME
+    # production guard with an empty URI).
+    sdk = TortoiseSDK()
     try:
-        sdk = TortoiseSDK()
         sdk._proj = _projection_for(target)
         report = sdk.reconcile_sessions(directory=args.dir,
                                         extract_metadata=args.metadata)
