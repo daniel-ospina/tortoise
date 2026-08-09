@@ -1094,6 +1094,72 @@ class TestBackupEndpoints:
         r = client.post("/backups/restore", json={"backup_key": "x", "confirm": True})
         assert r.status_code == 402
 
+    def test_backup_solo_tier_402(self, client):
+        """Solo tier cannot create backups (daily_backups:false in pricing.json).
+
+        Regression test for #656 — the old gate blocked only (None, 'free'),
+        so a solo-tier team would have slipped past the backups gate.
+        """
+        app.dependency_overrides[get_current_team] = lambda: dict(
+            TEST_TEAM, tier="solo"
+        )
+        try:
+            r = client.post("/backups")
+            assert r.status_code == 402, (
+                f"expected 402 for solo tier, got {r.status_code}: {r.text}"
+            )
+            r = client.post(
+                "/backups/restore",
+                json={"backup_key": "x", "confirm": True},
+            )
+            assert r.status_code == 402
+        finally:
+            app.dependency_overrides.clear()
+
+    def test_backup_tier_allowlist_from_pricing(self, client):
+        """Only tiers with truthy daily_backups in pricing.json pass the gate.
+
+        Pro (daily_backups: 'planned') → gate passes (not 402).
+        Team (daily_backups: 'planned') → gate passes (not 402).
+        Unknown tier → 402 (falls back to free, daily_backups:false).
+
+        We only assert the gate response (402 = blocked, not-402 = passed);
+        the actual backup operation needs R2 storage which is tested via
+        the pro_client fixture elsewhere.
+        """
+        allowed_tiers = ["pro", "team"]
+        for tier in allowed_tiers:
+            app.dependency_overrides[get_current_team] = lambda t=tier: dict(
+                TEST_TEAM, tier=t
+            )
+            try:
+                r = client.post("/backups")
+                assert r.status_code != 402, (
+                    f"{tier} tier should pass the backups gate "
+                    f"(daily_backups is truthy in pricing.json), "
+                    f"but got 402: {r.text}"
+                )
+                # restore endpoint too
+                r = client.post(
+                    "/backups/restore",
+                    json={"backup_key": "x", "confirm": True},
+                )
+                assert r.status_code != 402, (
+                    f"{tier} tier should pass the backups restore gate"
+                )
+            finally:
+                app.dependency_overrides.clear()
+
+        # Unknown tier → 402 (falls back to free limits).
+        app.dependency_overrides[get_current_team] = lambda: dict(
+            TEST_TEAM, tier="enterprise"
+        )
+        try:
+            r = client.post("/backups")
+            assert r.status_code == 402
+        finally:
+            app.dependency_overrides.clear()
+
     def test_backup_create_and_list_pro(self, pro_client):
         """Pro team: create returns a manifest; list shows it."""
         r = pro_client.post("/backups")

@@ -81,3 +81,17 @@ def has_overage(tier: str) -> bool:
 def all_tiers() -> list[str]:
     data = _load()
     return list(data.get("tiers", {}).keys())
+
+
+def daily_backups_enabled(tier: str | None) -> bool:
+    """True when pricing.json features.daily_backups is truthy for *tier*.
+
+    Derives the backup-tiers allowlist from the canonical pricing source
+    so the gate can never drift from product/pricing.json again (#656).
+    Unknown tiers default to False (no backups entitlement).
+    """
+    if not tier:
+        return False
+    data = _load()
+    t = data.get("tiers", {}).get(tier, {})
+    return bool(t.get("features", {}).get("daily_backups", False))
