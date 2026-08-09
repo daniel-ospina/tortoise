@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import os
 import re
+import stat
 import time
 from pathlib import Path
 
@@ -111,12 +112,17 @@ class SessionIndexLock:
         """Attribution read of the lock file (best-effort).
 
         Returns {pid, started_at, age_seconds, alive, stale} — never raises;
-        missing/corrupt files yield empty fields.
+        missing/corrupt files yield empty fields. Reads from the open fd when
+        one is held (the same inode we locked), else from the path.
         """
         info: dict = {"pid": None, "started_at": None, "age_seconds": None,
                       "alive": None, "stale": False}
         try:
-            raw = self.path.read_text().strip()
+            if self._fh is not None:
+                self._fh.seek(0)
+                raw = self._fh.read().decode(errors="replace").strip()
+            else:
+                raw = self.path.read_text().strip()
         except Exception:
             return info
         parts = raw.split()
@@ -127,7 +133,10 @@ class SessionIndexLock:
         if len(parts) > 1:
             info["started_at"] = parts[1]
         try:
-            mtime = self.path.stat().st_mtime
+            if self._fh is not None:
+                mtime = os.fstat(self._fh.fileno()).st_mtime
+            else:
+                mtime = self.path.stat().st_mtime
             info["age_seconds"] = max(0, int(time.time() - mtime))
         except Exception:
             pass
@@ -155,11 +164,28 @@ class SessionIndexLock:
                                      past the age threshold) was force-released
                                      and this caller now owns it.
           - ``"held"``             — a live holder owns the lock; DO NOT write.
+
+        Raises OSError (never fatal to a batch sweep — callers record it as a
+        retryable error and continue) when the lock file cannot be opened
+        safely: an unwritable/blocked lock dir (EACCES/EROFS/ENOSPC/EMFILE)
+        or a planted symlink at the lock path (ELOOP from O_NOFOLLOW — the
+        attacker-chosen target is never opened, truncated or written).
         """
         import fcntl
 
-        os.makedirs(self.path.parent, exist_ok=True)
-        self._fh = open(self.path, "a+")
+        # #280 review P2 (security): open WITHOUT following symlinks and
+        # create the lock dir 0700 (no other local user may plant files/sym-)
+        # links inside). O_NOFOLLOW raises ELOOP on a planted symlink instead
+        # of truncating an attacker-chosen file via the a+ open.
+        try:
+            os.makedirs(self.path.parent, mode=0o700, exist_ok=True)
+            self._fh = os.fdopen(
+                os.open(self.path,
+                        os.O_CREAT | os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW),
+                "a+b", buffering=0)
+        except OSError:
+            self._fh = None
+            raise
 
         # Fast path: if the flock is free, the file is ours. Report
         # "stale-recovered" when the previous attribution was stale (dead
@@ -227,23 +253,90 @@ class SessionIndexLock:
 
         Only safe when the holder is dead — a live holder's flock survives
         file removal and would keep writing to an unlinked inode, defeating
-        the lock. Used by ops tooling (E2E-13 observability surface).
+        the lock. TOCTOU-hardened (#280 review P2): the check-then-unlink
+        window is closed by taking the flock first, re-checking attribution
+        while holding it, and unlink()ing while holding. A contender that
+        acquires between the probe and the unlink fails our flock and is
+        never evicted; a symlink/special file at the lock path is refused
+        outright (O_NOFOLLOW + lstat — never act on an attacker-chosen file).
         """
-        info = self.held_by()
-        if info["pid"] is not None and info["alive"]:
-            return False
+        import fcntl
+
         try:
-            self.path.unlink(missing_ok=True)
-            return True
-        except OSError:
+            st = self.path.lstat()
+        except FileNotFoundError:
+            return True  # nothing to remove
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+            # Symlink / non-regular file: refuse — force_release must never
+            # unlink through a planted symlink or touch a special file.
             return False
+
+        try:
+            fd = os.open(self.path, os.O_RDWR | os.O_NOFOLLOW)
+        except OSError:
+            return False  # vanished or unwritable — nothing safe to do
+
+        try:
+            # Take the flock first: a live holder (or contender that raced
+            # our lstat) fails this non-blocking flock and is never evicted.
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                return False
+
+            # We hold the flock, so no live process owns the lock — but the
+            # file may still name a live PID (holder released the flock
+            # without removing the file): never evict that conservatively.
+            try:
+                os.lseek(fd, 0, os.SEEK_SET)
+                raw = os.read(fd, 4096).decode(errors="replace").strip()
+            except OSError:
+                raw = ""
+            parts = raw.split()
+            try:
+                pid = int(parts[0]) if parts else None
+            except ValueError:
+                pid = None
+            if pid is not None and _pid_alive(pid):
+                return False
+
+            # Verify the inode we locked is still the file at the path (a
+            # contender may have swapped it between open and flock); if it
+            # changed, someone else owns the path — back off.
+            try:
+                st_fd = os.fstat(fd)
+                st_path = self.path.stat()
+                if (st_fd.st_ino, st_fd.st_dev) != (st_path.st_ino,
+                                                    st_path.st_dev):
+                    return False
+            except OSError:
+                return True  # path vanished — nothing left to remove
+
+            # Unlink WHILE holding the flock: no contender can acquire the
+            # path between our check and the removal.
+            try:
+                self.path.unlink(missing_ok=True)
+                return True
+            except OSError:
+                return False
+        finally:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
     # ── internals ──────────────────────────────────────────────────
 
     def _write_owner(self) -> None:
         self._fh.seek(0)
         self._fh.truncate()
-        self._fh.write(f"{os.getpid()} {time.time():.0f}\n")
+        # O_APPEND file — truncate() emptied the file, so the write lands at
+        # offset 0 (append-at-end-of-empty == overwrite).
+        self._fh.write(f"{os.getpid()} {time.time():.0f}\n".encode())
         self._fh.flush()
 
     def _close_fh(self) -> None:

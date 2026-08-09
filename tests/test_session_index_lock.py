@@ -187,3 +187,59 @@ def test_sanitize_caps_length():
         assert lk.acquire() == "acquired"
         assert len(lk.path.name) <= 128 + len("index-.pid")
         lk.release()
+
+
+# ── #280 review P2: security (symlink) + force_release TOCTOU ────────
+
+
+def test_acquire_refuses_planted_symlink(lock_dir, tmp_path):
+    """Security (#280 review P2): a symlink planted at the lock path must
+    never be followed — acquire() surfaces a retryable OSError (ELOOP from
+    O_NOFOLLOW) and the attacker-chosen target is never truncated/overwritten.
+    """
+    import errno
+    target = tmp_path / "victim.txt"
+    target.write_text("precious data")
+    lock = SessionIndexLock("sess-symlink", lock_dir)
+    lock.path.symlink_to(target)
+    with pytest.raises(OSError) as ei:
+        lock.acquire()
+    assert ei.value.errno == errno.ELOOP
+    # The target file content is intact — no truncate-through-symlink.
+    assert target.read_text() == "precious data"
+
+
+def test_lock_dir_created_private(tmp_path):
+    """Security (#280 review P2): a freshly created lock dir is 0700 so no
+    other local user can plant symlinks inside it."""
+    d = tmp_path / "a" / "b"  # parent chain does not exist yet
+    lock = SessionIndexLock("sess-dirmode", d)
+    assert lock.acquire() == "acquired"
+    try:
+        assert (os.stat(d).st_mode & 0o777) == 0o700
+    finally:
+        lock.release()
+
+
+def test_force_release_race_contender_not_evicted(lock_dir):
+    """TOCTOU regression (#280 review P2): a contender that acquires the
+    flock between force_release's stale probe and its unlink must NOT be
+    evicted — the check-then-unlink window is closed by flock-first.
+    """
+    import fcntl
+    a = SessionIndexLock("sess-race", lock_dir)
+    assert a.acquire() == "acquired"
+    a.release()
+    a.path.write_text("999999999 0\n")  # stale attribution (dead pid)
+    # Contender acquires the lock, but its attribution write has not landed
+    # yet — the exact TOCTOU window where the file still reads stale/dead
+    # while a live flock holder owns the lock.
+    fd = os.open(a.path, os.O_RDWR)
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        b = SessionIndexLock("sess-race", lock_dir)
+        assert b.force_release() is False   # live contender — refuse
+        assert b.path.exists()              # live holder's lock NOT unlinked
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
