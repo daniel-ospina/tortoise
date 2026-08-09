@@ -44,6 +44,10 @@ def test_provider_availability(monkeypatch):
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     assert not _provider_available()
+    # #722: ANTHROPIC_API_KEY is NOT a tortoise provider key — its presence
+    # from unrelated host tooling must not fail the `required` gate open.
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    assert not _provider_available()
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
     assert _provider_available()
 
@@ -58,11 +62,25 @@ def client():
 
 
 def test_required_mode_without_provider_503(monkeypatch, client):
-    monkeypatch.setenv("TORTOISE_SESSION_EXTRACTION", "required")
-    for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
-              "GEMINI_API_KEY", "ANTHROPIC_API_KEY"):
-        monkeypatch.delenv(k, raising=False)
-    # auth boundary first — 401 without a team key; the 503 check needs auth.
-    # (The mode check runs AFTER auth; without a valid team the request 401s.)
-    r = client.post("/v1/sessions", json={"conversation": []})
-    assert r.status_code in (401, 503), r.status_code
+    """`required` without any provider key fails closed with 503.
+
+    Auth is overridden so the handler body actually runs — the extraction-mode
+    gate sits AFTER auth, so without a valid team the request would 401 before
+    ever reaching the 503 (previously the test was vacuous: the `in (401, 503)`
+    assertion could only ever observe the auth 401).
+    """
+    from tortoise.hosted_api import app, get_current_team
+
+    app.dependency_overrides[get_current_team] = lambda: {
+        "team_id": "test-team-722", "key_id": "test-key-722", "tier": "free",
+    }
+    try:
+        monkeypatch.setenv("TORTOISE_SESSION_EXTRACTION", "required")
+        for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
+                  "GEMINI_API_KEY", "ANTHROPIC_API_KEY"):
+            monkeypatch.delenv(k, raising=False)
+        r = client.post("/v1/sessions", json={"conversation": []})
+        assert r.status_code == 503, r.status_code
+        assert "required" in r.json()["detail"]
+    finally:
+        app.dependency_overrides.clear()
