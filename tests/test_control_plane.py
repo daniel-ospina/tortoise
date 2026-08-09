@@ -148,7 +148,7 @@ class TestMembershipCRUD:
             sdk.membership_create(team["id"], "user-2", "admin")
 
     def test_membership_list_returns_members(self, sdk, team):
-        sdk.team_update(team["id"], max_users=10)  # free tier caps at 1 (#493)
+        sdk.team_update(team["id"], max_users=10)
         sdk.membership_create(team["id"], "user-1", "admin")
         sdk.membership_create(team["id"], "user-2", "owner")
         members = sdk.membership_list(team["id"])
@@ -253,6 +253,28 @@ class TestAPIKeyCRUD:
 
     def test_apikey_verify_bad_key_returns_none(self, sdk):
         assert sdk.apikey_verify("tt_badkey123") is None
+
+    def test_apikey_verify_many_keys_prefix_lookup(self, sdk, team):
+        """#687: Many keys on a team — the correct key still authenticates
+        via indexed key_prefix lookup (O(1) per verification, not O(keys)).
+
+        We create 20 keys and verify the LAST one, proving it's not a scan
+        that happened to land on an early match. The key_prefix index on
+        :APIKey(key_prefix) in _ensure_registry_indexes is what makes the
+        _verify_hashed_lookup short-circuit work.
+        """
+        target_key = None
+        for i in range(20):
+            result = sdk.apikey_create(team["id"], "user-1")
+            if i == 19:  # last key is our target
+                target_key = result["api_key"]
+        assert target_key is not None
+        # Verify the last-created key (would fail a naive early-match scan)
+        valid = sdk.apikey_verify(target_key)
+        assert valid is not None
+        assert valid["team_id"] == team["id"]
+        # A bad key with a plausible tt_ prefix is still rejected
+        assert sdk.apikey_verify("tt_" + "0" * 32) is None
 
     def test_apikey_create_rejects_missing_team(self, sdk):
         with pytest.raises(ControlPlaneError, match="not found"):

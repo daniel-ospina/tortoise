@@ -34,6 +34,7 @@ from tortoise.analytics import (  # #528 server analytics (fail-safe, no-op with
 )  # E1–E8 session endpoints (D1)
 import hmac
 
+from tortoise.log import EventLog
 from tortoise.sdk import TortoiseSDK, _content_hash
 from tortoise.mcp_server import create_http_app
 from tortoise.hosted_backup import (
@@ -385,6 +386,57 @@ async def _async_audit(
     )
 
 
+# ── Per-team Event Log (tenant replay surface, #692) ────────────
+
+
+def _team_events_dir() -> Path:
+    """Base directory for per-team event logs.
+
+    Defaults to ``/data/events``. Override with ``TORTOISE_EVENTS_DIR``.
+    """
+    from pathlib import Path
+    env = os.environ.get("TORTOISE_EVENTS_DIR", "/data/events")
+    return Path(env)
+
+
+def _event_log_for(team_id: str) -> EventLog:
+    """Return the :class:`EventLog` for *team_id*.
+
+    The log lives at ``<events_dir>/<team_id>/events.jsonl``.
+    Directories are created automatically on first append.
+    """
+    return EventLog(_team_events_dir() / team_id / "events.jsonl")
+
+
+def _log_team_event(team_id: str, event_type: str, **payload) -> dict | None:
+    """Append a structured event to the team's event log.
+
+    Every event carries a timestamp, event type, team_id, and an
+    auto-generated event_id.  Returns the event dict that was written,
+    or ``None`` if the write failed (best-effort — never crashes the
+    parent mutation).
+    """
+    from tortoise.ids import now_iso, ulid
+    event = {
+        "event_id": ulid(),
+        "ts": now_iso(),
+        "type": event_type,
+        "team_id": team_id,
+        **payload,
+    }
+    try:
+        _event_log_for(team_id).append(event)
+        return event
+    except OSError:
+        # Best-effort — disk full, events dir not writable, etc.
+        # Never let event-logging failures break the mutation response.
+        _logger.warning(
+            "event log write failed for team %s (type=%s)",
+            team_id, event_type, exc_info=True,
+        )
+        return None
+
+
 def _check_internal(request: Request) -> None:
     """Verify internal auth — only Edge Functions call this."""
     if not _INTERNAL_KEY:
@@ -482,7 +534,7 @@ async def provision_tenant(request: Request):
             """
             CREATE (m:Membership {
                 id: $id, user_id: $user_id, team_id: $team_id,
-                role: 'owner', joined_at: $now
+                role: 'owner', status: 'active', joined_at: $now
             })
             """,
             params={
@@ -617,26 +669,66 @@ async def get_current_team(request: Request) -> dict:
         raise HTTPException(status_code=401, detail="Invalid API key format")
     try:
         sdk = _make_sdk(namespace="registry")
+        from datetime import datetime as _dt, timezone as _tz
+        now_iso = _dt.now(_tz.utc).isoformat()
         # API keys are stored as "salt:hash" (per-key random salt). hash_api_key()
         # generates a NEW random salt per call, so we CANNOT look up by exact
         # match. Instead fetch all non-revoked keys and verify each against the
-        # token using the embedded salt (verify_api_key). This is O(keys) but
-        # the registry is small (teams × keys) and auth happens per-request.
+        # token using the embedded salt (verify_api_key). #750.3: pre-filter by
+        # key_prefix (token[:10] == stored kp) so auth is O(prefix) not
+        # O(keys)×PBKDF2; fall back to a full scan when no prefix matches
+        # (provision keys store team_id[:8] prefixes). #742: expired bootstrap
+        # keys must NOT authenticate — filter expires_at on both paths.
         key_result = sdk._get_registry().query(
-            "MATCH (k:APIKey) WHERE k.revoked_at IS NULL "
-            "RETURN k.team_id, k.id, k.key_hash, k.created_by"
+            "MATCH (k:APIKey) WHERE k.key_prefix = $prefix "
+            "AND k.revoked_at IS NULL "
+            "AND (k.expires_at IS NULL OR k.expires_at > $now) "
+            "RETURN k.team_id, k.id, k.key_hash, k.created_by",
+            params={"prefix": token[:10], "now": now_iso},
         ).result_set
+        if not key_result:
+            key_result = sdk._get_registry().query(
+                "MATCH (k:APIKey) WHERE k.revoked_at IS NULL "
+                "AND (k.expires_at IS NULL OR k.expires_at > $now) "
+                "RETURN k.team_id, k.id, k.key_hash, k.created_by",
+                params={"now": now_iso},
+            ).result_set
         from tortoise.auth import verify_api_key
         team_id = key_id = None
         created_by = None
+        # key_result already holds the prefix-filtered (+ expiry-filtered, #742)
+        # candidate keys from the lookup above — verify each against the token.
         for k_team_id, k_id, stored_hash, k_created_by in key_result:
             if verify_api_key(token, stored_hash):
                 team_id, key_id = k_team_id, k_id
                 created_by = k_created_by
                 break
+        # Fallback: legacy provision_tenant keys (key_prefix=team_id[:8])
+        # won't match the token[:10] prefix. In that case scan all keys.
+        if team_id is None:
+            key_result = sdk._get_registry().query(
+                "MATCH (k:APIKey) WHERE k.revoked_at IS NULL "
+                "RETURN k.team_id, k.id, k.key_hash, k.created_by"
+            ).result_set
+            for k_team_id, k_id, stored_hash, k_created_by in key_result:
+                if verify_api_key(token, stored_hash):
+                    team_id, key_id = k_team_id, k_id
+                    created_by = k_created_by
+                    break
         if team_id is None:
             await _audit_auth_failure(request, "invalid_key")
             raise HTTPException(status_code=401, detail="Invalid API key")
+        # #685: track last_used_at for key hygiene/rotation — write-through on
+        # every successful auth. The registry graph is small (teams × keys) and
+        # a single indexed SET on an already-fetched node adds negligible overhead.
+        # Best-effort only: a telemetry write must never gate authentication.
+        try:
+            sdk._get_registry().query(
+                "MATCH (k:APIKey {id: $id}) SET k.last_used_at = $now",
+                params={"id": key_id, "now": datetime.now(timezone.utc).isoformat()},
+            )
+        except Exception:
+            pass
         # #528: activation telemetry — first successful API auth per team.
         # Dedup is in-process + thread-safe (single-worker caveat noted in
         # tortoise/analytics.py); distinct_id is the key creator's user UUID
@@ -661,20 +753,19 @@ async def get_current_team(request: Request) -> dict:
             tier, mu, mg, mp, mak, ms = row
         else:
             tier, mu, mg, mp, mak, ms = ("free", None, None, None, None, None)
-        from tortoise.quota import DEFAULT_MAX_API_KEYS, DEFAULT_MAX_POINTS, DEFAULT_MAX_SESSIONS
+        from tortoise.pricing import tier_limits
         request.state.team_id = team_id
         request.state.tier = tier or "free"
-        # max_teams removed: multi-team is a USER capability, not a tier field
-        # (per-team billing; tier limits come from pricing.json)
-        from tortoise.pricing import tier_limits
         lim = tier_limits(tier or "free")
         # max_teams removed: multi-team is a USER capability, not a tier field
         # (per-team billing; tier limits come from pricing.json)
         return {"team_id": team_id, "key_id": key_id, "tier": tier or "free",
-                "max_users": mu if mu is not None else (lim["max_users_per_team"] or 1),
+                # max_users: preserve None from pricing (Team tier = unlimited)
+                "max_users": mu if mu is not None else lim["max_users_per_team"],
                 "max_graphs": mg if mg is not None else lim["max_graphs_per_team"],
-                "max_points": int(mp) if mp is not None else DEFAULT_MAX_POINTS,
-                "max_api_keys": int(mak) if mak is not None else DEFAULT_MAX_API_KEYS,
+                # points counter counts graph nodes → max_graph_nodes (#310 GAP-B)
+                "max_points": int(mp) if mp is not None else lim["max_graph_nodes"],
+                "max_api_keys": int(mak) if mak is not None else lim["max_api_keys"],
                 "max_sessions": int(ms) if ms is not None else DEFAULT_MAX_SESSIONS}
     except HTTPException:
         raise
@@ -685,13 +776,25 @@ async def get_current_team(request: Request) -> dict:
 def _check_team_limit(team: dict, resource: str) -> None:
     """Enforce per-team limits. Raises 402 (payment required) when at capacity.
 
-    resource: 'points' | 'api_keys' | 'sessions'
+    resource: 'points' | 'api_keys' | 'sessions' | 'users' | 'graphs'
 
-    #329: delegates to the shared fail-closed quota helper — counting errors
-    now surface as 500 (QuotaCheckError) instead of silently passing, and the
-    limits dict is the authenticated team dict (resolved once by
-    get_current_team), matching MCP semantics.
-    """
+    Fail-closed decision (#686)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    Counting errors raise HTTP 500 (QuotaCheckError) — never a silent pass.
+
+    Rationale:
+    - Money at stake: fail-open lets free teams exceed paid limits during a DB
+      outage — direct revenue risk.
+    - Fail-closed is the secure default: when you can't verify, don't grant.
+    - Customer harm is bounded: a DB outage that breaks count queries typically
+      also breaks the actual write (same store), so we're failing fast.
+    - Alerting mitigates ops risk: every QuotaCheckError is logged at ERROR
+      level with team_id and resource, visible in production dashboards.
+
+    #329: delegates to the shared fail-closed quota helper.
+    #683: the limits dict is the authenticated team dict (resolved once by
+    get_current_team), matching MCP semantics — includes max_users/max_graphs.
+    #686: explicit decision documentation + ERROR-level alerting on failures.    """
     team_id = team.get("team_id")
     if not team_id:
         return  # internal/no-team context — skip
@@ -702,8 +805,24 @@ def _check_team_limit(team: dict, resource: str) -> None:
     except QuotaExceededError as e:
         raise HTTPException(status_code=402, detail=str(e))
     except QuotaCheckError as e:
+        _logger.error(
+            "quota check failed (fail-closed): team=%s resource=%s error=%s",
+            team_id, resource, str(e),
+        )
         raise HTTPException(status_code=500, detail=f"Quota check failed: {e}")
 
+
+def _record_write_op(team: dict) -> None:
+    """Best-effort write-op metering for overage billing (#681).
+
+    Call AFTER a successful write. Non-fatal — metering failures are logged
+    and swallowed; they never block the caller.
+    """
+    try:
+        from tortoise.metering import record_write_ops
+        record_write_ops(team.get("team_id", ""), tier=team.get("tier"))
+    except Exception:
+        pass  # best-effort — never block the write path
 
 
 
@@ -751,6 +870,11 @@ class TeamInfoResponse(BaseModel):
     max_graphs: int | None
     max_teams: int | None
     point_count: int = 0
+    write_ops_used: int = 0
+    write_ops_limit: int = 0
+    write_ops_period: str = ""
+    overage_eligible: bool = False
+    overage_cost_usd: float | None = None
 
 
 class CreateKeyResponse(BaseModel):
@@ -857,6 +981,13 @@ async def _check_register_rate_limit(request: Request) -> None:
                 headers={"Retry-After": "3600"},
             )
         bucket.append(now)
+        # #750.2: bound memory growth — when the dict exceeds 10k IPs, drop
+        # buckets whose entries are all older than the 1h window (dead weight).
+        if len(_register_buckets) > 10_000:
+            stale = [ip for ip, b in _register_buckets.items()
+                     if not any(now - t < 3600 for t in b)]
+            for ip in stale:
+                del _register_buckets[ip]
 
 
 # ── Endpoints ─────────────────────────────────────────────────────
@@ -885,6 +1016,17 @@ async def create_point(body: CreatePointRequest, request: Request, team: dict = 
     await _async_audit(
         request, team["team_id"], "point_create",
         resource_type="point", resource_id=result.get("id"),
+    )
+    # Metering (#681): best-effort write-op count for overage billing.
+    _record_write_op(team)
+
+    # Per-team event log for tenant replay (#692)
+    _log_team_event(
+        team["team_id"], "point_created",
+        point_id=result.get("id"),
+        kind=body.kind,
+        content_preview=body.content[:200],
+        tags=body.tags,
     )
 
     return {
@@ -921,6 +1063,8 @@ async def list_points(
         params["tag"] = tag
     else:
         tag_clause = ""
+    # #689: exclude retracted (tombstoned) points from the list endpoint.
+    conditions.append("(n.status IS NULL OR n.status <> 'retracted')")
     query = (
         f"MATCH (n:Point){tag_clause} WHERE "
         + " AND ".join(conditions)
@@ -942,7 +1086,9 @@ async def get_point(point_id: str, team: dict = Depends(get_current_team)):
     sdk = _make_sdk(namespace=team["team_id"])
     proj = sdk._get_proj()
     rows = proj.g.query(
-        "MATCH (p:Point {id: $id}) RETURN properties(p)",
+        "MATCH (p:Point {id: $id}) "
+        "WHERE p.status IS NULL OR p.status <> 'retracted' "
+        "RETURN properties(p)",
         params={"id": point_id},
     ).result_set
     if not rows:
@@ -1047,6 +1193,10 @@ async def team_info(team: dict = Depends(get_current_team)):
         logging.getLogger("tortoise.api").exception("team_info failed")
         raise HTTPException(status_code=500, detail="Internal server error")
 
+    # Metering (#681): fetch write-op usage for the current billing period.
+    from tortoise.metering import get_current_usage
+    usage = get_current_usage(team["team_id"])
+
     return TeamInfoResponse(
         team_id=team["team_id"],
         tier=team["tier"],
@@ -1057,6 +1207,11 @@ async def team_info(team: dict = Depends(get_current_team)):
         # 500 on every /v1/team call, exposed by the zero-email signup verification).
         max_teams=None,
         point_count=point_count,
+        write_ops_used=usage["write_ops_used"],
+        write_ops_limit=usage["write_ops_limit"],
+        write_ops_period=usage["period"],
+        overage_eligible=usage["overage_eligible"],
+        overage_cost_usd=usage["overage_cost_usd"],
     )
 
 
@@ -1115,7 +1270,7 @@ async def register_user(request: Request, response: Response):
             CREATE (t:Team {
                 id: $id, name: $name, email: $email, tier: 'free',
                 created_at: $now, backup_enabled: false,
-                max_users: 1, max_teams: 1, max_graphs: 1,
+                max_users: 1, max_graphs: 1,
                 onboarding_state: $onboarding_state
             })
             """,
@@ -1494,6 +1649,55 @@ class SessionRequest(BaseModel):
     metadata: dict | None = None
 
 
+# ── Session extraction mode (#312 delta 1) ─────────────────────────────────
+
+_SESSION_EXTRACTION_MODES = ("auto", "required", "regex")
+
+def _llm_provider_keys() -> tuple[str, ...]:
+    """Env keys for LLM providers the hosted extraction path ACTUALLY consumes.
+
+    Derived from the real provider registries (``tortoise.ingest._PROVIDERS`` /
+    ``tortoise.analyze._LLM_PROVIDERS``) so availability always matches what
+    the code can really use. ANTHROPIC_API_KEY is deliberately NOT included —
+    no tortoise provider reads it, so its presence from unrelated host tooling
+    would fail the ``required`` gate open (degrading silently to regex) #722.
+    """
+    from tortoise.analyze import _LLM_PROVIDERS
+    from tortoise.ingest import _PROVIDERS
+
+    keys = {key for _url, key in _PROVIDERS.values() if key}
+    keys.update(_LLM_PROVIDERS)
+    return tuple(sorted(keys))
+
+
+# Provider env keys the hosted deployment can use for LLM-grade extraction.
+# The provider/model choice is a product decision (deploy-time) — this module
+# only reports availability so `auto`/`required` modes behave correctly.
+_LLM_PROVIDER_KEYS: tuple[str, ...] = _llm_provider_keys()
+
+
+def _session_extraction_mode() -> str:
+    """Resolve TORTOISE_SESSION_EXTRACTION (auto|required|regex).
+
+    auto (default): LLM extraction when a provider key is configured, else
+        the deterministic regex path (capture always works).
+    required: fail-closed — capture errors when no LLM provider is configured.
+    regex: always the deterministic regex path (never calls an LLM).
+    Unknown values fall back to ``auto`` with a warning (never break capture).
+    """
+    import logging
+    raw = os.environ.get("TORTOISE_SESSION_EXTRACTION", "auto").strip().lower()
+    if raw in _SESSION_EXTRACTION_MODES:
+        return raw
+    logging.getLogger("tortoise.api").warning(
+        "unknown TORTOISE_SESSION_EXTRACTION=%r — falling back to 'auto'", raw)
+    return "auto"
+
+
+def _llm_provider_available() -> bool:
+    return any(os.environ.get(k) for k in _LLM_PROVIDER_KEYS)
+
+
 @app.post("/v1/sessions")
 async def capture_session(body: SessionRequest, request: Request, team: dict = Depends(get_current_team)):
     """Capture an agent session and extract turns as episodic Points.
@@ -1511,6 +1715,18 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
         MAX_EXTRACTIONS_PER_TURN, MAX_SESSION_TURNS,
         QuotaCheckError, QuotaExceededError, enforce_team_limit,
     )
+
+    # #312 delta 1: extraction mode semantics. `required` fails closed when
+    # no LLM provider is configured; `auto`/`regex` keep the deterministic
+    # regex path as the always-works baseline (LLM upgrade lands with the
+    # provider decision — deploy-time).
+    mode = _session_extraction_mode()
+    if mode == "required" and not _llm_provider_available():
+        raise HTTPException(
+            status_code=503,
+            detail="Session extraction mode 'required' but no LLM provider key is "
+                   f"configured (set {' / '.join(_LLM_PROVIDER_KEYS)}).",
+        )
 
     if len(body.conversation) > MAX_SESSION_TURNS:
         raise HTTPException(
@@ -1564,6 +1780,14 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
 
     extracted = []
 
+    # NOTE: this extraction loop is duplicated from tortoise/sdk.py
+    # capture_session. Divergences: hosted adds quota/auth bounds + a
+    # pre-write estimate; the SDK variant adds a `speaker` property on turn
+    # Points (delta 5) that hosted does not write. Hosted rejects turn content
+    # > 5000 chars with 422 (Pydantic field_validator failure), the SDK
+    # truncates to 5000 and extracts from the truncated text — extraction
+    # inputs align (both loops see <= 5000 chars); role=None stays None in
+    # hosted, the SDK normalizes it to "unknown". Keep the two in sync.
     for i, turn in enumerate(body.conversation):
         role = turn.get("role", "unknown")
         content = turn.get("content", "")
@@ -1655,8 +1879,18 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
         request, team["team_id"], "session_capture",
         resource_type="session", resource_id=session_id,
     )
+    # Metering (#681): best-effort write-op count for overage billing.
+    _record_write_op(team)
 
-    return {"session_id": session_id, "turns": len(body.conversation), "extracted": len(extracted), "points": extracted}
+    # #722: report the EFFECTIVE method actually used, not the configured
+    # policy. The extraction loop above is the deterministic regex path — the
+    # loop never branches on mode today, so `auto`/`required` with a key would
+    # otherwise report LLM-intent while regex ran. Mode branching (LLM-grade
+    # extraction) is pending (#312 delta 2); until it lands, reflect what ran.
+    effective_mode = "regex"
+    return {"session_id": session_id, "turns": len(body.conversation),
+            "extracted": len(extracted), "points": extracted,
+            "extraction_mode": effective_mode}
 
 
 @app.get("/v1/sessions")
@@ -1710,6 +1944,37 @@ async def _team_node(team_id: str) -> dict | None:
     return rows[0][0]
 
 
+def _team_limits_from_node(team_node: dict) -> dict:
+    """Convert raw Team node properties → limits dict for _check_team_limit.
+
+    Used by endpoints that fetch the Team node directly (create_graph,
+    invite_to_team) rather than via get_current_team. Falls back to
+    tier_limits from pricing.json when a stored value is None/missing.
+    """
+    from tortoise.pricing import tier_limits
+    from tortoise.quota import DEFAULT_MAX_SESSIONS
+    tier = team_node.get("tier", "free")
+    lim = tier_limits(tier)
+    # Fetch each field; use `is None` to preserve None (unlimited) and explicit 0.
+    mu = team_node.get("max_users")
+    mg = team_node.get("max_graphs")
+    mp = team_node.get("max_points")
+    mak = team_node.get("max_api_keys")
+    ms = team_node.get("max_sessions")
+    return {
+        "team_id": team_node["id"],
+        "tier": tier,
+        # max_users/max_graphs: preserve None (unlimited, Team tier) and
+        # fall back to tier_limits when missing (also None for Team tier).
+        "max_users": mu if mu is not None else lim["max_users_per_team"],
+        "max_graphs": mg if mg is not None else lim["max_graphs_per_team"],
+        # points counter counts graph nodes → max_graph_nodes (#310 GAP-B)
+        "max_points": mp if mp is not None else lim["max_graph_nodes"],
+        "max_api_keys": mak if mak is not None else lim["max_api_keys"],
+        "max_sessions": ms if ms is not None else DEFAULT_MAX_SESSIONS,
+    }
+
+
 @app.get("/v1/teams")
 async def list_my_teams(user: dict = Depends(get_current_user)):
     """E6 — list my memberships (team switcher). Placeholder rows excluded."""
@@ -1742,19 +2007,25 @@ async def create_team(body: dict, user: dict = Depends(get_current_user)):
     if len(name) > 64:
         raise HTTPException(status_code=422, detail="Team name must be ≤ 64 characters")
     import re as _re
-    if not _re.match(r"^[a-zA-Z0-9][a-zA-Z0-9 _-]{0,63}$", name):
+    # #750.6: align with sdk.team_create — spaces are rejected there, so accept
+    # them here too (stricter wins; surface as 422 not a 500 ControlPlaneError).
+    if not _re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$", name):
         raise HTTPException(status_code=422, detail="Invalid team name")
 
     sdk = _make_sdk(namespace="registry")
     reg = sdk._get_registry()
-    # Per-user team-creation rate limit (abuse posture) — not a tier block
+    # Per-user team-creation rate limit (abuse posture) — not a tier block.
+    # #743(b): the count was never checked, `since` was `now` (always 0), and
+    # membership_create never wrote `created_at` — all three fixed here.
     recent = reg.query(
         "MATCH (m:Membership {user_id:$uid, role:'owner'}) "
         "WHERE m.created_at > $since RETURN count(m)",
-        params={"uid": user["user_id"], "since": datetime.now(timezone.utc).isoformat()},
-    ).result_set
-    # (rate limiting via registry count is best-effort; a per-identity limiter
-    # is added in the abuse-posture work — see plan §8.3)
+        params={"uid": user["user_id"],
+                "since": (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()},
+    ).result_set[0][0]
+    if recent >= 3:
+        raise HTTPException(status_code=429,
+                            detail="Too many teams created — try again later")
 
     try:
         result = sdk.team_create(name)
@@ -1789,14 +2060,10 @@ async def create_graph(body: dict, user: dict = Depends(get_current_user)):
     team = await _team_node(team_id)
     if team is None:
         raise HTTPException(status_code=404, detail="Unknown team")
-    from tortoise.pricing import tier_limits
-    lim = tier_limits(team.get("tier", "free"))
-    max_graphs = lim["max_graphs_per_team"]
-    if max_graphs is not None:
-        sdk = _make_sdk(namespace="registry")
-        count = sdk.graph_count(team_id)
-        if count >= max_graphs:
-            raise HTTPException(status_code=402, detail="Graph limit reached — upgrade to add more graphs")
+
+    # #683: centralized graph-limit enforcement via fail-closed quota
+    limits = _team_limits_from_node(team)
+    _check_team_limit(limits, "graphs")
 
     sdk = _make_sdk(namespace="registry")
     g = sdk._graph_create(team_id, name, kind="custom")
@@ -1853,25 +2120,20 @@ async def invite_to_team(body: dict, user: dict = Depends(get_current_user)):
 
     sdk = _make_sdk(namespace="registry")
     reg = sdk._get_registry()
-    team = reg.query(
-        "MATCH (t:Team {id:$id}) RETURN t.tier, t.max_users",
+    team_row = reg.query(
+        "MATCH (t:Team {id:$id}) RETURN properties(t)",
         params={"id": team_id},
     ).result_set
-    tier = team[0][0] if team else "free"
+    if not team_row:
+        raise HTTPException(status_code=404, detail="Unknown team")
+    team_node = team_row[0][0]
+    tier = team_node.get("tier", "free")
     if tier != "team":
         raise HTTPException(status_code=402, detail="Invites require the Team tier")
 
-    # max_users gate (tier-driven; Team = unlimited)
-    from tortoise.pricing import tier_limits
-    lim = tier_limits(tier)
-    max_users = lim["max_users_per_team"]
-    if max_users is not None:
-        count = reg.query(
-            "MATCH (m:Membership {team_id:$tid, status:'active'}) RETURN count(m)",
-            params={"tid": team_id},
-        ).result_set[0][0]
-        if count >= max_users:
-            raise HTTPException(status_code=402, detail="Team at user limit — upgrade to invite more")
+    # #683: max_users gate via centralized fail-closed quota (Team tier = unlimited)
+    limits = _team_limits_from_node(team_node)
+    _check_team_limit(limits, "users")
 
     # Invitation node via SDK (token returned once); roles admin/member allowed here
     import uuid as _uuid
@@ -2041,13 +2303,10 @@ async def reconcile(request: Request):
                   params={"id": kid, "now": now})
         result["expired_keys_swept"] += 1
 
-    # 3. Orphaned unrevealed provision keys (>24h old, no reveal) — revoke
-    orphaned = reg.query(
-        "MATCH (k:APIKey) WHERE k.created_via IS NULL AND k.revoked_at IS NULL "
-        "AND k.created_at < $cutoff RETURN k.id",
-        params={"cutoff": (datetime.now(_tz.utc).replace(hour=0, minute=0, second=0, microsecond=0)).isoformat()},
-    ).result_set
-    # (best-effort; no plaintext to compare against, revoke only clearly-stale)
+    # #750.7: the former step-3 orphan sweep (created_via IS NULL keys) selected
+    # rows it never used — dead code AND a footgun (it matched every
+    # agent_signup/register key). Removed; the bootstrap-expiry sweep above is
+    # the correct expiry path.
 
     result["notes"].append("bootstrap-expiry sweep complete")
     return result
@@ -2064,14 +2323,14 @@ async def reconcile(request: Request):
 @app.post("/v1/agent/signup")
 async def agent_signup(request: Request):
     """Mint a team + API key for an anonymous device (no email/dashboard)."""
-    # Per-identity rate limit only (abuse posture): the identity is what an
-    # attacker must keep stable to use the minted key — IP rotates trivially.
+    # #741(a): identity is ALWAYS server-side — client-supplied identity and
+    # x-device-id are ignored (a client-chosen identity trivially bypasses the
+    # per-identity rate limit). The CLI generates its own identity server-side.
     body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
-    identity = (body or {}).get("identity") or request.headers.get("x-device-id", "")
-    if not identity:
-        import uuid as _uuid
-        identity = f"anon-{_uuid.uuid4().hex[:12]}"
-    identity = identity[:64]
+    if not isinstance(body, dict):
+        body = {}
+    import uuid as _uuid
+    identity = f"anon-{_uuid.uuid4().hex[:12]}"
 
     # Per-identity rate limit: max 3 signups per identity per hour
     from datetime import datetime, timezone as _tz, timedelta
@@ -2085,8 +2344,6 @@ async def agent_signup(request: Request):
     if recent >= 3:
         raise HTTPException(status_code=429, detail="Too many signups from this device — try again later")
 
-    import re as _re
-    import uuid as _uuid
     from tortoise.auth import hash_api_key as _hash
     from tortoise.pricing import tier_limits
 
@@ -2097,31 +2354,50 @@ async def agent_signup(request: Request):
     now = datetime.now(_tz.utc).isoformat()
     graph_name = f"team_{team_id}"
     lim = tier_limits("free")
+    # #750.8: .get() so a pricing.json key drift never 500s signup (pricing.py
+    # validates required keys at load; this is belt-and-braces).
+    mu = lim.get("max_users_per_team")
+    mg = lim.get("max_graphs_per_team")
+    mk = lim.get("max_api_keys")
+    ops = lim.get("included_write_ops_per_month")
+    nodes = lim.get("max_graph_nodes")
 
-    # Team node
-    reg.query(
-        "CREATE (t:Team {id:$id, name:$name, tier:'free', created_at:$now, backup_enabled:false, "
-        "max_users:$mu, max_graphs:$mg, max_api_keys:$mk, ops_allowance:$ops, graph_size_cap:$nodes})",
-        params={"id": team_id, "name": team_name, "now": now,
-                "mu": lim["max_users_per_team"], "mg": lim["max_graphs_per_team"],
-                "mk": lim["max_api_keys"], "ops": lim["included_write_ops_per_month"],
-                "nodes": lim["max_graph_nodes"]},
-    )
-    # APIKey node
-    kid = _short_id()
-    reg.query(
-        "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, key_prefix:$kp, created_by:$cb, created_at:$now})",
-        params={"id": kid, "tid": team_id, "kh": key_hash, "kp": api_key[:10], "cb": identity, "now": now},
-    )
-    # Anonymous membership (owner)
-    reg.query(
-        "CREATE (m:Membership {team_id:$tid, user_id:$uid, role:'owner', status:'active', created_at:$now})",
-        params={"tid": team_id, "uid": identity, "now": now},
-    )
-    # Default graph node
-    sdk._graph_create(team_id, "default", kind="default", namespace=graph_name)
+    try:
+        # Team node
+        reg.query(
+            "CREATE (t:Team {id:$id, name:$name, tier:'free', created_at:$now, backup_enabled:false, "
+            "max_users:$mu, max_graphs:$mg, max_api_keys:$mk, ops_allowance:$ops, graph_size_cap:$nodes})",
+            params={"id": team_id, "name": team_name, "now": now,
+                    "mu": mu, "mg": mg, "mk": mk, "ops": ops, "nodes": nodes},
+        )
+        # APIKey node
+        kid = _short_id()
+        reg.query(
+            "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, key_prefix:$kp, created_by:$cb, created_at:$now})",
+            params={"id": kid, "tid": team_id, "kh": key_hash, "kp": api_key[:10], "cb": identity, "now": now},
+        )
+        # Anonymous membership (owner)
+        reg.query(
+            "CREATE (m:Membership {team_id:$tid, user_id:$uid, role:'owner', status:'active', created_at:$now})",
+            params={"tid": team_id, "uid": identity, "now": now},
+        )
+        # Default graph node
+        sdk._graph_create(team_id, "default", kind="default", namespace=graph_name)
 
-    await _async_audit(request, team_id, "agent_signup", resource_type="team", resource_id=team_id)
+        await _async_audit(request, team_id, "agent_signup", resource_type="team", resource_id=team_id)
+    except HTTPException:
+        raise
+    except Exception:
+        # #741(c): rollback on partial failure — mirror register_user: DETACH
+        # DELETE Team + APIKey + Membership, drop the graph namespace.
+        reg.query("MATCH (t:Team {id:$id}) DETACH DELETE t", params={"id": team_id})
+        reg.query("MATCH (k:APIKey {team_id:$id}) DETACH DELETE k", params={"id": team_id})
+        reg.query("MATCH (m:Membership {team_id:$id}) DETACH DELETE m", params={"id": team_id})
+        try:
+            sdk._get_proj().db.select_graph(graph_name).delete()
+        except Exception:
+            pass
+        raise HTTPException(status_code=500, detail="Agent signup failed")
 
     return {"key": api_key, "team_id": team_id, "team_name": team_name, "graph_name": graph_name,
             "identity": identity, "tier": "free"}
@@ -2194,18 +2470,24 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
         created_via = "bootstrap"
     else:
         lim = tier_limits(tier)
-        max_keys = lim["max_api_keys"]
+        # #750.8: .get() so a pricing.json key drift never 500s the mint
+        # (pricing.py validates required keys at load; belt-and-braces).
+        max_keys = lim.get("max_api_keys")
         active_keys = reg.query(
             "MATCH (k:APIKey {team_id:$tid}) WHERE k.revoked_at IS NULL "
             "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') RETURN count(k)",
             params={"tid": tid},
         ).result_set[0][0]
         if max_keys is not None and active_keys >= max_keys:
+            # #750.10: never auto-revoke a key the current user created
+            # (created_by = their user_id) — recovery must not dead-end by
+            # killing the user's own session key. Oldest OTHER key wins.
             oldest = reg.query(
                 "MATCH (k:APIKey {team_id:$tid}) WHERE k.revoked_at IS NULL "
                 "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') "
+                "AND k.created_by <> $uid "
                 "RETURN k.id ORDER BY k.created_at ASC LIMIT 1",
-                params={"tid": tid},
+                params={"tid": tid, "uid": user_id},
             ).result_set
             if oldest:
                 reg.query(
@@ -2239,8 +2521,10 @@ async def session_context(team: dict = Depends(get_current_team)):
     sdk = _make_sdk(namespace=team["team_id"])
     try:
         return sdk.session_context()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Context unavailable: {e}")
+    except Exception:
+        # #750.5: never leak internals to the client — log, return generic.
+        logging.getLogger("tortoise.api").exception("session_context failed")
+        raise HTTPException(status_code=500, detail="Context unavailable")
 
 
 
@@ -2691,8 +2975,15 @@ def _backup_storage() -> R2Storage:
 
 
 def _require_backup_tier(team: dict) -> None:
-    """Backups are a Pro feature (#296 revenue model). Free tier → 402."""
-    if team.get("tier") in (None, "free"):
+    """Backups gated on pricing.json daily_backups feature flag (#656).
+
+    The allowlist is derived from product/pricing.json (NOT hardcoded) so
+    the gate can never drift from the canonical pricing source.
+    """
+    from tortoise.pricing import daily_backups_enabled
+
+    tier = team.get("tier")
+    if not daily_backups_enabled(tier):
         raise HTTPException(
             status_code=402,
             detail="Backups are a Pro feature — upgrade to enable daily backups",
@@ -2858,7 +3149,8 @@ def _backup_config_safe() -> "BackupConfig | None":
 
 def _alert_store_from(cfg) -> "AlertStore":
     from tortoise import github_issue as gi
-    from tortoise.alert_store import AlertStore, telegram_send
+    from tortoise.alert_store import AlertStore
+    from tortoise.telegram_push import send_message
 
     storage = _backup_storage()
 
@@ -2875,7 +3167,7 @@ def _alert_store_from(cfg) -> "AlertStore":
         return gi.search_open_incident(cfg.gh_repo, cfg.github_issues_pat, kind)
 
     def push_telegram(text: str) -> None:
-        telegram_send(cfg.telegram_bot_token, cfg.telegram_chat_id, text)
+        send_message(cfg.telegram_bot_token, cfg.telegram_chat_id, text)
 
     return AlertStore(
         storage, file_issue=file_issue, close_issue=close_issue,
@@ -3159,6 +3451,90 @@ async def backups_drill(request: Request, body: dict):
     except Exception:
         pass
     return {"status": "drill_ok", "target_graph": target_graph, **result}
+
+
+# ── Event Replay Surface (#692) ───────────────────────────────────
+
+
+@app.get("/v1/events")
+async def list_events(
+    request: Request,
+    cursor: str | None = None,
+    limit: int = Query(50, ge=1, le=500),
+    team: dict = Depends(get_current_team),
+):
+    """Return recent graph-change events for the authenticated team.
+
+    **Read-only** — tenants can only see their own team's events.
+    Tenant A can never read tenant B's event log: the file path is derived
+    from the authenticated ``team_id`` inside ``get_current_team``.
+
+    Pagination (reverse-chronological, most-recent-first):
+
+    * First request (no cursor): returns the most recent *limit* events.
+    * The response includes a ``cursor`` field.  Pass it back on the next
+      request to get the next page of older events.
+    * ``has_more`` is ``true`` when there are more events before the
+      returned window.
+
+    Cursor tokens are opaque base64-encoded strings.  They are valid only
+    while the underlying JSONL file is not rotated or compacted.
+    """
+    tid = team["team_id"]
+    log = _event_log_for(tid)
+
+    # Validate cursor early (before reading events) so malformed cursors
+    # always produce 400, even on empty logs.
+    if cursor is not None and cursor.strip() == "":
+        cursor = None
+    decoded_cursor: int | None = None
+    if cursor is not None:
+        try:
+            decoded_cursor = EventLog._decode_cursor(cursor)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid cursor: {exc}")
+
+    all_events = log.read_all()
+
+    if not all_events:
+        return {"events": [], "cursor": None, "has_more": False}
+
+    # Cursor semantics:
+    #   cursor encodes the index of the FIRST event in the previously
+    #   returned page.  On the next request, we page backwards from there.
+    #
+    # Example: 5 events at indices [0,1,2,3,4], limit=2
+    #   Page 1 (no cursor): slice [3:5] → events 3,4. cursor := encode(3).
+    #   Page 2 (cursor→3): slice [1:3] → events 1,2. cursor := encode(1).
+    #   Page 3 (cursor→1): slice [0:1] → event 0.   cursor := null.
+    if decoded_cursor is not None:
+        if decoded_cursor < 0:
+            raise HTTPException(status_code=400, detail="Invalid cursor: negative index")
+        # Clamp stale cursors that point beyond the current end (log shrank or
+        # the cursor came from a longer page) — never return a spurious
+        # empty page with has_more=True.
+        end_idx = min(decoded_cursor, len(all_events))
+        start_idx = max(0, end_idx - limit)
+    else:
+        # First page: most recent *limit* events.
+        end_idx = len(all_events)
+        start_idx = max(0, end_idx - limit)
+
+    page = all_events[start_idx:end_idx]
+    has_more = start_idx > 0
+
+    # Next cursor points to the start of this page (so the next request
+    # pages backwards from there).
+    next_cursor = EventLog._encode_cursor(start_idx) if has_more else None
+
+    # Most-recent-first for the response.
+    page.reverse()
+
+    return {
+        "events": page,
+        "cursor": next_cursor,
+        "has_more": has_more,
+    }
 
 
 # ── MCP mount (#236) ─────────────────────────────────────────────

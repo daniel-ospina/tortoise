@@ -1,7 +1,11 @@
-/* Tortoise consent manager — issue #658.
+/* Tortoise consent manager — issues #658 / #736.
  *
  * Single consent state gating PostHog (deployed on the tortoise funnel
- * pages) and, when activated later, Meta Pixel / Google Analytics.
+ * pages) and the Google Tag Manager container (GTM-WQR34GSC — the single
+ * tag container for GA4 and, when their tags are added, X / LinkedIn).
+ * GTM loads ONLY on "granted"; on decline/undecided it never loads, so no
+ * ad/analytics tags can fire. The Meta Pixel loader is a dormant stub
+ * (placeholder ID, fail-safe) until a real pixel ID exists.
  *
  * Fail-safe: with no real PostHog project key configured this module does
  * NOTHING — no network calls, no banner, no localStorage writes.
@@ -43,7 +47,7 @@
     }
   }
 
-  // Public getter for future Meta Pixel / GA4 loaders — they must check
+  // Public getter for the GTM / Meta Pixel loaders — they must check
   // `window.consentState() === "granted"` before loading.
   window.consentState = function () {
     return readConsent();
@@ -55,6 +59,7 @@
   }
 
   var bannerRendered = false;
+  var lastFocused = null; // element focused before the banner stole focus (#751)
 
   function hideBanner() {
     var banner = document.getElementById("consent-banner");
@@ -62,6 +67,12 @@
       banner.parentNode && banner.parentNode.removeChild(banner);
     }
     bannerRendered = false;
+    // Restore focus to the page element that had it before the banner
+    // appeared (standard dialog pattern).
+    if (lastFocused && typeof lastFocused.focus === "function" && document.body.contains(lastFocused)) {
+      lastFocused.focus();
+    }
+    lastFocused = null;
   }
 
   function onAccept() {
@@ -74,6 +85,9 @@
       window.posthog.opt_in_capturing();
     }
     hideBanner();
+    // Consent granted — activate the consent-gated GTM container + Meta
+    // loader too (GTM carries GA4; X/LinkedIn tags when they are added).
+    loadConsentedAnalytics();
   }
 
   function onDecline() {
@@ -90,7 +104,7 @@
 
   // Banner markup lives here (shared module) and is injected at runtime —
   // site design tokens: --bg #060b14, --surface #0d1a2d, --accent #06b6d4,
-  // --text #cbd5e1, --text-dim #64748b, --border #1e293b, mono font.
+  // --text #cbd5e1, --text-dim #94a3b8, --border #1e293b, mono font.
   function renderBanner() {
     // Automated browsers (Playwright/E2E) never get the overlay — keeps
     // same-viewport and mocked-click tests stable while real browsers do.
@@ -108,24 +122,27 @@
       "#consent-banner{position:fixed;left:0;right:0;bottom:0;z-index:9999;" +
       "background:#0d1a2d;border-top:1px solid #1e293b;padding:0.9rem 1.25rem;" +
       "font-family:'SF Mono','Cascadia Code','Fira Code','JetBrains Mono',monospace;" +
-      "font-size:0.8rem;color:#cbd5e1;display:flex;flex-wrap:wrap;align-items:center;" +
-      "justify-content:space-between;gap:0.75rem;box-shadow:0 -4px 24px rgba(0,0,0,0.45)}" +
-      "#consent-banner .consent-banner-text{margin:0;color:#64748b;line-height:1.5;max-width:38rem}" +
+      "font-size:0.8rem;color:#cbd5e1;box-shadow:0 -4px 24px rgba(0,0,0,0.45)}" +
+      "#consent-banner .consent-banner-inner{display:flex;flex-wrap:wrap;align-items:center;" +
+      "justify-content:space-between;gap:0.75rem 1.25rem;width:100%;margin:0 auto;max-width:72rem}" +
+      "#consent-banner .consent-banner-text{margin:0;color:#94a3b8;line-height:1.5;max-width:38rem;flex:1 1 22rem}" +
       "#consent-banner .consent-banner-text a{color:#06b6d4;text-decoration:none}" +
       "#consent-banner .consent-banner-text a:hover{text-decoration:underline}" +
-      "#consent-banner .consent-banner-actions{display:flex;gap:0.6rem;flex-shrink:0}" +
+      "#consent-banner .consent-banner-actions{display:flex;gap:0.6rem;flex-shrink:0;margin-left:auto}" +
       "#consent-banner button{font-family:inherit;font-size:0.78rem;padding:0.45rem 1rem;" +
       "border-radius:6px;cursor:pointer;border:1px solid #1e293b;background:transparent;" +
       "color:#cbd5e1;transition:border-color .15s,color .15s,background .15s}" +
       "#consent-banner .consent-accept{background:#06b6d4;border-color:#06b6d4;" +
       "color:#060b14;font-weight:600}" +
       "#consent-banner .consent-accept:hover{background:#22d3ee;border-color:#22d3ee}" +
-      "#consent-banner .consent-decline:hover{border-color:#64748b;color:#fff}";
+      "#consent-banner .consent-decline:hover{border-color:#94a3b8;color:#fff}";
 
     var banner = document.createElement("div");
     banner.id = "consent-banner";
     banner.setAttribute("role", "dialog");
     banner.setAttribute("aria-label", "Cookie and analytics consent");
+    banner.setAttribute("aria-modal", "true");
+    banner.setAttribute("tabindex", "-1"); // focusable so we can move focus into it (#751)
     banner.innerHTML =
       '<div class="consent-banner-inner">' +
       '<p class="consent-banner-text">We use cookies and analytics to understand how the product is used ' +
@@ -148,6 +165,32 @@
     if (decline) {
       decline.addEventListener("click", onDecline);
     }
+
+    // ── Focus management (#751): move focus into the banner on inject, keep
+    //    Tab within it (simple focus trap), and let Escape decline.
+    lastFocused = document.activeElement;
+    banner.focus();
+    banner.addEventListener("keydown", function (e) {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onDecline();
+        return;
+      }
+      if (e.key !== "Tab") return;
+      var focusables = banner.querySelectorAll(
+        'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      );
+      if (!focusables.length) return;
+      var first = focusables[0];
+      var last = focusables[focusables.length - 1];
+      if (e.shiftKey && (document.activeElement === first || document.activeElement === banner)) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    });
   }
 
   // ── posthog-js loader (official snippet logic, US api_host) — the stub
@@ -201,6 +244,76 @@
     });
   }
 
+  // ── Consent-gated Google Tag Manager loader + Meta Pixel stub ───────────
+  // GTM is the SINGLE tag container (owner decision, #736): GA4 and, when
+  // their tags are added, X (Twitter) + LinkedIn all fire from container
+  // GTM-WQR34GSC. The container loads ONLY when consent is "granted" —
+  // never on Decline or undecided — so if GTM never loads, none of those
+  // tags can fire. The container ID is public (it appears in page source).
+  //
+  // GA4 is now delivered VIA GTM — the former direct gtag loader
+  // (GA_MEASUREMENT_ID "__GA4_MEASUREMENT_ID__") was removed at #736; the
+  // GA4 config tag lives in container GTM-WQR34GSC (Google tag id
+  // G-QP6D2BGC2B, stream "Tortoise landing").
+  var GTM_CONTAINER_ID = "GTM-WQR34GSC";
+  var META_PIXEL_ID = "__META_PIXEL_ID__"; // dormant stub (fail-safe)
+  var gtmLoaded = false;
+  var metaPixelLoaded = false;
+
+  // Standard GTM loader (official snippet logic — dataLayer initialized
+  // BEFORE the gtm.js request). Fail-safe: placeholder ID stays inert.
+  function loadGTM() {
+    if (!GTM_CONTAINER_ID || GTM_CONTAINER_ID.indexOf("__") === 0 || gtmLoaded) {
+      return; // fail-safe: placeholder ID or already loaded — stay inert
+    }
+    gtmLoaded = true;
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push({
+      "gtm.start": new Date().getTime(),
+      event: "gtm.js",
+    });
+    var s = document.createElement("script");
+    s.async = true;
+    s.src = "https://www.googletagmanager.com/gtm.js?id=" + GTM_CONTAINER_ID;
+    (document.head || document.documentElement).appendChild(s);
+  }
+
+  function loadMetaPixel() {
+    if (!META_PIXEL_ID || META_PIXEL_ID.indexOf("__") === 0 || metaPixelLoaded) {
+      return; // fail-safe: placeholder ID or already loaded — stay inert
+    }
+    metaPixelLoaded = true;
+    // Meta Pixel base code (official snippet).
+    !function (f, b, e, v, n, t, s) {
+      if (f.fbq) { return; }
+      n = f.fbq = function () {
+        n.callMethod ? n.callMethod.apply(n, arguments) : n.queue.push(arguments);
+      };
+      if (!f._fbq) { f._fbq = n; }
+      n.push = n;
+      n.loaded = !0;
+      n.version = "2.0";
+      n.queue = [];
+      t = b.createElement(e);
+      t.async = !0;
+      t.src = v;
+      s = b.getElementsByTagName(e)[0];
+      s.parentNode.insertBefore(t, s);
+    }(window, document, "script", "https://connect.facebook.net/en_US/fbevents.js");
+    fbq("init", META_PIXEL_ID);
+    fbq("track", "PageView");
+  }
+
+  // Runs after a consent decision — reads the live state and loads the
+  // consented tools only when it is exactly "granted".
+  function loadConsentedAnalytics() {
+    if (window.consentState() !== "granted") {
+      return; // never load on Decline / undecided
+    }
+    loadGTM();
+    loadMetaPixel();
+  }
+
   function init() {
     // Defensive: never double-render if this module were ever loaded twice.
     if (document.getElementById("consent-banner-style")) {
@@ -214,6 +327,8 @@
       if (window.posthog && typeof window.posthog.opt_in_capturing === "function") {
         window.posthog.opt_in_capturing();
       }
+      // Consent already given — activate the consent-gated loaders too.
+      loadConsentedAnalytics();
     } else if (state === "denied") {
       if (window.posthog && typeof window.posthog.opt_out_capturing === "function") {
         window.posthog.opt_out_capturing();

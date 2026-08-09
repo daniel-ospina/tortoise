@@ -37,6 +37,7 @@
       }
     },
     "tortoise": {
+      "_comment": "HTTP transport — the DB target is resolved SERVER-SIDE by whichever process listens on localhost:8000 (hosted API via entrypoint.sh → FALKORDB_CLOUD_URI, or selfhost daemon via TORTOISE_DB_URI). The old stdio command+env pattern (python3 -m tortoise.mcp_server with TORTOISE_DB_URI in env) was replaced in feat/338 (commit 6ea920f). See how-to-use-tortoise skill §DB URI Reality for full env precedence.",
       "type": "http",
       "url": "http://localhost:8000/mcp",
       "headers": {}

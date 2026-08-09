@@ -14,7 +14,7 @@
       --bg: #060b14;
       --surface: #0d1a2d;
       --text: #cbd5e1;
-      --text-dim: #64748b;
+      --text-dim: #94a3b8;
       --accent: #06b6d4;
       --accent-glow: rgba(6, 182, 212, 0.35);
       --green: #4ade80;
@@ -154,31 +154,33 @@
       <p><strong>Jurisdiction of residence:</strong> Mexico.</p>
       <p><strong>Contact for privacy matters:</strong> email <a href="mailto:hello@premiselabs.co">hello@premiselabs.co</a>. This is the controller's designated contact channel for all privacy inquiries and requests.</p>
       <p><strong>EU/EEA representative (GDPR Art. 27):</strong> "We are not currently established in the EU/EEA. If we become subject to GDPR Art. 27, we will designate and disclose an EU representative here."</p>
-      <p><strong>LFPDPPP (Mexico):</strong> The Mexican Federal Law on the Protection of Personal Data Held by Private Parties (LFPDPPP) applies to personal data of individuals in Mexico. ARCO rights (Access, Rectification, Cancellation, Opposition) are exercised via email <a href="mailto:hello@premiselabs.co">hello@premiselabs.co</a>. A standalone privacy notice (Aviso de Privacidad) will be published as a follow-up and is available on request in the meantime.</p>
+      <p><strong>LFPDPPP (Mexico):</strong> The Mexican Federal Law on the Protection of Personal Data Held by Private Parties (LFPDPPP) applies to personal data of individuals in Mexico. ARCO rights (Access, Rectification, Cancellation, Opposition) are exercised via email <a href="mailto:hello@premiselabs.co">hello@premiselabs.co</a>. A standalone privacy notice (Aviso de Privacidad) in Spanish is available at <a href="/aviso-privacidad">Aviso de Privacidad (Español)</a>.</p>
 
       <h2>2. Data processed by the service</h2>
       <p>The service processes the following categories of personal data:</p>
       <ul>
         <li><strong>Account data.</strong> Account data includes your email address, authentication credentials, and account identifiers. Authentication is managed through an identity and database provider (Supabase), and sign-in may be completed through the GitHub or Google OAuth identity providers. This category is required for account creation, authentication, and billing.</li>
         <li><strong>Usage data.</strong> Usage data includes information about how the service is used — for example, API requests made, features used, and performance signals. Usage data is not tied to your identity beyond your account.</li>
-        <li><strong>Analytics data.</strong> Analytics data includes behavioral and technical signals that would be processed by analytics tools (Meta Pixel, Google Analytics (GA4), and PostHog) <strong>when those tools are activated</strong> — see §3.</li>
+        <li><strong>Analytics data.</strong> Analytics data includes behavioral and technical signals processed by the analytics tools (PostHog and Google Analytics (GA4)) when you give consent via the consent banner, and by planned tools (Meta Pixel, X (Twitter), and LinkedIn) when those tools are activated — see §3.</li>
         <li><strong>Waitlist data.</strong> Email addresses submitted through the waitlist form on premiselabs.co are stored in a subscription database and used solely to send launch notifications and updates related to the waitlist. Consent is given by submitting the form, and every message includes an unsubscribe option.</li>
       </ul>
       <p><strong>Sensitive data — expectation.</strong> "we expect users not to place sensitive data in the service" — do not place health data, biometric data, government identifiers, or other sensitive personal data in the service. See §13.</p>
       <p><strong>Eligibility.</strong> The service is intended for use by adults: you must be at least 18 years old to create an account or use the service. The service is not directed to children.</p>
 
       <h2>3. Analytics and cookies</h2>
-      <p><strong>Deployed analytics tool.</strong> The following analytics tool is deployed on the tortoise funnel pages (product, signup, sign-in, and welcome pages), and it captures data only after you give consent via the consent banner:</p>
+      <p><strong>Deployed analytics tools.</strong> The following analytics tools are deployed on the tortoise funnel pages (product, signup, sign-in, and welcome pages), and they capture data only after you give consent via the consent banner:</p>
       <ul>
         <li><strong>PostHog</strong> — product analytics (PostHog Inc.). PostHog is a data processor; data is stored in the United States.</li>
+        <li><strong>Google Analytics (GA4)</strong> — audience and product analytics (Google LLC), delivered through Google Tag Manager. GA4 loads only after you give consent via the consent banner.</li>
       </ul>
       <p><strong>Planned tools, disclosed now.</strong> The following analytics tools are not deployed yet and may be activated with your consent; consent is managed via the consent banner:</p>
       <ul>
         <li><strong>Meta Pixel</strong> — advertising measurement and conversion tracking (Meta Platforms, Inc.).</li>
-        <li><strong>Google Analytics (GA4)</strong> — audience and product analytics (Google LLC).</li>
+        <li><strong>X (Twitter)</strong> — advertising and conversion tracking (X Corp.).</li>
+        <li><strong>LinkedIn</strong> — advertising and conversion tracking (LinkedIn Corporation).</li>
       </ul>
       <p>Cookies and similar technologies are used by these tools when activated. You can give or withdraw consent at any time via the consent banner.</p>
-      <p>Until consent is given, PostHog captures no data, the planned tools are not loaded, and no data is sent to them.</p>
+      <p>Until consent is given, PostHog captures no data, the planned tools are not loaded, and no data is sent to them. Google Tag Manager itself is loaded only after consent, so GA4 and any other tags it contains cannot fire before consent is given.</p>
 
       <h2>4. Purposes of processing and legal bases</h2>
       <p><strong>Purposes of processing:</strong> "your email address and account information are used to deliver the service, respond to requests, and manage billing; usage data is used to improve the product"</p>
@@ -251,7 +253,11 @@
         <li><strong>GitHub</strong> — sign-in may be completed through the GitHub OAuth identity provider; when you choose that option, identity data is processed by GitHub. Used today.</li>
         <li><strong>Google</strong> — sign-in may be completed through the Google OAuth identity provider; when you choose that option, identity data is processed by Google. Used today.</li>
         <li><strong>PostHog</strong> — analytics data is processed by PostHog when you give consent via the consent banner (§3). Used today.</li>
-        <li><strong>Meta, Google</strong> — if the corresponding analytics tools are activated with consent, analytics data is processed by these providers (§3). Not deployed today.</li>
+        <li><strong>Google Tag Manager</strong> — the consent-gated tag container that delivers GA4 and, when activated, the X and LinkedIn tags; it is loaded only after consent via the consent banner (§3). Used today.</li>
+        <li><strong>Google Analytics (GA4)</strong> — analytics data is processed by Google when you give consent via the consent banner (§3). Used today, delivered via Google Tag Manager.</li>
+        <li><strong>X (Twitter)</strong> — if the X advertising tag is activated with consent, data is processed by X Corp. (§3). Not deployed today.</li>
+        <li><strong>LinkedIn</strong> — if the LinkedIn Insight Tag is activated with consent, data is processed by LinkedIn Corporation (§3). Not deployed today.</li>
+        <li><strong>Meta</strong> — if the Meta Pixel is activated with consent, data is processed by Meta Platforms, Inc. (§3). Not deployed today.</li>
         <li><strong>Stripe</strong> — when paid plans become available, payment data is processed by Stripe for billing. Not deployed today.</li>
       </ul>
       <p>No other sharing of personal data occurs, except as required by law or with your consent.</p>

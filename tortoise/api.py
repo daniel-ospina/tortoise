@@ -64,7 +64,9 @@ class EventAPI:
             "content": content,
             "operator": operator,
             "provenance": prov,
-            "status": "live",
+            # #432: parity with the SDK default — points enter as draft and go
+            # live when first operator edge is created (#131).
+            "status": "draft",
             "createdAt": now_iso(),
         }
 

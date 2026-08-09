@@ -9,7 +9,7 @@
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     :root {
-      --bg: #060b14; --text: #cbd5e1; --text-dim: #64748b;
+      --bg: #060b14; --text: #cbd5e1; --text-dim: #94a3b8;
       --accent: #06b6d4; --accent-glow: rgba(6, 182, 212, 0.35);
       --green: #4ade80; --gold: #f59e0b;
       --serif: 'Georgia', 'Times New Roman', serif;
@@ -91,10 +91,10 @@ Next: tortoise serve  — start MCP server for agents
   <div class="card">
     <p>Connect your agent over <strong>stdio</strong> (local process) instead of Streamable HTTP. Pick your harness:</p>
     <div class="harness-tabs" id="harness-tabs">
-      <button class="harness-tab active" data-harness="claude">Claude Code</button>
-      <button class="harness-tab" data-harness="codex">Codex</button>
-      <button class="harness-tab" data-harness="cursor">Cursor</button>
-      <button class="harness-tab" data-harness="pi">Pi</button>
+      <button class="harness-tab active" data-harness="claude" aria-pressed="true">Claude Code</button>
+      <button class="harness-tab" data-harness="codex" aria-pressed="false">Codex</button>
+      <button class="harness-tab" data-harness="cursor" aria-pressed="false">Cursor</button>
+      <button class="harness-tab" data-harness="pi" aria-pressed="false">Pi</button>
     </div>
     <pre id="mcp-config-text"></pre>
     <button class="copy-btn" onclick="copyText('mcp-config-text')">Copy config</button>
@@ -111,10 +111,10 @@ Next: tortoise serve  — start MCP server for agents
   <div class="card">
     <table>
       <tr><th></th><th>Embedded (default)</th><th>Docker / FalkorDB</th></tr>
-      <tr><td><strong>Setup</strong></td><td>Zero deps — <code>tortoise onboard</code> just works</td><td><code>docker run falkordb/falkordb</code></td></tr>
+      <tr><td><strong>Setup</strong></td><td>Zero deps — <code>tortoise onboard</code> uses the embedded default when no URI is configured</td><td><code>docker run falkordb/falkordb</code> + set <code>TORTOISE_DB_URI</code></td></tr>
       <tr><td><strong>Durability</strong></td><td>Single-node, file-backed</td><td>AOF + backups, multi-node</td></tr>
       <tr><td><strong>Best for</strong></td><td>Solo dev, laptop</td><td>Teams, production</td></tr>
-      <tr><td><strong>Init</strong></td><td><code>tortoise init</code> auto-detects</td><td><code>tortoise init</code> connects to <code>docker://</code> URI</td></tr>
+      <tr><td><strong>Init</strong></td><td><code>tortoise init</code> resolves: <code>--path</code> → <code>TORTOISE_DB_URI</code> (<code>docker://</code> / <code>redis://</code> / <code>rediss://</code>) → legacy <code>FALKORDB_*</code> → <code>TORTOISE_DB_PATH</code> → embedded default</td><td><code>tortoise init</code> connects to the <code>docker://</code> / <code>redis://</code> / <code>rediss://</code> URI from <code>TORTOISE_DB_URI</code></td></tr>
     </table>
   </div>
 
@@ -173,8 +173,11 @@ codex mcp add tortoise -- python3 -m tortoise.mcp_server`,
   document.querySelectorAll(".harness-tab").forEach(tab => {
     tab.addEventListener("click", () => {
       currentHarness = tab.dataset.harness;
-      document.querySelectorAll(".harness-tab").forEach(t =>
-        t.classList.toggle("active", t.dataset.harness === currentHarness));
+      document.querySelectorAll(".harness-tab").forEach(t => {
+        const active = t.dataset.harness === currentHarness;
+        t.classList.toggle("active", active);
+        t.setAttribute("aria-pressed", String(active));
+      });
       renderMcpConfig();
     });
   });

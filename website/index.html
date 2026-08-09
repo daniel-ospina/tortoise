@@ -18,7 +18,7 @@
     :root {
       --bg: #060b14;
       --text: #cbd5e1;
-      --text-dim: #64748b;
+      --text-dim: #94a3b8;
       --accent: #06b6d4;
       --accent-glow: rgba(6, 182, 212, 0.35);
       --green: #4ade80;
@@ -53,8 +53,12 @@
       padding: 2rem;
     }
 
-    /* Specific beats get pointer events for interactive elements */
-    #beat-cta { pointer-events: auto; }
+    /* CTA beat: the fixed full-screen overlay must never swallow clicks when
+       invisible — only its interactive children get pointer events (#744).
+       Other beats have no interactive children and inherit pointer-events:
+       none from .beat, so no further overrides are needed. */
+    #beat-cta { pointer-events: none; }
+    #beat-cta form, #beat-cta a, #beat-cta button { pointer-events: auto; }
 
     #beat-hero { opacity: 1; }
 
@@ -324,7 +328,7 @@
       <a href="https://tortoise.premiselabs.co" class="cta-start">Learn more →</a>
       <p class="cta-subtle">Meet Tortoise — the memory graph for AI agents.</p>
       <a class="selfhost-link" href="/docs">Docs</a>
-      <a class="selfhost-link" href="https://github.com/daniel-ospina/tortoise" target="_blank" rel="noopener">Self-hosting docs →</a>
+      <a class="selfhost-link" href="/self-hosted">Self-hosting docs →</a>
       <a class="selfhost-link" href="https://app.premiselabs.co">Login →</a>
       <a class="twitter-link" href="https://x.com/premiselabs" target="_blank" rel="noopener">@premiselabs</a>
     </section>

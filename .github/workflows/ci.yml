@@ -8,6 +8,40 @@ on:
   pull_request:
 
 jobs:
+  pricing-artifact:
+    # #682: canonical pricing must exist on main and stay in sync with the
+    # tier_limits() table — a missing/renamed product/pricing.json fails CI.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install package (parity check imports tortoise.pricing)
+        run: pip install -e . --quiet
+      - name: pricing.json present
+        run: test -f product/pricing.json || { echo "product/pricing.json missing — canonical pricing artifact (#682)"; exit 1; }
+      - name: parity (billing table == pricing.json)
+        run: |
+          python3 - <<'EOF'
+          import json, sys
+          sys.path.insert(0, '.')
+          from tortoise.pricing import tier_limits, all_tiers
+          pricing = json.load(open('product/pricing.json'))['tiers']
+          problems = []
+          for tier in all_tiers():
+              lim = tier_limits(tier)
+              spec = pricing.get(tier, {})
+              if lim['included_write_ops_per_month'] != spec.get('included_write_ops_per_month'):
+                  problems.append(f"{tier}: tier_limits={lim['included_write_ops_per_month']} vs pricing.json={spec.get('included_write_ops_per_month')}")
+              if lim['max_api_keys'] != spec.get('max_api_keys'):
+                  problems.append(f"{tier}: max_api_keys={lim['max_api_keys']} vs pricing.json={spec.get('max_api_keys')}")
+          if problems:
+              print('PRICING DRIFT:', *problems, sep='\n  ')
+              sys.exit(1)
+          print('pricing parity OK')
+          EOF
+
   docs:
     runs-on: ubuntu-latest
     steps:
@@ -29,15 +63,11 @@ jobs:
         with:
           args: --no-progress ${{ steps.changed.outputs.files }}
 
-  python-tests:
-    # Full Python suite, embedded FalkorDBLite (no Docker). uv is the
-    # canonical dev package manager (#492): the committed uv.lock is the
-    # enforcement loop, so `uv lock --check` + `uv sync --frozen` gate on
-    # lockfile/pyproject drift and `uv run pytest` gates on the suite.
-    # Self-contained (no reusable-workflow call — agent-infra@main calls
-    # fail to parse on GitHub, fix #555). Replaces the dead python-ci.yml
-    # symlink (agent-infra template is pip-based, Python 3.11 default;
-    # tortoise requires >=3.12 — kept repo-local instead).
+  uv-lock-check:
+    # #493: the committed uv.lock is the dev-environment source of truth —
+    # gate on lockfile/pyproject drift. The suite itself runs in the
+    # dedicated python-ci.yml workflow (pip); this job enforces the uv lock
+    # contract so the lockfile never silently drifts again.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -47,13 +77,8 @@ jobs:
           python-version: '3.12'
       - name: Lockfile coherence check (uv.lock vs pyproject.toml)
         run: uv lock --check
-      - name: Install deps, frozen (dev group)
+      - name: Frozen sync (dev group)
         run: uv sync --frozen --group dev
-      - name: Run test suite (embedded FalkorDBLite)
-        # E2E welcome/legal + waitlist page tests run in the dedicated
-        # welcome-e2e job (they need Playwright browsers); unit/integration
-        # suite here.
-        run: uv run pytest tests/ --ignore=tests/e2e --ignore=tests/test_waitlist_form.py -x -q -p no:cacheprovider --timeout=120
 
   test-isolation:
     runs-on: ubuntu-latest
@@ -100,3 +125,72 @@ jobs:
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
       - name: Run waitlist edge-function behavioral harness (#373)
         run: node --experimental-strip-types tests/test_waitlist_subscribe.mjs
+
+  legal-e2e:
+    runs-on: ubuntu-latest
+    # Full legal-page suite (#657) — ~1000 assertions across 10 plan checks
+    # (privacy/tos/license/dpa content, consent + pricing content, mocked
+    # signup/signin flows, mobile render, full link crawl). The suite is
+    # opt-in via RUN_LEGAL_E2E=1 (module-level skip otherwise) and had NO
+    # workflow setting it — this job is the automation (#747).
+    #
+    # Runs against a LOCAL `wrangler pages dev` preview of website/ — no
+    # production URLs, no secrets. The harness's own canary
+    # (_tortoise_emulated_locally) decides whether the Host-spoofed
+    # tortoise.* checks actually run or defer (skip = green-with-annotation,
+    # workers-sdk#165); TORTISE_HOST_CHECK=1 opts into that canary.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # Install the package (pulls falkordblite/redislite needed by
+      # tortoise/__init__) + the e2e test extras (playwright, pytest-playwright).
+      - run: pip install -e '.[test]'
+      - run: python -m playwright install --with-deps chromium
+      - name: Start wrangler pages dev preview (website/ = Pages root)
+        run: |
+          cd website
+          # --compatibility-date pinned: wrangler defaults to "today", but the
+          # bundled workerd lags a day behind (max date < today) → dev server
+          # fails to start. Any stable date ≤ workerd's max works; the
+          # middleware uses only stable APIs (next()/ASSETS.fetch).
+          npx --yes wrangler@4 pages dev . --port 8788 --ip 127.0.0.1 \
+            --compatibility-date=2024-09-23 \
+            > /tmp/wrangler.log 2>&1 &
+          echo $! > /tmp/wrangler.pid
+          # Wait for the dev server to accept connections (first start also
+          # downloads workerd + bundles website/functions/_middleware.ts).
+          for i in $(seq 1 120); do
+            if curl -fsS http://127.0.0.1:8788/ >/dev/null 2>&1; then
+              echo "wrangler dev ready after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::wrangler dev server failed to start"
+          tail -50 /tmp/wrangler.log || true
+          exit 1
+      - name: Run legal pages E2E suite (#657)
+        # LEGAL_E2E_SKIP_EXTERNAL_CRAWL=1: the third-party external-link
+        # crawl fetches unauthenticated production URLs (github.com/LICENSE,
+        # …) that rate-limit shared CI runner IPs (429 outlives the test's
+        # single retry) → nondeterministic gate. Skip-with-annotation, same
+        # pattern as the tortoise-host deferral; full crawl runs locally.
+        run: >
+          RUN_LEGAL_E2E=1 BASE_URL=http://127.0.0.1:8788
+          TORTISE_HOST=http://127.0.0.1:8788 TORTISE_HOST_CHECK=1
+          LEGAL_E2E_SKIP_EXTERNAL_CRAWL=1
+          python -m pytest tests/e2e/test_legal_pages.py -q -p no:cacheprovider
+      - name: Stop wrangler dev server
+        if: always()
+        # kill npx + its wrangler/workerd children (each job gets its own
+        # runner VM, so pkill can't touch other jobs)
+        run: |
+          kill $(cat /tmp/wrangler.pid) 2>/dev/null || true
+          pkill -f 'wrangler.*8788' 2>/dev/null || true
+          pkill workerd 2>/dev/null || true
+          true

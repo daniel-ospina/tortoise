@@ -24,22 +24,47 @@ from __future__ import annotations
 
 import os
 
-from redislite.falkordb_client import FalkorDB as _OriginalFalkorDB
+try:
+    from redislite.falkordb_client import FalkorDB as _OriginalFalkorDB
+except ModuleNotFoundError:  # pragma: no cover - dep-missing environment
+    # falkordblite not installed: do NOT crash at import time, or the CLI
+    # install guidance in `tortoise init` can never run (issue #716). The
+    # subclass below falls back to a placeholder that raises a clear
+    # ImportError at construction instead.
+    _OriginalFalkorDB = None  # type: ignore[assignment]
 
 from tortoise.config import RELATIVE_PATH_ERROR
 
 
-class FalkorDB(_OriginalFalkorDB):
-    """Guarded subclass of redislite's FalkorDB.
+if _OriginalFalkorDB is not None:
 
-    Raises RuntimeError when `path` is relative (never permitted — relative
-    paths create per-CWD servers, the Category-3 leak). Absolute paths and
-    no-arg construction pass through to the original.
-    """
+    class FalkorDB(_OriginalFalkorDB):
+        """Guarded subclass of redislite's FalkorDB.
 
-    def __init__(self, *args, **kwargs):
-        if args and args[0] is not None and isinstance(args[0], str):
-            path = args[0]
-            if not os.path.isabs(path) and not path.startswith("~"):
-                raise RuntimeError(RELATIVE_PATH_ERROR.format(path=path))
-        super().__init__(*args, **kwargs)
+        Raises RuntimeError when `path` is relative (never permitted — relative
+        paths create per-CWD servers, the Category-3 leak). Absolute paths and
+        no-arg construction pass through to the original.
+        """
+
+        def __init__(self, *args, **kwargs):
+            if args and args[0] is not None and isinstance(args[0], str):
+                path = args[0]
+                if not os.path.isabs(path) and not path.startswith("~"):
+                    raise RuntimeError(RELATIVE_PATH_ERROR.format(path=path))
+            super().__init__(*args, **kwargs)
+
+else:
+
+    class FalkorDB:
+        """Placeholder for when falkordblite is absent (issue #716).
+
+        Construction raises ImportError so the CLI's install guidance is
+        reachable when the dependency is actually missing, instead of a raw
+        traceback at import time.
+        """
+
+        def __init__(self, *args, **kwargs):
+            raise ImportError(
+                "falkordblite is not installed — embedded mode requires it. "
+                "Run: pip install falkordblite"
+            )

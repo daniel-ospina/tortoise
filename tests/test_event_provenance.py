@@ -637,7 +637,9 @@ class TestSupersedePointStructuralTransfer:
         assert r2[0][0] == 0
 
     def test_supersede_transfer_idempotent_no_duplicates(self, sdk):
-        """Running supersede twice must not duplicate edges."""
+        """Running supersede twice must not duplicate edges — the second call
+        is an illegal transition under the #432 state model (superseded is
+        terminal), so the guard raises before any edge writes."""
         proj = sdk._get_proj()
         subj = sdk.create_point("statement", "subject")
         old_pt = sdk.create_point("statement", "old")
@@ -646,8 +648,11 @@ class TestSupersedePointStructuralTransfer:
         proj.create_about_edge(old_pt["id"], subj["id"], "aboutSubject")
 
         sdk.supersede_point(old_pt["id"], new_pt["id"])
-        # Second supersede on already-superseded old point — MERGE must prevent duplicates
-        result2 = sdk.supersede_point(old_pt["id"], new_pt["id"])
+        # Second supersede on already-superseded (terminal) old point — #432
+        # guard rejects the transition (was previously a silent no-op).
+        import pytest
+        with pytest.raises(ValueError, match="terminal"):
+            sdk.supersede_point(old_pt["id"], new_pt["id"])
         # Verify exactly 1 aboutSubject edge on new point (no duplicates)
         r = proj.g.query(
             "MATCH (new:Point {id:$nid})-[a:aboutSubject]->(s:Point {id:$sid}) "

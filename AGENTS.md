@@ -70,6 +70,12 @@ Premise Labs is the internal R&D and strategy hub. It houses:
 - `AGENT_INFRA_PATH` — Path to agent-infra repo (required for bootstrap, pre-commit version gate)
 - See `.env.example` for all variables
 
+## Model Selection (Pi)
+
+- **Most tasks:** `deepseek-v4-flash` (base default)
+- **Graphics/visual tasks:** `qwen3.8-max` (Qwen 3.8)
+- **Highly complex / tricky tasks:** `qwen3.8-max` (Qwen 3.8)
+
 ## Git Workflow
 
 - **Before any commit:** invoke `commit-workflow` skill

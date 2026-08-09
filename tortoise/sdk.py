@@ -15,6 +15,7 @@ from .domain_loader import known_kinds, register_kind
 from .ids import ulid
 from . import monitoring
 from .projection import FalkorProjection
+from .quota import MAX_EXTRACTIONS_PER_TURN, MAX_SESSION_TURNS
 import threading
 
 # P0 Group 3: register custom kinds for diary + checkpoint
@@ -24,7 +25,7 @@ register_kind("option")    # used by file_decision (#133)
 register_kind("evidence")  # used by file_decision (#133)
 
 # Valid status values for Point nodes (used by update_point status validation)
-POINT_STATUS_VALUES = frozenset({'live', 'draft', 'outdated', 'archived'})
+POINT_STATUS_VALUES = frozenset({'live', 'draft', 'outdated', 'archived', 'retracted'})
 
 _logger = logging.getLogger(__name__)
 
@@ -172,13 +173,17 @@ class TortoiseSDK:
     Args:
         db_path: Optional path to FalkorDBLite database file (None = use TORTOISE_DB_URI env var).
         namespace: Optional namespace for graph-name isolation.
+        event_log_path: Optional path to JSONL event log. When set, SDK write
+            paths append events so rebuild_all can restore SDK-created points (#548).
+            If None, no events are emitted (backward-compatible).
 
     Precedence: an explicitly-provided db_path wins over the TORTOISE_DB_URI
     env var. This lets tests/fixtures force a temp embedded DB even when a
     shared test URI is set in the environment (#139).
     """
 
-    def __init__(self, db_path: str | None = None, *, namespace: str | None = None):
+    def __init__(self, db_path: str | None = None, *, namespace: str | None = None,
+                 event_log_path: str | None = None):
         import os, re
         db_uri = os.environ.get("TORTOISE_DB_URI")
         if db_uri and db_path is None:
@@ -213,6 +218,8 @@ class TortoiseSDK:
                     "Use alphanumeric, hyphens, underscores; max 64 chars."
                 )
         self._namespace = namespace
+        self._event_log_path = event_log_path
+        self._event_log = None  # lazy-init EventLog (#548)
         self._proj: FalkorProjection | None = None
         self._ep = None  # lazy-init TortoiseEP
         self._evidence: dict[str, tuple[float, float]] = {}
@@ -258,6 +265,76 @@ class TortoiseSDK:
             else:
                 self._proj = FalkorProjection(self._db_path, graph_name=graph_name)
         return self._proj
+
+    def _get_event_log(self):
+        """Lazy-init the EventLog for SDK event emission (#548).
+
+        Returns None when no event_log_path was configured — callers MUST
+        handle the None case before appending.
+        """
+        if self._event_log is None and self._event_log_path:
+            from tortoise.log import EventLog
+            self._event_log = EventLog(self._event_log_path)
+        return self._event_log
+
+    def _emit_event(self, type_: str, *, point: dict | None = None,
+                    id: str | None = None, **payload) -> dict | None:
+        """Append an event to the SDK event log for rebuild parity (#548).
+
+        Returns the event dict (for caller inspection), or None when no
+        event log is configured (backward-compatible — no log, no event).
+
+        Events emitted by the SDK use ``initiated_by="sdk"`` to distinguish
+        them from extractor/user events produced by EventAPI.
+
+        The *point* dict should be a complete snapshot of the Point's
+        properties (as returned by :meth:`get_point`) so that replay via
+        :meth:`~tortoise.projection.FalkorProjection.rebuild_all` can
+        reconstruct the node and its edges identically.
+        """
+        log = self._get_event_log()
+        if log is None:
+            return None
+        from .ids import ulid, now_iso
+        event: dict = {
+            "event_id": ulid(),
+            "ts": now_iso(),
+            "type": type_,
+            "initiated_by": "sdk",
+            "projection_version": 2,
+        }
+        if point is not None:
+            # Strip embedding — it is recomputed on replay by
+            # _upsert_point_props (vecf32 serialization is fragile).
+            # content_hash is also stripped — it is derived from content.
+            clean = {k: v for k, v in point.items()
+                     if k not in ("embedding", "content_hash")}
+            # Operators may not store 'content' as a node property (#548);
+            # _upsert_point_props requires it — synthesize a fallback.
+            if "content" not in clean:
+                op_type = clean.get("op_type", "IMPL")
+                op_inputs = (point.get("operator") or {}).get("inputs", [])
+                clean["content"] = f"{op_type}({', '.join(op_inputs)})"
+            # Similarly, operators may lack 'pointKind' — default to empty.
+            if "pointKind" not in clean:
+                clean["pointKind"] = ""
+            event["point"] = clean
+        if id is not None:
+            event["id"] = id
+        event.update(payload)
+        try:
+            log.append(event)
+        except Exception as exc:
+            # The graph mutation already succeeded — a log-write failure must
+            # not crash the caller or pretend the write failed. Rebuild parity
+            # is best-effort here: rebuild_all's graph snapshot catches any
+            # point missing from the log on the next rebuild (#548).
+            _logger.warning(
+                "failed to append %s event to SDK log %s: %s",
+                type_, self._event_log_path, exc,
+            )
+            return None
+        return event
 
     def test_guard(self) -> None:
         """Assert the connected graph is safe for destructive test teardowns.
@@ -328,6 +405,7 @@ class TortoiseSDK:
             ("Membership", "user_id"),
             ("APIKey", "team_id"),
             ("APIKey", "key_hash"),
+            ("APIKey", "key_prefix"),
             ("Invitation", "team_id"),
             ("Invitation", "token_hash"),
         ]
@@ -499,6 +577,8 @@ class TortoiseSDK:
         # Dreaming (#85): a new point can carry confidence-affecting props;
         # mark it dirty so the next dream/lazy-read stabilizes it.
         self._mark_dirty([pid])
+        # #548: emit PointAdded event for rebuild parity
+        self._emit_event("PointAdded", point=self.get_point(pid))
         return self.get_point(pid)
 
     def create_or_update_point(self, kind: str, content: str, **props) -> dict:
@@ -554,6 +634,168 @@ class TortoiseSDK:
 
         return None
 
+    def capture_session(
+        self,
+        conversation: list[dict[str, str]],
+        session_id: str | None = None,
+        *,
+        max_turns: int = MAX_SESSION_TURNS,
+    ) -> dict:
+        """Capture an agent session into the graph (#312 delta 4).
+
+        Mirrors the hosted POST /v1/sessions logic minus quota/auth:
+        turns become episodic Points keyed {session_id}_t{i} (deterministic +
+        idempotent), decisions/claims become epistemic Points (content-hash
+        dedup), plus a :Session node and an ontology-compliant
+        :Event {eventKind:'sessionCaptured'} with aboutEvent edges.
+
+        ``conversation`` is a list of {"role", "content"} dicts. Returns
+        {"session_id", "turns", "extracted", "points": [...]}.
+        """
+        import uuid
+        from datetime import datetime, timezone
+
+        proj = self._get_proj()
+        now = datetime.now(timezone.utc).isoformat()
+        session_id = session_id or f"session_{uuid.uuid4().hex[:12]}"
+
+        if len(conversation) > max_turns:
+            raise ValueError(
+                f"Session turn cap exceeded: {len(conversation)} > {max_turns}")
+
+        proj.g.query(
+            "MERGE (s:Session {id:$sid}) SET s.created_at=$now, s.turn_count=$tc",
+            params={"sid": session_id, "now": now, "tc": len(conversation)},
+        )
+
+        decisions = [
+            r"(?i)(?:let'?s|we will|we should|I will|I'm going to|decided|decision)\s+[^.!?]+[.!?]",
+            r"(?i)(?:plan is|next steps?:|action item:)\s+[^.!?]+[.!?]",
+        ]
+        claims = [
+            r"(?i)(?:I think|I believe|my understanding is|the problem is|the key insight)\s+[^.!?]+[.!?]",
+            r"(?i)(?:evidence suggests|data shows|we found that|this means)\s+[^.!?]+[.!?]",
+        ]
+
+        # NOTE: this extraction loop (regexes + per-turn caps) is duplicated
+        # from tortoise/hosted_api.py POST /v1/sessions. Divergences: the SDK
+        # variant writes a `speaker` property on turn Points (delta 5) while
+        # hosted adds quota/auth bounds; hosted has no speaker tag. SDK
+        # TRUNCATES turn content > 5000 chars silently AND extracts from the
+        # truncated text (stored-source parity — a phrase past the cut has no
+        # home in any stored turn), hosted rejects > 5000 with 422 (Pydantic
+        # field_validator failure) so its loop always sees <= 5000 chars:
+        # extraction inputs align. role=None normalizes to "unknown" in the
+        # SDK, hosted stores None as-is. Keep the two in sync when touching
+        # either.
+        extracted = []
+        for i, turn in enumerate(conversation):
+            # #721: same isinstance-first pattern as content below — an `or
+            # "unknown"` fallback only fixes falsy roles, but TRUTHY non-string
+            # roles (123, {"a": 1}) would pass raw and be stored as a
+            # non-string `speaker` (contradicting the `speaker | string`
+            # ontology row) — and a dict role could fail the Cypher write
+            # mid-loop, leaving a partial session. Coerce via str() so the
+            # speaker property is always a string; only None maps to "unknown".
+            raw_role = turn.get("role")
+            role = raw_role if isinstance(raw_role, str) else (
+                "unknown" if raw_role is None else str(raw_role))
+            raw = turn.get("content")
+            # #721: defensive coercion — check isinstance FIRST so falsy
+            # non-strings (0, False, {}, []) are not swallowed to "" by an
+            # `or ""` fallback, then coerce via str() (0 -> "0", False ->
+            # "False", [] -> "[]") before the write so the episodic point and
+            # the extraction loop share one value. Only None maps to "".
+            content = raw if isinstance(raw, str) else ("" if raw is None else str(raw))
+
+            # Episodic turn point — deterministic id, structured speaker tag
+            # (delta 5), content hash, session-scoped (never conflated across
+            # sessions — #490).
+            turn_id = f"{session_id}_t{i}"
+            turn_text = f"[{role}] {content[:5000]}"
+            proj.g.query(
+                "MERGE (t:Point {id:$id}) "
+                "SET t.content=$c, t.pointKind=$k, t.is_operator=false, "
+                "    t.speaker=$speaker, "
+                "    t.status=coalesce(t.status, $s), "
+                "    t.createdAt=coalesce(t.createdAt, $now), "
+                "    t.updatedAt=$now, t.content_hash=$ch",
+                params={"id": turn_id, "c": turn_text, "k": "event",
+                        "speaker": role, "s": "draft", "now": now,
+                        "ch": _content_hash(turn_text)},
+            )
+            proj.g.query(
+                "MATCH (s:Session {id:$sid}), (t:Point {id:$tid}) "
+                "MERGE (s)-[:CONTAINS]->(t)",
+                params={"sid": session_id, "tid": turn_id},
+            )
+
+            # Epistemic extraction (regex, same bounds as hosted). #721:
+            # scan the STORED (truncated) turn text — the turn Point above
+            # stores content[:5000], so the regexes must run on that same
+            # slice. Scanning the full content would extract phrases past the
+            # cut into session-wired Points whose source text exists in no
+            # stored turn (broken provenance). Hosted can't hit this (422 on
+            # content > 5000 before the loop); this keeps extraction input
+            # aligned with what is actually stored.
+            scan = content[:5000]
+            n_dec = 0
+            for pat in decisions:
+                for match in re.finditer(pat, scan):
+                    if n_dec >= MAX_EXTRACTIONS_PER_TURN:
+                        break
+                    n_dec += 1
+                    text = match.group().strip()
+                    p = self.create_point("decision", text[:5000], dedup=True)
+                    pid = p["id"]
+                    proj.g.query(
+                        "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
+                        "MERGE (s)-[:CONTAINS]->(p)",
+                        params={"sid": session_id, "pid": pid},
+                    )
+                    extracted.append({"id": pid, "kind": "decision", "text": text[:200]})
+
+            n_clm = 0
+            for pat in claims:
+                for match in re.finditer(pat, scan):
+                    if n_clm >= MAX_EXTRACTIONS_PER_TURN:
+                        break
+                    n_clm += 1
+                    text = match.group().strip()
+                    p = self.create_point("statement", text[:5000], dedup=True)
+                    pid = p["id"]
+                    proj.g.query(
+                        "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
+                        "MERGE (s)-[:CONTAINS]->(p)",
+                        params={"sid": session_id, "pid": pid},
+                    )
+                    extracted.append({"id": pid, "kind": "statement", "text": text[:200]})
+
+        # Ontology episodic model (v3.1 §4.5/§3.2): Event + aboutEvent edges.
+        try:
+            event = self.create_event(
+                f"session_{session_id}", "sessionCaptured",
+                startedAt=now, endedAt=now, sessionId=session_id,
+            )
+            event_id = event.get("id") or event.get("eventId")
+            for p in extracted:
+                proj.create_about_edge(p["id"], event_id, "aboutEvent")
+        except Exception as e:
+            # Non-fatal — mirrors hosted behavior, but surface the failure so
+            # silent event-log loss is visible (#721).
+            _logger.warning(
+                "capture_session: sessionCaptured Event/EventRecorded write "
+                "failed (non-fatal) for session %s: %s", session_id, e,
+                exc_info=True,
+            )
+
+        return {
+            "session_id": session_id,
+            "turns": len(conversation),
+            "extracted": len(extracted),
+            "points": extracted,
+        }
+
     def update_point(self, id: str, **props) -> dict:
         """Update properties on an existing Point. Returns updated point dict.
         
@@ -608,7 +850,11 @@ class TortoiseSDK:
             self._sync_tags(proj, id, props["tags"] or [])
         # Dreaming (#85): property mutations can affect confidence.
         self._mark_dirty([id])
-        return self.get_point(id)
+        result = self.get_point(id)
+        # #548: emit PointRevised event for rebuild parity
+        self._emit_event("PointRevised", id=id,
+                         new_content=props.get("content"), **props)
+        return result
 
     def delete_point(self, id: str) -> bool:
         """Delete a Point and its relationships. Returns True if found."""
@@ -627,6 +873,9 @@ class TortoiseSDK:
             params={"id": id},
         ).result_set[0][0]
         proj.g.query("MATCH (n:Point {id:$id}) DETACH DELETE n", params={"id": id})
+        # #548: emit PointRetracted event for rebuild parity (after delete,
+        # so the graph mutation is committed before the event is written)
+        self._emit_event("PointRetracted", id=id)
         # Tag GC (#485): delete orphaned :Tag nodes (no incoming TAGGED edges).
         # Idempotent — DETACH DELETE leaves count-0 tags behind that would
         # otherwise accumulate in list_tags.
@@ -721,6 +970,29 @@ class TortoiseSDK:
         for row in edges_result.result_set:
             validate_rel_type(row[1])  # raises ValueError before any mutation
 
+        # 0b. #547: validate both endpoints BEFORE any write (same contract as
+        #    invalidate_point #330).  Missing old → {"invalidated": False} with
+        #    no writes; missing new → ValueError; self-edge → ValueError.
+        if old_id == new_id:
+            raise ValueError(
+                f"supersede_point: new_id cannot be the same as old_id ({old_id!r})"
+            )
+        old_exists = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN count(n) > 0", params={"id": old_id},
+        ).result_set[0][0]
+        if not old_exists:
+            return {"invalidated": False, "id": old_id, "corrected_by": new_id,
+                    "edges_transferred": 0}
+        new_exists = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN count(n) > 0",
+            params={"id": new_id},
+        ).result_set[0][0]
+        if not new_exists:
+            raise ValueError(
+                f"supersede_point: new point {new_id!r} does not exist — "
+                f"refusing to orphan outdated point {old_id!r}"
+            )
+
         # 1. Mark old outdated + create CORRECTS edge (same as invalidate)
         proj.g.query(
             "MATCH (n:Point {id:$id}) SET n.outdated = true, n.updatedAt = $now",
@@ -799,14 +1071,22 @@ class TortoiseSDK:
         Semantic-epistemic edge model (#7801):
           - op_type: IMPL or NAND (epistemic mechanism)
           - label: domain verb — "addresses", "hasPart", "opposes" (semantic layer)
-          - direction: "bidirectional" (default) or "unidirectional" — explicit flag
-            controlling EP back-propagation (ONTOLOGY v3.1 §3.1, §8).
+          - direction: "bidirectional" (default) or "unidirectional" — explicit
+            flag controlling EP back-propagation (ONTOLOGY v3.1 §3.1, §8).
+            Default bidirectional (mutual) for all op types; pass
+            "unidirectional" for a directed attack (no back-pressure).
           - Operator carries the label and direction; IMPL/NAND edges carry confidence via EP.
         """
         if op_type not in ("IMPL", "NAND", "composedOf", "decomposesInto", "contains", "wraps"):
             raise ValueError(
                 f"op_type must be 'IMPL', 'NAND', or a part/whole type, got {op_type!r}"
             )
+        # Direction default: bidirectional for all op types (product owner,
+        # #753) — a NAND is logically "A and B can't both be true" (mutual).
+        # An agent may explicitly pass "unidirectional" to declare a DIRECTED
+        # attack (attacker's truth penalizes the target, no back-pressure).
+        if direction is None:
+            direction = "bidirectional"  # backward compat: explicit None = default
         if direction not in ("bidirectional", "unidirectional"):
             raise ValueError(
                 f"direction must be 'bidirectional' or 'unidirectional', got {direction!r}"
@@ -852,6 +1132,13 @@ class TortoiseSDK:
         # Dreaming (#85): new edges change propagation — mark all inputs dirty.
         self._mark_dirty(inputs)
         result = self.get_point(pid)
+        # #548: emit OperatorAdded event for rebuild parity.
+        # The operator.inputs dict must be constructed manually — it is not
+        # stored as a node property but is required by _upsert_point_edges
+        # during replay.
+        event_point = dict(result)
+        event_point["operator"] = {"op_type": op_type, "inputs": list(inputs)}
+        self._emit_event("OperatorAdded", point=event_point)
         return result
 
     def annotate_operator(self, id: str, bias: float, precision: float,
@@ -926,6 +1213,14 @@ class TortoiseSDK:
         )
         # Dreaming (#85): new mitigation + IMPL edge change propagation.
         self._mark_dirty([mid, id])
+        # #548: emit events for rebuild parity
+        self._emit_event("PointAdded", point=self.get_point(mid))
+        # Emit OperatorAdded so the IMPL edge (mitigation → operator) is
+        # recreated on replay. mitigated_by edges are ancillary and
+        # reconstructed separately via the operator's edge replay.
+        mit_point = self.get_point(mid)
+        mit_point["operator"] = {"op_type": "IMPL", "inputs": [id]}
+        self._emit_event("OperatorAdded", point=mit_point)
         return self.get_point(mid)
 
     # ── Query ─────────────────────────────────────────────────────
@@ -936,9 +1231,15 @@ class TortoiseSDK:
 
         For confidence-aware queries, use tortoise_fts_query() with query=None
         for full-scan mode with EP annotation.
+
+        Retracted points (status='retracted') are excluded. Use a raw Cypher
+        query via proj.g.query() to inspect retracted tombstones.
         """
         proj = self._get_proj()
-        clauses = ["(n.is_operator IS NULL OR n.is_operator = false)"]
+        clauses = [
+            "(n.is_operator IS NULL OR n.is_operator = false)",
+            "(n.status IS NULL OR n.status <> 'retracted')",  # #689: hide retracted
+        ]
         params: dict[str, Any] = {}
         if kind:
             expanded = self._expand_kind(kind)
@@ -969,9 +1270,15 @@ class TortoiseSDK:
     def paginated_query(self, kind: str | None = None,
                          skip: int = 0, limit: int = 20, **filters) -> dict:
         """Query points with pagination. Returns {results, total, hasMore}.
+
+        Retracted points (status='retracted') are excluded. Use a raw Cypher
+        query via proj.g.query() to inspect retracted tombstones.
         """
         proj = self._get_proj()
-        clauses = ["(n.is_operator IS NULL OR n.is_operator = false)"]
+        clauses = [
+            "(n.is_operator IS NULL OR n.is_operator = false)",
+            "(n.status IS NULL OR n.status <> 'retracted')",  # #689: hide retracted
+        ]
         params: dict[str, Any] = {}
         if kind:
             expanded = self._expand_kind(kind)
@@ -1007,13 +1314,23 @@ class TortoiseSDK:
         return {"results": results, "total": total, "hasMore": skip + limit < total}
 
     def get_point(self, id: str) -> dict:
-        """Get a Point by ID. Returns dict of all properties, or {} if not found."""
+        """Get a Point by ID. Returns dict of all properties, or {} if not found.
+
+        Retracted points (status='retracted') return {} — they are hidden
+        from normal reads but remain queryable via raw Cypher (#689).
+        """
         proj = self._get_proj()
         rows = proj.g.query(
             "MATCH (n:Point {id:$id}) RETURN properties(n)",
             params={"id": id},
         ).result_set
-        return rows[0][0] if rows else {}
+        if not rows:
+            return {}
+        props = rows[0][0]
+        # #689: hide retracted points from normal reads
+        if props.get("status") == "retracted":
+            return {}
+        return props
 
     def traverse(self, id: str, relationship_type: str, direction: str = "outgoing") -> list[dict]:
         """Traverse relationships from a Point. Returns connected point dicts.
@@ -1736,7 +2053,7 @@ class TortoiseSDK:
             factors_data, _ = proj.extract_svbp_factors()
             operator_ids = [f[0] for f in factors_data]
         if not operator_ids:
-            return {"iterations": 0, "converged": True, "confidences": {}}
+            return {"iterations": 0, "converged": True, "confidences": {}, "diagnostic": "no_factors"}
         # Lazy consistency (#85): if dirty roots exist and this is a
         # whole-graph/auto-extract computation, dream the dirty subgraph
         # first so the auto-extracted factors see stabilized values.
@@ -1746,7 +2063,7 @@ class TortoiseSDK:
             factors_data, _ = proj.extract_svbp_factors()
             operator_ids = [f[0] for f in factors_data]
             if not operator_ids:
-                return {"iterations": 0, "converged": True, "confidences": {}}
+                return {"iterations": 0, "converged": True, "confidences": {}, "diagnostic": "no_factors"}
         iterations, converged = ep.run(operator_ids, evidence=self._evidence)
         confidences = {}
         proj = self._get_proj()
@@ -1770,8 +2087,10 @@ class TortoiseSDK:
         same persistent evidence contract as explicit confidence reads.
         """
         proj = self._get_proj()
+        # #689: retracted points must not feed Beta priors into EP.
         rows = proj.g.query(
             "MATCH (n:Point) WHERE n.baseline_set = true AND n.ep_alpha IS NOT NULL "
+            "AND (n.status IS NULL OR n.status <> 'retracted') "
             "RETURN n.id, n.ep_alpha, n.ep_beta"
         ).result_set
         for pid, alpha, beta in rows:
@@ -1966,6 +2285,12 @@ class TortoiseSDK:
                 "n.baseline_set, n.baseline_source, n.inherited_at",
                 params={"id": pid},
             )
+            # Clear the stale prior from in-memory evidence cache (#652).
+            # set_point_baseline writes (alpha, beta) into self._evidence
+            # unconditionally, and _hydrate_evidence is additive-only — so
+            # the stale entry survives the graph-level remove and gets
+            # re-applied by ep.run(evidence=self._evidence).
+            self._evidence.pop(pid, None)
             self._mark_dirty([pid])
 
         for pid, sources in point_sources.items():
@@ -3269,7 +3594,7 @@ class TortoiseSDK:
         from .exceptions import ControlPlaneError
         allowed = {
             "name", "tier", "stripe_customer_id", "subscription_id",
-            "backup_enabled", "max_users", "max_teams", "max_graphs",
+            "backup_enabled", "max_users", "max_graphs",
             # #329 relief path: quota limits settable via the control plane so
             # a team at cap can be upgraded (no REST surface exists yet — the
             # fields are SDK/registry-level; get_current_team honors them).
@@ -3387,9 +3712,9 @@ class TortoiseSDK:
         from datetime import datetime, timezone
         from .exceptions import ControlPlaneError
 
-        if role not in ("owner", "admin"):
+        if role not in ("owner", "admin", "member"):
             raise ControlPlaneError(
-                f"Invalid role {role!r}. Must be 'owner' or 'admin'."
+                f"Invalid role {role!r}. Must be 'owner', 'admin', or 'member'."
             )
 
         team = self.team_get(team_id)
@@ -3401,7 +3726,8 @@ class TortoiseSDK:
         if max_users is not None:
             reg = self._get_registry()
             count = reg.query(
-                "MATCH (m:Membership {team_id:$tid}) RETURN count(m)",
+                "MATCH (m:Membership {team_id:$tid}) "
+                "WHERE m.status = 'active' RETURN count(m)",
                 params={"tid": team_id},
             ).result_set[0][0]
             if count >= max_users:
@@ -3414,7 +3740,7 @@ class TortoiseSDK:
         reg = self._get_registry()
         reg.query(
             "CREATE (m:Membership {id:$id, user_id:$uid, team_id:$tid, "
-            "role:$role, joinedAt:$now})",
+            "role:$role, status:'active', joinedAt:$now, created_at:$now})",
             params={"id": mid, "uid": user_id, "tid": team_id,
                     "role": role, "now": now},
         )
@@ -3451,9 +3777,9 @@ class TortoiseSDK:
                                 new_role: str) -> dict:
         """Update a membership's role."""
         from .exceptions import ControlPlaneError
-        if new_role not in ("owner", "admin"):
+        if new_role not in ("owner", "admin", "member"):
             raise ControlPlaneError(
-                f"Invalid role {new_role!r}. Must be 'owner' or 'admin'."
+                f"Invalid role {new_role!r}. Must be 'owner', 'admin', or 'member'."
             )
         m = self.membership_get(membership_id)
         if m is None:
@@ -3488,12 +3814,34 @@ class TortoiseSDK:
 
         hash_api_key() embeds a per-key random salt ("salt:hash"), so we can
         NOT look up by exact hash match — the lookup hash would never equal the
-        stored hash (same root cause as #130). Instead fetch all candidate
-        rows of the label and verify each stored hash against the plaintext.
-        The registry is small (teams × keys × invites), so a scan is fine.
+        stored hash (same root cause as #130).
+
+        #687: For APIKey nodes, we short-circuit the O(keys) scan by filtering
+        on key_prefix (key[:10] = "tt_<8 hex chars>"). The key_prefix index
+        (created in _ensure_registry_indexes) makes this O(1) per lookup.
+        Falls back to full scan for legacy provision_tenant keys whose
+        key_prefix was set to team_id[:8] (which won't match token[:10]).
         """
         from tortoise.auth import verify_api_key
         reg = self._get_registry()
+
+        # #687: indexed key_prefix lookup avoids O(keys) PBKDF2 scan
+        if label == "APIKey" and plaintext.startswith("tt_"):
+            prefix = plaintext[:10]
+            rows = reg.query(
+                f"MATCH (n:{label}) WHERE n.key_prefix = $prefix "
+                f"RETURN n.{prop}, properties(n)",
+                params={"prefix": prefix},
+            ).result_set
+            out = []
+            for stored_hash, props in rows:
+                if verify_api_key(plaintext, stored_hash):
+                    out.append(props)
+            if out:
+                return out
+            # Fall through to full scan for legacy provision_tenant keys
+            # (key_prefix = team_id[:8] won't match token[:10] = "tt_<8 hex>")
+
         rows = reg.query(
             f"MATCH (n:{label}) RETURN n.{prop}, properties(n)"
         ).result_set

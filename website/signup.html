@@ -7,13 +7,27 @@
   <meta name="description" content="Create your Tortoise account and start building your knowledge graph.">
   <meta name="theme-color" content="#060b14">
   <style>
+    .hidden {
+      display: none;
+    }
+    .checkmark {
+      width: 48px; height: 48px;
+      margin: 0 auto 1rem;
+      display: flex; align-items: center; justify-content: center;
+      color: var(--green, #4ade80);
+    }
+    .checkmark svg { width: 100%; height: 100%; }
+    .dim { color: var(--text-dim); }
+    .small { font-size: 0.82rem; }
+
+
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
     :root {
       --bg: #060b14;
       --surface: #0d1a2d;
       --text: #cbd5e1;
-      --text-dim: #64748b;
+      --text-dim: #94a3b8;
       --accent: #06b6d4;
       --accent-hover: #0891b2;
       --green: #4ade80;
@@ -34,7 +48,7 @@
     .topbar .logo { font-family: var(--serif, Georgia, serif); font-size: 1.15rem; color: var(--text, #cbd5e1); text-decoration: none; }
     .topbar .logo span { color: var(--accent, #06b6d4); }
     .topbar nav { flex: 1; display: flex; gap: 16px; }
-    .topbar nav a { color: var(--text-dim, #64748b); text-decoration: none; font-size: 14px; }
+    .topbar nav a { color: var(--text-dim, #94a3b8); text-decoration: none; font-size: 14px; }
     .topbar nav a:hover, .topbar nav a.active { color: var(--accent, #06b6d4); }
     .topbar .login { background: var(--accent, #06b6d4); color: #04121a; padding: 6px 16px; border-radius: 6px; text-decoration: none; font-weight: 600; font-size: 14px; }
     .topbar .login:hover { background: var(--accent-hover, #0891b2); }
@@ -268,7 +282,7 @@
     </div>
     <h1>Create your account</h1>
 
-    <div id="error" class="error"></div>
+    <div id="error" class="error" role="alert"></div>
 
     <div class="providers">
       <button class="btn-provider" onclick="signInWithProvider('github')" id="btn-github">
@@ -298,7 +312,7 @@
 
     <div class="divider">or</div>
 
-    <form id="email-form" onsubmit="signUpWithEmail(event)">
+    <form id="email-form" method="post" action="/signup" onsubmit="signUpWithEmail(event)">
       <div class="form-group">
         <label for="email">Email</label>
         <input type="email" id="email" name="email" placeholder="you@example.com" required autocomplete="email">
@@ -310,8 +324,12 @@
       <button type="submit" class="btn-submit" id="btn-submit">Create account</button>
     </form>
 
+    <noscript>
+      <div class="error visible" role="alert">Please enable JavaScript to create an account.</div>
+    </noscript>
+
     <!-- Check-your-inbox state (email confirmation ON, E2E-8) -->
-    <div id="confirmation-required" class="hidden">
+    <div id="confirmation-required" class="hidden" role="status" aria-live="polite">
       <div class="checkmark">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/>
@@ -331,8 +349,11 @@
     </div>
   </div>
 
-  <!-- Supabase JS client from CDN -->
-  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+  <!-- Supabase JS client from CDN. onerror belt (#527): if the CDN is
+       blocked (ad-blocker/CSP/outage), surface a clear message instead of a
+       dead form — the historical trigger for the credential-echo bug. -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"
+          onerror="(function(){var e=document.getElementById('error');if(e){e.textContent='Signup is temporarily unavailable (script blocked). Please try again later.';e.classList.add('visible');}})()"></script>
   <script>
     // ── Configuration ──────────────────────────────────────────────────────
     const SUPABASE_URL = "https://ybetwichurajbfswfeqa.supabase.co";
@@ -354,7 +375,26 @@
 
     let supabaseClient = null;
     if (isConfigured) {
-      supabaseClient = window.supabase.createClient(supabaseUrl, supabaseAnonKey);
+      // typeof check + try/catch (#527): if the CDN script failed to load,
+      // window.supabase is undefined and createClient would THROW, killing
+      // this entire script block at parse time (the historical 2026-08-08
+      // bug that left the form as a static shell echoing credentials into
+      // the URL). Guard so the form degrades to a clear error instead.
+      if (typeof window.supabase !== "undefined") {
+        try {
+          supabaseClient = window.supabase.createClient(supabaseUrl, supabaseAnonKey);
+        } catch (err) {
+          console.error("supabase client init failed:", err);
+        }
+      } else {
+        console.warn("supabase CDN script did not load — auth disabled");
+      }
+      if (!supabaseClient) {
+        document.querySelectorAll("button").forEach(function(btn) { btn.disabled = true; });
+        var errorEl = document.getElementById("error");
+        errorEl.textContent = "Signup is temporarily unavailable (script blocked). Please try again later.";
+        errorEl.classList.add("visible");
+      }
     } else {
       console.warn("SUPABASE_ANON_KEY not configured — auth disabled");
       document.querySelectorAll("button").forEach(function(btn) { btn.disabled = true; });
@@ -362,6 +402,10 @@
       errorEl.textContent = "Signup is not configured yet. Please contact support.";
       errorEl.classList.add("visible");
     }
+    // Expose the client on window for the watchdog script block (a top-level
+    // `let` does NOT create a window property — the watchdog must not show a
+    // false "temporarily unavailable" on healthy loads, #527).
+    window.supabaseClient = supabaseClient;
 
     // ── Error display ──────────────────────────────────────────────────────
     function showError(message) {
@@ -375,15 +419,88 @@
       el.classList.remove("visible");
     }
 
+    // ── Error humanization (#527) ────────────────────────────────────────
+    // Supabase surfaces raw engine messages ("Email rate limit exceeded",
+    // "Provider is not enabled") that mean nothing to end users. Map by
+    // error_code first (stable), then by message substring (legacy), with a
+    // friendly catch-all. Known codes:
+    // https://supabase.com/docs/guides/auth/error-codes
+    const AUTH_ERROR_MAP = [
+      {
+        codes: ["over_email_send_rate_limit", "over_request_rate_limit", "over_request_rate_limit_ip", "rate_limit"],
+        message: "Too many attempts from this network. Please wait about an hour and try again.",
+      },
+      {
+        codes: ["email_address_invalid"],
+        message: "That email address doesn't look valid. Check it and try again.",
+      },
+      {
+        codes: ["invalid_credentials"],
+        message: "Invalid email or password. Please try again.",
+      },
+      {
+        codes: ["email_not_confirmed"],
+        message: "Please confirm your email address before signing in. Check your inbox (and spam) for the confirmation link.",
+      },
+      {
+        codes: ["weak_password"],
+        message: "Password is too weak. Use at least 8 characters with a mix of letters, numbers, and symbols.",
+      },
+      {
+        codes: ["user_already_exists", "email_exists", "user_exists"],
+        message: "An account with this email already exists. Please sign in instead.",
+      },
+      {
+        codes: ["provider_disabled"],
+        message: "This sign-in option is temporarily unavailable. Try email instead.",
+      },
+    ];
+
+    function humanizeAuthError(error) {
+      if (!error) return "Something went wrong. Please try again.";
+      const code = error.code || "";
+      const msg = (error.message || error.msg || error.error_description || "").toLowerCase();
+      for (const entry of AUTH_ERROR_MAP) {
+        if (entry.codes.includes(code)) return entry.message;
+        for (const c of entry.codes) {
+          if (msg.includes(c.replace(/_/g, " "))) return entry.message;
+        }
+      }
+      if (msg.includes("already registered") || msg.includes("already exists") || msg.includes("already been registered")) {
+        return "An account with this email already exists. Please sign in instead.";
+      }
+      if (msg.includes("email rate limit") || msg.includes("rate limit")) {
+        return "Too many attempts from this network. Please wait about an hour and try again.";
+      }
+      if (msg.includes("provider is not enabled") || msg.includes("provider disabled") || msg.includes("unsupported provider")) {
+        return "This sign-in option is temporarily unavailable. Try email instead.";
+      }
+      if (msg.includes("invalid login credentials") || msg.includes("invalid email or password")) {
+        return "Invalid email or password. Please try again.";
+      }
+      if (msg.includes("email not confirmed")) {
+        return "Please confirm your email address before signing in. Check your inbox (and spam) for the confirmation link.";
+      }
+      if (msg.includes("network") || msg.includes("failed to fetch")) {
+        return "Couldn't reach the signup service. Check your connection and try again.";
+      }
+      return "Something went wrong. Please try again in a moment.";
+    }
+
     // ── Loading state ──────────────────────────────────────────────────────
+    // Saves the full innerHTML (provider SVG icons included) and restores it,
+    // so OAuth button icons survive an error cycle (#751).
     function setLoading(loading) {
       document.querySelectorAll("button").forEach((btn) => {
         btn.disabled = loading;
         if (loading) {
-          btn.dataset.originalText = btn.textContent;
+          if (!btn.dataset.originalHTML) btn.dataset.originalHTML = btn.innerHTML;
           btn.innerHTML = '<span class="loading-spinner"></span>';
         } else {
-          btn.textContent = btn.dataset.originalText || btn.textContent;
+          if (btn.dataset.originalHTML) {
+            btn.innerHTML = btn.dataset.originalHTML;
+            delete btn.dataset.originalHTML;
+          }
         }
       });
     }
@@ -393,23 +510,31 @@
       if (!supabaseClient) { showError("Auth not configured."); return; }
       clearError();
       setLoading(true);
+      try {
+        const { data, error } = await supabaseClient.auth.signInWithOAuth({
+          provider: provider,
+          options: {
+            redirectTo: window.location.origin + WELCOME_URL,
+          },
+        });
 
-      const { data, error } = await supabaseClient.auth.signInWithOAuth({
-        provider: provider,
-        options: {
-          redirectTo: window.location.origin + WELCOME_URL,
-        },
-      });
+        if (error) {
+          showError(humanizeAuthError(error));
+          return;
+        }
 
-      if (error) {
-        showError(error.message);
+        // Supabase OAuth redirects the user, so we don't need to do anything else.
+        // X conversion (#736 Path A) is intentionally SKIPPED on OAuth signup:
+        // the provider redirect navigates the page away before any conversion
+        // event could be pushed/reliably attributed to the user id.
+        if (data?.url) {
+          window.location.href = data.url;
+        }
+      } catch (err) {
+        console.error("signInWithProvider:", err);
+        showError(humanizeAuthError(err));
+      } finally {
         setLoading(false);
-        return;
-      }
-
-      // Supabase OAuth redirects the user, so we don't need to do anything else
-      if (data?.url) {
-        window.location.href = data.url;
       }
     }
 
@@ -419,68 +544,87 @@
       if (!supabaseClient) { showError("Auth not configured."); return; }
       clearError();
       setLoading(true);
+      try {
+        const email = document.getElementById("email").value.trim();
+        const password = document.getElementById("password").value;
 
-      const email = document.getElementById("email").value.trim();
-      const password = document.getElementById("password").value;
-
-      if (password.length < 6) {
-        showError("Password must be at least 6 characters.");
-        setLoading(false);
-        return;
-      }
-
-      const { data, error } = await supabaseClient.auth.signUp({
-        email: email,
-        password: password,
-        options: {
-          emailRedirectTo: window.location.origin + WELCOME_URL,
-        },
-      });
-
-      if (error) {
-        if (error.message.includes("already registered") || error.message.includes("already exists")) {
-          showError("An account with this email already exists. Please sign in instead.");
-        } else {
-          showError(error.message);
+        if (password.length < 6) {
+          showError("Password must be at least 6 characters.");
+          return;
         }
+
+        const { data, error } = await supabaseClient.auth.signUp({
+          email: email,
+          password: password,
+          options: {
+            emailRedirectTo: window.location.origin + WELCOME_URL,
+          },
+        });
+
+        if (error) {
+          showError(humanizeAuthError(error));
+          return;
+        }
+
+        // If email confirmation is enabled, show a message
+        if (data?.user?.identities?.length === 0) {
+          showError("An account with this email already exists. Please sign in instead.");
+          return;
+        }
+
+        // Analytics (#528): user_signed_up — CLIENT tracking, only when the
+        // consent banner granted it (consent.js defines window.consentState;
+        // window.posthog is a no-op stub until consent). Server-side account
+        // telemetry (tenant_provisioned etc.) is not gated by the banner.
+        // Runs AFTER the identities check so existing accounts re-submitting
+        // (identities.length === 0) are not counted as new signups (#732).
+        // Wrapped in try/catch (#527): a stub/analytics throw must never
+        // abort the signup success path (dataLayer push / inbox state).
+        if (data?.user?.identities?.length > 0) {
+          try {
+            if (window.posthog && window.consentState && window.consentState() === "granted") {
+              window.posthog.identify(data.user.id);
+              window.posthog.capture("user_signed_up", { provider: "email" });
+            }
+          } catch (analyticsErr) {
+            console.warn("analytics skipped:", analyticsErr);
+          }
+        }
+
+        // X conversion event (client-side, Path A of #736): the dataLayer push is
+        // local-only; GTM loads ONLY on consent so the X tag fires only for
+        // consenting users. conversion_id = Supabase user id (dedup key).
+        // Optional chaining guards against a missing user so this never throws.
+        window.dataLayer = window.dataLayer || [];
+        window.dataLayer.push({
+          event: "x_signup",
+          email: data.user?.email || "",
+          conversion_id: data.user?.id || "",
+        });
+
+        // Email confirmation ON: signUp returns no session — show the
+        // check-your-inbox state with resend (E2E-8). The confirmation link
+        // returns the user to /welcome.html where the session is established.
+        if (!data?.session) {
+          showConfirmationRequired(email);
+          return;
+        }
+
+        // Redirect to welcome page
+        // For email/password signup without email confirmation, the user is already signed in
+        window.location.href = WELCOME_URL;
+      } catch (err) {
+        console.error("signUpWithEmail:", err);
+        showError(humanizeAuthError(err));
+      } finally {
         setLoading(false);
-        return;
       }
-
-      // Analytics (#528): user_signed_up — CLIENT tracking, only when the
-      // consent banner granted it (consent.js defines window.consentState;
-      // window.posthog is a no-op stub until consent). Server-side account
-      // telemetry (tenant_provisioned etc.) is not gated by the banner.
-      if (window.posthog && window.consentState && window.consentState() === "granted") {
-        window.posthog.identify(data.user.id);
-        window.posthog.capture("user_signed_up", { provider: "email" });
-      }
-
-      // If email confirmation is enabled, show a message
-      if (data?.user?.identities?.length === 0) {
-        showError("An account with this email already exists. Please sign in instead.");
-        setLoading(false);
-        return;
-      }
-
-      // Email confirmation ON: signUp returns no session — show the
-      // check-your-inbox state with resend (E2E-8). The confirmation link
-      // returns the user to /welcome.html where PKCE exchange completes.
-      if (!data?.session) {
-        showConfirmationRequired(email);
-        setLoading(false);
-        return;
-      }
-
-      // Redirect to welcome page
-      // For email/password signup without email confirmation, the user is already signed in
-      window.location.href = WELCOME_URL;
     }
 
     // ── Check-your-inbox state (email confirmation ON) ──
     function showConfirmationRequired(email) {
       const form = document.getElementById("email-form");
-      const oauthBtns = document.querySelectorAll(".oauth-btn");
+      const oauthBtns = document.querySelectorAll(".btn-provider");
       const confirm = document.getElementById("confirmation-required");
       if (form) form.classList.add("hidden");
       oauthBtns.forEach((b) => b.classList.add("hidden"));
@@ -511,5 +655,31 @@
     }
   </script>
 <script src="/consent.js" defer></script>
+
+  <!-- Watchdog (#527): if the Supabase CDN script never arrives (slow
+       network, blocked CDN), surface a clear "temporarily unavailable" state
+       instead of a dead form. Idempotent: does nothing when the client is
+       present or an error is already showing; clears itself if the client
+       arrives late. -->
+  <script>
+    (function () {
+      function showWatchdogError() {
+        var el = document.getElementById("error");
+        if (!el) return;
+        if (window.supabaseClient || el.classList.contains("visible")) return;
+        el.textContent = "Signup is temporarily unavailable (script blocked). Please try again later.";
+        el.classList.add("visible");
+      }
+      function clearWatchdogError() {
+        var el = document.getElementById("error");
+        if (!el) return;
+        if (window.supabaseClient && el.textContent.indexOf("temporarily unavailable") !== -1) {
+          el.classList.remove("visible");
+        }
+      }
+      setTimeout(showWatchdogError, 6000);
+      setTimeout(clearWatchdogError, 10000);
+    })();
+  </script>
 </body>
 </html>

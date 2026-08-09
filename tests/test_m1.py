@@ -54,13 +54,17 @@ def test_reprocess_new_version_supersedes():
     api, log = _api()
     text = "hello world"
     api.begin_ingest("doc.txt", "mock@0", document_key(text))
-    old = api.add_point("old extraction", provenance("doc.txt", [0, 3], "hel"))
+    old = api.add_point("old extraction",
+                        provenance("doc.txt", [0, 3], "hel"))
     # same content, NEW extractor version → supersede the old run
     r = api.begin_ingest("doc.txt", "mock@1", document_key(text))
     assert not r.skip
-    new = api.add_point("new extraction", provenance("doc.txt", [0, 3], "hel"))
+    new = api.add_point("new extraction",
+                        provenance("doc.txt", [0, 3], "hel"))
     points = fold(log.read_all())
-    assert old not in points, "superseded run's points must be retracted"
+    # #689: tombstone — retracted point exists with status='retracted'
+    assert old in points
+    assert points[old].get("status") == "retracted"
     assert new in points
     print("PASS test_reprocess_new_version_supersedes")
 

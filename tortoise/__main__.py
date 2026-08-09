@@ -232,6 +232,74 @@ def _cmd_init(args):
             "api_key": args.api_key,
             "api_url": os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co"),
         }
+
+        # Validate the key against the hosted API BEFORE saving (#707).
+        # 401/403 → key rejected → hard fail (never silently write an invalid key);
+        # 404 → misconfigured URL → hard fail with distinct message;
+        # 5xx/429/408 → transient server error → retry once, then warn + save;
+        # non-JSON 200 → unvalidated (captive portal/proxy) → hard fail;
+        # network errors → warn + save (cannot validate offline).
+        from urllib.request import Request, urlopen
+        from urllib.error import URLError, HTTPError
+        from http.client import HTTPException as _HTTPException
+        from json import JSONDecodeError as _JSONDecodeError
+        import time as _time
+
+        # Normalize base URL: a trailing slash would produce `//v1/team` → 404.
+        base_url = config["api_url"].rstrip("/")
+        config["api_url"] = base_url
+
+        def _validate_key() -> None:
+            req = Request(
+                f"{base_url}/v1/team",
+                headers={"Authorization": f"Bearer {args.api_key}"},
+            )
+            with urlopen(req, timeout=10) as resp:
+                _json.loads(resp.read())
+
+        try:
+            for attempt in range(2):
+                try:
+                    _validate_key()
+                    print("✅ API key validated against Tortoise Cloud")
+                    break
+                except HTTPError as e:
+                    if e.code in (401, 403):
+                        # Only these mean the key itself was rejected.
+                        body = ""
+                        try:
+                            body = e.read().decode()
+                        except Exception:
+                            pass
+                        print(f"❌ API rejected the key ({e.code}): {body.strip() or e.reason}", file=sys.stderr)
+                        print(f"   Config NOT saved. Double-check the key or run:", file=sys.stderr)
+                        print(f"   tortoise init --api-key tt_<key>", file=sys.stderr)
+                        return 1
+                    if e.code == 404:
+                        print(f"❌ API URL appears misconfigured — got 404 from {base_url}/v1/team.", file=sys.stderr)
+                        print(f"   Check TORTOISE_API_URL. Config NOT saved.", file=sys.stderr)
+                        return 1
+                    if e.code in (408, 429) or 500 <= e.code <= 599:
+                        # Transient server-side failure — a valid key may be fine.
+                        if attempt == 0:
+                            _time.sleep(1)
+                            continue
+                        print(f"⚠️  Tortoise Cloud returned {e.code} while validating the key (transient error).")
+                        print(f"   Saving config anyway — verify with: tortoise team info")
+                        break
+                    print(f"⚠️  Unexpected status {e.code} from Tortoise Cloud while validating the key.")
+                    print(f"   Saving config anyway — verify with: tortoise team info")
+                    break
+        except _JSONDecodeError:
+            # 200 with a non-JSON body (captive portal / proxy) — unvalidated.
+            print(f"❌ Tortoise Cloud returned a non-JSON response — key NOT validated.", file=sys.stderr)
+            print(f"   (Possible captive portal or proxy intercepting the request.)", file=sys.stderr)
+            print(f"   Config NOT saved. Check your network / TORTOISE_API_URL and retry.", file=sys.stderr)
+            return 1
+        except (URLError, _HTTPException, ValueError) as e:
+            reason = getattr(e, "reason", e)
+            print(f"⚠️  Could not reach {base_url} to validate the key ({reason}).")
+            print(f"   Saving config anyway — verify with: tortoise team info")
         config_path.write_text(_json.dumps(config, indent=2) + "\n")
         os.chmod(config_path, 0o600)
         print("Connected to Tortoise Cloud (team will be resolved from API key)")
@@ -244,44 +312,52 @@ def _cmd_init(args):
         print("  # Connect your agent via MCP (see welcome page)")
         return 0
 
-    print("Tortoise init — auto-detecting FalkorDB…")
+    print("Tortoise init — resolving DB target…")
 
-    # 1. Try Docker FalkorDB
-    docker_host = os.environ.get("FALKORDB_HOST", "localhost")
-    docker_pass = os.environ.get("FALKORDB_PASSWORD", "")
-
+    # #705/#715: resolve the DB target ONCE through the shared helper — the
+    # same code path the onboarding index step uses — so init and index can
+    # never disagree (silent split graph, conf 60). Selection is purely
+    # environmental: explicit --path > TORTOISE_DB_URI (any supported scheme)
+    # > FALKORDB_* legacy trio > TORTOISE_DB_PATH > canonical default. No
+    # connectivity probing — docker reachability never overrides the
+    # configured target.
+    from tortoise.config import is_db_uri
     try:
-        docker_port = int(os.environ.get("FALKORDB_PORT", "16379"))
-    except (ValueError, TypeError):
-        print(f"  ❌ Invalid FALKORDB_PORT: {os.environ.get('FALKORDB_PORT')!r}. Must be an integer.")
+        target = _resolve_db_target(args.path)
+    except ValueError as e:
+        # Bad --path (e.g. relative) — clean CLI error, not a traceback (#715).
+        print(f"  ❌ Invalid DB path: {e}")
         return 1
 
     graph_ready = False
-    docker_detected = False
+    uri_mode = False
 
-    try:
-        from falkordb import FalkorDB
-        db = FalkorDB(host=docker_host, port=docker_port,
-                      password=docker_pass or None)
-        db.select_graph("tortoise").query("RETURN 1")
-        print(f"  ✅ Docker FalkorDB detected at {docker_host}:{docker_port}")
-        graph_ready = True
-        docker_detected = True
-    except ImportError:
-        pass
-    except (ConnectionError, ConnectionRefusedError, OSError) as e:
-        print(f"  ⚠️  Docker FalkorDB unreachable at {docker_host}:{docker_port}: {e}")
-    except Exception as e:
-        err = str(e).lower()
-        if "auth" in err or "password" in err:
-            print(f"  ⚠️  Docker FalkorDB auth failed — check FALKORDB_PASSWORD env var")
-        else:
-            print(f"  ⚠️  Docker FalkorDB unreachable ({e})")
-
-    # 2. Fallback: embedded mode (SQLite-backed)
-    if not graph_ready:
-        from tortoise.config import resolve_db_path
-        db_path = args.path or resolve_db_path()
+    if is_db_uri(target):
+        # 1. URI mode — connect to the configured URI target itself (never a
+        # differently-probed docker); unreachable is a hard error so the
+        # index step can't silently split onto a different store.
+        try:
+            from tortoise.projection import FalkorProjection
+            _proj = FalkorProjection.from_uri(target)
+            _proj.g.query("RETURN 1")
+            print(f"  ✅ FalkorDB reachable via TORTOISE_DB_URI")
+            graph_ready = True
+            uri_mode = True
+        except ImportError:
+            print(f"  ❌ falkordb not installed — required for URI mode")
+            print(f"     pip install falkordb")
+            return 1
+        except Exception as e:
+            err = str(e).lower()
+            if "auth" in err or "password" in err:
+                print(f"  ❌ FalkorDB auth failed — check TORTOISE_DB_URI credentials")
+            else:
+                print(f"  ❌ FalkorDB unreachable ({e})")
+            print("     Fix TORTOISE_DB_URI, or unset it to use embedded mode.")
+            return 1
+    else:
+        # 2. Fallback: embedded mode (SQLite-backed) at the resolved path
+        db_path = target
         try:
             from tortoise.projection import FalkorProjection
             _proj = FalkorProjection(db_path)
@@ -289,9 +365,12 @@ def _cmd_init(args):
             print(f"  ✅ Embedded mode initialized at {db_path}")
             graph_ready = True
         except ImportError:
-            print(f"  ❌ Neither falkordb nor redislite installed.")
-            print(f"     pip install falkordb       # for Docker mode (FalkorProjection)")
-            print(f"     pip install redislite      # for embedded mode (FalkorProjection)")
+            # Reachable when falkordblite is actually missing: tortoise/__init__
+            # no longer crashes at import time (issue #716). falkordb Docker
+            # mode is handled earlier, so this fires only for the embedded gap.
+            print(f"  ❌ Embedded mode unavailable — falkordblite not installed.")
+            print(f"     pip install falkordb        # for Docker mode (FalkorProjection)")
+            print(f"     pip install falkordblite    # for embedded mode (FalkorProjection)")
             return 1
         except Exception as e:
             print(f"  ❌ Embedded mode init failed: {e}")
@@ -303,11 +382,24 @@ def _cmd_init(args):
     # Write welcome Point to the graph
     try:
         from tortoise.sdk import TortoiseSDK
-        if docker_detected:
-            os.environ.setdefault("TORTOISE_DB_URI",
-                f"docker://:{docker_pass}@{docker_host}:{docker_port}/tortoise")
+        if uri_mode:
+            # Materialize the decision so later commands resolve to the SAME
+            # target (single source of truth). The background index spawn
+            # below carries the target via the env/argv handoff (#715,
+            # conf 60/85): password-bearing URIs travel through the
+            # TORTOISE_DB_URI env (never argv — a password in `ps` output
+            # leaks the secret); password-less targets travel via --db argv
+            # so the child resolves identically even if the parent env
+            # changes later. index's --db is optional at argparse since the
+            # split, so the child resolves through the shared precedence
+            # either way — never a hardcoded default.
+            os.environ.setdefault("TORTOISE_DB_URI", target)
             sdk = TortoiseSDK()
         else:
+            # Embedded: record the resolved path so later commands hit the
+            # same DB init wrote to. The spawn below passes --db explicitly
+            # so the child resolves identically (same precedence, conf 60).
+            os.environ.setdefault("TORTOISE_DB_PATH", db_path)
             sdk = TortoiseSDK(db_path=db_path)
         sdk.create_point(
             kind="observation",
@@ -330,38 +422,52 @@ def _cmd_init(args):
     print("  tortoise serve              — start MCP server for agents")
 
     # Onboarding: detect git repo and offer indexing
-    import subprocess as _sp
-    import sys as _sys
-    result = _sp.run(
-        ["git", "rev-parse", "--show-toplevel"],
-        capture_output=True, text=True, timeout=5,
-    )
-    if result.returncode == 0:
-        repo_root = result.stdout.strip()
-        md_count = len(list(__import__("pathlib").Path(repo_root).rglob("*.md")))
-        auto_index = getattr(args, 'yes', False)
-        if md_count > 0:
-            if auto_index:
-                print(f"\nFound {md_count} markdown files in this repo. Auto-indexing…")
-                log_f = open(str(Path(tempfile.gettempdir()) / "tortoise-init-index.log"), 'w')
-                _sp.Popen(
-                    [_sys.executable, "-m", "tortoise", "index", "github", repo_root],
-                    stdout=log_f, stderr=_sp.STDOUT,
-                    start_new_session=True,
-                )
-                print("Indexing in background. Tortoise is ready to use immediately.")
-            else:
-                print()
-                yn = input(f"Found {md_count} markdown files in this repo. Index them into Tortoise? [Y/n]: ").strip().lower()
-                if yn != "n":
-                    print("Launching indexer in background…")
-                    log_f = open(str(Path(tempfile.gettempdir()) / "tortoise-init-index.log"), 'a')
+    # #715 P2 conf 70: skip entirely when the caller (tortoise onboard)
+    # indexes inline — prevents the double index (init auto-spawn + inline).
+    # `is True` (not truthiness): mock.Mock args in tests return a truthy
+    # Mock for unset attrs, which must NOT disable the block.
+    if getattr(args, 'no_index', False) is not True:
+        import subprocess as _sp
+        import sys as _sys
+        result = _sp.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            repo_root = result.stdout.strip()
+            md_count = len(list(__import__("pathlib").Path(repo_root).rglob("*.md")))
+            auto_index = getattr(args, 'yes', False)
+            if md_count > 0:
+                if auto_index:
+                    print(f"\nFound {md_count} markdown files in this repo. Auto-indexing…")
+                    log_f = open(str(Path(tempfile.gettempdir()) / "tortoise-init-index.log"), 'w')
+                    # #715: pass the resolved DB target to the child — env
+                    # for password-bearing URIs (never leak in argv), --db
+                    # otherwise (index's --db resolves identically, conf 60).
+                    child_cmd, child_env = _index_github_child_cmd(
+                        target, repo_root)
                     _sp.Popen(
-                        [_sys.executable, "-m", "tortoise", "index", "github", repo_root],
+                        child_cmd,
                         stdout=log_f, stderr=_sp.STDOUT,
-                        start_new_session=True,
+                        start_new_session=True, env=child_env,
                     )
                     print("Indexing in background. Tortoise is ready to use immediately.")
+                else:
+                    print()
+                    yn = input(f"Found {md_count} markdown files in this repo. Index them into Tortoise? [Y/n]: ").strip().lower()
+                    if yn != "n":
+                        print("Launching indexer in background…")
+                        log_f = open(str(Path(tempfile.gettempdir()) / "tortoise-init-index.log"), 'a')
+                        # #715: same as the --yes path — carry the resolved
+                        # DB target so the child indexes the DB init wrote to.
+                        child_cmd, child_env = _index_github_child_cmd(
+                            target, repo_root)
+                        _sp.Popen(
+                            child_cmd,
+                            stdout=log_f, stderr=_sp.STDOUT,
+                            start_new_session=True, env=child_env,
+                        )
+                        print("Indexing in background. Tortoise is ready to use immediately.")
     return 0
 
 
@@ -826,6 +932,125 @@ def _cmd_session_view(args, api_key: str, api_url: str) -> int:
     return 0
 
 
+def _resolve_db_target(explicit: str | None = None) -> str:
+    """Resolve the DB target for `init` and the onboarding `index` step.
+
+    Single source of truth (#705/#715): both _cmd_init and the onboard index
+    step resolve through THIS function with ONE precedence, so they can never
+    disagree (silent split graph, conf 60). Selection is purely environmental
+    — no connectivity probing, because docker reachability must never override
+    the configured target:
+
+        explicit --path > TORTOISE_DB_URI (any supported scheme: docker://,
+        redis://, rediss://) > FALKORDB_* legacy trio (constructed docker://
+        URI, #715 migration guard) > TORTOISE_DB_PATH > canonical default
+
+    Returns a URI string (URI mode) or an absolute embedded path (embedded
+    mode). Raises ValueError for invalid input (e.g. a relative --path, or an
+    invalid FALKORDB_PORT) via resolve_db_path's _abs guard.
+    """
+    import os
+    from tortoise.config import resolve_db_path, is_db_uri
+
+    if explicit:
+        return resolve_db_path(explicit)
+    uri = os.environ.get("TORTOISE_DB_URI", "")
+    if is_db_uri(uri):
+        return uri
+    # Legacy FALKORDB_* trio (still in .env.example, still probed by doctor):
+    # honor it as a docker:// target so users with ONLY FALKORDB_* set do NOT
+    # silently switch Docker→embedded on upgrade (the split-graph failure mode
+    # #705/#715 exists to kill — conf 55, migration must be loud, not silent).
+    # Only triggers when the trio is EXPLICITLY set; a clean environment keeps
+    # the embedded default (no localhost probe like the pre-#705 init did).
+    # #715 P2 conf 68: empty-string FALKORDB_* values count as UNSET —
+    # FALKORDB_PORT="" previously tripped the `any(...)` check and then
+    # blew up with int('') instead of falling through to the default.
+    if any((os.environ.get(k) or "").strip() for k in
+           ("FALKORDB_HOST", "FALKORDB_PORT", "FALKORDB_PASSWORD")):
+        host = os.environ.get("FALKORDB_HOST") or "localhost"
+        port_raw = os.environ.get("FALKORDB_PORT") or "16379"
+        try:
+            port = int(port_raw)
+        except (ValueError, TypeError):
+            raise ValueError(
+                f"Invalid FALKORDB_PORT={port_raw!r} — must be an integer")
+        password = os.environ.get("FALKORDB_PASSWORD") or ""
+        legacy_uri = f"docker://:{password}@{host}:{port}/tortoise"
+        # #715 P2 conf 95: never print the password — a terminal/log line
+        # must not leak the credential (masked display only).
+        if password:
+            display_uri = f"docker://:***@{host}:{port}/tortoise"
+        else:
+            display_uri = legacy_uri
+        print(
+            f"  ⚠️  FALKORDB_* env vars are legacy — constructed "
+            f"{display_uri} (set TORTOISE_DB_URI to silence)")
+        return legacy_uri
+    return resolve_db_path(None)
+
+
+def _uri_has_password(target: str) -> bool:
+    """True if a DB URI embeds a password in its userinfo (:pw@ or user:pw@).
+
+    #715 P2 conf 85: password-bearing targets must be handed to child
+    processes via the TORTOISE_DB_URI env var, never via --db argv — argv
+    leaks the secret into `ps` output.
+
+    #715 P2 conf 75: a URI without userinfo has no `@` in its authority, so
+    it cannot carry a password — docker://host:6379/db's ":6379" is a
+    host:port, not a credential. Requiring the `@` separator prevents false
+    password-bearing classification (which would route the target to the env
+    handoff instead of the documented --db argv branch).
+    """
+    from tortoise.config import is_db_uri
+    if not is_db_uri(target):
+        return False
+    authority = target.split("://", 1)[1]
+    if "@" not in authority:
+        return False
+    userinfo = authority.split("@", 1)[0]
+    return ":" in userinfo and userinfo.rsplit(":", 1)[1] != ""
+
+
+def _index_github_child_cmd(target: str, repo_root: str,
+                            branch: str | None = None
+                            ) -> tuple[list[str], dict | None]:
+    """Build argv/env for a background `index github` child spawn.
+
+    #715 conf 60/75/85: the child must resolve the SAME target init/index
+    chose. Password-bearing URI targets go via TORTOISE_DB_URI env (never
+    argv); password-less targets keep the explicit --db so the child
+    resolves identically even if the parent env changes later.
+    """
+    import os as _os
+    import sys as _sys
+    cmd = [_sys.executable, "-m", "tortoise", "index", "github", repo_root]
+    if branch and branch != "main":
+        cmd.extend(["--branch", branch])
+    if _uri_has_password(target):
+        env = dict(_os.environ)
+        env["TORTOISE_DB_URI"] = target
+        return cmd, env
+    cmd.extend(["--db", target])
+    return cmd, None
+
+
+def _projection_for(target: str):
+    """Build a FalkorProjection for a resolved target (URI or embedded path).
+
+    #715 P2 conf 75: the single routing choke-point — URI targets go through
+    from_uri, everything else is an embedded path. Commands must never
+    hardcode a localhost default or silently fall back to embedded while a
+    TORTOISE_DB_URI points elsewhere.
+    """
+    from tortoise.config import is_db_uri
+    from tortoise.projection import FalkorProjection
+    if is_db_uri(target):
+        return FalkorProjection.from_uri(target)
+    return FalkorProjection(path=target)
+
+
 def _cmd_onboard(args) -> int:
     """Guided onboarding: init → index → demo → doctor.
 
@@ -833,7 +1058,6 @@ def _cmd_onboard(args) -> int:
     Non-interactive — skips prompts, just runs.
     Idempotent — re-running skips already-done steps.
     """
-    import os
     import subprocess as _sp
     import sys as _sys
     from pathlib import Path
@@ -858,8 +1082,12 @@ def _cmd_onboard(args) -> int:
         return 1
 
     # Step 2: Init — auto-detect FalkorDB, create graph
+    # #715 P2 conf 70: no_index=True disables init's own background
+    # auto-index — onboard indexes ONCE, inline in step 3 below. Without it
+    # a git repo gets indexed twice (init spawn + inline run).
     banner("Initialize graph")
-    rc = _cmd_init(argparse.Namespace(path=getattr(args, 'path', None), yes=True))
+    rc = _cmd_init(argparse.Namespace(
+        path=getattr(args, 'path', None), yes=True, no_index=True))
     if rc != 0:
         print("  ❌ Init failed")
         return rc
@@ -876,11 +1104,25 @@ def _cmd_onboard(args) -> int:
         md_count = len(list(Path(repo_root).rglob("*.md")))
         if md_count > 0:
             print(f"  Found {md_count} markdown files. Indexing…")
+            # #705: pass the SAME resolved DB target init used (docker:// URI
+            # or embedded path honoring --path / TORTOISE_DB_PATH) so index
+            # never silently writes to the default DB.
+            try:
+                db_target = _resolve_db_target(getattr(args, 'path', None))
+            except ValueError as e:
+                # Bad --path (e.g. relative) — clean CLI error, no traceback
+                # (#715). init rejects it first, but guard this call site too.
+                print(f"  ❌ Invalid DB target: {e}", file=_sys.stderr)
+                return 1
             idx_args = argparse.Namespace(
                 url=repo_root, background=False, branch="main",
                 index_cmd="github", cmd="index",
+                db=db_target,
             )
-            _cmd_index_github(idx_args)
+            rc_index = _cmd_index_github(idx_args)
+            if rc_index != 0:
+                print("  ❌ Index failed — see messages above")
+                return rc_index
         else:
             print("  ⊙ No markdown files found — skipping index.")
     else:
@@ -1231,7 +1473,7 @@ def _cmd_index_github(args):
     from pathlib import Path
 
     from tortoise.api import EventAPI
-    from tortoise.extraction_pipeline import ExtractionPipeline
+    from tortoise.extractor import MockModel, extract_from_document
     from tortoise.log import EventLog
     from tortoise.projection import FalkorProjection
 
@@ -1240,15 +1482,21 @@ def _cmd_index_github(args):
 
     # Background mode: detach and return immediately
     if args.background:
-        cmd = [sys.executable, "-m", "tortoise", "index", "github", url]
-        if branch != "main":
-            cmd.extend(["--branch", branch])
+        # #715 P2 conf 90: the re-spawn must carry the resolved DB target —
+        # it previously omitted --db entirely, so the child could index a
+        # different store than the parent (split graph).
+        try:
+            bg_target = args.db or _resolve_db_target(None)
+        except ValueError as e:
+            print(f"  ❌ Invalid DB target: {e}", file=sys.stderr)
+            return 1
+        cmd, child_env = _index_github_child_cmd(bg_target, url, branch)
         pid_file = Path(tempfile.gettempdir()) / f"tortoise-index-{Path(url).stem}.pid"
         log_file = pid_file.with_suffix('.log')
         with open(log_file, 'w') as lf:
             proc = subprocess.Popen(
                 cmd, stdout=lf, stderr=subprocess.STDOUT,
-                start_new_session=True,
+                start_new_session=True, env=child_env,
             )
         pid_file.write_text(str(proc.pid))
         print(f"Indexing {url} in background (pid {proc.pid})")
@@ -1266,6 +1514,10 @@ def _cmd_index_github(args):
         print(f"Indexing local repo: {repo_path}")
     else:
         # Clone repo
+        import shutil as _shutil
+        if _shutil.which("git") is None:
+            print("git is required to index GitHub repos but was not found on PATH", file=sys.stderr)
+            return 1
         tmpdir = tempfile.mkdtemp(prefix="tortoise-index-")
         atexit.register(lambda: __import__("shutil").rmtree(tmpdir, ignore_errors=True))
 
@@ -1295,28 +1547,29 @@ def _cmd_index_github(args):
 
     print(f"Found {total} markdown files. Indexing…")
 
-    # Set up projection + API (same detection as _cmd_init)
-    proj = None
-    # Try Docker FalkorDB first
+    # ── DB target: same single-source resolution as init (#705/#715, conf 60)
+    # args.db is authoritative when given (onboard passes the target init
+    # resolved); standalone falls back to the shared env precedence. No
+    # connectivity probing — a reachable local docker must never override the
+    # configured target or init and index silently split onto different stores.
+    # Guarded like the background branch above (#715): a bad FALKORDB_PORT
+    # (or other env) must surface as a clean CLI error, not a ValueError
+    # traceback.
     try:
-        host = os.environ.get("FALKORDB_HOST", "localhost")
-        port = int(os.environ.get("FALKORDB_PORT", "16379"))
-        password = os.environ.get("FALKORDB_PASSWORD", "")
-        from falkordb import FalkorDB as FDB
-        db = FDB(host=host, port=port, password=password or None)
-        db.select_graph("tortoise").query("RETURN 1")
-        proj = FalkorProjection(host=host, port=port, password=password or None)
-    except Exception:
-        # Fallback: embedded mode (SQLite-backed) or docker:// URI
-        try:
-            if args.db.startswith("docker://"):
-                proj = FalkorProjection.from_uri(args.db)
-            else:
-                proj = FalkorProjection(path=args.db)
-        except Exception as e:
-            print(f"tortoise index: Cannot connect to database: {e}", file=sys.stderr)
-            print("Set --db to a Docker URI or ensure FalkorDB is running.", file=sys.stderr)
-            return 1
+        target = args.db or _resolve_db_target(None)
+    except ValueError as e:
+        print(f"  ❌ Invalid DB target: {e}", file=sys.stderr)
+        return 1
+    from tortoise.config import is_db_uri
+    try:
+        if is_db_uri(target):
+            proj = FalkorProjection.from_uri(target)
+        else:
+            proj = FalkorProjection(path=target)
+    except Exception as e:
+        print(f"tortoise index: Cannot connect to database: {e}", file=sys.stderr)
+        print("Set --db to a Docker URI or ensure FalkorDB is running.", file=sys.stderr)
+        return 1
 
     log_path = Path(tempfile.gettempdir()) / f"tortoise-index-{repo_name}.jsonl"
     log = EventLog(str(log_path))
@@ -1336,13 +1589,16 @@ def _cmd_index_github(args):
         except Exception:
             pass
 
-    pipeline = ExtractionPipeline(enrich=False)
+    # Use deterministic mock models by default (offline, self-hosted friendly).
+    # Users can swap to LLM models via tortoise ingest for richer extraction.
+    point_model = MockModel("cheap")
+    relation_model = MockModel("reason")
     indexed, skipped, errors = 0, 0, 0
 
     for i, fp in enumerate(md_files, 1):
         rel = fp.relative_to(repo_path)
         raw_text = fp.read_text(encoding="utf-8")
-        # ponytail: strip frontmatter before hashing — pipeline may add
+        # ponytail: strip frontmatter before hashing — extractor may add
         # frontmatter, which would change the hash on the next run.
         text_for_hash = raw_text
         if raw_text.startswith('---'):
@@ -1356,11 +1612,21 @@ def _cmd_index_github(args):
             continue
         print(f"  [{i}/{total}] {rel}…", end=" ", flush=True)
         try:
-            stats = pipeline.process_file(fp, api)
+            stats = extract_from_document(
+                raw_text, str(rel), api,
+                point_model=point_model,
+                relation_model=relation_model,
+                authored_by="github-indexer",
+            )
             if stats.get("points", 0) > 0:
                 indexed += 1
                 indexed_hashes.add(content_hash)
-                print(f"✓ ({stats['points']} pts, {stats['operators']} ops, kind={stats['documentKind']})")
+                # Persist incrementally — avoid duplicate Points on crash
+                try:
+                    hash_file.write_text(_json.dumps(sorted(indexed_hashes)))
+                except Exception:
+                    pass
+                print(f"✓ ({stats['points']} pts, {stats['operators']} ops, {stats['sections']} sections)")
             else:
                 skipped += 1
                 print("⊙ (skipped — no claims found)")
@@ -1493,13 +1759,18 @@ def _cmd_doctor(args):
 
 def _cmd_list_kinds(args) -> int:
     """List all pointKinds present in the graph with counts."""
-    import os as _os
+    import sys as _sys
     from tortoise.sdk import TortoiseSDK
-    from tortoise.projection import FalkorProjection
 
-    uri = _os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise")
+    # #715 P2 conf 75: no hardcoded docker://localhost default — resolve the
+    # same target init/index use (env URI > FALKORDB_* > embedded path).
+    try:
+        target = _resolve_db_target(None)
+    except ValueError as e:
+        print(f"  ❌ Invalid DB target: {e}", file=_sys.stderr)
+        return 1
     sdk = TortoiseSDK()
-    sdk._proj = FalkorProjection.from_uri(uri)
+    sdk._proj = _projection_for(target)
 
     try:
         kinds = sdk.list_pointkinds()
@@ -1519,13 +1790,18 @@ def _cmd_list_kinds(args) -> int:
 
 def _cmd_list_sources(args) -> int:
     """List all Sources with point counts."""
-    import os as _os
+    import sys as _sys
     from tortoise.sdk import TortoiseSDK
-    from tortoise.projection import FalkorProjection
 
-    uri = _os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise")
+    # #715 P2 conf 75: no hardcoded docker://localhost default — resolve the
+    # same target init/index use (env URI > FALKORDB_* > embedded path).
+    try:
+        target = _resolve_db_target(None)
+    except ValueError as e:
+        print(f"  ❌ Invalid DB target: {e}", file=_sys.stderr)
+        return 1
     sdk = TortoiseSDK()
-    sdk._proj = FalkorProjection.from_uri(uri)
+    sdk._proj = _projection_for(target)
 
     try:
         sources = sdk.list_sources()
@@ -1565,7 +1841,6 @@ def _cmd_decide(args) -> int:
     import sys as _sys
     from pathlib import Path
     from tortoise.sdk import TortoiseSDK
-    from tortoise.projection import FalkorProjection
 
     # Two modes: --input <file> or inline (--options/--criteria/--findings/--edges)
     if args.input:
@@ -1607,10 +1882,19 @@ def _cmd_decide(args) -> int:
         print("Error: at least one option required (--input file with 'options' or --options JSON)", file=_sys.stderr)
         return 1
 
-    import os as _os
-    uri = getattr(args, "db", None) or _os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise")
-    sdk = TortoiseSDK()
-    sdk._proj = FalkorProjection.from_uri(uri)
+    # #715 P2 conf 75: --db override or the shared env resolution — never a
+    # hardcoded docker://localhost default. URI targets go through from_uri,
+    # paths through the embedded constructor (same parity as init/index).
+    try:
+        target = getattr(args, "db", None) or _resolve_db_target(None)
+        sdk = TortoiseSDK()
+        # Inside the guard: _projection_for rejects relative --db paths with
+        # the shared RELATIVE_PATH_ERROR (ValueError) — surface it as a
+        # clean CLI error, not a traceback (#715).
+        sdk._proj = _projection_for(target)
+    except ValueError as e:
+        print(f"  ❌ Invalid DB target: {e}", file=_sys.stderr)
+        return 1
 
     # Track all operator IDs for explicit-factor mode
     all_operator_ids: list[str] = []
@@ -1791,7 +2075,11 @@ def main(argv: list[str] | None = None) -> int:
     idx_sp = idx.add_subparsers(dest="index_cmd")
     ig = idx_sp.add_parser("github", help="Index a GitHub repo's markdown files")
     ig.add_argument("url", help="GitHub repo URL (https://github.com/user/repo)")
-    ig.add_argument("--db", required=True, help="Docker URI or file path for target database")
+    # #715 P2 conf 85: --db is optional so password-bearing targets can be
+    # handed to background children via TORTOISE_DB_URI env (never argv).
+    ig.add_argument("--db", default=None,
+                    help="Docker URI or file path for target database "
+                         "(default: TORTOISE_DB_URI / FALKORDB_* / embedded path)")
     ig.add_argument("--branch", default="main", help="Git branch to index")
     ig.add_argument("--background", action="store_true", help="Run in background")
     # tortoise create-point <content> --kind <kind>
@@ -1821,7 +2109,7 @@ def main(argv: list[str] | None = None) -> int:
     dc.add_argument("--edges", help="JSON list of edges, e.g. '[\"crit:1\", \"IMPL\", \"opt:a\"]' or full edge dicts")
     dc.add_argument("--context-free", action="store_true",
                     help="Deprecated no-op — context-free (explicit factors) is the only mode since #49 Phase 2",)
-    dc.add_argument("--db", help="FalkorDB URI override (default: TORTOISE_DB_URI or docker://:@localhost:16379/tortoise)")
+    dc.add_argument("--db", help="DB target override — URI (docker://, redis://, rediss://) or absolute path (default: TORTOISE_DB_URI, else legacy FALKORDB_*, else embedded path)")
     try:
         args = p.parse_args(argv)
     except (argparse.ArgumentError, SystemExit) as e:

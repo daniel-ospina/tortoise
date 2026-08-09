@@ -152,8 +152,12 @@ _QUOTA_GATED: frozenset[str] = frozenset({
     "tortoise_mitigate_operator",
     # edge-creating tools — edge growth is the same graph-flood family
     "tortoise_create_edge", "tortoise_supersede", "tortoise_invalidate",
+    "tortoise_retract_point",
     # delegates to hosted_api._seed_demo_graph (creates the 4-layer demo graph)
     "tortoise_onboarding_demo_create",
+    # #684: node-creating tools that were missed in the original #329 audit
+    "tortoise_file_human_approval",  # creates Event + decision Point + IMPL edges
+    "tortoise_assess_source",        # creates assessment Point
 })
 
 
@@ -192,16 +196,14 @@ def _enforce_quota(resource: str = "points") -> None:
     limits REST sees); fallback resolves from the registry. Stdio mode
     (no team context) → skip — operator/trusted (batch caps still apply).
     """
-    from tortoise.mcp_auth import _current_team_id, _current_team_limits
+    from tortoise.mcp_auth import SELFHOST_TEAM_ID, _current_team_id, _current_team_limits
     from tortoise.quota import enforce_team_limit, resolve_team_limits
     team_id = _current_team_id.get()
     if not team_id:
         return  # stdio/operator — no team context
-    if team_id == "selfhost":
-        # #493: selfhost transport (auth_mode static|none) is operator/trusted —
-        # no Team node exists in the registry (virtual team_selfhost namespace),
-        # so resolve_team_limits would fail-closed on every write. Same
-        # semantics as stdio mode: skip team quota (batch caps still apply).
+    if team_id == SELFHOST_TEAM_ID:
+        # Selfhost transport placeholder (#338): no tenant registry exists —
+        # quota is N/A (selfhost has no billing). Batch caps still apply.
         return
     limits = _current_team_limits.get()
     if limits is None:
@@ -212,15 +214,30 @@ def _enforce_quota(resource: str = "points") -> None:
 
 
 def _quota_gated(fn, resource: str = "points"):
-    """Wrap a bound SDK method with a pre-write quota check.
+    """Wrap a bound SDK method with a pre-write quota check + metering.
 
     Preserves the bound-callable style (_safe(_get_team_sdk().name, ...)):
     the quota check runs INSIDE _safe's try so errors surface as structured
     error dicts (see _safe's QuotaExceededError/QuotaCheckError mapping).
+
+    #681: after a successful write (fn returns without raising), records a
+    write op for overage metering. Best-effort — metering failures are
+    swallowed and never block the tool.
     """
     def _gated(*args, **kwargs):
         _enforce_quota(resource)
-        return fn(*args, **kwargs)
+        result = fn(*args, **kwargs)
+        # Metering (#681): best-effort, after successful write
+        try:
+            from tortoise.mcp_auth import _current_team_id, _current_team_limits
+            team_id = _current_team_id.get()
+            if team_id:
+                limits = _current_team_limits.get() or {}
+                from tortoise.metering import record_write_ops
+                record_write_ops(team_id, tier=limits.get("tier"))
+        except Exception:
+            pass  # best-effort — never block the tool
+        return result
     return _gated
 
 
@@ -568,7 +585,10 @@ def tortoise_create_operator(op_type: str, source_id: str, target_ids: Any,
              'composedOf'/'decomposesInto'/'contains'/'wraps' → stored as hasPart edge.
     source_id: source/parent Point ID.
     target_ids: target/child Point IDs (1 for IMPL/NAND, N for part/whole).
-    direction: 'bidirectional' (default) or 'unidirectional' — EP propagation direction.
+    direction: 'bidirectional' (default) or 'unidirectional' — EP propagation
+      direction. Default is mutual (both directions); pass 'unidirectional'
+      for a directed attack (attacker's truth penalizes the target, no
+      back-pressure).
 
     → See /skill:tortoise-graph-reasoning for proper usage:
       annotation, mitigation, NAND constraints, veracity vs implication.
@@ -661,8 +681,8 @@ def tortoise_file_human_approval(approver_id: str, artifact_id: str,
     Returns {event_id, decision_point_id, impl_operator_ids, confidence_delta}.
     """
     point_ids = _parse(point_ids)
-    return _safe(_get_team_sdk().file_human_approval, approver_id, artifact_id,
-                 point_ids, decision_content)
+    return _safe(_quota_gated(_get_team_sdk().file_human_approval, "points"),
+                 approver_id, artifact_id, point_ids, decision_content)
 
 
 def tortoise_delete_point(id: str) -> dict:
@@ -687,6 +707,39 @@ def tortoise_supersede(old_id: str, new_id: str) -> dict:
     Returns {invalidated, id, corrected_by}.
     """
     return _safe(_quota_gated(_get_team_sdk().supersede_point, "points"), old_id, new_id)
+
+
+def tortoise_retract_point(id: str) -> dict:
+    """Tombstone-retract a Point — status='retracted' (point stays in graph).
+
+    Terminal state transition; default query/list surfaces exclude retracted
+    points (opt-in via include_retracted). Raises ValueError if the point is
+    missing, is an operator, or is already terminal (retracted/superseded/
+    archived).
+    """
+    return _safe(_quota_gated(_get_team_sdk().retract_point, "points"), id)
+
+
+def tortoise_events_poll(after: str | None = None, types: Any = None,
+                         limit: int = 100) -> dict:
+    """Poll graph/claim events after an opaque cursor (at-least-once).
+
+    Returns {events: [...], next_cursor}. after=None → tail (oldest retained).
+    Expired cursor → structured error ('cursor expired — replay from tail');
+    malformed cursor → 'invalid cursor'. types: comma-free list of event types
+    (PointAdded, OperatorAdded, PointRetracted, PointSuperseded,
+    OperatorAnnotated) or None for all.
+
+    readOnlyHint covers user-visible state: the poll NEVER mutates user
+    content. A rare maintenance purge (retention) may run at most once per
+    TORTOISE_EVENT_RETENTION_INTERVAL — an internal housekeeping DELETE of
+    expired :GraphEvent nodes, gated so steady-state polls are read-only.
+    """
+    if types is not None:
+        types = _parse(types)
+        if not isinstance(types, list):
+            types = [types]
+    return _safe(_get_team_sdk().events_poll, after=after, types=types, limit=limit)
 
 
 
@@ -1044,7 +1097,8 @@ def tortoise_assess_source(url: str, assessor: str, score: float,
     (compute_reputation at write time). Feeds the source's reliability factor
     (clamped [0.1, 2.0]).
     """
-    return _safe(_get_team_sdk().assess_source, url, assessor, score, rationale)
+    return _safe(_quota_gated(_get_team_sdk().assess_source, "points"),
+                 url, assessor, score, rationale)
 
 
 @mcp.tool(annotations=ToolAnnotations(destructiveHint=True))

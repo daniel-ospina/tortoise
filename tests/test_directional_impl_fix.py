@@ -366,11 +366,10 @@ def test_nand_bidirectional():
 
         # Claim should be contested away from the strong-support fixed point.
         # With directional IMPL the T0 source pushes the claim strongly, and
-        # the NAND defeat (phi_nand T0-vs-T0 ~ 0.637, "moderate dampening")
-        # partially counters it — the claim settles around 0.74 (support
-        # dominates moderate contradiction), NOT 0.5. The regression guard is
-        # that the claim is materially below the pure-support case and above
-        # the pure-contradiction case (#86).
+        # the NAND contradiction potential phi_nand = exp(-w*ca*cb) penalizes
+        # agreement — at weight=1.0 the T0-vs-T0 coupling is ~0.44, which
+        # partially counters the IMPL support. The claim settles below the
+        # pure-support case and above the pure-contradiction case (#86).
         assert 0.50 < cc["mean"] < 0.85, \
             f"❌ Claim outside contested range: {cc['mean']:.4f}"
         print(f"  ✅ Claim contested by NAND: {cc['mean']:.4f} (in 0.50-0.85)")

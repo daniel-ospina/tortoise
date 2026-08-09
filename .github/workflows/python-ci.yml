@@ -1,0 +1,51 @@
+name: Python CI
+
+# Pre-merge Python test gate (#746).
+#
+# Replaces the previous broken symlink (`.github/workflows/python-ci.yml` →
+# `agent-infra/templates/.github/workflows/python-ci.yml`), which resolved to
+# a path that does NOT exist in this checkout. GitHub silently ignored the
+# invalid symlink, so NO pre-merge Python suite ran — the full suite only
+# ran post-merge, warn-only (post-merge-validation.yml). That is why the P0
+# membership-status bug (#740) would have merged green.
+#
+# Self-contained on purpose (fix #555): no reusable-workflow call and no
+# `scripts/`/`agent-infra` symlinks — both resolve to paths that are broken
+# on the runner.
+#
+# Runs the full embedded-FalkorDBLite suite (tests needing a live FalkorDB
+# self-skip via _skip_if_no_falkor). Per-test --timeout=90 turns any hang
+# into a fast, visible failure instead of a 6h CI budget burn.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: python-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'   # pyproject requires-python >= 3.12
+      - name: Install package + test extras
+        # embeddings extra required at COLLECTION time: test_gmm_proofs.py,
+        # test_embeddings.py, test_cross_lens.py, test_sdk_group3.py import
+        # sklearn at module scope (post-merge-validation.yml installs
+        # '.[embeddings]' for the same reason).
+        run: pip install -e '.[test,embeddings]'
+      - name: Run full test suite (per-test timeout — hangs fail fast)
+        # tests/e2e + test_waitlist_form.py run in the dedicated welcome-e2e
+        # job (they need Playwright browsers; this job installs none). #493
+        run: python -m pytest tests/ --ignore=tests/e2e --ignore=tests/test_waitlist_form.py -q --timeout=90
+        env:
+          # conftest.py sets a static pepper via setdefault, but pin it here
+          # so the requirement is explicit and the same across surfaces.
+          TORTOISE_SECRET_PEPPER: test-static-pepper

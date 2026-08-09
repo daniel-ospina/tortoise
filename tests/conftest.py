@@ -17,6 +17,29 @@ from tortoise.sdk import TortoiseSDK
 from tortoise.pricing import tier_limits
 
 
+@pytest.fixture(scope="session")
+def shared_embedded_db():
+    """One shared embedded FalkorDBLite DB for the whole session (#221 R5).
+
+    R5 mitigation for the redislite process leak (#176): tests that need an
+    embedded (redislite) DB create ONE server per session instead of one per
+    test. Each test wipes the graph on its own (or uses a per-test graph
+    name), so state never leaks across tests while the subprocess count stays
+    at 1.
+
+    Restored 2026-08-08 (#647): the D11 conftest rewrite (#578) dropped this
+    fixture but five test files (test_ep_selector, test_ranking,
+    test_sdk_legacy_coverage, test_search_sessions_temporal,
+    test_session_semantic_search) still depend on it.
+
+    # TODO(#176): stopgap — remove when the redislite root-cause fix lands.
+    """
+    db_path = os.path.join(
+        tempfile.mkdtemp(prefix="tortoise_shared_embedded_"), "shared.db"
+    )
+    yield db_path
+
+
 @pytest.fixture
 def provision_test_user():
     created = []
@@ -26,12 +49,16 @@ def provision_test_user():
         sdk = TortoiseSDK(os.path.join(tmpdir, "e2e.db"), namespace="e2e-tests")
         team = sdk.team_create(f"e2e-{os.urandom(4).hex()}")
         lim = tier_limits(tier)
+        # #310 (review fix 16b): mirror production CREATE semantics — write
+        # max_points (= max_graph_nodes, GAP-B mapping) + max_sessions too.
         sdk._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.tier=$tier, t.max_graphs=$mg, "
-            "t.max_users=$mu, t.max_api_keys=$mk, t.ops_allowance=$ops, t.graph_size_cap=$nodes",
+            "t.max_users=$mu, t.max_api_keys=$mk, t.max_points=$mp, "
+            "t.max_sessions=$ms, t.ops_allowance=$ops, t.graph_size_cap=$nodes",
             params={"id": team["id"], "tier": tier,
                     "mg": lim["max_graphs_per_team"], "mu": lim["max_users_per_team"],
-                    "mk": lim["max_api_keys"], "ops": lim["included_write_ops_per_month"],
+                    "mk": lim["max_api_keys"], "mp": lim["max_graph_nodes"],
+                    "ms": 1000, "ops": lim["included_write_ops_per_month"],
                     "nodes": lim["max_graph_nodes"]},
         )
         if demo_seed:
@@ -81,3 +108,35 @@ def shared_embedded_db():
 @pytest.fixture
 def test_user(provision_test_user):
     return provision_test_user(tier="free", demo_seed=True)
+
+
+@pytest.fixture
+def sdk_factory(tmp_path):
+    """Shared embedded-SDK factory for the #432 suite (Tasks 1/2/3/5).
+
+    Each call builds a TortoiseSDK on a FRESH embedded redislite DB file under
+    the per-test tmp_path (unique per call), so concurrent workers (threads)
+    each get an isolated graph. Embedded-vs-docker concurrency note
+    (plan-review P2): the embedded redislite server is shared per-path but is
+    NOT multi-connection-safe — two TortoiseSDK instances on the SAME path in
+    one process each open their own server and last-close wins on the DB file.
+    Tests that need cross-SDK sharing on one graph must run against a live
+    FalkorDB (TORTOISE_DB_URI=docker://...) instead; the seq-atomicity test
+    (Task 3) follows the plan's per-worker fresh-SDK construction.
+
+    ensure_schema=False (default): :GraphEvent schema is created lazily by
+    append_event on first emit (Task 3). ensure_schema=True eagerly installs
+    it (used by the duplicate-append test).
+    """
+    import os
+
+    def factory(_tmp_path=None, *, ensure_schema=False, namespace=None):
+        base = _tmp_path if _tmp_path is not None else tmp_path
+        db_path = os.path.join(str(base), f"evt-{os.urandom(4).hex()}.db")
+        sdk = TortoiseSDK(db_path, namespace=namespace)
+        if ensure_schema:
+            from tortoise import event_store
+            event_store.ensure_event_schema(sdk._get_proj())
+        return sdk
+
+    return factory

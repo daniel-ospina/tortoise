@@ -26,9 +26,9 @@ class TortoiseEP:
     Parameters:
         projection: FalkorProjection instance (provides .g and ._neighbors)
         damping: message damping factor, 0 < λ ≤ 1
-        n_quad: Gauss-Jacobi points per dimension (8 = 0.03% error at
-            w=50; at w=100 the n_quad=8 error is ~7% — use n_quad=16 for
-            w≥100, which recovers to <0.002% error)
+        n_quad: Gauss-Jacobi points per dimension (8 = ≤0.8% error at
+            w=100, <0.03% at w=50; n_quad=16 recovers to machine-like
+            precision across all w ≤ 100)
         max_iter: hard cap on EP outer iterations
         tol: convergence threshold (max relative change in α,β)
     """
@@ -227,6 +227,12 @@ class TortoiseEP:
         alpha_a, beta_a = self._beta_from_natural(*cav_eta_a)
         alpha_b, beta_b = self._beta_from_natural(*cav_eta_b)
 
+        # NAND uses the standard symmetric contradiction potential for the
+        # target message. DIRECTION is enforced structurally by the
+        # back-message guard below: for explicitly-'unidirectional' operators
+        # the source/attacker receives NO factor message (the Dung-style
+        # directed attack an agent opts into). Default is bidirectional
+        # (mutual contradiction) per product owner (#753).
         phi = phi_nand if op_type == "NAND" else phi_impl
         mom_a, mom_b = tilted_moments(
             alpha_a, beta_a, alpha_b, beta_b, weight, phi, self.n_quad
@@ -292,10 +298,20 @@ class TortoiseEP:
                             label: str | None = None,
                             direction: str = "bidirectional") -> None:
         # input_ids are sorted by idx (source=0, targets=1..N).
-        # For IMPL: only create source→target pairs (skip target↔target).
-        # For NAND: create all pairwise combinations (full mutual contradiction).
+        # IMPL: source→target pairs only (skip target↔target).
+        # NAND bidirectional (default): all pairwise combinations (mutual
+        # contradiction — at-most-one-true over all members).
+        # NAND unidirectional (agent-chosen directed attack): source→each-target
+        # attacks ONLY — target↔target pairwise edges would otherwise create
+        # arbitrary directed attacks between targets (review P2, #795).
         if op_type == "IMPL" and len(input_ids) >= 2:
             # Source is input_ids[0] (idx=0). Targets are input_ids[1:].
+            for j in range(1, len(input_ids)):
+                self._update_factor(op_id, op_type,
+                                    [input_ids[0], input_ids[j]], weight, label, direction)
+        elif op_type == "NAND" and direction != "bidirectional":
+            # Directed NAND: the source attacks each target; targets do not
+            # attack each other.
             for j in range(1, len(input_ids)):
                 self._update_factor(op_id, op_type,
                                     [input_ids[0], input_ids[j]], weight, label, direction)
@@ -372,7 +388,9 @@ class TortoiseEP:
                     params={"cid": claim_id},
                 ).result_set
                 for op_id, op_type, label, direction in rows:
-                    # Defensive: pre-migration operators without direction default to bidirectional
+                    # Read-path fallback for LEGACY/pre-migration operators lacking a
+                    # direction property: default to bidirectional (the creation
+                    # default for all op types per #753).
                     if direction is None:
                         direction = "bidirectional"
                         logger.warning(
