@@ -57,3 +57,35 @@ def provision_test_user():
 @pytest.fixture
 def test_user(provision_test_user):
     return provision_test_user(tier="free", demo_seed=True)
+
+
+@pytest.fixture
+def sdk_factory(tmp_path):
+    """Shared embedded-SDK factory for the #432 suite (Tasks 1/2/3/5).
+
+    Each call builds a TortoiseSDK on a FRESH embedded redislite DB file under
+    the per-test tmp_path (unique per call), so concurrent workers (threads)
+    each get an isolated graph. Embedded-vs-docker concurrency note
+    (plan-review P2): the embedded redislite server is shared per-path but is
+    NOT multi-connection-safe — two TortoiseSDK instances on the SAME path in
+    one process each open their own server and last-close wins on the DB file.
+    Tests that need cross-SDK sharing on one graph must run against a live
+    FalkorDB (TORTOISE_DB_URI=docker://...) instead; the seq-atomicity test
+    (Task 3) follows the plan's per-worker fresh-SDK construction.
+
+    ensure_schema=False (default): :GraphEvent schema is created lazily by
+    append_event on first emit (Task 3). ensure_schema=True eagerly installs
+    it (used by the duplicate-append test).
+    """
+    import os
+
+    def factory(_tmp_path=None, *, ensure_schema=False, namespace=None):
+        base = _tmp_path if _tmp_path is not None else tmp_path
+        db_path = os.path.join(str(base), f"evt-{os.urandom(4).hex()}.db")
+        sdk = TortoiseSDK(db_path, namespace=namespace)
+        if ensure_schema:
+            from tortoise import event_store
+            event_store.ensure_event_schema(sdk._get_proj())
+        return sdk
+
+    return factory

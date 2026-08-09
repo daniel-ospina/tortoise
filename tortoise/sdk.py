@@ -24,7 +24,42 @@ register_kind("option")    # used by file_decision (#133)
 register_kind("evidence")  # used by file_decision (#133)
 
 # Valid status values for Point nodes (used by update_point status validation)
-POINT_STATUS_VALUES = frozenset({'live', 'draft', 'outdated', 'archived'})
+# #432: claim lifecycle vocabulary — draft → live → retracted → superseded
+# (plus outdated/archived). challenged is a DERIVED condition (NAND operator
+# edge on a live point), NOT a stored status.
+POINT_STATUS_VALUES = frozenset({'draft', 'live', 'retracted', 'superseded', 'outdated', 'archived'})
+
+# #432: declarative spec for the retract/supersede transition guards. NOT
+# consulted by update_point per-call (update_point only promotes draft→live);
+# every claim transition is observable via a Task 3 emit hook, and no
+# transition can slip through update_point unemitted.
+_ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
+    "draft": frozenset({"live"}),                        # promote via update_point/create_operator
+    "live": frozenset({"retracted", "superseded"}),    # via retract_point / supersede_point
+    "retracted": frozenset(),                            # terminal
+    "superseded": frozenset(),                           # terminal
+    "outdated": frozenset({"retracted"}),               # outdated stays a flag; retract allowed
+    "archived": frozenset(),                             # terminal (reserved — no v1 write path)
+}
+
+
+def _raise_update_point_status_error(proj, id: str) -> None:
+    """#432: error path for the update_point draft→live promote guard.
+
+    Runs a diagnostic existence read ONLY when the guarded SET returned no
+    rows, so the happy path stays a single round trip. Missing point →
+    ValueError matching the historical missing-point behavior; present but
+    not draft → illegal-transition ValueError.
+    """
+    exists = proj.g.query(
+        "MATCH (n:Point {id:$id}) RETURN count(n)", params={"id": id},
+    ).result_set[0][0]
+    if not exists:
+        raise ValueError(f"No point {id!r}")
+    raise ValueError(
+        f"Illegal status transition — update_point only promotes draft→live; "
+        f"use retract_point()/supersede_point() for lifecycle transitions"
+    )
 
 _logger = logging.getLogger(__name__)
 
@@ -579,26 +614,63 @@ class TortoiseSDK:
                 f"Must be one of: {', '.join(sorted(POINT_STATUS_VALUES))}"
             )
 
+        # #432 plan-review P1: update_point is non-status except the draft→live
+        # promote (matches the create_operator promote). Any other status value
+        # is rejected BEFORE the query — lifecycle transitions go through
+        # retract_point()/supersede_point() (which emit events). This keeps
+        # every claim transition observable via an emit hook.
+        if 'status' in props:
+            if props['status'] != 'live':
+                raise ValueError(
+                    "update_point only promotes draft→live — use "
+                    "retract_point()/supersede_point() for lifecycle transitions"
+                )
+
         # Check if node carries :Object label (entity node with version tracking)
         has_object = proj.g.query(
             "MATCH (n:Point:Object {id:$id}) RETURN count(n) > 0",
             params={"id": id},
         ).result_set[0][0]
 
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+
         if has_object:
-            from datetime import datetime, timezone
-            now = datetime.now(timezone.utc).isoformat()
-            proj.g.query(
-                "MATCH (n:Point:Object {id:$id}) "
-                "SET n += $props, n.version = coalesce(n.version, 0) + 1, n.updatedAt = $now",
-                params={"id": id, "props": props, "now": now},
-            )
-        else:
-            for key, val in props.items():
-                proj.g.query(
-                    "MATCH (n:Point {id:$id}) SET n += $props",
-                    params={"id": id, "props": {key: val}},
+            if 'status' in props:
+                # Promote guard folded INTO the WHERE clause (plan-review P2:
+                # single round trip, no widened write window).
+                res = proj.g.query(
+                    "MATCH (n:Point:Object {id:$id}) "
+                    "WHERE (n.status IS NULL OR n.status = 'draft') "
+                    "SET n.status = 'live', n.updatedAt = $now, "
+                    "n.version = coalesce(n.version, 0) + 1 RETURN n",
+                    params={"id": id, "now": now},
                 )
+                if not res.result_set:
+                    _raise_update_point_status_error(proj, id)
+            else:
+                proj.g.query(
+                    "MATCH (n:Point:Object {id:$id}) "
+                    "SET n += $props, n.version = coalesce(n.version, 0) + 1, n.updatedAt = $now",
+                    params={"id": id, "props": props, "now": now},
+                )
+        else:
+            if 'status' in props:
+                # Promote guard folded INTO the WHERE clause (plan-review P2).
+                res = proj.g.query(
+                    "MATCH (n:Point {id:$id}) "
+                    "WHERE (n.status IS NULL OR n.status = 'draft') "
+                    "SET n.status = 'live', n.updatedAt = $now RETURN n",
+                    params={"id": id, "now": now},
+                )
+                if not res.result_set:
+                    _raise_update_point_status_error(proj, id)
+            else:
+                for key, val in props.items():
+                    proj.g.query(
+                        "MATCH (n:Point {id:$id}) SET n += $props",
+                        params={"id": id, "props": {key: val}},
+                    )
         # Tag sync (#485): keep TAGGED edges consistent with the n.tags
         # property — update_point previously set the property but left edges
         # stale, so query_points_by_tag missed updated points. Falsy tag
@@ -706,6 +778,23 @@ class TortoiseSDK:
         proj = self._get_proj()
         now = datetime.now(timezone.utc).isoformat()
 
+        # #432: transition guard — old point must exist, be a statement (not
+        # an operator), and not already be terminal (mirrors the retract
+        # guard; supersede is already multi-query so the read is cheap).
+        guard = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.is_operator, n.status",
+            params={"id": old_id},
+        ).result_set
+        if not guard:
+            raise ValueError(f"No point {old_id!r}")
+        is_op, cur = guard[0][0], guard[0][1]
+        if is_op:
+            raise ValueError(
+                f"Point {old_id!r} is an operator — supersession is for statement points")
+        if cur in ("retracted", "superseded", "archived"):
+            raise ValueError(
+                f"Point {old_id!r} is already terminal ({cur!r}) — supersession is terminal")
+
         # 0. #329: collect + validate ALL edge types BEFORE any mutation.
         #    The edge types are interpolated into query structure (no params
         #    possible) — an unvalidated type (e.g. from a crafted edge) is a
@@ -721,9 +810,12 @@ class TortoiseSDK:
         for row in edges_result.result_set:
             validate_rel_type(row[1])  # raises ValueError before any mutation
 
-        # 1. Mark old outdated + create CORRECTS edge (same as invalidate)
+        # 1. Mark old superseded + outdated + create CORRECTS edge (same as invalidate)
+        # #432: status='superseded' alongside the legacy outdated=true flag
+        # (back-compat for consumers reading the flag; #690 will consolidate).
         proj.g.query(
-            "MATCH (n:Point {id:$id}) SET n.outdated = true, n.updatedAt = $now",
+            "MATCH (n:Point {id:$id}) SET n.status = 'superseded', "
+            "n.outdated = true, n.updatedAt = $now",
             params={"id": old_id, "now": now},
         )
         proj.g.query(
@@ -788,6 +880,42 @@ class TortoiseSDK:
             "corrected_by": new_id,
             "edges_transferred": transferred,
         }
+
+    def retract_point(self, id: str) -> dict:
+        """Tombstone-retract a Point: status='retracted' (point stays in graph).
+
+        #432: retraction is a TERMINAL state transition, not a deletion — the
+        projection keeps the point with status='retracted' and default query
+        surfaces exclude it (opt-in via include_retracted). Single atomic
+        conditional query on the happy path; diagnostic read only on the error
+        path.
+
+        Raises ValueError if the point is missing, is an operator node, or is
+        already terminal (retracted/superseded/archived).
+        """
+        from datetime import datetime, timezone
+        proj = self._get_proj()
+        r = proj.g.query(
+            "MATCH (n:Point {id:$id}) "
+            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "AND (n.status IS NULL OR NOT (n.status IN $terminal)) "
+            "SET n.status = 'retracted', n.updatedAt = $now RETURN properties(n)",
+            params={"id": id, "now": datetime.now(timezone.utc).isoformat(),
+                    "terminal": ["retracted", "superseded", "archived"]})
+        if not r.result_set:
+            # diagnostic read ONLY on the error path — happy path stays 1 round trip
+            row = proj.g.query(
+                "MATCH (n:Point {id:$id}) RETURN n.is_operator, n.status",
+                params={"id": id}).result_set
+            if not row:
+                raise ValueError(f"No point {id!r}")
+            is_op, cur = row[0][0], row[0][1]
+            if is_op:
+                raise ValueError(
+                    f"Point {id!r} is an operator — retraction is for statement points")
+            raise ValueError(
+                f"Point {id!r} is already terminal ({cur!r}) — retraction is terminal")
+        return r.result_set[0][0]  # updated node props (no trailing get_point round trip)
 
     # ── Operators ─────────────────────────────────────────────────
 
