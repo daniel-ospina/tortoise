@@ -174,3 +174,36 @@ class TestCliOnboardDbTarget:
         assert rc == 1
         assert "Index failed" in out
         assert "Onboarding complete." not in out
+
+    def test_onboard_relative_path_clean_error(self, capsys):
+        """onboard --path rel.db must fail cleanly at init (rc 1, no
+        traceback, index never called) — #715: resolve_db_path's _abs
+        hard-reject was unguarded at the index call site and tracebacked."""
+        from tortoise import __main__ as m
+
+        with mock.patch.object(m, "_cmd_index_github") as fake_index:
+            rc = m._cmd_onboard(mock.Mock(path="rel.db", cmd="onboard"))
+
+        captured = capsys.readouterr()
+        out = captured.out + captured.err
+        assert rc == 1
+        assert "Relative DB path" in out
+        assert "Traceback" not in out
+        fake_index.assert_not_called()
+
+    def test_init_no_silent_fallback_when_docker_target_down(self, monkeypatch, capsys):
+        """conf 60: with TORTOISE_DB_URI=docker:// configured but unreachable,
+        init must fail loudly (rc 1) — NOT silently fall back to the embedded
+        default, which would split the graph from the index step (init writes
+        embedded, index writes the remote URI)."""
+        monkeypatch.setenv("TORTOISE_DB_URI", "docker://@127.0.0.1:1/tortoise")
+        monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+        from tortoise import __main__ as m
+
+        rc = m._cmd_init(mock.Mock(path=None, cmd="init", yes=True, api_key=None))
+
+        captured = capsys.readouterr()
+        out = captured.out + captured.err
+        assert rc == 1
+        assert "Embedded mode initialized" not in out
+        assert "Traceback" not in out

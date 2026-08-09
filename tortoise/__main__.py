@@ -244,44 +244,51 @@ def _cmd_init(args):
         print("  # Connect your agent via MCP (see welcome page)")
         return 0
 
-    print("Tortoise init — auto-detecting FalkorDB…")
+    print("Tortoise init — resolving DB target…")
 
-    # 1. Try Docker FalkorDB
-    docker_host = os.environ.get("FALKORDB_HOST", "localhost")
-    docker_pass = os.environ.get("FALKORDB_PASSWORD", "")
-
+    # #705/#715: resolve the DB target ONCE through the shared helper — the
+    # same code path the onboarding index step uses — so init and index can
+    # never disagree (silent split graph, conf 60). Selection is purely
+    # environmental: explicit --path > TORTOISE_DB_URI (docker://) >
+    # TORTOISE_DB_PATH > canonical default. No connectivity probing — docker
+    # reachability never overrides the configured target.
+    from tortoise.config import is_docker_uri
     try:
-        docker_port = int(os.environ.get("FALKORDB_PORT", "16379"))
-    except (ValueError, TypeError):
-        print(f"  ❌ Invalid FALKORDB_PORT: {os.environ.get('FALKORDB_PORT')!r}. Must be an integer.")
+        target = _resolve_db_target(args.path)
+    except ValueError as e:
+        # Bad --path (e.g. relative) — clean CLI error, not a traceback (#715).
+        print(f"  ❌ Invalid DB path: {e}")
         return 1
 
     graph_ready = False
     docker_detected = False
 
-    try:
-        from falkordb import FalkorDB
-        db = FalkorDB(host=docker_host, port=docker_port,
-                      password=docker_pass or None)
-        db.select_graph("tortoise").query("RETURN 1")
-        print(f"  ✅ Docker FalkorDB detected at {docker_host}:{docker_port}")
-        graph_ready = True
-        docker_detected = True
-    except ImportError:
-        pass
-    except (ConnectionError, ConnectionRefusedError, OSError) as e:
-        print(f"  ⚠️  Docker FalkorDB unreachable at {docker_host}:{docker_port}: {e}")
-    except Exception as e:
-        err = str(e).lower()
-        if "auth" in err or "password" in err:
-            print(f"  ⚠️  Docker FalkorDB auth failed — check FALKORDB_PASSWORD env var")
-        else:
-            print(f"  ⚠️  Docker FalkorDB unreachable ({e})")
-
-    # 2. Fallback: embedded mode (SQLite-backed)
-    if not graph_ready:
-        from tortoise.config import resolve_db_path
-        db_path = args.path or resolve_db_path()
+    if is_docker_uri(target):
+        # 1. Docker mode — connect to the configured URI target itself (never
+        # a differently-probed docker); unreachable is a hard error so the
+        # index step can't silently split onto a different store.
+        try:
+            from tortoise.projection import FalkorProjection
+            _proj = FalkorProjection.from_uri(target)
+            _proj.g.query("RETURN 1")
+            print(f"  ✅ Docker FalkorDB reachable via TORTOISE_DB_URI")
+            graph_ready = True
+            docker_detected = True
+        except ImportError:
+            print(f"  ❌ falkordb not installed — required for docker:// mode")
+            print(f"     pip install falkordb")
+            return 1
+        except Exception as e:
+            err = str(e).lower()
+            if "auth" in err or "password" in err:
+                print(f"  ❌ Docker FalkorDB auth failed — check TORTOISE_DB_URI credentials")
+            else:
+                print(f"  ❌ Docker FalkorDB unreachable ({e})")
+            print("     Fix TORTOISE_DB_URI, or unset it to use embedded mode.")
+            return 1
+    else:
+        # 2. Fallback: embedded mode (SQLite-backed) at the resolved path
+        db_path = target
         try:
             from tortoise.projection import FalkorProjection
             _proj = FalkorProjection(db_path)
@@ -304,10 +311,14 @@ def _cmd_init(args):
     try:
         from tortoise.sdk import TortoiseSDK
         if docker_detected:
-            os.environ.setdefault("TORTOISE_DB_URI",
-                f"docker://:{docker_pass}@{docker_host}:{docker_port}/tortoise")
+            # Materialize the decision so spawned index children and later
+            # commands resolve to the SAME target (single source of truth).
+            os.environ.setdefault("TORTOISE_DB_URI", target)
             sdk = TortoiseSDK()
         else:
+            # Embedded: record the resolved path so child processes (e.g. the
+            # background indexer) hit the same DB init wrote to.
+            os.environ.setdefault("TORTOISE_DB_PATH", db_path)
             sdk = TortoiseSDK(db_path=db_path)
         sdk.create_point(
             kind="observation",
@@ -827,22 +838,30 @@ def _cmd_session_view(args, api_key: str, api_url: str) -> int:
 
 
 def _resolve_db_target(explicit: str | None = None) -> str:
-    """Resolve the DB target used by onboarding's index step (#705).
+    """Resolve the DB target for `init` and the onboarding `index` step.
 
-    Mirrors _cmd_init's resolution so init and index operate on the SAME
-    database: TORTOISE_DB_URI with a docker:// prefix selects docker mode
-    (URI wins, matching init's docker-first detection); otherwise the
-    embedded path falls back through resolve_db_path(explicit), whose
-    precedence is explicit --path > TORTOISE_DB_PATH / TORTOISE_DB_URI
-    (non-docker, backward compat) > canonical default.
+    Single source of truth (#705/#715): both _cmd_init and the onboard index
+    step resolve through THIS function with ONE precedence, so they can never
+    disagree (silent split graph, conf 60). Selection is purely environmental
+    — no connectivity probing, because docker reachability must never override
+    the configured target:
+
+        explicit --path > TORTOISE_DB_URI (docker://) > TORTOISE_DB_PATH
+        > canonical default
+
+    Returns a docker:// URI string (docker mode) or an absolute embedded
+    path (embedded mode). Raises ValueError for invalid input (e.g. a
+    relative --path) via resolve_db_path's _abs guard.
     """
     import os
-    from tortoise.config import resolve_db_path
+    from tortoise.config import resolve_db_path, is_docker_uri
 
+    if explicit:
+        return resolve_db_path(explicit)
     uri = os.environ.get("TORTOISE_DB_URI", "")
-    if uri.startswith("docker://"):
+    if is_docker_uri(uri):
         return uri
-    return resolve_db_path(explicit)
+    return resolve_db_path(None)
 
 
 def _cmd_onboard(args) -> int:
@@ -897,10 +916,17 @@ def _cmd_onboard(args) -> int:
             # #705: pass the SAME resolved DB target init used (docker:// URI
             # or embedded path honoring --path / TORTOISE_DB_PATH) so index
             # never silently writes to the default DB.
+            try:
+                db_target = _resolve_db_target(getattr(args, 'path', None))
+            except ValueError as e:
+                # Bad --path (e.g. relative) — clean CLI error, no traceback
+                # (#715). init rejects it first, but guard this call site too.
+                print(f"  ❌ Invalid DB target: {e}", file=_sys.stderr)
+                return 1
             idx_args = argparse.Namespace(
                 url=repo_root, background=False, branch="main",
                 index_cmd="github", cmd="index",
-                db=_resolve_db_target(getattr(args, 'path', None)),
+                db=db_target,
             )
             rc_index = _cmd_index_github(idx_args)
             if rc_index != 0:
@@ -1320,28 +1346,21 @@ def _cmd_index_github(args):
 
     print(f"Found {total} markdown files. Indexing…")
 
-    # Set up projection + API (same detection as _cmd_init)
-    proj = None
-    # Try Docker FalkorDB first
+    # ── DB target: same single-source resolution as init (#705/#715, conf 60)
+    # args.db is authoritative when given (onboard passes the target init
+    # resolved); standalone falls back to the shared env precedence. No
+    # connectivity probing — a reachable local docker must never override the
+    # configured target or init and index silently split onto different stores.
+    target = args.db or _resolve_db_target(None)
     try:
-        host = os.environ.get("FALKORDB_HOST", "localhost")
-        port = int(os.environ.get("FALKORDB_PORT", "16379"))
-        password = os.environ.get("FALKORDB_PASSWORD", "")
-        from falkordb import FalkorDB as FDB
-        db = FDB(host=host, port=port, password=password or None)
-        db.select_graph("tortoise").query("RETURN 1")
-        proj = FalkorProjection(host=host, port=port, password=password or None)
-    except Exception:
-        # Fallback: embedded mode (SQLite-backed) or docker:// URI
-        try:
-            if args.db.startswith("docker://"):
-                proj = FalkorProjection.from_uri(args.db)
-            else:
-                proj = FalkorProjection(path=args.db)
-        except Exception as e:
-            print(f"tortoise index: Cannot connect to database: {e}", file=sys.stderr)
-            print("Set --db to a Docker URI or ensure FalkorDB is running.", file=sys.stderr)
-            return 1
+        if target.startswith("docker://"):
+            proj = FalkorProjection.from_uri(target)
+        else:
+            proj = FalkorProjection(path=target)
+    except Exception as e:
+        print(f"tortoise index: Cannot connect to database: {e}", file=sys.stderr)
+        print("Set --db to a Docker URI or ensure FalkorDB is running.", file=sys.stderr)
+        return 1
 
     log_path = Path(tempfile.gettempdir()) / f"tortoise-index-{repo_name}.jsonl"
     log = EventLog(str(log_path))
