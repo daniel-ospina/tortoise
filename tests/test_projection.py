@@ -62,6 +62,29 @@ def _skip_if_no_falkor() -> bool:
     return not _has_falkor()
 
 
+def _docker_falkor_reachable() -> bool:
+    """Socket probe: is a live Docker FalkorDB reachable?
+
+    The `live_proj` fixture needs a live FalkorDB on FALKORDB_HOST:PORT
+    (default localhost:16379). Embedded CI has no container — probe before
+    connecting so the fixture skips instead of raising redis
+    ConnectionError (Error 111/61). _skip_if_no_falkor only covers
+    redislite import availability, not Docker connectivity.
+    """
+    import socket
+    host = os.environ.get("FALKORDB_HOST", "localhost")
+    port = int(os.environ.get("FALKORDB_PORT", "16379"))
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(1.0)
+    try:
+        s.connect((host, port))
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
 # ----------------------------------------------------------------- _apply_one
 
 def test_apply_one_point_added():
@@ -1404,6 +1427,8 @@ if __name__ == "__main__":
 @pytest.fixture
 def live_proj():
     """Live FalkorProjection on a test-prefixed graph (safe via test_guard)."""
+    if not _docker_falkor_reachable():
+        pytest.skip("live FalkorDB (FALKORDB_HOST:PORT) not reachable")
     uri = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise_test_proj125")
     proj = FalkorProjection.from_uri(uri)
     # Clean the test graph (test-prefixed — test_guard permits; production blocked)
