@@ -50,9 +50,10 @@ jobs:
       - name: Install deps, frozen (dev group)
         run: uv sync --frozen --group dev
       - name: Run test suite (embedded FalkorDBLite)
-        # E2E welcome/legal page tests run in the dedicated welcome-e2e job
-        # (they need Playwright browsers); unit/integration suite here.
-        run: uv run pytest tests/ --ignore=tests/e2e -x -q -p no:cacheprovider --timeout=120
+        # E2E welcome/legal + waitlist page tests run in the dedicated
+        # welcome-e2e job (they need Playwright browsers); unit/integration
+        # suite here.
+        run: uv run pytest tests/ --ignore=tests/e2e --ignore=tests/test_waitlist_form.py -x -q -p no:cacheprovider --timeout=120
 
   test-isolation:
     runs-on: ubuntu-latest
