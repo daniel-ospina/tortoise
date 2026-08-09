@@ -429,3 +429,9 @@ s3_secret_key = "env(S3_SECRET_KEY)"
 # (Supabase Auth signs the hook request itself).
 [functions.tenant-provision]
 verify_jwt = false
+
+# waitlist-subscribe is called from the premiselabs.co landing page waitlist
+# form (#373) — anonymous browser POSTs carry NO user JWT → verify_jwt must
+# be false or every submission 401s before the function runs.
+[functions.waitlist-subscribe]
+verify_jwt = false

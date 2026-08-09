@@ -1,0 +1,49 @@
+# Deploy Supabase migrations + edge functions for the premise-labs project
+# (ybetwichurajbfswfeqa) on main when supabase/** changes (#373).
+#
+# Guarded: steps only run when BOTH secrets are set (if: env.X != '' — GitHub
+# does not allow secrets in if: conditions). Without them, the job no-ops
+# (manual fallback in supabase/README.md). This project also hosts the hosted
+# Tortoise platform — destructive migrations stay under PR review discipline.
+name: Deploy Supabase (migrations + functions)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'supabase/**'
+  workflow_dispatch:
+
+concurrency:
+  group: supabase-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      SUPABASE_PROJECT_REF: ybetwichurajbfswfeqa
+      # Full percent-encoded session-pooler connection string (port 5432):
+      #   postgresql://postgres.<ref>:<urlencoded-password>@aws-0-us-east-1.pooler.supabase.com:5432/postgres
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      - name: Apply migrations
+        if: env.SUPABASE_ACCESS_TOKEN != '' && env.SUPABASE_DB_URL != ''
+        run: supabase db push --db-url "$SUPABASE_DB_URL"
+      - name: Deploy waitlist-subscribe edge function
+        if: env.SUPABASE_ACCESS_TOKEN != '' && env.SUPABASE_DB_URL != ''
+        run: |
+          supabase functions deploy waitlist-subscribe \
+            --project-ref "$SUPABASE_PROJECT_REF" --no-verify-jwt
+      - name: Deploy tenant-provision edge function
+        if: env.SUPABASE_ACCESS_TOKEN != '' && env.SUPABASE_DB_URL != ''
+        run: |
+          supabase functions deploy tenant-provision \
+            --project-ref "$SUPABASE_PROJECT_REF" --no-verify-jwt

@@ -181,13 +181,45 @@
     }
     #beat-cta .twitter-link:hover { color: var(--accent); }
 
-    /* Success state */
+    /* Success / message states */
     #beat-cta .success-msg {
       display: none;
       color: var(--green);
       font-size: 0.85rem;
       text-align: center;
       margin-top: 0.5rem;
+    }
+    #beat-cta .error-msg {
+      display: none;
+      color: #f87171;
+      font-size: 0.8rem;
+      text-align: center;
+      margin-top: 0.5rem;
+    }
+    #beat-cta .error-msg.visible,
+    #beat-cta .success-msg.visible { display: block; }
+
+    /* Honeypot — visually hidden, never visible to humans (bots fill it) */
+    #waitlist-form .hp-field {
+      position: absolute;
+      left: -9999px;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      opacity: 0;
+    }
+
+    #waitlist-form button[disabled] {
+      opacity: 0.6;
+      cursor: wait;
+    }
+
+    #waitlist-form .consent-note {
+      font-size: 0.7rem;
+      color: var(--text-dim);
+      margin-top: 0.6rem;
+      max-width: 400px;
+      width: 100%;
     }
 
     /* CTA button */
@@ -274,6 +306,14 @@
       <h3><strong>Premise Labs</strong></h3>
     </section>
     <section id="beat-cta" class="beat">
+      <form id="waitlist-form" novalidate>
+        <input type="email" name="email" placeholder="your@email.com" aria-label="Email address" autocomplete="email" required>
+        <input type="text" name="hp" class="hp-field" tabindex="-1" autocomplete="off" aria-hidden="true">
+        <button type="submit">Stay in touch</button>
+      </form>
+      <p class="success-msg" id="waitlist-msg" role="status"></p>
+      <p class="error-msg" id="waitlist-error" role="alert"></p>
+      <p class="consent-note">Joining the waitlist means you'd like launch updates from Premise Labs — you can unsubscribe at any time.</p>
       <a href="https://tortoise.premiselabs.co" class="cta-start">Learn more →</a>
       <p class="cta-subtle">Meet Tortoise — the memory graph for AI agents.</p>
       <a class="selfhost-link" href="/docs">Docs</a>
@@ -482,6 +522,102 @@
       }
     });
 
+    /* ── Waitlist form (#373) ── */
+    const WAITLIST_ENDPOINT = 'https://ybetwichurajbfswfeqa.supabase.co/functions/v1/waitlist-subscribe';
+    // Empty until a Turnstile site key is provisioned (human step). When set,
+    // the widget + script are injected and a token is sent with each submit.
+    const TURNSTILE_SITE_KEY = '';
+
+    (function () {
+      const form = document.getElementById('waitlist-form');
+      const msg = document.getElementById('waitlist-msg');
+      const err = document.getElementById('waitlist-error');
+      const emailInput = form.querySelector('input[name="email"]');
+      const button = form.querySelector('button[type="submit"]');
+
+      let turnstileToken = null;
+
+      function showMsg(text) {
+        err.classList.remove('visible');
+        err.textContent = '';
+        msg.textContent = text;
+        msg.classList.add('visible');
+      }
+
+      function showError(text) {
+        msg.classList.remove('visible');
+        msg.textContent = '';
+        err.textContent = text;
+        err.classList.add('visible');
+      }
+
+      function resetStates() {
+        msg.classList.remove('visible');
+        err.classList.remove('visible');
+      }
+
+      // Turnstile widget — injected only when a site key is configured
+      if (TURNSTILE_SITE_KEY) {
+        const widget = document.createElement('div');
+        widget.className = 'cf-turnstile';
+        widget.setAttribute('data-sitekey', TURNSTILE_SITE_KEY);
+        form.appendChild(widget);
+        const script = document.createElement('script');
+        script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js';
+        script.async = true;
+        script.defer = true;
+        script.setAttribute('data-callback', 'onTurnstileToken');
+        document.head.appendChild(script);
+        window.onTurnstileToken = function (token) { turnstileToken = token; };
+      }
+
+      form.addEventListener('submit', async function (e) {
+        e.preventDefault();
+        resetStates();
+
+        const email = emailInput.value.trim();
+        if (!email) {
+          showError('Please enter your email address.');
+          return;
+        }
+
+        button.disabled = true;
+        button.textContent = 'Sending…';
+
+        const payload = {
+          email: email,
+          hp: form.querySelector('input[name="hp"]').value || ''
+        };
+        if (TURNSTILE_SITE_KEY) {
+          payload['cf-turnstile-response'] = turnstileToken || '';
+        }
+
+        try {
+          const res = await fetch(WAITLIST_ENDPOINT, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+          if (res.ok) {
+            const data = await res.json().catch(() => ({}));
+            if (data && data.message) {
+              showMsg(data.message);
+            } else {
+              showMsg('Thanks — we\'ll be in touch.');
+            }
+            emailInput.value = '';
+          } else {
+            const data = await res.json().catch(() => ({}));
+            showError(data && data.error ? data.error : 'Something went wrong — please try again.');
+          }
+        } catch (networkErr) {
+          showError('Something went wrong — please try again.');
+        } finally {
+          button.disabled = false;
+          button.textContent = 'Stay in touch';
+        }
+      });
+    })();
 
   </script>
 </body>
