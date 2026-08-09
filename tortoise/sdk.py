@@ -1085,6 +1085,8 @@ class TortoiseSDK:
         # #753) — a NAND is logically "A and B can't both be true" (mutual).
         # An agent may explicitly pass "unidirectional" to declare a DIRECTED
         # attack (attacker's truth penalizes the target, no back-pressure).
+        if direction is None:
+            direction = "bidirectional"  # backward compat: explicit None = default
         if direction not in ("bidirectional", "unidirectional"):
             raise ValueError(
                 f"direction must be 'bidirectional' or 'unidirectional', got {direction!r}"
