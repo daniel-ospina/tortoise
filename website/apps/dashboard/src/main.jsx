@@ -74,6 +74,13 @@ function App() {
   const [newGraphName, setNewGraphName] = React.useState('')
   const teamIdRef = React.useRef(null)
   const [checkoutPending, setCheckoutPending] = React.useState(false)
+  // P5 (code-review): distinguish 'loading' / 'ok' / 'denied' / 'error' so
+  // loading and network failures never masquerade as an RBAC denial.
+  const [membersStatus, setMembersStatus] = React.useState('loading')
+  // P1/P2 (code-review): per-team data-plane key cache. Bootstrap mints are
+  // capped at 3 active per team, so cache the minted key per team_id and
+  // reuse on switch instead of re-minting (which would 429 after 3 switches).
+  const teamKeysRef = React.useRef({})
 
   const headers = apiKey ? { Authorization: `Bearer ${apiKey}` } : {}
 
@@ -149,6 +156,46 @@ function App() {
   }, [team?.subscription_status])
 
   // ── Session auth: on load, try the shared cookie session ──
+  // P1 (code-review): POST /v1/session/key returns 400 "team_id required
+  // (multiple memberships)" when the user belongs to 2+ teams — and the team
+  // switcher exists exactly for those users. Mint for a concrete team_id, and
+  // on a 400 auto-select the first membership and retry instead of silently
+  // degrading to the API-key screen.
+  async function mintSessionKey(purpose, teamId) {
+    const tok = sessionTokenRef.current
+    if (!tok) throw new Error('No session')
+    const mint = async (tid) => {
+      const res = await fetch(`${API_BASE}/v1/session/key`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tok}` },
+        body: JSON.stringify(tid ? { purpose, team_id: tid } : { purpose }),
+      })
+      return res
+    }
+    let res = await mint(teamId)
+    if (res.status === 400 && !teamId) {
+      // Multi-membership: server demands a team_id — auto-select the first
+      // team and retry (P1 fallback; never degrade to the key screen).
+      const teamsRes = await fetch(`${API_BASE}/v1/teams`, {
+        headers: { Authorization: `Bearer ${tok}` },
+      })
+      if (teamsRes.ok) {
+        const list = await teamsRes.json()
+        if (list.length) {
+          setTeams(list)
+          res = await mint(list[0].team_id)
+        }
+      }
+    }
+    if (!res.ok) {
+      const b = await res.json().catch(() => ({}))
+      throw new Error(b.detail || `HTTP ${res.status}`)
+    }
+    const data = await res.json()
+    if (!data.key) throw new Error('Session mint returned no key')
+    return data.key
+  }
+
   React.useEffect(() => {
     ;(async () => {
       try {
@@ -157,38 +204,68 @@ function App() {
         if (error || !session) { setChecking(false); return }
         sessionTokenRef.current = session.access_token
 
-        // Session found — mint a data-plane key via E1 (POST /v1/session/key)
-        // using the session access token (JWKS-verified server-side).
-        const res = await fetch(`${API_BASE}/v1/session/key`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${session.access_token}`,
-          },
-          body: JSON.stringify({ purpose: 'bootstrap' }),
-        })
-        if (res.ok) {
-          const data = await res.json()
-          if (data.key) {
-            localStorage.setItem(KEY_STORAGE, data.key)
-            setApiKey(data.key)
-            setAuthMode('session')
-            await completeLogin(data.key)
+        // List memberships up front so the mint targets a concrete team
+        // (P1: multi-membership users cannot mint without team_id).
+        let teamsList = []
+        try {
+          const teamsRes = await fetch(`${API_BASE}/v1/teams`, {
+            headers: { Authorization: `Bearer ${session.access_token}` },
+          })
+          if (teamsRes.ok) {
+            teamsList = await teamsRes.json()
+            setTeams(teamsList)
           }
-        } else {
-          // No usable session key — fall back to the API-key screen
-          setChecking(false)
+        } catch { /* treated as no teams below */ }
+
+        // Reuse a stored key when it still belongs to one of the user's teams
+        // (avoids burning the 3-active bootstrap cap on every reload), else
+        // mint a bootstrap key for the first membership.
+        let key = null
+        const storedKey = localStorage.getItem(KEY_STORAGE)
+        if (storedKey && teamsList.length) {
+          try {
+            const tRes = await fetch(`${API_BASE}/v1/team`, {
+              headers: { Authorization: `Bearer ${storedKey}` },
+            })
+            if (tRes.ok) {
+              const t = await tRes.json()
+              if (teamsList.some((x) => x.team_id === t.team_id)) {
+                key = storedKey
+                teamKeysRef.current[t.team_id] = storedKey
+                setCurrentTeamId(t.team_id)
+              }
+            }
+          } catch { /* fall through to mint */ }
         }
+        if (!key) {
+          const firstTeamId = teamsList.length ? teamsList[0].team_id : null
+          try {
+            key = await mintSessionKey('bootstrap', firstTeamId)
+            if (firstTeamId) teamKeysRef.current[firstTeamId] = key
+          } catch {
+            // No usable session key — fall back to the API-key screen
+            setChecking(false)
+            return
+          }
+        }
+        if (!key) { setChecking(false); return }
+        localStorage.setItem(KEY_STORAGE, key)
+        setApiKey(key)
+        setAuthMode('session')
+        await completeLogin(key)
       } catch (e) {
         setChecking(false)
       }
     })()
   }, [])
 
-  async function refreshTeam() {
+  async function refreshTeam(key) {
     // P1 (code-review): extracted team refetch — the success-return poll loop
     // used an undefined `jl` (dead code); this is the real refetch.
-    const t = await api('/v1/team')
+    // P2 (code-review): key param so the refetch targets the selected team —
+    // the overview cards + header tier badge read /v1/team, which resolves
+    // the team from the API key.
+    const t = await api('/v1/team', key ? { headers: { Authorization: `Bearer ${key}` } } : {})
     setTeam(t)
     return t
   }
@@ -199,7 +276,7 @@ function App() {
       const t = await api('/v1/team', key ? { headers: { Authorization: `Bearer ${key}` } } : {})
       setTeam(t)
       setAuthed(true)
-      await Promise.all([loadAll(), loadTeams()])
+      await Promise.all([loadAll(key), loadTeams(), loadBackups(key)])
     } catch (e) {
       setError(e.message === 'Invalid API key' ? 'Invalid API key — check your key and try again.' : e.message)
       setAuthed(false)
@@ -216,6 +293,7 @@ function App() {
       const t = await api('/v1/team')
       setTeam(t)
       setAuthed(true)
+      setAuthMode('apikey') // P5 (code-review): makes the session-only notices live for API-key users
       localStorage.setItem(KEY_STORAGE, apiKey)
       await loadAll()
     } catch (e) {
@@ -234,12 +312,22 @@ function App() {
     setKeys([])
     setSessions([])
     setNewKey(null)
+    setGraphs([])
+    setMembers(null)
+    setMembersStatus('loading')
+    setCurrentTeamId(null)
+    setCurrentGraphId(null)
+    teamKeysRef.current = {}
     try { if (supabaseClient) await supabaseClient.auth.signOut() } catch { /* best-effort */ }
   }
 
-  async function loadAll() {
+  async function loadAll(key) {
+    // P2 (code-review): /v1/team/keys + /v1/sessions resolve the team from the
+    // API key — fetch them with the SELECTED team's key so the overview cards
+    // track the team switcher, not the bootstrap team.
+    const h = key ? { headers: { Authorization: `Bearer ${key}` } } : {}
     try {
-      const [k, s] = await Promise.all([api('/v1/team/keys'), api('/v1/sessions')])
+      const [k, s] = await Promise.all([api('/v1/team/keys', h), api('/v1/sessions', h)])
       setKeys(Array.isArray(k) ? k : k.keys || [])
       setSessions(Array.isArray(s) ? s : s.sessions || [])
     } catch (e) {
@@ -266,20 +354,40 @@ function App() {
   }
 
   async function switchTeam(teamId) {
-    setCurrentTeamId(teamId)
+    // P3 (code-review): reset stale team-scoped state at the top so a rapid
+    // switch never flashes the previous team's members/graphs, and record the
+    // requested team as current for staleness guards.
+    setMembers(null)
+    setMembersStatus('loading')
+    setGraphs([])
     setCurrentGraphId(null)
+    setError('')
+    setCurrentTeamId(teamId)
+    teamIdRef.current = teamId
+
     const tok = sessionTokenRef.current
     if (!tok) return
     try {
-      const res = await fetch(`${API_BASE}/v1/graphs?team_id=${teamId}`, {
-        headers: { Authorization: `Bearer ${tok}` },
-      })
-      if (res.ok) {
-        const list = await res.json()
-        setGraphs(list)
-        if (list.length > 0) setCurrentGraphId(list[0].graph_id)
+      // P1/P2 (code-review): overview cards + header tier badge read the
+      // API-key's team — mint (or reuse) a data-plane key for the selected
+      // team so every team-dependent surface tracks the switcher. The cache
+      // keeps us under the 3-active bootstrap mint cap across switches.
+      let key = teamKeysRef.current[teamId]
+      if (!key) {
+        key = await mintSessionKey('bootstrap', teamId)
+        teamKeysRef.current[teamId] = key
       }
-    } catch { /* best-effort */ }
+      if (teamIdRef.current !== teamId) return // stale — user switched again
+      localStorage.setItem(KEY_STORAGE, key)
+      setApiKey(key)
+      await refreshTeam(key)
+      if (teamIdRef.current !== teamId) return
+      await Promise.all([loadAll(key), loadBackups(key)])
+      // members + graphs load via the currentTeamId effect (JWT team-scoped;
+      // both loaders carry their own staleness guard).
+    } catch (e) {
+      if (teamIdRef.current === teamId) setError(e.message)
+    }
   }
 
   async function createTeamFromUI() {
@@ -358,16 +466,28 @@ function App() {
     }
   }
 
-  async function loadMembers() {
+  async function loadMembers(teamId) {
     const tok = sessionTokenRef.current
-    if (!tok || !currentTeamId) return
+    if (!tok || !teamId) return
     try {
-      const res = await fetch(`${API_BASE}/v1/teams/${currentTeamId}/members`, {
+      const res = await fetch(`${API_BASE}/v1/teams/${teamId}/members`, {
         headers: { Authorization: `Bearer ${tok}` },
       })
-      if (res.ok) setMembers(await res.json())
-      else if (res.status === 403) setMembers(null) // not owner/admin — cannot view
-    } catch { setMembers(null) }
+      // P3 (code-review): staleness guard — a newer team switch may have
+      // landed while this request was in flight.
+      if (teamIdRef.current !== teamId) return
+      if (res.ok) {
+        setMembers(await res.json())
+        setMembersStatus('ok')
+      } else if (res.status === 403) {
+        setMembers(null) // not owner/admin — cannot view
+        setMembersStatus('denied')
+      } else {
+        setMembersStatus('error')
+      }
+    } catch {
+      if (teamIdRef.current === teamId) setMembersStatus('error')
+    }
   }
 
   async function inviteMember() {
@@ -392,7 +512,7 @@ function App() {
         throw new Error(b.detail || `HTTP ${res.status}`)
       }
       setInviteEmail('')
-      await loadMembers()
+      await loadMembers(currentTeamId)
     } catch (e) {
       setError(e.message)
     } finally {
@@ -414,7 +534,7 @@ function App() {
         const b = await res.json().catch(() => ({}))
         throw new Error(b.detail || `HTTP ${res.status}`)
       }
-      await loadMembers()
+      await loadMembers(currentTeamId)
     } catch (e) {
       setError(e.message)
     }
@@ -434,27 +554,30 @@ function App() {
         const b = await res.json().catch(() => ({}))
         throw new Error(b.detail || `HTTP ${res.status}`)
       }
-      await loadMembers()
+      await loadMembers(currentTeamId)
     } catch (e) {
       setError(e.message)
     }
   }
 
-  async function loadBackups() {
+  async function loadBackups(key) {
+    // P2 (code-review): /backups is scoped to the API-key's team — fetch with
+    // the selected team's key so the Overview Backups card tracks the switcher.
     try {
-      const b = await api('/backups')
+      const b = await api('/backups', key ? { headers: { Authorization: `Bearer ${key}` } } : {})
       const list = b.backups || []
       setBackupInfo(list.length ? { latest: list[0], count: list.length } : { count: 0 })
     } catch { /* tier-gated (Pro) — leave null */ }
   }
 
-  // Load team-scoped data whenever the active team changes.
+  // Load team-scoped data whenever the active team changes. Members + graphs
+  // are JWT team-scoped; the key-scoped overview data (team/keys/sessions/
+  // backups) is reloaded in switchTeam/completeLogin with the team's key.
   React.useEffect(() => {
     if (currentTeamId) {
       teamIdRef.current = currentTeamId
-      loadMembers()
+      loadMembers(currentTeamId)
       loadGraphs(currentTeamId)
-      loadBackups()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentTeamId])
@@ -494,7 +617,9 @@ function App() {
       const res = await fetch(`${API_BASE}/v1/session/key`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tok}` },
-        body: JSON.stringify({ purpose: 'recovery' }),
+        // P1 (code-review): multi-membership users need a team_id — mint the
+        // recovery key for the currently selected team.
+        body: JSON.stringify({ purpose: 'recovery', ...(currentTeamId ? { team_id: currentTeamId } : {}) }),
       })
       if (!res.ok) {
         const b = await res.json().catch(() => ({}))
@@ -502,6 +627,7 @@ function App() {
       }
       const data = await res.json()
       setNewKey(data.key)
+      if (currentTeamId) teamKeysRef.current[currentTeamId] = data.key // cache for future switches (no extra mint)
       await loadAll()
     } catch (e) {
       setError(e.message)
@@ -630,7 +756,7 @@ function App() {
             <div className="cards">
               <div className="card"><div className="card-val">{team.point_count ?? 0}</div><div className="card-label">Points</div></div>
               <div className="card"><div className="card-val">{graphs.length}</div><div className="card-label">Graphs</div></div>
-              <div className="card"><div className="card-val">{members === null ? '—' : members.length}</div><div className="card-label">Users</div></div>
+              <div className="card"><div className="card-val">{membersStatus === 'ok' ? members.length : '—'}</div><div className="card-label">Users</div></div>
               <div className="card"><div className="card-val">{backupInfo ? (backupInfo.count || 'none') : '—'}</div><div className="card-label">Backups</div></div>
               <div className="card"><div className="card-val">{keys.length}</div><div className="card-label">API Keys</div></div>
               <div className="card"><div className="card-val">{sessions.length}</div><div className="card-label">Sessions</div></div>
@@ -700,20 +826,25 @@ function App() {
             )}
             <div className="row">
               <h2>Graphs</h2>
-              <div className="inline-form">
-                <input
-                  placeholder="New graph name"
-                  value={newGraphName}
-                  onChange={(e) => setNewGraphName(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && createGraph()}
-                />
-                <button onClick={createGraph} disabled={busy || !newGraphName.trim()}>+ Create</button>
-              </div>
+              {authMode === 'session' ? (
+                <div className="inline-form">
+                  <input
+                    placeholder="New graph name"
+                    value={newGraphName}
+                    onChange={(e) => setNewGraphName(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && createGraph()}
+                  />
+                  <button onClick={createGraph} disabled={busy || !newGraphName.trim()}>+ Create</button>
+                </div>
+              ) : (
+                <span className="dim small">Sign in required</span>
+              )}
             </div>
             <table>
               <thead><tr><th>Name</th><th>Kind</th><th>Graph ID</th></tr></thead>
               <tbody>
-                {graphs.length === 0 && <tr><td colSpan="3" className="dim">No graphs yet — create your first one above.</td></tr>}
+                {authMode !== 'session' && <tr><td colSpan="3" className="dim">Sign in with your Tortoise account to view graphs.</td></tr>}
+                {authMode === 'session' && graphs.length === 0 && <tr><td colSpan="3" className="dim">No graphs yet — create your first one above.</td></tr>}
                 {graphs.map((g) => (
                   <tr key={g.graph_id}>
                     <td><code>{g.name}</code></td>
@@ -758,9 +889,11 @@ function App() {
             <table>
               <thead><tr><th>Email / User</th><th>Role</th><th>Status</th><th></th></tr></thead>
               <tbody>
-                {members === null && <tr><td colSpan="4" className="dim">Member list is only visible to owners and admins.</td></tr>}
-                {members !== null && members.length === 0 && <tr><td colSpan="4" className="dim">No members yet.</td></tr>}
-                {members !== null && members.map((m) => {
+                {membersStatus === 'loading' && <tr><td colSpan="4" className="dim">Loading members…</td></tr>}
+                {membersStatus === 'denied' && <tr><td colSpan="4" className="dim">Member list is only visible to owners and admins.</td></tr>}
+                {membersStatus === 'error' && <tr><td colSpan="4" className="dim">Couldn't load members — check your connection and try again.</td></tr>}
+                {membersStatus === 'ok' && members.length === 0 && <tr><td colSpan="4" className="dim">No members yet.</td></tr>}
+                {membersStatus === 'ok' && members.map((m) => {
                   const invited = m.status === 'invited'
                   return (
                     <tr key={m.user_id || m.email}>
