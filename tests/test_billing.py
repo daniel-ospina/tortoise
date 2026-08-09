@@ -394,3 +394,207 @@ class TestApplyLimitsAndReconcile:
         t = sdk.team_get(team["id"])
         assert t["tier"] == "pro"  # preserved — never downgraded on unparseable price
         assert t["subscription_status"] == "active"
+
+
+# ── Checkout + Portal endpoints (#310, Task 5) ──────────────────────────────
+
+@pytest.fixture
+def billing_client(monkeypatch, tmp_path):
+    """TestClient + a REAL /v1/register team on an embedded DB.
+
+    Shared by Tasks 5/7/8 (review fix 16a): TORTOISE_DB_PATH embedded pattern
+    (mirrors tests/test_quota.py) so no Docker is needed. StripeClient is
+    monkeypatched per-test — the fixture itself only wires env + app + a
+    registry SDK (same DB) for direct mirror assertions.
+    """
+    import os
+    from fastapi.testclient import TestClient
+    from tortoise.hosted_api import app
+    from tortoise.sdk import TortoiseSDK
+
+    db = os.path.join(tmp_path, "billing_api.db")
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    monkeypatch.setenv("TORTOISE_DB_PATH", db)
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_123")
+    monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_test")
+    monkeypatch.setenv("STRIPE_PRICE_IDS", json.dumps(VALID_CATALOG))
+    monkeypatch.setenv("RATE_LIMIT_DISABLED", "1")
+
+    sdk = TortoiseSDK(db, namespace="registry")
+    with TestClient(app) as tc:
+        r = tc.post("/v1/register", json={
+            "email": "billing-owner@example.com",
+            "password": "supersecret1",
+        })
+        assert r.status_code == 200, r.text
+        body = r.json()
+        yield {
+            "client": tc,
+            "sdk": sdk,
+            "team_id": body["team_id"],
+            "api_key": body["api_key"],
+            "headers": {"Authorization": f"Bearer {body['api_key']}"},
+        }
+    sdk.close()
+
+
+class TestCheckoutPortal:
+    def test_checkout_creates_customer_persists_before_redirect(self, monkeypatch, billing_client):
+        """create_customer precedes the Checkout session, and the Stripe
+        customer binding is on the Team node BEFORE the redirect (survives a
+        missed first webhook event — scoping P1-2, review fix 1)."""
+        order: list[str] = []
+
+        def fake_create_customer(self, email):
+            order.append("create_customer")
+            return "cus_checkout1"
+
+        def fake_checkout(self, team_id, price_id, customer, success_url, cancel_url):
+            order.append("create_checkout_session")
+            assert order[0] == "create_customer"  # customer first
+            assert customer == "cus_checkout1"    # created id passed through
+            assert team_id == billing_client["team_id"]
+            assert price_id == "price_200proMM"
+            return "https://checkout.stripe.com/pay/session1"
+
+        monkeypatch.setattr(billing.StripeClient, "create_customer", fake_create_customer)
+        monkeypatch.setattr(billing.StripeClient, "list_subscriptions", lambda self, cid: [])
+        monkeypatch.setattr(billing.StripeClient, "create_checkout_session", fake_checkout)
+        r = billing_client["client"].post(
+            "/v1/billing/checkout",
+            json={"price_id": "price_200proMM"},
+            headers=billing_client["headers"],
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["checkout_url"] == "https://checkout.stripe.com/pay/session1"
+        # Customer binding persisted on the Team node before the redirect.
+        t = billing_client["sdk"].team_get(billing_client["team_id"])
+        assert t["stripe_customer_id"] == "cus_checkout1"
+        assert t["customer_email"] == "billing-owner@example.com"
+
+    def test_checkout_provision_path_uses_api_key_created_by(self, monkeypatch, billing_client):
+        """Provision-path teams have no Team.email — the email must resolve
+        from APIKey.created_by (review fix 1), not 400."""
+        sdk = billing_client["sdk"]
+        # Simulate a provision-path team: no Team.email, creator on the key.
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) REMOVE t.email",
+            params={"id": billing_client["team_id"]},
+        )
+        sdk._get_registry().query(
+            "MATCH (k:APIKey {team_id:$tid}) SET k.created_by='provision-user@example.com'",
+            params={"tid": billing_client["team_id"]},
+        )
+        captured: list[str] = []
+        monkeypatch.setattr(billing.StripeClient, "create_customer",
+                            lambda self, email: captured.append(email) or "cus_prov1")
+        monkeypatch.setattr(billing.StripeClient, "list_subscriptions", lambda self, cid: [])
+        monkeypatch.setattr(billing.StripeClient, "create_checkout_session",
+                            lambda self, tid, pid, cid, su, cu: "https://checkout.stripe.com/pay/p1")
+        r = billing_client["client"].post(
+            "/v1/billing/checkout",
+            json={"price_id": "price_100soloM"},
+            headers=billing_client["headers"],
+        )
+        assert r.status_code == 200, r.text
+        assert captured == ["provision-user@example.com"]  # APIKey.created_by, not 400
+
+    def test_checkout_active_subscription_409(self, monkeypatch, billing_client):
+        """Stored mirror active → 409 BEFORE any Stripe call — no customer
+        created, no session minted."""
+        billing_client["sdk"]._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.subscription_status='active'",
+            params={"id": billing_client["team_id"]},
+        )
+        called: list[str] = []
+        monkeypatch.setattr(billing.StripeClient, "create_customer",
+                            lambda self, e: called.append("create_customer") or "cus_x")
+        monkeypatch.setattr(billing.StripeClient, "create_checkout_session",
+                            lambda *a, **k: called.append("checkout") or "https://x")
+        r = billing_client["client"].post(
+            "/v1/billing/checkout",
+            json={"price_id": "price_200proMM"},
+            headers=billing_client["headers"],
+        )
+        assert r.status_code == 409, r.text
+        assert called == []  # guard fired before any Stripe call
+
+    def test_checkout_stale_mirror_race_409(self, monkeypatch, billing_client):
+        """Clean stored mirror but Stripe lists an active subscription → 409,
+        no Checkout session created (review fix 5 — Stripe is the money
+        authority, the mirror may read 'free' between checkout + webhook)."""
+        sub = {"id": "sub_race", "status": "active",
+               "items": {"data": [{"price": {"id": "price_200proMM"}}]}}
+        monkeypatch.setattr(billing.StripeClient, "create_customer", lambda self, e: "cus_race1")
+        monkeypatch.setattr(billing.StripeClient, "list_subscriptions", lambda self, cid: [sub])
+        called: list[str] = []
+        monkeypatch.setattr(billing.StripeClient, "create_checkout_session",
+                            lambda *a, **k: called.append("checkout") or "https://x")
+        r = billing_client["client"].post(
+            "/v1/billing/checkout",
+            json={"price_id": "price_200proMM"},
+            headers=billing_client["headers"],
+        )
+        assert r.status_code == 409, r.text
+        assert called == []  # no session created
+
+    def test_checkout_unknown_price_400(self, billing_client):
+        r = billing_client["client"].post(
+            "/v1/billing/checkout",
+            json={"price_id": "price_nope"},
+            headers=billing_client["headers"],
+        )
+        assert r.status_code == 400, r.text
+
+    def test_checkout_success_url_env_driven(self, monkeypatch, billing_client):
+        """success/cancel URLs come from env (review fix 10b), not hardcoded."""
+        monkeypatch.setenv(
+            "BILLING_SUCCESS_URL",
+            "https://app.example.com/success?session_id={CHECKOUT_SESSION_ID}",
+        )
+        monkeypatch.setenv("BILLING_CANCEL_URL", "https://app.example.com/cancel?checkout=cancelled")
+        seen: dict[str, str] = {}
+
+        def fake_checkout(self, team_id, price_id, customer, success_url, cancel_url):
+            seen["success_url"] = success_url
+            seen["cancel_url"] = cancel_url
+            return "https://checkout.stripe.com/pay/e1"
+
+        monkeypatch.setattr(billing.StripeClient, "create_customer", lambda self, e: "cus_e1")
+        monkeypatch.setattr(billing.StripeClient, "list_subscriptions", lambda self, c: [])
+        monkeypatch.setattr(billing.StripeClient, "create_checkout_session", fake_checkout)
+        r = billing_client["client"].post(
+            "/v1/billing/checkout",
+            json={"price_id": "price_200proMM"},
+            headers=billing_client["headers"],
+        )
+        assert r.status_code == 200, r.text
+        assert seen["success_url"] == "https://app.example.com/success?session_id={CHECKOUT_SESSION_ID}"
+        assert seen["cancel_url"] == "https://app.example.com/cancel?checkout=cancelled"
+
+    def test_checkout_missing_env_503(self, monkeypatch, billing_client):
+        """Lazy config: missing STRIPE_PRICE_IDS → 503, never a crash."""
+        monkeypatch.delenv("STRIPE_PRICE_IDS", raising=False)
+        r = billing_client["client"].post(
+            "/v1/billing/checkout",
+            json={"price_id": "price_200proMM"},
+            headers=billing_client["headers"],
+        )
+        assert r.status_code == 503, r.text
+
+    def test_portal_returns_url(self, monkeypatch, billing_client):
+        billing_client["sdk"]._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.stripe_customer_id='cus_portal1'",
+            params={"id": billing_client["team_id"]},
+        )
+        monkeypatch.setattr(
+            billing.StripeClient, "create_portal_session",
+            lambda self, cid, return_url: "https://billing.stripe.com/p/session1",
+        )
+        r = billing_client["client"].post("/v1/billing/portal", headers=billing_client["headers"])
+        assert r.status_code == 200, r.text
+        assert r.json()["portal_url"] == "https://billing.stripe.com/p/session1"
+
+    def test_portal_404_no_customer(self, billing_client):
+        r = billing_client["client"].post("/v1/billing/portal", headers=billing_client["headers"])
+        assert r.status_code == 404, r.text
