@@ -96,6 +96,7 @@ def _iter_registered_teams() -> list[dict]:
 
     Used by the event-retention sweep (#432 Task 7) and boot reconcile.
     Returns [] on any failure — the sweep is best-effort.
+    Used by the billing boot reconcile (#310 Task 8). Returns [] on failure.
     """
     try:
         from tortoise.sdk import TortoiseSDK
@@ -104,10 +105,7 @@ def _iter_registered_teams() -> list[dict]:
         rows = sdk._get_registry().query(
             "MATCH (t:Team) RETURN t.id, t.name"
         ).result_set
-        # P2 (Qwen): skip rows with falsy team_id — namespace=None would sweep
-        # the default/shared graph.
-        return [{"team_id": r[0], "name": r[1] if len(r) > 1 else None}
-                for r in rows if r and r[0]]
+        return [{"team_id": r[0], "name": r[1] if len(r) > 1 else None} for r in rows]
     except Exception:  # noqa: BLE001
         return []
 
@@ -190,44 +188,48 @@ async def _lifespan(app):
                 _boot_gc_drill_graphs(reg_sdk._get_proj().db)
         except Exception as exc:  # noqa: BLE001 — never crash the app
             _logger.warning("backup watcher could not start: %s", exc)
-        # #432 Task 7: event retention — boot purge + interval task. Best-effort
-        # and non-fatal (like the pre-warm): a purge failure never blocks bind.
-        # Per-team graphs get purged by the SDK lazy hook too (embedded/stdio);
-        # here we sweep once at boot and then on an asyncio interval.
+
+        # #310 Task 8: boot reconcile — repairs billing-mirror drift for teams
+        # with subscription_id OR stripe_customer_id (missed-first-event blind
+        # spot). NEVER awaited before the lifespan yields (review fix 3, #545
+        # lesson: a delayed bind breaks Fly health-grace/release_command) —
+        # daemon thread + hard wall-clock budget + per-call Stripe timeouts; a
+        # hanging Stripe API must not extend startup. Non-fatal: any failure is
+        # logged (redacted) and the app boots.
         try:
-            import asyncio
-            import os
+            import time as _time
 
-            def _sweep_events() -> None:
+            def _boot_reconcile_billing() -> None:
+                deadline = _time.monotonic() + 20.0  # hard budget
                 try:
-                    from tortoise.event_store import purge_expired, purge_overflow
-                    from tortoise.registry import registry_sdk  # noqa: F401  (not used; teams via loop below)
-                    days = int(os.environ.get("TORTOISE_EVENT_RETENTION_DAYS", "30"))
-                    cap = int(os.environ.get("TORTOISE_EVENT_MAX_PER_TEAM", "500000"))
-                    # Sweep every registered team's graph (registry Team nodes).
-                    for team in _iter_registered_teams():
+                    from tortoise.billing import reconcile_team
+
+                    teams = _iter_registered_teams()
+                    for team in teams:
+                        if _time.monotonic() > deadline:
+                            _logger.warning(
+                                "billing reconcile: budget exhausted — %d teams skipped", len(teams))
+                            break
                         try:
-                            sdk = _make_sdk(namespace=team["team_id"])
-                            proj = sdk._get_proj()
-                            purge_expired(proj, retention_days=days)
-                            purge_overflow(proj, max_events=cap)
-                        except Exception:  # noqa: BLE001
-                            _logger.debug("event retention sweep skipped for %s", team.get("team_id"))
+                            summary = reconcile_team(
+                                _make_sdk(namespace="registry"), team["team_id"])
+                            if summary.get("action") not in ("noop", None):
+                                _logger.info(
+                                    "billing reconcile: %s %s",
+                                    team["team_id"], summary.get("action"))
+                        except Exception as exc:  # noqa: BLE001
+                            # Unknown price / outage / config — keep stored
+                            # tier + status; drift repaired on the next event.
+                            _logger.warning(
+                                "billing reconcile: team %s skipped (%s)",
+                                team.get("team_id"), redact_error(exc))
                 except Exception as exc:  # noqa: BLE001
-                    _logger.warning("event retention sweep failed: %s", exc)
+                    _logger.warning("billing reconcile: pass failed (%s)", redact_error(exc))
 
-            _sweep_events()  # boot sweep
-            interval = int(os.environ.get("TORTOISE_EVENT_RETENTION_INTERVAL", "3600"))
-
-            async def _event_retention_loop() -> None:
-                while True:
-                    await asyncio.sleep(interval)
-                    _sweep_events()
-
-            _retention_task = asyncio.get_event_loop().create_task(_event_retention_loop())
-            app.state._event_retention_task = _retention_task
+            threading.Thread(
+                target=_boot_reconcile_billing, name="billing-reconcile", daemon=True).start()
         except Exception as exc:  # noqa: BLE001
-            _logger.warning("event retention loop not started: %s", exc)
+            _logger.warning("billing reconcile: could not start (%s)", redact_error(exc))
         yield
 
 
