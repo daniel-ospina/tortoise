@@ -81,10 +81,10 @@ MAX_EXTRACTIONS_PER_TURN = 200
 MAX_ANALYZE_LLM_PER_MIN = 60
 MAX_DREAM_FULL_PER_HOUR = 6
 
-# ── Default limits (match REST today: team.get("max_points") or 1000) ──────
-DEFAULT_MAX_POINTS = 1000
-DEFAULT_MAX_API_KEYS = 20
-DEFAULT_MAX_SESSIONS = 1000
+# ── Default limits (aligned with product/pricing.json free tier) ──────────
+DEFAULT_MAX_POINTS = 10000
+DEFAULT_MAX_API_KEYS = 2
+DEFAULT_MAX_SESSIONS = 10000
 DEFAULT_MAX_USERS = 1
 DEFAULT_MAX_GRAPHS = 1
 
@@ -110,7 +110,7 @@ def resolve_team_limits(team_id: str) -> dict:
 
     Missing Team node → QuotaCheckError (fail-closed; the auth layer should
     guarantee key→team mapping). Missing attributes → defaults
-    (1000/20/1000 — matching today's effective behavior).
+    (aligned with product/pricing.json free tier).
     """
     if not team_id:
         raise QuotaCheckError("resolve_team_limits requires a team_id")
@@ -127,8 +127,9 @@ def resolve_team_limits(team_id: str) -> dict:
     return {
         "team_id": team_id,
         "tier": tier or "free",
-        "max_users": int(mu) if mu is not None else DEFAULT_MAX_USERS,
-        "max_graphs": int(mg) if mg is not None else DEFAULT_MAX_GRAPHS,
+        # max_users/max_graphs: None means unlimited (Team tier); preserve it.
+        "max_users": int(mu) if mu is not None else None,
+        "max_graphs": int(mg) if mg is not None else None,
         "max_points": int(mp) if mp is not None else DEFAULT_MAX_POINTS,
         "max_api_keys": int(mak) if mak is not None else DEFAULT_MAX_API_KEYS,
         "max_sessions": int(ms) if ms is not None else DEFAULT_MAX_SESSIONS,

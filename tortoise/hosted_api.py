@@ -671,7 +671,8 @@ async def get_current_team(request: Request) -> dict:
         # max_teams removed: multi-team is a USER capability, not a tier field
         # (per-team billing; tier limits come from pricing.json)
         return {"team_id": team_id, "key_id": key_id, "tier": tier or "free",
-                "max_users": mu if mu is not None else (lim["max_users_per_team"] or 1),
+                # max_users: preserve None from pricing (Team tier = unlimited)
+                "max_users": mu if mu is not None else lim["max_users_per_team"],
                 "max_graphs": mg if mg is not None else lim["max_graphs_per_team"],
                 "max_points": int(mp) if mp is not None else DEFAULT_MAX_POINTS,
                 "max_api_keys": int(mak) if mak is not None else DEFAULT_MAX_API_KEYS,
@@ -1721,14 +1722,22 @@ def _team_limits_from_node(team_node: dict) -> dict:
     from tortoise.quota import DEFAULT_MAX_API_KEYS, DEFAULT_MAX_POINTS, DEFAULT_MAX_SESSIONS
     tier = team_node.get("tier", "free")
     lim = tier_limits(tier)
+    # Fetch each field; use `is None` to preserve None (unlimited) and explicit 0.
+    mu = team_node.get("max_users")
+    mg = team_node.get("max_graphs")
+    mp = team_node.get("max_points")
+    mak = team_node.get("max_api_keys")
+    ms = team_node.get("max_sessions")
     return {
         "team_id": team_node["id"],
         "tier": tier,
-        "max_users": team_node.get("max_users") or lim["max_users_per_team"] or 1,
-        "max_graphs": team_node.get("max_graphs") or lim["max_graphs_per_team"],
-        "max_points": team_node.get("max_points") or DEFAULT_MAX_POINTS,
-        "max_api_keys": team_node.get("max_api_keys") or DEFAULT_MAX_API_KEYS,
-        "max_sessions": team_node.get("max_sessions") or DEFAULT_MAX_SESSIONS,
+        # max_users/max_graphs: preserve None (unlimited, Team tier) and
+        # fall back to tier_limits when missing (also None for Team tier).
+        "max_users": mu if mu is not None else lim["max_users_per_team"],
+        "max_graphs": mg if mg is not None else lim["max_graphs_per_team"],
+        "max_points": mp if mp is not None else DEFAULT_MAX_POINTS,
+        "max_api_keys": mak if mak is not None else DEFAULT_MAX_API_KEYS,
+        "max_sessions": ms if ms is not None else DEFAULT_MAX_SESSIONS,
     }
 
 

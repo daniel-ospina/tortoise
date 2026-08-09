@@ -40,10 +40,12 @@ class TestResolveTeamLimits:
     def test_provisioned_team_has_defaults(self, reg_sdk):
         tid = _find_team_id(reg_sdk)
         limits = resolve_team_limits(tid)
-        # Free tier from pricing.json: max_api_keys=2
-        assert limits["max_points"] == 1000
+        # team_create writes max_api_keys from pricing.json free tier (=2),
+        # but NOT max_points / max_sessions — defaults apply (aligned with
+        # product/pricing.json free tier: max_graph_nodes=10000).
+        assert limits["max_points"] == 10000
         assert limits["max_api_keys"] == 2
-        assert limits["max_sessions"] == 1000
+        assert limits["max_sessions"] == 10000
         assert limits["max_users"] == 1
         assert limits["max_graphs"] == 1
 
@@ -155,3 +157,77 @@ class TestEnforceGraphsLimit:
         limits = resolve_team_limits(tid)
         limits["max_graphs"] = None  # Pro/Team tier → unlimited
         enforce_team_limit(limits, "graphs")  # must not raise
+
+
+# ── #683: None (unlimited) preservation in resolvers ──────────────────────
+
+class TestNonePreservation:
+    """None → unlimited must survive all limit resolvers (P0 regression)."""
+
+    def test_resolve_team_limits_preserves_none_users(self, reg_sdk):
+        """Team-tier team with max_users=None → resolve returns None, not 1."""
+        tid = _find_team_id(reg_sdk)
+        # Directly set max_users=None on the Team node (Team tier semantics)
+        reg_sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.max_users = NULL",
+            params={"id": tid},
+        )
+        limits = resolve_team_limits(tid)
+        assert limits["max_users"] is None, (
+            f"Expected None (unlimited), got {limits['max_users']!r}")
+
+    def test_resolve_team_limits_preserves_none_graphs(self, reg_sdk):
+        """Team-tier team with max_graphs=None → resolve returns None."""
+        tid = _find_team_id(reg_sdk)
+        reg_sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.max_graphs = NULL",
+            params={"id": tid},
+        )
+        limits = resolve_team_limits(tid)
+        assert limits["max_graphs"] is None, (
+            f"Expected None (unlimited), got {limits['max_graphs']!r}")
+
+    def test_team_limits_from_node_preserves_none_users(self):
+        """_team_limits_from_node: None max_users → None (not coiled to 1)."""
+        from tortoise.hosted_api import _team_limits_from_node
+        node = {"id": "t1", "tier": "team",
+                "max_users": None, "max_graphs": None}
+        limits = _team_limits_from_node(node)
+        assert limits["max_users"] is None, (
+            f"Expected None (unlimited Team tier), got {limits['max_users']!r}")
+        assert limits["max_graphs"] is None, (
+            f"Expected None (unlimited Team tier), got {limits['max_graphs']!r}")
+
+    def test_team_limits_from_node_preserves_none_graphs(self):
+        """_team_limits_from_node: None max_graphs for pro tier = unlimited."""
+        from tortoise.hosted_api import _team_limits_from_node
+        node = {"id": "t2", "tier": "pro",
+                "max_users": 2, "max_graphs": None}
+        limits = _team_limits_from_node(node)
+        # max_graphs=None (pro tier) → unlimited
+        assert limits["max_graphs"] is None, (
+            f"Expected None (unlimited pro graphs), got {limits['max_graphs']!r}")
+        # max_users=2 is explicit → preserved
+        assert limits["max_users"] == 2
+
+    def test_team_limits_from_node_explicit_zero(self):
+        """P1: explicit 0 is preserved, not conflated with missing."""
+        from tortoise.hosted_api import _team_limits_from_node
+        node = {"id": "t3", "tier": "free",
+                "max_points": 0, "max_api_keys": 0, "max_sessions": 0}
+        limits = _team_limits_from_node(node)
+        assert limits["max_points"] == 0, (
+            f"Explicit 0 should be 0, got {limits['max_points']!r}")
+        assert limits["max_api_keys"] == 0, (
+            f"Explicit 0 should be 0, got {limits['max_api_keys']!r}")
+        assert limits["max_sessions"] == 0, (
+            f"Explicit 0 should be 0, got {limits['max_sessions']!r}")
+
+    def test_team_limits_from_node_free_tier_defaults(self):
+        """Missing fields on free-tier node → pricing-aligned defaults."""
+        from tortoise.hosted_api import _team_limits_from_node
+        node = {"id": "t4", "tier": "free"}
+        limits = _team_limits_from_node(node)
+        assert limits["max_points"] == 10000
+        assert limits["max_api_keys"] == 2
+        assert limits["max_sessions"] == 10000
