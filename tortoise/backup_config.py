@@ -19,6 +19,8 @@ from dataclasses import dataclass
 _AES_KEY_SIZE = 32
 
 # Secrets that the deploy workflow can sync from GH → Fly (the "syncable" set).
+# REGISTRY_STREAM_KEY is deliberately EXCLUDED — it must be set out-of-band
+# by the operator on Fly (fly secrets set) and never present in GitHub.
 _SYNCABLE_REQUIRED = (
     "TORTOISE_BACKUP_KEY",
     "R2_ACCOUNT_ID",
@@ -40,6 +42,7 @@ class BackupConfig:
 
     enabled: bool
     backup_key: bytes
+    registry_stream_key: bytes  # Fly-only, never in GH — #661
     r2_account_id: str
     r2_access_key_id: str
     r2_secret_access_key: str
@@ -120,11 +123,12 @@ def _load_from_env() -> BackupConfig:
     enabled = _env_bool("BACKUP_SWEEP_ENABLED", default=False)
     team_sweep_enabled = _env_bool("BACKUP_TEAM_SWEEP_ENABLED", default=False)
     if not enabled:
-        # Fail-closed default: build a disabled config with an empty key; the
+        # Fail-closed default: build a disabled config with empty keys; the
         # app must not call into the sweep machinery when disabled.
         return BackupConfig(
             enabled=False,
             backup_key=b"",
+            registry_stream_key=b"",
             r2_account_id="",
             r2_access_key_id="",
             r2_secret_access_key="",
@@ -146,6 +150,18 @@ def _load_from_env() -> BackupConfig:
             + " (deploy-hosted.yml sets BACKUP_SWEEP_ENABLED=true only when all are present)"
         )
     backup_key = _parse_backup_key(_require("TORTOISE_BACKUP_KEY"))
+
+    # Registry stream key — Fly-only, never synced from GH (#661).
+    # Fail-closed: the sweep must not encrypt registry archives with a
+    # GH-visible key. The operator sets this out-of-band on Fly.
+    registry_stream_raw = os.environ.get("REGISTRY_STREAM_KEY", "").strip()
+    if not registry_stream_raw:
+        raise ConfigError(
+            "REGISTRY_STREAM_KEY not set — required when backup sweep is enabled. "
+            "Set it out-of-band on Fly (fly secrets set REGISTRY_STREAM_KEY=...). "
+            "It must never be a GitHub secret."
+        )
+    registry_stream_key = _parse_backup_key(registry_stream_raw)
 
     # Telegram — required-when-enabled (a silently-dead human channel is #101).
     telegram_token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
@@ -169,6 +185,7 @@ def _load_from_env() -> BackupConfig:
     return BackupConfig(
         enabled=True,
         backup_key=backup_key,
+        registry_stream_key=registry_stream_key,
         r2_account_id=_require("R2_ACCOUNT_ID"),
         r2_access_key_id=_require("R2_ACCESS_KEY_ID"),
         r2_secret_access_key=_require("R2_SECRET_ACCESS_KEY"),

@@ -46,6 +46,50 @@
 - **Simulate (staging):** `POST /v1/internal/backups/simulate-stale|recover` (gated on `BACKUP_SIMULATE_ENABLED`) — proves detection→filing→dedup ≤ 2× poll cadence.
 - **Secrets:** `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`/`DR_ISSUES_PAT`/`BACKUP_ALERT_ASSIGNEE` are Fly + GH secrets; the Telegram pair exists in both (daemon-side and driver-side legs). `BACKUP_SWEEP_ENABLED=true` is set by deploy-hosted.yml only when all required secrets are present (fail-closed).
 
+### REGISTRY_STREAM_KEY — out-of-band Fly secret (#661)
+
+**Purpose:** encrypts sweep backup archives (dump.enc) with a key that is
+NEVER present in GitHub. This breaks the GH-trust-boundary dependency:
+even a GH-capable collaborator cannot decrypt registry backup archives
+because the key lives only on Fly, set by the operator out-of-band.
+
+**Setup (operator, once):**
+```bash
+# Generate the key (do NOT commit or share):
+python -c "import base64,secrets; print(base64.b64encode(secrets.token_bytes(32)).decode())"
+
+# Set it directly on Fly (NEVER add to GitHub secrets):
+fly secrets set REGISTRY_STREAM_KEY=<generated-key> --app tortoise-y4mjjq
+```
+
+**Deploy safety:** `deploy-hosted.yml` deliberately EXCLUDES
+`REGISTRY_STREAM_KEY` from the secret-sync loop — there is no active
+negative check (the workflow can't check Fly-side state), but the key is
+never read from `secrets.*` in the YAML. A missing key causes the sweep
+endpoint (`POST /v1/internal/backups/sweep`) to 503 fail-closed — the app
+boots and serves normally, but no sweep backups are created until the key
+is set.
+
+**Rotating:**
+```bash
+# 1. Generate a new key
+# 2. Set it on Fly (overwrites the old key):
+fly secrets set REGISTRY_STREAM_KEY=<new-key> --app tortoise-y4mjjq
+# 3. Deploy to pick up the new secret value:
+fly deploy --app tortoise-y4mjjq
+# 4. Old archives remain decryptable with the OLD key — recover via manual
+#    decryption with TORTOISE_BACKUP_KEY (GH-secret, retained for recovery).
+```
+
+**Verification (operator, post-setup):**
+```bash
+# Trigger a drill against the oldest archive to confirm the key works:
+curl -sS -X POST -H "Authorization: Bearer $FASTAPI_INTERNAL_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"team_id":"<team>","backup_key":"backups/<team>/.../dump.enc"}' \
+  https://api.premiselabs.co/v1/internal/backups/drill
+```
+
 ## Known residuals (accepted)
 - **App down AND driver disabled simultaneously** — no alert (documented residual; reopen condition: first unattended app-down).
 - **NEVER detection while the app is down** — daemon-only; a never-backed-up team during an outage is silent until recovery.

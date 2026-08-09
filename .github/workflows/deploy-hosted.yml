@@ -93,6 +93,12 @@ jobs:
           if [ -n "${{ secrets.TORTOISE_BACKUP_KEY }}" ] && [ -n "${{ secrets.R2_ACCOUNT_ID }}" ] && [ -n "${{ secrets.R2_ACCESS_KEY_ID }}" ] && [ -n "${{ secrets.R2_SECRET_ACCESS_KEY }}" ] && [ -n "${{ secrets.R2_BUCKET }}" ] && [ -n "${{ secrets.TELEGRAM_BOT_TOKEN }}" ] && [ -n "${{ secrets.TELEGRAM_CHAT_ID }}" ] && [ -n "${{ secrets.DR_ISSUES_PAT }}" ] && [ -n "${{ secrets.BACKUP_ALERT_ASSIGNEE }}" ]; then
             ARGS="$ARGS BACKUP_SWEEP_ENABLED=true"
             echo "::notice::BACKUP_SWEEP_ENABLED=true — all backup-sweep secrets present"
+            # REGISTRY_STREAM_KEY is deliberately NOT synced from GH (#661).
+            # The operator must set it out-of-band on Fly:
+            #   fly secrets set REGISTRY_STREAM_KEY=... --app tortoise-y4mjjq
+            # When BACKUP_SWEEP_ENABLED=true, a missing REGISTRY_STREAM_KEY
+            # fails-closed at config-load time (the app boots but /sweep 503s).
+            echo "::notice::REGISTRY_STREAM_KEY — ensure the operator has set this Fly secret out-of-band (#661)"
           else
             echo "::warning::backup sweep secrets incomplete — BACKUP_SWEEP_ENABLED left off (fail-closed)"
           fi
