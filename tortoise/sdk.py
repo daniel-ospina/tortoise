@@ -24,8 +24,42 @@ register_kind("checkpoint-item")
 register_kind("option")    # used by file_decision (#133)
 register_kind("evidence")  # used by file_decision (#133)
 
-# Valid status values for Point nodes (used by update_point status validation)
-POINT_STATUS_VALUES = frozenset({'live', 'draft', 'outdated', 'archived', 'retracted'})
+# #432/#690: claim lifecycle vocabulary — draft → live → retracted → superseded
+# (plus outdated/archived). challenged is a DERIVED condition (NAND operator
+# edge on a live point), NOT a stored status.
+POINT_STATUS_VALUES = frozenset({'draft', 'live', 'retracted', 'superseded', 'outdated', 'archived'})
+
+# #432/#690: declarative spec for the retract/supersede transition guards. NOT
+# consulted by update_point per-call (update_point only promotes draft→live);
+# every claim transition is observable via an emit hook, and no transition can
+# slip through update_point unemitted.
+_ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
+    "draft": frozenset({"live"}),                          # promote via update_point/create_operator
+    "live": frozenset({"retracted", "superseded"}),        # via retract_point / supersede_point
+    "retracted": frozenset(),                               # terminal
+    "superseded": frozenset(),                              # terminal
+    "outdated": frozenset({"retracted"}),                  # outdated stays a flag; retract allowed
+    "archived": frozenset(),                                # terminal (reserved — no v1 write path)
+}
+
+
+def _raise_update_point_status_error(proj, id: str) -> None:
+    """#432: error path for the update_point draft→live promote guard.
+
+    Runs a diagnostic existence read ONLY when the guarded SET returned no
+    rows, so the happy path stays a single round trip. Missing point →
+    ValueError matching the historical missing-point behavior; present but
+    not draft → illegal-transition ValueError.
+    """
+    exists = proj.g.query(
+        "MATCH (n:Point {id:$id}) RETURN count(n)", params={"id": id},
+    ).result_set[0][0]
+    if not exists:
+        raise ValueError(f"No point {id!r}")
+    raise ValueError(
+        f"Illegal status transition — update_point only promotes draft→live; "
+        f"use retract_point()/supersede_point() for lifecycle transitions"
+    )
 
 _logger = logging.getLogger(__name__)
 
@@ -821,6 +855,21 @@ class TortoiseSDK:
                 f"Must be one of: {', '.join(sorted(POINT_STATUS_VALUES))}"
             )
 
+        # #432/#690: update_point is non-status except the draft→live
+        # promote (matches the create_operator promote). Any other status value
+        # is rejected BEFORE the query — lifecycle transitions go through
+        # retract_point()/supersede_point() (which emit events). This keeps
+        # every claim transition observable via an emit hook.
+        if 'status' in props:
+            if props['status'] != 'live':
+                raise ValueError(
+                    "update_point only promotes draft→live — use "
+                    "retract_point()/supersede_point() for lifecycle transitions"
+                )
+
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+
         # Check if node carries :Object label (entity node with version tracking)
         has_object = proj.g.query(
             "MATCH (n:Point:Object {id:$id}) RETURN count(n) > 0",
@@ -828,19 +877,41 @@ class TortoiseSDK:
         ).result_set[0][0]
 
         if has_object:
-            from datetime import datetime, timezone
-            now = datetime.now(timezone.utc).isoformat()
-            proj.g.query(
-                "MATCH (n:Point:Object {id:$id}) "
-                "SET n += $props, n.version = coalesce(n.version, 0) + 1, n.updatedAt = $now",
-                params={"id": id, "props": props, "now": now},
-            )
-        else:
-            for key, val in props.items():
-                proj.g.query(
-                    "MATCH (n:Point {id:$id}) SET n += $props",
-                    params={"id": id, "props": {key: val}},
+            if 'status' in props:
+                # Promote guard folded INTO the WHERE clause (single round trip,
+                # no widened write window).
+                res = proj.g.query(
+                    "MATCH (n:Point:Object {id:$id}) "
+                    "WHERE (n.status IS NULL OR n.status = 'draft') "
+                    "SET n.status = 'live', n.updatedAt = $now, "
+                    "n.version = coalesce(n.version, 0) + 1 RETURN n",
+                    params={"id": id, "now": now},
                 )
+                if not res.result_set:
+                    _raise_update_point_status_error(proj, id)
+            else:
+                proj.g.query(
+                    "MATCH (n:Point:Object {id:$id}) "
+                    "SET n += $props, n.version = coalesce(n.version, 0) + 1, n.updatedAt = $now",
+                    params={"id": id, "props": props, "now": now},
+                )
+        else:
+            if 'status' in props:
+                # Promote guard folded INTO the WHERE clause (single round trip).
+                res = proj.g.query(
+                    "MATCH (n:Point {id:$id}) "
+                    "WHERE (n.status IS NULL OR n.status = 'draft') "
+                    "SET n.status = 'live', n.updatedAt = $now RETURN n",
+                    params={"id": id, "now": now},
+                )
+                if not res.result_set:
+                    _raise_update_point_status_error(proj, id)
+            else:
+                for key, val in props.items():
+                    proj.g.query(
+                        "MATCH (n:Point {id:$id}) SET n += $props",
+                        params={"id": id, "props": {key: val}},
+                    )
         # Tag sync (#485): keep TAGGED edges consistent with the n.tags
         # property — update_point previously set the property but left edges
         # stale, so query_points_by_tag missed updated points. Falsy tag
@@ -993,9 +1064,11 @@ class TortoiseSDK:
                 f"refusing to orphan outdated point {old_id!r}"
             )
 
-        # 1. Mark old outdated + create CORRECTS edge (same as invalidate)
+        # 1. Mark old superseded + outdated + create CORRECTS edge (same as invalidate)
+        # #432/#690: status='superseded' alongside the legacy outdated=true flag
         proj.g.query(
-            "MATCH (n:Point {id:$id}) SET n.outdated = true, n.updatedAt = $now",
+            "MATCH (n:Point {id:$id}) SET n.status = 'superseded', "
+            "n.outdated = true, n.updatedAt = $now",
             params={"id": old_id, "now": now},
         )
         proj.g.query(
@@ -1060,6 +1133,45 @@ class TortoiseSDK:
             "corrected_by": new_id,
             "edges_transferred": transferred,
         }
+
+    def retract_point(self, id: str) -> dict:
+        """Tombstone-retract a Point: status='retracted' (point stays in graph).
+
+        #432/#690: retraction is a TERMINAL state transition, not a deletion — the
+        projection keeps the point with status='retracted' and default query
+        surfaces exclude it (opt-in via include_retracted). Single atomic
+        conditional query on the happy path; diagnostic read only on the error
+        path.
+
+        Raises ValueError if the point is missing, is an operator node, or is
+        already terminal (retracted/superseded/archived).
+        """
+        from datetime import datetime, timezone
+        proj = self._get_proj()
+        r = proj.g.query(
+            "MATCH (n:Point {id:$id}) "
+            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "AND (n.status IS NULL OR NOT (n.status IN $terminal)) "
+            "SET n.status = 'retracted', n.updatedAt = $now RETURN properties(n)",
+            params={"id": id, "now": datetime.now(timezone.utc).isoformat(),
+                    "terminal": ["retracted", "superseded", "archived"]})
+        if not r.result_set:
+            # diagnostic read ONLY on the error path — happy path stays 1 round trip
+            row = proj.g.query(
+                "MATCH (n:Point {id:$id}) RETURN n.is_operator, n.status",
+                params={"id": id}).result_set
+            if not row:
+                raise ValueError(f"No point {id!r}")
+            is_op, cur = row[0][0], row[0][1]
+            if is_op:
+                raise ValueError(
+                    f"Point {id!r} is an operator — retraction is for statement points")
+            raise ValueError(
+                f"Point {id!r} is already terminal ({cur!r}) — retraction is terminal")
+        result = r.result_set[0][0]  # updated node props (no trailing get_point round trip)
+        # #548: emit PointRetracted event for rebuild parity
+        self._emit_event("PointRetracted", id=id)
+        return result
 
     # ── Operators ─────────────────────────────────────────────────
 
@@ -1226,21 +1338,24 @@ class TortoiseSDK:
     # ── Query ─────────────────────────────────────────────────────
 
     def query(self, kind: str | None = None,
+              *, include_retracted: bool = False,
               **filters) -> list[dict]:
         """Query points by pointKind and/or custom property filters.
 
+        #432/#690: retracted points (status='retracted') are EXCLUDED by
+        default — pass include_retracted=True, or an explicit status= filter
+        (e.g. status='retracted'), to surface tombstones.
+
         For confidence-aware queries, use tortoise_fts_query() with query=None
         for full-scan mode with EP annotation.
-
-        Retracted points (status='retracted') are excluded. Use a raw Cypher
-        query via proj.g.query() to inspect retracted tombstones.
         """
         proj = self._get_proj()
-        clauses = [
-            "(n.is_operator IS NULL OR n.is_operator = false)",
-            "(n.status IS NULL OR n.status <> 'retracted')",  # #689: hide retracted
-        ]
+        clauses = ["(n.is_operator IS NULL OR n.is_operator = false)"]
         params: dict[str, Any] = {}
+        # #432/#690: retracted exclusion — skipped when the caller explicitly
+        # filters by status (their filter controls visibility).
+        if not include_retracted and "status" not in filters:
+            clauses.append("(n.status IS NULL OR n.status <> 'retracted')")
         if kind:
             expanded = self._expand_kind(kind)
             if len(expanded) == 1:
@@ -1268,18 +1383,22 @@ class TortoiseSDK:
         return [r[0] for r in rows]
 
     def paginated_query(self, kind: str | None = None,
-                         skip: int = 0, limit: int = 20, **filters) -> dict:
+                         skip: int = 0, limit: int = 20,
+                         *, include_retracted: bool = False,
+                         **filters) -> dict:
         """Query points with pagination. Returns {results, total, hasMore}.
 
-        Retracted points (status='retracted') are excluded. Use a raw Cypher
-        query via proj.g.query() to inspect retracted tombstones.
+        #432/#690: retracted points (status='retracted') are EXCLUDED by
+        default — pass include_retracted=True, or an explicit status= filter,
+        to surface tombstones.
         """
         proj = self._get_proj()
-        clauses = [
-            "(n.is_operator IS NULL OR n.is_operator = false)",
-            "(n.status IS NULL OR n.status <> 'retracted')",  # #689: hide retracted
-        ]
+        clauses = ["(n.is_operator IS NULL OR n.is_operator = false)"]
         params: dict[str, Any] = {}
+        # #432/#690: retracted exclusion — skipped when the caller explicitly
+        # filters by status (their filter controls visibility).
+        if not include_retracted and "status" not in filters:
+            clauses.append("(n.status IS NULL OR n.status <> 'retracted')")
         if kind:
             expanded = self._expand_kind(kind)
             if len(expanded) == 1:
@@ -1316,21 +1435,16 @@ class TortoiseSDK:
     def get_point(self, id: str) -> dict:
         """Get a Point by ID. Returns dict of all properties, or {} if not found.
 
-        Retracted points (status='retracted') return {} — they are hidden
-        from normal reads but remain queryable via raw Cypher (#689).
+        #432/#690: retracted points ARE returned by get_point (direct access).
+        Default query surfaces exclude retracted — use include_retracted=True
+        or explicit status='retracted' filter to surface them via query().
         """
         proj = self._get_proj()
         rows = proj.g.query(
             "MATCH (n:Point {id:$id}) RETURN properties(n)",
             params={"id": id},
         ).result_set
-        if not rows:
-            return {}
-        props = rows[0][0]
-        # #689: hide retracted points from normal reads
-        if props.get("status") == "retracted":
-            return {}
-        return props
+        return rows[0][0] if rows else {}
 
     def traverse(self, id: str, relationship_type: str, direction: str = "outgoing") -> list[dict]:
         """Traverse relationships from a Point. Returns connected point dicts.
