@@ -294,3 +294,76 @@ def test_capture_session_falsy_non_string_content_not_swallowed(sdk):
     assert rows[2][0] == "[user] {}", "{} stored as its str() form, not swallowed"
     assert rows[3][0] == "[assistant] []", "[] stored as its str() form, not swallowed"
     assert rows[4][0] == "[user] ", "None degrades to empty string"
+
+
+# ── E2E-6: Semantic connections (Event→Object) ──────────────────────────
+#
+# ONTOLOGY v3.2 §3.2 (issue #214) removed the INSTANTIATES predicate from
+# the valid-predicate vocabulary; the canonical Event→Object connection is
+# the aboutObject edge (#281 re-scope). The session-indexer's legacy
+# INSTANTIATES producer (_connect_issue_objects, sdk.py) is still pending
+# #281's swap on origin/main — these tests assert the canonical aboutObject
+# edge produced by the real capture surface (capture_session →
+# create_about_edge / create_event) and guard that the removed predicate is
+# never emitted from that producer. They start passing against the full
+# index flow unchanged once #281 lands.
+
+
+def test_capture_session_event_object_canonical_about_edge(sdk):
+    """E2E-6: sessionCaptured Event → Object semantic connection is the
+    canonical aboutObject edge — traversable both directions, and the dead
+    INSTANTIATES predicate is not emitted by the canonical producer."""
+    # 1. Session pipeline creates the sessionCaptured Event.
+    sdk.capture_session(CONV)
+    proj = sdk._get_proj()
+    ev = proj.g.query(
+        "MATCH (e:Event {eventKind:'sessionCaptured'}) RETURN e.eventId, e.id"
+    ).result_set
+    assert ev, "capture_session must create the sessionCaptured Event"
+    eid, euid = ev[0]
+    assert euid == eid, "Event node id mirrors the EventRecorded eventId"
+
+    # 2. Object the session was about (canonical ObjectRegistered event).
+    obj = sdk.create_object("license-research", "skill")
+
+    # 3. Canonical semantic connection: (Event)-[:aboutObject]->(Object).
+    #    create_event(aboutObject=…) wires this exact edge; use the same
+    #    producer primitive the capture flow calls.
+    assert proj.create_about_edge(eid, obj["id"], "aboutObject") is True
+    conn = proj.g.query(
+        "MATCH (e:Event {eventId:$eid})-[:aboutObject]->(o:Object {id:$oid}) "
+        "RETURN o.name, o.objectKind",
+        params={"eid": eid, "oid": obj["id"]},
+    ).result_set
+    assert conn == [["license-research", "skill"]], f"aboutObject miss: {conn}"
+
+    # 4. Backward traversal: Object → Event (graph queryable both ways).
+    back = proj.g.query(
+        "MATCH (o:Object {id:$oid})<-[:aboutObject]-(e:Event) RETURN e.eventId",
+        params={"oid": obj["id"]},
+    ).result_set
+    assert back and back[0][0] == eid, f"reverse traversal miss: {back}"
+
+    # 5. Removed-predicate guard (#214): the canonical producer must not
+    #    emit the dead INSTANTIATES edge.
+    dead = proj.g.query(
+        "MATCH (e:Event {eventId:$eid})-[:INSTANTIATES]->(o) RETURN count(o)",
+        params={"eid": eid},
+    ).result_set
+    assert dead[0][0] == 0, "INSTANTIATES was removed from ONTOLOGY v3.2 §3.2"
+
+
+def test_create_event_wires_about_object_by_name(sdk):
+    """E2E-6 companion: create_event(aboutObject=<name>) — the wiring the
+    session-capture flow uses once #281 lands — resolves an existing Object
+    by name and produces the canonical aboutObject edge."""
+    sdk.create_object("license-research", "skill")
+    ev = sdk.create_event("session-s1", "sessionCaptured",
+                          aboutObject="license-research")
+    proj = sdk._get_proj()
+    conn = proj.g.query(
+        "MATCH (e:Event {eventId:$eid})-[:aboutObject]->(o:Object) "
+        "RETURN o.name, o.objectKind",
+        params={"eid": ev["eventId"]},
+    ).result_set
+    assert conn == [["license-research", "skill"]], f"name-resolved aboutObject miss: {conn}"
