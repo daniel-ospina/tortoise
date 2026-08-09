@@ -421,7 +421,10 @@
         return;
       }
 
-      // Supabase OAuth redirects the user, so we don't need to do anything else
+      // Supabase OAuth redirects the user, so we don't need to do anything else.
+      // X conversion (#736 Path A) is intentionally SKIPPED on OAuth signup:
+      // the provider redirect navigates the page away before any conversion
+      // event could be pushed/reliably attributed to the user id.
       if (data?.url) {
         window.location.href = data.url;
       }
@@ -479,6 +482,17 @@
         window.posthog.identify(data.user.id);
         window.posthog.capture("user_signed_up", { provider: "email" });
       }
+
+      // X conversion event (client-side, Path A of #736): the dataLayer push is
+      // local-only; GTM loads ONLY on consent so the X tag fires only for
+      // consenting users. conversion_id = Supabase user id (dedup key).
+      // Optional chaining guards against a missing user so this never throws.
+      window.dataLayer = window.dataLayer || [];
+      window.dataLayer.push({
+        event: "x_signup",
+        email: data.user?.email || "",
+        conversion_id: data.user?.id || "",
+      });
 
       // Email confirmation ON: signUp returns no session — show the
       // check-your-inbox state with resend (E2E-8). The confirmation link

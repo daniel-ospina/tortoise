@@ -688,11 +688,12 @@ def test_mock_email_signup_shows_confirmation(page: Page) -> None:
                 return
             fired["signup"] = route.request
             # session-less response → the page shows the check-your-inbox state.
+            # email mirrors real Supabase signUp responses (user.email present).
             route.fulfill(
                 status=200,
                 content_type="application/json",
                 headers={"Access-Control-Allow-Origin": "*"},
-                body=json.dumps({"user": {"id": "mock-user", "identities": [{"id": "mock-id"}]}}),
+                body=json.dumps({"user": {"id": "mock-user", "email": email, "identities": [{"id": "mock-id"}]}}),
             )
             return
         route.continue_()
@@ -708,6 +709,15 @@ def test_mock_email_signup_shows_confirmation(page: Page) -> None:
     # MANDATORY inbox-state assertion (cycle-4 P2-7b).
     expect(page.locator("#confirmation-required")).to_be_visible(timeout=15_000)
     expect(page.locator("#confirm-email")).to_have_text(email)
+
+    # X conversion event (#736 Path A): the dataLayer push fired on success
+    # with event=x_signup, the typed email, and a non-empty conversion_id
+    # (Supabase user id — the dedup key for the X Lead event).
+    data_layer = page.evaluate("() => window.dataLayer || []")
+    assert any(
+        entry.get("event") == "x_signup" and entry.get("conversion_id") and entry.get("email") == email
+        for entry in data_layer
+    ), f"x_signup entry missing from dataLayer: {data_layer}"
 
     # The signup request fired with the typed payload.
     assert "signup" in fired, "auth/v1/signup request never fired"
