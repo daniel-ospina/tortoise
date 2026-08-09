@@ -669,7 +669,8 @@ function App() {
       if (teamIdRef.current !== _teamAtCall) return
 
     } catch (e) {
-      setError(e.message)
+      // Round-19: stale DELETE error must not land under the new team
+      if (teamIdRef.current === _teamAtCall) setError(e.message)
     }
   }
 
@@ -693,7 +694,8 @@ function App() {
       if (teamIdRef.current !== _teamAtCall) return
 
     } catch (e) {
-      setError(e.message)
+      // Round-19: stale PATCH error must not land under the new team
+      if (teamIdRef.current === _teamAtCall) setError(e.message)
     }
   }
 
@@ -744,10 +746,13 @@ function App() {
       // not render this team's plaintext key card or key table under the new
       // team's header (switchTeam's setNewKey(null) already ran for the new team).
       if (teamIdRef.current !== _teamAtCall) return
-      // Round-18 (P3): pre-mint window — switchTeam sets teamIdRef sync but
-      // apiKey lags until its mint resolves; if we POSTed with the OLD team's
-      // key (not in this team's cache) and apiKey state moved, treat as stale.
-      if (activeKey !== _apiKeyAtCall && teamKeysRef.current[_teamAtCall] !== activeKey) return
+      // Round-19 (P3): the pre-mint guard must actually fire. activeKey is
+      // either cache[t] or apiKey-at-call. If this team already has a cached
+      // key, the POST must have used it. Otherwise (no cached key), the POST
+      // key must still be the current apiKey state — if apiKey moved (a
+      // switchTeam mint completed), we hit the OLD team's key: bail.
+      const cachedForTeam = _teamAtCall ? teamKeysRef.current[_teamAtCall] : null
+      if (cachedForTeam ? activeKey !== cachedForTeam : activeKey !== apiKey) return
       setNewKey(k.api_key || k.key || k)
       await loadAll(activeKey)
     } catch (e) {
@@ -923,6 +928,7 @@ function App() {
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
               autoFocus
+              autoComplete="new-password" // Round-19: one-shot secret — drives password-manager hints
             />
             <button type="submit" disabled={busy || !apiKey.trim()}>
               {busy ? 'Connecting…' : 'Connect'}
