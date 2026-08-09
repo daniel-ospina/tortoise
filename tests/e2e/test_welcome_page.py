@@ -154,6 +154,10 @@ def test_welcome_success_shows_key_and_artifacts(page: Page) -> None:
     page.goto(WELCOME_URL, wait_until="domcontentloaded", timeout=30_000)
     expect(page.locator("#success")).not_to_be_hidden(timeout=15_000)
     expect(page.locator("#api-key")).to_contain_text("tt_", timeout=15_000)
+    # Regression guard (#728): showSuccess() must complete (no throw on the
+    # removed #mcp-snippet-key line) and reveal the dashboard CTA for
+    # first-time users — previously the button never appeared.
+    expect(page.locator("#btn-dashboard")).to_be_visible(timeout=15_000)
     expect(page.locator("#harness-tabs")).to_be_visible()
     # Four harness tabs (Claude Code / Codex / Cursor / Pi)
     expect(page.locator(".harness-tab")).to_have_count(4)
@@ -232,6 +236,10 @@ def test_returning_visitor_shows_dashboard_hub(page: Page) -> None:
     _mock_supabase_success(page, reveal_result="pending")
     page.goto(WELCOME_URL, wait_until="domcontentloaded", timeout=30_000)
     expect(page.locator("#returning-block")).not_to_be_hidden(timeout=15_000)
+    # Returning visitors also get the dashboard CTA (showAlreadyProvisioned path)
+    expect(page.locator("#btn-dashboard")).to_be_visible(timeout=15_000)
+    # And must NOT see a re-revealed key
+    expect(page.locator("#reveal-block")).to_be_hidden(timeout=5_000)
 
 
 # ── Live signup E2E (requires real Supabase creds + session) ────────
