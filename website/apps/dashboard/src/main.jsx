@@ -76,6 +76,7 @@ function App() {
   const fallbackTeamIdRef = React.useRef(null) // Round-4: team auto-selected by recoverKey 400-fallback
   const authSubRef = React.useRef(null) // Round-6: supabase onAuthStateChange subscription
   const checkoutResetTimerRef = React.useRef(null) // Round-16: popup-flow fallback reset
+  const apiKeyRef = React.useRef(null) // Round-21: live apiKey for staleness checks (state is closure-stale)
   const [checkoutPending, setCheckoutPending] = React.useState(false)
   // P5 (code-review): distinguish 'loading' / 'ok' / 'denied' / 'error' so
   // loading and network failures never masquerade as an RBAC denial.
@@ -304,6 +305,7 @@ function App() {
         if (!key) { setChecking(false); return }
         localStorage.setItem(KEY_STORAGE, key)
         setApiKey(key)
+        apiKeyRef.current = key
         setAuthMode('session')
         await completeLogin(key)
       } catch (e) {
@@ -370,6 +372,7 @@ function App() {
   async function logout() {
     localStorage.removeItem(KEY_STORAGE)
     setApiKey('')
+    apiKeyRef.current = null
     setAuthed(false)
     setAuthMode('apikey') // Round-6 (P3): card offers only the key input after logout
     setTeam(null)
@@ -478,6 +481,7 @@ function App() {
       if (teamIdRef.current !== teamId) return // stale — user switched again
       localStorage.setItem(KEY_STORAGE, key)
       setApiKey(key)
+      apiKeyRef.current = key
       setAuthMode('session') // Round-9: a session-minted key IS session auth — no more
                              // 'sign in required' notices beside live session data
       try {
@@ -495,6 +499,7 @@ function App() {
           if (teamIdRef.current !== teamId) return
           localStorage.setItem(KEY_STORAGE, key)
           setApiKey(key)
+          apiKeyRef.current = key
           await refreshTeam(key)
         } else {
           throw e
@@ -510,6 +515,7 @@ function App() {
         // previous team's key so the UI never shows mixed-team data.
         if (prevKey) {
           setApiKey(prevKey)
+          apiKeyRef.current = prevKey
           localStorage.setItem(KEY_STORAGE, prevKey)
           setCurrentTeamId(prevTeamId)
           teamIdRef.current = prevTeamId
@@ -752,7 +758,12 @@ function App() {
       // key must still be the current apiKey state — if apiKey moved (a
       // switchTeam mint completed), we hit the OLD team's key: bail.
       const cachedForTeam = _teamAtCall ? teamKeysRef.current[_teamAtCall] : null
-      if (cachedForTeam ? activeKey !== cachedForTeam : activeKey !== apiKey) return
+      // Round-21: branch 2 compares against the LIVE key (apiKeyRef) — the
+      // render-closure apiKey was always equal to _apiKeyAtCall, making the
+      // old guard dead code. Live-key comparison catches the post-sync
+      // mid-switch window (cache[B] empty, apiKey already moved to A's key
+      // from a prior switch).
+      if (cachedForTeam ? activeKey !== cachedForTeam : activeKey !== apiKeyRef.current) return
       setNewKey(k.api_key || k.key || k)
       await loadAll(activeKey)
     } catch (e) {
@@ -783,12 +794,17 @@ function App() {
         delete teamKeysRef.current[currentTeamId]
         if (localStorage.getItem(KEY_STORAGE) === cached) localStorage.removeItem(KEY_STORAGE)
         const tok = sessionTokenRef.current
-        if (tok && currentTeamId) {
+        if (tok && _teamAtCall) {
           try {
-            const minted = await mintSessionKey('bootstrap', currentTeamId)
-            teamKeysRef.current[currentTeamId] = minted.key
+            const minted = await mintSessionKey('bootstrap', _teamAtCall)
+            // Round-21 (P2): a switch (or logout) landing DURING the mint
+            // must not clobber the new team's active key/localStorage —
+            // the entry guard passed before this await, so re-check now.
+            if (teamIdRef.current !== _teamAtCall || !sessionTokenRef.current) return
+            teamKeysRef.current[_teamAtCall] = minted.key
             localStorage.setItem(KEY_STORAGE, minted.key)
             setApiKey(minted.key)
+            apiKeyRef.current = minted.key
             await refreshTeam(minted.key).catch(() => {})
             // Round-3: reload with the NEW key, not the revoked-key closure.
             await loadAll(minted.key).catch(() => {})
@@ -868,6 +884,7 @@ function App() {
       // working (the old bootstrap key may have just been rotated/revoked).
       localStorage.setItem(KEY_STORAGE, data.key)
       setApiKey(data.key)
+      apiKeyRef.current = data.key
       setAuthMode('session') // Round-10: a recovery-minted key IS session auth — keep tabs consistent
       await Promise.all([loadAll(data.key), refreshTeam(data.key)]).catch(() => {})
     } catch (e) {
