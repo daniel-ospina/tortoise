@@ -578,17 +578,17 @@ def tortoise_update_point(id: str, props: Any) -> dict:
     return _safe(_quota_gated(_get_team_sdk().update_point, "points"), id, **(props or {}))
 
 def tortoise_create_operator(op_type: str, source_id: str, target_ids: Any,
-                              direction: str | None = None) -> dict:
+                              direction: str = "bidirectional") -> dict:
     """Create an operator connecting Points.
     
     op_type: 'IMPL' (A supports B), 'NAND' (A contradicts B),
              'composedOf'/'decomposesInto'/'contains'/'wraps' → stored as hasPart edge.
     source_id: source/parent Point ID.
     target_ids: target/child Point IDs (1 for IMPL/NAND, N for part/whole).
-    direction: 'bidirectional' or 'unidirectional' — EP propagation direction.
-      Default (None) is resolved by the SDK per op_type (#753): NAND →
-      'unidirectional' (directed attack — the attacker's truth penalizes the
-      target, no back-pressure), IMPL → 'bidirectional'.
+    direction: 'bidirectional' (default) or 'unidirectional' — EP propagation
+      direction. Default is mutual (both directions); pass 'unidirectional'
+      for a directed attack (attacker's truth penalizes the target, no
+      back-pressure).
 
     → See /skill:tortoise-graph-reasoning for proper usage:
       annotation, mitigation, NAND constraints, veracity vs implication.
