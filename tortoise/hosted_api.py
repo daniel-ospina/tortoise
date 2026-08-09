@@ -933,6 +933,11 @@ async def list_points(
     sdk = _make_sdk(namespace=team["team_id"])
     proj = sdk._get_proj()
     conditions = ["(n.is_operator IS NULL OR n.is_operator = false)"]
+    # #432 Task 2: retracted points (status='retracted') are EXCLUDED from the
+    # default listing surface — tombstone contract: retrievable by id via
+    # GET /v1/points/{id}, not by list. No include param on REST v1 (surface
+    # minimal).
+    conditions.append("(n.status IS NULL OR n.status <> 'retracted')")
     params: dict = {"limit": limit}
     if kind:
         conditions.append("n.pointKind = $kind")
