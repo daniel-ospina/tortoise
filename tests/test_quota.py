@@ -1,4 +1,4 @@
-"""Tests for tortoise.quota (#329)."""
+"""Tests for tortoise.quota (#329, #683)."""
 from __future__ import annotations
 
 import pytest
@@ -40,9 +40,12 @@ class TestResolveTeamLimits:
     def test_provisioned_team_has_defaults(self, reg_sdk):
         tid = _find_team_id(reg_sdk)
         limits = resolve_team_limits(tid)
+        # Free tier from pricing.json: max_api_keys=2
         assert limits["max_points"] == 1000
-        assert limits["max_api_keys"] == 20
+        assert limits["max_api_keys"] == 2
         assert limits["max_sessions"] == 1000
+        assert limits["max_users"] == 1
+        assert limits["max_graphs"] == 1
 
 
 def _find_team_id(sdk) -> str:
@@ -97,3 +100,58 @@ class TestEnforceTeamLimit:
     def test_unknown_resource_fails_closed(self):
         with pytest.raises(QuotaCheckError):
             enforce_team_limit({"team_id": "t", "max_points": 10}, "widgets")
+
+
+# ── #683: users + graphs enforcement ──────────────────────────────────────
+
+class TestEnforceUsersLimit:
+    """User/membership quota enforcement."""
+
+    def test_users_below_limit_passes(self, reg_sdk):
+        tid = _find_team_id(reg_sdk)
+        limits = resolve_team_limits(tid)
+        # team_create does NOT create a membership; count = 0, max_users = 1
+        # → below limit
+        enforce_team_limit(limits, "users")  # must not raise
+
+    def test_users_at_limit_raises(self, reg_sdk):
+        tid = _find_team_id(reg_sdk)
+        # Create a membership to hit the limit
+        reg_sdk.membership_create(tid, "user-1", "owner")
+        limits = resolve_team_limits(tid)
+        # 1 membership, max_users=1 → at limit
+        with pytest.raises(QuotaExceededError, match="users limit reached"):
+            enforce_team_limit(limits, "users")
+
+    def test_users_unlimited_skips(self, reg_sdk):
+        """None max_users = unlimited (Team tier) — never raises."""
+        tid = _find_team_id(reg_sdk)
+        limits = resolve_team_limits(tid)
+        limits["max_users"] = None  # Team tier → unlimited
+        enforce_team_limit(limits, "users")  # must not raise
+
+
+class TestEnforceGraphsLimit:
+    """Graph quota enforcement."""
+
+    def test_graphs_below_limit_passes(self, reg_sdk):
+        tid = _find_team_id(reg_sdk)
+        limits = resolve_team_limits(tid)
+        # team_create auto-creates 1 default graph; max_graphs=1
+        # bump limit to 5 so we're below it
+        limits["max_graphs"] = 5
+        enforce_team_limit(limits, "graphs")  # must not raise
+
+    def test_graphs_at_limit_raises(self, reg_sdk):
+        tid = _find_team_id(reg_sdk)
+        limits = resolve_team_limits(tid)
+        # 1 default graph from team_create, max_graphs=1 → at limit
+        with pytest.raises(QuotaExceededError, match="graphs limit reached"):
+            enforce_team_limit(limits, "graphs")
+
+    def test_graphs_unlimited_skips(self, reg_sdk):
+        """None max_graphs = unlimited (pro/team tier) — never raises."""
+        tid = _find_team_id(reg_sdk)
+        limits = resolve_team_limits(tid)
+        limits["max_graphs"] = None  # Pro/Team tier → unlimited
+        enforce_team_limit(limits, "graphs")  # must not raise
