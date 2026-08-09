@@ -24,6 +24,31 @@ from tortoise.embedded_reaper import (
 pytest.importorskip("redislite")
 
 
+@pytest.fixture(autouse=True)
+def _clean_redislite_residue():
+    """Remove redislite server processes + socket dirs left by prior tests.
+
+    These tests assert exact orphan counts; residue from earlier tests in the
+    same run (or prior runs) makes them flaky. Clean after each test so every
+    test starts from a known state — mirrors a fresh CI runner (#493).
+    """
+    yield
+    try:
+        subprocess.run(["pkill", "-f", "redislite/bin/redis-server"],
+                       capture_output=True)
+        time.sleep(0.3)
+        tmp = tempfile.gettempdir()
+        import shutil
+        for entry in os.scandir(tmp):
+            if entry.is_dir() and (
+                os.path.exists(os.path.join(entry.path, "redis.socket")) or
+                os.path.exists(os.path.join(entry.path, "redis.pid"))
+            ):
+                shutil.rmtree(entry.path, ignore_errors=True)
+    except Exception:
+        pass
+
+
 def _make_no_path_server():
     """Start a no-path FalkorDB -> tempdir socket; return (db, socket_path).
 
