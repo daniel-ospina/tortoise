@@ -236,7 +236,8 @@ function App() {
           })
           if (teamsRes.ok) {
             teamsList = await teamsRes.json()
-            setTeams(teamsList)
+            // Round-12: SIGNED_OUT during this fetch must not resurrect teams
+            if (sessionTokenRef.current === session.access_token) setTeams(teamsList)
           }
         } catch { /* treated as no teams below */ }
 
@@ -379,7 +380,8 @@ function App() {
       setKeys(Array.isArray(k) ? k : k.keys || [])
       setSessions(Array.isArray(s) ? s : s.sessions || [])
     } catch (e) {
-      setError(e.message)
+      // Round-12: a stale switch's error must not land under the newer team's header
+      if (teamIdRef.current === _teamAtCall) setError(e.message)
     }
   }
 
@@ -393,6 +395,9 @@ function App() {
       })
       if (res.ok) {
         const list = await res.json()
+        // Round-12: a SIGNED_OUT (cross-tab broadcast) during this fetch must
+        // not resurrect the previous user's team list after logout's setTeams([]).
+        if (sessionTokenRef.current !== tok) return
         setTeams(list)
         // Round-8: guard on teamIdRef (sync write, no render-closure race) —
         // the stored-key bootstrap path already set it for the key's team, so
