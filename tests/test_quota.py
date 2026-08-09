@@ -37,9 +37,13 @@ class TestResolveTeamLimits:
         with pytest.raises(QuotaCheckError):
             resolve_team_limits("no-such-team")
 
-    def test_provisioned_team_has_defaults(self, reg_sdk):
+    def test_provisioned_team_has_tier_limits(self, reg_sdk):
+        """#310 GAP-B: a team_create'd team resolves TIER-derived limits from
+        pricing.json (free = 10k points / 2 api keys / 1000 sessions) — never
+        the old DEFAULT_MAX_* consts."""
         tid = _find_team_id(reg_sdk)
         limits = resolve_team_limits(tid)
+<<<<<<< HEAD
         # team_create writes max_api_keys from pricing.json free tier (=2),
         # but NOT max_points / max_sessions — defaults apply (aligned with
         # product/pricing.json free tier: max_graph_nodes=10000).
@@ -48,6 +52,52 @@ class TestResolveTeamLimits:
         assert limits["max_sessions"] == 10000
         assert limits["max_users"] == 1
         assert limits["max_graphs"] == 1
+=======
+        assert limits["max_points"] == 10000
+        assert limits["max_api_keys"] == 2
+        assert limits["max_sessions"] == 1000
+>>>>>>> origin/main
+
+    def test_legacy_team_no_stored_limits_resolves_tier_limits(self, monkeypatch, tmp_path):
+        """#310 GAP-B (review fix 2): a legacy Team node with tier='pro' and NO
+        stored max_* fields resolves tier-derived values (max_points == 100000
+        == max_graph_nodes, max_api_keys == 10) — REST get_current_team and
+        MCP resolve_team_limits must agree exactly."""
+        import os
+        db = os.path.join(tmp_path, "legacy.db")
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.setenv("TORTOISE_DB_PATH", db)
+        monkeypatch.setenv("RATE_LIMIT_DISABLED", "1")
+        from tortoise.sdk import TortoiseSDK
+        sdk = TortoiseSDK(db, namespace="registry")
+        try:
+            team = sdk.team_create("legacy-pro")
+            # Simulate a pre-D1 node: tier upgraded out-of-band, limits never stored.
+            sdk._get_registry().query(
+                "MATCH (t:Team {id:$id}) SET t.tier='pro' REMOVE t.max_users, "
+                "t.max_graphs, t.max_api_keys, t.max_points, t.max_sessions",
+                params={"id": team["id"]},
+            )
+            ak = sdk.apikey_create(team["id"], "user-1")
+            limits = resolve_team_limits(team["id"])
+            assert limits["tier"] == "pro"
+            assert limits["max_points"] == 100000
+            assert limits["max_api_keys"] == 10
+            assert limits["max_sessions"] == 1000
+
+            # REST parity: GET /v1/team (real auth) returns identical numbers.
+            from fastapi.testclient import TestClient
+            from tortoise.hosted_api import app
+            with TestClient(app) as tc:
+                r = tc.get("/v1/team", headers={"Authorization": f"Bearer {ak['api_key']}"})
+                assert r.status_code == 200, r.text
+                body = r.json()
+                assert body["tier"] == "pro"
+                assert body["max_points"] == 100000
+                assert body["max_api_keys"] == 10
+                assert body["max_sessions"] == 1000
+        finally:
+            sdk.close()
 
 
 def _find_team_id(sdk) -> str:

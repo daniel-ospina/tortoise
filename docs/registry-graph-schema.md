@@ -9,15 +9,32 @@ The registry graph is a dedicated FalkorDB namespace (`registry`) storing contro
 (:Team {
   id: string,              // ULID
   name: string,            // regex: [a-zA-Z0-9][a-zA-Z0-9_-]{0,63}
-  tier: string,            // "free" | "pro"
+  tier: string,            // "free" | "solo" | "pro" | "team"
   created_at: datetime,
-  stripe_customer_id: string?,  // null for free
+  stripe_customer_id: string?,  // null for free; set sync at checkout (#310)
   subscription_id: string?,
-  backup_enabled: boolean,
-  backup_latest_at: datetime?,
+  subscription_status: string?, // "active" | "past_due" | "canceled" | "trialing" | "incomplete" | "unpaid" — derived mirror of Stripe
+  current_period_end: float?,   // unix ts (webhook-sourced)
+  grace_until: float?,          // unix ts = current_period_end + 72h on payment_failed
+  customer_email: string?,      // webhook customer_details.email (provision-path identity)
   max_users: integer,      // 1 for free, 2 for pro
   max_teams: integer?,     // null = unlimited; 1 for free tier users
-  max_graphs: integer?     // null = unlimited; 1 for free tier
+  max_graphs: integer?,    // null = unlimited; 1 for free tier
+  max_api_keys: integer?,  // tier-derived from pricing.json (free=2)
+  max_points: integer?,    // = pricing.json max_graph_nodes (points quota counts graph nodes)
+  max_sessions: integer?,  // flat 1000 across tiers
+  backup_enabled: boolean,
+  backup_latest_at: datetime?
+})
+```
+
+### WebhookEvent (idempotency markers — #310)
+```
+(:WebhookEvent {
+  event_id: string,      // Stripe event.id — unique dedup key (SET-then-marker)
+  type: string,          // "checkout.session.completed" | "invoice.payment_failed" | "customer.subscription.updated" | "customer.subscription.deleted"
+  received_at: datetime,
+  team_id: string?,      // bound team when resolvable
 })
 ```
 

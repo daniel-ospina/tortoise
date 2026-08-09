@@ -753,12 +753,9 @@ async def get_current_team(request: Request) -> dict:
             tier, mu, mg, mp, mak, ms = row
         else:
             tier, mu, mg, mp, mak, ms = ("free", None, None, None, None, None)
-        from tortoise.quota import DEFAULT_MAX_API_KEYS, DEFAULT_MAX_POINTS, DEFAULT_MAX_SESSIONS
+        from tortoise.pricing import tier_limits
         request.state.team_id = team_id
         request.state.tier = tier or "free"
-        # max_teams removed: multi-team is a USER capability, not a tier field
-        # (per-team billing; tier limits come from pricing.json)
-        from tortoise.pricing import tier_limits
         lim = tier_limits(tier or "free")
         # max_teams removed: multi-team is a USER capability, not a tier field
         # (per-team billing; tier limits come from pricing.json)
@@ -766,8 +763,9 @@ async def get_current_team(request: Request) -> dict:
                 # max_users: preserve None from pricing (Team tier = unlimited)
                 "max_users": mu if mu is not None else lim["max_users_per_team"],
                 "max_graphs": mg if mg is not None else lim["max_graphs_per_team"],
-                "max_points": int(mp) if mp is not None else DEFAULT_MAX_POINTS,
-                "max_api_keys": int(mak) if mak is not None else DEFAULT_MAX_API_KEYS,
+                # points counter counts graph nodes → max_graph_nodes (#310 GAP-B)
+                "max_points": int(mp) if mp is not None else lim["max_graph_nodes"],
+                "max_api_keys": int(mak) if mak is not None else lim["max_api_keys"],
                 "max_sessions": int(ms) if ms is not None else DEFAULT_MAX_SESSIONS}
     except HTTPException:
         raise
@@ -1954,7 +1952,7 @@ def _team_limits_from_node(team_node: dict) -> dict:
     tier_limits from pricing.json when a stored value is None/missing.
     """
     from tortoise.pricing import tier_limits
-    from tortoise.quota import DEFAULT_MAX_API_KEYS, DEFAULT_MAX_POINTS, DEFAULT_MAX_SESSIONS
+    from tortoise.quota import DEFAULT_MAX_SESSIONS
     tier = team_node.get("tier", "free")
     lim = tier_limits(tier)
     # Fetch each field; use `is None` to preserve None (unlimited) and explicit 0.
@@ -1970,8 +1968,9 @@ def _team_limits_from_node(team_node: dict) -> dict:
         # fall back to tier_limits when missing (also None for Team tier).
         "max_users": mu if mu is not None else lim["max_users_per_team"],
         "max_graphs": mg if mg is not None else lim["max_graphs_per_team"],
-        "max_points": mp if mp is not None else DEFAULT_MAX_POINTS,
-        "max_api_keys": mak if mak is not None else DEFAULT_MAX_API_KEYS,
+        # points counter counts graph nodes → max_graph_nodes (#310 GAP-B)
+        "max_points": mp if mp is not None else lim["max_graph_nodes"],
+        "max_api_keys": mak if mak is not None else lim["max_api_keys"],
         "max_sessions": ms if ms is not None else DEFAULT_MAX_SESSIONS,
     }
 

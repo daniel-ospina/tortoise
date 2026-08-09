@@ -1065,7 +1065,7 @@ class TortoiseSDK:
 
     def create_operator(self, op_type: str, source_id: str, target_ids: list[str],
                         label: str | None = None,
-                        direction: str = "bidirectional") -> dict:
+                        direction: str | None = None) -> dict:
         """Create an operator Point with optional semantic label.
 
         Semantic-epistemic edge model (#7801):
@@ -1079,6 +1079,12 @@ class TortoiseSDK:
             raise ValueError(
                 f"op_type must be 'IMPL', 'NAND', or a part/whole type, got {op_type!r}"
             )
+        # Direction default (#753 directed-operator redesign): NAND defaults to
+        # unidirectional (directed attack — attacker's truth penalizes the
+        # target, no back-pressure); IMPL keeps bidirectional default. Explicit
+        # bidirectional NAND remains for genuine mutual contradictions.
+        if direction is None:
+            direction = "unidirectional" if op_type == "NAND" else "bidirectional"
         if direction not in ("bidirectional", "unidirectional"):
             raise ValueError(
                 f"direction must be 'bidirectional' or 'unidirectional', got {direction!r}"
