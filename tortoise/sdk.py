@@ -2721,7 +2721,7 @@ class TortoiseSDK:
                 _lock = SessionIndexLock(session_id)
                 try:
                     _lock_status = _lock.acquire()
-                except OSError as _lock_err:
+                except (OSError, AttributeError, ImportError) as _lock_err:
                     # #280 review P2 (robustness): an unusable lock path must
                     # never abort the batch sweep — unwritable/blocked lock dir
                     # (EACCES/EROFS/ENOSPC/EMFILE) or a planted symlink (ELOOP

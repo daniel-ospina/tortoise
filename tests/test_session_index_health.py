@@ -214,6 +214,29 @@ def test_doctor_includes_session_indexing(env, capsys, monkeypatch):
 # ── duplicate sessionIds (#280 review P2) ────────────────────────────
 
 
+def test_falsy_session_id_coerces_to_match_ingest(env, sdk):
+    """Review round 2 P2: sessionId: 0 / false are falsy raw but coercible —
+    extract_session_id must str-coerce (like ingest) so health derives the
+    SAME event_id and the sweep converges."""
+    f = env / "falsy-zero.md"
+    f.write_text("---\nsessionId: 0\ntitle: T\n---\nUser: hi\n")
+    # Ingest coerces sessionId -> "0" → event_id session_0
+    sdk.ingest_corpus(str(env), eventKind="AgentSession")
+    h = sdk.session_index_health(str(env))
+    assert h["unindexed"] == [], f"falsy sessionId not matched: {h}"
+    assert h["duplicates"] == []
+    # Second sweep converges (nothing to do)
+    h2 = sdk.session_index_health(str(env))
+    assert h2["up_to_date"], h2
+
+def test_falsy_boolean_session_id_coerces(env, sdk):
+    f = env / "falsy-bool.md"
+    f.write_text("---\nsessionId: false\ntitle: T\n---\nUser: hi\n")
+    sdk.ingest_corpus(str(env), eventKind="AgentSession")
+    h = sdk.session_index_health(str(env))
+    assert h["unindexed"] == [], f"sessionId:false not matched: {h}"
+
+
 def test_duplicate_session_files_surfaced_and_convergent(env, sdk):
     """Regression (#280 review P2): two corpus files sharing a sessionId used
     to make the sweep permanently non-convergent (MERGE is last-writer-wins;

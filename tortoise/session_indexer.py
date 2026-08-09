@@ -500,9 +500,15 @@ def extract_session_id(file_path: str) -> str | None:
         return None
     
     fm = _parse_frontmatter(content)
-    sid = fm.get("sessionId") or fm.get("session_id")
-    if sid:
-        return sid
+    # Check each key INDEPENDENTLY: `or` would collapse falsy-but-coercible
+    # scalars (0, 0.0, false). Coerce to str to match ingest (sdk.py coerces
+    # sessionId before use) so health derives the SAME event_id as
+    # ingest_corpus — otherwise the sweep never converges (review round 2 P2).
+    sid = fm.get("sessionId")
+    if sid is None:
+        sid = fm.get("session_id")
+    if sid is not None:
+        return str(sid)
     
     # Fallback: derive from filename
     stem = Path(file_path).stem
