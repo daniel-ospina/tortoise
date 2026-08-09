@@ -637,6 +637,13 @@ async def get_current_team(request: Request) -> dict:
         if team_id is None:
             await _audit_auth_failure(request, "invalid_key")
             raise HTTPException(status_code=401, detail="Invalid API key")
+        # #685: track last_used_at for key hygiene/rotation — write-through on
+        # every successful auth. The registry graph is small (teams × keys) and
+        # a single indexed SET on an already-fetched node adds negligible overhead.
+        sdk._get_registry().query(
+            "MATCH (k:APIKey {id: $id}) SET k.last_used_at = $now",
+            params={"id": key_id, "now": datetime.now(timezone.utc).isoformat()},
+        )
         # #528: activation telemetry — first successful API auth per team.
         # Dedup is in-process + thread-safe (single-worker caveat noted in
         # tortoise/analytics.py); distinct_id is the key creator's user UUID
