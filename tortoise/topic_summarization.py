@@ -174,6 +174,7 @@ def _retrieve_topic_neighborhood(
                 point_rows = graph.query(
                     f"MATCH (p:Point)-[:{edge_type}]->(e:{entity_label} {{name: $name}}) "
                     "WHERE (p.is_operator IS NULL OR p.is_operator = false) "
+                    "  AND (p.status IS NULL OR p.status <> 'retracted') "
                     "RETURN p.id, p.content, p.pointKind "
                     "LIMIT $max_seeds",
                     params={"name": entity_name, "max_seeds": max_seeds},
@@ -195,6 +196,7 @@ def _retrieve_topic_neighborhood(
         point_rows = graph.query(
             "MATCH (p:Point) "
             "WHERE (p.is_operator IS NULL OR p.is_operator = false) "
+            "  AND (p.status IS NULL OR p.status <> 'retracted') "
             "  AND (toLower(coalesce(p.content, '')) CONTAINS toLower($topic) "
             "       OR toLower(coalesce(p.pointKind, '')) CONTAINS toLower($topic)) "
             "RETURN p.id, p.content, p.pointKind "
@@ -218,9 +220,11 @@ def _retrieve_topic_neighborhood(
     # Stage 2: Expand via operator chains (IMPL/NAND) up to max_hops
     if max_hops > 0 and all_ids:
         try:
+            frontier: set[str] = set(seed_ids)  # only expand from newly discovered IDs
             for _hop in range(max_hops):
                 new_ids: set[str] = set()
-                current_ids = list(all_ids)
+                current_ids = list(frontier)
+                frontier = set()
                 # Process in batches of 100 to avoid massive Cypher strings
                 for batch_start in range(0, len(current_ids), 100):
                     batch = current_ids[batch_start:batch_start + 100]
@@ -228,6 +232,8 @@ def _retrieve_topic_neighborhood(
                         "MATCH (n:Point)<-[r1:IMPL|NAND]-(op:Point {is_operator:true})"
                         "-[r2:IMPL|NAND]->(m:Point) "
                         "WHERE n.id IN $ids AND m.id <> n.id "
+                        "  AND (n.status IS NULL OR n.status <> 'retracted') "
+                        "  AND (m.status IS NULL OR m.status <> 'retracted') "
                         "  AND (m.is_operator IS NULL OR m.is_operator = false) "
                         "RETURN DISTINCT m.id, m.content, m.pointKind",
                         params={"ids": batch},
@@ -235,6 +241,7 @@ def _retrieve_topic_neighborhood(
                     for row in rows:
                         if row[0] not in all_ids:
                             new_ids.add(row[0])
+                            frontier.add(row[0])
                             point_meta.append({
                                 "id": row[0],
                                 "content": (row[1] or "")[:200],
@@ -330,6 +337,12 @@ def _classify_points(
             ep_a = breakdowns.get(pid)
             ep_b = breakdowns.get(related_id)
             if ep_a is None or ep_b is None:
+                continue
+
+            # Gate on has_ep: uncalibrated points (no persisted ep_alpha/ep_beta)
+            # fall back to Beta(1,1) → variance 0.0833, which would falsely
+            # classify every NAND-connected pair as disputed.
+            if not ep_a.has_ep or not ep_b.has_ep:
                 continue
 
             var_a = ep_a.variance

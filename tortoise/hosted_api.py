@@ -1179,6 +1179,41 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), team: dict = Depe
     return {"results": out, "count": len(out)}
 
 
+@app.get("/v1/topics/{topic}/summary")
+async def topic_summary(
+    topic: str,
+    max_seeds: int = Query(50, ge=1, le=200),
+    max_hops: int = Query(1, ge=0, le=3),
+    include_relationships: bool = Query(True),
+    team: dict = Depends(get_current_team),
+):
+    """Epistemic topic summarization — settled vs contested structure (#592).
+
+    GET /v1/topics/{topic}/summary
+
+    Returns the epistemic structure for a topic: significant/settled claims,
+    contested claims, disputed NAND pairs, and argument topology.
+
+    Classification uses EP posterior variance (persisted ep_alpha/ep_beta):
+    - significant: confidence_mean >= 0.7 AND variance < 0.01
+    - contested: variance > 0.04 (destabilized posterior)
+    - disputed pairs: NAND-connected where both have variance > 0.02
+    """
+    sdk = _make_sdk(namespace=team["team_id"])
+    try:
+        result = sdk.topic_summarize(
+            topic,
+            max_seeds=max_seeds,
+            max_hops=max_hops,
+            include_relationships=include_relationships,
+        )
+        return result
+    except Exception:
+        import logging
+        logging.getLogger("tortoise.api").exception("topic summary failed")
+        raise HTTPException(status_code=500, detail="Topic summary failed")
+
+
 @app.get("/v1/team", response_model=TeamInfoResponse)
 async def team_info(team: dict = Depends(get_current_team)):
     """Get current team info: tier, usage, limits."""

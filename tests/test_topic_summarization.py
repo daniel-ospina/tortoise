@@ -374,3 +374,134 @@ class TestTopicSummarizationArgumentStructure:
                 assert conflict["mechanism"] == "NAND"
                 found = True
         assert found, f"NAND conflict linking {aid} and {bid} not found"
+
+
+class TestTopicSummarizationRetractedExclusion:
+    """P0: Retracted points must be excluded from topic neighborhood."""
+
+    def test_retracted_points_excluded_from_seeds(self, sdk):
+        """Points with status='retracted' are not returned in topic neighborhood."""
+        # Create a live point and a retracted point on the same topic
+        live = sdk.create_point("statement", "Pricing should be value-based retracted_test")
+        retracted = sdk.create_point("statement", "Pricing should be cost-plus retracted_test")
+        rid = retracted["id"]
+
+        # Retract the point (sets status='retracted')
+        proj = sdk._get_proj()
+        proj.g.query(
+            "MATCH (n:Point {id: $id}) SET n.status = 'retracted'",
+            params={"id": rid},
+        )
+
+        graph = proj.g
+        result = topic_summarize(graph, topic="retracted_test", max_seeds=50, max_hops=0)
+
+        # The retracted point should NOT appear in the results
+        all_classified_ids = (
+            {s.id for s in result.significant}
+            | {c.id for c in result.contested}
+        )
+        # We should only have the live point
+        assert rid not in all_classified_ids, \
+            f"Retracted point {rid} must be excluded from topic neighborhood"
+        assert result.total_points >= 1, "Live point should still be found"
+
+    def test_retracted_excluded_from_operator_chain(self, sdk):
+        """Retracted points are excluded from operator-chain expansion."""
+        # Seed point
+        seed = sdk.create_point("statement", "Architecture strategy retracted_chain_test")
+        sid = seed["id"]
+
+        # Connected point that is retracted
+        connected = sdk.create_point("statement", "Use monolith retracted_chain_test")
+        cid = connected["id"]
+
+        # Connect them via IMPL
+        sdk.create_operator("IMPL", sid, [cid])
+
+        # Set EP data on both
+        proj = sdk._get_proj()
+        proj.g.query(
+            "MATCH (n:Point) WHERE n.id IN $ids "
+            "SET n.ep_alpha = 20, n.ep_beta = 3",
+            params={"ids": [sid, cid]},
+        )
+
+        # Retract the connected point
+        proj.g.query(
+            "MATCH (n:Point {id: $id}) SET n.status = 'retracted'",
+            params={"id": cid},
+        )
+
+        graph = proj.g
+        result = topic_summarize(graph, topic="retracted_chain_test", max_seeds=50, max_hops=1)
+
+        # The retracted connected point should NOT appear
+        all_classified_ids = (
+            {s.id for s in result.significant}
+            | {c.id for c in result.contested}
+        )
+        assert cid not in all_classified_ids, \
+            f"Retracted connected point {cid} must be excluded from expansion"
+
+
+class TestUncalibratedNANDPair:
+    """P1: NAND-connected pair with no EP data must NOT be disputed."""
+
+    def test_nand_pair_no_ep_data_not_disputed(self, sdk):
+        """NAND-connected pair with NO persisted EP data → NOT disputed.
+
+        Uncalibrated points fall back to Beta(1,1) → variance 0.0833,
+        which exceeds the NAND_PAIR_VARIANCE_THRESHOLD (0.02). Without the
+        has_ep gate, this would be a false positive.
+        """
+        claim_a = sdk.create_point("statement", "Use tabs for indentation uncalibrated")
+        claim_b = sdk.create_point("statement", "Use spaces for indentation uncalibrated")
+        aid, bid = claim_a["id"], claim_b["id"]
+
+        # NAND connection: A contradicts B
+        sdk.create_operator("NAND", aid, [bid])
+
+        # DO NOT set any EP data — points remain uncalibrated
+
+        graph = sdk._get_proj().g
+        result = topic_summarize(graph, topic="indentation", max_seeds=50, max_hops=0)
+
+        # Verify EpBreakdown reflects uncalibrated state
+        from tortoise.search_engine import annotate_ep_batch
+        breakdowns = annotate_ep_batch(graph, [aid, bid])
+        for pid in (aid, bid):
+            assert breakdowns[pid].has_ep is False, \
+                f"Point {pid} should have has_ep=False (no EP data)"
+            # Beta(1,1) variance = 1/12 ≈ 0.0833
+            assert breakdowns[pid].variance > 0.08, \
+                f"Uncalibrated point {pid} should have Beta(1,1) variance"
+            assert breakdowns[pid].contested is False, \
+                f"Uncalibrated point {pid} should NOT be contested"
+
+        # Verify NO disputed pairs (the has_ep gate should block them)
+        pair_has_these = any(
+            {dp.point_a, dp.point_b} == {aid, bid}
+            for dp in result.disputed_pairs
+        )
+        assert not pair_has_these, \
+            "NAND-connected uncalibrated pair must NOT be classified as disputed"
+
+
+class TestHostedEndpointExists:
+    """P2: Hosted API surface has the topic summary endpoint."""
+
+    def test_hosted_endpoint_registered(self):
+        """The /v1/topics/{topic}/summary endpoint exists in the FastAPI app."""
+        from tortoise.hosted_api import app
+        # Collect all registered route paths
+        routes = {route.path for route in app.routes if hasattr(route, 'path')}
+        assert "/v1/topics/{topic}/summary" in routes, \
+            "GET /v1/topics/{topic}/summary must be registered in hosted_api"
+
+    def test_selfhost_endpoint_registered(self):
+        """The selfhost endpoint also has the topic summary endpoint."""
+        from tortoise.selfhost_api import router
+        routes = {route.path for route in router.routes if hasattr(route, 'path')}
+        assert "/v1/topics/{topic}/summary" in routes, \
+            "GET /v1/topics/{topic}/summary must be registered in selfhost_api"
