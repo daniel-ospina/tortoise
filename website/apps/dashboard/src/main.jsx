@@ -217,7 +217,7 @@ function App() {
           if (s?.access_token) sessionTokenRef.current = s.access_token
           else if (_evt === 'SIGNED_OUT') { sessionTokenRef.current = null; setTeams([]) }
         })
-        authSubRef.current = authSub.subscription
+        authSubRef.current = authSub?.subscription || null
 
         // List memberships up front so the mint targets a concrete team
         // (P1: multi-membership users cannot mint without team_id).
@@ -342,7 +342,9 @@ function App() {
     fallbackTeamIdRef.current = null    // Round-5: no stale team adoption across users
     teamIdRef.current = null            // Round-5: hygiene (inert, but consistent)
     setCheckoutPending(false)           // Round-6: no stuck 'Opening checkout…' for the next user
-    if (authSubRef.current) { supabaseClient?.auth?.removeChannel?.(authSubRef.current); authSubRef.current = null }
+    // Round-7: onAuthStateChange returns {data:{subscription}} with .unsubscribe() —
+    // client.auth.removeChannel doesn't exist on GoTrueClient (was a silent no-op).
+    if (authSubRef.current) { authSubRef.current.unsubscribe?.(); authSubRef.current = null }
     teamKeysRef.current = {}
     try { if (supabaseClient) await supabaseClient.auth.signOut() } catch { /* best-effort */ }
   }
@@ -704,6 +706,9 @@ function App() {
         })
         if (teamsRes.ok) {
           const list = await teamsRes.json()
+          // Round-7: a logout during the teams fetch must not resurrect
+          // teams/fallbackTeamIdRef for the signed-out page.
+          if (sessionTokenRef.current !== tok) return
           if (list.length) {
             setTeams(list)
             fallbackTeamIdRef.current = list[0].team_id
