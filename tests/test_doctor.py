@@ -151,6 +151,22 @@ class TestDoctorPath:
         assert "bad port" in probe
         assert "docker://:***@127.0.0.1:notaport" in probe  # masked, target intact
 
+    def test_doctor_unsupported_scheme_uri_masks_credentials(self, clear_db_env, capsys):
+        """#720 P2 conf 95: an unsupported-scheme URI (bolt://, mongodb://,
+        …) is not a DB URI, so it falls through is_db_uri → resolve_db_path →
+        RELATIVE_PATH_ERROR, which embeds the RAW URI. The resolution-error
+        line must mask the userinfo — the password must never reach stdout."""
+        rc = _run_doctor(["--db", "bolt://user:sup3rsekrit@host:7687/g"])
+        out = capsys.readouterr().out
+
+        assert rc == 1
+        assert "sup3rsekrit" not in out  # credential never reaches stdout
+        assert "Traceback" not in out
+        line = _health_line(out)
+        assert "❌" in line
+        assert "Relative DB path" in line  # still the actionable message
+        assert "bolt://:***@host:7687/g" in line  # masked, target intact
+
     def test_mask_uri_userinfo_masks_at_containing_password(self):
         """Unit-level: mask consumes up to the LAST @ (host boundary),
         never the first — @ inside a password stays hidden."""

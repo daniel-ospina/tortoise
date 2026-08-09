@@ -326,7 +326,9 @@ def _cmd_init(args):
         target = _resolve_db_target(args.path)
     except ValueError as e:
         # Bad --path (e.g. relative) — clean CLI error, not a traceback (#715).
-        print(f"  ❌ Invalid DB path: {e}")
+        # #720 P2 conf 95: mask userinfo — unsupported-scheme URIs fall into
+        # RELATIVE_PATH_ERROR with the RAW URI embedded (no-op for plain paths).
+        print(f"  ❌ Invalid DB path: {_mask_uri_userinfo(str(e))}")
         return 1
 
     graph_ready = False
@@ -1124,7 +1126,8 @@ def _cmd_onboard(args) -> int:
             except ValueError as e:
                 # Bad --path (e.g. relative) — clean CLI error, no traceback
                 # (#715). init rejects it first, but guard this call site too.
-                print(f"  ❌ Invalid DB target: {e}", file=_sys.stderr)
+                # #720 P2 conf 95: mask userinfo (no-op for plain paths).
+                print(f"  ❌ Invalid DB target: {_mask_uri_userinfo(str(e))}", file=_sys.stderr)
                 return 1
             idx_args = argparse.Namespace(
                 url=repo_root, background=False, branch="main",
@@ -1156,7 +1159,9 @@ def _cmd_onboard(args) -> int:
     try:
         db_target = _resolve_db_target(getattr(args, 'path', None))
     except ValueError as e:
-        print(f"  ❌ Invalid DB target: {e}", file=_sys.stderr)
+        # #720 P2 conf 95: mask userinfo — unsupported-scheme URIs fall into
+        # RELATIVE_PATH_ERROR with the RAW URI embedded (no-op for plain paths).
+        print(f"  ❌ Invalid DB target: {_mask_uri_userinfo(str(e))}", file=_sys.stderr)
         return 1
     from tortoise.config import is_db_uri
     if is_db_uri(db_target):
@@ -1516,7 +1521,8 @@ def _cmd_index_github(args):
         try:
             bg_target = args.db or _resolve_db_target(None)
         except ValueError as e:
-            print(f"  ❌ Invalid DB target: {e}", file=sys.stderr)
+            # #720 P2 conf 95: mask userinfo (no-op for plain paths).
+            print(f"  ❌ Invalid DB target: {_mask_uri_userinfo(str(e))}", file=sys.stderr)
             return 1
         cmd, child_env = _index_github_child_cmd(bg_target, url, branch)
         pid_file = Path(tempfile.gettempdir()) / f"tortoise-index-{Path(url).stem}.pid"
@@ -1586,7 +1592,8 @@ def _cmd_index_github(args):
     try:
         target = args.db or _resolve_db_target(None)
     except ValueError as e:
-        print(f"  ❌ Invalid DB target: {e}", file=sys.stderr)
+        # #720 P2 conf 95: mask userinfo (no-op for plain paths).
+        print(f"  ❌ Invalid DB target: {_mask_uri_userinfo(str(e))}", file=sys.stderr)
         return 1
     from tortoise.config import is_db_uri
     try:
@@ -1718,7 +1725,12 @@ def _cmd_doctor(args):
     try:
         target = db if (db and is_db_uri(db)) else _resolve_db_target(db or path)
     except ValueError as e:
-        results.append(("Graph: health", "❌", str(e)[:60]))
+        # #720 P2 conf 95: unsupported-scheme URIs (bolt://, mongodb://, …)
+        # fall through is_db_uri → resolve_db_path → RELATIVE_PATH_ERROR with
+        # the RAW URI embedded — mask userinfo so a credential in --db /
+        # --path / TORTOISE_DB_URI never reaches the terminal (no-op for
+        # plain paths).
+        results.append(("Graph: health", "❌", _mask_uri_userinfo(str(e))[:60]))
         target = None
 
     # 2. Docker / FalkorDB — probe the RESOLVED target, never a hardcoded
@@ -1851,7 +1863,8 @@ def _cmd_list_kinds(args) -> int:
     try:
         target = _resolve_db_target(None)
     except ValueError as e:
-        print(f"  ❌ Invalid DB target: {e}", file=_sys.stderr)
+        # #720 P2 conf 95: mask userinfo (no-op for plain paths).
+        print(f"  ❌ Invalid DB target: {_mask_uri_userinfo(str(e))}", file=_sys.stderr)
         return 1
     sdk = TortoiseSDK()
     sdk._proj = _projection_for(target)
@@ -1882,7 +1895,8 @@ def _cmd_list_sources(args) -> int:
     try:
         target = _resolve_db_target(None)
     except ValueError as e:
-        print(f"  ❌ Invalid DB target: {e}", file=_sys.stderr)
+        # #720 P2 conf 95: mask userinfo (no-op for plain paths).
+        print(f"  ❌ Invalid DB target: {_mask_uri_userinfo(str(e))}", file=_sys.stderr)
         return 1
     sdk = TortoiseSDK()
     sdk._proj = _projection_for(target)
@@ -1977,7 +1991,8 @@ def _cmd_decide(args) -> int:
         # clean CLI error, not a traceback (#715).
         sdk._proj = _projection_for(target)
     except ValueError as e:
-        print(f"  ❌ Invalid DB target: {e}", file=_sys.stderr)
+        # #720 P2 conf 95: mask userinfo (no-op for plain paths).
+        print(f"  ❌ Invalid DB target: {_mask_uri_userinfo(str(e))}", file=_sys.stderr)
         return 1
 
     # Track all operator IDs for explicit-factor mode
