@@ -173,6 +173,7 @@ function App() {
       return res
     }
     let res = await mint(teamId)
+    let mintedTeamId = teamId
     if (res.status === 400 && !teamId) {
       // Multi-membership: server demands a team_id — auto-select the first
       // team and retry (P1 fallback; never degrade to the key screen).
@@ -183,7 +184,8 @@ function App() {
         const list = await teamsRes.json()
         if (list.length) {
           setTeams(list)
-          res = await mint(list[0].team_id)
+          mintedTeamId = list[0].team_id
+          res = await mint(mintedTeamId)
         }
       }
     }
@@ -193,7 +195,10 @@ function App() {
     }
     const data = await res.json()
     if (!data.key) throw new Error('Session mint returned no key')
-    return data.key
+    // Fix C (review round 2): return the team actually minted for so callers
+    // cache on the right id even when the 400-fallback picked it (a null
+    // firstTeamId previously skipped the cache → cap burn on every switch).
+    return { key: data.key, teamId: mintedTeamId }
   }
 
   React.useEffect(() => {
@@ -240,8 +245,9 @@ function App() {
         if (!key) {
           const firstTeamId = teamsList.length ? teamsList[0].team_id : null
           try {
-            key = await mintSessionKey('bootstrap', firstTeamId)
-            if (firstTeamId) teamKeysRef.current[firstTeamId] = key
+            const minted = await mintSessionKey('bootstrap', firstTeamId)
+            key = minted.key
+            if (minted.teamId) teamKeysRef.current[minted.teamId] = key
           } catch {
             // No usable session key — fall back to the API-key screen
             setChecking(false)
@@ -294,6 +300,7 @@ function App() {
       setTeam(t)
       setAuthed(true)
       setAuthMode('apikey') // P5 (code-review): makes the session-only notices live for API-key users
+      setMembersStatus('denied') // Fix D (review round 2): no session → members view unavailable; never 'Loading…' forever
       localStorage.setItem(KEY_STORAGE, apiKey)
       await loadAll()
     } catch (e) {
@@ -357,10 +364,16 @@ function App() {
     // P3 (code-review): reset stale team-scoped state at the top so a rapid
     // switch never flashes the previous team's members/graphs, and record the
     // requested team as current for staleness guards.
+    const prevTeamId = currentTeamId
+    const prevKey = apiKey
     setMembers(null)
     setMembersStatus('loading')
     setGraphs([])
     setCurrentGraphId(null)
+    setTeam(null)          // Fix B: clear key-scoped overview state too
+    setKeys([])
+    setSessions([])
+    setBackupInfo(null)
     setError('')
     setCurrentTeamId(teamId)
     teamIdRef.current = teamId
@@ -374,7 +387,8 @@ function App() {
       // keeps us under the 3-active bootstrap mint cap across switches.
       let key = teamKeysRef.current[teamId]
       if (!key) {
-        key = await mintSessionKey('bootstrap', teamId)
+        const minted = await mintSessionKey('bootstrap', teamId)
+        key = minted.key
         teamKeysRef.current[teamId] = key
       }
       if (teamIdRef.current !== teamId) return // stale — user switched again
@@ -386,7 +400,19 @@ function App() {
       // members + graphs load via the currentTeamId effect (JWT team-scoped;
       // both loaders carry their own staleness guard).
     } catch (e) {
-      if (teamIdRef.current === teamId) setError(e.message)
+      if (teamIdRef.current === teamId) {
+        // Fix B: mint/refresh failed (429 cap or 401) — re-attach the
+        // previous team's key so the UI never shows mixed-team data.
+        if (prevKey) {
+          setApiKey(prevKey)
+          localStorage.setItem(KEY_STORAGE, prevKey)
+          setCurrentTeamId(prevTeamId)
+          teamIdRef.current = prevTeamId
+          setTeam(null)
+          await refreshTeam(prevKey).catch(() => {})
+        }
+        setError(e.message)
+      }
     }
   }
 
@@ -432,7 +458,12 @@ function App() {
       })
       if (!res.ok) return
       const list = await res.json()
-      if (teamIdRef.current === teamId) setGraphs(list)
+      if (teamIdRef.current === teamId) {
+        setGraphs(list)
+        // Fix E (review round 2): restore the auto-select lost when the
+        // inline switch fetch was removed — dropdown shows a selection.
+        setCurrentGraphId(list[0]?.graph_id ?? null)
+      }
     } catch { /* best-effort */ }
   }
 
@@ -601,6 +632,24 @@ function App() {
     setError('')
     try {
       await api(`/v1/team/keys/${keyId}`, { method: 'DELETE' })
+      // Fix A (review round 2): if we revoked the active data-plane key, the
+      // per-team cache + localStorage now hold a dead key — re-mint so the
+      // app doesn't 401 on the next switch/reload.
+      const cached = currentTeamId ? teamKeysRef.current[currentTeamId] : null
+      if (cached && keyId === keyIdFromValue(cached)) {
+        delete teamKeysRef.current[currentTeamId]
+        if (localStorage.getItem(KEY_STORAGE) === cached) localStorage.removeItem(KEY_STORAGE)
+        const tok = sessionTokenRef.current
+        if (tok && currentTeamId) {
+          try {
+            const minted = await mintSessionKey('bootstrap', currentTeamId)
+            teamKeysRef.current[currentTeamId] = minted.key
+            localStorage.setItem(KEY_STORAGE, minted.key)
+            setApiKey(minted.key)
+            await refreshTeam(minted.key).catch(() => {})
+          } catch { /* leave API-key screen; not fatal */ }
+        }
+      }
       await loadAll()
     } catch (e) {
       setError(e.message)
@@ -628,12 +677,26 @@ function App() {
       const data = await res.json()
       setNewKey(data.key)
       if (currentTeamId) teamKeysRef.current[currentTeamId] = data.key // cache for future switches (no extra mint)
-      await loadAll()
+      // Fix A (review round 2): adopt the recovery key so the UI keeps
+      // working (the old bootstrap key may have just been rotated/revoked).
+      localStorage.setItem(KEY_STORAGE, data.key)
+      setApiKey(data.key)
+      await Promise.all([loadAll(data.key), refreshTeam(data.key)]).catch(() => {})
     } catch (e) {
       setError(e.message)
     } finally {
       setBusy(false)
     }
+  }
+
+  // Fix A (review round 2): map a full key value to its list id (or prefix)
+  // so revoke can tell whether the active data-plane key is being revoked.
+  function keyIdFromValue(value) {
+    if (!value) return null
+    for (const k of keys || []) {
+      if (k.key === value || k.api_key === value) return k.key_id || k.id
+    }
+    return null
   }
 
   function fmtTime(iso) {
@@ -889,7 +952,7 @@ function App() {
             <table>
               <thead><tr><th>Email / User</th><th>Role</th><th>Status</th><th></th></tr></thead>
               <tbody>
-                {membersStatus === 'loading' && <tr><td colSpan="4" className="dim">Loading members…</td></tr>}
+                {membersStatus === 'loading' && authMode === 'session' && <tr><td colSpan="4" className="dim">Loading members…</td></tr>}
                 {membersStatus === 'denied' && <tr><td colSpan="4" className="dim">Member list is only visible to owners and admins.</td></tr>}
                 {membersStatus === 'error' && <tr><td colSpan="4" className="dim">Couldn't load members — check your connection and try again.</td></tr>}
                 {membersStatus === 'ok' && members.length === 0 && <tr><td colSpan="4" className="dim">No members yet.</td></tr>}
