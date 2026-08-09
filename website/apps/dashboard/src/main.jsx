@@ -366,6 +366,9 @@ function App() {
     // requested team as current for staleness guards.
     const prevTeamId = currentTeamId
     const prevKey = apiKey
+    const tok = sessionTokenRef.current
+    if (!tok) return // Round-3: guard BEFORE wiping state — logout→apikey
+                     // login must not blank the dashboard on a stale pick
     setMembers(null)
     setMembersStatus('loading')
     setGraphs([])
@@ -377,9 +380,6 @@ function App() {
     setError('')
     setCurrentTeamId(teamId)
     teamIdRef.current = teamId
-
-    const tok = sessionTokenRef.current
-    if (!tok) return
     try {
       // P1/P2 (code-review): overview cards + header tier badge read the
       // API-key's team — mint (or reuse) a data-plane key for the selected
@@ -410,6 +410,9 @@ function App() {
           teamIdRef.current = prevTeamId
           setTeam(null)
           await refreshTeam(prevKey).catch(() => {})
+          // Round-3: reload ALL key-scoped data for the reverted team —
+          // otherwise keys/sessions/backups stay wiped until reload.
+          await Promise.all([loadAll(prevKey), loadBackups(prevKey)]).catch(() => {})
         }
         setError(e.message)
       }
@@ -460,9 +463,10 @@ function App() {
       const list = await res.json()
       if (teamIdRef.current === teamId) {
         setGraphs(list)
-        // Fix E (review round 2): restore the auto-select lost when the
-        // inline switch fetch was removed — dropdown shows a selection.
-        setCurrentGraphId(list[0]?.graph_id ?? null)
+        // Fix E (review round 2): auto-select first graph so the dropdown
+        // shows a selection after switch; Round-3: only when nothing is
+        // selected yet (don't clobber a manual pick on re-load).
+        setCurrentGraphId((prev) => prev ?? list[0]?.graph_id ?? null)
       }
     } catch { /* best-effort */ }
   }
@@ -647,6 +651,9 @@ function App() {
             localStorage.setItem(KEY_STORAGE, minted.key)
             setApiKey(minted.key)
             await refreshTeam(minted.key).catch(() => {})
+            // Round-3: reload with the NEW key, not the revoked-key closure.
+            await loadAll(minted.key).catch(() => {})
+            return
           } catch { /* leave API-key screen; not fatal */ }
         }
       }
@@ -663,13 +670,31 @@ function App() {
     const tok = sessionTokenRef.current
     if (!tok) { setError('Sign in with your Tortoise account to recover a key.'); setBusy(false); return }
     try {
-      const res = await fetch(`${API_BASE}/v1/session/key`, {
+      let res = await fetch(`${API_BASE}/v1/session/key`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tok}` },
         // P1 (code-review): multi-membership users need a team_id — mint the
         // recovery key for the currently selected team.
         body: JSON.stringify({ purpose: 'recovery', ...(currentTeamId ? { team_id: currentTeamId } : {}) }),
       })
+      // Round-3: 400 "team_id required" with no selected team (e.g. /v1/teams
+      // failed during bootstrap) — auto-select first membership and retry.
+      if (res.status === 400 && !currentTeamId) {
+        const teamsRes = await fetch(`${API_BASE}/v1/teams`, {
+          headers: { Authorization: `Bearer ${tok}` },
+        })
+        if (teamsRes.ok) {
+          const list = await teamsRes.json()
+          if (list.length) {
+            setTeams(list)
+            res = await fetch(`${API_BASE}/v1/session/key`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tok}` },
+              body: JSON.stringify({ purpose: 'recovery', team_id: list[0].team_id }),
+            })
+          }
+        }
+      }
       if (!res.ok) {
         const b = await res.json().catch(() => ({}))
         throw new Error(b.detail || `HTTP ${res.status}`)
@@ -693,8 +718,11 @@ function App() {
   // so revoke can tell whether the active data-plane key is being revoked.
   function keyIdFromValue(value) {
     if (!value) return null
+    // GET /v1/team/keys returns {id, key_prefix, ...} — hashes only, no
+    // plaintext. Auth pre-filters on token[:10], so match on key_prefix.
+    const prefix = String(value).slice(0, 10)
     for (const k of keys || []) {
-      if (k.key === value || k.api_key === value) return k.key_id || k.id
+      if (k.key_prefix === prefix) return k.id || k.key_id
     }
     return null
   }
