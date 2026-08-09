@@ -1301,3 +1301,24 @@ class TestEventsPoll:
         ids_b = {e["payload"].get("id") for e in sdk_b.events_poll()["events"]}
         assert ids_a and ids_b
         assert ids_a.isdisjoint(ids_b), "cross-tenant event leak"
+
+
+class TestRetractedTombstoneContract:
+    """#432 Task 6 — /v1/points excludes retracted; /v1/points/{id} returns them."""
+
+    def test_list_excludes_retracted_but_get_returns_tombstone(self, client):
+        from tortoise.hosted_api import _make_sdk
+        sdk = _make_sdk(namespace=TEST_TEAM_ID)
+        p = sdk.create_point(content="doomed", kind="statement")
+        # listed while live
+        listed = client.get("/v1/points").json()
+        assert any(pt["id"] == p["id"] for pt in listed["points"])
+        # retract via the team SDK (Task 1 method)
+        sdk.retract_point(p["id"])
+        listed2 = client.get("/v1/points").json()
+        assert not any(pt["id"] == p["id"] for pt in listed2["points"]), \
+            "retracted point must be excluded from the default list surface"
+        # tombstone contract: still retrievable by id with status='retracted'
+        got = client.get(f"/v1/points/{p['id']}")
+        assert got.status_code == 200, got.text
+        assert got.json()["status"] == "retracted"
