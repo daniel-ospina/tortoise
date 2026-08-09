@@ -1966,6 +1966,12 @@ class TortoiseSDK:
                 "n.baseline_set, n.baseline_source, n.inherited_at",
                 params={"id": pid},
             )
+            # Clear the stale prior from in-memory evidence cache (#652).
+            # set_point_baseline writes (alpha, beta) into self._evidence
+            # unconditionally, and _hydrate_evidence is additive-only — so
+            # the stale entry survives the graph-level remove and gets
+            # re-applied by ep.run(evidence=self._evidence).
+            self._evidence.pop(pid, None)
             self._mark_dirty([pid])
 
         for pid, sources in point_sources.items():
