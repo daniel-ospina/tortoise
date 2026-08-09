@@ -229,6 +229,22 @@ def test_falsy_session_id_coerces_to_match_ingest(env, sdk):
     h2 = sdk.session_index_health(str(env))
     assert h2["up_to_date"], h2
 
+def test_empty_session_id_falls_back_to_file_stem(env, sdk):
+    """Review round 3 P2: sessionId: "" must fall back to file_<stem> on BOTH
+    sides (extract_session_id and ingest's or-collapse) — an empty string is
+    absent, not a session id; otherwise health derives session_'' while
+    ingest derives session_file_<stem> and the sweep never converges."""
+    f = env / "empty-sid.md"
+    f.write_text("---\nsessionId: ""\ntitle: T\n---\nUser: hi\n")
+    sdk.ingest_corpus(str(env), eventKind="AgentSession")
+    h = sdk.session_index_health(str(env))
+    assert h["unindexed"] == [], f"empty sessionId not matched: {h}"
+    assert h["duplicates"] == []
+    # Second sweep converges
+    h2 = sdk.session_index_health(str(env))
+    assert h2["up_to_date"], h2
+
+
 def test_falsy_boolean_session_id_coerces(env, sdk):
     f = env / "falsy-bool.md"
     f.write_text("---\nsessionId: false\ntitle: T\n---\nUser: hi\n")

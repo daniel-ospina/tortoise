@@ -508,7 +508,12 @@ def extract_session_id(file_path: str) -> str | None:
     if sid is None:
         sid = fm.get("session_id")
     if sid is not None:
-        return str(sid)
+        sid = str(sid)
+        if sid != "":
+            return sid
+    # empty-string (or None) sessionId → file fallback, mirroring ingest's
+    # `or` collapse — otherwise health derives a DIFFERENT event_id than
+    # ingest and the sweep never converges (review round 3 P2).
     
     # Fallback: derive from filename
     stem = Path(file_path).stem
@@ -576,7 +581,7 @@ def main():
             _lock = SessionIndexLock(session_id or f"file_{file_path.stem}")
             try:
                 _lock_status = _lock.acquire()
-            except OSError as _lock_err:
+            except (OSError, AttributeError, ImportError) as _lock_err:
                 # #280 review P2 (robustness): an unusable lock path (unwritable
                 # lock dir / planted symlink) must not crash the CLI — surface it
                 # as a retryable failure and exit 0 (never block the caller).

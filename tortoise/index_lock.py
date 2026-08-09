@@ -1,8 +1,8 @@
-"""
+"""Per-session indexing lock — flock+PID hybrid (#280 item 1).
 
 Unix-only (flock + O_NOFOLLOW + fchmod): on platforms lacking these
 (fcntl/O_NOFOLLOW/fchmod absent), lock operations raise (AttributeError/
-ImportError) — callers treat them as retryable, never fatal (#280 review P3).Per-session indexing lock — flock+PID hybrid (#280 item 1).
+ImportError) — callers treat them as retryable, never fatal (#280 review P3).
 
 Protects the LOCAL session-indexing read-modify-write cycle
 (MATCH → compute merged state → SET, which is NOT MERGE-atomic) from
