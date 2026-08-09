@@ -14,7 +14,7 @@
       --surface: #0d1a2d;
       --surface-hover: #12223d;
       --text: #cbd5e1;
-      --text-dim: #64748b;
+      --text-dim: #94a3b8;
       --accent: #06b6d4;
       --accent-hover: #0891b2;
       --green: #4ade80;
@@ -36,7 +36,7 @@
     .topbar .logo { font-family: var(--serif, Georgia, serif); font-size: 1.15rem; color: var(--text, #cbd5e1); text-decoration: none; }
     .topbar .logo span { color: var(--accent, #06b6d4); }
     .topbar nav { flex: 1; display: flex; gap: 16px; }
-    .topbar nav a { color: var(--text-dim, #64748b); text-decoration: none; font-size: 14px; }
+    .topbar nav a { color: var(--text-dim, #94a3b8); text-decoration: none; font-size: 14px; }
     .topbar nav a:hover, .topbar nav a.active { color: var(--accent, #06b6d4); }
     .topbar .login { background: var(--accent, #06b6d4); color: #04121a; padding: 6px 16px; border-radius: 6px; text-decoration: none; font-weight: 600; font-size: 14px; }
     .topbar .login:hover { background: var(--accent-hover, #0891b2); }
@@ -177,6 +177,16 @@
     .btn-copy.copied {
       border-color: var(--green);
       color: var(--green);
+    }
+
+    .btn-copy.copy-failed {
+      border-color: #ef4444;
+      color: #ef4444;
+    }
+
+    .btn-copy:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
     }
 
     .warning {
@@ -325,13 +335,13 @@
     </div>
 
     <!-- Loading state -->
-    <div id="loading" class="loading-state">
+    <div id="loading" class="loading-state" role="status" aria-live="polite">
       <div class="loading-spinner"></div>
       <p>Provisioning your Tortoise&hellip;</p>
     </div>
 
     <!-- Error state -->
-    <div id="error-state" class="error-state hidden">
+    <div id="error-state" class="error-state hidden" role="alert">
       <p id="error-message">Something went wrong during provisioning.</p>
       <p><a href="/signup.html">Try signing up again</a></p>
     </div>
@@ -389,10 +399,10 @@
             <div class="card">
         <div class="card-label">Use Tortoise — connect your agent <span style="font-weight:400;font-size:0.72rem;color:var(--text-dim);">(MCP — no install needed)</span></div>
         <div class="harness-tabs" id="harness-tabs" style="display:flex;gap:0.5rem;margin-bottom:0.75rem;flex-wrap:wrap;">
-          <button class="harness-tab active" data-harness="claude" onclick="switchHarness('claude')">Claude Code</button>
-          <button class="harness-tab" data-harness="codex" onclick="switchHarness('codex')">Codex</button>
-          <button class="harness-tab" data-harness="cursor" onclick="switchHarness('cursor')">Cursor</button>
-          <button class="harness-tab" data-harness="pi" onclick="switchHarness('pi')">Pi</button>
+          <button class="harness-tab active" data-harness="claude" aria-pressed="true" onclick="switchHarness('claude')">Claude Code</button>
+          <button class="harness-tab" data-harness="codex" aria-pressed="false" onclick="switchHarness('codex')">Codex</button>
+          <button class="harness-tab" data-harness="cursor" aria-pressed="false" onclick="switchHarness('cursor')">Cursor</button>
+          <button class="harness-tab" data-harness="pi" aria-pressed="false" onclick="switchHarness('pi')">Pi</button>
         </div>
         <div class="snippet" id="mcp-snippet">
           <pre><code id="mcp-config-text"></code></pre>
@@ -581,9 +591,45 @@ you up to 6 yes/no questions and set up your Tortoise memory.
     }
 
     // ── Copy functions ─────────────────────────────────────────────────────
-    function copyApiKey() {
+    // Shared copy helper: async clipboard API first, execCommand fallback via
+    // a temp textarea, and a visible failure message if both fail (#751).
+    async function copyWithFallback(text, btnId) {
+      let ok = false;
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(text);
+          ok = true;
+        }
+      } catch (e) { /* fall through to execCommand */ }
+      if (!ok) {
+        const textarea = document.createElement("textarea");
+        textarea.value = text;
+        textarea.style.position = "fixed";
+        textarea.style.opacity = "0";
+        document.body.appendChild(textarea);
+        textarea.select();
+        try { ok = document.execCommand("copy"); } catch (e2) { ok = false; }
+        document.body.removeChild(textarea);
+      }
+      if (!ok) flashCopyFailure(btnId);
+      return ok;
+    }
+
+    function flashCopyFailure(btnId, detail) {
+      const btn = document.getElementById(btnId);
+      if (!btn) return;
+      const old = btn.textContent;
+      btn.textContent = "Copy failed — " + (detail || "select and copy manually");
+      btn.classList.add("copy-failed");
+      setTimeout(() => {
+        btn.textContent = old;
+        btn.classList.remove("copy-failed");
+      }, 3000);
+    }
+
+    async function copyApiKey() {
       const key = document.getElementById("api-key").textContent;
-      copyToClipboard(key);
+      if (!(await copyWithFallback(key, "btn-copy"))) return;
       const btn = document.getElementById("btn-copy");
       btn.classList.add("copied");
       document.getElementById("copy-text").textContent = "Copied!";
@@ -593,7 +639,7 @@ you up to 6 yes/no questions and set up your Tortoise memory.
       }, 2000);
     }
 
-    function copySnippet() {
+    async function copySnippet() {
       const key = document.getElementById("api-key").textContent;
       const snippet = `# Install Tortoise
 pip install tortoise-graph
@@ -603,7 +649,7 @@ tortoise init --api-key ${key}
 
 # Create your first Point
 tortoise create-point "Hello world" --kind statement`;
-      copyToClipboard(snippet);
+      if (!(await copyWithFallback(snippet, "btn-copy-snippet"))) return;
 
       // Visual feedback (matches copyApiKey / copyMcpConfig)
       const btn = document.getElementById("btn-copy-snippet");
@@ -617,51 +663,6 @@ tortoise create-point "Hello world" --kind statement`;
         if (textEl) textEl.textContent = origText;
         else btn.textContent = origText;
       }, 2000);
-    }
-
-    function copyMcpConfig() {
-      const key = document.getElementById("api-key").textContent;
-      const config = `{
-  "mcpServers": {
-    "tortoise": {
-      "command": "python3",
-      "args": ["-m", "tortoise.mcp_server"],
-      "env": {
-        "TORTOISE_API_KEY": "${key}",
-        "TORTOISE_API_URL": "https://api.premiselabs.co"
-      }
-    }
-  }
-}`;
-      copyToClipboard(config);
-
-      const btn = document.getElementById("btn-copy-mcp");
-      const textEl = btn.querySelector("span");
-      const origText = textEl ? textEl.textContent : btn.textContent;
-      btn.classList.add("copied");
-      if (textEl) textEl.textContent = "Copied!";
-      else btn.textContent = "Copied!";
-      setTimeout(() => {
-        btn.classList.remove("copied");
-        if (textEl) textEl.textContent = origText;
-        else btn.textContent = origText;
-      }, 2000);
-    }
-
-    async function copyToClipboard(text) {
-      try {
-        await navigator.clipboard.writeText(text);
-      } catch {
-        // Fallback for older browsers
-        const textarea = document.createElement("textarea");
-        textarea.value = text;
-        textarea.style.position = "fixed";
-        textarea.style.opacity = "0";
-        document.body.appendChild(textarea);
-        textarea.select();
-        document.execCommand("copy");
-        document.body.removeChild(textarea);
-      }
     }
 
     // ── Start ──────────────────────────────────────────────────────────────
@@ -716,8 +717,11 @@ codex mcp add tortoise --url https://api.premiselabs.co/mcp --bearer-token-env-v
 
     function switchHarness(name) {
       currentHarness = name;
-      document.querySelectorAll(".harness-tab").forEach(t =>
-        t.classList.toggle("active", t.dataset.harness === name));
+      document.querySelectorAll(".harness-tab").forEach(t => {
+        const active = t.dataset.harness === name;
+        t.classList.toggle("active", active);
+        t.setAttribute("aria-pressed", String(active));
+      });
       renderMcpConfig();
     }
 
@@ -730,7 +734,7 @@ codex mcp add tortoise --url https://api.premiselabs.co/mcp --bearer-token-env-v
     async function copyMcpConfig() {
       renderMcpConfig();
       const text = document.getElementById("mcp-config-text").textContent;
-      await navigator.clipboard.writeText(text);
+      if (!(await copyWithFallback(text, "btn-copy-mcp"))) return;
       // Analytics: artifact_copied (config)
       try { fetch("https://api.premiselabs.co/v1/onboarding/state", {method:"PATCH"}); } catch(e) {}
       flashCopied("btn-copy-mcp");
@@ -745,7 +749,13 @@ codex mcp add tortoise --url https://api.premiselabs.co/mcp --bearer-token-env-v
           if (r.ok) text = await r.text();
         } catch(e) {}
       }
-      await navigator.clipboard.writeText(text);
+      // Never copy the load-time placeholder (#751): if the prompt still
+      // hasn't loaded, tell the user instead.
+      if (text.includes("Loading prompt")) {
+        flashCopyFailure("btn-copy-prompt", "prompt is still loading — try again in a moment");
+        return;
+      }
+      if (!(await copyWithFallback(text, "btn-copy-prompt"))) return;
       flashCopied("btn-copy-prompt");
     }
 
@@ -756,10 +766,15 @@ codex mcp add tortoise --url https://api.premiselabs.co/mcp --bearer-token-env-v
       setTimeout(() => { btn.textContent = old; }, 1500);
     }
 
-    // Fetch the prompt on load (best-effort; fallback text remains)
+    // Fetch the prompt on load (best-effort; fallback text remains). The copy
+    // button stays disabled until the fetch settles so it can't copy the
+    // "(Loading prompt…)" placeholder (#751).
+    const promptBtn = document.getElementById("btn-copy-prompt");
+    if (promptBtn) promptBtn.disabled = true;
     fetch(PROMPT_URL).then(r => { if (r.ok) return r.text(); })
       .then(t => { if (t) document.getElementById("prompt-text").textContent = t; })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => { if (promptBtn) promptBtn.disabled = false; });
 
 </script>
 
