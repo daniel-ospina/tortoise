@@ -4,7 +4,7 @@ type: readme
 domain: epistemic
 status: live
 created: 2026-07-24
-updated: 2026-08-07
+updated: 2026-08-08
 ---
 
 # Tortoise
@@ -19,15 +19,19 @@ A product of [Premise Labs](https://premiselabs.co).
 
 ### 1. Install
 
-Pick one:
+New to Tortoise? Choose a path:
 
-| Path | How | Best for |
-|---|---|---|
-| **Hosted** | Sign up at [tortoise.premiselabs.co](https://api.premiselabs.co) (free tier available), get an API key on the welcome page | Teams that want a managed server; zero ops |
-| **Self-host (eval)** | `docker run -p 127.0.0.1:8000:8000 ghcr.io/daniel-ospina/tortoise-selfhost` (embedded DB — **not durable**, for eval only; daemon refuses non-loopback binds without `TORTOISE_API_KEY`) | Solo devs trying it locally |
-| **Self-host (durable)** | `docker compose up -d` — daemon + FalkorDB sidecar (AOF on, backups) | Production self-hosting; data locality and trust |
+- **Hosted (managed)** — no install, just connect your agent: [docs/quickstart-cloud.md](docs/quickstart-cloud.md)
+- **Self-hosted (run it yourself)** — requires **Python ≥ 3.12**:
 
-> ⚠️ Embedded mode (plain `docker run`) is for evaluation only — it is not durable. For real data use `docker compose` or point the daemon at a FalkorDB with `TORTOISE_DB_URI`. See [License & FAQ](#license--faq) and [docs/infra-runbook.md](docs/infra-runbook.md).
+  ```bash
+  git clone https://github.com/daniel-ospina/tortoise.git && cd tortoise
+  pip install -e .                         # or: pip install -e '.[embeddings]' for vector search
+  # or straight from GitHub (no clone):
+  pip install git+https://github.com/daniel-ospina/tortoise.git
+  ```
+
+Operator/infra (deploying and maintaining the daemon): [docs/infra-runbook.md](docs/infra-runbook.md).
 
 ### 2. Connect
 
