@@ -374,8 +374,12 @@ function App() {
       if (res.ok) {
         const list = await res.json()
         setTeams(list)
-        if (list.length > 0 && !currentTeamId) {
+        // Round-8: guard on teamIdRef (sync write, no render-closure race) —
+        // the stored-key bootstrap path already set it for the key's team, so
+        // a multi-team reload must NOT clobber it with the first team.
+        if (list.length > 0 && !teamIdRef.current) {
           setCurrentTeamId(list[0].team_id)
+          teamIdRef.current = list[0].team_id
         }
       }
     } catch { /* best-effort */ }
