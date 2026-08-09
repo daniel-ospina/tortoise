@@ -579,7 +579,8 @@ function App() {
       if (teamIdRef.current !== _teamAtCall) return
 
     } catch (e) {
-      setError(e.message)
+      // Round-18: a stale request's error must not land under the new team
+      if (teamIdRef.current === _teamAtCall) setError(e.message)
     } finally {
       setBusy(false)
     }
@@ -641,7 +642,8 @@ function App() {
       if (teamIdRef.current !== _teamAtCall) return
 
     } catch (e) {
-      setError(e.message)
+      // Round-18: a stale request's error must not land under the new team
+      if (teamIdRef.current === _teamAtCall) setError(e.message)
     } finally {
       setBusy(false)
     }
@@ -731,7 +733,8 @@ function App() {
       // Round-15 (P2): resolve the ACTIVE team's key explicitly — during a
       // mid-switch window apiKey state is still the previous team's key, and
       // a key created with it lands on the wrong team.
-      const activeKey = _teamAtCall ? (teamKeysRef.current[_teamAtCall] || apiKey) : apiKey
+      const _apiKeyAtCall = apiKey
+      const activeKey = _teamAtCall ? (teamKeysRef.current[_teamAtCall] || _apiKeyAtCall) : _apiKeyAtCall
       const k = await api('/v1/team/keys', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...(activeKey ? { Authorization: `Bearer ${activeKey}` } : {}) },
@@ -741,10 +744,15 @@ function App() {
       // not render this team's plaintext key card or key table under the new
       // team's header (switchTeam's setNewKey(null) already ran for the new team).
       if (teamIdRef.current !== _teamAtCall) return
+      // Round-18 (P3): pre-mint window — switchTeam sets teamIdRef sync but
+      // apiKey lags until its mint resolves; if we POSTed with the OLD team's
+      // key (not in this team's cache) and apiKey state moved, treat as stale.
+      if (activeKey !== _apiKeyAtCall && teamKeysRef.current[_teamAtCall] !== activeKey) return
       setNewKey(k.api_key || k.key || k)
       await loadAll(activeKey)
     } catch (e) {
-      setError(e.message)
+      // Round-18: a stale request's error must not land under the new team
+      if (teamIdRef.current === _teamAtCall) setError(e.message)
     } finally {
       setBusy(false)
     }
@@ -778,12 +786,16 @@ function App() {
       }
       await loadAll()
     } catch (e) {
-      setError(e.message)
+      // Round-18: a stale revoke's error must not land under the new team
+      if (!currentTeamId || teamIdRef.current === currentTeamId) setError(e.message)
     }
   }
 
   // ── J-2: key recovery via E1 session mint (the #518 fix) ──
   async function recoverKey() {
+    // Round-18 (P2): the last mutation that writes the ACTIVE key + localStorage
+    // — capture team at call time; bail before any write if the user switched.
+    const _teamAtCall = currentTeamId || fallbackTeamIdRef.current
     setError('')
     setBusy(true)
     const tok = sessionTokenRef.current
@@ -826,6 +838,9 @@ function App() {
       // Round-6 (P3): a logout during the in-flight recovery must not resurrect
       // the team + key for the signed-out user.
       if (sessionTokenRef.current !== tok) return
+      // Round-18 (P2): a team switch during the recovery must not make A's
+      // recovery key the app's active key under team B's header.
+      if (teamIdRef.current !== _teamAtCall) return
       setNewKey(data.key)
       // Round-4: if the 400-fallback auto-selected the first membership,
       // persist it so graphs/members load and the key is cached (otherwise
@@ -843,7 +858,8 @@ function App() {
       setAuthMode('session') // Round-10: a recovery-minted key IS session auth — keep tabs consistent
       await Promise.all([loadAll(data.key), refreshTeam(data.key)]).catch(() => {})
     } catch (e) {
-      setError(e.message)
+      // Round-18: a stale recovery's error must not land under the new team
+      if (teamIdRef.current === _teamAtCall) setError(e.message)
     } finally {
       setBusy(false)
     }
@@ -900,17 +916,18 @@ function App() {
           <div className="logo">Tortoise</div>
           <h1>Dashboard</h1>
           <p className="dim">{authMode === 'session' ? 'Sign in with your Tortoise account.' : 'Enter your API key to manage your team, keys, and sessions.'}</p>
-          <input
-            type="password"
-            placeholder="tt_..."
-            value={apiKey}
-            onChange={(e) => setApiKey(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && login()}
-            autoFocus
-          />
-          <button onClick={login} disabled={busy || !apiKey.trim()}>
-            {busy ? 'Connecting…' : 'Connect'}
-          </button>
+          <form onSubmit={(e) => { e.preventDefault(); login() }}>
+            <input
+              type="password"
+              placeholder="tt_..."
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              autoFocus
+            />
+            <button type="submit" disabled={busy || !apiKey.trim()}>
+              {busy ? 'Connecting…' : 'Connect'}
+            </button>
+          </form>
           {error && <div className="error">{error}</div>}
           <p className="dim small">No key? <a href="https://tortoise.premiselabs.co/signup" target="_blank" rel="noreferrer">Sign up</a> — you'll get one on the welcome page.</p>
         </div>
