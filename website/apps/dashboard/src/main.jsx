@@ -75,6 +75,7 @@ function App() {
   const teamIdRef = React.useRef(null)
   const fallbackTeamIdRef = React.useRef(null) // Round-4: team auto-selected by recoverKey 400-fallback
   const authSubRef = React.useRef(null) // Round-6: supabase onAuthStateChange subscription
+  const checkoutResetTimerRef = React.useRef(null) // Round-16: popup-flow fallback reset
   const [checkoutPending, setCheckoutPending] = React.useState(false)
   // P5 (code-review): distinguish 'loading' / 'ok' / 'denied' / 'error' so
   // loading and network failures never masquerade as an RBAC denial.
@@ -122,6 +123,13 @@ function App() {
       if (!win) {
         setCheckoutPending(false)
         setError('Popup blocked — allow popups for app.premiselabs.co and try again.')
+      } else {
+        // Round-16 (P2): Stripe's success redirect (?session_id) lands in the
+        // POPUP tab, never this one — the URL-param poll never fires here.
+        // Bounded fallback so the button self-heals without a reload; the
+        // cancelled/session_id paths clear this timer.
+        window.clearTimeout(checkoutResetTimerRef.current)
+        checkoutResetTimerRef.current = window.setTimeout(() => setCheckoutPending(false), 90000)
       }
     } catch (err) {
       setError(err.message)
@@ -171,6 +179,7 @@ function App() {
       return () => clearInterval(poll)
     }
     if (cancelled) {
+      window.clearTimeout(checkoutResetTimerRef.current)
       setCheckoutPending(false)
       params.delete('checkout')
       window.history.replaceState({}, '', `${window.location.pathname}${params.toString() ? `?${params}` : ''}`)
@@ -451,6 +460,7 @@ function App() {
     setKeys([])
     setSessions([])
     setBackupInfo(null)
+    setNewKey(null)        // Round-16: the plaintext key card was shown once on the old team
     setError('')
     setCurrentTeamId(teamId)
     teamIdRef.current = teamId
@@ -542,6 +552,7 @@ function App() {
   }
 
   async function createGraph() {
+    const _teamAtCall = currentTeamId // Round-16: mutation identity guard — a switch mid-flight must not act on the previous team
     if (busy || !newGraphName.trim()) return
     setBusy(true)
     setError('')
@@ -564,6 +575,9 @@ function App() {
       }
       setNewGraphName('')
       await Promise.all([loadGraphs(currentTeamId), loadTeams()])
+      // Round-16: bail if the user switched teams mid-flight
+      if (teamIdRef.current !== _teamAtCall) return
+
     } catch (e) {
       setError(e.message)
     } finally {
@@ -600,6 +614,7 @@ function App() {
   }
 
   async function inviteMember() {
+    const _teamAtCall = currentTeamId // Round-16: mutation identity guard — a switch mid-flight must not act on the previous team
     if (!inviteEmail.includes('@')) return
     setBusy(true)
     setError('')
@@ -622,6 +637,9 @@ function App() {
       }
       setInviteEmail('')
       await loadMembers(currentTeamId)
+      // Round-16: bail if the user switched teams mid-flight
+      if (teamIdRef.current !== _teamAtCall) return
+
     } catch (e) {
       setError(e.message)
     } finally {
@@ -630,6 +648,7 @@ function App() {
   }
 
   async function removeMember(userId) {
+    const _teamAtCall = currentTeamId // Round-16: mutation identity guard — a switch mid-flight must not act on the previous team
     if (!confirm('Remove this member from the team?')) return
     setError('')
     try {
@@ -644,12 +663,16 @@ function App() {
         throw new Error(b.detail || `HTTP ${res.status}`)
       }
       await loadMembers(currentTeamId)
+      // Round-16: bail if the user switched teams mid-flight
+      if (teamIdRef.current !== _teamAtCall) return
+
     } catch (e) {
       setError(e.message)
     }
   }
 
   async function changeRole(userId, role) {
+    const _teamAtCall = currentTeamId // Round-16: mutation identity guard — a switch mid-flight must not act on the previous team
     setError('')
     try {
       const tok = sessionTokenRef.current
@@ -664,6 +687,9 @@ function App() {
         throw new Error(b.detail || `HTTP ${res.status}`)
       }
       await loadMembers(currentTeamId)
+      // Round-16: bail if the user switched teams mid-flight
+      if (teamIdRef.current !== _teamAtCall) return
+
     } catch (e) {
       setError(e.message)
     }
