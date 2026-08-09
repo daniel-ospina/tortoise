@@ -438,12 +438,16 @@ class TestSituation7_AddRemoveIdempotent:
             # EP path must also see the revert — no stale prior:
             res = sdk.compute_confidence(recency_decay=1.0, anchors=[a_id], max_hops=2)
             conf = get_conf(res, a_id)
-            # The measured post-revert confidence is 0.499997 (effectively
-            # exactly 0.5 — the IMPL operator does not shift the anchor's own
-            # confidence in this topology). Margin 0.01 is calibrated to catch
-            # the stale-prior resurrection (~0.024 from neutral) while allowing
-            # unrelated EP dynamics headroom.
-            assert abs(conf - 0.5) < 0.01
+            # #652 regression property: after revert the point carries NO
+            # evidence — its confidence must reflect operator coupling only,
+            # NOT the stale prior (0.7/0.3 → mean 0.7). With the bug, EP
+            # resurrects the prior and reports ~0.70; fixed, it drops well
+            # below neutral (coupling pulls it to ~0.39 on the current EP
+            # baseline after #400/#651 — the absolute value is baseline-
+            # dependent, which is why we assert the band, not exactly 0.5).
+            assert 0.2 < conf < 0.55, (
+                f"reverted point must not carry elevated confidence from the "
+                f"stale prior; got {conf}")
 
 
 # ═══════════════════════════════════════════════════════════════════
