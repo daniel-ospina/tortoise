@@ -45,6 +45,14 @@ def _run_context():
     return main(["context"])
 
 
+def _delenv_falkordb(monkeypatch):
+    """Isolate the legacy FALKORDB_* trio (#715 P2 conf 55): the honoring
+    branch in _resolve_db_target only fires when these are explicitly set,
+    so tests asserting embedded behavior must clear them explicitly."""
+    for k in ("FALKORDB_HOST", "FALKORDB_PORT", "FALKORDB_PASSWORD"):
+        monkeypatch.delenv(k, raising=False)
+
+
 class TestCliContext:
     def test_empty_graph_prints_empty_notice(self, db_env, capsys):
         """Empty graph → digest says memory is empty, exits 0."""
@@ -106,6 +114,7 @@ class TestCliOnboardDbTarget:
         db_path = str(tmp_path / "onboard.db")
         monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        _delenv_falkordb(monkeypatch)
         repo_root = tmp_path / "repo"
         repo_root.mkdir()
         (repo_root / "README.md").write_text("# readme", encoding="utf-8")
@@ -133,6 +142,103 @@ class TestCliOnboardDbTarget:
 
         assert rc == 0
         assert idx.db == uri
+
+    def test_index_receives_rediss_uri(self, tmp_path, monkeypatch):
+        """#715 P2 bug conf 65: rediss:// (documented TORTOISE_DB_URI scheme)
+        must pass through _resolve_db_target as a URI — previously only
+        docker:// was recognized, so rediss:// fell into the relative-path
+        hard-reject with a misleading "Relative DB path 'rediss://...'
+        rejected" error."""
+        uri = "rediss://:pw@db.example.com:6379/tortoise"
+        monkeypatch.setenv("TORTOISE_DB_URI", uri)
+        monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+        _delenv_falkordb(monkeypatch)
+        repo_root = tmp_path / "repo"
+        repo_root.mkdir()
+        (repo_root / "README.md").write_text("# readme", encoding="utf-8")
+
+        rc, idx = self._stub_onboard(repo_root)
+
+        assert rc == 0
+        assert idx.db == uri  # passed through unchanged, never path-mangled
+
+    def test_redis_uri_passes_resolve_db_target(self, monkeypatch):
+        """redis:// (plain) is routed as a URI too — not treated as a path."""
+        from tortoise.__main__ import _resolve_db_target
+        uri = "redis://:pw@db.example.com:6379/tortoise"
+        monkeypatch.setenv("TORTOISE_DB_URI", uri)
+        monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+        _delenv_falkordb(monkeypatch)
+        assert _resolve_db_target(None) == uri
+
+    def test_init_no_silent_fallback_when_rediss_target_down(self, monkeypatch, capsys):
+        """conf 60 for rediss://: configured URI unreachable -> init fails
+        loudly (rc 1), never silently falls back to embedded (split graph)."""
+        monkeypatch.setenv("TORTOISE_DB_URI", "rediss://@127.0.0.1:1/tortoise")
+        monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+        _delenv_falkordb(monkeypatch)
+        from tortoise import __main__ as m
+
+        rc = m._cmd_init(mock.Mock(path=None, cmd="init", yes=True, api_key=None))
+
+        captured = capsys.readouterr()
+        out = captured.out + captured.err
+        assert rc == 1
+        assert "Embedded mode initialized" not in out
+        assert "Traceback" not in out
+
+    def test_falkordb_env_honored_as_docker_uri(self, monkeypatch, capsys):
+        """#715 P2 conf 55: legacy FALKORDB_* trio (still in .env.example,
+        still probed by doctor) set without TORTOISE_DB_URI must be HONORED
+        as a docker:// URI matching doctor semantics — not silently dropped,
+        which would switch Docker->embedded on upgrade with no warning."""
+        from tortoise.__main__ import _resolve_db_target
+        monkeypatch.setenv("FALKORDB_HOST", "db.internal")
+        monkeypatch.setenv("FALKORDB_PORT", "6380")
+        monkeypatch.setenv("FALKORDB_PASSWORD", "secret")
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+
+        target = _resolve_db_target(None)
+
+        assert target == "docker://:secret@db.internal:6380/tortoise"
+        out = capsys.readouterr().out
+        assert "legacy" in out and "FALKORDB" in out  # loud, not silent
+
+    def test_falkordb_env_alone_password_defaults(self, monkeypatch):
+        """Partial trio (password only) still honored — host/port default like
+        _cmd_doctor (localhost:16379)."""
+        from tortoise.__main__ import _resolve_db_target
+        monkeypatch.setenv("FALKORDB_PASSWORD", "s3cret")
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+        monkeypatch.delenv("FALKORDB_HOST", raising=False)
+        monkeypatch.delenv("FALKORDB_PORT", raising=False)
+
+        assert _resolve_db_target(None) == "docker://:s3cret@localhost:16379/tortoise"
+
+    def test_falkordb_env_invalid_port_loud_error(self, monkeypatch):
+        """Invalid FALKORDB_PORT raises ValueError with a clear message
+        (matches pre-#705 init's loud failure, never a silent fallback)."""
+        from tortoise.__main__ import _resolve_db_target
+        monkeypatch.setenv("FALKORDB_HOST", "localhost")
+        monkeypatch.setenv("FALKORDB_PORT", "not-a-port")
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+
+        with pytest.raises(ValueError, match="FALKORDB_PORT"):
+            _resolve_db_target(None)
+
+    def test_falkordb_env_unset_keeps_embedded_default(self, monkeypatch):
+        """Clean env (no FALKORDB_*) keeps the embedded default — legacy
+        honoring must NOT force docker://localhost on users with no config."""
+        from tortoise.__main__ import _resolve_db_target
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+        _delenv_falkordb(monkeypatch)
+
+        assert _resolve_db_target(None) == os.path.expanduser(
+            "~/.tortoise/tortoise.db")
 
     def test_explicit_path_beats_env(self, tmp_path, monkeypatch):
         """onboard --path /custom.db must win over TORTOISE_DB_PATH (#715 bug:
@@ -164,6 +270,7 @@ class TestCliOnboardDbTarget:
         """Graceful index failure must exit non-zero, not claim success."""
         monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "onboard.db"))
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        _delenv_falkordb(monkeypatch)
         repo_root = tmp_path / "repo"
         repo_root.mkdir()
         (repo_root / "README.md").write_text("# readme", encoding="utf-8")
@@ -198,6 +305,7 @@ class TestCliOnboardDbTarget:
         embedded, index writes the remote URI)."""
         monkeypatch.setenv("TORTOISE_DB_URI", "docker://@127.0.0.1:1/tortoise")
         monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+        _delenv_falkordb(monkeypatch)
         from tortoise import __main__ as m
 
         rc = m._cmd_init(mock.Mock(path=None, cmd="init", yes=True, api_key=None))
@@ -216,6 +324,7 @@ class TestCliOnboardDbTarget:
         db_path = str(tmp_path / "init.db")
         monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        _delenv_falkordb(monkeypatch)
         repo_root = tmp_path / "repo"
         repo_root.mkdir()
         (repo_root / "README.md").write_text("# readme", encoding="utf-8")
@@ -247,6 +356,7 @@ class TestCliOnboardDbTarget:
         db_path = str(tmp_path / "init.db")
         monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        _delenv_falkordb(monkeypatch)
         repo_root = tmp_path / "repo"
         repo_root.mkdir()
         (repo_root / "README.md").write_text("# readme", encoding="utf-8")

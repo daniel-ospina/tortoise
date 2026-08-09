@@ -11,6 +11,7 @@ from tortoise.config import (
     DEFAULT_DB_PATH,
     resolve_db_path,
     is_docker_uri,
+    is_db_uri,
 )
 
 
@@ -62,6 +63,27 @@ def test_docker_uri_never_resolved_to_file(monkeypatch):
     monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pass@host:6379/tortoise")
     # resolve_db_path falls through to default (does not treat docker:// as a path)
     assert resolve_db_path() == DEFAULT_DB_PATH
+
+
+def test_redis_uris_never_resolved_to_file(monkeypatch):
+    """#715 P2 conf 65: redis:// and rediss:// TORTOISE_DB_URI must also never
+    be resolved to a file path (previously only docker:// was recognized, so
+    rediss:// was treated as a path and rejected as 'Relative DB path')."""
+    for uri in ("redis://:pw@host:6379/tortoise", "rediss://:pw@host:6379/tortoise"):
+        monkeypatch.setenv("TORTOISE_DB_URI", uri)
+        assert resolve_db_path() == DEFAULT_DB_PATH
+
+
+def test_is_db_uri():
+    """#715: is_db_uri recognizes every documented TORTOISE_DB_URI scheme and
+    nothing else — docker://, redis://, rediss:// are URIs; paths are not."""
+    assert is_db_uri("docker://:pass@host:6379/tortoise") is True
+    assert is_db_uri("redis://:pass@host:6379/tortoise") is True
+    assert is_db_uri("rediss://:pass@host:6379/tortoise") is True
+    assert is_db_uri("/file.db") is False
+    assert is_db_uri("tortoise.db") is False
+    assert is_db_uri(None) is False
+    assert is_db_uri("") is False
 
 
 def test_invalid_db_path_env_falls_through_to_default(monkeypatch, caplog):

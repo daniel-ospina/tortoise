@@ -249,10 +249,11 @@ def _cmd_init(args):
     # #705/#715: resolve the DB target ONCE through the shared helper — the
     # same code path the onboarding index step uses — so init and index can
     # never disagree (silent split graph, conf 60). Selection is purely
-    # environmental: explicit --path > TORTOISE_DB_URI (docker://) >
-    # TORTOISE_DB_PATH > canonical default. No connectivity probing — docker
-    # reachability never overrides the configured target.
-    from tortoise.config import is_docker_uri
+    # environmental: explicit --path > TORTOISE_DB_URI (any supported scheme)
+    # > FALKORDB_* legacy trio > TORTOISE_DB_PATH > canonical default. No
+    # connectivity probing — docker reachability never overrides the
+    # configured target.
+    from tortoise.config import is_db_uri
     try:
         target = _resolve_db_target(args.path)
     except ValueError as e:
@@ -261,29 +262,29 @@ def _cmd_init(args):
         return 1
 
     graph_ready = False
-    docker_detected = False
+    uri_mode = False
 
-    if is_docker_uri(target):
-        # 1. Docker mode — connect to the configured URI target itself (never
-        # a differently-probed docker); unreachable is a hard error so the
+    if is_db_uri(target):
+        # 1. URI mode — connect to the configured URI target itself (never a
+        # differently-probed docker); unreachable is a hard error so the
         # index step can't silently split onto a different store.
         try:
             from tortoise.projection import FalkorProjection
             _proj = FalkorProjection.from_uri(target)
             _proj.g.query("RETURN 1")
-            print(f"  ✅ Docker FalkorDB reachable via TORTOISE_DB_URI")
+            print(f"  ✅ FalkorDB reachable via TORTOISE_DB_URI")
             graph_ready = True
-            docker_detected = True
+            uri_mode = True
         except ImportError:
-            print(f"  ❌ falkordb not installed — required for docker:// mode")
+            print(f"  ❌ falkordb not installed — required for URI mode")
             print(f"     pip install falkordb")
             return 1
         except Exception as e:
             err = str(e).lower()
             if "auth" in err or "password" in err:
-                print(f"  ❌ Docker FalkorDB auth failed — check TORTOISE_DB_URI credentials")
+                print(f"  ❌ FalkorDB auth failed — check TORTOISE_DB_URI credentials")
             else:
-                print(f"  ❌ Docker FalkorDB unreachable ({e})")
+                print(f"  ❌ FalkorDB unreachable ({e})")
             print("     Fix TORTOISE_DB_URI, or unset it to use embedded mode.")
             return 1
     else:
@@ -310,7 +311,7 @@ def _cmd_init(args):
     # Write welcome Point to the graph
     try:
         from tortoise.sdk import TortoiseSDK
-        if docker_detected:
+        if uri_mode:
             # Materialize the decision so later commands resolve to the SAME
             # target (single source of truth). The background index spawn
             # below ALSO passes --db explicitly (#715, conf 75): index's
@@ -857,21 +858,43 @@ def _resolve_db_target(explicit: str | None = None) -> str:
     — no connectivity probing, because docker reachability must never override
     the configured target:
 
-        explicit --path > TORTOISE_DB_URI (docker://) > TORTOISE_DB_PATH
-        > canonical default
+        explicit --path > TORTOISE_DB_URI (any supported scheme: docker://,
+        redis://, rediss://) > FALKORDB_* legacy trio (constructed docker://
+        URI, #715 migration guard) > TORTOISE_DB_PATH > canonical default
 
-    Returns a docker:// URI string (docker mode) or an absolute embedded
-    path (embedded mode). Raises ValueError for invalid input (e.g. a
-    relative --path) via resolve_db_path's _abs guard.
+    Returns a URI string (URI mode) or an absolute embedded path (embedded
+    mode). Raises ValueError for invalid input (e.g. a relative --path, or an
+    invalid FALKORDB_PORT) via resolve_db_path's _abs guard.
     """
     import os
-    from tortoise.config import resolve_db_path, is_docker_uri
+    from tortoise.config import resolve_db_path, is_db_uri
 
     if explicit:
         return resolve_db_path(explicit)
     uri = os.environ.get("TORTOISE_DB_URI", "")
-    if is_docker_uri(uri):
+    if is_db_uri(uri):
         return uri
+    # Legacy FALKORDB_* trio (still in .env.example, still probed by doctor):
+    # honor it as a docker:// target so users with ONLY FALKORDB_* set do NOT
+    # silently switch Docker→embedded on upgrade (the split-graph failure mode
+    # #705/#715 exists to kill — conf 55, migration must be loud, not silent).
+    # Only triggers when the trio is EXPLICITLY set; a clean environment keeps
+    # the embedded default (no localhost probe like the pre-#705 init did).
+    if any(os.environ.get(k) is not None for k in
+           ("FALKORDB_HOST", "FALKORDB_PORT", "FALKORDB_PASSWORD")):
+        host = os.environ.get("FALKORDB_HOST", "localhost")
+        port_raw = os.environ.get("FALKORDB_PORT", "16379")
+        try:
+            port = int(port_raw)
+        except (ValueError, TypeError):
+            raise ValueError(
+                f"Invalid FALKORDB_PORT={port_raw!r} — must be an integer")
+        password = os.environ.get("FALKORDB_PASSWORD", "")
+        legacy_uri = f"docker://:{password}@{host}:{port}/tortoise"
+        print(
+            f"  ⚠️  FALKORDB_* env vars are legacy — constructed "
+            f"{legacy_uri} (set TORTOISE_DB_URI to silence)")
+        return legacy_uri
     return resolve_db_path(None)
 
 
@@ -1363,8 +1386,9 @@ def _cmd_index_github(args):
     # connectivity probing — a reachable local docker must never override the
     # configured target or init and index silently split onto different stores.
     target = args.db or _resolve_db_target(None)
+    from tortoise.config import is_db_uri
     try:
-        if target.startswith("docker://"):
+        if is_db_uri(target):
             proj = FalkorProjection.from_uri(target)
         else:
             proj = FalkorProjection(path=target)
