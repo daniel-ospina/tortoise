@@ -111,6 +111,52 @@ class TestDoctorPath:
         assert "localhost:16379" not in probe  # not the old hardcoded default
         assert "127.0.0.1:59998" in _health_line(out)  # same target as health
 
+    def test_doctor_db_uri_non_numeric_port_clean_error(self, clear_db_env, capsys):
+        """#720 P2 conf 75: a non-numeric port in --db/TORTOISE_DB_URI must
+        surface as a clean ❌ check + rc 1 — never an uncaught ValueError
+        traceback (parsed.port now lives inside the guarded try)."""
+        rc = _run_doctor(["--db", "docker://:@127.0.0.1:notaport/tortoise"])
+        out = capsys.readouterr().out
+
+        assert rc == 1
+        assert "Traceback" not in out
+        probe = next(line for line in out.splitlines() if "Graph: FalkorDB" in line)
+        assert "❌" in probe
+        assert "bad port" in probe  # actionable message, not a raw ValueError
+
+    def test_doctor_db_uri_probe_uses_uri_graph_name(self, clear_db_env, monkeypatch, capsys):
+        """#720 P2 conf 62: the Step 2 probe must select the graph from the
+        URI path — the same derivation from_uri uses in Step 3 — never a
+        hardcoded "tortoise". A non-default graph name in the URI must be
+        probed, so a remote server gets no stray "tortoise" graph created."""
+        import falkordb as _falkordb
+
+        selected: list[str] = []
+
+        class _FakeGraph:
+            def query(self, q):
+                return None
+
+        class _FakeFalkorDB:
+            def __init__(self, *a, **k):
+                pass
+
+            def select_graph(self, name):
+                selected.append(name)
+                return _FakeGraph()
+
+        monkeypatch.setattr(_falkordb, "FalkorDB", _FakeFalkorDB)
+        rc = _run_doctor(["--db", "docker://:@127.0.0.1:59997/tenant-alpha"])
+        out = capsys.readouterr().out
+
+        assert rc == 1  # health check still fails against the dead port
+        probe = next(line for line in out.splitlines() if "Graph: FalkorDB" in line)
+        assert "tenant-alpha" in probe  # probe reports the URI path's graph
+        # Every select_graph — probe AND Step 3's from_uri projection — used
+        # the URI path's graph; none created a stray "tortoise" graph.
+        assert set(selected) == {"tenant-alpha"}
+        assert "tortoise" not in selected
+
     def test_doctor_embedded_target_skips_docker_probe(self, clear_db_env, tmp_path, capsys):
         """#720 conf 78: embedded target → probe reports embedded mode
         instead of attempting a fake localhost:16379 connection."""

@@ -1711,28 +1711,43 @@ def _cmd_doctor(args):
 
     # 2. Docker / FalkorDB — probe the RESOLVED target, never a hardcoded
     # localhost (#720 conf 78): URI targets get a live connect probe at
-    # their OWN host/port (host/port/password/ssl parsed from the URI — the
-    # same parse from_uri uses, so the probe and the health check can never
-    # disagree); embedded targets have no Docker server to probe.
+    # their OWN host/port, user/pass, ssl, AND graph name — all parsed from
+    # the URI with the same derivation from_uri uses (Step 3), so the probe
+    # and the health check can never disagree; embedded targets have no
+    # Docker server to probe.
     if target is not None and is_db_uri(target):
         from urllib.parse import urlparse
         parsed = urlparse(target)
         probe_host = parsed.hostname or "localhost"
-        probe_port = parsed.port or 16379
         probe_user = parsed.username or None
         probe_pass = parsed.password or None
+        # Same graph derivation from_uri uses (parsed.path.lstrip('/') or
+        # "tortoise") — probe the URI path's graph, never a hardcoded
+        # "tortoise" (#720 P2 conf 62): a non-default graph name must be
+        # probed, and a remote server must not get a stray "tortoise" graph
+        # created by the probe.
+        graph_name = parsed.path.lstrip("/") or "tortoise"
+        probe_port = None
         try:
+            # parsed.port raises ValueError on a non-numeric port — keep it
+            # inside the guard so `doctor --db docker://host:notaport/...`
+            # surfaces as a clean ❌ + rc 1, never a traceback (#720 P2 conf 75).
+            probe_port = parsed.port or 16379
             from falkordb import FalkorDB
             dbc = FalkorDB(host=probe_host, port=probe_port,
                            username=probe_user, password=probe_pass,
                            ssl=(parsed.scheme == "rediss"),
                            socket_connect_timeout=5, socket_timeout=10)
-            dbc.select_graph("tortoise").query("RETURN 1")
-            results.append(("Graph: FalkorDB", "✅", f"connected at {probe_host}:{probe_port}"))
+            dbc.select_graph(graph_name).query("RETURN 1")
+            results.append(("Graph: FalkorDB", "✅", f"connected at {probe_host}:{probe_port} (graph {graph_name})"))
         except ImportError:
             results.append(("Graph: FalkorDB", "⚠️", "falkordb package not installed"))
         except Exception as e:
-            results.append(("Graph: FalkorDB", "❌", f"{probe_host}:{probe_port} — {str(e)[:60]}"))
+            if probe_port is None:
+                # Non-numeric port — probe never reached the client.
+                results.append(("Graph: FalkorDB", "❌", f"bad port in URI '{target}': {str(e)[:60]}"))
+            else:
+                results.append(("Graph: FalkorDB", "❌", f"{probe_host}:{probe_port} (graph {graph_name}) — {str(e)[:60]}"))
     elif target is not None:
         # Embedded mode (resolved to a file path) — no Docker server to
         # probe. ⚠️ (not ❌) keeps embedded setups healthy; the graph-health
