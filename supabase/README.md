@@ -93,7 +93,9 @@ supabase functions deploy waitlist-subscribe \
 2. First `supabase db push`: confirm the project's `supabase_migrations`
    history covers 0001-0004 (`supabase migration list`); if not, baseline
    with `supabase migration repair --status reverted 0001..0004` first so
-   the chain cannot abort mid-replay on a pre-existing project.
+   the chain cannot abort mid-replay. Also confirm any pre-existing
+   `waitlist_subscribers` table has an `id` column (migration 0005 dedupes
+   on it before adding the UNIQUE constraint).
 3. Submit a test email from the live landing page -> success state shown.
 4. Verify the row in Supabase Studio (`waitlist_subscribers`).
 5. Verify the confirmation email arrives within 30s (Resend dashboard log).

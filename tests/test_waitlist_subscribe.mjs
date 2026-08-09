@@ -128,7 +128,8 @@ stubFetch(() => { throw new Error("should not be called"); });
 {
   const res = await handle(post({ email: "bot@example.com", hp: "filled-by-bot" }), ENV);
   assert(res.status === 200 && (await res.json()).ok === true, "honeypot → silent 200");
-  assert(calls.length === 0, "honeypot → zero outbound calls");
+  const resObj = await handle(post({ email: "bot2@example.com", hp: {} }), ENV);
+  assert(resObj.status === 200 && calls.length === 0, "non-string honeypot → silent 200, zero calls");
 }
 
 // ── 5. Rate limit: 11th request from same IP → 429 with Retry-After ───────

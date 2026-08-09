@@ -222,8 +222,11 @@ export async function handle(req: Request, env: Env): Promise<Response> {
     return json({ error: "Invalid email address" }, 400, corsOrigin);
   }
 
-  // Honeypot — filled by bots; silent success, nothing stored, no email
-  const hp = typeof body.hp === "string" ? body.hp.trim() : "";
+  // Honeypot — filled by bots; silent success, nothing stored, no email.
+  // Non-string hp values are also bots (a JSON-literate bot can send any type).
+  const hp = typeof body.hp === "string"
+    ? body.hp.trim()
+    : (body.hp === undefined ? "" : "BOT");
   if (hp !== "") {
     return json({ ok: true }, 200, corsOrigin);
   }
