@@ -65,8 +65,8 @@ function App() {
   const [graphs, setGraphs] = React.useState([])
   const [currentTeamId, setCurrentTeamId] = React.useState(null)
   const [currentGraphId, setCurrentGraphId] = React.useState(null)
-  const [showCreateTeam, setShowCreateTeam] = React.useState(false)
-  const [newTeamName, setNewTeamName] = React.useState('')
+
+
   const [members, setMembers] = React.useState(null) // null = not loaded / no access
   const [inviteEmail, setInviteEmail] = React.useState('')
   const [inviteRole, setInviteRole] = React.useState('member')
@@ -352,7 +352,7 @@ function App() {
     setInviteEmail('')                  // Round-9: no half-typed invite from the previous user
     setInviteRole('member')
     setNewGraphName('')
-    setNewTeamName('')
+
     // Round-7: onAuthStateChange returns {data:{subscription}} with .unsubscribe() —
     // client.auth.removeChannel doesn't exist on GoTrueClient (was a silent no-op).
     if (authSubRef.current) { authSubRef.current.unsubscribe?.(); authSubRef.current = null }
@@ -361,6 +361,9 @@ function App() {
   }
 
   async function loadAll(key) {
+    const _teamAtCall = teamIdRef.current // Round-10: staleness guard — a rapid
+                                          // A→B→C switch must not land B's data
+                                          // under team C's header
     // P2 (code-review): /v1/team/keys + /v1/sessions resolve the team from the
     // API key — fetch them with the SELECTED team's key so the overview cards
     // track the team switcher, not the bootstrap team.
@@ -432,7 +435,24 @@ function App() {
       setApiKey(key)
       setAuthMode('session') // Round-9: a session-minted key IS session auth — no more
                              // 'sign in required' notices beside live session data
-      await refreshTeam(key)
+      try {
+        await refreshTeam(key)
+      } catch (e) {
+        // Round-10: a cached ephemeral key may have expired (24h) or been
+        // revoked — drop it and re-mint once before falling back to revert.
+        if (teamIdRef.current === teamId && String(e.message || '').includes('401')) {
+          delete teamKeysRef.current[teamId]
+          const minted = await mintSessionKey('bootstrap', teamId)
+          key = minted.key
+          teamKeysRef.current[teamId] = key
+          if (teamIdRef.current !== teamId) return
+          localStorage.setItem(KEY_STORAGE, key)
+          setApiKey(key)
+          await refreshTeam(key)
+        } else {
+          throw e
+        }
+      }
       if (teamIdRef.current !== teamId) return
       await Promise.all([loadAll(key), loadBackups(key)])
       // members + graphs load via the currentTeamId effect (JWT team-scoped;
@@ -457,31 +477,6 @@ function App() {
     }
   }
 
-  async function createTeamFromUI() {
-    if (!newTeamName.trim()) return
-    setBusy(true)
-    setError('')
-    try {
-      const tok = sessionTokenRef.current
-      if (!tok) throw new Error('No session')
-      const res = await fetch(`${API_BASE}/v1/teams`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tok}` },
-        body: JSON.stringify({ name: newTeamName.trim() }),
-      })
-      if (!res.ok) {
-        const b = await res.json().catch(() => ({}))
-        throw new Error(b.detail || `HTTP ${res.status}`)
-      }
-      setNewTeamName('')
-      setShowCreateTeam(false)
-      await loadTeams()
-    } catch (e) {
-      setError(e.message)
-    } finally {
-      setBusy(false)
-    }
-  }
 
   // ── #300: graphs + members + backups (session JWT authed) ──
   function myRole() {
@@ -634,10 +629,12 @@ function App() {
   }
 
   async function loadBackups(key) {
+    const _teamAtCall = teamIdRef.current // Round-10: staleness guard
     // P2 (code-review): /backups is scoped to the API-key's team — fetch with
     // the selected team's key so the Overview Backups card tracks the switcher.
     try {
       const b = await api('/backups', key ? { headers: { Authorization: `Bearer ${key}` } } : {})
+      if (teamIdRef.current !== _teamAtCall) return // stale switch response
       const list = b.backups || []
       setBackupInfo(list.length ? { latest: list[0], count: list.length } : { count: 0 })
     } catch { /* tier-gated (Pro) — leave null */ }
@@ -759,6 +756,7 @@ function App() {
       // working (the old bootstrap key may have just been rotated/revoked).
       localStorage.setItem(KEY_STORAGE, data.key)
       setApiKey(data.key)
+      setAuthMode('session') // Round-10: a recovery-minted key IS session auth — keep tabs consistent
       await Promise.all([loadAll(data.key), refreshTeam(data.key)]).catch(() => {})
     } catch (e) {
       setError(e.message)
