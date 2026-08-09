@@ -715,7 +715,8 @@ async def get_current_team(request: Request) -> dict:
         # max_teams removed: multi-team is a USER capability, not a tier field
         # (per-team billing; tier limits come from pricing.json)
         return {"team_id": team_id, "key_id": key_id, "tier": tier or "free",
-                "max_users": mu if mu is not None else (lim["max_users_per_team"] or 1),
+                # max_users: preserve None from pricing (Team tier = unlimited)
+                "max_users": mu if mu is not None else lim["max_users_per_team"],
                 "max_graphs": mg if mg is not None else lim["max_graphs_per_team"],
                 "max_points": int(mp) if mp is not None else DEFAULT_MAX_POINTS,
                 "max_api_keys": int(mak) if mak is not None else DEFAULT_MAX_API_KEYS,
@@ -729,7 +730,7 @@ async def get_current_team(request: Request) -> dict:
 def _check_team_limit(team: dict, resource: str) -> None:
     """Enforce per-team limits. Raises 402 (payment required) when at capacity.
 
-    resource: 'points' | 'api_keys' | 'sessions'
+    resource: 'points' | 'api_keys' | 'sessions' | 'users' | 'graphs'
 
     Fail-closed decision (#686)
     ~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -745,8 +746,9 @@ def _check_team_limit(team: dict, resource: str) -> None:
       level with team_id and resource, visible in production dashboards.
 
     #329: delegates to the shared fail-closed quota helper.
-    #686: explicit decision documentation + ERROR-level alerting on failures.
-    """
+    #683: the limits dict is the authenticated team dict (resolved once by
+    get_current_team), matching MCP semantics — includes max_users/max_graphs.
+    #686: explicit decision documentation + ERROR-level alerting on failures.    """
     team_id = team.get("team_id")
     if not team_id:
         return  # internal/no-team context — skip
@@ -1185,7 +1187,7 @@ async def register_user(request: Request, response: Response):
             CREATE (t:Team {
                 id: $id, name: $name, email: $email, tier: 'free',
                 created_at: $now, backup_enabled: false,
-                max_users: 1, max_teams: 1, max_graphs: 1,
+                max_users: 1, max_graphs: 1,
                 onboarding_state: $onboarding_state
             })
             """,
@@ -1857,6 +1859,36 @@ async def _team_node(team_id: str) -> dict | None:
     return rows[0][0]
 
 
+def _team_limits_from_node(team_node: dict) -> dict:
+    """Convert raw Team node properties → limits dict for _check_team_limit.
+
+    Used by endpoints that fetch the Team node directly (create_graph,
+    invite_to_team) rather than via get_current_team. Falls back to
+    tier_limits from pricing.json when a stored value is None/missing.
+    """
+    from tortoise.pricing import tier_limits
+    from tortoise.quota import DEFAULT_MAX_API_KEYS, DEFAULT_MAX_POINTS, DEFAULT_MAX_SESSIONS
+    tier = team_node.get("tier", "free")
+    lim = tier_limits(tier)
+    # Fetch each field; use `is None` to preserve None (unlimited) and explicit 0.
+    mu = team_node.get("max_users")
+    mg = team_node.get("max_graphs")
+    mp = team_node.get("max_points")
+    mak = team_node.get("max_api_keys")
+    ms = team_node.get("max_sessions")
+    return {
+        "team_id": team_node["id"],
+        "tier": tier,
+        # max_users/max_graphs: preserve None (unlimited, Team tier) and
+        # fall back to tier_limits when missing (also None for Team tier).
+        "max_users": mu if mu is not None else lim["max_users_per_team"],
+        "max_graphs": mg if mg is not None else lim["max_graphs_per_team"],
+        "max_points": mp if mp is not None else DEFAULT_MAX_POINTS,
+        "max_api_keys": mak if mak is not None else DEFAULT_MAX_API_KEYS,
+        "max_sessions": ms if ms is not None else DEFAULT_MAX_SESSIONS,
+    }
+
+
 @app.get("/v1/teams")
 async def list_my_teams(user: dict = Depends(get_current_user)):
     """E6 — list my memberships (team switcher). Placeholder rows excluded."""
@@ -1942,14 +1974,10 @@ async def create_graph(body: dict, user: dict = Depends(get_current_user)):
     team = await _team_node(team_id)
     if team is None:
         raise HTTPException(status_code=404, detail="Unknown team")
-    from tortoise.pricing import tier_limits
-    lim = tier_limits(team.get("tier", "free"))
-    max_graphs = lim["max_graphs_per_team"]
-    if max_graphs is not None:
-        sdk = _make_sdk(namespace="registry")
-        count = sdk.graph_count(team_id)
-        if count >= max_graphs:
-            raise HTTPException(status_code=402, detail="Graph limit reached — upgrade to add more graphs")
+
+    # #683: centralized graph-limit enforcement via fail-closed quota
+    limits = _team_limits_from_node(team)
+    _check_team_limit(limits, "graphs")
 
     sdk = _make_sdk(namespace="registry")
     g = sdk._graph_create(team_id, name, kind="custom")
@@ -2006,25 +2034,20 @@ async def invite_to_team(body: dict, user: dict = Depends(get_current_user)):
 
     sdk = _make_sdk(namespace="registry")
     reg = sdk._get_registry()
-    team = reg.query(
-        "MATCH (t:Team {id:$id}) RETURN t.tier, t.max_users",
+    team_row = reg.query(
+        "MATCH (t:Team {id:$id}) RETURN properties(t)",
         params={"id": team_id},
     ).result_set
-    tier = team[0][0] if team else "free"
+    if not team_row:
+        raise HTTPException(status_code=404, detail="Unknown team")
+    team_node = team_row[0][0]
+    tier = team_node.get("tier", "free")
     if tier != "team":
         raise HTTPException(status_code=402, detail="Invites require the Team tier")
 
-    # max_users gate (tier-driven; Team = unlimited)
-    from tortoise.pricing import tier_limits
-    lim = tier_limits(tier)
-    max_users = lim["max_users_per_team"]
-    if max_users is not None:
-        count = reg.query(
-            "MATCH (m:Membership {team_id:$tid, status:'active'}) RETURN count(m)",
-            params={"tid": team_id},
-        ).result_set[0][0]
-        if count >= max_users:
-            raise HTTPException(status_code=402, detail="Team at user limit — upgrade to invite more")
+    # #683: max_users gate via centralized fail-closed quota (Team tier = unlimited)
+    limits = _team_limits_from_node(team_node)
+    _check_team_limit(limits, "users")
 
     # Invitation node via SDK (token returned once); roles admin/member allowed here
     import uuid as _uuid

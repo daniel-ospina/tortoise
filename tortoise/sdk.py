@@ -3586,7 +3586,7 @@ class TortoiseSDK:
         from .exceptions import ControlPlaneError
         allowed = {
             "name", "tier", "stripe_customer_id", "subscription_id",
-            "backup_enabled", "max_users", "max_teams", "max_graphs",
+            "backup_enabled", "max_users", "max_graphs",
             # #329 relief path: quota limits settable via the control plane so
             # a team at cap can be upgraded (no REST surface exists yet — the
             # fields are SDK/registry-level; get_current_team honors them).
