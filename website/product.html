@@ -18,7 +18,7 @@
     :root {
       --bg: #060b14;
       --text: #cbd5e1;
-      --text-dim: #64748b;
+      --text-dim: #94a3b8;
       --accent: #06b6d4;
       --accent-glow: rgba(6, 182, 212, 0.35);
       --green: #4ade80;
@@ -82,7 +82,7 @@
     .features { display: flex; flex-direction: column; gap: 0.55rem; margin-bottom: 1.25rem; }
     .feature { display: flex; align-items: center; gap: 0.5rem; font-size: 0.8rem; color: var(--text); }
     .feature svg { width: 0.9rem; height: 0.9rem; flex-shrink: 0; }
-    .feature .x { color: #f87171; opacity: 0.7; margin-right: 0.25rem; }
+    .feature .x { color: #f87171; margin-right: 0.25rem; }
     .feature .muted { color: var(--text-dim); opacity: 0.7; }
     .pricing-card .btn { display: block; text-align: center; background: var(--accent); color: #04121a; padding: 0.6rem 1rem; border-radius: 0.5rem; text-decoration: none; font-weight: 600; font-size: 0.85rem; transition: background 0.2s; }
     .pricing-card .btn:hover { background: var(--accent-hover, #0891b2); }
@@ -321,11 +321,11 @@
       <p class="pricing-sub">Start free. Scale when your agents do — you pay for usage, not seats.</p>
 
       <div class="pricing-toggle">
-        <button id="btn-monthly" class="active" onclick="setBilling('monthly')">Monthly</button>
-        <button id="btn-annual" onclick="setBilling('annual')"><span>Annual</span> <span class="badge" id="annual-badge">-20%</span></button>
+        <button id="btn-monthly" class="active" aria-pressed="true" onclick="setBilling('monthly')">Monthly</button>
+        <button id="btn-annual" aria-pressed="false" onclick="setBilling('annual')"><span>Annual</span> <span class="badge" id="annual-badge">-20%</span></button>
       </div>
 
-      <div class="pricing-grid" id="pricing-grid"><!-- cards rendered by pricing.js --></div>
+      <div class="pricing-grid" id="pricing-grid" aria-live="polite"><!-- cards rendered by pricing.js --></div>
 
       <p class="pricing-usage" id="pricing-usage-line"></p>
 
@@ -338,7 +338,7 @@
       <p class="cta-subtle">Hosted free tier — 10,000 write ops free. No credit card.</p>
       <div class="cta-links">
         <a class="selfhost-link" href="/docs">Docs</a>
-        <a class="selfhost-link" href="https://github.com/daniel-ospina/tortoise" target="_blank" rel="noopener">Self-hosting docs →</a>
+        <a class="selfhost-link" href="/self-hosted">Self-hosting docs →</a>
         <a class="selfhost-link" href="https://app.premiselabs.co">Login →</a>
         <a class="twitter-link" href="https://x.com/premiselabs" target="_blank" rel="noopener">@premiselabs</a>
       </div>
@@ -653,6 +653,8 @@
       currentBilling = mode;
       document.getElementById('btn-monthly').classList.toggle('active', mode === 'monthly');
       document.getElementById('btn-annual').classList.toggle('active', mode === 'annual');
+      document.getElementById('btn-monthly').setAttribute('aria-pressed', String(mode === 'monthly'));
+      document.getElementById('btn-annual').setAttribute('aria-pressed', String(mode === 'annual'));
       renderPricing();
     }
 
