@@ -826,9 +826,13 @@ def test_docs_html_contact_is_mailto(page: Page) -> None:
     REVERSED). The served /docs.html MUST contain mailto:hello@premiselabs.co
     in the raw document (docs.html is also in the crawl + mobile-render sets)."""
     raw = page.request.get(BASE_URL + "/docs.html", timeout=15_000).text()
-    assert "mailto:hello@premiselabs.co" in raw, \
-        "/docs.html must carry the mailto:hello@premiselabs.co contact " \
-        "(mailbox live 2026-08-08 — P3-5 criterion superseded)"
+    # Cloudflare Email Address Obfuscation rewrites mailto: on proxied custom
+    # domains (data-cfemail + email-decode script). Accept the plain form
+    # (pages.dev) or the obfuscated form (custom domains).
+    assert ("mailto:hello@premiselabs.co" in raw) or (
+        "data-cfemail" in raw and "email-decode.min.js" in raw
+    ), "/docs.html must carry the hello@premiselabs.co contact " \
+        "(plain mailto or Cloudflare-obfuscated form)"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
