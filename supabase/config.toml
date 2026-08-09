@@ -426,7 +426,11 @@ s3_secret_key = "env(S3_SECRET_KEY)"
 # ── Edge Functions ────────────────────────────────────────────────
 # tenant-provision is invoked by the after_user_created auth hook.
 # Auth hooks call WITHOUT a user JWT → verify_jwt must be false
-# (Supabase Auth signs the hook request itself).
+# (Supabase Auth signs the hook request itself with the hook secret).
+# Caller auth is enforced INSIDE the function (#802): it verifies the
+# Standard-Webhooks signature against AUTH_HOOK_SECRET (hook calls) or a
+# user JWT whose identity matches the provisioning target (direct calls).
+# The public anon key alone returns 401.
 [functions.tenant-provision]
 verify_jwt = false
 
