@@ -26,6 +26,7 @@ from contextlib import asynccontextmanager
 from tortoise.audit_events import AuditLogger
 from tortoise.auth import hash_api_key
 from tortoise.session_auth import get_current_user
+from tortoise.quota import DEFAULT_MAX_SESSIONS  # used by get_current_team (#754 P0: missing import → 500 on every agent_signup auth)
 from tortoise.analytics import (  # #528 server analytics (fail-safe, no-op without key)
     api_key_created,
     first_api_call,
@@ -34,7 +35,6 @@ from tortoise.analytics import (  # #528 server analytics (fail-safe, no-op with
 )  # E1–E8 session endpoints (D1)
 import hmac
 
-from tortoise.log import EventLog
 from tortoise.sdk import TortoiseSDK, _content_hash
 from tortoise.mcp_server import create_http_app
 from tortoise.hosted_backup import (
@@ -89,6 +89,27 @@ mcp_http_app = create_http_app(
     allowed_hosts=_MCP_ALLOWED_HOSTS,
     rate_limit=100,
 )
+
+
+def _iter_registered_teams() -> list[dict]:
+    """List registered teams from the control_plane registry (best-effort).
+
+    Used by the event-retention sweep (#432 Task 7) and boot reconcile.
+    Returns [] on any failure — the sweep is best-effort.
+    """
+    try:
+        from tortoise.sdk import TortoiseSDK
+
+        sdk = TortoiseSDK()
+        rows = sdk._get_registry().query(
+            "MATCH (t:Team) RETURN t.id, t.name"
+        ).result_set
+        # P2 (Qwen): skip rows with falsy team_id — namespace=None would sweep
+        # the default/shared graph.
+        return [{"team_id": r[0], "name": r[1] if len(r) > 1 else None}
+                for r in rows if r and r[0]]
+    except Exception:  # noqa: BLE001
+        return []
 
 
 @asynccontextmanager
@@ -169,6 +190,44 @@ async def _lifespan(app):
                 _boot_gc_drill_graphs(reg_sdk._get_proj().db)
         except Exception as exc:  # noqa: BLE001 — never crash the app
             _logger.warning("backup watcher could not start: %s", exc)
+        # #432 Task 7: event retention — boot purge + interval task. Best-effort
+        # and non-fatal (like the pre-warm): a purge failure never blocks bind.
+        # Per-team graphs get purged by the SDK lazy hook too (embedded/stdio);
+        # here we sweep once at boot and then on an asyncio interval.
+        try:
+            import asyncio
+            import os
+
+            def _sweep_events() -> None:
+                try:
+                    from tortoise.event_store import purge_expired, purge_overflow
+                    from tortoise.registry import registry_sdk  # noqa: F401  (not used; teams via loop below)
+                    days = int(os.environ.get("TORTOISE_EVENT_RETENTION_DAYS", "30"))
+                    cap = int(os.environ.get("TORTOISE_EVENT_MAX_PER_TEAM", "500000"))
+                    # Sweep every registered team's graph (registry Team nodes).
+                    for team in _iter_registered_teams():
+                        try:
+                            sdk = _make_sdk(namespace=team["team_id"])
+                            proj = sdk._get_proj()
+                            purge_expired(proj, retention_days=days)
+                            purge_overflow(proj, max_events=cap)
+                        except Exception:  # noqa: BLE001
+                            _logger.debug("event retention sweep skipped for %s", team.get("team_id"))
+                except Exception as exc:  # noqa: BLE001
+                    _logger.warning("event retention sweep failed: %s", exc)
+
+            _sweep_events()  # boot sweep
+            interval = int(os.environ.get("TORTOISE_EVENT_RETENTION_INTERVAL", "3600"))
+
+            async def _event_retention_loop() -> None:
+                while True:
+                    await asyncio.sleep(interval)
+                    _sweep_events()
+
+            _retention_task = asyncio.get_event_loop().create_task(_event_retention_loop())
+            app.state._event_retention_task = _retention_task
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("event retention loop not started: %s", exc)
         yield
 
 
@@ -387,54 +446,6 @@ async def _async_audit(
 
 
 # ── Per-team Event Log (tenant replay surface, #692) ────────────
-
-
-def _team_events_dir() -> Path:
-    """Base directory for per-team event logs.
-
-    Defaults to ``/data/events``. Override with ``TORTOISE_EVENTS_DIR``.
-    """
-    from pathlib import Path
-    env = os.environ.get("TORTOISE_EVENTS_DIR", "/data/events")
-    return Path(env)
-
-
-def _event_log_for(team_id: str) -> EventLog:
-    """Return the :class:`EventLog` for *team_id*.
-
-    The log lives at ``<events_dir>/<team_id>/events.jsonl``.
-    Directories are created automatically on first append.
-    """
-    return EventLog(_team_events_dir() / team_id / "events.jsonl")
-
-
-def _log_team_event(team_id: str, event_type: str, **payload) -> dict | None:
-    """Append a structured event to the team's event log.
-
-    Every event carries a timestamp, event type, team_id, and an
-    auto-generated event_id.  Returns the event dict that was written,
-    or ``None`` if the write failed (best-effort — never crashes the
-    parent mutation).
-    """
-    from tortoise.ids import now_iso, ulid
-    event = {
-        "event_id": ulid(),
-        "ts": now_iso(),
-        "type": event_type,
-        "team_id": team_id,
-        **payload,
-    }
-    try:
-        _event_log_for(team_id).append(event)
-        return event
-    except OSError:
-        # Best-effort — disk full, events dir not writable, etc.
-        # Never let event-logging failures break the mutation response.
-        _logger.warning(
-            "event log write failed for team %s (type=%s)",
-            team_id, event_type, exc_info=True,
-        )
-        return None
 
 
 def _check_internal(request: Request) -> None:
@@ -805,7 +816,9 @@ def _check_team_limit(team: dict, resource: str) -> None:
     except QuotaExceededError as e:
         raise HTTPException(status_code=402, detail=str(e))
     except QuotaCheckError as e:
-        _logger.error(
+        # quota._count_resource already logged at ERROR level (#686);
+        # avoid double-logging — this site only records the HTTP context.
+        _logger.debug(
             "quota check failed (fail-closed): team=%s resource=%s error=%s",
             team_id, resource, str(e),
         )
@@ -1020,14 +1033,6 @@ async def create_point(body: CreatePointRequest, request: Request, team: dict = 
     # Metering (#681): best-effort write-op count for overage billing.
     _record_write_op(team)
 
-    # Per-team event log for tenant replay (#692)
-    _log_team_event(
-        team["team_id"], "point_created",
-        point_id=result.get("id"),
-        kind=body.kind,
-        content_preview=body.content[:200],
-        tags=body.tags,
-    )
 
     return {
         "id": result["id"],
@@ -1036,6 +1041,37 @@ async def create_point(body: CreatePointRequest, request: Request, team: dict = 
         "created_at": result.get("createdAt", result.get("created_at", "")),
     }
 
+
+@app.get("/v1/events")
+async def events_poll(
+    after: str | None = None,
+    types: str | None = None,
+    limit: int = Query(100, ge=1, le=1000),
+    team: dict = Depends(get_current_team),
+):
+    """Poll graph/claim events after an opaque cursor (at-least-once contract).
+
+    Clients must be idempotent on replay. Expired cursor → 410 (replay from
+    tail); malformed cursor → 400. Team scoping comes from auth + the SDK
+    namespace — never client input.
+    """
+    sdk = _make_sdk(namespace=team["team_id"])
+    type_list = [t.strip() for t in (types or "").split(",") if t.strip()]
+    try:
+        result = sdk.events_poll(after=after, types=type_list or None, limit=limit)
+    except ValueError as e:
+        msg = str(e)
+        if "cursor expired" in msg:
+            raise HTTPException(
+                status_code=410,
+                detail="cursor expired — replay from tail (after= omitted)",
+            )
+        if "invalid cursor" in msg:
+            raise HTTPException(status_code=400, detail="invalid cursor")
+        if "unknown event type" in msg:
+            raise HTTPException(status_code=400, detail=msg)
+        raise HTTPException(status_code=400, detail=str(e))
+    return result
 
 @app.get("/v1/points")
 async def list_points(
@@ -1053,6 +1089,11 @@ async def list_points(
     sdk = _make_sdk(namespace=team["team_id"])
     proj = sdk._get_proj()
     conditions = ["(n.is_operator IS NULL OR n.is_operator = false)"]
+    # #432 Task 2: retracted points (status='retracted') are EXCLUDED from the
+    # default listing surface — tombstone contract: retrievable by id via
+    # GET /v1/points/{id}, not by list. No include param on REST v1 (surface
+    # minimal).
+    conditions.append("(n.status IS NULL OR n.status <> 'retracted')")
     params: dict = {"limit": limit}
     if kind:
         conditions.append("n.pointKind = $kind")
@@ -1177,6 +1218,41 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), team: dict = Depe
             props["kind"] = "statement"
         out.append(props)
     return {"results": out, "count": len(out)}
+
+
+@app.get("/v1/topics/{topic}/summary")
+async def topic_summary(
+    topic: str,
+    max_seeds: int = Query(50, ge=1, le=200),
+    max_hops: int = Query(1, ge=0, le=3),
+    include_relationships: bool = Query(True),
+    team: dict = Depends(get_current_team),
+):
+    """Epistemic topic summarization — settled vs contested structure (#592).
+
+    GET /v1/topics/{topic}/summary
+
+    Returns the epistemic structure for a topic: significant/settled claims,
+    contested claims, disputed NAND pairs, and argument topology.
+
+    Classification uses EP posterior variance (persisted ep_alpha/ep_beta):
+    - significant: confidence_mean >= 0.7 AND variance < 0.01
+    - contested: variance > 0.04 (destabilized posterior)
+    - disputed pairs: NAND-connected where both have variance > 0.02
+    """
+    sdk = _make_sdk(namespace=team["team_id"])
+    try:
+        result = sdk.topic_summarize(
+            topic,
+            max_seeds=max_seeds,
+            max_hops=max_hops,
+            include_relationships=include_relationships,
+        )
+        return result
+    except Exception:
+        import logging
+        logging.getLogger("tortoise.api").exception("topic summary failed")
+        raise HTTPException(status_code=500, detail="Topic summary failed")
 
 
 @app.get("/v1/team", response_model=TeamInfoResponse)
@@ -1895,13 +1971,98 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
 
 @app.get("/v1/sessions")
 async def list_sessions(team: dict = Depends(get_current_team)):
-    """List captured sessions."""
+    """List captured sessions with turn and extracted point counts (#714)."""
     sdk = _make_sdk(namespace=team["team_id"])
     proj = sdk._get_proj()
     rows = proj.g.query(
-        "MATCH (s:Session) RETURN s.id, s.created_at, s.turn_count ORDER BY s.created_at DESC LIMIT 50"
+        "MATCH (s:Session) "
+        "OPTIONAL MATCH (s)-[:CONTAINS]->(p:Point) "
+        "WHERE p.pointKind IN ['decision', 'statement'] "
+        "RETURN s.id, s.created_at, s.turn_count, count(p) "
+        "ORDER BY s.created_at DESC LIMIT 50"
     ).result_set
-    return {"sessions": [{"id": r[0], "created_at": r[1], "turns": r[2]} for r in rows]}
+    return {"sessions": [
+        {"id": r[0], "created_at": r[1], "turns": r[2], "extracted": r[3]}
+        for r in rows
+    ]}
+
+
+@app.get("/v1/sessions/{session_id}")
+async def get_session_detail(session_id: str, team: dict = Depends(get_current_team)):
+    """Get a single session with its conversation turns and extracted points (#714).
+
+    Returns turns (episodic Point nodes with pointKind='event', ordered by
+    turn index) and extracted decisions/claims (Point nodes linked via
+    CONTAINS, filtered to pointKind IN ['decision', 'statement']).
+    """
+    import re
+    sdk = _make_sdk(namespace=team["team_id"])
+    proj = sdk._get_proj()
+
+    # Session node
+    sess_rows = proj.g.query(
+        "MATCH (s:Session {id:$sid}) RETURN s.id, s.created_at, s.turn_count",
+        params={"sid": session_id},
+    ).result_set
+    if not sess_rows:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Extracted point count (decisions + claims)
+    ext_rows = proj.g.query(
+        "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
+        "WHERE p.pointKind IN ['decision', 'statement'] "
+        "RETURN count(p)",
+        params={"sid": session_id},
+    ).result_set
+    extracted_count = ext_rows[0][0] if ext_rows else 0
+
+    # Turn points (events) — ordered by turn index embedded in the id
+    turn_rows = proj.g.query(
+        "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point {pointKind:'event'}) "
+        "RETURN t.id, t.content, t.createdAt ORDER BY t.id",
+        params={"sid": session_id},
+    ).result_set
+    turns = []
+    for tr in turn_rows:
+        tid = tr[0]
+        content = tr[1] or ""
+        created_at = tr[2]
+        # Parse "[role] content" format — role is bracketed prefix
+        role_match = re.match(r'^\[([^\]]+)\]\s*', content)
+        role = role_match.group(1) if role_match else "unknown"
+        body = content[role_match.end():] if role_match else content
+        turns.append({
+            "id": tid,
+            "role": role,
+            "content": body,
+            "created_at": created_at,
+        })
+
+    # Extracted points (decisions + claims)
+    ext_points_rows = proj.g.query(
+        "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
+        "WHERE p.pointKind IN ['decision', 'statement'] "
+        "RETURN p.id, p.content, p.pointKind, p.createdAt "
+        "ORDER BY p.createdAt",
+        params={"sid": session_id},
+    ).result_set
+    extracted = []
+    for er in ext_points_rows:
+        extracted.append({
+            "id": er[0],
+            "content": er[1] or "",
+            "kind": er[2],
+            "created_at": er[3],
+        })
+
+    return {
+        "id": sess_rows[0][0],
+        "created_at": sess_rows[0][1],
+        "turns": sess_rows[0][2],
+        "extracted": extracted_count,
+        "turn_points": turns,
+        "extracted_points": extracted,
+    }
 
 
 # ── Session endpoints (E2/E5/E6/E7) — JWT-authed, JWKS-verified (D1 #568) ──
@@ -3453,92 +3614,3 @@ async def backups_drill(request: Request, body: dict):
     return {"status": "drill_ok", "target_graph": target_graph, **result}
 
 
-# ── Event Replay Surface (#692) ───────────────────────────────────
-
-
-@app.get("/v1/events")
-async def list_events(
-    request: Request,
-    cursor: str | None = None,
-    limit: int = Query(50, ge=1, le=500),
-    team: dict = Depends(get_current_team),
-):
-    """Return recent graph-change events for the authenticated team.
-
-    **Read-only** — tenants can only see their own team's events.
-    Tenant A can never read tenant B's event log: the file path is derived
-    from the authenticated ``team_id`` inside ``get_current_team``.
-
-    Pagination (reverse-chronological, most-recent-first):
-
-    * First request (no cursor): returns the most recent *limit* events.
-    * The response includes a ``cursor`` field.  Pass it back on the next
-      request to get the next page of older events.
-    * ``has_more`` is ``true`` when there are more events before the
-      returned window.
-
-    Cursor tokens are opaque base64-encoded strings.  They are valid only
-    while the underlying JSONL file is not rotated or compacted.
-    """
-    tid = team["team_id"]
-    log = _event_log_for(tid)
-
-    # Validate cursor early (before reading events) so malformed cursors
-    # always produce 400, even on empty logs.
-    if cursor is not None and cursor.strip() == "":
-        cursor = None
-    decoded_cursor: int | None = None
-    if cursor is not None:
-        try:
-            decoded_cursor = EventLog._decode_cursor(cursor)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=f"Invalid cursor: {exc}")
-
-    all_events = log.read_all()
-
-    if not all_events:
-        return {"events": [], "cursor": None, "has_more": False}
-
-    # Cursor semantics:
-    #   cursor encodes the index of the FIRST event in the previously
-    #   returned page.  On the next request, we page backwards from there.
-    #
-    # Example: 5 events at indices [0,1,2,3,4], limit=2
-    #   Page 1 (no cursor): slice [3:5] → events 3,4. cursor := encode(3).
-    #   Page 2 (cursor→3): slice [1:3] → events 1,2. cursor := encode(1).
-    #   Page 3 (cursor→1): slice [0:1] → event 0.   cursor := null.
-    if decoded_cursor is not None:
-        if decoded_cursor < 0:
-            raise HTTPException(status_code=400, detail="Invalid cursor: negative index")
-        # Clamp stale cursors that point beyond the current end (log shrank or
-        # the cursor came from a longer page) — never return a spurious
-        # empty page with has_more=True.
-        end_idx = min(decoded_cursor, len(all_events))
-        start_idx = max(0, end_idx - limit)
-    else:
-        # First page: most recent *limit* events.
-        end_idx = len(all_events)
-        start_idx = max(0, end_idx - limit)
-
-    page = all_events[start_idx:end_idx]
-    has_more = start_idx > 0
-
-    # Next cursor points to the start of this page (so the next request
-    # pages backwards from there).
-    next_cursor = EventLog._encode_cursor(start_idx) if has_more else None
-
-    # Most-recent-first for the response.
-    page.reverse()
-
-    return {
-        "events": page,
-        "cursor": next_cursor,
-        "has_more": has_more,
-    }
-
-
-# ── MCP mount (#236) ─────────────────────────────────────────────
-# Mount AFTER all route definitions. DO NOT add /mcp to the parent
-# RateLimitMiddleware.SKIP — Starlette's mount already routes /mcp
-# requests to the sub-app before parent middleware runs.
-app.mount("/mcp", mcp_http_app)

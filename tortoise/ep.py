@@ -227,6 +227,12 @@ class TortoiseEP:
         alpha_a, beta_a = self._beta_from_natural(*cav_eta_a)
         alpha_b, beta_b = self._beta_from_natural(*cav_eta_b)
 
+        # NAND uses the standard symmetric contradiction potential for the
+        # target message. DIRECTION is enforced structurally by the
+        # back-message guard below: for explicitly-'unidirectional' operators
+        # the source/attacker receives NO factor message (the Dung-style
+        # directed attack an agent opts into). Default is bidirectional
+        # (mutual contradiction) per product owner (#753).
         phi = phi_nand if op_type == "NAND" else phi_impl
         mom_a, mom_b = tilted_moments(
             alpha_a, beta_a, alpha_b, beta_b, weight, phi, self.n_quad
@@ -292,10 +298,20 @@ class TortoiseEP:
                             label: str | None = None,
                             direction: str = "bidirectional") -> None:
         # input_ids are sorted by idx (source=0, targets=1..N).
-        # For IMPL: only create source→target pairs (skip target↔target).
-        # For NAND: create all pairwise combinations (full mutual contradiction).
+        # IMPL: source→target pairs only (skip target↔target).
+        # NAND bidirectional (default): all pairwise combinations (mutual
+        # contradiction — at-most-one-true over all members).
+        # NAND unidirectional (agent-chosen directed attack): source→each-target
+        # attacks ONLY — target↔target pairwise edges would otherwise create
+        # arbitrary directed attacks between targets (review P2, #795).
         if op_type == "IMPL" and len(input_ids) >= 2:
             # Source is input_ids[0] (idx=0). Targets are input_ids[1:].
+            for j in range(1, len(input_ids)):
+                self._update_factor(op_id, op_type,
+                                    [input_ids[0], input_ids[j]], weight, label, direction)
+        elif op_type == "NAND" and direction != "bidirectional":
+            # Directed NAND: the source attacks each target; targets do not
+            # attack each other.
             for j in range(1, len(input_ids)):
                 self._update_factor(op_id, op_type,
                                     [input_ids[0], input_ids[j]], weight, label, direction)
@@ -362,39 +378,63 @@ class TortoiseEP:
 
     def _affected_factors(self, affected_claims: set[str]
                           ) -> list[tuple[str, str, list[str], float, str | None, str]]:
+        """Extract EP factors from the affected claims subgraph.
+
+        Two batch queries replace the original per-claim N+1 pattern (#400 follow-up):
+        1. Single query for all operators connected to any affected claim.
+        2. Single query for all inputs of those operators, ordered by idx.
+
+        Semantics are preserved: same affected set, same factor list, same
+        ordering guarantees (source idx=0 first for directional IMPL).
+        """
         factors: list[tuple[str, str, list[str], float, str | None, str]] = []
-        seen: set[str] = set()
-        for claim_id in affected_claims:
-            for rel in ("IMPL", "NAND"):
-                rows = self.g.query(
-                    f"MATCH (o:Point)-[r:{rel}]->(c:Point {{id:$cid}}) "
-                    "RETURN o.id, o.op_type, o.label, o.direction",
-                    params={"cid": claim_id},
-                ).result_set
-                for op_id, op_type, label, direction in rows:
-                    # Defensive: pre-migration operators without direction default to bidirectional
-                    if direction is None:
-                        direction = "bidirectional"
-                        logger.warning(
-                            "Operator %s has no direction property — defaulting to 'bidirectional'. "
-                            "Run graph-scripts/migrate_direction.py to backfill.",
-                            op_id,
-                        )
-                    if op_id not in seen:
-                        seen.add(op_id)
-                        # ORDER BY r.idx ensures source (idx=0) comes first.
-                        # This is required for directional IMPL: id_a = source,
-                        # id_b = target so that back-messages are correctly skipped.
-                        input_rows = self.g.query(
-                            "MATCH (o:Point {id:$oid})-[r:IMPL|NAND]->(c:Point) "
-                            "RETURN c.id "
-                            "ORDER BY coalesce(r.idx, 0)",
-                            params={"oid": op_id},
-                        ).result_set
-                        input_ids = [r[0] for r in input_rows]
-                        from .weights import compute_operator_weight
-                        weight = compute_operator_weight(self.proj, op_id)
-                        factors.append((op_id, op_type, input_ids, weight, label, direction))
+        if not affected_claims:
+            return factors
+
+        # Batch 1: all operators connected to any affected claim.
+        op_info: dict[str, tuple[str, str | None, str | None]] = {}
+        rows = self.g.query(
+            "MATCH (o:Point)-[r:IMPL|NAND]->(c:Point) "
+            "WHERE c.id IN $ids "
+            "RETURN DISTINCT o.id, o.op_type, o.label, o.direction",
+            params={"ids": list(affected_claims)},
+        ).result_set
+        for op_id, op_type, label, direction in rows:
+            if op_id not in op_info:
+                op_info[op_id] = (op_type, label, direction)
+
+        if not op_info:
+            return factors
+
+        # Batch 2: all inputs for all discovered operators, ordered by idx.
+        # ORDER BY r.idx ensures source (idx=0) comes first — required
+        # for directional IMPL: id_a = source, id_b = target so that
+        # back-messages are correctly skipped.
+        op_inputs: dict[str, list[str]] = {op_id: [] for op_id in op_info}
+        rows = self.g.query(
+            "MATCH (o:Point)-[r:IMPL|NAND]->(c:Point) "
+            "WHERE o.id IN $ids "
+            "RETURN o.id, c.id, coalesce(r.idx, 0) "
+            "ORDER BY coalesce(r.idx, 0)",
+            params={"ids": list(op_info.keys())},
+        ).result_set
+        for op_id, claim_id, _idx in rows:
+            op_inputs[op_id].append(claim_id)
+
+        # Assemble factors (single compute_operator_weight per operator).
+        from .weights import compute_operator_weight
+        for op_id, (op_type, label, direction) in op_info.items():
+            # Defensive: pre-migration operators without direction default to bidirectional
+            if direction is None:
+                direction = "bidirectional"
+                logger.warning(
+                    "Operator %s has no direction property — defaulting to 'bidirectional'. "
+                    "Run graph-scripts/migrate_direction.py to backfill.",
+                    op_id,
+                )
+            input_ids = op_inputs.get(op_id, [])
+            weight = compute_operator_weight(self.proj, op_id)
+            factors.append((op_id, op_type, input_ids, weight, label, direction))
         return factors
 
     # ── Calibration ──────────────────────────────────────────────

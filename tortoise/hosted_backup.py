@@ -64,6 +64,25 @@ def _get_backup_key() -> bytes:
     Fail loudly — never encrypt with a default.
     """
     raw = os.environ.get("TORTOISE_BACKUP_KEY", "")
+
+def _alternate_backup_key(key: bytes | None) -> bytes | None:
+    """Return the OTHER configured backup key (#661 key separation).
+
+    Sweep archives encrypt with REGISTRY_STREAM_KEY; user backups with
+    TORTOISE_BACKUP_KEY. Given one key, return the other so restore can try
+    both. None when no alternate is configured.
+    """
+    from .backup_config import load_config as _load_cfg
+    try:
+        cfg = _load_cfg()
+    except Exception:
+        return None
+    candidates = [cfg.backup_key, cfg.registry_stream_key]
+    if key is not None and key in candidates:
+        return candidates[0] if key == candidates[1] else candidates[1]
+    # key is None (env fallback) — try the stream key as the alternate.
+    return cfg.registry_stream_key or None
+
     if not raw:
         raise RuntimeError(
             "TORTOISE_BACKUP_KEY not set — required for hosted backups. Generate with: "
@@ -579,7 +598,16 @@ def restore_backup(
     try:
         payload = json.loads(decrypt_backup(blob, key=key))
     except ValueError as e:
-        raise ValueError(f"Cannot restore: {e}") from e
+        # #661: sweep archives encrypt with REGISTRY_STREAM_KEY, user-facing
+        # backups with TORTOISE_BACKUP_KEY — try the alternate key before
+        # failing so both restore paths accept both archive types.
+        alt = _alternate_backup_key(key)
+        if alt is None:
+            raise ValueError(f"Cannot restore: {e}") from e
+        try:
+            payload = json.loads(decrypt_backup(blob, key=alt))
+        except Exception:
+            raise ValueError(f"Cannot restore: {e}") from e
     if not isinstance(payload, dict) or payload.get("format") != DUMP_FORMAT:
         raise ValueError("Decrypted payload is not a tortoise logical dump")
     # Authenticated graph isolation (defense in depth beyond the plaintext

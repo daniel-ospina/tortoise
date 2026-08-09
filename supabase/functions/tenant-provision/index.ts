@@ -1,8 +1,29 @@
 // Tenant provisioning Edge Function
-// Triggered on auth.users INSERT via Supabase Auth webhook
-// Creates Team node in registry graph, provisions FalkorDB namespace, generates API key
+// Triggered on auth.users INSERT via the Supabase Auth `after_user_created`
+// webhook. Creates Team node in registry graph, provisions FalkorDB
+// namespace, generates API key.
+//
+// ── CALLER AUTH (#802) ─────────────────────────────────────────────────
+// The function MUST be deployed with verify_jwt=false (--no-verify-jwt):
+// Supabase Auth hooks carry NO user JWT — the platform signs the hook
+// request itself with the hook secret (Standard Webhooks / Svix signature).
+// Because of that the function verifies the caller itself, and the public
+// anon key alone is NOT sufficient to mint teams/API keys:
+//
+//   1. Auth-hook calls → raw-body Standard-Webhooks signature verified
+//      against AUTH_HOOK_SECRET (the secret configured on the
+//      after_user_created hook; format `v1,whsec_...`, generated in
+//      Dashboard → Authentication → Hooks). See Supabase docs
+//      "Auth Hooks → Send email hook" for the canonical pattern.
+//   2. Direct calls → must present a USER JWT (Authorization: Bearer)
+//      whose identity (id + email) matches the user_id/email being
+//      provisioned — a user can only provision FOR THEMSELVES.
+//
+// Anything else → 401. Missing/unverifiable signature fails CLOSED
+// (mirrors the FASTAPI_URL / TORTOISE_SECRET_PEPPER fail-closed pattern).
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { Webhook } from "https://esm.sh/standardwebhooks@1.0.0";
 
 // Supabase Auth hook payload: { metadata: {...}, user: { id, email, user_metadata, ... } }
 // Also tolerates a direct { user_id, email, display_name } payload for manual testing.
@@ -19,11 +40,89 @@ interface HookPayload {
   display_name?: string;
 }
 
+// Caller identity established by authentication (hook signature or JWT).
+interface CallerIdentity {
+  id: string;
+  email: string;
+  display_name?: string;
+}
+
 interface ProvisionResponse {
   team_id: string;
   team_name: string;
   api_key: string;
   graph_name: string;
+}
+
+// Env var holding the after_user_created hook secret (v1,whsec_...).
+// Set via: supabase secrets set --project-ref ybetwichurajbfswfeqa \
+//   AUTH_HOOK_SECRET='v1,whsec_...'   (value from Dashboard → Auth → Hooks)
+const AUTH_HOOK_SECRET_ENV = "AUTH_HOOK_SECRET";
+
+/**
+ * Authenticate the caller. Returns the verified caller identity, or null
+ * when the request cannot be authenticated (→ the handler answers 401).
+ */
+async function authenticateCaller(
+  req: Request,
+  rawBody: string
+): Promise<CallerIdentity | null> {
+  // ── Path 1: user JWT (direct callers) ────────────────────────────────
+  // Verify the token against Supabase Auth. The identity match against the
+  // provisioning target is enforced by the caller (see handler) so user A
+  // cannot mint teams/keys for user B.
+  const authz = req.headers.get("authorization") ?? "";
+  if (authz.startsWith("Bearer ")) {
+    const token = authz.slice("Bearer ".length).trim();
+    if (!token) return null;
+    const supabase = createClient(
+      Deno.env.get("SUPABASE_URL") ?? "",
+      Deno.env.get("SUPABASE_ANON_KEY") ?? "",
+      { auth: { persistSession: false, autoRefreshToken: false } }
+    );
+    const { data, error } = await supabase.auth.getUser(token);
+    if (error || !data.user?.id || !data.user.email) return null;
+    return {
+      id: data.user.id,
+      email: data.user.email,
+      display_name:
+        (data.user.user_metadata as { display_name?: string } | undefined)
+          ?.display_name,
+    };
+  }
+
+  // ── Path 2: Supabase Auth hook (after_user_created) ─────────────────
+  // GoTrue signs the raw body with the hook secret (Standard Webhooks:
+  // webhook-id / webhook-timestamp / webhook-signature headers). Fail
+  // CLOSED while the secret is unprovisioned so the function can never
+  // fall back to trusting unsigned requests.
+  const hookSecret = Deno.env.get(AUTH_HOOK_SECRET_ENV);
+  if (!hookSecret) {
+    console.error(
+      "tenant-provision: AUTH_HOOK_SECRET is not set (#802). Configure the " +
+        "after_user_created hook secret (Dashboard → Authentication → Hooks) " +
+        "and run: supabase secrets set --project-ref ybetwichurajbfswfeqa " +
+        "AUTH_HOOK_SECRET='v1,whsec_...'"
+    );
+    return null;
+  }
+  try {
+    const webhook = new Webhook(hookSecret.replace(/^v1,whsec_/, ""));
+    // Headers → plain object (webhook-signature / webhook-id / webhook-timestamp).
+    const headers: Record<string, string> = {};
+    req.headers.forEach((v, k) => { headers[k] = v; });
+    const payload = webhook.verify(rawBody, headers) as HookPayload;
+    const user = payload.user;
+    if (!user?.id || !user.email) return null;
+    return {
+      id: user.id,
+      email: user.email,
+      display_name: user.user_metadata?.display_name,
+    };
+  } catch (err) {
+    console.error("tenant-provision: hook signature verification failed:", err);
+    return null;
+  }
 }
 
 Deno.serve(async (req: Request) => {
@@ -33,21 +132,61 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
-    const body = await req.json() as HookPayload;
+    // Read the RAW body first — the hook signature covers the raw bytes,
+    // so the body must be verified before it is parsed/re-serialized.
+    const rawBody = await req.text();
 
-    // Auth hook sends user object nested under `user`; direct payloads send top-level fields.
-    const user = body.user;
-    const user_id = user?.id || body.user_id;
-    const email = user?.email || body.email;
-    const display_name =
-      user?.user_metadata?.display_name || body.display_name || undefined;
-
-    if (!user_id || !email) {
+    // Caller auth (#802): signed auth-hook request OR user JWT matching
+    // the provisioning target. The public anon key is NOT sufficient.
+    const caller = await authenticateCaller(req, rawBody);
+    if (!caller) {
       return new Response(
-        JSON.stringify({ error: "user_id and email required" }),
+        JSON.stringify({
+          error:
+            "Unauthorized: expected a signed Supabase auth-hook request or " +
+            "a user JWT matching the provisioning target",
+        }),
+        { status: 401, headers: { "Content-Type": "application/json" } }
+      );
+    }
+
+    let body: HookPayload;
+    try {
+      body = JSON.parse(rawBody) as HookPayload;
+    } catch {
+      return new Response(
+        JSON.stringify({ error: "invalid JSON body" }),
         { status: 400, headers: { "Content-Type": "application/json" } }
       );
     }
+
+    // The provisioning target must BE the authenticated caller. A signed
+    // hook payload only ever names the user GoTrue just created, and a JWT
+    // caller may only provision for themselves — user A cannot mint teams
+    // or API keys for user B (#802).
+    const targetId = (body.user?.id || body.user_id || "").toLowerCase();
+    const targetEmail = (body.user?.email || body.email || "").toLowerCase();
+    if (
+      !targetId ||
+      !targetEmail ||
+      targetId !== caller.id.toLowerCase() ||
+      targetEmail !== caller.email.toLowerCase()
+    ) {
+      return new Response(
+        JSON.stringify({
+          error:
+            "Forbidden: provisioning target does not match the " +
+            "authenticated caller",
+        }),
+        { status: 403, headers: { "Content-Type": "application/json" } }
+      );
+    }
+
+    // Identity comes from the VERIFIED caller, not the (possibly forged)
+    // body fields.
+    const user_id = caller.id;
+    const email = caller.email;
+    const display_name = caller.display_name || body.display_name || undefined;
 
     // Validate user_id is a UUID before provisioning (avoids orphaned
     // FalkorDB namespaces when called manually with a malformed payload).

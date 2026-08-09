@@ -148,6 +148,8 @@ class TestMembershipCRUD:
             sdk.membership_create(team["id"], "user-2", "admin")
 
     def test_membership_list_returns_members(self, sdk, team):
+        # free tier default max_users=1 would reject the 2nd membership —
+        # raise the limit so the listing actually has 2 members to return.
         sdk.team_update(team["id"], max_users=10)
         sdk.membership_create(team["id"], "user-1", "admin")
         sdk.membership_create(team["id"], "user-2", "owner")

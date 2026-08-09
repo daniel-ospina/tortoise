@@ -135,9 +135,10 @@ class TestFileHumanApproval:
     def test_revocation_via_supersede(self, sdk):
         """Approval decision Point can be superseded (revocation path)."""
         subj, doc, c1, c2, result = _setup_approval(sdk)
-        # Supersede the decision Point with a retraction
-        sdk.supersede_point(result["decision_point_id"],
-                            "Approval revoked: CP-001")
+        # Supersede the decision Point with a retraction (#547: new_id must be
+        # an existing Point — create the retraction point first).
+        revoke = sdk.create_point("statement", "Approval revoked: CP-001")
+        sdk.supersede_point(result["decision_point_id"], revoke["id"])
         p = sdk.get_point(result["decision_point_id"])
         assert p.get("outdated") is True or p.get("status") == "superseded" or \
             p.get("outdated") is True

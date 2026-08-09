@@ -165,7 +165,8 @@ def _cmd_reconcile(args):
     import json, sys
     from pathlib import Path
 
-    if not args.db.startswith("docker://"):
+    from tortoise.config import is_docker_uri
+    if not is_docker_uri(args.db):
         print("Error: reconcile requires docker:// URI (e.g. docker://:pass@localhost:6379)", file=sys.stderr)
         return 1
 
@@ -326,7 +327,9 @@ def _cmd_init(args):
         target = _resolve_db_target(args.path)
     except ValueError as e:
         # Bad --path (e.g. relative) — clean CLI error, not a traceback (#715).
-        print(f"  ❌ Invalid DB path: {e}")
+        # #720 P2 conf 95: mask userinfo — unsupported-scheme URIs fall into
+        # RELATIVE_PATH_ERROR with the RAW URI embedded (no-op for plain paths).
+        print(f"  ❌ Invalid DB path: {_mask_uri_userinfo(str(e))}")
         return 1
 
     graph_ready = False
@@ -1013,6 +1016,86 @@ def _uri_has_password(target: str) -> bool:
     return ":" in userinfo and userinfo.rsplit(":", 1)[1] != ""
 
 
+def _mask_uri_userinfo(target: str) -> str:
+    """Redact userinfo (user:password@) from a DB URI for display.
+
+    #720 P2 conf 78: an error line must never print a credential embedded
+    in the URI — docker://:pw@host:notaport/graph would leak ':pw@' to a
+    terminal/log. Host/port/path stay visible for debuggability (matches
+    the FALKORDB_* legacy display mask, conf 95).
+
+    #720 P2 conf 68: the userinfo→host boundary is the LAST '@' of the
+    authority region (everything before the first '?'/'#'), NOT
+    urlsplit's netloc — a password may contain '/' (docker://user:p/ss@
+    host:... is RFC-invalid but urlparse/redis-py accept it, and
+    urlsplit's netloc cuts at the first '/'), which would split
+    mid-credential and leak the tail. The '://' may also sit mid-message
+    (RELATIVE_PATH_ERROR embeds the raw URI in prose), so every
+    scheme:// pattern in the string is scanned, not just a leading one.
+    """
+    from urllib.parse import urlsplit
+
+    def _scheme_ok(scheme: str) -> bool:
+        # RFC 3986 scheme: alpha-led, alnum/+-. thereafter.
+        return (scheme[:1].isalpha()
+                and all(c.isalnum() or c in "+-." for c in scheme))
+
+    out: list[str] = []
+    i = 0
+    while True:
+        j = target.find("://", i)
+        if j < 0:
+            out.append(target[i:])
+            break
+        # Recover the scheme token by walking back from '://' over scheme
+        # characters (stops at prose when the URI is embedded in a message).
+        k = j
+        while k > i and (target[k - 1].isalnum() or target[k - 1] in "+-."):
+            k -= 1
+        scheme = target[k:j]
+        if not _scheme_ok(scheme):
+            out.append(target[i:j + 3])
+            i = j + 3
+            continue
+        if i == 0 and k == 0:
+            # Bare URI — urlsplit is the authoritative scheme parse.
+            try:
+                if not urlsplit(target).scheme:
+                    out.append(target[i:])
+                    break
+            except ValueError:
+                pass  # malformed authority (e.g. unmatched '[') — mask below
+        # The authority region runs to the earliest of: the start of the
+        # next URI's scheme token (a second URI in the same message), or a
+        # '?'/'#' delimiter (query/fragment never belong to userinfo — an
+        # '@' in a query value must not swallow the host).
+        rest_start = j + 3
+        cut = None
+        for c in ("?", "#"):
+            pos = target.find(c, rest_start)
+            if pos >= 0 and (cut is None or pos < cut):
+                cut = pos
+        nxt = target.find("://", rest_start)
+        if nxt >= 0:
+            s = nxt
+            while s > rest_start and (target[s - 1].isalnum()
+                                      or target[s - 1] in "+-."):
+                s -= 1
+            if s < nxt and (cut is None or s < cut):
+                cut = s
+        region_end = cut if cut is not None else len(target)
+        authority = target[rest_start:region_end]
+        at = authority.rfind("@")
+        if at < 0:
+            out.append(target[i:j + 3])
+            i = j + 3
+            continue
+        out.append(target[i:k])
+        out.append(f"{scheme}://:***@{authority[at + 1:]}")
+        i = region_end
+    return "".join(out)
+
+
 def _index_github_child_cmd(target: str, repo_root: str,
                             branch: str | None = None
                             ) -> tuple[list[str], dict | None]:
@@ -1112,7 +1195,8 @@ def _cmd_onboard(args) -> int:
             except ValueError as e:
                 # Bad --path (e.g. relative) — clean CLI error, no traceback
                 # (#715). init rejects it first, but guard this call site too.
-                print(f"  ❌ Invalid DB target: {e}", file=_sys.stderr)
+                # #720 P2 conf 95: mask userinfo (no-op for plain paths).
+                print(f"  ❌ Invalid DB target: {_mask_uri_userinfo(str(e))}", file=_sys.stderr)
                 return 1
             idx_args = argparse.Namespace(
                 url=repo_root, background=False, branch="main",
@@ -1133,8 +1217,26 @@ def _cmd_onboard(args) -> int:
     _cmd_demo(argparse.Namespace(cmd="demo"))
 
     # Step 5: Doctor — health check (informational, don't fail on warnings)
+    # #720 conf 80: forward the SAME resolved target onboard wrote to
+    # (--path, TORTOISE_DB_URI, FALKORDB_* or TORTOISE_DB_PATH) into doctor
+    # — previously doctor re-resolved with a bare Namespace and health-
+    # checked the DEFAULT graph, not the one onboard just initialized and
+    # indexed (single-source violation, #715). Passed as args.db for URI
+    # targets / args.path for embedded paths so doctor probes and checks
+    # exactly the graph onboard wrote to.
     banner("Health check")
-    _cmd_doctor(argparse.Namespace(cmd="doctor"))
+    try:
+        db_target = _resolve_db_target(getattr(args, 'path', None))
+    except ValueError as e:
+        # #720 P2 conf 95: mask userinfo — unsupported-scheme URIs fall into
+        # RELATIVE_PATH_ERROR with the RAW URI embedded (no-op for plain paths).
+        print(f"  ❌ Invalid DB target: {_mask_uri_userinfo(str(e))}", file=_sys.stderr)
+        return 1
+    from tortoise.config import is_db_uri
+    if is_db_uri(db_target):
+        _cmd_doctor(argparse.Namespace(cmd="doctor", db=db_target, path=None))
+    else:
+        _cmd_doctor(argparse.Namespace(cmd="doctor", db=None, path=db_target))
 
     print(f"\n{'='*50}")
     print("Onboarding complete.")
@@ -1488,7 +1590,8 @@ def _cmd_index_github(args):
         try:
             bg_target = args.db or _resolve_db_target(None)
         except ValueError as e:
-            print(f"  ❌ Invalid DB target: {e}", file=sys.stderr)
+            # #720 P2 conf 95: mask userinfo (no-op for plain paths).
+            print(f"  ❌ Invalid DB target: {_mask_uri_userinfo(str(e))}", file=sys.stderr)
             return 1
         cmd, child_env = _index_github_child_cmd(bg_target, url, branch)
         pid_file = Path(tempfile.gettempdir()) / f"tortoise-index-{Path(url).stem}.pid"
@@ -1558,7 +1661,8 @@ def _cmd_index_github(args):
     try:
         target = args.db or _resolve_db_target(None)
     except ValueError as e:
-        print(f"  ❌ Invalid DB target: {e}", file=sys.stderr)
+        # #720 P2 conf 95: mask userinfo (no-op for plain paths).
+        print(f"  ❌ Invalid DB target: {_mask_uri_userinfo(str(e))}", file=sys.stderr)
         return 1
     from tortoise.config import is_db_uri
     try:
@@ -1658,7 +1762,6 @@ def _cmd_index_github(args):
 def _cmd_doctor(args):
     """Health check — verify Tortoise setup is healthy."""
     import importlib
-    import os
     from pathlib import Path
 
     print("Tortoise Doctor — Health Check")
@@ -1673,44 +1776,113 @@ def _cmd_doctor(args):
         except ImportError:
             results.append((f"Python: {pkg}", "⚠️", f"not installed — pip install {pkg}"))
 
-    # 2. Docker / FalkorDB
-    docker_host = os.environ.get("FALKORDB_HOST", "localhost")
+    # Resolve the DB target ONCE — shared by Step 2 (Docker probe) and
+    # Step 3 (graph health) (#720 conf 78). Step 2 previously probed a
+    # hardcoded FALKORDB_*/localhost:16379 while Step 3 used the resolved
+    # target, so `doctor --db docker://<healthy-remote>` reported
+    # "FalkorDB ❌ localhost:16379" + exit 1 while "Graph: health ✅"
+    # confirmed the configured target — a self-contradictory verdict.
+    # Precedence (#705/#715, conf 88): explicit --db (URI → from_uri, plain
+    # path → embedded) > --path > TORTOISE_DB_URI > FALKORDB_* trio >
+    # TORTOISE_DB_PATH > canonical EMBEDDED default (conf 70 — no local
+    # docker://localhost default). Routes through the shared
+    # _resolve_db_target(explicit) + config.is_db_uri; attributes read via
+    # getattr so bare Namespace(cmd="doctor") callers never raise (#703).
+    from tortoise.config import is_db_uri
+    db = getattr(args, "db", None)
+    path = getattr(args, "path", None)
     try:
-        docker_port = int(os.environ.get("FALKORDB_PORT", "16379"))
-    except (ValueError, TypeError):
-        results.append(("Graph: FalkorDB", "❌", f"Invalid FALKORDB_PORT: {os.environ.get('FALKORDB_PORT')!r}"))
-        docker_port = 6379
-    try:
-        from falkordb import FalkorDB
-        docker_pass = os.environ.get("FALKORDB_PASSWORD", "")
-        db = FalkorDB(host=docker_host, port=docker_port,
-                      password=docker_pass or None)
-        db.select_graph("tortoise").query("RETURN 1")
-        results.append(("Graph: FalkorDB", "✅", f"connected at {docker_host}:{docker_port}"))
-    except ImportError:
-        results.append(("Graph: FalkorDB", "⚠️", "falkordb package not installed"))
-    except Exception as e:
-        results.append(("Graph: FalkorDB", "❌", str(e)[:60]))
+        target = db if (db and is_db_uri(db)) else _resolve_db_target(db or path)
+    except ValueError as e:
+        # #720 P2 conf 95: unsupported-scheme URIs (bolt://, mongodb://, …)
+        # fall through is_db_uri → resolve_db_path → RELATIVE_PATH_ERROR with
+        # the RAW URI embedded — mask userinfo so a credential in --db /
+        # --path / TORTOISE_DB_URI never reaches the terminal (no-op for
+        # plain paths).
+        results.append(("Graph: health", "❌", _mask_uri_userinfo(str(e))[:60]))
+        target = None
 
-    # 3. Graph health
-    try:
-        # Resolve the same target init/index/list-kinds use (env URI > legacy
-        # FALKORDB_* trio > embedded path) so the session-indexing delta
-        # below is measured against the SAME graph `tortoise index sessions`
-        # would fix (#280 P2 review).
-        from tortoise.sdk import TortoiseSDK
-        target = _resolve_db_target(getattr(args, "path", None))
-        sdk = TortoiseSDK()
-        sdk._proj = _projection_for(target)
-        status = sdk.status()
-        points = status.get("counts", {}).get("Point", 0)
-        total = status.get("total_entities", 0)
-        if points > 0:
-            results.append(("Graph: health", "✅", f"{points} Points, {total} entities"))
-        else:
-            results.append(("Graph: health", "⚠️", "0 Points — graph is empty (expected for new setups)"))
-    except Exception as e:
-        results.append(("Graph: health", "❌", str(e)[:60]))
+    # 2. Docker / FalkorDB — probe the RESOLVED target, never a hardcoded
+    # localhost (#720 conf 78): URI targets get a live connect probe at
+    # their OWN host/port, user/pass, ssl, AND graph name — all parsed from
+    # the URI with the same derivation from_uri uses (Step 3), so the probe
+    # and the health check can never disagree; embedded targets have no
+    # Docker server to probe.
+    if target is not None and is_db_uri(target):
+        from urllib.parse import urlparse
+        # urlparse raises ValueError on malformed URIs (e.g. dangling IPv6
+        # bracket `docker://:pw@[abc`) — keep ALL parsing inside the guard
+        # so it surfaces as a clean ❌ + rc 1, never a traceback (#720 P2
+        # conf 95). Sentinel: parsed stays None when urlparse itself fails.
+        parsed = None
+        probe_host = "localhost"
+        probe_user = None
+        probe_pass = None
+        graph_name = "tortoise"
+        probe_port = None
+        try:
+            parsed = urlparse(target)
+            probe_host = parsed.hostname or "localhost"
+            probe_user = parsed.username or None
+            probe_pass = parsed.password or None
+            # Same graph derivation from_uri uses (parsed.path.lstrip('/') or
+            # "tortoise") — probe the URI path's graph, never a hardcoded
+            # "tortoise" (#720 P2 conf 62): a non-default graph name must be
+            # probed, and a remote server must not get a stray "tortoise" graph
+            # created by the probe.
+            graph_name = parsed.path.lstrip("/") or "tortoise"
+            # parsed.port raises ValueError on a non-numeric port — keep it
+            # inside the guard so `doctor --db docker://host:notaport/...`
+            # surfaces as a clean ❌ + rc 1, never a traceback (#720 P2 conf 75).
+            probe_port = parsed.port or 16379
+            from falkordb import FalkorDB
+            dbc = FalkorDB(host=probe_host, port=probe_port,
+                           username=probe_user, password=probe_pass,
+                           ssl=(parsed.scheme == "rediss"),
+                           socket_connect_timeout=5, socket_timeout=10)
+            dbc.select_graph(graph_name).query("RETURN 1")
+            results.append(("Graph: FalkorDB", "✅", f"connected at {probe_host}:{probe_port} (graph {graph_name})"))
+        except ImportError:
+            results.append(("Graph: FalkorDB", "⚠️", "falkordb package not installed"))
+        except Exception as e:
+            if parsed is None:
+                # Malformed URI — urlparse never completed; mask userinfo so
+                # a credential in --db never reaches the terminal.
+                results.append(("Graph: FalkorDB", "❌", f"bad URI '{_mask_uri_userinfo(target)}': {str(e)[:60]}"))
+            elif probe_port is None:
+                # Non-numeric port — probe never reached the client.
+                results.append(("Graph: FalkorDB", "❌", f"bad port in URI '{_mask_uri_userinfo(target)}': {str(e)[:60]}"))
+            else:
+                results.append(("Graph: FalkorDB", "❌", f"{probe_host}:{probe_port} (graph {graph_name}) — {str(e)[:60]}"))
+    elif target is not None:
+        # Embedded mode (resolved to a file path) — no Docker server to
+        # probe. ⚠️ (not ❌) keeps embedded setups healthy; the graph-health
+        # check below verifies the actual DB.
+        results.append(("Graph: FalkorDB", "⚠️", f"embedded mode ({target}) — no Docker probe"))
+
+    # 3. Graph health — verify the SAME resolved target above (probe + check
+    # can never diverge, #720 conf 78). URI → from_uri projection, plain
+    # path → embedded projection via _projection_for.
+    if target is not None:
+        try:
+            from tortoise.sdk import TortoiseSDK
+            sdk = TortoiseSDK()
+            sdk._proj = _projection_for(target)
+            try:
+                status = sdk.status()
+                points = status.get("counts", {}).get("Point", 0)
+                total = status.get("total_entities", 0)
+                if points > 0:
+                    results.append(("Graph: health", "✅", f"{points} Points, {total} entities"))
+                else:
+                    results.append(("Graph: health", "⚠️", "0 Points — graph is empty (expected for new setups)"))
+            finally:
+                # conf 52: close the projection in BOTH branches — the URI
+                # branch's from_uri projection must not leak.
+                if sdk._proj:
+                    sdk._proj.close()
+        except Exception as e:
+            results.append(("Graph: health", "❌", str(e)[:60]))
 
     # 4. Session indexing health (#280 item 2): corpus .md count vs indexed
     # AgentSession Events. Reuses the SDK instance from check 3 so both
@@ -1810,7 +1982,8 @@ def _cmd_list_kinds(args) -> int:
     try:
         target = _resolve_db_target(None)
     except ValueError as e:
-        print(f"  ❌ Invalid DB target: {e}", file=_sys.stderr)
+        # #720 P2 conf 95: mask userinfo (no-op for plain paths).
+        print(f"  ❌ Invalid DB target: {_mask_uri_userinfo(str(e))}", file=_sys.stderr)
         return 1
     sdk = TortoiseSDK()
     sdk._proj = _projection_for(target)
@@ -1841,7 +2014,8 @@ def _cmd_list_sources(args) -> int:
     try:
         target = _resolve_db_target(None)
     except ValueError as e:
-        print(f"  ❌ Invalid DB target: {e}", file=_sys.stderr)
+        # #720 P2 conf 95: mask userinfo (no-op for plain paths).
+        print(f"  ❌ Invalid DB target: {_mask_uri_userinfo(str(e))}", file=_sys.stderr)
         return 1
     sdk = TortoiseSDK()
     sdk._proj = _projection_for(target)
@@ -2015,7 +2189,8 @@ def _cmd_decide(args) -> int:
         # clean CLI error, not a traceback (#715).
         sdk._proj = _projection_for(target)
     except ValueError as e:
-        print(f"  ❌ Invalid DB target: {e}", file=_sys.stderr)
+        # #720 P2 conf 95: mask userinfo (no-op for plain paths).
+        print(f"  ❌ Invalid DB target: {_mask_uri_userinfo(str(e))}", file=_sys.stderr)
         return 1
 
     # Track all operator IDs for explicit-factor mode
@@ -2140,7 +2315,370 @@ def _cmd_decide(args) -> int:
     return 0
 
 
+def _parse_bind_ip(bind: str):
+    """Parse `--bind` as an IP address, normalizing IPv4-mapped IPv6
+    (::ffff:x.x.x.x) to the embedded IPv4.
+
+    CPython only reports is_loopback=True for mapped addresses on
+    3.11.13+/3.12.7+ (gh-117566 backports); normalizing first gives every
+    supported Python the same classification — and lets `_bind_allowed_hosts`
+    seed the plain embedded IPv4 (e.g. 192.168.1.50) into the Host guard,
+    which is what clients actually send in the Host header. Returns None for
+    hostnames/non-IP values (#719).
+    """
+    import ipaddress
+
+    try:
+        ip = ipaddress.ip_address(bind)
+    except ValueError:
+        return None
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return ip
+
+
+def _bind_allowed_hosts(bind: str, extra: str | None) -> list[str]:
+    """Host values fastmcp's Host guard must accept for `serve --http --bind ...`.
+
+    fastmcp's HostOriginGuardMiddleware auto-admits loopback hosts
+    (DEFAULT_HOSTS) and appends the socket's own bind address from
+    scope["server"] — so a plain specific-IP non-loopback bind passes even
+    unseeded. Tortoise always passes an explicit allowed_hosts list, which
+    flips the guard's has_explicit_allowed_hosts flag: host validation is
+    then ALWAYS on (fail-closed), and the allowlist is DEFAULT_HOSTS +
+    these entries + scope["server"]. Seeding is therefore load-bearing
+    exactly where the Host header a client sends differs from
+    scope["server"]: any-interface wildcards (0.0.0.0/:: — scope["server"]
+    is unspecified and NOT auto-appended, so clients' hostname/LAN-address
+    Host headers would 421), hostname binds (Host carries the DNS name,
+    scope carries the resolved IP), IPv4-mapped binds (scope carries the
+    ::ffff: form, clients send the plain IPv4), and any extra
+    --allowed-hosts names (#719). Returns those seeded values plus the
+    machine's own hostname/LAN addresses for wildcard binds.
+    """
+    import ipaddress
+    import socket
+
+    hosts: list[str] = []
+    seen: set[str] = set()
+
+    def _add(h: str) -> None:
+        h = h.strip().lower().rstrip(".")
+        if h and h not in seen:
+            seen.add(h)
+            hosts.append(h)
+
+    for part in (extra or "").split(","):
+        _add(part)
+
+    ip = _parse_bind_ip(bind)
+
+    if ip is not None:
+        if ip.is_unspecified:
+            # 0.0.0.0 / :: — any interface: clients reach us by the machine's
+            # hostname or a LAN address, not by the wildcard. Seed the guard
+            # with the machine's own identity so the "reachable on your
+            # network" warning is actually TRUE.
+            _add(socket.gethostname())
+            try:
+                for info in socket.getaddrinfo(socket.gethostname(), None):
+                    cand = info[4][0]
+                    try:
+                        if not ipaddress.ip_address(cand).is_loopback:
+                            _add(cand)
+                    except ValueError:
+                        _add(cand)
+            except OSError:
+                pass
+        elif not ip.is_loopback:
+            _add(str(ip))
+    elif bind.strip().lower().rstrip(".") != "localhost":
+        # Hostname bind (e.g. mybox.local) — honor it directly.
+        _add(bind)
+
+    return hosts
+
+
+def _is_loopback_bind(bind: str) -> bool:
+    """True when `--bind` exposes only the loopback interface.
+
+    Covers the explicit loopback aliases — 127.0.0.1, localhost, ::1, the
+    whole 127.0.0.0/8 range, and the IPv4-mapped ::ffff:127.0.0.1. Anything
+    else — a LAN/cloud IP, a real hostname, or the 0.0.0.0/:: any-interface
+    wildcards (which ARE reachable beyond the local machine) — returns False
+    so the "reachable on your network" warning and the auth=none refusal fire
+    only when they are actually true (#719).
+    """
+    if bind.strip().lower().rstrip(".") == "localhost":
+        return True
+    ip = _parse_bind_ip(bind)
+    if ip is None:
+        # Unknown hostname — assume it resolves to something reachable.
+        return False
+    return ip.is_loopback
+
+
+def _db_uri_remote(db_uri: str) -> bool:
+    """True when the TORTOISE_DB_URI target lives on a remote (non-loopback)
+    machine, so the "Remote/cloud DB target" warnings fire whenever an
+    operator's local key/process genuinely drives a shared graph.
+
+    redis:// and rediss:// targets are always remote by convention (managed
+    cloud / non-local Redis instances). docker:// is local ONLY when its host
+    is a loopback address (localhost / 127.0.0.0/8 / ::1, incl. IPv4-mapped
+    ::ffff:127.0.0.1) — docker://user:pass@remote-host:6379/... is a valid
+    remote FalkorDB target and must warn just like redis:// (#719).
+
+    Scheme membership derives from config (is_db_uri / is_docker_uri over
+    SUPPORTED_URI_SCHEMES) — a scheme added there can never silently skip
+    the remote-target warning (#715 no-drift invariant).
+    """
+    if not db_uri:
+        return False
+    from tortoise.config import is_db_uri, is_docker_uri
+    if not is_db_uri(db_uri):
+        return False
+    if is_docker_uri(db_uri):
+        from urllib.parse import urlsplit
+
+        host = urlsplit(db_uri).hostname
+        if host is None:
+            return False  # unparseable authority — don't invent a warning
+        if host.strip().lower().rstrip(".") == "localhost":
+            return False
+        ip = _parse_bind_ip(host)
+        if ip is None:
+            # Unknown hostname — assume it resolves to something reachable.
+            return True
+        return not ip.is_loopback
+    # Every other supported scheme (redis://, rediss://, and any future
+    # addition to config.SUPPORTED_URI_SCHEMES) is remote by convention
+    # (managed cloud / non-local instances) — conservative: warn rather
+    # than silently treat an unknown scheme as local.
+    return True
+
+
+def _cmd_serve_http(args) -> int:
+    """Serve the Tortoise MCP server over HTTP (streamable) for self-hosted use.
+
+    Auth modes (mirrors create_http_app):
+      tenant (default) — registry tt_ keys (bootstrap with `tortoise key create`)
+      static           — single key (--api-key or TORTOISE_API_KEY)
+      none             — no auth, localhost-bound eval only; a non-loopback
+                         --bind is REFUSED unless --allow-insecure-no-auth
+    """
+    import os
+    import sys
+
+    from tortoise.sdk import TortoiseSDK
+    from tortoise.config import resolve_db_path, is_db_uri
+    from tortoise.mcp_server import create_http_app
+
+    # ── Resolve the DB target (single canonical source; print for diagnostics) ──
+    db_uri = os.environ.get("TORTOISE_DB_URI", "")
+    if is_db_uri(db_uri):
+        print(f"serve --http: DB target = {db_uri.split('@')[-1]}")
+        if _db_uri_remote(db_uri):
+            print("  ⚠️  Remote/cloud DB target — any local process holding a key drives this graph.")
+    else:
+        # Tilde-expand the raw TORTOISE_DB_PATH: the env shortcut bypasses
+        # resolve_db_path() (which expands), and the quickstart documents the
+        # literal ~/.tortoise/tortoise.db form — the diagnostic must show the
+        # real path, not a shell-unescaped '~' (fixes the exists-check miss).
+        db_path = os.path.expanduser(os.environ.get("TORTOISE_DB_PATH") or resolve_db_path())
+        print(f"serve --http: DB target = {db_path}")
+
+    # ── HTTP mode: note the fresh-namespace semantics for existing stdio data ──
+    # EVERY HTTP auth mode serves an isolated namespace, never the stdio
+    # 'tortoise' graph: tenant → team_{id}; static/none → team_selfhost
+    # (SELFHOST_TEAM_ID, see tortoise/mcp_auth.py). A stdio → static-auth LAN
+    # switch would otherwise land on a silently empty graph — say it out loud.
+    if not is_db_uri(db_uri):
+        db_path = os.path.expanduser(os.environ.get("TORTOISE_DB_PATH") or resolve_db_path())
+        try:
+            if os.path.exists(db_path):
+                namespace = "team_{id}" if args.auth == "tenant" else "team_selfhost"
+                print(f"  ℹ️  HTTP ({args.auth}) mode uses a fresh {namespace} namespace — existing stdio data")
+                print("      remains in the 'tortoise' graph. See docs/infra-runbook.md §4.5.")
+        except Exception:
+            pass
+
+    origins = ["http://127.0.0.1:*", "http://localhost:*"]
+    # P1 #719: fastmcp's Host guard (host_origin_protection=True → strict mode)
+    # rejects any Host header outside its allowlist with 421 Misdirected
+    # Request. Loopback is allowed by default, but a non-loopback --bind is
+    # not — pass the derived hosts so LAN clients actually work.
+    allowed_hosts = _bind_allowed_hosts(args.bind, args.allowed_hosts)
+    bind_loopback = _is_loopback_bind(args.bind)
+
+    # P2 #719 (security): --auth none on a non-loopback bind would expose full
+    # MCP access with no auth to enforce — the old code only warned with text
+    # that was unfulfillable in none mode. Refuse (exit non-zero) unless the
+    # user explicitly opts into the insecure setup. Loopback stays allowed.
+    if args.auth == "none" and not bind_loopback and not args.allow_insecure_no_auth:
+        print(
+            f"❌ serve --http --auth none refuses non-loopback --bind {args.bind}: "
+            "there is no auth to enforce, so anyone who can reach the port would "
+            "get full MCP access. Bind a loopback address (127.0.0.1/localhost/::1) "
+            "or pass --allow-insecure-no-auth to override (UNSAFE — trusted networks only).",
+            file=sys.stderr,
+        )
+        return 1
+
+    # P2 #719: --api-key is only meaningful for static auth. Silently ignoring
+    # it under tenant (the default) would leave the user believing a key is
+    # enforced when it isn't — error out instead of silently switching modes.
+    if args.api_key and args.auth != "static":
+        print(
+            f"❌ serve --http --api-key requires --auth static (got --auth {args.auth}). "
+            "Pass --auth static to use a single static key, or drop --api-key "
+            "to keep tenant auth (registry tt_ keys; bootstrap with `tortoise key create`).",
+            file=sys.stderr,
+        )
+        return 1
+
+    if args.auth == "tenant":
+        # Inject the registry SDK built from the SAME canonical DB as the team
+        # SDK (avoids the /data default divergence — #702).
+        registry_sdk = TortoiseSDK(namespace="registry")
+        app = create_http_app(allowed_origins=origins, allowed_hosts=allowed_hosts,
+                              _registry_sdk=registry_sdk,
+                              auth_mode="tenant")
+        print("serve --http: auth = tenant (Bearer tt_ keys; bootstrap with `tortoise key create`)")
+    elif args.auth == "static":
+        api_key = args.api_key or os.environ.get("TORTOISE_API_KEY")
+        if not api_key:
+            print("❌ serve --http --auth static requires --api-key or TORTOISE_API_KEY", file=sys.stderr)
+            return 1
+        app = create_http_app(allowed_origins=origins, allowed_hosts=allowed_hosts,
+                              auth_mode="static", api_key=api_key)
+        print("serve --http: auth = static (single key)")
+    else:  # none
+        app = create_http_app(allowed_origins=origins, allowed_hosts=allowed_hosts,
+                              auth_mode="none")
+        print("serve --http: auth = none (localhost eval — NO auth; do not expose on a network)")
+
+    if not bind_loopback:
+        if args.auth == "none":
+            # Only reachable here with the --allow-insecure-no-auth override.
+            print(f"⚠️  Non-loopback bind {args.bind} — MCP is reachable on your network and auth=none is NOT enforced; anyone who can reach the port has full access.")
+        else:
+            print(f"⚠️  Non-loopback bind {args.bind} — MCP is reachable on your network; ensure auth is enforced.")
+        if allowed_hosts:
+            note = ""
+            if args.bind in ("0.0.0.0", "::"):
+                note = " — add more with --allowed-hosts"
+            print(f"    Host guard allows: {', '.join(allowed_hosts)}{note}")
+
+    import uvicorn
+    from fastapi import FastAPI
+    from contextlib import asynccontextmanager
+
+    # FastMCP's StreamableHTTPSessionManager lifespan must be composed into the
+    # parent app (Starlette Mount does not run mounted-app lifespans — same
+    # pattern as hosted_api._lifespan).
+    @asynccontextmanager
+    async def _local_lifespan(_app):
+        async with app.lifespan(app):
+            yield
+
+    # Wrap and mount at /mcp for parity with the hosted endpoint (keeps the
+    # mcp_metadata route truthful and the client URL familiar).
+    wrapper = FastAPI(lifespan=_local_lifespan)
+    wrapper.mount("/mcp", app)
+    print(f"Tortoise MCP (streamable-http) → http://{args.bind}:{args.port}/mcp")
+    uvicorn.run(wrapper, host=args.bind, port=args.port, log_level="info")
+    return 0
+
+
+def _cmd_key_create(args) -> int:
+    """Bootstrap a local registry team + tt_ API key for `serve --http --auth tenant`.
+
+    Mirrors hosted /internal/provision: Team + APIKey nodes in the registry
+    graph, TeamMeta in the team_{team_id} graph. Prints ONLY the apikey_create
+    key (the one apikey_verify actually matches — team_create's returned key
+    is stored on the Team node and never verifies).
+    """
+    import os
+    import sys
+    from datetime import datetime, timezone
+
+    from tortoise.config import is_db_uri
+    from tortoise.exceptions import ControlPlaneError
+    from tortoise.sdk import TortoiseSDK
+
+    db_uri = os.environ.get("TORTOISE_DB_URI", "")
+    if is_db_uri(db_uri):
+        print(f"key create: registry at {db_uri.split('@')[-1]}")
+        if _db_uri_remote(db_uri):
+            print("  ⚠️  Remote/cloud registry — key created on that instance.")
+    else:
+        from tortoise.config import resolve_db_path
+        print(f"key create: registry at {os.environ.get('TORTOISE_DB_PATH') or resolve_db_path()}")
+
+    sdk = TortoiseSDK(namespace="registry")
+    reg = sdk._get_registry()
+
+    # Find an existing team with this name (idempotent re-runs), else create.
+    team_id = None
+    rows = reg.query("MATCH (t:Team) RETURN t.id, t.name").result_set or []
+    for tid, tname in rows:
+        if tname == args.name:
+            team_id = tid
+            print(f"  ℹ️  Team {args.name!r} already exists — reusing.")
+            break
+    if team_id is None:
+        try:
+            result = sdk.team_create(args.name)
+        except ControlPlaneError as e:
+            # conf 85: an invalid --name (spaces/punctuation, >64 chars,
+            # blank) must surface as a clean CLI error, never a raw
+            # ControlPlaneError traceback.
+            print(f"  ❌ {e}", file=sys.stderr)
+            return 1
+        team_id = result["id"]
+        print(f"  ✅ Team {args.name!r} created (id {team_id})")
+
+    # Seed the team_{team_id} graph the tools actually resolve (hosted parity).
+    try:
+        now = datetime.now(timezone.utc).isoformat()
+        team_graph = sdk._get_proj().db.select_graph(f"team_{team_id}")
+        team_graph.query(
+            "CREATE (:TeamMeta {name: $name, created: $now})",
+            params={"name": args.name, "now": now},
+        )
+    except Exception as e:
+        print(f"  ⚠️  Could not seed team graph: {e}", file=sys.stderr)
+
+    # Create the verifiable API key and print ONLY this one.
+    key = sdk.apikey_create(team_id, created_by="local-cli")
+    print()
+    print(f"✅ Created API key: {key['api_key']}")
+    print("   Store it securely — the plaintext is shown once.")
+    print()
+    print("Use it with:")
+    print("   tortoise serve --http --auth tenant")
+    print(f"   MCP client url:      http://{args.bind}:{args.port}/mcp")
+    if args.bind in ("0.0.0.0", "::"):
+        # Wildcard bind mirrors 'serve --http --bind 0.0.0.0' — the printed
+        # URL is unusable for clients, so ALWAYS show the LAN correction.
+        print("   (URL above is the server's wildcard bind — clients connect to the")
+        print(f"    machine's LAN address instead, e.g. http://<lan-ip>:{args.port}/mcp,")
+        print(f"    never {args.bind})")
+    elif args.bind == "127.0.0.1" and args.port == 8000:
+        print("   (hint assumes the default serve bind/port — pass --bind/--port to")
+        print("    'key create' to match a custom 'serve --http' setup, e.g. LAN")
+        print("    --bind 0.0.0.0, in which case clients connect to the machine's")
+        print("    LAN address, not 0.0.0.0)")
+    print("   Authorization header: Bearer <key>")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
+    import os as _os
+    from tortoise.config import SUPPORTED_URI_SCHEMES
+
+    uri_schemes_hint = ", ".join(f"{s}://" for s in SUPPORTED_URI_SCHEMES)
 
     p = argparse.ArgumentParser(prog="tortoise", exit_on_error=False)
     sp = p.add_subparsers(dest="cmd")
@@ -2171,7 +2709,36 @@ def main(argv: list[str] | None = None) -> int:
     mc.add_argument("transcript", help="Path to transcript file (Speaker: text format)")
     mc.add_argument("--source-id", default=None, help="Source identifier (default: basename of transcript)")
     mc.add_argument("--db", default=None, help="FalkorDB docker:// URI for projection")
-    sr = sp.add_parser("serve", help="Start Tortoise MCP server (stdio)")
+    sr = sp.add_parser("serve", help="Start Tortoise MCP server (stdio, default) or local HTTP (--http)")
+    sr.add_argument("--http", action="store_true",
+                    help="Serve MCP over HTTP (streamable) instead of stdio — self-hosted authenticated mode")
+    sr.add_argument("--bind", default="127.0.0.1", help="HTTP bind address (default 127.0.0.1)")
+    sr.add_argument("--port", type=int, default=8000, help="HTTP port (default 8000)")
+    sr.add_argument("--auth", choices=["tenant", "static", "none"], default="tenant",
+                    help="HTTP auth mode: tenant = registry tt_ keys (default; bootstrap with 'tortoise key create'), "
+                         "static = single key (--api-key or TORTOISE_API_KEY), "
+                         "none = localhost eval (NO auth; non-loopback --bind refused unless --allow-insecure-no-auth)")
+    sr.add_argument("--api-key", dest="api_key", default=None,
+                    help="Static auth key (requires --auth static)")
+    sr.add_argument("--allowed-hosts", dest="allowed_hosts", default=None, metavar="HOST[,HOST...]",
+                    help="Extra Host-header values the MCP guard accepts (comma-separated). Use when "
+                         "clients connect via a hostname/IP that differs from --bind (e.g. --bind "
+                         "0.0.0.0 with clients using the machine's LAN name) — without this the "
+                         "fastmcp Host guard answers 421 Misdirected Request (#719).")
+    sr.add_argument("--allow-insecure-no-auth", action="store_true",
+                    help="DANGER: allow --auth none on a non-loopback --bind. Refused by default because "
+                         "there is no auth to enforce — anyone who can reach the port gets full MCP "
+                         "access. Only for trusted networks.")
+    kr = sp.add_parser("key", help="API-key management (self-hosted HTTP auth)")
+    key_sp = kr.add_subparsers(dest="key_cmd")
+    kc = key_sp.add_parser("create", help="Create a local registry team + tt_ API key for 'serve --http --auth tenant'")
+    kc.add_argument("--name", default="local", help="Team name (default 'local')")
+    kc.add_argument("--bind", default="127.0.0.1",
+                    help="Expected serve HTTP bind address for the MCP URL hint "
+                         "(default 127.0.0.1; mirror the --bind you pass to 'serve --http')")
+    kc.add_argument("--port", type=int, default=8000,
+                    help="Expected serve HTTP port for the MCP URL hint "
+                         "(default 8000; mirror the --port you pass to 'serve --http')")
     init = sp.add_parser("init", help="Auto-detect FalkorDB and create default graph")
     init.add_argument("--path", default=None, help="Path for embedded mode (opt-in)")
     init.add_argument("--yes", "-y", action="store_true", help="Skip prompts, auto-index repo")
@@ -2181,6 +2748,12 @@ def main(argv: list[str] | None = None) -> int:
     setup.add_argument("--team", default=None, help="Team name (used with --role)")
     setup.add_argument("--output", default=None, help="Save config to file instead of stdout")
     doctor = sp.add_parser("doctor", help="Health check — verify Tortoise setup")
+    doctor.add_argument("--path", default=None, help="Path for embedded mode")
+    doctor.add_argument(
+        "--db", default=None,
+        help="Docker URI (docker://, redis://, rediss://) or embedded DB file "
+             "path for the graph-health check",
+    )
     onboard = sp.add_parser("onboard", help="Guided onboarding: init → index → demo → doctor")
     onboard.add_argument("--path", default=None, help="Path for embedded mode")
     hs = sp.add_parser("health-server", help="Start standalone /health HTTP server")
@@ -2239,7 +2812,9 @@ def main(argv: list[str] | None = None) -> int:
     dc.add_argument("--edges", help="JSON list of edges, e.g. '[\"crit:1\", \"IMPL\", \"opt:a\"]' or full edge dicts")
     dc.add_argument("--context-free", action="store_true",
                     help="Deprecated no-op — context-free (explicit factors) is the only mode since #49 Phase 2",)
-    dc.add_argument("--db", help="DB target override — URI (docker://, redis://, rediss://) or absolute path (default: TORTOISE_DB_URI, else legacy FALKORDB_*, else embedded path)")
+    dc.add_argument("--db", help=(
+        f"DB target override — URI ({uri_schemes_hint}) or absolute path "
+        "(default: TORTOISE_DB_URI, else legacy FALKORDB_*, else embedded path)"))
     try:
         args = p.parse_args(argv)
     except (argparse.ArgumentError, SystemExit) as e:
@@ -2294,9 +2869,21 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Restored {result['events']} events — {result['status']}")
         return 0
     elif args.cmd == "serve":
+        if getattr(args, "http", False):
+            return _cmd_serve_http(args)
+        # Startup warning for the #702 trap: stdio + TORTOISE_API_KEY rejects
+        # every tool (or crashes at import without a pepper).
+        if _os.environ.get("TORTOISE_API_KEY"):
+            print("⚠️  TORTOISE_API_KEY is set — stdio MCP will reject all tools.", file=sys.stderr)
+            print("    Self-hosted auth: use 'tortoise serve --http' instead. Dev mode: unset TORTOISE_API_KEY.", file=sys.stderr)
         from tortoise.mcp_server import main as serve_main
         serve_main()
         return 0
+    elif args.cmd == "key":
+        if args.key_cmd == "create":
+            return _cmd_key_create(args)
+        print("tortoise key: unknown subcommand. Try: tortoise key create --help", file=sys.stderr)
+        return 1
     elif args.cmd == "mine-conversation":
         return _cmd_mine_conversation(args)
     elif args.cmd == "init":

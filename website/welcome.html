@@ -463,6 +463,13 @@ you up to 6 yes/no questions and set up your Tortoise memory.
     const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InliZXR3aWNodXJhamJmc3dmZXFhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODUyNzgzNDYsImV4cCI6MjEwMDg1NDM0Nn0.YHysJAebPualDNDQTU5bnGBUHg5guLe8eBadm0LiEiY";
     const POLL_INTERVAL_MS = 1000;
     const POLL_MAX_ATTEMPTS = 30; // 30 seconds max
+    // On the email-confirmation / OAuth callback, the session arrives via the
+    // URL fragment a moment after createClient. Current supabase-js awaits
+    // its async init inside getSession(), but older browser-cached builds
+    // don't — give the session a bounded wait window before declaring
+    // "no session" so a legitimate callback never bounces to a dead state
+    // (#527).
+    const SESSION_WAIT_MS = 5000;
 
     const isLocal = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
     const supabaseUrl = isLocal
@@ -482,12 +489,39 @@ you up to 6 yes/no questions and set up your Tortoise memory.
       console.warn("SUPABASE_ANON_KEY not configured — page disabled");
     }
 
+    // ── Session wait (#527) ───────────────────────────────────────────────
+    // Resolve with the session as soon as it's available (SIGNED_IN event or
+    // getSession), or null after the timeout. Non-throwing.
+    function waitForSession(timeoutMs) {
+      return new Promise((resolve) => {
+        let settled = false;
+        let authSub = null;
+        let timer = null;
+        const finish = (session) => {
+          if (settled) return;
+          settled = true;
+          if (timer) clearTimeout(timer);
+          if (authSub) authSub.unsubscribe();
+          resolve(session);
+        };
+        timer = setTimeout(() => finish(null), timeoutMs);
+        try {
+          authSub = supabaseClient.auth.onAuthStateChange((event, session) => {
+            if (event === "SIGNED_IN" && session) finish(session);
+          }).data.subscription;
+        } catch (e) { /* no auth subscription available — getSession poll only */ }
+        supabaseClient.auth.getSession()
+          .then(({ data: d }) => { if (d.session) finish(d.session); })
+          .catch(() => {});
+      });
+    }
+
     // ── Poll for provisioning ──────────────────────────────────────────────
     async function waitForProvisioning() {
-      const { data: { session }, error: sessionError } = await supabaseClient.auth.getSession();
+      const session = await waitForSession(SESSION_WAIT_MS);
 
-      if (sessionError || !session) {
-        showError("No active session. Please sign up first.");
+      if (!session) {
+        showError("No active session. Please sign up first — or if you just clicked a confirmation link, refresh this page in a few seconds.");
         return;
       }
 

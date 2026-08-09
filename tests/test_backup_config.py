@@ -12,9 +12,11 @@ from tortoise.backup_config import ConfigError, load_config
 
 def _good_env() -> dict[str, str]:
     key = base64.b64encode(b"k" * 32).decode()
+    stream_key = base64.b64encode(b"s" * 32).decode()
     return {
         "BACKUP_SWEEP_ENABLED": "true",
         "TORTOISE_BACKUP_KEY": key,
+        "REGISTRY_STREAM_KEY": stream_key,
         "R2_ACCOUNT_ID": "acct",
         "R2_ACCESS_KEY_ID": "ak",
         "R2_SECRET_ACCESS_KEY": "sk",
@@ -113,11 +115,36 @@ def test_enabled_loads_full_config(monkeypatch):
     assert cfg.size_guard_max_nodes == 100_000
 
 
+def test_team_sweep_enabled_flag_default_false(monkeypatch):
+    """BACKUP_TEAM_SWEEP_ENABLED defaults to false."""
+    env = _good_env()
+    monkeypatch.setattr(os, "environ", env)
+    cfg = load_config()
+    assert cfg.team_sweep_enabled is False
+
+
+def test_team_sweep_enabled_flag_true(monkeypatch):
+    """BACKUP_TEAM_SWEEP_ENABLED=true is parsed correctly."""
+    env = _good_env()
+    env["BACKUP_TEAM_SWEEP_ENABLED"] = "true"
+    monkeypatch.setattr(os, "environ", env)
+    cfg = load_config()
+    assert cfg.team_sweep_enabled is True
+
+
+def test_team_sweep_enabled_even_when_sweep_disabled(monkeypatch):
+    """BACKUP_TEAM_SWEEP_ENABLED is parsed independently of BACKUP_SWEEP_ENABLED."""
+    monkeypatch.delenv("BACKUP_SWEEP_ENABLED", raising=False)
+    monkeypatch.setenv("BACKUP_TEAM_SWEEP_ENABLED", "true")
+    cfg = load_config()
+    assert cfg.enabled is False  # main sweep disabled
+    assert cfg.team_sweep_enabled is True  # team-sweep flag still read
+
+
 def test_env_dict_injection_does_not_leak(monkeypatch):
     """load_config(env=...) must not mutate the real process environment."""
-    key = base64.b64encode(b"k" * 32).decode()
     before = dict(os.environ)
-    cfg = load_config({**_good_env(), "TORTOISE_BACKUP_KEY": key})
+    cfg = load_config(_good_env())
     assert cfg.enabled is True
     assert dict(os.environ) == before
     assert "BACKUP_SWEEP_ENABLED" not in os.environ

@@ -18,6 +18,10 @@ Per-team protection (all guards from the reviewed plan):
 - Empty-content transition guard: DATA_LOSS_CANDIDATE fires only on a
   transition (>0 → 0 nodes, or >50% drop vs the team's prior persisted count);
   steady-0 is a signal, not an incident. On fire, state.json is NOT written.
+- Label-level drift guard (#661): per-label node-count checks with
+  absolute-count-aware thresholds — a <50% wipe of a low-count label
+  (e.g. Invitation) that passes the overall >50% guard still fires
+  DATA_LOSS_CANDIDATE.
 - Enumeration-delta guard: a prior team count > 0 → 0 fires an incident (a
   wiped enumeration source must not degrade silently to chronic NO_TEAMS).
 - Per-team serialization via the caller's lock factory.
@@ -27,6 +31,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from contextlib import nullcontext
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -40,6 +45,78 @@ logger = logging.getLogger(__name__)
 OPS_STATE_KEY = "ops/state.json"
 _TEAM_STATE_PREFIX = "ops/teams/"
 
+# ── Per-label DATA_LOSS thresholds (#661) ───────────────────────────────────
+# Absolute-count-aware: small labels use a stricter guard so a <50% wipe of a
+# low-count label (e.g. 3 → 1 Invitation nodes = 67% drop, 5 Invitation nodes
+# on a 500-node graph) can't hide behind the overall node-count ratio.
+#
+# Configuration (env-driven, sensible defaults):
+#   REGISTRY_LABEL_FLOOR (default 10): labels with fewer than this many nodes
+#       use the absolute floor — ANY drop fires DATA_LOSS_CANDIDATE.
+#   REGISTRY_LABEL_DRIFT_PCT (default 40): labels at or above the floor use
+#       this relative threshold (a drop >= this % fires).
+
+
+def _label_drift_floor() -> int:
+    raw = os.environ.get("REGISTRY_LABEL_FLOOR", "10").strip()
+    try:
+        return int(raw)
+    except ValueError:
+        return 10
+
+
+def _label_drift_pct() -> float:
+    raw = os.environ.get("REGISTRY_LABEL_DRIFT_PCT", "40").strip()
+    try:
+        return float(raw) / 100.0
+    except ValueError:
+        return 0.4
+
+
+def _check_per_label_drift(
+    *,
+    prev_counts: dict[str, int],
+    current_counts: dict[str, int],
+    floor: int | None = None,
+    drift_pct: float | None = None,
+) -> dict[str, dict[str, int]] | None:
+    """Check per-label node-count drift against absolute-count-aware thresholds.
+
+    Returns a dict of label→{previous, now, drop_pct} for every label that
+    breached its threshold, or None if all labels are within bounds.
+
+    Guards (applied per-label):
+      - prev count < floor: ANY drop fires (absolute floor — small labels
+        can't silently dwindle).
+      - prev count >= floor: drop >= drift_pct fires (relative threshold).
+    """
+    floor = _label_drift_floor() if floor is None else floor
+    drift_pct = _label_drift_pct() if drift_pct is None else drift_pct
+    breaches: dict[str, dict[str, int]] = {}
+    for label, prev_n in prev_counts.items():
+        now_n = current_counts.get(label, 0)
+        if prev_n <= 0:
+            continue
+        if now_n >= prev_n:
+            continue
+        if prev_n < floor:
+            # Absolute floor: any loss fires for small labels.
+            if now_n < prev_n:
+                breaches[label] = {
+                    "previous": prev_n, "now": now_n,
+                    "drop_pct": round((1 - now_n / prev_n) * 100, 1),
+                    "threshold": f"floor={floor} (any drop)",
+                }
+        else:
+            drop = (prev_n - now_n) / prev_n
+            if drop >= drift_pct:
+                breaches[label] = {
+                    "previous": prev_n, "now": now_n,
+                    "drop_pct": round(drop * 100, 1),
+                    "threshold": f"drift>{drift_pct*100:.0f}%",
+                }
+    return breaches or None
+
 
 def enumerate_teams(registry) -> list[str]:
     """Seam: list Team ids from the control-plane registry (pre-#669 source).
@@ -52,6 +129,25 @@ def enumerate_teams(registry) -> list[str]:
         rows = registry.query("MATCH (t:Team) RETURN t.id").result_set
     except Exception as e:
         raise RuntimeError(f"team enumeration failed: {e}") from e
+    return [str(r[0]) for r in rows if r and r[0]]
+
+
+def enumerate_eligible_teams(registry) -> list[str]:
+    """List Pro teams eligible for hosted backup (#655).
+
+    Eligibility: tier != 'free' AND backup_enabled = true. The second
+    predicate is gated on #296 (entitlement path) — today every provision
+    path hardcodes ``backup_enabled: false``, so this returns [].
+
+    Fail-closed: a query failure raises RuntimeError (same contract as
+    ``enumerate_teams``).
+    """
+    try:
+        rows = registry.query(
+            "MATCH (t:Team) WHERE t.tier <> 'free' AND t.backup_enabled = true RETURN t.id"
+        ).result_set
+    except Exception as e:
+        raise RuntimeError(f"eligible-team enumeration failed: {e}") from e
     return [str(r[0]) for r in rows if r and r[0]]
 
 
@@ -114,13 +210,27 @@ def _backup_team(
 
     prior = read_team_state(storage, team_id)
     prev_node_count = int(prior.get("node_count") or 0)
+    prev_label_counts: dict[str, int] = prior.get("label_counts") or {}
 
-    # ── Dump via the shipped pipeline. ──
+    # ── Query per-label counts (before dump — same snapshot window). ──
+    label_counts: dict[str, int] = {}
+    try:
+        rows = g.query(
+            "MATCH (n) UNWIND labels(n) AS lbl RETURN lbl, count(*) ORDER BY lbl"
+        ).result_set
+        label_counts = {str(r[0]): int(r[1]) for r in rows if r and r[0]}
+    except Exception:
+        logger.warning("per-label count query failed for %s — continuing", team_id)
+
+    # ── Dump via the shipped pipeline (registry-stream-key, not GH-key, #661). ──
     proj = SimpleNamespace(g=g)
+    if not config.registry_stream_key or len(config.registry_stream_key) != 32:
+        return {"status": "error", "team_id": team_id,
+                "error": "REGISTRY_STREAM_KEY missing or invalid — fail-closed (#661)"}
     try:
         manifest = create_backup(
             proj, registry, storage,
-            team_id=team_id, graph_name=graph_name, key=config.backup_key,
+            team_id=team_id, graph_name=graph_name, key=config.registry_stream_key,
         )
     except Exception as e:
         return {"status": "error", "team_id": team_id, "error": str(e)}
@@ -179,6 +289,31 @@ def _backup_team(
         )
         return {"status": "data_loss_candidate", "team_id": team_id, "node_count": node_count}
 
+    # ── Per-label drift guard (#661): fires when the overall >50% ratio is
+    # quiet but a low-count label took a hit (e.g. invitations). ──
+    if prev_label_counts and label_counts:
+        breaches = _check_per_label_drift(
+            prev_counts=prev_label_counts, current_counts=label_counts,
+        )
+        if breaches:
+            _delete_uploaded(storage, team_id, manifest.get("backup_id", ""))
+            incidents.append(
+                {
+                    "kind": "DATA_LOSS_CANDIDATE",
+                    "team_id": team_id,
+                    "detail": {
+                        "previous": prev_node_count,
+                        "now": node_count,
+                        "overall_drop_pct": round(
+                            (1 - node_count / prev_node_count) * 100, 1
+                        ),
+                        "label_breaches": breaches,
+                    },
+                }
+            )
+            return {"status": "data_loss_candidate", "team_id": team_id,
+                    "node_count": node_count}
+
     # ── Persist team state (counts feed the transition guard next run). ──
     _write_json(
         storage,
@@ -189,6 +324,7 @@ def _backup_team(
             "latest_object_key": f"backups/{manifest.get('backup_id')}/dump.enc",
             "node_count": node_count,
             "counts": {"nodes": node_count, "edges": manifest.get("edge_count")},
+            "label_counts": label_counts,
             "updated_at": now.isoformat(),
         },
     )
@@ -227,20 +363,50 @@ def run_backup_sweep(
 
     ``lock_for`` is an optional per-team lock factory (the endpoint supplies
     the asyncio-lock seam); the sweep serializes each team's dump under it.
+
+    When ``config.team_sweep_enabled`` is True, only Pro teams (tier != 'free'
+    AND backup_enabled) are enumerated (#655). A 0-eligible-teams result files
+    a deduplicated NO_ELIGIBLE_TEAMS incident — the chronic-no-op alarm.
     """
     now = now or datetime.now(timezone.utc)
 
     if team_ids is None:
-        try:
-            team_ids = enumerate_teams(registry)
-        except RuntimeError as e:
-            return {"status": "enum_failed", "error": str(e), "teams_backed_up": 0}
+        if config.team_sweep_enabled:
+            try:
+                team_ids = enumerate_eligible_teams(registry)
+            except RuntimeError as e:
+                return {"status": "enum_failed", "error": str(e), "teams_backed_up": 0}
+        else:
+            try:
+                team_ids = enumerate_teams(registry)
+            except RuntimeError as e:
+                return {"status": "enum_failed", "error": str(e), "teams_backed_up": 0}
 
     incidents: list[dict[str, Any]] = []
     ops_state = read_ops_state(storage)
     prev_team_count = int(ops_state.get("last_team_count") or 0)
 
     if not team_ids:
+        # ── Team-sweep no-op alarm (#655): enabled but 0 Pro teams ──
+        if config.team_sweep_enabled:
+            incidents.append(
+                {
+                    "kind": "NO_ELIGIBLE_TEAMS",
+                    "team_id": "",
+                    "detail": {"message": "team sweep enabled but 0 eligible (Pro) teams found"},
+                }
+            )
+            _write_json(
+                storage, OPS_STATE_KEY,
+                {"last_team_count": 0, "updated_at": now.isoformat()},
+            )
+            return {
+                "status": "no_eligible_teams",
+                "teams_backed_up": 0,
+                "results": {},
+                "incidents": incidents,
+            }
+        # ── Legacy path: 0 ALL teams ──
         if prev_team_count > 0:
             # A wiped enumeration source must not degrade silently to the
             # chronic NO_TEAMS state — this is an incident, not a signal.
