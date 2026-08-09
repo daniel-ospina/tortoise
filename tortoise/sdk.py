@@ -440,7 +440,10 @@ class TortoiseSDK:
             data = json.loads(raw)
             if data.get("v") != 1 or "seq" not in data:
                 raise ValueError
-            return int(data["seq"])
+            seq = int(data["seq"])
+            if seq < 0:  # P2 (Qwen): negative cursors must not bypass expiry
+                raise ValueError
+            return seq
         except Exception:  # noqa: BLE001
             raise ValueError("invalid cursor") from None
 
@@ -921,6 +924,26 @@ class TortoiseSDK:
             raise ValueError(
                 f"Point {old_id!r} is already terminal ({cur!r}) — supersession is terminal")
 
+        # P1 (Qwen review): validate the NEW point too — it must exist, be a
+        # statement, not be terminal, and differ from the old point. A missing /
+        # self / terminal successor would terminalize the old point with no valid
+        # replacement (phantom PointSuperseded).
+        if old_id == new_id:
+            raise ValueError("supersede_point: old_id and new_id must differ")
+        new_guard = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.is_operator, n.status",
+            params={"id": new_id},
+        ).result_set
+        if not new_guard:
+            raise ValueError(f"No point {new_id!r}")
+        n_is_op, n_cur = new_guard[0][0], new_guard[0][1]
+        if n_is_op:
+            raise ValueError(
+                f"Point {new_id!r} is an operator — supersession target must be a statement")
+        if n_cur in ("retracted", "superseded", "archived"):
+            raise ValueError(
+                f"Point {new_id!r} is already terminal ({n_cur!r}) — cannot supersede into it")
+
         # 0. #329: collect + validate ALL edge types BEFORE any mutation.
         #    The edge types are interpolated into query structure (no params
         #    possible) — an unvalidated type (e.g. from a crafted edge) is a
@@ -1045,12 +1068,18 @@ class TortoiseSDK:
         # #432 Task 3: durable PointRetracted event (append-before-mutation;
         # only after the input contract validates).
         self._emit_event("PointRetracted", {"id": id})
+        # P1 (Qwen review): CAS the SET — the WHERE re-checks terminal state so
+        # a concurrent retract/supersede can't both pass validation and have a
+        # terminal overwrite (retracted overwriting superseded, or vice versa).
         r = proj.g.query(
             "MATCH (n:Point {id:$id}) "
+            "WHERE (n.status IS NULL OR NOT (n.status IN $terminal)) "
             "SET n.status = 'retracted', n.updatedAt = $now RETURN properties(n)",
-            params={"id": id, "now": datetime.now(timezone.utc).isoformat()})
+            params={"id": id, "now": datetime.now(timezone.utc).isoformat(),
+                    "terminal": ["retracted", "superseded", "archived"]})
         if not r.result_set:
-            raise ValueError(f"No point {id!r}")
+            raise ValueError(
+                f"Point {id!r} is already terminal — retraction is terminal")
         return r.result_set[0][0]  # updated node props (no trailing get_point round trip)
 
     # ── Operators ─────────────────────────────────────────────────
