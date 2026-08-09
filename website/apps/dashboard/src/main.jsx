@@ -764,14 +764,21 @@ function App() {
   }
 
   async function revokeKey(keyId) {
+    // Round-20 (P2): capture team at call — a mid-flight switch must not let
+    // this revoke's re-mint clobber the new team's active key/localStorage or
+    // land the old team's key table under the new header.
+    const _teamAtCall = currentTeamId
     if (!confirm('Revoke this API key? Applications using it will stop working.')) return
     setError('')
     try {
       await api(`/v1/team/keys/${keyId}`, { method: 'DELETE' })
+      // Round-20: bail after the DELETE — a switch already reloaded the new
+      // team's state; skip the stale re-mint + loadAll entirely.
+      if (teamIdRef.current !== _teamAtCall) return
       // Fix A (review round 2): if we revoked the active data-plane key, the
       // per-team cache + localStorage now hold a dead key — re-mint so the
       // app doesn't 401 on the next switch/reload.
-      const cached = currentTeamId ? teamKeysRef.current[currentTeamId] : null
+      const cached = _teamAtCall ? teamKeysRef.current[_teamAtCall] : null
       if (cached && keyId === keyIdFromValue(cached)) {
         delete teamKeysRef.current[currentTeamId]
         if (localStorage.getItem(KEY_STORAGE) === cached) localStorage.removeItem(KEY_STORAGE)
@@ -789,10 +796,11 @@ function App() {
           } catch { /* leave API-key screen; not fatal */ }
         }
       }
+      if (teamIdRef.current !== _teamAtCall) return // Round-20: stale fallthrough
       await loadAll()
     } catch (e) {
-      // Round-18: a stale revoke's error must not land under the new team
-      if (!currentTeamId || teamIdRef.current === currentTeamId) setError(e.message)
+      // Round-18/20: a stale revoke's error must not land under the new team
+      if (!_teamAtCall || teamIdRef.current === _teamAtCall) setError(e.message)
     }
   }
 
