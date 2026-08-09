@@ -720,22 +720,28 @@ function App() {
   }, [currentTeamId])
 
   async function createKey() {
+    // Round-17 (P3): capture the team AT CALL TIME — the previous guard compared
+    // teamIdRef.current to currentTeamId, which are always written together and
+    // can never diverge, so it was dead code. Capture to a local and compare
+    // against the ref after the await (the round-16 mutation pattern).
+    const _teamAtCall = currentTeamId
     setError('')
     setBusy(true)
     try {
       // Round-15 (P2): resolve the ACTIVE team's key explicitly — during a
       // mid-switch window apiKey state is still the previous team's key, and
       // a key created with it lands on the wrong team.
-      const activeKey = currentTeamId ? (teamKeysRef.current[currentTeamId] || apiKey) : apiKey
+      const activeKey = _teamAtCall ? (teamKeysRef.current[_teamAtCall] || apiKey) : apiKey
       const k = await api('/v1/team/keys', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...(activeKey ? { Authorization: `Bearer ${activeKey}` } : {}) },
         body: '{}',
       })
+      // Identity guard BEFORE any UI write: a team switch during the POST must
+      // not render this team's plaintext key card or key table under the new
+      // team's header (switchTeam's setNewKey(null) already ran for the new team).
+      if (teamIdRef.current !== _teamAtCall) return
       setNewKey(k.api_key || k.key || k)
-      // Identity guard: a team switch during the POST must not land the
-      // previous team's key table under the new selection.
-      if (teamIdRef.current !== currentTeamId) return
       await loadAll(activeKey)
     } catch (e) {
       setError(e.message)
