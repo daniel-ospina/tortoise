@@ -20,7 +20,7 @@ from tortoise.sdk import TortoiseSDK
 
 @pytest.fixture(autouse=True)
 def _http_transport_mode():
-    """#493: tortoise_search goes through _safe, which fails closed without a
+    """#493: MCP tool wrappers go through _safe, which fails closed without a
     transport mode (#236). Set HTTP parity like test_mcp_server."""
     from tortoise.mcp_auth import _transport_mode
 

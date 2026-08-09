@@ -1055,7 +1055,18 @@ class FalkorProjection(
 
         Returns a TortoiseSVBP instance with converged beliefs.
         """
-        from tortoise.svbp import TortoiseSVBP
+        # SVBP is DEPRECATED (replaced by EP — tortoise/ep.py, scipy-based).
+        # It requires the optional `quadrature` extra (jax). Without jax
+        # installed, degrade to None instead of crashing the caller
+        # (EventAPI.add_operator → ingest CLI): EP handles propagation.
+        try:
+            from tortoise.svbp import TortoiseSVBP
+        except ImportError:
+            logger.warning(
+                "get_svbp: jax not installed (quadrature extra) — "
+                "skipping deprecated SVBP; EP handles propagation"
+            )
+            return None
         factors, evidence = self.extract_svbp_factors()
         if not factors:
             return None

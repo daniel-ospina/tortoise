@@ -57,7 +57,7 @@ class TestProvenance:
 
     def test_document_event_creates_document_node(self, sdk, tmp_path):
         """DocumentCreated event → Document node in the projection (#493)."""
-        from tortoise.api import EventAPI, provenance
+        from tortoise.api import EventAPI
         from tortoise.log import EventLog
 
         log = EventLog(str(tmp_path / "p1_events.jsonl"))

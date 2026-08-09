@@ -26,6 +26,7 @@ from contextlib import asynccontextmanager
 from tortoise.audit_events import AuditLogger
 from tortoise.auth import hash_api_key
 from tortoise.session_auth import get_current_user
+from tortoise.quota import DEFAULT_MAX_SESSIONS  # used by get_current_team (#754 P0: missing import → 500 on every agent_signup auth)
 from tortoise.analytics import (  # #528 server analytics (fail-safe, no-op without key)
     api_key_created,
     first_api_call,

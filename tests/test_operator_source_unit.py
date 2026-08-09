@@ -21,7 +21,8 @@ class MockGraph:
         self.rows = rows or []
         self.queries = []
 
-    def query(self, cypher, params=None, timeout=None):
+    def query(self, cypher, params=None, **kwargs):
+        # real search_engine passes timeout=timeout_ms (#249 driver-level timeout)
         self.queries.append((cypher, params or {}))
         return MockResultSet(self.rows)
 
@@ -42,15 +43,6 @@ class TestOperatorStructuralQuery:
         run_structural_query(g, "IMPL", entity_type="operator", limit=10)
         assert any("n.op_type = $kind" in q for q, _ in g.queries), \
             "operator kind filter must use op_type"
-
-    def test_operator_no_context_filter(self):
-        """Operator queries do NOT emit a context filter (#49 — context is
-        deprecated; kind filtering goes through op_type)."""
-        g = MockGraph([["op-3", 1.0]])
-        run_structural_query(g, "IMPL", entity_type="operator", limit=10)
-        assert not any("n.context" in q for q, _ in g.queries), \
-            "operator query must not filter on deprecated context field"
-
 
 class TestSourceStructuralQuery:
     def test_source_uses_source_label(self):

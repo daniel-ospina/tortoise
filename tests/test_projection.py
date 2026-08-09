@@ -17,26 +17,6 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tortoise.api import EventAPI, provenance          # noqa: E402
-from tortoise.api import EventAPI, provenance          # noqa: E402
-
-# ── Live-FalkorDB availability (mirrors tests/test_hnsw_vector_index.py) ──
-# The live_proj fixture connects to docker://localhost:16379 (live FalkorDB).
-# Probe at module load so its tests skip gracefully in embedded-only CI (#493).
-FALKORDB_AVAILABLE = False
-try:
-    _old_uri = os.environ.get("TORTOISE_DB_URI")
-    os.environ["TORTOISE_DB_URI"] = "docker://:@localhost:16379/tortoise_test_proj125"
-    from tortoise.projection import FalkorProjection as _FP  # noqa: E402
-    _probe = _FP.from_uri(os.environ["TORTOISE_DB_URI"])
-    _probe.close()
-    FALKORDB_AVAILABLE = True
-except Exception:
-    FALKORDB_AVAILABLE = False
-finally:
-    if _old_uri is not None:
-        os.environ["TORTOISE_DB_URI"] = _old_uri
-    else:
-        os.environ.pop("TORTOISE_DB_URI", None)
 from tortoise.log import EventLog                       # noqa: E402
 from tortoise.projection import (                        # noqa: E402
     _apply_one, fold, split,
@@ -80,6 +60,29 @@ def _has_falkor() -> bool:
 
 def _skip_if_no_falkor() -> bool:
     return not _has_falkor()
+
+
+def _docker_falkor_reachable() -> bool:
+    """Socket probe: is a live Docker FalkorDB reachable?
+
+    The `live_proj` fixture needs a live FalkorDB on FALKORDB_HOST:PORT
+    (default localhost:16379). Embedded CI has no container — probe before
+    connecting so the fixture skips instead of raising redis
+    ConnectionError (Error 111/61). _skip_if_no_falkor only covers
+    redislite import availability, not Docker connectivity.
+    """
+    import socket
+    host = os.environ.get("FALKORDB_HOST", "localhost")
+    port = int(os.environ.get("FALKORDB_PORT", "16379"))
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(1.0)
+    try:
+        s.connect((host, port))
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
 
 
 # ----------------------------------------------------------------- _apply_one
@@ -1424,8 +1427,8 @@ if __name__ == "__main__":
 @pytest.fixture
 def live_proj():
     """Live FalkorProjection on a test-prefixed graph (safe via test_guard)."""
-    if not FALKORDB_AVAILABLE:
-        pytest.skip("Live FalkorDB (Docker) not available")
+    if not _docker_falkor_reachable():
+        pytest.skip("live FalkorDB (FALKORDB_HOST:PORT) not reachable")
     uri = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise_test_proj125")
     proj = FalkorProjection.from_uri(uri)
     # Clean the test graph (test-prefixed — test_guard permits; production blocked)

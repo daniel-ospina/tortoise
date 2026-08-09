@@ -14,6 +14,8 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tortoise.extractor import MockModel                                                  # noqa: E402
@@ -51,6 +53,39 @@ _live_db = pytest.mark.skipif(not FALKORDB_AVAILABLE, reason="Live FalkorDB (Doc
 
 def _tmp(name):
     return os.path.join(tempfile.mkdtemp(prefix="tortoise_"), name)
+
+
+def _docker_falkor_reachable() -> bool:
+    """Socket probe: is a live Docker FalkorDB reachable?
+
+    The #125/#133 capture + upgrade tests need a live FalkorDB on
+    FALKORDB_HOST:PORT (default localhost:16379). Embedded CI has no
+    container — probe before connecting so the suite skips instead of
+    raising redis ConnectionError (Error 111/61).
+    """
+    import socket
+    host = os.environ.get("FALKORDB_HOST", "localhost")
+    port = int(os.environ.get("FALKORDB_PORT", "16379"))
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(1.0)
+    try:
+        s.connect((host, port))
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+def _require_live_falkor() -> bool:
+    """True when a live FalkorDB is reachable; otherwise skip under pytest
+    (or return False in plain-script mode, matching the _skip_if_no_falkor
+    self-skip convention) — never raise ConnectionError."""
+    if _docker_falkor_reachable():
+        return True
+    if "pytest" in sys.modules:
+        pytest.skip("live FalkorDB (FALKORDB_HOST:PORT) not reachable")
+    return False
 
 
 def _transcript(text, ext=".txt"):
@@ -489,6 +524,8 @@ def test_capture_metadata_creates_document_no_points():
     import json
     uri = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise_test_ingest125")
     db = uri  # live DB URI
+    if not _require_live_falkor():
+        return
     log = _tmp("events_capture.jsonl")
     # Flush the test graph (test-prefixed — safe) for hermetic Point count
     from tortoise.projection import FalkorProjection as _FP
@@ -543,6 +580,8 @@ def test_full_ingest_unaffected_and_not_blocked_by_capture():
     """#125: full ingest (no flag) extracts Points; a prior capture does NOT block it."""
     uri = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise_test_ingest125")
     db = uri
+    if not _require_live_falkor():
+        return
     log1 = _tmp("events_capture2.jsonl")
     # Flush test graph for hermetic assertions
     from tortoise.projection import FalkorProjection as _FP
@@ -580,6 +619,8 @@ def test_capture_defaults_doc_status_captured():
     import json
     uri = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise_test_133")
     db = uri
+    if not _require_live_falkor():
+        return
     log = _tmp("events_133_capdefault.jsonl")
     from tortoise.projection import FalkorProjection as _FP
     _f = _FP.from_uri(uri)
@@ -613,6 +654,8 @@ def test_needs_extraction_flag_surfaces_and_drives_upgrade_all():
     import json
     uri = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise_test_133")
     db = uri
+    if not _require_live_falkor():
+        return
     log = _tmp("events_133_ne.jsonl")
     from tortoise.projection import FalkorProjection as _FP
     _f = _FP.from_uri(uri)
@@ -646,6 +689,8 @@ def test_upgrade_on_already_extracted_is_noop():
     import json
     uri = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise_test_133")
     db = uri
+    if not _require_live_falkor():
+        return
     log = _tmp("events_133_noop.jsonl")
     from tortoise.projection import FalkorProjection as _FP
     _f = _FP.from_uri(uri)
