@@ -50,9 +50,12 @@ MAX_EXTRACTIONS_PER_TURN = 200
 MAX_ANALYZE_LLM_PER_MIN = 60
 MAX_DREAM_FULL_PER_HOUR = 6
 
-# ── Default limits (match REST today: team.get("max_points") or 1000) ──────
-DEFAULT_MAX_POINTS = 1000
-DEFAULT_MAX_API_KEYS = 20
+# ── Default limits ──────────────────────────────────────────────────────────
+# max_points/max_api_keys have NO constant here — they resolve from
+# tortoise.pricing.tier_limits (product/pricing.json) so a legacy team without
+# stored limits gets pricing-correct caps, never the stale 1000/20 consts that
+# contradicted pricing.json (#310 GAP-B, review fix 2). max_sessions has no
+# pricing.json field — flat 1000 across tiers (matches REST today).
 DEFAULT_MAX_SESSIONS = 1000
 
 _RESOURCE_LIMIT_KEYS = {
@@ -74,8 +77,10 @@ def resolve_team_limits(team_id: str) -> dict:
     """Resolve a team's limits from the registry Team node.
 
     Missing Team node → QuotaCheckError (fail-closed; the auth layer should
-    guarantee key→team mapping). Missing attributes → defaults
-    (1000/20/1000 — matching today's effective behavior).
+    guarantee key→team mapping). Missing attributes → resolved from
+    ``tier_limits(tier)`` (pricing.json) — max_points falls back to
+    ``max_graph_nodes`` because the points counter counts graph nodes (#310
+    GAP-B mapping). Never the old DEFAULT_MAX_POINTS/API_KEYS consts.
     """
     if not team_id:
         raise QuotaCheckError("resolve_team_limits requires a team_id")
@@ -88,11 +93,14 @@ def resolve_team_limits(team_id: str) -> dict:
     if not rows:
         raise QuotaCheckError(f"Team {team_id!r} not found in registry")
     tier, mp, mak, ms = rows[0]
+    tier = tier or "free"
+    from tortoise.pricing import tier_limits
+    lim = tier_limits(tier)
     return {
         "team_id": team_id,
-        "tier": tier or "free",
-        "max_points": int(mp) if mp is not None else DEFAULT_MAX_POINTS,
-        "max_api_keys": int(mak) if mak is not None else DEFAULT_MAX_API_KEYS,
+        "tier": tier,
+        "max_points": int(mp) if mp is not None else lim["max_graph_nodes"],
+        "max_api_keys": int(mak) if mak is not None else lim["max_api_keys"],
         "max_sessions": int(ms) if ms is not None else DEFAULT_MAX_SESSIONS,
     }
 
@@ -154,8 +162,13 @@ def enforce_team_limit(limits: dict | None, resource: str, sdk=None) -> None:
         raise QuotaCheckError(f"unknown quota resource: {resource!r}")
     limit = limits.get(limit_key)
     if limit is None:
-        limit = DEFAULT_MAX_POINTS if resource == "points" else (
-            DEFAULT_MAX_API_KEYS if resource == "api_keys" else DEFAULT_MAX_SESSIONS)
+        # Fail-closed: a caller passing an incomplete limits dict must not
+        # silently fall back to lenient caps (#310 GAP-B — the old
+        # DEFAULT_MAX_POINTS/API_KEYS fallback hid the inert-tier bug).
+        if resource == "sessions":
+            limit = DEFAULT_MAX_SESSIONS
+        else:
+            raise QuotaCheckError(f"team limits missing {limit_key} for resource {resource!r}")
     count = _count_resource(team_id, resource, sdk=sdk)
     if count >= limit:
         raise QuotaExceededError(
