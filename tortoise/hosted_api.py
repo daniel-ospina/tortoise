@@ -617,23 +617,38 @@ async def get_current_team(request: Request) -> dict:
         raise HTTPException(status_code=401, detail="Invalid API key format")
     try:
         sdk = _make_sdk(namespace="registry")
-        # API keys are stored as "salt:hash" (per-key random salt). hash_api_key()
-        # generates a NEW random salt per call, so we CANNOT look up by exact
-        # match. Instead fetch all non-revoked keys and verify each against the
-        # token using the embedded salt (verify_api_key). This is O(keys) but
-        # the registry is small (teams × keys) and auth happens per-request.
-        key_result = sdk._get_registry().query(
-            "MATCH (k:APIKey) WHERE k.revoked_at IS NULL "
-            "RETURN k.team_id, k.id, k.key_hash, k.created_by"
-        ).result_set
+        # #687: Indexed key_prefix lookup avoids O(keys) PBKDF2 scan.
+        # API keys are "tt_<uuid4 hex>"; key_prefix = key[:10]. The
+        # key_prefix index (sdk._ensure_registry_indexes) makes this O(1).
+        # Falls back to full scan for legacy provision_tenant keys whose
+        # key_prefix was set to team_id[:8] (won't match token[:10]).
+        key_prefix = token[:10]
         from tortoise.auth import verify_api_key
         team_id = key_id = None
         created_by = None
+        key_result = sdk._get_registry().query(
+            "MATCH (k:APIKey) WHERE k.revoked_at IS NULL "
+            "AND k.key_prefix = $prefix "
+            "RETURN k.team_id, k.id, k.key_hash, k.created_by",
+            params={"prefix": key_prefix},
+        ).result_set
         for k_team_id, k_id, stored_hash, k_created_by in key_result:
             if verify_api_key(token, stored_hash):
                 team_id, key_id = k_team_id, k_id
                 created_by = k_created_by
                 break
+        # Fallback: legacy provision_tenant keys (key_prefix=team_id[:8])
+        # won't match the token[:10] prefix. In that case scan all keys.
+        if team_id is None:
+            key_result = sdk._get_registry().query(
+                "MATCH (k:APIKey) WHERE k.revoked_at IS NULL "
+                "RETURN k.team_id, k.id, k.key_hash, k.created_by"
+            ).result_set
+            for k_team_id, k_id, stored_hash, k_created_by in key_result:
+                if verify_api_key(token, stored_hash):
+                    team_id, key_id = k_team_id, k_id
+                    created_by = k_created_by
+                    break
         if team_id is None:
             await _audit_auth_failure(request, "invalid_key")
             raise HTTPException(status_code=401, detail="Invalid API key")
