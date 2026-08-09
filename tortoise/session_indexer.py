@@ -40,7 +40,6 @@ def _parse_frontmatter(content: str) -> dict:
     a malformed corpus file must degrade to the file-stem fallback, never
     crash the health check / doctor / sweep (review round 5 P2).
     """
-    import re as _re
     m = _FM_RE.match(content)
     if not m:
         return {}

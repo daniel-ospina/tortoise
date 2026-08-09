@@ -1717,7 +1717,11 @@ def _cmd_doctor(args):
     # checks observe the same DB target.
     try:
         _sdk = locals().get("sdk")
-        if _sdk is None:
+        # Round-8: check 3 fails LOUD for unreachable targets (_projection_for
+        # raises), leaving sdk._proj None — session_index_health would then
+        # build a projection from the SDK's own defaults and report health for
+        # the WRONG graph. Guard the projection too.
+        if _sdk is None or getattr(_sdk, "_proj", None) is None:
             raise RuntimeError("graph unreachable (check 3 failed)")
         health = _sdk.session_index_health()
         fc = health["file_count"]
