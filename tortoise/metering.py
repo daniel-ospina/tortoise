@@ -173,7 +173,7 @@ def record_write_ops(team_id: str, tier: str | None = None, n: int = 1) -> dict 
     }
 
     # Threshold events
-    _check_thresholds(team_id, tier, result)
+    _check_thresholds(team_id, tier, result, n)
 
     return result
 
@@ -192,6 +192,7 @@ def _check_thresholds(
     team_id: str,
     tier: str | None,
     result: dict,
+    n: int = 1,
 ) -> None:
     """Emit log events if write_ops crossed an 80% or 100% threshold.
 
@@ -208,8 +209,10 @@ def _check_thresholds(
 
     for pct in _THRESHOLD_PCT:
         threshold = int(allowance * pct / 100)
-        # Crossed the threshold THIS increment (was below, now at or above)
-        previous = write_ops - 1  # n is always 1 currently
+        # Crossed the threshold THIS increment (was below, now at or above).
+        # `previous` accounts for the batch size n — a single jump over the
+        # threshold (e.g. 0 → 105 with n=105) still fires the event.
+        previous = write_ops - max(n, 1)
         if previous < threshold <= write_ops:
             key = (team_id, period, pct)
             if key in _thresholds_fired:
