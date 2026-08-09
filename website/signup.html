@@ -10,6 +10,16 @@
     .hidden {
       display: none;
     }
+    .checkmark {
+      width: 48px; height: 48px;
+      margin: 0 auto 1rem;
+      display: flex; align-items: center; justify-content: center;
+      color: var(--green, #4ade80);
+    }
+    .checkmark svg { width: 100%; height: 100%; }
+    .dim { color: var(--text-dim); }
+    .small { font-size: 0.82rem; }
+
 
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -451,20 +461,23 @@
         return;
       }
 
-      // Analytics (#528): user_signed_up — CLIENT tracking, only when the
-      // consent banner granted it (consent.js defines window.consentState;
-      // window.posthog is a no-op stub until consent). Server-side account
-      // telemetry (tenant_provisioned etc.) is not gated by the banner.
-      if (window.posthog && window.consentState && window.consentState() === "granted") {
-        window.posthog.identify(data.user.id);
-        window.posthog.capture("user_signed_up", { provider: "email" });
-      }
-
       // If email confirmation is enabled, show a message
       if (data?.user?.identities?.length === 0) {
         showError("An account with this email already exists. Please sign in instead.");
         setLoading(false);
         return;
+      }
+
+      // Analytics (#528): user_signed_up — CLIENT tracking, only when the
+      // consent banner granted it (consent.js defines window.consentState;
+      // window.posthog is a no-op stub until consent). Server-side account
+      // telemetry (tenant_provisioned etc.) is not gated by the banner.
+      // Runs AFTER the identities check so existing accounts re-submitting
+      // (identities.length === 0) are not counted as new signups (#732).
+      if (data?.user?.identities?.length > 0 &&
+          window.posthog && window.consentState && window.consentState() === "granted") {
+        window.posthog.identify(data.user.id);
+        window.posthog.capture("user_signed_up", { provider: "email" });
       }
 
       // Email confirmation ON: signUp returns no session — show the
@@ -484,7 +497,7 @@
     // ── Check-your-inbox state (email confirmation ON) ──
     function showConfirmationRequired(email) {
       const form = document.getElementById("email-form");
-      const oauthBtns = document.querySelectorAll(".oauth-btn");
+      const oauthBtns = document.querySelectorAll(".btn-provider");
       const confirm = document.getElementById("confirmation-required");
       if (form) form.classList.add("hidden");
       oauthBtns.forEach((b) => b.classList.add("hidden"));
