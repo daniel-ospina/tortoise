@@ -2919,8 +2919,15 @@ def _backup_storage() -> R2Storage:
 
 
 def _require_backup_tier(team: dict) -> None:
-    """Backups are a Pro feature (#296 revenue model). Free tier → 402."""
-    if team.get("tier") in (None, "free"):
+    """Backups gated on pricing.json daily_backups feature flag (#656).
+
+    The allowlist is derived from product/pricing.json (NOT hardcoded) so
+    the gate can never drift from the canonical pricing source.
+    """
+    from tortoise.pricing import daily_backups_enabled
+
+    tier = team.get("tier")
+    if not daily_backups_enabled(tier):
         raise HTTPException(
             status_code=402,
             detail="Backups are a Pro feature — upgrade to enable daily backups",

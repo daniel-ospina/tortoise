@@ -1155,6 +1155,14 @@ class TestBackupEndpoints:
         )
         _store = _MS()  # SHARED instance — _backup_storage is called per request
         monkeypatch.setattr(_ha, "_backup_storage", lambda: _store)
+        # Decouple the machinery tests from the tier gate (#656): pricing.json
+        # marks pro.daily_backups "planned" (not live), so no tier passes the
+        # gate today. This fixture represents "Pro WITH the feature enabled" —
+        # the gate allowlist itself is tested by test_backup_tier_allowlist_from_pricing.
+        from tortoise import pricing as _pricing
+        monkeypatch.setattr(
+            _pricing, "daily_backups_enabled", lambda tier: tier == "pro"
+        )
         app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM, tier="pro")
         yield client
         app.dependency_overrides.clear()
@@ -1165,6 +1173,82 @@ class TestBackupEndpoints:
         assert r.status_code == 402
         r = client.post("/backups/restore", json={"backup_key": "x", "confirm": True})
         assert r.status_code == 402
+
+    def test_backup_solo_tier_402(self, client):
+        """Solo tier cannot create backups (daily_backups:false in pricing.json).
+
+        Regression test for #656 — the old gate blocked only (None, 'free'),
+        so a solo-tier team would have slipped past the backups gate.
+        """
+        app.dependency_overrides[get_current_team] = lambda: dict(
+            TEST_TEAM, tier="solo"
+        )
+        try:
+            r = client.post("/backups")
+            assert r.status_code == 402, (
+                f"expected 402 for solo tier, got {r.status_code}: {r.text}"
+            )
+            r = client.post(
+                "/backups/restore",
+                json={"backup_key": "x", "confirm": True},
+            )
+            assert r.status_code == 402
+        finally:
+            app.dependency_overrides.clear()
+
+    def test_backup_tier_allowlist_from_pricing(self, client):
+        """The gate strictly mirrors pricing.json: only a real JSON `true`
+        for features.daily_backups passes. "planned" (string) is NOT live —
+        so today NO tier passes (feature not shipped), and flipping pricing.json
+        to `true` enables a tier with zero code change (#656).
+
+        Expectations are derived from pricing.json itself (parity test) — the
+        gate can never drift from the canonical source again.
+        """
+        from tortoise.pricing import _load as _load_pricing
+
+        pricing = _load_pricing()
+        expected_allowed = [
+            tier for tier, spec in pricing.get("tiers", {}).items()
+            if spec.get("features", {}).get("daily_backups") is True
+        ]
+        expected_blocked = [
+            tier for tier in pricing.get("tiers", {})
+            if tier not in expected_allowed
+        ]
+        # Every tier in pricing.json behaves per its daily_backups flag.
+        for tier in expected_allowed:
+            app.dependency_overrides[get_current_team] = lambda t=tier: dict(
+                TEST_TEAM, tier=t
+            )
+            try:
+                r = client.post("/backups")
+                assert r.status_code != 402, (
+                    f"{tier} has daily_backups:true in pricing.json but was blocked: {r.text}"
+                )
+            finally:
+                app.dependency_overrides.clear()
+        for tier in expected_blocked:
+            app.dependency_overrides[get_current_team] = lambda t=tier: dict(
+                TEST_TEAM, tier=t
+            )
+            try:
+                r = client.post("/backups")
+                assert r.status_code == 402, (
+                    f"{tier} lacks daily_backups:true in pricing.json but passed the gate"
+                )
+            finally:
+                app.dependency_overrides.clear()
+
+        # Unknown tier → 402 (falls back to free limits).
+        app.dependency_overrides[get_current_team] = lambda: dict(
+            TEST_TEAM, tier="enterprise"
+        )
+        try:
+            r = client.post("/backups")
+            assert r.status_code == 402
+        finally:
+            app.dependency_overrides.clear()
 
     def test_backup_create_and_list_pro(self, pro_client):
         """Pro team: create returns a manifest; list shows it."""
