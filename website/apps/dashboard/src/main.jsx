@@ -544,16 +544,27 @@ function App() {
               <p className="dim">No sessions yet. Sessions appear when your agents capture conversations.</p>
             ) : (
               <table>
-                <thead><tr><th>ID</th><th>Summary</th><th>Created</th></tr></thead>
+                <thead><tr><th>ID</th><th>Turns / Extracted</th><th>Created</th></tr></thead>
                 <tbody>
                   {sessions.map((s) => (
                     <tr
                       key={s.id || s.session_id}
                       className="clickable"
+                      tabIndex={0}
+                      role="button"
+                      aria-label={`View session ${(s.id || s.session_id || '').slice(0, 16)} details`}
                       onClick={() => {
                         setSelectedSessionId(s.id || s.session_id)
                         setSessionDetail(null)
                         fetchSessionDetail(s.id || s.session_id)
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault()
+                          setSelectedSessionId(s.id || s.session_id)
+                          setSessionDetail(null)
+                          fetchSessionDetail(s.id || s.session_id)
+                        }
                       }}
                     >
                       <td><code>{(s.id || s.session_id || '').slice(0, 16)}…</code></td>

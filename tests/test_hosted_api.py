@@ -722,12 +722,149 @@ class TestSessionList:
         assert "id" in body["sessions"][0]
         assert "created_at" in body["sessions"][0]
         assert "turns" in body["sessions"][0]
+        assert "extracted" in body["sessions"][0]
 
     def test_list_sessions_empty(self, client):
         r = client.get("/v1/sessions")
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["sessions"] == []
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Session Detail
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestSessionDetail:
+    """GET /v1/sessions/{session_id} — session detail (#714)."""
+
+    def test_detail_404_nonexistent(self, client):
+        """404 when session doesn't exist."""
+        r = client.get("/v1/sessions/nonexistent-session-id")
+        assert r.status_code == 404, r.text
+
+    def test_detail_response_shape(self, client):
+        """Successful response includes turn_points, extracted_points, counts."""
+        # Capture a session with content that triggers extraction
+        r = client.post("/v1/sessions", json={
+            "conversation": [
+                {"role": "user", "content": "Let's use PostgreSQL for the backend."},
+                {"role": "assistant", "content": "I think that's a good choice."},
+            ],
+            "session_id": "detail-shape-test",
+        })
+        assert r.status_code == 200, r.text
+        sid = r.json()["session_id"]
+
+        r = client.get(f"/v1/sessions/{sid}")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["id"] == sid
+        assert "created_at" in body
+        assert body["turns"] == 2
+        assert body["extracted"] >= 1
+        assert isinstance(body["turn_points"], list)
+        assert isinstance(body["extracted_points"], list)
+        assert len(body["turn_points"]) == 2
+        assert len(body["extracted_points"]) >= 1
+        # Turn shape
+        turn = body["turn_points"][0]
+        assert "id" in turn
+        assert "role" in turn
+        assert "content" in turn
+        # Extracted point shape
+        ep = body["extracted_points"][0]
+        assert "id" in ep
+        assert "content" in ep
+        assert "kind" in ep
+
+    def test_detail_no_turns_no_extracted(self, client):
+        """Session with no turns / no extracted points (graceful)."""
+        r = client.post("/v1/sessions", json={
+            "conversation": [],
+            "session_id": "empty-session-detail",
+        })
+        assert r.status_code == 200, r.text
+
+        r = client.get("/v1/sessions/empty-session-detail")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["turns"] == 0
+        assert body["extracted"] == 0
+        assert body["turn_points"] == []
+        assert body["extracted_points"] == []
+
+    def test_detail_cross_team_isolation(self, client):
+        """Session from a different namespace is not found (404).
+
+        The harness patches TortoiseSDK to use a shared temp DB, but
+        namespaces isolate graphs — a session written to namespace
+        ``other-team-999`` is invisible to the endpoint which resolves
+        ``TEST_TEAM_ID`` (``test-team-001``).
+        """
+        from datetime import datetime, timezone
+        from tortoise.hosted_api import _make_sdk
+
+        sdk_b = _make_sdk(namespace="other-team-999")
+        proj_b = sdk_b._get_proj()
+        now = datetime.now(timezone.utc).isoformat()
+
+        # Create a session + turn point in other-team's graph
+        proj_b.g.query(
+            "CREATE (s:Session {id:'team-b-session', created_at:$now, turn_count:1})",
+            params={"now": now},
+        )
+        proj_b.g.query(
+            "CREATE (t:Point {id:'team-b-session_t0', content:'[user] secret', "
+            "pointKind:'event', is_operator:false, status:'draft', "
+            "createdAt:$now, updatedAt:$now})",
+            params={"now": now},
+        )
+        proj_b.g.query(
+            "MATCH (s:Session {id:'team-b-session'}), "
+            "(t:Point {id:'team-b-session_t0'}) "
+            "MERGE (s)-[:CONTAINS]->(t)",
+        )
+
+        # Team A (client) tries to access team B's session → 404
+        r = client.get("/v1/sessions/team-b-session")
+        assert r.status_code == 404, (
+            f"cross-team isolation broken: expected 404, got {r.status_code}"
+        )
+
+    def test_detail_role_parsing_no_brackets(self, client):
+        """Content without [role] prefix → role 'unknown'."""
+        from datetime import datetime, timezone
+        from tortoise.hosted_api import _make_sdk
+
+        sdk = _make_sdk(namespace=TEST_TEAM_ID)
+        proj = sdk._get_proj()
+        now = datetime.now(timezone.utc).isoformat()
+
+        # Create a session with a turn point that has no [role] prefix
+        proj.g.query(
+            "CREATE (s:Session {id:'role-test-session', created_at:$now, turn_count:1})",
+            params={"now": now},
+        )
+        proj.g.query(
+            "CREATE (t:Point {id:'role-test-session_t0', content:'no brackets here', "
+            "pointKind:'event', is_operator:false, status:'draft', "
+            "createdAt:$now, updatedAt:$now})",
+            params={"now": now},
+        )
+        proj.g.query(
+            "MATCH (s:Session {id:'role-test-session'}), "
+            "(t:Point {id:'role-test-session_t0'}) "
+            "MERGE (s)-[:CONTAINS]->(t)",
+        )
+
+        r = client.get("/v1/sessions/role-test-session")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert len(body["turn_points"]) == 1
+        assert body["turn_points"][0]["role"] == "unknown"
+        assert body["turn_points"][0]["content"] == "no brackets here"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
