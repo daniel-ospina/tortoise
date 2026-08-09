@@ -165,7 +165,8 @@ def _cmd_reconcile(args):
     import json, sys
     from pathlib import Path
 
-    if not args.db.startswith("docker://"):
+    from tortoise.config import is_docker_uri
+    if not is_docker_uri(args.db):
         print("Error: reconcile requires docker:// URI (e.g. docker://:pass@localhost:6379)", file=sys.stderr)
         return 1
 
@@ -2311,25 +2312,34 @@ def _db_uri_remote(db_uri: str) -> bool:
     is a loopback address (localhost / 127.0.0.0/8 / ::1, incl. IPv4-mapped
     ::ffff:127.0.0.1) — docker://user:pass@remote-host:6379/... is a valid
     remote FalkorDB target and must warn just like redis:// (#719).
+
+    Scheme membership derives from config (is_db_uri / is_docker_uri over
+    SUPPORTED_URI_SCHEMES) — a scheme added there can never silently skip
+    the remote-target warning (#715 no-drift invariant).
     """
     if not db_uri:
         return False
-    if db_uri.startswith(("redis://", "rediss://")):
-        return True
-    if not db_uri.startswith("docker://"):
+    from tortoise.config import is_db_uri, is_docker_uri
+    if not is_db_uri(db_uri):
         return False
-    from urllib.parse import urlsplit
+    if is_docker_uri(db_uri):
+        from urllib.parse import urlsplit
 
-    host = urlsplit(db_uri).hostname
-    if host is None:
-        return False  # unparseable authority — don't invent a warning
-    if host.strip().lower().rstrip(".") == "localhost":
-        return False
-    ip = _parse_bind_ip(host)
-    if ip is None:
-        # Unknown hostname — assume it resolves to something reachable.
-        return True
-    return not ip.is_loopback
+        host = urlsplit(db_uri).hostname
+        if host is None:
+            return False  # unparseable authority — don't invent a warning
+        if host.strip().lower().rstrip(".") == "localhost":
+            return False
+        ip = _parse_bind_ip(host)
+        if ip is None:
+            # Unknown hostname — assume it resolves to something reachable.
+            return True
+        return not ip.is_loopback
+    # Every other supported scheme (redis://, rediss://, and any future
+    # addition to config.SUPPORTED_URI_SCHEMES) is remote by convention
+    # (managed cloud / non-local instances) — conservative: warn rather
+    # than silently treat an unknown scheme as local.
+    return True
 
 
 def _cmd_serve_http(args) -> int:
@@ -2345,12 +2355,12 @@ def _cmd_serve_http(args) -> int:
     import sys
 
     from tortoise.sdk import TortoiseSDK
-    from tortoise.config import resolve_db_path
+    from tortoise.config import resolve_db_path, is_db_uri
     from tortoise.mcp_server import create_http_app
 
     # ── Resolve the DB target (single canonical source; print for diagnostics) ──
     db_uri = os.environ.get("TORTOISE_DB_URI", "")
-    if db_uri.startswith(("docker://", "redis://", "rediss://")):
+    if is_db_uri(db_uri):
         print(f"serve --http: DB target = {db_uri.split('@')[-1]}")
         if _db_uri_remote(db_uri):
             print("  ⚠️  Remote/cloud DB target — any local process holding a key drives this graph.")
@@ -2359,7 +2369,7 @@ def _cmd_serve_http(args) -> int:
         print(f"serve --http: DB target = {db_path}")
 
     # ── Tenant mode: note the fresh-namespace semantics for existing stdio data ──
-    if args.auth == "tenant" and not db_uri.startswith(("docker://", "redis://", "rediss://")):
+    if args.auth == "tenant" and not is_db_uri(db_uri):
         db_path = os.environ.get("TORTOISE_DB_PATH") or resolve_db_path()
         try:
             if os.path.exists(db_path):
@@ -2456,11 +2466,12 @@ def _cmd_key_create(args) -> int:
     import sys
     from datetime import datetime, timezone
 
+    from tortoise.config import is_db_uri
     from tortoise.exceptions import ControlPlaneError
     from tortoise.sdk import TortoiseSDK
 
     db_uri = os.environ.get("TORTOISE_DB_URI", "")
-    if db_uri.startswith(("docker://", "redis://", "rediss://")):
+    if is_db_uri(db_uri):
         print(f"key create: registry at {db_uri.split('@')[-1]}")
         if _db_uri_remote(db_uri):
             print("  ⚠️  Remote/cloud registry — key created on that instance.")
@@ -2517,6 +2528,9 @@ def _cmd_key_create(args) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     import os as _os
+    from tortoise.config import SUPPORTED_URI_SCHEMES
+
+    uri_schemes_hint = ", ".join(f"{s}://" for s in SUPPORTED_URI_SCHEMES)
 
     p = argparse.ArgumentParser(prog="tortoise", exit_on_error=False)
     sp = p.add_subparsers(dest="cmd")
@@ -2636,7 +2650,9 @@ def main(argv: list[str] | None = None) -> int:
     dc.add_argument("--edges", help="JSON list of edges, e.g. '[\"crit:1\", \"IMPL\", \"opt:a\"]' or full edge dicts")
     dc.add_argument("--context-free", action="store_true",
                     help="Deprecated no-op — context-free (explicit factors) is the only mode since #49 Phase 2",)
-    dc.add_argument("--db", help="DB target override — URI (docker://, redis://, rediss://) or absolute path (default: TORTOISE_DB_URI, else legacy FALKORDB_*, else embedded path)")
+    dc.add_argument("--db", help=(
+        f"DB target override — URI ({uri_schemes_hint}) or absolute path "
+        "(default: TORTOISE_DB_URI, else legacy FALKORDB_*, else embedded path)"))
     try:
         args = p.parse_args(argv)
     except (argparse.ArgumentError, SystemExit) as e:
