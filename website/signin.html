@@ -17,7 +17,7 @@
       --bg: #060b14;
       --surface: #0d1a2d;
       --text: #cbd5e1;
-      --text-dim: #64748b;
+      --text-dim: #94a3b8;
       --accent: #06b6d4;
       --accent-hover: #0891b2;
       --green: #4ade80;
@@ -38,7 +38,7 @@
     .topbar .logo { font-family: var(--serif, Georgia, serif); font-size: 1.15rem; color: var(--text, #cbd5e1); text-decoration: none; }
     .topbar .logo span { color: var(--accent, #06b6d4); }
     .topbar nav { flex: 1; display: flex; gap: 16px; }
-    .topbar nav a { color: var(--text-dim, #64748b); text-decoration: none; font-size: 14px; }
+    .topbar nav a { color: var(--text-dim, #94a3b8); text-decoration: none; font-size: 14px; }
     .topbar nav a:hover, .topbar nav a.active { color: var(--accent, #06b6d4); }
     .topbar .login { background: var(--accent, #06b6d4); color: #04121a; padding: 6px 16px; border-radius: 6px; text-decoration: none; font-weight: 600; font-size: 14px; }
     .topbar .login:hover { background: var(--accent-hover, #0891b2); }
@@ -255,7 +255,7 @@
     </div>
     <h1>Sign in to your account</h1>
 
-    <div id="error" class="error"></div>
+    <div id="error" class="error" role="alert"></div>
 
     <div class="providers">
       <button class="btn-provider" onclick="signInWithProvider('github')" id="btn-github">
@@ -343,14 +343,19 @@
     }
 
     // ── Loading state ──────────────────────────────────────────────────────
+    // Saves the full innerHTML (provider SVG icons included) and restores it,
+    // so OAuth button icons survive an error cycle (#751).
     function setLoading(loading) {
       document.querySelectorAll("button").forEach((btn) => {
         btn.disabled = loading;
         if (loading) {
-          btn.dataset.originalText = btn.textContent;
+          if (!btn.dataset.originalHTML) btn.dataset.originalHTML = btn.innerHTML;
           btn.innerHTML = '<span class="loading-spinner"></span>';
         } else {
-          btn.textContent = btn.dataset.originalText || btn.textContent;
+          if (btn.dataset.originalHTML) {
+            btn.innerHTML = btn.dataset.originalHTML;
+            delete btn.dataset.originalHTML;
+          }
         }
       });
     }

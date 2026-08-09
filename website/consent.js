@@ -59,6 +59,7 @@
   }
 
   var bannerRendered = false;
+  var lastFocused = null; // element focused before the banner stole focus (#751)
 
   function hideBanner() {
     var banner = document.getElementById("consent-banner");
@@ -66,6 +67,12 @@
       banner.parentNode && banner.parentNode.removeChild(banner);
     }
     bannerRendered = false;
+    // Restore focus to the page element that had it before the banner
+    // appeared (standard dialog pattern).
+    if (lastFocused && typeof lastFocused.focus === "function" && document.body.contains(lastFocused)) {
+      lastFocused.focus();
+    }
+    lastFocused = null;
   }
 
   function onAccept() {
@@ -97,7 +104,7 @@
 
   // Banner markup lives here (shared module) and is injected at runtime —
   // site design tokens: --bg #060b14, --surface #0d1a2d, --accent #06b6d4,
-  // --text #cbd5e1, --text-dim #64748b, --border #1e293b, mono font.
+  // --text #cbd5e1, --text-dim #94a3b8, --border #1e293b, mono font.
   function renderBanner() {
     // Automated browsers (Playwright/E2E) never get the overlay — keeps
     // same-viewport and mocked-click tests stable while real browsers do.
@@ -118,7 +125,7 @@
       "font-size:0.8rem;color:#cbd5e1;box-shadow:0 -4px 24px rgba(0,0,0,0.45)}" +
       "#consent-banner .consent-banner-inner{display:flex;flex-wrap:wrap;align-items:center;" +
       "justify-content:space-between;gap:0.75rem 1.25rem;width:100%;margin:0 auto;max-width:72rem}" +
-      "#consent-banner .consent-banner-text{margin:0;color:#64748b;line-height:1.5;max-width:38rem;flex:1 1 22rem}" +
+      "#consent-banner .consent-banner-text{margin:0;color:#94a3b8;line-height:1.5;max-width:38rem;flex:1 1 22rem}" +
       "#consent-banner .consent-banner-text a{color:#06b6d4;text-decoration:none}" +
       "#consent-banner .consent-banner-text a:hover{text-decoration:underline}" +
       "#consent-banner .consent-banner-actions{display:flex;gap:0.6rem;flex-shrink:0;margin-left:auto}" +
@@ -128,12 +135,14 @@
       "#consent-banner .consent-accept{background:#06b6d4;border-color:#06b6d4;" +
       "color:#060b14;font-weight:600}" +
       "#consent-banner .consent-accept:hover{background:#22d3ee;border-color:#22d3ee}" +
-      "#consent-banner .consent-decline:hover{border-color:#64748b;color:#fff}";
+      "#consent-banner .consent-decline:hover{border-color:#94a3b8;color:#fff}";
 
     var banner = document.createElement("div");
     banner.id = "consent-banner";
     banner.setAttribute("role", "dialog");
     banner.setAttribute("aria-label", "Cookie and analytics consent");
+    banner.setAttribute("aria-modal", "true");
+    banner.setAttribute("tabindex", "-1"); // focusable so we can move focus into it (#751)
     banner.innerHTML =
       '<div class="consent-banner-inner">' +
       '<p class="consent-banner-text">We use cookies and analytics to understand how the product is used ' +
@@ -156,6 +165,32 @@
     if (decline) {
       decline.addEventListener("click", onDecline);
     }
+
+    // ── Focus management (#751): move focus into the banner on inject, keep
+    //    Tab within it (simple focus trap), and let Escape decline.
+    lastFocused = document.activeElement;
+    banner.focus();
+    banner.addEventListener("keydown", function (e) {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onDecline();
+        return;
+      }
+      if (e.key !== "Tab") return;
+      var focusables = banner.querySelectorAll(
+        'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      );
+      if (!focusables.length) return;
+      var first = focusables[0];
+      var last = focusables[focusables.length - 1];
+      if (e.shiftKey && (document.activeElement === first || document.activeElement === banner)) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    });
   }
 
   // ── posthog-js loader (official snippet logic, US api_host) — the stub
