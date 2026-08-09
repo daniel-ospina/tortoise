@@ -161,6 +161,7 @@ class TestDiary:
         entries = sdk.diary_read("nobody", last_n=5)
         assert entries == []
 
+    # flake: known redislite lifecycle issue (#176)
     def test_multi_agent_isolation(self, sdk):
         sdk.diary_write("agent-a", "entry a1")
         sdk.diary_write("agent-b", "entry b1")
@@ -427,3 +428,68 @@ class TestCheckpointDedupObservability:
         assert any("dedup" in r.message for r in caplog.records), (
             "semantic-dedup failure was swallowed silently — no log record"
         )
+
+
+# ── #281: Event→Object aboutObject edges ────────────────────────────────
+
+class TestConnectIssueObjectsAboutObject:
+    def test_connect_issue_objects_uses_about_object(self, sdk):
+        ev = sdk.create_event("AgentSession", eventKind="AgentSession", session_id="s1")
+        meta = {"issues": [{"id": "12", "title": "fix thing", "repo": "acme/app",
+                            "number": 12, "url": "https://github.com/acme/app/issues/12"}]}
+        n = sdk._connect_issue_objects(ev["eventId"], meta)
+        assert n == 1
+        rel = sdk._get_proj().g.query(
+            "MATCH (e:Event {eventId:$eid})-[:aboutObject]->(o:Object) "
+            "RETURN o.name, o.repo, o.issue_number, o.url",
+            params={"eid": ev["eventId"]}).result_set
+        # FalkorDB result_set rows are lists, not tuples
+        assert rel == [["fix thing", "acme/app", 12, "https://github.com/acme/app/issues/12"]]
+        # Parameterized rel-type: the edge TYPE is passed as a param, so no edge-syntax
+        # literal appears in this file (Task 5 sweeps edge syntax only; raw-text words are fine)
+        assert sdk._get_proj().g.query(
+            "MATCH ()-[r]->() WHERE type(r) = $t RETURN count(*)",
+            params={"t": "INSTANTIATES"}).result_set[0][0] == 0
+
+    def test_connect_issue_objects_idempotent(self, sdk):
+        ev = sdk.create_event("AgentSession", eventKind="AgentSession", session_id="s1")
+        meta = {"issues": [{"id": "12", "title": "fix thing", "repo": "acme/app",
+                            "number": 12, "url": "https://github.com/acme/app/issues/12"}]}
+        assert sdk._connect_issue_objects(ev["eventId"], meta) == 1
+        assert sdk._connect_issue_objects(ev["eventId"], meta) == 1  # second run
+        assert sdk._get_proj().g.query(
+            "MATCH ()-[:aboutObject]->() RETURN count(*)").result_set[0][0] == 1
+        assert sdk._get_proj().g.query(
+            "MATCH (o:Object) RETURN count(*)").result_set[0][0] == 1
+
+    def test_connect_issue_objects_defensive_number(self, sdk):
+        ev = sdk.create_event("AgentSession", eventKind="AgentSession", session_id="s1")
+        meta = {"issues": [{"id": "13", "title": "odd", "repo": "acme/app",
+                            "number": "N/A", "url": "https://github.com/acme/app/issues/13"}]}
+        assert sdk._connect_issue_objects(ev["eventId"], meta) == 1  # no crash
+        # oid = item.get("id") or item.get("number") → Object id is "13"
+        row = sdk._get_proj().g.query(
+            "MATCH (o:Object {id:'13'}) RETURN o.issue_number").result_set
+        assert row[0][0] == "N/A"  # defensive cast stored the raw value
+
+    def test_connect_issue_objects_hash_fallback_and_bare_string(self, sdk):
+        ev = sdk.create_event("AgentSession", eventKind="AgentSession", session_id="s1")
+        import hashlib
+        expected_id = f"issue_{hashlib.sha256('no ids here'.encode()).hexdigest()[:8]}"
+        meta = {
+            "issues": [{"title": "no ids here"}],        # neither id nor number → hash fallback
+            "prs": ["just-a-string-pr"],                 # bare string item
+        }
+        n = sdk._connect_issue_objects(ev["eventId"], meta)
+        assert n == 2
+        # hash-fallback Object: issue_<sha256(title)[:8]>, objectKind issue, props default None
+        row = sdk._get_proj().g.query(
+            "MATCH (o:Object {id:$oid}) RETURN o.objectKind, o.repo, o.issue_number, o.url",
+            params={"oid": expected_id}).result_set
+        assert row == [["issue", None, None, None]]  # lists, not tuples
+        # bare-string PR Object: objectKind pr, props default None, one edge
+        pr = sdk._get_proj().g.query(
+            "MATCH (e:Event {eventId:$eid})-[:aboutObject]->(o:Object {objectKind:'pr'}) "
+            "RETURN o.name, o.repo, o.issue_number, o.url",
+            params={"eid": ev["eventId"]}).result_set
+        assert pr == [["just-a-string-pr", None, None, None]]  # lists, not tuples
