@@ -2522,7 +2522,13 @@ def _cmd_key_create(args) -> int:
     print("Use it with:")
     print("   tortoise serve --http --auth tenant")
     print(f"   MCP client url:      http://{args.bind}:{args.port}/mcp")
-    if args.bind == "127.0.0.1" and args.port == 8000:
+    if args.bind in ("0.0.0.0", "::"):
+        # Wildcard bind mirrors 'serve --http --bind 0.0.0.0' — the printed
+        # URL is unusable for clients, so ALWAYS show the LAN correction.
+        print("   (URL above is the server's wildcard bind — clients connect to the")
+        print(f"    machine's LAN address instead, e.g. http://<lan-ip>:{args.port}/mcp,")
+        print(f"    never {args.bind})")
+    elif args.bind == "127.0.0.1" and args.port == 8000:
         print("   (hint assumes the default serve bind/port — pass --bind/--port to")
         print("    'key create' to match a custom 'serve --http' setup, e.g. LAN")
         print("    --bind 0.0.0.0, in which case clients connect to the machine's")

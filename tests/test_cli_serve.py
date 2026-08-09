@@ -597,6 +597,39 @@ def test_local_http_roundtrip_lands_in_team_graph(local_db, monkeypatch):
         assert r.status_code == 200
 
 
+@pytest.mark.parametrize("bind,port", [("0.0.0.0", 8000), ("::", 8000), ("0.0.0.0", 9000)])
+def test_key_create_wildcard_bind_prints_lan_note(local_db, bind, port):
+    """#719 P2: `key create --bind 0.0.0.0` (the documented mirror of
+    'serve --http --bind 0.0.0.0') must print the LAN-address correction —
+    the printed wildcard URL is unusable for clients, and the note used to
+    fire only on full defaults (suppressed exactly when needed most).
+    Wildcard + non-default port must also show it."""
+    db, key, env = local_db
+    env["TORTOISE_DB_PATH"] = str(db)
+    proc = subprocess.run(
+        [sys.executable, "-m", "tortoise", "key", "create", "--name", "test",
+         "--bind", bind, "--port", str(port)],
+        capture_output=True, text=True, env=env, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert f"http://{bind}:{port}/mcp" in proc.stdout
+    assert "LAN address" in proc.stdout
+    assert f"never {bind}" in proc.stdout
+
+
+def test_key_create_default_bind_still_prints_mirror_hint(local_db):
+    """The defaults case keeps the mirror hint (pass --bind/--port to match
+    a custom serve setup) — regression guard for the elif branch."""
+    db, key, env = local_db
+    env["TORTOISE_DB_PATH"] = str(db)
+    proc = subprocess.run(
+        [sys.executable, "-m", "tortoise", "key", "create", "--name", "test"],
+        capture_output=True, text=True, env=env, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "assumes the default serve bind/port" in proc.stdout
+
+
 def test_bootstrap_key_persists_and_verifies(local_db):
     """The key printed by `tortoise key create` authenticates via apikey_verify
     in a FRESH process (survives restart on the canonical DB)."""
