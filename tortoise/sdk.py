@@ -363,12 +363,14 @@ class TortoiseSDK:
             return
         indexes = [
             ("Team", "name"),
+            ("Team", "stripe_customer_id"),  # #310 4b: webhook customer↔team bind
             ("Membership", "team_id"),
             ("Membership", "user_id"),
             ("APIKey", "team_id"),
             ("APIKey", "key_hash"),
             ("Invitation", "team_id"),
             ("Invitation", "token_hash"),
+            ("WebhookEvent", "event_id"),  # #310 7: webhook dedup marker lookup
         ]
         for label, prop in indexes:
             try:
@@ -3770,6 +3772,10 @@ class TortoiseSDK:
             # a team at cap can be upgraded (no REST surface exists yet — the
             # fields are SDK/registry-level; get_current_team honors them).
             "max_points", "max_api_keys", "max_sessions",
+            # #310 (Task 4b): billing mirror fields — the webhook/checkout
+            # paths write these directly; the control plane may also set them.
+            "subscription_status", "current_period_end", "grace_until",
+            "customer_email",
         }
         invalid = set(fields.keys()) - allowed
         if invalid:
