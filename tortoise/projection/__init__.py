@@ -74,7 +74,12 @@ class _GuardedGraph:
     def __getattr__(self, name):
         return getattr(self._g, name)
 
-from tortoise.config import RELATIVE_PATH_ERROR
+from tortoise.config import RELATIVE_PATH_ERROR, SUPPORTED_URI_SCHEMES
+
+# Backward-compat alias: the canonical scheme set lives in tortoise.config
+# (SUPPORTED_URI_SCHEMES) so URI-routing and connection-layer validation share
+# one source of truth (#715). Kept for existing importers of the private name.
+_SUPPORTED_URI_SCHEMES = SUPPORTED_URI_SCHEMES
 
 # ── Mixins ────────────────────────────────────────────────────────────────
 from tortoise.projection.entities import _EntityHandlers
@@ -172,16 +177,16 @@ class InMemoryProjection:
         self.points = fold(log.read_all())
 
 
-_SUPPORTED_URI_SCHEMES = ("docker", "redis", "rediss")
-
-
 def _validate_uri_scheme(scheme: str) -> str:
     """Accept docker:// (local) and redis:// / rediss:// (FalkorDB Cloud) URIs.
 
     Raises ValueError for anything else, mirroring the historical docker://-only
-    contract while making managed-instance URIs first-class.
+    contract while making managed-instance URIs first-class. The scheme set is
+    imported from tortoise.config (SUPPORTED_URI_SCHEMES) so the URI-routing
+    checks (resolve_db_path / is_db_uri / __main__._resolve_db_target) and this
+    connection-layer validation cannot drift (#715).
     """
-    if scheme not in _SUPPORTED_URI_SCHEMES:
+    if scheme not in SUPPORTED_URI_SCHEMES:
         raise ValueError(
             f"Unsupported scheme: {scheme} "
             f"(expected docker://, redis://, or rediss://). "
