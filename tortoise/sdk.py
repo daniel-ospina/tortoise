@@ -173,13 +173,17 @@ class TortoiseSDK:
     Args:
         db_path: Optional path to FalkorDBLite database file (None = use TORTOISE_DB_URI env var).
         namespace: Optional namespace for graph-name isolation.
+        event_log_path: Optional path to JSONL event log. When set, SDK write
+            paths append events so rebuild_all can restore SDK-created points (#548).
+            If None, no events are emitted (backward-compatible).
 
     Precedence: an explicitly-provided db_path wins over the TORTOISE_DB_URI
     env var. This lets tests/fixtures force a temp embedded DB even when a
     shared test URI is set in the environment (#139).
     """
 
-    def __init__(self, db_path: str | None = None, *, namespace: str | None = None):
+    def __init__(self, db_path: str | None = None, *, namespace: str | None = None,
+                 event_log_path: str | None = None):
         import os, re
         db_uri = os.environ.get("TORTOISE_DB_URI")
         if db_uri and db_path is None:
@@ -214,6 +218,8 @@ class TortoiseSDK:
                     "Use alphanumeric, hyphens, underscores; max 64 chars."
                 )
         self._namespace = namespace
+        self._event_log_path = event_log_path
+        self._event_log = None  # lazy-init EventLog (#548)
         self._proj: FalkorProjection | None = None
         self._ep = None  # lazy-init TortoiseEP
         self._evidence: dict[str, tuple[float, float]] = {}
@@ -259,6 +265,76 @@ class TortoiseSDK:
             else:
                 self._proj = FalkorProjection(self._db_path, graph_name=graph_name)
         return self._proj
+
+    def _get_event_log(self):
+        """Lazy-init the EventLog for SDK event emission (#548).
+
+        Returns None when no event_log_path was configured — callers MUST
+        handle the None case before appending.
+        """
+        if self._event_log is None and self._event_log_path:
+            from tortoise.log import EventLog
+            self._event_log = EventLog(self._event_log_path)
+        return self._event_log
+
+    def _emit_event(self, type_: str, *, point: dict | None = None,
+                    id: str | None = None, **payload) -> dict | None:
+        """Append an event to the SDK event log for rebuild parity (#548).
+
+        Returns the event dict (for caller inspection), or None when no
+        event log is configured (backward-compatible — no log, no event).
+
+        Events emitted by the SDK use ``initiated_by="sdk"`` to distinguish
+        them from extractor/user events produced by EventAPI.
+
+        The *point* dict should be a complete snapshot of the Point's
+        properties (as returned by :meth:`get_point`) so that replay via
+        :meth:`~tortoise.projection.FalkorProjection.rebuild_all` can
+        reconstruct the node and its edges identically.
+        """
+        log = self._get_event_log()
+        if log is None:
+            return None
+        from .ids import ulid, now_iso
+        event: dict = {
+            "event_id": ulid(),
+            "ts": now_iso(),
+            "type": type_,
+            "initiated_by": "sdk",
+            "projection_version": 2,
+        }
+        if point is not None:
+            # Strip embedding — it is recomputed on replay by
+            # _upsert_point_props (vecf32 serialization is fragile).
+            # content_hash is also stripped — it is derived from content.
+            clean = {k: v for k, v in point.items()
+                     if k not in ("embedding", "content_hash")}
+            # Operators may not store 'content' as a node property (#548);
+            # _upsert_point_props requires it — synthesize a fallback.
+            if "content" not in clean:
+                op_type = clean.get("op_type", "IMPL")
+                op_inputs = (point.get("operator") or {}).get("inputs", [])
+                clean["content"] = f"{op_type}({', '.join(op_inputs)})"
+            # Similarly, operators may lack 'pointKind' — default to empty.
+            if "pointKind" not in clean:
+                clean["pointKind"] = ""
+            event["point"] = clean
+        if id is not None:
+            event["id"] = id
+        event.update(payload)
+        try:
+            log.append(event)
+        except Exception as exc:
+            # The graph mutation already succeeded — a log-write failure must
+            # not crash the caller or pretend the write failed. Rebuild parity
+            # is best-effort here: rebuild_all's graph snapshot catches any
+            # point missing from the log on the next rebuild (#548).
+            _logger.warning(
+                "failed to append %s event to SDK log %s: %s",
+                type_, self._event_log_path, exc,
+            )
+            return None
+        return event
 
     def test_guard(self) -> None:
         """Assert the connected graph is safe for destructive test teardowns.
@@ -500,6 +576,8 @@ class TortoiseSDK:
         # Dreaming (#85): a new point can carry confidence-affecting props;
         # mark it dirty so the next dream/lazy-read stabilizes it.
         self._mark_dirty([pid])
+        # #548: emit PointAdded event for rebuild parity
+        self._emit_event("PointAdded", point=self.get_point(pid))
         return self.get_point(pid)
 
     def create_or_update_point(self, kind: str, content: str, **props) -> dict:
@@ -771,7 +849,11 @@ class TortoiseSDK:
             self._sync_tags(proj, id, props["tags"] or [])
         # Dreaming (#85): property mutations can affect confidence.
         self._mark_dirty([id])
-        return self.get_point(id)
+        result = self.get_point(id)
+        # #548: emit PointRevised event for rebuild parity
+        self._emit_event("PointRevised", id=id,
+                         new_content=props.get("content"), **props)
+        return result
 
     def delete_point(self, id: str) -> bool:
         """Delete a Point and its relationships. Returns True if found."""
@@ -790,6 +872,9 @@ class TortoiseSDK:
             params={"id": id},
         ).result_set[0][0]
         proj.g.query("MATCH (n:Point {id:$id}) DETACH DELETE n", params={"id": id})
+        # #548: emit PointRetracted event for rebuild parity (after delete,
+        # so the graph mutation is committed before the event is written)
+        self._emit_event("PointRetracted", id=id)
         # Tag GC (#485): delete orphaned :Tag nodes (no incoming TAGGED edges).
         # Idempotent — DETACH DELETE leaves count-0 tags behind that would
         # otherwise accumulate in list_tags.
@@ -1038,6 +1123,13 @@ class TortoiseSDK:
         # Dreaming (#85): new edges change propagation — mark all inputs dirty.
         self._mark_dirty(inputs)
         result = self.get_point(pid)
+        # #548: emit OperatorAdded event for rebuild parity.
+        # The operator.inputs dict must be constructed manually — it is not
+        # stored as a node property but is required by _upsert_point_edges
+        # during replay.
+        event_point = dict(result)
+        event_point["operator"] = {"op_type": op_type, "inputs": list(inputs)}
+        self._emit_event("OperatorAdded", point=event_point)
         return result
 
     def annotate_operator(self, id: str, bias: float, precision: float,
@@ -1112,6 +1204,14 @@ class TortoiseSDK:
         )
         # Dreaming (#85): new mitigation + IMPL edge change propagation.
         self._mark_dirty([mid, id])
+        # #548: emit events for rebuild parity
+        self._emit_event("PointAdded", point=self.get_point(mid))
+        # Emit OperatorAdded so the IMPL edge (mitigation → operator) is
+        # recreated on replay. mitigated_by edges are ancillary and
+        # reconstructed separately via the operator's edge replay.
+        mit_point = self.get_point(mid)
+        mit_point["operator"] = {"op_type": "IMPL", "inputs": [id]}
+        self._emit_event("OperatorAdded", point=mit_point)
         return self.get_point(mid)
 
     # ── Query ─────────────────────────────────────────────────────

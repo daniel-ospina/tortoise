@@ -1819,3 +1819,261 @@ def test_falkor_revise_point_wipes_stale_embedding_on_compute_failure():
         assert r[0][1] is True, "stale embedding survived a failed recompute (#19)"
     finally:
         proj.close()
+
+
+# ── #548: SDK-created points survive rebuild_all ──────────────────────────
+
+
+def test_falkor_rebuild_all_with_sdk_points():
+    """#548: SDK-created points (with event_log_path) survive rebuild_all.
+
+    SDK write paths emit PointAdded/OperatorAdded events to the log.
+    rebuild_all replays them → full parity between the incrementally-built
+    graph and the rebuilt graph.
+    """
+    if _skip_if_no_falkor():
+        return
+    from tortoise.sdk import TortoiseSDK
+
+    d = tempfile.mkdtemp(prefix="tortoise_sdk_rebuild_")
+    try:
+        db_path = os.path.join(d, "tortoise.db")
+        events_path = os.path.join(d, "events.jsonl")
+
+        # Create points via SDK (event_log_path configured)
+        sdk = TortoiseSDK(db_path=db_path, event_log_path=events_path)
+        try:
+            p1 = sdk.create_point("statement", "SDK point alpha",
+                                  authoredBy="alice", tags=["important"])
+            p2 = sdk.create_point("statement", "SDK point beta",
+                                  authoredBy="bob")
+            # Operator linking p2 → p1
+            op = sdk.create_operator("IMPL", p2["id"], [p1["id"]])
+            p3 = sdk.create_point("observation", "SDK point gamma")
+            # Update a point
+            sdk.update_point(p3["id"], content="SDK point gamma REVISED")
+        finally:
+            sdk.close()
+
+        # Verify the event log was written
+        from tortoise.log import EventLog
+        log_events = EventLog(events_path).read_all()
+        assert len(log_events) >= 5, (
+            f"Expected at least 5 SDK events (3 PointAdded + 1 OperatorAdded "
+            f"+ 1 PointRevised), got {len(log_events)}")
+        # Check event types
+        types = [e["type"] for e in log_events]
+        assert "PointAdded" in types
+        assert "OperatorAdded" in types
+        assert "PointRevised" in types
+        assert all(e.get("initiated_by") == "sdk" for e in log_events), \
+            "SDK events must have initiated_by='sdk'"
+
+        # Close the original SDK's DB so rebuild_all can open its own
+        # (the original projection is closed via sdk.close() above)
+
+        # ── Rebuild into a fresh graph from the event log ───
+        proj = FalkorProjection(
+            os.path.join(d, "rebuilt.db"), graph_name="test")
+        try:
+            result = proj.rebuild_all(d)
+            assert result["nodes"] >= 4, (
+                f"Expected at least 4 nodes (3 points + 1 operator), "
+                f"got {result['nodes']}")
+            assert result["edges"] >= 2, (
+                f"Expected at least 2 edges (IMPL from operator), "
+                f"got {result['edges']}")
+
+            # Verify all points exist with their properties
+            for pid, expected_content in [
+                (p1["id"], "SDK point alpha"),
+                (p2["id"], "SDK point beta"),
+                (p3["id"], "SDK point gamma REVISED"),
+                (op["id"], None),  # operator content varies
+            ]:
+                rows = proj.g.query(
+                    "MATCH (n:Point {id:$id}) RETURN n.content, n",
+                    params={"id": pid},
+                ).result_set
+                assert len(rows) == 1, f"Point {pid} not found after rebuild"
+                if expected_content is not None:
+                    assert rows[0][0] == expected_content, (
+                        f"Point {pid} content mismatch: "
+                        f"expected {expected_content!r}, got {rows[0][0]!r}")
+
+            # Verify operator edges survived
+            edge_count = proj.g.query(
+                f"MATCH (n:Point {{id:$oid}})-[r]->(m:Point {{id:$tid}}) "
+                f"RETURN count(r)",
+                params={"oid": op["id"], "tid": p1["id"]},
+            ).result_set[0][0]
+            assert edge_count >= 1, "Operator edge not recreated after rebuild"
+        finally:
+            proj.close()
+    finally:
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_falkor_rebuild_all_snapshot_preserves_sdk_points():
+    """#548 transitional: SDK points created WITHOUT event_log_path are
+    preserved via rebuild_all's graph snapshot.
+
+    Simulates existing graphs where SDK-created points predate the event
+    log fix. rebuild_all snapshots the graph before wiping and injects
+    synthetic events for points that have no JSONL counterpart.
+    """
+    if _skip_if_no_falkor():
+        return
+    from tortoise.sdk import TortoiseSDK
+
+    d = tempfile.mkdtemp(prefix="tortoise_snapshot_")
+    try:
+        db_path = os.path.join(d, "tortoise.db")
+        events_path = os.path.join(d, "events.jsonl")
+
+        # Create SDK points WITHOUT event_log_path (simulating pre-#548)
+        sdk = TortoiseSDK(db_path=db_path, event_log_path=None)
+        try:
+            p1 = sdk.create_point("statement", "Legacy SDK claim ONE",
+                                  authoredBy="alice")
+            p2 = sdk.create_point("statement", "Legacy SDK claim TWO",
+                                  authoredBy="bob")
+            # Operator (also without log)
+            op = sdk.create_operator("IMPL", p2["id"], [p1["id"]])
+        finally:
+            sdk.close()
+
+        # Also create an EventAPI-written event in the JSONL log
+        # (simulating the normal extractor path)
+        log = EventLog(events_path)
+        log.append({
+            "type": "PointAdded",
+            "point": {"id": "evt-001", "content": "EventAPI claim",
+                      "pointKind": "statement", "status": "live",
+                      "createdAt": "2026-08-01T00:00:00Z"},
+            "projection_version": 2,
+            "initiated_by": "extractor",
+        })
+
+        # ── rebuild_all on the SAME db_path (snapshot from SDK graph) ───
+        # The snapshot queries the existing graph BEFORE wiping, so
+        # SDK-created points without JSONL events are preserved.
+        # Must use the same graph_name as the SDK ("tortoise" is default).
+        proj = FalkorProjection(db_path, graph_name="tortoise")
+        try:
+            result = proj.rebuild_all(d)
+
+            # Should have 4+ nodes: p1, p2, op, evt-001
+            assert result["nodes"] >= 4, (
+                f"Expected at least 4 nodes, got {result['nodes']}")
+
+            # All points should be present
+            for pid, expected in [
+                (p1["id"], "Legacy SDK claim ONE"),
+                (p2["id"], "Legacy SDK claim TWO"),
+                ("evt-001", "EventAPI claim"),
+            ]:
+                rows = proj.g.query(
+                    "MATCH (n:Point {id:$id}) RETURN n.content",
+                    params={"id": pid},
+                ).result_set
+                assert len(rows) == 1, (
+                    f"Point {pid} not found after rebuild")
+                assert rows[0][0] == expected, (
+                    f"Point {pid} content mismatch: "
+                    f"expected {expected!r}, got {rows[0][0]!r}")
+
+            # Operator edges should be recreated
+            edge_rows = proj.g.query(
+                f"MATCH (n:Point {{id:$oid}})-[r]->(m:Point {{id:$tid}}) "
+                f"RETURN type(r)",
+                params={"oid": op["id"], "tid": p1["id"]},
+            ).result_set
+            assert len(edge_rows) >= 1, (
+                "Operator edge not recreated from snapshot")
+        finally:
+            proj.close()
+    finally:
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_falkor_rebuild_all_eventapi_regression():
+    """#548: existing EventAPI-written events still replay identically.
+
+    No regression — rebuild_all with only EventAPI events must produce
+    the same graph as apply().
+    """
+    if _skip_if_no_falkor():
+        return
+    d = tempfile.mkdtemp(prefix="tortoise_eventapi_reg_")
+    try:
+        # Create EventAPI events in a JSONL log
+        log = EventLog(os.path.join(d, "events.jsonl"))
+        now = "2026-08-01T00:00:00.000000+00:00"
+        events = [
+            {"event_id": "e0", "ts": now, "type": "IngestStarted",
+             "initiated_by": "extractor", "agent_id": "test",
+             "run_id": "r1",
+             "key": {"kind": "doc", "value": "reg.txt"},
+             "extractor_version": "1"},
+            {"event_id": "e1", "ts": now, "type": "PointAdded",
+             "initiated_by": "extractor", "agent_id": "test",
+             "projection_version": 2,
+             "point": {"id": "p-reg-1", "content": "regression claim A",
+                       "status": "live", "createdAt": now,
+                       "pointKind": "statement",
+                       "authoredBy": "alice", "confidence": 0.7}},
+            {"event_id": "e2", "ts": now, "type": "PointAdded",
+             "initiated_by": "extractor", "agent_id": "test",
+             "projection_version": 2,
+             "point": {"id": "p-reg-2", "content": "regression claim B",
+                       "status": "live", "createdAt": now,
+                       "pointKind": "statement",
+                       "authoredBy": "alice", "confidence": 0.6}},
+            {"event_id": "e3", "ts": now, "type": "PointRetracted",
+             "initiated_by": "extractor", "agent_id": "test",
+             "id": "p-reg-2"},
+        ]
+        for ev in events:
+            log.append(ev)
+
+        # Build via apply
+        projA = FalkorProjection(
+            os.path.join(d, "a.db"), graph_name="test")
+        projB = FalkorProjection(
+            os.path.join(d, "b.db"), graph_name="test")
+        try:
+            for ev in log.read_all():
+                projA.apply(ev)
+            result = projB.rebuild_all(d)
+
+            # p-reg-1 survives, p-reg-2 was retracted (deleted)
+            assert result["nodes"] >= 1, (
+                f"Expected at least 1 node (p-reg-1 survives, p-reg-2 retracted), "
+                f"got {result['nodes']}")
+
+            # Both graphs should have p-reg-1
+            for proj in (projA, projB):
+                rows = proj.g.query(
+                    "MATCH (n:Point {id:'p-reg-1'}) "
+                    "RETURN n.content, n.confidence"
+                ).result_set
+                assert len(rows) == 1, "p-reg-1 not found"
+                assert rows[0][0] == "regression claim A"
+                assert rows[0][1] == 0.7
+
+            # p-reg-2 was retracted — deleted in both (apply and rebuild)
+            for proj in (projA, projB):
+                rows = proj.g.query(
+                    "MATCH (n:Point {id:'p-reg-2'}) RETURN count(n)"
+                ).result_set
+                assert rows[0][0] == 0, (
+                    "p-reg-2 should be deleted after retraction")
+        finally:
+            projA.close()
+            projB.close()
+    finally:
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)
