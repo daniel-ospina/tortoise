@@ -300,13 +300,13 @@ def test_capture_session_falsy_non_string_content_not_swallowed(sdk):
 #
 # ONTOLOGY v3.2 §3.2 (issue #214) removed the INSTANTIATES predicate from
 # the valid-predicate vocabulary; the canonical Event→Object connection is
-# the aboutObject edge (#281 re-scope). The session-indexer's legacy
-# INSTANTIATES producer (_connect_issue_objects, sdk.py) is still pending
-# #281's swap on origin/main — these tests assert the canonical aboutObject
-# edge produced by the real capture surface (capture_session →
-# create_about_edge / create_event) and guard that the removed predicate is
-# never emitted from that producer. They start passing against the full
-# index flow unchanged once #281 lands.
+# the aboutObject edge (#281 re-scope). These tests assert the canonical
+# aboutObject edge produced by the capture surface (capture_session →
+# create_about_edge / create_event) and guard that no INSTANTIATES edge is
+# created anywhere in the graph these tests touch. The session-indexer's
+# legacy INSTANTIATES producer (_connect_issue_objects, sdk.py) is still
+# pending #281's swap on origin/main; its compliance with #214 is #281's
+# test scope, not asserted here.
 
 
 def test_capture_session_event_object_canonical_about_edge(sdk):
@@ -344,11 +344,11 @@ def test_capture_session_event_object_canonical_about_edge(sdk):
     ).result_set
     assert back and back[0][0] == eid, f"reverse traversal miss: {back}"
 
-    # 5. Removed-predicate guard (#214): the canonical producer must not
-    #    emit the dead INSTANTIATES edge.
+    # 5. Removed-predicate guard (#214): no INSTANTIATES edge anywhere in
+    #    this graph. Scoped to the capture surface this test drives — the
+    #    index flow's legacy producer is #281's test scope.
     dead = proj.g.query(
-        "MATCH (e:Event {eventId:$eid})-[:INSTANTIATES]->(o) RETURN count(o)",
-        params={"eid": eid},
+        "MATCH ()-[:INSTANTIATES]->() RETURN count(*)",
     ).result_set
     assert dead[0][0] == 0, "INSTANTIATES was removed from ONTOLOGY v3.2 §3.2"
 
