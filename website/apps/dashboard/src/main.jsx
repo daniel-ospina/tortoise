@@ -116,7 +116,13 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ price_id: team.checkout_price_id }),
       })
-      window.open(checkout_url, '_blank')
+      const win = window.open(checkout_url, '_blank')
+      // Round-13: async-fetch-then-open is popup-blocked in Firefox/Safari —
+      // don't leave the Upgrade button stuck at 'Opening checkout…'.
+      if (!win) {
+        setCheckoutPending(false)
+        setError('Popup blocked — allow popups for app.premiselabs.co and try again.')
+      }
     } catch (err) {
       setError(err.message)
       setCheckoutPending(false)
@@ -141,10 +147,14 @@ function App() {
     const cancelled = params.get('checkout') === 'cancelled'
     if (sessionId) {
       let tries = 0
+      // Round-13 (P2): a mid-poll team switch must not let a tick land the
+      // OLD team's data under the NEW team's switcher — capture the team at
+      // poll start and bail when it changes.
+      const teamAtPollStart = teamIdRef.current
       const poll = setInterval(async () => {
         tries += 1
         try {
-          const t = await refreshTeam()
+          const t = await refreshTeam(undefined, teamAtPollStart)
           if (t && ACTIVE_STATUSES.includes(t.subscription_status)) { tries = 5 }
         } catch { /* webhook may not have landed yet */ }
         if (tries >= 5) {
@@ -288,13 +298,17 @@ function App() {
     })()
   }, [])
 
-  async function refreshTeam(key) {
+  async function refreshTeam(key, expectedTeamId) {
     // P1 (code-review): extracted team refetch — the success-return poll loop
     // used an undefined `jl` (dead code); this is the real refetch.
     // P2 (code-review): key param so the refetch targets the selected team —
     // the overview cards + header tier badge read /v1/team, which resolves
     // the team from the API key.
     const t = await api('/v1/team', key ? { headers: { Authorization: `Bearer ${key}` } } : {})
+    // Round-13 (P2): the checkout poll pins the team at poll start — if the
+    // user switched teams mid-poll, never land the old team's data under the
+    // new team's switcher/header.
+    if (expectedTeamId != null && teamIdRef.current !== expectedTeamId) return t
     setTeam(t)
     return t
   }
@@ -558,7 +572,11 @@ function App() {
       // landed while this request was in flight.
       if (teamIdRef.current !== teamId) return
       if (res.ok) {
-        setMembers(await res.json())
+        const data = await res.json()
+        // Round-13: re-check after the parse — a switch landing between the
+        // guard and the json resolution must not write the old team's members.
+        if (teamIdRef.current !== teamId) return
+        setMembers(data)
         setMembersStatus('ok')
       } else if (res.status === 403) {
         setMembers(null) // not owner/admin — cannot view
