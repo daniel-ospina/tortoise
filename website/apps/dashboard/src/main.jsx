@@ -363,6 +363,9 @@ function App() {
       localStorage.setItem(KEY_STORAGE, apiKey)
       await loadAll()
     } catch (e) {
+      // Round-23: a failed key attempt must not keep the misleading
+      // 'Sign in with your Tortoise account.' headline above the key input.
+      setAuthMode('apikey')
       setError(e.message === 'Invalid API key' ? 'Invalid API key — check your key and try again.' : e.message)
       setAuthed(false)
     } finally {
