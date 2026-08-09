@@ -56,7 +56,11 @@ jobs:
           # pytest failures are silently masked — steps.tests.outcome would be
           # 'success' even when the suite is red.
           set -o pipefail
-          python -m pytest tests/ -q --timeout=90 2>&1 | tail -25
+          # tests/e2e has dedicated jobs (welcome-e2e, legal-e2e, signup/billing
+          # e2e in their own workflows) and needs pytest-playwright browsers this
+          # job does not install — post-merge-validation covers the
+          # unit/integration suite only.
+          python -m pytest tests/ -q --timeout=90 --ignore=tests/e2e 2>&1 | tail -25
       - name: Comment result on PR
         if: always()
         uses: actions/github-script@v7
