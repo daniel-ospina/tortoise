@@ -575,14 +575,16 @@
         widget.setAttribute('data-expired-callback', 'onTurnstileExpired');
         widget.setAttribute('data-error-callback', 'onTurnstileError');
         form.appendChild(widget);
+        // Assign callbacks BEFORE appending the async script so the widget
+        // render (next task) always finds them, regardless of script flags.
+        window.onTurnstileToken = function (token) { turnstileToken = token; };
+        window.onTurnstileExpired = function () { turnstileToken = null; };
+        window.onTurnstileError = function () { turnstileToken = null; };
         const script = document.createElement('script');
         script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js';
         script.async = true;
         script.defer = true;
         document.head.appendChild(script);
-        window.onTurnstileToken = function (token) { turnstileToken = token; };
-        window.onTurnstileExpired = function () { turnstileToken = null; };
-        window.onTurnstileError = function () { turnstileToken = null; };
       }
 
       let submitting = false;
@@ -610,6 +612,7 @@
 
         submitting = true;
         form.setAttribute('aria-busy', 'true');
+        button.disabled = true;
         button.textContent = 'Sending…';
 
         const payload = {
@@ -643,6 +646,7 @@
         } finally {
           submitting = false;
           form.removeAttribute('aria-busy');
+          button.disabled = false;
           button.textContent = 'Stay in touch';
           // Turnstile tokens are single-use — clear + re-render after submit
           if (TURNSTILE_SITE_KEY) {

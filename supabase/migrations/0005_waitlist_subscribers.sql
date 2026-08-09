@@ -50,7 +50,7 @@ BEGIN
         SELECT 1 FROM pg_constraint
         WHERE conrelid = 'public.waitlist_subscribers'::regclass
           AND contype  = 'u'
-          AND pg_get_constraintdef(oid) LIKE 'UNIQUE (email)%'
+          AND pg_get_constraintdef(oid) LIKE 'UNIQUE (email)'
     ) THEN
         ALTER TABLE public.waitlist_subscribers
             ADD CONSTRAINT waitlist_subscribers_email_key UNIQUE (email);

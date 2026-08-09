@@ -264,10 +264,18 @@ stubFetch(() => jsonResponse(201, [{ id: "x" }]));
   const bad2 = post({ email: [], hp: {} });
   const res2 = await handle(bad2, ENV);
   assert(res2.status === 400, "email: [] / hp: {} → 400");
+  const nullBody = new Request("http://x", {
+    method: "POST",
+    headers: { Origin: ORIGIN, "Content-Type": "application/json" },
+    body: "null",
+  });
+  const resNull = await handle(nullBody, ENV);
+  assert(resNull.status === 400 && resNull.headers.get("access-control-allow-origin"),
+    "JSON null body → 400 + ACAO (no uncaught TypeError)");
   assert(calls.length === 0, "type-confused inputs → zero outbound calls");
 }
 
-// ── 11. Per-email rate limit (email-bomb guard) ───────────────────────────
+// ── 11. Per-email rate limit — recorded AFTER captcha passes ─────────────
 reset();
 stubFetch(() => jsonResponse(201, [{ id: "x" }]));
 {
@@ -276,7 +284,35 @@ stubFetch(() => jsonResponse(201, [{ id: "x" }]));
     const req = post({ email: "bomb@example.com" });
     last = (await handle(req, ENV)).status;
   }
-  assert(last === 429, "6th submission for same email → 429");
+  assert(last === 429, "6th captcha-free submission for same email → 429");
+}
+reset();
+stubFetch((call) => {
+  if (call.url.includes("siteverify")) return jsonResponse(200, { success: false });
+  return jsonResponse(201, [{ id: "x" }]);
+});
+{
+  // FAILING captcha must NOT consume the victim's email quota
+  let last = 0;
+  for (let i = 0; i < 8; i++) {
+    const req = post({ email: "victim@example.com", "cf-turnstile-response": "tok" });
+    last = (await handle(req, ENV_CAPTCHA)).status;
+  }
+  assert(last === 400, "8 failing-captcha submissions → 400 (never 429: quota untouched)");
+}
+reset();
+stubFetch((call) => {
+  if (call.url.includes("siteverify")) return jsonResponse(200, { success: true });
+  return jsonResponse(201, [{ id: "x" }]);
+});
+{
+  // Passing captcha consumes quota → 429 after 5/hr
+  let last = 0;
+  for (let i = 0; i < 6; i++) {
+    const req = post({ email: "real@example.com", "cf-turnstile-response": "tok" });
+    last = (await handle(req, ENV_CAPTCHA)).status;
+  }
+  assert(last === 429, "6th captcha-passing submission for same email → 429");
 }
 
 // ── 12. Supabase failure → 500; oversize body → 400 ───────────────────────

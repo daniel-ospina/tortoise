@@ -60,6 +60,14 @@ function limited(map: Map<string, number[]>, key: string, max: number, now: numb
   for (const [k, times] of map) {
     if (times.every((t) => now - t >= RATE_LIMIT_WINDOW_MS)) map.delete(k);
   }
+  // Bound memory in long-lived isolates: rotating keys must not grow the map.
+  if (map.size > 10_000) {
+    const nowMs = now;
+    for (const [k, times] of map) {
+      if (times.every((t) => nowMs - t >= RATE_LIMIT_WINDOW_MS)) map.delete(k);
+    }
+    if (map.size > 10_000) map.clear();
+  }
   return false;
 }
 
@@ -201,6 +209,11 @@ export async function handle(req: Request, env: Env): Promise<Response> {
   } catch {
     return json({ error: "Invalid JSON body" }, 400, corsOrigin);
   }
+  // JSON.parse("null"|"42"|"[]") yields non-object values — property access
+  // on null throws; guard before coercion (400 with CORS, never a bare 500).
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return json({ error: "Invalid JSON body" }, 400, corsOrigin);
+  }
 
   // Email validation — guard non-string types before coercion (a type-confused
   // field must 400 cleanly with CORS, not throw an uncaught TypeError)
@@ -216,7 +229,9 @@ export async function handle(req: Request, env: Env): Promise<Response> {
   }
 
   // Rate limits (best-effort). IP limit keyed on the gateway-appended XFF
-  // entry; per-email limit guards third-party email-bombing + Resend quota.
+  // entry and checked BEFORE Turnstile (protects the verify endpoint); the
+  // per-email limit is checked AFTER captcha so a captcha-free attacker
+  // cannot burn a victim's email quota without solving the challenge.
   const ip = clientIp(req);
   const now = Date.now();
   if (ip && limited(rateLimitHits, `ip:${ip}`, RATE_LIMIT_MAX, now)) {
@@ -230,6 +245,18 @@ export async function handle(req: Request, env: Env): Promise<Response> {
       },
     });
   }
+
+  // Turnstile — when the secret is configured, a valid token is REQUIRED
+  const token = typeof body["cf-turnstile-response"] === "string"
+    ? body["cf-turnstile-response"]
+    : undefined;
+  const captchaOk = await verifyTurnstile(env, token, ip);
+  if (!captchaOk) {
+    return json({ error: "Captcha verification failed" }, 400, corsOrigin);
+  }
+
+  // Per-email limit (after captcha): guards email-bombing third parties +
+  // Resend quota burn on genuinely passing submissions.
   if (limited(emailRateLimitHits, `email:${email}`, EMAIL_RATE_LIMIT_MAX, now)) {
     return new Response(JSON.stringify({ error: "Too many requests" }), {
       status: 429,
@@ -240,12 +267,6 @@ export async function handle(req: Request, env: Env): Promise<Response> {
         "Vary": "Origin",
       },
     });
-  }
-
-  // Turnstile — when the secret is configured, a valid token is REQUIRED
-  const captchaOk = await verifyTurnstile(env, body["cf-turnstile-response"], ip);
-  if (!captchaOk) {
-    return json({ error: "Captcha verification failed" }, 400, corsOrigin);
   }
 
   // PostgREST insert with dedup. on_conflict is a URL QUERY PARAM; the Prefer
