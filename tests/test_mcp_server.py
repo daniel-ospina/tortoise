@@ -355,3 +355,67 @@ class TestAnalyzeLlmBudget:
         finally:
             _current_team_id.reset(token)
             ms._ANALYZE_LLM_BUDGET.pop("team-budget", None)
+
+
+class TestEventsTools:
+    """#432 Task 6 — tortoise_events_poll + tortoise_retract_point tool functions."""
+
+    def test_tools_exist_and_registered(self):
+        from tortoise.mcp_server import tortoise_events_poll, tortoise_retract_point
+        from tortoise.tool_registry import TOOL_REGISTRY
+
+        assert callable(tortoise_events_poll) and callable(tortoise_retract_point)
+        names = {t.name for t in TOOL_REGISTRY}
+        assert "tortoise_events_poll" in names
+        assert "tortoise_retract_point" in names
+        ev = next(t for t in TOOL_REGISTRY if t.name == "tortoise_events_poll")
+        rt = next(t for t in TOOL_REGISTRY if t.name == "tortoise_retract_point")
+        assert ev.http_policy is True and rt.http_policy is True
+        assert ev.annotations.readOnlyHint is True
+        assert rt.annotations.destructiveHint is True
+
+    def test_events_poll_returns_same_shape_as_sdk(self, monkeypatch, tmp_path):
+        import os
+        from tortoise.mcp_server import tortoise_events_poll, _transport_mode
+        from tortoise.sdk import TortoiseSDK
+
+        db = os.path.join(str(tmp_path), "evt.db")
+        sdk = TortoiseSDK(db)
+        sdk.create_point("statement", "hello from mcp")
+        monkeypatch.setattr("tortoise.mcp_server._get_team_sdk", lambda: sdk)
+        token = _transport_mode.set("stdio")
+        try:
+            result = tortoise_events_poll()
+        finally:
+            _transport_mode.reset(token)
+        assert result["events"] and result["events"][0]["type"] == "PointAdded"
+        assert result["next_cursor"]
+
+    def test_events_poll_unknown_type_error(self, monkeypatch, tmp_path):
+        import os
+        from tortoise.mcp_server import tortoise_events_poll, _transport_mode
+        from tortoise.sdk import TortoiseSDK
+
+        sdk = TortoiseSDK(os.path.join(str(tmp_path), "evt2.db"))
+        monkeypatch.setattr("tortoise.mcp_server._get_team_sdk", lambda: sdk)
+        token = _transport_mode.set("stdio")
+        try:
+            result = tortoise_events_poll(types=["Nope"])
+        finally:
+            _transport_mode.reset(token)
+        assert result.get("error")  # _safe structured error, not a crash
+
+    def test_retract_point_returns_sdk_result(self, monkeypatch, tmp_path):
+        import os
+        from tortoise.mcp_server import tortoise_retract_point, _transport_mode
+        from tortoise.sdk import TortoiseSDK
+
+        sdk = TortoiseSDK(os.path.join(str(tmp_path), "evt3.db"))
+        p = sdk.create_point("statement", "retract me")
+        monkeypatch.setattr("tortoise.mcp_server._get_team_sdk", lambda: sdk)
+        token = _transport_mode.set("stdio")
+        try:
+            result = tortoise_retract_point(p["id"])
+        finally:
+            _transport_mode.reset(token)
+        assert result.get("status") == "retracted"

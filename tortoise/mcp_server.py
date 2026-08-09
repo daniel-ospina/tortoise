@@ -152,6 +152,7 @@ _QUOTA_GATED: frozenset[str] = frozenset({
     "tortoise_mitigate_operator",
     # edge-creating tools — edge growth is the same graph-flood family
     "tortoise_create_edge", "tortoise_supersede", "tortoise_invalidate",
+    "tortoise_retract_point",
     # delegates to hosted_api._seed_demo_graph (creates the 4-layer demo graph)
     "tortoise_onboarding_demo_create",
 })
@@ -681,6 +682,39 @@ def tortoise_supersede(old_id: str, new_id: str) -> dict:
     Returns {invalidated, id, corrected_by}.
     """
     return _safe(_quota_gated(_get_team_sdk().supersede_point, "points"), old_id, new_id)
+
+
+def tortoise_retract_point(id: str) -> dict:
+    """Tombstone-retract a Point — status='retracted' (point stays in graph).
+
+    Terminal state transition; default query/list surfaces exclude retracted
+    points (opt-in via include_retracted). Raises ValueError if the point is
+    missing, is an operator, or is already terminal (retracted/superseded/
+    archived).
+    """
+    return _safe(_quota_gated(_get_team_sdk().retract_point, "points"), id)
+
+
+def tortoise_events_poll(after: str | None = None, types: Any = None,
+                         limit: int = 100) -> dict:
+    """Poll graph/claim events after an opaque cursor (at-least-once).
+
+    Returns {events: [...], next_cursor}. after=None → tail (oldest retained).
+    Expired cursor → structured error ('cursor expired — replay from tail');
+    malformed cursor → 'invalid cursor'. types: comma-free list of event types
+    (PointAdded, OperatorAdded, PointRetracted, PointSuperseded,
+    OperatorAnnotated) or None for all.
+
+    readOnlyHint covers user-visible state: the poll NEVER mutates user
+    content. A rare maintenance purge (retention) may run at most once per
+    TORTOISE_EVENT_RETENTION_INTERVAL — an internal housekeeping DELETE of
+    expired :GraphEvent nodes, gated so steady-state polls are read-only.
+    """
+    if types is not None:
+        types = _parse(types)
+        if not isinstance(types, list):
+            types = [types]
+    return _safe(_get_team_sdk().events_poll, after=after, types=types, limit=limit)
 
 
 
