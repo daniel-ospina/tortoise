@@ -854,6 +854,9 @@ class TeamInfoResponse(BaseModel):
     grace_until: float | None = None
     customer_email: str | None = None
     point_count: int = 0
+    # #310 (Task 9): server-resolved default checkout price (pro monthly) so
+    # the dashboard never hardcodes Stripe price ids (env-driven catalog).
+    checkout_price_id: str | None = None
 
 
 # ── Billing: Checkout + Portal request/response models (#310, Task 5) ───────
@@ -1223,8 +1226,9 @@ async def team_info(team: dict = Depends(get_current_team)):
         subscription_status=team.get("subscription_status"),
         current_period_end=team.get("current_period_end"),
         grace_until=team.get("grace_until"),
-        customer_email=team.get("customer_email"),        point_count=point_count,
-    )
+        customer_email=team.get("customer_email"),
+        point_count=point_count,
+        checkout_price_id=_default_checkout_price_id(),    )
 
 
 # ── Onboarding: Self-Service Registration (#498) ──────────────────
@@ -3835,3 +3839,20 @@ async def webhooks_stripe(request: Request):
     except Exception as e:  # noqa: BLE001 — 500 → Stripe retries (live up to 3 days)
         _logger.error("webhook: processing failed (%s)", _safe_log(e))
         return JSONResponse(status_code=500, content={"detail": "processing failed"})
+
+
+def _default_checkout_price_id() -> str | None:
+    """Server-resolved default checkout price: pro monthly (Task 9).
+
+    The dashboard upgrade CTA uses this so price ids stay env-driven
+    (STRIPE_PRICE_IDS) and never leak into the client. Best-effort — None when
+    the catalog is unconfigured (missing env → lazy BillingConfigError path).
+    """
+    try:
+        from tortoise.billing import PriceCatalog
+
+        catalog = PriceCatalog()
+        price_id = catalog.price_for("pro", "monthly")
+        return price_id or None
+    except Exception:  # noqa: BLE001
+        return None
