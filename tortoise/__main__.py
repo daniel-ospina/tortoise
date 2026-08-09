@@ -1231,7 +1231,7 @@ def _cmd_index_github(args):
     from pathlib import Path
 
     from tortoise.api import EventAPI
-    from tortoise.extraction_pipeline import ExtractionPipeline
+    from tortoise.extractor import MockModel, extract_from_document
     from tortoise.log import EventLog
     from tortoise.projection import FalkorProjection
 
@@ -1240,7 +1240,7 @@ def _cmd_index_github(args):
 
     # Background mode: detach and return immediately
     if args.background:
-        cmd = [sys.executable, "-m", "tortoise", "index", "github", url]
+        cmd = [sys.executable, "-m", "tortoise", "index", "github", url, "--db", args.db]
         if branch != "main":
             cmd.extend(["--branch", branch])
         pid_file = Path(tempfile.gettempdir()) / f"tortoise-index-{Path(url).stem}.pid"
@@ -1336,13 +1336,16 @@ def _cmd_index_github(args):
         except Exception:
             pass
 
-    pipeline = ExtractionPipeline(enrich=False)
+    # Use deterministic mock models by default (offline, self-hosted friendly).
+    # Users can swap to LLM models via tortoise ingest for richer extraction.
+    point_model = MockModel("cheap")
+    relation_model = MockModel("reason")
     indexed, skipped, errors = 0, 0, 0
 
     for i, fp in enumerate(md_files, 1):
         rel = fp.relative_to(repo_path)
         raw_text = fp.read_text(encoding="utf-8")
-        # ponytail: strip frontmatter before hashing — pipeline may add
+        # ponytail: strip frontmatter before hashing — extractor may add
         # frontmatter, which would change the hash on the next run.
         text_for_hash = raw_text
         if raw_text.startswith('---'):
@@ -1356,11 +1359,16 @@ def _cmd_index_github(args):
             continue
         print(f"  [{i}/{total}] {rel}…", end=" ", flush=True)
         try:
-            stats = pipeline.process_file(fp, api)
+            stats = extract_from_document(
+                raw_text, str(rel), api,
+                point_model=point_model,
+                relation_model=relation_model,
+                authored_by="github-indexer",
+            )
             if stats.get("points", 0) > 0:
                 indexed += 1
                 indexed_hashes.add(content_hash)
-                print(f"✓ ({stats['points']} pts, {stats['operators']} ops, kind={stats['documentKind']})")
+                print(f"✓ ({stats['points']} pts, {stats['operators']} ops, {stats['sections']} sections)")
             else:
                 skipped += 1
                 print("⊙ (skipped — no claims found)")
