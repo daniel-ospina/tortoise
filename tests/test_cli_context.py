@@ -781,3 +781,55 @@ class TestCliSecurityAndIndex:
         assert "Invalid DB target" in out
         assert "relative" in out
         assert "Traceback" not in out
+
+    # ── Fix 10 (P2): no credential at ANY non-doctor catch site ──
+
+    @pytest.mark.parametrize("command", ["init", "list-kinds", "index", "decide"])
+    def test_mask_applied_at_non_doctor_catch_sites(self, command, monkeypatch, capsys, tmp_path):
+        """#720 P2 conf 55: the userinfo mask must be applied at every
+        non-doctor catch site, not just doctor. A bolt:// (unsupported-
+        scheme) URI with a credential falls into RELATIVE_PATH_ERROR with
+        the RAW URI embedded in the message — whichever command surfaces
+        it, the secret must never reach stdout/stderr and the masked URI
+        (host/path intact) must appear instead."""
+        from tortoise import __main__ as m
+
+        uri = "bolt://user:sup3rsekrit@host:7687/g"
+        (tmp_path / "README.md").write_text("# repo\n", encoding="utf-8")
+
+        if command == "init":
+            # catch site __main__.py:331 — explicit --path that is not a
+            # supported-scheme URI → relative-path reject embeds the raw URI
+            rc = m._cmd_init(mock.Mock(path=uri, cmd="init", yes=True,
+                                       api_key=None))
+        elif command == "list-kinds":
+            # catch site __main__.py:1867 — env TORTOISE_DB_URI with an
+            # unsupported scheme falls through to the path branch → reject
+            monkeypatch.setenv("TORTOISE_DB_URI", uri)
+            monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+            _delenv_falkordb(monkeypatch)
+            rc = m._cmd_list_kinds(mock.Mock(cmd="list-kinds"))
+        elif command == "index":
+            # catch site __main__.py:1596 — standalone `index github` with
+            # no --db resolves the shared env target → reject
+            monkeypatch.setenv("TORTOISE_DB_URI", uri)
+            monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+            _delenv_falkordb(monkeypatch)
+            rc = m._cmd_index_github(mock.Mock(
+                url=str(tmp_path), branch="main", background=False, db=None))
+        elif command == "decide":
+            # catch site __main__.py:1995 — decide --db with an unsupported-
+            # scheme URI → _projection_for's hard-reject embeds the raw URI
+            from tortoise.sdk import TortoiseSDK
+            with mock.patch.object(TortoiseSDK, "__init__", return_value=None):
+                rc = m._cmd_decide(mock.Mock(
+                    input=None, options='{"opt:a": "Option A"}',
+                    criteria=None, findings=None, edges=None, db=uri))
+
+        captured = capsys.readouterr()
+        out = captured.out + captured.err
+        assert rc == 1
+        assert "Invalid DB" in out  # clean CLI error, actionable prefix
+        assert "Traceback" not in out
+        assert "sup3rsekrit" not in out  # credential never reaches output
+        assert "bolt://:***@host:7687/g" in out  # masked, host/path intact

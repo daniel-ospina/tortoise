@@ -1022,9 +1022,77 @@ def _mask_uri_userinfo(target: str) -> str:
     in the URI — docker://:pw@host:notaport/graph would leak ':pw@' to a
     terminal/log. Host/port/path stay visible for debuggability (matches
     the FALKORDB_* legacy display mask, conf 95).
+
+    #720 P2 conf 68: the userinfo→host boundary is the LAST '@' of the
+    authority region (everything before the first '?'/'#'), NOT
+    urlsplit's netloc — a password may contain '/' (docker://user:p/ss@
+    host:... is RFC-invalid but urlparse/redis-py accept it, and
+    urlsplit's netloc cuts at the first '/'), which would split
+    mid-credential and leak the tail. The '://' may also sit mid-message
+    (RELATIVE_PATH_ERROR embeds the raw URI in prose), so every
+    scheme:// pattern in the string is scanned, not just a leading one.
     """
-    import re
-    return re.sub(r"://[^/]*@", "://:***@", target)
+    from urllib.parse import urlsplit
+
+    def _scheme_ok(scheme: str) -> bool:
+        # RFC 3986 scheme: alpha-led, alnum/+-. thereafter.
+        return (scheme[:1].isalpha()
+                and all(c.isalnum() or c in "+-." for c in scheme))
+
+    out: list[str] = []
+    i = 0
+    while True:
+        j = target.find("://", i)
+        if j < 0:
+            out.append(target[i:])
+            break
+        # Recover the scheme token by walking back from '://' over scheme
+        # characters (stops at prose when the URI is embedded in a message).
+        k = j
+        while k > i and (target[k - 1].isalnum() or target[k - 1] in "+-."):
+            k -= 1
+        scheme = target[k:j]
+        if not _scheme_ok(scheme):
+            out.append(target[i:j + 3])
+            i = j + 3
+            continue
+        if i == 0 and k == 0:
+            # Bare URI — urlsplit is the authoritative scheme parse.
+            try:
+                if not urlsplit(target).scheme:
+                    out.append(target[i:])
+                    break
+            except ValueError:
+                pass  # malformed authority (e.g. unmatched '[') — mask below
+        # The authority region runs to the earliest of: the start of the
+        # next URI's scheme token (a second URI in the same message), or a
+        # '?'/'#' delimiter (query/fragment never belong to userinfo — an
+        # '@' in a query value must not swallow the host).
+        rest_start = j + 3
+        cut = None
+        for c in ("?", "#"):
+            pos = target.find(c, rest_start)
+            if pos >= 0 and (cut is None or pos < cut):
+                cut = pos
+        nxt = target.find("://", rest_start)
+        if nxt >= 0:
+            s = nxt
+            while s > rest_start and (target[s - 1].isalnum()
+                                      or target[s - 1] in "+-."):
+                s -= 1
+            if s < nxt and (cut is None or s < cut):
+                cut = s
+        region_end = cut if cut is not None else len(target)
+        authority = target[rest_start:region_end]
+        at = authority.rfind("@")
+        if at < 0:
+            out.append(target[i:j + 3])
+            i = j + 3
+            continue
+        out.append(target[i:k])
+        out.append(f"{scheme}://:***@{authority[at + 1:]}")
+        i = region_end
+    return "".join(out)
 
 
 def _index_github_child_cmd(target: str, repo_root: str,

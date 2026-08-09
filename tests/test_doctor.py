@@ -180,6 +180,57 @@ class TestDoctorPath:
         assert _mask_uri_userinfo("docker://127.0.0.1:7687/tortoise") == \
             "docker://127.0.0.1:7687/tortoise"
 
+    def test_mask_uri_userinfo_slash_in_password(self):
+        """#720 P2 conf 68: '/' INSIDE userinfo is RFC-invalid but accepted
+        by urlparse/redis-py — the mask must still consume the full
+        credential up to the LAST @ (the host boundary), never split at
+        the first '/' (which would leak the password tail)."""
+        from tortoise.__main__ import _mask_uri_userinfo
+
+        assert _mask_uri_userinfo("docker://user:p/ss@host:notaport/g") == \
+            "docker://:***@host:notaport/g"
+        # slash + multiple @ combined: everything up to the host is hidden
+        assert _mask_uri_userinfo("docker://user:p/ss@h1@host:7687/g") == \
+            "docker://:***@host:7687/g"
+        # user-only userinfo (no colon) is masked too
+        assert _mask_uri_userinfo("docker://user@host:6379/db") == \
+            "docker://:***@host:6379/db"
+        # empty userinfo (docker://:@host) is still a userinfo
+        assert _mask_uri_userinfo("docker://:@127.0.0.1:59997/tenant-alpha") == \
+            "docker://:***@127.0.0.1:59997/tenant-alpha"
+
+    def test_mask_uri_userinfo_all_schemes_and_delimiters(self):
+        """#720 P2 conf 68: the mask applies to every scheme:// pattern
+        (docker/redis/rediss/bolt/etc) and never touches query/fragment
+        delimiters — an '@' in a query value must not swallow the host."""
+        from tortoise.__main__ import _mask_uri_userinfo
+
+        assert _mask_uri_userinfo("bolt://user:sup3rsekrit@host:7687/g") == \
+            "bolt://:***@host:7687/g"
+        assert _mask_uri_userinfo("redis://:hunter2@db.example.com:6379/tortoise") == \
+            "redis://:***@db.example.com:6379/tortoise"
+        assert _mask_uri_userinfo("rediss://:pw@db.example.com:6380/0") == \
+            "rediss://:***@db.example.com:6380/0"
+        # query/fragment survive the mask verbatim
+        assert _mask_uri_userinfo("redis://:pw@db.example.com:6379/0?ssl=true") == \
+            "redis://:***@db.example.com:6379/0?ssl=true"
+        assert _mask_uri_userinfo("docker://user:p@ss@host:7687/g#frag") == \
+            "docker://:***@host:7687/g#frag"
+
+    def test_mask_uri_userinfo_plain_paths_and_malformed_unchanged(self):
+        """#720 P2 conf 68: plain paths (no scheme://) pass through
+        unchanged; a malformed authority (urlsplit raises, e.g. unmatched
+        '[') must never propagate out of an error handler — mask best-effort."""
+        from tortoise.__main__ import _mask_uri_userinfo
+
+        assert _mask_uri_userinfo("tortoise.db") == "tortoise.db"
+        assert _mask_uri_userinfo("/abs/path/tortoise.db") == "/abs/path/tortoise.db"
+        assert _mask_uri_userinfo("~/.tortoise/tortoise.db") == "~/.tortoise/tortoise.db"
+        assert _mask_uri_userinfo("C:\\foo\\tortoise.db") == "C:\\foo\\tortoise.db"
+        # urlsplit raises on unmatched '[' — the mask still hides the
+        # credential instead of leaking it (and never raises in a handler)
+        assert _mask_uri_userinfo("docker://user:pw@[abc") == "docker://:***@[abc"
+
     def test_doctor_db_uri_probe_uses_uri_graph_name(self, clear_db_env, monkeypatch, capsys):
         """#720 P2 conf 62: the Step 2 probe must select the graph from the
         URI path — the same derivation from_uri uses in Step 3 — never a
