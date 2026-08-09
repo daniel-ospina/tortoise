@@ -2004,13 +2004,98 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
 
 @app.get("/v1/sessions")
 async def list_sessions(team: dict = Depends(get_current_team)):
-    """List captured sessions."""
+    """List captured sessions with turn and extracted point counts (#714)."""
     sdk = _make_sdk(namespace=team["team_id"])
     proj = sdk._get_proj()
     rows = proj.g.query(
-        "MATCH (s:Session) RETURN s.id, s.created_at, s.turn_count ORDER BY s.created_at DESC LIMIT 50"
+        "MATCH (s:Session) "
+        "OPTIONAL MATCH (s)-[:CONTAINS]->(p:Point) "
+        "WHERE p.pointKind IN ['decision', 'statement'] "
+        "RETURN s.id, s.created_at, s.turn_count, count(p) "
+        "ORDER BY s.created_at DESC LIMIT 50"
     ).result_set
-    return {"sessions": [{"id": r[0], "created_at": r[1], "turns": r[2]} for r in rows]}
+    return {"sessions": [
+        {"id": r[0], "created_at": r[1], "turns": r[2], "extracted": r[3]}
+        for r in rows
+    ]}
+
+
+@app.get("/v1/sessions/{session_id}")
+async def get_session_detail(session_id: str, team: dict = Depends(get_current_team)):
+    """Get a single session with its conversation turns and extracted points (#714).
+
+    Returns turns (episodic Point nodes with pointKind='event', ordered by
+    turn index) and extracted decisions/claims (Point nodes linked via
+    CONTAINS, filtered to pointKind IN ['decision', 'statement']).
+    """
+    import re
+    sdk = _make_sdk(namespace=team["team_id"])
+    proj = sdk._get_proj()
+
+    # Session node
+    sess_rows = proj.g.query(
+        "MATCH (s:Session {id:$sid}) RETURN s.id, s.created_at, s.turn_count",
+        params={"sid": session_id},
+    ).result_set
+    if not sess_rows:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Extracted point count (decisions + claims)
+    ext_rows = proj.g.query(
+        "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
+        "WHERE p.pointKind IN ['decision', 'statement'] "
+        "RETURN count(p)",
+        params={"sid": session_id},
+    ).result_set
+    extracted_count = ext_rows[0][0] if ext_rows else 0
+
+    # Turn points (events) — ordered by turn index embedded in the id
+    turn_rows = proj.g.query(
+        "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point {pointKind:'event'}) "
+        "RETURN t.id, t.content, t.createdAt ORDER BY t.id",
+        params={"sid": session_id},
+    ).result_set
+    turns = []
+    for tr in turn_rows:
+        tid = tr[0]
+        content = tr[1] or ""
+        created_at = tr[2]
+        # Parse "[role] content" format — role is bracketed prefix
+        role_match = re.match(r'^\[([^\]]+)\]\s*', content)
+        role = role_match.group(1) if role_match else "unknown"
+        body = content[role_match.end():] if role_match else content
+        turns.append({
+            "id": tid,
+            "role": role,
+            "content": body,
+            "created_at": created_at,
+        })
+
+    # Extracted points (decisions + claims)
+    ext_points_rows = proj.g.query(
+        "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
+        "WHERE p.pointKind IN ['decision', 'statement'] "
+        "RETURN p.id, p.content, p.pointKind, p.createdAt "
+        "ORDER BY p.createdAt",
+        params={"sid": session_id},
+    ).result_set
+    extracted = []
+    for er in ext_points_rows:
+        extracted.append({
+            "id": er[0],
+            "content": er[1] or "",
+            "kind": er[2],
+            "created_at": er[3],
+        })
+
+    return {
+        "id": sess_rows[0][0],
+        "created_at": sess_rows[0][1],
+        "turns": sess_rows[0][2],
+        "extracted": extracted_count,
+        "turn_points": turns,
+        "extracted_points": extracted,
+    }
 
 
 # ── Session endpoints (E2/E5/E6/E7) — JWT-authed, JWKS-verified (D1 #568) ──
