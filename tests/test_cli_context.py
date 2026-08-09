@@ -810,3 +810,20 @@ class TestCliSecurityAndIndex:
         assert "Traceback" not in out
         assert "sup3rsekrit" not in out  # credential never reaches output
         assert "bolt://:***@host:7687/g" in out  # masked, host/path intact
+
+def test_index_sessions_constructor_failure_clean_error(monkeypatch, capsys, tmp_path):
+    """Round-11: TortoiseSDK() constructor raise (FLY_APP_NAME production
+    guard with empty URI) must produce a clean CLI error — no raw traceback,
+    exit 1 — same contract as unreachable-graph."""
+    import os
+    import sys as _sys
+    import tortoise.__main__ as m
+    monkeypatch.setenv("FLY_APP_NAME", "dummy")
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    monkeypatch.setattr(_sys, "argv", ["tortoise", "index", "sessions"])
+    rc = m.main()
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "graph unreachable" in err
+    assert "Traceback" not in err
+
