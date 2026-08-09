@@ -40,8 +40,7 @@ class TestPricingLoader:
         assert free["max_graphs_per_team"] == 1
         assert free["max_users_per_team"] == 1
         assert free["max_api_keys"] == 2
-        assert free["included_write_ops_per_month"] == 10000
-        assert free["max_graph_nodes"] == 10000
+        assert free["included_write_ops_per_month"] == 10000  # post-#662 (was 1000)        assert free["max_graph_nodes"] == 10000
 
         solo = pricing.tier_limits("solo")
         assert solo["max_graphs_per_team"] == 2
