@@ -1876,6 +1876,32 @@ def _cmd_doctor(args):
                     results.append(("Graph: health", "✅", f"{points} Points, {total} entities"))
                 else:
                     results.append(("Graph: health", "⚠️", "0 Points — graph is empty (expected for new setups)"))
+                # #280 check 4: session-indexing health runs HERE, while the
+                # projection is still open — #720's finally-close would kill
+                # the embedded server before the session check could connect.
+                try:
+                    _chk4 = sdk.session_index_health()
+                    _fc = _chk4["file_count"]
+                    if _fc == 0:
+                        results.append(("Session indexing", "⚠️",
+                                        "corpus empty — nothing indexed (expected for new setups)"))
+                    else:
+                        _delta = len(_chk4["unindexed"]) + len(_chk4["stale"])
+                        _dup = (f" — {len(_chk4.get('duplicates', []))} duplicate "
+                                f"sessionId(s) surfaced (merge/remove copies)"
+                                if _chk4.get("duplicates") else "")
+                        if _delta == 0:
+                            results.append(("Session indexing", "✅",
+                                            f"{_fc} corpus files all indexed "
+                                            f"({_chk4['indexed_events']} AgentSession Events total){_dup}"))
+                        else:
+                            results.append(("Session indexing", "❌",
+                                            f"{_fc} files vs {_chk4['indexed_events']} Events — {_delta} unindexed/stale "
+                                            f"(run `tortoise index sessions`){_dup}"))
+                except Exception as _e:
+                    results.append(("Session indexing", "⚠️",
+                                    f"check unavailable: {str(_e)[:60]}"))
+
             finally:
                 # conf 52: close the projection in BOTH branches — the URI
                 # branch's from_uri projection must not leak.
@@ -1883,43 +1909,6 @@ def _cmd_doctor(args):
                     sdk._proj.close()
         except Exception as e:
             results.append(("Graph: health", "❌", str(e)[:60]))
-
-    # 4. Session indexing health (#280 item 2): corpus .md count vs indexed
-    # AgentSession Events. Reuses the SDK instance from check 3 so both
-    # checks observe the same DB target.
-    try:
-        _sdk = locals().get("sdk")
-        # Round-8: check 3 fails LOUD for unreachable targets (_projection_for
-        # raises), leaving sdk._proj None — session_index_health would then
-        # build a projection from the SDK's own defaults and report health for
-        # the WRONG graph. Guard the projection too.
-        if _sdk is None or getattr(_sdk, "_proj", None) is None:
-            raise RuntimeError("graph unreachable (check 3 failed)")
-        health = _sdk.session_index_health()
-        fc = health["file_count"]
-        if fc == 0:
-            results.append(("Session indexing", "⚠️",
-                            "corpus empty — nothing indexed (expected for new setups)"))
-        else:
-            delta = len(health["unindexed"]) + len(health["stale"])
-            # #280 review P3: indexed_events is corpus-scoped (events whose
-            # eventId matches a corpus file), so the arithmetic below is
-            # coherent even when the graph holds non-corpus sessions.
-            dup_note = (f" — {len(health.get('duplicates', []))} duplicate "
-                        f"sessionId(s) surfaced (merge/remove copies)"
-                        if health.get("duplicates") else "")
-            if delta == 0:
-                results.append(("Session indexing", "✅",
-                                f"{fc} corpus files all indexed "
-                                f"({health['indexed_events']} AgentSession Events total)"
-                                f"{dup_note}"))
-            else:
-                results.append(("Session indexing", "❌",
-                                f"{fc} files vs {health['indexed_events']} Events — {delta} unindexed/stale "
-                                f"(run `tortoise index sessions`){dup_note}"))
-    except Exception as e:
-        results.append(("Session indexing", "⚠️",
-                        f"check unavailable: {str(e)[:60]}"))
 
     # 5. MCP server
     mcp_running = False
