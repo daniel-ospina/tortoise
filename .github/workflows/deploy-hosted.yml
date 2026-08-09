@@ -1,4 +1,15 @@
 # Deploy Tortoise Hosted API to Fly.io
+#
+# Stripe billing ops checklist (owner-executed, #310 — see
+# docs/plans/2026-08-08-310-stripe-billing.md §6 Runtime Prerequisites):
+#   1. Register webhook endpoint https://api.premiselabs.co/webhooks/stripe
+#      with events: checkout.session.completed, invoice.payment_failed,
+#      customer.subscription.updated, customer.subscription.deleted.
+#   2. Enable the Customer Portal config (subscription management).
+#   3. Create the 8 price ids (4 tiers × monthly/annual, annual −20%) and
+#      paste them into STRIPE_PRICE_IDS (existing Apresto account — do NOT
+#      create a new Stripe account; keep test/live key separation).
+#   4. Set RESEND_API_KEY + BILLING_NOTIFY_TO on Fly (already in GH secrets).
 name: Deploy Hosted API
 
 on:
@@ -30,6 +41,20 @@ jobs:
             echo "::error::FASTAPI_INTERNAL_KEY, TORTOISE_SECRET_PEPPER, and FALKORDB_CLOUD_URI must be set in GitHub secrets"
             exit 1
           fi
+          # Stripe billing (#310): the two keys are hard-required so a deploy
+          # never ships with billing silently dead. STRIPE_PRICE_IDS / Resend /
+          # BILLING_* are warn-only — they degrade lazily at runtime (billing
+          # endpoints 503, notifications skipped) until configured.
+          if [ -z "${{ secrets.STRIPE_SECRET_KEY }}" ] || [ -z "${{ secrets.STRIPE_WEBHOOK_SECRET }}" ]; then
+            echo "::error::STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET must be set in GitHub secrets"
+            exit 1
+          fi
+          if [ -z "${{ secrets.STRIPE_PRICE_IDS }}" ]; then
+            echo "::warning::STRIPE_PRICE_IDS not set — checkout/webhook tier resolution disabled until configured"
+          fi
+          if [ -z "${{ secrets.RESEND_API_KEY }}" ] || [ -z "${{ secrets.BILLING_NOTIFY_TO }}" ]; then
+            echo "::warning::RESEND_API_KEY/BILLING_NOTIFY_TO not set — billing email notifications disabled until configured"
+          fi
           # Backup (TORTOISE_BACKUP_KEY + R2_*) is env-gated at runtime and
           # Pro-tier-only — missing secrets degrade gracefully (backup
           # endpoints 402/503), so warn instead of blocking the deploy (#545).
@@ -42,6 +67,13 @@ jobs:
       - name: Set all app secrets on Fly.io (keeps in sync with GitHub/Supabase)
         run: |
           ARGS="FASTAPI_INTERNAL_KEY=${{ secrets.FASTAPI_INTERNAL_KEY }} TORTOISE_SECRET_PEPPER=${{ secrets.TORTOISE_SECRET_PEPPER }} FALKORDB_CLOUD_URI=${{ secrets.FALKORDB_CLOUD_URI }}"
+          # Stripe billing (#310): pass all billing secrets when present.
+          ARGS="$ARGS STRIPE_SECRET_KEY=${{ secrets.STRIPE_SECRET_KEY }} STRIPE_WEBHOOK_SECRET=${{ secrets.STRIPE_WEBHOOK_SECRET }}"
+          [ -n "${{ secrets.STRIPE_PRICE_IDS }}" ] && ARGS="$ARGS STRIPE_PRICE_IDS=${{ secrets.STRIPE_PRICE_IDS }}"
+          [ -n "${{ secrets.RESEND_API_KEY }}" ] && ARGS="$ARGS RESEND_API_KEY=${{ secrets.RESEND_API_KEY }}"
+          [ -n "${{ secrets.BILLING_NOTIFY_TO }}" ] && ARGS="$ARGS BILLING_NOTIFY_TO=${{ secrets.BILLING_NOTIFY_TO }}"
+          [ -n "${{ secrets.BILLING_SUCCESS_URL }}" ] && ARGS="$ARGS BILLING_SUCCESS_URL=${{ secrets.BILLING_SUCCESS_URL }}"
+          [ -n "${{ secrets.BILLING_CANCEL_URL }}" ] && ARGS="$ARGS BILLING_CANCEL_URL=${{ secrets.BILLING_CANCEL_URL }}"
           # Optional (env-gated at runtime): only pass when set, so unconfigured
           # backups / GitHub OAuth never fail the deploy.
           [ -n "${{ secrets.TORTOISE_BACKUP_KEY }}" ] && ARGS="$ARGS TORTOISE_BACKUP_KEY=${{ secrets.TORTOISE_BACKUP_KEY }}"
