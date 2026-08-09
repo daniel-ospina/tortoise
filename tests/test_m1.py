@@ -62,7 +62,9 @@ def test_reprocess_new_version_supersedes():
     new = api.add_point("new extraction", "ctx",
                         provenance("doc.txt", [0, 3], "hel"))
     points = fold(log.read_all())
-    assert old not in points, "superseded run's points must be retracted"
+    # #432 Task 2: superseded points are kept as retracted tombstones
+    assert points[old]["status"] == "retracted", \
+        "superseded run's points must be tombstone-retracted"
     assert new in points
     print("PASS test_reprocess_new_version_supersedes")
 
