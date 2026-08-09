@@ -280,6 +280,25 @@ TOOL_REGISTRY: list[ToolDefinition] = [
         http_policy=True,
         sdk_method="supersede_point",
     ),
+    # ── Subscriptions / claim lifecycle (#432) ─────────────────────
+    ToolDefinition(
+        name="tortoise_events_poll",
+        description="Poll graph/claim events after an opaque cursor (at-least-once). "
+                    "Returns {events, next_cursor}. Event types: PointAdded, "
+                    "OperatorAdded, PointRetracted, PointSuperseded, OperatorAnnotated.",
+        annotations=_ro(),
+        http_policy=True,
+        sdk_method="events_poll",
+    ),
+    ToolDefinition(
+        name="tortoise_retract_point",
+        description="Tombstone-retract a Point — status='retracted' (point stays "
+                    "in graph, excluded from default surfaces). Terminal; cannot "
+                    "retract operators or already-terminal points.",
+        annotations=_rw(),
+        http_policy=True,
+        sdk_method="retract_point",
+    ),
     # ── Navigation (#6962, #6963, #6964) ──────────────────────────
     ToolDefinition(
         name="tortoise_entity_profile",

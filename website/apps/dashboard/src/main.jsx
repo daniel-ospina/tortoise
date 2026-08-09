@@ -67,6 +67,7 @@ function App() {
   const [currentGraphId, setCurrentGraphId] = React.useState(null)
   const [showCreateTeam, setShowCreateTeam] = React.useState(false)
   const [newTeamName, setNewTeamName] = React.useState('')
+  const [checkoutPending, setCheckoutPending] = React.useState(false)
 
   const headers = apiKey ? { Authorization: `Bearer ${apiKey}` } : {}
 
@@ -81,6 +82,65 @@ function App() {
     }
     return res.json()
   }
+
+  // ── Billing (#310 Task 9): upgrade CTA + manage billing ──
+  const ACTIVE_STATUSES = ['active', 'past_due', 'trialing']
+  const hasActiveSubscription = team && ACTIVE_STATUSES.includes(team.subscription_status)
+
+  async function upgrade() {
+    if (!team?.checkout_price_id || checkoutPending) return
+    setCheckoutPending(true)
+    try {
+      const { checkout_url } = await api('/v1/billing/checkout', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ price_id: team.checkout_price_id }),
+      })
+      window.open(checkout_url, '_blank')
+    } catch (err) {
+      setError(err.message)
+      setCheckoutPending(false)
+    }
+  }
+
+  async function manageBilling() {
+    try {
+      const { portal_url } = await api('/v1/billing/portal', { method: 'POST' })
+      window.open(portal_url, '_blank')
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
+  // Success-return path: ?session_id=... triggers a refetch loop until the
+  // webhook flips subscription_status to active; ?checkout=cancelled clears
+  // the pending flag. Both params are stripped from the URL after handling.
+  React.useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const sessionId = params.get('session_id')
+    const cancelled = params.get('checkout') === 'cancelled'
+    if (sessionId) {
+      let tries = 0
+      const poll = setInterval(async () => {
+        tries += 1
+        try {
+          const t = await refreshTeam()
+          if (t && ACTIVE_STATUSES.includes(t.subscription_status)) { tries = 5 }
+        } catch { /* webhook may not have landed yet */ }
+        if (tries >= 5) {
+          clearInterval(poll)
+          params.delete('session_id')
+          window.history.replaceState({}, '', `${window.location.pathname}${params.toString() ? `?${params}` : ''}`)
+        }
+      }, 2000)
+      return () => clearInterval(poll)
+    }
+    if (cancelled) {
+      setCheckoutPending(false)
+      params.delete('checkout')
+      window.history.replaceState({}, '', `${window.location.pathname}${params.toString() ? `?${params}` : ''}`)
+    }
+  }, [team?.subscription_status])
 
   // ── Session auth: on load, try the shared cookie session ──
   React.useEffect(() => {
@@ -118,6 +178,14 @@ function App() {
       }
     })()
   }, [])
+
+  async function refreshTeam() {
+    // P1 (code-review): extracted team refetch — the success-return poll loop
+    // used an undefined `jl` (dead code); this is the real refetch.
+    const t = await api('/v1/team')
+    setTeam(t)
+    return t
+  }
 
   async function completeLogin(key) {
     setError('')
@@ -366,7 +434,16 @@ function App() {
       </header>
 
       <main>
-        {error && <div className="error banner">{error}</div>}
+        {error && (
+          <div className="error banner">
+            {error}
+            {/402|upgrade|quota|limit|checkout|billing/i.test(error) && (
+              <span>
+                {' '}— <button className="ghost" onClick={upgrade}>Upgrade plan</button>
+              </span>
+            )}
+          </div>
+        )}
 
         {tab === 'overview' && team && (team.point_count ?? 0) === 0 && (
           <section className="overview empty-state">
@@ -387,9 +464,21 @@ function App() {
               <div className="card"><div className="card-val">{team.point_count ?? 0}</div><div className="card-label">Points</div></div>
               <div className="card"><div className="card-val">{keys.length}</div><div className="card-label">API Keys</div></div>
               <div className="card"><div className="card-val">{sessions.length}</div><div className="card-label">Sessions</div></div>
-              <div className="card"><div className="card-val">{team.tier || 'free'}</div><div className="card-label">Tier</div></div>
+              <div className="card"><div className="card-val">{team.tier || 'free'}</div><div className="card-label">Plan{team.subscription_status ? ` · ${team.subscription_status}` : ''}</div></div>
             </div>
             <p className="dim small">Team ID: <code>{team.team_id}</code></p>
+            <p className="dim small">
+              Limits: {team.max_points ?? '—'} points · {team.max_api_keys ?? '—'} API keys · {team.max_graphs ?? '—'} graphs
+            </p>
+            <div className="billing-actions">
+              {hasActiveSubscription ? (
+                <button className="ghost" onClick={manageBilling}>Manage billing</button>
+              ) : (
+                <button className="ghost" onClick={upgrade} disabled={checkoutPending}>
+                  {checkoutPending ? 'Opening checkout…' : 'Upgrade'}
+                </button>
+              )}
+            </div>
             <div className="quickstart">
               <h3>Your first point</h3>
               <pre>{`curl -X POST https://api.premiselabs.co/v1/points \\
