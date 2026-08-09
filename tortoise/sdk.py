@@ -1888,6 +1888,40 @@ class TortoiseSDK:
         from .taxonomy import list_topics as _list_topics
         return _list_topics(self._get_proj(), entity_id)
 
+    def topic_summarize(
+        self,
+        topic: str,
+        *,
+        max_seeds: int = 50,
+        max_hops: int = 1,
+        include_relationships: bool = True,
+    ) -> dict:
+        """Epistemic topic summarization — settled vs contested structure (#592).
+
+        For a topic query, returns the epistemic structure: what is significant
+        (settled — high confidence, strong connections) and what is contested
+        (elevated variance, NAND conflicts), plus the argument topology.
+
+        Args:
+            topic: Topic string (e.g. "pricing", "architecture").
+            max_seeds: Max seed Points to retrieve from about* edges + content match.
+            max_hops: Operator-chain expansion depth (0 = seeds only, 1 = neighbors).
+            include_relationships: Whether to include argument topology.
+
+        Returns:
+            dict with keys: topic, total_points, significant, contested,
+            disputed_pairs, argument_structure, meta.
+        """
+        from .topic_summarization import topic_summarize as _summarize
+        result = _summarize(
+            self._get_proj().g,
+            topic,
+            max_seeds=max_seeds,
+            max_hops=max_hops,
+            include_relationships=include_relationships,
+        )
+        return result.to_dict()
+
     # ── Bulk ──────────────────────────────────────────────────────
 
     def batch_create_points(self, points_list: list[dict]) -> list[dict]:

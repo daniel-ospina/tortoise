@@ -902,6 +902,37 @@ def tortoise_list_topics(entity_id: str) -> dict:
     return _safe(_get_team_sdk().list_topics, entity_id)
 
 
+def tortoise_topic_summarize(topic: str,
+                             max_seeds: int = 50,
+                             max_hops: int = 1,
+                             include_relationships: bool = True) -> dict:
+    """Epistemic topic summarization — settled vs contested structure (#592).
+
+    For a topic query (e.g. "pricing", "architecture"), returns the epistemic
+    structure: what is significant/settled (high confidence, strong connections)
+    and what is contested (elevated variance, NAND conflicts), plus the argument
+    topology connecting them.
+
+    Classification uses EP posterior variance from persisted ep_alpha/ep_beta:
+    - significant/settled: confidence_mean >= 0.7 AND variance < 0.01
+    - contested: variance > 0.04 (destabilized posterior)
+    - disputed pairs: NAND-connected where both have variance > 0.02
+
+    Args:
+        topic: Topic string to summarize (e.g. "pricing", "security").
+        max_seeds: Max seed Points to retrieve (default 50).
+        max_hops: Operator-chain expansion from seeds (0 = seeds only).
+        include_relationships: Fetch argument topology (default True).
+
+    Returns:
+        {topic, total_points, significant: [...], contested: [...],
+         disputed_pairs: [...], argument_structure: {...}, meta: {...}}
+    """
+    return _safe(_get_team_sdk().topic_summarize, topic,
+                 max_seeds=max_seeds, max_hops=max_hops,
+                 include_relationships=include_relationships)
+
+
 # ── Graph Analysis ──────────────────────────────────────────────
 
 def tortoise_analyze(question: str,
