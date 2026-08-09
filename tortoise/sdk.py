@@ -25,7 +25,7 @@ register_kind("option")    # used by file_decision (#133)
 register_kind("evidence")  # used by file_decision (#133)
 
 # Valid status values for Point nodes (used by update_point status validation)
-POINT_STATUS_VALUES = frozenset({'live', 'draft', 'outdated', 'archived'})
+POINT_STATUS_VALUES = frozenset({'live', 'draft', 'outdated', 'archived', 'retracted'})
 
 _logger = logging.getLogger(__name__)
 
@@ -1222,9 +1222,15 @@ class TortoiseSDK:
 
         For confidence-aware queries, use tortoise_fts_query() with query=None
         for full-scan mode with EP annotation.
+
+        Retracted points (status='retracted') are excluded. Use a raw Cypher
+        query via proj.g.query() to inspect retracted tombstones.
         """
         proj = self._get_proj()
-        clauses = ["(n.is_operator IS NULL OR n.is_operator = false)"]
+        clauses = [
+            "(n.is_operator IS NULL OR n.is_operator = false)",
+            "(n.status IS NULL OR n.status <> 'retracted')",  # #689: hide retracted
+        ]
         params: dict[str, Any] = {}
         if kind:
             expanded = self._expand_kind(kind)
@@ -1255,9 +1261,15 @@ class TortoiseSDK:
     def paginated_query(self, kind: str | None = None,
                          skip: int = 0, limit: int = 20, **filters) -> dict:
         """Query points with pagination. Returns {results, total, hasMore}.
+
+        Retracted points (status='retracted') are excluded. Use a raw Cypher
+        query via proj.g.query() to inspect retracted tombstones.
         """
         proj = self._get_proj()
-        clauses = ["(n.is_operator IS NULL OR n.is_operator = false)"]
+        clauses = [
+            "(n.is_operator IS NULL OR n.is_operator = false)",
+            "(n.status IS NULL OR n.status <> 'retracted')",  # #689: hide retracted
+        ]
         params: dict[str, Any] = {}
         if kind:
             expanded = self._expand_kind(kind)
@@ -1293,13 +1305,23 @@ class TortoiseSDK:
         return {"results": results, "total": total, "hasMore": skip + limit < total}
 
     def get_point(self, id: str) -> dict:
-        """Get a Point by ID. Returns dict of all properties, or {} if not found."""
+        """Get a Point by ID. Returns dict of all properties, or {} if not found.
+
+        Retracted points (status='retracted') return {} — they are hidden
+        from normal reads but remain queryable via raw Cypher (#689).
+        """
         proj = self._get_proj()
         rows = proj.g.query(
             "MATCH (n:Point {id:$id}) RETURN properties(n)",
             params={"id": id},
         ).result_set
-        return rows[0][0] if rows else {}
+        if not rows:
+            return {}
+        props = rows[0][0]
+        # #689: hide retracted points from normal reads
+        if props.get("status") == "retracted":
+            return {}
+        return props
 
     def traverse(self, id: str, relationship_type: str, direction: str = "outgoing") -> list[dict]:
         """Traverse relationships from a Point. Returns connected point dicts.
@@ -2056,8 +2078,10 @@ class TortoiseSDK:
         same persistent evidence contract as explicit confidence reads.
         """
         proj = self._get_proj()
+        # #689: retracted points must not feed Beta priors into EP.
         rows = proj.g.query(
             "MATCH (n:Point) WHERE n.baseline_set = true AND n.ep_alpha IS NOT NULL "
+            "AND (n.status IS NULL OR n.status <> 'retracted') "
             "RETURN n.id, n.ep_alpha, n.ep_beta"
         ).result_set
         for pid, alpha, beta in rows:

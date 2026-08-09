@@ -943,6 +943,8 @@ async def list_points(
         params["tag"] = tag
     else:
         tag_clause = ""
+    # #689: exclude retracted (tombstoned) points from the list endpoint.
+    conditions.append("(n.status IS NULL OR n.status <> 'retracted')")
     query = (
         f"MATCH (n:Point){tag_clause} WHERE "
         + " AND ".join(conditions)
@@ -964,7 +966,9 @@ async def get_point(point_id: str, team: dict = Depends(get_current_team)):
     sdk = _make_sdk(namespace=team["team_id"])
     proj = sdk._get_proj()
     rows = proj.g.query(
-        "MATCH (p:Point {id: $id}) RETURN properties(p)",
+        "MATCH (p:Point {id: $id}) "
+        "WHERE p.status IS NULL OR p.status <> 'retracted' "
+        "RETURN properties(p)",
         params={"id": point_id},
     ).result_set
     if not rows:

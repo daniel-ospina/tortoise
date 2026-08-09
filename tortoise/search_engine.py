@@ -252,7 +252,8 @@ def run_fts_query(
             start = time.monotonic()
             cypher = (
                 "MATCH (n:Point) "
-                "WHERE n.is_operator = true AND toLower(n.label) CONTAINS toLower($query) "
+                "WHERE n.is_operator = true AND (n.status IS NULL OR n.status <> 'retracted') "
+                "  AND toLower(n.label) CONTAINS toLower($query) "
                 "RETURN n.id, 1.0 AS score "
                 "ORDER BY score DESC "
                 "LIMIT $limit"
@@ -285,11 +286,17 @@ def run_fts_query(
         id_field = "eventId"
     else:
         id_field = "id"
+    # #689: retracted Points must not leak into FTS results.
+    if label == "Point":
+        status_filter = "WHERE node.status IS NULL OR node.status <> 'retracted' "
+    else:
+        status_filter = ""
     try:
         start = time.monotonic()
         cypher = (
             f"CALL db.idx.fulltext.queryNodes('{label}', $query) "
             "YIELD node, score "
+            + status_filter +
             f"RETURN node.{id_field}, score "
             "ORDER BY score DESC "
             "LIMIT $limit"
@@ -367,11 +374,17 @@ def run_vector_query(
 
     # Docker/server mode → try index-accelerated vector search (#7777)
     if not is_embedded:
+        # #689: retracted Points must not leak into vector results.
+        if label == "Point":
+            vec_status_filter = "WHERE node.status IS NULL OR node.status <> 'retracted' "
+        else:
+            vec_status_filter = ""
         try:
             start = time.monotonic()
             cypher = (
                 f"CALL db.idx.vector.queryNodes('{label}', 'embedding', $query_vec, $limit) "
                 "YIELD node "
+                + vec_status_filter +
                 f"RETURN node.{id_field} "
                 "LIMIT $limit"
             )
@@ -407,10 +420,15 @@ def run_vector_query(
         # vecf32() so vector search actually runs. Stored embeddings must be
         # vecf32-encoded too (a single plain-list node poisons the whole
         # MATCH — see _upsert_event / session indexers).
+        # #689: retracted Points must not leak into vector results.
+        if label == "Point":
+            bf_status_clause = " AND (n.status IS NULL OR n.status <> 'retracted')"
+        else:
+            bf_status_clause = ""
         cypher = (
             f"MATCH (n:{label}) "
-            "WHERE n.embedding IS NOT NULL "
-            "WITH vecf32($query_vec) AS _qv, n "
+            "WHERE n.embedding IS NOT NULL" + bf_status_clause +
+            " WITH vecf32($query_vec) AS _qv, n "
             "WITH n, vec.euclideanDistance(n.embedding, _qv) AS distance "
             "WHERE distance IS NOT NULL "
             f"RETURN n.{id_field}, 1.0 / (1.0 + distance) AS score "
@@ -495,6 +513,9 @@ def run_structural_query(
             _breaker_record("structural", True)
             return []
 
+        # #689: retracted Points must not leak into structural results.
+        if label_str == "Point":
+            conditions.append("(n.status IS NULL OR n.status <> 'retracted')")
         where_clause = " AND ".join(conditions)
         cypher = (
             f"MATCH (n:{label_str}) "

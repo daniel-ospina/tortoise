@@ -139,7 +139,14 @@ def _apply_one(points: dict[str, dict], ev: dict) -> None:
             if ev.get("new_context") is not None and ev.get("projection_version", 0) < 2:
                 p["context"] = ev["new_context"]
     elif t == "PointRetracted":
-        points.pop(ev["id"], None)
+        # #689: tombstone instead of hard delete — retracted content stays
+        # recoverable via raw graph queries. Historical data loss prior to
+        # this change is irreversible (already-hard-deleted points cannot
+        # be reconstructed from the event log alone — the content existed
+        # only in the projection, and the projection deleted it).
+        p = points.get(ev["id"])
+        if p:
+            p["status"] = "retracted"
     elif t == "PointsMerged":
         for mid in ev.get("merge_ids", []):
             points.pop(mid, None)
@@ -451,7 +458,7 @@ class FalkorProjection(
                 ev.pop("new_context", None)
             self._revise_point(ev, set_updated_at=True)
         elif t == "PointRetracted":
-            self._delete(ev["id"])
+            self._retract(ev["id"])
         elif t == "PointsMerged":
             for mid in ev.get("merge_ids", []):
                 self._delete(mid)
@@ -604,11 +611,10 @@ class FalkorProjection(
             if t in ("PointAdded", "OperatorAdded"):
                 continue  # already handled in pass 1a
             elif t == "PointRetracted":
-                # Graceful id resolution — skip if neither id nor event_id
-                # present (malformed/legacy event, issue #325)
+                # #689: tombstone instead of hard delete
                 rid = ev.get("id") or ev.get("event_id")
                 if rid is not None:
-                    self._delete(rid)
+                    self._retract(rid)
             elif t == "PointsMerged":
                 for mid in ev.get("merge_ids", []):
                     self._delete(mid)
@@ -996,17 +1002,22 @@ class FalkorProjection(
         the N+1 query pattern that timed out on graphs with 1,800+ operators
         (#400). Operators with <2 inputs are excluded with a warning.
         """
-        # Query 1: all operator IDs and types (single query, O(1) round-trip)
+        # Query 1: all operator IDs and types (single query, O(1) round-trip).
+        # #689: retracted operators never feed EP factors.
         op_rows = self.g.query(
             "MATCH (o:Point) WHERE o.is_operator = true "
+            "AND (o.status IS NULL OR o.status <> 'retracted') "
             "RETURN o.id, o.op_type"
         ).result_set
 
         # Query 2: all inputs for all operators in one batch query (#400)
         # Avoids the N+1 pattern: previously this was a per-operator loop.
+        # #689: retracted claims never appear as operator inputs (an operator
+        # whose inputs all retract becomes degenerate and is excluded below).
         input_rows = self.g.query(
             "MATCH (o:Point)-[r:IMPL|NAND]->(c:Point) "
             "WHERE o.is_operator = true "
+            "AND (c.status IS NULL OR c.status <> 'retracted') "
             "RETURN o.id, c.id "
             "ORDER BY o.id, c.id"
         ).result_set
