@@ -251,7 +251,11 @@ class FalkorProjection(
             if not allow_nonstandard_path and \
                     os.environ.get("TORTOISE_ALLOW_NONSTANDARD_PATH") == "1":
                 allow_nonstandard_path = True
-            if not os.path.isabs(path) and not path.startswith("~"):
+            if path == ":memory:":
+                # redislite in-memory server — not a file path, exempt from
+                # the relative-path reject (test_open_kinds uses it).
+                pass
+            elif not os.path.isabs(path) and not path.startswith("~"):
                 raise ValueError(RELATIVE_PATH_ERROR.format(path=path))
             if path.startswith("~") and not allow_nonstandard_path:
                 # tilde is only valid if expanded to absolute via env;
