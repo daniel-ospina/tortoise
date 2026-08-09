@@ -169,14 +169,7 @@
       font-size: clamp(0.95rem, 1.6vw, 1.1rem);
       line-height: 1.6;
     }
-    #beat-hero .hero-sub-value {
-      margin-top: 1.1rem;
-      color: var(--text);
-    }
-    #beat-hero .hero-sub-overmcp {
-      margin-top: 1.1rem;
-      color: var(--accent);
-    }
+
 
     /* Sub-beats */
     .beat p {
@@ -256,7 +249,6 @@
 
     /* Self-hosting link */
     #cta-section .selfhost-link {
-      margin-top: 1.25rem;
       color: var(--text);
       text-decoration: none;
       font-size: 0.78rem;
@@ -324,8 +316,7 @@
   </div>
 
   <!-- Pricing — normal document-flow section (below the scroll narrative) -->
-  <a id="beat-pricing"></a>
-  <section id="pricing-section" class="content-section">
+    <section id="pricing-section" class="content-section">
       <h2>Pricing</h2>
       <p class="pricing-sub">Start free. Scale when your agents do — you pay for usage, not seats.</p>
 
@@ -435,8 +426,11 @@
 
     nodes.forEach((node, i) => {
       const stagger = i * 0.02;
-      tl.to(node, { _x: node.sx, _y: node.sy, r: node.r, duration: 0.12 }, 0.10 + stagger);
-      tl.to(node, { _x: node.tx, _y: node.ty, r: node.tr, duration: 0.5 }, 0.22 + stagger);
+      // Function-based values: GSAP re-reads node.sx/tx each tick, so
+      // distributeNodes() on resize re-targets the running tweens (the
+      // graph actually redistributes to the new viewport — #733-5).
+      tl.to(node, { _x: () => node.sx, _y: () => node.sy, r: () => node.r, duration: 0.12 }, 0.10 + stagger);
+      tl.to(node, { _x: () => node.tx, _y: () => node.ty, r: () => node.tr, duration: 0.5 }, 0.22 + stagger);
     });
 
     /* ── Render loop ── */
@@ -571,25 +565,6 @@
       });
     });
 
-    // ── (MCP config moved to docs — see /docs and the welcome page) ──
-    function copyMcpConfig() {
-      const codeEl = document.getElementById("mcp-config-code");
-      if (!codeEl) return;
-      copyToClipboard(codeEl.textContent.trim());
-
-      const btn = document.getElementById("btn-copy-config");
-      const textEl = btn.querySelector("span");
-      const origText = textEl ? textEl.textContent : btn.textContent;
-      btn.classList.add("copied");
-      if (textEl) textEl.textContent = "Copied!";
-      else btn.textContent = "Copied!";
-      setTimeout(() => {
-        btn.classList.remove("copied");
-        if (textEl) textEl.textContent = origText;
-        else btn.textContent = origText;
-      }, 2000);
-    }
-
     async function copyToClipboard(text) {
       try {
         await navigator.clipboard.writeText(text);
@@ -625,10 +600,13 @@
 
     function fmtPrice(price) {
       // Annual: effective PER-MONTH price big, total billed small (common practice).
+      // Round ONCE (per-month), then derive the total so the two never disagree
+      // (e.g. $7/mo × 12 must equal $84, not $86).
       if (currentBilling === 'annual') {
+        if (price === 0) return { big: '$0', total: 'Free forever' };
         const disc = PRICING.display.annual_discount_pct / 100;
-        const total = Math.round(price * 12 * (1 - disc));
-        const perMonth = price === 0 ? 0 : Math.round(total / 12);
+        const perMonth = Math.max(1, Math.round(price * 12 * (1 - disc) / 12));
+        const total = perMonth * 12;
         return { big: `$${perMonth}`, total: `$${total} billed annually` };
       }
       return { big: `$${price}`, total: 'Billed monthly' };
