@@ -415,6 +415,24 @@ class TortoiseSDK:
         if removed:
             proj.g.query("MATCH (t:Tag) WHERE NOT (t)<-[:TAGGED]-() DELETE t")
 
+    def _emit_event(self, type_: str, payload: dict) -> None:
+        """Append a durable :GraphEvent for a graph mutation (best-effort).
+
+        #432 Task 3: events land in THIS SDK's graph namespace — the namespace
+        IS the team partition (server-derived via mcp_auth `_get_team_sdk` /
+        hosted `_make_sdk`, never client-supplied). A failed append is logged
+        and swallowed — mutation paths must never fail on event emission.
+        """
+        try:
+            from .event_store import append_event, ensure_event_schema, next_seq
+
+            proj = self._get_proj()
+            ensure_event_schema(proj)
+            seq = next_seq(proj)
+            append_event(proj, seq, type_, payload, self.ulid())
+        except Exception:  # noqa: BLE001 — best-effort
+            _logger.warning("event emission failed for %s — continuing", type_)
+
     def create_point(self, kind: str, content: str, **props) -> dict:
         """Create a new Point node. Raises ValueError if kind is invalid.
 
@@ -489,6 +507,10 @@ class TortoiseSDK:
             pid = ulid()
         # Points enter as draft, go live when first edge is created (#131)
         status = props.pop("status", "draft")
+
+        # #432 Task 3: durable PointAdded event (append-before-mutation;
+        # phantom on failed mutation is the documented at-least-once tradeoff).
+        self._emit_event("PointAdded", {"id": pid, "kind": kind, "content_hash": ch})
 
         # Compute embedding (Phase 1A, #7698) — stored as Point property
         embedding = None
@@ -958,6 +980,9 @@ class TortoiseSDK:
             raise ValueError(
                 f"Point {old_id!r} is already terminal ({cur!r}) — supersession is terminal")
 
+        # #432 Task 3: durable PointSuperseded event (append-before-mutation).
+        self._emit_event("PointSuperseded", {"id": old_id, "new_id": new_id})
+
         # 0. #329: collect + validate ALL edge types BEFORE any mutation.
         #    The edge types are interpolated into query structure (no params
         #    possible) — an unvalidated type (e.g. from a crafted edge) is a
@@ -1058,6 +1083,9 @@ class TortoiseSDK:
         """
         from datetime import datetime, timezone
         proj = self._get_proj()
+        # #432 Task 3: durable PointRetracted event (append-before-mutation;
+        # a guard-failure phantom is the documented at-least-once tradeoff).
+        self._emit_event("PointRetracted", {"id": id})
         r = proj.g.query(
             "MATCH (n:Point {id:$id}) "
             "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
@@ -1105,6 +1133,12 @@ class TortoiseSDK:
         pid = ulid()
         inputs = [source_id] + list(target_ids)
         proj = self._get_proj()
+
+        # #432 Task 3: durable OperatorAdded event (append-before-mutation).
+        self._emit_event("OperatorAdded", {
+            "id": pid, "op_type": op_type, "source_id": source_id,
+            "target_ids": list(target_ids),
+        })
 
         # Validate all source/target Points exist (fail loudly, not silently)
         existing = proj.g.query(
@@ -1167,6 +1201,11 @@ class TortoiseSDK:
                           ("consistency", consistency), ("directness", directness)):
             if not 0 <= val <= 1:
                 raise ValueError(f"{name} must be 0-1, got {val}")
+        # #432 Task 3: durable OperatorAnnotated event (append-before-mutation).
+        self._emit_event("OperatorAnnotated", {
+            "id": id, "bias": bias, "precision": precision,
+            "consistency": consistency, "directness": directness,
+        })
         return self.update_point(id,
             annotator_bias=bias, annotator_precision=precision,
             annotator_consistency=consistency, annotator_directness=directness)
@@ -2475,7 +2514,9 @@ class TortoiseSDK:
                 room=item.get("room", ""),
                 content_hash=ch,
             )
-            # GAP-07: emit EventRecorded for provenance
+            # GAP-07 (partially closed by #432 _emit_event — graph mutations
+            # now emit :GraphEvent; this EventRecorded path is session-capture
+            # provenance and stays separate)
             try:
                 proj.apply({
                     "type": "EventRecorded",
