@@ -18,14 +18,13 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tortoise.ranking import GraphRanker
+from tortoise.ranking import GraphRanker, recency_decay, _min_max_normalize  # noqa: E402
+from tortoise.sdk import TortoiseSDK  # noqa: E402
 
 # Legacy predicate name for negative-direction tests (#281).
 # Kept as a constant so no edge-syntax literal appears in source
 # (Task 5 sweep + test_security drift test both require zero hits).
 _LEGACY_INSTANTIATES = "INSTANTIATES"
-, recency_decay, _min_max_normalize  # noqa: E402
-from tortoise.sdk import TortoiseSDK  # noqa: E402
 
 
 # ── Unit: recency decay ────────────────────────────────────────────────────
