@@ -93,7 +93,7 @@ The cut principle is **conversation-driven extraction with provenance, gated for
 **Given:** Phase-2 extraction creates Points for a batch of sessions
 **When:** the extraction batch completes
 **Then:** every extraction-created Point has `status: draft`
-**And:** no extraction-created Point auto-wires IMPL/NAND operators or auto-promotes to `live` (SDK #131 lifecycle overridden for extraction)
+**And:** **no extraction-created Point auto-wires IMPL/NAND operators to LIVE Points** (draft-to-draft links permitted ONLY via `create_operator(promote_source=False)` with draft operator nodes, excluded from EP by the draft filter — per plan §2 W-2/W-4 clarification) and no auto-promotion to `live` (SDK #131 lifecycle overridden for extraction)
 **And:** EP propagation excludes draft Points — snapshot mean grounding of all `live` Points changes ≤2% (mean absolute) vs the pre-batch snapshot
 
 ### E2E-5: Event→Object procedural wiring (produces/uses) + INSTANTIATES drift removal
