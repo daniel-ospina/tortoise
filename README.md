@@ -108,15 +108,23 @@ Tortoise is **Business Source License 1.1** — see [LICENSE](LICENSE) and the [
 
 `docs/ONTOLOGY.md` is the single source of truth for the entity model (Point, Subject, Object, Event, Source), edge topology (IMPL/NAND/structural/about*), kind vocabularies, and EP semantics. It is **canonical** — product gaps are filed as issues, never added to the ontology as roadmap detail.
 
+## Repository layout
+
+**`daniel-ospina/tortoise` (this repo)** is the **full product** — graph runtime, SDK, MCP server, self-host daemon + docker compose, Fly.io deployment config (`fly.toml`), Dockerfile.selfhost, embedded reaper, Supabase edge functions (`supabase/functions/tenant-provision/`), backup pipeline, and the hosted dashboard (`premise-labs/` dir → Cloudflare Pages). This is the canonical source of truth. If you want to deploy Tortoise (self-host or hosted), this is the only repo you need.
+
+**`daniel-ospina/premise-labs`** is a **partial copy** of the tortoise tree used as an **SDK-import surface** by dependent repos (notably `daniel-ospina/swarm`, which sets `PYTHONPATH` to import `tortoise/projection.py`, `tortoise/ids.py`, `tortoise/pipeline_cli.py`, and `config/` from it). It is **not** the full product — it lacks `docker-compose.yml`, `Dockerfile.selfhost`, `tortoise/embedded_reaper.py`, `tortoise/selfhost.py`, `fly.toml`, and `supabase/functions/tenant-provision/`. It also carries an outdated `.env.example` (port `:6379` in the URI example vs `FALKORDB_PORT=16379`; this repo uses `:16379` consistently).
+
+**Guidance:** if you clone `premise-labs` for swarm imports, also clone `tortoise` for deployment infrastructure. `premise-labs` is SDK-only — it cannot run a Tortoise server. (#761)
+
 ## Repo map & issue routing
 
 File issues in the repo that owns the code:
 
 | Repo | Owns | File issues for |
 |---|---|---|
-| **daniel-ospina/tortoise** (this repo) | Tortoise product: SDK, MCP, hosted API, graph engine, ontology | Tortoise product bugs, features, ontology gaps |
+| **daniel-ospina/tortoise** (this repo) | Tortoise product: SDK, MCP, hosted API, graph engine, ontology, deployment infra | Tortoise product bugs, features, ontology gaps |
 | **daniel-ospina/agent-infra** | Agent infrastructure: Pi extensions, skills, commit-workflow, CI gates, review-enforcer | Skill/pipeline/extension/CI work |
-| **daniel-ospina/premise-labs** | Premise Labs internal ops: meetings recorder, CRM (Twenty), bridge scripts, health checks | Ops tooling, CRM, meeting pipeline |
+| **daniel-ospina/premise-labs** | Premise Labs internal ops: meetings recorder, CRM (Twenty), bridge scripts, health checks; also an SDK-import surface for the swarm (partial tortoise tree — see above) | Ops tooling, CRM, meeting pipeline |
 | **daniel-ospina/eldato** | El Dato app (eldato.com.mx): scanner, webapp, deals/offers, notifications, ads, SEO | El Dato product work |
 
 **Rule of thumb:** if the issue is about Tortoise code (this repo's `tortoise/` or `premise-labs/` dirs), file it here. If it's about agent tooling, file in agent-infra. If it's about Premise Labs ops (meetings/CRM), file in premise-labs.
