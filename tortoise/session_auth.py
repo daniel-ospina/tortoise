@@ -91,8 +91,10 @@ def _verify_rs256(header: dict, payload: dict, token: str, jwk: dict) -> None:
     pub = serialization.load_der_public_key(_public_key_der(n, e))
     parts = token.split(".")
     signing_input = f"{parts[0]}.{parts[1]}".encode()
-    signature = _b64url_decode(parts[2])
     try:
+        # #750.4: signature decode INSIDE the try — a malformed signature part
+        # must 401, not 500.
+        signature = _b64url_decode(parts[2])
         pub.verify(signature, signing_input, padding.PKCS1v15(), hashes.SHA256())
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid session token signature")
@@ -146,7 +148,8 @@ async def verify_session_jwt(request: Request) -> dict:
     if aud is not None and aud != "authenticated":
         raise HTTPException(status_code=401, detail="Invalid session token audience")
     exp = payload.get("exp")
-    if exp is not None and time.time() > float(exp):
+    if exp is not None and time.time() > float(exp) + 30:
+        # #750.4: ~30s clock-skew leeway (matches common JWT verification).
         raise HTTPException(status_code=401, detail="Session token expired")
 
     user_id = payload.get("sub")
