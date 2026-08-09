@@ -277,3 +277,217 @@ def test_order_by_graph_surfaces_contestation_without_penalty():
         assert by_id[pb["id"]]["graph_ranking"]["variance"] > by_id[pa["id"]]["graph_ranking"]["variance"]
     finally:
         sdk.close()
+
+
+# ── Event aboutObject signals (#281) ───────────────────────────────────────
+
+@pytest.fixture
+def sdk(tmp_path):
+    s = TortoiseSDK(db_path=str(tmp_path / "t.db"))
+    yield s
+    s.close()
+
+
+def test_event_signal_counts_about_objects(sdk):
+    ev = sdk.create_event("AgentSession", eventKind="AgentSession", session_id="s2")
+    proj = sdk._get_proj()
+    # Public SDK path for Object nodes; distinct names survive the #452 MERGE dedup.
+    objs = [sdk.create_object(f"obj{i}", "issue") for i in range(3)]
+    for o in objs:
+        proj.create_about_edge(ev["eventId"], o["id"], "aboutObject")
+    ranker = GraphRanker(projection=proj)
+    sig = ranker._fetch_event_signals([ev["eventId"]])[ev["eventId"]]
+    assert sig["about_objects"] == 3  # count>1 through the real OPTIONAL MATCH path
+    assert sig["is_event"] is True
+    assert sig["confidence"] == 0.5  # no PRODUCES Points → coalesce fallback
+    # Real-path chain: fetched sig → consumer. Guards producer key (KeyError
+    # if renamed back to instantiates), consumer key, is_event routing, and
+    # the producer→consumer handoff in one assertion.
+    assert ranker.graph_boost({}, sig) == 0.65  # 0.6·(1-1/4) + 0.4·0.5
+    # Independent consumer-formula guard (renamed consumer key → 0.6·0+0.2 = 0.2).
+    assert ranker.graph_boost(
+        {}, {"about_objects": 3, "is_event": True, "confidence": 0.5}) == round(0.6 * (1 - 1 / 4) + 0.4 * 0.5, 4)
+    # Saturation-shape pin: inst_norm = 1 - 1/(1+n) is nonlinear (0, 0.5, 0.75
+    # for n=0,1,3); a linearized inst_norm (e.g. 0.25·n) would pass the 0 and
+    # 3 anchors but diverge here at the midpoint (0.5, not 0.35).
+    assert ranker.graph_boost(
+        {}, {"about_objects": 1, "is_event": True, "confidence": 0.5}) == round(0.6 * (1 - 1 / 2) + 0.4 * 0.5, 4)
+
+
+def test_event_signal_degrades_without_about_objects(sdk):
+    ev = sdk.create_event("AgentSession", eventKind="AgentSession", session_id="s3")
+    ranker = GraphRanker(projection=sdk._get_proj())
+    sig = ranker._fetch_event_signals([ev["eventId"]])[ev["eventId"]]
+    assert sig["about_objects"] == 0
+    assert sig["is_event"] is True
+    assert sig["confidence"] == 0.5  # no PRODUCES Points → coalesce fallback
+    # Real-path chain: if the producer dropped is_event this would route to the
+    # point branch → 0.5·0.5 + 0 = 0.25, not 0.2. This 0.2 assert is
+    # consumer-key-agnostic by construction (n=0 → inst_norm=0 under any key
+    # name); the renamed-consumer-key guard lives in
+    # test_event_signal_counts_about_objects' 0.65 asserts.
+    assert ranker.graph_boost({}, sig) == 0.2
+
+
+def test_rerank_event_boost_from_about_objects(sdk):
+    """rerank(entity_type='event') wires _fetch_event_signals into
+    graph_ranking.graph_boost via result-id → eventId keying (#281 seam).
+
+    NB: the SDK's create_event sets node id == eventId, so this pins the
+    eventId-keyed lookup only modulo that invariant; the unmatched-id path is
+    covered by test_rerank_event_unmatched_signals_are_neutral.
+    """
+    ev = sdk.create_event("AgentSession", eventKind="AgentSession", session_id="s4")
+    proj = sdk._get_proj()
+    objs = [sdk.create_object(f"rerank-obj{i}", "issue") for i in range(3)]
+    for o in objs:
+        proj.create_about_edge(ev["eventId"], o["id"], "aboutObject")
+    ranker = GraphRanker(projection=proj)
+    out = ranker.rerank([{"id": ev["eventId"], "scores": {"rrf": 0.05}}], entity_type="event")
+    assert out[0]["graph_ranking"]["graph_boost"] == 0.65  # 0.6·(1-1/4) + 0.4·0.5
+
+
+def test_event_signal_includes_produces_confidence(sdk):
+    """PRODUCES branch: the event boost's 0.4·confidence term must come from
+    the MEAN EP confidence of produced Points, not the 0.5 coalesce fallback.
+
+    Two produced Points (0.9 and 0.3) pin avg() against max()/min()/first-row
+    selection and, combined with 3 aboutObject edges, guard the count(o) query
+    against a cartesian o×p merge (which would inflate about_objects to 6).
+
+    NB: ranking.py queries `-[:PRODUCES]->` (uppercase). Production emits
+    lowercase `produces` (sdk.py:1582, entities.py) — a PRE-EXISTING case
+    mismatch (#25) that leaves this branch dead in production (confidence
+    always coalesces to 0.5). This test pins the branch as ranking.py
+    consumes it; when the #25 fix lands (lowercase query), flip the edge
+    creation to lowercase and update expectations.
+    """
+    ev = sdk.create_event("AgentSession", eventKind="AgentSession", session_id="s5")
+    proj = sdk._get_proj()
+    objs = [sdk.create_object(f"prod-obj{i}", "issue") for i in range(3)]
+    for o in objs:
+        proj.create_about_edge(ev["eventId"], o["id"], "aboutObject")
+    p_hi = sdk.create_point("statement", "session-produced finding hi")
+    p_lo = sdk.create_point("statement", "session-produced finding lo")
+    _set_confidence(sdk, p_hi["id"], 0.9)
+    _set_confidence(sdk, p_lo["id"], 0.3)
+    # No SDK path emits uppercase PRODUCES; raw Cypher matches the query shape.
+    proj.g.query(
+        "MATCH (e:Event {eventId:$eid}), (p:Point) WHERE p.id IN $pids "
+        "CREATE (e)-[:PRODUCES]->(p)",
+        params={"eid": ev["eventId"], "pids": [p_hi["id"], p_lo["id"]]},
+    )
+    ranker = GraphRanker(projection=proj)
+    sig = ranker._fetch_event_signals([ev["eventId"]])[ev["eventId"]]
+    assert sig["about_objects"] == 3  # NOT 6 — guards o×p cartesian merge
+    assert sig["confidence"] == 0.6  # avg([0.9, 0.3]), not max/min/first-row
+    assert ranker.graph_boost({}, sig) == 0.69  # 0.6·(1-1/4) + 0.4·0.6
+    # Production-reality pin: the SDK emits lowercase `produces` (sdk.py:1582),
+    # which the uppercase query never matches → coalesce 0.5 stays live even
+    # when produced Points exist. When the #25 fix lowercases the query, this
+    # assert flips to 0.9 (avg of the produced Point) — signaling the fix's
+    # correctness instead of silently staying green.
+    ev_prod = sdk.create_event("AgentSession", eventKind="AgentSession", session_id="s5b")
+    p_prod = sdk.create_point("statement", "decision-produced point")
+    _set_confidence(sdk, p_prod["id"], 0.9)
+    assert proj.create_edge(ev_prod["eventId"], p_prod["id"], "produces") is True
+    sig_prod = ranker._fetch_event_signals([ev_prod["eventId"]])[ev_prod["eventId"]]
+    assert sig_prod["confidence"] == 0.5  # lowercase edge NOT matched → coalesce
+
+
+def test_event_signal_confidence_only_degradation(sdk):
+    """Plan acceptance criterion: 'no aboutObject on old graphs → boost =
+    0.4·confidence' must hold at a REAL produced confidence, not just the 0.5
+    coalesce fallback. Pre-#281 graphs carry PRODUCES edges but zero
+    aboutObject (INSTANTIATES edges don't match -[:aboutObject]->), so
+    0.4·avg_produced_conf is the migration-window production value. The row
+    must survive at count=0 (a non-OPTIONAL aboutObject match would drop it
+    → 0.0) and avg_conf must flow through even when no aboutObject exists."""
+    ev = sdk.create_event("AgentSession", eventKind="AgentSession", session_id="s5c")
+    proj = sdk._get_proj()
+    p_hi = sdk.create_point("statement", "old-graph finding hi")
+    p_lo = sdk.create_point("statement", "old-graph finding lo")
+    _set_confidence(sdk, p_hi["id"], 0.9)
+    _set_confidence(sdk, p_lo["id"], 0.3)
+    proj.g.query(
+        "MATCH (e:Event {eventId:$eid}), (p:Point) WHERE p.id IN $pids "
+        "CREATE (e)-[:PRODUCES]->(p)",
+        params={"eid": ev["eventId"], "pids": [p_hi["id"], p_lo["id"]]},
+    )
+    ranker = GraphRanker(projection=proj)
+    sig = ranker._fetch_event_signals([ev["eventId"]])[ev["eventId"]]
+    assert sig["about_objects"] == 0
+    assert sig["confidence"] == 0.6  # avg([0.9, 0.3]) with zero aboutObject
+    assert ranker.graph_boost({}, sig) == 0.24  # 0.6·0 + 0.4·0.6
+
+
+def test_event_signal_batch_fetch_preserves_per_event_grouping(sdk):
+    """One WHERE eventId IN $ids call over multiple MATCHED events must keep
+    per-event aggregation (the WITH e, count(o) scoping) — counts must not
+    merge across events. Production rerank batches all search results in a
+    single fetch (sdk.py:3252)."""
+    ev_a = sdk.create_event("AgentSession", eventKind="AgentSession", session_id="s8")
+    ev_b = sdk.create_event("AgentSession", eventKind="AgentSession", session_id="s9")
+    proj = sdk._get_proj()
+    objs = [sdk.create_object(f"batch-obj{i}", "issue") for i in range(3)]
+    for o in objs:
+        proj.create_about_edge(ev_a["eventId"], o["id"], "aboutObject")
+    ranker = GraphRanker(projection=proj)
+    sig = ranker._fetch_event_signals([ev_a["eventId"], ev_b["eventId"]])
+    assert sig[ev_a["eventId"]]["about_objects"] == 3
+    assert sig[ev_b["eventId"]]["about_objects"] == 0
+    out = ranker.rerank(
+        [{"id": ev_a["eventId"], "scores": {"rrf": 0.05}},
+         {"id": ev_b["eventId"], "scores": {"rrf": 0.05}}],
+        entity_type="event",
+    )
+    by_id = {r["id"]: r for r in out}
+    assert by_id[ev_a["eventId"]]["graph_ranking"]["graph_boost"] == 0.65
+    assert by_id[ev_b["eventId"]]["graph_ranking"]["graph_boost"] == 0.2
+
+
+def test_event_signal_keyed_by_eventId_not_id(sdk):
+    """Signal rows are keyed by eventId, NOT node id. The SDK's create_event
+    always sets id == eventId, hiding the seam; production session_indexer
+    creates Events via raw `CREATE (e:Event {eventId:...})` with NO id
+    property (session_indexer.py:550) — so a regression to id-keying would
+    silently zero the boost for every session-indexed event (bug pattern (a)).
+    """
+    proj = sdk._get_proj()
+    proj.g.query(
+        "CREATE (e:Event {id:'evt-node-id', eventId:'evt-7', "
+        "name:'AgentSession', eventKind:'AgentSession'})"
+    )
+    ranker = GraphRanker(projection=proj)
+    sig = ranker._fetch_event_signals(["evt-7"])
+    assert "evt-7" in sig  # keyed by eventId; an id-keyed producer yields KeyError here
+    # rerank with result id == eventId resolves to the signal row.
+    out = ranker.rerank([{"id": "evt-7", "scores": {"rrf": 0.05}}], entity_type="event")
+    assert out[0]["graph_ranking"]["graph_boost"] == 0.2  # no aboutObject edges
+
+
+def test_rerank_event_unmatched_signals_are_neutral(sdk):
+    """Unmatched/missing event ids degrade to neutral, never crash, and never
+    cross-contaminate matched events. Asserting matched (0.2) and unknown
+    (0.0) divergence in ONE rerank call makes a swallowed producer crash
+    (defensive try/except → {}) visible: it would collapse everything to 0.0."""
+    ev = sdk.create_event("AgentSession", eventKind="AgentSession", session_id="s6")
+    ranker = GraphRanker(projection=sdk._get_proj())
+    out = ranker.rerank(
+        [{"id": ev["eventId"], "scores": {"rrf": 0.05}},
+         {"id": "no-such-event", "scores": {"rrf": 0.05}}],
+        entity_type="event",
+    )
+    by_id = {r["id"]: r for r in out}
+    assert by_id[ev["eventId"]]["graph_ranking"]["graph_boost"] == 0.2
+    assert by_id["no-such-event"]["graph_ranking"]["graph_boost"] == 0.0
+    # WHERE eventId IN $ids must scope to requested ids: fetching one event
+    # never returns another event's row (would pass if the filter were removed).
+    other = sdk.create_event("AgentSession", eventKind="AgentSession", session_id="s7")
+    assert other["eventId"] not in ranker._fetch_event_signals([ev["eventId"]])
+    # Result without an id → neutral 0.0, no crash. NB: this pins the
+    # no-crash/neutral CONTRACT only — the `if not ids` guard itself is
+    # behaviorally unpinnable (removing it yields the same {} via the
+    # try/except swallow or an empty IN match), so it is defense-in-depth.
+    no_id = ranker.rerank([{"scores": {"rrf": 0.05}}], entity_type="event")
+    assert no_id[0]["graph_ranking"]["graph_boost"] == 0.0
