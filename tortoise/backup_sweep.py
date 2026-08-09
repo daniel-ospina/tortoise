@@ -55,6 +55,25 @@ def enumerate_teams(registry) -> list[str]:
     return [str(r[0]) for r in rows if r and r[0]]
 
 
+def enumerate_eligible_teams(registry) -> list[str]:
+    """List Pro teams eligible for hosted backup (#655).
+
+    Eligibility: tier != 'free' AND backup_enabled = true. The second
+    predicate is gated on #296 (entitlement path) — today every provision
+    path hardcodes ``backup_enabled: false``, so this returns [].
+
+    Fail-closed: a query failure raises RuntimeError (same contract as
+    ``enumerate_teams``).
+    """
+    try:
+        rows = registry.query(
+            "MATCH (t:Team) WHERE t.tier <> 'free' AND t.backup_enabled = true RETURN t.id"
+        ).result_set
+    except Exception as e:
+        raise RuntimeError(f"eligible-team enumeration failed: {e}") from e
+    return [str(r[0]) for r in rows if r and r[0]]
+
+
 def _read_json(storage, key: str) -> dict[str, Any]:
     try:
         parsed = json.loads(storage.download(key))
@@ -227,20 +246,50 @@ def run_backup_sweep(
 
     ``lock_for`` is an optional per-team lock factory (the endpoint supplies
     the asyncio-lock seam); the sweep serializes each team's dump under it.
+
+    When ``config.team_sweep_enabled`` is True, only Pro teams (tier != 'free'
+    AND backup_enabled) are enumerated (#655). A 0-eligible-teams result files
+    a deduplicated NO_ELIGIBLE_TEAMS incident — the chronic-no-op alarm.
     """
     now = now or datetime.now(timezone.utc)
 
     if team_ids is None:
-        try:
-            team_ids = enumerate_teams(registry)
-        except RuntimeError as e:
-            return {"status": "enum_failed", "error": str(e), "teams_backed_up": 0}
+        if config.team_sweep_enabled:
+            try:
+                team_ids = enumerate_eligible_teams(registry)
+            except RuntimeError as e:
+                return {"status": "enum_failed", "error": str(e), "teams_backed_up": 0}
+        else:
+            try:
+                team_ids = enumerate_teams(registry)
+            except RuntimeError as e:
+                return {"status": "enum_failed", "error": str(e), "teams_backed_up": 0}
 
     incidents: list[dict[str, Any]] = []
     ops_state = read_ops_state(storage)
     prev_team_count = int(ops_state.get("last_team_count") or 0)
 
     if not team_ids:
+        # ── Team-sweep no-op alarm (#655): enabled but 0 Pro teams ──
+        if config.team_sweep_enabled:
+            incidents.append(
+                {
+                    "kind": "NO_ELIGIBLE_TEAMS",
+                    "team_id": "",
+                    "detail": {"message": "team sweep enabled but 0 eligible (Pro) teams found"},
+                }
+            )
+            _write_json(
+                storage, OPS_STATE_KEY,
+                {"last_team_count": 0, "updated_at": now.isoformat()},
+            )
+            return {
+                "status": "no_eligible_teams",
+                "teams_backed_up": 0,
+                "results": {},
+                "incidents": incidents,
+            }
+        # ── Legacy path: 0 ALL teams ──
         if prev_team_count > 0:
             # A wiped enumeration source must not degrade silently to the
             # chronic NO_TEAMS state — this is an incident, not a signal.
