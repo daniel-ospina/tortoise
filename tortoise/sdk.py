@@ -4850,7 +4850,14 @@ class TortoiseSDK:
                                   progress_file=progress_file)
 
     def _connect_issue_objects(self, event_id: str, metadata: dict) -> int:
-        """Create INSTANTIATES edges from an AgentSession Event to issue/PR Objects."""
+        """Create aboutObject edges from an AgentSession Event to issue/PR Objects (ONTOLOGY §3.2).
+
+        The Object node carries its identifying props (``name``, ``objectKind`` and — for
+        dict items — ``repo``/``issue_number``/``url``) so the references are resolvable
+        outside the edge itself. Only successfully-resolved connections are counted; a
+        resolution failure is logged at debug (the session_indexer call site otherwise
+        swallows it).
+        """
         proj = self._get_proj()
         connected = 0
         for key in ("issues", "prs"):
@@ -4858,20 +4865,36 @@ class TortoiseSDK:
                 if isinstance(item, dict):
                     oid = item.get("id") or item.get("number")
                     name = item.get("title") or item.get("name") or str(item)
+                    repo = item.get("repo")
+                    try:
+                        issue_number = int(item.get("number")) if item.get("number") is not None else None
+                    except (TypeError, ValueError):
+                        issue_number = item.get("number")
+                    url = item.get("url")
                 else:
                     oid = None
                     name = str(item)
+                    repo = None
+                    issue_number = None
+                    url = None
                 if not oid:
                     # Deterministic hash (builtin hash() is salted per-process →
                     # would create duplicate Objects on every run).
                     oid = f"{key.rstrip('s')}_{hashlib.sha256(name.encode()).hexdigest()[:8]}"
                 okind = "pr" if key == "prs" else "issue"
                 proj.g.query(
-                    "MERGE (o:Object {id:$oid}) SET o.name=$name, o.objectKind=$okind "
-                    "WITH o MATCH (e:Event {eventId:$eid}) MERGE (e)-[:INSTANTIATES]->(o)",
-                    params={"oid": oid, "name": name[:200], "eid": event_id, "okind": okind},
+                    "MERGE (o:Object {id:$oid}) SET o.name=$name, o.objectKind=$okind, "
+                    "o.repo=$repo, o.issue_number=$issue_number, o.url=$url",
+                    params={"oid": oid, "name": name[:200], "okind": okind,
+                            "repo": repo, "issue_number": issue_number, "url": url},
                 )
-                connected += 1
+                if proj.create_about_edge(event_id, oid, "aboutObject"):
+                    connected += 1
+                else:
+                    _logger.debug(
+                        "connect_issue_objects: unresolved aboutObject target %s for event %s",
+                        oid, event_id,
+                    )
         return connected
 
 

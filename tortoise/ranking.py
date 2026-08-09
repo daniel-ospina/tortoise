@@ -9,8 +9,8 @@ graph topology — as a composable ranking signal:
 * graph_boost for Points uses the persisted EP confidence (``n.confidence``,
   written by ``compute_confidence``) and operator connectivity (incident
   IMPL/NAND edge count).
-* graph_boost for Events/Sessions uses INSTANTIATES edge count (Objects
-  produced = reusable knowledge) plus the mean EP confidence of Points the
+* graph_boost for Events/Sessions uses aboutObject edge count (Objects
+  referenced = reusable knowledge) plus the mean EP confidence of Points the
   session produced, per docs/scoping-7769-graph-informed-ranking.md.
 * recency_decay is exponential with a configurable half-life (default 30 days).
 
@@ -20,8 +20,8 @@ Design notes (from the scoping doc):
 - Weights are configurable at construction; defaults α=0.5, β=0.35, γ=0.15.
 - Missing signals degrade to neutral, never to a penalty — uncalibrated
   Points get a graph boost of 0.0 and missing timestamps get neutral recency.
-- INSTANTIATES / PRODUCES edges may be absent on older graphs; the queries
-  are OPTIONAL MATCH so the boost degrades to 0.0 gracefully.
+- aboutObject / PRODUCES edges may be absent on older graphs; the queries
+  are OPTIONAL MATCH so the boost degrades to 0.4·confidence gracefully.
 """
 from __future__ import annotations
 
@@ -86,7 +86,7 @@ class GraphRanker:
 
     ``projection`` may be None for pure unit testing — graph signals are then
     read from the result dicts themselves (keys ``graph_confidence``,
-    ``graph_degree``, ``graph_instantiates``, ``createdAt``/``startedAt``).
+    ``graph_degree``, ``graph_about_objects``, ``createdAt``/``startedAt``).
     """
 
     def __init__(
@@ -169,7 +169,7 @@ class GraphRanker:
 
         Points: 0.5·persisted EP confidence + 0.5·operator connectivity
         (normalized incident IMPL/NAND edge count).
-        Events/Sessions: 0.6·INSTANTIATES count (Objects produced) +
+        Events/Sessions: 0.6·aboutObject count (Objects referenced) +
         0.4·mean EP confidence of produced Points.
 
         Contestation is deliberately NOT used as a ranking penalty: a
@@ -181,9 +181,10 @@ class GraphRanker:
         if signals:
             confidence = signals.get("confidence", 0.0)
             degree = signals.get("degree", 0)
-            instantiates = signals.get("instantiates", 0)
-            if instantiates > 0 or signals.get("is_event"):
-                inst_norm = 1.0 - 1.0 / (1.0 + instantiates)
+            about_objects = signals.get("about_objects", 0)
+            if about_objects > 0 or signals.get("is_event"):
+                # Events/Sessions: 0.6·aboutObject count (Objects referenced).
+                inst_norm = 1.0 - 1.0 / (1.0 + about_objects)
                 return round(0.6 * inst_norm + 0.4 * confidence, 4)
             connectivity = 1.0 - 1.0 / (1.0 + (degree or 0))
             return round(0.5 * confidence + 0.5 * connectivity, 4)
@@ -242,12 +243,12 @@ class GraphRanker:
     def _fetch_event_signals(self, ids: list[str]) -> dict[str, dict]:
         cypher = (
             "MATCH (e:Event) WHERE e.eventId IN $ids "
-            "OPTIONAL MATCH (e)-[:INSTANTIATES]->(o:Object) "
-            "WITH e, count(o) AS instantiates "
+            "OPTIONAL MATCH (e)-[:aboutObject]->(o:Object) "
+            "WITH e, count(o) AS about_objects "
             "OPTIONAL MATCH (e)-[:PRODUCES]->(p:Point) "
-            "WITH e, instantiates, avg(p.confidence) AS avg_conf "
+            "WITH e, about_objects, avg(p.confidence) AS avg_conf "
             "RETURN e.eventId, coalesce(avg_conf, 0.5) AS conf, "
-            "       instantiates, e.startedAt AS created"
+            "       about_objects, e.startedAt AS created"
         )
         rows = self.projection.g.query(cypher, params={"ids": ids}).result_set
         out = {}
@@ -255,7 +256,7 @@ class GraphRanker:
             eid = row[0]
             out[eid] = {
                 "confidence": float(row[1]),
-                "instantiates": int(row[2]),
+                "about_objects": int(row[2]),
                 "created": row[3],
                 "is_event": True,
             }
