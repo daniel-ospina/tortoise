@@ -2651,6 +2651,15 @@ class TortoiseSDK:
                 pass
         processed_set = set(completed_files)
 
+        # #280 review P2: two corpus files sharing a sessionId (duplicated
+        # frontmatter, or rglob picking up copies) used to make the sweep
+        # permanently non-convergent — MERGE is last-writer-wins, so the
+        # losing copy stays hash-stale and every run re-merges both. Dedupe
+        # the scan to ONE primary file per sessionId (first in sorted order);
+        # non-primary copies are surfaced by session_index_health()'s
+        # `duplicates` bucket instead of being re-indexed every run.
+        _primary_sessions: dict[str, str] = {}
+
         for i, filepath in enumerate(files):
             rel_path = str(filepath)
             if rel_path in processed_set:
@@ -2689,6 +2698,20 @@ class TortoiseSDK:
             if eventKind == "AgentSession":
                 # AgentSession branch — session indexing with metadata extraction
                 session_id = frontmatter.get("sessionId") or frontmatter.get("session_id") or f"file_{filepath.stem}"
+                # #280 review P2: non-primary copy of a duplicated sessionId —
+                # skip deterministically (retryable:False — re-running changes
+                # nothing); the duplicate is surfaced, not silently re-indexed.
+                _primary = _primary_sessions.get(session_id)
+                if _primary is not None and _primary != rel_path:
+                    skipped += 1
+                    errors.append({"file": rel_path,
+                                   "error": f"duplicate sessionId '{session_id}' "
+                                            f"(primary file: {_primary}) — non-primary "
+                                            f"copy skipped (see session_index_health "
+                                            f"'duplicates')",
+                                   "retryable": False})
+                    continue
+                _primary_sessions.setdefault(session_id, rel_path)
                 event_id = f"session_{session_id}"
                 name = frontmatter.get("title", filepath.stem)
                 # #280: per-session flock — serialize against the session-end hook's
@@ -4536,8 +4559,17 @@ class TortoiseSDK:
         expected Event by session_id + file_hash.
 
         Returns ``{directory, file_count, indexed_events, matched, unindexed,
-        stale, up_to_date}`` — ``stale`` = Event exists but hash differs
-        (re-index needed); ``unindexed`` = no Event at all.
+        stale, up_to_date, duplicates}`` — ``stale`` = Event exists but hash
+        differs (re-index needed); ``unindexed`` = no Event at all.
+
+        ``indexed_events`` is CORPUS-SCOPED (#280 review P3): the count of
+        AgentSession Events whose eventId matches a corpus file — not all
+        AgentSession Events in the graph (other sessions would make the
+        doctor arithmetic misleading). ``duplicates`` surfaces sessionIds
+        claimed by more than one corpus file (rglob copies / duplicated
+        frontmatter): those copies made the sweep permanently non-convergent
+        (MERGE is last-writer-wins) — they are surfaced here and skipped in
+        ingest_corpus, never silently re-indexed (#280 review P2).
         """
         from pathlib import Path
         from .session_indexer import (
@@ -4548,7 +4580,8 @@ class TortoiseSDK:
         if not dir_path.is_dir():
             return {"directory": str(dir_path), "file_count": 0,
                     "indexed_events": 0, "matched": 0,
-                    "unindexed": [], "stale": [], "up_to_date": []}
+                    "unindexed": [], "stale": [], "up_to_date": [],
+                    "duplicates": []}
 
         proj = self._get_proj()
         rows = proj.g.query(
@@ -4558,27 +4591,46 @@ class TortoiseSDK:
         by_event = {r[0]: r[1] for r in rows}
 
         files = sorted(dir_path.rglob("*.md"))
+        # Group by session id: two files may share a sessionId (rglob picking
+        # up copies, or duplicated frontmatter). Classify only the PRIMARY
+        # file (first in sorted order) so the delta drives the sweep to
+        # convergence; non-primary copies surface in the `duplicates` bucket.
+        by_sid: dict[str, list[str]] = {}
+        for f in files:
+            # str() coercion: frontmatter sessionId may be a YAML list/dict —
+            # the f-string path tolerated it (repr), but it is unhashable as a
+            # dict key; str() also keeps health consistent with ingest_corpus's
+            # frontmatter coercion (#280 review P2 verification finding).
+            sid = str(extract_session_id(str(f)) or f"file_{f.stem}")
+            by_sid.setdefault(sid, []).append(str(f))
         unindexed: list[str] = []
         stale: list[str] = []
         up_to_date: list[str] = []
-        for f in files:
-            session_id = extract_session_id(str(f))
-            event_id = f"session_{session_id}"
-            file_hash = compute_file_hash(str(f))
+        duplicates: list[dict] = []
+        for sid, flist in by_sid.items():
+            event_id = f"session_{sid}"
+            if len(flist) > 1:
+                duplicates.append({"session_id": sid, "event_id": event_id,
+                                   "files": flist})
+            primary = flist[0]
+            file_hash = compute_file_hash(primary)
             existing = by_event.get(event_id)
             if existing is None:
-                unindexed.append(str(f))
+                unindexed.append(primary)
             elif existing == file_hash:
-                up_to_date.append(str(f))
+                up_to_date.append(primary)
             else:
-                stale.append(str(f))
+                stale.append(primary)
+        corpus_event_ids = {f"session_{sid}" for sid in by_sid}
         return {"directory": str(dir_path),
                 "file_count": len(files),
-                "indexed_events": len(by_event),
+                "indexed_events": sum(1 for eid in corpus_event_ids
+                                       if eid in by_event),
                 "matched": len(up_to_date),
                 "unindexed": unindexed,
                 "stale": stale,
-                "up_to_date": up_to_date}
+                "up_to_date": up_to_date,
+                "duplicates": duplicates}
 
     def reconcile_sessions(self, directory: str | None = None,
                            extract_metadata: bool = False,

@@ -209,3 +209,58 @@ def test_doctor_includes_session_indexing(env, capsys, monkeypatch):
     assert "Session indexing" in out
     assert "corpus empty" in out
     assert rc in (0, 1)
+
+
+# ── duplicate sessionIds (#280 review P2) ────────────────────────────
+
+
+def test_duplicate_session_files_surfaced_and_convergent(env, sdk):
+    """Regression (#280 review P2): two corpus files sharing a sessionId used
+    to make the sweep permanently non-convergent (MERGE is last-writer-wins;
+    the losing copy is forever hash-stale, so every run re-merges both). Now
+    the duplicates are surfaced in a `duplicates` bucket and ingest_corpus
+    dedupes to one primary file per sessionId → the sweep converges."""
+    env.joinpath("a.md").write_text(
+        "---\nsessionId: dup-sess\ntitle: A\n---\nUser: hi\n")
+    env.joinpath("b.md").write_text(
+        "---\nsessionId: dup-sess\ntitle: B\n---\nUser: yo\n")
+
+    h = sdk.session_index_health()
+    assert len(h["duplicates"]) == 1
+    d = h["duplicates"][0]
+    assert d["session_id"] == "dup-sess"
+    assert d["event_id"] == "session_dup-sess"
+    assert len(d["files"]) == 2
+    # Only the primary file drives the delta — one unindexed, not two
+    assert len(h["unindexed"]) == 1
+
+    rep1 = sdk.reconcile_sessions(str(env))
+    assert rep1["reindex"]["ingested"] == 1   # one primary indexed
+    assert rep1["reindex"]["skipped"] == 1    # non-primary copy deduped
+
+    h2 = sdk.session_index_health()
+    assert h2["matched"] == 1
+    assert h2["unindexed"] == [] and h2["stale"] == []
+    assert len(h2["duplicates"]) == 1  # still surfaced (corpus condition)
+
+    # Second sweep: nothing to do — converged
+    rep2 = sdk.reconcile_sessions(str(env))
+    assert rep2["reindex"] == {}
+
+
+def test_indexed_events_corpus_scoped(env, sdk):
+    """Regression (#280 review P3): indexed_events counts events whose
+    eventId matches a corpus file — NOT all AgentSession Events in the graph
+    (a non-corpus session in the same graph would make the doctor arithmetic
+    `fc files vs N Events` misleading)."""
+    _write_session(env, "sess-a")
+    _ingest(sdk, env)
+    # A non-corpus AgentSession Event in the same graph (other project).
+    sdk._get_proj().g.query(
+        "CREATE (e:Event {eventId:'session_elsewhere', eventKind:'AgentSession'})"
+    )
+    h = sdk.session_index_health()
+    assert h["indexed_events"] == 1   # corpus-scoped, not 2
+    assert h["matched"] == 1
+    assert h["unindexed"] == []
+    assert h["up_to_date"] == [str(env / "sess-a.md")]

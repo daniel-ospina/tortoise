@@ -1726,14 +1726,21 @@ def _cmd_doctor(args):
                             "corpus empty — nothing indexed (expected for new setups)"))
         else:
             delta = len(health["unindexed"]) + len(health["stale"])
+            # #280 review P3: indexed_events is corpus-scoped (events whose
+            # eventId matches a corpus file), so the arithmetic below is
+            # coherent even when the graph holds non-corpus sessions.
+            dup_note = (f" — {len(health.get('duplicates', []))} duplicate "
+                        f"sessionId(s) surfaced (merge/remove copies)"
+                        if health.get("duplicates") else "")
             if delta == 0:
                 results.append(("Session indexing", "✅",
                                 f"{fc} corpus files all indexed "
-                                f"({health['indexed_events']} AgentSession Events total)"))
+                                f"({health['indexed_events']} AgentSession Events total)"
+                                f"{dup_note}"))
             else:
                 results.append(("Session indexing", "❌",
                                 f"{fc} files vs {health['indexed_events']} Events — {delta} unindexed/stale "
-                                f"(run `tortoise index sessions`)"))
+                                f"(run `tortoise index sessions`){dup_note}"))
     except Exception as e:
         results.append(("Session indexing", "⚠️",
                         f"check unavailable: {str(e)[:60]}"))
@@ -1894,6 +1901,10 @@ def _cmd_index_sessions(args) -> int:
         print(f"    - {f}")
     for f in report["stale"]:
         print(f"    ~ {f}")
+    if report.get("duplicates"):
+        print(f"  duplicate sessionIds: {len(report['duplicates'])}")
+        for d in report["duplicates"]:
+            print(f"    ! {d['session_id']}: {", ".join(d['files'])}")
     if report.get("reindex"):
         r = report["reindex"]
         print(f"Re-index: {r.get('ingested', 0)} ingested, "
