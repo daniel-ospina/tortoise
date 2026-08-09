@@ -183,6 +183,12 @@ class SessionIndexLock:
                 os.open(self.path,
                         os.O_CREAT | os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW),
                 "a+b", buffering=0)
+            # Review follow-up: the lock file itself is private (pid +
+            # timestamp observability content stays owner-only).
+            try:
+                os.fchmod(self._fh.fileno(), 0o600)
+            except OSError:
+                pass
         except OSError:
             self._fh = None
             raise
@@ -192,6 +198,8 @@ class SessionIndexLock:
         # holder / unreadable-and-old) — the observable E2E-13 signal.
         try:
             fcntl.flock(self._fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if not self._fh_matches_path():
+                return self._replaced_path_held()
             info = self.held_by()
             self._write_owner()
             self._status = "stale-recovered" if info["stale"] else "acquired"
@@ -217,6 +225,8 @@ class SessionIndexLock:
         # Holder unidentifiable or dead — retry once (flock released on death).
         try:
             fcntl.flock(self._fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if not self._fh_matches_path():
+                return self._replaced_path_held()
             self._write_owner()
             self._status = "stale-recovered"
             self._detail = f"stale lock recovered (attribution: {info})"
@@ -309,8 +319,10 @@ class SessionIndexLock:
                 if (st_fd.st_ino, st_fd.st_dev) != (st_path.st_ino,
                                                     st_path.st_dev):
                     return False
-            except OSError:
+            except FileNotFoundError:
                 return True  # path vanished — nothing left to remove
+            except OSError:
+                return False  # stat failed (EACCES...) — cannot verify; refuse
 
             # Unlink WHILE holding the flock: no contender can acquire the
             # path between our check and the removal.
@@ -330,6 +342,35 @@ class SessionIndexLock:
                 pass
 
     # ── internals ──────────────────────────────────────────────────
+
+    def _fh_matches_path(self) -> bool:
+        """True when the open lock fd still refers to the file at self.path.
+
+        Review follow-up (P2 double-hold): a force_release/contender cycle
+        can unlink the lock file between our open() and flock(); the flock
+        then succeeds on a dead inode — trusting it would let us write to an
+        unlinked file and double-hold with a fresh acquirer who owns the new
+        inode. stat() follows symlinks, so a swapped-in symlink also trips
+        the guard (never trust a path we did not lock).
+        """
+        if self._fh is None:
+            return False
+        try:
+            st_fd = os.fstat(self._fh.fileno())
+            st_path = self.path.stat()
+        except OSError:
+            return False
+        return (st_fd.st_ino, st_fd.st_dev) == (st_path.st_ino,
+                                                st_path.st_dev)
+
+    def _replaced_path_held(self) -> str:
+        """Map an inode-mismatched acquire to a conservative 'held' (retry
+        next sweep) — never claim a lock whose path no longer resolves to the
+        locked inode."""
+        self._close_fh()
+        self._status = "held"
+        self._detail = "lock path replaced during acquire (inode mismatch)"
+        return self._status
 
     def _write_owner(self) -> None:
         self._fh.seek(0)

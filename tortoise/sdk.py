@@ -4597,11 +4597,14 @@ class TortoiseSDK:
         # convergence; non-primary copies surface in the `duplicates` bucket.
         by_sid: dict[str, list[str]] = {}
         for f in files:
-            # str() coercion: frontmatter sessionId may be a YAML list/dict —
-            # the f-string path tolerated it (repr), but it is unhashable as a
-            # dict key; str() also keeps health consistent with ingest_corpus's
-            # frontmatter coercion (#280 review P2 verification finding).
-            sid = str(extract_session_id(str(f)) or f"file_{f.stem}")
+            # str() coercion keeps the value hashable as a dict key (a YAML
+            # list/dict frontmatter sessionId would raise TypeError) while
+            # preserving the base event_id derivation (str() == repr() for
+            # str/int/float/bool/list/dict), so health stays consistent with
+            # ingest_corpus's frontmatter coercion. Only a read failure
+            # (extract returns None) falls back to the file-stem id.
+            _sid_raw = extract_session_id(str(f))
+            sid = str(_sid_raw) if _sid_raw is not None else f"file_{f.stem}"
             by_sid.setdefault(sid, []).append(str(f))
         unindexed: list[str] = []
         stale: list[str] = []

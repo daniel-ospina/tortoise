@@ -243,3 +243,51 @@ def test_force_release_race_contender_not_evicted(lock_dir):
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
+
+
+def test_acquire_inode_guard_detects_replaced_path(lock_dir):
+    """Review follow-up P2: a contender whose open() predates a force_release
+    unlink must not trust a flock won on the dead inode (double-hold with a
+    fresh acquirer). acquire() verifies the locked inode still matches the
+    lock path and reports the lock as held instead.
+    """
+    import fcntl
+    a = SessionIndexLock("sess-dbl", lock_dir)
+    assert a.acquire() == "acquired"
+    a.release()
+    a.path.write_text("999999999 0\n")  # stale
+    # Contender C opens the file BEFORE force_release unlinks it (dead inode).
+    fd_c = os.open(a.path, os.O_RDWR | os.O_NOFOLLOW)
+    f = SessionIndexLock("sess-dbl", lock_dir)
+    assert f.force_release() is True
+    assert not a.path.exists()
+    # A fresh acquirer D owns the path again (new inode).
+    d = SessionIndexLock("sess-dbl", lock_dir)
+    assert d.acquire() == "acquired"
+    try:
+        # C's flock on the dead inode succeeds (flock is inode-scoped)...
+        fcntl.flock(fd_c, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        # ...but the inode guard must refuse to treat it as the lock file.
+        c = SessionIndexLock("sess-dbl", lock_dir)
+        c._fh = os.fdopen(fd_c, "r+b", buffering=0)
+        assert c._fh_matches_path() is False
+        # End-to-end: acquire() (which reopens the path) reports held while
+        # D owns the lock — never a second "acquired".
+        assert c.acquire() == "held"
+        assert "replaced" not in (c.detail or "")
+    finally:
+        try:
+            fcntl.flock(fd_c, fcntl.LOCK_UN)
+        except OSError:
+            pass
+
+
+def test_lock_file_created_private(lock_dir):
+    """Review follow-up P2: the lock file itself is chmod 0600 (pid +
+    timestamp observability content stays private to the owner)."""
+    lock = SessionIndexLock("sess-priv", lock_dir)
+    assert lock.acquire() == "acquired"
+    try:
+        assert (os.stat(lock.path).st_mode & 0o777) == 0o600
+    finally:
+        lock.release()

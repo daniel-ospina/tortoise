@@ -1911,6 +1911,17 @@ def _cmd_index_sessions(args) -> int:
               f"{r.get('updated', 0)} updated, "
               f"{r.get('skipped', 0)} skipped, "
               f"{r.get('failed', 0)} failed")
+        # Review follow-up: surface per-file errors (lock unavailable / held /
+        # duplicate sessionId) — a sweep that skipped everything must not look
+        # green. Retryable errors are retried on the next sweep.
+        if r.get("errors"):
+            _n_retry = sum(1 for e in r["errors"] if e.get("retryable"))
+            print(f"  {len(r['errors'])} error(s) "
+                  f"({_n_retry} retryable — retried next sweep):")
+            for e in r["errors"][:5]:
+                print(f"    ! {e['file']}: {e['error']}")
+            if len(r["errors"]) > 5:
+                print(f"    ... and {len(r['errors']) - 5} more")
     else:
         print("Re-index: nothing to do (corpus fully indexed)")
     return 1 if (report.get("reindex") or {}).get("failed") else 0

@@ -264,3 +264,32 @@ def test_indexed_events_corpus_scoped(env, sdk):
     assert h["matched"] == 1
     assert h["unindexed"] == []
     assert h["up_to_date"] == [str(env / "sess-a.md")]
+
+
+def test_session_indexer_cli_lock_error_exits_zero(monkeypatch, tmp_path, capsys):
+    """Review follow-up P3: the single-file index CLI surfaces a lock-path
+    OSError as {"status": "error"} and returns (exit 0) — never a traceback,
+    preserving the hook exit-0 contract."""
+    import json as _json
+    import sys as _sys
+    import tortoise.session_indexer as si
+
+    f = tmp_path / "sess.md"
+    f.write_text("---\nsessionId: cli-sess\ntitle: T\n---\nUser: hi\n")
+    blocker = tmp_path / "blocker"
+    blocker.write_text("x")
+    monkeypatch.setenv("TORTOISE_INDEX_LOCK_DIR", str(blocker / "locks"))
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://localhost:16379/x")
+
+    class _FakeSDK:
+        def __init__(self, *a, **k):
+            pass
+    monkeypatch.setattr("tortoise.sdk.TortoiseSDK", _FakeSDK)
+    monkeypatch.setattr(_sys, "argv",
+                        ["tortoise-index", "--no-llm", "--db",
+                         "docker://localhost:16379/x", str(f)])
+
+    si.main()  # must print JSON and return, not raise / sys.exit(1)
+    payload = _json.loads(capsys.readouterr().out)
+    assert payload["status"] == "error"
+    assert "lock" in payload["reason"].lower()
