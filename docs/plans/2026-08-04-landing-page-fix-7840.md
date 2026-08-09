@@ -13,7 +13,7 @@ The Tortoise landing page (`premise-labs/index.html` → `premiselabs.co`) and p
 | # | Problem | Impact |
 |---|---------|--------|
 | P1 | `pip install tortoise-client` (welcome L318, L446) is a non-existent package; `tortoise` is squatted on PyPI by an unrelated turtle library. Real install: `pip install git+https://github.com/daniel-ospina/tortoise.git` | Broken onboarding — user's first action after signup fails |
-| P2 | No MCP integration snippet on either page. MCP is the primary integration path for coding agents. Hosted mode works via `TORTOISE_API_KEY` (mcp_server.py L51-58). | Lost conversion — agent developers don't know how to connect |
+| P2 | No MCP integration snippet on either page. MCP is the primary integration path for coding agents. Hosted mode works via the streamable-http endpoint `https://api.premiselabs.co/mcp` with `Authorization: Bearer tt_<key>` — NOT stdio + TORTOISE_API_KEY (the stdio transport cannot carry auth tokens; setting the key locally disables stdio — #702). | Lost conversion — agent developers don't know how to connect |
 | P3 | Hero tagline "a memory system where agents learn" (L271) is vague. Doesn't communicate what the product *does*. | Weak value prop — no concrete mental model |
 | P4 | Cloudflare Turnstile widget (L279 div + L289 script) protects nothing — Supabase auth + issue #7724 rate-limiting cover abuse. | Visual clutter, external dependency, unnecessary load |
 | P5 | "5 minutes to your first graph" (L278) is an unvalidated claim. | Trust erosion if onboarding takes longer |
