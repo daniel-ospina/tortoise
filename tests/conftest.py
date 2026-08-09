@@ -105,6 +105,13 @@ def shared_embedded_db():
     isolates it), so state never leaks across tests while the subprocess
     count stays at 1.
 
+    Restored 2026-08-08 (#647): the D11 conftest rewrite (#578) dropped this
+    fixture but five test files (test_ep_selector, test_ranking,
+    test_sdk_legacy_coverage, test_search_sessions_temporal,
+    test_session_semantic_search) still depend on it. Kept via #281: the
+    branch's own copy survived its merge of main (main had dropped the
+    fixture at that point; the #647 restoration landed on main afterward).
+
     # TODO(#176): stopgap — remove when the redislite root-cause fix lands.
     """
     import tempfile as _tf

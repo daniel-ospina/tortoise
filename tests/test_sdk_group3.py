@@ -161,6 +161,7 @@ class TestDiary:
         entries = sdk.diary_read("nobody", last_n=5)
         assert entries == []
 
+    # flake: known redislite lifecycle issue (#176)
     def test_multi_agent_isolation(self, sdk):
         sdk.diary_write("agent-a", "entry a1")
         sdk.diary_write("agent-b", "entry b1")

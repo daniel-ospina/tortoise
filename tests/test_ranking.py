@@ -471,6 +471,7 @@ def test_event_signal_confidence_only_degradation(sdk):
     assert ranker.graph_boost({}, sig) == 0.24  # 0.6·0 + 0.4·0.6
 
 
+# flake: known redislite lifecycle issue (#176)
 def test_event_signal_batch_fetch_preserves_per_event_grouping(sdk):
     """One WHERE eventId IN $ids call over multiple MATCHED events must keep
     per-event aggregation for BOTH about_objects count AND avg confidence —
