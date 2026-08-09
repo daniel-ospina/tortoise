@@ -395,6 +395,7 @@ function App() {
     setSessions([])
     setNewKey(null)
     setGraphs([])
+    setGraphsLoaded(false) // Round-27: symmetry with switchTeam
     setMembers(null)
     setMembersStatus('loading')
     setCurrentTeamId(null)
@@ -473,6 +474,7 @@ function App() {
     setMembers(null)
     setMembersStatus('loading')
     setGraphs([])
+    setGraphsLoaded(false) // Round-27: per-team loaded flag — no '0' flash on switch
     setCurrentGraphId(null)
     setTeam(null)          // Fix B: clear key-scoped overview state too
     setKeys([])
@@ -643,6 +645,7 @@ function App() {
 
   async function inviteMember() {
     const _teamAtCall = currentTeamId // Round-16: mutation identity guard — a switch mid-flight must not act on the previous team
+    if (busy) return // Round-27: in-function double-click guard (disabled attr is click-path only)
     if (!inviteEmail.includes('@')) return
     setBusy(true)
     setError('')
@@ -764,6 +767,7 @@ function App() {
     // can never diverge, so it was dead code. Capture to a local and compare
     // against the ref after the await (the round-16 mutation pattern).
     const _teamAtCall = currentTeamId
+    if (busy) return // Round-27: in-function double-click guard (disabled attr is click-path only)
     setError('')
     setBusy(true)
     try {
