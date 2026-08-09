@@ -1890,11 +1890,13 @@ def _cmd_index_sessions(args) -> int:
     # CLI error, not a raw ConnectionError traceback — mirroring doctor
     # check-3's pattern. The hook fires this on every session end, so a down
     # DB would otherwise spawn one noisy failing process per close.
-    # Round-10: hoist sdk above the try — the finally must never see an
-    # unbound sdk (TortoiseSDK() constructor can raise, e.g. the FLY_APP_NAME
-    # production guard with an empty URI).
-    sdk = TortoiseSDK()
+    # Round-11: sdk pre-initialized to None, constructor INSIDE the try — a
+    # constructor raise (FLY_APP_NAME production guard with an empty URI)
+    # must produce a clean CLI error, not a raw traceback; the finally never
+    # sees an unbound sdk.
+    sdk: TortoiseSDK | None = None
     try:
+        sdk = TortoiseSDK()
         sdk._proj = _projection_for(target)
         report = sdk.reconcile_sessions(directory=args.dir,
                                         extract_metadata=args.metadata)
@@ -1902,7 +1904,7 @@ def _cmd_index_sessions(args) -> int:
         print(f"  ❌ graph unreachable: {e}", file=_sys.stderr)
         return 1
     finally:
-        if sdk._proj:
+        if sdk is not None and sdk._proj:
             sdk._proj.close()
 
     print(f"Session corpus: {report['directory']}")

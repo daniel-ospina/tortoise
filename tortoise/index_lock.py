@@ -183,7 +183,14 @@ class SessionIndexLock:
         # of truncating an attacker-chosen file via the a+ open.
         try:
             os.makedirs(self.path.parent, mode=0o700, exist_ok=True)
-            os.chmod(self.path.parent, 0o700)  # Round-10: tighten pre-existing dirs
+            # Round-10/11: tighten pre-existing dirs — best-effort (a shared/
+            # root-owned/group-owned dir the user can write but not chmod must
+            # NOT turn every acquire into a retryable error / silent loss of
+            # auto-reindexing; dirs we create already get 0700 via makedirs).
+            try:
+                os.chmod(self.path.parent, 0o700)
+            except OSError:
+                pass
             self._fh = os.fdopen(
                 os.open(self.path,
                         os.O_CREAT | os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW),
