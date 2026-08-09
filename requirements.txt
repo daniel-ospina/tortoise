@@ -8,6 +8,7 @@ prometheus-client>=0.16
 
 fastapi>=0.100.0
 uvicorn>=0.23.0
+posthog>=3.0
 
 
 # NOTE: sentence-transformers intentionally NOT in the base deploy

@@ -26,7 +26,12 @@ from contextlib import asynccontextmanager
 from tortoise.audit_events import AuditLogger
 from tortoise.auth import hash_api_key
 from tortoise.session_auth import get_current_user
-from tortoise.analytics import first_api_call, tenant_provisioned  # D10 funnel hooks  # E1–E8 session endpoints (D1)
+from tortoise.analytics import (  # #528 server analytics (fail-safe, no-op without key)
+    api_key_created,
+    first_api_call,
+    first_api_call_pending,
+    tenant_provisioned,
+)  # E1–E8 session endpoints (D1)
 import hmac
 
 from tortoise.sdk import TortoiseSDK, _content_hash
@@ -445,8 +450,7 @@ async def provision_tenant(request: Request):
                     "nodes": lim["max_graph_nodes"]},
         )
 
-        tenant_provisioned(created_by, team_id, status='unconfirmed')  # D10 hook (status refined on confirm)
-    # Create APIKey node
+        # Create APIKey node
         api_key_id = _short_id()
         sdk._get_registry().query(
             """
@@ -493,6 +497,16 @@ async def provision_tenant(request: Request):
         await _async_audit(
             request, team_id, "tenant_provision",
             resource_type="team", resource_id=team_id,
+        )
+
+        # #528 analytics — fire-and-forget, only on success (never in the
+        # rollback path). created_by is the Supabase user UUID (joins the
+        # web funnel); no key configured → no-op.
+        await asyncio.to_thread(
+            tenant_provisioned, created_by, team_id, team_name, "free", graph_name
+        )
+        await asyncio.to_thread(
+            api_key_created, created_by, team_id, team_id[:8], api_key_id, "provision"
         )
 
         return {"status": "provisioned", "team_id": team_id, "graph_name": graph_name}
@@ -609,17 +623,30 @@ async def get_current_team(request: Request) -> dict:
         # token using the embedded salt (verify_api_key). This is O(keys) but
         # the registry is small (teams × keys) and auth happens per-request.
         key_result = sdk._get_registry().query(
-            "MATCH (k:APIKey) WHERE k.revoked_at IS NULL RETURN k.team_id, k.id, k.key_hash"
+            "MATCH (k:APIKey) WHERE k.revoked_at IS NULL "
+            "RETURN k.team_id, k.id, k.key_hash, k.created_by"
         ).result_set
         from tortoise.auth import verify_api_key
         team_id = key_id = None
-        for k_team_id, k_id, stored_hash in key_result:
+        created_by = None
+        for k_team_id, k_id, stored_hash, k_created_by in key_result:
             if verify_api_key(token, stored_hash):
                 team_id, key_id = k_team_id, k_id
+                created_by = k_created_by
                 break
         if team_id is None:
             await _audit_auth_failure(request, "invalid_key")
             raise HTTPException(status_code=401, detail="Invalid API key")
+        # #528: activation telemetry — first successful API auth per team.
+        # Dedup is in-process + thread-safe (single-worker caveat noted in
+        # tortoise/analytics.py); distinct_id is the key creator's user UUID
+        # (joins web + server funnels), with team_id fallback for legacy/
+        # bootstrap keys that predate created_by.
+        if first_api_call_pending(team_id):
+            await asyncio.to_thread(
+                first_api_call,
+                created_by or team_id, team_id, request.url.path, request.method,
+            )
         # #329: fetch quota limits in the SAME fetch as tier (one round-trip;
         # mirrors quota.resolve_team_limits so REST and MCP see identical limits).
         team = sdk._get_registry().query(
@@ -1025,7 +1052,10 @@ async def team_info(team: dict = Depends(get_current_team)):
         tier=team["tier"],
         max_users=team["max_users"],
         max_graphs=team["max_graphs"],
-        max_teams=team["max_teams"],
+        # max_teams removed (D1): multi-team is a user capability, not a tier field.
+        # TeamInfoResponse.max_teams is optional — omit rather than KeyError (pre-existing
+        # 500 on every /v1/team call, exposed by the zero-email signup verification).
+        max_teams=None,
         point_count=point_count,
     )
 
@@ -1355,6 +1385,22 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
     await _async_audit(
         request, team["team_id"], "api_key_create",
         resource_type="api_key", resource_id=kid,
+    )
+
+    # #528 analytics — actor user id from the team's Membership graph when
+    # resolvable (key creation is rare; one extra registry lookup), else a
+    # team_id-prefixed id (request.state only carries team_id here).
+    try:
+        actor = sdk._get_registry().query(
+            "MATCH (m:Membership {team_id:$tid}) RETURN m.user_id LIMIT 1",
+            params={"tid": team["team_id"]},
+        ).result_set
+        distinct_id = actor[0][0] if actor else f"team:{team['team_id']}"
+    except Exception:
+        distinct_id = f"team:{team['team_id']}"
+    await asyncio.to_thread(
+        api_key_created,
+        distinct_id, team["team_id"], key_prefix, kid, "team_keys",
     )
 
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
@@ -2005,6 +2051,80 @@ async def reconcile(request: Request):
 
     result["notes"].append("bootstrap-expiry sweep complete")
     return result
+
+
+# ── Zero-email agent signup (issue #663) ──
+# Public, rate-limited. An agent or a non-technical user can mint a working
+# tt_ key with ONE command — no email, no dashboard, no Supabase account.
+# Matches the Mem0/Hindsight self-onboarding pattern (competitor research).
+# Anonymous identity = device-generated UUID; per-identity rate limit.
+# The key is shown once; the anonymous identity can attach an email later
+# (future upgrade path).
+
+@app.post("/v1/agent/signup")
+async def agent_signup(request: Request):
+    """Mint a team + API key for an anonymous device (no email/dashboard)."""
+    # Per-identity rate limit only (abuse posture): the identity is what an
+    # attacker must keep stable to use the minted key — IP rotates trivially.
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    identity = (body or {}).get("identity") or request.headers.get("x-device-id", "")
+    if not identity:
+        import uuid as _uuid
+        identity = f"anon-{_uuid.uuid4().hex[:12]}"
+    identity = identity[:64]
+
+    # Per-identity rate limit: max 3 signups per identity per hour
+    from datetime import datetime, timezone as _tz, timedelta
+    sdk = _make_sdk(namespace="registry")
+    reg = sdk._get_registry()
+    cutoff = (datetime.now(_tz.utc) - timedelta(hours=1)).isoformat()
+    recent = reg.query(
+        "MATCH (m:Membership {user_id:$uid}) WHERE m.created_at > $cutoff RETURN count(m)",
+        params={"uid": identity, "cutoff": cutoff},
+    ).result_set[0][0]
+    if recent >= 3:
+        raise HTTPException(status_code=429, detail="Too many signups from this device — try again later")
+
+    import re as _re
+    import uuid as _uuid
+    from tortoise.auth import hash_api_key as _hash
+    from tortoise.pricing import tier_limits
+
+    team_id = _uuid.uuid4().hex[:26]
+    team_name = f"agent-{team_id[:6]}"
+    api_key = f"tt_{_uuid.uuid4().hex}"
+    key_hash = _hash(api_key)
+    now = datetime.now(_tz.utc).isoformat()
+    graph_name = f"team_{team_id}"
+    lim = tier_limits("free")
+
+    # Team node
+    reg.query(
+        "CREATE (t:Team {id:$id, name:$name, tier:'free', created_at:$now, backup_enabled:false, "
+        "max_users:$mu, max_graphs:$mg, max_api_keys:$mk, ops_allowance:$ops, graph_size_cap:$nodes})",
+        params={"id": team_id, "name": team_name, "now": now,
+                "mu": lim["max_users_per_team"], "mg": lim["max_graphs_per_team"],
+                "mk": lim["max_api_keys"], "ops": lim["included_write_ops_per_month"],
+                "nodes": lim["max_graph_nodes"]},
+    )
+    # APIKey node
+    kid = _short_id()
+    reg.query(
+        "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, key_prefix:$kp, created_by:$cb, created_at:$now})",
+        params={"id": kid, "tid": team_id, "kh": key_hash, "kp": api_key[:10], "cb": identity, "now": now},
+    )
+    # Anonymous membership (owner)
+    reg.query(
+        "CREATE (m:Membership {team_id:$tid, user_id:$uid, role:'owner', status:'active', created_at:$now})",
+        params={"tid": team_id, "uid": identity, "now": now},
+    )
+    # Default graph node
+    sdk._graph_create(team_id, "default", kind="default", namespace=graph_name)
+
+    await _async_audit(request, team_id, "agent_signup", resource_type="team", resource_id=team_id)
+
+    return {"key": api_key, "team_id": team_id, "team_name": team_name, "graph_name": graph_name,
+            "identity": identity, "tier": "free"}
 
 
 @app.post("/v1/session/key")
