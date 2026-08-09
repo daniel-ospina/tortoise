@@ -2301,6 +2301,37 @@ def _is_loopback_bind(bind: str) -> bool:
     return ip.is_loopback
 
 
+def _db_uri_remote(db_uri: str) -> bool:
+    """True when the TORTOISE_DB_URI target lives on a remote (non-loopback)
+    machine, so the "Remote/cloud DB target" warnings fire whenever an
+    operator's local key/process genuinely drives a shared graph.
+
+    redis:// and rediss:// targets are always remote by convention (managed
+    cloud / non-local Redis instances). docker:// is local ONLY when its host
+    is a loopback address (localhost / 127.0.0.0/8 / ::1, incl. IPv4-mapped
+    ::ffff:127.0.0.1) — docker://user:pass@remote-host:6379/... is a valid
+    remote FalkorDB target and must warn just like redis:// (#719).
+    """
+    if not db_uri:
+        return False
+    if db_uri.startswith(("redis://", "rediss://")):
+        return True
+    if not db_uri.startswith("docker://"):
+        return False
+    from urllib.parse import urlsplit
+
+    host = urlsplit(db_uri).hostname
+    if host is None:
+        return False  # unparseable authority — don't invent a warning
+    if host.strip().lower().rstrip(".") == "localhost":
+        return False
+    ip = _parse_bind_ip(host)
+    if ip is None:
+        # Unknown hostname — assume it resolves to something reachable.
+        return True
+    return not ip.is_loopback
+
+
 def _cmd_serve_http(args) -> int:
     """Serve the Tortoise MCP server over HTTP (streamable) for self-hosted use.
 
@@ -2321,7 +2352,7 @@ def _cmd_serve_http(args) -> int:
     db_uri = os.environ.get("TORTOISE_DB_URI", "")
     if db_uri.startswith(("docker://", "redis://", "rediss://")):
         print(f"serve --http: DB target = {db_uri.split('@')[-1]}")
-        if not db_uri.startswith("docker://"):
+        if _db_uri_remote(db_uri):
             print("  ⚠️  Remote/cloud DB target — any local process holding a key drives this graph.")
     else:
         db_path = os.environ.get("TORTOISE_DB_PATH") or resolve_db_path()
@@ -2431,7 +2462,7 @@ def _cmd_key_create(args) -> int:
     db_uri = os.environ.get("TORTOISE_DB_URI", "")
     if db_uri.startswith(("docker://", "redis://", "rediss://")):
         print(f"key create: registry at {db_uri.split('@')[-1]}")
-        if not db_uri.startswith("docker://"):
+        if _db_uri_remote(db_uri):
             print("  ⚠️  Remote/cloud registry — key created on that instance.")
     else:
         from tortoise.config import resolve_db_path

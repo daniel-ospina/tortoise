@@ -357,6 +357,66 @@ def test_is_loopback_bind_ipv4_mapped_loopback_guarded(monkeypatch):
         "IPv4-mapped LAN address must never classify as loopback"
 
 
+@pytest.mark.parametrize("uri,remote", [
+    # redis:// / rediss:// — always remote by convention (managed/shared
+    # instances), even when the host string is loopback.
+    ("redis://:pass@db.example.com:6379/0", True),
+    ("rediss://:pass@localhost:6379/0", True),
+    # docker:// loopback hosts — local instance, no warning.
+    ("docker://:pass@localhost:6379/0", False),
+    ("docker://:pass@127.0.0.1:6379/0", False),
+    ("docker://:pass@127.0.0.2:6379/0", False),
+    ("docker://:pass@[::1]:6379/0", False),
+    ("docker://:pass@[::ffff:127.0.0.1]:6379/0", False),
+    # docker:// non-loopback hosts — valid remote FalkorDB targets, warn.
+    ("docker://:pass@db.example.com:6379/0", True),
+    ("docker://user:pass@10.0.0.5:6379/tortoise", True),
+    ("docker://:pass@192.168.1.50:6379/0", True),
+    ("docker://:pass@[::ffff:192.168.1.50]:6379/0", True),
+    # Not a URI — never remote.
+    ("", False),
+    ("/tmp/tortoise.db", False),
+])
+def test_db_uri_remote_classifies_remote_docker_hosts(uri, remote):
+    """The remote-target warnings must fire for every genuinely remote DB
+    target — including docker://user:pass@remote-host:6379/... (a valid
+    remote FalkorDB instance) — and stay silent for loopback docker://
+    instances (localhost / 127.0.0.0/8 / ::1 / IPv4-mapped). redis:// /
+    rediss:// are always remote by convention (#719 P2, round 7)."""
+    from tortoise.__main__ import _db_uri_remote
+
+    assert _db_uri_remote(uri) is remote, f"{uri!r}: expected remote={remote}"
+
+
+@pytest.mark.parametrize("uri,warns", [
+    ("docker://:pass@db.example.com:6379/0", True),
+    ("docker://user:pass@10.0.0.5:6379/tortoise", True),
+    ("docker://:pass@localhost:6379/0", False),
+    ("docker://:pass@127.0.0.1:6379/0", False),
+    ("redis://:pass@db.example.com:6379/0", True),
+])
+def test_serve_http_remote_db_target_warning_fires_for_remote_docker(monkeypatch, tmp_path, capsys, uri, warns):
+    """serve --http must print the 'Remote/cloud DB target' warning for
+    docker:// targets on non-loopback hosts exactly as it does for redis:// /
+    rediss://, and stay silent for loopback docker:// instances — operators
+    bootstrapping keys / serving against a remote docker:// instance get the
+    same remote-graph awareness as cloud targets (#719 P2, round 7)."""
+    from tortoise.__main__ import main
+
+    calls = _patch_serve_runtime(monkeypatch, tmp_path)
+    monkeypatch.setenv("TORTOISE_DB_URI", uri)
+    rc = main(["serve", "--http", "--auth", "static", "--api-key", "tt_x"])
+    assert rc == 0
+    assert calls["uvicorn"] is not None, "uvicorn.run was not invoked"
+    out = capsys.readouterr().out
+    assert "DB target" in out, "DB target diagnostic line must still print"
+    if warns:
+        assert "Remote/cloud DB target" in out, f"{uri}: remote-target warning must fire"
+    else:
+        assert "Remote/cloud DB target" not in out, f"{uri}: loopback target must not warn"
+
+
+
 def test_bind_allowed_hosts_ipv4_mapped_normalized(monkeypatch):
     """_bind_allowed_hosts must apply the same ipv4_mapped normalization as
     _is_loopback_bind: ::ffff:127.0.0.1 stays loopback (no Host-guard
