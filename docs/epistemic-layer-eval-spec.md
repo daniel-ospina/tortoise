@@ -1,9 +1,10 @@
 > **UPDATE (2026-08-09) — P0 NAND fix IMPLEMENTED on feat/753-directed-nand (PR #795).**
 > Investigation: φ_directed = exp(w·ca)·φ_nand is NOT message-equivalent on the
 > target (the exp(w·ca) factor sits inside the marginalization integral —
-> measured up to 17.6% difference). The fix is purely structural: the
-> **creation default flip** (NAND → unidirectional) + the existing back-message
-> guard (unidirectional operators skip the source message). 5 property tests landed (directed-attack-lowers-target, no-back-
+> measured up to 17.6% difference). Directedness is structural (the back-message
+> guard: unidirectional operators skip the source message). **Product-owner
+> decision (2026-08-09): NAND stays BIDIRECTIONAL by default (logical mutual);
+> `unidirectional` is the agent-declared directed attack.** 5 property tests landed (directed-attack-lowers-target, no-back-
 > pressure, bidirectional-is-mutual, reinstatement, default-is-directed). The
 > §1 potential-replacement recommendation is superseded by the default flip;
 > the remaining known weakness is weak mutual-contradiction coupling (+0.0024).

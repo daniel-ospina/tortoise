@@ -1,14 +1,17 @@
 """Directed NAND operator tests (#753 — P0 fix: NAND attack semantics).
 
+NAND direction semantics (#753, product-owner decision 2026-08-09):
+  - DEFAULT is bidirectional (mutual contradiction — "A and B can't both
+    be true" is logically symmetric).
+  - An agent may explicitly declare direction="unidirectional" for a
+    DIRECTED attack: the attacker's truth penalizes the target, and the
+    back-message guard in ep.py ensures the attacker receives NO factor
+    message (Dung-style attack).
+  - N-ary directed NAND decomposes as source→each-target (no arbitrary
+    target↔target directed attacks).
 The symmetric phi_nand potential was measured to behave as an "agreement
-coupling" — in configurations it INVERTED attacks (a strong attacker
-RAISED the target, dense attacks strengthened it). The fix:
-  1. NAND creation defaults to unidirectional (directed attack): the
-     attacker's truth penalizes the target, and the back-message guard in
-     ep.py ensures the attacker receives NO factor message.
-  2. Explicit bidirectional NAND keeps mutual-contradiction semantics.
-  3. N-ary directed NAND decomposes as source→each-target (no arbitrary
-     target↔target directed attacks).
+coupling" in some configurations (a strong attacker could RAISE a target);
+directed attacks opt out of that coupling.
 """
 import pytest
 
@@ -56,20 +59,28 @@ def sdk(tmp_path):
     return TortoiseSDK(db_path=str(tmp_path / "t.db"))
 
 
-def test_nand_defaults_to_directed(sdk):
-    """New NANDs default to unidirectional (directed attack); IMPL stays bidirectional."""
+def test_nand_defaults_to_bidirectional(sdk):
+    """NAND defaults to bidirectional (mutual) for all op types; the agent may
+    explicitly declare a directed (unidirectional) attack."""
     a = make_point(sdk, "a")
     b = make_point(sdk, "b")
+    c = make_point(sdk, "c")
     nand = sdk.create_operator("NAND", a["id"], [b["id"]])
     impl = sdk.create_operator("IMPL", a["id"], [b["id"]])
-    d_nand = sdk._get_proj().g.query(
+    directed = sdk.create_operator("NAND", a["id"], [c["id"]], direction="unidirectional")
+    proj = sdk._get_proj()
+    d_nand = proj.g.query(
         "MATCH (o:Point {id:$id}) RETURN o.direction", params={"id": nand["id"]}
     ).result_set[0][0]
-    d_impl = sdk._get_proj().g.query(
+    d_impl = proj.g.query(
         "MATCH (o:Point {id:$id}) RETURN o.direction", params={"id": impl["id"]}
     ).result_set[0][0]
-    assert d_nand == "unidirectional", "NAND must default to directed attack"
-    assert d_impl == "bidirectional", "IMPL keeps bidirectional default"
+    d_dir = proj.g.query(
+        "MATCH (o:Point {id:$id}) RETURN o.direction", params={"id": directed["id"]}
+    ).result_set[0][0]
+    assert d_nand == "bidirectional", "NAND must default to bidirectional (mutual)"
+    assert d_impl == "bidirectional"
+    assert d_dir == "unidirectional", "explicit unidirectional must be honored"
 
 
 def test_directed_attack_lowers_target(sdk):
@@ -85,7 +96,7 @@ def test_directed_attack_lowers_target(sdk):
     make_operator(sdk, s["id"], a["id"], "IMPL")   # activate subgraph
     make_operator(sdk, s["id"], b1["id"], "IMPL")  # matched twin support (review P2)
     make_operator(sdk, s["id"], b2["id"], "IMPL")  # matched twin support
-    make_operator(sdk, a["id"], b1["id"], "NAND")  # directed attack on b1 only
+    make_operator(sdk, a["id"], b1["id"], "NAND", direction="unidirectional")  # directed attack on b1 only
 
     res = run_ep(sdk)
     attacked, control = res[b1["id"]], res[b2["id"]]
@@ -113,7 +124,7 @@ def test_no_direct_back_pressure_on_attacker(sdk):
     res_before = run_ep(sdk)
     ca_before = res_before[a["id"]]
 
-    make_operator(sdk, a["id"], b["id"], "NAND")  # directed attack
+    make_operator(sdk, a["id"], b["id"], "NAND", direction="unidirectional")  # directed attack
     res_after = run_ep(sdk)
     ca_after = res_after[a["id"]]
 
@@ -176,13 +187,13 @@ def test_reinstatement(sdk):
     make_operator(sdk, s["id"], b["id"], "IMPL")
     make_operator(sdk, s["id"], c["id"], "IMPL")
 
-    # Case 1: A attacked by B only
-    make_operator(sdk, b["id"], a["id"], "NAND")
+    # Case 1: A attacked by B only (directed attacks)
+    make_operator(sdk, b["id"], a["id"], "NAND", direction="unidirectional")
     res1 = run_ep(sdk)
     a_without_reinst = res1[a["id"]]
 
     # Case 2: add C attacking B (reinstatement chain)
-    make_operator(sdk, c["id"], b["id"], "NAND")
+    make_operator(sdk, c["id"], b["id"], "NAND", direction="unidirectional")
     res2 = run_ep(sdk)
     a_with_reinst = res2[a["id"]]
 
@@ -193,9 +204,9 @@ def test_reinstatement(sdk):
     )
 
 
-def test_mcp_tool_nand_resolves_directed(sdk, tmp_path):
-    """The MCP tool surface must inherit the SDK's directed NAND default
-    (P1 review fix — the tool previously hard-coded bidirectional)."""
+def test_mcp_tool_honors_direction(sdk, tmp_path):
+    """The MCP tool default is bidirectional (mutual); an agent passing
+    direction='unidirectional' gets a directed attack stored."""
     import os
     _prev_db = os.environ.get("TORTOISE_DB_PATH")
     os.environ["TORTOISE_DB_PATH"] = str(tmp_path / "t.db")  # align tool SDK with fixture
@@ -207,12 +218,18 @@ def test_mcp_tool_nand_resolves_directed(sdk, tmp_path):
         a = make_point(sdk, "a")
         b = make_point(sdk, "b")
         # route through the MCP tool handler with NO direction (default None)
-        res = tortoise_create_operator("NAND", a["id"], [b["id"]])
-        op_id = res["id"]
-        d = sdk._get_proj().g.query(
-            "MATCH (o:Point {id:$id}) RETURN o.direction", params={"id": op_id}
-        ).result_set[0][0]
-        assert d == "unidirectional", "MCP-created NAND must be directed by default"
+        res_default = tortoise_create_operator("NAND", a["id"], [b["id"]])
+        res_directed = tortoise_create_operator(
+            "NAND", a["id"], [b["id"]], direction="unidirectional")
+        proj = sdk._get_proj()
+        d_def = proj.g.query(
+            "MATCH (o:Point {id:$id}) RETURN o.direction",
+            params={"id": res_default["id"]}).result_set[0][0]
+        d_dir = proj.g.query(
+            "MATCH (o:Point {id:$id}) RETURN o.direction",
+            params={"id": res_directed["id"]}).result_set[0][0]
+        assert d_def == "bidirectional", "MCP tool must default to bidirectional"
+        assert d_dir == "unidirectional", "explicit directed must be honored"
     finally:
         _transport_mode.reset(tok_mode)
         _current_team_id.reset(tok_team)
@@ -237,7 +254,8 @@ def test_directed_nary_nand_source_to_targets_only(sdk):
     make_operator(sdk, s["id"], t1["id"], "IMPL")
     make_operator(sdk, s["id"], t2["id"], "IMPL")
     # directed n-ary NAND: src attacks both targets
-    sdk.create_operator("NAND", src["id"], [t1["id"], t2["id"]])
+    sdk.create_operator("NAND", src["id"], [t1["id"], t2["id"]],
+                        direction="unidirectional")
 
     from tortoise.ep import TortoiseEP
     proj = sdk._get_proj()

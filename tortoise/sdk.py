@@ -1065,28 +1065,26 @@ class TortoiseSDK:
 
     def create_operator(self, op_type: str, source_id: str, target_ids: list[str],
                         label: str | None = None,
-                        direction: str | None = None) -> dict:
+                        direction: str = "bidirectional") -> dict:
         """Create an operator Point with optional semantic label.
 
         Semantic-epistemic edge model (#7801):
           - op_type: IMPL or NAND (epistemic mechanism)
           - label: domain verb — "addresses", "hasPart", "opposes" (semantic layer)
-          - direction: "bidirectional" or "unidirectional" — explicit flag
-            controlling EP back-propagation (ONTOLOGY v3.1 §3.1, §8). Default is
-            per-op-type (#753): NAND → unidirectional (directed attack),
-            IMPL → bidirectional. Pass None (default) to let the SDK resolve.
+          - direction: "bidirectional" (default) or "unidirectional" — explicit
+            flag controlling EP back-propagation (ONTOLOGY v3.1 §3.1, §8).
+            Default bidirectional (mutual) for all op types; pass
+            "unidirectional" for a directed attack (no back-pressure).
           - Operator carries the label and direction; IMPL/NAND edges carry confidence via EP.
         """
         if op_type not in ("IMPL", "NAND", "composedOf", "decomposesInto", "contains", "wraps"):
             raise ValueError(
                 f"op_type must be 'IMPL', 'NAND', or a part/whole type, got {op_type!r}"
             )
-        # Direction default (#753 directed-operator redesign): NAND defaults to
-        # unidirectional (directed attack — attacker's truth penalizes the
-        # target, no back-pressure); IMPL keeps bidirectional default. Explicit
-        # bidirectional NAND remains for genuine mutual contradictions.
-        if direction is None:
-            direction = "unidirectional" if op_type == "NAND" else "bidirectional"
+        # Direction default: bidirectional for all op types (product owner,
+        # #753) — a NAND is logically "A and B can't both be true" (mutual).
+        # An agent may explicitly pass "unidirectional" to declare a DIRECTED
+        # attack (attacker's truth penalizes the target, no back-pressure).
         if direction not in ("bidirectional", "unidirectional"):
             raise ValueError(
                 f"direction must be 'bidirectional' or 'unidirectional', got {direction!r}"
