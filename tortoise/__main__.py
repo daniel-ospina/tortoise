@@ -2223,14 +2223,21 @@ def _parse_bind_ip(bind: str):
 def _bind_allowed_hosts(bind: str, extra: str | None) -> list[str]:
     """Host values fastmcp's Host guard must accept for `serve --http --bind ...`.
 
-    fastmcp's HostOriginGuardMiddleware only admits loopback hosts
-    (DEFAULT_HOSTS) unless allowed_hosts is configured — a non-loopback bind is
-    therefore 421 Misdirected Request for LAN clients unless the address they
-    actually connect to is in the allowlist (#719). Returns the bind address
-    itself (non-loopback only), plus any --allowed-hosts entries, plus the
-    machine's own hostname/LAN addresses when bind is an any-interface
-    wildcard (0.0.0.0/::) where clients use an address we can't infer from the
-    bind value alone.
+    fastmcp's HostOriginGuardMiddleware auto-admits loopback hosts
+    (DEFAULT_HOSTS) and appends the socket's own bind address from
+    scope["server"] — so a plain specific-IP non-loopback bind passes even
+    unseeded. Tortoise always passes an explicit allowed_hosts list, which
+    flips the guard's has_explicit_allowed_hosts flag: host validation is
+    then ALWAYS on (fail-closed), and the allowlist is DEFAULT_HOSTS +
+    these entries + scope["server"]. Seeding is therefore load-bearing
+    exactly where the Host header a client sends differs from
+    scope["server"]: any-interface wildcards (0.0.0.0/:: — scope["server"]
+    is unspecified and NOT auto-appended, so clients' hostname/LAN-address
+    Host headers would 421), hostname binds (Host carries the DNS name,
+    scope carries the resolved IP), IPv4-mapped binds (scope carries the
+    ::ffff: form, clients send the plain IPv4), and any extra
+    --allowed-hosts names (#719). Returns those seeded values plus the
+    machine's own hostname/LAN addresses for wildcard binds.
     """
     import ipaddress
     import socket
@@ -2418,6 +2425,7 @@ def _cmd_key_create(args) -> int:
     import sys
     from datetime import datetime, timezone
 
+    from tortoise.exceptions import ControlPlaneError
     from tortoise.sdk import TortoiseSDK
 
     db_uri = os.environ.get("TORTOISE_DB_URI", "")
@@ -2441,7 +2449,14 @@ def _cmd_key_create(args) -> int:
             print(f"  ℹ️  Team {args.name!r} already exists — reusing.")
             break
     if team_id is None:
-        result = sdk.team_create(args.name)
+        try:
+            result = sdk.team_create(args.name)
+        except ControlPlaneError as e:
+            # conf 85: an invalid --name (spaces/punctuation, >64 chars,
+            # blank) must surface as a clean CLI error, never a raw
+            # ControlPlaneError traceback.
+            print(f"  ❌ {e}", file=sys.stderr)
+            return 1
         team_id = result["id"]
         print(f"  ✅ Team {args.name!r} created (id {team_id})")
 

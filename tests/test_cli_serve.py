@@ -84,28 +84,55 @@ def local_db(tmp_path, monkeypatch):
 
 # ── 1. stdio-refusal message content ──────────────────────────────────────
 
-def test_stdio_refusal_names_real_alternatives_not_health_server():
-    """The #702 dead end: stdio + TORTOISE_API_KEY must name serve --http /
-    hosted URL / dev-mode — never the health-server (which has no MCP surface)."""
+def test_stdio_refusal_names_real_alternatives_not_health_server(monkeypatch):
+    """The #702 dead end, behaviorally: with the stdio transport active and
+    an API key configured (non-dev), _safe() rejects with a message that
+    names serve --http and the hosted URL — never the health-server (which
+    has no MCP surface). Exercises the real ContextVar branch + live
+    is_dev_mode() env check instead of pinning source text."""
     import tortoise.mcp_server as m
-    import inspect
-    src = inspect.getsource(m._safe)
-    assert "serve --http" in src, "stdio refusal must recommend serve --http"
-    assert "api.premiselabs.co/mcp" in src, "stdio refusal must name hosted URL"
-    assert "health-server" not in src, "health-server is not an MCP endpoint — must not be recommended"
+    from tortoise.mcp_auth import _transport_mode
+
+    monkeypatch.setenv("TORTOISE_API_KEY", "tt_test_key")
+    token = _transport_mode.set("stdio")
+    try:
+        result = m._safe(lambda: "ok")
+    finally:
+        _transport_mode.reset(token)
+
+    assert isinstance(result, dict) and "error" in result, \
+        "stdio + non-dev must reject, not call through"
+    msg = result["error"]
+    assert "serve --http" in msg, "stdio refusal must recommend serve --http"
+    assert "api.premiselabs.co/mcp" in msg, "stdio refusal must name hosted URL"
+    assert "health-server" not in msg, "health-server is not an MCP endpoint — must not be recommended"
 
 
 # ── 2. auth.py import-crash message content ────────────────────────────────
 
 def test_auth_import_crash_message_guides_unset():
-    """auth.py: with TORTOISE_API_KEY but no pepper, the error must tell the
-    user to UNSET the key for local stdio (and point at serve --http)."""
-    import tortoise.auth as a
-    import inspect
-    src = inspect.getsource(a)
-    assert "UNSET" in src and "TORTOISE_API_KEY" in src
-    assert "serve --http" in src
-    assert "health-server" not in src
+    """The import-crash contract, behaviorally: with TORTOISE_API_KEY set
+    but no pepper, importing tortoise.auth must FAIL with a RuntimeError
+    whose message tells the user to UNSET the key for local stdio and points
+    at serve --http (never the health-server). Simulates the real user
+    failure (the exact import the mcp server does at startup) in a fresh
+    process instead of pinning source text."""
+    code = (
+        "import os\n"
+        "os.environ['TORTOISE_API_KEY'] = 'tt_x'\n"
+        "os.environ.pop('TORTOISE_SECRET_PEPPER', None)\n"
+        "import tortoise.auth\n"
+    )
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("TORTOISE_API_KEY", "TORTOISE_SECRET_PEPPER")}
+    proc = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                          text=True, env=env, timeout=60)
+    assert proc.returncode != 0, "auth import must crash without a pepper when the API key is set"
+    msg = proc.stderr
+    assert "RuntimeError" in msg, "must raise RuntimeError, not silently pass"
+    assert "UNSET" in msg and "TORTOISE_API_KEY" in msg
+    assert "serve --http" in msg
+    assert "health-server" not in msg
 
 
 # ── 3. CLI wiring — real main() dispatch (no fake Namespace) ──────────────

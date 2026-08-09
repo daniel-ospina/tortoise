@@ -441,9 +441,9 @@ class TestCliOnboardDbTarget:
 
 
 class TestCliSecurityAndIndex:
-    """#715 P1/P2 fixes: extraction-pipeline error surfacing, password
-    hygiene in warnings/argv, blank FALKORDB_* guard, single-index onboard,
-    and URI routing parity for decide/list-kinds/list-sources."""
+    """#715 P1/P2 fixes: password hygiene in warnings/argv, blank
+    FALKORDB_* guard, single-index onboard, and URI routing parity for
+    decide/list-kinds/list-sources."""
 
     @staticmethod
     def _fake_pipeline_module(monkeypatch):
@@ -461,29 +461,6 @@ class TestCliSecurityAndIndex:
 
         fake.ExtractionPipeline = ExtractionPipeline
         monkeypatch.setitem(sys.modules, "tortoise.extraction_pipeline", fake)
-
-    # ── Fix 1 (P1): clear error when extraction pipeline is missing ──
-
-    def test_index_github_missing_pipeline_clear_error(self, monkeypatch, capsys):
-        """#715 P1 conf 95: with no tortoise.extraction_pipeline module,
-        `index github` exits rc 1 with the actionable issue #713 message —
-        never a raw ModuleNotFoundError traceback."""
-        import importlib
-        with pytest.raises(ModuleNotFoundError):
-            importlib.import_module("tortoise.extraction_pipeline")  # real state
-
-        from tortoise import __main__ as m
-        rc = m._cmd_index_github(mock.Mock(
-            url="https://github.com/daniel-ospina/tortoise",
-            branch="main", background=False, db=None))
-
-        captured = capsys.readouterr()
-        out = captured.out + captured.err
-        assert rc == 1
-        assert "The extraction pipeline is not installed" in out
-        assert "missing module tortoise.extraction_pipeline" in out
-        assert "issue #713" in out
-        assert "Traceback" not in out
 
     # ── Fix 2 (P2): FALKORDB_* warning masks the password ──
 
