@@ -75,6 +75,10 @@ def _make_sdk(*, namespace: str | None = None) -> TortoiseSDK:
 # Built BEFORE _lifespan references it (no unbound reference). Mounted at /mcp
 # — the MCP app carries its own auth/rate-limit/security middleware stack;
 # FastAPI parent middleware does NOT propagate to mounted sub-apps.
+# P1 (code-review): per-team in-flight checkout locks (TOCTOU double-sub guard).
+_CHECKOUT_LOCKS: dict[str, asyncio.Lock] = {}
+
+
 _MCP_ALLOWED_ORIGINS = [
     "https://premiselabs.co",
     "https://app.premiselabs.co",
@@ -3541,7 +3545,13 @@ def _billing_checkout_sync(team: dict, price_id: str) -> dict:
 
 @app.post("/v1/billing/checkout", response_model=CheckoutResponse)
 async def billing_checkout(body: CheckoutRequest, request: Request, team: dict = Depends(get_current_team)):
-    """Start a Stripe Checkout session for a validated price (team auth)."""
+    """Start a Stripe Checkout session for a validated price (team auth).
+
+    P1 (code-review): a per-team in-flight asyncio lock serializes concurrent
+    checkouts (two tabs) so only one session can be created per team — closes
+    the TOCTOU double-subscription race between the mirror guard and
+    list_subscriptions (both pass when neither session exists yet).
+    """
     from tortoise.billing import BillingConfigError, BillingError, PriceCatalog
     try:
         # Price validation against the catalog — unknown price_id → 400.
@@ -3550,7 +3560,15 @@ async def billing_checkout(body: CheckoutRequest, request: Request, team: dict =
         raise HTTPException(status_code=503, detail=str(e))
     except BillingError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    return await asyncio.to_thread(_billing_checkout_sync, team, body.price_id)
+    team_id = team["team_id"]
+    lock = _CHECKOUT_LOCKS.setdefault(team_id, asyncio.Lock())
+    if lock.locked():
+        raise HTTPException(status_code=409, detail="a checkout is already pending for this team")
+    async with lock:
+        try:
+            return await asyncio.to_thread(_billing_checkout_sync, team, body.price_id)
+        finally:
+            _CHECKOUT_LOCKS.pop(team_id, None)
 
 
 def _billing_portal_sync(team: dict) -> dict:
@@ -3684,7 +3702,10 @@ def _webhook_apply_event(sdk, team_id: str, event: dict) -> str | None:
         now = datetime.now(timezone.utc)
         grace = (datetime.fromtimestamp(period_end, tz=timezone.utc) + timedelta(hours=72)
                  if period_end else now + timedelta(hours=72))
-        _set({"subscription_status": "past_due", "grace_until": grace.isoformat()})
+        # P0 (code-review): grace_until must be a UNIX TIMESTAMP —
+        # effective_tier parses float(grace_until); an ISO string would be
+        # unparseable and the grace degrade would silently never fire.
+        _set({"subscription_status": "past_due", "grace_until": grace.timestamp()})
         return "billing_payment_failed"
 
     if etype == "customer.subscription.updated":
@@ -3698,7 +3719,9 @@ def _webhook_apply_event(sdk, team_id: str, event: dict) -> str | None:
             updates["subscription_status"] = status
         # review fix 11: canceled surfacing via .updated (deleted event may be
         # dropped) → revert to free, identical to subscription.deleted.
-        if status == "canceled":
+        # P0 (code-review): unpaid / incomplete_expired are the same class —
+        # non-paying teams must not hold paid limits.
+        if status in ("canceled", "unpaid", "incomplete_expired"):
             _set({**updates, "tier": "free"})
             apply_limits(sdk, team_id, "free")
             return "billing_cancel"
@@ -3709,9 +3732,17 @@ def _webhook_apply_event(sdk, team_id: str, event: dict) -> str | None:
         _set(updates)
         tier = _resolve_tier_from_price(_price_id_from(data))
         if tier:
-            apply_limits(sdk, team_id, tier)
-            _set({"tier": tier})
-            notify_kind = "billing_upgrade"
+            # P2 (code-review): notify only on an ACTUAL tier change — Stripe
+            # fires .updated on renewals/period-end changes too; ops must not
+            # be spammed monthly per subscriber.
+            prior = sdk._get_registry().query(
+                "MATCH (t:Team {id:$id}) RETURN t.tier", params={"id": team_id}
+            ).result_set
+            prior_tier = prior[0][0] if prior else None
+            if prior_tier != tier:
+                apply_limits(sdk, team_id, tier)
+                _set({"tier": tier})
+                notify_kind = "billing_upgrade"
         return notify_kind
 
     if etype == "customer.subscription.deleted":
@@ -3753,12 +3784,28 @@ async def webhooks_stripe(request: Request):
     etype = event.get("type", "")
     event_id = event.get("id") or ""
     data = event.get("data", {}).get("object", {}) or {}
-    team_id = data.get("client_reference_id")
-    if not team_id and etype in ("customer.subscription.updated", "customer.subscription.deleted",
-                                 "invoice.payment_failed"):
-        cust = data.get("customer")
-        if cust:
-            team_id = _team_id_for_stripe_customer(cust)
+    ref_team = data.get("client_reference_id")
+    cust = data.get("customer")
+    cust_team = _team_id_for_stripe_customer(cust) if cust else None
+    team_id = ref_team
+    if etype in ("customer.subscription.updated", "customer.subscription.deleted",
+                 "invoice.payment_failed"):
+        # Customer is the CANONICAL binding (sync-persisted by our checkout
+        # endpoint); client_reference_id is a legacy/fallback. Customer wins
+        # when resolvable.
+        if cust_team:
+            team_id = cust_team
+    elif etype == "checkout.session.completed":
+        # P1 (code-review): client_reference_id is attacker-controllable —
+        # anyone can complete a Checkout in their own Stripe account with a
+        # victim's team_id. The customer binding (created by OUR checkout
+        # endpoint) is authoritative; refuse mismatches / stale overrides.
+        if cust_team:
+            team_id = cust_team
+            if ref_team and ref_team != cust_team:
+                _logger.warning(
+                    "webhook: checkout customer↔team mismatch (%s vs %s) — trusting customer",
+                    ref_team, cust_team)
     if not team_id:
         # No team binding — ack so Stripe stops retrying.
         return JSONResponse(status_code=200, content={"detail": "no team binding"})
@@ -3770,15 +3817,24 @@ async def webhooks_stripe(request: Request):
         # Marker: first-seen detection (SET-then-marker — the apply ran
         # regardless, so a retry cannot drop the upgrade; only side-effects
         # are dedup'd).
-        seen_rows = sdk._get_registry().query(
-            "MATCH (w:WebhookEvent {event_id:$id}) RETURN w.first_seen",
-            params={"id": event_id},
+        # P2 (code-review): atomic MERGE marker — check-then-create was racy
+        # under overlapping deliveries (Stripe timeout → retry can double-fire
+        # side-effects). The ON CREATE property distinguishes first processing.
+        # P2 (code-review): atomic MERGE marker — check-then-create was racy
+        # under overlapping deliveries (Stripe timeout → retry can double-fire
+        # side-effects). MERGE + ON CREATE sets is_first=true; the flag is
+        # removed after first processing so replays return coalesce→false.
+        marker = sdk._get_registry().query(
+            "MERGE (w:WebhookEvent {event_id:$id}) "
+            "ON CREATE SET w.first_seen=$now, w.type=$type, w.is_first=true "
+            "RETURN coalesce(w.is_first, false)",
+            params={"id": event_id, "now": _now_iso(), "type": etype},
         ).result_set
-        is_first = not seen_rows
+        is_first = bool(marker and marker[0][0])
         if is_first:
             sdk._get_registry().query(
-                "CREATE (w:WebhookEvent {event_id:$id, first_seen:$now, type:$type})",
-                params={"id": event_id, "now": _now_iso(), "type": etype},
+                "MATCH (w:WebhookEvent {event_id:$id}) REMOVE w.is_first",
+                params={"id": event_id},
             )
         if is_first and notify_kind:
             # Audit + analytics + notifications — first processing only.
