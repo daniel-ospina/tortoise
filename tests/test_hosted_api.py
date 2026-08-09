@@ -201,6 +201,78 @@ class TestAuthMatrix:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Auth — last_used_at tracking (#685)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestLastUsedAtTracking:
+    """API key last_used_at is set on successful authentication."""
+
+    def test_last_used_at_set_on_successful_auth(self):
+        """#685: get_current_team updates key.last_used_at on valid auth."""
+        import asyncio
+        from unittest.mock import MagicMock
+        from tortoise.auth import hash_api_key
+        from tortoise.hosted_api import _make_sdk, get_current_team
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            _orig_init = _patch_tortoise_sdk_init(db_path)
+            try:
+                sdk = _make_sdk(namespace="registry")
+
+                # Seed a Team node (get_current_team queries Team after auth)
+                sdk._get_registry().query(
+                    "CREATE (t:Team {id: $id, tier: 'free'})",
+                    params={"id": "test-team-lua"},
+                )
+
+                # Create a valid API key and hash it
+                key_token = "tt_testkey_last_used_at_000000001"
+                key_hash = hash_api_key(key_token)
+                sdk._get_registry().query(
+                    "CREATE (k:APIKey {id: $id, team_id: $tid, "
+                    "key_hash: $kh, key_prefix: $kp, created_by: $cb})",
+                    params={
+                        "id": "test-key-lua",
+                        "tid": "test-team-lua",
+                        "kh": key_hash,
+                        "kp": key_token[:10],
+                        "cb": "test",
+                    },
+                )
+
+                # Build a mock request with the valid key
+                request = MagicMock()
+                request.url.path = "/v1/points"
+                request.headers = {"Authorization": f"Bearer {key_token}"}
+                request.state = MagicMock()
+
+                result = asyncio.run(get_current_team(request))
+
+                assert result["team_id"] == "test-team-lua"
+                assert result["key_id"] == "test-key-lua"
+
+                # Verify last_used_at was written — a parseable recent ISO-8601
+                # timestamp (not just any non-null value)
+                from datetime import datetime, timezone
+                row = sdk._get_registry().query(
+                    "MATCH (k:APIKey {id: $id}) RETURN k.last_used_at",
+                    params={"id": "test-key-lua"},
+                ).result_set
+                assert len(row) == 1
+                assert row[0][0] is not None, \
+                    "last_used_at should be set after successful auth"
+                last_used = datetime.fromisoformat(row[0][0])
+                assert last_used.tzinfo is not None, "last_used_at must be timezone-aware"
+                age = datetime.now(timezone.utc) - last_used
+                assert age.total_seconds() < 30, \
+                    f"last_used_at should be recent, got {row[0][0]}"
+            finally:
+                _restore_tortoise_sdk_init(_orig_init)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Points Endpoints
 # ═══════════════════════════════════════════════════════════════════════════════
 
