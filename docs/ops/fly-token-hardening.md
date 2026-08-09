@@ -1,0 +1,99 @@
+# Fly Token Hardening + Main Branch Protection (#660)
+
+Follow-up to #596 (registry backup DR). Closes the largest residual under the
+cycle-5 P0 threat model: an unconstrained `FLY_API_TOKEN` in GitHub Actions
+secrets + unprotected main branch gave any main-push collaborator full app
+takeover (deploy + `flyctl secrets set`).
+
+## Part 1: deploy-scoped Fly token
+
+The deploy-hosted workflow now uses TWO Fly tokens:
+
+| Step | Secret | Scope | Why |
+|---|---|---|---|
+| Set all app secrets on Fly.io | `FLY_API_TOKEN` | Full org access | `flyctl secrets set` requires it |
+| Deploy | `FLY_API_TOKEN_DEPLOY` | Deploy-only | Least privilege — cannot mutate secrets |
+
+### Operator setup (one-time)
+
+```bash
+# 1. Create a deploy-scoped token (requires Fly.io auth + org access).
+fly tokens create deploy --app tortoise-y4mjjq
+# Output: a token string starting with "fm1" or "fm2".
+
+# 2. Set it as a GitHub Actions secret.
+gh secret set FLY_API_TOKEN_DEPLOY --body "fm1..." --repo daniel-ospina/tortoise
+
+# 3. Verify the new secret is registered.
+gh secret list --repo daniel-ospina/tortoise | grep FLY_API_TOKEN
+```
+
+### Migration / rotation
+
+After confirming deploys succeed with `FLY_API_TOKEN_DEPLOY`:
+
+1. **Rotate the full-scope token** (optional but good practice after scoping):
+   ```bash
+   fly tokens create org --org premiselabs   # creates a new full-scope token
+   gh secret set FLY_API_TOKEN --body "<new-token>" --repo daniel-ospina/tortoise
+   # Then revoke the old token in Fly dashboard → Access Tokens.
+   ```
+
+2. **Remove the old full-scope secret name** when confident the new one works
+   (the old secret value stays in GH until explicitly removed).
+
+### E2E verification
+
+A deploy-scoped token cannot run `flyctl secrets set`:
+
+```bash
+# This SHOULD fail with a permission error:
+FLY_API_TOKEN="$FLY_API_TOKEN_DEPLOY_VALUE" \
+  flyctl secrets set TEST=1 --app tortoise-y4mjjq
+# Expected: "Error: ..." (authz failure)
+
+# This SHOULD succeed:
+FLY_API_TOKEN="$FLY_API_TOKEN_DEPLOY_VALUE" \
+  flyctl deploy --remote-only --app tortoise-y4mjjq
+```
+
+## Part 2: main branch protection
+
+Applied via GitHub API (token has admin:true on the repo):
+
+```bash
+gh api repos/daniel-ospina/tortoise/branches/main/protection -X PUT \
+  --input - <<'EOF'
+{
+  "required_status_checks": {
+    "strict": true,
+    "contexts": [
+      "pricing-artifact",
+      "docs",
+      "test-isolation",
+      "license-surface",
+      "welcome-e2e",
+      "legal-e2e"
+    ]
+  },
+  "enforce_admins": false,
+  "required_pull_request_reviews": {
+    "dismiss_stale_reviews": true,
+    "require_code_owner_reviews": false,
+    "required_approving_review_count": 1
+  },
+  "restrictions": null,
+  "allow_force_pushes": false,
+  "allow_deletions": false
+}
+EOF
+```
+
+Settings applied:
+- **Require PR reviews:** min 1 approval, dismiss stale reviews on new commits
+- **Prevent force pushes:** yes
+- **Prevent branch deletion:** yes
+- **Require status checks (strict):** all 6 CI jobs must pass before merge
+  (`pricing-artifact`, `docs`, `test-isolation`, `license-surface`,
+  `welcome-e2e`, `legal-e2e`)
+- **Enforce admins:** no (owner can still bypass in emergencies)
