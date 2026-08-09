@@ -46,6 +46,16 @@ _ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
     "archived": frozenset(),                             # terminal (reserved — no v1 write path)
 }
 
+# Event types that write to the :GraphEvent store (#432). Other types
+# (e.g. PointRevised) only write to the JSONL event log (#548).
+_GRAPH_EVENT_TYPES = frozenset({
+    "PointAdded",
+    "OperatorAdded",
+    "PointRetracted",
+    "PointSuperseded",
+    "OperatorAnnotated",
+})
+
 
 def _raise_update_point_status_error(proj, id: str) -> None:
     """#432: error path for the update_point draft→live promote guard.
@@ -315,65 +325,6 @@ class TortoiseSDK:
             self._event_log = EventLog(self._event_log_path)
         return self._event_log
 
-    def _emit_event(self, type_: str, *, point: dict | None = None,
-                    id: str | None = None, **payload) -> dict | None:
-        """Append an event to the SDK event log for rebuild parity (#548).
-
-        Returns the event dict (for caller inspection), or None when no
-        event log is configured (backward-compatible — no log, no event).
-
-        Events emitted by the SDK use ``initiated_by="sdk"`` to distinguish
-        them from extractor/user events produced by EventAPI.
-
-        The *point* dict should be a complete snapshot of the Point's
-        properties (as returned by :meth:`get_point`) so that replay via
-        :meth:`~tortoise.projection.FalkorProjection.rebuild_all` can
-        reconstruct the node and its edges identically.
-        """
-        log = self._get_event_log()
-        if log is None:
-            return None
-        from .ids import ulid, now_iso
-        event: dict = {
-            "event_id": ulid(),
-            "ts": now_iso(),
-            "type": type_,
-            "initiated_by": "sdk",
-            "projection_version": 2,
-        }
-        if point is not None:
-            # Strip embedding — it is recomputed on replay by
-            # _upsert_point_props (vecf32 serialization is fragile).
-            # content_hash is also stripped — it is derived from content.
-            clean = {k: v for k, v in point.items()
-                     if k not in ("embedding", "content_hash")}
-            # Operators may not store 'content' as a node property (#548);
-            # _upsert_point_props requires it — synthesize a fallback.
-            if "content" not in clean:
-                op_type = clean.get("op_type", "IMPL")
-                op_inputs = (point.get("operator") or {}).get("inputs", [])
-                clean["content"] = f"{op_type}({', '.join(op_inputs)})"
-            # Similarly, operators may lack 'pointKind' — default to empty.
-            if "pointKind" not in clean:
-                clean["pointKind"] = ""
-            event["point"] = clean
-        if id is not None:
-            event["id"] = id
-        event.update(payload)
-        try:
-            log.append(event)
-        except Exception as exc:
-            # The graph mutation already succeeded — a log-write failure must
-            # not crash the caller or pretend the write failed. Rebuild parity
-            # is best-effort here: rebuild_all's graph snapshot catches any
-            # point missing from the log on the next rebuild (#548).
-            _logger.warning(
-                "failed to append %s event to SDK log %s: %s",
-                type_, self._event_log_path, exc,
-            )
-            return None
-        return event
-
     def test_guard(self) -> None:
         """Assert the connected graph is safe for destructive test teardowns.
 
@@ -599,23 +550,96 @@ class TortoiseSDK:
         except Exception:  # noqa: BLE001 — best-effort
             _logger.warning("event retention purge failed — continuing", exc_info=True)
 
-    def _emit_event(self, type_: str, payload: dict) -> None:
-        """Append a durable :GraphEvent for a graph mutation (best-effort).
+    def _emit_event(self, type_: str, payload: dict | None = None, *,
+                    point: dict | None = None,
+                    id: str | None = None, **extra) -> None:
+        """Unified event emission: JSONL rebuild log (#548) + graph event store (#432).
 
-        #432 Task 3: events land in THIS SDK's graph namespace — the namespace
-        IS the team partition (server-derived via mcp_auth `_get_team_sdk` /
-        hosted `_make_sdk`, never client-supplied). A failed append is logged
-        and swallowed — mutation paths must never fail on event emission.
+        Both stores are best-effort — failures log and continue (never crash
+        the mutation).
+
+        Two call styles supported:
+        1. ``_emit_event("PointAdded", {"id": ..., ...})``
+           — #432: domain payload for the :GraphEvent store.
+        2. ``_emit_event("PointAdded", point=point_dict)``
+           — #548: full point snapshot for JSONL rebuild replay.
+        3. ``_emit_event("PointRevised", id=pid, **props)``
+           — #548: id + extra fields for JSONL.
+
+        **Graph event store (#432):** written when *type_* is in
+        ``_GRAPH_EVENT_TYPES`` (PointAdded, OperatorAdded, PointRetracted,
+        PointSuperseded, OperatorAnnotated). The payload is taken from
+        *payload* if given, otherwise synthesized from ``point["id"]`` or
+        *id* + *extra*.
+
+        **JSONL event log (#548):** written when *point* is provided (cleaned
+        and appended as the ``"point"`` key) or *id* is provided. Events with
+        neither are skipped (nothing meaningful to log). The full point
+        snapshot is needed for ``rebuild_all`` replay.
         """
-        try:
-            from .event_store import append_event, ensure_event_schema, next_seq
+        # ── Graph event store (#432) ──────────────────────────────
+        if type_ in _GRAPH_EVENT_TYPES:
+            graph_payload = payload
+            if graph_payload is None:
+                if point is not None:
+                    graph_payload = {"id": point.get("id")}
+                elif id is not None:
+                    graph_payload = {"id": id, **extra}
+                else:
+                    graph_payload = {}
+            try:
+                from .event_store import append_event, ensure_event_schema, next_seq
+                proj = self._get_proj()
+                ensure_event_schema(proj)
+                seq = next_seq(proj)
+                append_event(proj, seq, type_, graph_payload, self.ulid())
+            except Exception:  # noqa: BLE001 — best-effort
+                _logger.warning("event emission failed for %s — continuing", type_)
 
-            proj = self._get_proj()
-            ensure_event_schema(proj)
-            seq = next_seq(proj)
-            append_event(proj, seq, type_, payload, self.ulid())
-        except Exception:  # noqa: BLE001 — best-effort
-            _logger.warning("event emission failed for %s — continuing", type_)
+        # ── JSONL event log (#548) ─────────────────────────────────
+        if point is None and id is None:
+            return  # nothing meaningful to log
+        log = self._get_event_log()
+        if log is None:
+            return
+        from .ids import ulid, now_iso
+        event: dict = {
+            "event_id": ulid(),
+            "ts": now_iso(),
+            "type": type_,
+            "initiated_by": "sdk",
+            "projection_version": 2,
+        }
+        if point is not None:
+            # Strip embedding — it is recomputed on replay by
+            # _upsert_point_props (vecf32 serialization is fragile).
+            # content_hash is also stripped — it is derived from content.
+            clean = {k: v for k, v in point.items()
+                     if k not in ("embedding", "content_hash")}
+            # Operators may not store 'content' as a node property (#548);
+            # _upsert_point_props requires it — synthesize a fallback.
+            if "content" not in clean:
+                op_type = clean.get("op_type", "IMPL")
+                op_inputs = (point.get("operator") or {}).get("inputs", [])
+                clean["content"] = f"{op_type}({', '.join(op_inputs)})"
+            # Similarly, operators may lack 'pointKind' — default to empty.
+            if "pointKind" not in clean:
+                clean["pointKind"] = ""
+            event["point"] = clean
+        if id is not None:
+            event["id"] = id
+        event.update(extra)
+        try:
+            log.append(event)
+        except Exception as exc:
+            # The graph mutation already succeeded — a log-write failure must
+            # not crash the caller or pretend the write failed. Rebuild parity
+            # is best-effort here: rebuild_all's graph snapshot catches any
+            # point missing from the log on the next rebuild (#548).
+            _logger.warning(
+                "failed to append %s event to SDK log %s: %s",
+                type_, self._event_log_path, exc,
+            )
 
     def create_point(self, kind: str, content: str, **props) -> dict:
         """Create a new Point node. Raises ValueError if kind is invalid.
@@ -692,10 +716,6 @@ class TortoiseSDK:
         # Points enter as draft, go live when first edge is created (#131)
         status = props.pop("status", "draft")
 
-        # #432 Task 3: durable PointAdded event (append-before-mutation;
-        # phantom on failed mutation is the documented at-least-once tradeoff).
-        self._emit_event("PointAdded", {"id": pid, "kind": kind, "content_hash": ch})
-
         # Compute embedding (Phase 1A, #7698) — stored as Point property
         embedding = None
         try:
@@ -741,8 +761,10 @@ class TortoiseSDK:
         # Dreaming (#85): a new point can carry confidence-affecting props;
         # mark it dirty so the next dream/lazy-read stabilizes it.
         self._mark_dirty([pid])
-        # #548: emit PointAdded event for rebuild parity
-        self._emit_event("PointAdded", point=self.get_point(pid))
+        # #432+#548 unified: domain payload + full point snapshot for both
+        # the :GraphEvent store (subscriptions/poll) and JSONL (rebuild_all).
+        self._emit_event("PointAdded", {"id": pid, "kind": kind, "content_hash": ch},
+                         point=self.get_point(pid))
         return self.get_point(pid)
 
     def create_or_update_point(self, kind: str, content: str, **props) -> dict:
@@ -1208,35 +1230,10 @@ class TortoiseSDK:
         for row in edges_result.result_set:
             validate_rel_type(row[1])  # raises ValueError before any mutation
 
-        # 0b. #547: validate both endpoints BEFORE any write (same contract as
-        #    invalidate_point #330).  Missing old → {"invalidated": False} with
-        #    no writes; missing new → ValueError; self-edge → ValueError.
-        if old_id == new_id:
-            raise ValueError(
-                f"supersede_point: new_id cannot be the same as old_id ({old_id!r})"
-            )
-        old_exists = proj.g.query(
-            "MATCH (n:Point {id:$id}) RETURN count(n) > 0", params={"id": old_id},
-        ).result_set[0][0]
-        if not old_exists:
-            return {"invalidated": False, "id": old_id, "corrected_by": new_id,
-                    "edges_transferred": 0}
-        new_exists = proj.g.query(
-            "MATCH (n:Point {id:$id}) RETURN count(n) > 0",
-            params={"id": new_id},
-        ).result_set[0][0]
-        if not new_exists:
-            raise ValueError(
-                f"supersede_point: new point {new_id!r} does not exist — "
-                f"refusing to orphan outdated point {old_id!r}"
-            )
-
-        # 1. Mark old outdated + create CORRECTS edge (same as invalidate)
-
         # #432 Task 3: durable PointSuperseded event (append-before-mutation,
         # AFTER the guard + edge-type validation — P2 review fix: emitting
         # before validation produced phantoms on corrupt-edge data).
-        self._emit_event("PointSuperseded", {"id": old_id, "new_id": new_id})
+        self._emit_event("PointSuperseded", {"id": old_id, "new_id": new_id}, id=old_id)
 
         # 1. Mark old superseded + outdated + create CORRECTS edge (same as invalidate)
         # #432: status='superseded' alongside the legacy outdated=true flag
@@ -1341,7 +1338,7 @@ class TortoiseSDK:
                 f"Point {id!r} is already terminal ({cur!r}) — retraction is terminal")
         # #432 Task 3: durable PointRetracted event (append-before-mutation;
         # only after the input contract validates).
-        self._emit_event("PointRetracted", {"id": id})
+        self._emit_event("PointRetracted", {"id": id}, id=id)
         # P1 (Qwen review): CAS the SET — the WHERE re-checks terminal state so
         # a concurrent retract/supersede can't both pass validation and have a
         # terminal overwrite (retracted overwriting superseded, or vice versa).
@@ -1403,12 +1400,6 @@ class TortoiseSDK:
         if missing:
             raise ValueError(f"Cannot create operator: Points {missing} do not exist")
 
-        # #432 Task 3: durable OperatorAdded event (append-before-mutation).
-        self._emit_event("OperatorAdded", {
-            "id": pid, "op_type": op_type, "source_id": source_id,
-            "target_ids": list(target_ids),
-        })
-
         # Build operator node with direction + optional label (context is NOT written — P1 #49)
         extra_props = []
         params = {"id": pid, "op": op_type, "direction": direction}
@@ -1441,13 +1432,14 @@ class TortoiseSDK:
         # Dreaming (#85): new edges change propagation — mark all inputs dirty.
         self._mark_dirty(inputs)
         result = self.get_point(pid)
-        # #548: emit OperatorAdded event for rebuild parity.
-        # The operator.inputs dict must be constructed manually — it is not
-        # stored as a node property but is required by _upsert_point_edges
-        # during replay.
+        # #432+#548 unified: domain payload + full point snapshot for both
+        # the :GraphEvent store (subscriptions/poll) and JSONL (rebuild_all).
         event_point = dict(result)
         event_point["operator"] = {"op_type": op_type, "inputs": list(inputs)}
-        self._emit_event("OperatorAdded", point=event_point)
+        self._emit_event("OperatorAdded", {
+            "id": pid, "op_type": op_type, "source_id": source_id,
+            "target_ids": list(target_ids),
+        }, point=event_point)
         return result
 
     def annotate_operator(self, id: str, bias: float, precision: float,
@@ -1555,10 +1547,7 @@ class TortoiseSDK:
         query via proj.g.query() to inspect retracted tombstones.
         """
         proj = self._get_proj()
-        clauses = [
-            "(n.is_operator IS NULL OR n.is_operator = false)",
-            "(n.status IS NULL OR n.status <> 'retracted')",  # #689: hide retracted
-        ]
+        clauses = ["(n.is_operator IS NULL OR n.is_operator = false)"]
         params: dict[str, Any] = {}
         # #432 Task 2: retracted exclusion — skipped when the caller explicitly
         # filters by status (their filter controls visibility).
@@ -1601,10 +1590,7 @@ class TortoiseSDK:
         to surface tombstones.
         """
         proj = self._get_proj()
-        clauses = [
-            "(n.is_operator IS NULL OR n.is_operator = false)",
-            "(n.status IS NULL OR n.status <> 'retracted')",  # #689: hide retracted
-        ]
+        clauses = ["(n.is_operator IS NULL OR n.is_operator = false)"]
         params: dict[str, Any] = {}
         # #432 Task 2: retracted exclusion — skipped when the caller explicitly
         # filters by status (their filter controls visibility).
@@ -1646,21 +1632,16 @@ class TortoiseSDK:
     def get_point(self, id: str) -> dict:
         """Get a Point by ID. Returns dict of all properties, or {} if not found.
 
-        Retracted points (status='retracted') return {} — they are hidden
-        from normal reads but remain queryable via raw Cypher (#689).
+        #432: retracted points (status='retracted') ARE returned by get_point
+        — they are tombstoned, not deleted. Query surfaces exclude them by
+        default (opt-in via include_retracted).
         """
         proj = self._get_proj()
         rows = proj.g.query(
             "MATCH (n:Point {id:$id}) RETURN properties(n)",
             params={"id": id},
         ).result_set
-        if not rows:
-            return {}
-        props = rows[0][0]
-        # #689: hide retracted points from normal reads
-        if props.get("status") == "retracted":
-            return {}
-        return props
+        return rows[0][0] if rows else {}
 
     def traverse(self, id: str, relationship_type: str, direction: str = "outgoing") -> list[dict]:
         """Traverse relationships from a Point. Returns connected point dicts.

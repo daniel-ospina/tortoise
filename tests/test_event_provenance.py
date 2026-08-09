@@ -757,42 +757,28 @@ class TestNegativePaths:
     # ── supersede_point with bad IDs ──────────────────────────────────
 
     def test_supersede_point_nonexistent_old(self, sdk):
-        """supersede_point with non-existent old_id silently succeeds (0 transfers)."""
+        """#432: supersede_point with non-existent old_id raises ValueError."""
         new_pt = sdk.create_point("statement", "valid new point")
-        result = sdk.supersede_point("nonexistent-old-id", new_pt["id"])
-        assert result["invalidated"] is True
-        assert result["edges_transferred"] == 0
+        with pytest.raises(ValueError, match="No point"):
+            sdk.supersede_point("nonexistent-old-id", new_pt["id"])
 
     def test_supersede_point_nonexistent_new(self, sdk):
-        """supersede_point with non-existent new_id silently succeeds (0 transfers)."""
+        """#432: supersede_point with non-existent new_id raises ValueError."""
         old_pt = sdk.create_point("statement", "valid old point")
-        result = sdk.supersede_point(old_pt["id"], "nonexistent-new-id")
-        # The CORRECTS edge won't be created (MATCH fails), but it still runs
-        assert result["invalidated"] is True
-        assert result["edges_transferred"] == 0
+        with pytest.raises(ValueError, match="No point"):
+            sdk.supersede_point(old_pt["id"], "nonexistent-new-id")
 
     def test_supersede_point_both_nonexistent(self, sdk):
-        """supersede_point with both IDs non-existent silently succeeds."""
-        result = sdk.supersede_point("nonexistent-old", "nonexistent-new")
-        assert result["invalidated"] is True
-        assert result["edges_transferred"] == 0
+        """#432: supersede_point with both IDs non-existent raises ValueError."""
+        with pytest.raises(ValueError, match="No point"):
+            sdk.supersede_point("nonexistent-old", "nonexistent-new")
 
     def test_supersede_point_same_id(self, sdk):
-        """supersede_point with old==new creates self-CORRECTS edge.
-
-        Current behavior: no guard against self-supersede. Creates a
-        self-referencing CORRECTS edge on the point."""
+        """#432: supersede_point with old==new raises ValueError
+        (self-CORRECTS poisons traversal chains)."""
         pt = sdk.create_point("statement", "self-superseding point")
-        result = sdk.supersede_point(pt["id"], pt["id"])
-        assert result["invalidated"] is True
-        # Verify self-CORRECTS edge exists
-        proj = sdk._get_proj()
-        r = proj.g.query(
-            "MATCH (p:Point {id:$pid})-[c:CORRECTS]->(p) "
-            "RETURN count(c) > 0",
-            params={"pid": pt["id"]},
-        ).result_set
-        assert r[0][0] is True
+        with pytest.raises(ValueError):
+            sdk.supersede_point(pt["id"], pt["id"])
 
     # ── compute_reputation with all-superseded claims ─────────────────
 
