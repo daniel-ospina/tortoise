@@ -241,7 +241,12 @@ function App() {
       try {
         if (!supabaseClient) { setChecking(false); return }
         const { data: { session }, error } = await supabaseClient.auth.getSession()
-        if (error || !session) { setChecking(false); return }
+        if (error || !session) {
+          // Round-24: no session → the card's only affordance is the key input;
+          // don't show the misleading 'Sign in with your Tortoise account.'
+          setAuthMode('apikey')
+          setChecking(false); return
+        }
         sessionTokenRef.current = session.access_token
         // Round-6 (P2): supabase-js auto-refreshes the access token (~1h) into
         // the cookie — keep the ref in sync so JWT-scoped calls never die with
@@ -667,6 +672,8 @@ function App() {
   async function removeMember(userId) {
     const _teamAtCall = currentTeamId // Round-16: mutation identity guard — a switch mid-flight must not act on the previous team
     if (!confirm('Remove this member from the team?')) return
+    if (busy) return // Round-24: double-click guard
+    setBusy(true)
     setError('')
     try {
       const tok = sessionTokenRef.current
@@ -686,11 +693,15 @@ function App() {
     } catch (e) {
       // Round-19: stale DELETE error must not land under the new team
       if (teamIdRef.current === _teamAtCall) setError(e.message)
+    } finally {
+      setBusy(false)
     }
   }
 
   async function changeRole(userId, role) {
     const _teamAtCall = currentTeamId // Round-16: mutation identity guard — a switch mid-flight must not act on the previous team
+    if (busy) return // Round-24: double-click guard
+    setBusy(true)
     setError('')
     try {
       const tok = sessionTokenRef.current
@@ -711,6 +722,8 @@ function App() {
     } catch (e) {
       // Round-19: stale PATCH error must not land under the new team
       if (teamIdRef.current === _teamAtCall) setError(e.message)
+    } finally {
+      setBusy(false)
     }
   }
 
@@ -957,11 +970,12 @@ function App() {
         <div className="auth-card">
           <div className="logo">Tortoise</div>
           <h1>Dashboard</h1>
-          <p className="dim">{authMode === 'session' ? 'Sign in with your Tortoise account.' : 'Enter your API key to manage your team, keys, and sessions.'}</p>
+          <p className="dim">{authMode === 'session' ? 'Sign in with your account key, or enter an API key to manage your team.' : 'Enter your API key to manage your team, keys, and sessions.'}</p>
           <form onSubmit={(e) => { e.preventDefault(); login() }}>
             <input
               type="password"
               placeholder="tt_..."
+              aria-label="API key"
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
               autoFocus
@@ -1126,6 +1140,7 @@ function App() {
                 <div className="inline-form">
                   <input
                     placeholder="New graph name"
+                    aria-label="New graph name"
                     value={newGraphName}
                     onChange={(e) => setNewGraphName(e.target.value)}
                     onKeyDown={(e) => e.key === 'Enter' && createGraph()}
@@ -1162,6 +1177,7 @@ function App() {
                   <input
                     type="email"
                     placeholder="teammate@example.com"
+                    aria-label="Teammate email"
                     value={inviteEmail}
                     onChange={(e) => setInviteEmail(e.target.value)}
                   />
