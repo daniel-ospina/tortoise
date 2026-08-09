@@ -53,8 +53,12 @@
       padding: 2rem;
     }
 
-    /* Specific beats get pointer events for interactive elements */
-    #beat-cta { pointer-events: auto; }
+    /* CTA beat: the fixed full-screen overlay must never swallow clicks when
+       invisible — only its interactive children get pointer events (#744).
+       Other beats have no interactive children and inherit pointer-events:
+       none from .beat, so no further overrides are needed. */
+    #beat-cta { pointer-events: none; }
+    #beat-cta form, #beat-cta a, #beat-cta button { pointer-events: auto; }
 
     #beat-hero { opacity: 1; }
 

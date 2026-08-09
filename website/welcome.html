@@ -386,7 +386,7 @@
         <p style="margin-top:0.75rem;"><a href="https://app.premiselabs.co" style="color:var(--accent);">Lost your key? Open Dashboard →</a></p>
       </div>
 
-            <div class="card">
+            <div class="card" id="mcp-card">
         <div class="card-label">Use Tortoise — connect your agent <span style="font-weight:400;font-size:0.72rem;color:var(--text-dim);">(MCP — no install needed)</span></div>
         <div class="harness-tabs" id="harness-tabs" style="display:flex;gap:0.5rem;margin-bottom:0.75rem;flex-wrap:wrap;">
           <button class="harness-tab active" data-harness="claude" onclick="switchHarness('claude')">Claude Code</button>
@@ -418,7 +418,7 @@ you up to 6 yes/no questions and set up your Tortoise memory.
         </p>
       </div>
 
-      <div class="card">
+      <div class="card" id="build-card">
         <div class="card-label">Build with Tortoise — call the API <span style="font-weight:400;font-size:0.72rem;color:var(--text-dim);">(CLI / REST)</span></div>
         <div class="snippet" id="snippet">
           <pre><span class="comment"># Install Tortoise</span>
@@ -483,16 +483,28 @@ you up to 6 yes/no questions and set up your Tortoise memory.
       // Poll team_memberships for the team row (non-secret columns only — the
       // api_key column is column-level REVOKED; the reveal_api_key RPC is the
       // sole read path, atomic reveal+null per plan §4.1b/A13).
+      // M:N-safe (#745b): never .single() — a user may hold multiple
+      // membership rows (including the team_id='' placeholder), which makes
+      // .single() fail with PGRST116. Pick the most recently created ACTIVE
+      // membership via order(created_at desc).limit(1).maybeSingle(): zero
+      // rows → null (keep polling), multiple rows → impossible (limit 1),
+      // and hard errors (RLS/network) surface instead of looping.
+      const activeMembershipQuery = () => supabaseClient
+        .from("team_memberships")
+        .select("team_id, team_name, graph_name, status")
+        .eq("user_id", userId)
+        .eq("status", "active")
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
       for (let attempt = 0; attempt < POLL_MAX_ATTEMPTS; attempt++) {
-        const { data, error } = await supabaseClient
-          .from("team_memberships")
-          .select("team_id, team_name, graph_name, status")
-          .eq("user_id", userId)
-          .single();
+        const { data, error } = await activeMembershipQuery();
 
         if (error) {
-          await sleep(POLL_INTERVAL_MS);
-          continue;
+          // Hard error (RLS / network) — surface it instead of looping
+          showError("Couldn't check your provisioning status. Please refresh and try again.");
+          return;
         }
 
         if (data && data.status === "active" && data.team_id) {
@@ -504,11 +516,12 @@ you up to 6 yes/no questions and set up your Tortoise memory.
       }
 
       // Timed out — one final check, then reveal-or-error
-      const { data } = await supabaseClient
-        .from("team_memberships")
-        .select("team_id, team_name, graph_name, status")
-        .eq("user_id", userId)
-        .single();
+      const { data, error } = await activeMembershipQuery();
+
+      if (error) {
+        showError("Couldn't check your provisioning status. Please refresh and try again.");
+        return;
+      }
 
       if (data && data.status === "active" && data.team_id) {
         await revealKeyOnce(userId, data);
@@ -523,7 +536,13 @@ you up to 6 yes/no questions and set up your Tortoise memory.
         p_user_id: userId,
         p_team_id: row.team_id,
       });
-      if (error || !key || key === "pending") {
+      if (error) {
+        // Hard RPC error (RLS / network) — surface it and keep the reveal
+        // path. Do NOT misroute to the "already provisioned" state (#745c).
+        showError("Couldn't reveal your API key — please refresh and try again.");
+        return;
+      }
+      if (!key || key === "pending") {
         // Key already consumed (returning visitor) or not yet available — show
         // the dashboard-hub state (UX-D2): no re-reveal, route to dashboard.
         showAlreadyProvisioned(row);
@@ -549,6 +568,13 @@ you up to 6 yes/no questions and set up your Tortoise memory.
       if (returningEl) returningEl.classList.remove("hidden");
       const dashBtn = document.getElementById("btn-dashboard");
       if (dashBtn) dashBtn.classList.remove("hidden");
+      // Returning visitor: the key was shown exactly once and is nulled —
+      // hide the artifact cards so their copy buttons can't copy a masked
+      // `Bearer ••••••` / `--api-key ••••••` (#745c).
+      const mcpCard = document.getElementById("mcp-card");
+      if (mcpCard) mcpCard.classList.add("hidden");
+      const buildCard = document.getElementById("build-card");
+      if (buildCard) buildCard.classList.add("hidden");
     }
 
     function sleep(ms) {
@@ -564,6 +590,9 @@ you up to 6 yes/no questions and set up your Tortoise memory.
       document.getElementById("team-name").textContent = data.team_name;
       document.getElementById("api-key").textContent = data.api_key;
       document.getElementById("snippet-key").textContent = data.api_key;
+      // MCP config must reflect the revealed key, not the masked placeholder
+      // (#745a) — re-render now that #api-key holds the real key.
+      renderMcpConfig();
       // Reveal path: key shown; returning-visit block stays hidden; dashboard btn shown
       const revealEl = document.getElementById("reveal-block");
       if (revealEl) revealEl.classList.remove("hidden");
@@ -708,6 +737,10 @@ codex mcp add tortoise --url https://api.premiselabs.co/mcp --bearer-token-env-v
       }, null, 2),
     };
     let currentHarness = "claude";
+    // Render the default (Claude Code) MCP config on load so the box is never
+    // empty (#745a) — switchHarness/copyMcpConfig re-render on interaction,
+    // and showSuccess() re-renders once the real key is revealed.
+    renderMcpConfig();
     // Canonical onboarding prompt (#540): served by the premise-labs Pages
     // project from tortoise/onboarding/AGENT_ONBOARDING.md via deploy-pages.yml.
     // premiselabs.co is the project's active custom domain (tortoise.premiselabs.co
