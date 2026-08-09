@@ -359,6 +359,7 @@ function App() {
       setAuthed(true)
       setAuthMode('apikey') // P5 (code-review): makes the session-only notices live for API-key users
       setMembersStatus('denied') // Fix D (review round 2): no session → members view unavailable; never 'Loading…' forever
+      apiKeyRef.current = apiKey // Round-22 (P1): createKey's branch-2 guard compares against the LIVE key — API-key auth never populated the ref, so every createKey bailed and keys were silently invisible
       localStorage.setItem(KEY_STORAGE, apiKey)
       await loadAll()
     } catch (e) {
@@ -514,16 +515,21 @@ function App() {
         // Fix B: mint/refresh failed (429 cap or 401) — re-attach the
         // previous team's key so the UI never shows mixed-team data.
         if (prevKey) {
-          setApiKey(prevKey)
-          apiKeyRef.current = prevKey
-          localStorage.setItem(KEY_STORAGE, prevKey)
+          // Round-22 (P2): restore the key that BELONGS to the reverted team —
+          // under rapid A→B→C with B's mint succeeding and C's failing, prevKey
+          // is team A's key (captured from the render closure) while prevTeamId
+          // is B; re-attaching A's key under B's header mixed teams.
+          const restoreKey = (prevTeamId && teamKeysRef.current[prevTeamId]) || prevKey
+          setApiKey(restoreKey)
+          apiKeyRef.current = restoreKey
+          localStorage.setItem(KEY_STORAGE, restoreKey)
           setCurrentTeamId(prevTeamId)
           teamIdRef.current = prevTeamId
           setTeam(null)
-          await refreshTeam(prevKey).catch(() => {})
+          await refreshTeam(restoreKey).catch(() => {})
           // Round-3: reload ALL key-scoped data for the reverted team —
           // otherwise keys/sessions/backups stay wiped until reload.
-          await Promise.all([loadAll(prevKey), loadBackups(prevKey)]).catch(() => {})
+          await Promise.all([loadAll(restoreKey), loadBackups(restoreKey)]).catch(() => {})
         }
         setError(e.message)
       }
@@ -806,6 +812,9 @@ function App() {
             setApiKey(minted.key)
             apiKeyRef.current = minted.key
             await refreshTeam(minted.key).catch(() => {})
+            // Round-22 (P2): a switch during refreshTeam's await — loadAll would
+            // capture teamIdRef (=new team) and land the OLD team's keys under it.
+            if (teamIdRef.current !== _teamAtCall) return
             // Round-3: reload with the NEW key, not the revoked-key closure.
             await loadAll(minted.key).catch(() => {})
             return
