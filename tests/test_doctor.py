@@ -124,6 +124,19 @@ class TestDoctorPath:
         assert "❌" in probe
         assert "bad port" in probe  # actionable message, not a raw ValueError
 
+    def test_doctor_db_uri_password_never_in_error_output(self, clear_db_env, capsys):
+        """#720 P2 conf 78: a malformed URI carrying a password must not
+        print the credential — the 'bad port' error redacts the userinfo
+        (docker://:***@) while keeping host/port for debuggability."""
+        rc = _run_doctor(["--db", "docker://:sekritpass@127.0.0.1:notaport/tortoise"])
+        out = capsys.readouterr().out
+
+        assert rc == 1
+        assert "sekritpass" not in out  # credential never reaches stdout
+        probe = next(line for line in out.splitlines() if "Graph: FalkorDB" in line)
+        assert "bad port" in probe
+        assert "docker://:***@127.0.0.1:notaport" in probe  # masked, target intact
+
     def test_doctor_db_uri_probe_uses_uri_graph_name(self, clear_db_env, monkeypatch, capsys):
         """#720 P2 conf 62: the Step 2 probe must select the graph from the
         URI path — the same derivation from_uri uses in Step 3 — never a

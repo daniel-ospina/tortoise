@@ -1013,6 +1013,18 @@ def _uri_has_password(target: str) -> bool:
     return ":" in userinfo and userinfo.rsplit(":", 1)[1] != ""
 
 
+def _mask_uri_userinfo(target: str) -> str:
+    """Redact userinfo (user:password@) from a DB URI for display.
+
+    #720 P2 conf 78: an error line must never print a credential embedded
+    in the URI — docker://:pw@host:notaport/graph would leak ':pw@' to a
+    terminal/log. Host/port/path stay visible for debuggability (matches
+    the FALKORDB_* legacy display mask, conf 95).
+    """
+    import re
+    return re.sub(r"://[^@/]*@", "://:***@", target)
+
+
 def _index_github_child_cmd(target: str, repo_root: str,
                             branch: str | None = None
                             ) -> tuple[list[str], dict | None]:
@@ -1745,7 +1757,7 @@ def _cmd_doctor(args):
         except Exception as e:
             if probe_port is None:
                 # Non-numeric port — probe never reached the client.
-                results.append(("Graph: FalkorDB", "❌", f"bad port in URI '{target}': {str(e)[:60]}"))
+                results.append(("Graph: FalkorDB", "❌", f"bad port in URI '{_mask_uri_userinfo(target)}': {str(e)[:60]}"))
             else:
                 results.append(("Graph: FalkorDB", "❌", f"{probe_host}:{probe_port} (graph {graph_name}) — {str(e)[:60]}"))
     elif target is not None:
