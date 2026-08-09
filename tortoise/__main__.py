@@ -2521,7 +2521,12 @@ def _cmd_key_create(args) -> int:
     print()
     print("Use it with:")
     print("   tortoise serve --http --auth tenant")
-    print(f"   MCP client url:      http://127.0.0.1:8000/mcp")
+    print(f"   MCP client url:      http://{args.bind}:{args.port}/mcp")
+    if args.bind == "127.0.0.1" and args.port == 8000:
+        print("   (hint assumes the default serve bind/port — pass --bind/--port to")
+        print("    'key create' to match a custom 'serve --http' setup, e.g. LAN")
+        print("    --bind 0.0.0.0, in which case clients connect to the machine's")
+        print("    LAN address, not 0.0.0.0)")
     print("   Authorization header: Bearer <key>")
     return 0
 
@@ -2585,6 +2590,12 @@ def main(argv: list[str] | None = None) -> int:
     key_sp = kr.add_subparsers(dest="key_cmd")
     kc = key_sp.add_parser("create", help="Create a local registry team + tt_ API key for 'serve --http --auth tenant'")
     kc.add_argument("--name", default="local", help="Team name (default 'local')")
+    kc.add_argument("--bind", default="127.0.0.1",
+                    help="Expected serve HTTP bind address for the MCP URL hint "
+                         "(default 127.0.0.1; mirror the --bind you pass to 'serve --http')")
+    kc.add_argument("--port", type=int, default=8000,
+                    help="Expected serve HTTP port for the MCP URL hint "
+                         "(default 8000; mirror the --port you pass to 'serve --http')")
     init = sp.add_parser("init", help="Auto-detect FalkorDB and create default graph")
     init.add_argument("--path", default=None, help="Path for embedded mode (opt-in)")
     init.add_argument("--yes", "-y", action="store_true", help="Skip prompts, auto-index repo")

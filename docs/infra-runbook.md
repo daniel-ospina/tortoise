@@ -128,7 +128,9 @@ TORTOISE_DB_PATH=~/.tortoise/tortoise.db tortoise serve --http   # tenant auth, 
 - `--auth static` (single `TORTOISE_API_KEY`/`--api-key`) and `--auth none`
   (localhost eval, NO auth) are available; default bind 127.0.0.1.
 - Static-auth first run: `export TORTOISE_SECRET_PEPPER=$(openssl rand -hex 32)`
-  before `serve --http --auth static` — required or the auth import fails.
+  before `serve --http --auth static` — required when the static key comes
+  from the `TORTOISE_API_KEY` env var: the auth import fails on startup in
+  that case. Passing `--api-key` directly does not need it.
 - Changing `TORTOISE_SECRET_PEPPER` invalidates all local keys (re-run
   `tortoise key create`).
 
