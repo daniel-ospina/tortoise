@@ -414,6 +414,67 @@ class TortoiseSDK:
         if removed:
             proj.g.query("MATCH (t:Tag) WHERE NOT (t)<-[:TAGGED]-() DELETE t")
 
+    # ── Events: cursor-based poll (Task 5) ────────────────────────────
+
+    @staticmethod
+    def _encode_cursor(seq: int) -> str:
+        """Opaque cursor: base64url JSON {v:1, seq:N} — ONE format for every
+        cursor incl. the empty graph ({v:1, seq:0}). Plan-review P2."""
+        import base64
+        import json
+
+        raw = json.dumps({"v": 1, "seq": int(seq)}, separators=(",", ":"))
+        return base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
+
+    @staticmethod
+    def _decode_cursor(cursor: str) -> int:
+        """Decode an opaque cursor → seq. Raises ValueError('invalid cursor')."""
+        import base64
+        import json
+
+        try:
+            raw = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4))
+            data = json.loads(raw)
+            if data.get("v") != 1 or "seq" not in data:
+                raise ValueError
+            return int(data["seq"])
+        except Exception:  # noqa: BLE001
+            raise ValueError("invalid cursor") from None
+
+    def events_poll(self, after: str | None = None, types: list[str] | None = None,
+                    limit: int = 100) -> dict:
+        """Poll graph/claim events after a cursor (at-least-once; idempotent on replay).
+
+        Returns {"events": [payload dicts ordered by seq], "next_cursor": opaque}.
+        after=None → tail (oldest retained). Expired cursor → ValueError(
+        'cursor expired — replay from tail'); malformed → ValueError('invalid cursor').
+        Types are validated against the EventCodec registry (unknown → ValueError).
+        Events live in THIS SDK's graph namespace (the team partition).
+        """
+        from .event_store import read_after
+
+        after_seq = 0 if after is None else self._decode_cursor(after)
+        if types:
+            from .shared_state.events import event_types
+
+            registered = event_types()
+            unknown = [t for t in types if t not in registered]
+            if unknown:
+                raise ValueError(f"unknown event type: {unknown[0]}")
+        proj = self._get_proj()
+        # Expired-cursor check: a NON-ZERO cursor pointing below the graph's
+        # min seq was purged/compacted. after_seq == 0 is the "from the start"
+        # sentinel (after=None) — it never expires, it just returns all
+        # retained events.
+        if after_seq != 0:
+            min_row = proj.g.query("MATCH (n:GraphEvent) RETURN min(n.seq)").result_set
+            min_seq = min_row[0][0] if min_row and min_row[0][0] is not None else None
+            if min_seq is not None and after_seq < min_seq:
+                raise ValueError("cursor expired — replay from tail")
+        evs = read_after(proj, after_seq, types=types, limit=limit)
+        last = evs[-1]["seq"] if evs else after_seq
+        return {"events": evs, "next_cursor": self._encode_cursor(last)}
+
     def _emit_event(self, type_: str, payload: dict) -> None:
         """Append a durable :GraphEvent for a graph mutation (best-effort).
 

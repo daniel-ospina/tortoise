@@ -826,6 +826,37 @@ async def create_point(body: CreatePointRequest, request: Request, team: dict = 
     }
 
 
+@app.get("/v1/events")
+async def events_poll(
+    after: str | None = None,
+    types: str | None = None,
+    limit: int = Query(100, ge=1, le=1000),
+    team: dict = Depends(get_current_team),
+):
+    """Poll graph/claim events after an opaque cursor (at-least-once contract).
+
+    Clients must be idempotent on replay. Expired cursor → 410 (replay from
+    tail); malformed cursor → 400. Team scoping comes from auth + the SDK
+    namespace — never client input.
+    """
+    sdk = _make_sdk(namespace=team["team_id"])
+    type_list = [t for t in (types or "").split(",") if t]
+    try:
+        result = sdk.events_poll(after=after, types=type_list or None, limit=limit)
+    except ValueError as e:
+        msg = str(e)
+        if "cursor expired" in msg:
+            raise HTTPException(
+                status_code=410,
+                detail="cursor expired — replay from tail (after= omitted)",
+            )
+        if "invalid cursor" in msg:
+            raise HTTPException(status_code=400, detail="invalid cursor")
+        if "unknown event type" in msg:
+            raise HTTPException(status_code=400, detail=msg)
+        raise HTTPException(status_code=400, detail=str(e))
+    return result
+
 @app.get("/v1/points")
 async def list_points(
     kind: str | None = None,
