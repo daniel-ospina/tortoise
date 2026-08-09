@@ -3277,7 +3277,12 @@ async def list_events(
     #   Page 2 (cursor→3): slice [1:3] → events 1,2. cursor := encode(1).
     #   Page 3 (cursor→1): slice [0:1] → event 0.   cursor := null.
     if decoded_cursor is not None:
-        end_idx = decoded_cursor
+        if decoded_cursor < 0:
+            raise HTTPException(status_code=400, detail="Invalid cursor: negative index")
+        # Clamp stale cursors that point beyond the current end (log shrank or
+        # the cursor came from a longer page) — never return a spurious
+        # empty page with has_more=True.
+        end_idx = min(decoded_cursor, len(all_events))
         start_idx = max(0, end_idx - limit)
     else:
         # First page: most recent *limit* events.
