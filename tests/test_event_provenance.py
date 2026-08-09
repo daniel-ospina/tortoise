@@ -15,6 +15,26 @@ from tortoise.sdk import TortoiseSDK
 
 TEST_DB = os.environ.get("TEST_DB_PATH", "/tmp/tortoise_test_122.db")
 
+# ── Live-FalkorDB availability (mirrors tests/test_hnsw_vector_index.py) ──
+# TestParticipatesInEdges connects to docker://localhost:16379 (live FalkorDB,
+# not embedded). Probe at module load so the class skips gracefully in CI
+# where no Docker FalkorDB is running (#493).
+FALKORDB_AVAILABLE = False
+_old_uri = os.environ.get("TORTOISE_DB_URI")
+try:
+    os.environ["TORTOISE_DB_URI"] = "docker://localhost:16379/tortoise_test_212_participates"
+    _probe = TortoiseSDK()
+    _probe.status()
+    _probe.close()
+    FALKORDB_AVAILABLE = True
+except Exception:
+    FALKORDB_AVAILABLE = False
+finally:
+    if _old_uri is not None:
+        os.environ["TORTOISE_DB_URI"] = _old_uri
+    else:
+        os.environ.pop("TORTOISE_DB_URI", None)
+
 
 @pytest.fixture
 def sdk():
@@ -1046,6 +1066,7 @@ def live_sdk_212():
             os.environ.pop("TORTOISE_DB_URI", None)
 
 
+@pytest.mark.skipif(not FALKORDB_AVAILABLE, reason="Live FalkorDB (Docker) not available")
 class TestParticipatesInEdges:
     """#212: _upsert_event wires (Subject)-[:participatesIn]->(Event)
     from event.participants list, falling back to event.subject."""

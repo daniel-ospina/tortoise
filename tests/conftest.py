@@ -81,4 +81,3 @@ def shared_embedded_db():
 @pytest.fixture
 def test_user(provision_test_user):
     return provision_test_user(tier="free", demo_seed=True)
-
