@@ -535,6 +535,34 @@ def test_serve_http_static_missing_key_error_path(monkeypatch, tmp_path, capsys)
     assert "--api-key" in err and "TORTOISE_API_KEY" in err
 
 
+def test_serve_http_api_key_requires_static_auth(monkeypatch, tmp_path, capsys):
+    """--api-key with non-static auth (tenant default) → exit 1 with a clean
+    error pointing at --auth static — the key must never be silently ignored
+    (#719 P2)."""
+    import tortoise.mcp_server as mcp_mod
+
+    from tortoise.__main__ import main
+
+    monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "t.db"))
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+
+    def _boom(**kw):
+        raise AssertionError("create_http_app must not run when --api-key is ignored")
+
+    monkeypatch.setattr(mcp_mod, "create_http_app", _boom)
+    # default --auth (tenant) + --api-key: refused, not silently ignored
+    rc = main(["serve", "--http", "--api-key", "tt_x"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "--auth static" in err, "error must tell the user to pass --auth static"
+    assert "tenant" in err, "error must name the active auth mode"
+    # explicit non-static modes are refused too
+    rc = main(["serve", "--http", "--auth", "none", "--api-key", "tt_x"])
+    assert rc == 1
+    assert "--auth static" in capsys.readouterr().err
+
+
 # ── 4+5. local HTTP roundtrip with the bootstrap key ──────────────────────
 
 def test_local_http_roundtrip_lands_in_team_graph(local_db, monkeypatch):

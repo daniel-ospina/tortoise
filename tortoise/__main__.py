@@ -2400,6 +2400,18 @@ def _cmd_serve_http(args) -> int:
         )
         return 1
 
+    # P2 #719: --api-key is only meaningful for static auth. Silently ignoring
+    # it under tenant (the default) would leave the user believing a key is
+    # enforced when it isn't — error out instead of silently switching modes.
+    if args.api_key and args.auth != "static":
+        print(
+            f"❌ serve --http --api-key requires --auth static (got --auth {args.auth}). "
+            "Pass --auth static to use a single static key, or drop --api-key "
+            "to keep tenant auth (registry tt_ keys; bootstrap with `tortoise key create`).",
+            file=sys.stderr,
+        )
+        return 1
+
     if args.auth == "tenant":
         # Inject the registry SDK built from the SAME canonical DB as the team
         # SDK (avoids the /data default divergence — #702).

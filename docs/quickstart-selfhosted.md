@@ -132,4 +132,4 @@ tortoise backup --db ~/.tortoise/tortoise.db           # snapshot → backups/<t
 - **`tortoise serve` exits immediately with "Neither TORTOISE_DB_URI nor TORTOISE_DB_PATH is set"** — set one in the MCP client's `env` block (step 5).
 - **Port 16379 already in use** — another container/process is on it. Map a different host port (`-p 16380:6379`) and use `docker://:@localhost:16380/tortoise`.
 - **Upgrading** — clone: `git pull && pip install -e .`; direct install: `pip install -U git+https://github.com/daniel-ospina/tortoise.git`.
-- **`tortoise doctor` shows a Docker ❌** — expected in embedded-only mode (no container running). It also trips a known `'Namespace' object has no attribute 'path'` error in its graph-health check; the remaining checks still run.
+- **`tortoise doctor` shows a Docker ❌** — expected in embedded-only mode (no container running). The graph-health check runs against the resolved DB target; `doctor --db <uri|path>` and `doctor --path` explicitly target a specific DB, and the bare `doctor` invocation works without extra flags.
