@@ -3787,61 +3787,70 @@ async def webhooks_stripe(request: Request):
     ref_team = data.get("client_reference_id")
     cust = data.get("customer")
     cust_team = _team_id_for_stripe_customer(cust) if cust else None
-    team_id = ref_team
-    if etype in ("customer.subscription.updated", "customer.subscription.deleted",
+    # P0 (Qwen review): the CUSTOMER binding is MANDATORY for checkout +
+    # subscription/invoice events. client_reference_id is attacker-controlled
+    # (anyone can complete a Checkout in their own Stripe account with a
+    # victim's team_id) and must NEVER be a fallback for these paths — our
+    # checkout endpoint sync-persists stripe_customer_id BEFORE redirect, so
+    # any genuine event has a resolvable customer→team binding.
+    if etype in ("checkout.session.completed",
+                 "customer.subscription.updated",
+                 "customer.subscription.deleted",
                  "invoice.payment_failed"):
-        # Customer is the CANONICAL binding (sync-persisted by our checkout
-        # endpoint); client_reference_id is a legacy/fallback. Customer wins
-        # when resolvable.
-        if cust_team:
-            team_id = cust_team
-    elif etype == "checkout.session.completed":
-        # P1 (code-review): client_reference_id is attacker-controllable —
-        # anyone can complete a Checkout in their own Stripe account with a
-        # victim's team_id. The customer binding (created by OUR checkout
-        # endpoint) is authoritative; refuse mismatches / stale overrides.
-        if cust_team:
-            team_id = cust_team
-            if ref_team and ref_team != cust_team:
+        if not cust_team:
+            if ref_team:
                 _logger.warning(
-                    "webhook: checkout customer↔team mismatch (%s vs %s) — trusting customer",
-                    ref_team, cust_team)
+                    "webhook: %s for unbound customer %s (ref %s) — ignoring (spoof guard)",
+                    etype, cust, ref_team)
+            return JSONResponse(status_code=200, content={"detail": "no team binding"})
+        team_id = cust_team
+        if ref_team and ref_team != cust_team:
+            _logger.warning(
+                "webhook: customer↔ref mismatch (%s vs %s) — trusting customer",
+                ref_team, cust_team)
+    else:
+        team_id = ref_team or cust_team
     if not team_id:
         # No team binding — ack so Stripe stops retrying.
         return JSONResponse(status_code=200, content={"detail": "no team binding"})
 
-    sdk = _make_sdk(namespace="registry")
     try:
-        # Idempotent apply (SETs converge on replay).
-        notify_kind = await asyncio.to_thread(_webhook_apply_event, sdk, team_id, event)
-        # Marker: first-seen detection (SET-then-marker — the apply ran
-        # regardless, so a retry cannot drop the upgrade; only side-effects
-        # are dedup'd).
-        # P2 (code-review): atomic MERGE marker — check-then-create was racy
-        # under overlapping deliveries (Stripe timeout → retry can double-fire
-        # side-effects). The ON CREATE property distinguishes first processing.
-        # P2 (code-review): atomic MERGE marker — check-then-create was racy
-        # under overlapping deliveries (Stripe timeout → retry can double-fire
-        # side-effects). MERGE + ON CREATE sets is_first=true; the flag is
-        # removed after first processing so replays return coalesce→false.
-        marker = sdk._get_registry().query(
-            "MERGE (w:WebhookEvent {event_id:$id}) "
-            "ON CREATE SET w.first_seen=$now, w.type=$type, w.is_first=true "
-            "RETURN coalesce(w.is_first, false)",
-            params={"id": event_id, "now": _now_iso(), "type": etype},
-        ).result_set
-        is_first = bool(marker and marker[0][0])
-        if is_first:
-            sdk._get_registry().query(
-                "MATCH (w:WebhookEvent {event_id:$id}) REMOVE w.is_first",
-                params={"id": event_id},
-            )
+        # P1 (Qwen review): ALL registry/SDK work runs inside the worker thread
+        # (the SDK is created there, never shared across threads); the async
+        # side only does audit/analytics/notify when the marker claims first
+        # processing.
+        def _process() -> tuple:
+            sdk = _make_sdk(namespace="registry")
+            try:
+                notify_kind = _webhook_apply_event(sdk, team_id, event)
+                # Single-query atomic claim — ON CREATE sets is_first=true, ON
+                # MATCH sets it false, RETURN reports the claim (no separate
+                # REMOVE: a crash between MERGE and REMOVE could re-fire
+                # side-effects under a two-step marker).
+                marker = sdk._get_registry().query(
+                    "MERGE (w:WebhookEvent {event_id:$id}) "
+                    "ON CREATE SET w.first_seen=$now, w.type=$type, w.is_first=true "
+                    "ON MATCH SET w.is_first=false "
+                    "RETURN coalesce(w.is_first, false)",
+                    params={"id": event_id, "now": _now_iso(), "type": etype},
+                ).result_set
+                is_first = bool(marker and marker[0][0])
+                tier = None
+                if is_first:
+                    tier_rows = sdk._get_registry().query(
+                        "MATCH (t:Team {id:$id}) RETURN t.tier", params={"id": team_id}
+                    ).result_set
+                    tier = tier_rows[0][0] if tier_rows else None
+                return is_first, notify_kind, tier
+            finally:
+                try:
+                    sdk.close()
+                except Exception:  # noqa: BLE001
+                    pass
+
+        is_first, notify_kind, tier = await asyncio.to_thread(_process)
         if is_first and notify_kind:
             # Audit + analytics + notifications — first processing only.
-            tier_rows = sdk._get_registry().query(
-                "MATCH (t:Team {id:$id}) RETURN t.tier", params={"id": team_id}
-            ).result_set
-            tier = tier_rows[0][0] if tier_rows else None
             await _async_audit(
                 request, team_id, notify_kind,
                 resource_type="team", resource_id=team_id,
