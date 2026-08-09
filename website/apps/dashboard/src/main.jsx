@@ -328,6 +328,9 @@ function App() {
     setTeams([])                       // Round-4: drop the previous session's teams
     sessionTokenRef.current = null      // Round-4: never reuse the previous user's JWT
     setError('')                        // Round-4: stale error banner must not survive
+    setBackupInfo(null)                 // Round-5: no cross-session backup data leak
+    fallbackTeamIdRef.current = null    // Round-5: no stale team adoption across users
+    teamIdRef.current = null            // Round-5: hygiene (inert, but consistent)
     teamKeysRef.current = {}
     try { if (supabaseClient) await supabaseClient.auth.signOut() } catch { /* best-effort */ }
   }
