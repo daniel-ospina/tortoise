@@ -14,8 +14,12 @@ from __future__ import annotations
 
 import re
 import os
+import logging
+from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Protocol, runtime_checkable
+
+logger = logging.getLogger(__name__)
 
 # P0 guard (#99): bulk graph-wipe classifier. Restored here in #49 Phase 2 —
 # the guard was lost from this (live) module during the v3.0 ontology rewrite
@@ -905,23 +909,51 @@ class FalkorProjection(
         Returns (factors, evidence) where:
           factors = [(op_id, op_type, [input_ids], weight), ...]
           evidence = {claim_id: (alpha, beta), ...}
+
+        Uses batch I/O (2 queries regardless of operator count) to avoid
+        the N+1 query pattern that timed out on graphs with 1,800+ operators
+        (#400). Operators with <2 inputs are excluded with a warning.
         """
-        rows = self.g.query(
+        # Query 1: all operator IDs and types (single query, O(1) round-trip)
+        op_rows = self.g.query(
             "MATCH (o:Point) WHERE o.is_operator = true "
             "RETURN o.id, o.op_type"
         ).result_set
 
+        # Query 2: all inputs for all operators in one batch query (#400)
+        # Avoids the N+1 pattern: previously this was a per-operator loop.
+        input_rows = self.g.query(
+            "MATCH (o:Point)-[r:IMPL|NAND]->(c:Point) "
+            "WHERE o.is_operator = true "
+            "RETURN o.id, c.id "
+            "ORDER BY o.id, c.id"
+        ).result_set
+
+        # Aggregate input IDs per operator
+        op_inputs: dict[str, list[str]] = defaultdict(list)
+        op_types: dict[str, str] = {}
+        for op_id, op_type in op_rows:
+            op_types[op_id] = op_type
+        for op_id, claim_id in input_rows:
+            op_inputs[op_id].append(claim_id)
+
         factors = []
-        for op_id, op_type in rows:
-            input_rows = self.g.query(
-                "MATCH (o:Point {id:$oid})-[r:IMPL|NAND]->(c:Point) "
-                "RETURN c.id ORDER BY c.id",
-                params={"oid": op_id},
-            ).result_set
-            input_ids = [r[0] for r in input_rows]
+        degenerate_count = 0
+        for op_id, op_type in op_types.items():
+            input_ids = op_inputs.get(op_id, [])
             if len(input_ids) >= 2:
                 weight = 3.0 if op_type == "NAND" else 1.0
                 factors.append((op_id, op_type, input_ids, weight))
+            else:
+                degenerate_count += 1
+
+        if degenerate_count > 0:
+            logger.warning(
+                "extract_svbp_factors: %d operators with <2 inputs excluded "
+                "from EP (possible silent edge drop). Run operator validation "
+                "to identify affected operators.",
+                degenerate_count,
+            )
 
         return factors, {}
 
