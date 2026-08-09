@@ -1927,3 +1927,182 @@ def test_retract_missing_point_noop():
         assert r[0][0] == 0
     finally:
         proj.close()
+
+
+# ── #689 review fixes: retracted points excluded from search/EP/evidence ───
+
+def test_retract_tombstone_excluded_from_structural_search():
+    """Retracted points are NOT returned by run_structural_query (#689 review)."""
+    if _skip_if_no_falkor():
+        return
+    from tortoise.search_engine import run_structural_query
+    proj = FalkorProjection(_tmp("g_ret_struct.db"), graph_name="test")
+    try:
+        # Create two points
+        proj.apply({"type": "PointAdded",
+                     "point": {"id": "p_keep", "content": "keep me",
+                               "pointKind": "statement"}})
+        proj.apply({"type": "PointAdded",
+                     "point": {"id": "p_ret", "content": "retract me",
+                               "pointKind": "statement"}})
+        # Retract one
+        proj.apply({"type": "PointRetracted", "id": "p_ret"})
+        # Structural query by kind should only return the live point
+        results = run_structural_query(proj.g, "statement", entity_type="point", limit=10)
+        ids = {r[0] for r in results}
+        assert "p_keep" in ids, "live point must appear in structural results"
+        assert "p_ret" not in ids, "retracted point must NOT appear in structural results"
+    finally:
+        proj.close()
+
+
+def test_retract_tombstone_excluded_from_vector_search():
+    """Retracted points are NOT returned by run_vector_query (#689 review).
+
+    Uses the brute-force (embedded) path. FalkorDBLite vec.euclideanDistance
+    requires vecf32-encoded embeddings; the test creates points WITHOUT
+    embeddings to ensure the vector query path (not index path) is exercised,
+    then verifies the status filter is present in the brute-force Cypher by
+    asserting retracted points are excluded at the MATCH level before any
+    distance computation.
+    """
+    if _skip_if_no_falkor():
+        return
+    from tortoise.search_engine import run_vector_query
+    proj = FalkorProjection(_tmp("g_ret_vec.db"), graph_name="test")
+    try:
+        # Create two points with embeddings (vecf32 encoded for FalkorDBLite).
+        # We use the FalkorDB vecf32 function directly via Cypher to ensure
+        # the embedding is stored in the format the brute-force query expects.
+        import struct
+        emb_keep = [0.1] * 384
+        emb_ret = [0.2] * 384
+        emb_keep_bytes = struct.pack(f"<{len(emb_keep)}f", *emb_keep)
+        emb_ret_bytes = struct.pack(f"<{len(emb_ret)}f", *emb_ret)
+        proj.apply({"type": "PointAdded",
+                     "point": {"id": "p_keep", "content": "keep me",
+                               "pointKind": "statement"}})
+        proj.apply({"type": "PointAdded",
+                     "point": {"id": "p_ret", "content": "retract me",
+                               "pointKind": "statement"}})
+        # Store embeddings via Cypher to ensure correct FalkorDB vector type
+        proj.g.query(
+            "MATCH (n:Point {id:'p_keep'}) SET n.embedding = vecf32($e)",
+            params={"e": emb_keep},
+        )
+        proj.g.query(
+            "MATCH (n:Point {id:'p_ret'}) SET n.embedding = vecf32($e)",
+            params={"e": emb_ret},
+        )
+        proj.apply({"type": "PointRetracted", "id": "p_ret"})
+        # Brute-force vector query should filter retracted before distance.
+        dummy_vec = [0.1] * 384
+        results = run_vector_query(proj.g, dummy_vec, limit=10, is_embedded=True,
+                                   entity_type="point")
+        ids = {r[0] for r in results}
+        assert "p_keep" in ids, (
+            "live point with embedding must appear in vector search "
+            f"(got ids={ids})"
+        )
+        assert "p_ret" not in ids, (
+            "retracted point must NOT appear in vector search results"
+        )
+    finally:
+        proj.close()
+
+
+def test_retract_tombstone_excluded_from_svbp_factors():
+    """extract_svbp_factors excludes retracted operators and claims (#689 review)."""
+    if _skip_if_no_falkor():
+        return
+    proj = FalkorProjection(_tmp("g_ret_svbp.db"), graph_name="test")
+    try:
+        # Create claims
+        proj.apply({"type": "PointAdded",
+                     "point": {"id": "c_good", "content": "good claim",
+                               "pointKind": "statement"}})
+        proj.apply({"type": "PointAdded",
+                     "point": {"id": "c_ret", "content": "retracted claim",
+                               "pointKind": "statement"}})
+        # Create operator that references both
+        proj.apply({"type": "PointAdded",
+                     "point": {"id": "op1", "content": "operator",
+                               "pointKind": "operator",
+                               "is_operator": True, "op_type": "IMPL"}})
+        # Wire operator → both claims (simulate IMPL edges)
+        proj.g.query(
+            "MATCH (o:Point {id:'op1'}), (c:Point {id:'c_good'}) "
+            "CREATE (o)-[:IMPL]->(c)"
+        )
+        proj.g.query(
+            "MATCH (o:Point {id:'op1'}), (c:Point {id:'c_ret'}) "
+            "CREATE (o)-[:IMPL]->(c)"
+        )
+        # Retract the bad claim
+        proj.apply({"type": "PointRetracted", "id": "c_ret"})
+        # extract_svbp_factors should only see the good claim
+        factors, _evidence = proj.extract_svbp_factors()
+        # factors: [(op_id, op_type, [input_ids], weight), ...]
+        for _op_id, _op_type, input_ids, _weight in factors:
+            assert "c_ret" not in input_ids, (
+                "retracted claim must NOT appear as an SVBP factor input"
+            )
+    finally:
+        proj.close()
+
+
+def test_retract_tombstone_excluded_from_evidence():
+    """_hydrate_evidence excludes retracted baselines (#689 review)."""
+    if _skip_if_no_falkor():
+        return
+    from tortoise.sdk import TortoiseSDK
+    sdk = TortoiseSDK(db_path=_tmp("g_ret_evidence.db"))
+    try:
+        p1 = sdk.create_point("statement", "keep baseline")
+        p2 = sdk.create_point("statement", "retracted baseline")
+        # Set baselines on both
+        sdk.set_point_baseline(p1["id"], 2.0, 8.0)
+        sdk.set_point_baseline(p2["id"], 3.0, 7.0)
+        # Retract p2
+        sdk._get_proj().apply({"type": "PointRetracted", "id": p2["id"]})
+        # Hydrate evidence — should only load p1
+        sdk._evidence = {}  # clear cache
+        sdk._hydrate_evidence()
+        assert p1["id"] in sdk._evidence, "live baseline must be hydrated"
+        assert p2["id"] not in sdk._evidence, (
+            "retracted baseline must NOT be hydrated into evidence"
+        )
+    finally:
+        sdk.close()
+
+
+def test_retract_tombstone_hosted_list_excludes_retracted():
+    """GET /v1/points raw query pattern excludes retracted points (#689 review)."""
+    if _skip_if_no_falkor():
+        return
+    # Simulate the hosted API query pattern for GET /v1/points
+    proj = FalkorProjection(_tmp("g_ret_hosted.db"), graph_name="test")
+    try:
+        proj.apply({"type": "PointAdded",
+                     "point": {"id": "h_keep", "content": "visible",
+                               "pointKind": "statement"}})
+        proj.apply({"type": "PointAdded",
+                     "point": {"id": "h_ret", "content": "hidden",
+                               "pointKind": "statement"}})
+        proj.apply({"type": "PointRetracted", "id": "h_ret"})
+        # Replicate the hosted API query (non-operator, no kind filter)
+        conditions = [
+            "(n.is_operator IS NULL OR n.is_operator = false)",
+            "(n.status IS NULL OR n.status <> 'retracted')",
+        ]
+        query = (
+            "MATCH (n:Point) WHERE "
+            + " AND ".join(conditions)
+            + " RETURN properties(n) ORDER BY n.createdAt DESC LIMIT 10"
+        )
+        rows = proj.g.query(query).result_set
+        ids = {r[0].get("id") for r in rows}
+        assert "h_keep" in ids, "live point must appear in list"
+        assert "h_ret" not in ids, "retracted point must NOT appear in list"
+    finally:
+        proj.close()

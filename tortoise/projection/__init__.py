@@ -912,8 +912,10 @@ class FalkorProjection(
           factors = [(op_id, op_type, [input_ids], weight), ...]
           evidence = {claim_id: (alpha, beta), ...}
         """
+        # #689: retracted operators/claims must not feed EP factors.
         rows = self.g.query(
             "MATCH (o:Point) WHERE o.is_operator = true "
+            "AND (o.status IS NULL OR o.status <> 'retracted') "
             "RETURN o.id, o.op_type"
         ).result_set
 
@@ -921,6 +923,7 @@ class FalkorProjection(
         for op_id, op_type in rows:
             input_rows = self.g.query(
                 "MATCH (o:Point {id:$oid})-[r:IMPL|NAND]->(c:Point) "
+                "WHERE c.status IS NULL OR c.status <> 'retracted' "
                 "RETURN c.id ORDER BY c.id",
                 params={"oid": op_id},
             ).result_set

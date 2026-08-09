@@ -177,7 +177,7 @@ class _EntityHandlers:
     def _retract(self, pid: str) -> None:
         """Mark a Point as retracted instead of hard-deleting (#689).
 
-        Retracted points are hidden from normal reads (get_point, find_points,
+        Retracted points are hidden from normal reads (get_point, query,
         paginated_query all filter status='retracted') but remain queryable via
         raw Cypher. This preserves data integrity — retraction is reversible.
 

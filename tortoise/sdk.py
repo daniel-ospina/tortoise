@@ -1792,8 +1792,10 @@ class TortoiseSDK:
         same persistent evidence contract as explicit confidence reads.
         """
         proj = self._get_proj()
+        # #689: retracted points must not feed Beta priors into EP.
         rows = proj.g.query(
             "MATCH (n:Point) WHERE n.baseline_set = true AND n.ep_alpha IS NOT NULL "
+            "AND (n.status IS NULL OR n.status <> 'retracted') "
             "RETURN n.id, n.ep_alpha, n.ep_beta"
         ).result_set
         for pid, alpha, beta in rows:
