@@ -618,8 +618,8 @@ class TestSupersedePointStructuralTransfer:
 
     def test_supersede_transfer_idempotent_no_duplicates(self, sdk):
         """Running supersede twice must not duplicate edges — the second call
-        is an illegal transition under the #432 state model (superseded is
-        terminal), so the guard raises before any edge writes."""
+        is a no-op (0 transfers; the #432 terminal-state guard is enforced in
+        the MCP layer, not SDK supersede_point — see mcp_server.py:717)."""
         proj = sdk._get_proj()
         subj = sdk.create_point("statement", "subject")
         old_pt = sdk.create_point("statement", "old")
@@ -628,11 +628,9 @@ class TestSupersedePointStructuralTransfer:
         proj.create_about_edge(old_pt["id"], subj["id"], "aboutSubject")
 
         sdk.supersede_point(old_pt["id"], new_pt["id"])
-        # Second supersede on already-superseded (terminal) old point — #432
-        # guard rejects the transition (was previously a silent no-op).
-        import pytest
-        with pytest.raises(ValueError, match="terminal"):
-            sdk.supersede_point(old_pt["id"], new_pt["id"])
+        # Second supersede: no-op — edges already transferred, nothing to move.
+        second = sdk.supersede_point(old_pt["id"], new_pt["id"])
+        assert second["edges_transferred"] == 0
         # Verify exactly 1 aboutSubject edge on new point (no duplicates)
         r = proj.g.query(
             "MATCH (new:Point {id:$nid})-[a:aboutSubject]->(s:Point {id:$sid}) "
@@ -757,42 +755,29 @@ class TestNegativePaths:
     # ── supersede_point with bad IDs ──────────────────────────────────
 
     def test_supersede_point_nonexistent_old(self, sdk):
-        """supersede_point with non-existent old_id silently succeeds (0 transfers)."""
+        """supersede_point with non-existent old_id → no-op (invalidated False, #547)."""
         new_pt = sdk.create_point("statement", "valid new point")
         result = sdk.supersede_point("nonexistent-old-id", new_pt["id"])
-        assert result["invalidated"] is True
+        assert result["invalidated"] is False
         assert result["edges_transferred"] == 0
 
     def test_supersede_point_nonexistent_new(self, sdk):
-        """supersede_point with non-existent new_id silently succeeds (0 transfers)."""
+        """supersede_point with non-existent new_id → ValueError (#547: refuse to orphan)."""
         old_pt = sdk.create_point("statement", "valid old point")
-        result = sdk.supersede_point(old_pt["id"], "nonexistent-new-id")
-        # The CORRECTS edge won't be created (MATCH fails), but it still runs
-        assert result["invalidated"] is True
-        assert result["edges_transferred"] == 0
+        with pytest.raises(ValueError, match="does not exist"):
+            sdk.supersede_point(old_pt["id"], "nonexistent-new-id")
 
     def test_supersede_point_both_nonexistent(self, sdk):
-        """supersede_point with both IDs non-existent silently succeeds."""
+        """supersede_point with both IDs non-existent → no-op (old miss checked first, #547)."""
         result = sdk.supersede_point("nonexistent-old", "nonexistent-new")
-        assert result["invalidated"] is True
+        assert result["invalidated"] is False
         assert result["edges_transferred"] == 0
 
     def test_supersede_point_same_id(self, sdk):
-        """supersede_point with old==new creates self-CORRECTS edge.
-
-        Current behavior: no guard against self-supersede. Creates a
-        self-referencing CORRECTS edge on the point."""
+        """supersede_point with old==new → ValueError (#547: self-supersede rejected)."""
         pt = sdk.create_point("statement", "self-superseding point")
-        result = sdk.supersede_point(pt["id"], pt["id"])
-        assert result["invalidated"] is True
-        # Verify self-CORRECTS edge exists
-        proj = sdk._get_proj()
-        r = proj.g.query(
-            "MATCH (p:Point {id:$pid})-[c:CORRECTS]->(p) "
-            "RETURN count(c) > 0",
-            params={"pid": pt["id"]},
-        ).result_set
-        assert r[0][0] is True
+        with pytest.raises(ValueError, match="same as old_id"):
+            sdk.supersede_point(pt["id"], pt["id"])
 
     # ── compute_reputation with all-superseded claims ─────────────────
 
@@ -1029,9 +1014,25 @@ class TestStubEntityULID:
 # ── #212: participatesIn edges ────────────────────────────────────────
 
 
+def _docker_falkor_reachable(port: int = 16379) -> bool:
+    """True when a live FalkorDB (Docker) answers on localhost:port.
+
+    #212 live-DB tests self-skip on embedded-only runs (CI pre-merge gate has
+    no Docker) — mirrors the _skip_if_no_falkor pattern used elsewhere.
+    """
+    import socket
+    try:
+        with socket.create_connection(("localhost", port), timeout=1.5):
+            return True
+    except OSError:
+        return False
+
+
 @pytest.fixture
 def live_sdk_212():
     """Live FalkorProjection on a test-prefixed graph with test_guard."""
+    if not _docker_falkor_reachable():
+        pytest.skip("live FalkorDB (docker://localhost:16379) not reachable — embedded-only run")
     old_uri = os.environ.get("TORTOISE_DB_URI")
     os.environ["TORTOISE_DB_URI"] = (
         "docker://:@localhost:16379/tortoise_test_212_participates"
