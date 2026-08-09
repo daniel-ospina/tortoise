@@ -169,7 +169,9 @@ PINNED_CANONICAL = {
     "consent-banner": "you can give or withdraw consent at any time via the consent banner",
     "repo-state": "no analytics tools are currently deployed",
     "posthog-processor": "posthog is a data processor; data is stored in the united states",
-    "meta-ga-conditional": "not deployed yet and may be activated with your consent; consent is managed via the consent banner",
+    "planned-tools-conditional": "not deployed yet and may be activated with your consent; consent is managed via the consent banner",
+    "ga4-gtm-deployed": "google analytics (ga4) — audience and product analytics (google llc), delivered through google tag manager",
+    "gtm-consent-gated": "google tag manager itself is loaded only after consent",
     "purposes": "your email address and account information are used to deliver the service, respond to requests, and manage billing; usage data is used to improve the product",
     "art126": "we may request identity verification before acting on any request",
 }
@@ -351,6 +353,8 @@ def _scan_instrumentation_markers() -> list[str]:
             markers.append(f"{f.name}: consent.js script tag")
         if re.search(r"posthog\.init\(|fbq\(|gtag\(", text, re.I):
             markers.append(f"{f.name}: analytics init call")
+        if re.search(r"googletagmanager\.com/gtm\.js", text, re.I):
+            markers.append(f"{f.name}: GTM container loader (gtm.js)")
         if re.search(r"id=[\"']consent-banner|klaro|consent_manager|data-consent", text, re.I):
             markers.append(f"{f.name}: consent-banner markup")
     return markers
@@ -890,8 +894,9 @@ def test_privacy_repo_state_matches_local_tree(page: Page) -> None:
     """#10(c1): the repo-state sentence ('no analytics tools are currently
     deployed') is present IFF the local website/ tree has NO instrumentation
     markers (BOTH-AND — no vacuous pass). With markers present (consent.js +
-    PostHog loader live), /privacy must instead assert the deployed-processor
-    framing for PostHog and the conditional framing for Meta/GA."""
+    PostHog loader + GTM container live), /privacy must instead assert the
+    deployed-processor framing for PostHog and GA4 (via GTM) and the
+    conditional framing for the planned tools (Meta / X / LinkedIn)."""
     markers = _scan_instrumentation_markers()
     _goto(page, BASE_URL + "/privacy")
     body = _body_text_clean(page)
@@ -901,8 +906,13 @@ def test_privacy_repo_state_matches_local_tree(page: Page) -> None:
             "page claims no tools deployed but local tree has instrumentation markers"
         assert PINNED_CANONICAL["posthog-processor"] in body, \
             "instrumented tree but /privacy lacks PostHog deployed-processor framing"
-        assert PINNED_CANONICAL["meta-ga-conditional"] in body, \
-            "instrumented tree but /privacy lacks Meta/GA conditional framing"
+        assert PINNED_CANONICAL["planned-tools-conditional"] in body, \
+            "instrumented tree but /privacy lacks planned-tools conditional framing"
+        if any("GTM container" in m for m in markers):
+            assert PINNED_CANONICAL["ga4-gtm-deployed"] in body, \
+                "GTM present in local tree but /privacy lacks GA4-via-GTM deployed framing"
+            assert PINNED_CANONICAL["gtm-consent-gated"] in body, \
+                "GTM present in local tree but /privacy lacks GTM consent-gated framing"
     else:
         assert repo_state_present, \
             "local tree has no instrumentation but /privacy does not state deployment status"
@@ -914,7 +924,7 @@ def test_privacy_per_tool_conditional_framing(page: Page) -> None:
     'meta' (false-matches 'metadata')."""
     _goto(page, BASE_URL + "/privacy")
     text = _body_text_clean(page)
-    for tool in (r"\bmeta pixel\b", r"\bposthog\b", r"google analytics"):
+    for tool in (r"\bmeta pixel\b", r"\bposthog\b", r"google analytics", r"x \(twitter\)", r"\blinkedin\b"):
         framed = False
         for m in re.finditer(tool, text):
             ctx = text[max(0, m.start() - 120): m.end() + 120]
@@ -927,9 +937,11 @@ def test_privacy_per_tool_conditional_framing(page: Page) -> None:
 def test_consent_js_served_and_banner_present(page: Page) -> None:
     """#10(h): the shared consent module serves 200 with the wired PostHog
     project API key (project 548850, US Cloud) replacing the fail-safe
-    placeholder, plus the banner markup; every tortoise funnel page loads it
-    (defer); the company landing page (index.html) deliberately does NOT
-    (no analytics per design)."""
+    placeholder, the wired Google Tag Manager container (GTM-WQR34GSC — the
+    single consent-gated tag container carrying GA4, #736) with NO direct
+    gtag loader, the dormant Meta Pixel stub, plus the banner markup; every
+    tortoise funnel page loads it (defer); the company landing page
+    (index.html) deliberately does NOT (no analytics per design)."""
     resp = page.request.get(BASE_URL + "/consent.js", timeout=15_000)
     assert resp.status == 200, f"/consent.js status {resp.status}"
     js = resp.text()
@@ -942,6 +954,18 @@ def test_consent_js_served_and_banner_present(page: Page) -> None:
     assert '"consent-banner"' in js, "consent.js missing the banner markup"
     assert "us.i.posthog.com" in js and "-assets.i.posthog.com" in js, \
         "consent.js missing the US loader (us-assets.i.posthog.com/static/array.js)"
+
+    # #736 GTM unification: GTM container wired and consent-gated; GA4 loads
+    # via GTM (no direct gtag loader remains in consent.js).
+    assert "GTM-WQR34GSC" in js, "consent.js missing the wired GTM container ID"
+    assert "www.googletagmanager.com/gtm.js?id=" in js, \
+        "consent.js missing the GTM loader (gtm.js?id=<container>)"
+    assert 'event: "gtm.js"' in js, \
+        "consent.js missing the dataLayer gtm.start init before the GTM snippet"
+    assert "gtag(" not in js, \
+        "consent.js still contains a direct gtag loader (GA4 must come via GTM)"
+    assert "__META_PIXEL_ID__" in js, \
+        "consent.js missing the dormant Meta Pixel stub (placeholder ID, fail-safe)"
 
     for path in ("/product.html", "/signup", "/signin", "/welcome"):
         raw = page.request.get(BASE_URL + path, timeout=15_000).text()
