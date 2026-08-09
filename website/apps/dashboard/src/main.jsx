@@ -73,6 +73,7 @@ function App() {
   const [backupInfo, setBackupInfo] = React.useState(null)
   const [newGraphName, setNewGraphName] = React.useState('')
   const teamIdRef = React.useRef(null)
+  const fallbackTeamIdRef = React.useRef(null) // Round-4: team auto-selected by recoverKey 400-fallback
   const [checkoutPending, setCheckoutPending] = React.useState(false)
   // P5 (code-review): distinguish 'loading' / 'ok' / 'denied' / 'error' so
   // loading and network failures never masquerade as an RBAC denial.
@@ -324,6 +325,9 @@ function App() {
     setMembersStatus('loading')
     setCurrentTeamId(null)
     setCurrentGraphId(null)
+    setTeams([])                       // Round-4: drop the previous session's teams
+    sessionTokenRef.current = null      // Round-4: never reuse the previous user's JWT
+    setError('')                        // Round-4: stale error banner must not survive
     teamKeysRef.current = {}
     try { if (supabaseClient) await supabaseClient.auth.signOut() } catch { /* best-effort */ }
   }
@@ -687,6 +691,7 @@ function App() {
           const list = await teamsRes.json()
           if (list.length) {
             setTeams(list)
+            fallbackTeamIdRef.current = list[0].team_id
             res = await fetch(`${API_BASE}/v1/session/key`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tok}` },
@@ -701,7 +706,15 @@ function App() {
       }
       const data = await res.json()
       setNewKey(data.key)
-      if (currentTeamId) teamKeysRef.current[currentTeamId] = data.key // cache for future switches (no extra mint)
+      // Round-4: if the 400-fallback auto-selected the first membership,
+      // persist it so graphs/members load and the key is cached (otherwise
+      // the effect never fires and every manual pick burns a fresh mint).
+      const mintedTeamId = currentTeamId || fallbackTeamIdRef.current
+      if (mintedTeamId) teamKeysRef.current[mintedTeamId] = data.key
+      if (!currentTeamId && fallbackTeamIdRef.current) {
+        setCurrentTeamId(fallbackTeamIdRef.current)
+        teamIdRef.current = fallbackTeamIdRef.current
+      }
       // Fix A (review round 2): adopt the recovery key so the UI keeps
       // working (the old bootstrap key may have just been rotated/revoked).
       localStorage.setItem(KEY_STORAGE, data.key)
@@ -716,6 +729,16 @@ function App() {
 
   // Fix A (review round 2): map a full key value to its list id (or prefix)
   // so revoke can tell whether the active data-plane key is being revoked.
+  // Round-4 (P3): the dashboard mints ephemeral bootstrap keys (≤3/team,
+  // 24h). They appear in /v1/team/keys with no created_via/expires_at — flag
+  // the one matching our cached active key so it renders 'ephemeral · session'
+  // and can't be revoked from the table (it IS the session the app runs on).
+  function isSessionKey(k) {
+    if (!k || k.revoked_at) return false
+    const active = currentTeamId ? teamKeysRef.current[currentTeamId] : null
+    return !!active && (k.key_prefix === String(active).slice(0, 10))
+  }
+
   function keyIdFromValue(value) {
     if (!value) return null
     // GET /v1/team/keys returns {id, key_prefix, ...} — hashes only, no
@@ -901,8 +924,8 @@ function App() {
                   <tr key={k.id}>
                     <td><code>{k.key_prefix || k.id?.slice(0, 12)}</code></td>
                     <td>{fmtTime(k.created_at || k.createdAt)}</td>
-                    <td>{k.revoked_at ? <span className="revoked">revoked</span> : <span className="live">active</span>}</td>
-                    <td>{!k.revoked_at && <button className="ghost small" onClick={() => revokeKey(k.id)}>Revoke</button>}</td>
+                    <td>{k.revoked_at ? <span className="revoked">revoked</span> : isSessionKey(k) ? <span className="live">ephemeral · session</span> : <span className="live">active</span>}</td>
+                    <td>{!k.revoked_at && !isSessionKey(k) && <button className="ghost small" onClick={() => revokeKey(k.id)}>Revoke</button>}</td>
                   </tr>
                 ))}
               </tbody>
