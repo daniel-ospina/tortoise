@@ -9,8 +9,30 @@ migrations and function changes as production operations.
 
 | Function           | Purpose                         | verify_jwt        |
 |--------------------|---------------------------------|-------------------|
-| tenant-provision   | Auth hook (after_user_created)  | false             |
+| tenant-provision   | Auth hook (after_user_created)  | false (self-auth) |
 | waitlist-subscribe | Landing waitlist capture (#373) | false (anon POST) |
+
+### tenant-provision caller auth (#802)
+
+`verify_jwt=false` is required because the `after_user_created` auth hook
+sends NO user JWT — Supabase Auth signs the hook request itself. Caller
+auth is enforced inside the function:
+
+- **Auth-hook calls** — the Standard-Webhooks signature (`webhook-id` /
+  `webhook-timestamp` / `webhook-signature` headers) is verified against
+  `AUTH_HOOK_SECRET` (the hook secret configured on `after_user_created`,
+  format `v1,whsec_...`).
+- **Direct calls** — must present a user JWT (`Authorization: Bearer`)
+  whose `id` + `email` match the `user_id`/`email` being provisioned
+  (a user can only provision for themselves).
+- Everything else (incl. bare anon-key POSTs) → **401**.
+
+Set the secret (dashboard step, #802):
+
+```bash
+supabase secrets set --project-ref ybetwichurajbfswfeqa \
+  AUTH_HOOK_SECRET='v1,whsec_...'   # value from Dashboard → Auth → Hooks
+```
 
 ### waitlist-subscribe contract
 

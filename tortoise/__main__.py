@@ -326,7 +326,9 @@ def _cmd_init(args):
         target = _resolve_db_target(args.path)
     except ValueError as e:
         # Bad --path (e.g. relative) — clean CLI error, not a traceback (#715).
-        print(f"  ❌ Invalid DB path: {e}")
+        # #720 P2 conf 95: mask userinfo — unsupported-scheme URIs fall into
+        # RELATIVE_PATH_ERROR with the RAW URI embedded (no-op for plain paths).
+        print(f"  ❌ Invalid DB path: {_mask_uri_userinfo(str(e))}")
         return 1
 
     graph_ready = False
@@ -1013,6 +1015,86 @@ def _uri_has_password(target: str) -> bool:
     return ":" in userinfo and userinfo.rsplit(":", 1)[1] != ""
 
 
+def _mask_uri_userinfo(target: str) -> str:
+    """Redact userinfo (user:password@) from a DB URI for display.
+
+    #720 P2 conf 78: an error line must never print a credential embedded
+    in the URI — docker://:pw@host:notaport/graph would leak ':pw@' to a
+    terminal/log. Host/port/path stay visible for debuggability (matches
+    the FALKORDB_* legacy display mask, conf 95).
+
+    #720 P2 conf 68: the userinfo→host boundary is the LAST '@' of the
+    authority region (everything before the first '?'/'#'), NOT
+    urlsplit's netloc — a password may contain '/' (docker://user:p/ss@
+    host:... is RFC-invalid but urlparse/redis-py accept it, and
+    urlsplit's netloc cuts at the first '/'), which would split
+    mid-credential and leak the tail. The '://' may also sit mid-message
+    (RELATIVE_PATH_ERROR embeds the raw URI in prose), so every
+    scheme:// pattern in the string is scanned, not just a leading one.
+    """
+    from urllib.parse import urlsplit
+
+    def _scheme_ok(scheme: str) -> bool:
+        # RFC 3986 scheme: alpha-led, alnum/+-. thereafter.
+        return (scheme[:1].isalpha()
+                and all(c.isalnum() or c in "+-." for c in scheme))
+
+    out: list[str] = []
+    i = 0
+    while True:
+        j = target.find("://", i)
+        if j < 0:
+            out.append(target[i:])
+            break
+        # Recover the scheme token by walking back from '://' over scheme
+        # characters (stops at prose when the URI is embedded in a message).
+        k = j
+        while k > i and (target[k - 1].isalnum() or target[k - 1] in "+-."):
+            k -= 1
+        scheme = target[k:j]
+        if not _scheme_ok(scheme):
+            out.append(target[i:j + 3])
+            i = j + 3
+            continue
+        if i == 0 and k == 0:
+            # Bare URI — urlsplit is the authoritative scheme parse.
+            try:
+                if not urlsplit(target).scheme:
+                    out.append(target[i:])
+                    break
+            except ValueError:
+                pass  # malformed authority (e.g. unmatched '[') — mask below
+        # The authority region runs to the earliest of: the start of the
+        # next URI's scheme token (a second URI in the same message), or a
+        # '?'/'#' delimiter (query/fragment never belong to userinfo — an
+        # '@' in a query value must not swallow the host).
+        rest_start = j + 3
+        cut = None
+        for c in ("?", "#"):
+            pos = target.find(c, rest_start)
+            if pos >= 0 and (cut is None or pos < cut):
+                cut = pos
+        nxt = target.find("://", rest_start)
+        if nxt >= 0:
+            s = nxt
+            while s > rest_start and (target[s - 1].isalnum()
+                                      or target[s - 1] in "+-."):
+                s -= 1
+            if s < nxt and (cut is None or s < cut):
+                cut = s
+        region_end = cut if cut is not None else len(target)
+        authority = target[rest_start:region_end]
+        at = authority.rfind("@")
+        if at < 0:
+            out.append(target[i:j + 3])
+            i = j + 3
+            continue
+        out.append(target[i:k])
+        out.append(f"{scheme}://:***@{authority[at + 1:]}")
+        i = region_end
+    return "".join(out)
+
+
 def _index_github_child_cmd(target: str, repo_root: str,
                             branch: str | None = None
                             ) -> tuple[list[str], dict | None]:
@@ -1112,7 +1194,8 @@ def _cmd_onboard(args) -> int:
             except ValueError as e:
                 # Bad --path (e.g. relative) — clean CLI error, no traceback
                 # (#715). init rejects it first, but guard this call site too.
-                print(f"  ❌ Invalid DB target: {e}", file=_sys.stderr)
+                # #720 P2 conf 95: mask userinfo (no-op for plain paths).
+                print(f"  ❌ Invalid DB target: {_mask_uri_userinfo(str(e))}", file=_sys.stderr)
                 return 1
             idx_args = argparse.Namespace(
                 url=repo_root, background=False, branch="main",
@@ -1133,8 +1216,26 @@ def _cmd_onboard(args) -> int:
     _cmd_demo(argparse.Namespace(cmd="demo"))
 
     # Step 5: Doctor — health check (informational, don't fail on warnings)
+    # #720 conf 80: forward the SAME resolved target onboard wrote to
+    # (--path, TORTOISE_DB_URI, FALKORDB_* or TORTOISE_DB_PATH) into doctor
+    # — previously doctor re-resolved with a bare Namespace and health-
+    # checked the DEFAULT graph, not the one onboard just initialized and
+    # indexed (single-source violation, #715). Passed as args.db for URI
+    # targets / args.path for embedded paths so doctor probes and checks
+    # exactly the graph onboard wrote to.
     banner("Health check")
-    _cmd_doctor(argparse.Namespace(cmd="doctor"))
+    try:
+        db_target = _resolve_db_target(getattr(args, 'path', None))
+    except ValueError as e:
+        # #720 P2 conf 95: mask userinfo — unsupported-scheme URIs fall into
+        # RELATIVE_PATH_ERROR with the RAW URI embedded (no-op for plain paths).
+        print(f"  ❌ Invalid DB target: {_mask_uri_userinfo(str(e))}", file=_sys.stderr)
+        return 1
+    from tortoise.config import is_db_uri
+    if is_db_uri(db_target):
+        _cmd_doctor(argparse.Namespace(cmd="doctor", db=db_target, path=None))
+    else:
+        _cmd_doctor(argparse.Namespace(cmd="doctor", db=None, path=db_target))
 
     print(f"\n{'='*50}")
     print("Onboarding complete.")
@@ -1488,7 +1589,8 @@ def _cmd_index_github(args):
         try:
             bg_target = args.db or _resolve_db_target(None)
         except ValueError as e:
-            print(f"  ❌ Invalid DB target: {e}", file=sys.stderr)
+            # #720 P2 conf 95: mask userinfo (no-op for plain paths).
+            print(f"  ❌ Invalid DB target: {_mask_uri_userinfo(str(e))}", file=sys.stderr)
             return 1
         cmd, child_env = _index_github_child_cmd(bg_target, url, branch)
         pid_file = Path(tempfile.gettempdir()) / f"tortoise-index-{Path(url).stem}.pid"
@@ -1558,7 +1660,8 @@ def _cmd_index_github(args):
     try:
         target = args.db or _resolve_db_target(None)
     except ValueError as e:
-        print(f"  ❌ Invalid DB target: {e}", file=sys.stderr)
+        # #720 P2 conf 95: mask userinfo (no-op for plain paths).
+        print(f"  ❌ Invalid DB target: {_mask_uri_userinfo(str(e))}", file=sys.stderr)
         return 1
     from tortoise.config import is_db_uri
     try:
@@ -1658,7 +1761,6 @@ def _cmd_index_github(args):
 def _cmd_doctor(args):
     """Health check — verify Tortoise setup is healthy."""
     import importlib
-    import os
     from pathlib import Path
 
     print("Tortoise Doctor — Health Check")
@@ -1673,38 +1775,113 @@ def _cmd_doctor(args):
         except ImportError:
             results.append((f"Python: {pkg}", "⚠️", f"not installed — pip install {pkg}"))
 
-    # 2. Docker / FalkorDB
-    docker_host = os.environ.get("FALKORDB_HOST", "localhost")
+    # Resolve the DB target ONCE — shared by Step 2 (Docker probe) and
+    # Step 3 (graph health) (#720 conf 78). Step 2 previously probed a
+    # hardcoded FALKORDB_*/localhost:16379 while Step 3 used the resolved
+    # target, so `doctor --db docker://<healthy-remote>` reported
+    # "FalkorDB ❌ localhost:16379" + exit 1 while "Graph: health ✅"
+    # confirmed the configured target — a self-contradictory verdict.
+    # Precedence (#705/#715, conf 88): explicit --db (URI → from_uri, plain
+    # path → embedded) > --path > TORTOISE_DB_URI > FALKORDB_* trio >
+    # TORTOISE_DB_PATH > canonical EMBEDDED default (conf 70 — no local
+    # docker://localhost default). Routes through the shared
+    # _resolve_db_target(explicit) + config.is_db_uri; attributes read via
+    # getattr so bare Namespace(cmd="doctor") callers never raise (#703).
+    from tortoise.config import is_db_uri
+    db = getattr(args, "db", None)
+    path = getattr(args, "path", None)
     try:
-        docker_port = int(os.environ.get("FALKORDB_PORT", "16379"))
-    except (ValueError, TypeError):
-        results.append(("Graph: FalkorDB", "❌", f"Invalid FALKORDB_PORT: {os.environ.get('FALKORDB_PORT')!r}"))
-        docker_port = 6379
-    try:
-        from falkordb import FalkorDB
-        docker_pass = os.environ.get("FALKORDB_PASSWORD", "")
-        db = FalkorDB(host=docker_host, port=docker_port,
-                      password=docker_pass or None)
-        db.select_graph("tortoise").query("RETURN 1")
-        results.append(("Graph: FalkorDB", "✅", f"connected at {docker_host}:{docker_port}"))
-    except ImportError:
-        results.append(("Graph: FalkorDB", "⚠️", "falkordb package not installed"))
-    except Exception as e:
-        results.append(("Graph: FalkorDB", "❌", str(e)[:60]))
+        target = db if (db and is_db_uri(db)) else _resolve_db_target(db or path)
+    except ValueError as e:
+        # #720 P2 conf 95: unsupported-scheme URIs (bolt://, mongodb://, …)
+        # fall through is_db_uri → resolve_db_path → RELATIVE_PATH_ERROR with
+        # the RAW URI embedded — mask userinfo so a credential in --db /
+        # --path / TORTOISE_DB_URI never reaches the terminal (no-op for
+        # plain paths).
+        results.append(("Graph: health", "❌", _mask_uri_userinfo(str(e))[:60]))
+        target = None
 
-    # 3. Graph health
-    try:
-        from tortoise.sdk import TortoiseSDK
-        sdk = TortoiseSDK(db_path=args.path)
-        status = sdk.status()
-        points = status.get("counts", {}).get("Point", 0)
-        total = status.get("total_entities", 0)
-        if points > 0:
-            results.append(("Graph: health", "✅", f"{points} Points, {total} entities"))
-        else:
-            results.append(("Graph: health", "⚠️", "0 Points — graph is empty (expected for new setups)"))
-    except Exception as e:
-        results.append(("Graph: health", "❌", str(e)[:60]))
+    # 2. Docker / FalkorDB — probe the RESOLVED target, never a hardcoded
+    # localhost (#720 conf 78): URI targets get a live connect probe at
+    # their OWN host/port, user/pass, ssl, AND graph name — all parsed from
+    # the URI with the same derivation from_uri uses (Step 3), so the probe
+    # and the health check can never disagree; embedded targets have no
+    # Docker server to probe.
+    if target is not None and is_db_uri(target):
+        from urllib.parse import urlparse
+        # urlparse raises ValueError on malformed URIs (e.g. dangling IPv6
+        # bracket `docker://:pw@[abc`) — keep ALL parsing inside the guard
+        # so it surfaces as a clean ❌ + rc 1, never a traceback (#720 P2
+        # conf 95). Sentinel: parsed stays None when urlparse itself fails.
+        parsed = None
+        probe_host = "localhost"
+        probe_user = None
+        probe_pass = None
+        graph_name = "tortoise"
+        probe_port = None
+        try:
+            parsed = urlparse(target)
+            probe_host = parsed.hostname or "localhost"
+            probe_user = parsed.username or None
+            probe_pass = parsed.password or None
+            # Same graph derivation from_uri uses (parsed.path.lstrip('/') or
+            # "tortoise") — probe the URI path's graph, never a hardcoded
+            # "tortoise" (#720 P2 conf 62): a non-default graph name must be
+            # probed, and a remote server must not get a stray "tortoise" graph
+            # created by the probe.
+            graph_name = parsed.path.lstrip("/") or "tortoise"
+            # parsed.port raises ValueError on a non-numeric port — keep it
+            # inside the guard so `doctor --db docker://host:notaport/...`
+            # surfaces as a clean ❌ + rc 1, never a traceback (#720 P2 conf 75).
+            probe_port = parsed.port or 16379
+            from falkordb import FalkorDB
+            dbc = FalkorDB(host=probe_host, port=probe_port,
+                           username=probe_user, password=probe_pass,
+                           ssl=(parsed.scheme == "rediss"),
+                           socket_connect_timeout=5, socket_timeout=10)
+            dbc.select_graph(graph_name).query("RETURN 1")
+            results.append(("Graph: FalkorDB", "✅", f"connected at {probe_host}:{probe_port} (graph {graph_name})"))
+        except ImportError:
+            results.append(("Graph: FalkorDB", "⚠️", "falkordb package not installed"))
+        except Exception as e:
+            if parsed is None:
+                # Malformed URI — urlparse never completed; mask userinfo so
+                # a credential in --db never reaches the terminal.
+                results.append(("Graph: FalkorDB", "❌", f"bad URI '{_mask_uri_userinfo(target)}': {str(e)[:60]}"))
+            elif probe_port is None:
+                # Non-numeric port — probe never reached the client.
+                results.append(("Graph: FalkorDB", "❌", f"bad port in URI '{_mask_uri_userinfo(target)}': {str(e)[:60]}"))
+            else:
+                results.append(("Graph: FalkorDB", "❌", f"{probe_host}:{probe_port} (graph {graph_name}) — {str(e)[:60]}"))
+    elif target is not None:
+        # Embedded mode (resolved to a file path) — no Docker server to
+        # probe. ⚠️ (not ❌) keeps embedded setups healthy; the graph-health
+        # check below verifies the actual DB.
+        results.append(("Graph: FalkorDB", "⚠️", f"embedded mode ({target}) — no Docker probe"))
+
+    # 3. Graph health — verify the SAME resolved target above (probe + check
+    # can never diverge, #720 conf 78). URI → from_uri projection, plain
+    # path → embedded projection via _projection_for.
+    if target is not None:
+        try:
+            from tortoise.sdk import TortoiseSDK
+            sdk = TortoiseSDK()
+            sdk._proj = _projection_for(target)
+            try:
+                status = sdk.status()
+                points = status.get("counts", {}).get("Point", 0)
+                total = status.get("total_entities", 0)
+                if points > 0:
+                    results.append(("Graph: health", "✅", f"{points} Points, {total} entities"))
+                else:
+                    results.append(("Graph: health", "⚠️", "0 Points — graph is empty (expected for new setups)"))
+            finally:
+                # conf 52: close the projection in BOTH branches — the URI
+                # branch's from_uri projection must not leak.
+                if sdk._proj:
+                    sdk._proj.close()
+        except Exception as e:
+            results.append(("Graph: health", "❌", str(e)[:60]))
 
     # 4. MCP server
     mcp_running = False
@@ -1767,7 +1944,8 @@ def _cmd_list_kinds(args) -> int:
     try:
         target = _resolve_db_target(None)
     except ValueError as e:
-        print(f"  ❌ Invalid DB target: {e}", file=_sys.stderr)
+        # #720 P2 conf 95: mask userinfo (no-op for plain paths).
+        print(f"  ❌ Invalid DB target: {_mask_uri_userinfo(str(e))}", file=_sys.stderr)
         return 1
     sdk = TortoiseSDK()
     sdk._proj = _projection_for(target)
@@ -1798,7 +1976,8 @@ def _cmd_list_sources(args) -> int:
     try:
         target = _resolve_db_target(None)
     except ValueError as e:
-        print(f"  ❌ Invalid DB target: {e}", file=_sys.stderr)
+        # #720 P2 conf 95: mask userinfo (no-op for plain paths).
+        print(f"  ❌ Invalid DB target: {_mask_uri_userinfo(str(e))}", file=_sys.stderr)
         return 1
     sdk = TortoiseSDK()
     sdk._proj = _projection_for(target)
@@ -1893,7 +2072,8 @@ def _cmd_decide(args) -> int:
         # clean CLI error, not a traceback (#715).
         sdk._proj = _projection_for(target)
     except ValueError as e:
-        print(f"  ❌ Invalid DB target: {e}", file=_sys.stderr)
+        # #720 P2 conf 95: mask userinfo (no-op for plain paths).
+        print(f"  ❌ Invalid DB target: {_mask_uri_userinfo(str(e))}", file=_sys.stderr)
         return 1
 
     # Track all operator IDs for explicit-factor mode
@@ -2059,6 +2239,12 @@ def main(argv: list[str] | None = None) -> int:
     setup.add_argument("--team", default=None, help="Team name (used with --role)")
     setup.add_argument("--output", default=None, help="Save config to file instead of stdout")
     doctor = sp.add_parser("doctor", help="Health check — verify Tortoise setup")
+    doctor.add_argument("--path", default=None, help="Path for embedded mode")
+    doctor.add_argument(
+        "--db", default=None,
+        help="Docker URI (docker://, redis://, rediss://) or embedded DB file "
+             "path for the graph-health check",
+    )
     onboard = sp.add_parser("onboard", help="Guided onboarding: init → index → demo → doctor")
     onboard.add_argument("--path", default=None, help="Path for embedded mode")
     hs = sp.add_parser("health-server", help="Start standalone /health HTTP server")

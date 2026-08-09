@@ -228,11 +228,11 @@ class TortoiseEP:
         alpha_b, beta_b = self._beta_from_natural(*cav_eta_b)
 
         # NAND uses the standard symmetric contradiction potential for the
-        # target message. DIRECTEDNESS is enforced structurally by the
-        # back-message guard below: for unidirectional operators the
-        # source/attacker receives NO factor message (Dung-style directed
-        # attack). New NANDs default to unidirectional per #753; explicit
-        # bidirectional NAND keeps mutual-contradiction semantics.
+        # target message. DIRECTION is enforced structurally by the
+        # back-message guard below: for explicitly-'unidirectional' operators
+        # the source/attacker receives NO factor message (the Dung-style
+        # directed attack an agent opts into). Default is bidirectional
+        # (mutual contradiction) per product owner (#753).
         phi = phi_nand if op_type == "NAND" else phi_impl
         mom_a, mom_b = tilted_moments(
             alpha_a, beta_a, alpha_b, beta_b, weight, phi, self.n_quad
@@ -299,9 +299,9 @@ class TortoiseEP:
                             direction: str = "bidirectional") -> None:
         # input_ids are sorted by idx (source=0, targets=1..N).
         # IMPL: source→target pairs only (skip target↔target).
-        # NAND bidirectional: all pairwise combinations (mutual contradiction —
-        # at-most-one-true over all members).
-        # NAND unidirectional (directed, the #753 default): source→each-target
+        # NAND bidirectional (default): all pairwise combinations (mutual
+        # contradiction — at-most-one-true over all members).
+        # NAND unidirectional (agent-chosen directed attack): source→each-target
         # attacks ONLY — target↔target pairwise edges would otherwise create
         # arbitrary directed attacks between targets (review P2, #795).
         if op_type == "IMPL" and len(input_ids) >= 2:
@@ -389,8 +389,8 @@ class TortoiseEP:
                 ).result_set
                 for op_id, op_type, label, direction in rows:
                     # Read-path fallback for LEGACY/pre-migration operators lacking a
-                    # direction property: preserve the old bidirectional semantics.
-                    # (Creation default is op-dependent per #753: NAND→unidirectional.)
+                    # direction property: default to bidirectional (the creation
+                    # default for all op types per #753).
                     if direction is None:
                         direction = "bidirectional"
                         logger.warning(
