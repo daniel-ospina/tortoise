@@ -84,6 +84,19 @@ from playwright.sync_api import Page, expect  # noqa: E402
 # ── Tortoise-host check contract (cycle-4 P2-1). ───────────────────────────
 TORTISE_HOST_CHECK = os.environ.get("TORTISE_HOST_CHECK") == "1"
 
+# ── Third-party external-link crawl gate (cycle-8 P1, #747 CI) ────────────
+# The crawl fetches unauthenticated third-party hrefs (github.com/LICENSE,
+# etc.). From shared CI runner IPs those hosts rate-limit aggressively (429
+# persists past the test's single retry) → nondeterministic pre-merge gate.
+# CI sets LEGAL_E2E_SKIP_EXTERNAL_CRAWL=1 (skip = green-with-annotation,
+# same pattern as the tortoise-host deferral); local runs keep the full crawl.
+EXTERNAL_CRAWL_SKIP = pytest.mark.skipif(
+    os.environ.get("LEGAL_E2E_SKIP_EXTERNAL_CRAWL") == "1",
+    reason="third-party external-link crawl disabled (CI: unauthenticated "
+    "third-party fetches from shared runner IPs are rate-limit flaky) — "
+    "run locally for the full crawl",
+)
+
 
 def _tortoise_emulated_locally() -> bool:
     """Local middleware-emulation canary (cycle-4 P1-2 discrimination).
@@ -797,6 +810,7 @@ def test_crawl_tortoise_root_serves_product(page: Page) -> None:
 _PROJECT_OWNED_HOSTS = ("premiselabs.co", "tortoise.premiselabs.co", "app.premiselabs.co")
 
 
+@EXTERNAL_CRAWL_SKIP
 def test_crawl_external_links_resolve(page: Page) -> None:
     """Third-party hrefs on the site must resolve with a final 200 (15s
     timeout; redirects followed — e.g. github.com LICENSE 301→blob is OK)."""
