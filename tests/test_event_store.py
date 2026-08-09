@@ -124,27 +124,33 @@ def test_event_nodes_invisible_to_domain_queries(sdk_factory, tmp_path):
 
 
 def test_seq_is_monotonic_under_concurrency(sdk_factory, tmp_path):
+    """P1 (code-review): the previous version was VACUOUS — sdk_factory mints a
+    fresh db per call, so 8 workers wrote to 8 isolated graphs and the final
+    assertion ran on an empty graph (trivially true). Here we assert every
+    worker's per-graph seqs are strictly monotonic+unique AND the run produced
+    events at all (non-vacuous). TRUE cross-worker atomicity on ONE shared
+    graph needs a live FalkorDB (TORTOISE_DB_URI=docker://...) — the embedded
+    redislite client is not multi-connection-safe (documented on sdk_factory).
+    """
     import threading
-    # Embedded-vs-docker uncertainty is documented on the shared sdk_factory
-    # fixture in tests/conftest.py (Task 1): the embedded redislite server is
-    # shared per-path; if the embedded client is not multi-connection-safe,
-    # this test runs against a live FalkorDB (docker) instead.
     errors = []
+    per_worker: list[list[int]] = []
 
     def worker(i):
         try:
             s = sdk_factory(tmp_path)
             s.create_point("statement", f"c{i}")
+            per_worker.append([e["seq"] for e in _events(s._get_proj())])
         except Exception as e:  # pragma: no cover
             errors.append(e)
 
     threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
     [t.start() for t in threads]
     [t.join() for t in threads]
-    assert not errors
-    proj = sdk_factory(tmp_path)._get_proj()
-    seqs = [e["seq"] for e in _events(proj)]
-    assert sorted(seqs) == seqs and len(set(seqs)) == len(seqs)
+    assert not errors, errors
+    assert per_worker, "no worker produced events — test would be vacuous"
+    for seqs in per_worker:
+        assert sorted(seqs) == seqs and len(set(seqs)) == len(seqs),             f"non-monotonic or duplicate seqs: {seqs}"
 
 
 def test_purge_expired_removes_old_events(sdk_factory, tmp_path):
