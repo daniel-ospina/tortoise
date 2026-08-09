@@ -365,9 +365,12 @@ def _cmd_init(args):
             print(f"  ✅ Embedded mode initialized at {db_path}")
             graph_ready = True
         except ImportError:
-            print(f"  ❌ Neither falkordb nor redislite installed.")
-            print(f"     pip install falkordb       # for Docker mode (FalkorProjection)")
-            print(f"     pip install redislite      # for embedded mode (FalkorProjection)")
+            # Reachable when falkordblite is actually missing: tortoise/__init__
+            # no longer crashes at import time (issue #716). falkordb Docker
+            # mode is handled earlier, so this fires only for the embedded gap.
+            print(f"  ❌ Embedded mode unavailable — falkordblite not installed.")
+            print(f"     pip install falkordb        # for Docker mode (FalkorProjection)")
+            print(f"     pip install falkordblite    # for embedded mode (FalkorProjection)")
             return 1
         except Exception as e:
             print(f"  ❌ Embedded mode init failed: {e}")

@@ -42,3 +42,12 @@ include = ["tortoise*"]
 [build-system]
 requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
+
+[dependency-groups]
+# Ergonomic dev group so `uv run pytest` works with per-test timeouts in
+# offline CI (complements the existing `test` extra; pytest-timeout caps
+# infra-dependent tests that would otherwise hang when Redis/Docker are down).
+dev = [
+    "pytest>=9.1.1",
+    "pytest-timeout>=2.4.0",
+]
