@@ -18,3 +18,7 @@ posthog>=3.0
 # I/O with no HuggingFace network access (the runtime download merged in
 # 69aefae hung in Fly's sandboxed network and was reverted in 0da50a0).
 # Vector search without the model falls back to FTS+structural RRF.
+
+# httpx: direct dependency of hosted_api.py analytics + tortoise.billing (#310)
+# StripeClient — previously transitive via fastmcp, now pinned explicitly.
+httpx>=0.27

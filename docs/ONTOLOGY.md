@@ -198,7 +198,7 @@ Epistemic edges (operators): `IMPL`, `NAND` (+ semantic label). About edges: `ab
 | `pointKind` | string | ✅ | — | ✅ | Classification tag: statement, decision, vision, strategy, plan, goal, target, observation, hypothesis + pack pointKinds |
 | `is_operator` | bool | — | — | ✅ | true for operator Points |
 | `op_type` | string | — | — | ✅ | IMPL / NAND (operator Points only) |
-| `status` | string | — | `pav:status` | ✅ | Lifecycle: draft, live, superseded, deprecated, archived, resolved. draft/deprecated inert for computation |
+| `status` | string | — | `pav:status` | ✅ | Lifecycle: draft, live, retracted, superseded, outdated, archived (#432). **challenged is a derived condition** (presence of a NAND operator edge on a live point), not a stored status (§5). draft inert for computation; retracted/superseded/archived are terminal |
 | `confidence` | float 0..1 | — | — | ⚠️ | EP posterior mean, computed by propagation |
 | `authoredBy` | SubjectID | — | `dc:creator` | ✅ | Who created the claim |
 | `validFrom` / `validTo` | ISO8601 | — | — | ✅ | Temporal validity window |
@@ -350,6 +350,8 @@ T0 (meta-analysis), T1 (peer-reviewed), T2 (expert), T3 (anecdotal), T4 (unverif
 > (docs/ep-source-credibility-experiment.md §1.1).
 
 > **Expansion-pack kinds live in the packs, not here.** Pack-declared kinds (dev:epic, product-strategy:product, etc.) are defined in their pack manifests (§9) and registered at load time via the pack registry. This file documents only the core vocabulary; it is not the home for pack kinds.
+
+> **#432 — Claim lifecycle vocabulary (v3.3).** Point `status` is `draft → live → retracted → superseded` (plus `outdated`/`archived`; `archived` is a reserved terminal state with no v1 SDK write path). **`challenged` is NOT a state** — it is a DERIVED condition emerging from the presence of a NAND operator edge on a live point, queryable as such (e.g. `MATCH (p:Point {status:'live'})<-[:NAND]-(:Point {is_operator:true})`). Retraction is a TOMBSTONE (status change to `retracted`), not a deletion — the point stays in the graph, default query surfaces exclude it, `get_point` still returns it. The `:GraphEvent` label is RESERVED for the #432 change-log stream (`{seq, ts, type, payload, event_id}`, zero relationships — graph islands) — distinct from the `:Event` ontology entity with `eventId` (§3.4). See docs/event-catalog.md.
 
 ---
 

@@ -26,9 +26,9 @@ class TortoiseEP:
     Parameters:
         projection: FalkorProjection instance (provides .g and ._neighbors)
         damping: message damping factor, 0 < λ ≤ 1
-        n_quad: Gauss-Jacobi points per dimension (8 = 0.03% error at
-            w=50; at w=100 the n_quad=8 error is ~7% — use n_quad=16 for
-            w≥100, which recovers to <0.002% error)
+        n_quad: Gauss-Jacobi points per dimension (8 = ≤0.8% error at
+            w=100, <0.03% at w=50; n_quad=16 recovers to machine-like
+            precision across all w ≤ 100)
         max_iter: hard cap on EP outer iterations
         tol: convergence threshold (max relative change in α,β)
     """
