@@ -131,8 +131,11 @@ jobs:
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
       - name: Deploy (retry through Fly lease/API races)
-        # Uses deploy-scoped token (#660) — cannot run `flyctl secrets set`,
-        # limiting blast radius if the GH secret is compromised.
+        # Uses app-scoped deploy token (#660). NOTE (verified 2026-08-09):
+        # app-scoped deploy tokens CAN still manage this app's secrets —
+        # the security win is APP-scoping (org-wide blast radius → one app),
+        # not secrets isolation. The secrets-set step above keeps the
+        # full-scope FLY_API_TOKEN for cross-app/org operations.
         run: |
           for attempt in 1 2 3 4 5; do
             if flyctl deploy --remote-only --wait-timeout 420 --app tortoise-y4mjjq; then
