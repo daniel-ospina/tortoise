@@ -45,7 +45,9 @@ jobs:
       - name: Install
         run: |
           set -o pipefail  # don't let `tail` mask a pip failure
-          pip install -e '.[embeddings]' falkordblite pytest pytest-timeout 2>&1 | tail -2
+          # pytest-asyncio: tests/test_github_indexer.py uses @pytest.mark.asyncio
+          # (mirrors the python-ci.yml '.[test,embeddings]' surface, #493).
+          pip install -e '.[embeddings]' falkordblite pytest pytest-timeout pytest-asyncio 2>&1 | tail -2
       - name: Run tests (embedded suite, per-test timeout)
         id: tests
         run: |

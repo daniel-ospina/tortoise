@@ -54,6 +54,12 @@
       box-sizing: border-box;
     }
 
+    /* Text selection: beats receive pointer events ONLY while visible. The
+       full-screen overlay must never swallow clicks when invisible (#744), so
+       GSAP toggles .pe-on from the scrubbed opacity — visible beat = selectable
+       text, faded-out beats = click-through. */
+    .beat.pe-on { pointer-events: auto; user-select: text; }
+
     /* Beats are fixed full-viewport crossfade overlays — ONLY for short story
        beats (hero/capture/recall/reason). Pricing + CTA are NORMAL document-flow
        sections (real scroll, working links, no clipping) below the narrative. */
@@ -488,14 +494,23 @@
     const gapSpan = 0.05;
     const step = beatSpan + gapSpan;
 
+    /* Toggle .pe-on with visibility so text is selectable only while its beat
+       is on screen — invisible beats stay click-through (#744). */
+    const syncPE = (el) => {
+      el.classList.toggle('pe-on', parseFloat(gsap.getProperty(el, 'opacity')) > 0.05);
+    };
+
     beats.forEach((id, i) => {
       const el = document.getElementById(id);
       const start = i * step;
       const peak = start + beatSpan;
 
       if (i === 0) {
+        // Hero starts visible (CSS opacity: 1) — selectable from load.
+        el.classList.add('pe-on');
         gsap.to(el, {
           opacity: 0, y: -20,
+          onUpdate: () => syncPE(el),
           scrollTrigger: {
             trigger: '#scroll-wrapper',
             start: '1% top',
@@ -513,6 +528,7 @@
         { opacity: 0, y: 20 },
         {
           opacity: 1, y: 0,
+          onUpdate: () => syncPE(el),
           scrollTrigger: {
             trigger: '#scroll-wrapper',
             start: `${fadeInStart * 100}% top`,
@@ -528,6 +544,7 @@
       const fadeOutStart = peak;
       gsap.to(el, {
         opacity: 0, y: -20,
+        onUpdate: () => syncPE(el),
         scrollTrigger: {
           trigger: '#scroll-wrapper',
           start: `${fadeOutStart * 100}% top`,

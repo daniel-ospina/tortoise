@@ -31,7 +31,9 @@ from tortoise.hosted_api import app, get_current_team, get_current_user
 from tortoise.mcp_server import create_http_app
 
 from tests.fake_control_plane import ErrorControlPlane, FakeControlPlane
-from tests.test_supabase_control import FREE_TEAM, TOKEN, _key_row, _membership_row
+from tests.test_supabase_control import (
+    FREE_TEAM, TEAM_TIER_TEAM, TOKEN, _key_row, _membership_row,
+)
 
 # Supabase mode token (deterministic via conftest pepper)
 
@@ -232,6 +234,200 @@ class TestSessionKeyRoundTrip:
         fake.tables["team_memberships"] = []
         r = tc.post("/v1/session/key", json={"purpose": "bootstrap"})
         assert r.status_code == 403
+
+
+# ── E2E-3 invitations flip (plan Task 4) ───────────────────────────────────
+
+class TestInvitesEndpointFlip:
+    """E2E-3: owner invites by email → invite verified via lookup_hash,
+    accepted → real membership with the invited role, pending invite
+    consumed; a used/revoked invite cannot be re-accepted — over HTTP in
+    Supabase mode with the fake control plane."""
+
+    @pytest.fixture
+    def as_user(self):
+        """Override get_current_user per test (JWT session user)."""
+
+        def _set(user_id: str, email: str | None = None):
+            app.dependency_overrides[get_current_user] = lambda: {
+                "user_id": user_id, "email": email}
+
+        yield _set
+        app.dependency_overrides.pop(get_current_user, None)
+
+    @pytest.fixture
+    def team_tier(self, rest_client):
+        """Team-tier team with user-1 as owner (invites enabled)."""
+        tc, fake = rest_client
+        fake.tables["teams"] = [dict(TEAM_TIER_TEAM)]
+        fake.seed("team_memberships", [{
+            "user_id": "user-1", "team_id": "team-team-001",
+            "role": "owner", "status": "active"}])
+        return tc, fake
+
+    def test_mint_accept_round_trip_role_preserved(self, team_tier, as_user):
+        """E2E-3 happy path: mint → lookup_hash row → accept → membership
+        with the INVITED role; consumed invite cannot be re-accepted."""
+        tc, fake = team_tier
+        as_user("user-1")
+
+        r = tc.post("/v1/invites", json={
+            "team_id": "team-team-001", "email": "bob@example.com",
+            "role": "admin"})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["status"] == "invited"
+        assert body["role"] == "admin"
+        token = body["token"]
+        assert token
+
+        # invite verified via lookup_hash (token never stored plaintext)
+        rows = fake.tables["invitations"]
+        assert len(rows) == 1
+        assert rows[0]["lookup_hash"] == lookup_hash(token)
+        assert rows[0]["email"] == "bob@example.com"
+        assert rows[0]["status"] == "pending"
+
+        # accept as the invitee (JWT email must match)
+        as_user("user-2", "bob@example.com")
+        r = tc.post("/v1/invites/accept", json={"token": token})
+        assert r.status_code == 200, r.text
+        assert r.json() == {"team_id": "team-team-001", "role": "admin"}
+
+        mem = [m for m in fake.tables["team_memberships"]
+               if m["user_id"] == "user-2"]
+        assert len(mem) == 1
+        assert mem[0]["role"] == "admin"  # invited role preserved (O/I/T)
+        assert mem[0]["status"] == "active"
+        assert rows[0]["status"] == "accepted"  # pending invite consumed
+        assert rows[0]["accepted_at"] is not None
+
+        # used invite cannot be re-accepted (E2E-3)
+        r = tc.post("/v1/invites/accept", json={"token": token})
+        assert r.status_code == 400
+        assert "accepted" in r.json()["detail"]
+
+    def test_mint_dedup_409(self, team_tier, as_user):
+        tc, fake = team_tier
+        as_user("user-1")
+        payload = {"team_id": "team-team-001", "email": "bob@example.com",
+                   "role": "member"}
+        assert tc.post("/v1/invites", json=payload).status_code == 200
+        r = tc.post("/v1/invites", json=payload)
+        assert r.status_code == 409
+        assert len(fake.tables["invitations"]) == 1
+
+    def test_mint_requires_team_tier(self, rest_client, as_user):
+        """Free tier → 402 (invites are a Team-tier feature, D7 #574)."""
+        tc, fake = rest_client
+        fake.seed("team_memberships", [{
+            "user_id": "user-1", "team_id": "team-free-001",
+            "role": "owner", "status": "active"}])
+        as_user("user-1")
+        r = tc.post("/v1/invites", json={
+            "team_id": "team-free-001", "email": "bob@example.com",
+            "role": "member"})
+        assert r.status_code == 402
+
+    def test_mint_requires_owner_admin(self, team_tier, as_user):
+        tc, fake = team_tier
+        fake.seed("team_memberships", [{
+            "user_id": "user-9", "team_id": "team-team-001",
+            "role": "member", "status": "active"}])
+        as_user("user-9")
+        r = tc.post("/v1/invites", json={
+            "team_id": "team-team-001", "email": "bob@example.com",
+            "role": "member"})
+        assert r.status_code == 403
+
+    def test_expired_invite_rejected(self, team_tier, as_user):
+        tc, fake = team_tier
+        as_user("user-1")
+        r = tc.post("/v1/invites", json={
+            "team_id": "team-team-001", "email": "bob@example.com",
+            "role": "member"})
+        token = r.json()["token"]
+        from datetime import datetime, timedelta, timezone
+        past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+        fake.tables["invitations"][0]["expires_at"] = past
+        as_user("user-2", "bob@example.com")
+        r = tc.post("/v1/invites/accept", json={"token": token})
+        assert r.status_code == 400
+        assert "expired" in r.json()["detail"]
+
+    def test_revoked_invite_rejected_after_rescind(self, team_tier, as_user):
+        """E2E-3: rescind → revoked; a revoked invite cannot be accepted."""
+        tc, fake = team_tier
+        as_user("user-1")
+        r = tc.post("/v1/invites", json={
+            "team_id": "team-team-001", "email": "bob@example.com",
+            "role": "member"})
+        invite_id = r.json()["invite_id"]
+        token = r.json()["token"]
+
+        r = tc.delete(f"/v1/invites/{invite_id}?team_id=team-team-001")
+        assert r.status_code == 200, r.text
+        assert r.json()["revoked"] is True
+        assert fake.tables["invitations"][0]["status"] == "revoked"
+
+        as_user("user-2", "bob@example.com")
+        r = tc.post("/v1/invites/accept", json={"token": token})
+        assert r.status_code == 400
+        assert "revoked" in r.json()["detail"]
+        # no membership created for the invitee (user-1's row is the owner)
+        assert all(m["user_id"] != "user-2"
+                   for m in fake.tables["team_memberships"])
+
+    def test_rescind_requires_owner_admin(self, team_tier, as_user):
+        tc, fake = team_tier
+        as_user("user-1")
+        r = tc.post("/v1/invites", json={
+            "team_id": "team-team-001", "email": "bob@example.com",
+            "role": "member"})
+        invite_id = r.json()["invite_id"]
+        fake.seed("team_memberships", [{
+            "user_id": "user-9", "team_id": "team-team-001",
+            "role": "member", "status": "active"}])
+        as_user("user-9")
+        r = tc.delete(f"/v1/invites/{invite_id}?team_id=team-team-001")
+        assert r.status_code == 403
+        assert fake.tables["invitations"][0]["status"] == "pending"
+
+    def test_list_pending_invites(self, team_tier, as_user):
+        tc, fake = team_tier
+        as_user("user-1")
+        tokens = {}
+        for email in ("bob@example.com", "carol@example.com", "dave@example.com"):
+            r = tc.post("/v1/invites", json={
+                "team_id": "team-team-001", "email": email,
+                "role": "member"})
+            assert r.status_code == 200, r.text
+            tokens[email] = r.json()["token"]
+        # consume one (accepted), rescind another → only one stays pending
+        as_user("user-2", "bob@example.com")
+        r = tc.post("/v1/invites/accept", json={"token": tokens["bob@example.com"]})
+        assert r.status_code == 200, r.text
+        as_user("user-1")
+        r = tc.delete(f"/v1/invites/{fake.tables['invitations'][2]['id']}?team_id=team-team-001")
+        assert r.status_code == 200, r.text
+
+        r = tc.get("/v1/invites?team_id=team-team-001")
+        assert r.status_code == 200
+        rows = r.json()
+        assert [i["email"] for i in rows] == ["carol@example.com"]
+        assert rows[0]["status"] == "pending"
+
+    def test_invites_fail_closed_on_control_plane_error(self, monkeypatch,
+                                                        team_tier, as_user):
+        """A Supabase error is a 500 — never a registry fallback (#851)."""
+        import tortoise.supabase_control as sc
+        monkeypatch.setattr(sc, "get_control_plane", lambda: ErrorControlPlane())
+        tc, _ = team_tier
+        as_user("user-1")
+        r = tc.post("/v1/invites", json={
+            "team_id": "team-team-001", "email": "bob@example.com",
+            "role": "member"})
+        assert r.status_code == 500
 
 
 # ── MCP flip ────────────────────────────────────────────────────────────────

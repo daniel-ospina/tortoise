@@ -37,16 +37,24 @@ def _parse_sse_json(r):
     return r.json()
 
 
-def _boot_tenant_app(db_path):
+def _boot_tenant_app(registry_sdk=None):
     """Build the exact app `serve --http --auth tenant` builds (via the CLI
-    helper path) with a registry SDK rooted at the same canonical DB."""
+    helper path) with a registry SDK rooted at the same canonical DB.
+
+    registry_sdk: optional pre-opened registry SDK. Passing the test's own
+    SDK (instead of opening a second handle on the same canonical path)
+    removes the redislite second-server race seen on CI runners: under load
+    a fresh open can start a NEW server on the same DB file whose RDB load
+    misses the just-created key (→ spurious 401 on the first tools/list).
+    The test still exercises the real CLI key creation + tenant auth path.
+    """
     from contextlib import asynccontextmanager
 
     from fastapi import FastAPI
 
     from tortoise.mcp_server import create_http_app
 
-    reg = TortoiseSDK(namespace="registry")
+    reg = registry_sdk if registry_sdk is not None else TortoiseSDK(namespace="registry")
     app = create_http_app(
         allowed_origins=["http://127.0.0.1:*", "http://localhost:*"],
         _registry_sdk=reg,
@@ -71,6 +79,12 @@ def local_db(tmp_path, monkeypatch):
     monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
     db = tmp_path / "t.db"
     env = {**os.environ, "TORTOISE_DB_PATH": str(db)}
+    # Hermetic resolution: pin the repo root on PYTHONPATH so the CLI
+    # subprocess always imports the checkout's tortoise (a shadowed
+    # tortoise.config on CI made the key land elsewhere → 401s, #493).
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env["PYTHONPATH"] = os.pathsep.join(
+        [repo_root] + [p for p in env.get("PYTHONPATH", "").split(os.pathsep) if p])
     proc = subprocess.run(
         [sys.executable, "-m", "tortoise", "key", "create", "--name", "test"],
         capture_output=True, text=True, env=env, timeout=120,
@@ -619,7 +633,7 @@ def test_local_http_roundtrip_lands_in_team_graph(local_db, monkeypatch):
         "MATCH (k:APIKey) RETURN k.team_id"
     ).result_set[0][0]
 
-    wrapper = _boot_tenant_app(db)
+    wrapper = _boot_tenant_app(registry_sdk=sdk)
     accept = "application/json, text/event-stream"
     headers = {"Authorization": f"Bearer {key}", "Accept": accept}
 
@@ -632,7 +646,7 @@ def test_local_http_roundtrip_lands_in_team_graph(local_db, monkeypatch):
         # tools/list with the bootstrap key → 200, real tools
         r = c.post("/mcp", json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
                    headers=headers)
-        assert r.status_code == 200
+        assert r.status_code == 200, r.text
         body = _parse_sse_json(r)
         tools = body["result"]["tools"]
         names = {t["name"] for t in tools}

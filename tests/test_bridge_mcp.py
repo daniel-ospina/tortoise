@@ -7,10 +7,15 @@
 from __future__ import annotations
 
 import os
+import sys
 import threading
 import time
 
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
+
+# Repo root on sys.path so `import integrations` works under any pytest
+# invocation (console script does not add CWD; `python -m pytest` does).
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
