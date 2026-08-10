@@ -8,9 +8,12 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -27,41 +30,28 @@ pytest.importorskip("redislite")
 def _make_no_path_server():
     """Start a no-path FalkorDB -> tempdir socket; return (db, socket_path).
 
-    Socket found via ps (the redislite server cmdline carries --unixsocket
-    in its config path; we match the newest tmp dir with redis.socket).
-    Returns the REALPATH'd socket (matching discover() output — macOS
-    /var -> /private/var symlink).
+    Socket taken from db.client.socket_file (no shared-tempdir walk, so
+    concurrent test sessions spawning servers in the same tempdir cannot
+    confuse the lookup). Returns the REALPATH'd socket (matching
+    discover() output — macOS /var -> /private/var symlink).
     """
     from redislite.falkordb_client import FalkorDB
     db = FalkorDB()  # no path -> fresh tempdir server
     time.sleep(1)
-    sock = _socket_for_newest_tmpdir()
-    if sock is None:
+    sock = os.path.realpath(db.client.socket_file)
+    if not os.path.exists(sock):
         db.close()
-        raise AssertionError("no redis.socket found in tempdir")
-    return db, os.path.realpath(sock)
-
-
-def _socket_for_newest_tmpdir():
-    """Find the newest tempdir containing redis.socket (no-path server dirs
-    have redis.socket + redis.pid, NOT a .settings file)."""
-    tmpdir = tempfile.gettempdir()
-    candidates = []
-    for root, dirs, files in os.walk(tmpdir):
-        if "redis.socket" in files and "redis.pid" in files:
-            try:
-                mtime = os.path.getmtime(os.path.join(root, "redis.socket"))
-                candidates.append((mtime, os.path.join(root, "redis.socket")))
-            except OSError:
-                continue
-    if not candidates:
-        return None
-    candidates.sort(reverse=True)
-    return candidates[0][1]
+        raise AssertionError("no redis.socket for spawned server")
+    return db, sock
 
 
 def _pid_for_socket(socket_path: str) -> int | None:
-    """Find the redis-server PID bound to a socket via ps/lsof."""
+    """Find the redis-server PID bound to a socket via ps/lsof.
+
+    NOTE: ps shows the symlink form of the path (/var/...) while sockets
+    are often realpath'd (/private/var/...), so prefer reading redis.pid
+    from the socket's dir over this helper.
+    """
     out = subprocess.run(
         ["ps", "-eo", "pid,args"], capture_output=True, text=True
     ).stdout
@@ -267,6 +257,112 @@ def test_reaper_excludes_own_connection_from_client_count(monkeypatch):
         db.close()
 
 
+def _force_raw_resp_fallback(monkeypatch):
+    """Hide redis-cli so _client_list exercises the raw-RESP path (the
+    fallback that must be non-destructive, issue #849)."""
+    import subprocess as sp
+    real_run = sp.run
+
+    def _no_redis_cli(*args, **kwargs):
+        if args and args[0] and str(args[0][0]).endswith("redis-cli"):
+            raise FileNotFoundError("redis-cli absent (test)")
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "tortoise.embedded_reaper.subprocess.run", _no_redis_cli)
+
+
+def test_client_list_raw_resp_fallback_probe_is_non_destructive(monkeypatch):
+    """Regression #849: with redis-cli absent, _client_list falls back to raw
+    RESP over a plain socket and must NOT kill the server it probes."""
+    import redis as _redis
+    from tortoise.embedded_reaper import _client_list
+    _force_raw_resp_fallback(monkeypatch)
+    db, sock = _make_no_path_server()
+    try:
+        # ps args show the symlink form (/var/...) while sock is realpath'd
+        # (/private/var/...), so read the server PID from redis.pid instead.
+        pid = int(Path(os.path.dirname(sock), "redis.pid").read_text().strip())
+        assert _pid_alive_for(pid), "probed server not alive before probe"
+        clients = _client_list(sock)
+        assert isinstance(clients, list)
+        assert all(isinstance(c, dict) for c in clients)
+        # The probed server must survive the probe and keep serving.
+        time.sleep(1)
+        assert _pid_alive_for(pid), "probe killed the probed server (#849)"
+        r = _redis.Redis(unix_socket_path=sock, socket_connect_timeout=2)
+        try:
+            assert r.ping(), "probed server no longer serves queries"
+        finally:
+            r.close()
+    finally:
+        db.close()
+
+
+def test_client_list_raw_resp_fallback_never_uses_redislite_client(monkeypatch):
+    """Regression #849: the raw-RESP fallback must NOT construct a redislite
+    client — its close() shuts down the probed server whenever it believes it
+    is the last client (_connection_count() <= 1), killing the orphan.
+    Deterministic on all platforms/versions (the kill itself is timing- and
+    version-dependent)."""
+    import redislite.falkordb_client as _fc
+    from tortoise.embedded_reaper import _client_list
+    db, sock = _make_no_path_server()
+    _force_raw_resp_fallback(monkeypatch)
+    calls = []
+
+    class _SpyFalkorDB:
+        def __init__(self, *a, **k):
+            calls.append(k)
+
+    monkeypatch.setattr(_fc, "FalkorDB", _SpyFalkorDB)
+    try:
+        clients = _client_list(sock)
+        assert isinstance(clients, list)
+        assert all(isinstance(c, dict) for c in clients)
+        assert calls == [], "raw-RESP fallback constructed a redislite client"
+    finally:
+        db.close()
+
+
+def test_client_list_fails_closed_on_dead_socket():
+    """Probe against a dead socket -> None (fail closed), NOT [] — an empty
+    list would look like "zero clients" and license a kill."""
+    from tortoise.embedded_reaper import _client_list
+    assert _client_list("/nonexistent/reaper-probe.sock") is None
+
+
+def test_client_list_fails_closed_on_garbage_reply(monkeypatch, tmp_path):
+    """Malformed/non-bulk RESP reply -> None (fail closed), never a bogus
+    zero-client verdict."""
+    from tortoise.embedded_reaper import _client_list
+    _force_raw_resp_fallback(monkeypatch)
+    # Short path: macOS AF_UNIX sun_path is limited to ~104 bytes and
+    # pytest tmp_path is too long.
+    tmpdir = tempfile.mkdtemp(prefix="reaper_probe_")
+    sock_path = os.path.join(tmpdir, "garbage.sock")
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(sock_path)
+    srv.listen(1)
+
+    def _serve():
+        conn, _ = srv.accept()
+        try:
+            conn.recv(4096)
+            conn.sendall(b"-ERR nonsense\r\n")  # error reply, not bulk string
+        finally:
+            conn.close()
+
+    t = threading.Thread(target=_serve, daemon=True)
+    t.start()
+    try:
+        assert _client_list(sock_path) is None
+    finally:
+        t.join(timeout=5)
+        srv.close()
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 # ── _parse_min_uptime ───────────────────────────────────────────────
 
 @pytest.mark.parametrize("raw,expected", [
@@ -314,32 +410,39 @@ class monkeypatch_tempdir:
 def _spawn_orphan(monkeypatch=None):
     """Spawn a no-path server in a subprocess, SIGKILL the parent WITHOUT
     close() -> leaves a genuine orphan (socket + pid + tempdir persist).
-    Returns the orphan's socket_path (realpath'd)."""
+    Returns the orphan's socket_path (realpath'd).
+
+    The child prints its own socket path (db.client.socket_file) so no
+    shared-tempdir walk is needed — concurrent test sessions spawning
+    redislite servers in the same tempdir cannot confuse the lookup.
+    """
     import subprocess as sp
     import sys as _sys
     code = (
         "import os,time; os.environ.pop('TORTOISE_DB_URI',None);\n"
         "from redislite.falkordb_client import FalkorDB; db=FalkorDB();\n"
-        "print('READY', flush=True); time.sleep(30)"
+        "print('READY ' + db.client.socket_file, flush=True); time.sleep(30)"
     )
     proc = sp.Popen([_sys.executable, "-c", code],
                     stdout=sp.PIPE, text=True)
-    proc.stdout.readline()  # wait READY
+    import select
+    if not select.select([proc.stdout], [], [], 30)[0]:
+        proc.kill()
+        proc.wait()
+        raise AssertionError("orphan spawn timed out")
+    line = proc.stdout.readline().strip()  # wait READY <socket>
+    if not line.startswith("READY "):
+        proc.kill()
+        proc.wait()
+        raise AssertionError("orphan spawn failed: %r" % line)
+    sock = line.split(None, 1)[1]
     time.sleep(1)
     proc.kill()
     proc.wait()
     time.sleep(1)
-    # find the newest orphan socket
-    tmp = tempfile.gettempdir()
-    newest = None
-    for root, dirs, files in os.walk(tmp):
-        if "redis.socket" in files and "redis.pid" in files:
-            m = os.path.getmtime(os.path.join(root, "redis.socket"))
-            if newest is None or m > newest[0]:
-                newest = (m, os.path.join(root, "redis.socket"))
-    if newest is None:
-        raise AssertionError("no orphan created")
-    return os.path.realpath(newest[1])
+    if not os.path.exists(sock):
+        raise AssertionError("orphan socket vanished: %s" % sock)
+    return os.path.realpath(sock)
 
 
 def test_reap_kills_idle_orphan(monkeypatch):
@@ -433,6 +536,35 @@ def test_reap_dry_run_does_not_kill(monkeypatch):
     reap([match], dry_run=True)
     time.sleep(1)
     assert _pid_alive_for(pid), "dry-run killed the orphan"
+
+
+def test_reap_fails_closed_when_client_probe_unknown(monkeypatch):
+    """Regression #849: if CLIENT LIST state is unknown (probe failure),
+    reap() must skip the server — never kill on unknown client state."""
+    from tortoise.embedded_reaper import _active_client_count, reap
+    db, sock = _make_no_path_server()
+    try:
+        # Build the candidate record directly (discover() is racy under
+        # concurrent test sessions sharing the tempdir).
+        dbdir = os.path.dirname(sock)
+        pid = int(Path(dbdir, "redis.pid").read_text().strip())
+        record = {
+            "pid": pid,
+            "socket_path": sock,
+            "dbdir": dbdir,
+            "client_count": 0,
+            "uptime": 999,
+            "classification": "candidate",
+            "settings": None,
+        }
+        monkeypatch.setattr(
+            "tortoise.embedded_reaper._active_client_count", lambda _s: None)
+        acted = reap([record], dry_run=False)
+        assert acted == []
+        time.sleep(1)
+        assert _pid_alive_for(pid), "server killed on unknown client state"
+    finally:
+        db.close()
 
 
 def test_reap_skips_hung_server_not_dead():
