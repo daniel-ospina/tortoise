@@ -118,12 +118,21 @@ class TestNANDCalibrationAtRealWeights:
     def test_nand_no_collapse_at_w1(self, ep_graph):
         """Two T0 claims + plain NAND → confidence stays ≥ floor.
 
-        A plain NAND operator (no mitigations, no input_ops) gets
-        weight 1.0 from compute_operator_weight. At this weight the
-        factor penalty is mild (φ ≈ 0.437 at T0), and EP converges
-        with both claims well above the collapse threshold.
+        A plain NAND operator (no mitigations, no input_ops) gets the
+        #855 base weight 8.0 from compute_operator_weight. The
+        contradiction is strong (φ ≈ 0.0013 at T0) yet EP still
+        converges well above the collapse threshold (#855: restore
+        cascade without collapse).
         """
+        from tortoise.weights import compute_operator_weight
         sdk, claim_a_id, claim_b_id, op_id = ep_graph
+
+        # Pin the base weight (#855): a plain NAND must carry NAND_BASE_WEIGHT
+        # (8.0), not the generic 1.0 — this is the root-cause fix and must
+        # not regress.
+        proj = sdk._get_proj()
+        w = compute_operator_weight(proj, op_id)
+        assert w == 8.0, f"Expected w=8.0 for plain NAND, got {w}"
 
         result = sdk.compute_confidence(factors=[op_id])
         assert result["converged"], (
@@ -135,7 +144,7 @@ class TestNANDCalibrationAtRealWeights:
 
         assert conf_a > self.CONFIDENCE_FLOOR, (
             f"Claim A collapsed: {conf_a:.4f} ≤ {self.CONFIDENCE_FLOOR} "
-            f"(NAND at w≈1.0, expected ~0.90 from EP convergence)"
+            f"(NAND at w=8.0, expected ~0.82 from EP convergence)"
         )
         assert conf_b > self.CONFIDENCE_FLOOR, (
             f"Claim B collapsed: {conf_b:.4f} ≤ {self.CONFIDENCE_FLOOR} "

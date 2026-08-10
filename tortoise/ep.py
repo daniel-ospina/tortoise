@@ -212,9 +212,11 @@ class TortoiseEP:
     def _is_strong(self, claim_id: str, threshold: float = 0.85) -> bool:
         """True if the claim's current belief is at/above the given threshold.
 
-        Used for bidirectional IMPL back-message semantics (#86): a target that
-        is still strong (>= threshold) keeps the source's support unchanged; a
-        weakened target triggers a reduction signal to the source.
+        Utility predicate (reads posterior-first, consistent with
+        _read_node). The #86 bidirectional-IMPL back-message hack that was
+        its production caller was removed in #855 (difference coupling
+        handles upward damage naturally) — retained for defensive utility
+        and the zero-division guard test.
         """
         _cache = getattr(self, "_node_cache", None)
         if _cache is not None and claim_id in _cache:

@@ -26,6 +26,23 @@ run it, connect your tools over MCP.
   commercial with free tier. See `docs/license-notes.md` (clause → precedent).
 - **`.mcp.json`**: tortoise entry points at the daemon (`http://localhost:8000/mcp`).
 
+### Fixed — EP NAND under-propagation (#855)
+
+Restored genuine cascade propagation through IMPL chains. Two root causes:
+- **NAND base weight**: plain NAND carried the generic weight 1.0 vs
+  `phi_nand`'s documented w=8.0 default → 8× weaker contradiction potential.
+  Now `NAND_BASE_WEIGHT = 8.0` (mitigated NAND 8×2=16 → clamped 10.0).
+- **`phi_impl` coupling**: product coupling `exp(w·ca·cb)` was insensitive to
+  source strength — a contradicted source's weakness didn't reach its
+  dependents. Changed to **difference (level-matching) coupling**
+  `exp(-w·(ca-cb)²)`: the target tracks the source's level, so damage
+  cascades downstream (C1 drop 0.001 → 0.022; B feedback 0.000 → 0.006).
+
+**Behavior note:** difference coupling adds a small (~0.008) downward drag on
+strong sources supporting weak targets (deliberate level-matching semantics,
+per the canonical SVBP reference). The #86 bidirectional-IMPL NAND-style
+back-message hack was removed — its role is now handled by the coupling.
+
 ### Fixed — redislite embedded process leak (issue #176)
 
 The embedded (redislite) mode leaked one `redis-server` OS process per
