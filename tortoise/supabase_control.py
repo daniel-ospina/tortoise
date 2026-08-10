@@ -952,17 +952,25 @@ def api_key_by_id(cp, key_id: str) -> dict | None:
 
 
 def membership_count_since(cp, *, cutoff: str, user_id: str | None = None,
-                           identity: str | None = None) -> int:
+                           identity: str | None = None,
+                           role: str | None = None) -> int:
     """Membership rows created after ``cutoff`` for a user or an anon
     identity — the Supabase twin of the registry rate-limit counts
     (agent-signup per-identity 3/hour, team-create per-user 3/hour).
     NULL semantics: a row without the anchor column never matches.
+
+    ``role`` narrows to owner rows when given (team-create parity: the
+    registry counts ``(m:Membership {user_id:$uid, role:'owner'})`` — a
+    user who accepted invites into other teams must NOT be rate-limited
+    from creating their own; review P2, PR #874).
     """
     filters: list[tuple[str, str, object]] = [("created_at", "gt", cutoff)]
     if user_id is not None:
         filters.append(("user_id", "eq", user_id))
     if identity is not None:
         filters.append(("identity", "eq", identity))
+    if role is not None:
+        filters.append(("role", "eq", role))
     return len(cp.query("team_memberships", select=["id"], filters=filters))
 
 

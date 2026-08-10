@@ -351,7 +351,10 @@ def _provision_disabled() -> bool:
         from tortoise.supabase_control import is_supabase_enabled
         return is_supabase_enabled()
     except Exception:
-        return False
+        # FAIL-CLOSED (review P2, PR #874): if the mode check itself fails,
+        # the endpoint stays DISABLED — the zero-registry-writes contract
+        # prefers a 410 over an uncertain registry write.
+        return True
 
 
 class ProvisionRequest(BaseModel):

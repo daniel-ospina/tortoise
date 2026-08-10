@@ -1590,11 +1590,25 @@ async def register_user(request: Request, response: Response):
                 pass
             raise HTTPException(status_code=500, detail="Registration failed")
 
-    # Log audit event
-    await _async_audit(
-        request, team_id, "tenant_register",
-        resource_type="team", resource_id=team_id,
-    )
+    # Log audit event — BEST-EFFORT (review P2, PR #874): on main the audit
+    # sat INSIDE the registry try, so an audit failure rolled the whole
+    # registration back (clean 500, retry succeeds). The Supabase path has no
+    # row-level rollback — a post-persist audit failure must NOT 500 the
+    # client with a 409-on-retry lockout. The registry path keeps the
+    # in-try audit (selfhost parity with main).
+    if not is_supabase_enabled():
+        await _async_audit(
+            request, team_id, "tenant_register",
+            resource_type="team", resource_id=team_id,
+        )
+    else:
+        try:
+            await _async_audit(
+                request, team_id, "tenant_register",
+                resource_type="team", resource_id=team_id,
+            )
+        except Exception:
+            pass  # registration is durable; audit failure must not 500
 
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
 
@@ -2511,19 +2525,28 @@ async def create_team(body: dict, user: dict = Depends(get_current_user)):
         # role='owner' rows created within the last hour).
         since = (datetime.now(_tz.utc) - _td(hours=1)).isoformat()
         recent = membership_count_since(
-            cp, cutoff=since, user_id=user["user_id"])
+            cp, cutoff=since, user_id=user["user_id"], role="owner")
         if recent >= 3:
             raise HTTPException(status_code=429,
                                 detail="Too many teams created — try again later")
         # Duplicate-name 409 (registry team_create raises ControlPlaneError
-        # 'already exists'; teams.name has no unique index in 0006, so the
-        # pre-check is the parity guard).
+        # 'already exists'; the 0011 unique index is the atomic guard — the
+        # pre-check is the friendly fast-path, the RPC 409 is authoritative).
         if team_by_name(cp, name):
             raise HTTPException(status_code=409, detail="Team name already exists")
 
         team_id = str(_uuid.uuid4().hex[:26])
         graph_name = f"team_{name}"  # sdk.team_create parity (0006 note: team_{name})
         api_key = f"tt_{_uuid.uuid4().hex}"
+        # Eager default-graph TeamMeta FIRST (register_user's documented
+        # ordering — review P2, PR #874): an orphaned graph namespace is
+        # harmless, an orphaned teams row is not (provision-then-graph would
+        # 500 the client with rows persisted; retry then 409s on the name).
+        proj = _make_sdk(namespace=team_id)._get_proj()
+        proj.db.select_graph(graph_name).query(
+            "CREATE (:TeamMeta {name: $name, created: $now})",
+            params={"name": name, "now": datetime.now(_tz.utc).isoformat()},
+        )
         try:
             provision_team(cp, **{
                 "p_user_id": user["user_id"],
@@ -2536,18 +2559,13 @@ async def create_team(body: dict, user: dict = Depends(get_current_user)):
                 "p_graph_name": graph_name,
                 "p_tier": "free",
             })
-            # Eager default-graph TeamMeta (sdk.team_create parity — the
-            # backup sweep reads graph_name from teams and expects the
-            # namespace to exist).
-            proj = _make_sdk(namespace=team_id)._get_proj()
-            proj.db.select_graph(graph_name).query(
-                "CREATE (:TeamMeta {name: $name, created: $now})",
-                params={"name": name, "now": datetime.now(_tz.utc).isoformat()},
-            )
         except Exception as e:
-            from tortoise.exceptions import ControlPlaneError
-            if isinstance(e, ControlPlaneError) and "already exists" in str(e):
-                raise HTTPException(status_code=409, detail="Team name already exists")
+            # 0011 unique index: a concurrent duplicate name surfaces as a
+            # PostgREST 409 → 409 (the ControlPlaneError mapping below is for
+            # the registry path).
+            if "HTTP 409" in str(e):
+                raise HTTPException(status_code=409,
+                                    detail="Team name already exists")
             raise HTTPException(status_code=500, detail="Team creation failed")
         return {"team_id": team_id, "graph_name": graph_name,
                 "tier": "free", "name": name}
@@ -3154,6 +3172,11 @@ async def agent_signup(request: Request):
                 "p_lookup_hash": lookup_hash,
                 "p_graph_name": graph_name,
                 "p_tier": "free",
+                # key_prefix = api_key[:10] — registry-path parity (review
+                # P2, PR #874: without this the RPC default left(team_id, 8)
+                # applied, so the dashboard showed a different prefix per
+                # mode for the same mint type).
+                "p_key_prefix": api_key[:10],
                 "p_max_users": mu,
                 "p_max_graphs": mg,
                 "p_ops_allowance": ops,
@@ -3610,6 +3633,13 @@ async def create_onboarding_team(body: dict, team: dict = Depends(get_current_te
                 "p_tier": "free",
             })
         except Exception as e:
+            # 0011 unique index: a duplicate team name surfaces as a
+            # PostgREST 409 → 409 (registry sdk.team_create raises
+            # ControlPlaneError → 400; 409 is the closer contract — review
+            # P1, PR #874).
+            if "HTTP 409" in str(e):
+                raise HTTPException(status_code=409,
+                                    detail="Team name already exists")
             raise HTTPException(status_code=400, detail=f"Team create failed: {e}")
         _update_onboarding_state(team["team_id"], team_created=True)
         _track_onboarding_event(team, "question_answered",

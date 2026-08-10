@@ -305,6 +305,9 @@ class TestAgentSignup:
         assert fn == "provision_team"
         assert p["p_user_id"] is None
         assert p["p_identity"] == identity
+        # key_prefix = api_key[:10] — registry-path parity (review P2,
+        # PR #874)
+        assert p["p_key_prefix"] == key[:10]
         assert p["p_team_id"] == team_id
         assert p["p_graph_name"] == f"team_{team_id}"
         assert p["p_lookup_hash"] == lookup_hash(key)
@@ -431,6 +434,55 @@ class TestCreateTeam:
         fake.seed("teams", [{"id": "t-acme", "name": "acme"}])
         r = tc.post("/v1/teams", json={"name": "acme"})
         assert r.status_code == 409
+
+    def test_duplicate_name_race_maps_rpc_409(self, user_client):
+        """0011 unique-index guard (review P1, PR #874): a concurrent
+        duplicate name surfaces as a PostgREST 409 from provision_team →
+        HTTP 409, NOT a 500 (the pre-check is a friendly fast-path; the
+        index is authoritative)."""
+        tc, fake, _ = user_client
+
+        class _UniqueViolation(FakeControlPlane):
+            def __init__(self, base):
+                self._base = base
+
+            def rpc(self, fn, body):
+                if fn == "provision_team":
+                    raise RuntimeError(
+                        "Supabase control-plane RPC failed (provision_team): "
+                        "HTTP 409 (duplicate key value violates unique "
+                        "constraint uq_teams_name)")
+                return self._base.rpc(fn, body)
+
+            def query(self, table, **kw):
+                return self._base.query(table, **kw)
+
+        import tortoise.supabase_control as sc
+        old = sc.get_control_plane
+        sc.get_control_plane = lambda: _UniqueViolation(fake)
+        try:
+            r = tc.post("/v1/teams", json={"name": "acme"})
+        finally:
+            sc.get_control_plane = old
+        assert r.status_code == 409, r.text
+
+    def test_rate_limit_counts_owner_rows_only(self, user_client):
+        """#743(b) parity (review P2, PR #874): the team-create rate limit
+        counts OWNER memberships only — a user who accepted invites into
+        other teams (member rows) must not be 429-blocked from creating
+        their own team."""
+        from datetime import datetime, timedelta, timezone
+        tc, fake, _ = user_client
+        since = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
+        # 3 MEMBER rows (invite accepts) — must NOT trigger the owner limit
+        fake.seed("team_memberships", [
+            {"id": f"mem-inv-{i}", "user_id": "user-1",
+             "team_id": f"team-inv-{i}", "role": "member",
+             "status": "active", "created_at": since}
+            for i in range(3)
+        ])
+        r = tc.post("/v1/teams", json={"name": "mine"})
+        assert r.status_code == 200, r.text
 
     def test_rate_limit_3_per_hour(self, user_client):
         tc, fake, _ = user_client
