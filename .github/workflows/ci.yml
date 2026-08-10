@@ -82,6 +82,11 @@ jobs:
         run: uv lock --check
       - name: Frozen sync (dev group)
         run: uv sync --frozen --group dev
+      - name: Dev-group collection check
+        # Cheap (no servers): proves the dev group is sufficient for the
+        # suite's imports, so `uv run pytest` cannot silently drift from
+        # the pip CI path (#493).
+        run: uv run pytest tests/ --collect-only -q --ignore=tests/e2e
 
   test-isolation:
     runs-on: ubuntu-latest

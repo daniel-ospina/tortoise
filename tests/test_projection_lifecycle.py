@@ -83,9 +83,10 @@ sys.path.insert(0, {os.getcwd()!r})
 from tortoise.projection import FalkorProjection
 proj = FalkorProjection({path!r})
 # no close(), no with — atexit must clean up on normal exit
-out = subprocess.run(["ps", "-eo", "args"], capture_output=True, text=True).stdout
+out = subprocess.run(["ps", "-ww", "-eo", "args"], capture_output=True, text=True).stdout
 # The server must be ALIVE while the projection is open (self-contained
-# sanity — no dependency on other tests' servers being up, #493).
+# sanity — no dependency on other tests' servers being up; -ww avoids the
+# 80-column ps truncation that hides the path on ubuntu runners, #493).
 print("ALIVE" if ("redis-server" in out and {dbname!r} in out) else "DEAD")
 """
     proc = subprocess.run([sys.executable, "-c", code],
@@ -95,7 +96,7 @@ print("ALIVE" if ("redis-server" in out and {dbname!r} in out) else "DEAD")
         f"server not alive during subprocess (ps: {proc.stdout[:200]})"
     time.sleep(1)
     # the specific socket for this db should be gone
-    out = subprocess.run(["ps", "-eo", "args"], capture_output=True,
+    out = subprocess.run(["ps", "-ww", "-eo", "args"], capture_output=True,
                          text=True).stdout
     leftovers = [l for l in out.splitlines()
                  if "redis-server" in l and dbname in l]

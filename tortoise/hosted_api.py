@@ -101,6 +101,14 @@ def _make_sdk(*, namespace: str | None = None) -> TortoiseSDK:
             # anchor may connect on a later call.
             pass
         _FALLBACK_KEEPALIVE.setdefault(namespace or "", anchor)
+    elif anchor._proj is None:
+        # Self-heal: the anchor was stored unconnected (transient failure
+        # above, or created under a test patch). Try once more so keepalive
+        # is not permanently off for this namespace.
+        try:
+            anchor._get_proj()
+        except Exception:
+            pass
     sdk = TortoiseSDK(db_path=db_path, namespace=namespace)
     return sdk
 
