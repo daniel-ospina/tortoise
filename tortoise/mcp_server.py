@@ -109,13 +109,24 @@ def _get_sdk():
     if _db_uri.startswith(("docker://", "redis://", "rediss://")):
         from tortoise.projection import FalkorProjection
         import time as _time
-        _sdk = TortoiseSDK()
-        # Retry Docker connection 3x with backoff; exit on exhaustion (#25 P3a, #32)
+        # Retry Docker connection 3x with backoff; exit on exhaustion (#25 P3a, #32).
+        # _sdk is cached ONLY on success — assigning before the retry loop left a
+        # poisoned docker-URI SDK cached when the connection failed and a caller
+        # caught the SystemExit, breaking every later tool call (localhost:6379
+        # connection refused across the whole suite, #493).
         for attempt in range(3):
             try:
-                _sdk._proj = FalkorProjection.from_uri(_db_uri)
+                # Connect FIRST (FalkorProjection.from_uri probes eagerly), then
+                # commit to the global — TortoiseSDK() is lazy and never
+                # connects, so assigning it before from_uri left a poisoned
+                # docker-URI SDK cached when the connection failed and a caller
+                # caught the SystemExit, breaking every later tool call
+                # (localhost:6379 connection refused across the whole suite, #493).
+                _proj = FalkorProjection.from_uri(_db_uri)
                 if attempt > 0:
                     _log.warning("Docker connection succeeded on attempt %d", attempt + 1)
+                _sdk = TortoiseSDK()
+                _sdk._proj = _proj
                 break
             except Exception as e:
                 if attempt < 2:
@@ -917,7 +928,7 @@ def tortoise_topic_summarize(topic: str,
     and what is contested (elevated variance, NAND conflicts), plus the argument
     topology connecting them.
 
-    Classification uses EP posterior variance from persisted ep_alpha/ep_beta:
+    Classification uses EP posterior variance from persisted posterior (posterior_alpha/beta, falling back to ep_alpha/beta priors):
     - significant/settled: confidence_mean >= 0.7 AND variance < 0.01
     - contested: variance > 0.04 (destabilized posterior)
     - disputed pairs: NAND-connected where both have variance > 0.02
@@ -1279,16 +1290,24 @@ def tortoise_onboarding_github_status() -> dict:
     team_id = _current_team_id.get()
     if team_id is None:
         return {"error": "No team context (HTTP mode required)"}
-    sdk = _get_team_sdk()
+    # Follows the hosted seam (plan Task 6): Supabase teams row via the
+    # service-role control plane in Supabase mode, registry for selfhost.
+    from tortoise.hosted_api import _github_credentials
     try:
-        reg = sdk._get_registry().query(
-            "MATCH (t:Team {id: $id}) RETURN t.github_token_enc, t.github_org",
-            params={"id": team_id}).result_set
+        enc, org = _github_credentials(team_id)
+    except RuntimeError:
+        # Fail-closed: a control-plane outage is an ERROR, not "disconnected"
+        # — reporting connected=False would make the user think GitHub got
+        # disconnected. Name the actual plane (registry vs Supabase) so
+        # selfhost operators aren't misled (code-review P2, PR #861).
+        from tortoise.supabase_control import is_supabase_enabled
+        plane = "Supabase control plane" if is_supabase_enabled() else "registry"
+        return {"error": f"{plane} unavailable"}
     except Exception:
         return {"connected": False, "org": None, "repos_count": None}
-    if not reg or not reg[0][0]:
+    if not enc:
         return {"connected": False, "org": None, "repos_count": None}
-    return {"connected": True, "org": reg[0][1], "repos_count": None}
+    return {"connected": True, "org": org, "repos_count": None}
 
 
 @mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
@@ -1303,15 +1322,16 @@ def tortoise_onboarding_github_index(org: str, repo: str | None = None) -> dict:
         return {"error": "No team context (HTTP mode required)"}
     import secrets as _secrets
     import asyncio as _asyncio
-    from tortoise.hosted_api import _INDEX_JOBS, _run_indexing, _make_sdk as _ha_make_sdk
-    sdk = _ha_make_sdk(namespace="registry")
+    from tortoise.hosted_api import _INDEX_JOBS, _github_token_enc, _run_indexing
     try:
-        rows = sdk._get_registry().query(
-            "MATCH (t:Team {id: $id}) RETURN t.github_token_enc",
-            params={"id": team_id}).result_set
+        encrypted = _github_token_enc(team_id)
     except Exception:
-        return {"error": "Registry unavailable"}
-    if not rows or not rows[0][0]:
+        # Name the actual plane (registry vs Supabase) so selfhost operators
+        # aren't misled (code-review P2, PR #861).
+        from tortoise.supabase_control import is_supabase_enabled
+        plane = "Supabase control plane" if is_supabase_enabled() else "registry"
+        return {"error": f"{plane} unavailable"}
+    if not encrypted:
         return {"error": "GitHub not connected. Run tortoise_onboarding_github_connect first."}
     job_id = _secrets.token_hex(8)
     _INDEX_JOBS[job_id] = {"status": "started", "progress": 0,

@@ -35,7 +35,7 @@ class TortoiseEP:
     """
 
     def __init__(self, projection, *, damping=0.5, n_quad=8,
-                 max_iter=50, tol=1e-3, evidence=None):
+                 max_iter=50, tol=1e-4, evidence=None):
         self.proj = projection
         self.g = projection.g
         self.damping = damping
@@ -52,14 +52,23 @@ class TortoiseEP:
         self._node_cache: dict[str, tuple[float, float]] = {}
         self._msg_cache: dict[tuple[str, str, str], tuple[float, float]] = {}
 
+        self._immutable_priors: set[str] = set()
         if affected_claims:
             rows = self.g.query(
                 "MATCH (n:Point) WHERE n.id IN $ids "
-                "RETURN n.id, coalesce(n.ep_alpha,1.0), coalesce(n.ep_beta,1.0)",
+                "RETURN n.id, coalesce(n.ep_alpha,1.0), coalesce(n.ep_beta,1.0), "
+                "       coalesce(n.baseline_set, false)",
                 params={"ids": list(affected_claims)},
             ).result_set
-            for cid, a, b in rows:
+            for cid, a, b, is_baseline in rows:
                 self._node_cache[cid] = (float(a), float(b))
+                # #844: explicit baselines (baseline_set=true) are IMMUTABLE
+                # evidence priors per sdk.py 'NEVER recomputed' contract — EP
+                # must not persist posteriors over them or re-runs drift
+                # (each run re-hydrates the previous posterior as the new
+                # prior → confidence erodes monotonically).
+                if is_baseline:
+                    self._immutable_priors.add(cid)
 
         for rel in ("IMPL", "NAND"):
             rows = self.g.query(
@@ -78,15 +87,25 @@ class TortoiseEP:
         by the per-run lifecycle) — flush whatever is present.
         """
         if getattr(self, "_node_cache", None):
+            immutable = getattr(self, "_immutable_priors", set())
             params_list = [
                 {"id": cid, "a": a, "b": b,
-                 "c": round(a/(a+b), 4) if (a + b) > 0 else 0.5}
+                 "c": round(a/(a+b), 4) if (a + b) > 0 else 0.5,
+                 "keep_prior": cid in immutable}
                 for cid, (a, b) in self._node_cache.items()
             ]
             self.g.query(
                 "UNWIND $params AS p "
                 "MATCH (n:Point {id: p.id}) "
-                "SET n.ep_alpha = p.a, n.ep_beta = p.b, n.confidence = p.c",
+                # n.posterior_alpha/beta = the true EP posterior (preferred by
+                # _read_node/compute_confidence — resolves observability for
+                # baseline'd claims, #852 review P1). n.confidence = posterior
+                # mean. n.ep_alpha/beta stay as IMMUTABLE priors for baseline'd
+                # claims (re-run stability), posteriors for others (back-compat).
+                "SET n.confidence = p.c, "
+                "    n.posterior_alpha = p.a, n.posterior_beta = p.b, "
+                "    n.ep_alpha = CASE WHEN p.keep_prior THEN n.ep_alpha ELSE p.a END, "
+                "    n.ep_beta  = CASE WHEN p.keep_prior THEN n.ep_beta  ELSE p.b END",
                 params={"params": params_list},
             )
 
@@ -122,7 +141,8 @@ class TortoiseEP:
             return _cache[node_id]
         rows = self.g.query(
             "MATCH (n:Point {id:$id}) "
-            "RETURN coalesce(n.ep_alpha, 1.0), coalesce(n.ep_beta, 1.0)",
+            "RETURN coalesce(n.posterior_alpha, n.ep_alpha, 1.0), "
+            "       coalesce(n.posterior_beta, n.ep_beta, 1.0)",
             params={"id": node_id},
         ).result_set
         return (float(rows[0][0]), float(rows[0][1])) if rows else (1.0, 1.0)
@@ -134,9 +154,15 @@ class TortoiseEP:
             return
         # #330: guard degenerate (0,0) params — uniform fallback instead of ZDE
         mean = round(alpha / (alpha + beta), 4) if (alpha + beta) > 0 else 0.5
+        # #852 round-6: mirror _flush_cache — baseline'd claims keep their
+        # immutable prior; posterior written separately for observability.
         self.g.query(
             "MATCH (n:Point {id:$id}) "
-            "SET n.ep_alpha=$a, n.ep_beta=$b, n.confidence=$c",
+            "SET n.confidence=$c, n.posterior_alpha=$a, n.posterior_beta=$b, "
+            "    n.ep_alpha=CASE WHEN coalesce(n.baseline_set,false) "
+            "                    THEN n.ep_alpha ELSE $a END, "
+            "    n.ep_beta =CASE WHEN coalesce(n.baseline_set,false) "
+            "                    THEN n.ep_beta  ELSE $b END",
             params={"id": node_id, "a": alpha, "b": beta, "c": mean},
         )
 
@@ -193,9 +219,11 @@ class TortoiseEP:
     def _is_strong(self, claim_id: str, threshold: float = 0.85) -> bool:
         """True if the claim's current belief is at/above the given threshold.
 
-        Used for bidirectional IMPL back-message semantics (#86): a target that
-        is still strong (>= threshold) keeps the source's support unchanged; a
-        weakened target triggers a reduction signal to the source.
+        Utility predicate (reads posterior-first, consistent with
+        _read_node). The #86 bidirectional-IMPL back-message hack that was
+        its production caller was removed in #855 (difference coupling
+        handles upward damage naturally) — retained for defensive utility
+        and the zero-division guard test.
         """
         _cache = getattr(self, "_node_cache", None)
         if _cache is not None and claim_id in _cache:
@@ -203,7 +231,9 @@ class TortoiseEP:
             mean = a / (a + b) if (a + b) > 0 else 0.5
             return mean >= threshold
         rows = self.g.query(
-            "MATCH (n:Point {id:$id}) RETURN n.ep_alpha, n.ep_beta",
+            "MATCH (n:Point {id:$id}) "
+            "RETURN coalesce(n.posterior_alpha, n.ep_alpha, 1.0), "
+            "       coalesce(n.posterior_beta, n.ep_beta, 1.0)",
             params={"id": claim_id},
         ).result_set
         if not rows or rows[0][0] is None:
@@ -252,27 +282,19 @@ class TortoiseEP:
         # Default and missing → bidirectional.
         bidirectional = (direction == "bidirectional")
 
-        # For bidirectional IMPL, the back-message to the source must
-        # carry the TARGET's state as a reduction signal — if the target is
-        # weakened (by NAND or low evidence), the source must be pulled DOWN,
-        # not given a weak positive agreement push. Recompute the back-message
-        # with NAND-style coupling (contradiction) when the target is below its
-        # cavity prior, so bidirectional operators propagate damage upward (#86).
-        if (op_type == "IMPL" and bidirectional and not self._is_strong(id_b)):
-            mom_bk, _ = tilted_moments(
-                alpha_a, beta_a, alpha_b, beta_b, weight, phi_nand, self.n_quad
-            )
-            new_a_bk, new_b_bk = moments_to_beta(*mom_bk)
-            new_eta_a = self._natural_from_beta(new_a_bk, new_b_bk)
-            raw_eta_a = (new_eta_a[0] - cav_eta_a[0], new_eta_a[1] - cav_eta_a[1])
-
         # Proportional boost: breaks EP fixed-point symmetry that forces
         # messages to near-zero for unevidenced targets. Fades as evidence
-        # accumulates: Beta(1,1)=7× boost, Beta(4,4)=1.5×, Beta(10,10)=1×.
+        # accumulates: Beta(1,1)=3×, Beta(4,4)≈1.29×, Beta(10,10)≈1.1× (1+2/max(α+β−1,1)).
+        # Applied to IMPL agreement messages ONLY: boosting a NAND
+        # (contradiction) message to a weakly-evidenced claim would crush it
+        # to ~0 (T4 claim hit by a T0 NAND at w=8 collapses 0.52→0.15 raw,
+        # →0.001 boosted), cratering the whole downstream chain (#855).
         alpha_a, beta_a = self._beta_from_natural(*cav_eta_a)
         alpha_b, beta_b = self._beta_from_natural(*cav_eta_b)
         boost_a = 1.0 + 2.0 / max(alpha_a + beta_a - 1.0, 1.0)
         boost_b = 1.0 + 2.0 / max(alpha_b + beta_b - 1.0, 1.0)
+        if op_type == "NAND":
+            boost_a, boost_b = 1.0, 1.0
         raw_eta_a = (raw_eta_a[0] * boost_a, raw_eta_a[1] * boost_a)
         raw_eta_b = (raw_eta_b[0] * boost_b, raw_eta_b[1] * boost_b)
 
@@ -577,7 +599,8 @@ class TortoiseEP:
         rows = self.g.query(
             "MATCH (n:Point) "
             "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
-            "WITH n, coalesce(n.ep_alpha,1.0) AS a, coalesce(n.ep_beta,1.0) AS b "
+            "WITH n, coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS a, "
+            "     coalesce(n.posterior_beta, n.ep_beta, 1.0) AS b "
             "WITH n, a, b, (a*b)/((a+b)*(a+b)*(a+b+1)) AS v "
             "WHERE v > $t RETURN n.id, n.content, a, b, v ORDER BY v DESC",
             params={"t": variance_threshold},
@@ -625,7 +648,24 @@ class TortoiseEP:
             self.g.query(
                 "UNWIND $params AS p "
                 "MATCH (n:Point {id: p.id}) "
-                "SET n.ep_alpha = p.a, n.ep_beta = p.b",
+                # #852 round-4: mirror _flush_cache's keep_prior semantics —
+                # explicit baselines (baseline_set=true) are IMMUTABLE evidence
+                # priors; run-level evidence must not clobber them. Also clear
+                # any stale posterior so a changed prior is immediately
+                # observable (a successful run re-flushes posteriors).
+                "SET n.ep_alpha = CASE WHEN coalesce(n.baseline_set,false) "
+                "                    THEN n.ep_alpha ELSE p.a END, "
+                "    n.ep_beta  = CASE WHEN coalesce(n.baseline_set,false) "
+                "                    THEN n.ep_beta  ELSE p.b END, "
+                # #852 round-5: clear stale posterior ONLY when the prior
+                # actually changed (baseline'd claims keep their posterior —
+                # it is the observable EP result and not stale if the prior
+                # was rejected). set_point_baseline already clears it on a
+                # genuine baseline change.
+                "    n.posterior_alpha = CASE WHEN coalesce(n.baseline_set,false) "
+                "                           THEN n.posterior_alpha ELSE null END, "
+                "    n.posterior_beta  = CASE WHEN coalesce(n.baseline_set,false) "
+                "                           THEN n.posterior_beta  ELSE null END",
                 params={"params": params_list},
             )
 

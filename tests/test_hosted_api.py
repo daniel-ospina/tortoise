@@ -23,7 +23,7 @@ os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 # Tests opt out; production keeps the limit (RATE_LIMIT_DISABLED=1).
 os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 
-from tortoise.hosted_api import app, get_current_team
+from tortoise.hosted_api import app, get_current_team, get_current_user
 from tortoise.sdk import TortoiseSDK
 
 
@@ -1880,3 +1880,142 @@ class TestMCPMount:
         assert r.status_code == 401, (
             f"/mcp must be mounted (401 from auth middleware), got {r.status_code}: {r.text[:120]}"
         )
+
+
+
+# ── Invite endpoints, registry path (selfhost; plan Task 4 flip) ────────────
+# The Supabase flip keeps the registry path for selfhost — these tests lock
+# the registry behavior + response contract so the env-gated branches can't
+# drift (and so the owner/admin gate can't silently vanish, #763 review).
+
+class TestInviteEndpointsRegistry:
+    """E3/E4 via the registry path with the SAME contract as Supabase mode."""
+
+    @pytest.fixture
+    def registry_env(self, client, monkeypatch):
+        """TestClient + embedded registry seeded with a Team-tier team and
+        an owner membership (user-1).
+
+        Pins TORTOISE_CONTROL_PLANE=registry so these tests exercise the
+        registry path even when SUPABASE_URL + a service key are exported in
+        the dev shell (code-review P2, PR #864)."""
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
+        sdk = TortoiseSDK(namespace="registry")  # patched __init__ → shared temp DB
+        reg = sdk._get_registry()
+        reg.query(
+            "CREATE (t:Team {id: $id, name: $name, tier: 'team'})",
+            params={"id": "team-inv-001", "name": "invite-team"},
+        )
+        reg.query(
+            "CREATE (m:Membership {user_id: $uid, team_id: $tid, "
+            "role: 'owner', status: 'active'})",
+            params={"uid": "user-1", "tid": "team-inv-001"},
+        )
+        return client, sdk
+
+    @pytest.fixture
+    def session_user(self):
+        """JWT session user (get_current_user is NOT the get_current_team
+        override the client fixture applies)."""
+
+        def _set(user_id: str, email: str | None = None):
+            app.dependency_overrides[get_current_user] = lambda: {
+                "user_id": user_id, "email": email}
+
+        yield _set
+        app.dependency_overrides.pop(get_current_user, None)
+
+    def test_mint_accept_round_trip_role_preserved(self, registry_env,
+                                                   session_user):
+        """E2E-3 registry path: mint → accept → membership with the invited
+        role; a used invite cannot be re-accepted."""
+        tc, sdk = registry_env
+        session_user("user-1")
+        r = tc.post("/v1/invites", json={
+            "team_id": "team-inv-001", "email": "bob@example.com",
+            "role": "admin"})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["status"] == "invited"
+        assert body["role"] == "admin"
+        token = body["token"]
+
+        session_user("user-2", "bob@example.com")
+        r = tc.post("/v1/invites/accept", json={"token": token})
+        assert r.status_code == 200, r.text
+        assert r.json() == {"team_id": "team-inv-001", "role": "admin"}
+
+        rows = sdk._get_registry().query(
+            "MATCH (m:Membership {team_id:$tid, user_id:$uid, status:'active'}) "
+            "RETURN m.role",
+            params={"tid": "team-inv-001", "uid": "user-2"},
+        ).result_set
+        assert rows and rows[0][0] == "admin"  # invited role preserved
+
+        # used invite cannot be re-accepted (E2E-3)
+        r = tc.post("/v1/invites/accept", json={"token": token})
+        assert r.status_code == 400
+
+    def test_mint_requires_owner_admin(self, registry_env, session_user):
+        """The owner/admin gate must hold on the registry path too."""
+        tc, sdk = registry_env
+        sdk._get_registry().query(
+            "CREATE (m:Membership {user_id: $uid, team_id: $tid, "
+            "role: 'member', status: 'active'})",
+            params={"uid": "user-9", "tid": "team-inv-001"},
+        )
+        session_user("user-9")
+        r = tc.post("/v1/invites", json={
+            "team_id": "team-inv-001", "email": "bob@example.com",
+            "role": "member"})
+        assert r.status_code == 403
+
+    def test_mint_dedup_409_and_free_tier_402(self, registry_env,
+                                              session_user):
+        tc, sdk = registry_env
+        session_user("user-1")
+        payload = {"team_id": "team-inv-001", "email": "bob@example.com",
+                   "role": "member"}
+        assert tc.post("/v1/invites", json=payload).status_code == 200
+        assert tc.post("/v1/invites", json=payload).status_code == 409
+
+        # free-tier team → 402 (invites are a Team-tier feature)
+        sdk._get_registry().query(
+            "CREATE (t:Team {id: $id, name: $name, tier: 'free'})",
+            params={"id": "team-free-002", "name": "free-team"},
+        )
+        sdk._get_registry().query(
+            "CREATE (m:Membership {user_id: $uid, team_id: $tid, "
+            "role: 'owner', status: 'active'})",
+            params={"uid": "user-1", "tid": "team-free-002"},
+        )
+        r = tc.post("/v1/invites", json={
+            "team_id": "team-free-002", "email": "x@example.com",
+            "role": "member"})
+        assert r.status_code == 402
+
+    def test_list_and_rescind_registry_path(self, registry_env, session_user):
+        tc, sdk = registry_env
+        session_user("user-1")
+        r = tc.post("/v1/invites", json={
+            "team_id": "team-inv-001", "email": "bob@example.com",
+            "role": "member"})
+        invite_id = r.json()["invite_id"]
+        token = r.json()["token"]
+
+        r = tc.get("/v1/invites?team_id=team-inv-001")
+        assert r.status_code == 200
+        assert [i["id"] for i in r.json()] == [invite_id]
+
+        r = tc.delete(f"/v1/invites/{invite_id}?team_id=team-inv-001")
+        assert r.status_code == 200, r.text
+        assert r.json()["revoked"] is True
+
+        r = tc.get("/v1/invites?team_id=team-inv-001")
+        assert r.status_code == 200
+        assert r.json() == []  # revoked no longer pending
+
+        # revoked invite cannot be accepted (E2E-3)
+        session_user("user-2", "bob@example.com")
+        r = tc.post("/v1/invites/accept", json={"token": token})
+        assert r.status_code == 400
