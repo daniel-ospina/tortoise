@@ -1857,3 +1857,23 @@ class TestEventReplay:
         assert len(r.json()["events"]) == 1
 
     # ── Cursor namespace (#692 review P2) ──────────────────────────────
+
+
+# ── MCP mount guard (#833) ──────────────────────────────────────────
+# The /mcp mount was accidentally deleted once (0875221) and production
+# MCP 404'd. This guard asserts the mount is registered: an unauthenticated
+# tools/list POST must reach the MCP app's auth middleware (401), never the
+# FastAPI catch-all (404).
+
+class TestMCPMount:
+    def test_mcp_mount_registered_and_rejects_unauthenticated(self, client):
+        r = client.post(
+            "/mcp",
+            json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+            headers={"Accept": "application/json, text/event-stream"},
+        )
+        # 401 = the mounted MCP app's TeamResolutionMiddleware ran.
+        # 404 = the mount is missing (regression — see #833).
+        assert r.status_code == 401, (
+            f"/mcp must be mounted (401 from auth middleware), got {r.status_code}: {r.text[:120]}"
+        )
