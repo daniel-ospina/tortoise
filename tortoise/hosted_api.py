@@ -4922,29 +4922,50 @@ async def webhooks_stripe(request: Request):
         # No team binding — ack so Stripe stops retrying.
         return JSONResponse(status_code=200, content={"detail": "no team binding"})
 
-    sdk = _make_sdk(namespace="registry")
+    # Lazy registry SDK — ONLY for the registry (selfhost) path. In Supabase
+    # mode the apply + marker + tier read go through the seam and this SDK is
+    # never constructed (a registry-namespaced SDK would be a write vector
+    # post-delete; re-review P1, PR #878).
+    from tortoise.supabase_control import is_supabase_enabled as _sb_enabled
+    sdk = None if _sb_enabled() else _make_sdk(namespace="registry")
+
     try:
-        # Idempotent apply (SETs converge on replay).
+        # Idempotent apply (SETs converge on replay). The apply itself is
+        # seam-aware (#771 re-review P1: _webhook_apply_event's _set branches
+        # to the teams row in Supabase mode; the registry twin for selfhost).
         notify_kind = await asyncio.to_thread(_webhook_apply_event, sdk, team_id, event)
+
         # Marker: first-seen detection (SET-then-marker — the apply ran
         # regardless, so a retry cannot drop the upgrade; only side-effects
-        # are dedup'd).
-        seen_rows = sdk._get_registry().query(
-            "MATCH (w:WebhookEvent {event_id:$id}) RETURN w.first_seen",
-            params={"id": event_id},
-        ).result_set
-        is_first = not seen_rows
-        if is_first:
-            sdk._get_registry().query(
-                "CREATE (w:WebhookEvent {event_id:$id, first_seen:$now, type:$type})",
-                params={"id": event_id, "now": _now_iso(), "type": etype},
-            )
-        if is_first and notify_kind:
-            # Audit + analytics + notifications — first processing only.
+        # are dedup'd). Supabase mode: webhook_events table (0013) via the
+        # seam — the registry WebhookEvent write would RESURRECT the deleted
+        # registry graph (re-review P1, PR #878). Registry mode: WebhookEvent
+        # node, as before.
+        from tortoise.supabase_control import (
+            get_control_plane, is_supabase_enabled, team_tier,
+            webhook_event_marker,
+        )
+        if is_supabase_enabled():
+            cp = get_control_plane()
+            is_first = webhook_event_marker(cp, event_id, etype)
+            tier = team_tier(cp, team_id)
+        else:
+            seen_rows = sdk._get_registry().query(
+                "MATCH (w:WebhookEvent {event_id:$id}) RETURN w.first_seen",
+                params={"id": event_id},
+            ).result_set
+            is_first = not seen_rows
+            if is_first:
+                sdk._get_registry().query(
+                    "CREATE (w:WebhookEvent {event_id:$id, first_seen:$now, type:$type})",
+                    params={"id": event_id, "now": _now_iso(), "type": etype},
+                )
             tier_rows = sdk._get_registry().query(
                 "MATCH (t:Team {id:$id}) RETURN t.tier", params={"id": team_id}
             ).result_set
             tier = tier_rows[0][0] if tier_rows else None
+        if is_first and notify_kind:
+            # Audit + analytics + notifications — first processing only.
             await _async_audit(
                 request, team_id, notify_kind,
                 resource_type="team", resource_id=team_id,

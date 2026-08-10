@@ -228,14 +228,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"verify-cutover: CANNOT RUN — Supabase precondition: {e}",
               file=sys.stderr)
 
-    if cannot_run:
-        return 2
     if assertion_failures:
         # Exit-code contract (review P2, PR #878): 1 = an assertion was
-        # VIOLATED (detected but not fixed), 2 = could not run. Both legs
-        # failing is still 1 — the operator must see "assertion failed",
-        # not "could not run".
+        # VIOLATED (detected but not fixed), 2 = could not run. An assertion
+        # failure wins over a cannot-run on the other leg — the operator
+        # must see "assertion failed" even when the second leg couldn't
+        # run, so a masked violation is impossible.
         return 1
+    if cannot_run:
+        return 2
     print("verify-cutover: PASS — preconditions hold "
           f"(registry {REGISTRY_GRAPH} empty, Supabase placeholder-only).")
     return 0

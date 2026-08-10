@@ -1103,7 +1103,11 @@ def update_team_billing(cp, team_id: str, updates: dict) -> None:
     """
     allowed = {"tier", "stripe_customer_id", "subscription_id",
                "subscription_status", "customer_email", "grace_until",
-               "current_period_end"}
+               "current_period_end",
+               # quota columns (0006) — apply_limits' Supabase branch writes
+               # them; dropping them here would silently keep upgrades at
+               # free-tier caps (re-review P1, PR #878)
+               "max_users", "max_graphs", "ops_allowance", "graph_size_cap"}
     body = {k: v for k, v in updates.items() if k in allowed}
     if not body:
         return
@@ -1113,3 +1117,38 @@ def update_team_billing(cp, team_id: str, updates: dict) -> None:
         filters=[("id", "eq", team_id)],
         json_body=body,
     )
+
+
+def webhook_event_marker(cp, event_id: str, etype: str) -> bool:
+    """First-seen marker for a Stripe webhook event (Supabase twin of the
+    registry WebhookEvent node — #771 re-review P1).
+
+    Returns True when the event is NEW (marker created now), False when it
+    was already seen. The apply itself is idempotent (replays converge);
+    only side-effects (notify/audit/analytics) are gated on first-seen.
+    """
+    rows = cp.query(
+        "webhook_events",
+        select=["event_id"],
+        filters=[("event_id", "eq", event_id)],
+    )
+    if rows:
+        return False
+    from datetime import datetime, timezone
+    cp.query(
+        "webhook_events",
+        method="POST",
+        json_body={
+            "event_id": event_id,
+            "first_seen": datetime.now(timezone.utc).isoformat(),
+            "type": etype,
+        },
+    )
+    return True
+
+
+def team_tier(cp, team_id: str) -> str | None:
+    """Current tier from the teams row (webhook analytics twin of the
+    registry tier read)."""
+    rows = cp.query("teams", select=["tier"], filters=[("id", "eq", team_id)])
+    return rows[0].get("tier") if rows else None

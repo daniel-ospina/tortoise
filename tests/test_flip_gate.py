@@ -377,7 +377,91 @@ class TestWebhookSupabaseBranch:
         row = fake.tables["teams"][0]
         assert row.get("tier") == "free"
         assert row.get("subscription_status") == "canceled"
-        # No registry write: the webhook must not construct a registry SDK
-        # for the apply path in Supabase mode (make_sdk may be called for
-        # unrelated reasons — assert no registry-namespaced _get_registry
-        # usage by checking the teams row was the only write).
+        # ZERO registry writes (re-review P1, PR #878): the webhook must not
+        # construct a registry-namespaced SDK in Supabase mode — the marker
+        # (webhook_events) and tier read go through the seam.
+        assert not any(
+            a[0] == "make_sdk" and a[1] and a[1][0] == "registry"
+            for a in calls
+        ), f"webhook built a registry SDK in Supabase mode: {calls}"
+        # The first-seen marker landed in the seam store, not the registry.
+        assert len(fake.tables.get("webhook_events", [])) == 1
+        assert fake.tables["webhook_events"][0]["event_id"] == "evt_test_1"
+
+    def test_webhook_retry_dedup_via_seam_marker(self, monkeypatch):
+        """A replayed event is NOT first-seen: side-effects fire once."""
+        import tortoise.hosted_api as ha
+        from tests.fake_control_plane import FakeControlPlane
+
+        monkeypatch.setenv("SUPABASE_URL", "https://test.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc_key")
+        monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_test")
+        monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_123")
+        monkeypatch.setenv("STRIPE_PRICE_IDS", json.dumps({
+            "free": {"monthly": "price_free", "annual": "price_free_yr"},
+            "team": {"monthly": "price_team", "annual": "price_team_yr"},
+        }))
+        import tortoise.supabase_control as sc
+        fake = FakeControlPlane({"teams": [{"id": "team-1",
+                                             "stripe_customer_id": "cus_123"}]})
+        monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
+        from fastapi.testclient import TestClient
+
+        def _signed():
+            import time as _t, hmac as _h, hashlib as _hl
+            payload = {
+                "id": "evt_test_2",
+                "type": "customer.subscription.deleted",
+                "data": {"object": {"id": "sub_1", "customer": "cus_123",
+                                      "status": "canceled"}},
+            }
+            raw = json.dumps(payload).encode()
+            ts = str(int(_t.time()))
+            sig = _h.new(b"whsec_test", f"{ts}.{raw.decode()}".encode(),
+                         _hl.sha256).hexdigest()
+            return raw, {"stripe-signature": f"t={ts},v1={sig}"}
+
+        raw, headers = _signed()
+        with TestClient(ha.app) as tc:
+            assert tc.post("/webhooks/stripe", content=raw,
+                           headers=headers).status_code == 200
+        # marker now exists
+        assert len(fake.tables["webhook_events"]) == 1
+        raw2, headers2 = _signed()
+        with TestClient(ha.app) as tc:
+            assert tc.post("/webhooks/stripe", content=raw2,
+                           headers=headers2).status_code == 200
+        # replay: still one marker row (dedup), teams row still canceled
+        assert len(fake.tables["webhook_events"]) == 1
+        assert fake.tables["teams"][0].get("tier") == "free"
+
+    def test_apply_limits_supabase_writes_quota_columns(self, monkeypatch):
+        """Re-review P1 (PR #878): apply_limits' Supabase branch must raise
+        quota caps on upgrade — update_team_billing's whitelist carries the
+        0006 quota columns."""
+        from tortoise.billing import apply_limits
+        from tests.fake_control_plane import FakeControlPlane
+        import tortoise.supabase_control as sc
+
+        monkeypatch.setenv("SUPABASE_URL", "https://test.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc_key")
+        fake = FakeControlPlane({"teams": [{"id": "team-1", "tier": "free",
+                                             "max_users": 1, "max_graphs": 1,
+                                             "ops_allowance": 10000,
+                                             "graph_size_cap": 10000}]})
+        monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
+        # A registry SDK that must NOT be touched in Supabase mode.
+        class _Boom:
+            def _get_registry(self):
+                raise AssertionError("registry touched in Supabase mode")
+
+        apply_limits(_Boom(), "team-1", "team")
+        row = fake.tables["teams"][0]
+        assert row["tier"] == "team"
+        # team tier: max_users/max_graphs are None (unlimited — matches the
+        # registry SET twin); ops_allowance + graph_size_cap are raised
+        # above the free defaults.
+        assert row["max_users"] is None
+        assert row["max_graphs"] is None
+        assert row["ops_allowance"] > 10000
+        assert row["graph_size_cap"] > 10000
