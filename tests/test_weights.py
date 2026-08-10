@@ -74,3 +74,27 @@ def test_dynamic_strong_edges_cap_at_3():
     proj = _make_proj(dyn_rows={"IMPL": [[100.0], [100.0]]})  # mean 100 → 3.0
     w = compute_operator_weight(proj, "op", use_dynamic=True)
     assert abs(w - 3.0) < 1e-9, f"expected cap 3.0, got {w}"
+
+
+def test_dynamic_one_rel_type_empty_skips():
+    """A rel type with zero edges is skipped (if rows: guard) — the other
+    type still applies its factor."""
+    proj = _make_proj(dyn_rows={"IMPL": [[20.0], [0.0]]})  # NAND absent
+    w = compute_operator_weight(proj, "op", use_dynamic=True)
+    # IMPL mean 10 → dyn 1.0; NAND has no rows → unchanged
+    assert abs(w - 1.0) < 1e-9, f"expected 1.0 (NAND skipped), got {w}"
+
+
+def test_dynamic_below_floor_dampens_to_0_5():
+    """Mean strength below 5 hits the 0.5 floor."""
+    proj = _make_proj(dyn_rows={"IMPL": [[1.0], [1.0]]})  # mean 1 → 0.5 floor
+    w = compute_operator_weight(proj, "op", use_dynamic=True)
+    assert abs(w - 0.5) < 1e-9, f"expected floor 0.5, got {w}"
+
+
+def test_mitigation_input_ops_doubles_weight():
+    """Mitigating an operator (input_ops > 0) doubles the base weight —
+    the ×2 mitigation factor applies independently of dynamic mode."""
+    proj = _make_proj(input_ops=1)
+    w = compute_operator_weight(proj, "op")
+    assert abs(w - 2.0) < 1e-9, f"expected 2.0 (mitigation ×2), got {w}"

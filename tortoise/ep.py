@@ -320,40 +320,49 @@ class TortoiseEP:
         if not pairs:
             return
 
-        # Cache-free fallback (direct graph-mode calls): keep the legacy
-        # per-pair behavior — run() always loads the cache first, so the
-        # conservation path below is the one that matters in practice.
-        if self._msg_cache is None:
-            for a, b in pairs:
-                self._update_factor(op_id, op_type, [a, b], weight, label, direction)
-            return
-
-        # Accumulate-then-scale (#326). The operator carries ONE weight w
-        # (ONTOLOGY v3.1 §3.1): the factor's TOTAL pull must equal the
-        # isolated 2-input factor's pull at the same weight, and the
-        # decomposition must be input-order-invariant.
+        # Accumulate-then-scale (#326). The operator carries ONE weight w:
+        # the factor's TOTAL pull must equal the isolated 2-input factor's
+        # pull at the same weight, and the decomposition must be
+        # input-order-invariant (design decision recorded in #326; the
+        # #420/#536 falsification suite pins it).
         #
-        # Each pairwise application is computed from a CLEAN cavity state
-        # (the pre-factor message cache is restored between pairs, and
-        # damping is temporarily disabled so raw messages are captured), so
-        # every pair contributes identically regardless of input order. The
-        # per-claim contributions are then summed (accumulate) and the whole
-        # factor is scaled once (scale) to conserve total pull.
-        saved = dict(self._msg_cache)
+        # Every pairwise application is computed from a CLEAN cavity state
+        # (the pre-factor messages for THIS operator are restored between
+        # pairs, and damping is temporarily disabled so raw messages are
+        # captured), so each pair contributes identically regardless of
+        # input order. Per-claim contributions are summed (accumulate) and
+        # the factor is scaled once (scale) to conserve total pull.
+        cache = getattr(self, "_msg_cache", None)
+        saved = dict(cache) if cache is not None else {}
+        # Overlay cache: only THIS operator's (op, claim, rel) keys matter
+        # to the pairwise computations, so copying just those keys between
+        # pairs is O(arity) instead of O(|cache|).
+        overlay_base = {k: v for k, v in saved.items()
+                        if k[0] == op_id and k[2] == op_type}
+        bidirectional = (direction == "bidirectional")
         orig_damping = self.damping
         acc: dict[str, tuple[float, float]] = {c: (0.0, 0.0) for c in input_ids}
+        touched: set[str] = set()
         try:
             self.damping = 1.0  # capture raw (undamped) pair messages
             for a, b in pairs:
-                self._msg_cache = dict(saved)  # clean per-pair state
+                self._msg_cache = dict(overlay_base)  # clean per-pair state
                 self._update_factor(op_id, op_type, [a, b], weight, label, direction)
+                # _update_factor writes the target's message always, and the
+                # source's only for bidirectional operators. Accumulate ONLY
+                # freshly written claims — never the pre-factor state (a stale
+                # source message must not be re-accumulated as if fresh, #326
+                # directed-path corruption).
                 for c in (a, b):
+                    if c == a and not bidirectional:
+                        continue
                     msg = self._msg_cache.get((op_id, c, op_type))
                     if msg is not None:
                         ea, eb = acc[c]
                         acc[c] = (ea + msg[0], eb + msg[1])
+                        touched.add(c)
         finally:
-            self._msg_cache = saved
+            self._msg_cache = cache
             self.damping = orig_damping
 
         # Conservation scale: the FULL pairwise (clique) topology — NAND
@@ -361,22 +370,32 @@ class TortoiseEP:
         # by (n-1) of them -> scale 2/(n(n-1)) makes the total
         # n*(n-1)*pair*scale = 2*pair = the binary factor's total. The STAR
         # topology (IMPL source→targets, and directed NAND attacks) has (n-1)
-        # pairs with the source touched by all -> 1/(n-1) makes source total
-        # pair_src and each target pair_tgt/(n-1) (evidence dilution across
-        # siblings), conserving the binary total.
-        is_star = (op_type != "NAND") or (direction != "bidirectional")
+        # pairs -> scale 1/(n-1) makes the total pair_tgt (directed: targets
+        # only) or pair_src + pair_tgt (bidirectional IMPL: source back-message
+        # + each target), matching the binary factor's total at the same
+        # weight. Star targets are diluted 1/(n-1) (evidence dilution across
+        # siblings).
+        is_star = (op_type != "NAND") or not bidirectional
         scale = (1.0 / (n - 1)) if is_star else (2.0 / (n * (n - 1)))
         d = self.damping
         for c in input_ids:
-            ea, eb = acc[c]
-            if ea == 0.0 and eb == 0.0:
+            if c not in touched:
+                # Directed-star source: no message by design — clear any stale
+                # persisted source message so unidirectional semantics hold.
+                if not bidirectional and c == input_ids[0]:
+                    if saved.get((op_id, c, op_type)) is not None:
+                        self._write_message(op_id, c, 0.0, 0.0, op_type)
                 continue
+            ea, eb = acc[c]
             new_eta = (ea * scale, eb * scale)
             new_eta = (max(min(new_eta[0], 1000), -1000),
                        max(min(new_eta[1], 1000), -1000))
-            old_eta = saved.get((op_id, c, op_type), (0.0, 0.0))
-            damped = (d * new_eta[0] + (1 - d) * old_eta[0],
-                      d * new_eta[1] + (1 - d) * old_eta[1])
+            if cache is not None:
+                old_eta = saved.get((op_id, c, op_type), (0.0, 0.0))
+                damped = (d * new_eta[0] + (1 - d) * old_eta[0],
+                          d * new_eta[1] + (1 - d) * old_eta[1])
+            else:
+                damped = new_eta  # graph mode: no damping base available
             self._write_message(op_id, c, *damped, op_type)
 
     def _update_claim_posterior(self, claim_id: str,
@@ -514,7 +533,7 @@ class TortoiseEP:
             k: evidence strength multiplier (default 2 = mild prior)
             uniform_threshold: |c-0.5| < threshold → uniform prior
         """
-        if confidence is None:
+        if confidence is None or isinstance(confidence, bool):
             return (1.0, 1.0)
         try:
             conf = float(confidence)
