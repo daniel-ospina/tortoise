@@ -21,21 +21,32 @@ from tortoise.auth import lookup_hash
 from tortoise.supabase_control import (
     InvitationError,
     active_api_keys,
+    api_key_by_id,
+    expired_bootstrap_keys,
     get_control_plane,
     github_credentials,
+    graph_metadata,
     insert_api_key,
     invitation_accept,
     invitation_mint,
     invitation_rescind,
     is_supabase_enabled,
+    membership_count_since,
     membership_for_user_team,
+    membership_role,
     pending_invitations,
+    provision_team,
     resolve_api_key,
     revoke_api_key,
+    set_membership,
     store_github_credentials,
+    team_by_email,
     team_by_id,
+    team_by_name,
     team_email,
+    team_members,
     team_onboarding_state,
+    team_api_keys,
     update_last_used,
     update_onboarding_state,
     update_team_email,
@@ -795,6 +806,22 @@ class TestFakeControlPlane:
         assert cp.query("t", filters=[("a", "eq", 1)], select=["a"]) == [
             {"a": 1}, {"a": 1}]
 
+    def test_gt_lt_filters_null_excluding(self):
+        """#765 dialect: gt/lt mirror SQL NULL semantics — a NULL column
+        never matches an ordered comparison."""
+        cp = FakeControlPlane({"t": [
+            {"a": 1, "b": None}, {"a": 2, "b": "x"}, {"a": 3, "b": "y"},
+        ]})
+        assert cp.query("t", filters=[("a", "gt", 1)]) == [
+            {"a": 2, "b": "x"}, {"a": 3, "b": "y"}]
+        assert cp.query("t", filters=[("a", "lt", 3)]) == [
+            {"a": 1, "b": None}, {"a": 2, "b": "x"}]
+        # NULL b never matches gt/lt
+        assert cp.query("t", filters=[("b", "gt", "a")]) == [
+            {"a": 2, "b": "x"}, {"a": 3, "b": "y"}]
+        assert cp.query("t", filters=[("b", "lt", "z")]) == [
+            {"a": 2, "b": "x"}, {"a": 3, "b": "y"}]
+
     def test_patch_and_post(self):
         cp = FakeControlPlane({"t": [{"id": "k1", "x": None}]})
         assert cp.query("t", method="PATCH", filters=[("id", "eq", "k1")],
@@ -803,6 +830,210 @@ class TestFakeControlPlane:
         row = cp.query("t", method="POST", json_body={"id": "k2"})
         assert row == [{"id": "k2"}]
         assert len(cp.tables["t"]) == 2
+
+    def test_rpc_records_calls(self):
+        cp = FakeControlPlane()
+        cp.rpc("some_fn", {"a": 1})
+        assert cp.rpc_calls == [("some_fn", {"a": 1})]
+
+
+# ── Task 8 seam helpers (#765 writer/reader inventory) ───────────────────────
+
+class TestTask8Helpers:
+    """The migrated writers/readers' seam helpers (plan Task 8)."""
+
+    def test_provision_team_via_rpc(self, fake):
+        """provision_team() routes through the RPC and lands teams +
+        membership + api_keys rows (fake mirrors the 0010 SQL)."""
+        from tortoise.auth import lookup_hash
+        key = "tt_provision_test_key_0000000000001"
+        provision_team(fake, **{
+            "p_user_id": None, "p_identity": "anon-abc123",
+            "p_team_id": "team-new-1", "p_team_name": "agent-new",
+            "p_api_key": key, "p_key_hash": "salt:hash",
+            "p_lookup_hash": lookup_hash(key),
+            "p_graph_name": "team_team-new-1",
+            "p_tier": "free", "p_max_users": 1, "p_max_graphs": 1,
+            "p_ops_allowance": 10000, "p_graph_size_cap": 10000,
+        })
+        assert fake.rpc_calls[0][0] == "provision_team"
+        assert any(t["id"] == "team-new-1" for t in fake.tables["teams"])
+        mem = [m for m in fake.tables["team_memberships"]
+               if m["team_id"] == "team-new-1"]
+        assert len(mem) == 1
+        assert mem[0]["user_id"] is None
+        assert mem[0]["identity"] == "anon-abc123"
+        assert mem[0]["role"] == "owner" and mem[0]["status"] == "active"
+        keys = [k for k in fake.tables["api_keys"]
+                if k["team_id"] == "team-new-1"]
+        assert len(keys) == 1
+        assert keys[0]["lookup_hash"] == lookup_hash(key)
+        assert keys[0]["created_via"] == "provisioned"
+        assert keys[0]["id"] == f"key_team-new-1_{lookup_hash(key)[:12]}"
+
+    def test_provision_team_idempotent(self, fake):
+        """Re-invocation is an idempotent upsert (0010 ON CONFLICT) — no
+        duplicate rows, key material refreshed."""
+        from tortoise.auth import lookup_hash
+        key = "tt_provision_test_key_0000000000002"
+        params = {
+            "p_user_id": None, "p_identity": "anon-abc123",
+            "p_team_id": "team-new-2", "p_team_name": "agent-new",
+            "p_api_key": key, "p_key_hash": "salt:hash",
+            "p_lookup_hash": lookup_hash(key),
+            "p_graph_name": "team_team-new-2", "p_tier": "free",
+            "p_max_users": 1, "p_max_graphs": 1,
+            "p_ops_allowance": 10000, "p_graph_size_cap": 10000,
+        }
+        provision_team(fake, **params)
+        key2 = "tt_provision_test_key_0000000000003"
+        params["p_api_key"] = key2
+        params["p_lookup_hash"] = lookup_hash(key2)
+        params["p_key_hash"] = "salt2:hash"
+        provision_team(fake, **params)
+        assert len([t for t in fake.tables["teams"]
+                    if t["id"] == "team-new-2"]) == 1
+        assert len([m for m in fake.tables["team_memberships"]
+                    if m["team_id"] == "team-new-2"]) == 1
+        # rotated key lands as a SECOND api_keys row (multi-key valid; free
+        # tier caps at 2) — matching 0010's ON CONFLICT (lookup_hash)
+        assert len([k for k in fake.tables["api_keys"]
+                    if k["team_id"] == "team-new-2"]) == 2
+
+    def test_provision_team_fail_closed_on_rpc_error(self):
+        with pytest.raises(RuntimeError):
+            provision_team(ErrorControlPlane(), p_team_id="t")
+
+    def test_team_by_email_and_name(self, fake):
+        fake.seed("teams", [{"id": "t1", "name": "acme",
+                              "email": "a@example.com"}])
+        assert team_by_email(fake, "a@example.com") == {"id": "t1"}
+        assert team_by_email(fake, "nope@example.com") is None
+        assert team_by_name(fake, "acme") == {"id": "t1"}
+        assert team_by_name(fake, "other") is None
+
+    def test_team_api_keys_all_rows_newest_first(self, fake):
+        fake.seed("api_keys", [
+            _key_row(id="k1", created_at="2026-07-01T00:00:00Z"),
+            _key_row(id="k2", created_at="2026-08-01T00:00:00Z"),
+            _key_row(id="k3", created_at="2026-08-02T00:00:00Z",
+                     revoked_at="2026-08-03T00:00:00Z"),
+            _key_row(id="k4", team_id="team-other"),
+        ])
+        rows = team_api_keys(fake, "team-free-001")
+        assert [r["id"] for r in rows] == ["k3", "k2", "k1"]
+        assert rows[0]["revoked_at"] == "2026-08-03T00:00:00Z"  # revoked shown
+        assert {"id", "key_prefix", "created_at", "last_used_at",
+                "revoked_at"} <= set(rows[0])
+
+    def test_api_key_by_id(self, fake):
+        fake.seed("api_keys", [_key_row()])
+        row = api_key_by_id(fake, "key-001")
+        assert row == {"team_id": "team-free-001", "revoked_at": None}
+        assert api_key_by_id(fake, "missing") is None
+
+    def test_membership_count_since(self, fake):
+        """Rate-limit counts: gt cutoff + anchor match, NULL-anchored rows
+        excluded."""
+        recent = "2026-08-01T00:00:00Z"
+        fake.seed("team_memberships", [
+            {"id": "m1", "user_id": "u1", "identity": None,
+             "created_at": "2026-08-02T00:00:00Z"},
+            {"id": "m2", "user_id": "u1", "identity": None,
+             "created_at": "2026-07-01T00:00:00Z"},  # old — excluded
+            {"id": "m3", "user_id": None, "identity": "anon-x",
+             "created_at": "2026-08-03T00:00:00Z"},
+            {"id": "m4", "user_id": "u1", "identity": None,
+             "created_at": None},  # NULL — excluded (SQL semantics)
+        ])
+        assert membership_count_since(
+            fake, cutoff=recent, user_id="u1") == 1
+        assert membership_count_since(
+            fake, cutoff=recent, identity="anon-x") == 1
+        assert membership_count_since(
+            fake, cutoff=recent, identity="anon-other") == 0
+
+    def test_team_members_active_and_invited_with_identity(self, fake):
+        fake.seed("team_memberships", [
+            {"id": "m1", "user_id": "u1", "team_id": "team-free-001",
+             "identity": None, "role": "owner", "status": "active",
+             "invited_email": None},
+            {"id": "m2", "user_id": None, "team_id": "team-free-001",
+             "identity": "anon-abc", "role": "member", "status": "active",
+             "invited_email": None},
+            {"id": "m3", "user_id": "u2", "team_id": "team-free-001",
+             "identity": None, "role": "member", "status": "invited",
+             "invited_email": "bob@example.com"},
+            {"id": "m4", "user_id": "u3", "team_id": "team-free-001",
+             "identity": None, "role": "member", "status": "removed",
+             "invited_email": None},
+            {"id": "m5", "user_id": "u4", "team_id": "team-other",
+             "identity": None, "role": "member", "status": "active",
+             "invited_email": None},
+        ])
+        rows = team_members(fake, "team-free-001")
+        assert len(rows) == 3  # removed + other-team excluded
+        # identity rows surface their anon anchor as user_id (round-trip)
+        by_id = {r["user_id"]: r for r in rows}
+        assert by_id["anon-abc"]["role"] == "member"
+        assert by_id["u2"]["email"] == "bob@example.com"
+
+    def test_membership_role_and_set_membership(self, fake):
+        fake.seed("team_memberships", [
+            {"id": "m1", "user_id": "u1", "team_id": "team-free-001",
+             "identity": None, "role": "owner", "status": "active",
+             "invited_email": None},
+            {"id": "m2", "user_id": None, "team_id": "team-free-001",
+             "identity": "anon-abc", "role": "member", "status": "active",
+             "invited_email": None},
+        ])
+        assert membership_role(fake, "team-free-001", "u1") == "owner"
+        # identity rows match by their anchor
+        assert membership_role(fake, "team-free-001", "anon-abc") == "member"
+        assert membership_role(fake, "team-free-001", "ghost") is None
+        set_membership(fake, "team-free-001", "anon-abc", status="removed")
+        assert fake.tables["team_memberships"][1]["status"] == "removed"
+        set_membership(fake, "team-free-001", "u1", role="admin")
+        assert fake.tables["team_memberships"][0]["role"] == "admin"
+
+    def test_expired_bootstrap_keys(self, fake):
+        past = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+        future = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+        fake.seed("api_keys", [
+            _key_row(id="e1", created_via="bootstrap", expires_at=past),
+            _key_row(id="e2", created_via="bootstrap", expires_at=past,
+                     revoked_at="2026-01-01T00:00:00Z"),  # already revoked
+            _key_row(id="e3", created_via="recovery", expires_at=past),
+            _key_row(id="e4", created_via="bootstrap", expires_at=None),
+            _key_row(id="e5", created_via="bootstrap", expires_at=future),
+        ])
+        got = expired_bootstrap_keys(fake, datetime.now(timezone.utc).isoformat())
+        assert [r["id"] for r in got] == ["e1"]
+
+    def test_graph_metadata_derives_default(self, fake):
+        fake.tables["teams"][0]["graph_name"] = "team_team-free-001"
+        assert graph_metadata(fake, "team-free-001") == [{
+            "graph_id": "default", "name": "default", "kind": "default",
+            "namespace": "team_team-free-001"}]
+        assert graph_metadata(fake, "no-such-team") == []
+        assert graph_metadata(fake, "team-free-001")[0]["graph_id"] == "default"
+
+    def test_seam_helpers_fail_closed(self):
+        cp = ErrorControlPlane()
+        for fn in (team_api_keys, api_key_by_id, team_members,
+                   expired_bootstrap_keys, graph_metadata):
+            with pytest.raises(RuntimeError):
+                fn(cp, "team-x")
+        with pytest.raises(RuntimeError):
+            team_by_email(cp, "a@b.co")
+        with pytest.raises(RuntimeError):
+            team_by_name(cp, "acme")
+        with pytest.raises(RuntimeError):
+            membership_count_since(cp, cutoff="2026-01-01", user_id="u")
+        with pytest.raises(RuntimeError):
+            membership_role(cp, "team-x", "u")
+        with pytest.raises(RuntimeError):
+            set_membership(cp, "team-x", "u", status="removed")
 
 
 # ── Constructor sanity ──────────────────────────────────────────────────────
@@ -864,6 +1095,59 @@ class TestClientConstruction:
             r2 = cp.query("teams", select=["id"], filters=[("id", "eq", "team-1")])
             assert r1 == [{"id": "team-1"}] and r2 == [{"id": "team-1"}]
             assert calls["n"] == 2
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_real_client_rpc_persistent_and_fail_closed(self):
+        """#765: rpc() uses the SAME persistent httpx client (no `with
+        client:` close hazard) and fails closed on non-2xx (RuntimeError,
+        never a silent pass)."""
+        import json
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        calls = {"n": 0}
+
+        class _Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                calls["n"] += 1
+                if self.path.startswith("/rest/v1/rpc/provision_team"):
+                    body = b""
+                    self.send_response(204)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                else:
+                    body = json.dumps({"message": "boom"}).encode()
+                    self.send_response(500)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+
+            def log_message(self, *a):  # silence
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), _Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            from tortoise.supabase_control import SupabaseControlPlane
+            cp = SupabaseControlPlane(
+                url=f"http://127.0.0.1:{server.server_port}",
+                service_key="svc",
+            )
+            # two RPC calls on one persistent client (the #851 regression
+            # class: `with client:` would close it after the first call)
+            assert cp.rpc("provision_team", {"a": 1}) is None
+            assert cp.rpc("provision_team", {"a": 2}) is None
+            assert calls["n"] == 2
+            # fail-closed: non-2xx raises RuntimeError
+            with pytest.raises(RuntimeError, match="HTTP 500"):
+                cp.rpc("no_such_fn")
+            # and the client still works after the failure
+            assert cp.rpc("provision_team", {"a": 3}) is None
         finally:
             server.shutdown()
             server.server_close()

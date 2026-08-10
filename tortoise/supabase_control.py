@@ -129,6 +129,52 @@ class SupabaseControlPlane:
         import httpx
         self._http = httpx.Client(timeout=self._timeout)
 
+    def rpc(self, fn: str, body: dict | None = None) -> dict | None:
+        """Call a Postgres function via PostgREST RPC (#765 plan Task 8).
+
+        ``POST {url}/rest/v1/rpc/{fn}`` with the service key and JSON body.
+        Used by the writer flip for ``provision_team`` (the atomic
+        teams + team_memberships + api_keys upsert, migration 0010) — the
+        agent-signup / register / team-create writers must NOT hand-roll
+        three table writes when the RPC is one transaction.
+
+        Fail-closed contract (same as ``query``): non-2xx responses and
+        transport errors raise RuntimeError. Uses the same persistent httpx
+        client — never ``with self._http`` (httpx 0.28 closes externally-
+        constructed clients on __exit__; re-review P0, PR #851).
+        """
+        url = f"{self._url}/rest/v1/rpc/{fn}"
+        headers = {
+            "apikey": self._key,
+            "Authorization": f"Bearer {self._key}",
+            "Content-Type": "application/json",
+            "Prefer": "return=minimal",
+        }
+        try:
+            import httpx
+            resp = self._http.post(url, params={"select": "*"},
+                                   headers=headers, json=body or {})
+        except RuntimeError:
+            raise
+        except Exception as e:  # transport errors — fail closed
+            raise RuntimeError(
+                f"Supabase control-plane RPC failed ({fn}): {e}"
+            ) from e
+        if resp.status_code >= 300:
+            raise RuntimeError(
+                f"Supabase control-plane RPC failed ({fn}): "
+                f"HTTP {resp.status_code}"
+            )
+        if not resp.content:
+            return None
+        try:
+            data = resp.json()
+        except Exception as e:
+            raise RuntimeError(
+                f"Supabase control-plane bad RPC response ({fn}): {e}"
+            ) from e
+        return data if isinstance(data, dict) else None
+
     def query(self, table: str, *, select: list[str] | None = None,
               filters: list[tuple[str, str, object]] | None = None,
               method: str = "GET", json_body: dict | None = None,
@@ -136,7 +182,8 @@ class SupabaseControlPlane:
         """Run one PostgREST call. Returns row dicts; [] for PATCH/no rows.
 
         Filters: (column, op, value) with ops ``eq``, ``neq``, ``is``
-        (value None → ``col=is.null``). Raises RuntimeError on any failure.
+        (value None → ``col=is.null``), ``gt``, ``lt``. Raises RuntimeError
+        on any failure.
         """
         url = f"{self._url}/rest/v1/{table}"
         params: dict[str, str] = {}
@@ -149,7 +196,15 @@ class SupabaseControlPlane:
                 params[col] = f"eq.{value}"
             elif op == "neq":
                 params[col] = f"neq.{value}"
+            elif op in ("gt", "lt"):
+                # #765 plan Task 8: reconcile (expires_at < now) + the
+                # signup/team-creation rate-limit counts (created_at > cutoff)
+                # need ordered comparisons. NULL semantics mirror SQL: a row
+                # with a NULL column never matches (PostgREST's gt./lt. is
+                # NULL-excluding; the fake mirrors this).
+                params[col] = f"{op}.{value}"
             elif op == "lte":
+                # ISO-8601 cutoff for the post-grace purge sweep (#302).
                 params[col] = f"lte.{value}"
             else:
                 raise ValueError(f"unsupported filter op {op!r}")
@@ -948,3 +1003,183 @@ def purge_team_control_plane(cp, team_id: str) -> None:
     cp.query("team_memberships", method="DELETE", filters=[("team_id", "eq", team_id)])
     cp.query("invitations", method="DELETE", filters=[("team_id", "eq", team_id)])
     cp.query("teams", method="DELETE", filters=[("id", "eq", team_id)])
+
+
+# ── Task 8 writer inventory: keys + members + provisioning (#765) ────────────
+#
+# The remaining hosted writers flip here (plan Task 8): POST/GET/DELETE
+# /v1/team/keys, /v1/agent/signup + /v1/register + POST /v1/teams (all via
+# the atomic provision_team RPC, migration 0010), members DELETE/PATCH,
+# member listing, reconcile, and the graph-metadata derivation for
+# graph_list. Everything stays fail-closed: a query error raises RuntimeError
+# and no writer ever falls back to the registry.
+
+
+def provision_team(cp, **params: object) -> None:
+    """Call the atomic provision_team SECURITY DEFINER RPC (migration 0010).
+
+    One transaction: teams + team_memberships + api_keys (idempotent
+    upserts; exactly one row each). Writer inventory (#765): agent_signup,
+    /v1/register, POST /v1/teams and the onboarding sub-team create all
+    route their Supabase writes through this RPC — never hand-rolled table
+    writes (an atomic provision cannot leave a half-team behind).
+
+    Exactly one of ``user_id`` / ``identity`` is required (the RPC enforces
+    it too); key hashes are computed by the caller (the pepper lives in app
+    code, never the DB — plan P1-1). Raises RuntimeError on failure
+    (fail-closed): a failed provision surfaces as a 500, and the caller
+    cleans up any data-plane graph it created first.
+    """
+    cp.rpc("provision_team", params)
+
+
+def team_by_email(cp, email: str) -> dict | None:
+    """Team row for an email (register idempotency — 409 already_registered)."""
+    rows = cp.query("teams", select=["id"], filters=[("email", "eq", email)])
+    return rows[0] if rows else None
+
+
+def team_by_name(cp, name: str) -> dict | None:
+    """Team row for a name (create_team duplicate-name 409)."""
+    rows = cp.query("teams", select=["id"], filters=[("name", "eq", name)])
+    return rows[0] if rows else None
+
+
+def team_api_keys(cp, team_id: str) -> list[dict]:
+    """ALL api_keys rows for a team (revoked included — the dashboard lists
+    them with their revoked_at; registry parity), newest first."""
+    rows = cp.query(
+        "api_keys",
+        select=["id", "key_prefix", "created_at", "last_used_at",
+                "revoked_at"],
+        filters=[("team_id", "eq", team_id)],
+    )
+    rows.sort(key=lambda r: r.get("created_at") or "", reverse=True)
+    return rows
+
+
+def api_key_by_id(cp, key_id: str) -> dict | None:
+    """One api_keys row by id (revoke lookup — team-scoping + already-revoked)."""
+    rows = cp.query(
+        "api_keys",
+        select=["team_id", "revoked_at"],
+        filters=[("id", "eq", key_id)],
+    )
+    return rows[0] if rows else None
+
+
+def membership_count_since(cp, *, cutoff: str, user_id: str | None = None,
+                           identity: str | None = None,
+                           role: str | None = None) -> int:
+    """Membership rows created after ``cutoff`` for a user or an anon
+    identity — the Supabase twin of the registry rate-limit counts
+    (agent-signup per-identity 3/hour, team-create per-user 3/hour).
+    NULL semantics: a row without the anchor column never matches.
+
+    ``role`` narrows to owner rows when given (team-create parity: the
+    registry counts ``(m:Membership {user_id:$uid, role:'owner'})`` — a
+    user who accepted invites into other teams must NOT be rate-limited
+    from creating their own; review P2, PR #874).
+    """
+    filters: list[tuple[str, str, object]] = [("created_at", "gt", cutoff)]
+    if user_id is not None:
+        filters.append(("user_id", "eq", user_id))
+    if identity is not None:
+        filters.append(("identity", "eq", identity))
+    if role is not None:
+        filters.append(("role", "eq", role))
+    return len(cp.query("team_memberships", select=["id"], filters=filters))
+
+
+def team_members(cp, team_id: str) -> list[dict]:
+    """Member listing (E8a): active + invited memberships for a team.
+
+    Mirrors the registry ``list_members`` predicate (status active OR
+    invited). Identity rows (NULL user_id — anon agents) surface their
+    ``identity`` as ``user_id`` so the members API can round-trip
+    DELETE/PATCH /members/{user_id} against them (the registry stores the
+    anon anchor in user_id directly; 0009 keeps it in ``identity``).
+    """
+    rows = cp.query(
+        "team_memberships",
+        select=["user_id", "identity", "role", "status", "invited_email"],
+        filters=[("team_id", "eq", team_id)],
+    )
+    out = []
+    for r in rows:
+        if r.get("status") not in ("active", "invited"):
+            continue
+        out.append({
+            "user_id": r.get("user_id") or r.get("identity"),
+            "role": r.get("role"),
+            "status": r.get("status"),
+            "email": r.get("invited_email") or "",
+        })
+    return out
+
+
+def membership_role(cp, team_id: str, user_id: str) -> str | None:
+    """Role of a member matched by user_id OR identity (agents), any status
+    (mirrors the registry remove/role-change lookup which does not filter
+    status). None when no row matches."""
+    for col in ("user_id", "identity"):
+        rows = cp.query(
+            "team_memberships",
+            select=["role"],
+            filters=[("team_id", "eq", team_id), (col, "eq", user_id)],
+        )
+        if rows:
+            return rows[0]["role"]
+    return None
+
+
+def set_membership(cp, team_id: str, user_id: str, **updates: object) -> None:
+    """PATCH a membership row matched by user_id OR identity (remove =
+    status 'removed'; role change = role). Raises on failure (fail-closed)."""
+    for col in ("user_id", "identity"):
+        cp.query(
+            "team_memberships",
+            method="PATCH",
+            filters=[("team_id", "eq", team_id), (col, "eq", user_id)],
+            json_body=dict(updates),
+        )
+
+
+def expired_bootstrap_keys(cp, now: str) -> list[dict]:
+    """Expired, non-revoked bootstrap api_keys (reconcile sweep — the
+    ``created_via='bootstrap' AND revoked_at IS NULL AND expires_at < now``
+    predicate, D3 #618 contract). NULL expires_at never matches (SQL
+    semantics)."""
+    return cp.query(
+        "api_keys",
+        select=["id"],
+        filters=[("created_via", "eq", "bootstrap"),
+                 ("revoked_at", "is", None),
+                 ("expires_at", "lt", now)],
+    )
+
+
+def graph_metadata(cp, team_id: str) -> list[dict]:
+    """Graph-metadata derivation for Supabase mode (reader inventory:
+    graph_list). The plan data model (0006-0009) has no graphs table —
+    team→graph 1:N metadata is not persisted; the DEFAULT graph is derived
+    from ``teams.graph_name`` (the canonical graph name — 0006 note:
+    sdk.team_create names graphs team_{name}, hosted provisioning
+    team_{team_id}). Returns the registry-shaped list
+    [{graph_id, name, kind, namespace}] with a stable deterministic
+    graph_id (``default``) — the dashboard graph switcher key. Custom
+    graphs are NOT listed in Supabase mode (their namespaces are minted
+    lazily and no table records them); create_graph still returns a
+    namespace for direct use.
+    """
+    rows = cp.query(
+        "teams", select=["id", "graph_name"], filters=[("id", "eq", team_id)]
+    )
+    if not rows or not rows[0].get("graph_name"):
+        return []
+    return [{
+        "graph_id": "default",
+        "name": "default",
+        "kind": "default",
+        "namespace": rows[0]["graph_name"],
+    }]
