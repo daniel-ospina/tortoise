@@ -673,7 +673,7 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
 
     Single Cypher query — NOT N+1. Returns EpBreakdown per Point ID.
     Points with no EP data get EpBreakdown with confidence_mean=0.0, contention=0.0.
-    variance/contested are computed from the PERSISTED ep_alpha/ep_beta
+    variance/contested are computed from the PERSISTED posterior (posterior_alpha/beta, falling back to ep_alpha/beta priors)
     (posterior stability), not from edge ratios.
     """
     if not point_ids:
@@ -692,8 +692,8 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
             "    THEN toFloat(nand_count) / (impl_count + nand_count) "
             "    ELSE 0.0 "
             "  END AS contention, "
-            "  coalesce(n.ep_alpha, 1.0) AS alpha, coalesce(n.ep_beta, 1.0) AS beta, "
-            "  n.ep_alpha IS NOT NULL AS has_ep "
+            "  coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS alpha, coalesce(n.posterior_beta, n.ep_beta, 1.0) AS beta, "
+            "  (n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL) AS has_ep "
         )
         rows = graph.query(cypher, params={"ids": point_ids}).result_set
 
