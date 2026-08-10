@@ -103,7 +103,7 @@ For NAND sources (contradictory), the pseudo-count contributes to `total_pc_neg`
 - **Evidence priors** are set via `set_point_baseline(point_id, α, β)` and injected
   as natural-parameter offsets before message accumulation.
 - **EP convergence** uses damped message passing with Gauss-Jacobi quadrature (n=8),
-  tolerance 1e-3, max 50 iterations.
+  tolerance 1e-4 (#855 tightened from 1e-3), max 50 iterations.
 
 ### 1.5 Graph Topology
 

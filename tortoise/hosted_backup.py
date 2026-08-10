@@ -447,6 +447,74 @@ def _validate_team_id(team_id: str) -> None:
         raise ValueError(f"Invalid team_id {team_id!r} — must be [A-Za-z0-9_-]")
 
 
+# ── #669 backup seam (plan Task 5, P1-3) ────────────────────────────────────
+# The backup pipeline talks to the control plane through ONE seam (an adapter
+# exposing ``query()``): pre-#669 the FalkorDB registry graph handle (Cypher
+# dialect), post-#669 the Supabase control plane (PostgREST dialect —
+# ``SupabaseControlPlane`` or a fake mirroring its interface). The dialect is
+# auto-detected so the registry path keeps working for selfhost while hosted
+# passes the Supabase source through the same seam.
+
+
+def _is_supabase_source(source) -> bool:
+    """Dialect check for the backup seam.
+
+    The registry source is a FalkorDB graph handle whose ``query(cypher)``
+    returns a result-set object; the Supabase source exposes
+    ``query(table, ...)`` returning row dicts. Both name their method
+    ``query`` — the first positional parameter name is the discriminator
+    (``q`` for FalkorDB, ``table`` for PostgREST). An un-inspectable query
+    (or a ``*args`` stub) is treated as the registry dialect — the failure
+    path is unchanged for every existing test stub.
+    """
+    try:
+        import inspect
+        first = next(iter(inspect.signature(source.query).parameters.values()))
+    except Exception:  # noqa: BLE001 — un-inspectable → not PostgREST
+        return False
+    return first.name == "table"
+
+
+def _stamp_backup_latest(source, team_id: str, ts: str) -> None:
+    """Seam: stamp ``backup_latest_at`` on the team's control-plane row.
+
+    Registry mode: SET on the Team graph node. Supabase mode: PATCH the
+    ``teams`` row (the ``id`` filter pins the exact team). Raises on failure
+    — the callers (create_backup/restore_backup) keep the best-effort
+    contract (#669 P3: a control-plane blip must not fail an
+    otherwise-durable backup).
+    """
+    if _is_supabase_source(source):
+        source.query(
+            "teams", method="PATCH", filters=[("id", "eq", team_id)],
+            json_body={"backup_latest_at": ts},
+        )
+    else:
+        source.query(
+            "MATCH (t:Team {id:$id}) SET t.backup_latest_at = $ts",
+            params={"id": team_id, "ts": ts},
+        )
+
+
+def _stamp_backup_restored(source, team_id: str, ts: str | None = None) -> None:
+    """Seam: stamp ``backup_restored_at`` on the team's control-plane row.
+
+    Same dialect split as ``_stamp_backup_latest``. Drills never reach it
+    (restore_backup's ``drill`` flag skips the end-stamp entirely).
+    """
+    ts = ts or datetime.now(timezone.utc).isoformat()
+    if _is_supabase_source(source):
+        source.query(
+            "teams", method="PATCH", filters=[("id", "eq", team_id)],
+            json_body={"backup_restored_at": ts},
+        )
+    else:
+        source.query(
+            "MATCH (t:Team {id:$id}) SET t.backup_restored_at = $ts",
+            params={"id": team_id, "ts": ts},
+        )
+
+
 def create_backup(
     proj,
     registry,
@@ -500,12 +568,9 @@ def create_backup(
             pass
         raise
     try:
-        registry.query(
-            "MATCH (t:Team {id:$id}) SET t.backup_latest_at = $ts",
-            params={"id": team_id, "ts": dump["dumped_at"]},
-        )
-    except Exception as e:  # backup already durable; registry stamp is best-effort
-        logger.warning("backup uploaded but registry stamp failed for %s: %s", team_id, e)
+        _stamp_backup_latest(registry, team_id, dump["dumped_at"])
+    except Exception as e:  # backup already durable; the stamp is best-effort (#669 P3)
+        logger.warning("backup uploaded but stamp failed for %s: %s", team_id, e)
     return manifest
 
 
@@ -763,12 +828,9 @@ def restore_backup(
 
     if not drill:
         try:
-            registry.query(
-                "MATCH (t:Team {id:$id}) SET t.backup_restored_at = $ts",
-                params={"id": team_id, "ts": datetime.now(timezone.utc).isoformat()},
-            )
-        except Exception as e:  # best-effort metadata
-            logger.warning("registry restore stamp failed for %s: %s", team_id, e)
+            _stamp_backup_restored(registry, team_id)
+        except Exception as e:  # best-effort metadata (#669 P3)
+            logger.warning("restore stamp failed for %s: %s", team_id, e)
 
     return {
         "backup_key": backup_key,
