@@ -254,7 +254,11 @@ class _EdgeHandlers:
             'performs', 'produces', 'uses', 'authoredBy', 'ownedBy', 'managedBy',
             'hasMember', 'holdsRole', 'memberOf', 'reportsTo',
             'participatesIn', 'hasPart', 'related', 'dependsOn', 'references',
-            'wasDerivedFrom'
+            'wasDerivedFrom',
+            # #391: about* edges (ONTOLOGY §3.2/§3.3) were only creatable via
+            # create_about_edge — the generic create_edge set missed them.
+            'aboutSubject', 'aboutObject', 'aboutEvent', 'aboutDocument',
+            'aboutSource', 'aboutAction',
         }
         if predicate not in valid_predicates:
             raise ValueError(f"Unknown predicate: {predicate}")
@@ -266,6 +270,23 @@ class _EdgeHandlers:
         targets = self._resolve_entity(target_id, by_id=True, by_eventId=True)
         if not sources or not targets:
             return False
+        # #390: mirror create_owned_by's circular-DAG guard for ownedBy — the
+        # generic create_edge path must not bypass it. The new edge is
+        # source -[:ownedBy]-> target; a cycle would close iff target already
+        # (transitively) owns source. Same varlen 1..10 traversal + all
+        # resolved (target, source) pairs as create_owned_by.
+        if predicate == 'ownedBy':
+            for t in targets:
+                for s in sources:
+                    cycle = self.g.query(
+                        f"MATCH (t:{t['label']} {{{t['key']}:$tid}}) "
+                        f"MATCH (s:{s['label']} {{{s['key']}:$sid}}) "
+                        f"MATCH path = (t)-[:ownedBy*1..10]->(s) RETURN count(path) > 0",
+                        params={"tid": t["value"], "sid": s["value"]},
+                    )
+                    if cycle.result_set and cycle.result_set[0][0]:
+                        raise ValueError(
+                            f"Circular ownership: {target_id} already owned by {source_id}")
         created = False
         for s in sources:
             for t in targets:
