@@ -2389,8 +2389,36 @@ async def invite_to_team(body: dict, user: dict = Depends(get_current_user)):
     if role not in ("admin", "member"):
         raise HTTPException(status_code=422, detail="role must be 'admin' or 'member'")
 
-    await _require_owner_admin(user["user_id"], team_id)
+    # ── Supabase mode (plan Task 4): invitations table, lookup_hash verify ──
+    from tortoise.supabase_control import (
+        InvitationError, get_control_plane, invitation_mint, is_supabase_enabled,
+        team_by_id,
+    )
+    if is_supabase_enabled():
+        try:
+            await _require_owner_admin(user["user_id"], team_id)
+            team = team_by_id(get_control_plane(), team_id)
+            if team is None:
+                raise HTTPException(status_code=404, detail="Unknown team")
+            if (team.get("tier") or "free") != "team":
+                raise HTTPException(status_code=402, detail="Invites require the Team tier")
+            inv = invitation_mint(get_control_plane(), team_id, email, role,
+                                  invited_by=user["user_id"])
+            return {"invite_id": inv["id"], "status": "invited",
+                    "token": inv["token"], "expires_at": inv["expires_at"],
+                    "role": role}
+        except InvitationError as e:
+            raise HTTPException(status_code=e.status, detail=str(e))
+        except HTTPException:
+            raise
+        except Exception:
+            # Fail-closed (#851): a control-plane error is a 500 — never a
+            # fallback to the registry.
+            raise HTTPException(status_code=500,
+                                detail="Invites unavailable (control plane error)")
 
+    # ── selfhost / registry path (unchanged) ──
+    await _require_owner_admin(user["user_id"], team_id)
     sdk = _make_sdk(namespace="registry")
     reg = sdk._get_registry()
     team_row = reg.query(
@@ -2449,6 +2477,27 @@ async def accept_invite(body: dict, user: dict = Depends(get_current_user)):
     token = (body or {}).get("token")
     if not token:
         raise HTTPException(status_code=422, detail="token required")
+
+    # ── Supabase mode (plan Task 4): lookup_hash verify + role preserved ──
+    from tortoise.supabase_control import (
+        InvitationError, get_control_plane, invitation_accept as _sb_accept,
+        is_supabase_enabled,
+    )
+    if is_supabase_enabled():
+        try:
+            return _sb_accept(get_control_plane(), token, user["user_id"],
+                              user_email=user.get("email"))
+        except InvitationError as e:
+            raise HTTPException(status_code=e.status, detail=str(e))
+        except HTTPException:
+            raise
+        except Exception:
+            # Fail-closed (#851): a control-plane error is a 500 — never a
+            # fallback to the registry.
+            raise HTTPException(status_code=500,
+                                detail="Invites unavailable (control plane error)")
+
+    # ── selfhost / registry path (unchanged) ──
     from tortoise.auth import verify_api_key as _verify
 
     sdk = _make_sdk(namespace="registry")
@@ -2491,6 +2540,70 @@ async def accept_invite(body: dict, user: dict = Depends(get_current_user)):
     except Exception as e:
         raise HTTPException(status_code=402, detail=f"Could not join team: {e}")
     return {"team_id": invite["team_id"], "role": invite["role"]}
+
+
+@app.get("/v1/invites")
+async def list_invites(team_id: str, user: dict = Depends(get_current_user)):
+    """E3b — list PENDING invites for a team (owner/admin only).
+
+    Dashboard surface (plan Task 4): the actionable set — consumed
+    (accepted/revoked) invites are excluded; list_members shows the
+    resulting memberships.
+    """
+    from tortoise.supabase_control import (
+        get_control_plane, is_supabase_enabled, pending_invitations,
+    )
+    if is_supabase_enabled():
+        try:
+            await _require_owner_admin(user["user_id"], team_id)
+            return pending_invitations(get_control_plane(), team_id)
+        except HTTPException:
+            raise
+        except Exception:
+            # Fail-closed (#851): a control-plane error is a 500 — never a
+            # fallback to the registry.
+            raise HTTPException(status_code=500,
+                                detail="Invites unavailable (control plane error)")
+    await _require_owner_admin(user["user_id"], team_id)
+    sdk = _make_sdk(namespace="registry")
+    return [i for i in sdk.invitation_list(team_id)
+            if i.get("status") in (None, "pending")]
+
+
+@app.delete("/v1/invites/{invitation_id}")
+async def rescind_invite(invitation_id: str, team_id: str,
+                         user: dict = Depends(get_current_user)):
+    """E3c — rescind a pending invite (owner/admin only).
+
+    Soft delete: status → 'revoked'. A revoked invite cannot be accepted
+    (E2E-3). Team-scoped: an invitation from another team is a 404.
+    """
+    from tortoise.supabase_control import (
+        InvitationError, get_control_plane, invitation_rescind,
+        is_supabase_enabled,
+    )
+    if is_supabase_enabled():
+        try:
+            return invitation_rescind(get_control_plane(), invitation_id,
+                                      team_id, user["user_id"])
+        except InvitationError as e:
+            raise HTTPException(status_code=e.status, detail=str(e))
+        except HTTPException:
+            raise
+        except Exception:
+            # Fail-closed (#851): a control-plane error is a 500 — never a
+            # fallback to the registry.
+            raise HTTPException(status_code=500,
+                                detail="Invites unavailable (control plane error)")
+    await _require_owner_admin(user["user_id"], team_id)
+    sdk = _make_sdk(namespace="registry")
+    inv = sdk.invitation_get_by_id(invitation_id)
+    if inv is None or inv.get("team_id") != team_id:
+        raise HTTPException(status_code=404, detail="Invitation not found")
+    if inv.get("status") == "accepted":
+        raise HTTPException(status_code=409,
+                            detail="Invitation already accepted — cannot rescind")
+    return sdk.invitation_revoke(invitation_id)
 
 
 @app.get("/v1/teams/{team_id}/members")

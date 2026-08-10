@@ -19,11 +19,16 @@ os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 
 from tortoise.auth import lookup_hash
 from tortoise.supabase_control import (
+    InvitationError,
     active_api_keys,
     get_control_plane,
     insert_api_key,
+    invitation_accept,
+    invitation_mint,
+    invitation_rescind,
     is_supabase_enabled,
     membership_for_user_team,
+    pending_invitations,
     resolve_api_key,
     revoke_api_key,
     team_by_id,
@@ -295,6 +300,256 @@ class TestSessionHelpers:
         assert len(fake.tables["api_keys"]) == 1
         revoke_api_key(fake, "key-001", now="2026-08-02T00:00:00Z")
         assert fake.tables["api_keys"][0]["revoked_at"] == "2026-08-02T00:00:00Z"
+
+
+# ── Invitations seam (plan Task 4: mint / accept / rescind) ───────────────
+
+class TestInvitationSeam:
+    """Mint/accept/rescind against the invitations table (E2E-3 owns).
+
+    Covers the O/I/T contract: dedup (team,email) pending + 7-day expiry
+    enforced at mint; accept verifies via lookup_hash and creates the REAL
+    membership with the INVITED role; used/expired/revoked invites are
+    rejected (E2E-3).
+    """
+
+    def _owner(self, fake, team_id="team-1", user_id="owner-1"):
+        fake.seed("team_memberships", [{
+            "user_id": user_id, "team_id": team_id,
+            "role": "owner", "status": "active",
+        }])
+
+    # ── mint ───────────────────────────────────────────────────────────
+
+    def test_mint_creates_pending_row_with_lookup_hash(self, fake):
+        inv = invitation_mint(fake, "team-1", "bob@example.com", "admin",
+                              "owner-1")
+        assert inv["token"]
+        assert inv["role"] == "admin"
+        assert inv["status"] == "pending"
+        rows = fake.tables["invitations"]
+        assert len(rows) == 1
+        row = rows[0]
+        # token stored ONLY as SHA-256(pepper + token) — O(1) indexed verify
+        assert row["lookup_hash"] == lookup_hash(inv["token"])
+        assert row["status"] == "pending"
+        assert row["team_id"] == "team-1"
+        assert row["email"] == "bob@example.com"
+        assert row["invited_by"] == "owner-1"
+        # 7-day expiry (default)
+        exp = datetime.fromisoformat(row["expires_at"])
+        now = datetime.now(timezone.utc)
+        assert timedelta(days=6) < exp - now < timedelta(days=8)
+
+    def test_mint_rejects_duplicate_pending(self, fake):
+        """Dedup: partial unique (team_id, email) WHERE status='pending'."""
+        invitation_mint(fake, "team-1", "bob@example.com", "admin", "u1")
+        with pytest.raises(InvitationError) as ei:
+            invitation_mint(fake, "team-1", "bob@example.com", "member", "u1")
+        assert ei.value.status == 409
+        assert len(fake.tables["invitations"]) == 1
+
+    def test_mint_reinvite_allowed_after_consumed(self, fake):
+        """Dedup is on PENDING only — a consumed invite doesn't block a
+        fresh re-invite (NULLs are distinct; the partial index enforces)."""
+        inv1 = invitation_mint(fake, "team-1", "bob@example.com", "admin", "u1")
+        invitation_accept(fake, inv1["token"], "user-2")
+        inv2 = invitation_mint(fake, "team-1", "bob@example.com", "member", "u1")
+        assert inv2["token"] != inv1["token"]
+        assert len(fake.tables["invitations"]) == 2
+
+    def test_mint_validates_role_and_email(self, fake):
+        """0008 CHECK closes role to admin|member (owner is NOT invitable)."""
+        with pytest.raises(InvitationError) as ei:
+            invitation_mint(fake, "team-1", "bob@example.com", "owner", "u1")
+        assert ei.value.status == 422
+        with pytest.raises(InvitationError):
+            invitation_mint(fake, "team-1", "not-an-email", "member", "u1")
+
+    # ── accept ──────────────────────────────────────────────────────────
+
+    def test_accept_creates_membership_with_invited_role(self, fake):
+        """E2E-3 core: mint → lookup_hash verify → accept → REAL membership
+        carrying the INVITED role; pending invite consumed."""
+        inv = invitation_mint(fake, "team-1", "bob@example.com", "admin",
+                              "owner-1")
+        result = invitation_accept(fake, inv["token"], "user-2")
+        assert result == {"team_id": "team-1", "role": "admin"}
+
+        mem = fake.tables["team_memberships"]
+        assert len(mem) == 1
+        assert mem[0]["user_id"] == "user-2"
+        assert mem[0]["team_id"] == "team-1"
+        assert mem[0]["role"] == "admin"  # invited role preserved (O/I/T)
+        assert mem[0]["status"] == "active"
+        assert mem[0]["invited_email"] == "bob@example.com"
+
+        inv_row = fake.tables["invitations"][0]
+        assert inv_row["status"] == "accepted"  # pending invite consumed
+        assert inv_row["accepted_at"] is not None
+
+    def test_accept_role_member_preserved(self, fake):
+        inv = invitation_mint(fake, "team-1", "bob@example.com", "member",
+                              "owner-1")
+        invitation_accept(fake, inv["token"], "user-2")
+        assert fake.tables["team_memberships"][0]["role"] == "member"
+
+    def test_accept_unknown_token_rejected(self, fake):
+        invitation_mint(fake, "team-1", "bob@example.com", "member", "u1")
+        with pytest.raises(InvitationError, match="Invalid or expired"):
+            invitation_accept(fake, "not-the-token", "user-2")
+
+    def test_accept_expired_rejected(self, fake):
+        """E2E-3: expiry enforced (expires_at <= now → rejected)."""
+        inv = invitation_mint(fake, "team-1", "bob@example.com", "member",
+                              "owner-1")
+        past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+        fake.tables["invitations"][0]["expires_at"] = past
+        with pytest.raises(InvitationError, match="expired"):
+            invitation_accept(fake, inv["token"], "user-2")
+        assert fake.tables["team_memberships"] == []
+
+    def test_accept_used_invite_rejected(self, fake):
+        """E2E-3: a used invite cannot be re-accepted."""
+        inv = invitation_mint(fake, "team-1", "bob@example.com", "member",
+                              "owner-1")
+        invitation_accept(fake, inv["token"], "user-2")
+        with pytest.raises(InvitationError, match="accepted"):
+            invitation_accept(fake, inv["token"], "user-3")
+        assert len(fake.tables["team_memberships"]) == 1  # no double join
+
+    def test_accept_revoked_invite_rejected(self, fake):
+        """E2E-3: a revoked invite cannot be accepted."""
+        self._owner(fake)
+        inv = invitation_mint(fake, "team-1", "bob@example.com", "member",
+                              "owner-1")
+        invitation_rescind(fake, inv["id"], "team-1", "owner-1")
+        with pytest.raises(InvitationError, match="revoked"):
+            invitation_accept(fake, inv["token"], "user-2")
+        # no membership created for the invitee (owner-1's row is the actor)
+        assert all(m["user_id"] != "user-2"
+                   for m in fake.tables["team_memberships"])
+
+    def test_accept_rejects_when_already_active_member(self, fake):
+        inv = invitation_mint(fake, "team-1", "bob@example.com", "member",
+                              "owner-1")
+        fake.seed("team_memberships", [{
+            "user_id": "user-2", "team_id": "team-1",
+            "role": "member", "status": "active"}])
+        with pytest.raises(InvitationError) as ei:
+            invitation_accept(fake, inv["token"], "user-2")
+        assert ei.value.status == 409
+
+    def test_accept_resurrects_removed_membership(self, fake):
+        """A previously removed member re-joining is resurrected in place
+        (registry MERGE semantics — uq_member_team would reject a second
+        row)."""
+        inv = invitation_mint(fake, "team-1", "bob@example.com", "admin",
+                              "owner-1")
+        fake.seed("team_memberships", [{
+            "id": "mem-1", "user_id": "user-2", "team_id": "team-1",
+            "role": "member", "status": "removed"}])
+        invitation_accept(fake, inv["token"], "user-2")
+        rows = fake.tables["team_memberships"]
+        assert len(rows) == 1
+        assert rows[0]["status"] == "active"
+        assert rows[0]["role"] == "admin"  # invited role wins
+
+    def test_accept_email_mismatch_403(self, fake):
+        """Invitee must be the invitee's account (JWT email guard, #574)."""
+        inv = invitation_mint(fake, "team-1", "bob@example.com", "member",
+                              "owner-1")
+        with pytest.raises(InvitationError) as ei:
+            invitation_accept(fake, inv["token"], "user-2",
+                              user_email="mallory@example.com")
+        assert ei.value.status == 403
+        assert fake.tables["team_memberships"] == []
+
+    def test_accept_email_guard_skipped_without_jwt_email(self, fake):
+        """No email claim in the JWT → no guard (mirrors registry path)."""
+        inv = invitation_mint(fake, "team-1", "bob@example.com", "member",
+                              "owner-1")
+        invitation_accept(fake, inv["token"], "user-2", user_email=None)
+        assert len(fake.tables["team_memberships"]) == 1
+
+    # ── rescind ─────────────────────────────────────────────────────────
+
+    def test_rescind_owner_admin_only(self, fake):
+        self._owner(fake)
+        inv = invitation_mint(fake, "team-1", "bob@example.com", "member",
+                              "owner-1")
+        with pytest.raises(InvitationError) as ei:
+            invitation_rescind(fake, inv["id"], "team-1", "outsider")
+        assert ei.value.status == 403
+        assert fake.tables["invitations"][0]["status"] == "pending"
+
+    def test_rescind_sets_revoked(self, fake):
+        self._owner(fake)
+        inv = invitation_mint(fake, "team-1", "bob@example.com", "member",
+                              "owner-1")
+        result = invitation_rescind(fake, inv["id"], "team-1", "owner-1")
+        assert result == {"revoked": True, "invitation_id": inv["id"]}
+        assert fake.tables["invitations"][0]["status"] == "revoked"
+
+    def test_rescind_idempotent_for_already_revoked(self, fake):
+        self._owner(fake)
+        inv = invitation_mint(fake, "team-1", "bob@example.com", "member",
+                              "owner-1")
+        invitation_rescind(fake, inv["id"], "team-1", "owner-1")
+        again = invitation_rescind(fake, inv["id"], "team-1", "owner-1")
+        assert again["already"] is True
+
+    def test_rescind_rejects_accepted_invite(self, fake):
+        """A used invite cannot be rescinded — the membership already exists."""
+        self._owner(fake)
+        inv = invitation_mint(fake, "team-1", "bob@example.com", "member",
+                              "owner-1")
+        invitation_accept(fake, inv["token"], "user-2")
+        with pytest.raises(InvitationError) as ei:
+            invitation_rescind(fake, inv["id"], "team-1", "owner-1")
+        assert ei.value.status == 409
+
+    def test_rescind_unknown_or_other_team_404(self, fake):
+        self._owner(fake)
+        inv = invitation_mint(fake, "team-1", "bob@example.com", "member",
+                              "owner-1")
+        # an owner of ANOTHER team cannot see this team's invite → 404
+        # (role check passes for team-OTHER, but the id is not scoped there)
+        self._owner(fake, team_id="team-OTHER")
+        with pytest.raises(InvitationError) as ei:
+            invitation_rescind(fake, inv["id"], "team-OTHER", "owner-1")
+        assert ei.value.status == 404
+        with pytest.raises(InvitationError) as ei:
+            invitation_rescind(fake, "no-such-id", "team-1", "owner-1")
+        assert ei.value.status == 404
+
+    # ── list ────────────────────────────────────────────────────────────
+
+    def test_pending_invitations_lists_only_pending(self, fake):
+        inv = invitation_mint(fake, "team-1", "bob@example.com", "admin",
+                              "u1")
+        invitation_mint(fake, "team-1", "carol@example.com", "member", "u1")
+        invitation_mint(fake, "team-2", "other@example.com", "member", "u1")
+        used = invitation_mint(fake, "team-1", "dave@example.com", "member",
+                               "u1")
+        invitation_accept(fake, used["token"], "user-2")
+        rows = pending_invitations(fake, "team-1")
+        assert [r["email"] for r in rows] == ["bob@example.com", "carol@example.com"]
+        assert all(r["status"] == "pending" for r in rows)
+        assert inv["id"] in [r["id"] for r in rows]
+
+    # ── fail-closed ─────────────────────────────────────────────────────
+
+    def test_invitation_seam_fail_closed_on_query_error(self):
+        """P1-3: a control-plane error RAISES (RuntimeError) — mint/accept
+        must never silently succeed or fall back to the registry."""
+        cp = ErrorControlPlane()
+        with pytest.raises(RuntimeError):
+            invitation_mint(cp, "team-1", "bob@example.com", "member", "u1")
+        with pytest.raises(RuntimeError):
+            invitation_accept(cp, "some-token", "user-2")
+        with pytest.raises(RuntimeError):
+            invitation_rescind(cp, "inv-1", "team-1", "owner-1")
 
 
 # ── Fake adapter semantics (query dialect parity) ───────────────────────────
