@@ -3839,6 +3839,15 @@ class TortoiseSDK:
         graph (team_{name}) for Point/Operator storage.
 
         Returns {name, graph_name, api_key, id}.
+
+        #765 (plan Task 8 — SDK control-plane backend env-gated): the SDK
+        control-plane backend stays REGISTRY-BACKED — the
+        TORTOISE_CONTROL_PLANE env gate lives at the hosted layer
+        (hosted_api.py), and the hosted create-team writers (POST /v1/teams,
+        /v1/agent/signup, /v1/register, onboarding sub-team) route their
+        Supabase writes through the atomic provision_team RPC instead of
+        this method. Selfhost + embedded (where this SDK runs) have no
+        Supabase control plane — the registry IS the control plane there.
         """
         import re, uuid
         from datetime import datetime, timezone
@@ -3932,9 +3941,29 @@ class TortoiseSDK:
         custom namespaces are NOT minted until a consumer exists (E2E-11
         decision — v1 writes resolve the default graph only). The default
         graph's namespace is the team namespace itself (back-compat).
+
+        #765 (plan Task 8 — SDK control-plane backend env-gated): in
+        Supabase control-plane mode (TORTOISE_CONTROL_PLANE=supabase / creds
+        configured) NO registry write happens — the plan data model
+        (0006-0009) has no graphs table, so team→graph metadata is not
+        persisted; the graph_id is derived deterministically from the
+        namespace and graph_list() derives the default graph from
+        teams.graph_name. Selfhost (registry mode) keeps the registry Graph
+        node. The zero-registry-writes cutover contract (registry node count
+        == 0) requires this gate.
         """
         import uuid as _uuid
+        import hashlib as _hashlib
         from datetime import datetime, timezone as _tz
+        from tortoise.supabase_control import is_supabase_enabled
+        if is_supabase_enabled():
+            # Deterministic per-(team, name) id — stable across calls so a
+            # re-created graph maps to the same display key; namespace shape
+            # matches the registry mode (team_{team_id}_{gid}).
+            gid = f"g_{_hashlib.sha256(f'{team_id}:{name}'.encode()).hexdigest()[:16]}"
+            ns = namespace or f"team_{team_id}_{gid}"
+            return {"graph_id": gid, "name": name, "kind": kind,
+                    "namespace": ns}
         reg = self._get_registry()
         gid = f"g_{_uuid.uuid4().hex[:16]}"
         ns = namespace or f"team_{team_id}_{gid}"
@@ -3948,7 +3977,20 @@ class TortoiseSDK:
         return {"graph_id": gid, "name": name, "kind": kind, "namespace": ns}
 
     def graph_list(self, team_id: str) -> list[dict]:
-        """List Graph nodes for a team (default graph first)."""
+        """List Graph nodes for a team (default graph first).
+
+        #765 (plan Task 8 reader inventory): in Supabase control-plane mode
+        the default graph is derived from ``teams.graph_name`` via the seam
+        (no graphs table in the plan data model — see
+        supabase_control.graph_metadata); the registry Graph-node read stays
+        for selfhost. Registry-shaped rows (graph_id/team_id/name/kind/
+        namespace) so callers are mode-agnostic.
+        """
+        from tortoise.supabase_control import (
+            get_control_plane, graph_metadata, is_supabase_enabled,
+        )
+        if is_supabase_enabled():
+            return graph_metadata(get_control_plane(), team_id)
         reg = self._get_registry()
         rows = reg.query(
             "MATCH (g:Graph {team_id:$tid}) RETURN properties(g) "

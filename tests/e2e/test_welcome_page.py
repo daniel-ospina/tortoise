@@ -14,14 +14,14 @@ Two test groups:
 
 Run:  python -m pytest tests/e2e/ -q
 Env:   WELCOME_URL overrides the target (default https://premiselabs.co/welcome)
-       SUPABASE_URL/SUPABASE_SERVICE_KEY + a real session enable the live
-       signup E2E (skipped by default — no creds in CI).
+       SUPABASE_URL/SUPABASE_SERVICE_KEY enable the live no-429 signup smoke
+       (skipped by default — no creds in CI; see #801).
 """
 from __future__ import annotations
 
 import json
 import os
-import re
+import time
 import uuid
 
 import pytest
@@ -484,19 +484,54 @@ LIVE_SIGNUP = pytest.mark.skipif(
 
 
 @LIVE_SIGNUP
-def test_live_signup_redirects_to_welcome_with_key(page: Page) -> None:
-    """Full live journey: sign up via Supabase → welcome page → key shown.
-    Requires a real signup (email) against the production Supabase project.
-    NOTE: this creates a real team in prod — run sparingly with a throwaway
-    email like e2e-<ts>@premise-labs.dev."""
-    page.goto("https://premiselabs.co/signup", wait_until="domcontentloaded", timeout=30_000)
-    ts = uuid.uuid4().hex[:8]
-    email = f"e2e-live-{ts}@premise-labs.dev"
-    page.locator('input[type="email"], input[name="email"]').first.fill(email)
-    password_field = page.locator('input[type="password"]').first
-    password_field.fill(f"E2eLivePass-{ts}!")
-    page.locator('button[type="submit"], button:has-text("Sign up")').first.click()
-    expect(page).to_have_url(re.compile(r"welcome"), timeout=30_000)
-    expect(page.locator("#success")).not_to_be_hidden(timeout=60_000)
-    expect(page.locator("#api-key")).to_contain_text("tt_")
+def test_live_signup_no_429_confirmation_required(page: Page) -> None:
+    """#801 live no-429 monitor (per-push smoke).
+
+    Real signup against PROD (confirmations ON since #832). The signup POST
+    must return 200 and the page must reach the check-your-inbox state —
+    NOT the 429 over_email_send_rate_limit error. If the project-wide email
+    bucket is exhausted (real traffic / parallel CI), this test FAILS with
+    the server body in the message: that is the monitored signal.
+
+    No sign-in / provisioning / key reveal here — the mocked welcome suite
+    owns those (green in CI); a live key-reveal would mint an un-deletable
+    prod team + api_keys row + FalkorDB graph (no cleanup endpoint in-repo).
+
+    Teardown deletes the created auth user via the Admin API (best-effort;
+    the FK cascade removes the placeholder team_memberships row)."""
+    signup = {"status": None, "body": ""}
+
+    def _on_response(resp):
+        if "auth/v1/signup" in resp.url and resp.request.method == "POST":
+            signup["status"] = resp.status
+            signup["body"] = resp.text()[:400]
+
+    page.on("response", _on_response)
+    email = f"e2e-live-{uuid.uuid4().hex[:8]}@premise-labs.dev"
+    password = f"E2eLivePass-{uuid.uuid4().hex[:8]}!"
+    try:
+        page.goto("https://premiselabs.co/signup", wait_until="domcontentloaded", timeout=30_000)
+        page.locator("#email").fill(email)
+        page.locator("#password").fill(password)
+        page.locator("#btn-submit").click()
+        # Direct no-429 proof: the server must accept the signup.
+        # expect.poll is NOT available in playwright-python (JS-only) — poll
+        # the captured response manually (code-review P1).
+        deadline = time.time() + 30
+        while signup["status"] is None and time.time() < deadline:
+            page.wait_for_timeout(250)
+        assert signup["status"] is not None, "no auth/v1/signup response observed"
+        assert signup["status"] == 200, (
+            f"live signup returned {signup['status']} — rate-limited or error: {signup['body']!r}")
+        # User-visible truth: check-your-inbox with the typed email.
+        expect(page.locator("#confirmation-required")).to_be_visible(timeout=30_000)
+        expect(page.locator("#confirm-email")).to_have_text(email)
+        # No 429 copy / no other error surfaced.
+        expect(page.locator("#error")).to_be_hidden(timeout=5_000)
+        assert "email=" not in page.url and "password=" not in page.url, \
+            f"credentials echoed into URL: {page.url}"
+    finally:
+        from supabase_admin import delete_user_by_email
+        delete_user_by_email(os.environ["SUPABASE_URL"],
+                             os.environ["SUPABASE_SERVICE_KEY"], email)
 

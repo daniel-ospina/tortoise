@@ -46,11 +46,12 @@ await db.exec(`
     $$ SELECT coalesce(nullif(current_setting('request.jwt.claims', true), ''), '{}')::jsonb $$;
 `);
 
-// ── Apply migrations 0001-0010 in order ──
+// ── Apply migrations 0001-0011 in order ──
 const files = ['0001_user_teams.sql','0002_audit_events.sql','0003_team_memberships.sql',
                '0004_analytics_events.sql','0005_waitlist_subscribers.sql',
                '0006_teams.sql','0007_api_keys.sql','0008_invitations.sql',
-               '0009_team_memberships_extend.sql','0010_provisioning_rpcs.sql'];
+               '0009_team_memberships_extend.sql','0010_provisioning_rpcs.sql',
+               '0011_teams_name_unique.sql'];
 for (const f of files) {
   const sql = readFileSync(`${MIG_DIR}/${f}`, 'utf8');
   try {
@@ -79,6 +80,23 @@ for (const suite of suites) {
   }
 }
 
+// ── 0011 duplicate-name guard (PR #874 review P1) ──
+// The unique index must reject a second team with the same name (registry
+// sdk.team_create parity — two teams sharing team_{name} would share a
+// FalkorDB namespace).
+try {
+  await db.exec(`INSERT INTO public.teams (id, name, graph_name)
+                 VALUES ('dup-a', 'dup-name', 'team_dup-name');`);
+  await db.exec(`INSERT INTO public.teams (id, name, graph_name)
+                 VALUES ('dup-b', 'dup-name', 'team_dup-name');`);
+  console.error('✗ 0011: duplicate team name NOT rejected');
+  process.exit(1);
+} catch (e) {
+  console.log('✓ 0011: duplicate team name rejected (unique index active)');
+} finally {
+  await db.exec(`DELETE FROM public.teams WHERE id IN ('dup-a', 'dup-b');`);
+}
+
 // ── Post-verification spot checks (independent of the test files) ──
 const checks = await db.query(`SELECT
   (SELECT count(*) FROM pg_proc WHERE proname='provision_team') AS provision_team,
@@ -86,14 +104,17 @@ const checks = await db.query(`SELECT
   (SELECT count(*) FROM pg_proc WHERE proname='reveal_api_key') AS reveal_api_key,
   (SELECT count(*) FROM pg_indexes WHERE schemaname='public' AND tablename='team_memberships'
      AND indexname='uq_member_identity_team') AS identity_anchor_index,
-  (SELECT count(*) FROM public.teams WHERE id LIKE '%-770' OR id LIKE '%-769') AS leftover_test_teams,
+  (SELECT count(*) FROM pg_indexes WHERE schemaname='public' AND tablename='teams'
+     AND indexname='uq_teams_name') AS teams_name_unique,
+  (SELECT count(*) FROM public.teams WHERE id LIKE '%-770' OR id LIKE '%-769' OR id LIKE 'dup-%') AS leftover_test_teams,
   (SELECT count(*) FROM public.team_memberships WHERE team_id LIKE '%-770' OR team_id LIKE '%-769') AS leftover_test_memberships;
 `);
 console.log('spot checks:', JSON.stringify(checks.rows[0]));
 
 const r = checks.rows[0];
 if (!(r.provision_team === 1 && r.update_user_team === 0 && r.reveal_api_key === 1
-      && r.identity_anchor_index === 1 && r.leftover_test_teams === 0
+      && r.identity_anchor_index === 1 && r.teams_name_unique === 1
+      && r.leftover_test_teams === 0
       && r.leftover_test_memberships === 0)) {
   console.error('✗ spot checks failed — see JSON above');
   process.exit(1);
