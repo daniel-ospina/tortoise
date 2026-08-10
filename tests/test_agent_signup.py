@@ -8,6 +8,13 @@ x-device-id are ignored (a client-chosen identity trivially bypasses the
 per-identity rate limit).
 #740: /internal/provision must write Membership with status:'active' so the
 E6 /v1/teams listing (active-membership query) includes the provisioned team.
+#770 (plan Task 2 — identity path): the server-side anon identity is the
+anchor for the Supabase control-plane row. When the agent writer flips to
+Supabase (plan Task 8/#765), provision_team stores it as team_memberships.identity
+with user_id NULL (0009 chk_member_or_invite amendment + 0010 provision_team
+p_identity variant) — the endpoint itself still writes the registry until
+Task 8, and test_signup_identity_anchors_anon_membership locks the anchor
+contract now.
 """
 from __future__ import annotations
 
@@ -87,6 +94,28 @@ class TestAgentSignup:
             assert r.status_code == 200, r.text
             seen.add(r.json()["identity"])
         assert len(seen) == 4  # every request minted a distinct server identity
+
+    def test_signup_identity_anchors_anon_membership(self, client):
+        """#770 identity path: the server-side anon identity returned by signup
+        is the anchor for the Supabase team_memberships row (NULL user_id +
+        identity — 0009 chk_member_or_invite amendment; provision_team's
+        p_identity variant, 0010). The registry Membership node's user_id must
+        equal the response identity — the SAME value provision_team stores in
+        team_memberships.identity when the agent writer flips to Supabase
+        (plan Task 8/#765), so a later migration can reconcile rows 1:1."""
+        r = client.post("/v1/agent/signup", json={})
+        assert r.status_code == 200, r.text
+        data = r.json()
+        assert data["identity"].startswith("anon-")
+        sdk = ha_mod._make_sdk(namespace="registry")
+        rows = sdk._get_registry().query(
+            "MATCH (m:Membership {team_id:$tid}) RETURN m.user_id",
+            params={"tid": data["team_id"]},
+        ).result_set
+        assert rows, f"no membership row for {data['team_id']}"
+        assert rows[0][0] == data["identity"], (
+            f"membership anchor {rows[0][0]!r} != signup identity {data['identity']!r}"
+        )
 
 
 class TestProvisionMembershipStatus:

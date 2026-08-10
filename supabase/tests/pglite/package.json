@@ -1,0 +1,11 @@
+{
+  "name": "pglite-schema-tests",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@electric-sql/pglite": "^0.5.4"
+  },
+  "scripts": {
+    "validate": "node validate.mjs"
+  }
+}
