@@ -38,6 +38,10 @@ Restored genuine cascade propagation through IMPL chains. Two root causes:
   `exp(-w·(ca-cb)²)`: the target tracks the source's level, so damage
   cascades downstream (C1 drop 0.001 → 0.022; B feedback 0.000 → 0.006).
 
+**Also ships:** NAND factor messages no longer receive the evidence-scaled
+proportional boost (would crush weak claims at w=8); EP default convergence
+tolerance tightened 1e-3 → 1e-4 (more iterations per run).
+
 **Behavior note:** difference coupling adds a small (~0.008) downward drag on
 strong sources supporting weak targets (deliberate level-matching semantics,
 per the canonical SVBP reference). The #86 bidirectional-IMPL NAND-style

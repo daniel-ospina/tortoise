@@ -277,7 +277,7 @@ class TortoiseEP:
 
         # Proportional boost: breaks EP fixed-point symmetry that forces
         # messages to near-zero for unevidenced targets. Fades as evidence
-        # accumulates: Beta(1,1)=3× boost, Beta(4,4)=1.5×, Beta(10,10)=1×.
+        # accumulates: Beta(1,1)=3×, Beta(4,4)≈1.29×, Beta(10,10)≈1.1× (1+2/max(α+β−1,1)).
         # Applied to IMPL agreement messages ONLY: boosting a NAND
         # (contradiction) message to a weakly-evidenced claim would crush it
         # to ~0 (T4 claim hit by a T0 NAND at w=8 collapses 0.52→0.15 raw,

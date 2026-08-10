@@ -18,7 +18,8 @@ from tortoise.quadrature import phi_nand
 # ═══════════════════════════════════════════════════════════════════
 
 class TestPhiNandRealWeights:
-    """Verify the phi_nand docstring examples at production weights."""
+    """Verify phi_nand at reference weights (legacy values; production is
+    w=8.0/10.0 per #855)."""
 
     def test_phi_nand_t0_claims_w1(self):
         """Two T0 (0.91, 0.91) at w=1.0: phi ≈ 0.437 — mild NAND penalty.
@@ -148,11 +149,12 @@ class TestNANDCalibrationAtRealWeights:
         )
         assert conf_b > self.CONFIDENCE_FLOOR, (
             f"Claim B collapsed: {conf_b:.4f} ≤ {self.CONFIDENCE_FLOOR} "
-            f"(NAND at w≈1.0, expected ~0.90 from EP convergence)"
+            f"(NAND at w=8.0, expected ~0.82 from EP convergence)"
         )
 
         # Both should have moved from T0 (0.909) but remain credible.
-        # At w=1.0 the NAND pull is mild — expected drop from ~0.909 to ~0.901.
+        # At w=8.0 the contradiction is strong — expected drop from ~0.909
+        # to ~0.82 (#855).
         assert conf_a < 0.909, f"Claim A unchanged by NAND: {conf_a:.4f}"
         assert conf_b < 0.909, f"Claim B unchanged by NAND: {conf_b:.4f}"
 
@@ -208,13 +210,13 @@ class TestNANDCalibrationAtRealWeights:
             f"Claim B collapsed: {conf_b:.4f} ≤ {self.CONFIDENCE_FLOOR} "
             f"(mitigated NAND at w=10.0)"
         )
-        # At w=2.0 the pull should be stronger than w=1.0.
+        # At w=10.0 the pull is stronger than the plain w=8.0 case.
         # Note: the dummy IMPL operator also connects to both claims,
         # so claim_b may be slightly pulled UP by IMPL while claim_a
         # gets the full bidirectional NAND pull. We only bound claim_a
         # which receives the unambiguous NAND penalty.
         assert conf_a < 0.905, (
-            f"NAND at w=2.0 pull too weak: {conf_a:.4f} (expected < 0.905)"
+            f"NAND at w=10.0 pull too weak: {conf_a:.4f} (expected < 0.905)"
         )
 
     def test_both_claims_symmetric(self, ep_graph):
@@ -253,9 +255,10 @@ class TestTiltedMomentsNANDConvergence:
     def test_tilted_mean_t0_nand_w1(self):
         """Tilted mean of T0 Beta(10,1) under NAND at w=1.0 stays > 0.55.
 
-        At production weight w=1.0 the NAND pull is mild on strong
-        T0 priors: the tilted mean drops from 0.909 to ~0.903.
-        This is expected — the NAND penalty is subtle, not catastrophic.
+        Reference-weight math pin (production is w=8.0/10.0 per #855):
+        at w=1.0 the NAND pull is mild on strong T0 priors — the tilted
+        mean drops from 0.909 to ~0.903. Expected — the NAND penalty is
+        subtle, not catastrophic.
         """
         from tortoise.quadrature import tilted_moments, moments_to_beta
 
@@ -288,8 +291,8 @@ class TestTiltedMomentsNANDConvergence:
     def test_tilted_mean_t0_nand_w2(self):
         """Tilted mean of T0 Beta(10,1) under NAND at w=2.0 stays > 0.55.
 
-        At w=2.0 (mitigated operator) the pull is stronger (~0.895),
-        but still nowhere near collapse.
+        Reference-weight math pin (production is w=8.0/10.0 per #855):
+        at w=2.0 the pull is stronger (~0.895), but nowhere near collapse.
         """
         from tortoise.quadrature import tilted_moments, moments_to_beta
 

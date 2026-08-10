@@ -14,7 +14,7 @@ import math
 # drives the target down ~0.08 (meaningful) while Dung reinstatement
 # (#753) still holds once re-run drift is fixed (#852). IMPL keeps its
 # generic base of 1.0.
-NAND_BASE_WEIGHT = 8.0
+NAND_BASE_WEIGHT = 8.0  # applied BEFORE the dynamic post-convergence multiplier (0.5-3.0): for NAND, any dyn >= 1.25 lands on the 10.0 clamp, so dynamic mode can only down-modulate NAND within [4.0, 10.0] (latent — no caller uses use_dynamic today)
 
 
 def compute_operator_weight(proj, op_id: str, use_dynamic: bool = False) -> float:

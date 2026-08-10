@@ -101,11 +101,11 @@ def phi_nand(ca, cb, w=8.0):
     Legacy w=1.0/2.0 values (φ≈0.437/0.191) are the pre-#855 reference
     regime and no longer occur in production.
 
-    At w=1.0 (legacy) the NAND penalty was mild
-    (mitigated operator) they converge to ~0.90 (tilted mean ~0.895).
-    Stronger T0 priors make the NAND pull even milder; the historical
-    overshoot failure mode (91% → 12%) is definitively eliminated.
-    Calibration validated in test_ep_calibration.py.
+    At the legacy w=1.0 the NAND penalty was mild (φ≈0.437 at T0); at
+    legacy w=2.0 (mitigated) two T0 claims converged to ~0.90 (tilted
+    mean ~0.895). Both regimes no longer occur in production since #855.
+    The historical overshoot failure mode (91% → 12%) is definitively
+    eliminated. Calibration validated in test_ep_calibration.py.
     """
     return np.exp(-w * ca * cb)
 
