@@ -37,16 +37,24 @@ def _parse_sse_json(r):
     return r.json()
 
 
-def _boot_tenant_app(db_path):
+def _boot_tenant_app(registry_sdk=None):
     """Build the exact app `serve --http --auth tenant` builds (via the CLI
-    helper path) with a registry SDK rooted at the same canonical DB."""
+    helper path) with a registry SDK rooted at the same canonical DB.
+
+    registry_sdk: optional pre-opened registry SDK. Passing the test's own
+    SDK (instead of opening a second handle on the same canonical path)
+    removes the redislite second-server race seen on CI runners: under load
+    a fresh open can start a NEW server on the same DB file whose RDB load
+    misses the just-created key (→ spurious 401 on the first tools/list).
+    The test still exercises the real CLI key creation + tenant auth path.
+    """
     from contextlib import asynccontextmanager
 
     from fastapi import FastAPI
 
     from tortoise.mcp_server import create_http_app
 
-    reg = TortoiseSDK(namespace="registry")
+    reg = registry_sdk if registry_sdk is not None else TortoiseSDK(namespace="registry")
     app = create_http_app(
         allowed_origins=["http://127.0.0.1:*", "http://localhost:*"],
         _registry_sdk=reg,
@@ -619,7 +627,7 @@ def test_local_http_roundtrip_lands_in_team_graph(local_db, monkeypatch):
         "MATCH (k:APIKey) RETURN k.team_id"
     ).result_set[0][0]
 
-    wrapper = _boot_tenant_app(db)
+    wrapper = _boot_tenant_app(registry_sdk=sdk)
     accept = "application/json, text/event-stream"
     headers = {"Authorization": f"Bearer {key}", "Accept": accept}
 
