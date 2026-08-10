@@ -2590,6 +2590,7 @@ quadrature = [
 test = [
     { name = "playwright" },
     { name = "pytest" },
+    { name = "pytest-asyncio" },
     { name = "pytest-playwright" },
     { name = "pytest-timeout" },
 ]
@@ -2620,6 +2621,7 @@ requires-dist = [
     { name = "prometheus-client", specifier = ">=0.16" },
     { name = "psycopg2-binary", marker = "extra == 'postgres'", specifier = ">=2.9" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=8" },
+    { name = "pytest-asyncio", marker = "extra == 'test'", specifier = ">=0.23" },
     { name = "pytest-playwright", marker = "extra == 'test'", specifier = ">=0.5" },
     { name = "pytest-timeout", marker = "extra == 'test'" },
     { name = "pyyaml", specifier = ">=6.0" },

@@ -64,6 +64,22 @@ def _get_backup_key() -> bytes:
     Fail loudly — never encrypt with a default.
     """
     raw = os.environ.get("TORTOISE_BACKUP_KEY", "")
+    if not raw:
+        raise RuntimeError(
+            "TORTOISE_BACKUP_KEY not set — required for hosted backups. Generate with: "
+            "python -c \"import base64,secrets; print(base64.b64encode(secrets.token_bytes(32)).decode())\""
+        )
+    try:
+        key = base64.b64decode(raw.strip(), validate=True)  # tolerate trailing newline
+    except Exception as e:
+        raise RuntimeError(
+            f"TORTOISE_BACKUP_KEY must be base64-encoded (got {raw[:8]!r}...): {e}"
+        ) from e
+    if len(key) != _AES_KEY_SIZE:
+        raise RuntimeError(
+            f"TORTOISE_BACKUP_KEY must decode to {_AES_KEY_SIZE} bytes (got {len(key)})"
+        )
+    return key
 
 def _alternate_backup_key(key: bytes | None) -> bytes | None:
     """Return the OTHER configured backup key (#661 key separation).
@@ -350,16 +366,13 @@ class R2Storage:
                     "412",
                 ):
                     return False
-                # Review P3: a non-412 ClientError (403 auth, 5xx, bucket
-                # policy) must NOT fall through to a blind-put — re-raise so
-                # the misconfiguration is loud, never hidden by the fallback.
-                raise
             except ImportError:
                 pass
-            # Fallback ONLY for conditional-write-unsupported clients: HEAD-
-            # check, and RAISE on an ambiguous HEAD instead of blind-putting
-            # (an inconclusive read must never weaken the dedup linearization
-            # point).
+            # Fallback (HEAD-check) for any client that rejected the
+            # conditional write — boto3 412s are handled above; other clients
+            # (and the review P3 guard) fall through to a HEAD that confirms
+            # existence. An ambiguous HEAD (object missing, read failed) must
+            # RAISE — a blind-put would weaken the dedup linearization point.
             try:
                 self._s3().head_object(Bucket=self._bucket, Key=key)
                 return False  # exists → not created

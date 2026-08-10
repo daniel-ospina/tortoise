@@ -93,22 +93,11 @@
     .selfhost h4 { color: var(--green); font-size: 0.95rem; margin-bottom: 0.5rem; }
     .selfhost p { color: var(--text); font-size: 0.85rem; margin-bottom: 0.75rem; }
     .selfhost .license { color: var(--text-dim); font-size: 0.8rem; margin-bottom: 1rem; }
-    .selfhost .actions { display: flex; gap: 1rem; flex-wrap: wrap; }
+    .selfhost .actions { display: flex; gap: 1rem; flex-wrap: wrap; justify-content: center; }
     .selfhost a { color: var(--accent); text-decoration: none; font-size: 0.85rem; border: 1px solid var(--accent); padding: 0.5rem 1rem; border-radius: 0.5rem; }
     .selfhost a:hover { background: var(--accent); color: #04121a; }
 
     #beat-hero { opacity: 1; }
-
-    /* Scroll indicator */
-    #scroll-hint {
-      position: fixed; bottom: 3.5rem; left: 50%; transform: translateX(-50%);
-      z-index: 3; pointer-events: none;
-      width: 0; height: 0;
-      border-left: 12px solid transparent;
-      border-right: 12px solid transparent;
-      border-top: 16px solid var(--accent);
-      opacity: 1;
-    }
 
     /* Hero headline */
     /* Beat number (01 · Ingest, etc.) */
@@ -208,53 +197,31 @@
     }
 
     #cta-section { text-align: center; }
-    #cta-section .cta-start {
-      display: inline-block;
-      background: var(--accent);
-      color: var(--bg);
-      padding: 0.9rem 2rem;
-      font-family: var(--mono);
-      font-size: 1rem;
-      font-weight: 600;
-      text-decoration: none;
-      cursor: pointer;
-      transition: background 0.2s, transform 0.2s;
-      margin-bottom: 1.25rem;
+    #cta-section .social-links {
+      display: flex;
+      gap: 1.5rem;
+      justify-content: center;
+      margin-top: 2rem;
     }
-    #cta-section .cta-start:hover {
-      background: #0891b2;
-      transform: scale(1.02);
+    #cta-section .social-link {
+      color: #fff;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      transition: color 0.2s, opacity 0.2s;
     }
-    #cta-section .cta-subtle {
-      margin: 0 0 1rem;
-      color: var(--text);
-      font-size: 0.8rem;
+    #cta-section .social-link svg {
+      width: 24px;
+      height: 24px;
+      display: block;
     }
-    #cta-section .twitter-link {
-      margin-top: 1.5rem;
-      color: var(--text);
-      text-decoration: none;
-      font-size: 0.8rem;
-      transition: color 0.2s;
-    }
-    #cta-section .twitter-link:hover { color: var(--accent); }
-    #cta-section .cta-links { display: flex; gap: 1.5rem; justify-content: center; flex-wrap: wrap; margin-top: 2rem; }
-    #cta-section .cta-links a { font-size: 0.85rem; }
+    #cta-section .social-link:hover { color: var(--accent); opacity: 0.85; }
 
     /* Success state */
 
     /* MCP snippet */
 
     /* CLI snippet — demoted below MCP */
-
-    /* Self-hosting link */
-    #cta-section .selfhost-link {
-      color: var(--text);
-      text-decoration: none;
-      font-size: 0.78rem;
-      transition: color 0.2s;
-    }
-    #cta-section .selfhost-link:hover { color: var(--accent); }
 
     /* Subtle fade at bottom edges */
     #vignette {
@@ -270,6 +237,7 @@
       flex-wrap: wrap;
       gap: 0.5rem 1.5rem;
       padding: 2.5rem 1.5rem 3rem;
+      background: var(--bg);
       color: var(--text-dim);
       font-size: 0.78rem;
       font-family: var(--mono);
@@ -285,7 +253,6 @@
 <body>
   <canvas id="graph-canvas"></canvas>
   <div id="vignette"></div>
-  <div id="scroll-hint"></div>
 
   <div id="scroll-wrapper">
     <section id="beat-hero" class="beat">
@@ -334,13 +301,13 @@
 
   <!-- CTA — normal document-flow section -->
   <section id="cta-section" class="content-section">
-      <a href="/signup" class="cta-start">Connect your agent →</a>
-      <p class="cta-subtle">Hosted free tier — 10,000 write ops free. No credit card.</p>
-      <div class="cta-links">
-        <a class="selfhost-link" href="/docs">Docs</a>
-        <a class="selfhost-link" href="/self-hosted">Self-hosting docs →</a>
-        <a class="selfhost-link" href="https://app.premiselabs.co">Login →</a>
-        <a class="twitter-link" href="https://x.com/premiselabs" target="_blank" rel="noopener">@premiselabs</a>
+      <div class="social-links">
+        <a class="social-link" href="https://x.com/premiselabs" target="_blank" rel="noopener" aria-label="Premise Labs on X (Twitter)">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231L18.244 2.25Zm-1.161 17.52h1.833L7.084 4.126H5.117L17.083 19.77Z"/></svg>
+        </a>
+        <a class="social-link" href="https://www.linkedin.com/company/premiselabs" target="_blank" rel="noopener" aria-label="Premise Labs on LinkedIn">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433c-1.144 0-2.063-.926-2.063-2.065 0-1.138.92-2.063 2.063-2.063 1.14 0 2.064.925 2.064 2.063 0 1.139-.925 2.065-2.064 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.225 0z"/></svg>
+        </a>
       </div>
   </section>
 
@@ -508,20 +475,6 @@
       const peak = start + beatSpan;
 
       if (i === 0) {
-        // Pulse independently, kill on scroll
-        const pulse = gsap.to('#scroll-hint', {
-          opacity: 0.4, y: 6, duration: 1.5, yoyo: true, repeat: -1, ease: 'power1.inOut'
-        });
-        gsap.to('#scroll-hint', {
-          opacity: 0,
-          scrollTrigger: {
-            trigger: '#scroll-wrapper',
-            start: '10% top',
-            end: '14% top',
-            scrub: 1,
-            onEnter: () => pulse.kill(),
-          }
-        });
         gsap.to(el, {
           opacity: 0, y: -20,
           scrollTrigger: {

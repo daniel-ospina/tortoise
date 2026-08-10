@@ -1466,11 +1466,13 @@ class TestSessionFloodGate:
     def test_extraction_amplifier_402_zero_growth(self, client):
         """Dense decision content → extraction-aware estimate exceeds the
         points quota → 402 BEFORE any write (zero node growth)."""
-        # est = 2 + Σ_turns(1 + min(decisions,cap)) — dense turns × 201 each.
-        # TEST_TEAM max_points = 10000 (#310 GAP-B: points count maps to
-        # max_graph_nodes); 51 turns → est = 2 + 51×201 = 10253 > 10000 → 402.
+        # est = 2 + Σ_turns(1 + min(decisions,200)) — 5 dense turns × ~300
+        # matches = 2 + 5×201 = 1007 > 1000 (default max_points) → 402.
         dense = ("we should go. " * 300)  # 4500 chars < 5000 turn limit
-        conversation = [{"role": "user", "content": dense}] * 51
+        # 50 dense turns × ~300 matches = est 10052 > 10000 (Free max_points
+        # per #662 pricing) → 402. (Was 5 turns × est 1007, which no longer
+        # exceeds the 10000 cap after the Free-tier pricing raise.)
+        conversation = [{"role": "user", "content": dense}] * 50
         r = client.post("/v1/sessions", json={
             "session_id": "dense-session", "conversation": conversation,
         })
@@ -1858,3 +1860,23 @@ class TestEventReplay:
         assert len(r.json()["events"]) == 1
 
     # ── Cursor namespace (#692 review P2) ──────────────────────────────
+
+
+# ── MCP mount guard (#833) ──────────────────────────────────────────
+# The /mcp mount was accidentally deleted once (0875221) and production
+# MCP 404'd. This guard asserts the mount is registered: an unauthenticated
+# tools/list POST must reach the MCP app's auth middleware (401), never the
+# FastAPI catch-all (404).
+
+class TestMCPMount:
+    def test_mcp_mount_registered_and_rejects_unauthenticated(self, client):
+        r = client.post(
+            "/mcp",
+            json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+            headers={"Accept": "application/json, text/event-stream"},
+        )
+        # 401 = the mounted MCP app's TeamResolutionMiddleware ran.
+        # 404 = the mount is missing (regression — see #833).
+        assert r.status_code == 401, (
+            f"/mcp must be mounted (401 from auth middleware), got {r.status_code}: {r.text[:120]}"
+        )

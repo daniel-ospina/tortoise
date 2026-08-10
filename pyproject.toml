@@ -35,7 +35,7 @@ embeddings = ["sentence-transformers>=3,<6", "scikit-learn>=1.0"]
 quadrature = ["jax>=0.4"]
 postgres = ["psycopg2-binary>=2.9"]
 backups = ["boto3>=1.34", "cryptography>=42"]
-test = ["pytest>=8", "pytest-timeout", "playwright>=1.40", "pytest-playwright>=0.5"]
+test = ["pytest>=8", "pytest-timeout", "pytest-asyncio>=0.23", "playwright>=1.40", "pytest-playwright>=0.5"]
 
 # Canonical dev/test tooling (#492, #493) — installed via `uv sync --group dev`.
 # The `test` extra above is the CI/live E2E path (pip install -e '.[test]').

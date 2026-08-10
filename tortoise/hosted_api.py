@@ -3627,3 +3627,9 @@ async def backups_drill(request: Request, body: dict):
     return {"status": "drill_ok", "target_graph": target_graph, **result}
 
 
+# ── MCP mount (#236) ─────────────────────────────────────────────
+# Mount AFTER all route definitions. DO NOT add /mcp to the parent
+# RateLimitMiddleware.SKIP — Starlette's mount already routes /mcp.
+# Restored in #833: accidentally deleted with the superseded file-based
+# replay surface (0875221) — guarded by TestMCPMount in test_hosted_api.py.
+app.mount("/mcp", mcp_http_app)
