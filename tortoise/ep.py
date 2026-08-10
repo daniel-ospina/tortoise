@@ -51,14 +51,23 @@ class TortoiseEP:
         self._node_cache: dict[str, tuple[float, float]] = {}
         self._msg_cache: dict[tuple[str, str, str], tuple[float, float]] = {}
 
+        self._immutable_priors: set[str] = set()
         if affected_claims:
             rows = self.g.query(
                 "MATCH (n:Point) WHERE n.id IN $ids "
-                "RETURN n.id, coalesce(n.ep_alpha,1.0), coalesce(n.ep_beta,1.0)",
+                "RETURN n.id, coalesce(n.ep_alpha,1.0), coalesce(n.ep_beta,1.0), "
+                "       coalesce(n.baseline_set, false)",
                 params={"ids": list(affected_claims)},
             ).result_set
-            for cid, a, b in rows:
+            for cid, a, b, is_baseline in rows:
                 self._node_cache[cid] = (float(a), float(b))
+                # #844: explicit baselines (baseline_set=true) are IMMUTABLE
+                # evidence priors per sdk.py 'NEVER recomputed' contract — EP
+                # must not persist posteriors over them or re-runs drift
+                # (each run re-hydrates the previous posterior as the new
+                # prior → confidence erodes monotonically).
+                if is_baseline:
+                    self._immutable_priors.add(cid)
 
         for rel in ("IMPL", "NAND"):
             rows = self.g.query(
@@ -77,15 +86,19 @@ class TortoiseEP:
         by the per-run lifecycle) — flush whatever is present.
         """
         if getattr(self, "_node_cache", None):
+            immutable = getattr(self, "_immutable_priors", set())
             params_list = [
                 {"id": cid, "a": a, "b": b,
-                 "c": round(a/(a+b), 4) if (a + b) > 0 else 0.5}
+                 "c": round(a/(a+b), 4) if (a + b) > 0 else 0.5,
+                 "keep_prior": cid in immutable}
                 for cid, (a, b) in self._node_cache.items()
             ]
             self.g.query(
                 "UNWIND $params AS p "
                 "MATCH (n:Point {id: p.id}) "
-                "SET n.ep_alpha = p.a, n.ep_beta = p.b, n.confidence = p.c",
+                "SET n.confidence = p.c, "
+                "    n.ep_alpha = CASE WHEN p.keep_prior THEN n.ep_alpha ELSE p.a END, "
+                "    n.ep_beta  = CASE WHEN p.keep_prior THEN n.ep_beta  ELSE p.b END",
                 params={"params": params_list},
             )
 
