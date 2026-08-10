@@ -1876,3 +1876,148 @@ def test_r2_create_if_not_exists_fallback_head(monkeypatch):
     # a blind-put would weaken the dedup linearization point (review P3).
     with pytest.raises(RuntimeError, match="could not confirm absence"):
         store.create_if_not_exists("ops/alerts/Z.json", b"new")
+
+
+# ── #669 Supabase-seam stamps (plan Task 5 / P1-3: seam abstraction + fake) ──
+# create_backup/restore_backup stamp the control plane through the seam: the
+# FalkorDB registry handle (Cypher SET, pre-#669) or the Supabase control
+# plane (PostgREST PATCH on the teams row, post-#669). The Supabase side is
+# driven through the in-memory FakeControlPlane — zero network.
+
+from tests.fake_control_plane import ErrorControlPlane, FakeControlPlane
+
+
+def test_backup_seam_dialect_detection():
+    """The seam discriminates the FalkorDB registry dialect from PostgREST."""
+    from tortoise.hosted_backup import _is_supabase_source
+
+    with tempfile.TemporaryDirectory() as tmp:
+        proj = _make_proj(tmp)
+        registry = proj.db.select_graph("registry_tortoise")
+        assert not _is_supabase_source(registry)  # falkordb Graph → Cypher
+        assert _is_supabase_source(FakeControlPlane())
+        assert _is_supabase_source(FakeControlPlane().seed("teams", []))
+
+        class _VarArgsStub:  # *args stub → treated as the registry dialect
+            def query(self, *a, **k):
+                raise RuntimeError("down")
+
+        assert not _is_supabase_source(_VarArgsStub())
+        proj.close()
+
+
+def test_backup_seam_real_supabase_query_signature_pinned():
+    """The discriminator keys on the REAL SupabaseControlPlane.query first
+    positional param being ``table`` — pin it so a rename can never silently
+    break seam detection (all unit tests exercise the fake, which mirrors the
+    real signature only by convention)."""
+    import inspect
+
+    from tortoise.supabase_control import SupabaseControlPlane
+
+    params = list(inspect.signature(SupabaseControlPlane.query).parameters.values())
+    assert params[1].name == "table"
+
+
+def test_create_backup_stamps_supabase_teams_row(monkeypatch):
+    """Supabase mode: create_backup PATCHes backup_latest_at on the RIGHT row."""
+    _set_env_key(monkeypatch)
+    with tempfile.TemporaryDirectory() as tmp:
+        proj = _make_proj(tmp)
+        _seed(proj.g)
+        cp = FakeControlPlane().seed("teams", [
+            {"id": "team_x", "graph_name": "tortoise", "tier": "pro",
+             "backup_enabled": True},
+            {"id": "team_y", "graph_name": "tortoise", "tier": "pro",
+             "backup_enabled": True},
+        ])
+        store = MemoryStorage()
+        manifest = create_backup(proj, cp, store, team_id="team_x", graph_name="tortoise")
+        assert manifest["node_count"] == 6
+        row = cp.query("teams", select=["backup_latest_at"],
+                       filters=[("id", "eq", "team_x")])
+        assert row[0]["backup_latest_at"]  # stamped on the target team
+        other = cp.query("teams", select=["backup_latest_at"],
+                         filters=[("id", "eq", "team_y")])
+        assert other[0]["backup_latest_at"] is None  # untouched
+        proj.close()
+
+
+def test_create_backup_supabase_stamp_blip_best_effort(monkeypatch):
+    """#669 P3: a Supabase stamp blip must not fail an otherwise-durable backup."""
+    _set_env_key(monkeypatch)
+    with tempfile.TemporaryDirectory() as tmp:
+        proj = _make_proj(tmp)
+        _seed(proj.g)
+
+        class StampBlip(FakeControlPlane):
+            # Seam-interface signature (table first) — dialect detection must
+            # recognize it as a Supabase source.
+            def query(self, table, *args, **kwargs):
+                if kwargs.get("method") == "PATCH":
+                    raise RuntimeError("Supabase blip (simulated)")
+                return super().query(table, *args, **kwargs)
+
+        store = MemoryStorage()
+        manifest = create_backup(
+            proj, StampBlip().seed("teams", [{"id": "team_x"}]), store,
+            team_id="team_x", graph_name="tortoise",
+        )
+        assert manifest["node_count"] == 6
+        assert any(k.endswith("dump.enc") for k in store.list("backups/team_x/"))
+        assert any(k.endswith("manifest.json") for k in store.list("backups/team_x/"))
+        proj.close()
+
+
+def test_restore_backup_stamps_supabase_teams_row(monkeypatch):
+    """Supabase mode: restore_backup PATCHes backup_restored_at on the RIGHT row."""
+    _set_env_key(monkeypatch)
+    with tempfile.TemporaryDirectory() as tmp:
+        proj = _make_proj(tmp)
+        _seed(proj.g)
+        cp = FakeControlPlane().seed("teams", [
+            {"id": "team_x", "graph_name": "tortoise", "tier": "pro",
+             "backup_enabled": True},
+        ])
+        store = MemoryStorage()
+        manifest = create_backup(proj, cp, store, team_id="team_x", graph_name="tortoise")
+        dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]
+        result = restore_backup(
+            proj.db, cp, store, dump_key, team_id="team_x", graph_name="tortoise",
+        )
+        assert result["restored"] == {"nodes": 6, "edges": 5}
+        row = cp.query("teams", select=["backup_restored_at"],
+                       filters=[("id", "eq", "team_x")])
+        assert row[0]["backup_restored_at"]
+        proj.close()
+
+
+def test_restore_supabase_stamp_blip_best_effort(monkeypatch):
+    """Restore stays durable when the Supabase restore-stamp PATCH blips."""
+    _set_env_key(monkeypatch)
+    with tempfile.TemporaryDirectory() as tmp:
+        proj = _make_proj(tmp)
+        _seed(proj.g)
+
+        class StampBlip(FakeControlPlane):
+            # Seam-interface signature (table first) — dialect detection must
+            # recognize it as a Supabase source.
+            def query(self, table, *args, **kwargs):
+                if kwargs.get("method") == "PATCH":
+                    raise RuntimeError("Supabase blip (simulated)")
+                return super().query(table, *args, **kwargs)
+
+        store = MemoryStorage()
+        manifest = create_backup(
+            proj, StampBlip().seed("teams", [{"id": "team_x"}]), store,
+            team_id="team_x", graph_name="tortoise",
+        )
+        dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]
+        result = restore_backup(
+            proj.db, StampBlip().seed("teams", [{"id": "team_x"}]), store, dump_key,
+            team_id="team_x", graph_name="tortoise",
+        )
+        assert result["restored"] == {"nodes": 6, "edges": 5}
+        live = proj.db.select_graph("tortoise")
+        assert live.query("MATCH (n) RETURN count(n)").result_set[0][0] == 6
+        proj.close()

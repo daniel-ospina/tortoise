@@ -234,14 +234,32 @@
     .legal-footer {
       position: relative; z-index: 2;   /* paint above the fixed graph canvas */
       display: flex;
-      justify-content: center;
+      justify-content: space-between;
+      align-items: center;
       flex-wrap: wrap;
-      gap: 0.5rem 1.5rem;
-      padding: 2.5rem 1.5rem 3rem;
+      gap: 1rem 2rem;
+      padding: 2.5rem 2.5rem 3rem;
       background: var(--bg);
       color: var(--text-dim);
       font-size: 0.78rem;
       font-family: var(--mono);
+    }
+    .footer-logo { line-height: 0; }
+    .footer-logo img {
+      height: 44px;
+      width: auto;
+      opacity: 0.85;
+      filter: drop-shadow(0 0 14px rgba(34, 211, 238, 0.25));
+      transition: opacity 0.2s, filter 0.2s;
+    }
+    .footer-logo:hover img {
+      opacity: 1;
+      filter: drop-shadow(0 0 18px rgba(34, 211, 238, 0.45));
+    }
+    .footer-links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem 1.5rem;
     }
     .legal-footer a {
       color: var(--text-dim);
@@ -619,10 +637,15 @@
   </script>
 
   <footer class="legal-footer">
-    <a href="/privacy">Privacy Policy</a>
-    <a href="/tos">Terms of Service</a>
-    <a href="/license">License</a>
-    <a href="/dpa">DPA</a>
+    <a href="https://premiselabs.co" class="footer-logo" aria-label="Premise Labs">
+      <img src="/assets/premiselabs-logo.png" alt="Premise Labs" width="160" height="98" />
+    </a>
+    <nav class="footer-links" aria-label="Legal">
+      <a href="/privacy">Privacy Policy</a>
+      <a href="/tos">Terms of Service</a>
+      <a href="/license">License</a>
+      <a href="/dpa">DPA</a>
+    </nav>
   </footer>
 <script src="/consent.js" defer></script>
 </body>

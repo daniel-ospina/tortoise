@@ -200,7 +200,7 @@ async def topic_summary(
     Returns the epistemic structure for a topic: significant/settled claims,
     contested claims, disputed NAND pairs, and argument topology.
 
-    Classification uses EP posterior variance (persisted ep_alpha/ep_beta):
+    Classification uses EP posterior variance (persisted posterior (posterior_alpha/beta, falling back to ep_alpha/beta priors)):
     - significant: confidence_mean >= 0.7 AND variance < 0.01
     - contested: variance > 0.04 (destabilized posterior)
     - disputed pairs: NAND-connected where both have variance > 0.02

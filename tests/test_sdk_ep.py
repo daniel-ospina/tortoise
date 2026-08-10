@@ -201,10 +201,15 @@ class TestCacheFreshness:
         ep = sdk._get_ep()
         ep.run([op["id"]], evidence={b["id"]: (10.0, 1.0)})
 
-        # External write changes the graph AFTER the run
+        # External write changes the graph AFTER the run. Under the #852
+        # posterior-first contract, consumers read
+        # coalesce(posterior_*, ep_*, 1.0) — a param change must clear the
+        # stale posterior too (mirrors the evidence pre-write in run() and
+        # set_point_baseline's baseline-change clearing).
         proj = sdk._get_proj()
         proj.g.query(
-            "MATCH (n:Point {id:$id}) SET n.ep_alpha=4.0, n.ep_beta=4.0",
+            "MATCH (n:Point {id:$id}) SET n.ep_alpha=4.0, n.ep_beta=4.0, "
+            "n.posterior_alpha=null, n.posterior_beta=null",
             params={"id": b["id"]},
         )
         # A run that early-returns (no affected claims) must NOT serve the

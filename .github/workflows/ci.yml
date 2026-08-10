@@ -86,6 +86,12 @@ jobs:
 
   welcome-e2e:
     runs-on: ubuntu-latest
+    # Serialize live smoke runs: each run consumes 1 email-send from the
+    # shared 30/hr project-wide prod bucket — parallel PRs would exhaust it
+    # and red CI on unrelated PRs (#801 code-review). Latest run wins.
+    concurrency:
+      group: welcome-e2e
+      cancel-in-progress: true
     # Playwright browser tests for the onboarding welcome page (#541).
     # Runs against the live prod page; Supabase-backed tests need
     # SUPABASE_URL/SUPABASE_SERVICE_KEY secrets (skipped without them).
@@ -102,7 +108,20 @@ jobs:
       - run: pip install -e '.[test]'
       - run: python -m playwright install --with-deps chromium
       - name: Run welcome page E2E + waitlist static tests (#373)
-        run: python -m pytest tests/e2e/ tests/test_waitlist_form.py -q -p no:cacheprovider
+        run: python -m pytest tests/e2e/ tests/test_waitlist_form.py -q -rs -p no:cacheprovider
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+      - name: Warn if live signup smoke is skipping (no-429 monitor off)
+        if: always()
+        run: |
+          # ⛔ env-var check, NOT pytest output parsing: `--collect-only` never
+          # prints "skipped" (verified empirically) — grep on it can never match.
+          if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_SERVICE_KEY" ]; then
+            echo "::warning::live signup smoke is SKIPPED — SUPABASE_URL/SUPABASE_SERVICE_KEY secrets missing; the #801 no-429 monitor is OFF"
+          else
+            echo "secrets present — live signup smoke will run"
+          fi
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
@@ -163,11 +182,15 @@ jobs:
         # …) that rate-limit shared CI runner IPs (429 outlives the test's
         # single retry) → nondeterministic gate. Skip-with-annotation, same
         # pattern as the tortoise-host deferral; full crawl runs locally.
+        # test_signup_form_safety_e2e.py joined here (#801): same module-level
+        # RUN_LEGAL_E2E gate, same wrangler dev server; it ran nowhere in CI
+        # before (welcome-e2e collects it without RUN_LEGAL_E2E → self-skips).
         run: >
           RUN_LEGAL_E2E=1 BASE_URL=http://127.0.0.1:8788
           TORTISE_HOST=http://127.0.0.1:8788 TORTISE_HOST_CHECK=1
           LEGAL_E2E_SKIP_EXTERNAL_CRAWL=1
-          python -m pytest tests/e2e/test_legal_pages.py -q -p no:cacheprovider
+          python -m pytest tests/e2e/test_legal_pages.py tests/e2e/test_signup_form_safety_e2e.py
+          -q -p no:cacheprovider
       - name: Stop wrangler dev server
         if: always()
         # kill npx + its wrangler/workerd children (each job gets its own

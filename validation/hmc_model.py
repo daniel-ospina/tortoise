@@ -25,7 +25,9 @@ N_CLAIMS = 10
 
 # Which claims are NAND-linked (pairs)
 NAND_PAIRS = [(0, 1), (2, 3)]  # A-B, C-D
-NAND_WEIGHT = 3.0
+# #855: EP NAND base weight is 8.0 (weights.py NAND_BASE_WEIGHT) — the HMC
+# reference must match so EP-vs-HMC W2 calibration compares like distributions.
+NAND_WEIGHT = 8.0
 
 # Which claims are IMPL-linked (source → target)
 IMPL_PAIRS = [(4, 5), (6, 7), (8, 9)]  # E→F, G→H, I→J
