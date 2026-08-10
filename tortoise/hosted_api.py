@@ -2566,8 +2566,12 @@ async def list_invites(team_id: str, user: dict = Depends(get_current_user)):
                                 detail="Invites unavailable (control plane error)")
     await _require_owner_admin(user["user_id"], team_id)
     sdk = _make_sdk(namespace="registry")
+    # Registry accept sets accepted_at but LEAVES status='pending' — a
+    # consumed invite must not appear as actionable (code-review P2,
+    # PR #864).
     return [i for i in sdk.invitation_list(team_id)
-            if i.get("status") in (None, "pending")]
+            if i.get("status") in (None, "pending")
+            and i.get("accepted_at") is None]
 
 
 @app.delete("/v1/invites/{invitation_id}")
@@ -2600,7 +2604,9 @@ async def rescind_invite(invitation_id: str, team_id: str,
     inv = sdk.invitation_get_by_id(invitation_id)
     if inv is None or inv.get("team_id") != team_id:
         raise HTTPException(status_code=404, detail="Invitation not found")
-    if inv.get("status") == "accepted":
+    # Registry accept sets accepted_at but leaves status='pending' — check
+    # BOTH signals (code-review P2, PR #864).
+    if inv.get("status") == "accepted" or inv.get("accepted_at"):
         raise HTTPException(status_code=409,
                             detail="Invitation already accepted — cannot rescind")
     return sdk.invitation_revoke(invitation_id)

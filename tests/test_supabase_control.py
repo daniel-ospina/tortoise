@@ -82,10 +82,15 @@ def _membership_row(**overrides) -> dict:
 
 @pytest.fixture
 def fake() -> FakeControlPlane:
+    # The invitation-seam tests use team-1 (with a generous member cap for
+    # the accept quota gate, PR #864 review P2); FREE_TEAM serves the
+    # resolve/session tests.
     return FakeControlPlane({
         "api_keys": [],
         "team_memberships": [],
-        "teams": [dict(FREE_TEAM)],
+        "teams": [dict(FREE_TEAM),
+                   {"id": "team-1", "name": "Invite Team", "tier": "free",
+                    "max_users": 100, "graph_name": "team_team-1"}],
     })
 
 
@@ -318,6 +323,13 @@ class TestInvitationSeam:
             "user_id": user_id, "team_id": team_id,
             "role": "owner", "status": "active",
         }])
+        # Accept's quota/tier gate (PR #864 review P2) reads the teams row —
+        # seed it with a generous member cap unless a test overrides.
+        if not any(t.get("id") == team_id for t in fake.tables.get("teams", [])):
+            fake.seed("teams", [{
+                "id": team_id, "name": "Invite Team", "tier": "free",
+                "max_users": 100, "graph_name": f"team_{team_id}",
+            }])
 
     # ── mint ───────────────────────────────────────────────────────────
 
@@ -471,6 +483,99 @@ class TestInvitationSeam:
                               "owner-1")
         invitation_accept(fake, inv["token"], "user-2", user_email=None)
         assert len(fake.tables["team_memberships"]) == 1
+
+    def test_accept_402_when_team_at_member_cap(self, fake):
+        """Quota/tier gate parity with the registry accept path (code-review
+        P2, PR #864): a free-tier team at its 1-user cap rejects with 402."""
+        # free tier: max_users=1; the owner already occupies the slot
+        for t in fake.tables["teams"]:
+            if t["id"] == "team-1":
+                t.update({"tier": "free", "max_users": 1})
+        self._owner(fake)
+        inv = invitation_mint(fake, "team-1", "bob@example.com", "member",
+                              "owner-1")
+        with pytest.raises(InvitationError) as ei:
+            invitation_accept(fake, inv["token"], "user-2")
+        assert ei.value.status == 402
+        # invite still pending — the gate fires BEFORE consumption
+        assert fake.tables["invitations"][0]["status"] == "pending"
+
+    def test_accept_compensates_invite_when_membership_write_fails(self, fake):
+        """Burn-window fix (code-review P2, PR #864): if the membership write
+        fails after the invite was consumed, the invite rolls back to pending
+        so the invitee can retry."""
+        inv = invitation_mint(fake, "team-1", "bob@example.com", "member",
+                              "owner-1")
+        fake.seed("teams", [{"id": "team-1", "name": "T", "tier": "free",
+                              "max_users": 10, "graph_name": "team_team-1"}])
+        # Fail the membership POST only (first failing call after accept)
+        class _FlakyAfterAccept(FakeControlPlane):
+            def __init__(self, base):
+                self._base = base
+                self._fail_next_membership = False
+
+            def query(self, table, **kw):
+                if table == "team_memberships" and kw.get("method") == "POST":
+                    self._fail_next_membership = True
+                    raise RuntimeError("simulated membership write failure")
+                return self._base.query(table, **kw)
+
+        flaky = _FlakyAfterAccept(fake)
+        with pytest.raises(RuntimeError):
+            invitation_accept(flaky, inv["token"], "user-2")
+        # compensating rollback: invite is pending again, not burned
+        row = fake.tables["invitations"][0]
+        assert row["status"] == "pending"
+        assert row["accepted_at"] is None
+
+    def test_rescind_loses_race_to_concurrent_accept_409(self, fake):
+        """Race fix (code-review P2, PR #864): a rescind racing a concurrent
+        accept must not flip a consumed invite to revoked — 409 instead."""
+        self._owner(fake)
+        fake.seed("teams", [{"id": "team-1", "name": "T", "tier": "free",
+                              "max_users": 10, "graph_name": "team_team-1"}])
+        inv = invitation_mint(fake, "team-1", "bob@example.com", "member",
+                              "owner-1")
+        # simulate: accept consumed the invite between rescind's read + PATCH
+        class _AcceptMidRace(FakeControlPlane):
+            def __init__(self, base):
+                self._base = base
+
+            def query(self, table, **kw):
+                # on the rescind PATCH, consume first (the concurrent accept)
+                if table == "invitations" and kw.get("method") == "PATCH" \
+                        and kw.get("json_body", {}).get("status") == "revoked":
+                    for r in self._base.tables["invitations"]:
+                        if r["id"] == inv["id"]:
+                            r["status"] = "accepted"
+                return self._base.query(table, **kw)
+
+        racer = _AcceptMidRace(fake)
+        with pytest.raises(InvitationError) as ei:
+            invitation_rescind(racer, inv["id"], "team-1", "owner-1")
+        assert ei.value.status == 409
+        assert fake.tables["invitations"][0]["status"] == "accepted"
+
+    def test_mint_concurrent_duplicate_maps_to_409(self, fake):
+        """Concurrent dedup (code-review P2, PR #864): when the partial
+        unique index rejects the loser (PostgREST HTTP 409), mint surfaces
+        InvitationError(409) — not a 500."""
+        class _UniqueViolation(FakeControlPlane):
+            def __init__(self, base):
+                self._base = base
+
+            def query(self, table, **kw):
+                if table == "invitations" and kw.get("method") == "POST":
+                    raise RuntimeError(
+                        "Supabase control-plane query failed (invitations): "
+                        "HTTP 409 (duplicate key value violates unique "
+                        "constraint uq_invitations_team_email_pending)")
+                return self._base.query(table, **kw)
+
+        with pytest.raises(InvitationError) as ei:
+            invitation_mint(_UniqueViolation(fake), "team-1",
+                            "bob@example.com", "member", "owner-1")
+        assert ei.value.status == 409
 
     # ── rescind ─────────────────────────────────────────────────────────
 

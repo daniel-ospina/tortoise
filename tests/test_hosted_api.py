@@ -1892,9 +1892,14 @@ class TestInviteEndpointsRegistry:
     """E3/E4 via the registry path with the SAME contract as Supabase mode."""
 
     @pytest.fixture
-    def registry_env(self, client):
+    def registry_env(self, client, monkeypatch):
         """TestClient + embedded registry seeded with a Team-tier team and
-        an owner membership (user-1)."""
+        an owner membership (user-1).
+
+        Pins TORTOISE_CONTROL_PLANE=registry so these tests exercise the
+        registry path even when SUPABASE_URL + a service key are exported in
+        the dev shell (code-review P2, PR #864)."""
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
         sdk = TortoiseSDK(namespace="registry")  # patched __init__ → shared temp DB
         reg = sdk._get_registry()
         reg.query(
