@@ -1183,3 +1183,89 @@ def graph_metadata(cp, team_id: str) -> list[dict]:
         "kind": "default",
         "namespace": rows[0]["graph_name"],
     }]
+
+
+# ── Stripe webhook billing state (plan Task 10 — #771 review P1) ───────────
+#
+# The Stripe webhook (_webhook_apply_event) writes billing state on the
+# control plane. Registry mode: Team node SETs. Supabase mode: PATCH the
+# teams row (0012 added subscription_status / customer_email / grace_until /
+# current_period_end next to 0006's tier / stripe_customer_id /
+# subscription_id). Without this branch the webhook would silently lose
+# billing state post-registry-delete — or recreate the registry graph via
+# an unguarded write (FalkorDB GRAPH.QUERY auto-creates missing graphs).
+
+
+def team_id_for_stripe_customer(cp, customer_id: str) -> str | None:
+    """Team id whose teams.stripe_customer_id matches (subscription events).
+
+    Registry twin: MATCH (t:Team {stripe_customer_id:$cid}) RETURN t.id.
+    None when no team is bound to the customer (webhook acks 200 "no team
+    binding" — Stripe stops retrying).
+    """
+    rows = cp.query(
+        "teams", select=["id"], filters=[("stripe_customer_id", "eq", customer_id)]
+    )
+    return rows[0]["id"] if rows else None
+
+
+def update_team_billing(cp, team_id: str, updates: dict) -> None:
+    """PATCH billing state on the teams row (webhook SET twin).
+
+    ``updates`` is a subset of {tier, stripe_customer_id, subscription_id,
+    subscription_status, customer_email, grace_until, current_period_end}
+    — only columns that exist on teams (0006 + 0012) are written. Raises on
+    failure (fail-closed): a dropped billing write must surface, not
+    silently lose an upgrade/downgrade/cancel.
+    """
+    allowed = {"tier", "stripe_customer_id", "subscription_id",
+               "subscription_status", "customer_email", "grace_until",
+               "current_period_end",
+               # quota columns (0006) — apply_limits' Supabase branch writes
+               # them; dropping them here would silently keep upgrades at
+               # free-tier caps (re-review P1, PR #878)
+               "max_users", "max_graphs", "ops_allowance", "graph_size_cap"}
+    body = {k: v for k, v in updates.items() if k in allowed}
+    if not body:
+        return
+    cp.query(
+        "teams",
+        method="PATCH",
+        filters=[("id", "eq", team_id)],
+        json_body=body,
+    )
+
+
+def webhook_event_marker(cp, event_id: str, etype: str) -> bool:
+    """First-seen marker for a Stripe webhook event (Supabase twin of the
+    registry WebhookEvent node — #771 re-review P1).
+
+    Returns True when the event is NEW (marker created now), False when it
+    was already seen. The apply itself is idempotent (replays converge);
+    only side-effects (notify/audit/analytics) are gated on first-seen.
+    """
+    rows = cp.query(
+        "webhook_events",
+        select=["event_id"],
+        filters=[("event_id", "eq", event_id)],
+    )
+    if rows:
+        return False
+    from datetime import datetime, timezone
+    cp.query(
+        "webhook_events",
+        method="POST",
+        json_body={
+            "event_id": event_id,
+            "first_seen": datetime.now(timezone.utc).isoformat(),
+            "type": etype,
+        },
+    )
+    return True
+
+
+def team_tier(cp, team_id: str) -> str | None:
+    """Current tier from the teams row (webhook analytics twin of the
+    registry tier read)."""
+    rows = cp.query("teams", select=["tier"], filters=[("id", "eq", team_id)])
+    return rows[0].get("tier") if rows else None

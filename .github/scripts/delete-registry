@@ -1,0 +1,205 @@
+#!/usr/bin/env python3
+"""delete-registry — the #669 flip's FINAL step: delete the FalkorDB control-
+plane registry graphs (plan Task 10.5, issue #771).
+
+⚠️ POINT OF NO RETURN. Rollback is lossless ONLY until this deletion runs:
+after the registry graphs are deleted, recovery = redeploy the pre-flip
+build AND re-seed from Supabase (trivially empty at zero data — the flip
+gate asserts both stores hold no real data). The owner must be informed
+before this script runs; it is NOT part of any CI job.
+
+Safety contract:
+  - TARGETED GRAPH.DELETE of the registry graph set ONLY —
+    ``registry_control_plane`` (the graph reached via namespace='registry';
+    docs/registry-graph-schema.md). NEVER flushall: the FalkorDB instance
+    sits BESIDE tenant knowledge graphs (team_*) and the default graph.
+  - Whitelist: the delete set is a hardcoded constant. Before deleting,
+    every graph in the delete set must be IN the whitelist (defense-in-
+    depth: a typo in the constant must refuse, never delete); anything else
+    on the instance is never touched.
+  - Post-delete verify: the registry graphs are GONE and every knowledge
+    graph is INTACT (present, with the same node count as before) — the
+    script exits non-zero if either assertion fails.
+  - ``--confirm`` is REQUIRED (dry-run is the default). Requires
+    TORTOISE_DB_URI (e.g. the FALKORDB_CLOUD_URI value) or TORTOISE_DB_PATH
+    (embedded — for dry-run/whitelist testing only).
+
+Usage:
+    TORTOISE_DB_URI=rediss://... .github/scripts/delete-registry            # dry-run
+    TORTOISE_DB_URI=rediss://... .github/scripts/delete-registry --confirm  # the flip's last step
+
+Exit codes:
+    0 — registry deleted (or, in dry-run, would be) + knowledge graphs intact
+    1 — refusal (whitelist violation) or post-delete verification failure
+    2 — could not run (missing env/DB, usage error)
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+# ── The registry graph set (single source of truth) ────────────────────────
+# namespace='registry' resolves to f"{ns}_control_plane" (tortoise/sdk.py
+# _get_registry); docs/registry-graph-schema.md documents the namespace.
+# WebhookEvent idempotency markers live in the same registry graph. This is
+# the FULL registry-writer surface as of the flip: the Stripe webhook's
+# Supabase-mode branch (PR #878, migration 0012) PATCHes the teams row via
+# the seam instead of writing here, so no live writer touches this graph
+# after the flip.
+# the ONLY set this script may ever delete.
+REGISTRY_GRAPHS = frozenset({"registry_control_plane"})
+
+
+def open_projection(db_path: str | None, db_uri: str | None):
+    """Open the FalkorDB projection. db_uri wins over db_path (like the SDK)."""
+    from tortoise.projection import FalkorProjection
+    if db_uri:
+        return FalkorProjection.from_uri(db_uri)
+    if db_path:
+        return FalkorProjection(db_path)
+    raise RuntimeError(
+        "neither TORTOISE_DB_URI nor TORTOISE_DB_PATH is set — cannot open "
+        "the FalkorDB instance")
+
+
+def plan_delete(all_graphs: list[str], registry_set: frozenset[str] = REGISTRY_GRAPHS):
+    """Compute the deletion plan. Returns (to_delete, absent, refused).
+
+    - to_delete: registry-set graphs present on the instance.
+    - absent:    registry-set graphs NOT present (already gone — fine).
+    - refused:   requested graphs outside the whitelist (never deleted —
+                 a violation must abort, not proceed).
+    """
+    present = set(all_graphs)
+    # to_delete is WHITELIST-ONLY: a requested graph outside REGISTRY_GRAPHS
+    # is never deleteable — it lands in ``refused`` instead.
+    to_delete = sorted(g for g in registry_set if g in present and g in REGISTRY_GRAPHS)
+    absent = sorted(g for g in registry_set if g not in present)
+    refused = sorted(g for g in registry_set if g not in REGISTRY_GRAPHS)
+    return to_delete, absent, refused
+
+
+def count_nodes(db, graph_name: str) -> int:
+    g = db.select_graph(graph_name)
+    rows = g.query("MATCH (n) RETURN count(n)").result_set
+    return int(rows[0][0]) if rows else 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(
+        prog="delete-registry",
+        description="Delete the FalkorDB control-plane registry graphs "
+                    "(#669 flip final step). TARGETED GRAPH.DELETE only — "
+                    "knowledge graphs are never touched.",
+        epilog="Exit codes: 0 deleted (or dry-run); 1 refusal/verify "
+               "failure; 2 could not run. POINT OF NO RETURN: lossless "
+               "rollback ends at deletion; after it, recovery = redeploy "
+               "prior + re-seed from Supabase (empty at zero data).",
+    )
+    ap.add_argument("--confirm", action="store_true",
+                    help="REQUIRED to actually delete. Without it, prints "
+                         "the plan (dry-run) and exits 0.")
+    ap.add_argument("--db-path", help="Embedded FalkorDBLite path "
+                    "(overrides TORTOISE_DB_PATH; testing only).")
+    ap.add_argument("--db-uri", help="FalkorDB URI (overrides "
+                    "TORTOISE_DB_URI env).")
+    args = ap.parse_args(argv)
+
+    db_path = args.db_path or os.environ.get("TORTOISE_DB_PATH") or None
+    db_uri = args.db_uri or os.environ.get("TORTOISE_DB_URI") or None
+    try:
+        proj = open_projection(db_path, db_uri)
+    except Exception as e:
+        print(f"delete-registry: CANNOT RUN — {e}", file=sys.stderr)
+        return 2
+
+    try:
+        db = proj.db
+        all_graphs = sorted(db.list_graphs())
+        to_delete, absent, refused = plan_delete(all_graphs)
+
+        # ── Whitelist refusal (defense-in-depth) ──
+        if refused:
+            print("delete-registry: REFUSED — graphs outside the registry "
+                  f"whitelist {sorted(REGISTRY_GRAPHS)}: {refused}. Nothing "
+                  "was deleted.", file=sys.stderr)
+            return 1
+        # Never delete anything that is not in the registry set.
+        unexpected = sorted(set(to_delete) - REGISTRY_GRAPHS)
+        if unexpected:
+            print("delete-registry: REFUSED — would delete non-registry "
+                  f"graphs: {unexpected}. Nothing was deleted.", file=sys.stderr)
+            return 1
+
+        knowledge = sorted(set(all_graphs) - REGISTRY_GRAPHS)
+        pre_counts = {g: count_nodes(db, g) for g in knowledge}
+
+        print("delete-registry: registry graph set = "
+              f"{sorted(REGISTRY_GRAPHS)}")
+        if absent:
+            print(f"delete-registry: already absent (nothing to delete): {absent}")
+        if not to_delete:
+            print("delete-registry: no registry graphs present — nothing to "
+                  "delete. Knowledge graphs untouched.")
+            return 0
+        print(f"delete-registry: would delete: {to_delete}")
+        print(f"delete-registry: knowledge graphs INTACT before delete "
+              f"({len(knowledge)}): "
+              + ", ".join(f"{g}={pre_counts[g]} nodes" for g in knowledge) + ".")
+
+        if not args.confirm:
+            print("delete-registry: DRY-RUN — pass --confirm to execute. "
+                  "This is the flip's POINT OF NO RETURN: rollback is "
+                  "lossless only until deletion; after it, recovery = "
+                  "redeploy prior + re-seed from Supabase (empty at zero "
+                  "data). The owner must be informed first.")
+            return 0
+
+        # ── Execute: targeted GRAPH.DELETE of the registry set only. ──
+        for g in to_delete:
+            try:
+                db.execute_command("GRAPH.DELETE", g)
+                print(f"delete-registry: deleted {g}")
+            except Exception as e:
+                print(f"delete-registry: FAILED to delete {g}: {e}",
+                      file=sys.stderr)
+                return 1
+
+        # ── Post-delete verify: registry gone, knowledge graphs intact. ──
+        after = set(db.list_graphs())
+        leftovers = [g for g in to_delete if g in after]
+        if leftovers:
+            print(f"delete-registry: VERIFY FAILED — registry graphs still "
+                  f"present: {leftovers}", file=sys.stderr)
+            return 1
+        for g in knowledge:
+            if g not in after:
+                print(f"delete-registry: VERIFY FAILED — knowledge graph "
+                      f"{g} is MISSING after the delete!", file=sys.stderr)
+                return 1
+            now = count_nodes(db, g)
+            if now != pre_counts[g]:
+                print(f"delete-registry: VERIFY FAILED — knowledge graph "
+                      f"{g} node count changed: {pre_counts[g]} → {now}",
+                      file=sys.stderr)
+                return 1
+        print("delete-registry: VERIFY OK — registry graphs gone; all "
+              "knowledge graphs intact (node counts unchanged).")
+        print("delete-registry: DONE. Post-flip verification (#766) may now "
+              "proceed.")
+        return 0
+    finally:
+        try:
+            proj.close()
+        except Exception:
+            pass
+
+
+if __name__ == "__main__":
+    sys.exit(main())

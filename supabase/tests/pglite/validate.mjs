@@ -46,12 +46,13 @@ await db.exec(`
     $$ SELECT coalesce(nullif(current_setting('request.jwt.claims', true), ''), '{}')::jsonb $$;
 `);
 
-// ── Apply migrations 0001-0011 in order ──
+// ── Apply migrations 0001-0013 in order ──
 const files = ['0001_user_teams.sql','0002_audit_events.sql','0003_team_memberships.sql',
                '0004_analytics_events.sql','0005_waitlist_subscribers.sql',
                '0006_teams.sql','0007_api_keys.sql','0008_invitations.sql',
                '0009_team_memberships_extend.sql','0010_provisioning_rpcs.sql',
-               '0011_teams_name_unique.sql'];
+               '0011_teams_name_unique.sql','0012_teams_billing_columns.sql',
+               '0013_webhook_events.sql'];
 for (const f of files) {
   const sql = readFileSync(`${MIG_DIR}/${f}`, 'utf8');
   try {

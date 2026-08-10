@@ -77,6 +77,22 @@ def _label_drift_pct() -> float:
         return 0.4
 
 
+def _enum_delta_suppressed() -> bool:
+    """#669 flip window (P3-4, #771): suppression flag for ENUM_DELTA.
+
+    At the flip the FalkorDB control-plane registry is deleted while Supabase
+    (still empty at zero data) becomes the enumeration source — the team
+    universe legitimately drops to 0, and the enumeration-delta guard would
+    otherwise file a spurious incident ("wiped enumeration source"). The
+    operator sets ``TORTOISE_SUPPRESS_ENUM_DELTA=1`` for the flip window
+    ONLY (the pre-deploy gate asserts BOTH stores are empty, so suppressing
+    during the flip cannot hide a real wipe); it must be unset after
+    post-flip verification (#766) so the guard's protection is restored.
+    """
+    return os.environ.get("TORTOISE_SUPPRESS_ENUM_DELTA", "").strip().lower() in (
+        "1", "true", "yes")
+
+
 def _check_per_label_drift(
     *,
     prev_counts: dict[str, int],
@@ -459,9 +475,13 @@ def run_backup_sweep(
                 "incidents": incidents,
             }
         # ── Legacy path: 0 ALL teams ──
-        if prev_team_count > 0:
+        if prev_team_count > 0 and not _enum_delta_suppressed():
             # A wiped enumeration source must not degrade silently to the
             # chronic NO_TEAMS state — this is an incident, not a signal.
+            # (#669 flip window P3-4: suppressed while the operator sets
+            # TORTOISE_SUPPRESS_ENUM_DELTA=1 — the registry delete makes the
+            # 0→0 drop legitimate; the pre-deploy gate guarantees both stores
+            # are empty before the flip.)
             incidents.append(
                 {
                     "kind": "ENUM_DELTA",

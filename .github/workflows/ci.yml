@@ -234,3 +234,25 @@ jobs:
           pkill -f 'wrangler.*8788' 2>/dev/null || true
           pkill workerd 2>/dev/null || true
           true
+
+  flip-gate:
+    # #669 pre-deploy cutover gate (plan Task 10.1, issue #771) — the gate
+    # that MUST PASS before the single-deploy flip. Runs the local/CI
+    # equivalence of the operator's live gate: FalkorDBLite + the seam fakes
+    # (zero network, no Docker — the plan's `local supabase start` leg maps
+    # to the seam-fake + embedded-DB equivalence, documented in
+    # .github/scripts/verify-cutover). The operator additionally runs
+    # `bash .github/scripts/verify-cutover --live` with prod creds right
+    # before dispatching the flip (sequence in supabase-deploy.yml).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'   # tenant-provision TS-parse guard (#770)
+      - run: pip install -e '.[test]'
+      - name: Run the #669 pre-deploy flip gate
+        run: bash .github/scripts/verify-cutover

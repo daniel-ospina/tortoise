@@ -1,5 +1,29 @@
 # Deploy Supabase migrations + edge functions for the premise-labs project
-# (ybetwichurajbfswfeqa) on main when supabase/** changes (#373).
+# (ybetwichurajbfswfeqa) (#373).
+#
+# ⚠️ #669 FLIP GATING (issue #771, plan Task 10.2 — NO auth-blackout window):
+# The deploy steps run ONLY on `workflow_dispatch`. A push to main touching
+# supabase/** is recorded but never deploys. This is deliberate: the
+# tenant-provision Edge Function writes Supabase ONLY (#770) while the app
+# still reads the registry until the flip (#767) — if the Edge Function
+# deployed BEFORE the app flipped, new signups' keys would be unreadable
+# (auth blackout). Everything ships together at the flip instead.
+#
+# ══ THE FLIP SEQUENCE (operator-executed, owner informed) ════════════════════
+#   1. Pre-deploy gate PASSES: .github/scripts/verify-cutover
+#      (CI job `flip-gate` in ci.yml + the operator's live run with prod
+#      creds: TORTOISE_DB_URI SUPABASE_URL SUPABASE_SERVICE_ROLE_KEY
+#      bash .github/scripts/verify-cutover --live).
+#   2. DISPATCH this workflow (migrations + waitlist-subscribe +
+#      tenant-provision Edge Functions) — the Supabase side of the flip.
+#   3. DISPATCH deploy-hosted (the app flip: reads Supabase, #767) —
+#      same operator, immediately after step 2.
+#   4. Post-flip verification incl. E2E-7 (#766 — the next issue).
+#   5. Registry delete (point of no return, owner informed):
+#      TORTOISE_DB_URI=... .github/scripts/delete-registry --confirm
+#      (with TORTOISE_SUPPRESS_ENUM_DELTA=1 set on the app for the flip
+#      window, per plan Task 10 P3-4).
+# Steps 2+3 together are "the single deploy" — no interim state ships.
 #
 # Guarded: steps only run when BOTH secrets are set (if: env.X != '' — GitHub
 # does not allow secrets in if: conditions). Without them, the job no-ops
@@ -31,20 +55,23 @@ jobs:
           version: latest
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      # Flip gating (#771): dispatch-only, so a routine supabase/** push can
+      # never deploy the tenant-provision Edge Function ahead of the app
+      # flip (auth-blackout window). See the flip sequence above.
       - name: Link project
         run: supabase link --project-ref "$SUPABASE_PROJECT_REF"
       - name: Apply migrations
         # Token-based push (login role) — no DB password secret needed.
         # Proven 2026-08-10 against the premise-labs project.
-        if: env.SUPABASE_ACCESS_TOKEN != ''
+        if: github.event_name == 'workflow_dispatch' && env.SUPABASE_ACCESS_TOKEN != ''
         run: supabase db push --linked --include-all
       - name: Deploy waitlist-subscribe edge function
-        if: env.SUPABASE_ACCESS_TOKEN != ''
+        if: github.event_name == 'workflow_dispatch' && env.SUPABASE_ACCESS_TOKEN != ''
         run: |
           supabase functions deploy waitlist-subscribe \
             --project-ref "$SUPABASE_PROJECT_REF" --no-verify-jwt
       - name: Deploy tenant-provision edge function
-        if: env.SUPABASE_ACCESS_TOKEN != ''
+        if: github.event_name == 'workflow_dispatch' && env.SUPABASE_ACCESS_TOKEN != ''
         # --no-verify-jwt is REQUIRED: the after_user_created auth hook sends
         # no user JWT. Caller auth is enforced inside the function (#802) via
         # the hook's Standard-Webhooks signature (AUTH_HOOK_SECRET secret)
@@ -52,3 +79,9 @@ jobs:
         run: |
           supabase functions deploy tenant-provision \
             --project-ref "$SUPABASE_PROJECT_REF" --no-verify-jwt
+      - name: Note when push runs no-op (flip gating)
+        if: github.event_name == 'push'
+        run: |
+          echo "::notice::supabase/** push recorded — deploy steps are "
+          echo "::notice::workflow_dispatch-only (#771 flip gating). Run the "
+          echo "::notice::flip sequence to deploy migrations + Edge Functions."
