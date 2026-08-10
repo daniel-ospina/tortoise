@@ -179,8 +179,10 @@ class TestE019DirectionalCascade:
 
     # ── Dense shared conclusions ───────────────────────────
 
-    @pytest.mark.xfail(reason="EP NAND under-propagates (#855): true cascade ~0.001 "
-                              "after re-run-drift fix; engine needs EP factor investigation", strict=False)
+    @pytest.mark.xfail(reason="EP NAND under-propagates (#855): true cascade ~0.001 after "
+                              "re-run-drift fix; root cause suspected = compute_operator_weight "
+                              "returns 1.0 for plain NAND vs phi_nand's documented w=8.0 "
+                              "default → 8x weaker contradiction potential", strict=True)
     def test_dense_shared_bidirectional(self):
         """3 shared conclusions: bidirectional cascade is larger."""
         sdk = fresh_sdk()
@@ -208,8 +210,10 @@ class TestE019DirectionalCascade:
 
     # ── Anchored C2: gradient ──────────────────────────────
 
-    @pytest.mark.xfail(reason="EP NAND under-propagates (#855): true cascade ~0.001 "
-                              "after re-run-drift fix; engine needs EP factor investigation", strict=False)
+    @pytest.mark.xfail(reason="EP NAND under-propagates (#855): true cascade ~0.001 after "
+                              "re-run-drift fix; root cause suspected = compute_operator_weight "
+                              "returns 1.0 for plain NAND vs phi_nand's documented w=8.0 "
+                              "default → 8x weaker contradiction potential", strict=True)
     def test_low_anchor_one_t4(self):
         """C2 with 1 T4 anchor: partial cascade protection."""
         sdk = fresh_sdk()
@@ -248,8 +252,10 @@ class TestE019DirectionalCascade:
 
     # ── Anchoring gradient monotonicity ────────────────────
 
-    @pytest.mark.xfail(reason="EP NAND under-propagates (#855): true cascade ~0.001 "
-                              "after re-run-drift fix; engine needs EP factor investigation", strict=False)
+    @pytest.mark.xfail(reason="EP NAND under-propagates (#855): true cascade ~0.001 after "
+                              "re-run-drift fix; root cause suspected = compute_operator_weight "
+                              "returns 1.0 for plain NAND vs phi_nand's documented w=8.0 "
+                              "default → 8x weaker contradiction potential", strict=True)
     def test_anchor_gradient_monotonic(self):
         """More anchors = less cascade (monotonic)."""
         sdk = fresh_sdk()
@@ -283,8 +289,10 @@ class TestE019DirectionalCascade:
 
     # ── C1 control: always drops ───────────────────────────
 
-    @pytest.mark.xfail(reason="EP NAND under-propagates (#855): true cascade ~0.001 "
-                              "after re-run-drift fix; engine needs EP factor investigation", strict=False)
+    @pytest.mark.xfail(reason="EP NAND under-propagates (#855): true cascade ~0.001 after "
+                              "re-run-drift fix; root cause suspected = compute_operator_weight "
+                              "returns 1.0 for plain NAND vs phi_nand's documented w=8.0 "
+                              "default → 8x weaker contradiction potential", strict=True)
     def test_c1_always_drops(self):
         """C1 loses A's support regardless of mode."""
         sdk = fresh_sdk()
@@ -305,8 +313,10 @@ class TestE019DirectionalCascade:
 
     # ── B feedback measurement ─────────────────────────────
 
-    @pytest.mark.xfail(reason="EP NAND under-propagates (#855): true cascade ~0.001 "
-                              "after re-run-drift fix; engine needs EP factor investigation", strict=False)
+    @pytest.mark.xfail(reason="EP NAND under-propagates (#855): true cascade ~0.001 after "
+                              "re-run-drift fix; root cause suspected = compute_operator_weight "
+                              "returns 1.0 for plain NAND vs phi_nand's documented w=8.0 "
+                              "default → 8x weaker contradiction potential", strict=True)
     def test_b_feedback_bidirectional(self):
         """B receives feedback from C1 in bidirectional mode."""
         sdk = fresh_sdk()
@@ -327,3 +337,52 @@ class TestE019DirectionalCascade:
         sdk.close()
         assert r["b_drop"] < 0.02, \
             f"B should not receive feedback in directed: drop={r['b_drop']:.4f}"
+
+
+# ── #852 regression: re-run stability + posterior observability ─────────────
+
+def test_rerun_stability_immutable_baselines():
+    """#852: re-running EP on an UNCHANGED graph must not drift. The old
+    _flush_cache overwrote ep_alpha/ep_beta (the immutable baseline priors)
+    with posteriors, so each re-run re-hydrated the previous posterior as the
+    new prior → confidence eroded monotonically (0.309→0.191→0.132…)."""
+    sdk = fresh_sdk()
+    a = make_point(sdk, "A"); c1 = make_point(sdk, "C1")
+    make_operator(sdk, a["id"], c1["id"], "IMPL")
+    sdk.set_point_baseline(a["id"], *TIER_MAP["T0"])
+    r1 = run_ep(sdk); c1_run1 = get_conf(r1, c1["id"])
+    r2 = run_ep(sdk); c1_run2 = get_conf(r2, c1["id"])
+    r3 = run_ep(sdk); c1_run3 = get_conf(r3, c1["id"])
+    sdk.close()
+    assert abs(c1_run2 - c1_run1) < 1e-3, f"re-run drift: {c1_run1:.4f} -> {c1_run2:.4f}"
+    assert abs(c1_run3 - c1_run2) < 1e-3, f"re-run drift: {c1_run2:.4f} -> {c1_run3:.4f}"
+
+def test_baseline_prior_preserved_posterior_observable():
+    """#852 review P1: baseline'd claims keep ep_alpha/beta as immutable
+    priors, but the EP posterior is observable via posterior_alpha/beta and
+    n.confidence (compute_confidence reflects the attack, not the prior)."""
+    sdk = fresh_sdk()
+    a = make_point(sdk, "A"); c1 = make_point(sdk, "C1")
+    make_operator(sdk, a["id"], c1["id"], "IMPL")
+    sdk.set_point_baseline(a["id"], *TIER_MAP["T0"])  # 10/1 → prior mean 0.9091
+    nand = make_point(sdk, "NAND"); sdk.set_point_baseline(nand["id"], 10, 1)
+    make_operator(sdk, nand["id"], a["id"], "NAND")
+    proj = sdk._get_proj()
+    rows = proj.g.query("MATCH (o:Point) WHERE o.is_operator = true RETURN o.id").result_set
+    ev = proj.g.query("MATCH (n:Point) WHERE n.baseline_set = true RETURN n.id, n.ep_alpha, n.ep_beta").result_set
+    evidence = {r[0]: (r[1], r[2]) for r in ev}
+    from tortoise.ep import TortoiseEP
+    ep = TortoiseEP(proj, damping=0.5, n_quad=12, max_iter=50, tol=1e-3, evidence=evidence)
+    ep.run([r[0] for r in rows], max_hops=2)
+    pt = sdk.get_point(a["id"])
+    # prior preserved
+    assert pt["ep_alpha"] == 10 and pt["ep_beta"] == 1, \
+        f"baseline prior overwritten: {pt['ep_alpha']}/{pt['ep_beta']}"
+    # posterior observable
+    assert pt.get("posterior_alpha") is not None, "posterior_alpha not written"
+    conf = ep.compute_confidence(a["id"])
+    prior_mean = pt["ep_alpha"] / (pt["ep_alpha"] + pt["ep_beta"])
+    assert conf["mean"] != prior_mean, "posterior equals prior — attack invisible"
+    assert abs(conf["mean"] - pt["confidence"]) < 1e-4, \
+        f"confidence {pt['confidence']} != posterior {conf['mean']}"
+    sdk.close()
