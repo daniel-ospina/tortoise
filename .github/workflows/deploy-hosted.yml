@@ -130,17 +130,17 @@ jobs:
           else
             echo "::warning::backup sweep secrets incomplete — BACKUP_SWEEP_ENABLED left off (fail-closed)"
           fi
-          # GitHub OAuth (#542): GITHUB_CLIENT_ID/SECRET + encryption key —
+          # GitHub OAuth (#542): GH_CLIENT_ID/GH_CLIENT_SECRET (GitHub reserves GITHUB_* prefix) + encryption key —
           # warn-only until the OAuth app is registered and secrets set.
-          if [ -z "${{ secrets.GITHUB_CLIENT_ID }}" ] || [ -z "${{ secrets.GITHUB_CLIENT_SECRET }}" ]; then
-            echo "::warning::GITHUB_CLIENT_ID/GITHUB_CLIENT_SECRET not set — GitHub OAuth disabled until configured (#542)"
+          if [ -z "${{ secrets.GH_CLIENT_ID }}" ] || [ -z "${{ secrets.GH_CLIENT_SECRET }}" ]; then
+            echo "::warning::GH_CLIENT_ID/GH_CLIENT_SECRET not set — GitHub OAuth disabled until configured (#542)"
           fi
           if [ -z "${{ secrets.TORTOISE_ENCRYPTION_KEY }}" ]; then
             echo "::warning::TORTOISE_ENCRYPTION_KEY not set — token encryption unavailable until configured (#542)"
           fi
-          [ -n "${{ secrets.GITHUB_CLIENT_ID }}" ] && ARGS="$ARGS GITHUB_CLIENT_ID=${{ secrets.GITHUB_CLIENT_ID }}"
-          [ -n "${{ secrets.GITHUB_CLIENT_SECRET }}" ] && ARGS="$ARGS GITHUB_CLIENT_SECRET=${{ secrets.GITHUB_CLIENT_SECRET }}"
-          [ -n "${{ secrets.GITHUB_CALLBACK_URL }}" ] && ARGS="$ARGS GITHUB_CALLBACK_URL=${{ secrets.GITHUB_CALLBACK_URL }}"
+          [ -n "${{ secrets.GH_CLIENT_ID }}" ] && ARGS="$ARGS GITHUB_CLIENT_ID=${{ secrets.GH_CLIENT_ID }}"
+          [ -n "${{ secrets.GH_CLIENT_SECRET }}" ] && ARGS="$ARGS GITHUB_CLIENT_SECRET=${{ secrets.GH_CLIENT_SECRET }}"
+          [ -n "${{ secrets.GH_CALLBACK_URL }}" ] && ARGS="$ARGS GITHUB_CALLBACK_URL=${{ secrets.GH_CALLBACK_URL }}"
           [ -n "${{ secrets.TORTOISE_ENCRYPTION_KEY }}" ] && ARGS="$ARGS TORTOISE_ENCRYPTION_KEY=${{ secrets.TORTOISE_ENCRYPTION_KEY }}"
           # #528 server analytics (PostHog) — absent key → analytics module no-ops.
           [ -n "${{ secrets.POSTHOG_API_KEY }}" ] && ARGS="$ARGS POSTHOG_API_KEY=${{ secrets.POSTHOG_API_KEY }}"
