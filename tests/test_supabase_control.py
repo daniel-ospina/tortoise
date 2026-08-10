@@ -329,10 +329,14 @@ class TestOnboardingState:
         assert state["demo_created"] is True
         assert state["team_created"] is False  # default preserved
 
-    def test_read_drops_unknown_keys(self, fake):
+    def test_read_preserves_unknown_keys(self, fake):
+        """Unknown stored keys are PRESERVED on the merge — registry parity
+        (code-review P2, PR #861): dropping them would let a later write-back
+        permanently erase keys the whitelist doesn't know (e.g.
+        completed_at / github_index_job_id)."""
         self._set_state(fake, {"not_a_field": 1})
         state = team_onboarding_state(fake, "team-free-001")
-        assert "not_a_field" not in state
+        assert state["not_a_field"] == 1
 
     def test_read_missing_team_returns_none(self, fake):
         assert team_onboarding_state(fake, "no-such-team") is None
@@ -346,8 +350,16 @@ class TestOnboardingState:
         assert isinstance(stored, dict)  # jsonb object, NOT a string
         assert stored == {"demo_created": True}
         # and the read back merges over defaults
-        state = team_onboarding_state(fake, "team-free-001")
-        assert state["demo_created"] is True
+
+    def test_email_read_patch_round_trip(self, fake):
+        """E2E-5: team email read-patch from teams (wired via the onboarding
+        endpoints — #764 review P2: the email seam must not be dead code)."""
+        fake.tables["teams"][0]["email"] = None  # fixture has none set
+        assert team_email(fake, "team-free-001") is None
+        update_team_email(fake, "team-free-001", "owner@premise-labs.dev")
+        assert team_email(fake, "team-free-001") == "owner@premise-labs.dev"
+        # missing team → None (no exception)
+        assert team_email(fake, "no-such-team") is None
 
     def test_fail_closed_on_error(self):
         with pytest.raises(RuntimeError):

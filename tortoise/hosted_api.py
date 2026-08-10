@@ -653,6 +653,14 @@ async def health_security():
     """
     pepper_set = bool(os.environ.get("TORTOISE_SECRET_PEPPER"))
     internal_key_set = bool(os.environ.get("FASTAPI_INTERNAL_KEY"))
+    # "api_auth_enforced" is unconditionally True on the hosted API: every
+    # tt_-auth dependency enforces Bearer auth (only SKIP_AUTH paths —
+    # /health, /docs, /v1/register, /webhooks/stripe — bypass). The
+    # pre-existing expression `not internal_key_set or bool(...)` was a
+    # tautology that happened to produce the right answer; FASTAPI_INTERNAL_KEY
+    # gates /internal/* endpoints (a separate bypass), not API auth. Fixes the
+    # tautology form without changing the true semantics (review P2, PR #861).
+    auth_enforced = True
     from tortoise.supabase_control import is_supabase_enabled
     if is_supabase_enabled():
         return {
@@ -661,7 +669,7 @@ async def health_security():
             "hashing": "pbkdf2_hmac_sha256",
             "scheme": "lookup_hash_sha256",
             "lookup": "sha256(pepper + key) exact-match over teams/api_keys (Supabase)",
-            "api_auth_enforced": not internal_key_set or bool(os.environ.get("FASTAPI_INTERNAL_KEY")),
+            "api_auth_enforced": auth_enforced,
         }
     return {
         "pepper_configured": pepper_set,
@@ -669,7 +677,7 @@ async def health_security():
         "hashing": "pbkdf2_hmac_sha256",
         "scheme": "salted_pbkdf2_hmac_sha256",
         "lookup": "salted PBKDF2 (per-key salt) over registry APIKey nodes",
-        "api_auth_enforced": not internal_key_set or bool(os.environ.get("FASTAPI_INTERNAL_KEY")),
+        "api_auth_enforced": auth_enforced,
     }
 
 # ── Phase 1a: Core Endpoints ──────────────────────────────────────
@@ -3027,6 +3035,11 @@ def _update_onboarding_state(team_id: str, **fields) -> dict:
 
 class OnboardingStateResponse(BaseModel):
     onboarding: dict
+    # E2E-5 (plan Task 6): the team email is read from the control plane
+    # alongside onboarding state — additive, backward-compatible (None when
+    # the team has no email yet). #764 review P2: wires the email seam so it
+    # is not dead code.
+    email: str | None = None
 
 
 class OnboardingStatePatchRequest(BaseModel):
@@ -3037,12 +3050,18 @@ class OnboardingStatePatchRequest(BaseModel):
     team_created: bool | None = None
     prompt_pasted: bool | None = None
     onboarding_complete: bool | None = None
+    # E2E-5 (plan Task 6): email read-patch from the control plane (teams
+    # row in Supabase mode, Team node in registry mode). #764 review P2.
+    email: str | None = None
 
 
 @app.get("/v1/onboarding/state", response_model=OnboardingStateResponse)
 async def get_onboarding_state(team: dict = Depends(get_current_team)):
-    """Return the team's onboarding progress."""
-    return {"onboarding": _get_onboarding_state(team["team_id"])}
+    """Return the team's onboarding progress + team email."""
+    return {
+        "onboarding": _get_onboarding_state(team["team_id"]),
+        "email": _team_email(team["team_id"]),
+    }
 
 
 @app.patch("/v1/onboarding/state", response_model=OnboardingStateResponse)
@@ -3050,8 +3069,14 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
                                 team: dict = Depends(get_current_team)):
     """Merge provided onboarding fields into the team's state."""
     updates = {k: v for k, v in body.model_dump().items() if v is not None}
+    email = updates.pop("email", None)  # state keys only — email is a teams column
     state = _update_onboarding_state(team["team_id"], **updates)
-    return {"onboarding": state}
+    if email is not None:
+        _write_team_email(team["team_id"], email)
+    return {
+        "onboarding": state,
+        "email": _team_email(team["team_id"]),
+    }
 
 
 @app.post("/v1/onboarding/session-recording", response_model=OnboardingStateResponse)
@@ -3225,6 +3250,44 @@ def _github_credentials(team_id: str) -> tuple[str | None, str | None]:
 def _github_token_enc(team_id: str) -> str | None:
     """Encrypted GitHub token for a team (seam-aware — see _github_credentials)."""
     return _github_credentials(team_id)[0]
+
+
+def _team_email(team_id: str) -> str | None:
+    """Team email from the control plane — E2E-5 (plan Task 6).
+
+    Supabase mode: ``teams.email`` via the service-role seam. Registry mode:
+    the Team node (selfhost). None when unset/missing.
+    """
+    from tortoise.supabase_control import (
+        get_control_plane, is_supabase_enabled, team_email as _sb_email,
+    )
+    if is_supabase_enabled():
+        return _sb_email(get_control_plane(), team_id)
+    sdk = _make_sdk(namespace="registry")
+    rows = sdk._get_registry().query(
+        "MATCH (t:Team {id: $id}) RETURN t.email",
+        params={"id": team_id},
+    ).result_set
+    return rows[0][0] if rows else None
+
+
+def _write_team_email(team_id: str, email: str) -> None:
+    """Persist the team email on the control plane — E2E-5 (plan Task 6).
+
+    Supabase mode: PATCH ``teams.email`` via the service-role seam. Registry
+    mode: SET on the Team node. Raises on failure (fail-closed — a dropped
+    email write must surface, not silently lose the value)."""
+    from tortoise.supabase_control import (
+        get_control_plane, is_supabase_enabled, update_team_email as _sb_email,
+    )
+    if is_supabase_enabled():
+        _sb_email(get_control_plane(), team_id, email)
+        return
+    sdk = _make_sdk(namespace="registry")
+    sdk._get_registry().query(
+        "MATCH (t:Team {id: $id}) SET t.email = $email",
+        params={"id": team_id, "email": email},
+    )
 
 
 async def _exchange_github_token(code: str) -> str:

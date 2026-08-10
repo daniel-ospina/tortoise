@@ -1287,8 +1287,11 @@ def tortoise_onboarding_github_status() -> dict:
     except RuntimeError:
         # Fail-closed: a control-plane outage is an ERROR, not "disconnected"
         # — reporting connected=False would make the user think GitHub got
-        # disconnected.
-        return {"error": "Control plane unavailable"}
+        # disconnected. Name the actual plane (registry vs Supabase) so
+        # selfhost operators aren't misled (code-review P2, PR #861).
+        from tortoise.supabase_control import is_supabase_enabled
+        plane = "Supabase control plane" if is_supabase_enabled() else "registry"
+        return {"error": f"{plane} unavailable"}
     except Exception:
         return {"connected": False, "org": None, "repos_count": None}
     if not enc:
@@ -1312,7 +1315,11 @@ def tortoise_onboarding_github_index(org: str, repo: str | None = None) -> dict:
     try:
         encrypted = _github_token_enc(team_id)
     except Exception:
-        return {"error": "Control plane unavailable"}
+        # Name the actual plane (registry vs Supabase) so selfhost operators
+        # aren't misled (code-review P2, PR #861).
+        from tortoise.supabase_control import is_supabase_enabled
+        plane = "Supabase control plane" if is_supabase_enabled() else "registry"
+        return {"error": f"{plane} unavailable"}
     if not encrypted:
         return {"error": "GitHub not connected. Run tortoise_onboarding_github_connect first."}
     job_id = _secrets.token_hex(8)

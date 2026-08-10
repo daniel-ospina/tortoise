@@ -136,6 +136,23 @@ class TestOnboardingStateFlip:
         assert r.status_code == 200, r.text
         assert "not_a_field" not in r.json()["onboarding"]
 
+    def test_email_read_patch_via_onboarding_endpoint(self, supabase_client):
+        """E2E-5: email read-patch from teams via the onboarding endpoints
+        (#764 review P2 — the email seam is wired, not dead code)."""
+        tc, fake = supabase_client
+        # read: fixture seeds owner@example.com on the teams row
+        r = tc.get("/v1/onboarding/state")
+        assert r.status_code == 200, r.text
+        assert r.json()["email"] == "owner@example.com"
+        # patch: email lands on the teams row via the seam
+        r = tc.patch("/v1/onboarding/state", json={"email": "owner@premise-labs.dev"})
+        assert r.status_code == 200, r.text
+        assert r.json()["email"] == "owner@premise-labs.dev"
+        assert fake.tables["teams"][0]["email"] == "owner@premise-labs.dev"
+        # read-back reflects it
+        r = tc.get("/v1/onboarding/state")
+        assert r.json()["email"] == "owner@premise-labs.dev"
+
     def test_session_recording_toggle_lands_on_teams(self, supabase_client):
         tc, fake = supabase_client
         r = tc.post("/v1/onboarding/session-recording", json={"enabled": True})

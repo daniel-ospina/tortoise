@@ -439,17 +439,15 @@ def team_onboarding_state(cp, team_id: str) -> dict | None:
     auto-initializes to), so callers never see a partial dict for an existing
     row. None when the team row does not exist — the caller mirrors the
     registry ``MATCH``-no-op (a missing team reads as defaults without
-    writing). Unknown keys from the JSONB are dropped (``_ALLOWED_STATE_KEYS``
-    filter — the same whitelist the registry write path applies in
-    ``_update_onboarding_state``).
+    writing). Unknown stored keys are PRESERVED on the merge (mirrors the
+    registry ``state.update(stored)`` semantics — dropping them would let a
+    later write-back permanently erase keys the whitelist doesn't know,
+    e.g. ``completed_at``/``github_index_job_id``; code-review P2, PR #861).
     """
     # Deferred import: hosted_api imports this module inside functions (#851
     # pattern), so a module-level import here would create a cycle. By call
     # time hosted_api is fully loaded.
-    from tortoise.hosted_api import (
-        _ALLOWED_STATE_KEYS,
-        _ONBOARDING_DEFAULT_STATE,
-    )
+    from tortoise.hosted_api import _ONBOARDING_DEFAULT_STATE
     rows = cp.query(
         "teams", select=["onboarding_state"], filters=[("id", "eq", team_id)]
     )
@@ -458,7 +456,7 @@ def team_onboarding_state(cp, team_id: str) -> dict | None:
     state = dict(_ONBOARDING_DEFAULT_STATE)
     stored = rows[0].get("onboarding_state")
     if isinstance(stored, dict):
-        state.update({k: v for k, v in stored.items() if k in _ALLOWED_STATE_KEYS})
+        state.update(stored)  # preserve unknown keys (registry parity)
     return state
 
 
