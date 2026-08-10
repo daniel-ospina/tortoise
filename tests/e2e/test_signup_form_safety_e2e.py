@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import re
 import uuid
 
@@ -68,10 +69,12 @@ def test_429_signup_rate_limit_is_humanized(page: Page) -> None:
     """The production-verified failure (over_email_send_rate_limit 429) must
     show friendly copy and keep the URL clean."""
     console_errors = _page_js_errors(page)
+    calls = {"n": 0}
 
     def handle(route):
         url = route.request.url
         if "auth/v1/signup" in url and route.request.method == "POST":
+            calls["n"] += 1
             route.fulfill(status=429, content_type="application/json",
                           headers={"Access-Control-Allow-Origin": "*"},
                           body=json.dumps({"code": 429,
@@ -90,6 +93,28 @@ def test_429_signup_rate_limit_is_humanized(page: Page) -> None:
         "Too many attempts from this network", timeout=10_000)
     assert "email=" not in page.url and "password=" not in page.url
     assert "Email rate limit exceeded" not in page.locator("#error").inner_text()
+
+    # ── #801 lockout: disabled button + countdown + storage + early return ──
+    btn = page.locator("#btn-submit")
+    expect(btn).to_be_disabled(timeout=5_000)
+    assert re.search(r"Try again in \d{2}:\d{2}", btn.inner_text()), btn.inner_text()
+    # resend is force-disabled during the lockout (shared email bucket, #801)
+    expect(page.locator("#btn-resend")).to_be_disabled(timeout=5_000)
+    until = page.evaluate(
+        "parseInt(sessionStorage.getItem('tortoise_signup_rate_limited_until') || '0', 10)")
+    now_ms = time.time() * 1000
+    assert now_ms < until <= now_ms + 3_600_000 + 5_000, f"lockout until={until}"
+    # two-tier check: the mocked 429 is over_email_send_rate_limit (email bucket)
+    # → lockout must be the 1h tier (SHORT_RATE_LIMIT_LOCKOUT_MS would fail this)
+    # early-return guard: re-dispatching submit must NOT fire a second request
+    page.evaluate("document.getElementById('email-form')"
+                  ".dispatchEvent(new Event('submit', {cancelable: true}))")
+    page.wait_for_timeout(500)
+    assert calls["n"] == 1, f"lockout failed to guard: {calls['n']} signup requests"
+    # persistence across reload
+    page.reload(wait_until="domcontentloaded")
+    expect(page.locator("#btn-submit")).to_be_disabled(timeout=5_000)
+    assert re.search(r"Try again in \d{2}:\d{2}", btn.inner_text()), "countdown lost on reload"
     assert console_errors == [], f"page JS errors: {console_errors}"
 
 

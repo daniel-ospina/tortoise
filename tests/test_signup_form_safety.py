@@ -98,6 +98,19 @@ def test_no_raw_error_message_leakage() -> None:
         "signin.html still surfaces raw error.message"
 
 
+def test_rate_limit_lockout_guards_present() -> None:
+    """#801: after a 429 (project-wide email bucket) the client must lock
+    out email signup for ~1h — sessionStorage timestamp, disabled submit,
+    countdown label, early-return guard. Literal pins (no regex)."""
+    assert "tortoise_signup_rate_limited_until" in SIGNUP
+    assert "RATE_LIMIT_LOCKOUT_MS" in SIGNUP
+    assert "SHORT_RATE_LIMIT_LOCKOUT_MS" in SIGNUP  # two-tier: per-IP limits ≠ email bucket
+    assert "applyRateLimitLockout" in SIGNUP
+    assert "sessionStorage" in SIGNUP
+    # the guard runs before any request: top-of-handler early return
+    assert "rateLimitRemainingMs() > 0" in SIGNUP
+
+
 # ── CDN / script-failure guards ────────────────────────────────────────────
 
 
