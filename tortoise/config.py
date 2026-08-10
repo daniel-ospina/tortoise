@@ -126,7 +126,12 @@ def _abs(path: str) -> str:
     resolves per-CWD and silently creates a per-directory redislite server
     (Category-3 leak). This guard in the single choke-point covers ALL
     branches (explicit arg, TORTOISE_DB_PATH, TORTOISE_DB_URI) uniformly.
+
+    Exceptions: ``:memory:`` (redislite in-memory server, not a file path)
+    passes through untouched.
     """
+    if path == ":memory:":
+        return path
     expanded = os.path.expanduser(path)
     if not os.path.isabs(expanded):
         raise ValueError(RELATIVE_PATH_ERROR.format(path=path))

@@ -51,7 +51,7 @@ def test_telegram_called_with_message(monkeypatch):
     def fake_telegram_send(bot_token, chat_id, text, timeout=15.0):
         sent.update(bot_token=bot_token, chat_id=chat_id, text=text)
 
-    monkeypatch.setattr("tortoise.alert_store.telegram_send", fake_telegram_send)
+    monkeypatch.setattr("tortoise.notify.telegram_send", fake_telegram_send)
     notify.notify_billing_event("billing_payment_failed", TEAM, DETAILS)
     assert sent
     assert sent["chat_id"] == "551595722"
@@ -73,7 +73,7 @@ def test_telegram_failure_swallowed(monkeypatch, caplog):
     def boom(bot_token, chat_id, text, timeout=15.0):
         raise RuntimeError("tg down")
 
-    monkeypatch.setattr("tortoise.alert_store.telegram_send", boom)
+    monkeypatch.setattr("tortoise.notify.telegram_send", boom)
     with caplog.at_level(logging.WARNING):
         notify.notify_billing_event("billing_downgrade", TEAM)  # must not raise
     assert any("telegram failed" in r.message for r in caplog.records)

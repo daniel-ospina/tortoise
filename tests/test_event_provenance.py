@@ -618,8 +618,8 @@ class TestSupersedePointStructuralTransfer:
 
     def test_supersede_transfer_idempotent_no_duplicates(self, sdk):
         """Running supersede twice must not duplicate edges — the second call
-        is a no-op (0 transfers; the #432 terminal-state guard is enforced in
-        the MCP layer, not SDK supersede_point — see mcp_server.py:717)."""
+        raises (the #432 terminal-state guard: superseded is terminal), so no
+        duplicate edge writes can occur."""
         proj = sdk._get_proj()
         subj = sdk.create_point("statement", "subject")
         old_pt = sdk.create_point("statement", "old")
@@ -628,9 +628,11 @@ class TestSupersedePointStructuralTransfer:
         proj.create_about_edge(old_pt["id"], subj["id"], "aboutSubject")
 
         sdk.supersede_point(old_pt["id"], new_pt["id"])
-        # Second supersede: no-op — edges already transferred, nothing to move.
-        second = sdk.supersede_point(old_pt["id"], new_pt["id"])
-        assert second["edges_transferred"] == 0
+        # Second supersede: the old point is now terminal ('superseded') —
+        # the guard rejects the transition (#432), guaranteeing no duplicates.
+        import pytest
+        with pytest.raises(ValueError, match="already terminal"):
+            sdk.supersede_point(old_pt["id"], new_pt["id"])
         # Verify exactly 1 aboutSubject edge on new point (no duplicates)
         r = proj.g.query(
             "MATCH (new:Point {id:$nid})-[a:aboutSubject]->(s:Point {id:$sid}) "
@@ -755,28 +757,26 @@ class TestNegativePaths:
     # ── supersede_point with bad IDs ──────────────────────────────────
 
     def test_supersede_point_nonexistent_old(self, sdk):
-        """supersede_point with non-existent old_id → no-op (invalidated False, #547)."""
+        """supersede_point with non-existent old_id → ValueError (#432 transition guard)."""
         new_pt = sdk.create_point("statement", "valid new point")
-        result = sdk.supersede_point("nonexistent-old-id", new_pt["id"])
-        assert result["invalidated"] is False
-        assert result["edges_transferred"] == 0
+        with pytest.raises(ValueError, match="No point"):
+            sdk.supersede_point("nonexistent-old-id", new_pt["id"])
 
     def test_supersede_point_nonexistent_new(self, sdk):
-        """supersede_point with non-existent new_id → ValueError (#547: refuse to orphan)."""
+        """supersede_point with non-existent new_id → ValueError (#432: no phantom successor)."""
         old_pt = sdk.create_point("statement", "valid old point")
-        with pytest.raises(ValueError, match="does not exist"):
+        with pytest.raises(ValueError, match="No point"):
             sdk.supersede_point(old_pt["id"], "nonexistent-new-id")
 
     def test_supersede_point_both_nonexistent(self, sdk):
-        """supersede_point with both IDs non-existent → no-op (old miss checked first, #547)."""
-        result = sdk.supersede_point("nonexistent-old", "nonexistent-new")
-        assert result["invalidated"] is False
-        assert result["edges_transferred"] == 0
+        """supersede_point with both IDs non-existent → ValueError (old miss, #432)."""
+        with pytest.raises(ValueError, match="No point"):
+            sdk.supersede_point("nonexistent-old", "nonexistent-new")
 
     def test_supersede_point_same_id(self, sdk):
-        """supersede_point with old==new → ValueError (#547: self-supersede rejected)."""
+        """supersede_point with old==new → ValueError (#432: successor must differ)."""
         pt = sdk.create_point("statement", "self-superseding point")
-        with pytest.raises(ValueError, match="same as old_id"):
+        with pytest.raises(ValueError, match="same|differ"):
             sdk.supersede_point(pt["id"], pt["id"])
 
     # ── compute_reputation with all-superseded claims ─────────────────

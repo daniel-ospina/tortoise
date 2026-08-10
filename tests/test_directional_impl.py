@@ -20,20 +20,23 @@ import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-# Isolated test graph — never the production graph
-os.environ["TORTOISE_DB_URI"] = (
-    "docker://:falkordb@localhost:6379/tortoise_test_dir_impl"
-)
+# Isolated test graph — never the production graph.
+# NOTE: the docker URI is set INSIDE the autouse fixture (per-test, restored
+# after) — NOT at import time. An import-time set leaks into every later test
+# file (#176 contamination).
 
 from tortoise.sdk import TortoiseSDK
 from tortoise.ep import TortoiseEP
 from tortoise.weights import compute_operator_weight
 
 # Requires live FalkorDB (Docker). Skip gracefully when unavailable so the
-# no-Docker embedded suite stays green (AGENTS.md). Mirrors the probe pattern
-# in tests/test_integration_search.py.
+# no-Docker embedded suite stays green (AGENTS.md). Probe targets the DOCKER
+# URI explicitly (embedded is "available" but lacks docker graph semantics).
+_DB_URI = "docker://:falkordb@localhost:6379/tortoise_test_dir_impl"
 FALKORDB_AVAILABLE = False
+_OLD_URI = os.environ.get("TORTOISE_DB_URI")
 try:
+    os.environ["TORTOISE_DB_URI"] = _DB_URI
     from tortoise.sdk import TortoiseSDK as _ProbeSDK
     _probe = _ProbeSDK()
     _probe._get_proj().g.query("RETURN 1")
@@ -41,9 +44,26 @@ try:
     FALKORDB_AVAILABLE = True
 except Exception:
     pass
+finally:
+    if _OLD_URI is not None:
+        os.environ["TORTOISE_DB_URI"] = _OLD_URI
+    else:
+        os.environ.pop("TORTOISE_DB_URI", None)
 
 pytestmark = pytest.mark.skipif(
     not FALKORDB_AVAILABLE, reason="Live FalkorDB (Docker) not available")
+
+
+@pytest.fixture(autouse=True)
+def _isolated_db_uri():
+    """Set the isolated docker URI for THIS test, restore after (env-leak guard, #176)."""
+    _old = os.environ.get("TORTOISE_DB_URI")
+    os.environ["TORTOISE_DB_URI"] = _DB_URI
+    yield
+    if _old is not None:
+        os.environ["TORTOISE_DB_URI"] = _old
+    else:
+        os.environ.pop("TORTOISE_DB_URI", None)
 
 
 

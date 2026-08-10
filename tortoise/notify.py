@@ -18,6 +18,7 @@ import logging
 import os
 
 import httpx
+from tortoise.telegram_push import send_message as telegram_send  # noqa: E402 — #673 sender location
 
 logger = logging.getLogger(__name__)
 
@@ -108,8 +109,6 @@ def notify_billing_event(kind: str, team: dict, details: dict | None = None) -> 
     chat_id = _env("TELEGRAM_CHAT_ID")
     if not _skip_channel("telegram", bot_token) and not _skip_channel("telegram-chat", chat_id):
         try:
-            from tortoise.alert_store import telegram_send
-
             telegram_send(bot_token, chat_id, _telegram_text(kind, team, details))
         except Exception as e:  # noqa: BLE001 — best-effort, never raise
             logger.warning("billing notify: telegram failed (%s)", redact_safe(e))
