@@ -1469,7 +1469,10 @@ class TestSessionFloodGate:
         # est = 2 + Σ_turns(1 + min(decisions,200)) — 5 dense turns × ~300
         # matches = 2 + 5×201 = 1007 > 1000 (default max_points) → 402.
         dense = ("we should go. " * 300)  # 4500 chars < 5000 turn limit
-        conversation = [{"role": "user", "content": dense}] * 5
+        # 50 dense turns × ~300 matches = est 10052 > 10000 (Free max_points
+        # per #662 pricing) → 402. (Was 5 turns × est 1007, which no longer
+        # exceeds the 10000 cap after the Free-tier pricing raise.)
+        conversation = [{"role": "user", "content": dense}] * 50
         r = client.post("/v1/sessions", json={
             "session_id": "dense-session", "conversation": conversation,
         })

@@ -3614,3 +3614,10 @@ async def backups_drill(request: Request, body: dict):
     return {"status": "drill_ok", "target_graph": target_graph, **result}
 
 
+
+
+# ── MCP mount (#236) ─────────────────────────────────────────────
+# Mount AFTER all route definitions. DO NOT add /mcp to the parent
+# RateLimitMiddleware.SKIP — Starlette's mount already routes /mcp
+# requests to the sub-app before parent middleware runs.
+app.mount("/mcp", mcp_http_app)
