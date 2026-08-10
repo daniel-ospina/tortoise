@@ -5,11 +5,13 @@ mounted at /mcp on the hosted FastAPI app. Imports ONLY tortoise.sdk +
 starlette — mcp_server imports from here (one-directional; no circular import).
 
 Design: per-request team-scoped SDK via ContextVar. TeamResolutionMiddleware
-validates the Bearer tt_ token against the control-plane registry
-(apikey_verify) and sets _current_team_id / _transport_mode. Tools resolve the
-request-scoped SDK via _get_team_sdk(). Fail-closed: if _transport_mode is None
-(unset/misconfigured), _safe() rejects ALL operations — it never depends on
-is_dev_mode(), which returns True in hosted production (TORTOISE_API_KEY unset).
+validates the Bearer tt_ token against the control plane — Supabase
+(lookup_hash, #767 plan Task 3) when SUPABASE_URL + service key are set,
+otherwise the FalkorDB registry (apikey_verify) — and sets
+_current_team_id / _transport_mode. Tools resolve the request-scoped SDK via
+_get_team_sdk(). Fail-closed: if _transport_mode is None (unset/misconfigured),
+_safe() rejects ALL operations — it never depends on is_dev_mode(), which
+returns True in hosted production (TORTOISE_API_KEY unset).
 """
 from __future__ import annotations
 
@@ -97,9 +99,11 @@ def _jsonrpc_error(code: int, message: str, data: dict | None = None,
 class TeamResolutionMiddleware(BaseHTTPMiddleware):
     """Bearer tt_ token → team_id ContextVar. 401 pre-tool-leak (D3, D17).
 
-    Uses TortoiseSDK.apikey_verify() — the same registry O(keys) salted-hash
-    scan the REST get_current_team uses. Bounded 60s true-LRU cache protects
-    against MCP init bursts.
+    Supabase-backed (#767): resolves via tortoise.supabase_control.resolve_api_key
+    (lookup_hash exact-match; api_keys.revoked_at authoritative; tier/quota from
+    teams) — the SAME shared function REST get_current_team uses. Registry
+    apikey_verify (O(keys) salted-hash scan) stays for selfhost. Bounded 60s
+    true-LRU cache protects against MCP init bursts.
     """
 
     def __init__(self, app, *, max_cache: int = 10000,
@@ -141,8 +145,19 @@ class TeamResolutionMiddleware(BaseHTTPMiddleware):
             self._cache.move_to_end(token)  # true LRU
         else:
             try:
-                sdk = await self._get_registry_sdk()
-                team = sdk.apikey_verify(token)
+                # #767 (plan Task 3): Supabase-backed resolution (lookup_hash)
+                # when the control plane is Supabase-backed — the SAME shared
+                # function REST get_current_team uses (single source of truth,
+                # REST + MCP cannot drift). Registry apikey_verify stays for
+                # selfhost.
+                from tortoise.supabase_control import (
+                    get_control_plane, is_supabase_enabled, resolve_api_key,
+                )
+                if is_supabase_enabled():
+                    team = resolve_api_key(get_control_plane(), token)
+                else:
+                    sdk = await self._get_registry_sdk()
+                    team = sdk.apikey_verify(token)
             except Exception:
                 # Registry down → 503, never 500/stack-trace
                 return _jsonrpc_error(
@@ -157,13 +172,19 @@ class TeamResolutionMiddleware(BaseHTTPMiddleware):
                     "Expected format: Authorization: Bearer tt_<key>",
                     status=401,
                 )
-            # #329: resolve quota limits (registry Team node) — fail-closed
-            # enforcement still applies with defaults if resolution fails.
-            from tortoise.quota import resolve_team_limits
-            try:
-                limits = resolve_team_limits(team["team_id"])
-            except Exception:
-                limits = {"team_id": team["team_id"]}
+            if is_supabase_enabled():
+                # The Supabase resolution already carries tier/quota from the
+                # teams row (one round-trip) — use it directly as the limits
+                # dict so REST and MCP enforce identical limits (#329).
+                limits = team
+            else:
+                # #329: resolve quota limits (registry Team node) — fail-closed
+                # enforcement still applies with defaults if resolution fails.
+                from tortoise.quota import resolve_team_limits
+                try:
+                    limits = resolve_team_limits(team["team_id"])
+                except Exception:
+                    limits = {"team_id": team["team_id"]}
             if len(self._cache) >= self._max_cache:
                 self._cache.popitem(last=False)  # evict LRU
             self._cache[token] = (now, team, limits)

@@ -679,6 +679,12 @@ async def get_current_team(request: Request) -> dict:
     if not token.startswith("tt_"):
         await _audit_auth_failure(request, "invalid_format")
         raise HTTPException(status_code=401, detail="Invalid API key format")
+    # #767 (plan Task 3): hosted auth resolves from Supabase (lookup_hash)
+    # when the control plane is Supabase-backed; the registry path stays for
+    # selfhost (TORTOISE_CONTROL_PLANE=registry / no Supabase creds).
+    from tortoise.supabase_control import is_supabase_enabled
+    if is_supabase_enabled():
+        return await _get_current_team_supabase(request, token)
     try:
         sdk = _make_sdk(namespace="registry")
         from datetime import datetime as _dt, timezone as _tz
@@ -779,6 +785,47 @@ async def get_current_team(request: Request) -> dict:
                 "max_points": int(mp) if mp is not None else lim["max_graph_nodes"],
                 "max_api_keys": int(mak) if mak is not None else lim["max_api_keys"],
                 "max_sessions": int(ms) if ms is not None else DEFAULT_MAX_SESSIONS}
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=500, detail="Auth error")
+
+
+async def _get_current_team_supabase(request: Request, token: str) -> dict:
+    """Supabase control-plane key resolution (#767, plan Task 3 / E2E-2).
+
+    lookup_hash exact-match against api_keys (unique index, O(1)) then
+    team_memberships (long-lived keys); api_keys.revoked_at is authoritative
+    (P1-2); tier/quota from teams. A registry-only key resolves to nothing →
+    401 (E2E-7-negative). Fail-closed: a Supabase error raises 500 — never a
+    fallback to the registry, never 200.
+    """
+    from tortoise.supabase_control import (
+        get_control_plane, resolve_api_key, update_last_used,
+    )
+    try:
+        team = resolve_api_key(get_control_plane(), token)
+        if team is None:
+            await _audit_auth_failure(request, "invalid_key")
+            raise HTTPException(status_code=401, detail="Invalid API key")
+        team_id = team["team_id"]
+        # #685: last_used_at write-through on api_keys.id — best-effort
+        # (telemetry must never gate auth). Membership-only resolutions have
+        # no api_keys row (key_id=None) → no write.
+        if team.get("key_id"):
+            update_last_used(get_control_plane(), team["key_id"])
+        # #528: activation telemetry — first successful API auth per team.
+        # created_by (key creator's user UUID) joins web + server funnels,
+        # with team_id fallback for keys that predate created_by.
+        if first_api_call_pending(team_id):
+            await asyncio.to_thread(
+                first_api_call,
+                team.get("created_by") or team_id, team_id,
+                request.url.path, request.method,
+            )
+        request.state.team_id = team_id
+        request.state.tier = team["tier"]
+        return team
     except HTTPException:
         raise
     except Exception:
@@ -1251,7 +1298,7 @@ async def topic_summary(
     Returns the epistemic structure for a topic: significant/settled claims,
     contested claims, disputed NAND pairs, and argument topology.
 
-    Classification uses EP posterior variance (persisted ep_alpha/ep_beta):
+    Classification uses EP posterior variance (persisted posterior (posterior_alpha/beta, falling back to ep_alpha/beta priors)):
     - significant: confidence_mean >= 0.7 AND variance < 0.01
     - contested: variance > 0.04 (destabilized posterior)
     - disputed pairs: NAND-connected where both have variance > 0.02
@@ -1614,7 +1661,15 @@ async def create_demo_graph(request: Request):
 
 @app.post("/v1/team/keys", response_model=CreateKeyResponse)
 async def create_api_key(request: Request, response: Response, team: dict = Depends(get_current_team)):
-    """Generate a new API key for the team."""
+    """Generate a new API key for the team.
+
+    #767 review note (PR #851 P1, tracked by #765 plan Task 8 writer
+    inventory): in Supabase control-plane mode this endpoint still mints
+    into the FalkorDB registry ONLY — a key minted here would 401 against
+    Supabase-backed auth until the writer flip lands. #765 migrates this
+    writer (api_keys insert with lookup_hash + created_via) BEFORE the
+    single-deploy flip (#771), so no production window exists. Do not use
+    in Supabase mode until then."""
     _check_team_limit(team, "api_keys")
     import uuid
     from tortoise.auth import hash_api_key
@@ -1662,7 +1717,12 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
 
 @app.get("/v1/team/keys")
 async def list_api_keys(team: dict = Depends(get_current_team)):
-    """List API keys for the team (hashes only — no plaintext)."""
+    """List API keys for the team (hashes only — no plaintext).
+
+    #767 review note (PR #851 P1, tracked by #765 plan Task 8 writer
+    inventory): reads the FalkorDB registry; in Supabase control-plane mode
+    this list will not show Supabase-minted session keys until the #765
+    writer flip (must land before the single-deploy flip #771)."""
     sdk = _make_sdk(namespace="registry")
     try:
         keys = sdk._get_registry().query(
@@ -1698,7 +1758,10 @@ async def revoke_api_key(key_id: str, team: dict = Depends(get_current_team)):
     Keys live in the control_plane registry graph (per #7873) — created via
     POST /v1/team/keys, listed via GET /v1/team/keys, revoked here, all on
     _get_registry(), consistent with the SDK's control-plane methods.
-    """
+    #767 review note (PR #851 P1, tracked by #765 plan Task 8 writer
+    inventory): registry-only until the writer flip; in Supabase mode a key
+    minted via /v1/session/key resolves via api_keys and is not revocable
+    here until #765 migrates this surface (PATCH revoked_at on api_keys)."""
     sdk = _make_sdk(namespace="registry")
     try:
         rows = sdk._get_registry().query(
@@ -2087,7 +2150,15 @@ async def get_session_detail(session_id: str, team: dict = Depends(get_current_t
 
 async def _user_memberships(user_id: str) -> list[dict]:
     """Resolve a user's team memberships (active only). Placeholder rows
-    (team_id='') are excluded (plan §4.1 step 6)."""
+    (team_id='') are excluded (plan §4.1 step 6).
+
+    #767 (plan Task 3): Supabase mode reads team_memberships
+    (user_id = JWT sub); registry stays for selfhost."""
+    from tortoise.supabase_control import (
+        get_control_plane, is_supabase_enabled, user_memberships as _sb_memberships,
+    )
+    if is_supabase_enabled():
+        return _sb_memberships(get_control_plane(), user_id)
     sdk = _make_sdk(namespace="registry")
     rows = sdk._get_registry().query(
         "MATCH (m:Membership {user_id:$uid, status:'active'}) "
@@ -2099,6 +2170,12 @@ async def _user_memberships(user_id: str) -> list[dict]:
 
 async def _membership_team(user_id: str, team_id: str) -> dict | None:
     """Return the membership for (user, team) if active, else None."""
+    from tortoise.supabase_control import (
+        get_control_plane, is_supabase_enabled,
+        membership_for_user_team as _sb_membership,
+    )
+    if is_supabase_enabled():
+        return _sb_membership(get_control_plane(), user_id, team_id)
     sdk = _make_sdk(namespace="registry")
     rows = sdk._get_registry().query(
         "MATCH (m:Membership {user_id:$uid, team_id:$tid, status:'active'}) "
@@ -2111,6 +2188,16 @@ async def _membership_team(user_id: str, team_id: str) -> dict | None:
 
 
 async def _team_node(team_id: str) -> dict | None:
+    """Team node/properties for session endpoints (E5/E6/E7/E8).
+
+    #767 (plan Task 3): Supabase mode reads the teams row so E6/E8 keep
+    working for teams that only exist in Supabase (provision writes both
+    stores today; post-flip the registry freezes)."""
+    from tortoise.supabase_control import (
+        get_control_plane, is_supabase_enabled, team_by_id as _sb_team,
+    )
+    if is_supabase_enabled():
+        return _sb_team(get_control_plane(), team_id)
     sdk = _make_sdk(namespace="registry")
     rows = sdk._get_registry().query(
         "MATCH (t:Team {id:$id}) RETURN properties(t)",
@@ -2271,6 +2358,15 @@ async def list_graphs(team_id: str, user: dict = Depends(get_current_user)):
 
 async def _require_owner_admin(user_id: str, team_id: str) -> dict:
     """Return the membership if the user is owner/admin in the team, else 403."""
+    from tortoise.supabase_control import (
+        get_control_plane, is_supabase_enabled,
+        membership_for_user_team as _sb_membership,
+    )
+    if is_supabase_enabled():
+        membership = _sb_membership(get_control_plane(), user_id, team_id)
+        if not membership or membership["role"] not in ("owner", "admin"):
+            raise HTTPException(status_code=403, detail="Requires owner or admin role in team")
+        return {"team_id": team_id, "role": membership["role"]}
     sdk = _make_sdk(namespace="registry")
     rows = sdk._get_registry().query(
         "MATCH (m:Membership {user_id:$uid, team_id:$tid, status:'active'}) "
@@ -2499,7 +2595,15 @@ async def reconcile(request: Request):
 
 @app.post("/v1/agent/signup")
 async def agent_signup(request: Request):
-    """Mint a team + API key for an anonymous device (no email/dashboard)."""
+    """Mint a team + API key for an anonymous device (no email/dashboard).
+
+    #767 review note (PR #851 P1, tracked by #765 plan Task 8 writer
+    inventory): in Supabase control-plane mode this endpoint still writes
+    the FalkorDB registry ONLY — the identity path (NULL user_id + identity
+    via provision_team, shipped in #770/0010) is exercised by the Supabase
+    writer flip in #765, which must land BEFORE the single-deploy flip
+    (#771). No production window exists; do not run Supabase mode against
+    this endpoint until then."""
     # #741(a): identity is ALWAYS server-side — client-supplied identity and
     # x-device-id are ignored (a client-chosen identity trivially bypasses the
     # per-identity rate limit). The CLI generates its own identity server-side.
@@ -2599,6 +2703,14 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
     if purpose not in ("bootstrap", "recovery"):
         raise HTTPException(status_code=422, detail="purpose must be 'bootstrap' or 'recovery'")
 
+    # #767 (plan Task 3, E2E-2): in Supabase mode the mint writes api_keys
+    # (lookup_hash + created_via + expires_at) so the minted key resolves via
+    # api_keys.lookup_hash and revocation is authoritative. The registry mint
+    # stays for selfhost.
+    from tortoise.supabase_control import is_supabase_enabled
+    if is_supabase_enabled():
+        return await _session_key_supabase(body or {}, request, user)
+
     sdk = _make_sdk(namespace="registry")
     reg = sdk._get_registry()
     user_id = user["user_id"]
@@ -2682,6 +2794,97 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
         params={"id": kid, "tid": tid, "kh": key_hash, "kp": api_key[:10],
                 "cb": user_id, "now": now, "exp": expires_at, "cv": created_via},
     )
+    await _async_audit(request, tid, "api_key_mint", resource_type="api_key", resource_id=kid)
+
+    return {"key": api_key, "key_prefix": api_key[:10], "expires_at": expires_at,
+            "team_id": tid, "purpose": purpose}
+
+
+async def _session_key_supabase(body: dict, request: Request, user: dict) -> dict:
+    """E1 session-key mint against Supabase (#767 E2E-2 round-trip).
+
+    Mirrors the registry mint exactly (bootstrap: 24h expiry, 3-active cap;
+    recovery: persistent, max_api_keys cap with oldest-OTHER auto-revoke so
+    recovery never dead-ends) with reads/writes on team_memberships / teams /
+    api_keys. The minted key lands in api_keys with lookup_hash + created_via
+    + expires_at, so get_current_team / MCP resolve it via the unique
+    lookup_hash index, and api_keys.revoked_at is the authoritative revoke.
+    """
+    import uuid as _uuid
+    from datetime import datetime, timedelta, timezone as _tz
+    from tortoise.auth import lookup_hash
+    from tortoise.pricing import tier_limits
+    from tortoise.supabase_control import (
+        active_api_keys,
+        get_control_plane,
+        insert_api_key,
+        membership_for_user_team,
+        revoke_api_key,
+        team_by_id,
+        user_memberships,
+    )
+
+    purpose = body.get("purpose", "bootstrap")  # validated by caller
+    cp = get_control_plane()
+    user_id = user["user_id"]
+
+    memberships = user_memberships(cp, user_id)
+    if not memberships:
+        raise HTTPException(status_code=403, detail="No team membership — create a team first")
+    if len(memberships) > 1:
+        tid = body.get("team_id")
+        if not tid:
+            raise HTTPException(status_code=400, detail="team_id required (multiple memberships)")
+    else:
+        tid = memberships[0]["team_id"]
+
+    if not membership_for_user_team(cp, user_id, tid):
+        raise HTTPException(status_code=403, detail="No membership in team")
+
+    team_row = team_by_id(cp, tid)
+    tier = (team_row or {}).get("tier") or "free"
+
+    api_key = f"tt_{_uuid.uuid4().hex}"
+    kid = _short_id()
+    now = datetime.now(_tz.utc).isoformat()
+
+    if purpose == "bootstrap":
+        active_boot = active_api_keys(cp, tid, created_via="bootstrap", created_by=user_id)
+        if len(active_boot) >= 3:
+            raise HTTPException(status_code=429, detail="Too many active session keys — wait for expiry")
+        expires_at = (datetime.now(_tz.utc) + timedelta(hours=24)).isoformat()
+        created_via = "bootstrap"
+    else:
+        lim = tier_limits(tier)
+        # #750.8: .get() so a pricing.json key drift never 500s the mint.
+        max_keys = lim.get("max_api_keys")
+        # Legacy rows may have created_via NULL — NULL <> 'bootstrap' counts
+        # against the cap, matching the registry predicate.
+        active = [r for r in active_api_keys(cp, tid)
+                  if r.get("created_via") != "bootstrap"]
+        if max_keys is not None and len(active) >= max_keys:
+            # #750.10: never auto-revoke a key the current user created —
+            # recovery must not dead-end by killing the user's own key.
+            others = [r for r in active if r.get("created_by") != user_id]
+            others.sort(key=lambda r: r.get("created_at") or "")
+            if others:
+                revoke_api_key(cp, others[0]["id"], now)
+            else:
+                raise HTTPException(status_code=402, detail="Key limit reached — revoke an existing key")
+        expires_at = None
+        created_via = "recovery"
+
+    insert_api_key(cp, {
+        "id": kid,
+        "team_id": tid,
+        "lookup_hash": lookup_hash(api_key),
+        "key_prefix": api_key[:10],
+        "created_via": created_via,
+        "created_by": user_id,
+        "created_at": now,
+        "revoked_at": None,
+        "expires_at": expires_at,
+    })
     await _async_audit(request, tid, "api_key_mint", resource_type="api_key", resource_id=kid)
 
     return {"key": api_key, "key_prefix": api_key[:10], "expires_at": expires_at,

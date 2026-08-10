@@ -73,6 +73,12 @@ class TestApiKeyHashing:
 
         # Different peppers → different hashes for the same key
         assert h_a != h_b
+        # Restore module state (env + _PEPPER_BYTES) — the reloads above leave
+        # auth._PEPPER_BYTES pinned to "other-pepper-value", poisoning every
+        # later lookup_hash/hash_api_key call in the session (broke
+        # test_auth_flip + test_supabase_control in full-suite runs, #767).
+        monkeypatch.setenv("TORTOISE_SECRET_PEPPER", "test-static-pepper")
+        importlib.reload(auth_mod)
 
     def test_hash_api_key_import_uses_dev_pepper_without_env(self, monkeypatch):
         """Dev mode (no TORTOISE_API_KEY, no pepper): import succeeds using dev pepper."""

@@ -9,6 +9,7 @@ See: tortoise/research/reflection-agentic-systems/ep-implementation-plan.md
 from __future__ import annotations
 
 import logging
+import math
 import random
 
 from .quadrature import tilted_moments, moments_to_beta, phi_nand, phi_impl
@@ -51,14 +52,23 @@ class TortoiseEP:
         self._node_cache: dict[str, tuple[float, float]] = {}
         self._msg_cache: dict[tuple[str, str, str], tuple[float, float]] = {}
 
+        self._immutable_priors: set[str] = set()
         if affected_claims:
             rows = self.g.query(
                 "MATCH (n:Point) WHERE n.id IN $ids "
-                "RETURN n.id, coalesce(n.ep_alpha,1.0), coalesce(n.ep_beta,1.0)",
+                "RETURN n.id, coalesce(n.ep_alpha,1.0), coalesce(n.ep_beta,1.0), "
+                "       coalesce(n.baseline_set, false)",
                 params={"ids": list(affected_claims)},
             ).result_set
-            for cid, a, b in rows:
+            for cid, a, b, is_baseline in rows:
                 self._node_cache[cid] = (float(a), float(b))
+                # #844: explicit baselines (baseline_set=true) are IMMUTABLE
+                # evidence priors per sdk.py 'NEVER recomputed' contract — EP
+                # must not persist posteriors over them or re-runs drift
+                # (each run re-hydrates the previous posterior as the new
+                # prior → confidence erodes monotonically).
+                if is_baseline:
+                    self._immutable_priors.add(cid)
 
         for rel in ("IMPL", "NAND"):
             rows = self.g.query(
@@ -77,15 +87,25 @@ class TortoiseEP:
         by the per-run lifecycle) — flush whatever is present.
         """
         if getattr(self, "_node_cache", None):
+            immutable = getattr(self, "_immutable_priors", set())
             params_list = [
                 {"id": cid, "a": a, "b": b,
-                 "c": round(a/(a+b), 4) if (a + b) > 0 else 0.5}
+                 "c": round(a/(a+b), 4) if (a + b) > 0 else 0.5,
+                 "keep_prior": cid in immutable}
                 for cid, (a, b) in self._node_cache.items()
             ]
             self.g.query(
                 "UNWIND $params AS p "
                 "MATCH (n:Point {id: p.id}) "
-                "SET n.ep_alpha = p.a, n.ep_beta = p.b, n.confidence = p.c",
+                # n.posterior_alpha/beta = the true EP posterior (preferred by
+                # _read_node/compute_confidence — resolves observability for
+                # baseline'd claims, #852 review P1). n.confidence = posterior
+                # mean. n.ep_alpha/beta stay as IMMUTABLE priors for baseline'd
+                # claims (re-run stability), posteriors for others (back-compat).
+                "SET n.confidence = p.c, "
+                "    n.posterior_alpha = p.a, n.posterior_beta = p.b, "
+                "    n.ep_alpha = CASE WHEN p.keep_prior THEN n.ep_alpha ELSE p.a END, "
+                "    n.ep_beta  = CASE WHEN p.keep_prior THEN n.ep_beta  ELSE p.b END",
                 params={"params": params_list},
             )
 
@@ -121,7 +141,8 @@ class TortoiseEP:
             return _cache[node_id]
         rows = self.g.query(
             "MATCH (n:Point {id:$id}) "
-            "RETURN coalesce(n.ep_alpha, 1.0), coalesce(n.ep_beta, 1.0)",
+            "RETURN coalesce(n.posterior_alpha, n.ep_alpha, 1.0), "
+            "       coalesce(n.posterior_beta, n.ep_beta, 1.0)",
             params={"id": node_id},
         ).result_set
         return (float(rows[0][0]), float(rows[0][1])) if rows else (1.0, 1.0)
@@ -133,9 +154,15 @@ class TortoiseEP:
             return
         # #330: guard degenerate (0,0) params — uniform fallback instead of ZDE
         mean = round(alpha / (alpha + beta), 4) if (alpha + beta) > 0 else 0.5
+        # #852 round-6: mirror _flush_cache — baseline'd claims keep their
+        # immutable prior; posterior written separately for observability.
         self.g.query(
             "MATCH (n:Point {id:$id}) "
-            "SET n.ep_alpha=$a, n.ep_beta=$b, n.confidence=$c",
+            "SET n.confidence=$c, n.posterior_alpha=$a, n.posterior_beta=$b, "
+            "    n.ep_alpha=CASE WHEN coalesce(n.baseline_set,false) "
+            "                    THEN n.ep_alpha ELSE $a END, "
+            "    n.ep_beta =CASE WHEN coalesce(n.baseline_set,false) "
+            "                    THEN n.ep_beta  ELSE $b END",
             params={"id": node_id, "a": alpha, "b": beta, "c": mean},
         )
 
@@ -202,7 +229,9 @@ class TortoiseEP:
             mean = a / (a + b) if (a + b) > 0 else 0.5
             return mean >= threshold
         rows = self.g.query(
-            "MATCH (n:Point {id:$id}) RETURN n.ep_alpha, n.ep_beta",
+            "MATCH (n:Point {id:$id}) "
+            "RETURN coalesce(n.posterior_alpha, n.ep_alpha, 1.0), "
+            "       coalesce(n.posterior_beta, n.ep_beta, 1.0)",
             params={"id": claim_id},
         ).result_set
         if not rows or rows[0][0] is None:
@@ -304,22 +333,108 @@ class TortoiseEP:
         # NAND unidirectional (agent-chosen directed attack): source→each-target
         # attacks ONLY — target↔target pairwise edges would otherwise create
         # arbitrary directed attacks between targets (review P2, #795).
-        if op_type == "IMPL" and len(input_ids) >= 2:
-            # Source is input_ids[0] (idx=0). Targets are input_ids[1:].
-            for j in range(1, len(input_ids)):
-                self._update_factor(op_id, op_type,
-                                    [input_ids[0], input_ids[j]], weight, label, direction)
+        n = len(input_ids)
+        if n < 2:
+            return
+        if op_type == "IMPL":
+            pairs = [(input_ids[0], input_ids[j]) for j in range(1, n)]
         elif op_type == "NAND" and direction != "bidirectional":
             # Directed NAND: the source attacks each target; targets do not
             # attack each other.
-            for j in range(1, len(input_ids)):
-                self._update_factor(op_id, op_type,
-                                    [input_ids[0], input_ids[j]], weight, label, direction)
+            pairs = [(input_ids[0], input_ids[j]) for j in range(1, n)]
         else:
-            for i in range(len(input_ids)):
-                for j in range(i + 1, len(input_ids)):
-                    self._update_factor(op_id, op_type,
-                                        [input_ids[i], input_ids[j]], weight, label, direction)
+            pairs = [(input_ids[i], input_ids[j])
+                     for i in range(n) for j in range(i + 1, n)]
+        if not pairs:
+            return
+
+        # Accumulate-then-scale (#326). The operator carries ONE weight w:
+        # the factor's TOTAL pull must equal the isolated 2-input factor's
+        # pull at the same weight, and the decomposition must be
+        # input-order-invariant (design decision recorded in #326; the
+        # #420/#536 falsification suite pins it).
+        #
+        # Every pairwise application is computed from a CLEAN cavity state
+        # (the pre-factor messages for THIS operator are restored between
+        # pairs, and damping is temporarily disabled so raw messages are
+        # captured), so each pair contributes identically regardless of
+        # input order. Per-claim contributions are summed (accumulate) and
+        # the factor is scaled once (scale) to conserve total pull.
+        cache = getattr(self, "_msg_cache", None)
+        saved = dict(cache) if cache is not None else {}
+        # Overlay cache: only THIS operator's (op, claim, rel) keys matter
+        # to the pairwise computations, so copying just those keys between
+        # pairs is O(arity) instead of O(|cache|).
+        overlay_base = {k: v for k, v in saved.items()
+                        if k[0] == op_id and k[2] == op_type}
+        bidirectional = (direction == "bidirectional")
+        orig_damping = self.damping
+        acc: dict[str, tuple[float, float]] = {c: (0.0, 0.0) for c in input_ids}
+        touched: set[str] = set()
+        try:
+            self.damping = 1.0  # capture raw (undamped) pair messages
+            for a, b in pairs:
+                self._msg_cache = dict(overlay_base)  # clean per-pair state
+                self._update_factor(op_id, op_type, [a, b], weight, label, direction)
+                # _update_factor writes the target's message always, and the
+                # source's only for bidirectional operators. Accumulate ONLY
+                # freshly written claims — never the pre-factor state (a stale
+                # source message must not be re-accumulated as if fresh, #326
+                # directed-path corruption).
+                for c in (a, b):
+                    if c == a and not bidirectional:
+                        continue
+                    msg = self._msg_cache.get((op_id, c, op_type))
+                    if msg is not None:
+                        ea, eb = acc[c]
+                        acc[c] = (ea + msg[0], eb + msg[1])
+                        touched.add(c)
+        finally:
+            if cache is None:
+                # Cache-less entry: the attribute did not pre-exist — remove
+                # it again so graph-mode callers (which use hasattr(_msg_cache)
+                # to select graph I/O) keep working.
+                if hasattr(self, "_msg_cache"):
+                    delattr(self, "_msg_cache")
+            else:
+                self._msg_cache = cache
+            self.damping = orig_damping
+
+        # Conservation scale: the FULL pairwise (clique) topology — NAND
+        # bidirectional — has C(n,2) pair applications with each claim touched
+        # by (n-1) of them -> scale 2/(n(n-1)) makes the total
+        # n*(n-1)*pair*scale = 2*pair = the binary factor's total. The STAR
+        # topology (IMPL source→targets, and directed NAND attacks) has (n-1)
+        # pairs -> scale 1/(n-1) makes the total pair_tgt (directed: targets
+        # only) or pair_src + pair_tgt (bidirectional IMPL: source back-message
+        # + each target), matching the binary factor's total at the same
+        # weight. Star targets are diluted 1/(n-1) (evidence dilution across
+        # siblings).
+        is_star = (op_type != "NAND") or not bidirectional
+        scale = (1.0 / (n - 1)) if is_star else (2.0 / (n * (n - 1)))
+        d = self.damping
+        for c in input_ids:
+            if c not in touched:
+                # Directed-star source: no message by design — clear any stale
+                # persisted source message so unidirectional semantics hold.
+                # Cache mode: only when a stale entry exists (don't create a
+                # zero entry for a never-messaged source). Graph mode: the
+                # MATCH…SET is a no-op when no edge exists, so write always.
+                if not bidirectional and c == input_ids[0]:
+                    if cache is None or saved.get((op_id, c, op_type)) is not None:
+                        self._write_message(op_id, c, 0.0, 0.0, op_type)
+                continue
+            ea, eb = acc[c]
+            new_eta = (ea * scale, eb * scale)
+            new_eta = (max(min(new_eta[0], 1000), -1000),
+                       max(min(new_eta[1], 1000), -1000))
+            if cache is not None:
+                old_eta = saved.get((op_id, c, op_type), (0.0, 0.0))
+                damped = (d * new_eta[0] + (1 - d) * old_eta[0],
+                          d * new_eta[1] + (1 - d) * old_eta[1])
+            else:
+                damped = new_eta  # graph mode: no damping base available
+            self._write_message(op_id, c, *damped, op_type)
 
     def _update_claim_posterior(self, claim_id: str,
                                  run_evidence: dict | None = None) -> None:
@@ -447,14 +562,28 @@ class TortoiseEP:
         Extractor confidence 0.8 → Beta(1+0.8k, 1+0.2k).
         Confidence near 0.5 → Beta(1,1) uniform (no information).
 
+        Malformed confidence (None, bool, non-numeric, NaN/±inf) falls back
+        to the uniform Beta(1,1) — never a NaN/degenerate prior that would
+        silently zero downstream weights (#326). Out-of-range values are
+        clamped to [0,1] before conversion.
+
         Args:
             confidence: extractor confidence in [0, 1]
             k: evidence strength multiplier (default 2 = mild prior)
             uniform_threshold: |c-0.5| < threshold → uniform prior
         """
-        if abs(confidence - 0.5) < uniform_threshold:
+        if confidence is None or isinstance(confidence, bool):
             return (1.0, 1.0)
-        return (1.0 + confidence * k, 1.0 + (1.0 - confidence) * k)
+        try:
+            conf = float(confidence)
+        except (TypeError, ValueError):
+            return (1.0, 1.0)
+        if not math.isfinite(conf):
+            return (1.0, 1.0)
+        conf = max(0.0, min(1.0, conf))
+        if abs(conf - 0.5) < uniform_threshold:
+            return (1.0, 1.0)
+        return (1.0 + conf * k, 1.0 + (1.0 - conf) * k)
 
     # ── Public API ────────────────────────────────────────────────
 
@@ -476,7 +605,8 @@ class TortoiseEP:
         rows = self.g.query(
             "MATCH (n:Point) "
             "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
-            "WITH n, coalesce(n.ep_alpha,1.0) AS a, coalesce(n.ep_beta,1.0) AS b "
+            "WITH n, coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS a, "
+            "     coalesce(n.posterior_beta, n.ep_beta, 1.0) AS b "
             "WITH n, a, b, (a*b)/((a+b)*(a+b)*(a+b+1)) AS v "
             "WHERE v > $t RETURN n.id, n.content, a, b, v ORDER BY v DESC",
             params={"t": variance_threshold},
@@ -524,7 +654,24 @@ class TortoiseEP:
             self.g.query(
                 "UNWIND $params AS p "
                 "MATCH (n:Point {id: p.id}) "
-                "SET n.ep_alpha = p.a, n.ep_beta = p.b",
+                # #852 round-4: mirror _flush_cache's keep_prior semantics —
+                # explicit baselines (baseline_set=true) are IMMUTABLE evidence
+                # priors; run-level evidence must not clobber them. Also clear
+                # any stale posterior so a changed prior is immediately
+                # observable (a successful run re-flushes posteriors).
+                "SET n.ep_alpha = CASE WHEN coalesce(n.baseline_set,false) "
+                "                    THEN n.ep_alpha ELSE p.a END, "
+                "    n.ep_beta  = CASE WHEN coalesce(n.baseline_set,false) "
+                "                    THEN n.ep_beta  ELSE p.b END, "
+                # #852 round-5: clear stale posterior ONLY when the prior
+                # actually changed (baseline'd claims keep their posterior —
+                # it is the observable EP result and not stale if the prior
+                # was rejected). set_point_baseline already clears it on a
+                # genuine baseline change.
+                "    n.posterior_alpha = CASE WHEN coalesce(n.baseline_set,false) "
+                "                           THEN n.posterior_alpha ELSE null END, "
+                "    n.posterior_beta  = CASE WHEN coalesce(n.baseline_set,false) "
+                "                           THEN n.posterior_beta  ELSE null END",
                 params={"params": params_list},
             )
 

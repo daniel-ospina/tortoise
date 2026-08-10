@@ -81,9 +81,11 @@ TEMPLATES: dict[str, dict] = {
         "cypher": """
             MATCH (c:Point)
             WHERE (c.is_operator IS NULL OR c.is_operator = false)
-              AND c.ep_alpha IS NOT NULL AND c.ep_beta IS NOT NULL
-            WITH c, (c.ep_alpha * c.ep_beta) / 
-               ((c.ep_alpha + c.ep_beta)^2 * (c.ep_alpha + c.ep_beta + 1)) as variance
+              AND (c.posterior_alpha IS NOT NULL OR c.ep_alpha IS NOT NULL)
+            WITH c, coalesce(c.posterior_alpha, c.ep_alpha, 1.0) AS a,
+                 coalesce(c.posterior_beta, c.ep_beta, 1.0) AS b
+            WITH c, a, b, (a * b) / 
+               ((a + b)^2 * (a + b + 1)) as variance
             RETURN c.id, c.content, coalesce(c.confidence,0.5) as conf, variance
             ORDER BY variance DESC LIMIT $limit
         """,
@@ -110,9 +112,11 @@ TEMPLATES: dict[str, dict] = {
         "cypher": """
             MATCH (c:Point)
             WHERE c.content CONTAINS $entity
-              AND c.ep_alpha IS NOT NULL
+              AND (c.posterior_alpha IS NOT NULL OR c.ep_alpha IS NOT NULL)
             RETURN c.id, c.content, coalesce(c.confidence,0.5) as conf,
-                   c.ep_alpha, c.ep_beta, c.createdAt
+                   coalesce(c.posterior_alpha, c.ep_alpha, 1.0) as a,
+                   coalesce(c.posterior_beta, c.ep_beta, 1.0) as b,
+                   c.createdAt
             ORDER BY c.createdAt DESC LIMIT $limit
         """,
         "format": lambda rows: _format_timeline(rows),
