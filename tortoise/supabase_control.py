@@ -20,6 +20,13 @@ the read-side seam the hosted auth paths use AFTER the flip:
   (SHA-256(pepper + token)), accept creates the real team_memberships row
   with the INVITED role, and dedup (team, email) + 7-day expiry are
   enforced (0008 partial unique index).
+- Onboarding/GitHub (plan Task 6): onboarding_state (jsonb) + email are
+  read/patched on ``teams``; github_token_enc/github_org are read/written
+  ONLY through the service-role seam here — the column is REVOKEd from
+  anon/authenticated in migration 0006, so this module is the sole access
+  path for the encrypted token in Supabase mode.
+- Health (plan Task 7): /health/ready probes this control plane as the
+  second plane (AND with FalkorDB) in Supabase mode.
 
 Fail-closed contract (backup-seam P1-3 pattern): every query error raises
 ``RuntimeError`` — auth never falls back to the registry and never
@@ -718,4 +725,110 @@ def pending_invitations(cp, team_id: str) -> list[dict]:
                 "expires_at", "created_at"],
         filters=[("team_id", "eq", team_id), ("status", "eq", "pending")],
         order="created_at",
+    )
+
+
+# ── Onboarding / email / GitHub connect (plan Task 6) ───────────────────────
+#
+# onboarding_state is jsonb in migration 0006 (real JSON object — no
+# string-wrapping, unlike the FalkorDB registry path which stores a JSON
+# string). github_token_enc is column-REVOKEd from anon/authenticated;
+# service_role (this client) is the ONLY reader/writer in Supabase mode.
+
+
+def team_onboarding_state(cp, team_id: str) -> dict | None:
+    """Read ``teams.onboarding_state`` (jsonb) for a team.
+
+    Returns the stored state merged over the hosted default shape
+    (``hosted_api._ONBOARDING_DEFAULT_STATE`` — same shape the registry path
+    auto-initializes to), so callers never see a partial dict for an existing
+    row. None when the team row does not exist — the caller mirrors the
+    registry ``MATCH``-no-op (a missing team reads as defaults without
+    writing). Unknown stored keys are PRESERVED on the merge (mirrors the
+    registry ``state.update(stored)`` semantics — dropping them would let a
+    later write-back permanently erase keys the whitelist doesn't know,
+    e.g. ``completed_at``/``github_index_job_id``; code-review P2, PR #861).
+    """
+    # Deferred import: hosted_api imports this module inside functions (#851
+    # pattern), so a module-level import here would create a cycle. By call
+    # time hosted_api is fully loaded.
+    from tortoise.hosted_api import _ONBOARDING_DEFAULT_STATE
+    rows = cp.query(
+        "teams", select=["onboarding_state"], filters=[("id", "eq", team_id)]
+    )
+    if not rows:
+        return None
+    state = dict(_ONBOARDING_DEFAULT_STATE)
+    stored = rows[0].get("onboarding_state")
+    if isinstance(stored, dict):
+        state.update(stored)  # preserve unknown keys (registry parity)
+    return state
+
+
+def update_onboarding_state(cp, team_id: str, state_dict: dict) -> None:
+    """PATCH ``teams`` SET onboarding_state = state_dict (jsonb).
+
+    PostgREST accepts the JSON object directly in the PATCH body (the
+    ``query()`` json_body path sends it verbatim) — no string-wrapping. Raises
+    on failure (fail-closed): a dropped onboarding write must surface as an
+    error, never silently lose progress.
+    """
+    cp.query(
+        "teams",
+        method="PATCH",
+        filters=[("id", "eq", team_id)],
+        json_body={"onboarding_state": state_dict},
+    )
+
+
+def team_email(cp, team_id: str) -> str | None:
+    """Read ``teams.email`` for a team (None when the row is missing)."""
+    rows = cp.query("teams", select=["email"], filters=[("id", "eq", team_id)])
+    return rows[0]["email"] if rows else None
+
+
+def update_team_email(cp, team_id: str, email: str) -> None:
+    """PATCH ``teams`` SET email (onboarding flow writes the signup email)."""
+    cp.query(
+        "teams",
+        method="PATCH",
+        filters=[("id", "eq", team_id)],
+        json_body={"email": email},
+    )
+
+
+def github_credentials(cp, team_id: str) -> dict:
+    """Read the encrypted GitHub token + org from ``teams``.
+
+    github_token_enc is column-REVOKEd from anon/authenticated (migration
+    0006) — this service-role seam is the ONLY read path for it in Supabase
+    mode. Returns ``{"github_token_enc": ..., "github_org": ...}`` (both None
+    when the team row is missing).
+    """
+    rows = cp.query(
+        "teams",
+        select=["github_token_enc", "github_org"],
+        filters=[("id", "eq", team_id)],
+    )
+    if not rows:
+        return {"github_token_enc": None, "github_org": None}
+    return {
+        "github_token_enc": rows[0].get("github_token_enc"),
+        "github_org": rows[0].get("github_org"),
+    }
+
+
+def store_github_credentials(cp, team_id: str, *, token_enc: str, org: str) -> None:
+    """PATCH ``teams`` SET github_token_enc + github_org (service role).
+
+    Rotation (plan Task 6 "rotation documented"): every OAuth reconnect —
+    ``github_callback`` running connect again — PATCHes a fresh encrypted
+    token over the old one in place; the previous ciphertext is simply
+    replaced, so rotation needs no separate endpoint or background job.
+    """
+    cp.query(
+        "teams",
+        method="PATCH",
+        filters=[("id", "eq", team_id)],
+        json_body={"github_token_enc": token_enc, "github_org": org},
     )

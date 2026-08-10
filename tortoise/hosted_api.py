@@ -611,7 +611,14 @@ async def health():
 
 @app.get("/health/ready")
 async def health_ready():
-    """Readiness — DB connectivity (what /health used to check)."""
+    """Readiness — AND(Supabase control plane, FalkorDB data plane).
+
+    Supabase mode (plan Task 7): BOTH planes must be reachable — the app can
+    serve neither auth (Supabase) nor data (FalkorDB) when either is down, so
+    ready=false (503) unless both answer. Registry mode: FalkorDB only
+    (today's behavior — selfhost has no second plane). Fail-closed: not-ready
+    is a 503, never a 200.
+    """
     db_ok = False
     try:
         sdk = _make_sdk(namespace="registry")
@@ -621,19 +628,56 @@ async def health_ready():
         pass
     if not db_ok:
         raise HTTPException(status_code=503, detail="Database unreachable")
+    from tortoise.supabase_control import get_control_plane, is_supabase_enabled
+    if is_supabase_enabled():
+        try:
+            # Minimal control-plane probe — a 1-row teams read exercises the
+            # PostgREST path without depending on any tenant data.
+            get_control_plane().query("teams", select=["id"], limit=1)
+        except Exception:
+            raise HTTPException(status_code=503, detail="Control plane unreachable")
+        return {"status": "ok", "db": "connected", "control_plane": "connected"}
     return {"status": "ok", "db": "connected"}
 
 
 @app.get("/health/security")
 async def health_security():
-    """Security posture endpoint — verifies pepper, hashing, and auth config."""
+    """Security posture endpoint — verifies pepper, hashing, and auth config.
+
+    Reports the ACTUAL lookup scheme (plan Task 7): Supabase mode →
+    lookup_hash (SHA-256(pepper + key), exact-match over teams/api_keys);
+    registry mode → salted PBKDF2 (per-key salt, prefix-indexed scan).
+    Backward-compatible keys (pepper_configured/internal_key_configured/
+    hashing/api_auth_enforced) are unchanged; ``scheme`` + ``lookup`` are
+    additive.
+    """
     pepper_set = bool(os.environ.get("TORTOISE_SECRET_PEPPER"))
     internal_key_set = bool(os.environ.get("FASTAPI_INTERNAL_KEY"))
+    # "api_auth_enforced" is unconditionally True on the hosted API: every
+    # tt_-auth dependency enforces Bearer auth (only SKIP_AUTH paths —
+    # /health, /docs, /v1/register, /webhooks/stripe — bypass). The
+    # pre-existing expression `not internal_key_set or bool(...)` was a
+    # tautology that happened to produce the right answer; FASTAPI_INTERNAL_KEY
+    # gates /internal/* endpoints (a separate bypass), not API auth. Fixes the
+    # tautology form without changing the true semantics (review P2, PR #861).
+    auth_enforced = True
+    from tortoise.supabase_control import is_supabase_enabled
+    if is_supabase_enabled():
+        return {
+            "pepper_configured": pepper_set,
+            "internal_key_configured": internal_key_set,
+            "hashing": "pbkdf2_hmac_sha256",
+            "scheme": "lookup_hash_sha256",
+            "lookup": "sha256(pepper + key) exact-match over teams/api_keys (Supabase)",
+            "api_auth_enforced": auth_enforced,
+        }
     return {
         "pepper_configured": pepper_set,
         "internal_key_configured": internal_key_set,
         "hashing": "pbkdf2_hmac_sha256",
-        "api_auth_enforced": not internal_key_set or bool(os.environ.get("FASTAPI_INTERNAL_KEY")),
+        "scheme": "salted_pbkdf2_hmac_sha256",
+        "lookup": "salted PBKDF2 (per-key salt) over registry APIKey nodes",
+        "api_auth_enforced": auth_enforced,
     }
 
 # ── Phase 1a: Core Endpoints ──────────────────────────────────────
@@ -3043,12 +3087,23 @@ _ALLOWED_STATE_KEYS = set(_ONBOARDING_DEFAULT_STATE.keys())
 
 
 def _get_onboarding_state(team_id: str) -> dict:
-    """Read onboarding_state from the Team node in the registry graph.
+    """Read onboarding_state — Supabase ``teams.onboarding_state`` (jsonb,
+    migration 0006) in Supabase mode, registry Team node (JSON string) for
+    selfhost.
 
-    Auto-initializes to defaults if missing (plan Task 3 — missing state
-    auto-initializes on first read). Stored as a JSON string (FalkorDB
-    properties are primitives-only — dicts raise ResponseError).
+    Auto-initializes to defaults if missing. Supabase mode: ``teams`` rows
+    default onboarding_state to '{}', so reads return the merged default
+    shape without writing (the first patch materializes the full state).
     """
+    from tortoise.supabase_control import (
+        get_control_plane, is_supabase_enabled,
+        team_onboarding_state as _sb_state,
+    )
+    if is_supabase_enabled():
+        stored = _sb_state(get_control_plane(), team_id)
+        # None = team row missing — mirror the registry MATCH-no-op: read as
+        # defaults, don't write.
+        return stored if stored is not None else dict(_ONBOARDING_DEFAULT_STATE)
     import json as _json
     sdk = _make_sdk(namespace="registry")
     rows = sdk._get_registry().query(
@@ -3069,8 +3124,16 @@ def _get_onboarding_state(team_id: str) -> dict:
 
 
 def _write_onboarding_state(team_id: str, state: dict) -> None:
-    """Persist onboarding_state on the Team node (JSON string — #498 fix:
-    FalkorDB node properties must be primitives, not dicts)."""
+    """Persist onboarding state — Supabase ``teams.onboarding_state`` (jsonb —
+    no string-wrapping, 0006) or the registry Team node (JSON string —
+    #498 fix: FalkorDB node properties must be primitives, not dicts)."""
+    from tortoise.supabase_control import (
+        get_control_plane, is_supabase_enabled,
+        update_onboarding_state as _sb_write,
+    )
+    if is_supabase_enabled():
+        _sb_write(get_control_plane(), team_id, state)
+        return
     import json as _json
     sdk = _make_sdk(namespace="registry")
     sdk._get_registry().query(
@@ -3091,6 +3154,11 @@ def _update_onboarding_state(team_id: str, **fields) -> dict:
 
 class OnboardingStateResponse(BaseModel):
     onboarding: dict
+    # E2E-5 (plan Task 6): the team email is read from the control plane
+    # alongside onboarding state — additive, backward-compatible (None when
+    # the team has no email yet). #764 review P2: wires the email seam so it
+    # is not dead code.
+    email: str | None = None
 
 
 class OnboardingStatePatchRequest(BaseModel):
@@ -3101,12 +3169,18 @@ class OnboardingStatePatchRequest(BaseModel):
     team_created: bool | None = None
     prompt_pasted: bool | None = None
     onboarding_complete: bool | None = None
+    # E2E-5 (plan Task 6): email read-patch from the control plane (teams
+    # row in Supabase mode, Team node in registry mode). #764 review P2.
+    email: str | None = None
 
 
 @app.get("/v1/onboarding/state", response_model=OnboardingStateResponse)
 async def get_onboarding_state(team: dict = Depends(get_current_team)):
-    """Return the team's onboarding progress."""
-    return {"onboarding": _get_onboarding_state(team["team_id"])}
+    """Return the team's onboarding progress + team email."""
+    return {
+        "onboarding": _get_onboarding_state(team["team_id"]),
+        "email": _team_email(team["team_id"]),
+    }
 
 
 @app.patch("/v1/onboarding/state", response_model=OnboardingStateResponse)
@@ -3114,8 +3188,14 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
                                 team: dict = Depends(get_current_team)):
     """Merge provided onboarding fields into the team's state."""
     updates = {k: v for k, v in body.model_dump().items() if v is not None}
+    email = updates.pop("email", None)  # state keys only — email is a teams column
     state = _update_onboarding_state(team["team_id"], **updates)
-    return {"onboarding": state}
+    if email is not None:
+        _write_team_email(team["team_id"], email)
+    return {
+        "onboarding": state,
+        "email": _team_email(team["team_id"]),
+    }
 
 
 @app.post("/v1/onboarding/session-recording", response_model=OnboardingStateResponse)
@@ -3261,6 +3341,120 @@ class GitHubConnectRequest(BaseModel):
     org: str | None = None
 
 
+def _github_credentials(team_id: str) -> tuple[str | None, str | None]:
+    """(github_token_enc, github_org) for a team — the single read path.
+
+    Supabase mode (plan Task 6): reads ``teams.github_token_enc/github_org``
+    via the service-role seam — the column is column-REVOKEd from
+    anon/authenticated in migration 0006, so this seam is the ONLY reader in
+    Supabase mode (never the registry). Registry mode: the Team node, for
+    selfhost.
+    """
+    from tortoise.supabase_control import (
+        get_control_plane, github_credentials as _sb_creds, is_supabase_enabled,
+    )
+    if is_supabase_enabled():
+        row = _sb_creds(get_control_plane(), team_id)
+        return row.get("github_token_enc"), row.get("github_org")
+    sdk = _make_sdk(namespace="registry")
+    rows = sdk._get_registry().query(
+        "MATCH (t:Team {id: $id}) RETURN t.github_token_enc, t.github_org",
+        params={"id": team_id},
+    ).result_set
+    if not rows:
+        return None, None
+    return rows[0][0], rows[0][1]
+
+
+def _github_token_enc(team_id: str) -> str | None:
+    """Encrypted GitHub token for a team (seam-aware — see _github_credentials)."""
+    return _github_credentials(team_id)[0]
+
+
+def _team_email(team_id: str) -> str | None:
+    """Team email from the control plane — E2E-5 (plan Task 6).
+
+    Supabase mode: ``teams.email`` via the service-role seam. Registry mode:
+    the Team node (selfhost). None when unset/missing.
+    """
+    from tortoise.supabase_control import (
+        get_control_plane, is_supabase_enabled, team_email as _sb_email,
+    )
+    if is_supabase_enabled():
+        return _sb_email(get_control_plane(), team_id)
+    sdk = _make_sdk(namespace="registry")
+    rows = sdk._get_registry().query(
+        "MATCH (t:Team {id: $id}) RETURN t.email",
+        params={"id": team_id},
+    ).result_set
+    return rows[0][0] if rows else None
+
+
+def _write_team_email(team_id: str, email: str) -> None:
+    """Persist the team email on the control plane — E2E-5 (plan Task 6).
+
+    Supabase mode: PATCH ``teams.email`` via the service-role seam. Registry
+    mode: SET on the Team node. Raises on failure (fail-closed — a dropped
+    email write must surface, not silently lose the value)."""
+    from tortoise.supabase_control import (
+        get_control_plane, is_supabase_enabled, update_team_email as _sb_email,
+    )
+    if is_supabase_enabled():
+        _sb_email(get_control_plane(), team_id, email)
+        return
+    sdk = _make_sdk(namespace="registry")
+    sdk._get_registry().query(
+        "MATCH (t:Team {id: $id}) SET t.email = $email",
+        params={"id": team_id, "email": email},
+    )
+
+
+async def _exchange_github_token(code: str) -> str:
+    """Exchange an OAuth code for an access token (extracted for tests).
+
+    Raises HTTPException(502) on transport/HTTP failure or a missing token.
+    """
+    client_id = os.environ.get("GITHUB_CLIENT_ID")
+    client_secret = os.environ.get("GITHUB_CLIENT_SECRET")
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.post(_GITHUB_TOKEN_URL, data={
+                "client_id": client_id, "client_secret": client_secret,
+                "code": code,
+            }, headers={"Accept": "application/json"})
+            tok = r.json()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"GitHub token exchange failed: {e}")
+    access_token = tok.get("access_token")
+    if not access_token:
+        raise HTTPException(status_code=502, detail="GitHub token exchange failed")
+    return access_token
+
+
+def _github_repos_count(token: str) -> int | None:
+    """Best-effort repo count for a connected token (None on any failure).
+
+    Extracted for tests — the github_status endpoint keeps its behavior.
+    (Blocking call inside the async endpoint — pre-existing behavior.)
+    """
+    repos_count = None
+    try:
+        import httpx
+        with httpx.Client(timeout=10) as client:
+            r = client.get(f"{_GITHUB_API}/user/repos?per_page=1",
+                           headers={"Authorization": f"Bearer {token}",
+                                    "Accept": "application/vnd.github+json"})
+            if r.status_code == 200:
+                import re
+                link = r.headers.get("Link", "")
+                m = re.search(r'page=(\d+)>; rel="last"', link)
+                repos_count = int(m.group(1)) if m else len(r.json())
+    except Exception:
+        repos_count = None
+    return repos_count
+
+
 @app.post("/v1/onboarding/github/connect")
 async def github_connect(body: GitHubConnectRequest | None = None,
                          team: dict = Depends(get_current_team)):
@@ -3319,29 +3513,29 @@ async def github_callback(code: str | None = None, state: str | None = None,
         raise HTTPException(status_code=503, detail="GitHub OAuth not configured")
 
     # Exchange code for token
-    try:
-        import httpx
-        async with httpx.AsyncClient(timeout=15) as client:
-            r = await client.post(_GITHUB_TOKEN_URL, data={
-                "client_id": client_id, "client_secret": client_secret,
-                "code": code,
-            }, headers={"Accept": "application/json"})
-            tok = r.json()
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"GitHub token exchange failed: {e}")
-    access_token = tok.get("access_token")
-    if not access_token:
-        raise HTTPException(status_code=502, detail="GitHub token exchange failed")
+    access_token = await _exchange_github_token(code)
 
-    # Encrypt + store on Team node (never log the raw token)
+    # Encrypt + store on the Team record (never log the raw token).
+    # Supabase mode (plan Task 6): PATCH teams via the service-role seam —
+    # github_token_enc is column-REVOKEd from anon/authenticated (migration
+    # 0006); the seam is the only write path. Rotation: every reconnect
+    # overwrites the previous encrypted token in place (see
+    # store_github_credentials docstring).
     from tortoise.crypto import encrypt_token
     encrypted = encrypt_token(access_token)
     team_id = st["team_id"]
-    sdk = _make_sdk(namespace="registry")
-    sdk._get_registry().query(
-        "MATCH (t:Team {id: $id}) SET t.github_token_enc = $tok, t.github_org = $org",
-        params={"id": team_id, "tok": encrypted, "org": st["org"]},
+    from tortoise.supabase_control import (
+        get_control_plane, is_supabase_enabled,
+        store_github_credentials as _sb_store,
     )
+    if is_supabase_enabled():
+        _sb_store(get_control_plane(), team_id, token_enc=encrypted, org=st["org"])
+    else:
+        sdk = _make_sdk(namespace="registry")
+        sdk._get_registry().query(
+            "MATCH (t:Team {id: $id}) SET t.github_token_enc = $tok, t.github_org = $org",
+            params={"id": team_id, "tok": encrypted, "org": st["org"]},
+        )
     _update_onboarding_state(team_id, github_connected=True)
     _track_analytics_event(team_id, "question_answered",
                            {"question_id": "github_connect", "answer": "yes"})
@@ -3351,33 +3545,15 @@ async def github_callback(code: str | None = None, state: str | None = None,
 @app.get("/v1/onboarding/github/status")
 async def github_status(team: dict = Depends(get_current_team)):
     """Return GitHub connection status + repo count."""
-    sdk = _make_sdk(namespace="registry")
-    rows = sdk._get_registry().query(
-        "MATCH (t:Team {id: $id}) RETURN t.github_token_enc, t.github_org",
-        params={"id": team["team_id"]},
-    ).result_set
-    if not rows or not rows[0][0]:
+    encrypted, org = _github_credentials(team["team_id"])
+    if not encrypted:
         return {"connected": False, "org": None, "repos_count": None}
-    encrypted, org = rows[0]
     from tortoise.crypto import decrypt_token
     try:
         token = decrypt_token(encrypted)
     except ValueError:
         return {"connected": False, "org": None, "repos_count": None}
-    repos_count = None
-    try:
-        import httpx
-        with httpx.Client(timeout=10) as client:
-            r = client.get(f"{_GITHUB_API}/user/repos?per_page=1",
-                           headers={"Authorization": f"Bearer {token}",
-                                    "Accept": "application/vnd.github+json"})
-            if r.status_code == 200:
-                import re
-                link = r.headers.get("Link", "")
-                m = re.search(r'page=(\d+)>; rel="last"', link)
-                repos_count = int(m.group(1)) if m else len(r.json())
-    except Exception:
-        repos_count = None
+    repos_count = _github_repos_count(token)
     return {"connected": True, "org": org, "repos_count": repos_count}
 
 
@@ -3395,16 +3571,19 @@ class GitHubIndexRequest(BaseModel):
 async def _run_indexing(job_id: str, team_id: str, org: str, repo: str | None) -> None:
     """Background indexing job: fetch GitHub issues/PRs → Points."""
     from tortoise.indexer.github_indexer import GitHubIndexer
-    sdk = _make_sdk(namespace="registry")
-    rows = sdk._get_registry().query(
-        "MATCH (t:Team {id: $id}) RETURN t.github_token_enc",
-        params={"id": team_id}).result_set
-    if not rows or not rows[0][0]:
+    try:
+        encrypted = _github_token_enc(team_id)
+    except Exception:
+        # Fail-closed: a control-plane outage must not leave the job stuck at
+        # "started" — mark it failed so the poller reports a real error.
+        _INDEX_JOBS[job_id].update({"status": "failed", "error": "Control plane unavailable"})
+        return
+    if not encrypted:
         _INDEX_JOBS[job_id].update({"status": "failed", "error": "GitHub not connected"})
         return
     from tortoise.crypto import decrypt_token
     try:
-        token = decrypt_token(rows[0][0])
+        token = decrypt_token(encrypted)
     except ValueError:
         _INDEX_JOBS[job_id].update({"status": "failed", "error": "Token undecryptable"})
         return
@@ -3436,12 +3615,10 @@ async def index_github(body: GitHubIndexRequest, team: dict = Depends(get_curren
     org = (body.org or "").strip()
     if not org:
         raise HTTPException(status_code=400, detail="org is required")
-    # Verify GitHub connected first
-    sdk = _make_sdk(namespace="registry")
-    rows = sdk._get_registry().query(
-        "MATCH (t:Team {id: $id}) RETURN t.github_token_enc",
-        params={"id": team["team_id"]}).result_set
-    if not rows or not rows[0][0]:
+    # Verify GitHub connected first (seam-aware read — Supabase teams in
+    # Supabase mode, registry for selfhost)
+    encrypted = _github_token_enc(team["team_id"])
+    if not encrypted:
         raise HTTPException(status_code=400, detail="GitHub not connected. Run connect first.")
     job_id = secrets.token_hex(8)
     _INDEX_JOBS[job_id] = {"status": "started", "progress": 0,

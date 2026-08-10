@@ -22,6 +22,7 @@ from tortoise.supabase_control import (
     InvitationError,
     active_api_keys,
     get_control_plane,
+    github_credentials,
     insert_api_key,
     invitation_accept,
     invitation_mint,
@@ -31,8 +32,13 @@ from tortoise.supabase_control import (
     pending_invitations,
     resolve_api_key,
     revoke_api_key,
+    store_github_credentials,
     team_by_id,
+    team_email,
+    team_onboarding_state,
     update_last_used,
+    update_onboarding_state,
+    update_team_email,
     user_memberships,
 )
 
@@ -655,6 +661,124 @@ class TestInvitationSeam:
             invitation_accept(cp, "some-token", "user-2")
         with pytest.raises(RuntimeError):
             invitation_rescind(cp, "inv-1", "team-1", "owner-1")
+# ── Onboarding / email / GitHub connect (plan Task 6, issue #764) ─────────
+
+class TestOnboardingState:
+    """teams.onboarding_state (jsonb) read-patch via the seam (E2E-5)."""
+
+    def _set_state(self, fake, state):
+        fake.tables["teams"][0]["onboarding_state"] = state
+
+    def test_read_returns_merged_defaults_for_empty_state(self, fake):
+        """A team row with empty onboarding_state reads as the full hosted
+        default shape (registry auto-initialize parity)."""
+        self._set_state(fake, {})
+        state = team_onboarding_state(fake, "team-free-001")
+        assert state == {
+            "github_connected": False, "github_indexed": False,
+            "demo_created": False, "session_recording": False,
+            "team_created": False, "prompt_pasted": False,
+            "onboarding_complete": False,
+        }
+
+    def test_read_merges_partial_state_over_defaults(self, fake):
+        self._set_state(fake, {"demo_created": True})
+        state = team_onboarding_state(fake, "team-free-001")
+        assert state["demo_created"] is True
+        assert state["team_created"] is False  # default preserved
+
+    def test_read_preserves_unknown_keys(self, fake):
+        """Unknown stored keys are PRESERVED on the merge — registry parity
+        (code-review P2, PR #861): dropping them would let a later write-back
+        permanently erase keys the whitelist doesn't know (e.g.
+        completed_at / github_index_job_id)."""
+        self._set_state(fake, {"not_a_field": 1})
+        state = team_onboarding_state(fake, "team-free-001")
+        assert state["not_a_field"] == 1
+
+    def test_read_missing_team_returns_none(self, fake):
+        assert team_onboarding_state(fake, "no-such-team") is None
+
+    def test_patch_round_trip_no_string_wrapping(self, fake):
+        """PATCH stores the dict directly (jsonb — migration 0006), unlike
+        the registry path's JSON-string wrapping."""
+        self._set_state(fake, {})
+        update_onboarding_state(fake, "team-free-001", {"demo_created": True})
+        stored = fake.tables["teams"][0]["onboarding_state"]
+        assert isinstance(stored, dict)  # jsonb object, NOT a string
+        assert stored == {"demo_created": True}
+        # and the read back merges over defaults
+
+    def test_email_read_patch_round_trip(self, fake):
+        """E2E-5: team email read-patch from teams (wired via the onboarding
+        endpoints — #764 review P2: the email seam must not be dead code)."""
+        fake.tables["teams"][0]["email"] = None  # fixture has none set
+        assert team_email(fake, "team-free-001") is None
+        update_team_email(fake, "team-free-001", "owner@premise-labs.dev")
+        assert team_email(fake, "team-free-001") == "owner@premise-labs.dev"
+        # missing team → None (no exception)
+        assert team_email(fake, "no-such-team") is None
+
+    def test_fail_closed_on_error(self):
+        with pytest.raises(RuntimeError):
+            team_onboarding_state(ErrorControlPlane(), "team-free-001")
+        with pytest.raises(RuntimeError):
+            update_onboarding_state(ErrorControlPlane(), "team-free-001", {})
+
+
+class TestTeamEmail:
+    """teams.email read-patch via the seam (E2E-5)."""
+
+    def test_read_and_patch_round_trip(self, fake):
+        fake.tables["teams"][0]["email"] = None
+        assert team_email(fake, "team-free-001") is None
+        update_team_email(fake, "team-free-001", "owner@example.com")
+        assert team_email(fake, "team-free-001") == "owner@example.com"
+
+    def test_read_missing_team_returns_none(self, fake):
+        assert team_email(fake, "no-such-team") is None
+
+    def test_fail_closed_on_error(self):
+        with pytest.raises(RuntimeError):
+            team_email(ErrorControlPlane(), "team-free-001")
+        with pytest.raises(RuntimeError):
+            update_team_email(ErrorControlPlane(), "team-free-001", "a@b.co")
+
+
+class TestGithubCredentials:
+    """github_token_enc/github_org via the service-role seam (E2E-5).
+
+    github_token_enc is column-REVOKEd from anon/authenticated (0006) — the
+    seam is the ONLY read/write path in Supabase mode."""
+
+    def test_store_then_read_round_trip(self, fake):
+        fake.tables["teams"][0].update(
+            {"github_token_enc": None, "github_org": None})
+        store_github_credentials(
+            fake, "team-free-001", token_enc="enc-blob", org="acme")
+        got = github_credentials(fake, "team-free-001")
+        assert got == {"github_token_enc": "enc-blob", "github_org": "acme"}
+
+    def test_rotation_overwrites_in_place(self, fake):
+        """Re-connecting PATCHes a fresh encrypted token over the old one —
+        rotation is the reconnect itself (plan Task 6 'rotation documented')."""
+        fake.tables["teams"][0].update(
+            {"github_token_enc": "old", "github_org": "acme"})
+        store_github_credentials(
+            fake, "team-free-001", token_enc="new", org="acme")
+        assert github_credentials(fake, "team-free-001") == {
+            "github_token_enc": "new", "github_org": "acme"}
+
+    def test_missing_team_returns_none_creds(self, fake):
+        assert github_credentials(fake, "no-such-team") == {
+            "github_token_enc": None, "github_org": None}
+
+    def test_fail_closed_on_error(self):
+        with pytest.raises(RuntimeError):
+            github_credentials(ErrorControlPlane(), "team-free-001")
+        with pytest.raises(RuntimeError):
+            store_github_credentials(ErrorControlPlane(), "team-free-001",
+                                     token_enc="x", org="acme")
 
 
 # ── Fake adapter semantics (query dialect parity) ───────────────────────────
