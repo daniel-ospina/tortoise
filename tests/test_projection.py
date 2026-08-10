@@ -1649,6 +1649,140 @@ class TestVocabEdgeValidation:
         assert "'related'" in src
 
 
+class TestCreateEdgeAboutPredicates:
+    """#391: about* predicates must be creatable via generic create_edge."""
+
+    def _proj(self):
+        proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+        proj._upsert({"id": "p1", "content": "claim", "context": "ctx"})
+        proj._upsert({"id": "p2", "content": "other", "context": "ctx"})
+        proj._upsert_subject({"id": "s1", "name": "Alice"})
+        proj._upsert_object({"id": "o1", "name": "Widget", "object_kind": "product"})
+        proj._upsert_document({"id": "d1", "title": "Doc"})
+        proj._upsert_event({"id": "e1", "eventKind": "review"})
+        proj._upsert_source({"id": "src1", "url": "https://x.dev/a"})
+        return proj
+
+    def test_about_edges_accepted_by_create_edge(self):
+        """Each documented about* predicate is accepted and creates the edge."""
+        if _skip_if_no_falkor():
+            return
+        proj = self._proj()
+        try:
+            cases = [
+                ("aboutSubject", "s1"), ("aboutObject", "o1"),
+                ("aboutEvent", "e1"), ("aboutDocument", "d1"),
+                ("aboutSource", "src1"),
+            ]
+            for rel, tid in cases:
+                assert proj.create_edge("p1", tid, rel) is True, rel
+                rows = proj.g.query(
+                    f"MATCH (:Point {{id:'p1'}})-[:{rel}]->(t) "
+                    f"RETURN t.id"
+                ).result_set
+                assert [r[0] for r in rows] == [tid], f"{rel}: {rows}"
+            # aboutAction (Action dissolved in v3.0 — predicate kept for
+            # legacy edge types; endpoints are whatever resolves)
+            assert proj.create_edge("p1", "p2", "aboutAction") is True
+            rows = proj.g.query(
+                "MATCH (:Point {id:'p1'})-[:aboutAction]->(t) RETURN t.id"
+            ).result_set
+            assert [r[0] for r in rows] == ["p2"]
+        finally:
+            proj.close()
+
+    def test_about_edges_idempotent_on_recreate(self):
+        """Re-creating the same about edge is a no-op (MERGE semantics)."""
+        if _skip_if_no_falkor():
+            return
+        proj = self._proj()
+        try:
+            assert proj.create_edge("p1", "s1", "aboutSubject") is True
+            assert proj.create_edge("p1", "s1", "aboutSubject") is True
+            rows = proj.g.query(
+                "MATCH (:Point {id:'p1'})-[:aboutSubject]->(:Subject {id:'s1'}) RETURN count(*)"
+            ).result_set
+            assert rows[0][0] == 1
+        finally:
+            proj.close()
+
+
+class TestOwnedByDagGuard:
+    """#390: generic create_edge must not bypass the ownedBy circular-DAG guard."""
+
+    def _proj(self, ids=("a", "b", "c")):
+        proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+        for pid in ids:
+            proj._upsert({"id": pid, "content": pid.upper(), "context": "ctx"})
+        return proj
+
+    def test_direct_cycle_rejected(self):
+        """a→b then b→a must raise — same guard as create_owned_by."""
+        if _skip_if_no_falkor():
+            return
+        proj = self._proj()
+        try:
+            assert proj.create_edge("a", "b", "ownedBy") is True
+            with pytest.raises(ValueError, match="Circular ownership"):
+                proj.create_edge("b", "a", "ownedBy")
+            # the rejected call must not have created the edge
+            rows = proj.g.query(
+                "MATCH (:Point {id:'b'})-[:ownedBy]->(:Point {id:'a'}) RETURN count(*)"
+            ).result_set
+            assert rows[0][0] == 0
+        finally:
+            proj.close()
+
+    def test_transitive_cycle_rejected(self):
+        """a→b→c then c→a must raise (2-hop cycle closes)."""
+        if _skip_if_no_falkor():
+            return
+        proj = self._proj()
+        try:
+            proj.create_edge("a", "b", "ownedBy")
+            proj.create_edge("b", "c", "ownedBy")
+            with pytest.raises(ValueError, match="Circular ownership"):
+                proj.create_edge("c", "a", "ownedBy")
+        finally:
+            proj.close()
+
+    def test_acyclic_chain_accepted(self):
+        """Valid ownership chains still pass through create_edge."""
+        if _skip_if_no_falkor():
+            return
+        proj = self._proj()
+        try:
+            assert proj.create_edge("a", "b", "ownedBy") is True
+            assert proj.create_edge("b", "c", "ownedBy") is True
+            rows = proj.g.query(
+                "MATCH (:Point)-[:ownedBy]->(:Point) RETURN count(*)"
+            ).result_set
+            assert rows[0][0] == 2
+        finally:
+            proj.close()
+
+    def test_guard_consistent_with_create_owned_by(self):
+        """create_owned_by and create_edge agree on the same cycle either way."""
+        if _skip_if_no_falkor():
+            return
+        # edge created via create_edge blocks create_owned_by
+        proj = self._proj(ids=("a", "b"))
+        try:
+            proj.create_edge("a", "b", "ownedBy")   # a owned by b
+            with pytest.raises(ValueError, match="Circular ownership"):
+                proj.create_owned_by("b", "a")       # b owned by a → cycle
+        finally:
+            proj.close()
+        # edge created via create_owned_by blocks create_edge
+        proj = self._proj(ids=("a", "b"))
+        try:
+            proj.create_owned_by("a", "b")           # a owned by b
+            with pytest.raises(ValueError, match="Circular ownership"):
+                proj.create_edge("b", "a", "ownedBy")
+        finally:
+            proj.close()
+
+
 def test_falkor_rebuild_all_parity_with_apply():
     """#330: rebuild_all must produce the same Point node properties and edges
     as replaying the same events through apply() — including provenance edges
