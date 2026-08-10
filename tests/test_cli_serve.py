@@ -18,6 +18,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 import tempfile
 from pathlib import Path
 
@@ -72,7 +73,33 @@ def _boot_tenant_app(registry_sdk=None):
 
 
 @pytest.fixture()
-def local_db(tmp_path, monkeypatch):
+def _wait_rdb_settled():
+    """#880: the key-create subprocess's redislite server is gone (atexit
+    SHUTDOWN SAVE), but the RDB flush can lag under CI load — a handle opened
+    mid-write sees a stale registry → 401. Returns a waiter that polls until
+    the DB file stops changing (mtime stable for settle_s, 10s cap).
+    """
+    def _wait(db, settle_s=1.0, max_wait_s=10.0):
+        deadline = time.monotonic() + max_wait_s
+        last_mtime = None
+        stable_since = None
+        while time.monotonic() < deadline:
+            mtime = os.path.getmtime(db) if os.path.exists(db) else None
+            now = time.monotonic()
+            if mtime == last_mtime:
+                if stable_since is None:
+                    stable_since = now
+                elif now - stable_since >= settle_s:
+                    return
+            else:
+                stable_since = None
+            last_mtime = mtime
+            time.sleep(0.1)
+    return _wait
+
+
+@pytest.fixture()
+def local_db(tmp_path, monkeypatch, _wait_rdb_settled):
     """A canonical embedded DB + a bootstrap key via the real CLI."""
     # Pin to the tmp embedded DB — a TORTOISE_DB_URI in the host env would
     # otherwise steer the CLI and the roundtrip tests at a live DB.
@@ -93,6 +120,7 @@ def local_db(tmp_path, monkeypatch):
     match = [l for l in proc.stdout.splitlines() if "Created API key:" in l]
     assert match, proc.stdout
     key = match[0].split(":", 1)[1].strip()
+    _wait_rdb_settled(db)
     yield db, key, env
 
 
@@ -627,11 +655,24 @@ def test_local_http_roundtrip_lands_in_team_graph(local_db, monkeypatch):
     # env mutation restored even on failure (monkeypatch = pytest try/finally)
     monkeypatch.setenv("TORTOISE_DB_PATH", str(db))
 
-    # team id from the registry
+    # team id from the registry — #880: bounded poll with a FRESH handle per
+    # attempt. A cached projection reloads the RDB only at server start, so
+    # re-querying the same handle can never see a key written after boot;
+    # fresh opens re-load the RDB and observe the subprocess's write once the
+    # flush lands (cross-process redislite handoff race under CI load).
+    team_id = None
+    for _ in range(10):
+        probe = TortoiseSDK(namespace="registry")
+        rows = probe._get_registry().query(
+            "MATCH (k:APIKey) RETURN k.team_id").result_set
+        probe.close()
+        if rows:
+            team_id = rows[0][0]
+            break
+        time.sleep(1.0)
+    assert team_id is not None, \
+        "registry key not visible after 10s (cross-process handoff race, #880)"
     sdk = TortoiseSDK(namespace="registry")
-    team_id = sdk._get_registry().query(
-        "MATCH (k:APIKey) RETURN k.team_id"
-    ).result_set[0][0]
 
     wrapper = _boot_tenant_app(registry_sdk=sdk)
     accept = "application/json, text/event-stream"
