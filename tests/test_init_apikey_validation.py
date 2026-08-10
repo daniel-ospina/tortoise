@@ -272,7 +272,11 @@ class TestInitApiKeyEnhancements:
         assert tortoise["type"] == "streamable-http"
         assert tortoise["url"] == "https://api.premiselabs.co/mcp"
         assert tortoise["headers"]["Authorization"] == "Bearer tt_testkey"
-        assert "Wrote MCP config" in capsys.readouterr().out
+        captured = capsys.readouterr()
+        assert "Wrote MCP config" in captured.out
+        # plaintext key → 0600 perms + do-not-commit warning, like .tortoise (#875 P2)
+        assert (tmp_path / ".mcp.json").stat().st_mode & 0o777 == 0o600
+        assert ".mcp.json contains a plaintext API key — do NOT commit this file." in captured.out
 
     def test_write_mcp_config_merges_existing(self, monkeypatch, tmp_path, capsys):
         (tmp_path / ".mcp.json").write_text(
@@ -285,6 +289,8 @@ class TestInitApiKeyEnhancements:
         assert mcp["extra"] == 1  # other top-level keys preserved
         assert "other" in mcp["mcpServers"]  # other servers preserved
         assert mcp["mcpServers"]["tortoise"]["type"] == "streamable-http"
+        # perms tightened to 0600 even on the merge path (#875 P2)
+        assert (tmp_path / ".mcp.json").stat().st_mode & 0o777 == 0o600
 
     def test_write_mcp_config_no_harness_errors(self, monkeypatch, tmp_path, capsys):
         with mock.patch("urllib.request.urlopen", return_value=_ok_response()):
@@ -323,6 +329,74 @@ class TestInitApiKeyEnhancements:
         out = capsys.readouterr().out
         assert "codex mcp add tortoise --url https://api.premiselabs.co/mcp --bearer-token-env-var TORTOISE_API_KEY" in out
         assert not (tmp_path / ".mcp.json").exists()  # codex is command-based
+
+    def test_json_output_with_write_mcp_config_keeps_stdout_pure(self, monkeypatch, tmp_path, capsys):
+        # --json + --write-mcp-config: status lines go to stderr so stdout
+        # stays machine-parseable JSON (#875 P2).
+        with mock.patch("urllib.request.urlopen", return_value=_ok_response()):
+            rc = self._run(monkeypatch, tmp_path,
+                           ["init", "--api-key", "tt_testkey", "--json", "--harness", "claude", "--write-mcp-config"])
+        assert rc == 0
+        out = json.loads(capsys.readouterr().out)  # pure JSON despite the write
+        assert out["status"] == "connected"
+        assert (tmp_path / ".mcp.json").exists()
+        assert (tmp_path / ".mcp.json").stat().st_mode & 0o777 == 0o600
+
+    # ── already-connected re-runs --write-mcp-config (#875 P2) ──
+    def test_already_connected_writes_mcp_config_json(self, monkeypatch, tmp_path, capsys):
+        (tmp_path / ".tortoise").write_text(
+            json.dumps({"api_key": "tt_same", "api_url": "https://api.premiselabs.co"}))
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            rc = self._run(monkeypatch, tmp_path,
+                           ["init", "--api-key", "tt_same", "--json", "--harness", "claude", "--write-mcp-config"])
+        assert rc == 0
+        assert not urlopen.called  # still no API call
+        # MCP config WAS written despite the short-circuit
+        mcp = json.loads((tmp_path / ".mcp.json").read_text())
+        assert mcp["mcpServers"]["tortoise"]["type"] == "streamable-http"
+        assert mcp["mcpServers"]["tortoise"]["headers"]["Authorization"] == "Bearer tt_same"
+        # stdout stays pure JSON with the FULL shape (not the partial one)
+        out = json.loads(capsys.readouterr().out)
+        assert out["status"] == "connected"
+        assert out["already_connected"] is True
+        assert out["api_url"] == "https://api.premiselabs.co"
+        assert out["mcp"]["endpoint"] == "https://api.premiselabs.co/mcp"
+        assert set(out["mcp"]["configs"]) == {"claude", "codex", "cursor", "pi"}
+        assert out["onboarding_prompt_url"] == "https://premiselabs.co/onboarding-prompt.md"
+        assert out["next_steps"]
+        assert out["config_path"].endswith(".tortoise")
+
+    def test_already_connected_writes_mcp_config_human(self, monkeypatch, tmp_path, capsys):
+        (tmp_path / ".tortoise").write_text(
+            json.dumps({"api_key": "tt_same", "api_url": "https://api.premiselabs.co"}))
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            rc = self._run(monkeypatch, tmp_path,
+                           ["init", "--api-key", "tt_same", "--harness", "claude", "--write-mcp-config"])
+        assert rc == 0
+        assert not urlopen.called
+        out = capsys.readouterr().out
+        assert "Already connected" in out
+        assert "Wrote MCP config" in out
+        assert (tmp_path / ".mcp.json").exists()
+
+    def test_already_connected_mcp_config_force_needed(self, monkeypatch, tmp_path, capsys):
+        # Existing tortoise entry → refused without --force, even on the
+        # already-connected path — with the JSON error contract on stdout.
+        (tmp_path / ".tortoise").write_text(
+            json.dumps({"api_key": "tt_same", "api_url": "https://api.premiselabs.co"}))
+        (tmp_path / ".mcp.json").write_text(
+            json.dumps({"mcpServers": {"tortoise": {"url": "old"}}}))
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            rc = self._run(monkeypatch, tmp_path,
+                           ["init", "--api-key", "tt_same", "--json", "--harness", "claude", "--write-mcp-config"])
+        assert rc == 1
+        assert not urlopen.called
+        captured = capsys.readouterr()
+        assert "already configured" in captured.err
+        out = json.loads(captured.out)
+        assert out["status"] == "error"
+        assert out["error"] == "mcp_config"
+        assert '"url": "old"' in (tmp_path / ".mcp.json").read_text()  # untouched
 
     # ── already-connected (idempotent, no API call) ───────────
     def test_already_connected_same_key(self, monkeypatch, tmp_path, capsys):

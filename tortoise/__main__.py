@@ -232,13 +232,46 @@ def _cmd_init(args):
         if config_path.exists():
             existing = _json.loads(config_path.read_text())
             if existing.get("api_key") == args.api_key:
+                # Already connected — but still honor --write-mcp-config /
+                # --harness so a re-run provisions the MCP file instead of
+                # silently returning (#875 P2).
+                existing_api_url = (existing.get("api_url")
+                                    or os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co")).rstrip("/")
+                if write_mcp:
+                    if not harness:
+                        print("--harness required with --write-mcp-config (claude|codex|cursor|pi)", file=sys.stderr)
+                        return 1
+                    rc = _write_mcp_config_file(args.api_key, existing_api_url, harness, mcp_force,
+                                                status_to_stderr=json_mode)
+                    if rc != 0:
+                        if json_mode:
+                            _emit_json({"status": "error", "error": "mcp_config",
+                                        "message": "Failed to write MCP config (see stderr)."})
+                        return rc
                 if json_mode:
+                    # Full shape — same contract as a fresh connect (#875 P2).
                     _emit_json({
                         "status": "connected",
                         "already_connected": True,
-                        "api_url": existing.get("api_url", os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co")),
+                        "team_id": existing.get("team_id"),
+                        "api_url": existing_api_url,
+                        "mcp": {
+                            "endpoint": f"{existing_api_url}/mcp",
+                            "auth_header": f"Bearer {args.api_key}",
+                            "configs": {
+                                "claude": {"file": ".mcp.json", "config": _harness_mcp_config("claude", args.api_key, existing_api_url)},
+                                "codex": _harness_mcp_config("codex", args.api_key, existing_api_url),
+                                "cursor": {"file": ".mcp.json", "config": _harness_mcp_config("cursor", args.api_key, existing_api_url)},
+                                "pi": {"file": ".mcp.json", "config": _harness_mcp_config("pi", args.api_key, existing_api_url)},
+                            },
+                        },
+                        "onboarding_prompt_url": ONBOARDING_PROMPT_URL,
                         "config_path": str(config_path),
-                        "message": "Already connected to Tortoise Cloud with this API key.",
+                        "next_steps": [
+                            "tortoise team keys create",
+                            "tortoise team info",
+                            'tortoise create-point "hello"',
+                        ],
                     })
                 else:
                     print("Already connected to Tortoise Cloud with this API key.")
@@ -386,7 +419,8 @@ def _cmd_init(args):
                 if not harness:
                     print("--harness required with --write-mcp-config (claude|codex|cursor|pi)", file=sys.stderr)
                     return 1
-                return _write_mcp_config_file(args.api_key, base_url, harness, mcp_force)
+                return _write_mcp_config_file(args.api_key, base_url, harness, mcp_force,
+                                              status_to_stderr=json_mode)
             return 0
 
         print("Connected to Tortoise Cloud (team will be resolved from API key)")
@@ -407,7 +441,8 @@ def _cmd_init(args):
             if not harness:
                 print("--harness required with --write-mcp-config (claude|codex|cursor|pi)", file=sys.stderr)
                 return 1
-            return _write_mcp_config_file(args.api_key, base_url, harness, mcp_force)
+            return _write_mcp_config_file(args.api_key, base_url, harness, mcp_force,
+                                          status_to_stderr=json_mode)
         return 0
 
     print("Tortoise init — resolving DB target…")
@@ -663,11 +698,13 @@ def _cmd_team_info(args) -> int:
 ONBOARDING_PROMPT_URL = "https://premiselabs.co/onboarding-prompt.md"
 
 
-def _read_config() -> tuple[dict | None, str | None, str | None]:
+def _read_config(json_mode: bool = False) -> tuple[dict | None, str | None, str | None]:
     """Read .tortoise config → (config, api_key, api_url).
 
     Shared by the hosted-team commands (team info, team keys *). Prints the
     failure reason to stderr; callers must return 1 when api_key is None.
+    With json_mode, also emits the machine-readable error on stdout so the
+    --json contract holds even for config failures (#875 P2).
     """
     import json as _json
     import os as _os
@@ -675,18 +712,16 @@ def _read_config() -> tuple[dict | None, str | None, str | None]:
 
     config_path = Path.cwd() / ".tortoise"
     if not config_path.exists():
-        print("No .tortoise config found. Run 'tortoise init --api-key <key>' first.", file=sys.stderr)
-        return None, None, None
+        return _cmd_fail(json_mode, "no_config",
+                         "No .tortoise config found. Run 'tortoise init --api-key <key>' first."), None, None
     try:
         config = _json.loads(config_path.read_text())
     except _json.JSONDecodeError:
-        print(f"Invalid .tortoise config at {config_path}", file=sys.stderr)
-        return None, None, None
+        return _cmd_fail(json_mode, "no_config", f"Invalid .tortoise config at {config_path}"), None, None
     api_key = config.get("api_key")
     api_url = config.get("api_url") or _os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co")
     if not api_key:
-        print("No api_key in .tortoise config.", file=sys.stderr)
-        return None, None, None
+        return _cmd_fail(json_mode, "no_config", "No api_key in .tortoise config."), None, None
     return config, api_key, api_url
 
 
@@ -694,6 +729,19 @@ def _emit_json(obj: dict) -> None:
     """Print a JSON object to stdout (machine-consumable output)."""
     import json as _json
     print(_json.dumps(obj, indent=2))
+
+
+def _cmd_fail(json_mode: bool, error: str, message: str, **extra: object) -> int:
+    """CLI failure contract (#875 P2): human text on stderr, and when --json
+    is passed the same machine JSON on stdout that init --json emits
+    ({status: "error", error, message, ...}). Returns 1 for the caller.
+    """
+    print(message, file=sys.stderr)
+    if json_mode:
+        payload: dict = {"status": "error", "error": error, "message": message}
+        payload.update(extra)
+        _emit_json(payload)
+    return 1
 
 
 def _harness_mcp_config(harness: str, api_key: str, api_url: str) -> dict:
@@ -753,14 +801,20 @@ def _print_mcp_configs(api_key: str, api_url: str, harness: str | None) -> None:
     print("→ Auth: Bearer <your-key>")
 
 
-def _write_mcp_config_file(api_key: str, api_url: str, harness: str, force: bool) -> int:
+def _write_mcp_config_file(api_key: str, api_url: str, harness: str, force: bool,
+                           status_to_stderr: bool = False) -> int:
     """Write/merge .mcp.json for file-based harnesses (claude/cursor/pi).
 
     Codex is command-based (#497) — prints the registration command instead.
     Merge strategy: preserve existing mcpServers entries, overwrite only the
     tortoise entry (refused if it exists unless --force).
+
+    The file holds a plaintext API key → chmod 0o600 + do-not-commit warning,
+    matching the .tortoise pattern (#875 P2). status_to_stderr keeps stdout
+    pure JSON for --json callers.
     """
     import json as _json
+    import os
     from pathlib import Path
 
     if harness == "codex":
@@ -789,17 +843,21 @@ def _write_mcp_config_file(api_key: str, api_url: str, harness: str, force: bool
     else:
         data = {"mcpServers": {"tortoise": entry}}
     target.write_text(_json.dumps(data, indent=2) + "\n")
-    print(f"✅ Wrote MCP config to {target}")
+    os.chmod(target, 0o600)  # plaintext API key — no group/other read (#875 P2)
+    status = sys.stderr if status_to_stderr else sys.stdout
+    print(f"✅ Wrote MCP config to {target}", file=status)
+    print("⚠️  .mcp.json contains a plaintext API key — do NOT commit this file.", file=status)
     return 0
 
 
 def _cmd_team_keys_list(args) -> int:
     """List team API keys (GET /v1/team/keys). Hashes only — no plaintext."""
-    import json as _json, sys as _sys
+    import json as _json
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
 
-    config, api_key, api_url = _read_config()
+    json_mode = getattr(args, "json", False)
+    config, api_key, api_url = _read_config(json_mode=json_mode)
     if api_key is None:
         return 1
 
@@ -813,16 +871,20 @@ def _cmd_team_keys_list(args) -> int:
     except HTTPError as e:
         body = e.read().decode() if e.fp else ""
         if e.code in (401, 403):
-            print("API key rejected — re-run tortoise init --api-key", file=_sys.stderr)
-        else:
-            print(f"API error ({e.code}): {body}", file=_sys.stderr)
-        return 1
+            return _cmd_fail(json_mode, "key_rejected",
+                             "API key rejected — re-run tortoise init --api-key", http_code=e.code)
+        return _cmd_fail(json_mode, "api_error", f"API error ({e.code}): {body}", http_code=e.code)
     except (_json.JSONDecodeError, ValueError) as e:
-        print(f"Invalid response from API: {e}", file=_sys.stderr)
-        return 1
+        return _cmd_fail(json_mode, "invalid_response", f"Invalid response from API: {e}")
     except URLError as e:
-        print(f"Cannot reach API at {api_url}: {e.reason}", file=_sys.stderr)
-        return 1
+        return _cmd_fail(json_mode, "network", f"Cannot reach API at {api_url}: {e.reason}")
+
+    if not isinstance(data, dict):
+        # 2xx with a non-object body ([]/null) — clean error, not AttributeError.
+        return _cmd_fail(
+            json_mode, "invalid_response",
+            "Invalid response from API: expected a JSON object, got "
+            f"{type(data).__name__}.")
 
     keys = data.get("keys", [])
     if getattr(args, "json", False):
@@ -842,11 +904,12 @@ def _cmd_team_keys_list(args) -> int:
 
 def _cmd_team_keys_create(args) -> int:
     """Mint a new team API key (POST /v1/team/keys). Key shown exactly once."""
-    import json as _json, sys as _sys
+    import json as _json
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
 
-    config, api_key, api_url = _read_config()
+    json_mode = getattr(args, "json", False)
+    config, api_key, api_url = _read_config(json_mode=json_mode)
     if api_key is None:
         return 1
 
@@ -862,20 +925,27 @@ def _cmd_team_keys_create(args) -> int:
     except HTTPError as e:
         body = e.read().decode() if e.fp else ""
         if e.code == 402:
-            print("API key limit reached (max 3 for free tier). Revoke an existing key first.", file=_sys.stderr)
-        elif e.code == 429:
-            print("Too many keys created recently — try again in 60s.", file=_sys.stderr)
-        elif e.code in (401, 403):
-            print("API key rejected — re-run tortoise init --api-key", file=_sys.stderr)
-        else:
-            print(f"API error ({e.code}): {body}", file=_sys.stderr)
-        return 1
+            return _cmd_fail(json_mode, "limit_reached",
+                             "API key limit reached (max 3 for free tier). Revoke an existing key first.",
+                             http_code=402)
+        if e.code == 429:
+            return _cmd_fail(json_mode, "rate_limited",
+                             "Too many keys created recently — try again in 60s.", http_code=429)
+        if e.code in (401, 403):
+            return _cmd_fail(json_mode, "key_rejected",
+                             "API key rejected — re-run tortoise init --api-key", http_code=e.code)
+        return _cmd_fail(json_mode, "api_error", f"API error ({e.code}): {body}", http_code=e.code)
     except (_json.JSONDecodeError, ValueError) as e:
-        print(f"Invalid response from API: {e}", file=_sys.stderr)
-        return 1
+        return _cmd_fail(json_mode, "invalid_response", f"Invalid response from API: {e}")
     except URLError as e:
-        print(f"Cannot reach API at {api_url}: {e.reason}", file=_sys.stderr)
-        return 1
+        return _cmd_fail(json_mode, "network", f"Cannot reach API at {api_url}: {e.reason}")
+
+    if not isinstance(data, dict):
+        # 2xx with a non-object body ([]/null) — clean error, not AttributeError.
+        return _cmd_fail(
+            json_mode, "invalid_response",
+            "Invalid response from API: expected a JSON object, got "
+            f"{type(data).__name__}.")
 
     if getattr(args, "json", False):
         _emit_json({
@@ -897,23 +967,22 @@ def _cmd_team_keys_create(args) -> int:
 
 def _cmd_team_keys_revoke(args) -> int:
     """Revoke a team API key (DELETE /v1/team/keys/{id}). Soft delete."""
-    import json as _json, sys as _sys
+    import json as _json
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
 
-    config, api_key, api_url = _read_config()
+    json_mode = getattr(args, "json", False)
+    config, api_key, api_url = _read_config(json_mode=json_mode)
     if api_key is None:
         return 1
 
-    json_mode = getattr(args, "json", False)
     if not json_mode and not getattr(args, "force", False):
         try:
             answer = input(f"Revoke API key {args.key_id}? This cannot be undone. [y/N]: ")
         except EOFError:
             answer = "n"
         if answer.strip().lower() not in ("y", "yes"):
-            print("Aborted.", file=_sys.stderr)
-            return 1
+            return _cmd_fail(json_mode, "aborted", "Aborted.")
 
     try:
         req = Request(
@@ -926,20 +995,25 @@ def _cmd_team_keys_revoke(args) -> int:
     except HTTPError as e:
         body = e.read().decode() if e.fp else ""
         if e.code == 404:
-            print("API key not found", file=_sys.stderr)
-        elif e.code == 403:
-            print("Cannot revoke — this key belongs to a different team", file=_sys.stderr)
-        elif e.code == 401:
-            print("API key rejected — re-run tortoise init --api-key", file=_sys.stderr)
-        else:
-            print(f"API error ({e.code}): {body}", file=_sys.stderr)
-        return 1
+            return _cmd_fail(json_mode, "not_found", "API key not found", http_code=404)
+        if e.code == 403:
+            return _cmd_fail(json_mode, "cross_team",
+                             "Cannot revoke — this key belongs to a different team", http_code=403)
+        if e.code == 401:
+            return _cmd_fail(json_mode, "key_rejected",
+                             "API key rejected — re-run tortoise init --api-key", http_code=401)
+        return _cmd_fail(json_mode, "api_error", f"API error ({e.code}): {body}", http_code=e.code)
     except (_json.JSONDecodeError, ValueError) as e:
-        print(f"Invalid response from API: {e}", file=_sys.stderr)
-        return 1
+        return _cmd_fail(json_mode, "invalid_response", f"Invalid response from API: {e}")
     except URLError as e:
-        print(f"Cannot reach API at {api_url}: {e.reason}", file=_sys.stderr)
-        return 1
+        return _cmd_fail(json_mode, "network", f"Cannot reach API at {api_url}: {e.reason}")
+
+    if not isinstance(data, dict):
+        # 2xx with a non-object body ([]/null) — clean error, not AttributeError.
+        return _cmd_fail(
+            json_mode, "invalid_response",
+            "Invalid response from API: expected a JSON object, got "
+            f"{type(data).__name__}.")
 
     if json_mode:
         out: dict = {"revoked": True, "key_id": args.key_id}

@@ -104,6 +104,68 @@ class TestTeamKeysList:
         err = capsys.readouterr().err
         assert "Cannot reach API at https://api.premiselabs.co" in err
 
+    # ── non-object 2xx body ([]/null) → clean error, no traceback (#875 P2) ──
+    def test_list_keys_non_object_response(self, monkeypatch, tmp_path, capsys):
+        self._cfg(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        with mock.patch("urllib.request.urlopen", return_value=_ok_response(b"[]")):
+            rc = main(["team", "keys", "list"])
+        assert rc == 1
+        captured = capsys.readouterr()
+        assert "expected a JSON object, got list" in captured.err
+        assert "Traceback" not in captured.err
+
+    def test_list_keys_null_response_json(self, monkeypatch, tmp_path, capsys):
+        self._cfg(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        with mock.patch("urllib.request.urlopen", return_value=_ok_response(b"null")):
+            rc = main(["team", "keys", "list", "--json"])
+        assert rc == 1
+        captured = capsys.readouterr()
+        out = json.loads(captured.out)
+        assert out == {"status": "error", "error": "invalid_response",
+                       "message": "Invalid response from API: expected a JSON object, got NoneType."}
+        assert "expected a JSON object" in captured.err
+
+    # ── --json error contract: JSON on stdout, human text on stderr (#875 P2) ──
+    def test_list_keys_json_error_unauthorized(self, monkeypatch, tmp_path, capsys):
+        self._cfg(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        with mock.patch("urllib.request.urlopen", side_effect=_http_error(401, "Unauthorized")):
+            rc = main(["team", "keys", "list", "--json"])
+        assert rc == 1
+        captured = capsys.readouterr()
+        out = json.loads(captured.out)
+        assert out["status"] == "error"
+        assert out["error"] == "key_rejected"
+        assert out["http_code"] == 401
+        assert "API key rejected" in out["message"]
+        assert "API key rejected — re-run tortoise init --api-key" in captured.err
+
+    def test_list_keys_json_error_network(self, monkeypatch, tmp_path, capsys):
+        self._cfg(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        with mock.patch("urllib.request.urlopen", side_effect=URLError("connection refused")):
+            rc = main(["team", "keys", "list", "--json"])
+        assert rc == 1
+        captured = capsys.readouterr()
+        out = json.loads(captured.out)
+        assert out["status"] == "error"
+        assert out["error"] == "network"
+        assert "Cannot reach API" in out["message"]
+        assert "Cannot reach API at https://api.premiselabs.co" in captured.err
+
+    def test_list_keys_json_error_no_config(self, monkeypatch, tmp_path, capsys):
+        monkeypatch.chdir(tmp_path)
+        rc = main(["team", "keys", "list", "--json"])
+        assert rc == 1
+        captured = capsys.readouterr()
+        out = json.loads(captured.out)
+        assert out["status"] == "error"
+        assert out["error"] == "no_config"
+        assert "tortoise init --api-key" in out["message"]
+        assert "Run 'tortoise init --api-key <key>' first" in captured.err
+
 
 class TestTeamKeysCreate:
     def _cfg(self, tmp_path):
@@ -161,6 +223,45 @@ class TestTeamKeysCreate:
             rc = main(["team", "keys", "create"])
         assert rc == 1
         assert "API key rejected" in capsys.readouterr().err
+
+    # ── non-object 2xx body → clean error, no traceback (#875 P2) ──
+    def test_create_key_non_object_response(self, monkeypatch, tmp_path, capsys):
+        self._cfg(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        with mock.patch("urllib.request.urlopen", return_value=_ok_response(b"[]")):
+            rc = main(["team", "keys", "create"])
+        assert rc == 1
+        captured = capsys.readouterr()
+        assert "expected a JSON object, got list" in captured.err
+        assert "Traceback" not in captured.err
+
+    # ── --json error contract: JSON on stdout, human text on stderr (#875 P2) ──
+    def test_create_key_json_error_limit(self, monkeypatch, tmp_path, capsys):
+        self._cfg(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        with mock.patch("urllib.request.urlopen", side_effect=_http_error(402, "Limit")):
+            rc = main(["team", "keys", "create", "--json"])
+        assert rc == 1
+        captured = capsys.readouterr()
+        out = json.loads(captured.out)
+        assert out["status"] == "error"
+        assert out["error"] == "limit_reached"
+        assert out["http_code"] == 402
+        assert "API key limit reached" in out["message"]
+        assert "API key limit reached (max 3 for free tier)" in captured.err
+
+    def test_create_key_json_error_rate_limited(self, monkeypatch, tmp_path, capsys):
+        self._cfg(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        with mock.patch("urllib.request.urlopen", side_effect=_http_error(429, "Rate")):
+            rc = main(["team", "keys", "create", "--json"])
+        assert rc == 1
+        captured = capsys.readouterr()
+        out = json.loads(captured.out)
+        assert out["status"] == "error"
+        assert out["error"] == "rate_limited"
+        assert out["http_code"] == 429
+        assert "Too many keys created recently" in captured.err
 
 
 class TestTeamKeysRevoke:
@@ -246,3 +347,41 @@ class TestTeamKeysRevoke:
             rc = main(["team", "keys", "revoke", "kid1", "--force"])
         assert rc == 1
         assert "API key rejected — re-run tortoise init --api-key" in capsys.readouterr().err
+
+    # ── non-object 2xx body → clean error, no traceback (#875 P2) ──
+    def test_revoke_key_non_object_response(self, monkeypatch, tmp_path, capsys):
+        self._cfg(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        with mock.patch("urllib.request.urlopen", return_value=_ok_response(b"null")):
+            rc = main(["team", "keys", "revoke", "kid1", "--force"])
+        assert rc == 1
+        captured = capsys.readouterr()
+        assert "expected a JSON object, got NoneType" in captured.err
+        assert "Traceback" not in captured.err
+
+    # ── --json error contract: JSON on stdout, human text on stderr (#875 P2) ──
+    def test_revoke_key_json_error_not_found(self, monkeypatch, tmp_path, capsys):
+        self._cfg(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        with mock.patch("urllib.request.urlopen", side_effect=_http_error(404, "Not Found")):
+            rc = main(["team", "keys", "revoke", "ghost", "--json"])
+        assert rc == 1
+        captured = capsys.readouterr()
+        out = json.loads(captured.out)
+        assert out["status"] == "error"
+        assert out["error"] == "not_found"
+        assert out["http_code"] == 404
+        assert "API key not found" in captured.err
+
+    def test_revoke_key_json_error_cross_team(self, monkeypatch, tmp_path, capsys):
+        self._cfg(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        with mock.patch("urllib.request.urlopen", side_effect=_http_error(403, "Forbidden")):
+            rc = main(["team", "keys", "revoke", "otherkid", "--json"])
+        assert rc == 1
+        captured = capsys.readouterr()
+        out = json.loads(captured.out)
+        assert out["status"] == "error"
+        assert out["error"] == "cross_team"
+        assert out["http_code"] == 403
+        assert "Cannot revoke — this key belongs to a different team" in captured.err
