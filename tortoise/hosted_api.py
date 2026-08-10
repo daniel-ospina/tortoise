@@ -49,14 +49,25 @@ from tortoise.hosted_backup import (
 _logger = logging.getLogger(__name__)
 
 
-# Embedded-fallback keep-alive: the LAST fallback SDK per namespace, held
-# so its redislite server is not GC'd between requests. Without this, each
-# request spawned a fresh SDK on the shared fallback path; when the previous
-# request's SDK was garbage-collected its server died, and the next request
-# opened a NEW server on the same path — losing the previous request's writes
-# (signup minted a team+key, then /v1/team 500 "Auth error" — #493). Holding
-# the reference keeps the server alive; redislite socket-sharing lets new
-# SDKs read the same data. One entry per namespace — bounded, never reused.
+# Embedded-fallback keep-alive: one anchored SDK per namespace (the FIRST
+# created), held so its redislite server is not GC'd between requests.
+# Without it, each request spawned a fresh SDK on the shared fallback path;
+# when the previous request's SDK was garbage-collected its server died, and
+# the next request opened a NEW server on the same path — losing the previous
+# request's writes (signup minted a team+key, then /v1/team 500 "Auth error"
+# — #493).
+#
+# ANCHOR semantics: the dict keeps the FIRST SDK per namespace (setdefault,
+# never replaced) and that anchor is eagerly connected (_get_proj) so its
+# redislite server stays alive between requests; each request still gets a
+# FRESH SDK (the SDK has mutable in-memory state — _evidence/_dirty_roots —
+# and must not be shared across concurrent requests), which connects to the
+# same path via redislite socket-sharing. Without the anchor, replacing the
+# dict entry dropped the only connected SDK and the server shut down
+# (save-then-reload round-trip) at the start of every request.
+#
+# TODO(#176): one anchor per namespace, never evicted — bounded by provisioned
+# team count until a production FalkorDB replaces the embedded fallback.
 _FALLBACK_KEEPALIVE: dict[str, "TortoiseSDK"] = {}
 
 
@@ -79,8 +90,18 @@ def _make_sdk(*, namespace: str | None = None) -> TortoiseSDK:
         # fall back to a temp file so provisioning still works.
         import tempfile
         db_path = os.path.join(tempfile.gettempdir(), "tortoise.db")
+    anchor = _FALLBACK_KEEPALIVE.get(namespace or "")
+    if anchor is None:
+        anchor = TortoiseSDK(db_path=db_path, namespace=namespace)
+        try:
+            anchor._get_proj()  # eager: hold the connection so the server survives
+        except Exception:
+            # Keepalive is best-effort — a transient connect failure must not
+            # 500 this request; the request SDK connects lazily anyway and the
+            # anchor may connect on a later call.
+            pass
+        _FALLBACK_KEEPALIVE.setdefault(namespace or "", anchor)
     sdk = TortoiseSDK(db_path=db_path, namespace=namespace)
-    _FALLBACK_KEEPALIVE[namespace or ""] = sdk
     return sdk
 
 

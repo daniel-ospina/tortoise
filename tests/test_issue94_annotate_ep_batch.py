@@ -1,7 +1,9 @@
 """Issue #94: annotate_ep_batch distinguishes "no evidence" from "all NANDs".
 
-Tests that isolated points (0 edges) get has_evidence=False + confidence_mean=0.5,
-while points with NAND edges get has_evidence=True + confidence_mean < 0.5.
+Tests that isolated points (0 edges) get evidence.total == 0 +
+confidence_mean == 0.0, while points with NAND edges get evidence.total > 0 +
+confidence_mean < 0.5 (updated to the #432 EpBreakdown contract — the old
+has_evidence field no longer exists, code-review #803).
 """
 import os
 import sys

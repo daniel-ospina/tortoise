@@ -2598,8 +2598,10 @@ test = [
 [package.dev-dependencies]
 dev = [
     { name = "jax" },
+    { name = "playwright" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
+    { name = "pytest-playwright" },
     { name = "pytest-timeout" },
     { name = "requests" },
     { name = "scikit-learn" },
@@ -2635,8 +2637,10 @@ provides-extras = ["embeddings", "quadrature", "postgres", "backups", "test"]
 [package.metadata.requires-dev]
 dev = [
     { name = "jax", specifier = ">=0.4" },
+    { name = "playwright", specifier = ">=1.40" },
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "pytest-asyncio" },
+    { name = "pytest-playwright", specifier = ">=0.5" },
     { name = "pytest-timeout", specifier = ">=2.4.0" },
     { name = "requests", specifier = ">=2.31" },
     { name = "scikit-learn", specifier = ">=1.0" },

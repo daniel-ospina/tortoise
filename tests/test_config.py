@@ -237,6 +237,35 @@ class TestGetSdkEnvPrecedence:
             assert sdk._proj is fake_proj
             assert sdk._db_uri == "docker://:@localhost:16379/tortoise"
 
+    def test_failed_docker_connect_does_not_cache_poisoned_sdk(self, monkeypatch):
+        """#493: a failed docker connect + caught SystemExit must NOT leave a
+        poisoned docker-URI SDK cached — the next call retries instead of
+        returning the dead instance (TortoiseSDK() is lazy, so the cache was
+        previously committed before the eager from_uri probe raised)."""
+        import tortoise.mcp_server as mcp_mod
+        from unittest import mock
+
+        monkeypatch.setenv("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise")
+
+        def _fail(_uri):
+            raise RuntimeError("connection refused")
+
+        with mock.patch("tortoise.projection.FalkorProjection.from_uri",
+                        side_effect=_fail):
+            with pytest.raises(SystemExit) as exc:
+                mcp_mod._get_sdk()
+            assert exc.value.code == 1
+            # The failed attempt must not have poisoned the global cache.
+            assert mcp_mod._sdk is None
+
+        # Subsequent call with a working connection succeeds and caches.
+        fake_proj = mock.MagicMock()
+        with mock.patch("tortoise.projection.FalkorProjection.from_uri",
+                        return_value=fake_proj):
+            sdk = mcp_mod._get_sdk()
+            assert sdk._proj is fake_proj
+            assert mcp_mod._sdk is sdk
+
     def test_file_path_uri_routes_to_resolve_db_path(self, monkeypatch, tmp_path):
         """Set TORTOISE_DB_URI=/some/path (non-docker) → _get_sdk() uses
         resolve_db_path and passes it as db_path to TortoiseSDK."""
@@ -296,10 +325,13 @@ class TestGetSdkEnvPrecedence:
 
         _load_dotenv(str(env_file))
 
-        assert os.environ["TORTOISE_DB_URI"] == "docker://:@dotenv:6379/tortoise"
-        # _load_dotenv writes directly to os.environ — invisible to monkeypatch
-        # (the var was already unset at delenv time, so no restore was
-        # recorded; a post-hoc delenv would even RESTORE the leaked value).
-        # Pop it directly so the docker:// URI never leaks into the rest of
-        # the suite (#493: it poisoned every later TortoiseSDK()).
-        os.environ.pop("TORTOISE_DB_URI", None)
+        try:
+            assert os.environ["TORTOISE_DB_URI"] == "docker://:@dotenv:6379/tortoise"
+        finally:
+            # _load_dotenv writes directly to os.environ — invisible to monkeypatch
+            # (the var was already unset at delenv time, so no restore was
+            # recorded; a post-hoc delenv would even RESTORE the leaked value).
+            # Pop it directly so the docker:// URI never leaks into the rest of
+            # the suite — even on assert failure (#493: it poisoned every later
+            # TortoiseSDK()).
+            os.environ.pop("TORTOISE_DB_URI", None)

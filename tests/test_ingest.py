@@ -9,7 +9,6 @@ import os
 import sys
 import tempfile
 
-import pytest
 from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
@@ -21,7 +20,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tortoise.extractor import MockModel                                                  # noqa: E402
 from tortoise.ingest import build_model, main                                             # noqa: E402
 from tortoise.models import OllamaModel, OpenAICompatModel                                # noqa: E402
-from tortoise.projection import FalkorProjection                                          # noqa: E402
 from tortoise.projection import FalkorProjection                                          # noqa: E402
 
 # ── Live-FalkorDB availability (mirrors tests/test_hnsw_vector_index.py) ──

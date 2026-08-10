@@ -81,30 +81,6 @@ def provision_test_user():
             pass
 
 
-@pytest.fixture(scope="session")
-def shared_embedded_db():
-    """One shared embedded FalkorDBLite DB for the whole session (#221 R5).
-
-    R5 mitigation for the redislite process leak (#176): tests that need an
-    embedded (redislite) DB create ONE server per session instead of one per
-    test. Each test wipes the graph on its own (or uses a per-test graph
-    name), so state never leaks across tests while the subprocess count stays
-    at 1.
-
-    Restored 2026-08-08 (#493): the D11 conftest rewrite (#578) dropped this
-    fixture but five test files (test_ep_selector, test_ranking,
-    test_sdk_legacy_coverage, test_search_sessions_temporal,
-    test_session_semantic_search) still depend on it — the main suite had no
-    CI to catch the breakage until the Python test job landed.
-
-    # TODO(#176): stopgap — remove when the redislite root-cause fix lands.
-    """
-    db_path = os.path.join(
-        tempfile.mkdtemp(prefix="tortoise_shared_embedded_"), "shared.db"
-    )
-    yield db_path
-
-
 @pytest.fixture
 def test_user(provision_test_user):
     return provision_test_user(tier="free", demo_seed=True)

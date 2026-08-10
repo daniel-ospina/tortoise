@@ -53,6 +53,8 @@ dev = [
     "scikit-learn>=1.0",
     "requests>=2.31",
     "jax>=0.4",
+    "playwright>=1.40",
+    "pytest-playwright>=0.5",
 ]
 
 [tool.setuptools.packages.find]
