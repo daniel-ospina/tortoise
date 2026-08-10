@@ -220,7 +220,7 @@ class GraphRanker:
             "OPTIONAL MATCH (n)-[r:IMPL|NAND]-(:Point {is_operator: true}) "
             "WITH n, count(r) AS degree "
             "RETURN n.id, coalesce(n.confidence, 0.5) AS conf, degree, n.createdAt AS created, "
-            "  coalesce(n.ep_alpha, 1.0) AS alpha, coalesce(n.ep_beta, 1.0) AS beta, "
+            "  coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS alpha, coalesce(n.posterior_beta, n.ep_beta, 1.0) AS beta, "
             "  n.ep_alpha IS NOT NULL AS has_ep"
         )
         rows = self.projection.g.query(cypher, params={"ids": ids}).result_set

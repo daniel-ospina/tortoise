@@ -917,7 +917,7 @@ def tortoise_topic_summarize(topic: str,
     and what is contested (elevated variance, NAND conflicts), plus the argument
     topology connecting them.
 
-    Classification uses EP posterior variance from persisted ep_alpha/ep_beta:
+    Classification uses EP posterior variance from persisted posterior (posterior_alpha/beta, falling back to ep_alpha/beta priors):
     - significant/settled: confidence_mean >= 0.7 AND variance < 0.01
     - contested: variance > 0.04 (destabilized posterior)
     - disputed pairs: NAND-connected where both have variance > 0.02
