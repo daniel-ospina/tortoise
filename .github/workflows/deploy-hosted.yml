@@ -32,6 +32,7 @@ on:
       - 'entrypoint.sh'
       - 'requirements.txt'
       - 'pyproject.toml'
+      - 'uv.lock'
   workflow_dispatch:
 
 concurrency:
@@ -43,6 +44,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: '3.12'
+          # Pin the uv version that generated uv.lock — a patch bump (e.g.
+          # 0.12.2 → 0.12.3) can flag the lock as stale under --check (#493).
+          version: '0.12.3'
+      - name: Dependency parity gate — pyproject ↔ uv.lock ↔ requirements.txt (#494)
+        # Fail-closed: the image installs ONLY from requirements.txt, so a
+        # drifted lock or hand-edited requirements file must never deploy.
+        # Comment lines + the "." line (uv exports the root project as a
+        # non-editable local path) are stripped from both sides — the
+        # committed file intentionally omits it.
+        run: |
+          uv lock --check
+          uv export --frozen --no-dev --no-editable | grep -vE '^#|^\.$' > /tmp/expected-reqs.txt
+          grep -vE '^#|^\.$' requirements.txt > /tmp/committed-reqs.txt
+          diff -u /tmp/committed-reqs.txt /tmp/expected-reqs.txt
       - uses: superfly/flyctl-actions/setup-flyctl@master
       - name: Verify secrets exist
         run: |

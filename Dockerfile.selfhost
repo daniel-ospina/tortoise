@@ -19,8 +19,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY tortoise/ tortoise/
 COPY pyproject.toml .
-RUN pip install --no-cache-dir -e . \
-    && pip install --no-cache-dir '.[embeddings]'
+# --no-deps on the editable install: dependencies come from the lock-pinned
+# requirements.txt above; extras resolve here once, at build time (#494).
+RUN pip install --no-cache-dir '.[embeddings]' \
+    && pip install --no-cache-dir -e . --no-deps
 
 # NOTE: unlike Dockerfile.hosted (which bakes the embedding model at build
 # time because Fly's sandbox blocks runtime network), self-host runs on the
