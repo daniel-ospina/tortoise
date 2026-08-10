@@ -14,6 +14,11 @@ Classification (dual-signal):
 NEVER_KILL: anything classified protected (stable singleton, path-based
 servers, boot-cooldown servers, unknown patterns). Only candidates may be
 reaped, and only after liveness + CLIENT LIST verification (see reap()).
+
+Probing is read-only and fail-closed: CLIENT LIST goes over a plain unix
+socket (redis-cli or raw RESP) and never kills or mutates the probed
+server (#849); if the client state cannot be determined the server is
+skipped, never killed.
 """
 from __future__ import annotations
 
@@ -280,12 +285,17 @@ def _probe_socket(socket_path: str) -> str:
         return "undetermined"
 
 
-def _client_list(socket_path: str) -> list[dict]:
-    """CLIENT LIST over the unix socket using a raw RESP connection.
+def _client_list(socket_path: str) -> list[dict] | None:
+    """CLIENT LIST over the unix socket — read-only, never kills the server.
 
-    Uses redislite's own client (which is a redis client) via subprocess-free
-    approach: we shell to redis-cli if available, else parse via raw RESP.
-    Returns list of client dicts; empty on failure.
+    Prefers redis-cli; falls back to raw RESP over a plain unix socket.
+    NEVER constructs a redislite client here: its close() terminates the
+    orphan server being probed (issue #849 — fail-open kill).
+
+    Returns parsed client dicts, or None if the probe failed (no listener,
+    timeout, malformed reply). None means "client state unknown" — callers
+    MUST fail closed (skip reaping). [] means the server reported zero
+    clients.
     """
     # Prefer redis-cli (no python redis dependency, no spawn risk).
     try:
@@ -293,25 +303,72 @@ def _client_list(socket_path: str) -> list[dict]:
             ["redis-cli", "-s", socket_path, "CLIENT", "LIST"],
             capture_output=True, text=True, timeout=PROBE_TIMEOUT,
         )
-        if out.returncode == 0 and out.stdout.strip():
-            return _parse_client_list(out.stdout)
+        if out.returncode == 0:
+            # rc 0 with empty stdout = zero clients (empty bulk string) —
+            # a valid verdict, don't double-probe via the raw fallback.
+            return _parse_client_list(out.stdout if out.stdout else "")
     except (subprocess.TimeoutExpired, OSError):
         pass
-    # Fallback: raw RESP via the redislite client API (execute_command).
+    # Non-destructive fallback: raw RESP over a plain socket.
+    return _raw_resp_client_list(socket_path)
+
+
+def _raw_resp_client_list(socket_path: str) -> list[dict] | None:
+    """CLIENT LIST via raw RESP over a plain unix socket.
+
+    Non-destructive by construction: a plain socket connect/send/close never
+    mutates or terminates the probed server (issue #849: the previous
+    fallback built a redislite FalkorDB client whose close() KILLED the
+    orphan it was probing — fail-open data loss on the no-redis-cli path).
+
+    Returns parsed clients, or None on any connect/read/parse failure so
+    callers fail closed (never reap a server whose client state is unknown).
+    """
     try:
-        from redislite.falkordb_client import FalkorDB
-        db = FalkorDB(unix_socket_path=socket_path)
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(PROBE_TIMEOUT)
         try:
-            raw = db.execute_command("CLIENT", "LIST")
-            return _parse_client_list(raw if isinstance(raw, str) else "")
+            s.connect(socket_path)
+            s.sendall(b"*2\r\n$6\r\nCLIENT\r\n$4\r\nLIST\r\n")
+            raw = _read_resp_reply(s)
         finally:
-            try:
-                db.close()
-            except Exception:
-                pass
-    except Exception:
-        return []
-    return []
+            s.close()
+    except OSError:  # includes socket.timeout (Python 3.10+)
+        return None
+    if raw is None:
+        return None
+    return _parse_client_list(raw)
+
+
+def _read_resp_reply(sock: socket.socket) -> str | None:
+    """Read one RESP reply; return the bulk-string payload (CLIENT LIST).
+
+    Returns None for non-bulk replies (-ERR, +OK, integers) or on
+    truncation/malformed input — callers fail closed on None.
+    """
+    buf = b""
+    while b"\r\n" not in buf:
+        chunk = sock.recv(4096)
+        if not chunk:
+            return None
+        if len(buf) + len(chunk) > 1 << 20:  # 1 MiB sanity cap
+            return None
+        buf += chunk
+    head, rest = buf.split(b"\r\n", 1)
+    if not head.startswith(b"$"):
+        return None
+    try:
+        length = int(head[1:])
+    except ValueError:
+        return None
+    if length < 0 or length > 1 << 20:
+        return None
+    while len(rest) < length + 2:
+        chunk = sock.recv(4096)
+        if not chunk:
+            return None
+        rest += chunk
+    return rest[:length].decode("utf-8", errors="replace")
 
 
 def _parse_client_list(raw: str) -> list[dict]:
@@ -328,14 +385,19 @@ def _parse_client_list(raw: str) -> list[dict]:
     return clients
 
 
-def _active_client_count(socket_path: str) -> int:
+def _active_client_count(socket_path: str) -> int | None:
     """Count non-reaper clients (SKIPME semantics).
 
-    Our probing connection (redis-cli) is the freshly-created one with
-    age ~0 and idle ~0. Any connection with age >= 2s is a pre-existing
-    real client. Named clients are also real users regardless of age.
+    Our probing connection is the freshly-created one with age ~0 and
+    idle ~0. Any connection with age >= 2s is a pre-existing real client.
+    Named clients are also real users regardless of age.
+
+    Returns None when the probe failed — the caller must fail closed
+    (a server whose client state is unknown must never be reaped).
     """
     clients = _client_list(socket_path)
+    if clients is None:
+        return None
     count = 0
     for c in clients:
         if c.get("name"):
@@ -402,7 +464,10 @@ def _classify_dir(dbdir: str, socket_path: str) -> dict | None:
     uptime = _uptime_seconds(pid) if pid else None
     client_count = 0
     if classification == "candidate" and pid and _pid_alive(pid):
-        client_count = _active_client_count(socket_real)
+        # None (probe failed) means unknown — reap() will fail closed.
+        # Keep the record field an int (None is internal to the probe).
+        cc = _active_client_count(socket_real)
+        client_count = 0 if cc is None else cc
 
     return {
         "pid": pid,
@@ -558,11 +623,21 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
 
         # Double-check CLIENT LIST (before+after).
         clients_before = _active_client_count(record["socket_path"])
+        if clients_before is None:
+            logger.warning(
+                "CLIENT LIST probe failed, skipping (fail closed): %s",
+                record.get("socket_path"))
+            continue
         if clients_before > 0:
             logger.info("server has %d active client(s), skipping: %s",
                         clients_before, record["socket_path"])
             continue
         clients_after = _active_client_count(record["socket_path"])
+        if clients_after is None:
+            logger.warning(
+                "CLIENT LIST re-probe failed, skipping (fail closed): %s",
+                record.get("socket_path"))
+            continue
         if clients_after > 0:
             logger.info("server gained a client between checks, skipping: %s",
                         record["socket_path"])

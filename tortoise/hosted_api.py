@@ -50,6 +50,28 @@ from tortoise.hosted_backup import (
 _logger = logging.getLogger(__name__)
 
 
+# Embedded-fallback keep-alive: one anchored SDK per namespace (the FIRST
+# created), held so its redislite server is not GC'd between requests.
+# Without it, each request spawned a fresh SDK on the shared fallback path;
+# when the previous request's SDK was garbage-collected its server died, and
+# the next request opened a NEW server on the same path — losing the previous
+# request's writes (signup minted a team+key, then /v1/team 500 "Auth error"
+# — #493).
+#
+# ANCHOR semantics: the dict keeps the FIRST SDK per namespace (setdefault,
+# never replaced) and that anchor is eagerly connected (_get_proj) so its
+# redislite server stays alive between requests; each request still gets a
+# FRESH SDK (the SDK has mutable in-memory state — _evidence/_dirty_roots —
+# and must not be shared across concurrent requests), which connects to the
+# same path via redislite socket-sharing. Without the anchor, replacing the
+# dict entry dropped the only connected SDK and the server shut down
+# (save-then-reload round-trip) at the start of every request.
+#
+# TODO(#176): one anchor per namespace, never evicted — bounded by provisioned
+# team count until a production FalkorDB replaces the embedded fallback.
+_FALLBACK_KEEPALIVE: dict[str, "TortoiseSDK"] = {}
+
+
 def _make_sdk(*, namespace: str | None = None) -> TortoiseSDK:
     """Build an SDK backed by TORTOISE_DB_URI, or embedded mode when unset.
 
@@ -69,7 +91,27 @@ def _make_sdk(*, namespace: str | None = None) -> TortoiseSDK:
         # fall back to a temp file so provisioning still works.
         import tempfile
         db_path = os.path.join(tempfile.gettempdir(), "tortoise.db")
-    return TortoiseSDK(db_path=db_path, namespace=namespace)
+    anchor = _FALLBACK_KEEPALIVE.get(namespace or "")
+    if anchor is None:
+        anchor = TortoiseSDK(db_path=db_path, namespace=namespace)
+        try:
+            anchor._get_proj()  # eager: hold the connection so the server survives
+        except Exception:
+            # Keepalive is best-effort — a transient connect failure must not
+            # 500 this request; the request SDK connects lazily anyway and the
+            # anchor may connect on a later call.
+            pass
+        _FALLBACK_KEEPALIVE.setdefault(namespace or "", anchor)
+    elif anchor._proj is None:
+        # Self-heal: the anchor was stored unconnected (transient failure
+        # above, or created under a test patch). Try once more so keepalive
+        # is not permanently off for this namespace.
+        try:
+            anchor._get_proj()
+        except Exception:
+            pass
+    sdk = TortoiseSDK(db_path=db_path, namespace=namespace)
+    return sdk
 
 
 # ── MCP Streamable HTTP sub-app (#236) ────────────────────────────
@@ -330,7 +372,7 @@ class AnalyticsMiddleware(BaseHTTPMiddleware):
 class RateLimitMiddleware(BaseHTTPMiddleware):
     """In-memory token bucket rate limiter. 100 Points/min per API key."""
 
-    SKIP = {"/health", "/health/ready", "/docs", "/openapi.json", "/v1/register"}
+    SKIP = {"/health", "/health/ready", "/docs", "/openapi.json", "/v1/register", "/v1/signup/email"}
 
     def __init__(self, app, max_per_minute=100):
         super().__init__(app)
@@ -711,7 +753,7 @@ async def health_security():
 
 # ── Auth Dependency ────────────────────────────────────────────────
 
-SKIP_AUTH = {"/health", "/health/ready", "/docs", "/openapi.json", "/v1/register", "/webhooks/stripe"}
+SKIP_AUTH = {"/health", "/health/ready", "/docs", "/openapi.json", "/v1/register", "/v1/signup/email", "/webhooks/stripe"}
 
 
 async def _audit_auth_failure(request: Request, reason: str) -> None:
@@ -1062,6 +1104,32 @@ class RegisterResponse(BaseModel):
     team_id: str | None = None
     graph_name: str | None = None
     message: str | None = None  # "already_registered" on duplicate
+
+
+class EmailSignupRequest(BaseModel):
+    """#801: server-side email signup — same fields as the web form.
+
+    password min_length=6 matches the signup page's client check and
+    Supabase's minimum_password_length; GoTrue enforces the project's
+    actual policy (weak-password 422 mapped to a clear message).
+    """
+    email: str = Field(..., min_length=5, max_length=254)
+    password: str = Field(..., min_length=6, max_length=128)
+
+    @field_validator("email")
+    @classmethod
+    def valid_email(cls, v: str) -> str:
+        import re
+        if not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', v):
+            raise ValueError("Invalid email format")
+        return v.lower().strip()
+
+
+class EmailSignupResponse(BaseModel):
+    user_id: str | None = None
+    email: str | None = None
+    email_confirm: bool | None = None
+    message: str | None = None  # "user_created" | "already_registered"
 
 
 class OnboardingStateResponse(BaseModel):
@@ -1663,6 +1731,158 @@ async def register_user(request: Request, response: Response):
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
 
     return {"api_key": api_key, "team_id": team_id, "graph_name": graph_name}
+
+
+# ── Email signup via Supabase admin API (#801) ────────────────────
+
+def _signup_email_confirm() -> bool:
+    """#801: whether signup creates the auth user pre-confirmed (no email).
+
+    TORTOISE_SIGNUP_EMAIL_CONFIRM defaults to true — the account is created
+    with email_confirm=true so NO confirmation email is sent (bypasses
+    Supabase's SMTP per-IP bucket). false|0|no|off (case-insensitive) opt
+    back into the confirmation-email funnel.
+    """
+    val = os.environ.get("TORTOISE_SIGNUP_EMAIL_CONFIRM", "true").strip().lower()
+    return val not in ("false", "0", "no", "off")
+
+
+def _supabase_admin_create_user(email: str, password: str) -> tuple[int, dict]:
+    """Create a Supabase auth user through the GoTrue ADMIN API.
+
+    #801: admin create_user with email_confirm=true creates the account
+    WITHOUT sending a confirmation email — bypassing Supabase's built-in
+    SMTP per-IP send bucket (over_email_send_rate_limit 429s, the P1
+    production signup blocker). Atomic: GoTrue either creates the user or
+    returns an error — no partial state to roll back.
+
+    Returns (status_code, json_body) of the GoTrue response. Raises on
+    transport errors (the caller maps those to 502).
+    """
+    import httpx
+    url = os.environ.get("SUPABASE_URL", "").rstrip("/")
+    key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_SERVICE_KEY")
+    email_confirm = _signup_email_confirm()
+    resp = httpx.post(
+        f"{url}/auth/v1/admin/users",
+        json={"email": email, "password": password, "email_confirm": email_confirm},
+        headers={
+            "Authorization": f"Bearer {key}",
+            "apikey": key,
+            "Content-Type": "application/json",
+        },
+        timeout=15.0,
+    )
+    try:
+        body = resp.json()
+    except ValueError:
+        body = {}
+    return resp.status_code, body
+
+
+@app.post("/v1/signup/email", response_model=EmailSignupResponse)
+async def email_signup(request: Request):
+    """Server-side email signup — the #801 over_email_send_rate_limit fix.
+
+    The web form previously created auth users client-side via anon-key
+    auth.signUp, which makes GoTrue send a confirmation email through
+    Supabase's built-in SMTP. That path is IP-bucketed (30 sends/hr/IP,
+    configurable in the dashboard): once the bucket is exhausted EVERY
+    signup from that IP 429s (over_email_send_rate_limit) and no account
+    is created — the P1 production signup blocker.
+
+    This endpoint creates the user server-side via the GoTrue ADMIN API
+    (service-role key) with email_confirm=true (default): the account is
+    created confirmed and NO confirmation email is sent, so the SMTP
+    bucket is never touched. The client then signs in with the password.
+
+    - TORTOISE_SIGNUP_EMAIL_CONFIRM=false opts back into the
+      confirmation-email funnel (the email IS sent, subject to Supabase's
+      rate limits — not recommended until custom SMTP is configured).
+    - Same IP rate limit as /v1/register (3/hour, shared bucket).
+    - Supabase unconfigured (selfhost): 503 — the client falls back to
+      its legacy client-side auth.signUp flow.
+    - 429 pass-through carries a clear message pointing at the zero-email
+      `tortoise signup` path (issue #663).
+    """
+    await _check_register_rate_limit(request)
+
+    try:
+        body = await request.json()
+        req = EmailSignupRequest.model_validate(body)
+    except Exception:
+        # #801 review P1: never echo str(ValidationError) — Pydantic v2 embeds
+        # input_value (the raw password) in the message. Generic copy only.
+        raise HTTPException(
+            status_code=422,
+            detail="Invalid email or password. Check the email format and that the password is at least 6 characters.",
+        )
+
+    url = os.environ.get("SUPABASE_URL", "").rstrip("/")
+    key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_SERVICE_KEY")
+    if not url or not key:
+        raise HTTPException(
+            status_code=503,
+            detail=("Email signup is not available on this deployment. "
+                    "Use `tortoise signup` (zero-email) or sign in with GitHub."),
+        )
+
+    try:
+        status, gb = _supabase_admin_create_user(req.email, req.password)
+    except Exception:
+        raise HTTPException(
+            status_code=502,
+            detail="Signup service temporarily unavailable — try again in a moment.",
+        )
+
+    if status in (200, 201):
+        email_confirm = _signup_email_confirm()
+        await _async_audit(
+            request, req.email, "email_signup",
+            resource_type="user", resource_id=gb.get("id", req.email),
+        )
+        return {
+            "user_id": gb.get("id"),
+            "email": req.email,
+            "email_confirm": email_confirm,
+            "message": "user_created",
+        }
+
+    # GoTrue error mapping (error body: {code, error_code, msg}).
+    code = str(gb.get("code") or gb.get("error_code") or "").lower()
+    msg = str(gb.get("msg") or gb.get("message") or "").lower()
+    if status == 429 or "rate_limit" in code or "rate limit" in msg:
+        raise HTTPException(
+            status_code=429,
+            detail=("Signup is rate-limited right now. Try again in about an hour — "
+                    "or get an instant zero-email key with: tortoise signup"),
+            headers={"Retry-After": "3600"},
+        )
+    if status == 422 or status == 400:
+        if "already" in msg or "exists" in code:
+            raise HTTPException(
+                status_code=409,
+                detail={"message": "already_registered", "email": req.email},
+            )
+        if "weak_password" in code or "password" in msg:
+            raise HTTPException(
+                status_code=422,
+                detail="Password is too weak. Use at least 8 characters with a mix of letters, numbers, and symbols.",
+            )
+        # #801 review P1: never pass raw GoTrue messages to the client — log
+        # them server-side and return generic copy.
+        _logger.warning(
+            "email signup: unrecognized GoTrue error status=%s code=%s msg=%s",
+            status, code, gb.get("msg"),
+        )
+        raise HTTPException(
+            status_code=422,
+            detail="Invalid signup request. Please check your email and password.",
+        )
+    raise HTTPException(
+        status_code=502,
+        detail="Signup service temporarily unavailable — try again in a moment.",
+    )
 
 
 def _seed_demo_graph(team_id: str) -> dict:

@@ -1,11 +1,25 @@
+---
+title: "Ops: Deploy + Verification Runbook — hosted embeddings (#160, #566)"
+type: engineering
+domain: platform
+doc_status: live
+subjects.team: epistemic-team
+created: 2026-08-07
+aboutSubjects: tortoise
+aboutObjects: tortoise, hosted-api, docker, deploy-hosted
+---
+
 # Deploy + Verification Runbook — hosted embeddings (#160, #566)
 
 The #160 embedding pipeline is **already merged and auto-deployed**: 
 `.github/workflows/deploy-hosted.yml` deploys on every push to main touching
 `tortoise/**`, `Dockerfile.hosted`, `entrypoint.sh`, `requirements.txt`,
-`pyproject.toml`, or `fly.toml` (uses `FLY_API_TOKEN` + `FALKORDB_CLOUD_URI`
-secrets). This runbook covers the **manual verification + backfill** steps that
-automation cannot do.
+`pyproject.toml`, `uv.lock`, or `fly.toml` (uses `FLY_API_TOKEN` +
+`FALKORDB_CLOUD_URI` secrets). Before deploying it runs a dependency parity
+gate (#494): `uv lock --check` + a diff of the committed requirements.txt
+against a fresh `uv export --frozen` — a drifted lock or hand-edited
+requirements file fails the deploy. This runbook covers the **manual
+verification + backfill** steps that automation cannot do.
 
 ## 1. Confirm the deploy is live
 
