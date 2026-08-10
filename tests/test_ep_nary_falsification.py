@@ -149,8 +149,9 @@ def test_nary_nand_per_claim_pull_matches_binary_pair():
     After #326's accumulate-then-scale conservation fix, each claim of an
     n-ary factor receives (2/n) × the binary per-claim pull (the binary
     TOTAL is shared across n claims). For n=4 that is exactly 0.5× the
-    binary per-claim — the band below is widened to 0.4× to leave margin
-    for numerical noise while still pinning the conservation semantics.
+    binary per-claim — the band [0.45, 0.6] leaves margin for quadrature
+    drift while pinning the conservation semantics (and failing the
+    original last-pair-wins over-pull).
     """
     w = 3.0
     ep_nary = _make_ep(["a", "b", "c", "d"])
@@ -162,8 +163,9 @@ def test_nary_nand_per_claim_pull_matches_binary_pair():
     msg_bin = _msg_norm(ep_bin._msg_cache[("op", "a", "NAND")])
     msg_nary = _msg_norm(ep_nary._msg_cache[("op", "a", "NAND")])
     # n=4: per-claim = 2/n × binary = 0.5× exactly. Band [0.45, 0.6] leaves
-    # margin for quadrature drift while FAILING the pre-fix behavior
-    # (measured 0.78-0.92×, last-pair-wins at full weight).
+    # margin for quadrature drift while FAILING the original #326 behavior
+    # (per-claim ≈0.88-0.94× binary, last-pair-wins at full weight — outside
+    # the band).
     assert 0.45 * msg_bin <= msg_nary <= 0.6 * msg_bin, (
         f"per-claim nary pull {msg_nary:.4f} drifted from binary {msg_bin:.4f}"
     )
@@ -282,9 +284,16 @@ def test_nary_cacheless_direct_call_conserves():
     ep = TortoiseEP(types.SimpleNamespace(g=_G()), damping=1.0, n_quad=8)
     assert not hasattr(ep, "_msg_cache"), "fresh instance has no msg cache"
     ep._update_factor("op", "NAND", ["a", "b", "c", "d"], weight=w)
-    # one scaled message written per claim (graph mode), no crash
+    # exactly ONE scaled message written per claim (graph mode) — the old
+    # per-pair fallback wrote 12 (6 pairs × 2 claims)
     claims = {c for _, c in written}
+    assert len(written) == 4, f"expected 4 writes, got {len(written)}"
     assert claims == {"a", "b", "c", "d"}, f"wrote {claims}"
+    # the attribute must NOT be left behind in graph mode (hasattr selects
+    # graph I/O in _update_claim_posterior)
+    assert not hasattr(ep, "_msg_cache")
+    # and the sibling API must not crash on the fresh instance
+    ep._update_claim_posterior("a")
 
 
 def test_nary_with_less_than_two_inputs_is_noop():

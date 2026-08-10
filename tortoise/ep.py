@@ -362,7 +362,14 @@ class TortoiseEP:
                         acc[c] = (ea + msg[0], eb + msg[1])
                         touched.add(c)
         finally:
-            self._msg_cache = cache
+            if cache is None:
+                # Cache-less entry: the attribute did not pre-exist — remove
+                # it again so graph-mode callers (which use hasattr(_msg_cache)
+                # to select graph I/O) keep working.
+                if hasattr(self, "_msg_cache"):
+                    delattr(self, "_msg_cache")
+            else:
+                self._msg_cache = cache
             self.damping = orig_damping
 
         # Conservation scale: the FULL pairwise (clique) topology — NAND
@@ -382,8 +389,11 @@ class TortoiseEP:
             if c not in touched:
                 # Directed-star source: no message by design — clear any stale
                 # persisted source message so unidirectional semantics hold.
+                # Cache mode: only when a stale entry exists (don't create a
+                # zero entry for a never-messaged source). Graph mode: the
+                # MATCH…SET is a no-op when no edge exists, so write always.
                 if not bidirectional and c == input_ids[0]:
-                    if saved.get((op_id, c, op_type)) is not None:
+                    if cache is None or saved.get((op_id, c, op_type)) is not None:
                         self._write_message(op_id, c, 0.0, 0.0, op_type)
                 continue
             ea, eb = acc[c]
@@ -524,9 +534,10 @@ class TortoiseEP:
         Extractor confidence 0.8 → Beta(1+0.8k, 1+0.2k).
         Confidence near 0.5 → Beta(1,1) uniform (no information).
 
-        Malformed confidence (None, non-numeric, NaN/±inf, or out of [0,1])
-        falls back to the uniform Beta(1,1) — never a NaN/degenerate prior
-        that would silently zero downstream weights (#326).
+        Malformed confidence (None, bool, non-numeric, NaN/±inf) falls back
+        to the uniform Beta(1,1) — never a NaN/degenerate prior that would
+        silently zero downstream weights (#326). Out-of-range values are
+        clamped to [0,1] before conversion.
 
         Args:
             confidence: extractor confidence in [0, 1]
