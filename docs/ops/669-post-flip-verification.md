@@ -151,7 +151,7 @@ curl -s -X POST https://api.premiselabs.co/v1/register \
 Save the `api_key` and `team_id` — you'll use them in E2E-2/3/5/9.
 
 Option B — real user flow (also covers the manual round-trip, §11):
-open `https://premiselabs.co/signup`, sign up with email + password.
+open `https://tortoise.premiselabs.co/signup`, sign up with email + password.
 
 ### 2.2 Supabase rows exist (dashboard SQL)
 
@@ -191,8 +191,7 @@ must not have added any registry nodes.
 curl -s https://api.premiselabs.co/v1/team -H "Authorization: Bearer tt_…"
 ```
 
-✅ **Expect:** `200` with your `team_id`, `tier` (`free`), and limits
-(`max_api_keys`, etc.) — quota/tier now comes from Supabase `teams`.
+✅ **Expect:** `200` with your `team_id`, `tier` (`free`), `max_users`, `max_graphs`, and `write_ops_limit` — quota/tier now comes from Supabase `teams` (note: `max_api_keys` is a quota concept, not a `/v1/team` response field — review P2, PR #887).
 
 ### 3.2 The same key authenticates on MCP
 
@@ -348,7 +347,7 @@ curl -s https://api.premiselabs.co/v1/onboarding/github/status -H "Authorization
 
 **Manual (browser):**
 
-1. Sign up / sign in at `https://premiselabs.co/welcome` (welcome page).
+1. Sign up / sign in at `https://tortoise.premiselabs.co/welcome` (welcome page).
 2. First visit: the reveal block shows the plaintext `tt_…` key **once**.
 3. Reload / visit again: the page shows the **returning state** (dashboard CTA, no re-revealed key).
 
@@ -424,7 +423,7 @@ window, investigate before proceeding.
 
 ## 11. Manual signup round-trip (the new-user experience)
 
-1. Open `https://premiselabs.co/signup` → create account (email + password ≥ 6 chars).
+1. Open `https://tortoise.premiselabs.co/signup` → create account (email + password ≥ 6 chars).
 2. Land on the welcome page → the key reveal shows `tt_…` **once**.
 3. First API call with the revealed key:
 
