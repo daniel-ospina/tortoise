@@ -96,7 +96,13 @@ class TortoiseEP:
             self.g.query(
                 "UNWIND $params AS p "
                 "MATCH (n:Point {id: p.id}) "
+                # n.posterior_alpha/beta = the true EP posterior (preferred by
+                # _read_node/compute_confidence — resolves observability for
+                # baseline'd claims, #852 review P1). n.confidence = posterior
+                # mean. n.ep_alpha/beta stay as IMMUTABLE priors for baseline'd
+                # claims (re-run stability), posteriors for others (back-compat).
                 "SET n.confidence = p.c, "
+                "    n.posterior_alpha = p.a, n.posterior_beta = p.b, "
                 "    n.ep_alpha = CASE WHEN p.keep_prior THEN n.ep_alpha ELSE p.a END, "
                 "    n.ep_beta  = CASE WHEN p.keep_prior THEN n.ep_beta  ELSE p.b END",
                 params={"params": params_list},
@@ -134,7 +140,8 @@ class TortoiseEP:
             return _cache[node_id]
         rows = self.g.query(
             "MATCH (n:Point {id:$id}) "
-            "RETURN coalesce(n.ep_alpha, 1.0), coalesce(n.ep_beta, 1.0)",
+            "RETURN coalesce(n.posterior_alpha, n.ep_alpha, 1.0), "
+            "       coalesce(n.posterior_beta, n.ep_beta, 1.0)",
             params={"id": node_id},
         ).result_set
         return (float(rows[0][0]), float(rows[0][1])) if rows else (1.0, 1.0)
