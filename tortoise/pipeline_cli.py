@@ -128,8 +128,15 @@ def cmd_run(name: str) -> None:
             if hasattr(connector, "ingest"):
                 # Create projection and ingest
                 from tortoise.projection import FalkorProjection
-                from tortoise.config import resolve_db_path
-                proj = FalkorProjection(resolve_db_path())
+                from tortoise.config import resolve_db_path, is_db_uri
+                # #715 P2 conf 75: route a supported TORTOISE_DB_URI through
+                # from_uri — resolve_db_path() alone would silently pick the
+                # embedded default and split the graph from the URI target.
+                _uri = os.environ.get("TORTOISE_DB_URI", "")
+                if is_db_uri(_uri):
+                    proj = FalkorProjection.from_uri(_uri)
+                else:
+                    proj = FalkorProjection(resolve_db_path())
                 count = connector.ingest(proj)
                 print(f"  Ingested {count} entities into FalkorDB")
                 # Auto-dispatch: create missions + cards from ingested Objects

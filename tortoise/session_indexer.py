@@ -3,8 +3,14 @@
 Extracts narrative_arc, summary, keywords, topics, issues, PRs, and
 critical_decisions from session markdown files via LLM or keyword fallback.
 
+Model specs follow the `provider:model` convention from ingest.build_model:
+    ollama:MODEL    → local Ollama endpoint (http://localhost:11434, no key)
+                      — PII-safe: content never leaves the machine
+    gpt-5-mini / gpt-4o-mini / gpt-4o → OpenAI (OPENAI_API_KEY)
+
 Usage:
     python -m tortoise.session_indexer <file_path>
+    python -m tortoise.session_indexer --model ollama:llama3.2:3b <file_path>
     python -m tortoise.session_indexer --dir <directory> --batch
 """
 from __future__ import annotations
@@ -19,16 +25,28 @@ from typing import Any
 
 # ── YAML frontmatter parsing ──────────────────────────────────────
 
+_FM_RE = re.compile(r'^---\s*\n(.*?)\n---', re.DOTALL)
+
+
 def _parse_frontmatter(content: str) -> dict:
-    """Extract YAML frontmatter from markdown content."""
-    if not content.startswith("---"):
-        return {}
-    parts = content.split("---", 2)
-    if len(parts) < 3:
+    """Extract YAML frontmatter from markdown content.
+
+    Uses the canonical boundary regex (this module's ``_FM_RE``), imported by
+    ``ingest_corpus`` so both sides
+    agree on what constitutes frontmatter (review round 5 P2): a file starting
+    ``---sessionId: foo\n---`` must parse as NO frontmatter here, exactly as
+    ingest sees it — otherwise health derives a different event_id and the
+    sweep never converges. Non-dict roots (list/scalar YAML) return {} —
+    a malformed corpus file must degrade to the file-stem fallback, never
+    crash the health check / doctor / sweep (review round 5 P2).
+    """
+    m = _FM_RE.match(content)
+    if not m:
         return {}
     try:
         import yaml
-        return yaml.safe_load(parts[1]) or {}
+        parsed = yaml.safe_load(m.group(1))
+        return parsed if isinstance(parsed, dict) else {}
     except Exception:
         return {}
 
@@ -75,8 +93,7 @@ def _build_idf(corpus_paths: list[str] | None = None, force: bool = False) -> di
     from pathlib import Path
     
     if corpus_paths is None:
-        docs_dir = Path.home() / '.tortoise' / 'docs' / 'conversations'
-        corpus_paths = [str(p) for p in docs_dir.glob('*.md')]
+        corpus_paths = [str(p) for p in session_corpus_dir().glob("*.md")]
     
     df = {}  # document frequency: term → how many docs contain it
     doc_count = 0
@@ -242,6 +259,11 @@ def _count_messages(content: str) -> int:
 
 # ── LLM extraction ────────────────────────────────────────────────
 
+EXTRACTION_SYSTEM_PROMPT = (
+    "You extract structured metadata from agent conversations. "
+    "Return only valid JSON, no markdown fences."
+)
+
 EXTRACTION_PROMPT = """Analyze this AI agent conversation. Return JSON only, no markdown:
 
 {
@@ -268,43 +290,17 @@ Conversation:
 """
 
 
-# Whitelist of known models — llm_model flows from MCP tools / CLI and must
+# Whitelist of known OpenAI models — llm_model flows from MCP tools / CLI and must
 # not allow arbitrary model injection (could trigger expensive tiers).
+# `ollama:MODEL` specs bypass this whitelist: they route to the LOCAL Ollama
+# endpoint (no cost tier, content never leaves the machine) — mirroring how
+# ingest.build_model() treats the ollama provider outside _PROVIDERS.
 _ALLOWED_LLM_MODELS = {"gpt-5-mini", "gpt-4o-mini", "gpt-4o"}
 
 
-def extract_metadata_with_llm(content: str, model: str = "gpt-5-mini") -> dict | None:
-    """Extract metadata using an LLM. Returns None on failure (caller should fall back)."""
-    if model not in _ALLOWED_LLM_MODELS:
-        return {"error": f"llm_model {model!r} not allowed (whitelist: {sorted(_ALLOWED_LLM_MODELS)})"}
+def _parse_llm_json(text: str) -> dict | None:
+    """Parse + type-validate LLM JSON output. Returns None on malformed output."""
     try:
-        # Try OpenAI-compatible API
-        api_key = os.environ.get("OPENAI_API_KEY")
-        if not api_key:
-            return None
-        
-        import requests
-        response = requests.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": "You extract structured metadata from agent conversations. Return only valid JSON, no markdown fences."},
-                    {"role": "user", "content": EXTRACTION_PROMPT + content[:16000]},  # ~12K token limit
-                ],
-                "temperature": 0.3,
-                "max_tokens": 2000,
-            },
-            timeout=30,
-        )
-        response.raise_for_status()
-        result = response.json()
-        text = result["choices"][0]["message"]["content"]
-        
         # Strip markdown fences if present
         text = text.strip()
         if text.startswith("```"):
@@ -312,8 +308,10 @@ def extract_metadata_with_llm(content: str, model: str = "gpt-5-mini") -> dict |
             if text.endswith("```"):
                 text = text[:-3]
         text = text.strip()
-        
+
         result = json.loads(text)
+        if not isinstance(result, dict):
+            return None
         # Validate types to prevent downstream crashes
         if not isinstance(result.get("narrative_arc"), list):
             result["narrative_arc"] = []
@@ -324,6 +322,67 @@ def extract_metadata_with_llm(content: str, model: str = "gpt-5-mini") -> dict |
         if not isinstance(result.get("prs"), list):
             result["prs"] = []
         return result
+    except Exception:
+        return None
+
+
+def extract_metadata_with_llm(content: str, model: str = "gpt-5-mini") -> dict | None:
+    """Extract metadata using an LLM. Returns None on failure (caller should fall back).
+
+    Model specs follow the `provider:model` convention from ingest.build_model:
+      - ``ollama:MODEL`` → local Ollama endpoint (http://localhost:11434, no API
+        key, PII-safe: content never leaves the machine)
+      - otherwise → OpenAI whitelist (gpt-5-mini / gpt-4o-mini / gpt-4o)
+    """
+    # Ollama local mode — PII-sensitive extraction. Exempt from the OpenAI
+    # whitelist because there is no external cost tier to protect against.
+    if model.startswith("ollama:"):
+        model_id = model.split(":", 1)[1]
+        if not model_id:
+            return {"error": f"llm_model {model!r} missing model part "
+                             f"(expected ollama:MODEL)"}
+        try:
+            from .models import OllamaModel
+            llm = OllamaModel(id=model_id, timeout=30)  # match OpenAI-path timeout
+            text = llm.complete(
+                system=EXTRACTION_SYSTEM_PROMPT,
+                user=EXTRACTION_PROMPT + content[:16000],  # ~12K token limit
+            )
+            return _parse_llm_json(text)
+        except Exception as e:
+            print(f"[session_indexer] Ollama extraction failed: {e}", file=sys.stderr)
+            return None
+
+    if model not in _ALLOWED_LLM_MODELS:
+        return {"error": f"llm_model {model!r} not allowed "
+                         f"(whitelist: {sorted(_ALLOWED_LLM_MODELS)}; use ollama:MODEL for local)"}
+    try:
+        # Try OpenAI-compatible API
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            return None
+
+        import requests
+        response = requests.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": EXTRACTION_SYSTEM_PROMPT},
+                    {"role": "user", "content": EXTRACTION_PROMPT + content[:16000]},  # ~12K token limit
+                ],
+                "temperature": 0.3,
+                "max_tokens": 2000,
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+        result = response.json()
+        return _parse_llm_json(result["choices"][0]["message"]["content"])
     except Exception as e:
         print(f"[session_indexer] LLM extraction failed: {e}", file=sys.stderr)
         return None
@@ -416,11 +475,30 @@ def compute_session_embedding(name: str, summary: str = "",
 
 # ── File utilities ────────────────────────────────────────────────
 
+def session_corpus_dir() -> Path:
+    """Canonical session corpus directory (local indexer path).
+
+    Default: ``~/.tortoise/docs/conversations/`` — the canonical store for
+    the local indexer path (align decision, #280 items 2-3). Honors
+    ``TORTOISE_SESSION_CORPUS`` for non-home setups / tests.
+    """
+    env = os.environ.get("TORTOISE_SESSION_CORPUS", "")
+    if env:
+        return Path(env).expanduser()
+    return Path.home() / ".tortoise" / "docs" / "conversations"
+
+
 def compute_file_hash(file_path: str) -> str | None:
-    """SHA256 hash of file contents. Returns None on error."""
+    """SHA256 of file contents — text-mode (universal newlines) normalized.
+
+    MUST match ``ingest_corpus``'s file_hash derivation exactly (both hash
+    ``read_text(encoding="utf-8").encode()``): a raw-bytes read would diverge
+    on CRLF files, permanently classifying them as hash-stale in the health
+    check / reconciliation sweep (non-convergent). Returns None on error.
+    """
     try:
-        with open(file_path, "rb") as f:
-            return hashlib.sha256(f.read()).hexdigest()
+        with open(file_path, encoding="utf-8") as f:
+            return hashlib.sha256(f.read().encode()).hexdigest()
     except Exception:
         return None
 
@@ -428,15 +506,34 @@ def compute_file_hash(file_path: str) -> str | None:
 def extract_session_id(file_path: str) -> str | None:
     """Extract session ID from frontmatter or filename."""
     try:
-        with open(file_path) as f:
+        # Round-10: explicit utf-8 — ingest (sdk.py) and compute_file_hash both
+        # use it; under a non-UTF-8 locale (LC_ALL=C in cron/systemd) the
+        # default encoding would throw UnicodeDecodeError → None → a different
+        # event_id than ingest → permanent sweep non-convergence.
+        with open(file_path, encoding="utf-8") as f:
             content = f.read()
     except Exception:
         return None
     
     fm = _parse_frontmatter(content)
-    sid = fm.get("sessionId") or fm.get("session_id")
+    # Check each key INDEPENDENTLY: `or` would collapse falsy-but-coercible
+    # scalars (0, 0.0, false). Coerce to str to match ingest (sdk.py coerces
+    # sessionId before use) so health derives the SAME event_id as
+    # ingest_corpus — otherwise the sweep never converges (review round 2 P2).
+    def _coerce(v):
+        return str(v) if v is not None else None
+
+    # Mirror ingest's str-coerced `or`-collapse EXACTLY (review round 4 P2):
+    # sessionId or session_id or file_<stem> — an empty-string sessionId is
+    # falsy and must fall through to the alternate key, not straight to the
+    # file stem. Otherwise health derives a DIFFERENT event_id than ingest
+    # and the sweep never converges.
+    sid = _coerce(fm.get("sessionId"))
+    if not sid:
+        sid = _coerce(fm.get("session_id"))
     if sid:
         return sid
+    # empty-string/None both keys → file fallback (matches ingest's or-collapse)
     
     # Fallback: derive from filename
     stem = Path(file_path).stem
@@ -452,7 +549,8 @@ def main():
     parser.add_argument("--dir", action="store_true", help="Path is a directory")
     parser.add_argument("--batch", action="store_true", help="Batch process (with --dir)")
     parser.add_argument("--no-llm", action="store_true", help="Skip LLM, use keyword-only")
-    parser.add_argument("--model", default="gpt-5-mini", help="LLM model name")
+    parser.add_argument("--model", default="gpt-5-mini",
+                        help="LLM model spec (provider:model — e.g. ollama:llama3.2:3b for local PII-safe extraction)")
     parser.add_argument("--db", default=None, help="Tortoise DB URI (docker://host:port/graph). When set, indexes into FalkorDB instead of printing to stdout.")
     args = parser.parse_args()
     
@@ -497,68 +595,89 @@ def main():
             content = file_path.read_text()
             metadata = extract_metadata(content, llm)
             session_id = extract_session_id(str(file_path))
-            file_hash = compute_file_hash(str(file_path))
-            event_id = f"session_{session_id}" if session_id else f"file_{file_path.stem}"
-            proj = sdk._get_proj()
-            exists = proj.g.query(
-                "MATCH (e:Event {eventId: $eid}) RETURN properties(e)",
-                params={"eid": event_id}
-            ).result_set
-            if exists and exists[0][0].get("file_hash") == file_hash:
-                print(json.dumps({"status": "skipped", "reason": "unchanged"}))
-            else:
-                # #244: compute the session embedding (name + summary + keywords
-                # + topics) and store as vecf32 — degrades to None when the
-                # model is unavailable (session indexing never depends on it).
-                embedding = compute_session_embedding(
-                    metadata.get("summary", file_path.stem),
-                    metadata.get("summary", ""),
-                    metadata.get("keywords", []),
-                    metadata.get("topics", []),
-                )
-                props = {
-                    "name": metadata.get("summary", file_path.stem),
-                    "eventKind": "AgentSession",
-                    "session_id": session_id or f"file_{file_path.stem}",
-                    "agent": "pi",
-                    "source_file": str(file_path),
-                    "file_hash": file_hash,
-                    "keywords": metadata.get("keywords", []),
-                    "topics": metadata.get("topics", []),
-                    "message_count": _count_messages(content),
-                    "content_metadata": json.dumps({
-                        "schema_version": 1,
-                        "summary": metadata.get("summary", ""),
-                        "narrative_arc": metadata.get("narrative_arc", []),
-                        "issues": metadata.get("issues", []),
-                        "prs": metadata.get("prs", []),
-                        "critical_decisions": metadata.get("critical_decisions", []),
-                    }),
-                    "eventStatus": "completed",
-                    "classificationLevel": "internal",
-                }
-                if exists:
-                    proj.g.query(
-                        "MATCH (e:Event {eventId: $eid}) SET e += $props, "
-                        "e.embedding = CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE e.embedding END",
-                        params={"eid": event_id, "props": props, "embedding": embedding}
-                    )
-                    print(json.dumps({"status": "updated", "eventId": event_id}))
+            # #280: per-session flock — the session-end hook is fire-and-forget;
+            # a concurrent hook/sweep must not race this MATCH->SET read-modify-write.
+            from .index_lock import SessionIndexLock
+            _lock = SessionIndexLock(session_id or f"file_{file_path.stem}")
+            try:
+                _lock_status = _lock.acquire()
+            except (OSError, AttributeError, ImportError) as _lock_err:
+                # #280 review P2 (robustness): an unusable lock path (unwritable
+                # lock dir / planted symlink) must not crash the CLI — surface it
+                # as a retryable failure and exit 0 (never block the caller).
+                print(json.dumps({"status": "error",
+                                  "reason": f"session lock unavailable: {_lock_err}"}))
+                return
+            if _lock_status == "held":
+                # ALWAYS exit 0 — never block session close; the holder wins.
+                print(json.dumps({"status": "locked",
+                                  "reason": f"session lock held: {_lock.detail}"}))
+                return
+            try:
+                file_hash = compute_file_hash(str(file_path))
+                event_id = f"session_{session_id}" if session_id else f"file_{file_path.stem}"
+                proj = sdk._get_proj()
+                exists = proj.g.query(
+                    "MATCH (e:Event {eventId: $eid}) RETURN properties(e)",
+                    params={"eid": event_id}
+                ).result_set
+                if exists and exists[0][0].get("file_hash") == file_hash:
+                    print(json.dumps({"status": "skipped", "reason": "unchanged"}))
                 else:
-                    props["startedAt"] = __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat()
-                    proj.g.query(
-                        "CREATE (e:Event {eventId: $eid}) SET e += $props, "
-                        "e.embedding = CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) END",
-                        params={"eid": event_id, "props": props, "embedding": embedding}
+                    # #244: compute the session embedding (name + summary + keywords
+                    # + topics) and store as vecf32 — degrades to None when the
+                    # model is unavailable (session indexing never depends on it).
+                    embedding = compute_session_embedding(
+                        metadata.get("summary", file_path.stem),
+                        metadata.get("summary", ""),
+                        metadata.get("keywords", []),
+                        metadata.get("topics", []),
                     )
-                    print(json.dumps({"status": "ingested", "eventId": event_id}))
-                # Wire INSTANTIATES edges to issue/PR Objects (parity with ingest_corpus)
-                try:
-                    from tortoise.sdk import TortoiseSDK
-                    _sdk = TortoiseSDK()
-                    _sdk._connect_issue_objects(event_id, metadata)
-                except Exception:
-                    pass  # non-fatal edge wiring
+                    props = {
+                        "name": metadata.get("summary", file_path.stem),
+                        "eventKind": "AgentSession",
+                        "session_id": session_id or f"file_{file_path.stem}",
+                        "agent": "pi",
+                        "source_file": str(file_path),
+                        "file_hash": file_hash,
+                        "keywords": metadata.get("keywords", []),
+                        "topics": metadata.get("topics", []),
+                        "message_count": _count_messages(content),
+                        "content_metadata": json.dumps({
+                            "schema_version": 1,
+                            "summary": metadata.get("summary", ""),
+                            "narrative_arc": metadata.get("narrative_arc", []),
+                            "issues": metadata.get("issues", []),
+                            "prs": metadata.get("prs", []),
+                            "critical_decisions": metadata.get("critical_decisions", []),
+                        }),
+                        "eventStatus": "completed",
+                        "classificationLevel": "internal",
+                    }
+                    if exists:
+                        proj.g.query(
+                            "MATCH (e:Event {eventId: $eid}) SET e += $props, "
+                            "e.embedding = CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE e.embedding END",
+                            params={"eid": event_id, "props": props, "embedding": embedding}
+                        )
+                        print(json.dumps({"status": "updated", "eventId": event_id}))
+                    else:
+                        props["startedAt"] = __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat()
+                        proj.g.query(
+                            "CREATE (e:Event {eventId: $eid}) SET e += $props, "
+                            "e.embedding = CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) END",
+                            params={"eid": event_id, "props": props, "embedding": embedding}
+                        )
+                        print(json.dumps({"status": "ingested", "eventId": event_id}))
+                    # Wire INSTANTIATES edges to issue/PR Objects (parity with ingest_corpus)
+                    try:
+                        from tortoise.sdk import TortoiseSDK
+                        _sdk = TortoiseSDK()
+                        _sdk._connect_issue_objects(event_id, metadata)
+                    except Exception:
+                        pass  # non-fatal edge wiring
+            finally:
+                _lock.release()
         else:
             content = file_path.read_text()
             metadata = extract_metadata(content, args.model if not args.no_llm else None)

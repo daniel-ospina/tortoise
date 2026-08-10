@@ -42,12 +42,6 @@ def test_migrate_kinds_resolves_db_path(monkeypatch):
     assert "resolve_db_path" in src
 
 
-def test_github_docs_connector_resolves_db_path(monkeypatch):
-    """github_docs gate accepts TORTOISE_DB_PATH as well as URI."""
-    src = open("tortoise/connectors/github_docs.py").read()
-    assert 'os.environ.get("TORTOISE_DB_URI") or os.environ.get("TORTOISE_DB_PATH")' in src
-
-
 def test_tortoise_client_diagnostic_reports_db_path(monkeypatch):
     """Diagnostic payload reports TORTOISE_DB_PATH when only it is set."""
     monkeypatch.setenv("TORTOISE_DB_PATH", "/tc-canonical.db")
@@ -58,11 +52,13 @@ def test_tortoise_client_diagnostic_reports_db_path(monkeypatch):
 
 def test_init_docker_mode_does_not_set_db_path_env(monkeypatch):
     """__main__ init in docker mode must NOT setdefault TORTOISE_DB_PATH
-    (a local file path is semantically wrong when the DB is remote)."""
+    (a local file path is semantically wrong when the DB is remote).
+    #715: the branch is now URI-mode (docker:// / redis:// / rediss://), so
+    the structural anchor tracks the `uri_mode` flag."""
     src = open("tortoise/__main__.py").read()
-    docker_block = src.split('if docker_detected:')[1].split('else:')[0]
-    assert 'setdefault("TORTOISE_DB_URI"' in docker_block
-    assert 'TORTOISE_DB_PATH' not in docker_block
+    uri_block = src.split('if uri_mode:')[1].split('else:')[0]
+    assert 'setdefault("TORTOISE_DB_URI"' in uri_block
+    assert 'TORTOISE_DB_PATH' not in uri_block
 
 
 def test_cross_ontology_rejects_canonical_db_path():

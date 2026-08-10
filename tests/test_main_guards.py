@@ -48,7 +48,7 @@ def test_m0_main_guard():
                     "Bob: But however we should verify everything.\n")
 
         subprocess.run(
-            [sys.executable, "-m", "tortoise.tortoise.m0", transcript,
+            [sys.executable, "-m", "tortoise.m0", transcript,
              "--out", out_path, "--log", log_path],
             cwd=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."),
             capture_output=True, timeout=30
@@ -105,7 +105,7 @@ def test_ingest_main_guard():
                     "Bob: But however the coverage needs improvement.\n")
 
         subprocess.run(
-            [sys.executable, "-m", "tortoise.tortoise.ingest", transcript,
+            [sys.executable, "-m", "tortoise.ingest", transcript,
              "--point-model", "mock:cheap",
              "--relation-model", "mock:reason",
              "--out", out_path, "--log", log_path, "--db", db_path],

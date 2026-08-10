@@ -25,8 +25,13 @@ def client(tmp_path):
     orig_init = TortoiseSDK.__init__
 
     def _patched(self, db_path_arg=None, *, namespace=None, **kw):
-        orig_init(self, db_path=db_path if db_path_arg is None else db_path_arg,
-                  namespace=namespace, **kw)
+        # hosted_api._make_sdk (onboarding SDK builder) calls
+        # TortoiseSDK(db_path=..., ...) with db_path as a KEYWORD — pop it
+        # from **kw so the forwarding doesn't produce a duplicate-kwarg
+        # TypeError (#647 sweep catch).
+        kw_db = kw.pop("db_path", None)
+        resolved = kw_db if kw_db is not None else (db_path if db_path_arg is None else db_path_arg)
+        orig_init(self, db_path=resolved, namespace=namespace, **kw)
 
     TortoiseSDK.__init__ = _patched
     from tortoise.hosted_api import get_current_team
@@ -46,8 +51,13 @@ def unauth_client(tmp_path):
     orig_init = TortoiseSDK.__init__
 
     def _patched(self, db_path_arg=None, *, namespace=None, **kw):
-        orig_init(self, db_path=db_path if db_path_arg is None else db_path_arg,
-                  namespace=namespace, **kw)
+        # hosted_api._make_sdk (onboarding SDK builder) calls
+        # TortoiseSDK(db_path=..., ...) with db_path as a KEYWORD — pop it
+        # from **kw so the forwarding doesn't produce a duplicate-kwarg
+        # TypeError (#647 sweep catch).
+        kw_db = kw.pop("db_path", None)
+        resolved = kw_db if kw_db is not None else (db_path if db_path_arg is None else db_path_arg)
+        orig_init(self, db_path=resolved, namespace=namespace, **kw)
 
     TortoiseSDK.__init__ = _patched
     with TestClient(app) as tc:

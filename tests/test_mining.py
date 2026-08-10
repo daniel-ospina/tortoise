@@ -126,14 +126,31 @@ def test_mine_derives_friction():
     recorded = [e for e in events if e["type"] == "EventRecorded"]
     kinds = [e["event"]["eventKind"] for e in recorded]
 
-    # Should produce friction from NAND operators (but + however → contradiction)
-    has_friction = "friction" in kinds
-    if not has_friction:
-        # MockExtractor may not produce NAND with short transcripts
-        # Fallback: at minimum we have meeting + milestone/observation events
-        pass
+    # Friction must come from NAND operators and/or conflict-language points.
+    # Regression for #325: the friction-language fallback used to be a no-op
+    # `pass` — conflict-language friction was never emitted.
+    assert "friction" in kinds, f"Expected 'friction' event, got: {kinds}"
     print(f"PASS test_mine_derives_friction ({len(recorded)} events, kinds: {kinds})")
 
+
+
+def test_mine_friction_from_conflict_language_without_nand():
+    """Regression #325: conflict-language in a point that is NOT covered by a
+    NAND operator must still produce a friction event. The old fallback loop
+    was a literal `pass` — conflict-language friction was never emitted."""
+    miner = ConversationMiner()
+    api, log = _api()
+
+    # A single disagreement-cue point, no NAND operators (MockExtractor only
+    # emits NAND when two points are in tension — a lone claim has none).
+    transcript = "Alice: This approach does not agree with our findings.\n"
+
+    result = miner.mine(transcript, "test_friction_lang", api)
+    events = log.read_all()
+    recorded = [e for e in events if e["type"] == "EventRecorded"]
+    kinds = [e["event"]["eventKind"] for e in recorded]
+
+    assert "friction" in kinds, f"Expected conflict-language friction, got: {kinds}"
 
 
 def test_mine_sparse_transcript():

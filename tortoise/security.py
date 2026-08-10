@@ -81,7 +81,7 @@ KNOWN_REL_TYPES: frozenset[str] = frozenset({
     "hasMember", "holdsRole", "memberOf", "reportsTo", "participatesIn",
     "related", "dependsOn",
     # Organisational / registry / session
-    "BELONGS_TO", "FOR_TEAM", "INSTANTIATES", "CONTAINS", "SUPPORTS",
+    "BELONGS_TO", "FOR_TEAM", "CONTAINS", "SUPPORTS",
     "INFORMED_BY", "PRODUCES",
 })
 

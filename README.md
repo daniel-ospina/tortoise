@@ -4,7 +4,7 @@ type: readme
 domain: epistemic
 status: live
 created: 2026-07-24
-updated: 2026-08-07
+updated: 2026-08-10
 ---
 
 # Tortoise
@@ -19,15 +19,19 @@ A product of [Premise Labs](https://premiselabs.co).
 
 ### 1. Install
 
-Pick one:
+New to Tortoise? Choose a path:
 
-| Path | How | Best for |
-|---|---|---|
-| **Hosted** | Sign up at [tortoise.premiselabs.co](https://api.premiselabs.co) (free tier available), get an API key on the welcome page | Teams that want a managed server; zero ops |
-| **Self-host (eval)** | `docker run -p 127.0.0.1:8000:8000 ghcr.io/daniel-ospina/tortoise-selfhost` (embedded DB — **not durable**, for eval only; daemon refuses non-loopback binds without `TORTOISE_API_KEY`) | Solo devs trying it locally |
-| **Self-host (durable)** | `docker compose up -d` — daemon + FalkorDB sidecar (AOF on, backups) | Production self-hosting; data locality and trust |
+- **Hosted (managed)** — no install, just connect your agent: [docs/quickstart-cloud.md](docs/quickstart-cloud.md)
+- **Self-hosted (run it yourself)** — requires **Python ≥ 3.12**:
 
-> ⚠️ Embedded mode (plain `docker run`) is for evaluation only — it is not durable. For real data use `docker compose` or point the daemon at a FalkorDB with `TORTOISE_DB_URI`. See [License & FAQ](#license--faq) and [docs/infra-runbook.md](docs/infra-runbook.md).
+  ```bash
+  git clone https://github.com/daniel-ospina/tortoise.git && cd tortoise
+  pip install -e .                         # or: pip install -e '.[embeddings]' for vector search
+  # or straight from GitHub (no clone):
+  pip install git+https://github.com/daniel-ospina/tortoise.git
+  ```
+
+Operator/infra (deploying and maintaining the daemon): [docs/infra-runbook.md](docs/infra-runbook.md).
 
 ### 2. Connect
 
@@ -100,13 +104,21 @@ Tortoise is **Business Source License 1.1** — see [LICENSE](LICENSE) and the [
 
 - `tortoise/` — the SDK, MCP server, projection, search engine, backup/restore, and the self-host daemon (`tortoise/selfhost.py`)
 - `integrations/` — thin connectors that talk to Tortoise over MCP (not SDK imports)
-- `premise-labs/` — the hosted product's landing pages + dashboard (deploys to Cloudflare Pages)
-- `docs/ONTOLOGY.md` — **canonical ontology v3.1** (co-located with the code it governs)
+- `website/` — the hosted product's landing pages + dashboard (deploys to Cloudflare Pages)
+- `docs/ONTOLOGY.md` — **canonical ontology v3.4** (co-located with the code it governs)
 - `tests/` — test suite
 
 ## Canonical ontology
 
 `docs/ONTOLOGY.md` is the single source of truth for the entity model (Point, Subject, Object, Event, Source), edge topology (IMPL/NAND/structural/about*), kind vocabularies, and EP semantics. It is **canonical** — product gaps are filed as issues, never added to the ontology as roadmap detail.
+
+## Repository layout
+
+**`daniel-ospina/tortoise` (this repo)** is the **full product** — graph runtime, SDK, MCP server, self-host daemon + docker compose, Fly.io deployment config (`fly.toml`), Dockerfile.selfhost, embedded reaper, Supabase edge functions (`supabase/functions/tenant-provision/`), backup pipeline, and the hosted dashboard (`website/` dir → Cloudflare Pages). This is the canonical source of truth. If you want to deploy Tortoise (self-host or hosted), this is the only repo you need.
+
+**`daniel-ospina/premise-labs`** is a **partial copy** of the tortoise tree used as an **SDK-import surface** by dependent repos (notably `daniel-ospina/swarm`, which sets `PYTHONPATH` to import `tortoise/projection.py`, `tortoise/ids.py`, `tortoise/pipeline_cli.py`, and `config/` from it). It is **not** the full product — it lacks `docker-compose.yml`, `Dockerfile.selfhost`, `tortoise/embedded_reaper.py`, `tortoise/selfhost.py`, `fly.toml`, and `supabase/functions/tenant-provision/`. It also carries an outdated `.env.example` (port `:6379` in the URI example vs `FALKORDB_PORT=16379`; this repo uses `:16379` consistently).
+
+**Guidance:** if you clone `premise-labs` for swarm imports, also clone `tortoise` for deployment infrastructure. `premise-labs` is SDK-only — it cannot run a Tortoise server. (#761)
 
 ## Repo map & issue routing
 
@@ -114,9 +126,9 @@ File issues in the repo that owns the code:
 
 | Repo | Owns | File issues for |
 |---|---|---|
-| **daniel-ospina/tortoise** (this repo) | Tortoise product: SDK, MCP, hosted API, graph engine, ontology | Tortoise product bugs, features, ontology gaps |
+| **daniel-ospina/tortoise** (this repo) | Tortoise product: SDK, MCP, hosted API, graph engine, ontology, deployment infra | Tortoise product bugs, features, ontology gaps |
 | **daniel-ospina/agent-infra** | Agent infrastructure: Pi extensions, skills, commit-workflow, CI gates, review-enforcer | Skill/pipeline/extension/CI work |
-| **daniel-ospina/premise-labs** | Premise Labs internal ops: meetings recorder, CRM (Twenty), bridge scripts, health checks | Ops tooling, CRM, meeting pipeline |
+| **daniel-ospina/premise-labs** | Premise Labs internal ops: meetings recorder, CRM (Twenty), bridge scripts, health checks; also an SDK-import surface for the swarm (partial tortoise tree — see above) | Ops tooling, CRM, meeting pipeline |
 | **daniel-ospina/eldato** | El Dato app (eldato.com.mx): scanner, webapp, deals/offers, notifications, ads, SEO | El Dato product work |
 
-**Rule of thumb:** if the issue is about Tortoise code (this repo's `tortoise/` or `premise-labs/` dirs), file it here. If it's about agent tooling, file in agent-infra. If it's about Premise Labs ops (meetings/CRM), file in premise-labs.
+**Rule of thumb:** if the issue is about Tortoise code (this repo's `tortoise/` or `website/` dirs), file it here. If it's about agent tooling, file in agent-infra. If it's about Premise Labs ops (meetings/CRM), file in premise-labs.

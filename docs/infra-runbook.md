@@ -41,8 +41,8 @@ fly certs create api.premiselabs.co
 ### Cloudflare Pages (Dashboard)
 ```bash
 # Create project in Cloudflare dashboard: "tortoise-dashboard"
-# Deploy placeholder:
-wrangler pages deploy apps/dashboard --project-name=tortoise-dashboard
+# Deploy the React/Vite SPA (source of truth):
+./website/apps/dashboard/deploy.sh   # npm run build + wrangler pages deploy dist
 # Custom domain: app.premiselabs.co → tortoise-dashboard.pages.dev
 ```
 
@@ -113,6 +113,35 @@ install defeats the purpose of hosting locally.
   resolves `FALKORDB_CLOUD_URI` → `TORTOISE_DB_URI` at runtime (entrypoint.sh).
 - Restart the MCP server after changing the URI (resolved once at startup).
 
+**Self-hosted authenticated MCP (`serve --http`, #702):** local stdio is
+dev-mode only (no auth tokens on stdio — setting `TORTOISE_API_KEY` disables
+it). For an authenticated local MCP endpoint:
+
+```bash
+tortoise key create                    # bootstrap a local registry team + tt_ key
+TORTOISE_DB_PATH=~/.tortoise/tortoise.db tortoise serve --http   # tenant auth, binds 127.0.0.1:8000
+```
+
+- Client config: `url http://127.0.0.1:8000/mcp`, header `Authorization: Bearer tt_<key>`.
+- HTTP (tenant) mode uses a fresh `team_{id}` namespace — existing stdio data
+  stays in the `tortoise` graph (no automatic migration).
+- `--auth static` (single `TORTOISE_API_KEY`/`--api-key`) and `--auth none`
+  (localhost eval, NO auth) are available; default bind 127.0.0.1.
+- Static-auth first run: `export TORTOISE_SECRET_PEPPER=$(openssl rand -hex 32)`
+  before `serve --http --auth static` — required when the static key comes
+  from the `TORTOISE_API_KEY` env var: the auth import fails on startup in
+  that case. Passing `--api-key` directly does not need it.
+- Changing `TORTOISE_SECRET_PEPPER` invalidates all local keys (re-run
+  `tortoise key create`).
+
+**`--auth none` safety (fail-closed):** `serve --http --auth none` on a
+non-loopback/wildcard `--bind` is **refused (exit non-zero)** unless
+`--allow-insecure-no-auth` is passed — and that override is **UNSAFE**
+(no authentication; trusted networks only). Loopback binds (default
+`127.0.0.1`) with `--auth none` remain allowed. For a LAN-accessible server,
+pass `--allowed-hosts HOST[,HOST...]` (e.g. `--bind 0.0.0.0 --allowed-hosts
+myhost.lan`) so the host guard accepts the hostnames clients use.
+
 Do **not** commit `.env` (gitignored) and do **not** put DB credentials in
 `.mcp.json`.
 
@@ -134,6 +163,17 @@ wrangler pages deploy dist --project-name=tortoise-dashboard
 | FALKORDB_CLOUD_URI | ✅ (set via GitHub secret → Fly) | ✅ (instance creds) | ✅ |
 | FLY_API_TOKEN | — | — | ✅ |
 | CLOUDFLARE_API_TOKEN | — | — | ✅ |
+| TORTOISE_BACKUP_KEY | ✅ (base64 32-byte AES-256-GCM key) | — | ✅ |
+| R2_ACCOUNT_ID | ✅ | — | ✅ |
+| R2_ACCESS_KEY_ID | ✅ | — | ✅ |
+| R2_SECRET_ACCESS_KEY | ✅ | — | ✅ |
+| R2_BUCKET | ✅ (`tortoise-backups`) | — | ✅ |
+
+### Runtime Config (non-secret)
+
+| Var | Default | Effect |
+|-----|---------|--------|
+| `TORTOISE_SESSION_EXTRACTION` | `auto` | `/v1/sessions` extraction mode (`auto\|required\|regex`). `required` fails closed: **all** session captures return 503 when no LLM provider key (`OPENROUTER/DEEPSEEK/OPENAI/GEMINI_API_KEY`) is set — do not enable it until a provider key is deployed. Unknown values fall back to `auto`. |
 
 ## Reproducibility Test
 Can a fresh Fly.io account + Cloudflare account follow §1 from zero and arrive at the same infra?

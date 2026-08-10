@@ -148,3 +148,33 @@ if __name__ == "__main__":
     print("✅ events")
     os.unlink(tmp)
     os.rmdir(tmp.parent)
+
+
+# ── #432 claim/graph event types ────────────────────────────────────────────
+# Registered here (indicator 3 — EventCodec is the catalog of record, not a
+# parallel mechanism). Registration ONLY: encode/decode wiring into the emit
+# hook / read path is deferred to the first real upcaster task (plan-review
+# P2 — the codec adds no value until events carry versions that need
+# migration; node-level type/event_id/ts are canonical for v1).
+# NOTE: ClaimStateChanged is deliberately NOT registered — no code path emits
+# it (plan-review P1); challenged is derived from NAND-edge presence, and
+# every claim transition maps to one of the five concrete event types below.
+CLAIM_EVENT_TYPES = (
+    "PointAdded",
+    "OperatorAdded",
+    "PointRetracted",
+    "PointSuperseded",
+    "OperatorAnnotated",
+)
+
+
+def register_claim_event_types() -> None:
+    """Register the #432 claim event types (idempotent)."""
+    for name in CLAIM_EVENT_TYPES:
+        try:
+            register_event_type(name)
+        except ValueError:
+            pass  # already registered (idempotent)
+
+
+register_claim_event_types()

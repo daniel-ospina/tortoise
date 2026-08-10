@@ -12,23 +12,40 @@ import asyncio
 import json as _json
 import logging
 import os
+import threading
 import time
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse  # JSONResponse: billing webhook (#310)
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from contextlib import asynccontextmanager
 
 from tortoise.audit_events import AuditLogger
 from tortoise.auth import hash_api_key
-from tortoise.session_auth import get_current_user  # E1–E8 session endpoints (D1)
+from tortoise.security import redact_error  # billing webhook + checkout error logging
+from tortoise.session_auth import get_current_user
+from tortoise.quota import DEFAULT_MAX_SESSIONS  # used by get_current_team (#754 P0: missing import → 500 on every agent_signup auth)
+from tortoise.analytics import (  # #528 server analytics (fail-safe, no-op without key)
+    api_key_created,
+    first_api_call,
+    first_api_call_pending,
+    tenant_provisioned,
+)  # E1–E8 session endpoints (D1)
 import hmac
 
 from tortoise.sdk import TortoiseSDK, _content_hash
 from tortoise.mcp_server import create_http_app
+from tortoise.hosted_backup import (
+    RestoreVerificationError,
+    R2Storage,
+    create_backup,
+    list_backups,
+    prune_backups,
+    restore_backup,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -75,6 +92,27 @@ mcp_http_app = create_http_app(
 )
 
 
+def _iter_registered_teams() -> list[dict]:
+    """List registered teams from the control_plane registry (best-effort).
+
+    Used by the event-retention sweep (#432 Task 7) and boot reconcile.
+    Returns [] on any failure — the sweep is best-effort.
+    """
+    try:
+        from tortoise.sdk import TortoiseSDK
+
+        sdk = TortoiseSDK()
+        rows = sdk._get_registry().query(
+            "MATCH (t:Team) RETURN t.id, t.name"
+        ).result_set
+        # P2 (Qwen): skip rows with falsy team_id — namespace=None would sweep
+        # the default/shared graph.
+        return [{"team_id": r[0], "name": r[1] if len(r) > 1 else None}
+                for r in rows if r and r[0]]
+    except Exception:  # noqa: BLE001
+        return []
+
+
 @asynccontextmanager
 async def _lifespan(app):
     """Compose the FastMCP sub-app's lifespan (session manager init) into
@@ -112,6 +150,85 @@ async def _lifespan(app):
             threading.Thread(target=_prewarm_embeddings, name="embedding-prewarm", daemon=True).start()
         except Exception as exc:  # noqa: BLE001
             _logger.warning("embeddings: could not start background pre-warm: %s", exc)
+
+        # Backup watcher (driver-disabled leg, #596): a read-only staleness
+        # daemon that files GitHub issues + pushes Telegram ITSELF, so the
+        # driver-disabled case is covered by construction. Spawned only when
+        # the sweep config validates (fail-closed default keeps TestClient and
+        # misconfigured deploys quiet) and not explicitly disabled for tests.
+        global _WATCHER
+        try:
+            cfg = _backup_config_safe()
+            if cfg and os.environ.get("BACKUP_WATCHER_DISABLED") != "1":
+                from tortoise.backup_sweep import read_team_state
+                from tortoise.backup_watcher import BackupWatcher, WatcherThread
+
+                reg_sdk = _registry_sdk()
+                registry = reg_sdk._get_registry()
+
+                def _sweep_teams() -> list[str]:
+                    from tortoise.backup_sweep import enumerate_teams
+
+                    try:
+                        return enumerate_teams(registry)
+                    except Exception as exc:  # noqa: BLE001 — fail-closed, never crash
+                        _logger.warning("watcher team enumeration failed: %s", exc)
+                        return []
+
+                watcher = BackupWatcher(
+                    _backup_storage(), _alert_store_from(cfg),
+                    team_provider=_sweep_teams,
+                    state_reader=read_team_state,
+                    driver_heartbeat_reader=lambda: _read_driver_heartbeat(),
+                    stale_threshold_min=cfg.stale_threshold_min,
+                    driver_down_threshold_min=cfg.driver_down_threshold_min,
+                    grace_min=cfg.watcher_grace_min,
+                    simulate_enabled=cfg.simulate_enabled,
+                    kill_switch_off=lambda: _backup_config_safe() is None,
+                )
+                _WATCHER = WatcherThread(watcher, interval_seconds=cfg.watcher_poll_seconds)
+                _WATCHER.start()
+                _boot_gc_drill_graphs(reg_sdk._get_proj().db)
+        except Exception as exc:  # noqa: BLE001 — never crash the app
+            _logger.warning("backup watcher could not start: %s", exc)
+        # #432 Task 7: event retention — boot purge + interval task. Best-effort
+        # and non-fatal (like the pre-warm): a purge failure never blocks bind.
+        # Per-team graphs get purged by the SDK lazy hook too (embedded/stdio);
+        # here we sweep once at boot and then on an asyncio interval.
+        try:
+            import asyncio
+            import os
+
+            def _sweep_events() -> None:
+                try:
+                    from tortoise.event_store import purge_expired, purge_overflow
+                    from tortoise.registry import registry_sdk  # noqa: F401  (not used; teams via loop below)
+                    days = int(os.environ.get("TORTOISE_EVENT_RETENTION_DAYS", "30"))
+                    cap = int(os.environ.get("TORTOISE_EVENT_MAX_PER_TEAM", "500000"))
+                    # Sweep every registered team's graph (registry Team nodes).
+                    for team in _iter_registered_teams():
+                        try:
+                            sdk = _make_sdk(namespace=team["team_id"])
+                            proj = sdk._get_proj()
+                            purge_expired(proj, retention_days=days)
+                            purge_overflow(proj, max_events=cap)
+                        except Exception:  # noqa: BLE001
+                            _logger.debug("event retention sweep skipped for %s", team.get("team_id"))
+                except Exception as exc:  # noqa: BLE001
+                    _logger.warning("event retention sweep failed: %s", exc)
+
+            _sweep_events()  # boot sweep
+            interval = int(os.environ.get("TORTOISE_EVENT_RETENTION_INTERVAL", "3600"))
+
+            async def _event_retention_loop() -> None:
+                while True:
+                    await asyncio.sleep(interval)
+                    _sweep_events()
+
+            _retention_task = asyncio.get_event_loop().create_task(_event_retention_loop())
+            app.state._event_retention_task = _retention_task
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("event retention loop not started: %s", exc)
         yield
 
 
@@ -189,6 +306,23 @@ async def _dream_worker(team_id: str) -> None:
 
 
 # ── Rate Limiter ──────────────────────────────────────────────────
+
+# ── Analytics middleware (D10 #577) — fire-and-forget first_api_call ──
+# Fires the activation event on data-plane writes (points/sessions/keys) using
+# the request-scoped team from the auth middleware. Non-blocking (R19).
+class AnalyticsMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        try:
+            if request.method == "POST" and request.url.path.startswith("/v1/"):
+                team_id = getattr(request.state, "team_id", None)
+                user_id = getattr(request.state, "user_id", None)
+                if team_id and response.status_code < 400:
+                    first_api_call(user_id or team_id, team_id, request.url.path)
+        except Exception:
+            pass  # never let telemetry break the response
+        return response
+
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
     """In-memory token bucket rate limiter. 100 Points/min per API key."""
@@ -279,6 +413,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(SecurityHeadersMiddleware)
 
+app.add_middleware(AnalyticsMiddleware)
 # Internal auth key for Edge Function → API communication
 _INTERNAL_KEY = os.environ.get("FASTAPI_INTERNAL_KEY", "")
 
@@ -311,6 +446,9 @@ async def _async_audit(
     )
 
 
+# ── Per-team Event Log (tenant replay surface, #692) ────────────
+
+
 def _check_internal(request: Request) -> None:
     """Verify internal auth — only Edge Functions call this."""
     if not _INTERNAL_KEY:
@@ -339,10 +477,15 @@ async def provision_tenant(request: Request):
 
     # Validate team_id and team_name against allowed pattern
     import re
-    _team_pattern = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9 _-]{0,63}$')
-    if not _team_pattern.match(team_id):
+    # team_id flows into graph names + SDK namespaces — strict (aligned with
+    # the SDK namespace regex + hosted_backup._validate_team_id: a space would
+    # pass provision but fail every downstream _make_sdk(namespace=...) call).
+    # team_name is display-only — spaces allowed.
+    _id_pattern = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$')
+    _name_pattern = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9 _-]{0,63}$')
+    if not _id_pattern.match(team_id):
         raise HTTPException(status_code=400, detail="Invalid team_id format")
-    if not _team_pattern.match(team_name):
+    if not _name_pattern.match(team_name):
         raise HTTPException(status_code=400, detail="Invalid team_name format")
 
     sdk = _make_sdk(namespace="registry")
@@ -403,7 +546,7 @@ async def provision_tenant(request: Request):
             """
             CREATE (m:Membership {
                 id: $id, user_id: $user_id, team_id: $team_id,
-                role: 'owner', joined_at: $now
+                role: 'owner', status: 'active', joined_at: $now
             })
             """,
             params={
@@ -418,6 +561,16 @@ async def provision_tenant(request: Request):
         await _async_audit(
             request, team_id, "tenant_provision",
             resource_type="team", resource_id=team_id,
+        )
+
+        # #528 analytics — fire-and-forget, only on success (never in the
+        # rollback path). created_by is the Supabase user UUID (joins the
+        # web funnel); no key configured → no-op.
+        await asyncio.to_thread(
+            tenant_provisioned, created_by, team_id, team_name, "free", graph_name
+        )
+        await asyncio.to_thread(
+            api_key_created, created_by, team_id, team_id[:8], api_key_id, "provision"
         )
 
         return {"status": "provisioned", "team_id": team_id, "graph_name": graph_name}
@@ -488,7 +641,7 @@ async def health_security():
 
 # ── Auth Dependency ────────────────────────────────────────────────
 
-SKIP_AUTH = {"/health", "/health/ready", "/docs", "/openapi.json", "/v1/register"}
+SKIP_AUTH = {"/health", "/health/ready", "/docs", "/openapi.json", "/v1/register", "/webhooks/stripe"}
 
 
 async def _audit_auth_failure(request: Request, reason: str) -> None:
@@ -528,23 +681,76 @@ async def get_current_team(request: Request) -> dict:
         raise HTTPException(status_code=401, detail="Invalid API key format")
     try:
         sdk = _make_sdk(namespace="registry")
+        from datetime import datetime as _dt, timezone as _tz
+        now_iso = _dt.now(_tz.utc).isoformat()
         # API keys are stored as "salt:hash" (per-key random salt). hash_api_key()
         # generates a NEW random salt per call, so we CANNOT look up by exact
         # match. Instead fetch all non-revoked keys and verify each against the
-        # token using the embedded salt (verify_api_key). This is O(keys) but
-        # the registry is small (teams × keys) and auth happens per-request.
+        # token using the embedded salt (verify_api_key). #750.3: pre-filter by
+        # key_prefix (token[:10] == stored kp) so auth is O(prefix) not
+        # O(keys)×PBKDF2; fall back to a full scan when no prefix matches
+        # (provision keys store team_id[:8] prefixes). #742: expired bootstrap
+        # keys must NOT authenticate — filter expires_at on both paths.
         key_result = sdk._get_registry().query(
-            "MATCH (k:APIKey) WHERE k.revoked_at IS NULL RETURN k.team_id, k.id, k.key_hash"
+            "MATCH (k:APIKey) WHERE k.key_prefix = $prefix "
+            "AND k.revoked_at IS NULL "
+            "AND (k.expires_at IS NULL OR k.expires_at > $now) "
+            "RETURN k.team_id, k.id, k.key_hash, k.created_by",
+            params={"prefix": token[:10], "now": now_iso},
         ).result_set
+        if not key_result:
+            key_result = sdk._get_registry().query(
+                "MATCH (k:APIKey) WHERE k.revoked_at IS NULL "
+                "AND (k.expires_at IS NULL OR k.expires_at > $now) "
+                "RETURN k.team_id, k.id, k.key_hash, k.created_by",
+                params={"now": now_iso},
+            ).result_set
         from tortoise.auth import verify_api_key
         team_id = key_id = None
-        for k_team_id, k_id, stored_hash in key_result:
+        created_by = None
+        # key_result already holds the prefix-filtered (+ expiry-filtered, #742)
+        # candidate keys from the lookup above — verify each against the token.
+        for k_team_id, k_id, stored_hash, k_created_by in key_result:
             if verify_api_key(token, stored_hash):
                 team_id, key_id = k_team_id, k_id
+                created_by = k_created_by
                 break
+        # Fallback: legacy provision_tenant keys (key_prefix=team_id[:8])
+        # won't match the token[:10] prefix. In that case scan all keys.
+        if team_id is None:
+            key_result = sdk._get_registry().query(
+                "MATCH (k:APIKey) WHERE k.revoked_at IS NULL "
+                "RETURN k.team_id, k.id, k.key_hash, k.created_by"
+            ).result_set
+            for k_team_id, k_id, stored_hash, k_created_by in key_result:
+                if verify_api_key(token, stored_hash):
+                    team_id, key_id = k_team_id, k_id
+                    created_by = k_created_by
+                    break
         if team_id is None:
             await _audit_auth_failure(request, "invalid_key")
             raise HTTPException(status_code=401, detail="Invalid API key")
+        # #685: track last_used_at for key hygiene/rotation — write-through on
+        # every successful auth. The registry graph is small (teams × keys) and
+        # a single indexed SET on an already-fetched node adds negligible overhead.
+        # Best-effort only: a telemetry write must never gate authentication.
+        try:
+            sdk._get_registry().query(
+                "MATCH (k:APIKey {id: $id}) SET k.last_used_at = $now",
+                params={"id": key_id, "now": datetime.now(timezone.utc).isoformat()},
+            )
+        except Exception:
+            pass
+        # #528: activation telemetry — first successful API auth per team.
+        # Dedup is in-process + thread-safe (single-worker caveat noted in
+        # tortoise/analytics.py); distinct_id is the key creator's user UUID
+        # (joins web + server funnels), with team_id fallback for legacy/
+        # bootstrap keys that predate created_by.
+        if first_api_call_pending(team_id):
+            await asyncio.to_thread(
+                first_api_call,
+                created_by or team_id, team_id, request.url.path, request.method,
+            )
         # #329: fetch quota limits in the SAME fetch as tier (one round-trip;
         # mirrors quota.resolve_team_limits so REST and MCP see identical limits).
         team = sdk._get_registry().query(
@@ -559,20 +765,19 @@ async def get_current_team(request: Request) -> dict:
             tier, mu, mg, mp, mak, ms = row
         else:
             tier, mu, mg, mp, mak, ms = ("free", None, None, None, None, None)
-        from tortoise.quota import DEFAULT_MAX_API_KEYS, DEFAULT_MAX_POINTS, DEFAULT_MAX_SESSIONS
+        from tortoise.pricing import tier_limits
         request.state.team_id = team_id
         request.state.tier = tier or "free"
-        # max_teams removed: multi-team is a USER capability, not a tier field
-        # (per-team billing; tier limits come from pricing.json)
-        from tortoise.pricing import tier_limits
         lim = tier_limits(tier or "free")
         # max_teams removed: multi-team is a USER capability, not a tier field
         # (per-team billing; tier limits come from pricing.json)
         return {"team_id": team_id, "key_id": key_id, "tier": tier or "free",
-                "max_users": mu if mu is not None else (lim["max_users_per_team"] or 1),
+                # max_users: preserve None from pricing (Team tier = unlimited)
+                "max_users": mu if mu is not None else lim["max_users_per_team"],
                 "max_graphs": mg if mg is not None else lim["max_graphs_per_team"],
-                "max_points": int(mp) if mp is not None else DEFAULT_MAX_POINTS,
-                "max_api_keys": int(mak) if mak is not None else DEFAULT_MAX_API_KEYS,
+                # points counter counts graph nodes → max_graph_nodes (#310 GAP-B)
+                "max_points": int(mp) if mp is not None else lim["max_graph_nodes"],
+                "max_api_keys": int(mak) if mak is not None else lim["max_api_keys"],
                 "max_sessions": int(ms) if ms is not None else DEFAULT_MAX_SESSIONS}
     except HTTPException:
         raise
@@ -583,13 +788,25 @@ async def get_current_team(request: Request) -> dict:
 def _check_team_limit(team: dict, resource: str) -> None:
     """Enforce per-team limits. Raises 402 (payment required) when at capacity.
 
-    resource: 'points' | 'api_keys' | 'sessions'
+    resource: 'points' | 'api_keys' | 'sessions' | 'users' | 'graphs'
 
-    #329: delegates to the shared fail-closed quota helper — counting errors
-    now surface as 500 (QuotaCheckError) instead of silently passing, and the
-    limits dict is the authenticated team dict (resolved once by
-    get_current_team), matching MCP semantics.
-    """
+    Fail-closed decision (#686)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    Counting errors raise HTTP 500 (QuotaCheckError) — never a silent pass.
+
+    Rationale:
+    - Money at stake: fail-open lets free teams exceed paid limits during a DB
+      outage — direct revenue risk.
+    - Fail-closed is the secure default: when you can't verify, don't grant.
+    - Customer harm is bounded: a DB outage that breaks count queries typically
+      also breaks the actual write (same store), so we're failing fast.
+    - Alerting mitigates ops risk: every QuotaCheckError is logged at ERROR
+      level with team_id and resource, visible in production dashboards.
+
+    #329: delegates to the shared fail-closed quota helper.
+    #683: the limits dict is the authenticated team dict (resolved once by
+    get_current_team), matching MCP semantics — includes max_users/max_graphs.
+    #686: explicit decision documentation + ERROR-level alerting on failures.    """
     team_id = team.get("team_id")
     if not team_id:
         return  # internal/no-team context — skip
@@ -600,8 +817,26 @@ def _check_team_limit(team: dict, resource: str) -> None:
     except QuotaExceededError as e:
         raise HTTPException(status_code=402, detail=str(e))
     except QuotaCheckError as e:
+        # quota._count_resource already logged at ERROR level (#686);
+        # avoid double-logging — this site only records the HTTP context.
+        _logger.debug(
+            "quota check failed (fail-closed): team=%s resource=%s error=%s",
+            team_id, resource, str(e),
+        )
         raise HTTPException(status_code=500, detail=f"Quota check failed: {e}")
 
+
+def _record_write_op(team: dict) -> None:
+    """Best-effort write-op metering for overage billing (#681).
+
+    Call AFTER a successful write. Non-fatal — metering failures are logged
+    and swallowed; they never block the caller.
+    """
+    try:
+        from tortoise.metering import record_write_ops
+        record_write_ops(team.get("team_id", ""), tier=team.get("tier"))
+    except Exception:
+        pass  # best-effort — never block the write path
 
 
 
@@ -649,6 +884,26 @@ class TeamInfoResponse(BaseModel):
     max_graphs: int | None
     max_teams: int | None
     point_count: int = 0
+    write_ops_used: int = 0
+    write_ops_limit: int = 0
+    write_ops_period: str = ""
+    overage_eligible: bool = False
+    overage_cost_usd: float | None = None
+
+
+# ── Billing: Checkout + Portal request/response models (#310, Task 5) ───────
+
+class CheckoutRequest(BaseModel):
+    """POST /v1/billing/checkout body — the price id is the only input."""
+    price_id: str = Field(..., min_length=1, max_length=128)
+
+
+class CheckoutResponse(BaseModel):
+    checkout_url: str
+
+
+class PortalResponse(BaseModel):
+    portal_url: str
 
 
 class CreateKeyResponse(BaseModel):
@@ -694,6 +949,14 @@ class RegisterResponse(BaseModel):
 
 class OnboardingStateResponse(BaseModel):
     onboarding: dict
+
+
+# ── Backups: Pydantic Models (#305) ──────────────────────────────
+
+class BackupRestoreRequest(BaseModel):
+    """Owner-initiated restore — requires explicit confirm (destructive swap)."""
+    backup_key: str = Field(..., min_length=1)
+    confirm: bool = False
 
 
 class OnboardingStatePatchRequest(BaseModel):
@@ -747,6 +1010,13 @@ async def _check_register_rate_limit(request: Request) -> None:
                 headers={"Retry-After": "3600"},
             )
         bucket.append(now)
+        # #750.2: bound memory growth — when the dict exceeds 10k IPs, drop
+        # buckets whose entries are all older than the 1h window (dead weight).
+        if len(_register_buckets) > 10_000:
+            stale = [ip for ip, b in _register_buckets.items()
+                     if not any(now - t < 3600 for t in b)]
+            for ip in stale:
+                del _register_buckets[ip]
 
 
 # ── Endpoints ─────────────────────────────────────────────────────
@@ -776,6 +1046,9 @@ async def create_point(body: CreatePointRequest, request: Request, team: dict = 
         request, team["team_id"], "point_create",
         resource_type="point", resource_id=result.get("id"),
     )
+    # Metering (#681): best-effort write-op count for overage billing.
+    _record_write_op(team)
+
 
     return {
         "id": result["id"],
@@ -784,6 +1057,37 @@ async def create_point(body: CreatePointRequest, request: Request, team: dict = 
         "created_at": result.get("createdAt", result.get("created_at", "")),
     }
 
+
+@app.get("/v1/events")
+async def events_poll(
+    after: str | None = None,
+    types: str | None = None,
+    limit: int = Query(100, ge=1, le=1000),
+    team: dict = Depends(get_current_team),
+):
+    """Poll graph/claim events after an opaque cursor (at-least-once contract).
+
+    Clients must be idempotent on replay. Expired cursor → 410 (replay from
+    tail); malformed cursor → 400. Team scoping comes from auth + the SDK
+    namespace — never client input.
+    """
+    sdk = _make_sdk(namespace=team["team_id"])
+    type_list = [t.strip() for t in (types or "").split(",") if t.strip()]
+    try:
+        result = sdk.events_poll(after=after, types=type_list or None, limit=limit)
+    except ValueError as e:
+        msg = str(e)
+        if "cursor expired" in msg:
+            raise HTTPException(
+                status_code=410,
+                detail="cursor expired — replay from tail (after= omitted)",
+            )
+        if "invalid cursor" in msg:
+            raise HTTPException(status_code=400, detail="invalid cursor")
+        if "unknown event type" in msg:
+            raise HTTPException(status_code=400, detail=msg)
+        raise HTTPException(status_code=400, detail=str(e))
+    return result
 
 @app.get("/v1/points")
 async def list_points(
@@ -801,6 +1105,11 @@ async def list_points(
     sdk = _make_sdk(namespace=team["team_id"])
     proj = sdk._get_proj()
     conditions = ["(n.is_operator IS NULL OR n.is_operator = false)"]
+    # #432 Task 2: retracted points (status='retracted') are EXCLUDED from the
+    # default listing surface — tombstone contract: retrievable by id via
+    # GET /v1/points/{id}, not by list. No include param on REST v1 (surface
+    # minimal).
+    conditions.append("(n.status IS NULL OR n.status <> 'retracted')")
     params: dict = {"limit": limit}
     if kind:
         conditions.append("n.pointKind = $kind")
@@ -811,6 +1120,8 @@ async def list_points(
         params["tag"] = tag
     else:
         tag_clause = ""
+    # #689: exclude retracted (tombstoned) points from the list endpoint.
+    conditions.append("(n.status IS NULL OR n.status <> 'retracted')")
     query = (
         f"MATCH (n:Point){tag_clause} WHERE "
         + " AND ".join(conditions)
@@ -832,7 +1143,9 @@ async def get_point(point_id: str, team: dict = Depends(get_current_team)):
     sdk = _make_sdk(namespace=team["team_id"])
     proj = sdk._get_proj()
     rows = proj.g.query(
-        "MATCH (p:Point {id: $id}) RETURN properties(p)",
+        "MATCH (p:Point {id: $id}) "
+        "WHERE p.status IS NULL OR p.status <> 'retracted' "
+        "RETURN properties(p)",
         params={"id": point_id},
     ).result_set
     if not rows:
@@ -923,6 +1236,41 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), team: dict = Depe
     return {"results": out, "count": len(out)}
 
 
+@app.get("/v1/topics/{topic}/summary")
+async def topic_summary(
+    topic: str,
+    max_seeds: int = Query(50, ge=1, le=200),
+    max_hops: int = Query(1, ge=0, le=3),
+    include_relationships: bool = Query(True),
+    team: dict = Depends(get_current_team),
+):
+    """Epistemic topic summarization — settled vs contested structure (#592).
+
+    GET /v1/topics/{topic}/summary
+
+    Returns the epistemic structure for a topic: significant/settled claims,
+    contested claims, disputed NAND pairs, and argument topology.
+
+    Classification uses EP posterior variance (persisted ep_alpha/ep_beta):
+    - significant: confidence_mean >= 0.7 AND variance < 0.01
+    - contested: variance > 0.04 (destabilized posterior)
+    - disputed pairs: NAND-connected where both have variance > 0.02
+    """
+    sdk = _make_sdk(namespace=team["team_id"])
+    try:
+        result = sdk.topic_summarize(
+            topic,
+            max_seeds=max_seeds,
+            max_hops=max_hops,
+            include_relationships=include_relationships,
+        )
+        return result
+    except Exception:
+        import logging
+        logging.getLogger("tortoise.api").exception("topic summary failed")
+        raise HTTPException(status_code=500, detail="Topic summary failed")
+
+
 @app.get("/v1/team", response_model=TeamInfoResponse)
 async def team_info(team: dict = Depends(get_current_team)):
     """Get current team info: tier, usage, limits."""
@@ -937,13 +1285,25 @@ async def team_info(team: dict = Depends(get_current_team)):
         logging.getLogger("tortoise.api").exception("team_info failed")
         raise HTTPException(status_code=500, detail="Internal server error")
 
+    # Metering (#681): fetch write-op usage for the current billing period.
+    from tortoise.metering import get_current_usage
+    usage = get_current_usage(team["team_id"])
+
     return TeamInfoResponse(
         team_id=team["team_id"],
         tier=team["tier"],
         max_users=team["max_users"],
         max_graphs=team["max_graphs"],
-        max_teams=team["max_teams"],
+        # max_teams removed (D1): multi-team is a user capability, not a tier field.
+        # TeamInfoResponse.max_teams is optional — omit rather than KeyError (pre-existing
+        # 500 on every /v1/team call, exposed by the zero-email signup verification).
+        max_teams=None,
         point_count=point_count,
+        write_ops_used=usage["write_ops_used"],
+        write_ops_limit=usage["write_ops_limit"],
+        write_ops_period=usage["period"],
+        overage_eligible=usage["overage_eligible"],
+        overage_cost_usd=usage["overage_cost_usd"],
     )
 
 
@@ -1002,7 +1362,7 @@ async def register_user(request: Request, response: Response):
             CREATE (t:Team {
                 id: $id, name: $name, email: $email, tier: 'free',
                 created_at: $now, backup_enabled: false,
-                max_users: 1, max_teams: 1, max_graphs: 1,
+                max_users: 1, max_graphs: 1,
                 onboarding_state: $onboarding_state
             })
             """,
@@ -1274,6 +1634,22 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
         resource_type="api_key", resource_id=kid,
     )
 
+    # #528 analytics — actor user id from the team's Membership graph when
+    # resolvable (key creation is rare; one extra registry lookup), else a
+    # team_id-prefixed id (request.state only carries team_id here).
+    try:
+        actor = sdk._get_registry().query(
+            "MATCH (m:Membership {team_id:$tid}) RETURN m.user_id LIMIT 1",
+            params={"tid": team["team_id"]},
+        ).result_set
+        distinct_id = actor[0][0] if actor else f"team:{team['team_id']}"
+    except Exception:
+        distinct_id = f"team:{team['team_id']}"
+    await asyncio.to_thread(
+        api_key_created,
+        distinct_id, team["team_id"], key_prefix, kid, "team_keys",
+    )
+
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
 
     return {
@@ -1335,7 +1711,7 @@ async def revoke_api_key(key_id: str, team: dict = Depends(get_current_team)):
             raise HTTPException(status_code=403, detail="Not your API key")
         if rows[0][1] is not None:
             return {"revoked": True, "already": True, "key_id": key_id}
-        from datetime import datetime, timezone
+        from datetime import datetime, timedelta, timezone
         now = datetime.now(timezone.utc).isoformat()
         sdk._get_registry().query(
             "MATCH (k:APIKey {id: $id}) SET k.revoked_at = $now",
@@ -1365,6 +1741,55 @@ class SessionRequest(BaseModel):
     metadata: dict | None = None
 
 
+# ── Session extraction mode (#312 delta 1) ─────────────────────────────────
+
+_SESSION_EXTRACTION_MODES = ("auto", "required", "regex")
+
+def _llm_provider_keys() -> tuple[str, ...]:
+    """Env keys for LLM providers the hosted extraction path ACTUALLY consumes.
+
+    Derived from the real provider registries (``tortoise.ingest._PROVIDERS`` /
+    ``tortoise.analyze._LLM_PROVIDERS``) so availability always matches what
+    the code can really use. ANTHROPIC_API_KEY is deliberately NOT included —
+    no tortoise provider reads it, so its presence from unrelated host tooling
+    would fail the ``required`` gate open (degrading silently to regex) #722.
+    """
+    from tortoise.analyze import _LLM_PROVIDERS
+    from tortoise.ingest import _PROVIDERS
+
+    keys = {key for _url, key in _PROVIDERS.values() if key}
+    keys.update(_LLM_PROVIDERS)
+    return tuple(sorted(keys))
+
+
+# Provider env keys the hosted deployment can use for LLM-grade extraction.
+# The provider/model choice is a product decision (deploy-time) — this module
+# only reports availability so `auto`/`required` modes behave correctly.
+_LLM_PROVIDER_KEYS: tuple[str, ...] = _llm_provider_keys()
+
+
+def _session_extraction_mode() -> str:
+    """Resolve TORTOISE_SESSION_EXTRACTION (auto|required|regex).
+
+    auto (default): LLM extraction when a provider key is configured, else
+        the deterministic regex path (capture always works).
+    required: fail-closed — capture errors when no LLM provider is configured.
+    regex: always the deterministic regex path (never calls an LLM).
+    Unknown values fall back to ``auto`` with a warning (never break capture).
+    """
+    import logging
+    raw = os.environ.get("TORTOISE_SESSION_EXTRACTION", "auto").strip().lower()
+    if raw in _SESSION_EXTRACTION_MODES:
+        return raw
+    logging.getLogger("tortoise.api").warning(
+        "unknown TORTOISE_SESSION_EXTRACTION=%r — falling back to 'auto'", raw)
+    return "auto"
+
+
+def _llm_provider_available() -> bool:
+    return any(os.environ.get(k) for k in _LLM_PROVIDER_KEYS)
+
+
 @app.post("/v1/sessions")
 async def capture_session(body: SessionRequest, request: Request, team: dict = Depends(get_current_team)):
     """Capture an agent session and extract turns as episodic Points.
@@ -1377,11 +1802,23 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
     points quota → 402; per-turn extraction cap (in the loop).
     """
     import uuid, re
-    from datetime import datetime, timezone
+    from datetime import datetime, timedelta, timezone
     from tortoise.quota import (
         MAX_EXTRACTIONS_PER_TURN, MAX_SESSION_TURNS,
         QuotaCheckError, QuotaExceededError, enforce_team_limit,
     )
+
+    # #312 delta 1: extraction mode semantics. `required` fails closed when
+    # no LLM provider is configured; `auto`/`regex` keep the deterministic
+    # regex path as the always-works baseline (LLM upgrade lands with the
+    # provider decision — deploy-time).
+    mode = _session_extraction_mode()
+    if mode == "required" and not _llm_provider_available():
+        raise HTTPException(
+            status_code=503,
+            detail="Session extraction mode 'required' but no LLM provider key is "
+                   f"configured (set {' / '.join(_LLM_PROVIDER_KEYS)}).",
+        )
 
     if len(body.conversation) > MAX_SESSION_TURNS:
         raise HTTPException(
@@ -1435,6 +1872,14 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
 
     extracted = []
 
+    # NOTE: this extraction loop is duplicated from tortoise/sdk.py
+    # capture_session. Divergences: hosted adds quota/auth bounds + a
+    # pre-write estimate; the SDK variant adds a `speaker` property on turn
+    # Points (delta 5) that hosted does not write. Hosted rejects turn content
+    # > 5000 chars with 422 (Pydantic field_validator failure), the SDK
+    # truncates to 5000 and extracts from the truncated text — extraction
+    # inputs align (both loops see <= 5000 chars); role=None stays None in
+    # hosted, the SDK normalizes it to "unknown". Keep the two in sync.
     for i, turn in enumerate(body.conversation):
         role = turn.get("role", "unknown")
         content = turn.get("content", "")
@@ -1526,19 +1971,114 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
         request, team["team_id"], "session_capture",
         resource_type="session", resource_id=session_id,
     )
+    # Metering (#681): best-effort write-op count for overage billing.
+    _record_write_op(team)
 
-    return {"session_id": session_id, "turns": len(body.conversation), "extracted": len(extracted), "points": extracted}
+    # #722: report the EFFECTIVE method actually used, not the configured
+    # policy. The extraction loop above is the deterministic regex path — the
+    # loop never branches on mode today, so `auto`/`required` with a key would
+    # otherwise report LLM-intent while regex ran. Mode branching (LLM-grade
+    # extraction) is pending (#312 delta 2); until it lands, reflect what ran.
+    effective_mode = "regex"
+    return {"session_id": session_id, "turns": len(body.conversation),
+            "extracted": len(extracted), "points": extracted,
+            "extraction_mode": effective_mode}
 
 
 @app.get("/v1/sessions")
 async def list_sessions(team: dict = Depends(get_current_team)):
-    """List captured sessions."""
+    """List captured sessions with turn and extracted point counts (#714)."""
     sdk = _make_sdk(namespace=team["team_id"])
     proj = sdk._get_proj()
     rows = proj.g.query(
-        "MATCH (s:Session) RETURN s.id, s.created_at, s.turn_count ORDER BY s.created_at DESC LIMIT 50"
+        "MATCH (s:Session) "
+        "OPTIONAL MATCH (s)-[:CONTAINS]->(p:Point) "
+        "WHERE p.pointKind IN ['decision', 'statement'] "
+        "RETURN s.id, s.created_at, s.turn_count, count(p) "
+        "ORDER BY s.created_at DESC LIMIT 50"
     ).result_set
-    return {"sessions": [{"id": r[0], "created_at": r[1], "turns": r[2]} for r in rows]}
+    return {"sessions": [
+        {"id": r[0], "created_at": r[1], "turns": r[2], "extracted": r[3]}
+        for r in rows
+    ]}
+
+
+@app.get("/v1/sessions/{session_id}")
+async def get_session_detail(session_id: str, team: dict = Depends(get_current_team)):
+    """Get a single session with its conversation turns and extracted points (#714).
+
+    Returns turns (episodic Point nodes with pointKind='event', ordered by
+    turn index) and extracted decisions/claims (Point nodes linked via
+    CONTAINS, filtered to pointKind IN ['decision', 'statement']).
+    """
+    import re
+    sdk = _make_sdk(namespace=team["team_id"])
+    proj = sdk._get_proj()
+
+    # Session node
+    sess_rows = proj.g.query(
+        "MATCH (s:Session {id:$sid}) RETURN s.id, s.created_at, s.turn_count",
+        params={"sid": session_id},
+    ).result_set
+    if not sess_rows:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Extracted point count (decisions + claims)
+    ext_rows = proj.g.query(
+        "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
+        "WHERE p.pointKind IN ['decision', 'statement'] "
+        "RETURN count(p)",
+        params={"sid": session_id},
+    ).result_set
+    extracted_count = ext_rows[0][0] if ext_rows else 0
+
+    # Turn points (events) — ordered by turn index embedded in the id
+    turn_rows = proj.g.query(
+        "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point {pointKind:'event'}) "
+        "RETURN t.id, t.content, t.createdAt ORDER BY t.id",
+        params={"sid": session_id},
+    ).result_set
+    turns = []
+    for tr in turn_rows:
+        tid = tr[0]
+        content = tr[1] or ""
+        created_at = tr[2]
+        # Parse "[role] content" format — role is bracketed prefix
+        role_match = re.match(r'^\[([^\]]+)\]\s*', content)
+        role = role_match.group(1) if role_match else "unknown"
+        body = content[role_match.end():] if role_match else content
+        turns.append({
+            "id": tid,
+            "role": role,
+            "content": body,
+            "created_at": created_at,
+        })
+
+    # Extracted points (decisions + claims)
+    ext_points_rows = proj.g.query(
+        "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
+        "WHERE p.pointKind IN ['decision', 'statement'] "
+        "RETURN p.id, p.content, p.pointKind, p.createdAt "
+        "ORDER BY p.createdAt",
+        params={"sid": session_id},
+    ).result_set
+    extracted = []
+    for er in ext_points_rows:
+        extracted.append({
+            "id": er[0],
+            "content": er[1] or "",
+            "kind": er[2],
+            "created_at": er[3],
+        })
+
+    return {
+        "id": sess_rows[0][0],
+        "created_at": sess_rows[0][1],
+        "turns": sess_rows[0][2],
+        "extracted": extracted_count,
+        "turn_points": turns,
+        "extracted_points": extracted,
+    }
 
 
 # ── Session endpoints (E2/E5/E6/E7) — JWT-authed, JWKS-verified (D1 #568) ──
@@ -1581,6 +2121,37 @@ async def _team_node(team_id: str) -> dict | None:
     return rows[0][0]
 
 
+def _team_limits_from_node(team_node: dict) -> dict:
+    """Convert raw Team node properties → limits dict for _check_team_limit.
+
+    Used by endpoints that fetch the Team node directly (create_graph,
+    invite_to_team) rather than via get_current_team. Falls back to
+    tier_limits from pricing.json when a stored value is None/missing.
+    """
+    from tortoise.pricing import tier_limits
+    from tortoise.quota import DEFAULT_MAX_SESSIONS
+    tier = team_node.get("tier", "free")
+    lim = tier_limits(tier)
+    # Fetch each field; use `is None` to preserve None (unlimited) and explicit 0.
+    mu = team_node.get("max_users")
+    mg = team_node.get("max_graphs")
+    mp = team_node.get("max_points")
+    mak = team_node.get("max_api_keys")
+    ms = team_node.get("max_sessions")
+    return {
+        "team_id": team_node["id"],
+        "tier": tier,
+        # max_users/max_graphs: preserve None (unlimited, Team tier) and
+        # fall back to tier_limits when missing (also None for Team tier).
+        "max_users": mu if mu is not None else lim["max_users_per_team"],
+        "max_graphs": mg if mg is not None else lim["max_graphs_per_team"],
+        # points counter counts graph nodes → max_graph_nodes (#310 GAP-B)
+        "max_points": mp if mp is not None else lim["max_graph_nodes"],
+        "max_api_keys": mak if mak is not None else lim["max_api_keys"],
+        "max_sessions": ms if ms is not None else DEFAULT_MAX_SESSIONS,
+    }
+
+
 @app.get("/v1/teams")
 async def list_my_teams(user: dict = Depends(get_current_user)):
     """E6 — list my memberships (team switcher). Placeholder rows excluded."""
@@ -1613,19 +2184,25 @@ async def create_team(body: dict, user: dict = Depends(get_current_user)):
     if len(name) > 64:
         raise HTTPException(status_code=422, detail="Team name must be ≤ 64 characters")
     import re as _re
-    if not _re.match(r"^[a-zA-Z0-9][a-zA-Z0-9 _-]{0,63}$", name):
+    # #750.6: align with sdk.team_create — spaces are rejected there, so accept
+    # them here too (stricter wins; surface as 422 not a 500 ControlPlaneError).
+    if not _re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$", name):
         raise HTTPException(status_code=422, detail="Invalid team name")
 
     sdk = _make_sdk(namespace="registry")
     reg = sdk._get_registry()
-    # Per-user team-creation rate limit (abuse posture) — not a tier block
+    # Per-user team-creation rate limit (abuse posture) — not a tier block.
+    # #743(b): the count was never checked, `since` was `now` (always 0), and
+    # membership_create never wrote `created_at` — all three fixed here.
     recent = reg.query(
         "MATCH (m:Membership {user_id:$uid, role:'owner'}) "
         "WHERE m.created_at > $since RETURN count(m)",
-        params={"uid": user["user_id"], "since": datetime.now(timezone.utc).isoformat()},
-    ).result_set
-    # (rate limiting via registry count is best-effort; a per-identity limiter
-    # is added in the abuse-posture work — see plan §8.3)
+        params={"uid": user["user_id"],
+                "since": (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()},
+    ).result_set[0][0]
+    if recent >= 3:
+        raise HTTPException(status_code=429,
+                            detail="Too many teams created — try again later")
 
     try:
         result = sdk.team_create(name)
@@ -1660,14 +2237,10 @@ async def create_graph(body: dict, user: dict = Depends(get_current_user)):
     team = await _team_node(team_id)
     if team is None:
         raise HTTPException(status_code=404, detail="Unknown team")
-    from tortoise.pricing import tier_limits
-    lim = tier_limits(team.get("tier", "free"))
-    max_graphs = lim["max_graphs_per_team"]
-    if max_graphs is not None:
-        sdk = _make_sdk(namespace="registry")
-        count = sdk.graph_count(team_id)
-        if count >= max_graphs:
-            raise HTTPException(status_code=402, detail="Graph limit reached — upgrade to add more graphs")
+
+    # #683: centralized graph-limit enforcement via fail-closed quota
+    limits = _team_limits_from_node(team)
+    _check_team_limit(limits, "graphs")
 
     sdk = _make_sdk(namespace="registry")
     g = sdk._graph_create(team_id, name, kind="custom")
@@ -1691,6 +2264,430 @@ async def list_graphs(team_id: str, user: dict = Depends(get_current_user)):
 
 
 
+# ── E3/E4/E8: invites + RBAC (Team tier, D7 #574) ──
+# Token-only accept in v1 (decision 1e); owner is NOT invitable (single-owner
+# model — invitable roles: admin, member). Free/Solo/Pro: invites disabled
+# (max_users=1 or invite path deferred to billing).
+
+async def _require_owner_admin(user_id: str, team_id: str) -> dict:
+    """Return the membership if the user is owner/admin in the team, else 403."""
+    sdk = _make_sdk(namespace="registry")
+    rows = sdk._get_registry().query(
+        "MATCH (m:Membership {user_id:$uid, team_id:$tid, status:'active'}) "
+        "RETURN m.role",
+        params={"uid": user_id, "tid": team_id},
+    ).result_set
+    if not rows or rows[0][0] not in ("owner", "admin"):
+        raise HTTPException(status_code=403, detail="Requires owner or admin role in team")
+    return {"team_id": team_id, "role": rows[0][0]}
+
+
+@app.post("/v1/invites")
+async def invite_to_team(body: dict, user: dict = Depends(get_current_user)):
+    """E3 — invite a user to the team (admin/member roles; Team tier)."""
+    team_id = (body or {}).get("team_id")
+    email = ((body or {}).get("email") or "").strip().lower()
+    role = (body or {}).get("role", "member")
+    if not team_id or not email or "@" not in email:
+        raise HTTPException(status_code=422, detail="team_id and valid email required")
+    if role not in ("admin", "member"):
+        raise HTTPException(status_code=422, detail="role must be 'admin' or 'member'")
+
+    await _require_owner_admin(user["user_id"], team_id)
+
+    sdk = _make_sdk(namespace="registry")
+    reg = sdk._get_registry()
+    team_row = reg.query(
+        "MATCH (t:Team {id:$id}) RETURN properties(t)",
+        params={"id": team_id},
+    ).result_set
+    if not team_row:
+        raise HTTPException(status_code=404, detail="Unknown team")
+    team_node = team_row[0][0]
+    tier = team_node.get("tier", "free")
+    if tier != "team":
+        raise HTTPException(status_code=402, detail="Invites require the Team tier")
+
+    # #683: max_users gate via centralized fail-closed quota (Team tier = unlimited)
+    limits = _team_limits_from_node(team_node)
+    _check_team_limit(limits, "users")
+
+    # Invitation node via SDK (token returned once); roles admin/member allowed here
+    import uuid as _uuid
+    from datetime import datetime, timedelta, timezone as _tz, timedelta
+    from tortoise.auth import hash_api_key as _hash
+
+    dup = reg.query(
+        "MATCH (i:Invitation {team_id:$tid, email:$email}) "
+        "WHERE i.accepted_at IS NULL AND (i.status IS NULL OR i.status <> 'revoked') RETURN count(i)",
+        params={"tid": team_id, "email": email},
+    ).result_set[0][0]
+    if dup:
+        raise HTTPException(status_code=409, detail="Pending invitation already exists for this email")
+
+    token = str(_uuid.uuid4())
+    token_hash = _hash(token)
+    iid = _short_id()
+    now = datetime.now(_tz.utc).isoformat()
+    expires_at = (datetime.now(_tz.utc) + timedelta(days=7)).isoformat()
+    reg.query(
+        "CREATE (i:Invitation {id:$id, team_id:$tid, email:$email, role:$role, "
+        "token_hash:$th, created_by:$cb, created_at:$now, expires_at:$exp, "
+        "accepted_at:null, status:'pending'})",
+        params={"id": iid, "tid": team_id, "email": email, "role": role,
+                "th": token_hash, "cb": user["user_id"], "now": now, "exp": expires_at},
+    )
+    # Also record the invitee row in team_memberships (status='invited') per plan §4.1
+    reg.query(
+        "MERGE (m:Membership {team_id:$tid, user_id:$fake}) "
+        "ON CREATE SET m.role=$role, m.status='invited', m.invited_email=$email, m.created_at=$now",
+        params={"tid": team_id, "fake": f"invite-{iid}", "role": role, "email": email, "now": now},
+    )
+    return {"invite_id": iid, "status": "invited", "token": token,
+            "expires_at": expires_at, "role": role}
+
+
+@app.post("/v1/invites/accept")
+async def accept_invite(body: dict, user: dict = Depends(get_current_user)):
+    """E4 — accept an invite by token (token-only in v1, decision 1e)."""
+    token = (body or {}).get("token")
+    if not token:
+        raise HTTPException(status_code=422, detail="token required")
+    from tortoise.auth import verify_api_key as _verify
+
+    sdk = _make_sdk(namespace="registry")
+    reg = sdk._get_registry()
+    rows = reg.query(
+        "MATCH (i:Invitation) WHERE i.accepted_at IS NULL "
+        "AND (i.status IS NULL OR i.status <> 'revoked') RETURN i.id, i.team_id, i.email, i.role, i.token_hash, i.expires_at",
+    ).result_set
+    invite = None
+    for iid, tid, email, role, th, exp in rows:
+        if _verify(token, th):
+            invite = {"id": iid, "team_id": tid, "email": email, "role": role, "expires_at": exp}
+            break
+    if not invite:
+        raise HTTPException(status_code=400, detail="Invalid or expired invite token")
+    if invite["expires_at"] and invite["expires_at"] < datetime.now(timezone.utc).isoformat():
+        raise HTTPException(status_code=400, detail="Invite token expired")
+
+    # Email match guard (invitee must be the invitee's account)
+    user_email = (user.get("email") or "").lower()
+    if user_email and user_email != invite["email"].lower():
+        raise HTTPException(status_code=403, detail="Invite email does not match this account")
+
+    # Check not already a member
+    existing = reg.query(
+        "MATCH (m:Membership {team_id:$tid, user_id:$uid, status:'active'}) RETURN count(m)",
+        params={"tid": invite["team_id"], "uid": user["user_id"]},
+    ).result_set[0][0]
+    if existing:
+        raise HTTPException(status_code=409, detail="Already a member of this team")
+
+    # Token single-use: mark accepted
+    reg.query(
+        "MATCH (i:Invitation {id:$id}) SET i.accepted_at = $now, i.accepted_by = $uid",
+        params={"id": invite["id"], "now": datetime.now(timezone.utc).isoformat(), "uid": user["user_id"]},
+    )
+    # Create the active membership (route through membership_create for the max_users gate)
+    try:
+        sdk.membership_create(invite["team_id"], user["user_id"], invite["role"])
+    except Exception as e:
+        raise HTTPException(status_code=402, detail=f"Could not join team: {e}")
+    return {"team_id": invite["team_id"], "role": invite["role"]}
+
+
+@app.get("/v1/teams/{team_id}/members")
+async def list_members(team_id: str, user: dict = Depends(get_current_user)):
+    """E8a — list team members."""
+    await _require_owner_admin(user["user_id"], team_id)
+    sdk = _make_sdk(namespace="registry")
+    rows = sdk._get_registry().query(
+        "MATCH (m:Membership {team_id:$tid}) WHERE m.status = 'active' OR m.status = 'invited' "
+        "RETURN m.user_id, m.role, m.status, m.invited_email",
+        params={"tid": team_id},
+    ).result_set
+    return [{"user_id": r[0], "role": r[1], "status": r[2],
+             "email": r[3] or ""} for r in rows]
+
+
+@app.delete("/v1/teams/{team_id}/members/{user_id}")
+async def remove_member(team_id: str, user_id: str, user: dict = Depends(get_current_user)):
+    """E8b — remove a member (owner cannot be removed)."""
+    membership = await _require_owner_admin(user["user_id"], team_id)
+    sdk = _make_sdk(namespace="registry")
+    target = sdk._get_registry().query(
+        "MATCH (m:Membership {team_id:$tid, user_id:$uid}) RETURN m.role",
+        params={"tid": team_id, "uid": user_id},
+    ).result_set
+    if not target:
+        raise HTTPException(status_code=404, detail="Member not found")
+    if target[0][0] == "owner":
+        raise HTTPException(status_code=409, detail="Owner cannot be removed")
+    sdk._get_registry().query(
+        "MATCH (m:Membership {team_id:$tid, user_id:$uid}) SET m.status='removed'",
+        params={"tid": team_id, "uid": user_id},
+    )
+    return {"status": "removed"}
+
+
+@app.patch("/v1/teams/{team_id}/members/{user_id}")
+async def change_member_role(team_id: str, user_id: str, body: dict, user: dict = Depends(get_current_user)):
+    """E8c — change a member's role (admin/member; owner cannot be demoted)."""
+    await _require_owner_admin(user["user_id"], team_id)
+    new_role = (body or {}).get("role")
+    if new_role not in ("admin", "member"):
+        raise HTTPException(status_code=422, detail="role must be 'admin' or 'member'")
+    sdk = _make_sdk(namespace="registry")
+    target = sdk._get_registry().query(
+        "MATCH (m:Membership {team_id:$tid, user_id:$uid}) RETURN m.role",
+        params={"tid": team_id, "uid": user_id},
+    ).result_set
+    if not target:
+        raise HTTPException(status_code=404, detail="Member not found")
+    if target[0][0] == "owner":
+        raise HTTPException(status_code=409, detail="Owner role cannot be changed")
+    sdk._get_registry().query(
+        "MATCH (m:Membership {team_id:$tid, user_id:$uid}) SET m.role=$role",
+        params={"tid": team_id, "uid": user_id, "role": new_role},
+    )
+    return {"user_id": user_id, "role": new_role}
+
+
+# ── Reconciliation sweep (D9 #576) — one job, three purposes ──
+# 1. Re-provision stuck-pending rows (idempotent keyed on user_id, plan §8.3-4)
+# 2. Sweep expired bootstrap keys (D3 #618 contract)
+# 3. Clean up never-confirmed accounts (A11)
+# Called by an external cron; internal-key protected.
+
+@app.post("/v1/internal/reconcile")
+async def reconcile(request: Request):
+    _check_internal(request)
+    from datetime import datetime, timedelta, timezone as _tz
+    sdk = _make_sdk(namespace="registry")
+    reg = sdk._get_registry()
+    now = datetime.now(_tz.utc).isoformat()
+    result = {"reprovisioned": 0, "expired_keys_swept": 0, "notes": []}
+
+    # 2. Sweep expired bootstrap keys
+    expired = reg.query(
+        "MATCH (k:APIKey) WHERE k.created_via = 'bootstrap' AND k.revoked_at IS NULL "
+        "AND k.expires_at IS NOT NULL AND k.expires_at < $now RETURN k.id",
+        params={"now": now},
+    ).result_set
+    for (kid,) in expired:
+        reg.query("MATCH (k:APIKey {id:$id}) SET k.revoked_at = $now",
+                  params={"id": kid, "now": now})
+        result["expired_keys_swept"] += 1
+
+    # #750.7: the former step-3 orphan sweep (created_via IS NULL keys) selected
+    # rows it never used — dead code AND a footgun (it matched every
+    # agent_signup/register key). Removed; the bootstrap-expiry sweep above is
+    # the correct expiry path.
+
+    result["notes"].append("bootstrap-expiry sweep complete")
+    return result
+
+
+# ── Zero-email agent signup (issue #663) ──
+# Public, rate-limited. An agent or a non-technical user can mint a working
+# tt_ key with ONE command — no email, no dashboard, no Supabase account.
+# Matches the Mem0/Hindsight self-onboarding pattern (competitor research).
+# Anonymous identity = device-generated UUID; per-identity rate limit.
+# The key is shown once; the anonymous identity can attach an email later
+# (future upgrade path).
+
+@app.post("/v1/agent/signup")
+async def agent_signup(request: Request):
+    """Mint a team + API key for an anonymous device (no email/dashboard)."""
+    # #741(a): identity is ALWAYS server-side — client-supplied identity and
+    # x-device-id are ignored (a client-chosen identity trivially bypasses the
+    # per-identity rate limit). The CLI generates its own identity server-side.
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    if not isinstance(body, dict):
+        body = {}
+    import uuid as _uuid
+    identity = f"anon-{_uuid.uuid4().hex[:12]}"
+
+    # Per-identity rate limit: max 3 signups per identity per hour
+    from datetime import datetime, timezone as _tz, timedelta
+    sdk = _make_sdk(namespace="registry")
+    reg = sdk._get_registry()
+    cutoff = (datetime.now(_tz.utc) - timedelta(hours=1)).isoformat()
+    recent = reg.query(
+        "MATCH (m:Membership {user_id:$uid}) WHERE m.created_at > $cutoff RETURN count(m)",
+        params={"uid": identity, "cutoff": cutoff},
+    ).result_set[0][0]
+    if recent >= 3:
+        raise HTTPException(status_code=429, detail="Too many signups from this device — try again later")
+
+    from tortoise.auth import hash_api_key as _hash
+    from tortoise.pricing import tier_limits
+
+    team_id = _uuid.uuid4().hex[:26]
+    team_name = f"agent-{team_id[:6]}"
+    api_key = f"tt_{_uuid.uuid4().hex}"
+    key_hash = _hash(api_key)
+    now = datetime.now(_tz.utc).isoformat()
+    graph_name = f"team_{team_id}"
+    lim = tier_limits("free")
+    # #750.8: .get() so a pricing.json key drift never 500s signup (pricing.py
+    # validates required keys at load; this is belt-and-braces).
+    mu = lim.get("max_users_per_team")
+    mg = lim.get("max_graphs_per_team")
+    mk = lim.get("max_api_keys")
+    ops = lim.get("included_write_ops_per_month")
+    nodes = lim.get("max_graph_nodes")
+
+    try:
+        # Team node
+        reg.query(
+            "CREATE (t:Team {id:$id, name:$name, tier:'free', created_at:$now, backup_enabled:false, "
+            "max_users:$mu, max_graphs:$mg, max_api_keys:$mk, ops_allowance:$ops, graph_size_cap:$nodes})",
+            params={"id": team_id, "name": team_name, "now": now,
+                    "mu": mu, "mg": mg, "mk": mk, "ops": ops, "nodes": nodes},
+        )
+        # APIKey node
+        kid = _short_id()
+        reg.query(
+            "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, key_prefix:$kp, created_by:$cb, created_at:$now})",
+            params={"id": kid, "tid": team_id, "kh": key_hash, "kp": api_key[:10], "cb": identity, "now": now},
+        )
+        # Anonymous membership (owner)
+        reg.query(
+            "CREATE (m:Membership {team_id:$tid, user_id:$uid, role:'owner', status:'active', created_at:$now})",
+            params={"tid": team_id, "uid": identity, "now": now},
+        )
+        # Default graph node
+        sdk._graph_create(team_id, "default", kind="default", namespace=graph_name)
+
+        await _async_audit(request, team_id, "agent_signup", resource_type="team", resource_id=team_id)
+    except HTTPException:
+        raise
+    except Exception:
+        # #741(c): rollback on partial failure — mirror register_user: DETACH
+        # DELETE Team + APIKey + Membership, drop the graph namespace.
+        reg.query("MATCH (t:Team {id:$id}) DETACH DELETE t", params={"id": team_id})
+        reg.query("MATCH (k:APIKey {team_id:$id}) DETACH DELETE k", params={"id": team_id})
+        reg.query("MATCH (m:Membership {team_id:$id}) DETACH DELETE m", params={"id": team_id})
+        try:
+            sdk._get_proj().db.select_graph(graph_name).delete()
+        except Exception:
+            pass
+        raise HTTPException(status_code=500, detail="Agent signup failed")
+
+    return {"key": api_key, "team_id": team_id, "team_name": team_name, "graph_name": graph_name,
+            "identity": identity, "tier": "free"}
+
+
+@app.post("/v1/session/key")
+async def session_key(body: dict, request: Request, user: dict = Depends(get_current_user)):
+    """E1 — session-scoped key mint (the #518 chicken-and-egg fix).
+
+    A session-authenticated user with NO valid key can mint a tt_ key here —
+    no pre-existing key required. Two purposes (plan §6.2 E1):
+    - bootstrap: 24h ephemeral, cap-EXEMPT (R13), 3-active backstop (dashboard auth)
+    - recovery: persistent (no expiry), revocable, counts against max_api_keys;
+      at cap, auto-revokes the oldest orphaned key so recovery never dead-ends.
+    """
+    import uuid as _uuid
+    from datetime import datetime, timedelta, timezone as _tz, timedelta
+    from tortoise.auth import hash_api_key as _hash
+    from tortoise.pricing import tier_limits
+
+    purpose = (body or {}).get("purpose", "bootstrap")
+    if purpose not in ("bootstrap", "recovery"):
+        raise HTTPException(status_code=422, detail="purpose must be 'bootstrap' or 'recovery'")
+
+    sdk = _make_sdk(namespace="registry")
+    reg = sdk._get_registry()
+    user_id = user["user_id"]
+
+    memberships = reg.query(
+        "MATCH (m:Membership {user_id:$uid, status:'active'}) "
+        "WHERE m.team_id <> '' RETURN m.team_id, m.role",
+        params={"uid": user_id},
+    ).result_set
+    if not memberships:
+        raise HTTPException(status_code=403, detail="No team membership — create a team first")
+    if len(memberships) > 1:
+        tid = (body or {}).get("team_id")
+        if not tid:
+            raise HTTPException(status_code=400, detail="team_id required (multiple memberships)")
+    else:
+        tid = memberships[0][0]
+
+    membership = reg.query(
+        "MATCH (m:Membership {user_id:$uid, team_id:$tid, status:'active'}) RETURN m.role",
+        params={"uid": user_id, "tid": tid},
+    ).result_set
+    if not membership:
+        raise HTTPException(status_code=403, detail="No membership in team")
+
+    team_row = reg.query(
+        "MATCH (t:Team {id:$id}) RETURN t.tier", params={"id": tid},
+    ).result_set
+    tier = team_row[0][0] if team_row else "free"
+
+    api_key = f"tt_{_uuid.uuid4().hex}"
+    key_hash = _hash(api_key)
+    kid = _short_id()
+    now = datetime.now(_tz.utc).isoformat()
+
+    if purpose == "bootstrap":
+        active_boot = reg.query(
+            "MATCH (k:APIKey {team_id:$tid, created_via:'bootstrap', created_by:$uid}) "
+            "WHERE k.revoked_at IS NULL AND (k.expires_at IS NULL OR k.expires_at > $now) "
+            "RETURN count(k)",
+            params={"tid": tid, "uid": user_id, "now": now},
+        ).result_set[0][0]
+        if active_boot >= 3:
+            raise HTTPException(status_code=429, detail="Too many active session keys — wait for expiry")
+        expires_at = (datetime.now(_tz.utc) + timedelta(hours=24)).isoformat()
+        created_via = "bootstrap"
+    else:
+        lim = tier_limits(tier)
+        # #750.8: .get() so a pricing.json key drift never 500s the mint
+        # (pricing.py validates required keys at load; belt-and-braces).
+        max_keys = lim.get("max_api_keys")
+        active_keys = reg.query(
+            "MATCH (k:APIKey {team_id:$tid}) WHERE k.revoked_at IS NULL "
+            "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') RETURN count(k)",
+            params={"tid": tid},
+        ).result_set[0][0]
+        if max_keys is not None and active_keys >= max_keys:
+            # #750.10: never auto-revoke a key the current user created
+            # (created_by = their user_id) — recovery must not dead-end by
+            # killing the user's own session key. Oldest OTHER key wins.
+            oldest = reg.query(
+                "MATCH (k:APIKey {team_id:$tid}) WHERE k.revoked_at IS NULL "
+                "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') "
+                "AND k.created_by <> $uid "
+                "RETURN k.id ORDER BY k.created_at ASC LIMIT 1",
+                params={"tid": tid, "uid": user_id},
+            ).result_set
+            if oldest:
+                reg.query(
+                    "MATCH (k:APIKey {id:$id}) SET k.revoked_at = $now",
+                    params={"id": oldest[0][0], "now": now},
+                )
+            else:
+                raise HTTPException(status_code=402, detail="Key limit reached — revoke an existing key")
+        expires_at = None
+        created_via = "recovery"
+
+    reg.query(
+        "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, key_prefix:$kp, "
+        "created_by:$cb, created_at:$now, revoked_at:null, expires_at:$exp, created_via:$cv})",
+        params={"id": kid, "tid": tid, "kh": key_hash, "kp": api_key[:10],
+                "cb": user_id, "now": now, "exp": expires_at, "cv": created_via},
+    )
+    await _async_audit(request, tid, "api_key_mint", resource_type="api_key", resource_id=kid)
+
+    return {"key": api_key, "key_prefix": api_key[:10], "expires_at": expires_at,
+            "team_id": tid, "purpose": purpose}
+
+
 @app.get("/v1/context")
 async def session_context(team: dict = Depends(get_current_team)):
     """Memory digest for agent session-start hooks (tortoise context CLI).
@@ -1701,8 +2698,10 @@ async def session_context(team: dict = Depends(get_current_team)):
     sdk = _make_sdk(namespace=team["team_id"])
     try:
         return sdk.session_context()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Context unavailable: {e}")
+    except Exception:
+        # #750.5: never leak internals to the client — log, return generic.
+        logging.getLogger("tortoise.api").exception("session_context failed")
+        raise HTTPException(status_code=500, detail="Context unavailable")
 
 
 
@@ -2144,8 +3143,873 @@ async def index_job_status(job_id: str, team: dict = Depends(get_current_team)):
     return {"job_id": job_id, **job}
 
 
+# ── Backups: endpoints (#305) ────────────────────────────────────
+
+
+def _backup_storage() -> R2Storage:
+    """R2 storage from env (R2_ACCOUNT_ID / R2_ACCESS_KEY_ID / ...)."""
+    return R2Storage()
+
+
+def _require_backup_tier(team: dict) -> None:
+    """Backups gated on pricing.json daily_backups feature flag (#656).
+
+    The allowlist is derived from product/pricing.json (NOT hardcoded) so
+    the gate can never drift from the canonical pricing source.
+    """
+    from tortoise.pricing import daily_backups_enabled
+
+    tier = team.get("tier")
+    if not daily_backups_enabled(tier):
+        raise HTTPException(
+            status_code=402,
+            detail="Backups are a Pro feature — upgrade to enable daily backups",
+        )
+
+
+@app.get("/backups")
+async def backups_list(team: dict = Depends(get_current_team)):
+    """List this team's backups (newest first) with timestamps + node counts."""
+    team_id = team.get("team_id")
+    if not team_id:
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+    try:
+        return {"backups": await asyncio.to_thread(list_backups, _backup_storage(), team_id)}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"List rejected: {e}")
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=f"Backup storage unavailable: {e}")
+
+
+def _registry_sdk() -> TortoiseSDK:
+    """Registry-namespaced SDK — Team/Membership nodes live in the canonical
+    registry_control_plane graph, reached only via namespace='registry' (the
+    same resolution every other registry op in this file uses)."""
+    return _make_sdk(namespace="registry")
+
+
+# Per-team restore serialization: the swap (delete live → copy temp) must not
+# interleave with a concurrent same-team restore — a second restore landing in
+# the delete→copy window would recreate the live key and fail the copy, or
+# defeat the empty-backup guard's TOCTOU.
+_BACKUP_RESTORE_LOCKS: dict[str, asyncio.Lock] = {}
+_BACKUP_LOCKS_GUARD = asyncio.Lock()
+
+
+async def _team_restore_lock(team_id: str) -> asyncio.Lock:
+    async with _BACKUP_LOCKS_GUARD:
+        return _BACKUP_RESTORE_LOCKS.setdefault(team_id, asyncio.Lock())
+
+
+@app.post("/backups", status_code=201)
+async def backups_create(team: dict = Depends(get_current_team)):
+    """Trigger an on-demand backup of the team graph (Pro tier)."""
+    team_id = team.get("team_id")
+    if not team_id:
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+    _require_backup_tier(team)
+    graph_name = f"team_{team_id}"
+    sdk = None
+    registry_sdk = None
+    try:
+        sdk = _make_sdk(namespace=team_id)
+        registry_sdk = _registry_sdk()
+        storage = _backup_storage()
+        manifest = await asyncio.to_thread(
+            create_backup, sdk._get_proj(), registry_sdk._get_registry(), storage,
+            team_id=team_id, graph_name=graph_name,
+        )
+        # Retention: prune after a successful backup so storage stays bounded
+        # (best-effort — a prune failure must not fail the backup).
+        try:
+            await asyncio.to_thread(prune_backups, storage, team_id)
+        except Exception as e:
+            _logger.warning("prune failed for team %s: %s", team_id, e)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Backup rejected: {e}")
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=f"Backup failed: {e}")
+    except Exception as e:
+        _logger.exception("backup failed for team %s", team_id)
+        raise HTTPException(status_code=500, detail=f"Backup failed: {e}")
+    finally:
+        if sdk is not None:
+            sdk.close()
+        if registry_sdk is not None:
+            registry_sdk.close()
+    return manifest
+
+
+@app.post("/backups/restore")
+async def backups_restore(body: BackupRestoreRequest, team: dict = Depends(get_current_team)):
+    """Restore the team graph from a backup (Pro tier; confirm=true required).
+
+    Restores into a temp graph, verifies node/edge counts against the payload,
+    then swaps (pre-restore safety copy → delete live → copy temp). The live
+    graph is only touched after the temp graph verifies. ``confirm=true`` is
+    a footgun guard, not role authorization — every team key already has full
+    write access to the team graph.
+    """
+    team_id = team.get("team_id")
+    if not team_id:
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+    _require_backup_tier(team)
+    if not body.confirm:
+        raise HTTPException(
+            status_code=400, detail="confirm=true required — restore replaces the live graph"
+        )
+    graph_name = f"team_{team_id}"
+    lock = await _team_restore_lock(team_id)
+    sdk = None
+    registry_sdk = None
+    async with lock:
+        try:
+            sdk = _make_sdk(namespace=team_id)
+            registry_sdk = _registry_sdk()
+            result = await asyncio.to_thread(
+                restore_backup, sdk._get_proj().db, registry_sdk._get_registry(),
+                _backup_storage(),
+                body.backup_key, team_id=team_id, graph_name=graph_name,
+            )
+            # Rebuild indexes on the restored live graph (range/FTS/vector) —
+            # the logical dump + GRAPH.COPY restores data, not schema. Off the
+            # event loop: a large graph's index build must not stall all tenants.
+            try:
+                await asyncio.to_thread(sdk._get_proj()._ensure_indexes)
+            except Exception as e:
+                _logger.warning(
+                    "index rebuild after restore failed for team %s: %s", team_id, e
+                )
+        except RestoreVerificationError as e:
+            raise HTTPException(status_code=409, detail=f"Restore rejected: {e}")
+        except (ValueError, KeyError) as e:
+            raise HTTPException(status_code=400, detail=f"Restore rejected: {e}")
+        except RuntimeError as e:
+            raise HTTPException(status_code=503, detail=f"Restore failed: {e}")
+        except Exception as e:
+            _logger.exception("restore failed for team %s", team_id)
+            raise HTTPException(status_code=500, detail=f"Restore failed: {e}")
+        finally:
+            if sdk is not None:
+                sdk.close()
+            if registry_sdk is not None:
+                registry_sdk.close()
+    return result
+
+
+# ── Backup sweep / DR alerting (#596) ──────────────────────────────────
+# Per-team knowledge-graph protection: scheduled sweep driver, dual-watcher
+# alerting (GitHub issue + Telegram), drill-only restore. Fail-closed: every
+# endpoint 503s when the sweep is disabled (config missing or BACKUP_SWEEP_ENABLED
+# not true).
+
+_WATCHER: "BackupWatcher | None" = None  # spawned in _lifespan (driver-disabled leg)
+_DRIVER_HEARTBEAT_KEY = "ops/driver-heartbeat.json"
+_LAST_DRILL_AT: float = 0.0  # in-memory drill cooldown (single-instance, resets on restart)
+_DRILL_COOLDOWN_S = 3600
+_SWEEP_TEAM_LOCKS: dict[str, threading.Lock] = {}
+_SWEEP_LOCKS_GUARD = threading.Lock()
+_SWEEP_INFLIGHT = asyncio.Lock()
+
+
+def _backup_config_safe() -> "BackupConfig | None":
+    """Sweep config, or None when disabled (fail-closed)."""
+    from tortoise.backup_config import ConfigError, load_config
+
+    try:
+        cfg = load_config()
+    except ConfigError as e:
+        _logger.warning("backup sweep config invalid: %s", e)
+        return None
+    return cfg if cfg.enabled else None
+
+
+def _alert_store_from(cfg) -> "AlertStore":
+    from tortoise import github_issue as gi
+    from tortoise.alert_store import AlertStore
+    from tortoise.telegram_push import send_message
+
+    storage = _backup_storage()
+
+    def file_issue(title: str, body: str) -> int:
+        return gi.create_issue(
+            cfg.gh_repo, cfg.github_issues_pat, title=title, body=body,
+            assignee=cfg.alert_assignee,
+        )
+
+    def close_issue(number: int, comment: str | None = None) -> None:
+        gi.close_issue(cfg.gh_repo, cfg.github_issues_pat, number, comment)
+
+    def search_open(kind: str) -> list[int]:
+        return gi.search_open_incident(cfg.gh_repo, cfg.github_issues_pat, kind)
+
+    def push_telegram(text: str) -> None:
+        send_message(cfg.telegram_bot_token, cfg.telegram_chat_id, text)
+
+    return AlertStore(
+        storage, file_issue=file_issue, close_issue=close_issue,
+        search_open=search_open, push_telegram=push_telegram,
+        repo=cfg.gh_repo, assignee=cfg.alert_assignee,
+    )
+
+
+def _sweep_team_lock(team_id: str) -> threading.Lock:
+    with _SWEEP_LOCKS_GUARD:
+        return _SWEEP_TEAM_LOCKS.setdefault(team_id, threading.Lock())
+
+
+def _read_driver_heartbeat() -> dict:
+    try:
+        parsed = _json.loads(_backup_storage().download(_DRIVER_HEARTBEAT_KEY))
+        return parsed if isinstance(parsed, dict) else {}
+    except (KeyError, ValueError):
+        return {}
+
+
+def _boot_gc_drill_graphs(db, max_age_hours: float = 6.0) -> None:
+    """Sweep drill/restore scratch graphs left by a mid-drill crash. A crash
+    mid-drill would otherwise leave a full team snapshot on the production
+    instance under a scratch name (Task 7 acceptance; boot-time GC)."""
+    from datetime import timedelta as _td
+
+    try:
+        graphs = db.list_graphs()
+    except Exception as exc:  # noqa: BLE001
+        _logger.warning("drill-graph GC: list failed: %s", exc)
+        return
+    now = datetime.now(timezone.utc)
+    # Review P1-1: only the drill endpoint's OWN scratch prefix is eligible —
+    # substring patterns could match a legitimately-provisioned team id (e.g.
+    # "team_drill_20240101...") and the GC would delete a LIVE graph. Team
+    # graphs are never eligible.
+    for name in graphs:
+        if not name.startswith("_drill_"):
+            continue
+        if name.startswith("team_"):
+            continue
+        try:
+            g = db.select_graph(name)
+            ts_part = name.rsplit("_", 1)[-1]
+            created = datetime.strptime(ts_part, "%Y%m%dT%H%M%S%fZ").replace(tzinfo=timezone.utc)
+            if (now - created).total_seconds() / 3600.0 > max_age_hours:
+                g.delete()
+                _logger.info("drill-graph GC removed %s", name)
+        except Exception:
+            continue
+
+
+@app.post("/v1/internal/backups/sweep")
+async def backups_sweep(request: Request):
+    """Run the per-team backup sweep (driver's core action). Internal-key only."""
+    _check_internal(request)
+    cfg = _backup_config_safe()
+    if cfg is None:
+        raise HTTPException(status_code=503, detail="Backup sweep disabled")
+    from tortoise.backup_sweep import run_backup_sweep
+
+    reg_sdk = _registry_sdk()
+    registry = reg_sdk._get_registry()
+    db = reg_sdk._get_proj().db
+    storage = _backup_storage()
+
+    # In-flight guard: a concurrent sweep returns 202 (no queueing — the next
+    # hourly run retries). This is what the driver's 202 branch keys on.
+    if _SWEEP_INFLIGHT.locked():
+        return {"status": "already_running", "teams_backed_up": 0}
+    async with _SWEEP_INFLIGHT:
+        def lock_for(team_id: str):
+            return _sweep_team_lock(team_id)
+
+        try:
+            result = await asyncio.to_thread(
+                run_backup_sweep, db=db, registry=registry, storage=storage,
+                config=cfg, lock_for=lock_for,
+            )
+        except RuntimeError as e:
+            raise HTTPException(status_code=503, detail=f"Sweep failed: {e}")
+
+        alerts = _alert_store_from(cfg)
+        alerts_failed = []
+        for inc in result.get("incidents", []):
+            try:
+                await asyncio.to_thread(
+                    alerts.open_incident, inc["kind"], inc.get("team_id", ""), inc.get("detail")
+                )
+            except Exception as e:  # incident-filing must never fail the run (review P3)
+                _logger.warning("incident routing failed for %s: %s", inc.get("kind"), e)
+                alerts_failed.append(inc.get("kind"))
+        if alerts_failed:
+            result["alerts_failed"] = alerts_failed
+        return result
+
+
+@app.get("/v1/internal/backups/status")
+async def backups_status(request: Request):
+    """Operator/driver status — per-team tri-state, watcher + driver liveness."""
+    _check_internal(request)
+    from tortoise.backup_config import ConfigError, load_config
+    from tortoise.backup_sweep import read_ops_state
+    from tortoise.backup_watcher import HEARTBEAT_KEY
+
+    config_error = None
+    try:
+        cfg = load_config()
+    except ConfigError as e:
+        cfg = None
+        config_error = str(e)
+    try:
+        storage = _backup_storage()
+    except RuntimeError as e:
+        return {"enabled": False, "app_time": datetime.now(timezone.utc).isoformat(),
+                "storage_error": str(e), "per_team": {}, "no_teams": False}
+    watcher = _WATCHER
+    now = datetime.now(timezone.utc)
+    watcher_status = watcher._watcher._last_status if watcher else {}
+    hb = {}
+    storage_error = None
+    try:
+        parsed = _json.loads(storage.download(HEARTBEAT_KEY))
+        hb = parsed if isinstance(parsed, dict) else {}
+    except KeyError:
+        pass  # not-yet-written heartbeat is benign, not an error
+    except Exception as e:  # R2 hiccup must never 500 /status (live-E2E fix)
+        storage_error = f"heartbeat read: {e}"
+    driver_hb = {}
+    try:
+        parsed = _json.loads(storage.download(_DRIVER_HEARTBEAT_KEY))
+        driver_hb = parsed if isinstance(parsed, dict) else {}
+    except KeyError:
+        pass  # not-yet-written driver heartbeat is benign
+    except Exception as e:
+        storage_error = f"{storage_error}; driver-heartbeat read: {e}" if storage_error else f"driver-heartbeat read: {e}"
+
+    watcher_age_min = None
+    if hb.get("last_poll_at"):
+        try:
+            watcher_age_min = (now - datetime.fromisoformat(hb["last_poll_at"])).total_seconds() / 60.0
+        except ValueError:
+            pass
+    driver_age_min = None
+    if driver_hb.get("ran_at"):
+        try:
+            driver_age_min = (now - datetime.fromisoformat(driver_hb["ran_at"])).total_seconds() / 60.0
+        except ValueError:
+            pass
+
+    return {  # noqa: C901
+        "enabled": bool(cfg and cfg.enabled),
+        "config_error": config_error,
+        "storage_error": storage_error,
+        "app_time": now.isoformat(),
+        "per_team": watcher_status.get("per_team", {}),
+        "no_teams": watcher_status.get("no_teams", False),
+        "unknown": watcher_status.get("unknown", False),
+        "watcher": {
+            "running": bool(watcher and watcher._thread and watcher._thread.is_alive()),
+            "last_poll_at": hb.get("last_poll_at"),
+            "age_minutes": watcher_age_min,
+            "r2_ok": hb.get("r2_ok"),
+        },
+        "driver": {"last_heartbeat_at": driver_hb.get("ran_at"), "age_minutes": driver_age_min},
+    }
+
+@app.post("/v1/internal/driver/heartbeat")
+async def driver_heartbeat(request: Request, body: dict):
+    """Driver liveness — written through the app so R2 creds stay off GH for
+    this leg; a stale heartbeat is only meaningful when the app is up."""
+    _check_internal(request)
+    storage = _backup_storage()
+    storage.upload(
+        _DRIVER_HEARTBEAT_KEY,
+        _json.dumps({"ran_at": datetime.now(timezone.utc).isoformat(), "body": body or {}}).encode(),
+        content_type="application/json",
+    )
+    return {"ok": True}
+
+
+@app.post("/v1/internal/backups/simulate-stale")
+@app.post("/v1/internal/backups/simulate-recover")
+async def backups_simulate(request: Request):
+    """Simulated-stale hooks (env-gated, fail closed) — prove the detection →
+    filing → dedup path end-to-end in staging."""
+    _check_internal(request)
+    cfg = _backup_config_safe()
+    if cfg is None or not cfg.simulate_enabled:
+        raise HTTPException(status_code=403, detail="simulate disabled (BACKUP_SIMULATE_ENABLED)")
+    storage = _backup_storage()
+    now = datetime.now(timezone.utc)
+    if request.url.path.endswith("simulate-stale"):
+        ts = now.strftime("%Y%m%dT%H%M%S%fZ")
+        storage.upload(
+            f"ops/simulate/stale-{ts}.json",
+            _json.dumps({
+                "age_ts": (now - timedelta(hours=100)).isoformat(),
+                "expires_at": (now + timedelta(hours=2)).isoformat(),
+            }).encode(),
+            content_type="application/json",
+        )
+        return {"status": "simulated_stale"}
+    for k in storage.list("ops/simulate/"):
+        storage.delete(k)
+    return {"status": "simulated_recovered"}
+
+
+@app.post("/v1/internal/backups/re-baseline")
+async def backups_rebaseline(request: Request, body: dict):
+    """Operator re-baseline: acknowledge a fired DATA_LOSS_CANDIDATE by
+    re-persisting the current graph counts (updates team state, closes the
+    incident) — distinct from suppression."""
+    _check_internal(request)
+    team_id = (body or {}).get("team_id", "")
+    if not team_id:
+        raise HTTPException(status_code=400, detail="team_id required")
+    from tortoise.backup_sweep import read_team_state, _write_json
+
+    reg_sdk = _registry_sdk()
+    registry = reg_sdk._get_registry()
+    db = reg_sdk._get_proj().db
+    storage = _backup_storage()
+    try:
+        g = db.select_graph(f"team_{team_id}")
+        count = int(g.query("MATCH (n) RETURN count(n)").result_set[0][0])
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"team graph unavailable: {e}")
+    state = read_team_state(storage, team_id)
+    _write_json(
+        storage, f"ops/teams/{team_id}/state.json",
+        {**state, "node_count": count, "updated_at": datetime.now(timezone.utc).isoformat()},
+    )
+    alerts = _alert_store_from(_backup_config_safe())
+    alerts.resolve_incident("DATA_LOSS_CANDIDATE", team_id)
+    alerts.resolve_incident("SIZE_GUARD_ABORT", team_id)
+    return {"status": "rebaselined", "team_id": team_id, "node_count": count}
+
+
+@app.post("/v1/internal/backups/drill")
+async def backups_drill(request: Request, body: dict):
+    """Drill-only restore: scratch target, internal-key auth, zero production
+    writes (drill:true skips the registry end-stamp; live-phase binds the
+    scratch target). Cooldown ≥1h between drill accepts (in-memory)."""
+    _check_internal(request)
+    global _LAST_DRILL_AT
+    cfg = _backup_config_safe()
+    if cfg is None:
+        raise HTTPException(status_code=503, detail="Backup sweep disabled")
+    body = body or {}
+    team_id = body.get("team_id", "")
+    backup_key = body.get("backup_key", "")
+    if not team_id or not backup_key:
+        raise HTTPException(status_code=400, detail="team_id and backup_key required")
+    import time as _time
+
+    if _time.time() - _LAST_DRILL_AT < _DRILL_COOLDOWN_S:
+        raise HTTPException(status_code=429, detail="drill cooldown — ≥1h between drills")
+    _LAST_DRILL_AT = _time.time()
+
+    from tortoise.hosted_backup import restore_backup
+
+    reg_sdk = _registry_sdk()
+    registry = reg_sdk._get_registry()
+    db = reg_sdk._get_proj().db
+    storage = _backup_storage()
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    target_graph = f"_drill_{ts}"
+    try:
+        result = await asyncio.to_thread(
+            restore_backup, db, registry, storage, backup_key,
+            team_id=team_id, graph_name=f"team_{team_id}",
+            key=cfg.backup_key, target_graph=target_graph, drill=True,
+        )
+    except (ValueError, RuntimeError) as e:
+        raise HTTPException(status_code=409, detail=f"Drill failed: {e}")
+    # Cleanup the scratch graph (best-effort; boot GC is the backstop).
+    try:
+        db.select_graph(target_graph).delete()
+    except Exception:
+        pass
+    return {"status": "drill_ok", "target_graph": target_graph, **result}
+
+
+_BILLING_ACTIVE_STATUSES = ("active", "trialing", "past_due")
+_BILLING_DEFAULT_SUCCESS_URL = "https://app.premiselabs.co/team?session_id={CHECKOUT_SESSION_ID}"
+_BILLING_DEFAULT_CANCEL_URL = "https://app.premiselabs.co/team?checkout=cancelled"
+_BILLING_DEFAULT_PORTAL_RETURN = "https://app.premiselabs.co/team"
+
+
+def _billing_error_to_http(exc: Exception) -> HTTPException:
+    """Map billing exceptions to HTTP responses — degrade, never crash.
+
+    BillingConfigError (missing STRIPE_* env, lazy by design) → 503;
+    BillingError (bad input like an unknown price id) → 400;
+    StripeAPIError (upstream failure) → 502.
+    """
+    from tortoise.billing import BillingConfigError, BillingError, StripeAPIError
+    if isinstance(exc, BillingConfigError):
+        return HTTPException(status_code=503, detail=str(exc))
+    if isinstance(exc, BillingError):
+        return HTTPException(status_code=400, detail=str(exc))
+    if isinstance(exc, StripeAPIError):
+        return HTTPException(status_code=502, detail=str(exc))
+    return HTTPException(status_code=502, detail=str(exc))
+
+
+def _billing_customer_email(sdk, team: dict) -> str:
+    """Resolve the billing email via the fallback chain (review fix 1):
+
+    1. ``Team.email`` — set at /v1/register (self-service teams).
+    2. ``APIKey.created_by`` — provision-path teams (created via
+       /internal/provision) have no ``Team.email``; the Edge Function stored
+       the creator on the APIKey node instead. Prefer the key used for THIS
+       request, fall back to any team key.
+    3. 400 last resort — clear message, no crash.
+    """
+    team_id = team["team_id"]
+    row = sdk._get_registry().query(
+        "MATCH (t:Team {id:$id}) RETURN t.email", params={"id": team_id}
+    ).result_set
+    if row and row[0][0]:
+        return row[0][0]
+    key_id = team.get("key_id")
+    if key_id:
+        row = sdk._get_registry().query(
+            "MATCH (k:APIKey {id:$id}) RETURN k.created_by", params={"id": key_id}
+        ).result_set
+        if row and row[0][0]:
+            return row[0][0]
+    row = sdk._get_registry().query(
+        "MATCH (k:APIKey {team_id:$tid}) RETURN k.created_by LIMIT 1",
+        params={"tid": team_id},
+    ).result_set
+    if row and row[0][0]:
+        return row[0][0]
+    raise HTTPException(
+        status_code=400,
+        detail="No customer email for this team — register with an email or "
+               "provision via a key carrying created_by",
+    )
+
+
+def _billing_checkout_sync(team: dict, price_id: str) -> dict:
+    """Sync body of POST /v1/billing/checkout (runs in a thread — the Stripe
+    calls + registry writes are blocking).
+
+    Order matters (scoping P1-2, review fix 1): resolve/validate price →
+    stored-mirror guard → resolve email → create-or-reuse Stripe customer →
+    SYNC-PERSIST ``stripe_customer_id`` + ``customer_email`` on the Team node
+    → stale-mirror race guard (list_subscriptions) → create Checkout session.
+    A missed first webhook event leaves a reconcilable mirror (Task 8).
+    """
+    from tortoise.billing import StripeClient
+    team_id = team["team_id"]
+    sdk = _make_sdk(namespace="registry")
+
+    # Layer 1 guard: stored mirror already active → reject before any Stripe call.
+    row = sdk._get_registry().query(
+        "MATCH (t:Team {id:$id}) RETURN t.subscription_status, t.stripe_customer_id",
+        params={"id": team_id},
+    ).result_set
+    status = row[0][0] if row else None
+    stored_customer_id = row[0][1] if row else None
+    if status in _BILLING_ACTIVE_STATUSES:
+        raise HTTPException(status_code=409, detail="team already has an active subscription")
+
+    email = _billing_customer_email(sdk, team)
+    try:
+        client = StripeClient()
+        if stored_customer_id:
+            customer_id = stored_customer_id  # create-or-fetch: reuse the Stripe customer
+        else:
+            customer_id = client.create_customer(email)
+    except Exception as e:  # noqa: BLE001 — _billing_error_to_http maps by type
+        raise _billing_error_to_http(e) from e
+
+    # Sync-persist the customer binding BEFORE the session (survives a missed first event).
+    sdk._get_registry().query(
+        "MATCH (t:Team {id:$id}) SET t.stripe_customer_id=$cid, t.customer_email=$email",
+        params={"id": team_id, "cid": customer_id, "email": email},
+    )
+
+    # Layer 2 guard: stale-mirror race — Stripe is the authority for money.
+    try:
+        subs = client.list_subscriptions(customer_id)
+    except Exception as e:  # noqa: BLE001
+        raise _billing_error_to_http(e) from e
+    for sub in subs:
+        if sub.get("status") in _BILLING_ACTIVE_STATUSES:
+            raise HTTPException(status_code=409, detail="team already has an active subscription")
+
+    try:
+        url = client.create_checkout_session(
+            team_id, price_id, customer_id,
+            os.environ.get("BILLING_SUCCESS_URL", _BILLING_DEFAULT_SUCCESS_URL),
+            os.environ.get("BILLING_CANCEL_URL", _BILLING_DEFAULT_CANCEL_URL),
+        )
+    except Exception as e:  # noqa: BLE001
+        raise _billing_error_to_http(e) from e
+    return {"checkout_url": url}
+
+
+@app.post("/v1/billing/checkout", response_model=CheckoutResponse)
+async def billing_checkout(body: CheckoutRequest, request: Request, team: dict = Depends(get_current_team)):
+    """Start a Stripe Checkout session for a validated price (team auth)."""
+    from tortoise.billing import BillingConfigError, BillingError, PriceCatalog
+    try:
+        # Price validation against the catalog — unknown price_id → 400.
+        PriceCatalog().tier_for_price(body.price_id)
+    except BillingConfigError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except BillingError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return await asyncio.to_thread(_billing_checkout_sync, team, body.price_id)
+
+
+def _billing_portal_sync(team: dict) -> dict:
+    """Sync body of POST /v1/billing/portal — portal session for an existing
+    Stripe customer; 404 when the team never checked out (no customer id)."""
+    from tortoise.billing import StripeClient
+    team_id = team["team_id"]
+    sdk = _make_sdk(namespace="registry")
+    row = sdk._get_registry().query(
+        "MATCH (t:Team {id:$id}) RETURN t.stripe_customer_id", params={"id": team_id}
+    ).result_set
+    customer_id = row[0][0] if row else None
+    if not customer_id:
+        raise HTTPException(status_code=404, detail="no Stripe customer for this team — start a checkout first")
+    try:
+        url = StripeClient().create_portal_session(
+            customer_id,
+            os.environ.get("BILLING_PORTAL_RETURN_URL", _BILLING_DEFAULT_PORTAL_RETURN),
+        )
+    except Exception as e:  # noqa: BLE001
+        raise _billing_error_to_http(e) from e
+    return {"portal_url": url}
+
+
+@app.post("/v1/billing/portal", response_model=PortalResponse)
+async def billing_portal(request: Request, team: dict = Depends(get_current_team)):
+    """Customer portal for existing subscribers (team auth)."""
+    return await asyncio.to_thread(_billing_portal_sync, team)
+
+
+
+# ── Stripe webhook (#310 Task 7) ────────────────────────────────────────────
+
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _team_id_for_stripe_customer(customer_id: str) -> str | None:
+    """Registry lookup: Team node by stripe_customer_id (subscription events)."""
+    try:
+        sdk = _make_sdk(namespace="registry")
+        rows = sdk._get_registry().query(
+            "MATCH (t:Team {stripe_customer_id:$cid}) RETURN t.id",
+            params={"cid": customer_id},
+        ).result_set
+        return rows[0][0] if rows else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _webhook_apply_event(sdk, team_id: str, event: dict) -> str | None:
+    """Apply one verified Stripe event to the registry mirror (idempotent SETs).
+
+    Returns the ops kind when a notification-worthy transition happened:
+    billing_upgrade | billing_downgrade | billing_payment_failed | billing_cancel.
+    Unknown price ids keep the stored tier + status and fire an ops
+    notification (review fix 7); cancel-at-period-end keeps tier until the end.
+    """
+    import json as _json
+    from tortoise.billing import PriceCatalog, StripeClient, apply_limits
+
+    etype = event.get("type", "")
+    data = event.get("data", {}).get("object", {}) or {}
+    notify_kind = None
+
+    def _set(updates: dict) -> None:
+        _json.dumps(updates)  # sanity: JSON-safe params
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t += $props",
+            params={"id": team_id, "props": updates},
+        )
+
+    def _price_id_from(sub: dict) -> str | None:
+        """Extract items[0].price.id handling BOTH Stripe shapes: items may be
+        a flat list OR {'data': [...]} (FIXTURE_SUB uses the latter)."""
+        items = sub.get("items") or {}
+        rows = items if isinstance(items, list) else items.get("data") or []
+        return (rows[0].get("price", {}) or {}).get("id") if rows else None
+
+    def _resolve_tier_from_price(price_id: str | None) -> str | None:
+        """price → tier; unknown price → None + ops-notify signal."""
+        nonlocal notify_kind
+        if not price_id:
+            return None
+        try:
+            return PriceCatalog().tier_for_price(price_id)
+        except Exception as e:  # noqa: BLE001
+            _logger.error(
+                "webhook: unknown price %s for team %s (%s)",
+                price_id, team_id, redact_error(e))
+            notify_kind = "billing_downgrade"  # ops alert; stored tier preserved
+            return None
+
+    if etype == "checkout.session.completed":
+        cust = data.get("customer")
+        email = (data.get("customer_details") or {}).get("email")
+        sub_id = data.get("subscription")
+        updates = {"subscription_status": "active", "stripe_customer_id": cust}
+        if email:
+            updates["customer_email"] = email
+        if sub_id:
+            updates["subscription_id"] = sub_id
+        _set(updates)
+        if sub_id:
+            try:
+                sub = StripeClient().get_subscription(sub_id)
+                tier = _resolve_tier_from_price(_price_id_from(sub))
+                if tier:
+                    apply_limits(sdk, team_id, tier)
+                    _set({"tier": tier})
+                    notify_kind = "billing_upgrade"
+            except Exception as e:  # noqa: BLE001 — Stripe fetch failure; .updated confirms later
+                _logger.warning("webhook: subscription fetch failed: %s", redact_error(e))
+        return notify_kind
+
+    if etype == "invoice.payment_failed":
+        from datetime import datetime, timedelta, timezone
+        period_end = None
+        try:
+            period_end = (data.get("lines") or {}).get("data", [{}])[0] \
+                .get("period", {}).get("end")
+        except Exception:  # noqa: BLE001
+            period_end = None
+        now = datetime.now(timezone.utc)
+        grace = (datetime.fromtimestamp(period_end, tz=timezone.utc) + timedelta(hours=72)
+                 if period_end else now + timedelta(hours=72))
+        _set({"subscription_status": "past_due", "grace_until": grace.isoformat()})
+        return "billing_payment_failed"
+
+    if etype == "customer.subscription.updated":
+        status = data.get("status")
+        updates: dict = {}
+        if data.get("id"):
+            updates["subscription_id"] = data["id"]
+        if data.get("current_period_end"):
+            updates["current_period_end"] = data["current_period_end"]
+        if status:
+            updates["subscription_status"] = status
+        # review fix 11: canceled surfacing via .updated (deleted event may be
+        # dropped) → revert to free, identical to subscription.deleted.
+        if status == "canceled":
+            _set({**updates, "tier": "free"})
+            apply_limits(sdk, team_id, "free")
+            return "billing_cancel"
+        # cancel_at_period_end → keep tier until period end (mirror status only).
+        if data.get("cancel_at_period_end"):
+            _set(updates)
+            return None
+        _set(updates)
+        tier = _resolve_tier_from_price(_price_id_from(data))
+        if tier:
+            apply_limits(sdk, team_id, tier)
+            _set({"tier": tier})
+            notify_kind = "billing_upgrade"
+        return notify_kind
+
+    if etype == "customer.subscription.deleted":
+        _set({"tier": "free", "subscription_status": "canceled"})
+        apply_limits(sdk, team_id, "free")
+        return "billing_cancel"
+
+    return None  # unhandled event type → 200-ack
+
+
+@app.post("/webhooks/stripe")
+async def webhooks_stripe(request: Request):
+    """Stripe webhook — signature-verified, event-ID dedup, 4-event semantics.
+
+    Public surface (SKIP + SKIP_AUTH): authenticity is the Stripe-Signature
+    HMAC over the RAW body. Idempotency is SET-then-marker: the Team SET is
+    idempotent (replays converge), and the :WebhookEvent marker gates
+    notify/audit/analytics to FIRST processing only (scoping P1-1 retry-drop
+    race: the SET happens regardless, so a retry can never drop an upgrade).
+    """
+    from tortoise.billing import BillingError, BillingConfigError, StripeClient, _scrub_secrets
+    from tortoise.notify import notify_billing_event
+
+
+    def _safe_log(exc: Exception) -> str:
+        """redact_error + scrub known secret values (review fix 9)."""
+        return _scrub_secrets(redact_error(exc))
+
+    raw = await request.body()
+    sig = request.headers.get("stripe-signature")
+    try:
+        event = StripeClient().verify_webhook_signature(raw, sig)
+    except BillingConfigError:
+        return JSONResponse(status_code=500, content={"detail": "webhook not configured"})
+    except BillingError as e:
+        _logger.warning("webhook: rejected (%s)", _safe_log(e))
+        return JSONResponse(status_code=400, content={"detail": "invalid signature"})
+
+    etype = event.get("type", "")
+    event_id = event.get("id") or ""
+    data = event.get("data", {}).get("object", {}) or {}
+    team_id = data.get("client_reference_id")
+    if not team_id and etype in ("customer.subscription.updated", "customer.subscription.deleted",
+                                 "invoice.payment_failed"):
+        cust = data.get("customer")
+        if cust:
+            team_id = _team_id_for_stripe_customer(cust)
+    if not team_id:
+        # No team binding — ack so Stripe stops retrying.
+        return JSONResponse(status_code=200, content={"detail": "no team binding"})
+
+    sdk = _make_sdk(namespace="registry")
+    try:
+        # Idempotent apply (SETs converge on replay).
+        notify_kind = await asyncio.to_thread(_webhook_apply_event, sdk, team_id, event)
+        # Marker: first-seen detection (SET-then-marker — the apply ran
+        # regardless, so a retry cannot drop the upgrade; only side-effects
+        # are dedup'd).
+        seen_rows = sdk._get_registry().query(
+            "MATCH (w:WebhookEvent {event_id:$id}) RETURN w.first_seen",
+            params={"id": event_id},
+        ).result_set
+        is_first = not seen_rows
+        if is_first:
+            sdk._get_registry().query(
+                "CREATE (w:WebhookEvent {event_id:$id, first_seen:$now, type:$type})",
+                params={"id": event_id, "now": _now_iso(), "type": etype},
+            )
+        if is_first and notify_kind:
+            # Audit + analytics + notifications — first processing only.
+            tier_rows = sdk._get_registry().query(
+                "MATCH (t:Team {id:$id}) RETURN t.tier", params={"id": team_id}
+            ).result_set
+            tier = tier_rows[0][0] if tier_rows else None
+            await _async_audit(
+                request, team_id, notify_kind,
+                resource_type="team", resource_id=team_id,
+            )
+            _track_analytics_event(team_id, notify_kind, {
+                "plan": tier, "tier": tier, "status": etype,
+            })
+            notify_billing_event(
+                notify_kind, {"team_id": team_id, "tier": tier},
+                {"subscription_status": etype},
+            )
+        return JSONResponse(status_code=200, content={"detail": "processed"})
+    except Exception as e:  # noqa: BLE001 — 500 → Stripe retries (live up to 3 days)
+        _logger.error("webhook: processing failed (%s)", _safe_log(e))
+        return JSONResponse(status_code=500, content={"detail": "processing failed"})
+
+
 # ── MCP mount (#236) ─────────────────────────────────────────────
 # Mount AFTER all route definitions. DO NOT add /mcp to the parent
-# RateLimitMiddleware.SKIP — Starlette's mount already routes /mcp
-# requests to the sub-app before parent middleware runs.
+# RateLimitMiddleware.SKIP — Starlette's mount already routes /mcp.
+# Restored in #833: accidentally deleted with the superseded file-based
+# replay surface (0875221) — guarded by TestMCPMount in test_hosted_api.py.
 app.mount("/mcp", mcp_http_app)

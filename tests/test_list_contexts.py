@@ -18,9 +18,26 @@ import pytest
 from tortoise.sdk import TortoiseSDK
 
 
+def _docker_falkor_reachable(port: int = 6379) -> bool:
+    """True when a live FalkorDB (Docker) answers on localhost:port.
+
+    These tests target the LIVE FalkorDB (per the module docstring) — in the
+    embedded-only pre-merge CI they self-skip (mirrors the _skip_if_no_falkor
+    convention in test_projection.py / test_event_provenance.py).
+    """
+    import socket
+    try:
+        with socket.create_connection(("localhost", port), timeout=1.5):
+            return True
+    except OSError:
+        return False
+
+
 @pytest.fixture
 def sdk():
     """SDK against the live FalkorDB with a unique namespace per test run."""
+    if not _docker_falkor_reachable():
+        pytest.skip("live FalkorDB (docker://localhost:6379) not reachable — embedded-only run")
     ns = f"test_lc_{uuid.uuid4().hex[:8]}"
     sdk = TortoiseSDK(namespace=ns)
     yield sdk

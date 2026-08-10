@@ -1,7 +1,7 @@
 # AGENTS.md — Premise Labs
 
-> Private repository for strategy, research, internal operations, and the Tortoise epistemic graph engine.
-> Extends [AGENTS.base.md](https://github.com/premise-labs/agent-infra/blob/main/templates/AGENTS.base.md) principles. Universal rules (Auto-Continue, Process Discipline, Skill Compliance, Research Discipline, Debugging Discipline) are inherited — this file adds repo-specific conventions only.
+> Public repository for the Tortoise epistemic graph engine (with internal strategy, research, and operations docs).
+> Extends [AGENTS.base.md](https://github.com/daniel-ospina/agent-infra/blob/main/templates/AGENTS.base.md) principles. Universal rules (Auto-Continue, Process Discipline, Skill Compliance, Research Discipline, Debugging Discipline) are inherited — this file adds repo-specific conventions only.
 
 ## Project Identity
 
@@ -69,6 +69,12 @@ Premise Labs is the internal R&D and strategy hub. It houses:
 - `TORTOISE_DB_URI` — FalkorDB connection string (`docker://` or `bolt://`)
 - `AGENT_INFRA_PATH` — Path to agent-infra repo (required for bootstrap, pre-commit version gate)
 - See `.env.example` for all variables
+
+## Model Selection (Pi)
+
+- **Most tasks:** `deepseek-v4-flash` (base default)
+- **Graphics/visual tasks:** `qwen3.8-max` (Qwen 3.8)
+- **Highly complex / tricky tasks:** `qwen3.8-max` (Qwen 3.8)
 
 ## Git Workflow
 

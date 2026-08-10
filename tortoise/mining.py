@@ -187,12 +187,35 @@ class ConversationMiner:
                 friction_idx += 1
 
         # Check point content for friction/conflict language (in addition to NAND operators)
+        # A point already covered by a NAND operator is skipped — NAND is the
+        # stronger signal and was already captured above (issue #325).
+        nand_inputs = {
+            iid
+            for op in operators
+            if op.get("operator", {}).get("op_type") == "NAND"
+            for iid in op.get("operator", {}).get("inputs", [])
+        }
+        seen_friction_content: set[str] = set()
         for p in points:
             content = p.get("content", "")
-            if self._has_cue(content, _FRICTION_WORDS):
-                # Don't duplicate if already covered by a NAND operator
-                # (skip — NAND is stronger signal, already captured above)
-                pass
+            if p.get("id") not in nand_inputs and self._has_cue(content, _FRICTION_WORDS):
+                # Dedup by full content — the same conflict repeated across
+                # points must not flood the log with identical friction events
+                # (a 100-char prefix could collide between distinct conflicts).
+                if content in seen_friction_content:
+                    continue
+                seen_friction_content.add(content)
+                events.append(self._make_event(
+                    event_id=f"friction-{source_id}-{friction_idx}",
+                    event_kind="friction",
+                    subject="extraction",
+                    object=content[:200],
+                    source=source,
+                    participants=parts,
+                    started_at=ts,
+                    parent_event=f"meeting-{source_id}",
+                ))
+                friction_idx += 1
 
         # Fallback: if <3 events, add milestone events for significant content
         milestone_idx = 1

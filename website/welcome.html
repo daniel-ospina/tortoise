@@ -14,7 +14,7 @@
       --surface: #0d1a2d;
       --surface-hover: #12223d;
       --text: #cbd5e1;
-      --text-dim: #64748b;
+      --text-dim: #94a3b8;
       --accent: #06b6d4;
       --accent-hover: #0891b2;
       --green: #4ade80;
@@ -36,7 +36,7 @@
     .topbar .logo { font-family: var(--serif, Georgia, serif); font-size: 1.15rem; color: var(--text, #cbd5e1); text-decoration: none; }
     .topbar .logo span { color: var(--accent, #06b6d4); }
     .topbar nav { flex: 1; display: flex; gap: 16px; }
-    .topbar nav a { color: var(--text-dim, #64748b); text-decoration: none; font-size: 14px; }
+    .topbar nav a { color: var(--text-dim, #94a3b8); text-decoration: none; font-size: 14px; }
     .topbar nav a:hover, .topbar nav a.active { color: var(--accent, #06b6d4); }
     .topbar .login { background: var(--accent, #06b6d4); color: #04121a; padding: 6px 16px; border-radius: 6px; text-decoration: none; font-weight: 600; font-size: 14px; }
     .topbar .login:hover { background: var(--accent-hover, #0891b2); }
@@ -49,6 +49,7 @@
       line-height: 1.6;
       -webkit-font-smoothing: antialiased;
       display: flex;
+      flex-direction: column;
       align-items: center;
       justify-content: center;
       min-height: 100vh;
@@ -179,6 +180,16 @@
       color: var(--green);
     }
 
+    .btn-copy.copy-failed {
+      border-color: #ef4444;
+      color: #ef4444;
+    }
+
+    .btn-copy:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
     .warning {
       font-size: 12px;
       color: var(--gold);
@@ -289,13 +300,33 @@
       .snippet pre { font-size: 0.68rem; overflow-x: auto; }
       .btn-copy, .btn-dashboard { width: 100%; }
     }
+
+    /* Legal footer */
+    .legal-footer {
+      margin-top: auto;
+      width: 100%;
+      display: flex;
+      justify-content: center;
+      flex-wrap: wrap;
+      gap: 0.5rem 1.5rem;
+      padding: 1.75rem 1.5rem 2.25rem;
+      color: var(--text-dim);
+      font-size: 0.78rem;
+      font-family: var(--mono);
+    }
+    .legal-footer a {
+      color: var(--text-dim);
+      text-decoration: none;
+      transition: color 0.2s;
+    }
+    .legal-footer a:hover { color: var(--accent); }
 </style>
 </head>
 <body>
   <div class="topbar">
     <a class="logo" href="/">Tortoise<span>.</span></a>
     <nav>
-      <a href="/product.html">Product</a>
+      <a href="https://tortoise.premiselabs.co/">Product</a>
       <a href="/docs">Docs</a>
     </nav>
     <a class="login" href="https://app.premiselabs.co">Login</a>
@@ -307,15 +338,15 @@
     </div>
 
     <!-- Loading state -->
-    <div id="loading" class="loading-state">
+    <div id="loading" class="loading-state" role="status" aria-live="polite">
       <div class="loading-spinner"></div>
       <p>Provisioning your Tortoise&hellip;</p>
     </div>
 
     <!-- Error state -->
-    <div id="error-state" class="error-state hidden">
+    <div id="error-state" class="error-state hidden" role="alert">
       <p id="error-message">Something went wrong during provisioning.</p>
-      <p><a href="/signup.html">Try signing up again</a></p>
+      <p><a href="/signup.html">Try signing up again</a> · <a href="mailto:hello@premiselabs.co">Contact support</a></p>
     </div>
 
     <!-- Success state -->
@@ -331,7 +362,11 @@
         Team: <strong id="team-name">—</strong> &nbsp;·&nbsp; Tier: <strong>Free</strong>
       </div>
 
-      <div class="card">
+      <p style="font-size:0.82rem;color:var(--text-dim);text-align:center;margin:1rem 0 0.25rem;">
+        Your key is ready. Two ways to use it: connect your agent (MCP) for memory that
+        follows you, or call the API directly to build memory into your own product.
+      </p>
+      <div class="card" id="reveal-block">
         <div class="card-label">Your API key</div>
         <div class="api-key-display">
           <span class="key-text" id="api-key">••••••••••••••••</span>
@@ -355,13 +390,22 @@
         </div>
       </div>
 
-            <div class="card">
-        <div class="card-label">Connect your agent <span style="font-weight:400;font-size:0.72rem;color:var(--text-dim);">(Streamable HTTP — no install needed)</span></div>
+      <div class="card hidden" id="returning-block">
+        <div class="card-label">Your team is ready!</div>
+        <p style="font-size:0.85rem;color:var(--text-dim);line-height:1.5;">
+          Your API key was already created and can't be shown again (it's shown exactly once).
+          Open the dashboard to manage your keys, or generate a new one if you lost it.
+        </p>
+        <p style="margin-top:0.75rem;"><a href="https://app.premiselabs.co" style="color:var(--accent);">Lost your key? Open Dashboard →</a></p>
+      </div>
+
+            <div class="card" id="mcp-card">
+        <div class="card-label">Use Tortoise — connect your agent <span style="font-weight:400;font-size:0.72rem;color:var(--text-dim);">(MCP — no install needed)</span></div>
         <div class="harness-tabs" id="harness-tabs" style="display:flex;gap:0.5rem;margin-bottom:0.75rem;flex-wrap:wrap;">
-          <button class="harness-tab active" data-harness="claude" onclick="switchHarness('claude')">Claude Code</button>
-          <button class="harness-tab" data-harness="codex" onclick="switchHarness('codex')">Codex</button>
-          <button class="harness-tab" data-harness="cursor" onclick="switchHarness('cursor')">Cursor</button>
-          <button class="harness-tab" data-harness="pi" onclick="switchHarness('pi')">Pi</button>
+          <button class="harness-tab active" data-harness="claude" aria-pressed="true" onclick="switchHarness('claude')">Claude Code</button>
+          <button class="harness-tab" data-harness="codex" aria-pressed="false" onclick="switchHarness('codex')">Codex</button>
+          <button class="harness-tab" data-harness="cursor" aria-pressed="false" onclick="switchHarness('cursor')">Cursor</button>
+          <button class="harness-tab" data-harness="pi" aria-pressed="false" onclick="switchHarness('pi')">Pi</button>
         </div>
         <div class="snippet" id="mcp-snippet">
           <pre><code id="mcp-config-text"></code></pre>
@@ -387,11 +431,11 @@ you up to 6 yes/no questions and set up your Tortoise memory.
         </p>
       </div>
 
-      <div class="card">
-        <div class="card-label">Quickstart</div>
+      <div class="card" id="build-card">
+        <div class="card-label">Build with Tortoise — call the API <span style="font-weight:400;font-size:0.72rem;color:var(--text-dim);">(CLI / REST)</span></div>
         <div class="snippet" id="snippet">
           <pre><span class="comment"># Install Tortoise</span>
-<span class="cmd">pip install git+https://github.com/daniel-ospina/tortoise.git</span>
+<span class="cmd">pip install tortoise-graph</span>
 
 <span class="comment"># Connect to your hosted graph</span>
 <span class="cmd">tortoise init --api-key <span id="snippet-key">tt_YOUR_KEY</span></span>
@@ -404,7 +448,11 @@ you up to 6 yes/no questions and set up your Tortoise memory.
         </button>
       </div>
 
-      <a href="https://app.premiselabs.co" class="btn-dashboard" target="_blank" rel="noopener">Open Dashboard →</a>
+      <a href="https://app.premiselabs.co" class="btn-dashboard hidden" id="btn-dashboard" target="_blank" rel="noopener">Open Dashboard →</a>
+
+      <p style="margin-top:1.25rem;font-size:0.8rem;color:var(--text-dim);text-align:center;">
+        Prefer your own infrastructure? <a href="/self-hosted" style="color:var(--accent);">Self-host Tortoise →</a>
+      </p>
     </div>
   </div>
 
@@ -414,7 +462,21 @@ you up to 6 yes/no questions and set up your Tortoise memory.
     const SUPABASE_URL = "https://ybetwichurajbfswfeqa.supabase.co";
     const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InliZXR3aWNodXJhamJmc3dmZXFhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODUyNzgzNDYsImV4cCI6MjEwMDg1NDM0Nn0.YHysJAebPualDNDQTU5bnGBUHg5guLe8eBadm0LiEiY";
     const POLL_INTERVAL_MS = 1000;
-    const POLL_MAX_ATTEMPTS = 30; // 30 seconds max
+    // Client-side provisioning (#527): the after_user_created webhook is
+    // DISABLED on this Supabase plan (its Standard-Webhooks signature can't
+    // be verified — signup 500'd on hook invocation), so nothing server-side
+    // mints the team anymore. The page polls briefly for an EXISTING
+    // membership (returning users / hook-era rows), then calls the
+    // tenant-provision edge function with the user's JWT (#802).
+    const MEMBERSHIP_POLL_ATTEMPTS = 5;   // ~5s — existing-team window before provisioning
+    const PROVISION_REFRESH_ATTEMPTS = 3; // ~3s — membership-row visibility after a 201
+    // On the email-confirmation / OAuth callback, the session arrives via the
+    // URL fragment a moment after createClient. Current supabase-js awaits
+    // its async init inside getSession(), but older browser-cached builds
+    // don't — give the session a bounded wait window before declaring
+    // "no session" so a legitimate callback never bounces to a dead state
+    // (#527).
+    const SESSION_WAIT_MS = 5000;
 
     const isLocal = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
     const supabaseUrl = isLocal
@@ -423,6 +485,11 @@ you up to 6 yes/no questions and set up your Tortoise memory.
     const supabaseAnonKey = isLocal
       ? "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0"
       : SUPABASE_ANON_KEY;
+    // Edge function URL for client-side provisioning (JWT path, #802).
+    // Local dev: the local Supabase CLI serves functions on :54321 too.
+    const PROVISION_URL = isLocal
+      ? "http://127.0.0.1:54321/functions/v1/tenant-provision"
+      : SUPABASE_URL + "/functions/v1/tenant-provision";
 
     // Guard: check if the anon key placeholder was replaced at deploy time
     const isConfigured = supabaseAnonKey && !supabaseAnonKey.includes("{{");
@@ -434,51 +501,213 @@ you up to 6 yes/no questions and set up your Tortoise memory.
       console.warn("SUPABASE_ANON_KEY not configured — page disabled");
     }
 
+    // ── Session wait (#527) ───────────────────────────────────────────────
+    // Resolve with the session as soon as it's available (SIGNED_IN event or
+    // getSession), or null after the timeout. Non-throwing.
+    function waitForSession(timeoutMs) {
+      return new Promise((resolve) => {
+        let settled = false;
+        let authSub = null;
+        let timer = null;
+        const finish = (session) => {
+          if (settled) return;
+          settled = true;
+          if (timer) clearTimeout(timer);
+          if (authSub) authSub.unsubscribe();
+          resolve(session);
+        };
+        timer = setTimeout(() => finish(null), timeoutMs);
+        try {
+          authSub = supabaseClient.auth.onAuthStateChange((event, session) => {
+            if (event === "SIGNED_IN" && session) finish(session);
+          }).data.subscription;
+        } catch (e) { /* no auth subscription available — getSession poll only */ }
+        supabaseClient.auth.getSession()
+          .then(({ data: d }) => { if (d.session) finish(d.session); })
+          .catch(() => {});
+      });
+    }
+
     // ── Poll for provisioning ──────────────────────────────────────────────
     async function waitForProvisioning() {
-      const { data: { session }, error: sessionError } = await supabaseClient.auth.getSession();
+      const session = await waitForSession(SESSION_WAIT_MS);
 
-      if (sessionError || !session) {
-        showError("No active session. Please sign up first.");
+      if (!session) {
+        showError("No active session. Please sign up first — or if you just clicked a confirmation link, refresh this page in a few seconds.");
         return;
       }
 
       const userId = session.user.id;
 
-      // Poll the team_memberships table until api_key is populated
-      for (let attempt = 0; attempt < POLL_MAX_ATTEMPTS; attempt++) {
-        const { data, error } = await supabase
-          .from("team_memberships")
-          .select("team_id, team_name, api_key, graph_name")
-          .eq("user_id", userId)
-          .single();
+      // Poll team_memberships for the team row (non-secret columns only — the
+      // api_key column is column-level REVOKED; the reveal_api_key RPC is the
+      // sole read path, atomic reveal+null per plan §4.1b/A13).
+      // M:N-safe (#745b): never .single() — a user may hold multiple
+      // membership rows (including the team_id='' placeholder), which makes
+      // .single() fail with PGRST116. Pick the most recently created ACTIVE
+      // membership via order(created_at desc).limit(1).maybeSingle(): zero
+      // rows → null (keep polling), multiple rows → impossible (limit 1),
+      // and hard errors (RLS/network) surface instead of looping.
+      const activeMembershipQuery = () => supabaseClient
+        .from("team_memberships")
+        .select("team_id, team_name, graph_name, status")
+        .eq("user_id", userId)
+        .eq("status", "active")
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      // Phase 1 — existing membership? (returning user, hook-era row, or a
+      // concurrent tab that already provisioned). Bounded short window: the
+      // old 30s webhook wait is gone — provisioning is now client-side (#527).
+      for (let attempt = 0; attempt < MEMBERSHIP_POLL_ATTEMPTS; attempt++) {
+        const { data, error } = await activeMembershipQuery();
 
         if (error) {
-          // Table might not exist yet or row not created — keep polling
-          await sleep(POLL_INTERVAL_MS);
-          continue;
+          // Hard error (RLS / network) — surface it instead of looping
+          showError("Couldn't check your provisioning status. Please refresh and try again.");
+          return;
         }
 
-        if (data && data.api_key && data.api_key !== "pending") {
-          showSuccess(data);
+        if (data && data.status === "active" && data.team_id) {
+          await revealKeyOnce(userId, data);
           return;
         }
 
         await sleep(POLL_INTERVAL_MS);
       }
 
-      // Timed out — check one more time
-      const { data } = await supabase
-        .from("team_memberships")
-        .select("team_id, team_name, api_key, graph_name")
-        .eq("user_id", userId)
-        .single();
+      // Phase 2 — no membership row: provision client-side via the edge
+      // function's JWT path (#527). Idempotency guard: this runs ONLY when
+      // the membership query came back empty, so a team is never minted
+      // twice for the same user (the function would mint a NEW team per
+      // call — the page must not re-provision once a team exists).
+      await provisionViaEdgeFunction(session, userId, activeMembershipQuery);
+    }
 
-      if (data && data.api_key && data.api_key !== "pending") {
-        showSuccess(data);
-      } else {
-        showError("Provisioning is taking longer than expected. Your team is being set up — please refresh in a moment.");
+    // ── Client-side provisioning (#527) ────────────────────────────────────
+    // The after_user_created webhook is disabled on this Supabase plan (its
+    // Svix/Standard-Webhooks signature can't be verified), so the welcome
+    // page calls tenant-provision directly with the user's access token:
+    // the function mints the team ONLY when the token's id+email match the
+    // provisioning target (#802). Never throws — every path lands in a
+    // display state. Errors are humanized (never raw JSON), retried ONCE,
+    // then a contact-support fallback.
+    async function provisionViaEdgeFunction(session, userId, activeMembershipQuery) {
+      const meta = session.user.user_metadata || {};
+      const displayName = meta.display_name || undefined;
+
+      const callProvision = () => fetch(PROVISION_URL, {
+        method: "POST",
+        headers: {
+          "Authorization": "Bearer " + session.access_token,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          user_id: userId,
+          email: session.user.email,
+          ...(displayName ? { display_name: displayName } : {}),
+        }),
+      });
+
+      // Attempt 1 — plus exactly ONE retry on 401/error (a second mint
+      // would be a second team; never loop).
+      let response = null;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          response = await callProvision();
+        } catch (e) {
+          response = null; // network failure — counts as a failed attempt
+        }
+        if (response && response.ok) break;
+        if (attempt === 0) await sleep(POLL_INTERVAL_MS);
       }
+
+      if (response && response.ok) {
+        // Provisioned (201) — the function wrote the membership row before
+        // answering. Re-query and reveal through the canonical path (atomic
+        // reveal+null, A13) so the key is shown exactly once.
+        for (let attempt = 0; attempt < PROVISION_REFRESH_ATTEMPTS; attempt++) {
+          const { data, error } = await activeMembershipQuery();
+          if (!error && data && data.status === "active" && data.team_id) {
+            await revealKeyOnce(userId, data);
+            return;
+          }
+          await sleep(POLL_INTERVAL_MS);
+        }
+        // The function's team_memberships write failed (it still returns 201
+        // with the key) — the 201 body is the ONLY copy of the plaintext key
+        // (nothing was stored), so show it directly rather than losing it.
+        try {
+          const body = await response.json();
+          if (body && body.api_key && body.team_name) {
+            showSuccess({
+              team_name: body.team_name,
+              api_key: body.api_key,
+              graph_name: body.graph_name || "",
+              team_id: body.team_id || "",
+            });
+            return;
+          }
+        } catch (e) { /* fall through to error */ }
+        showError("Your team was created, but we couldn't load your API key. Please refresh — or contact support at hello@premiselabs.co.");
+        return;
+      }
+
+      // Both attempts failed — humanized message, never raw JSON.
+      const status = response ? response.status : null;
+      showError(
+        status === 401
+          ? "We couldn't verify your session to set up your team. Please sign out and sign in again — or contact support at hello@premiselabs.co."
+          : "We couldn't set up your team automatically. Please refresh and try again — or contact support at hello@premiselabs.co."
+      );
+    }
+
+    // ── Reveal key exactly once via the SECURITY DEFINER RPC (A13) ────────
+    async function revealKeyOnce(userId, row) {
+      const { data: key, error } = await supabaseClient.rpc("reveal_api_key", {
+        p_user_id: userId,
+        p_team_id: row.team_id,
+      });
+      if (error) {
+        // Hard RPC error (RLS / network) — surface it and keep the reveal
+        // path. Do NOT misroute to the "already provisioned" state (#745c).
+        showError("Couldn't reveal your API key — please refresh and try again.");
+        return;
+      }
+      if (!key || key === "pending") {
+        // Key already consumed (returning visitor) or not yet available — show
+        // the dashboard-hub state (UX-D2): no re-reveal, route to dashboard.
+        showAlreadyProvisioned(row);
+        return;
+      }
+      showSuccess({
+        team_name: row.team_name,
+        api_key: key,
+        graph_name: row.graph_name,
+        team_id: row.team_id,
+      });
+    }
+
+    // ── Returning-visit state (UX-D2): key nulled, no re-reveal ───────────
+    function showAlreadyProvisioned(row) {
+      document.getElementById("loading").classList.add("hidden");
+      document.getElementById("error-state").classList.add("hidden");
+      document.getElementById("success").classList.remove("hidden");
+      document.getElementById("team-name").textContent = row.team_name;
+      const revealEl = document.getElementById("reveal-block");
+      if (revealEl) revealEl.classList.add("hidden");
+      const returningEl = document.getElementById("returning-block");
+      if (returningEl) returningEl.classList.remove("hidden");
+      const dashBtn = document.getElementById("btn-dashboard");
+      if (dashBtn) dashBtn.classList.remove("hidden");
+      // Returning visitor: the key was shown exactly once and is nulled —
+      // hide the artifact cards so their copy buttons can't copy a masked
+      // `Bearer ••••••` / `--api-key ••••••` (#745c).
+      const mcpCard = document.getElementById("mcp-card");
+      if (mcpCard) mcpCard.classList.add("hidden");
+      const buildCard = document.getElementById("build-card");
+      if (buildCard) buildCard.classList.add("hidden");
     }
 
     function sleep(ms) {
@@ -494,7 +723,16 @@ you up to 6 yes/no questions and set up your Tortoise memory.
       document.getElementById("team-name").textContent = data.team_name;
       document.getElementById("api-key").textContent = data.api_key;
       document.getElementById("snippet-key").textContent = data.api_key;
-      document.getElementById("mcp-snippet-key").textContent = data.api_key;
+      // MCP config must reflect the revealed key, not the masked placeholder
+      // (#745a) — re-render now that #api-key holds the real key.
+      renderMcpConfig();
+      // Reveal path: key shown; returning-visit block stays hidden; dashboard btn shown
+      const revealEl = document.getElementById("reveal-block");
+      if (revealEl) revealEl.classList.remove("hidden");
+      const returningEl = document.getElementById("returning-block");
+      if (returningEl) returningEl.classList.add("hidden");
+      const dashBtn = document.getElementById("btn-dashboard");
+      if (dashBtn) dashBtn.classList.remove("hidden");
     }
 
     function showError(message) {
@@ -505,9 +743,45 @@ you up to 6 yes/no questions and set up your Tortoise memory.
     }
 
     // ── Copy functions ─────────────────────────────────────────────────────
-    function copyApiKey() {
+    // Shared copy helper: async clipboard API first, execCommand fallback via
+    // a temp textarea, and a visible failure message if both fail (#751).
+    async function copyWithFallback(text, btnId) {
+      let ok = false;
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(text);
+          ok = true;
+        }
+      } catch (e) { /* fall through to execCommand */ }
+      if (!ok) {
+        const textarea = document.createElement("textarea");
+        textarea.value = text;
+        textarea.style.position = "fixed";
+        textarea.style.opacity = "0";
+        document.body.appendChild(textarea);
+        textarea.select();
+        try { ok = document.execCommand("copy"); } catch (e2) { ok = false; }
+        document.body.removeChild(textarea);
+      }
+      if (!ok) flashCopyFailure(btnId);
+      return ok;
+    }
+
+    function flashCopyFailure(btnId, detail) {
+      const btn = document.getElementById(btnId);
+      if (!btn) return;
+      const old = btn.textContent;
+      btn.textContent = "Copy failed — " + (detail || "select and copy manually");
+      btn.classList.add("copy-failed");
+      setTimeout(() => {
+        btn.textContent = old;
+        btn.classList.remove("copy-failed");
+      }, 3000);
+    }
+
+    async function copyApiKey() {
       const key = document.getElementById("api-key").textContent;
-      copyToClipboard(key);
+      if (!(await copyWithFallback(key, "btn-copy"))) return;
       const btn = document.getElementById("btn-copy");
       btn.classList.add("copied");
       document.getElementById("copy-text").textContent = "Copied!";
@@ -517,17 +791,17 @@ you up to 6 yes/no questions and set up your Tortoise memory.
       }, 2000);
     }
 
-    function copySnippet() {
+    async function copySnippet() {
       const key = document.getElementById("api-key").textContent;
       const snippet = `# Install Tortoise
-pip install git+https://github.com/daniel-ospina/tortoise.git
+pip install tortoise-graph
 
 # Connect to your hosted graph
 tortoise init --api-key ${key}
 
 # Create your first Point
 tortoise create-point "Hello world" --kind statement`;
-      copyToClipboard(snippet);
+      if (!(await copyWithFallback(snippet, "btn-copy-snippet"))) return;
 
       // Visual feedback (matches copyApiKey / copyMcpConfig)
       const btn = document.getElementById("btn-copy-snippet");
@@ -541,51 +815,6 @@ tortoise create-point "Hello world" --kind statement`;
         if (textEl) textEl.textContent = origText;
         else btn.textContent = origText;
       }, 2000);
-    }
-
-    function copyMcpConfig() {
-      const key = document.getElementById("api-key").textContent;
-      const config = `{
-  "mcpServers": {
-    "tortoise": {
-      "command": "python3",
-      "args": ["-m", "tortoise.mcp_server"],
-      "env": {
-        "TORTOISE_API_KEY": "${key}",
-        "TORTOISE_API_URL": "https://api.premiselabs.co"
-      }
-    }
-  }
-}`;
-      copyToClipboard(config);
-
-      const btn = document.getElementById("btn-copy-mcp");
-      const textEl = btn.querySelector("span");
-      const origText = textEl ? textEl.textContent : btn.textContent;
-      btn.classList.add("copied");
-      if (textEl) textEl.textContent = "Copied!";
-      else btn.textContent = "Copied!";
-      setTimeout(() => {
-        btn.classList.remove("copied");
-        if (textEl) textEl.textContent = origText;
-        else btn.textContent = origText;
-      }, 2000);
-    }
-
-    async function copyToClipboard(text) {
-      try {
-        await navigator.clipboard.writeText(text);
-      } catch {
-        // Fallback for older browsers
-        const textarea = document.createElement("textarea");
-        textarea.value = text;
-        textarea.style.position = "fixed";
-        textarea.style.opacity = "0";
-        document.body.appendChild(textarea);
-        textarea.select();
-        document.execCommand("copy");
-        document.body.removeChild(textarea);
-      }
     }
 
     // ── Start ──────────────────────────────────────────────────────────────
@@ -632,12 +861,23 @@ codex mcp add tortoise --url https://api.premiselabs.co/mcp --bearer-token-env-v
       }, null, 2),
     };
     let currentHarness = "claude";
-    const PROMPT_URL = "https://tortoise.premiselabs.co/onboarding-prompt.md";
+    // Render the default (Claude Code) MCP config on load so the box is never
+    // empty (#745a) — switchHarness/copyMcpConfig re-render on interaction,
+    // and showSuccess() re-renders once the real key is revealed.
+    renderMcpConfig();
+    // Canonical onboarding prompt (#540): served by the premise-labs Pages
+    // project from tortoise/onboarding/AGENT_ONBOARDING.md via deploy-pages.yml.
+    // premiselabs.co is the project's active custom domain (tortoise.premiselabs.co
+    // still CNAMEs to the legacy tortoise-landing-v2 project — see #540).
+    const PROMPT_URL = "https://premiselabs.co/onboarding-prompt.md";
 
     function switchHarness(name) {
       currentHarness = name;
-      document.querySelectorAll(".harness-tab").forEach(t =>
-        t.classList.toggle("active", t.dataset.harness === name));
+      document.querySelectorAll(".harness-tab").forEach(t => {
+        const active = t.dataset.harness === name;
+        t.classList.toggle("active", active);
+        t.setAttribute("aria-pressed", String(active));
+      });
       renderMcpConfig();
     }
 
@@ -650,7 +890,7 @@ codex mcp add tortoise --url https://api.premiselabs.co/mcp --bearer-token-env-v
     async function copyMcpConfig() {
       renderMcpConfig();
       const text = document.getElementById("mcp-config-text").textContent;
-      await navigator.clipboard.writeText(text);
+      if (!(await copyWithFallback(text, "btn-copy-mcp"))) return;
       // Analytics: artifact_copied (config)
       try { fetch("https://api.premiselabs.co/v1/onboarding/state", {method:"PATCH"}); } catch(e) {}
       flashCopied("btn-copy-mcp");
@@ -665,7 +905,13 @@ codex mcp add tortoise --url https://api.premiselabs.co/mcp --bearer-token-env-v
           if (r.ok) text = await r.text();
         } catch(e) {}
       }
-      await navigator.clipboard.writeText(text);
+      // Never copy the load-time placeholder (#751): if the prompt still
+      // hasn't loaded, tell the user instead.
+      if (text.includes("Loading prompt")) {
+        flashCopyFailure("btn-copy-prompt", "prompt is still loading — try again in a moment");
+        return;
+      }
+      if (!(await copyWithFallback(text, "btn-copy-prompt"))) return;
       flashCopied("btn-copy-prompt");
     }
 
@@ -676,11 +922,24 @@ codex mcp add tortoise --url https://api.premiselabs.co/mcp --bearer-token-env-v
       setTimeout(() => { btn.textContent = old; }, 1500);
     }
 
-    // Fetch the prompt on load (best-effort; fallback text remains)
+    // Fetch the prompt on load (best-effort; fallback text remains). The copy
+    // button stays disabled until the fetch settles so it can't copy the
+    // "(Loading prompt…)" placeholder (#751).
+    const promptBtn = document.getElementById("btn-copy-prompt");
+    if (promptBtn) promptBtn.disabled = true;
     fetch(PROMPT_URL).then(r => { if (r.ok) return r.text(); })
       .then(t => { if (t) document.getElementById("prompt-text").textContent = t; })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => { if (promptBtn) promptBtn.disabled = false; });
 
 </script>
+
+  <footer class="legal-footer">
+    <a href="/privacy">Privacy Policy</a>
+    <a href="/tos">Terms of Service</a>
+    <a href="/license">License</a>
+    <a href="/dpa">DPA</a>
+  </footer>
+<script src="/consent.js" defer></script>
 </body>
 </html>

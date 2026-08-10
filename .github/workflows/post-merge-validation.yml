@@ -23,34 +23,56 @@ concurrency:
   group: postmerge-validation
   cancel-in-progress: false
 
+# The comment step posts on the PR and the linked issue — the default
+# read-only token for pull_request events cannot do that.
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
 jobs:
   validate:
     if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.merge_commit_sha }}
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.12'  # pyproject requires-python >= 3.12 (mirrors python-ci.yml)
       - name: Install
         run: |
+          set -o pipefail  # don't let `tail` mask a pip failure
           pip install -e '.[embeddings]' falkordblite pytest pytest-timeout 2>&1 | tail -2
       - name: Run tests (embedded suite, per-test timeout)
         id: tests
         run: |
-          python -m pytest tests/ -q --timeout=45 2>&1 | tail -25
-          # pytest exits nonzero on failure — capture for the comment step
-          exit $?
+          # 90s per-test: embedded redislite EP tests take ~25-35s locally
+          # (slowest ~33s on this hardware), more on CI runners. Still a hang
+          # detector — just not a speed gate.
+          # pipefail: without it the pipeline's exit status is `tail`'s (0) and
+          # pytest failures are silently masked — steps.tests.outcome would be
+          # 'success' even when the suite is red.
+          set -o pipefail
+          # tests/e2e has dedicated jobs (welcome-e2e, legal-e2e, signup/billing
+          # e2e in their own workflows) and needs pytest-playwright browsers this
+          # job does not install — post-merge-validation covers the
+          # unit/integration suite only.
+          python -m pytest tests/ -q --timeout=90 --ignore=tests/e2e 2>&1 | tail -25
       - name: Comment result on PR
         if: always()
         uses: actions/github-script@v7
+        env:
+          # github-script v7 does not expose `steps` in the JS scope (and
+          # rejects undeclared `with:` inputs) — pass the tests step outcome via
+          # an expression-evaluated env var instead.
+          TESTS_OUTCOME: ${{ steps.tests.outcome }}
         with:
           script: |
             const pr = context.payload.pull_request;
-            const passed = steps.tests.outcome === 'success';
+            const passed = process.env.TESTS_OUTCOME === 'success';
             const body = passed
               ? `✅ **Post-merge validation PASSED** — merge ${pr.merge_commit_sha.slice(0, 8)} verified on main.`
               : `❌ **Post-merge validation FAILED** — the merged change broke the test suite (see run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}). The linked issue must NOT be considered done until this is resolved.`;

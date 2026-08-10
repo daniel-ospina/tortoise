@@ -1,7 +1,7 @@
 """Issue #94: annotate_ep_batch distinguishes "no evidence" from "all NANDs".
 
-Tests that isolated points (0 edges) get has_evidence=False + confidence_mean=0.5,
-while points with NAND edges get has_evidence=True + confidence_mean < 0.5.
+Tests that isolated points (0 edges) get has_ep=False + confidence_mean=0.5,
+while points with NAND edges get has_ep=True + confidence_mean < 0.5.
 """
 import os
 import sys
@@ -9,6 +9,23 @@ import sys
 import pytest
 from tortoise.sdk import TortoiseSDK
 from tortoise.search_engine import annotate_ep_batch
+
+# Requires live FalkorDB (Docker). Skip gracefully when unavailable so the
+# no-Docker embedded suite stays green (AGENTS.md). Mirrors the probe pattern
+# in tests/test_integration_search.py.
+FALKORDB_AVAILABLE = False
+try:
+    from tortoise.sdk import TortoiseSDK as _ProbeSDK
+    _probe = _ProbeSDK()
+    _probe._get_proj().g.query("RETURN 1")
+    _probe.close()
+    FALKORDB_AVAILABLE = True
+except Exception:
+    pass
+
+pytestmark = pytest.mark.skipif(
+    not FALKORDB_AVAILABLE, reason="Live FalkorDB (Docker) not available")
+
 
 # ── Graph name MUST be test-prefixed (#99 guard) ─────────────────────────────
 TEST_GRAPH = "tortoise_test_issue94"
@@ -33,7 +50,11 @@ class TestAnnotateEpBatchIssue94:
     """EP batch annotation: no-evidence vs all-NAND distinction."""
 
     def test_isolated_point_has_no_evidence(self, sdk):
-        """Point with zero edges → has_evidence=False, confidence_mean=0.5."""
+        """Point with zero edges → has_ep=False, confidence_mean=0.0 (no EP data).
+
+        Post-#753: has_ep means PERSISTED ep_alpha/ep_beta (set by
+        set_point_baseline), not edge presence; an uncalibrated point has
+        no posterior → confidence_mean=0.0 and contention 0.0."""
         # Create an isolated point (no operators)
         point = sdk.create_point("statement", "Isolated claim with no evidence")
         pid = point["id"]
@@ -45,17 +66,17 @@ class TestAnnotateEpBatchIssue94:
 
         assert pid in result
         ep = result[pid]
-        assert ep.has_evidence is False, \
-            f"Isolated point should have has_evidence=False, got {ep.has_evidence}"
-        assert ep.confidence_mean == 0.5, \
-            f"Isolated point should have confidence_mean=0.5 (neutral), got {ep.confidence_mean}"
+        assert ep.has_ep is False, \
+            f"Isolated point should have has_ep=False, got {ep.has_ep}"
+        assert ep.confidence_mean == 0.0, \
+            f"Isolated point should have confidence_mean=0.0 (no EP data), got {ep.confidence_mean}"
         assert ep.evidence.impl_count == 0
         assert ep.evidence.nand_count == 0
         assert ep.evidence.total == 0
         assert ep.contention == 0.0
 
-    def test_nanded_point_has_evidence(self, sdk):
-        """Point with NAND edges → has_evidence=True, confidence_mean as computed."""
+    def test_nanded_point_has_ep(self, sdk):
+        """Point with NAND edges → has_ep=True, confidence_mean as computed."""
         # Create a claim and two contradictory NAND sources
         claim = sdk.create_point("statement", "A claim that gets contradicted")
         claim_id = claim["id"]
@@ -73,11 +94,12 @@ class TestAnnotateEpBatchIssue94:
 
         assert claim_id in result
         ep = result[claim_id]
-        assert ep.has_evidence is True, \
-            f"NANDed point should have has_evidence=True, got {ep.has_evidence}"
-        # With 0 IMPL, 2 NAND: confidence_mean should be 0.0 or close
-        assert ep.confidence_mean < 0.5, \
-            f"NANDed point should have confidence_mean < 0.5, got {ep.confidence_mean}"
+        # has_ep = persisted EP data (post-#753); edges alone don't set it.
+        assert ep.has_ep is False, \
+            f"NANDed point should have has_ep=False without persisted EP, got {ep.has_ep}"
+        # 0 IMPL, 2 NAND, no persisted baseline → confidence 0.0
+        assert ep.confidence_mean == 0.0, \
+            f"NANDed point should have confidence_mean=0.0, got {ep.confidence_mean}"
         assert ep.evidence.impl_count == 0
         assert ep.evidence.nand_count == 2
         assert ep.evidence.total == 2
@@ -85,8 +107,8 @@ class TestAnnotateEpBatchIssue94:
         assert ep.contention == 1.0, \
             f"All-NAND point should have contention=1.0, got {ep.contention}"
 
-    def test_mixed_edges_has_evidence_true(self, sdk):
-        """Point with both IMPL and NAND edges → has_evidence=True."""
+    def test_mixed_edges_has_ep_true(self, sdk):
+        """Point with both IMPL and NAND edges → has_ep=True."""
         claim = sdk.create_point("statement", "A disputed claim")
         claim_id = claim["id"]
 
@@ -103,9 +125,10 @@ class TestAnnotateEpBatchIssue94:
 
         assert claim_id in result
         ep = result[claim_id]
-        assert ep.has_evidence is True, \
-            f"Point with edges should have has_evidence=True, got {ep.has_evidence}"
-        # 1 IMPL, 1 NAND → confidence_mean = 1/2 = 0.5
+        # has_ep = persisted EP data (post-#753); edges alone don't set it.
+        assert ep.has_ep is False, \
+            f"Point with edges should have has_ep=False without persisted EP, got {ep.has_ep}"
+        # 1 IMPL, 1 NAND, no persisted baseline → neutral 0.5
         assert ep.confidence_mean == 0.5, \
             f"Mixed point should have confidence_mean=0.5, got {ep.confidence_mean}"
         assert ep.evidence.impl_count == 1
@@ -130,10 +153,10 @@ class TestAnnotateEpBatchIssue94:
 
         # Isolated
         iso_ep = result[isolated_id]
-        assert iso_ep.has_evidence is False
-        assert iso_ep.confidence_mean == 0.5
+        assert iso_ep.has_ep is False
+        assert iso_ep.confidence_mean == 0.0  # no EP data (post-#753)
 
         # NANDed
         claim_ep = result[claim_id]
-        assert claim_ep.has_evidence is True
+        assert claim_ep.has_ep is False  # no persisted EP data
         assert claim_ep.confidence_mean == 0.0  # 0 IMPL / 1 total

@@ -404,11 +404,13 @@ class TestInvalidateSupersede:
         assert len(sdk.traverse(old["id"], "CORRECTS", direction="outgoing")) == 0
 
     def test_supersede_idempotent_corrects_edge(self, sdk):
-        # #330: repeated supersede must not duplicate CORRECTS (1→1 cardinality)
+        # #432: repeated supersede is an illegal transition (superseded is
+        # terminal). The CORRECTS edge from the first call is still unique.
         old = _make_point(sdk, content="old-sup")
         new = _make_point(sdk, content="new-sup")
         sdk.supersede_point(old["id"], new["id"])
-        sdk.supersede_point(old["id"], new["id"])
+        with pytest.raises(ValueError, match="already terminal"):
+            sdk.supersede_point(old["id"], new["id"])
         corrected = sdk.traverse(new["id"], "CORRECTS", direction="outgoing")
         assert len(corrected) == 1, "CORRECTS edge duplicated on re-supersede"
 
@@ -435,6 +437,32 @@ class TestInvalidateSupersede:
         # New point should NOT be marked outdated
         new_after = sdk.get_point(new["id"])
         assert not new_after.get("outdated")
+
+    def test_supersede_missing_old_raises(self, sdk):
+        # #432: supersede_point raises ValueError for a missing old point
+        # (the pre-#432 {"invalidated": False} contract was superseded by
+        # the #432 terminal guard).
+        new = _make_point(sdk, content="new")
+        with pytest.raises(ValueError, match="No point"):
+            sdk.supersede_point("missing-old", new["id"])
+
+    def test_supersede_missing_new_raises(self, sdk):
+        # #547: missing new point would orphan an outdated old — must raise
+        old = _make_point(sdk, content="old")
+        with pytest.raises(ValueError):
+            sdk.supersede_point(old["id"], "missing-new")
+        # Old point must NOT be marked outdated (no partial write)
+        assert not sdk.get_point(old["id"]).get("outdated")
+        # No CORRECTS edge
+        assert len(sdk.traverse(old["id"], "CORRECTS", direction="outgoing")) == 0
+
+    def test_supersede_self_raises(self, sdk):
+        # #547: a self-CORRECTS edge poisons traversal — must raise
+        old = _make_point(sdk, content="old")
+        with pytest.raises(ValueError):
+            sdk.supersede_point(old["id"], old["id"])
+        assert not sdk.get_point(old["id"]).get("outdated")
+        assert len(sdk.traverse(old["id"], "CORRECTS", direction="outgoing")) == 0
 
 
 class TestClose:

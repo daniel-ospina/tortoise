@@ -25,19 +25,35 @@ jobs:
         run: |
           cp tortoise/onboarding/AGENT_ONBOARDING.md website/onboarding-prompt.md
           test -s website/onboarding-prompt.md
-      - name: Diag production branch
+      - name: Sync DNS — tortoise.premiselabs.co → premise-labs Pages project (best-effort)
+        # The subdomain previously CNAME'd to the legacy tortoise-landing-v2
+        # Pages project (stale content: welcome v1, no onboarding-prompt.md),
+        # which is why the premise-labs custom-domain attach stayed "pending"
+        # and the old PROMPT_URL fetch returned HTML (#540).
+        # Best-effort: the deploy token may lack Zone:DNS edit scope (auth error
+        # is tolerated — the welcome page now uses premiselabs.co which is
+        # already active). Once the token gains DNS scope this repairs the
+        # subdomain automatically.
+        continue-on-error: true
         run: |
-          curl -s "https://api.cloudflare.com/client/v4/accounts/367c7ecf27e1b1b092d04fe9915a1e56/pages/projects/premise-labs" \
-            -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" | python3 -c "
-import json,sys
-d=json.load(sys.stdin)
-if not d.get('success'): print('API ERROR:', d); sys.exit(1)
-p=d['result']
-print('production_branch:', p.get('production_branch'))
-print('domains:', p.get('domains'))
-ld=p.get('latest_deployment') or {}
-print('latest_deployment_url:', ld.get('url'))
-"
+          ZONE=$(curl -s "https://api.cloudflare.com/client/v4/zones?name=premiselabs.co" \
+            -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" | jq -r '.result[0].id')
+          echo "zone: $ZONE"
+          REC=$(curl -s "https://api.cloudflare.com/client/v4/zones/$ZONE/dns_records?name=tortoise.premiselabs.co" \
+            -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}")
+          REC_ID=$(echo "$REC" | jq -r '.result[0].id // empty')
+          CUR=$(echo "$REC" | jq -r '.result[0].content // empty')
+          echo "current: id=$REC_ID content=$CUR"
+          if [ "$CUR" != "premise-labs.pages.dev" ]; then
+            echo "repairing CNAME $CUR → premise-labs.pages.dev"
+            curl -s -X PATCH "https://api.cloudflare.com/client/v4/zones/$ZONE/dns_records/$REC_ID" \
+              -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" \
+              -H "Content-Type: application/json" \
+              -d '{"type":"CNAME","name":"tortoise.premiselabs.co","content":"premise-labs.pages.dev","proxied":true}' \
+              | jq -c '{success, errors: [.errors[].message]}'
+          else
+            echo "CNAME already correct"
+          fi
       - name: Deploy to Cloudflare Pages (premise-labs project)
         run: |
           cd website
@@ -45,3 +61,85 @@ print('latest_deployment_url:', ld.get('url'))
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: 367c7ecf27e1b1b092d04fe9915a1e56
+
+  # ── Post-deploy verification: legal pages E2E suite (#677) ───────────
+  verify-legal:
+    needs: deploy
+    runs-on: ubuntu-latest
+    steps:
+      # Step 1: Deploy-completion poll — after the deploy step, poll
+      # https://premiselabs.co/privacy → 200 (retry ~30s × 5–10 min).
+      - name: Poll deploy completion (premiselabs.co/privacy → 200)
+        run: |
+          MAX_ATTEMPTS=20
+          for i in $(seq 1 $MAX_ATTEMPTS); do
+            STATUS=$(curl -s -o /dev/null -w '%{http_code}' https://premiselabs.co/privacy)
+            if [ "$STATUS" = "200" ]; then
+              echo "deploy complete — premiselabs.co/privacy returned 200 (attempt $i)"
+              break
+            fi
+            if [ "$i" -eq "$MAX_ATTEMPTS" ]; then
+              echo "::error::deploy did not complete after $MAX_ATTEMPTS attempts (~$((MAX_ATTEMPTS * 30 / 60)) min)"
+              exit 1
+            fi
+            echo "attempt $i/$MAX_ATTEMPTS: status $STATUS, retrying in 30s..."
+            sleep 30
+          done
+
+      # Step 2: DNS preflight — dig +short tortoise.premiselabs.co CNAME
+      # target == premise-labs.pages.dev + root-marker curl; green ⇒ set
+      # TORTISE_HOST_CHECK=1 (tortoise.* tests run); stale ⇒ leave unset
+      # (skip — green-with-annotation; the premiselabs.co half remains
+      # the green signal).
+      - name: DNS preflight (tortoise.premiselabs.co CNAME + root-marker)
+        run: |
+          CNAME=$(dig +short tortoise.premiselabs.co CNAME || true)
+          echo "tortoise.premiselabs.co CNAME target: ${CNAME:-<none>}"
+          # Accept trailing dot (standard dig output).
+          if [ "$CNAME" = "premise-labs.pages.dev." ] || [ "$CNAME" = "premise-labs.pages.dev" ]; then
+            ROOT_MARKER=$(curl -s https://tortoise.premiselabs.co/ 2>/dev/null || true)
+            if echo "$ROOT_MARKER" | grep -qF "Memory that makes your agents"; then
+              echo "TORTISE_HOST_CHECK=1" >> "$GITHUB_ENV"
+              echo "DNS preflight green — tortoise.* tests enabled"
+            else
+              echo "::warning::tortoise host serves root but root-marker absent — tortoise.* tests skipped"
+            fi
+          else
+            echo "::warning::tortoise.premiselabs.co CNAME stale (got '${CNAME:-<none>}', expected premise-labs.pages.dev) — tortoise.* tests skipped"
+          fi
+
+      # Step 3: pytest — mirroring welcome-e2e conventions from ci.yml
+      # (checkout → setup-python 3.12 → pip install -e '.[test]' →
+      # playwright install --with-deps chromium → pytest).
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -e '.[test]'
+      - run: python -m playwright install --with-deps chromium
+      - name: Run legal pages E2E suite
+        run: python -m pytest tests/e2e/test_legal_pages.py -v
+        env:
+          RUN_LEGAL_E2E: '1'
+          ALLOW_PROD: '1'
+          BASE_URL: https://premiselabs.co
+          TORTISE_HOST: https://tortoise.premiselabs.co
+
+      # Step 4: Warn-only effective-date comparison — served
+      # "Effective date: YYYY-MM-DD" vs deploy-commit date
+      # (git log -1 --format=%cs); if either is unavailable ⇒
+      # warn + skip, never fail.
+      - name: Effective-date comparison (warn-only)
+        if: always()
+        run: |
+          SERVED_DATE=$(curl -s https://premiselabs.co/privacy | grep -oP 'Effective date:\s*\K\d{4}-\d{2}-\d{2}' || true)
+          DEPLOY_DATE=$(git log -1 --format=%cs 2>/dev/null || true)
+          echo "served effective date: ${SERVED_DATE:-<not found>}"
+          echo "deploy commit date:   ${DEPLOY_DATE:-<not found>}"
+          if [ -z "$SERVED_DATE" ] || [ -z "$DEPLOY_DATE" ]; then
+            echo "::warning::cannot compare effective dates (served='${SERVED_DATE:-}' deploy='${DEPLOY_DATE:-}') — skipping"
+          elif [ "$SERVED_DATE" != "$DEPLOY_DATE" ]; then
+            echo "::warning::served effective date ($SERVED_DATE) != deploy commit date ($DEPLOY_DATE)"
+          else
+            echo "effective date matches deploy commit date ($SERVED_DATE)"
+          fi

@@ -17,6 +17,23 @@ import pytest
 
 from tortoise.sdk import TortoiseSDK
 
+# Requires live FalkorDB (Docker). Skip gracefully when unavailable so the
+# no-Docker embedded suite stays green (AGENTS.md). Mirrors the probe pattern
+# in tests/test_integration_search.py.
+FALKORDB_AVAILABLE = False
+try:
+    from tortoise.sdk import TortoiseSDK as _ProbeSDK
+    _probe = _ProbeSDK()
+    _probe._get_proj().g.query("RETURN 1")
+    _probe.close()
+    FALKORDB_AVAILABLE = True
+except Exception:
+    pass
+
+pytestmark = pytest.mark.skipif(
+    not FALKORDB_AVAILABLE, reason="Live FalkorDB (Docker) not available")
+
+
 
 @pytest.fixture
 def sdk():
@@ -348,3 +365,77 @@ class TestDecideContextFree:
             assert abs(a_cf - a_an) < 0.5, (
                 f"A confidence divergence: cf={a_cf:.4f} anchors={a_an:.4f}"
             )
+
+
+class TestIssue400EPFixes:
+    """#400: EP N+1 factor extraction + create_operator validation + empty-result signal."""
+
+    def test_batch_factor_extraction_has_both_inputs(self, sdk):
+        """Batch extract_svbp_factors returns operators with all inputs (not N+1 drops)."""
+        opt_a = sdk.create_point("option", "Option A")
+        opt_b = sdk.create_point("option", "Option B")
+        ev = sdk.create_point("evidence", "Both good")
+
+        # Create operator with source + 2 targets (3 inputs total)
+        op = sdk.create_operator("IMPL", ev["id"], [opt_a["id"], opt_b["id"]])
+
+        proj = sdk._get_proj()
+        factors, _ = proj.extract_svbp_factors()
+
+        # Find our operator in the extracted factors
+        op_factor = None
+        for f in factors:
+            if f[0] == op["id"]:
+                op_factor = f
+                break
+
+        assert op_factor is not None, f"Operator {op['id']} not found in extracted factors"
+        _op_id, op_type, input_ids, weight = op_factor
+        assert op_type == "IMPL"
+        assert weight == 1.0
+        # Should have all 3 inputs: source (ev) + 2 targets (opt_a, opt_b)
+        assert len(input_ids) >= 2, \
+            f"Expected >=2 inputs, got {len(input_ids)}: {input_ids}"
+        assert ev["id"] in input_ids
+        assert opt_a["id"] in input_ids
+        assert opt_b["id"] in input_ids
+
+    def test_create_operator_missing_endpoint_raises(self, sdk):
+        """create_operator with missing source or target raises ValueError (no silent drop)."""
+        ev = sdk.create_point("evidence", "Real evidence")
+        fake_id = "nonexistent-point-000000"
+
+        # Missing target
+        with pytest.raises(ValueError, match="do not exist"):
+            sdk.create_operator("IMPL", ev["id"], [fake_id])
+
+        # Missing source
+        with pytest.raises(ValueError, match="do not exist"):
+            sdk.create_operator("IMPL", fake_id, [ev["id"]])
+
+    def test_compute_confidence_empty_signals_no_factors(self, sdk):
+        """compute_confidence on empty graph returns diagnostic='no_factors'."""
+        result = sdk.compute_confidence()
+        assert result["iterations"] == 0
+        assert result["converged"] is True
+        assert result.get("diagnostic") == "no_factors", (
+            f"Expected diagnostic='no_factors' on empty graph, got {result}"
+        )
+        assert result["confidences"] == {}
+
+    def test_nand_operator_gets_weight_3(self, sdk):
+        """NAND operators get weight 3.0 in factor extraction (batch query preserves this)."""
+        opt_a = sdk.create_point("option", "Option A")
+        opt_b = sdk.create_point("option", "Option B")
+        ev = sdk.create_point("evidence", "A opposes B")
+
+        op = sdk.create_operator("NAND", ev["id"], [opt_a["id"], opt_b["id"]])
+
+        proj = sdk._get_proj()
+        factors, _ = proj.extract_svbp_factors()
+
+        nand_factors = [f for f in factors if f[0] == op["id"]]
+        assert len(nand_factors) == 1
+        _op_id, op_type, _inputs, weight = nand_factors[0]
+        assert op_type == "NAND"
+        assert weight == 3.0, f"Expected NAND weight 3.0, got {weight}"

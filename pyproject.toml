@@ -13,6 +13,7 @@ classifiers = [
 ]
 dependencies = [
     "fastapi>=0.100.0",
+    "httpx>=0.24",
     "uvicorn>=0.23.0",
     "numpy>=1.24",
     "scipy>=1.10",
@@ -21,6 +22,7 @@ dependencies = [
     "pyyaml>=6.0",
     "fastmcp==3.4.6",
     "prometheus-client>=0.16",
+    "posthog>=3.0",
 ]
 
 [project.scripts]
@@ -32,6 +34,8 @@ tortoise-serve = "tortoise.deployment:serve"
 embeddings = ["sentence-transformers>=3,<6", "scikit-learn>=1.0"]
 quadrature = ["jax>=0.4"]
 postgres = ["psycopg2-binary>=2.9"]
+backups = ["boto3>=1.34", "cryptography>=42"]
+test = ["pytest>=8", "pytest-timeout", "pytest-asyncio>=0.23", "playwright>=1.40", "pytest-playwright>=0.5"]
 
 [tool.setuptools.packages.find]
 include = ["tortoise*"]
@@ -39,3 +43,12 @@ include = ["tortoise*"]
 [build-system]
 requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
+
+[dependency-groups]
+# Ergonomic dev group so `uv run pytest` works with per-test timeouts in
+# offline CI (complements the existing `test` extra; pytest-timeout caps
+# infra-dependent tests that would otherwise hang when Redis/Docker are down).
+dev = [
+    "pytest>=9.1.1",
+    "pytest-timeout>=2.4.0",
+]

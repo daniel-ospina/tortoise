@@ -27,10 +27,12 @@ _SECRET_PEPPER = os.environ.get("TORTOISE_SECRET_PEPPER", "")
 if not _SECRET_PEPPER:
     if os.environ.get("TORTOISE_API_KEY"):
         raise RuntimeError(
-            "TORTOISE_SECRET_PEPPER is not set. "
-            "Set TORTOISE_SECRET_PEPPER in production to ensure API key hashes "
-            "survive process restart. API key hashes cannot be verified without "
-            "a stable pepper value."
+            "TORTOISE_API_KEY is the hosted/cloud key — it is not used by local "
+            "stdio MCP and causes this startup error. For local stdio, UNSET "
+            "TORTOISE_API_KEY (dev mode). For authenticated local MCP, run "
+            "'tortoise serve --http' (needs TORTOISE_SECRET_PEPPER for key "
+            "hashing; set a stable value, e.g. openssl rand -hex 32). "
+            "API key hashes cannot be verified without a stable pepper value."
         )
     _logger.warning(
         "TORTOISE_SECRET_PEPPER not set — using dev-mode pepper. "
@@ -99,9 +101,37 @@ def verify_api_key(key: str, stored: str) -> bool:
             return False
     except (ValueError, AttributeError):
         return False
-    per_key_salt = bytes.fromhex(salt_hex)
+    # #750.1: a non-hex salt (corrupt/garbage stored value) must fail closed
+    # with False, not raise ValueError → 500.
+    try:
+        per_key_salt = bytes.fromhex(salt_hex)
+    except ValueError:
+        return False
+    if len(per_key_salt) != 32:
+        return False
     key_material = key.encode() + _PEPPER_BYTES
     computed = hashlib.pbkdf2_hmac(
         "sha256", key_material, per_key_salt, 100_000
     )
     return _hmac.compare_digest(computed.hex(), expected_hex)
+
+
+def lookup_hash(key: str) -> str:
+    """Instant key-lookup hash for the Supabase control plane (#669 plan P1-1).
+
+    lookup_hash := SHA-256(pepper + key), hex-encoded. Unlike the salted
+    PBKDF2 hash_api_key() (verification-only, iterated, salt per key), this
+    is a deterministic one-way digest used to LOOK UP a key at request time:
+    the presented key is hashed and matched against the indexed
+    lookup_hash column (team_memberships / api_keys) — O(1) index equality,
+    no scan. The pepper is held in app code (never the DB), so the DB cannot
+    reverse the digest without it.
+
+    Construction is "pepper first, then key" — the plan's exact spelling
+    ("SHA-256(pepper + key)"). The TS mirror lives in
+    supabase/functions/_shared/lookup.ts and MUST stay byte-identical;
+    supabase/tests/lookup_parity.test.mjs locks both sides to the same
+    test vectors. Do NOT change the order here without updating the mirror
+    and the parity vectors.
+    """
+    return hashlib.sha256(_PEPPER_BYTES + key.encode()).hexdigest()

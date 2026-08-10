@@ -1,103 +1,121 @@
-"""Pytest configuration — test graph isolation guard (#99) + per-test isolation (#221).
+"""D11 #578 — shared fixtures for the epic E2E suite.
 
-Forces ALL integration tests onto an isolated graph name starting with
-'tortoise_test_' so that the SDK-level DETACH DELETE guard passes, and
-no test can affect the real graph (falkordb-personal:16379/tortoise).
-
-The default URI uses the test FalkorDB container (port 6379) with an
-isolated graph name. Individual test files or CI can override via
-TORTOISE_DB_URI env var as long as the graph name starts with
-'test_' or 'tortoise_test'.
-
-Per-test isolation (#221): an autouse fixture recomposes TORTOISE_DB_URI
-per test so every test gets its OWN graph name
-(``tortoise_test_<session>_<testname>``). Whole-graph ``DETACH DELETE``
-calls then only ever wipe the test's own graph — order-dependence from
-shared-graph pollution is eliminated structurally.
+provision_test_user: creates a provisioned test user (team + membership +
+key) with tier + demo_seed control. Tier injection writes the Team node
+directly (no user-facing tier path in v1). Used by E2E-1/3/4/5/10/11/12/13.
 """
 from __future__ import annotations
 
 import os
-import re
-import sys
 import tempfile
-import uuid
 
 import pytest
 
-# ── Embedded-mode dependency guard (#450) ──────────────────────────────────
-# falkordblite (not plain redislite) provides redislite.falkordb_client.
-# Catch the gap early so a fresh checkout doesn't silently fail 69+ tests.
-try:
-    from redislite.falkordb_client import FalkorDB  # noqa: F401
-except ImportError:
-    print(
-        "\n⚠️  falkordblite NOT installed — embedded-mode tests will fail.\n"
-        "    Fix: pip install falkordblite>=0.10\n"
-        "    (plain redislite does NOT include the FalkorDB embedded client)\n",
-        file=sys.stderr,
-    )
+os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
+
+from tortoise.sdk import TortoiseSDK
+from tortoise.pricing import tier_limits
 
 
-# ── Test graph isolation ───────────────────────────────────────────────────
-# Generate a unique graph name per test session so parallel pytest runs
-# do not collide. The graph name starts with 'tortoise_test_' which is
-# required by the FalkorProjection._assert_test_graph() guard for
-# DETACH DELETE operations.
-TEST_GRAPH = f"tortoise_test_{uuid.uuid4().hex[:8]}"
+@pytest.fixture(scope="session")
+def shared_embedded_db():
+    """One shared embedded FalkorDBLite DB for the whole session (#221 R5).
 
-# Default to the test FalkorDB container (not the real graph at 16379).
-# Individual test files / CI can override via the env var as long as
-# the graph name starts with 'test_' or 'tortoise_test'.
-_TEST_DEFAULT_URI = f"docker://:falkordb@localhost:6379/{TEST_GRAPH}"
+    R5 mitigation for the redislite process leak (#176): tests that need an
+    embedded (redislite) DB create ONE server per session instead of one per
+    test. Each test wipes the graph on its own (or uses a per-test graph
+    name), so state never leaks across tests while the subprocess count stays
+    at 1.
 
-os.environ.setdefault("TORTOISE_DB_URI", _TEST_DEFAULT_URI)
+    Restored 2026-08-08 (#647): the D11 conftest rewrite (#578) dropped this
+    fixture but five test files (test_ep_selector, test_ranking,
+    test_sdk_legacy_coverage, test_search_sessions_temporal,
+    test_session_semantic_search) still depend on it.
 
-# Per-worker uniqueness (xdist-safe): the session UUID is combined with
-# the worker PID so parallel workers never collide on graph names.
-_WORKER_UUID = f"{uuid.uuid4().hex[:8]}_{os.getpid()}"
-
-# Tests that MUST keep whole-graph DETACH DELETE on their own graph
-# (they verify the guard itself). Marked with @pytest.mark.allow_graph_delete
-# — the per-test fixture still isolates them to their own graph, so the
-# wipe stays safe; the marker documents intent and permits a future
-# collection-time lint to require it.
-_ALLOW_GRAPH_DELETE_MARK = "allow_graph_delete"
-
-
-def _recompose_graph_name(base_uri: str, new_graph: str) -> str:
-    """Replace the graph-name segment of a connection URI.
-
-    URI-scheme-aware (#221): docker:// / redis:// / rediss:// URIs get their
-    path (graph name) replaced, preserving query strings and fragments.
-    Embedded file-path URIs pass through UNCHANGED — they are inherently
-    isolated per-test via the per-test DB path, and a naive rewrite would
-    corrupt them.
-
-    Returns the original URI if the scheme is not one of the supported
-    graph-addressed schemes.
+    # TODO(#176): stopgap — remove when the redislite root-cause fix lands.
     """
-    from urllib.parse import urlparse, urlunparse
-    parsed = urlparse(base_uri)
-    if parsed.scheme not in ("docker", "redis", "rediss"):
-        return base_uri
-    # Pathless URI: append the per-test graph so isolation still applies
-    # (P2, #221): docker://host:6379 → docker://host:6379/<graph>
-    return urlunparse(parsed._replace(path=f"/{new_graph}"))
+    db_path = os.path.join(
+        tempfile.mkdtemp(prefix="tortoise_shared_embedded_"), "shared.db"
+    )
+    yield db_path
 
 
-def _sanitize_node_name(name: str) -> str:
-    """Sanitize a pytest node id into a safe graph-name fragment."""
-    # node ids look like test_foo.py::TestClass::test_bar[param]
-    fragment = name.split("::")[-1]
-    fragment = re.sub(r"[^A-Za-z0-9_]", "_", fragment)
-    fragment = fragment[:40]
-    # P3 (#221): append a short hash so long parameterized names whose first
-    # 40 sanitized chars collide (e.g. [ctx-a] vs [ctx-b]) still get unique
-    # graphs.
-    import hashlib
-    suffix = hashlib.blake2b(name.encode(), digest_size=3).hexdigest()
-    return f"{fragment or 'test'}_{suffix}"
+@pytest.fixture
+def provision_test_user():
+    created = []
+
+    def factory(tier: str = "free", demo_seed: bool = True):
+        tmpdir = tempfile.mkdtemp()
+        sdk = TortoiseSDK(os.path.join(tmpdir, "e2e.db"), namespace="e2e-tests")
+        team = sdk.team_create(f"e2e-{os.urandom(4).hex()}")
+        lim = tier_limits(tier)
+        # #310 (review fix 16b): mirror production CREATE semantics — write
+        # max_points (= max_graph_nodes, GAP-B mapping) + max_sessions too.
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.tier=$tier, t.max_graphs=$mg, "
+            "t.max_users=$mu, t.max_api_keys=$mk, t.max_points=$mp, "
+            "t.max_sessions=$ms, t.ops_allowance=$ops, t.graph_size_cap=$nodes",
+            params={"id": team["id"], "tier": tier,
+                    "mg": lim["max_graphs_per_team"], "mu": lim["max_users_per_team"],
+                    "mk": lim["max_api_keys"], "mp": lim["max_graph_nodes"],
+                    "ms": 1000, "ops": lim["included_write_ops_per_month"],
+                    "nodes": lim["max_graph_nodes"]},
+        )
+        if demo_seed:
+            try:
+                sdk._graph_create(team["id"], "demo", kind="custom")
+            except Exception:
+                pass
+        user_id = f"user-{os.urandom(4).hex()}"
+        sdk.membership_create(team["id"], user_id, "owner")
+        created.append(sdk)
+        return {"sdk": sdk, "team_id": team["id"], "api_key": team["api_key"],
+                "graph_name": team["graph_name"], "team_name": team["name"],
+                "user_id": user_id}
+
+    yield factory
+    for sdk in created:
+        try:
+            sdk.close()
+        except Exception:
+            pass
+
+
+@pytest.fixture
+def test_user(provision_test_user):
+    return provision_test_user(tier="free", demo_seed=True)
+
+
+@pytest.fixture
+def sdk_factory(tmp_path):
+    """Shared embedded-SDK factory for the #432 suite (Tasks 1/2/3/5).
+
+    Each call builds a TortoiseSDK on a FRESH embedded redislite DB file under
+    the per-test tmp_path (unique per call), so concurrent workers (threads)
+    each get an isolated graph. Embedded-vs-docker concurrency note
+    (plan-review P2): the embedded redislite server is shared per-path but is
+    NOT multi-connection-safe — two TortoiseSDK instances on the SAME path in
+    one process each open their own server and last-close wins on the DB file.
+    Tests that need cross-SDK sharing on one graph must run against a live
+    FalkorDB (TORTOISE_DB_URI=docker://...) instead; the seq-atomicity test
+    (Task 3) follows the plan's per-worker fresh-SDK construction.
+
+    ensure_schema=False (default): :GraphEvent schema is created lazily by
+    append_event on first emit (Task 3). ensure_schema=True eagerly installs
+    it (used by the duplicate-append test).
+    """
+    import os
+
+    def factory(_tmp_path=None, *, ensure_schema=False, namespace=None):
+        base = _tmp_path if _tmp_path is not None else tmp_path
+        db_path = os.path.join(str(base), f"evt-{os.urandom(4).hex()}.db")
+        sdk = TortoiseSDK(db_path, namespace=namespace)
+        if ensure_schema:
+            from tortoise import event_store
+            event_store.ensure_event_schema(sdk._get_proj())
+        return sdk
+
+    return factory
 
 
 @pytest.fixture(scope="session")
@@ -110,6 +128,13 @@ def shared_embedded_db():
     isolates it), so state never leaks across tests while the subprocess
     count stays at 1.
 
+    Restored 2026-08-08 (#647): the D11 conftest rewrite (#578) dropped this
+    fixture but five test files (test_ep_selector, test_ranking,
+    test_sdk_legacy_coverage, test_search_sessions_temporal,
+    test_session_semantic_search) still depend on it. Kept via #281: the
+    branch's own copy survived its merge of main (main had dropped the
+    fixture at that point; the #647 restoration landed on main afterward).
+
     # TODO(#176): stopgap — remove when the redislite root-cause fix lands.
     """
     import tempfile as _tf
@@ -117,48 +142,3 @@ def shared_embedded_db():
     yield db_path
 
 
-@pytest.fixture(autouse=True)
-def _per_test_graph(monkeypatch, request):
-    """Give every test its own graph name on the session DB connection.
-
-    Intercepts ALL SDK constructions during the test (they read
-    TORTOISE_DB_URI at construction), including direct from_uri callers
-    that read the env var at use-time. Module-level URI captures are
-    handled individually in their test files (R3/R4, #221).
-    """
-    base_uri = os.environ.get("TORTOISE_DB_URI", "")
-    if not base_uri:
-        yield
-        return
-    test_name = _sanitize_node_name(request.node.name)
-    graph = f"tortoise_test_{_WORKER_UUID}_{test_name}"
-    monkeypatch.setenv("TORTOISE_DB_URI", _recompose_graph_name(base_uri, graph))
-    yield
-    # No teardown needed — the next test gets a fresh graph name.
-    # Graphs accumulate on the shared server between tests (harmless —
-    # each is private to its test).
-
-
-def pytest_configure(config):
-    """Register the allow_graph_delete marker (P4, #221)."""
-    config.addinivalue_line(
-        "markers",
-        "allow_graph_delete: test legitimately wipes its own graph (guard-testing)",
-    )
-
-
-def pytest_collection_modifyitems(config, items):
-    """Attach the allow_graph_delete marker to marked items."""
-    for item in items:
-        if _ALLOW_GRAPH_DELETE_MARK in item.keywords:
-            item.add_marker(getattr(pytest.mark, _ALLOW_GRAPH_DELETE_MARK))
-
-
-@pytest.fixture(autouse=True)
-def _set_stdio_transport_mode():
-    """#236: new _safe() gate rejects when _transport_mode is None; stdio tests
-    must run in stdio mode (mirrors main())."""
-    from tortoise.mcp_auth import _transport_mode
-    token = _transport_mode.set("stdio")
-    yield
-    _transport_mode.reset(token)

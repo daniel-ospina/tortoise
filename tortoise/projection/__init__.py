@@ -14,8 +14,12 @@ from __future__ import annotations
 
 import re
 import os
+import logging
+from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Protocol, runtime_checkable
+
+logger = logging.getLogger(__name__)
 
 # P0 guard (#99): bulk graph-wipe classifier. Restored here in #49 Phase 2 —
 # the guard was lost from this (live) module during the v3.0 ontology rewrite
@@ -74,7 +78,12 @@ class _GuardedGraph:
     def __getattr__(self, name):
         return getattr(self._g, name)
 
-from tortoise.config import RELATIVE_PATH_ERROR
+from tortoise.config import RELATIVE_PATH_ERROR, SUPPORTED_URI_SCHEMES
+
+# Backward-compat alias: the canonical scheme set lives in tortoise.config
+# (SUPPORTED_URI_SCHEMES) so URI-routing and connection-layer validation share
+# one source of truth (#715). Kept for existing importers of the private name.
+_SUPPORTED_URI_SCHEMES = SUPPORTED_URI_SCHEMES
 
 # ── Mixins ────────────────────────────────────────────────────────────────
 from tortoise.projection.entities import _EntityHandlers
@@ -95,8 +104,12 @@ def _now_iso() -> str:
 
 
 def _norm(ev: dict) -> dict:
-    """Normalize event shape — tolerates API (flat) and script (nested point)."""
-    if ev.get("point"):
+    """Normalize event shape — tolerates API (flat) and script (nested point).
+
+    Only splices point fields when ``point`` is a dict — a non-dict ``point``
+    (e.g. a legacy string ID) must not crash normalization (issue #325).
+    """
+    if isinstance(ev.get("point"), dict):
         return {**ev, **ev["point"]}
     return ev
 
@@ -106,6 +119,9 @@ def _apply_one(points: dict[str, dict], ev: dict) -> None:
     t = ev["type"]
     if t in ("PointAdded", "OperatorAdded"):
         p = ev["point"]
+        if not isinstance(p, dict):
+            # Malformed event (non-dict point) — skip, don't crash (issue #325)
+            return
         # Phase 1 stop-writes: strip context from v2+ events (#49)
         if ev.get("projection_version", 0) >= 2:
             p.pop("context", None)
@@ -123,7 +139,14 @@ def _apply_one(points: dict[str, dict], ev: dict) -> None:
             if ev.get("new_context") is not None and ev.get("projection_version", 0) < 2:
                 p["context"] = ev["new_context"]
     elif t == "PointRetracted":
-        points.pop(ev["id"], None)
+        # #689: tombstone instead of hard delete — retracted content stays
+        # recoverable via raw graph queries. Historical data loss prior to
+        # this change is irreversible (already-hard-deleted points cannot
+        # be reconstructed from the event log alone — the content existed
+        # only in the projection, and the projection deleted it).
+        p = points.get(ev["id"])
+        if p:
+            p["status"] = "retracted"
     elif t == "PointsMerged":
         for mid in ev.get("merge_ids", []):
             points.pop(mid, None)
@@ -165,16 +188,16 @@ class InMemoryProjection:
         self.points = fold(log.read_all())
 
 
-_SUPPORTED_URI_SCHEMES = ("docker", "redis", "rediss")
-
-
 def _validate_uri_scheme(scheme: str) -> str:
     """Accept docker:// (local) and redis:// / rediss:// (FalkorDB Cloud) URIs.
 
     Raises ValueError for anything else, mirroring the historical docker://-only
-    contract while making managed-instance URIs first-class.
+    contract while making managed-instance URIs first-class. The scheme set is
+    imported from tortoise.config (SUPPORTED_URI_SCHEMES) so the URI-routing
+    checks (resolve_db_path / is_db_uri / __main__._resolve_db_target) and this
+    connection-layer validation cannot drift (#715).
     """
-    if scheme not in _SUPPORTED_URI_SCHEMES:
+    if scheme not in SUPPORTED_URI_SCHEMES:
         raise ValueError(
             f"Unsupported scheme: {scheme} "
             f"(expected docker://, redis://, or rediss://). "
@@ -228,7 +251,11 @@ class FalkorProjection(
             if not allow_nonstandard_path and \
                     os.environ.get("TORTOISE_ALLOW_NONSTANDARD_PATH") == "1":
                 allow_nonstandard_path = True
-            if not os.path.isabs(path) and not path.startswith("~"):
+            if path == ":memory:":
+                # redislite in-memory server — not a file path, exempt from
+                # the relative-path reject (test_open_kinds uses it).
+                pass
+            elif not os.path.isabs(path) and not path.startswith("~"):
                 raise ValueError(RELATIVE_PATH_ERROR.format(path=path))
             if path.startswith("~") and not allow_nonstandard_path:
                 # tilde is only valid if expanded to absolute via env;
@@ -412,7 +439,7 @@ class FalkorProjection(
 
     def _norm(self, ev: dict) -> dict:
         """Normalize event shape — tolerates API (flat) and script (nested point)."""
-        if ev.get("point"):
+        if isinstance(ev.get("point"), dict):
             # Script format: id lives inside point
             return {**ev, **ev["point"]}
         return ev
@@ -422,6 +449,9 @@ class FalkorProjection(
         t = ev["type"]
         if t in ("PointAdded", "OperatorAdded"):
             p = ev["point"]
+            if not isinstance(p, dict):
+                # Malformed event (non-dict point) — skip, don't crash (issue #325)
+                return
             # Phase 1 stop-writes: strip context from v2+ events (#49)
             if ev.get("projection_version", 0) >= 2:
                 p.pop("context", None)
@@ -432,9 +462,9 @@ class FalkorProjection(
                 ev.pop("new_context", None)
             self._revise_point(ev, set_updated_at=True)
         elif t == "PointRetracted":
-            self._delete(ev["id"])
+            self._retract(ev["id"])
         elif t == "PointsMerged":
-            for mid in event.get("merge_ids", []):
+            for mid in ev.get("merge_ids", []):
                 self._delete(mid)
         elif t == "EventRecorded":
             self._upsert_event(ev)
@@ -470,13 +500,90 @@ class FalkorProjection(
         replaying through apply(). A reversed order (extractedFrom-bearing
         point before its SourceCreated) can diverge Source node version/id
         properties — known, documented limitation.
+
+        #548 SDK parity: before wiping, snapshot the current graph to preserve
+        SDK-created points that have no corresponding event in any .jsonl file.
+        These are injected as synthetic PointAdded/OperatorAdded events before
+        the JSONL replay so the two-pass logic handles them identically.
         """
         import os
         from tortoise.log import EventLog
+
+        # ── #548: snapshot existing graph BEFORE wiping ──────────────
+        # SDK-created points written via Cypher may have no corresponding
+        # event in the JSONL log. Snapshot them now so they survive the
+        # wipe+replay cycle.
+        synthetic_events: list[dict] = []
+        try:
+            rows = self.g.query(
+                "MATCH (n:Point) RETURN properties(n)"
+            ).result_set
+            existing_points = {}
+            for r in rows:
+                props = r[0]
+                pid = props.get("id")
+                if pid:
+                    existing_points[pid] = props
+            if existing_points:
+                # Collect all JSONL events to find which IDs are already
+                # represented in the log.
+                log_point_ids: set[str] = set()
+                for fname in sorted(os.listdir(log_dir)):
+                    if fname.endswith('.jsonl'):
+                        for ev in EventLog(os.path.join(log_dir, fname)).read_all():
+                            if ev.get("type") in ("PointAdded", "OperatorAdded"):
+                                p = ev.get("point", {})
+                                if isinstance(p, dict) and p.get("id"):
+                                    log_point_ids.add(p["id"])
+                # Generate synthetic events for graph-only points
+                for pid, props in existing_points.items():
+                    if pid in log_point_ids:
+                        continue  # log already covers this point
+                    # Strip volatile properties that are recomputed on replay
+                    clean = {k: v for k, v in props.items()
+                             if k not in ("embedding", "content_hash",
+                                          "updatedAt", "_nid", "_graph_id")}
+                    is_op = bool(props.get("is_operator") or props.get("op_type"))
+                    ev_type = "OperatorAdded" if is_op else "PointAdded"
+                    if is_op:
+                        # Reconstruct operator.inputs from graph edges
+                        inputs: list[str] = []
+                        try:
+                            op_type_val = props.get("op_type", "IMPL")
+                            edge_rel = "hasPart" if op_type_val not in ("IMPL", "NAND") else op_type_val
+                            edge_rows = self.g.query(
+                                f"MATCH (n:Point {{id:$id}})-[r:{edge_rel}]->(m:Point) "
+                                f"RETURN m.id ORDER BY r.idx",
+                                params={"id": pid},
+                            ).result_set
+                            inputs = [er[0] for er in edge_rows]
+                        except Exception:
+                            pass  # edge query may fail on corrupt graphs
+                        clean["operator"] = {"op_type": props.get("op_type", "IMPL"),
+                                             "inputs": inputs}
+                        # Operators may not store 'content' as a node property;
+                        # _upsert_point_props requires it — synthesize fallback.
+                        if "content" not in clean:
+                            clean["content"] = (
+                                f"{props.get('op_type', 'IMPL')}"
+                                f"({', '.join(inputs)})")
+                    # Ensure pointKind is present (operators often lack it)
+                    if "pointKind" not in clean:
+                        clean["pointKind"] = ""
+                    synthetic_events.append({
+                        "type": ev_type,
+                        "point": clean,
+                        "projection_version": 2,
+                    })
+        except Exception:
+            pass  # Graph may be corrupt — skip snapshot; JSONL replay is best-effort
+
+        # ── Wipe + rebuild ──────────────────────────────────────────
         self.g.query("MATCH (n) DETACH DELETE n")
 
-        # Collect all events from all files
-        events = []
+        # Collect all events from all files (synthetic first so their nodes
+        # exist before JSONL events that may reference them)
+        events = list(synthetic_events)
         for fname in sorted(os.listdir(log_dir)):
             if fname.endswith('.jsonl'):
                 events.extend(EventLog(os.path.join(log_dir, fname)).read_all())
@@ -485,9 +592,13 @@ class FalkorProjection(
         # Pass 1a: create all Point/Operator nodes first
         # (skip edges), so cross-file PointRevised always has a node to revise (#21).
         for ev in events:
+            ev = self._norm(ev)
             t = ev["type"]
             if t in ("PointAdded", "OperatorAdded"):
                 p = ev["point"]
+                if not isinstance(p, dict):
+                    # Malformed event (non-dict point) — skip (issue #325)
+                    continue
                 # Phase 1 stop-writes: strip context from v2+ events (#49)
                 # (identical to apply() — parity between rebuild and apply)
                 if ev.get("projection_version", 0) >= 2:
@@ -499,11 +610,15 @@ class FalkorProjection(
 
         # Pass 1b: apply revisions + other non-edge events AFTER all nodes exist
         for ev in events:
+            ev = self._norm(ev)
             t = ev["type"]
             if t in ("PointAdded", "OperatorAdded"):
                 continue  # already handled in pass 1a
             elif t == "PointRetracted":
-                self._delete(ev.get("id") or ev["event_id"])
+                # #689: tombstone instead of hard delete
+                rid = ev.get("id") or ev.get("event_id")
+                if rid is not None:
+                    self._retract(rid)
             elif t == "PointsMerged":
                 for mid in ev.get("merge_ids", []):
                     self._delete(mid)
@@ -529,8 +644,12 @@ class FalkorProjection(
         # Pass 2: create edges for all operators + provenance/entity wiring
         # (shared _upsert_point_edges — single source of truth with apply, #330).
         for ev in events:
+            ev = self._norm(ev)
             if ev["type"] in ("PointAdded", "OperatorAdded"):
                 p = ev["point"]
+                if not isinstance(p, dict):
+                    # Malformed event (non-dict point) — skip (issue #325)
+                    continue
                 if ev.get("projection_version", 0) >= 2:
                     p.pop("context", None)
                 self._upsert_point_edges(p)
@@ -840,7 +959,10 @@ class FalkorProjection(
         """Apply PointRevised event — update content, context, and re-compute embedding."""
         new_content = ev.get("new_content")
         new_context = ev.get("new_context")
-        pid = ev.get("id") or ev["event_id"]
+        pid = ev.get("id") or ev.get("event_id")
+        if pid is None:
+            # Malformed PointRevised — skip rather than crash (issue #325)
+            return
         params: dict = {"id": pid, "c": new_content}
 
         # Re-compute embedding when content changes (even to empty — wipe stale).
@@ -879,23 +1001,56 @@ class FalkorProjection(
         Returns (factors, evidence) where:
           factors = [(op_id, op_type, [input_ids], weight), ...]
           evidence = {claim_id: (alpha, beta), ...}
+
+        Uses batch I/O (2 queries regardless of operator count) to avoid
+        the N+1 query pattern that timed out on graphs with 1,800+ operators
+        (#400). Operators with <2 inputs are excluded with a warning.
         """
-        rows = self.g.query(
+        # Query 1: all operator IDs and types (single query, O(1) round-trip).
+        # #689: retracted operators never feed EP factors.
+        op_rows = self.g.query(
             "MATCH (o:Point) WHERE o.is_operator = true "
+            "AND (o.status IS NULL OR o.status <> 'retracted') "
             "RETURN o.id, o.op_type"
         ).result_set
 
+        # Query 2: all inputs for all operators in one batch query (#400)
+        # Avoids the N+1 pattern: previously this was a per-operator loop.
+        # #689: retracted claims never appear as operator inputs (an operator
+        # whose inputs all retract becomes degenerate and is excluded below).
+        input_rows = self.g.query(
+            "MATCH (o:Point)-[r:IMPL|NAND]->(c:Point) "
+            "WHERE o.is_operator = true "
+            "AND (c.status IS NULL OR c.status <> 'retracted') "
+            "RETURN o.id, c.id "
+            "ORDER BY o.id, c.id"
+        ).result_set
+
+        # Aggregate input IDs per operator
+        op_inputs: dict[str, list[str]] = defaultdict(list)
+        op_types: dict[str, str] = {}
+        for op_id, op_type in op_rows:
+            op_types[op_id] = op_type
+        for op_id, claim_id in input_rows:
+            op_inputs[op_id].append(claim_id)
+
         factors = []
-        for op_id, op_type in rows:
-            input_rows = self.g.query(
-                "MATCH (o:Point {id:$oid})-[r:IMPL|NAND]->(c:Point) "
-                "RETURN c.id ORDER BY c.id",
-                params={"oid": op_id},
-            ).result_set
-            input_ids = [r[0] for r in input_rows]
+        degenerate_count = 0
+        for op_id, op_type in op_types.items():
+            input_ids = op_inputs.get(op_id, [])
             if len(input_ids) >= 2:
                 weight = 3.0 if op_type == "NAND" else 1.0
                 factors.append((op_id, op_type, input_ids, weight))
+            else:
+                degenerate_count += 1
+
+        if degenerate_count > 0:
+            logger.warning(
+                "extract_svbp_factors: %d operators with <2 inputs excluded "
+                "from EP (possible silent edge drop). Run operator validation "
+                "to identify affected operators.",
+                degenerate_count,
+            )
 
         return factors, {}
 
@@ -904,7 +1059,18 @@ class FalkorProjection(
 
         Returns a TortoiseSVBP instance with converged beliefs.
         """
-        from tortoise.svbp import TortoiseSVBP
+        # SVBP is DEPRECATED (replaced by EP — tortoise/ep.py, scipy-based).
+        # It requires the optional `quadrature` extra (jax). Without jax
+        # installed, degrade to None instead of crashing the caller
+        # (EventAPI.add_operator → ingest CLI): EP handles propagation.
+        try:
+            from tortoise.svbp import TortoiseSVBP
+        except ImportError:
+            logger.warning(
+                "get_svbp: jax not installed (quadrature extra) — "
+                "skipping deprecated SVBP; EP handles propagation"
+            )
+            return None
         factors, evidence = self.extract_svbp_factors()
         if not factors:
             return None

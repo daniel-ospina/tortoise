@@ -151,8 +151,14 @@ def _format_ranked(rows: list, label: str) -> str:
         return f"No {label} claims found."
     lines = [f"Top {label} claims:"]
     for i, r in enumerate(rows[:10], 1):
-        conf = r[2] if len(r) > 2 else r[2] if len(r) > 2 else "?"
-        lines.append(f"  {i}. \"{r[1][:80]}\" (confidence: {float(conf):.2f})")
+        try:
+            conf = float(r[2])
+            content = r[1][:80] if r[1] is not None else ""
+        except (TypeError, ValueError, IndexError):
+            conf = None  # non-numeric/missing confidence → degrade, don't crash
+            content = (r[1][:80] if len(r) > 1 and r[1] is not None else "")
+        val = f"  {i}. \"{content}\"" + (f" (confidence: {conf:.2f})" if conf is not None else "")
+        lines.append(val)
     return "\n".join(lines)
 
 
@@ -168,9 +174,16 @@ def _format_uncertain(rows: list) -> str:
 def _format_chain(rows: list) -> str:
     if not rows:
         return "No evidence chain found."
-    lines = ["Evidence chain (ordered by proximity):"]
+    lines = ["Evidence chain (ordered by confidence):"]
     for r in rows[:10]:
-        lines.append(f"  [{r[3]} hops] \"{r[1][:80]}\" (conf: {r[2]:.2f})")
+        # evidence_chain template returns 3 columns: id, content, conf
+        try:
+            conf = float(r[2])
+            conf_txt = f" (conf: {conf:.2f})"
+        except (TypeError, ValueError, IndexError):
+            conf_txt = ""  # non-numeric/missing confidence → degrade, don't crash
+        content = r[1][:80] if len(r) > 1 and r[1] is not None else ""
+        lines.append(f"  \"{content}\"{conf_txt}")
     return "\n".join(lines)
 
 
@@ -458,12 +471,20 @@ def analyze(question: str, proj=None, *,
             from .security import redact_error
             return {"answer": f"Query error: {redact_error(e)}", "raw": [], "pattern": pattern_name, "query": None}
 
-    # 3. Format
+    # 3. Format (wrapped — a malformed value must degrade, never crash the
+    # whole analyze surface; security: redacted, no raw internals)
     formatter = tmpl.get("format")
-    if formatter:
-        answer = formatter(rows)
-    else:
-        answer = f"Found {len(rows)} results."
+    try:
+        if formatter:
+            answer = formatter(rows)
+        else:
+            answer = f"Found {len(rows)} results."
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).exception(
+            "analyze formatter failed for pattern %s", pattern_name)
+        from .security import redact_error
+        answer = f"Formatting error: {redact_error(e)}"
 
     return {
         "answer": answer,
