@@ -3378,10 +3378,13 @@ async def delete_team(team_id: str, request: Request,
     if is_supabase_enabled():
         cp = get_control_plane()
         # Access-kill first, stamp LAST (fail-closed ordering, PR #873).
-        revoke_team_api_keys(cp, team_id, now)
-        remove_team_memberships(cp, team_id, now)
-        revoke_team_invitations(cp, team_id, now)
-        soft_delete_team(cp, team_id, now, grace_hours=grace_hours)
+        # Sync httpx calls must not block the loop (to_thread, #310 pattern).
+        await asyncio.to_thread(revoke_team_api_keys, cp, team_id, now)
+        await asyncio.to_thread(remove_team_memberships, cp, team_id, now)
+        await asyncio.to_thread(revoke_team_invitations, cp, team_id, now)
+        await asyncio.to_thread(
+            soft_delete_team, cp, team_id, now, grace_hours=grace_hours
+        )
     else:
         await asyncio.to_thread(
             _soft_delete_registry_team, team_id, now, grace_hours
@@ -3455,11 +3458,15 @@ def _purge_deleted_teams() -> None:
     never hard-delete a team before its promised hard_delete_after.
 
     Registry mode cascades Membership/APIKey/Invitation nodes and drops
-    the team graph; Supabase mode deletes the control-plane rows via the
-    service-role seam AND sweeps the registry nodes provision_tenant
-    writes in both modes (code-review P2, PR #873). Immutable audit_events
-    rows survive (no FK). Fail-safe: per-team failures are logged and
-    skipped — a purge failure never crashes the loop.
+    the team graph; Supabase mode sweeps the registry nodes provision_tenant
+    writes in both modes AND deletes the control-plane rows via the
+    service-role seam (code-review P2, PR #873). Ordering matters in
+    Supabase mode: the registry sweep runs FIRST, the teams row is deleted
+    LAST — if the registry sweep or graph drop fails, the teams row survives
+    as the retry anchor and the next sweep finds the team again (no
+    registry/graph leak past the grace window). Immutable audit_events rows
+    survive (no FK). Fail-safe: per-team failures are logged and skipped —
+    a purge failure never crashes the loop.
     """
     try:
         env_grace = float(os.environ.get("TORTOISE_TEAM_DELETE_GRACE_HOURS", "24"))
@@ -3492,12 +3499,16 @@ def _purge_deleted_teams() -> None:
                 if not _past_grace(row.get("deleted_at"), row.get("grace_hours")):
                     continue  # env shrank — honor the stored promise
                 try:
-                    purge_team_control_plane(cp, team_id)
-                    # Registry cleanup (both modes provision registry nodes).
+                    # Registry sweep FIRST, control-plane LAST: the teams
+                    # row is the retry anchor — a failed registry purge or
+                    # graph drop leaves it in place, so the next sweep
+                    # retries instead of leaking nodes past the grace
+                    # window (code-review P2, PR #873).
                     _purge_registry_team(
                         _make_sdk(namespace="registry"), team_id,
                         row.get("graph_name"),
                     )
+                    purge_team_control_plane(cp, team_id)
                     _audit_logger.append(
                         team_id, None, "team_delete_purged",
                         resource_type="team", resource_id=team_id,

@@ -1,4 +1,4 @@
--- Migration 0011: team soft-delete columns (issue #302 E2E-6-D)
+-- Migration 0012: team soft-delete columns (issue #302 E2E-6-D)
 --
 -- Owner-only team deletion is two-phase: soft delete (teams.deleted_at
 -- stamp + immediate key/membership/invitation revocation) then hard
