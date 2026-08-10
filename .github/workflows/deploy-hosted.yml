@@ -1,5 +1,22 @@
 # Deploy Tortoise Hosted API to Fly.io
 #
+# ══ #669 FLIP SEQUENCE (issue #771, plan Task 10.2 — no auth-blackout) ════
+# This workflow is step 3 of the single-deploy flip. The FULL sequence:
+#   1. Pre-deploy gate PASSES: `.github/scripts/verify-cutover` (CI job
+#      `flip-gate` in ci.yml; the operator additionally runs it --live with
+#      prod creds: TORTOISE_DB_URI + SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY).
+#   2. Dispatch `supabase-deploy` (workflow_dispatch-only since #771):
+#      migrations + waitlist-subscribe + tenant-provision Edge Functions.
+#   3. DISPATCH THIS WORKFLOW — the app flips to reading Supabase (#767).
+#      Steps 2+3 are the "single deploy": never run step 3 without step 2
+#      (the app would read Supabase before the Edge Function writes it) and
+#      never let step 2 sit alone (new signups' keys would be unreadable).
+#   4. Post-flip verification incl. E2E-7 (#766, the next issue).
+#   5. Registry delete (point of no return, owner informed):
+#      TORTOISE_DB_URI=... .github/scripts/delete-registry --confirm
+#      (TORTOISE_SUPPRESS_ENUM_DELTA=1 on the app for the flip window).
+# ══════════════════════════════════════════════════════════════════════════
+#
 # Token scoping (#660): the deploy step uses a deploy-only token
 # (FLY_API_TOKEN_DEPLOY, created via `fly tokens create deploy`). The
 # secrets-set step still uses the full FLY_API_TOKEN because `flyctl

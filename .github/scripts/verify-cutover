@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+# verify-cutover — the #669 flip pre-deploy gate (plan Task 10.1, #771).
+#
+# The gate that MUST PASS before the single-deploy flip (migrations + Edge
+# Function + app shipped together). It is a RUNNABLE, ASSERTED script — not
+# a prose checklist — and it fails closed: every leg must pass or the exit
+# code is non-zero.
+#
+# Legs:
+#   1. Preconditions (verify-cutover-preconditions.py): the FalkorDB
+#      registry graph (registry_control_plane) has node count == 0, and
+#      Supabase contains ONLY reconcilable placeholders (no teams/api_keys
+#      rows; team_memberships rows are team_id='' / key_hash='pending').
+#   2. The E2E suites the flip owns, with the seam fakes (zero network):
+#      E2E-1 writer inventory (test_writer_inventory + the tenant-provision
+#      source guard), E2E-2/3 auth + invitations (test_auth_flip,
+#      test_supabase_control), E2E-4 backup seam + the #596 suite
+#      (test_backup_sweep, test_backup_watcher), E2E-5/8 onboarding +
+#      health (test_onboarding_health_flip), E2E-6 agent signup
+#      (test_agent_signup), E2E-9 audit (test_audit_events), plus the
+#      gate's own tests (test_flip_gate).
+#
+# Modes:
+#   Default (local/CI equivalence, no Docker, no network): the preconditions
+#   run against a fresh embedded DB + the seam FAKE (documented in the
+#   checker output), and the pytest legs run with FalkorDBLite + fakes —
+#   exactly what the CI flip-gate job runs.
+#   --live: the operator's pre-flip run — preconditions checked against the
+#   REAL FalkorDB + REAL Supabase (requires TORTOISE_DB_URI (or
+#   TORTOISE_DB_PATH), SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY in env).
+#   --preconditions-only: skip the pytest legs (fast iteration / CI smoke).
+#
+# Usage:
+#   bash .github/scripts/verify-cutover [--live] [--preconditions-only]
+#
+# Exit codes:
+#   0 — gate PASSES (all assertions hold)
+#   1 — an assertion failed (see the FAIL lines; the flip MUST NOT proceed)
+#   2 — could not run (missing deps/env, DB unreachable) — NOT a pass
+#
+# NOTE on the flip sequence (also documented in
+# .github/workflows/supabase-deploy.yml): (1) this gate passes, (2) operator
+# dispatches supabase-deploy (migrations + Edge Function), (3) operator
+# dispatches deploy-hosted (the app flip), (4) post-flip E2E-7 (#766),
+# (5) operator runs .github/scripts/delete-registry (owner informed; the
+# point of no return). Nothing in this script deploys or deletes anything.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+# Prefer the repo's venv (uv/venv layout); fall back to whatever python is
+# on PATH (CI installs with pip install -e '.[test]' into the runner env).
+if [ -x "$REPO_ROOT/.venv/bin/python" ]; then
+  PYTHON="${PYTHON:-$REPO_ROOT/.venv/bin/python}"
+else
+  PYTHON="${PYTHON:-python3}"
+fi
+
+LIVE=false
+PRECONDITIONS_ONLY=false
+for arg in "$@"; do
+  case "$arg" in
+    --live) LIVE=true ;;
+    --preconditions-only) PRECONDITIONS_ONLY=true ;;
+    --help|-h)
+      sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'
+      exit 0
+      ;;
+    *)
+      echo "verify-cutover: unknown argument: $arg (try --help)" >&2
+      exit 2
+      ;;
+  esac
+done
+
+cd "$REPO_ROOT"
+echo "verify-cutover: repo root = $REPO_ROOT"
+
+# ── Dependency preflight (fail-closed: never a pass on a broken env) ──────
+if ! "$PYTHON" -c "import tortoise, pytest" >/dev/null 2>&1; then
+  echo "verify-cutover: CANNOT RUN — 'tortoise' and 'pytest' must be importable." >&2
+  echo "  Install the package first: pip install -e '.[test]'" >&2
+  exit 2
+fi
+
+# ── Leg 1: preconditions ────────────────────────────────────────────────────
+if $LIVE; then
+  if [ -z "${SUPABASE_URL:-}" ] || { [ -z "${SUPABASE_SERVICE_ROLE_KEY:-}" ] && [ -z "${SUPABASE_SERVICE_KEY:-}" ]; }; then
+    echo "verify-cutover: CANNOT RUN (--live) — SUPABASE_URL and a service-role key are required." >&2
+    exit 2
+  fi
+  if [ -z "${TORTOISE_DB_URI:-}" ] && [ -z "${TORTOISE_DB_PATH:-}" ]; then
+    echo "verify-cutover: CANNOT RUN (--live) — TORTOISE_DB_URI (or TORTOISE_DB_PATH) is required to check the real registry." >&2
+    exit 2
+  fi
+  # NOTE: no ${PRECOND_ARGS[@]} expansion — macOS bash 3.2 + set -u errors on
+  # empty arrays; the explicit branches below are portable.
+  "$PYTHON" "$SCRIPT_DIR/verify-cutover-preconditions.py" --live
+else
+  "$PYTHON" "$SCRIPT_DIR/verify-cutover-preconditions.py"
+fi
+if [ $? -ne 0 ]; then
+  echo "verify-cutover: FAIL — preconditions did not hold; the flip MUST NOT proceed." >&2
+  exit 1
+fi
+
+if $PRECONDITIONS_ONLY; then
+  echo "verify-cutover: PASS — preconditions only (pytest legs skipped via --preconditions-only)."
+  exit 0
+fi
+
+# ── Leg 2: E2E-1..6, 8, 9 + #596 suites (seam fakes, zero network) ─────────
+# The audit suite's Postgres-gated tests skip without TEST_AUDIT_DB_URI; the
+# mock-based E2E-9 assertions run everywhere. test_provisioning_edge_function
+# needs node for the TS-parse guard (skips when absent).
+echo "verify-cutover: running the E2E-1..6/8/9 + #596 pytest legs..."
+if ! "$PYTHON" -m pytest -q -p no:cacheprovider \
+    tests/test_writer_inventory.py \
+    tests/test_auth_flip.py \
+    tests/test_supabase_control.py \
+    tests/test_onboarding_health_flip.py \
+    tests/test_agent_signup.py \
+    tests/test_backup_sweep.py \
+    tests/test_backup_watcher.py \
+    tests/test_audit_events.py \
+    tests/test_provisioning_edge_function.py \
+    tests/test_flip_gate.py; then
+  echo "verify-cutover: FAIL — one or more E2E/#596 suites failed; the flip MUST NOT proceed." >&2
+  exit 1
+fi
+
+echo "verify-cutover: PASS — preconditions hold and all E2E-1..6/8/9 + #596 assertions are green."
+echo "verify-cutover: the operator may now run the flip sequence (see supabase-deploy.yml comments)."
+exit 0

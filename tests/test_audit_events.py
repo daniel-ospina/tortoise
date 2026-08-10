@@ -94,6 +94,86 @@ class TestAuditLoggerJSONL:
 class TestAuditLoggerMockPostgres:
     """Tests with mocked psycopg2 to verify Postgres path is attempted."""
 
+    class _FakeCursor:
+        """Captures executed SQL + params for assertions."""
+
+        def __init__(self):
+            self.executed = []
+
+        def execute(self, sql, params=None):
+            self.executed.append((sql, params))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    class _FakeConn:
+        autocommit = True
+
+        def __init__(self):
+            self.cursor_obj = TestAuditLoggerMockPostgres._FakeCursor()
+
+        def cursor(self):
+            return self.cursor_obj
+
+        def close(self):
+            pass
+
+    def _logger_with_fake_pg(self, monkeypatch, tmp_path):
+        """AuditLogger whose Postgres writes land on a capturing fake conn.
+
+        Injects a fake ``psycopg2`` module (with a capturing connect) into
+        tortoise.audit_events — no real Postgres, no psycopg2 install
+        needed, so the E2E-9 contract runs in plain CI.
+        """
+        import types
+        monkeypatch.setenv("TORTOISE_AUDIT_DSN", "postgresql://fake:fake@localhost/fake")
+        conn = self._FakeConn()
+        fake_psycopg2 = types.SimpleNamespace(connect=lambda dsn: conn)
+        monkeypatch.setattr("tortoise.audit_events.psycopg2", fake_psycopg2)
+        monkeypatch.setattr("tortoise.audit_events._HAS_PSYCOPG2", True)
+        logger = AuditLogger()
+        logger._fallback_dir = tmp_path / ".tortoise"
+        logger._fallback_path = tmp_path / ".tortoise" / "audit_fallback.jsonl"
+        return logger, conn
+
+    def _insert_params(self, conn):
+        inserts = [
+            (sql, params) for sql, params in conn.cursor_obj.executed
+            if sql.strip().upper().startswith("INSERT")
+        ]
+        assert inserts, "no INSERT was executed against the fake Postgres conn"
+        return inserts[-1]
+
+    def test_non_uuid_actor_inserted_verbatim(self, monkeypatch, tmp_path):
+        """E2E-9 (#771): a NON-UUID actor must insert cleanly.
+
+        Pre-#669 the Supabase audit_events table declared actor_user_id UUID
+        (migration 0002) while the logger emits TEXT — any non-UUID actor
+        ('service-bootstrap', 'anon-*', ...) failed the INSERT and fell back
+        to JSONL. Migration 0006 alters the column to TEXT; this test locks
+        the contract: the logger passes the actor through verbatim (no UUID
+        coercion anywhere in the INSERT statement or params).
+        """
+        logger, conn = self._logger_with_fake_pg(monkeypatch, tmp_path)
+        logger.append("team-1", "service-bootstrap", "bootstrap",
+                     resource_type="team", resource_id="t-1")
+        sql, params = self._insert_params(conn)
+        assert "actor_user_id" in sql
+        assert "%(actor_user_id)s" in sql
+        assert params["actor_user_id"] == "service-bootstrap"
+        logger.close()
+
+    def test_anon_prefixed_actor_inserted_verbatim(self, monkeypatch, tmp_path):
+        """E2E-9: the anon-* actor family (agent signups) lands as TEXT too."""
+        logger, conn = self._logger_with_fake_pg(monkeypatch, tmp_path)
+        logger.append("team-2", "anon-8f3a1c", "agent_signup")
+        sql, params = self._insert_params(conn)
+        assert params["actor_user_id"] == "anon-8f3a1c"
+        logger.close()
+
     def test_postgres_insert_attempted_when_dsn_set(self, monkeypatch, tmp_path):
         """When TORTOISE_AUDIT_DSN is set, Postgres INSERT is attempted."""
         if not _HAS_PSYCOPG2:
@@ -165,6 +245,30 @@ class TestAuditLoggerPostgres:
         # Verify by appending another and checking no fallback was needed
         assert not pg_logger._fallback_path.exists() or \
             pg_logger._fallback_path.read_text().strip() == ""
+
+    def test_non_uuid_actor_lands_with_text_value(self, pg_logger):
+        """E2E-9 (#771): non-UUID actor round-trips through a real Postgres.
+
+        Runs against a real Postgres (TEST_AUDIT_DB_URI, e.g. a local
+        Supabase stack with migrations 0002+0006 applied): the row must land
+        with the actor stored verbatim — a UUID-typed column would reject
+        'service-bootstrap' with an invalid-input error and silently fall
+        back to JSONL.
+        """
+        actor = "service-bootstrap"
+        team_id = "team-e2e9"
+        pg_logger.append(team_id, actor, "e2e9_bootstrap",
+                         resource_type="team", resource_id=team_id)
+        with pg_logger._conn.cursor() as cur:
+            cur.execute(
+                "SELECT actor_user_id FROM audit_events "
+                "WHERE team_id = %s AND operation = 'e2e9_bootstrap' "
+                "ORDER BY created_at DESC LIMIT 1",
+                (team_id,),
+            )
+            row = cur.fetchone()
+        assert row is not None, "audit row did not land in Postgres"
+        assert row[0] == actor, f"actor stored as {row[0]!r}, expected {actor!r}"
 
     def test_schema_auto_created(self, pg_logger):
         """Verifies the table exists by writing to it (schema auto-create)."""

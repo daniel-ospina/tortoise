@@ -114,6 +114,33 @@ def test_sweep_enum_delta_fires_incident():
         assert "ENUM_DELTA" in kinds
 
 
+def test_sweep_enum_delta_suppressed_during_flip_window(monkeypatch):
+    """#669 flip window (P3-4, #771): TORTOISE_SUPPRESS_ENUM_DELTA=1 stops
+    the spurious ENUM_DELTA incident when the registry is deleted at the
+    flip (team universe legitimately drops to 0 — the pre-deploy gate
+    asserts both stores are empty first). The state is still persisted and
+    the guard returns as soon as the flag is unset."""
+    with tempfile.TemporaryDirectory() as tmp:
+        proj = FalkorProjection(os.path.join(tmp, "t.db"))
+        reg = proj.db.select_graph("registry_control_plane")
+        store = MemoryStorage()
+        store.upload(OPS_STATE_KEY, json.dumps({"last_team_count": 3}).encode())
+        monkeypatch.setenv("TORTOISE_SUPPRESS_ENUM_DELTA", "1")
+        res = run_backup_sweep(
+            db=proj.db, registry=reg, storage=store, config=_config(),
+        )
+        assert res["status"] == "no_teams"
+        assert not any(i["kind"] == "ENUM_DELTA" for i in res["incidents"])
+        assert read_ops_state(store).get("last_team_count") == 0
+        # Guard restored once the flag is gone.
+        monkeypatch.delenv("TORTOISE_SUPPRESS_ENUM_DELTA")
+        store.upload(OPS_STATE_KEY, json.dumps({"last_team_count": 2}).encode())
+        res2 = run_backup_sweep(
+            db=proj.db, registry=reg, storage=store, config=_config(),
+        )
+        assert any(i["kind"] == "ENUM_DELTA" for i in res2["incidents"])
+
+
 def test_sweep_backs_up_team_and_writes_state():
     with tempfile.TemporaryDirectory() as tmp:
         proj = _make_env(None, tmp)
