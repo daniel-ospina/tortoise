@@ -74,7 +74,7 @@ def local_db(tmp_path, monkeypatch):
     # Hermetic resolution: pin the repo root on PYTHONPATH so the CLI
     # subprocess always imports the checkout's tortoise (a shadowed
     # tortoise.config on CI made the key land elsewhere → 401s, #493).
-    repo_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     env["PYTHONPATH"] = os.pathsep.join(
         [repo_root] + [p for p in env.get("PYTHONPATH", "").split(os.pathsep) if p])
     proc = subprocess.run(
