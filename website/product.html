@@ -93,22 +93,11 @@
     .selfhost h4 { color: var(--green); font-size: 0.95rem; margin-bottom: 0.5rem; }
     .selfhost p { color: var(--text); font-size: 0.85rem; margin-bottom: 0.75rem; }
     .selfhost .license { color: var(--text-dim); font-size: 0.8rem; margin-bottom: 1rem; }
-    .selfhost .actions { display: flex; gap: 1rem; flex-wrap: wrap; }
+    .selfhost .actions { display: flex; gap: 1rem; flex-wrap: wrap; justify-content: center; }
     .selfhost a { color: var(--accent); text-decoration: none; font-size: 0.85rem; border: 1px solid var(--accent); padding: 0.5rem 1rem; border-radius: 0.5rem; }
     .selfhost a:hover { background: var(--accent); color: #04121a; }
 
     #beat-hero { opacity: 1; }
-
-    /* Scroll indicator */
-    #scroll-hint {
-      position: fixed; bottom: 3.5rem; left: 50%; transform: translateX(-50%);
-      z-index: 3; pointer-events: none;
-      width: 0; height: 0;
-      border-left: 12px solid transparent;
-      border-right: 12px solid transparent;
-      border-top: 16px solid var(--accent);
-      opacity: 1;
-    }
 
     /* Hero headline */
     /* Beat number (01 · Ingest, etc.) */
@@ -248,6 +237,7 @@
       flex-wrap: wrap;
       gap: 0.5rem 1.5rem;
       padding: 2.5rem 1.5rem 3rem;
+      background: var(--bg);
       color: var(--text-dim);
       font-size: 0.78rem;
       font-family: var(--mono);
@@ -263,7 +253,6 @@
 <body>
   <canvas id="graph-canvas"></canvas>
   <div id="vignette"></div>
-  <div id="scroll-hint"></div>
 
   <div id="scroll-wrapper">
     <section id="beat-hero" class="beat">
@@ -486,20 +475,6 @@
       const peak = start + beatSpan;
 
       if (i === 0) {
-        // Pulse independently, kill on scroll
-        const pulse = gsap.to('#scroll-hint', {
-          opacity: 0.4, y: 6, duration: 1.5, yoyo: true, repeat: -1, ease: 'power1.inOut'
-        });
-        gsap.to('#scroll-hint', {
-          opacity: 0,
-          scrollTrigger: {
-            trigger: '#scroll-wrapper',
-            start: '10% top',
-            end: '14% top',
-            scrub: 1,
-            onEnter: () => pulse.kill(),
-          }
-        });
         gsap.to(el, {
           opacity: 0, y: -20,
           scrollTrigger: {
