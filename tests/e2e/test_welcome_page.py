@@ -114,6 +114,25 @@ def _fake_user_id() -> str:
     return str(uuid.uuid4())
 
 
+def _seed_local_session(page: Page, user_id: str) -> None:
+    """Seed a supabase-js session in localStorage under BOTH storage keys —
+    the prod project ref (sb-ybetwichurajbfswfeqa) and the local CLI ref
+    (127.0.0.1 → sb-127) — so the mocked tests run against either the live
+    site (premiselabs.co) or a wrangler pages dev preview (localhost:8788)."""
+    page.add_init_script(f"""
+      const session = JSON.stringify({{ 
+        access_token: "fake-access-token",
+        refresh_token: "fake-refresh-token",
+        expires_in: 3600,
+        expires_at: {2**31},
+        token_type: "bearer",
+        user: {{ id: "{user_id}", email: "e2e@premise-labs.dev" }}
+      }});
+      localStorage.setItem("sb-ybetwichurajbfswfeqa-auth-token", session);
+      localStorage.setItem("sb-127-auth-token", session);
+    """)
+
+
 def _mock_supabase_success(page: Page, team_name: str = "Test Team",
                             reveal_result: str = "tt_e2e_mock_api_key_1234567890abcdef") -> str:
     """Drive the welcome page into its success state by (1) seeding a
@@ -127,21 +146,6 @@ def _mock_supabase_success(page: Page, team_name: str = "Test Team",
     (success state) or "pending" (returning-visitor state).
     """
     user_id = _fake_user_id()
-    session = {
-        "access_token": "fake-access-token",
-        "refresh_token": "fake-refresh-token",
-        "expires_in": 3600,
-        "expires_at": 2**31,
-        "token_type": "bearer",
-        "user": {
-            "id": user_id,
-            "aud": "authenticated",
-            "role": "authenticated",
-            "email": "e2e@premise-labs.dev",
-            "app_metadata": {"provider": "email"},
-            "user_metadata": {"email": "e2e@premise-labs.dev"},
-        },
-    }
     team_row = {
         "team_id": f"team_{user_id[:8]}",
         "team_name": team_name,
@@ -149,18 +153,7 @@ def _mock_supabase_success(page: Page, team_name: str = "Test Team",
         "status": "active",
     }
 
-    # supabase-js v2 stores the session under sb-<project-ref>-auth-token in
-    # localStorage; seed it before the page script runs.
-    page.add_init_script(f"""
-      localStorage.setItem("sb-ybetwichurajbfswfeqa-auth-token", JSON.stringify({{
-        access_token: "fake-access-token",
-        refresh_token: "fake-refresh-token",
-        expires_in: 3600,
-        expires_at: {2**31},
-        token_type: "bearer",
-        user: {{ id: "{user_id}", email: "e2e@premise-labs.dev" }}
-      }}));
-    """)
+    _seed_local_session(page, user_id)
 
     def _handle(route):
         url = route.request.url
@@ -246,7 +239,7 @@ def test_mcp_config_copy_puts_bearer_json_on_clipboard(page: Page) -> None:
     page.goto(WELCOME_URL, wait_until="domcontentloaded", timeout=30_000)
     expect(page.locator("#success")).not_to_be_hidden(timeout=15_000)
     page.context.grant_permissions(["clipboard-read", "clipboard-write"],
-                                   origin="https://premiselabs.co")
+                                   origin=_clipboard_origin())
     page.locator("#btn-copy-mcp").click()
     clip = page.evaluate("navigator.clipboard.readText()")
     parsed = json.loads(clip)
@@ -262,7 +255,7 @@ def test_prompt_copy_uses_fetched_markdown(page: Page) -> None:
     page.goto(WELCOME_URL, wait_until="domcontentloaded", timeout=30_000)
     expect(page.locator("#success")).not_to_be_hidden(timeout=15_000)
     page.context.grant_permissions(["clipboard-read", "clipboard-write"],
-                                   origin="https://premiselabs.co")
+                                   origin=_clipboard_origin())
     page.locator("#btn-copy-prompt").click()
     clip = page.evaluate("navigator.clipboard.readText()")
     assert clip.startswith("# Tortoise Onboarding"), "prompt copy is not the markdown"
@@ -279,6 +272,159 @@ def test_returning_visitor_shows_dashboard_hub(page: Page) -> None:
     expect(page.locator("#btn-dashboard")).to_be_visible(timeout=15_000)
     # And must NOT see a re-revealed key
     expect(page.locator("#reveal-block")).to_be_hidden(timeout=5_000)
+
+
+# ── Client-side provisioning tests (#527) ───────────────────────────────
+# The after_user_created webhook is DISABLED on this Supabase plan (its
+# Standard-Webhooks signature can't be verified), so the welcome page must
+# provision through the edge function's JWT path: session present + NO
+# membership row → POST /functions/v1/tenant-provision with
+# Authorization: Bearer <access_token> → 201 → re-query membership → reveal.
+
+
+def _mock_empty_membership_then_provision(page: Page, provision_status: int = 201,
+                                           existing_membership: bool = False) -> dict:
+    """Seed a session with NO real membership and intercept the client-side
+    provisioning flow: team_memberships returns the PLACEHOLDER row
+    (team_id='' — what the on_auth_user_created trigger inserts at signup;
+    the page's poll skips it because team_id is falsy) → tenant-provision
+    call (recorded) → membership appears → reveal_api_key.
+
+    provision_status: HTTP status the edge function mock returns (201 = mint
+    succeeds; 401/500 exercise the retry + contact-support fallback).
+    existing_membership: True = the membership row is present from the start
+    (idempotency case — provision must NEVER fire).
+
+    Returns a state dict: {user_id, provision_requests: [playwright Request],
+    provisioned: bool}."""
+    user_id = _fake_user_id()
+    state = {"user_id": user_id, "provision_requests": [], "provisioned": False}
+    placeholder_row = {
+        "team_id": "",
+        "team_name": "provisioning...",
+        "graph_name": "",
+        "status": "active",
+    }
+    team_row = {
+        "team_id": f"team_{user_id[:8]}",
+        "team_name": "Test Team",
+        "graph_name": f"team_{user_id[:8]}",
+        "status": "active",
+    }
+    provision_body = {
+        "team_id": f"team_{user_id[:8]}",
+        "team_name": "Test Team",
+        "api_key": "tt_provisioned_mock_key_abcdef0123456789",
+        "graph_name": f"team_{user_id[:8]}",
+    }
+
+    _seed_local_session(page, user_id)
+
+    def _handle(route):
+        url = route.request.url
+        method = route.request.method
+        if "functions/v1/tenant-provision" in url and method == "POST":
+            state["provision_requests"].append(route.request)
+            if provision_status == 201:
+                state["provisioned"] = True
+                route.fulfill(status=201, content_type="application/json",
+                              body=json.dumps(provision_body))
+            else:
+                route.fulfill(status=provision_status, content_type="application/json",
+                              body=json.dumps({"error": "Unauthorized: mock"}))
+            return
+        if "team_memberships" in url and method == "GET":
+            if state["provisioned"] or existing_membership:
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps(team_row))
+            else:
+                # Pre-provision state: the placeholder row (team_id='') from
+                # the on_auth_user_created trigger. The page's poll guard
+                # (data.team_id truthy) skips it and proceeds to provision.
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps(placeholder_row))
+            return
+        if "rpc/reveal_api_key" in url and method == "POST":
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps("tt_provisioned_mock_key_abcdef0123456789"))
+            return
+        route.continue_()
+
+    page.route("**/*", _handle)
+    return state
+
+
+def _clipboard_origin() -> str:
+    """Clipboard permissions must be granted for the page's ACTUAL origin:
+    https://premiselabs.co in CI/live runs, http://127.0.0.1:8788 in local
+    wrangler pages dev runs. Derive it from WELCOME_URL (#527 local runs)."""
+    from urllib.parse import urlsplit
+
+    u = urlsplit(WELCOME_URL)
+    return f"{u.scheme}://{u.netloc}"
+
+
+def _require_client_side_provisioning(page: Page) -> None:
+    """Skip when the deployed welcome page predates the #527 client-side
+    provisioning code. The CI welcome-e2e job tests the LIVE prod page
+    (premiselabs.co/welcome), which only gains provisionViaEdgeFunction once
+    this PR deploys — so pre-deploy runs skip (green-with-annotation, the
+    repo's TORTISE_HOST_CHECK pattern) and post-deploy runs exercise the
+    mocked provision flow on every subsequent run."""
+    has = page.evaluate("typeof window.provisionViaEdgeFunction !== 'undefined'")
+    if not has:
+        pytest.skip(
+            "deployed welcome page predates #527 client-side provisioning — "
+            "runs post-deploy"
+        )
+
+
+def test_welcome_provisions_via_edge_function_when_no_membership(page: Page) -> None:
+    """#527: session + NO membership row → the page calls tenant-provision
+    with the user's JWT (Authorization: Bearer), then re-queries the
+    membership and reveals the key through the canonical reveal path."""
+    state = _mock_empty_membership_then_provision(page)
+    page.goto(WELCOME_URL, wait_until="domcontentloaded", timeout=30_000)
+    _require_client_side_provisioning(page)
+    expect(page.locator("#success")).not_to_be_hidden(timeout=30_000)
+    expect(page.locator("#api-key")).to_contain_text("tt_provisioned_mock_key", timeout=15_000)
+
+    assert len(state["provision_requests"]) == 1, \
+        f"expected exactly 1 provision call, got {len(state['provision_requests'])}"
+    req = state["provision_requests"][0]
+    assert req.headers.get("authorization") == "Bearer fake-access-token", \
+        f"provision call missing the user JWT: {req.headers.get('authorization')!r}"
+    payload = json.loads(req.post_data or "{}")
+    assert payload["user_id"] == state["user_id"]
+    assert payload["email"] == "e2e@premise-labs.dev"
+
+
+def test_welcome_provision_failure_retries_once_then_contact_support(page: Page) -> None:
+    """#527: a failed provision call (401) is retried exactly ONCE, then the
+    page shows a humanized error with a contact-support note — never raw
+    JSON, never a broken page."""
+    state = _mock_empty_membership_then_provision(page, provision_status=401)
+    page.goto(WELCOME_URL, wait_until="domcontentloaded", timeout=30_000)
+    _require_client_side_provisioning(page)
+    expect(page.locator("#error-state")).not_to_be_hidden(timeout=30_000)
+    msg = page.locator("#error-message").inner_text()
+    assert "contact support" in msg, f"error lacks the contact-support note: {msg!r}"
+    assert "{" not in msg, f"error leaks raw JSON: {msg!r}"
+    assert len(state["provision_requests"]) == 2, \
+        f"expected 1 retry (2 calls total), got {len(state['provision_requests'])}"
+
+
+def test_welcome_existing_membership_skips_provisioning(page: Page) -> None:
+    """#527 idempotency guard: when a membership row already exists the edge
+    function is NEVER called — a second call would mint a NEW team (the
+    function is not idempotent server-side, so the page must guard)."""
+    state = _mock_empty_membership_then_provision(page, existing_membership=True)
+    page.goto(WELCOME_URL, wait_until="domcontentloaded", timeout=30_000)
+    _require_client_side_provisioning(page)
+    expect(page.locator("#success")).not_to_be_hidden(timeout=15_000)
+    expect(page.locator("#api-key")).to_contain_text("tt_", timeout=15_000)
+    assert len(state["provision_requests"]) == 0, \
+        f"provision called despite existing membership: {len(state['provision_requests'])} calls"
 
 
 # ── Live signup E2E (requires real Supabase creds + session) ────────
