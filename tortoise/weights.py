@@ -45,7 +45,9 @@ def compute_operator_weight(proj, op_id: str, use_dynamic: bool = False) -> floa
     annotation_factor = 1.0
     w *= annotation_factor
 
-    # Dynamic: post-convergence message strength
+    # Dynamic: post-convergence message strength (aggregated over ALL
+    # relationships of each type — previously only the first row was read,
+    # silently ignoring the rest of the operator's edges, #326)
     if use_dynamic:
         for rel in ("IMPL", "NAND"):
             rows = g.query(
@@ -54,8 +56,9 @@ def compute_operator_weight(proj, op_id: str, use_dynamic: bool = False) -> floa
                 params={"id": op_id},
             ).result_set
             if rows:
-                strength = float(rows[0][0])
-                dyn = max(min(strength / 10.0, 3.0), 0.5)
+                strengths = [float(r[0]) for r in rows]
+                mean_strength = sum(strengths) / len(strengths)
+                dyn = max(min(mean_strength / 10.0, 3.0), 0.5)
                 w *= dyn
 
     return max(min(w, 10.0), 0.1)
