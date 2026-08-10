@@ -638,7 +638,7 @@ def test_local_http_roundtrip_lands_in_team_graph(local_db, monkeypatch):
         # tools/list with the bootstrap key → 200, real tools
         r = c.post("/mcp", json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
                    headers=headers)
-        assert r.status_code == 200
+        assert r.status_code == 200, r.text
         body = _parse_sse_json(r)
         tools = body["result"]["tools"]
         names = {t["name"] for t in tools}
