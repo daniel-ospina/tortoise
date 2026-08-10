@@ -179,6 +179,37 @@ def _count_resource(team_id: str, resource: str, sdk=None) -> int:
     try:
         # ── Registry-scoped counts (api_keys, users, graphs) ──
         if resource in ("api_keys", "users", "graphs"):
+            # #765 (plan Task 8 quota paths): in Supabase control-plane mode
+            # the count reads Supabase via the seam — post-flip the registry
+            # is DELETED, so a registry count would fail-open (0 nodes) or
+            # 500. Mirrors the registry predicates exactly:
+            #   api_keys: revoked_at IS NULL (expired rows still count)
+            #   users:    status IS NULL OR status = 'active'
+            #   graphs:   the default graph derived from teams.graph_name
+            #             (no graphs table in the plan data model — custom
+            #             graphs are not tracked in Supabase mode).
+            # Selfhost (registry mode) keeps the registry count.
+            from tortoise.supabase_control import (
+                get_control_plane, graph_metadata, is_supabase_enabled,
+            )
+            if is_supabase_enabled():
+                cp = get_control_plane()
+                if resource == "api_keys":
+                    rows = cp.query(
+                        "api_keys", select=["id"],
+                        filters=[("team_id", "eq", team_id),
+                                 ("revoked_at", "is", None)],
+                    )
+                    return len(rows)
+                if resource == "users":
+                    rows = cp.query(
+                        "team_memberships", select=["status"],
+                        filters=[("team_id", "eq", team_id)],
+                    )
+                    return len([r for r in rows
+                                if r.get("status") in (None, "active")])
+                # graphs: default graph exists whenever the team row does
+                return len(graph_metadata(cp, team_id))
             reg = (sdk if sdk is not None and getattr(sdk, "_namespace", None) == "registry"
                    else _make_sdk(namespace="registry"))
             if resource == "api_keys":
