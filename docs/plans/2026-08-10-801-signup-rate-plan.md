@@ -678,3 +678,20 @@ python -m pytest tests/test_waitlist_form.py -q                           # welc
 - `verify-legal` (same workflow, after deploy) will run the signup-safety suite against prod — this is the post-deploy gate for the lockout code.
 - `supabase/config.toml` is local-only (no deploy; prod auth config unchanged — confirmations stay ON).
 - Pre-deploy CI runs test the PR's page code via wrangler dev (legal-e2e) and the old-but-sufficient live page for the smoke (confirmation state shipped pre-#832) — no deploy-order flakiness.
+
+---
+
+## Code-Review Deltas (2026-08-10, applied before merge)
+
+Deviations from the task bodies above, applied after the code-review gate (all verified):
+
+1. **Task 2 — `expect.poll` removed:** playwright-python has no `expect.poll` (JS-only) — the live smoke now polls the captured response with a manual deadline loop (`time.time()` + 250ms waits, 30s cap).
+2. **Task 1 — resend 429 handling fixed (P1):** supabase-js v2 `auth.resend()` RETURNS `{data, error}` on HTTP 429 (never throws). The handler now destructures the return and applies `setRateLimitLockout(error)` + tier-aware note; `catch` remains for network failures. Previously a 429 showed the false "Resent — check your inbox" and never locked out.
+3. **Task 1 — interval only while locked:** `applyRateLimitLockout` starts the 1s ticker only when `rateLimitRemainingMs() > 0` (an idle interval's tick could re-enable the submit button mid-request → double-signup → bucket burn).
+4. **Task 1 — tier-aware copy:** new `rateLimitMessage()` — short (per-IP) tier shows "Please try again in a minute." instead of the pinned "about an hour" literal; the error branch overrides `humanizeAuthError` for non-email-bucket codes. Pinned literals unchanged (static pins green).
+5. **Task 1 — never-shrink + storage-fail-open:** `setRateLimitLockout` mirrors the deadline in memory (`rateLimitUntil`) and takes `Math.max(existing, now+ms)` — a later 60s lockout can never truncate an active 1h one, and the lockout holds even when sessionStorage is unavailable; NaN stored values are ignored (`Number.isFinite`).
+6. **Task 1 — CDN-guard interaction:** the on-load lockout restore is skipped when `window.supabaseClient` is falsy (#527's "temporarily unavailable" state wins).
+7. **Tests — discriminating two-tier asserts:** the 1h test now asserts `until - now_ms >= 50min` (a 60s-tier regression fails); three new e2e tests: short-tier 60s + expiry recovery, non-rate-limit error writes no lockout key, resend-429 → lockout + note + no false success.
+8. **Task 3 — welcome-e2e `concurrency` group** (`cancel-in-progress: true`) so parallel PRs cannot exhaust the shared prod email bucket.
+9. **PR/plan wording:** "#839 owns live key-reveal" corrected — no automated live key-reveal run exists; a weekly scheduled live journey with server-side cleanup is documented as future work (tracked in the plan's post-merge table).
+10. **Issue close:** #801's close is deferred (per Task 5) — the PR references it without the auto-close keyword.

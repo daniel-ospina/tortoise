@@ -501,7 +501,8 @@
     const SHORT_RATE_LIMIT_LOCKOUT_MS = 60 * 1000;  // per-IP auth-attempt limits — 60s
     const RATE_LIMIT_KEY = "tortoise_signup_rate_limited_until";
     let rateLimitTimer = null;
-    let resendCooldownUntil = 0;   // #527 60s resend cooldown (shared bucket, #801)
+    let rateLimitUntil = 0;      // in-memory mirror — the lockout still holds when sessionStorage is unavailable (#801 code-review)
+    let resendCooldownUntil = 0; // #527 60s resend cooldown (shared bucket, #801)
 
     function isEmailBucketError(error) {
       if (!error) return false;
@@ -525,16 +526,36 @@
 
     function rateLimitRemainingMs() {
       try {
-        const until = parseInt(sessionStorage.getItem(RATE_LIMIT_KEY) || "0", 10);
+        const stored = parseInt(sessionStorage.getItem(RATE_LIMIT_KEY) || "0", 10);
+        const until = Number.isFinite(stored) ? Math.max(stored, rateLimitUntil) : rateLimitUntil;
         return Math.max(0, until - Date.now());
-      } catch (e) { return 0; }
+      } catch (e) { return Math.max(0, rateLimitUntil - Date.now()); }
     }
 
     function setRateLimitLockout(error) {
       // Two-tier: email-bucket exhaustion → 1h; per-IP auth-attempt limits → 60s.
       const ms = isEmailBucketError(error) ? RATE_LIMIT_LOCKOUT_MS : SHORT_RATE_LIMIT_LOCKOUT_MS;
-      try { sessionStorage.setItem(RATE_LIMIT_KEY, String(Date.now() + ms)); } catch (e) {}
+      // Never-shrink invariant: a later 60s (or shorter) lockout must never
+      // truncate an active longer lockout (both tiers share one key).
+      rateLimitUntil = Math.max(rateLimitUntil, Date.now() + ms);
+      try {
+        const existing = parseInt(sessionStorage.getItem(RATE_LIMIT_KEY) || "0", 10);
+        const until = Math.max(Number.isFinite(existing) ? existing : 0, rateLimitUntil);
+        sessionStorage.setItem(RATE_LIMIT_KEY, String(until));
+      } catch (e) {}
       applyRateLimitLockout();
+    }
+
+    // Tier-aware lockout copy: the email bucket maps to the #527 pinned
+    // "about an hour" literal; the short per-IP tier must not contradict the
+    // live countdown it shows (code-review P2).
+    function rateLimitMessage() {
+      const ms = rateLimitRemainingMs();
+      if (ms <= 0) return "";
+      if (ms >= 55 * 60 * 1000) {
+        return "Too many attempts from this network. Please wait about an hour and try again.";
+      }
+      return "Too many attempts from this network. Please try again in a minute.";
     }
 
     function applyRateLimitLockout() {
@@ -559,7 +580,7 @@
           if (rateLimitTimer) { clearInterval(rateLimitTimer); rateLimitTimer = null; }
           return;
         }
-        const totalSec = Math.ceil(ms / 1000);
+        const totalSec = Math.max(0, Math.floor(ms / 1000));
         const label = "Try again in "
           + String(Math.floor(totalSec / 60)).padStart(2, "0") + ":"
           + String(totalSec % 60).padStart(2, "0");
@@ -571,11 +592,16 @@
         if (resend) resend.disabled = true;
       };
       update();
-      rateLimitTimer = setInterval(update, 1000);
+      // Only run the ticking interval while a lockout is actually pending — an
+      // idle interval's first tick could re-enable #btn-submit mid-request
+      // (double-submit → duplicate confirmation email → bucket burn, #801).
+      if (rateLimitRemainingMs() > 0) rateLimitTimer = setInterval(update, 1000);
     }
     // On load: honor a persisted lockout (and explain why the button is off).
-    if (rateLimitRemainingMs() > 0) {
-      showError("Too many attempts from this network. Please wait about an hour and try again.");
+    // Skip when the CDN guard already surfaced "temporarily unavailable"
+    // (#527 — a blocked supabase-js CDN must stay in its fail-closed state).
+    if (window.supabaseClient && rateLimitRemainingMs() > 0) {
+      showError(rateLimitMessage());
       applyRateLimitLockout();
     }
 
@@ -636,7 +662,7 @@
       event.preventDefault();
       if (!supabaseClient) { showError("Auth not configured."); return; }
       if (rateLimitRemainingMs() > 0) {
-        showError("Too many attempts from this network. Please wait about an hour and try again.");
+        showError(rateLimitMessage());
         applyRateLimitLockout();
         return;
       }
@@ -660,8 +686,15 @@
         });
 
         if (error) {
-          if (isRateLimitError(error)) setRateLimitLockout(error);
-          showError(humanizeAuthError(error));
+          if (isRateLimitError(error)) {
+            setRateLimitLockout(error);
+            // Tier-aware copy: humanizeAuthError maps ALL rate-limit codes to
+            // the pinned "about an hour" literal — the short per-IP tier must
+            // show its own minute-scoped message (code-review P2).
+            showError(isEmailBucketError(error) ? humanizeAuthError(error) : rateLimitMessage());
+          } else {
+            showError(humanizeAuthError(error));
+          }
           return;
         }
 
@@ -742,16 +775,34 @@
       if (rateLimitRemainingMs() > 0) { applyRateLimitLockout(); return; }
       btn.disabled = true;
       try {
-        await supabaseClient.auth.resend({
+        // supabase-js v2 returns {data, error} for HTTP errors (429 included) —
+        // it does NOT throw (only network failures throw). Destructure so a
+        // rate-limited resend is handled, not silently reported as success
+        // (code-review P1: the old catch-only path burned the shared bucket
+        // while claiming "Resent").
+        const { error } = await supabaseClient.auth.resend({
           type: 'signup',
           email: email,
           options: { emailRedirectTo: window.location.origin + WELCOME_URL },
         });
+        if (error) {
+          if (isRateLimitError(error)) {
+            setRateLimitLockout(error);
+            document.getElementById("resend-note").textContent = isEmailBucketError(error)
+              ? "Email limit reached — try again in about an hour."
+              : "Email limit reached — try again in a minute.";
+          } else {
+            document.getElementById("resend-note").textContent = "Could not resend — try again shortly.";
+          }
+          return;
+        }
         document.getElementById("resend-note").textContent = "Resent — check your inbox (limit applies).";
       } catch (e) {
         if (isRateLimitError(e)) {
           setRateLimitLockout(e);
-          document.getElementById("resend-note").textContent = "Email limit reached — try again in about an hour.";
+          document.getElementById("resend-note").textContent = isEmailBucketError(e)
+            ? "Email limit reached — try again in about an hour."
+            : "Email limit reached — try again in a minute.";
         } else {
           document.getElementById("resend-note").textContent = "Could not resend — try again shortly.";
         }

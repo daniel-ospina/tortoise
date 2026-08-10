@@ -86,6 +86,12 @@ jobs:
 
   welcome-e2e:
     runs-on: ubuntu-latest
+    # Serialize live smoke runs: each run consumes 1 email-send from the
+    # shared 30/hr project-wide prod bucket — parallel PRs would exhaust it
+    # and red CI on unrelated PRs (#801 code-review). Latest run wins.
+    concurrency:
+      group: welcome-e2e
+      cancel-in-progress: true
     # Playwright browser tests for the onboarding welcome page (#541).
     # Runs against the live prod page; Supabase-backed tests need
     # SUPABASE_URL/SUPABASE_SERVICE_KEY secrets (skipped without them).

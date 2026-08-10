@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import uuid
 
 import pytest
@@ -514,7 +515,12 @@ def test_live_signup_no_429_confirmation_required(page: Page) -> None:
         page.locator("#password").fill(password)
         page.locator("#btn-submit").click()
         # Direct no-429 proof: the server must accept the signup.
-        expect.poll(lambda: signup["status"] is not None, timeout=30_000).to_be_truthy()
+        # expect.poll is NOT available in playwright-python (JS-only) — poll
+        # the captured response manually (code-review P1).
+        deadline = time.time() + 30
+        while signup["status"] is None and time.time() < deadline:
+            page.wait_for_timeout(250)
+        assert signup["status"] is not None, "no auth/v1/signup response observed"
         assert signup["status"] == 200, (
             f"live signup returned {signup['status']} — rate-limited or error: {signup['body']!r}")
         # User-visible truth: check-your-inbox with the typed email.
