@@ -34,6 +34,13 @@ try:
             "content": "w{writer_id}-content-" + str(i),
             "context": "ctx",
         }})
+        # Explicit SAVE per write: SIGKILL (the crash-recovery test) can
+        # lose un-flushed data — redis RDB snapshots are not on the hot
+        # path. The crash test asserts pre-crash keys survive, so the
+        # killed writer must make its writes durable BEFORE the kill
+        # (fresh servers load the RDB on start).
+        proj.db.execute_command("SAVE")
+        print("WROTE", i, flush=True)
         time.sleep(0.1)
     print("DONE", {writer_id}, flush=True)
 finally:
@@ -41,7 +48,9 @@ finally:
 """
     return subprocess.Popen(
         [sys.executable, "-c", code],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        start_new_session=True)  # own process group: crash tests kill the
+    # writer AND its redis-server child with one killpg (a real crash).
 
 
 def _count_redis_servers(path=None):
@@ -154,7 +163,14 @@ def test_crash_recovery_keys_intact(monkeypatch):
     Uses STAGGERED writes (the safe embedded pattern — sequential single
     writers). Concurrent multi-writer on one embedded file is a documented
     redislite limitation (loses data); the plan routes concurrent writes to
-    Docker (Tier D). This proves crash recovery for the supported pattern."""
+    Docker (Tier D). This proves crash recovery for the supported pattern.
+
+    Durability note: redis RDB snapshots are periodic, so a SIGKILLed
+    process can lose writes that never reached the RDB (that is redis'
+    documented contract, not a bug). The writers SAVE after each write, so
+    "pre-crash" here means "durably persisted before the kill" — the
+    assertion is deterministic on every host (fresh servers load the RDB,
+    reconnects see live memory)."""
     canonical = _canonical_path()
     monkeypatch.setenv("TORTOISE_DB_PATH", canonical)
     # Staggered survivors (safe embedded pattern): each writes 10, closes
@@ -163,15 +179,19 @@ def test_crash_recovery_keys_intact(monkeypatch):
         w.wait(timeout=60)
         time.sleep(1)  # stagger so each persists before the next
 
-    # SIGKILL writer 2 mid-run (crash simulation)
+    # SIGKILL writer 2's ENTIRE process group mid-run (real crash: python
+    # writer + its redis-server child both die). Wait for the first WROTE
+    # line first so >=1 write is durably SAVE'd before the crash — killing
+    # on a blind sleep raced server boot and made this test flaky (#819).
     k = _spawn_writer(canonical, 2, writes=10)
-    time.sleep(1.5)  # let it write >=1 key
-    k.kill()
+    for line in k.stdout:
+        if line.startswith("WROTE"):
+            break
+    os.killpg(k.pid, signal.SIGKILL)
     k.wait()
     time.sleep(2)  # RDB settle
 
-    import os as _os
-    _os.environ["TORTOISE_DB_PATH"] = canonical
+    os.environ["TORTOISE_DB_PATH"] = canonical
     from tortoise.projection import FalkorProjection
     proj = FalkorProjection()
     try:
