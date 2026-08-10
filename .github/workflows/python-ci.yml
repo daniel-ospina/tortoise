@@ -159,12 +159,14 @@ jobs:
           restore-keys: |
             hf-embedding-cache-v1-${{ runner.os }}-
       - name: Pre-cache embedding model (all-MiniLM-L6-v2)
-        # Embedding-dependent tests (test_tortoise_search, SDK hybrid
-        # search) load the model via sentence-transformers. On GitHub
-        # runners the download is rate-limited (HF 429) and each load
-        # attempt stalls ~30s mid-suite, turning into timeouts/failures.
-        # Download ONCE here (with retries), then run the suite fully
-        # offline (HF_HUB_OFFLINE=1) so no test ever hits the network.
+        # Best-effort: when the model is already cached (actions/cache
+        # restore) this is a no-op. When the download succeeds, the suite
+        # exercises the real embedding path. When it fails (HF unreachable
+        # from runner — observed: "couldn't connect to huggingface.co"),
+        # the runtime already degrades gracefully to TF-IDF fallback
+        # (embeddings.py catches load failure), so a failed download is a
+        # WARNING, never a job failure.
+        continue-on-error: true
         run: |
           python - <<'EOF'
           import os, time
@@ -238,7 +240,9 @@ jobs:
           restore-keys: |
             hf-embedding-cache-v1-${{ runner.os }}-
       - name: Pre-cache embedding model (all-MiniLM-L6-v2)
-        # Same offline contract as the fast job: no mid-suite HF access.
+        # Same best-effort contract as the fast job: no mid-suite HF access;
+        # download failure is a warning (TF-IDF fallback), never a failure.
+        continue-on-error: true
         run: |
           python - <<'EOF'
           import os, time
