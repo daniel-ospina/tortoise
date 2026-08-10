@@ -1573,6 +1573,15 @@ async def register_user(request: Request, response: Response):
                 "CREATE (:TeamMeta {name: $name, created: $now})",
                 params={"name": team_name, "now": now},
             )
+
+            # Log audit event — INSIDE the try (main parity, re-review P2
+            # PR #874): an audit failure rolls the whole registration back
+            # (clean 500, retry succeeds) instead of 500-after-persist with
+            # a 409-on-retry lockout.
+            await _async_audit(
+                request, team_id, "tenant_register",
+                resource_type="team", resource_id=team_id,
+            )
         except HTTPException:
             raise
         except Exception:
@@ -1590,18 +1599,10 @@ async def register_user(request: Request, response: Response):
                 pass
             raise HTTPException(status_code=500, detail="Registration failed")
 
-    # Log audit event — BEST-EFFORT (review P2, PR #874): on main the audit
-    # sat INSIDE the registry try, so an audit failure rolled the whole
-    # registration back (clean 500, retry succeeds). The Supabase path has no
-    # row-level rollback — a post-persist audit failure must NOT 500 the
-    # client with a 409-on-retry lockout. The registry path keeps the
-    # in-try audit (selfhost parity with main).
-    if not is_supabase_enabled():
-        await _async_audit(
-            request, team_id, "tenant_register",
-            resource_type="team", resource_id=team_id,
-        )
-    else:
+    if is_supabase_enabled():
+        # Supabase path audit — BEST-EFFORT (review P2, PR #874): no
+        # row-level rollback exists here, so a post-persist audit failure
+        # must NOT 500 the client with a 409-on-retry lockout.
         try:
             await _async_audit(
                 request, team_id, "tenant_register",
