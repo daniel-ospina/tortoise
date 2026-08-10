@@ -221,14 +221,30 @@ def _cmd_init(args):
     from pathlib import Path
 
     # ── Cloud mode (--api-key) ──────────────────────────────────
+    # #304: --json / --harness / --write-mcp-config extend the hosted path.
+    json_mode = getattr(args, "json", False)
+    harness = getattr(args, "harness", None)
+    write_mcp = getattr(args, "write_mcp_config", False)
+    mcp_force = getattr(args, "force", False)
+
     if getattr(args, 'api_key', None):
         config_path = Path.cwd() / ".tortoise"
         if config_path.exists():
             existing = _json.loads(config_path.read_text())
             if existing.get("api_key") == args.api_key:
-                print("Already connected to Tortoise Cloud with this API key.")
+                if json_mode:
+                    _emit_json({
+                        "status": "connected",
+                        "already_connected": True,
+                        "api_url": existing.get("api_url", os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co")),
+                        "config_path": str(config_path),
+                        "message": "Already connected to Tortoise Cloud with this API key.",
+                    })
+                else:
+                    print("Already connected to Tortoise Cloud with this API key.")
                 return 0
-            print(f"⚠️  Existing .tortoise config found — overwriting.")
+            if not json_mode:
+                print(f"⚠️  Existing .tortoise config found — overwriting.")
         config = {
             "api_key": args.api_key,
             "api_url": os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co"),
@@ -250,19 +266,26 @@ def _cmd_init(args):
         base_url = config["api_url"].rstrip("/")
         config["api_url"] = base_url
 
-        def _validate_key() -> None:
+        def _validate_key() -> dict:
             req = Request(
                 f"{base_url}/v1/team",
                 headers={"Authorization": f"Bearer {args.api_key}"},
             )
             with urlopen(req, timeout=10) as resp:
-                _json.loads(resp.read())
+                return _json.loads(resp.read())
+
+        # Validation outcome: (error_kind, message, http_code) or None when the
+        # key validated. Hard-fail kinds → config NOT saved; warn kinds → saved.
+        team_id = None
+        fail: tuple[str, str, int | None] | None = None
 
         try:
             for attempt in range(2):
                 try:
-                    _validate_key()
-                    print("✅ API key validated against Tortoise Cloud")
+                    team_data = _validate_key()
+                    team_id = (team_data or {}).get("team_id") if isinstance(team_data, dict) else None
+                    if not json_mode:
+                        print("✅ API key validated against Tortoise Cloud")
                     break
                 except HTTPError as e:
                     if e.code in (401, 403):
@@ -272,45 +295,119 @@ def _cmd_init(args):
                             body = e.read().decode()
                         except Exception:
                             pass
-                        print(f"❌ API rejected the key ({e.code}): {body.strip() or e.reason}", file=sys.stderr)
-                        print(f"   Config NOT saved. Double-check the key or run:", file=sys.stderr)
-                        print(f"   tortoise init --api-key tt_<key>", file=sys.stderr)
-                        return 1
+                        fail = ("key_rejected", f"API rejected the key ({e.code}): {body.strip() or e.reason}", e.code)
+                        if not json_mode:
+                            print(f"❌ {fail[1]}", file=sys.stderr)
+                            print(f"   Config NOT saved. Double-check the key or run:", file=sys.stderr)
+                            print(f"   tortoise init --api-key tt_<key>", file=sys.stderr)
+                        break
                     if e.code == 404:
-                        print(f"❌ API URL appears misconfigured — got 404 from {base_url}/v1/team.", file=sys.stderr)
-                        print(f"   Check TORTOISE_API_URL. Config NOT saved.", file=sys.stderr)
-                        return 1
+                        fail = ("bad_url", f"API URL appears misconfigured — got 404 from {base_url}/v1/team.", 404)
+                        if not json_mode:
+                            print(f"❌ {fail[1]}", file=sys.stderr)
+                            print(f"   Check TORTOISE_API_URL. Config NOT saved.", file=sys.stderr)
+                        break
                     if e.code in (408, 429) or 500 <= e.code <= 599:
                         # Transient server-side failure — a valid key may be fine.
                         if attempt == 0:
                             _time.sleep(1)
                             continue
-                        print(f"⚠️  Tortoise Cloud returned {e.code} while validating the key (transient error).")
-                        print(f"   Saving config anyway — verify with: tortoise team info")
+                        fail = ("transient", f"Tortoise Cloud returned {e.code} while validating the key (transient error).", e.code)
+                        if not json_mode:
+                            print(f"⚠️  {fail[1]}")
+                            print(f"   Saving config anyway — verify with: tortoise team info")
                         break
-                    print(f"⚠️  Unexpected status {e.code} from Tortoise Cloud while validating the key.")
-                    print(f"   Saving config anyway — verify with: tortoise team info")
+                    fail = ("transient", f"Unexpected status {e.code} from Tortoise Cloud while validating the key.", e.code)
+                    if not json_mode:
+                        print(f"⚠️  {fail[1]}")
+                        print(f"   Saving config anyway — verify with: tortoise team info")
                     break
         except _JSONDecodeError:
             # 200 with a non-JSON body (captive portal / proxy) — unvalidated.
-            print(f"❌ Tortoise Cloud returned a non-JSON response — key NOT validated.", file=sys.stderr)
-            print(f"   (Possible captive portal or proxy intercepting the request.)", file=sys.stderr)
-            print(f"   Config NOT saved. Check your network / TORTOISE_API_URL and retry.", file=sys.stderr)
-            return 1
+            fail = ("captive_portal",
+                    "Tortoise Cloud returned a non-JSON response — key NOT validated "
+                    "(possible captive portal or proxy intercepting the request).", 200)
+            if not json_mode:
+                print(f"❌ Tortoise Cloud returned a non-JSON response — key NOT validated.", file=sys.stderr)
+                print(f"   (Possible captive portal or proxy intercepting the request.)", file=sys.stderr)
+                print(f"   Config NOT saved. Check your network / TORTOISE_API_URL and retry.", file=sys.stderr)
         except (URLError, _HTTPException, ValueError) as e:
             reason = getattr(e, "reason", e)
-            print(f"⚠️  Could not reach {base_url} to validate the key ({reason}).")
-            print(f"   Saving config anyway — verify with: tortoise team info")
+            fail = ("offline", f"Could not reach {base_url} to validate the key ({reason}).", None)
+            if not json_mode:
+                print(f"⚠️  {fail[1]}")
+                print(f"   Saving config anyway — verify with: tortoise team info")
+
+        if fail and fail[0] in ("key_rejected", "bad_url", "captive_portal"):
+            # Hard-fail kinds: config is NOT saved (existing #707 behavior).
+            if json_mode:
+                _emit_json({"status": "error", "error": fail[0], "message": fail[1], "http_code": fail[2]})
+            return 1
+
         config_path.write_text(_json.dumps(config, indent=2) + "\n")
         os.chmod(config_path, 0o600)
+
+        if json_mode:
+            if fail:
+                # Warn-and-save paths (transient/offline): config IS saved but
+                # the key was not validated — report the error to agents.
+                _emit_json({
+                    "status": "error",
+                    "error": fail[0],
+                    "message": fail[1],
+                    "http_code": fail[2],
+                    "config_saved": True,
+                })
+                return 0
+            # Machine-consumable output — full shape for agents (#304).
+            _emit_json({
+                "status": "connected",
+                "team_id": team_id,
+                "api_url": base_url,
+                "mcp": {
+                    "endpoint": f"{base_url}/mcp",
+                    "auth_header": f"Bearer {args.api_key}",
+                    "configs": {
+                        "claude": {"file": ".mcp.json", "config": _harness_mcp_config("claude", args.api_key, base_url)},
+                        "codex": _harness_mcp_config("codex", args.api_key, base_url),
+                        "cursor": {"file": ".mcp.json", "config": _harness_mcp_config("cursor", args.api_key, base_url)},
+                        "pi": {"file": ".mcp.json", "config": _harness_mcp_config("pi", args.api_key, base_url)},
+                    },
+                },
+                "onboarding_prompt_url": ONBOARDING_PROMPT_URL,
+                "config_path": str(config_path),
+                "next_steps": [
+                    "tortoise team keys create",
+                    "tortoise team info",
+                    'tortoise create-point "hello"',
+                ],
+            })
+            if write_mcp:
+                if not harness:
+                    print("--harness required with --write-mcp-config (claude|codex|cursor|pi)", file=sys.stderr)
+                    return 1
+                return _write_mcp_config_file(args.api_key, base_url, harness, mcp_force)
+            return 0
+
         print("Connected to Tortoise Cloud (team will be resolved from API key)")
         print(f"Config saved to {config_path}")
         print("⚠️  .tortoise contains a plaintext API key — do NOT commit this file.")
         print()
+        _print_mcp_configs(args.api_key, base_url, harness)
+        print()
+        print("── Onboarding Prompt ──")
+        print("Paste this into your agent to complete setup:")
+        print(f"  {ONBOARDING_PROMPT_URL}")
+        print()
         print("Next steps:")
-        print("  tortoise session capture --file transcript.txt   # capture an agent session")
-        print("  tortoise session list                             # view your sessions")
-        print("  # Connect your agent via MCP (see welcome page)")
+        print("  tortoise team keys create       # create additional keys for team members")
+        print("  tortoise team info              # see your team usage and limits")
+        print('  tortoise create-point "hello"   # create your first memory')
+        if write_mcp:
+            if not harness:
+                print("--harness required with --write-mcp-config (claude|codex|cursor|pi)", file=sys.stderr)
+                return 1
+            return _write_mcp_config_file(args.api_key, base_url, harness, mcp_force)
         return 0
 
     print("Tortoise init — resolving DB target…")
@@ -528,26 +625,12 @@ def _cmd_signup(args) -> int:
 def _cmd_team_info(args) -> int:
     """Show team info from Tortoise Cloud API."""
     import json, sys
-    from pathlib import Path
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
 
     # Read config
-    config_path = Path.cwd() / ".tortoise"
-    if not config_path.exists():
-        print("No .tortoise config found. Run 'tortoise init --api-key <key>' first.", file=sys.stderr)
-        return 1
-
-    try:
-        config = json.loads(config_path.read_text())
-    except json.JSONDecodeError:
-        print(f"Invalid .tortoise config at {config_path}", file=sys.stderr)
-        return 1
-
-    api_key = config.get("api_key")
-    api_url = config.get("api_url") or os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co")
-    if not api_key:
-        print("No api_key in .tortoise config.", file=sys.stderr)
+    config, api_key, api_url = _read_config()
+    if api_key is None:
         return 1
 
     # Call API
@@ -574,6 +657,303 @@ def _cmd_team_info(args) -> int:
     print(f"Points:     {data.get('point_count', 0)}")
     print(f"Max users:  {data.get('max_users', 1)}")
     print(f"Max graphs: {data.get('max_graphs', 1)}")
+    return 0
+
+
+ONBOARDING_PROMPT_URL = "https://premiselabs.co/onboarding-prompt.md"
+
+
+def _read_config() -> tuple[dict | None, str | None, str | None]:
+    """Read .tortoise config → (config, api_key, api_url).
+
+    Shared by the hosted-team commands (team info, team keys *). Prints the
+    failure reason to stderr; callers must return 1 when api_key is None.
+    """
+    import json as _json
+    import os as _os
+    from pathlib import Path
+
+    config_path = Path.cwd() / ".tortoise"
+    if not config_path.exists():
+        print("No .tortoise config found. Run 'tortoise init --api-key <key>' first.", file=sys.stderr)
+        return None, None, None
+    try:
+        config = _json.loads(config_path.read_text())
+    except _json.JSONDecodeError:
+        print(f"Invalid .tortoise config at {config_path}", file=sys.stderr)
+        return None, None, None
+    api_key = config.get("api_key")
+    api_url = config.get("api_url") or _os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co")
+    if not api_key:
+        print("No api_key in .tortoise config.", file=sys.stderr)
+        return None, None, None
+    return config, api_key, api_url
+
+
+def _emit_json(obj: dict) -> None:
+    """Print a JSON object to stdout (machine-consumable output)."""
+    import json as _json
+    print(_json.dumps(obj, indent=2))
+
+
+def _harness_mcp_config(harness: str, api_key: str, api_url: str) -> dict:
+    """MCP config for one harness — mirrors website/welcome.html (#497).
+
+    Hosted (Streamable HTTP) shapes:
+    - claude / pi: {"mcpServers": {"tortoise": {"type": "streamable-http", ...}}}
+    - cursor: same but WITHOUT `type` (Cursor's client doesn't use it)
+    - codex: shell command — Codex manages its own config (no file to write)
+    """
+    endpoint = api_url.rstrip("/") + "/mcp"
+    if harness == "codex":
+        return {"command": f"codex mcp add tortoise --url {endpoint} --bearer-token-env-var TORTOISE_API_KEY"}
+    server: dict = {
+        "url": endpoint,
+        "headers": {"Authorization": f"Bearer {api_key}"},
+    }
+    if harness in ("claude", "pi"):
+        server = {"type": "streamable-http", **server}
+    return {"mcpServers": {"tortoise": server}}
+
+
+def _harness_label(harness: str) -> str:
+    return {"claude": "Claude Code", "codex": "Codex", "cursor": "Cursor", "pi": "Pi"}.get(harness, harness)
+
+
+def _print_mcp_configs(api_key: str, api_url: str, harness: str | None) -> None:
+    """Print per-harness MCP config (hosted Streamable HTTP shape, #304).
+
+    With --harness, print only that harness; without, print the selector UI.
+    """
+    import json as _json
+    endpoint = api_url.rstrip("/") + "/mcp"
+    if harness:
+        print(f"── MCP Configuration (Streamable HTTP) — {_harness_label(harness)} ──")
+        if harness == "codex":
+            print("Codex manages its own config — run:")
+            print(f"  export TORTOISE_API_KEY={api_key}")
+            cfg = _harness_mcp_config("codex", api_key, api_url)
+            print(f"  {cfg['command']}")
+        else:
+            print("Add this to .mcp.json:")
+            print(_json.dumps(_harness_mcp_config(harness, api_key, api_url), indent=2))
+        print()
+        print(f"→ MCP endpoint: {endpoint}")
+        print("→ Auth: Bearer <your-key>")
+        return
+    print("── MCP Configuration (Streamable HTTP) ──")
+    print("Connect your agent to Tortoise Cloud. Pick your harness:")
+    print()
+    print("[1] Claude Code")
+    print("[2] Codex")
+    print("[3] Cursor")
+    print("[4] Pi")
+    print()
+    print(f"→ MCP endpoint: {endpoint}")
+    print("→ Auth: Bearer <your-key>")
+
+
+def _write_mcp_config_file(api_key: str, api_url: str, harness: str, force: bool) -> int:
+    """Write/merge .mcp.json for file-based harnesses (claude/cursor/pi).
+
+    Codex is command-based (#497) — prints the registration command instead.
+    Merge strategy: preserve existing mcpServers entries, overwrite only the
+    tortoise entry (refused if it exists unless --force).
+    """
+    import json as _json
+    from pathlib import Path
+
+    if harness == "codex":
+        print("Codex manages its own config — run:")
+        print(f"  export TORTOISE_API_KEY={api_key}")
+        cfg = _harness_mcp_config("codex", api_key, api_url)
+        print(f"  {cfg['command']}")
+        return 0
+
+    target = Path.cwd() / ".mcp.json"
+    entry = _harness_mcp_config(harness, api_key, api_url)["mcpServers"]["tortoise"]
+    if target.exists():
+        try:
+            data = _json.loads(target.read_text())
+        except _json.JSONDecodeError:
+            print(f"❌ {target} is not valid JSON — fix or remove it, then retry.", file=sys.stderr)
+            return 1
+        if not isinstance(data, dict):
+            print(f"❌ {target} is not a JSON object — fix or remove it, then retry.", file=sys.stderr)
+            return 1
+        servers = data.setdefault("mcpServers", {})
+        if "tortoise" in servers and not force:
+            print(f"⚠️  tortoise MCP server already configured in {target}. Use --force to overwrite.", file=sys.stderr)
+            return 1
+        servers["tortoise"] = entry
+    else:
+        data = {"mcpServers": {"tortoise": entry}}
+    target.write_text(_json.dumps(data, indent=2) + "\n")
+    print(f"✅ Wrote MCP config to {target}")
+    return 0
+
+
+def _cmd_team_keys_list(args) -> int:
+    """List team API keys (GET /v1/team/keys). Hashes only — no plaintext."""
+    import json as _json, sys as _sys
+    from urllib.request import Request, urlopen
+    from urllib.error import URLError, HTTPError
+
+    config, api_key, api_url = _read_config()
+    if api_key is None:
+        return 1
+
+    try:
+        req = Request(
+            f"{api_url}/v1/team/keys",
+            headers={"Authorization": f"Bearer {api_key}"},
+        )
+        with urlopen(req, timeout=10) as resp:
+            data = _json.loads(resp.read())
+    except HTTPError as e:
+        body = e.read().decode() if e.fp else ""
+        if e.code in (401, 403):
+            print("API key rejected — re-run tortoise init --api-key", file=_sys.stderr)
+        else:
+            print(f"API error ({e.code}): {body}", file=_sys.stderr)
+        return 1
+    except (_json.JSONDecodeError, ValueError) as e:
+        print(f"Invalid response from API: {e}", file=_sys.stderr)
+        return 1
+    except URLError as e:
+        print(f"Cannot reach API at {api_url}: {e.reason}", file=_sys.stderr)
+        return 1
+
+    keys = data.get("keys", [])
+    if getattr(args, "json", False):
+        _emit_json({"team_id": config.get("team_id"), "keys": keys})
+        return 0
+
+    team_id = config.get("team_id")
+    print(f"API keys for team {team_id}:" if team_id else "API keys:")
+    print(f"  {'ID':<14}{'Prefix':<14}{'Created':<26}{'Last used':<26}Status")
+    for k in keys:
+        status = "revoked" if k.get("revoked_at") else "active"
+        last = k.get("last_used_at") or "never"
+        print(f"  {str(k.get('id') or ''):<14}{str(k.get('key_prefix') or ''):<14}"
+              f"{str(k.get('created_at') or ''):<26}{str(last):<26}{status}")
+    return 0
+
+
+def _cmd_team_keys_create(args) -> int:
+    """Mint a new team API key (POST /v1/team/keys). Key shown exactly once."""
+    import json as _json, sys as _sys
+    from urllib.request import Request, urlopen
+    from urllib.error import URLError, HTTPError
+
+    config, api_key, api_url = _read_config()
+    if api_key is None:
+        return 1
+
+    try:
+        req = Request(
+            f"{api_url}/v1/team/keys",
+            data=b"{}",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(req, timeout=10) as resp:
+            data = _json.loads(resp.read())
+    except HTTPError as e:
+        body = e.read().decode() if e.fp else ""
+        if e.code == 402:
+            print("API key limit reached (max 3 for free tier). Revoke an existing key first.", file=_sys.stderr)
+        elif e.code == 429:
+            print("Too many keys created recently — try again in 60s.", file=_sys.stderr)
+        elif e.code in (401, 403):
+            print("API key rejected — re-run tortoise init --api-key", file=_sys.stderr)
+        else:
+            print(f"API error ({e.code}): {body}", file=_sys.stderr)
+        return 1
+    except (_json.JSONDecodeError, ValueError) as e:
+        print(f"Invalid response from API: {e}", file=_sys.stderr)
+        return 1
+    except URLError as e:
+        print(f"Cannot reach API at {api_url}: {e.reason}", file=_sys.stderr)
+        return 1
+
+    if getattr(args, "json", False):
+        _emit_json({
+            "key": data.get("key"),
+            "key_prefix": data.get("key_prefix"),
+            "id": data.get("id"),
+            "created_at": data.get("created_at"),
+            "team_id": config.get("team_id"),
+        })
+        return 0
+
+    print(f"Created new API key: {data.get('key')}")
+    print(f"  Key prefix:  {data.get('key_prefix')}")
+    print(f"  Key ID:      {data.get('id')}")
+    print(f"  ⚠️  Store this key — it won't be shown again.")
+    print(f"  ⚠️  This key has full access to your team's graph.")
+    return 0
+
+
+def _cmd_team_keys_revoke(args) -> int:
+    """Revoke a team API key (DELETE /v1/team/keys/{id}). Soft delete."""
+    import json as _json, sys as _sys
+    from urllib.request import Request, urlopen
+    from urllib.error import URLError, HTTPError
+
+    config, api_key, api_url = _read_config()
+    if api_key is None:
+        return 1
+
+    json_mode = getattr(args, "json", False)
+    if not json_mode and not getattr(args, "force", False):
+        try:
+            answer = input(f"Revoke API key {args.key_id}? This cannot be undone. [y/N]: ")
+        except EOFError:
+            answer = "n"
+        if answer.strip().lower() not in ("y", "yes"):
+            print("Aborted.", file=_sys.stderr)
+            return 1
+
+    try:
+        req = Request(
+            f"{api_url}/v1/team/keys/{args.key_id}",
+            headers={"Authorization": f"Bearer {api_key}"},
+            method="DELETE",
+        )
+        with urlopen(req, timeout=10) as resp:
+            data = _json.loads(resp.read())
+    except HTTPError as e:
+        body = e.read().decode() if e.fp else ""
+        if e.code == 404:
+            print("API key not found", file=_sys.stderr)
+        elif e.code == 403:
+            print("Cannot revoke — this key belongs to a different team", file=_sys.stderr)
+        elif e.code == 401:
+            print("API key rejected — re-run tortoise init --api-key", file=_sys.stderr)
+        else:
+            print(f"API error ({e.code}): {body}", file=_sys.stderr)
+        return 1
+    except (_json.JSONDecodeError, ValueError) as e:
+        print(f"Invalid response from API: {e}", file=_sys.stderr)
+        return 1
+    except URLError as e:
+        print(f"Cannot reach API at {api_url}: {e.reason}", file=_sys.stderr)
+        return 1
+
+    if json_mode:
+        out: dict = {"revoked": True, "key_id": args.key_id}
+        if data.get("revoked_at"):
+            out["revoked_at"] = data["revoked_at"]
+        if data.get("already"):
+            out["already"] = True
+        _emit_json(out)
+        return 0
+
+    if data.get("already"):
+        print(f"✅ API key {args.key_id} was already revoked (idempotent).")
+    else:
+        print(f"✅ API key {args.key_id} revoked.")
     return 0
 
 
@@ -2732,6 +3112,14 @@ def main(argv: list[str] | None = None) -> int:
     init.add_argument("--path", default=None, help="Path for embedded mode (opt-in)")
     init.add_argument("--yes", "-y", action="store_true", help="Skip prompts, auto-index repo")
     init.add_argument("--api-key", dest="api_key", default=None, help="Connect to Tortoise Cloud instead of local Docker")
+    # #304 hosted-path extras
+    init.add_argument("--json", action="store_true", help="Machine-readable JSON output (cloud mode)")
+    init.add_argument("--harness", choices=["claude", "codex", "cursor", "pi"], default=None,
+                      help="Target agent harness for MCP config output (cloud mode)")
+    init.add_argument("--write-mcp-config", dest="write_mcp_config", action="store_true",
+                      help="Write .mcp.json for the --harness target (cloud mode; requires --harness)")
+    init.add_argument("--force", action="store_true",
+                      help="Overwrite an existing tortoise entry in .mcp.json (cloud mode)")
     setup = sp.add_parser("setup", help="Configure memory_filter per role (interactive)")
     setup.add_argument("--role", default=None, help="Role name (non-interactive, outputs YAML)")
     setup.add_argument("--team", default=None, help="Team name (used with --role)")
@@ -2752,6 +3140,17 @@ def main(argv: list[str] | None = None) -> int:
     team = sp.add_parser("team", help="Team management (Tortoise Cloud)")
     team_sp = team.add_subparsers(dest="team_cmd")
     team_info_p = team_sp.add_parser("info", help="Show team info and usage")
+    # tortoise team keys {list,create,revoke} (#304)
+    team_keys = team_sp.add_parser("keys", help="Manage API keys")
+    team_keys_sp = team_keys.add_subparsers(dest="team_keys_cmd")
+    team_keys_list_p = team_keys_sp.add_parser("list", help="List API keys")
+    team_keys_list_p.add_argument("--json", action="store_true", help="Machine-readable JSON output")
+    team_keys_create_p = team_keys_sp.add_parser("create", help="Create a new API key (shown once)")
+    team_keys_create_p.add_argument("--json", action="store_true", help="Machine-readable JSON output")
+    team_keys_revoke_p = team_keys_sp.add_parser("revoke", help="Revoke an API key")
+    team_keys_revoke_p.add_argument("key_id", help="Key ID to revoke")
+    team_keys_revoke_p.add_argument("--json", action="store_true", help="Machine-readable JSON output")
+    team_keys_revoke_p.add_argument("--force", "-f", action="store_true", help="Skip the confirmation prompt")
     # tortoise signup — zero-email free-team mint (issue #663)
     sp.add_parser("signup", help="Mint a free hosted team + API key — no email or dashboard")
     # tortoise index github <url>
@@ -2893,6 +3292,15 @@ def main(argv: list[str] | None = None) -> int:
     elif args.cmd == "team":
         if args.team_cmd == "info":
             return _cmd_team_info(args)
+        elif args.team_cmd == "keys":
+            if args.team_keys_cmd == "list":
+                return _cmd_team_keys_list(args)
+            elif args.team_keys_cmd == "create":
+                return _cmd_team_keys_create(args)
+            elif args.team_keys_cmd == "revoke":
+                return _cmd_team_keys_revoke(args)
+            team_keys.print_help()
+            return 1
         team.print_help()
         return 1
     elif args.cmd == "create-point":
