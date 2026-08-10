@@ -6,9 +6,10 @@ the shared resolution logic (resolve_api_key, user_memberships, ...) runs
 verbatim in CI with zero network. Mirrors the backup-seam fake pattern
 (plan Task 5 / P1-3): an adapter exposing query() over in-memory rows.
 
-Filter ops: eq | neq | is (None → IS NULL) | gt | lt (NULL-excluding, SQL
-semantics). PATCH applies json_body to matching rows; POST appends a row
-(return=representation semantics).
+Filter ops: eq | neq | is (None → IS NULL) | gt | lt | lte (all ordered
+ops NULL-excluding, SQL semantics). PATCH applies json_body to matching
+rows; POST appends a row (return=representation semantics); DELETE
+removes matching rows (mirrors PostgREST service-role deletes, #302).
 
 ``rpc(fn, body)`` simulates PostgREST RPC calls — currently ``provision_team``
 (#765 plan Task 8: the atomic teams + team_memberships + api_keys upsert,
@@ -136,6 +137,12 @@ class FakeControlPlane:
             row = dict(json_body or {})
             self.tables.setdefault(table, []).append(row)
             return [row]
+        if method == "DELETE":
+            # PostgREST row-delete semantics (used by the #302 purge).
+            self.tables[table] = [
+                r for r in self.tables.get(table, []) if not _matches(r, filters or [])
+            ]
+            return []
         rows = [dict(r) for r in self.tables.get(table, [])]
         for col, op, value in filters or []:
             if op == "eq":
@@ -151,6 +158,9 @@ class FakeControlPlane:
             elif op == "lt":
                 rows = [r for r in rows
                         if r.get(col) is not None and r.get(col) < value]
+            elif op == "lte":
+                rows = [r for r in rows
+                        if r.get(col) is not None and r.get(col) <= value]
             else:
                 raise ValueError(f"unsupported filter op {op!r}")
         if method == "GET":
@@ -176,6 +186,9 @@ def _matches(row: dict, filters: list[tuple[str, str, object]]) -> bool:
         if op == "gt" and (row.get(col) is None or row.get(col) <= value):
             return False
         if op == "lt" and (row.get(col) is None or row.get(col) >= value):
+            return False
+        if op == "lte" and (row.get(col) is None or row.get(col) > value):
+            # ISO-8601 cutoff (mirrors the GET path — #302 purge).
             return False
     return True
 

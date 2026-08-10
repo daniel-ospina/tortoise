@@ -145,7 +145,7 @@ def _iter_registered_teams() -> list[dict]:
 
         sdk = TortoiseSDK()
         rows = sdk._get_registry().query(
-            "MATCH (t:Team) RETURN t.id, t.name"
+            "MATCH (t:Team) WHERE t.deleted_at IS NULL RETURN t.id, t.name"
         ).result_set
         # P2 (Qwen): skip rows with falsy team_id — namespace=None would sweep
         # the default/shared graph.
@@ -260,12 +260,15 @@ async def _lifespan(app):
                     _logger.warning("event retention sweep failed: %s", exc)
 
             _sweep_events()  # boot sweep
+            await asyncio.to_thread(_purge_deleted_teams)  # boot purge (#302)
             interval = int(os.environ.get("TORTOISE_EVENT_RETENTION_INTERVAL", "3600"))
 
             async def _event_retention_loop() -> None:
                 while True:
                     await asyncio.sleep(interval)
                     _sweep_events()
+                    # #302: hard-delete past grace (sync DB work off the loop)
+                    await asyncio.to_thread(_purge_deleted_teams)
 
             _retention_task = asyncio.get_event_loop().create_task(_event_retention_loop())
             app.state._event_retention_task = _retention_task
@@ -472,14 +475,20 @@ async def _async_audit(
     *,
     resource_type: str | None = None,
     resource_id: str | None = None,
+    actor_user_id: str | None = None,
 ) -> None:
-    """Async-safe audit event writer. Offloads sync psycopg2 to thread pool."""
+    """Async-safe audit event writer. Offloads sync psycopg2 to thread pool.
+
+    actor_user_id records the JWT-session user for session-plane operations
+    (owner export/delete, #302) — key-plane paths leave it None (the key
+    creator is not the caller).
+    """
     ip = request.client.host if request.client else None
     ua = request.headers.get("user-agent")
     await asyncio.to_thread(
         _audit_logger.append,
         team_id=team_id,
-        actor_user_id=None,
+        actor_user_id=actor_user_id,
         operation=operation,
         resource_type=resource_type,
         resource_id=resource_id,
@@ -1193,6 +1202,46 @@ async def _check_register_rate_limit(request: Request) -> None:
                      if not any(now - t < 3600 for t in b)]
             for ip in stale:
                 del _register_buckets[ip]
+
+
+# ── Sensitive-op rate limits (E2E-6-D, #302) ─────────────────────────────
+# Owner-only endpoints (team export / team delete) get their own per-IP
+# hourly budget on top of the global 100/min middleware: export is a heavy
+# read (full graph scan), delete is an irreversible write. Mirrors the
+# register limiter pattern (RATE_LIMIT_DISABLED=1 opts out in tests).
+_SENSITIVE_OP_LIMITS = {"export": 20, "team_delete": 5}  # per hour per IP
+_SENSITIVE_BUCKETS: dict[tuple[str, str], list[float]] = defaultdict(list)
+_SENSITIVE_LOCK = asyncio.Lock()
+
+
+async def _check_sensitive_op_rate_limit(request: Request, op: str) -> None:
+    """Per-IP hourly budget for sensitive team ops (export / team_delete)."""
+    if os.environ.get("RATE_LIMIT_DISABLED") == "1":
+        return
+    if not request.client or not request.client.host:
+        return
+    max_per_hour = _SENSITIVE_OP_LIMITS.get(op)
+    if max_per_hour is None:
+        return
+    ip = request.client.host
+    now = time.time()
+    key = (ip, op)
+    async with _SENSITIVE_LOCK:
+        bucket = _SENSITIVE_BUCKETS[key]
+        bucket[:] = [t for t in bucket if now - t < 3600]
+        if len(bucket) >= max_per_hour:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Rate limit exceeded for {op}. Please try again later.",
+                headers={"Retry-After": "3600"},
+            )
+        bucket.append(now)
+        # Bound memory growth: drop dead buckets beyond 10k entries.
+        if len(_SENSITIVE_BUCKETS) > 10_000:
+            stale = [k for k, b in _SENSITIVE_BUCKETS.items()
+                     if not any(now - t < 3600 for t in b)]
+            for k in stale:
+                del _SENSITIVE_BUCKETS[k]
 
 
 # ── Endpoints ─────────────────────────────────────────────────────
@@ -2893,6 +2942,53 @@ async def _require_owner_admin(user_id: str, team_id: str) -> dict:
     return {"team_id": team_id, "role": rows[0][0]}
 
 
+async def _require_owner(user_id: str, team_id: str, *,
+                         allow_removed: str | None = None) -> dict:
+    """Return the membership if the user is the OWNER in the team, else 403.
+
+    Strict-owner RBAC for export/deletion (#302) — mirrors
+    _require_owner_admin but requires role == 'owner' exactly: admins can
+    manage members, but only the owner can export the graph or schedule
+    team deletion (issue spec: "Team deletion: Owner-only").
+
+    allow_removed: when set (the team's deleted_at), a REMOVED owner
+    membership also passes — the delete cascade removes the owner's own
+    membership, so the idempotent replay must still authenticate them.
+    Owners can never be removed/demoted by any other path (remove_member /
+    change_member_role block owner), so removed+owner uniquely identifies
+    the cascade. AuthZ-first callers pass this only after reading
+    deleted_at, and non-owners get 403 regardless of team state (no
+    existence oracle).
+    """
+    from tortoise.supabase_control import (
+        get_control_plane, is_supabase_enabled,
+    )
+    if is_supabase_enabled():
+        rows = get_control_plane().query(
+            "team_memberships",
+            select=["role", "status"],
+            filters=[("user_id", "eq", user_id), ("team_id", "eq", team_id)],
+        )
+        if not rows or rows[0].get("role") != "owner":
+            raise HTTPException(status_code=403, detail="Requires owner role in team")
+        status = rows[0].get("status")
+        if status == "active" or (allow_removed and status == "removed"):
+            return {"team_id": team_id, "role": "owner"}
+        raise HTTPException(status_code=403, detail="Requires owner role in team")
+    sdk = _make_sdk(namespace="registry")
+    rows = sdk._get_registry().query(
+        "MATCH (m:Membership {user_id:$uid, team_id:$tid}) "
+        "RETURN m.role, m.status",
+        params={"uid": user_id, "tid": team_id},
+    ).result_set
+    if not rows or rows[0][0] != "owner":
+        raise HTTPException(status_code=403, detail="Requires owner role in team")
+    status = rows[0][1]
+    if status == "active" or (allow_removed and status == "removed"):
+        return {"team_id": team_id, "role": "owner"}
+    raise HTTPException(status_code=403, detail="Requires owner role in team")
+
+
 @app.post("/v1/invites")
 async def invite_to_team(body: dict, user: dict = Depends(get_current_user)):
     """E3 — invite a user to the team (admin/member roles; Team tier)."""
@@ -3238,6 +3334,430 @@ async def change_member_role(team_id: str, user_id: str, body: dict, user: dict 
         params={"tid": team_id, "uid": user_id, "role": new_role},
     )
     return {"user_id": user_id, "role": new_role}
+
+
+# ── Data export + team deletion (E2E-6-D, #302 security baseline) ──────────
+# Owner-only, JWT-session plane (role lives in memberships — tt_ keys carry
+# no role). Both endpoints are per-IP rate limited, audit-logged with the
+# acting user, and idempotent (GET export; repeat DELETE → already-pending).
+
+_EXPORT_MAX_EVENTS = 5000  # event log is a rolling window (30d retention)
+_EXPORT_SKIP_LABELS = {"GraphEventMeta", "TeamMeta"}  # internal plumbing
+
+
+def _team_members_sync(team_id: str) -> list[dict]:
+    """Active members for a team (export metadata). Dual-plane like _team_node.
+
+    Sync — callers wrap in asyncio.to_thread (control-plane queries are
+    blocking; #310 pattern)."""
+    from tortoise.supabase_control import get_control_plane, is_supabase_enabled
+    if is_supabase_enabled():
+        rows = get_control_plane().query(
+            "team_memberships",
+            select=["user_id", "role", "status"],
+            filters=[("team_id", "eq", team_id), ("status", "eq", "active")],
+        )
+        return [{"user_id": r["user_id"], "role": r["role"], "status": r["status"]}
+                for r in rows]
+    sdk = _make_sdk(namespace="registry")
+    rows = sdk._get_registry().query(
+        "MATCH (m:Membership {team_id:$tid, status:'active'}) "
+        "RETURN m.user_id, m.role, m.joined_at",
+        params={"tid": team_id},
+    ).result_set
+    return [{"user_id": r[0], "role": r[1], "joined_at": r[2]} for r in rows]
+
+
+def _team_namespace(team_node: dict, team_id: str) -> str:
+    """Namespace for the team's data graph.
+
+    Stored ``graph_name`` (sdk.team_create uses ``team_{name}`` and records
+    it on the Team node; code-review P1, PR #873) wins over the
+    ``team_{team_id}`` convention used by provision_tenant — exporting the
+    wrong graph would silently return an empty dump.
+    """
+    graph_name = team_node.get("graph_name")
+    if graph_name and str(graph_name).startswith("team_") and len(str(graph_name)) > 5:
+        return str(graph_name)[5:]
+    return team_id
+
+
+def _export_graph_snapshot(namespace: str):
+    """Sync full-graph dump for export (run via asyncio.to_thread — heavy
+    read that must not block the event loop, #310 webhook precedent).
+
+    Returns (summary, points, entities, events, edges). Events are kept in
+    seq order; the caller truncates to the newest window."""
+    sdk = _make_sdk(namespace=namespace)
+    g = sdk._get_proj().g
+    summary = {"nodes": 0, "points": 0, "entities": 0, "edges": 0, "events": 0}
+    points: list[dict] = []
+    entities: list[dict] = []
+    events: list[dict] = []
+    edges: list[dict] = []
+    for labels, props in g.query(
+        "MATCH (n) RETURN labels(n), properties(n)"
+    ).result_set:
+        summary["nodes"] += 1
+        labels = list(labels or [])
+        if "Point" in labels:
+            d = dict(props or {})
+            if "pointKind" in d:
+                d["kind"] = d.pop("pointKind")
+            points.append(d)
+            summary["points"] += 1
+        elif "GraphEvent" in labels:
+            d = dict(props or {})
+            payload = d.get("payload")
+            if isinstance(payload, str):
+                try:
+                    d["payload"] = _json.loads(payload)
+                except Exception:  # noqa: BLE001 — keep raw on bad JSON
+                    pass
+            events.append(d)
+            summary["events"] += 1
+        elif not (_EXPORT_SKIP_LABELS & set(labels)):
+            entities.append({"labels": labels, **dict(props or {})})
+            summary["entities"] += 1
+    for src_labels, src_id, rel_type, tgt_labels, tgt_id, rel_props in g.query(
+        "MATCH (a)-[r]->(b) RETURN labels(a), coalesce(a.id, a.name), "
+        "type(r), labels(b), coalesce(b.id, b.name), properties(r)"
+    ).result_set:
+        edges.append({
+            "source": src_id, "source_labels": list(src_labels or []),
+            "type": rel_type, "target": tgt_id,
+            "target_labels": list(tgt_labels or []),
+            "properties": dict(rel_props or {}),
+        })
+        summary["edges"] += 1
+    return summary, points, entities, events, edges
+
+
+@app.get("/v1/teams/{team_id}/export")
+async def export_team(team_id: str, request: Request,
+                      user: dict = Depends(get_current_user)):
+    """E2E-6-D — owner-only JSON export of the team graph + control plane.
+
+    Full data surface: every Point (full properties incl. confidence
+    scores), every relationship, entity nodes, and the recent event log
+    (capped at _EXPORT_MAX_EVENTS, newest-by-seq kept — events are a
+    rolling 30d window), plus control-plane metadata (team row, members,
+    plan/tier limits).
+
+    AuthZ-first (security review, PR #873): a non-owner gets 403 whether
+    or not the team exists or is delete-pending — no existence oracle.
+    Owner-only; per-IP rate limited; audit logged (team_export,
+    actor_user_id); idempotent by nature (GET). The graph read runs on a
+    worker thread (never blocks the event loop).
+    """
+    await _check_sensitive_op_rate_limit(request, "export")
+    team_node = await _team_node(team_id)
+    deleted_at = team_node.get("deleted_at") if team_node else None
+    await _require_owner(user["user_id"], team_id, allow_removed=deleted_at)
+    if team_node is None:
+        raise HTTPException(status_code=404, detail="Team not found")
+    if deleted_at:
+        raise HTTPException(status_code=410, detail="Team is scheduled for deletion")
+
+    try:
+        summary, points, entities, events, edges = await asyncio.to_thread(
+            _export_graph_snapshot, _team_namespace(team_node, team_id)
+        )
+    except Exception:
+        logging.getLogger("tortoise.api").exception("team export failed")
+        raise HTTPException(status_code=500, detail="Export failed")
+
+    total_events = len(events)
+    if total_events > _EXPORT_MAX_EVENTS:
+        # Newest-by-seq window: traversal order is unspecified, so sort
+        # before truncating (code-review P2, PR #873).
+        events.sort(key=lambda e: e.get("seq") or 0, reverse=True)
+        events = events[:_EXPORT_MAX_EVENTS]
+        summary["events"] = len(events)
+        summary["events_total"] = total_events
+        summary["events_truncated"] = True
+
+    from tortoise.pricing import tier_limits
+    tier = team_node.get("tier", "free")
+    plan = {"tier": tier, "limits": tier_limits(tier)}
+    members = await asyncio.to_thread(_team_members_sync, team_id)
+    await _async_audit(
+        request, team_id, "team_export",
+        resource_type="team", resource_id=team_id,
+        actor_user_id=user["user_id"],
+    )
+    return {
+        "schema_version": 1,
+        "team_id": team_id,
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "summary": summary,
+        "points": points,
+        "entities": entities,
+        "edges": edges,
+        "events": events,
+        "team": team_node,
+        "members": members,
+        "plan": plan,
+    }
+
+
+def _soft_delete_registry_team(team_id: str, now: str, grace_hours: float) -> None:
+    """Registry-plane soft-delete cascade (sync — caller to_threads it).
+
+    Order matters (code-review P1, PR #873): the access-kill writes run
+    FIRST and the ``deleted_at`` stamp LAST, so a partial failure leaves
+    the team NOT marked deleted and a retry re-runs the full cascade —
+    never a "deleted" team whose keys still authenticate.
+    """
+    sdk = _make_sdk(namespace="registry")
+    reg = sdk._get_registry()
+    reg.query(
+        "MATCH (k:APIKey {team_id:$tid}) WHERE k.revoked_at IS NULL "
+        "SET k.revoked_at=$now",
+        params={"tid": team_id, "now": now},
+    )
+    reg.query(
+        "MATCH (m:Membership {team_id:$tid, status:'active'}) "
+        "SET m.status='removed'",
+        params={"tid": team_id},
+    )
+    reg.query(
+        "MATCH (i:Invitation {team_id:$tid}) "
+        "WHERE (i.status IS NULL OR i.status = 'pending') "
+        "SET i.status='revoked'",
+        params={"tid": team_id},
+    )
+    reg.query(
+        "MATCH (t:Team {id:$id}) SET t.deleted_at=$now, t.grace_hours=$gh",
+        params={"id": team_id, "now": now, "gh": grace_hours},
+    )
+
+
+@app.delete("/v1/teams/{team_id}", status_code=202)
+async def delete_team(team_id: str, request: Request,
+                      user: dict = Depends(get_current_user)):
+    """E2E-6-D — owner-only team deletion (soft delete → 24h grace → hard delete).
+
+    Immediate cascade, access-kill first: all API keys revoked (tt_ auth
+    fails closed), active memberships marked removed (JWT-session access
+    stops), pending invitations revoked, then ``deleted_at`` + the
+    promised ``grace_hours`` stamped LAST — a partial failure leaves the
+    team not marked deleted and retries re-run the full cascade. The boot
+    + hourly purge hard-deletes the team graph and control-plane rows once
+    the stored grace window elapses — deletion is irreversible within 24
+    hours (issue #302 indicator); the purge honors the stored window even
+    if the env var changes mid-grace. Immutable audit_events rows are
+    preserved by design (the delete trail survives).
+
+    AuthZ-first: non-owners get 403 whether or not the team exists or is
+    delete-pending (no existence oracle). Idempotent: repeat calls by the
+    owner while pending → 200 already (owner membership is removed by the
+    cascade, so the replay check accepts the removed-owner state); after
+    the purge the team is gone → 403 (team no longer resolvable). Supabase
+    auth user accounts are NOT deleted — no auth-admin wiring exists, and
+    a user can own multiple teams (per-team deletion must not cascade to
+    the account).
+    """
+    await _check_sensitive_op_rate_limit(request, "team_delete")
+    team_node = await _team_node(team_id)
+    deleted_at = team_node.get("deleted_at") if team_node else None
+    await _require_owner(user["user_id"], team_id, allow_removed=deleted_at)
+    if team_node is None:
+        raise HTTPException(status_code=404, detail="Team not found")
+
+    grace_hours = float(os.environ.get("TORTOISE_TEAM_DELETE_GRACE_HOURS", "24"))
+    if deleted_at:
+        # Idempotent replay: already scheduled — same grace answer (200),
+        # using the STORED grace window (promise made at schedule time).
+        stored_grace = team_node.get("grace_hours")
+        try:
+            replay_grace = float(stored_grace) if stored_grace is not None else grace_hours
+        except Exception:  # noqa: BLE001
+            replay_grace = grace_hours
+        try:
+            hard_delete_after = (
+                datetime.fromisoformat(deleted_at) + timedelta(hours=replay_grace)
+            ).isoformat()
+        except Exception:  # noqa: BLE001 — non-ISO stamp (legacy/foreign)
+            hard_delete_after = None
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": "delete_pending", "already": True, "team_id": team_id,
+                "deleted_at": deleted_at, "grace_hours": replay_grace,
+                "hard_delete_after": hard_delete_after,
+            },
+        )
+
+    now = datetime.now(timezone.utc).isoformat()
+    from tortoise.supabase_control import (
+        get_control_plane, is_supabase_enabled,
+        remove_team_memberships, revoke_team_api_keys,
+        revoke_team_invitations, soft_delete_team,
+    )
+    if is_supabase_enabled():
+        cp = get_control_plane()
+        # Access-kill first, stamp LAST (fail-closed ordering, PR #873).
+        # Sync httpx calls must not block the loop (to_thread, #310 pattern).
+        await asyncio.to_thread(revoke_team_api_keys, cp, team_id, now)
+        await asyncio.to_thread(remove_team_memberships, cp, team_id, now)
+        await asyncio.to_thread(revoke_team_invitations, cp, team_id, now)
+        await asyncio.to_thread(
+            soft_delete_team, cp, team_id, now, grace_hours=grace_hours
+        )
+    else:
+        await asyncio.to_thread(
+            _soft_delete_registry_team, team_id, now, grace_hours
+        )
+    await _async_audit(
+        request, team_id, "team_delete_requested",
+        resource_type="team", resource_id=team_id,
+        actor_user_id=user["user_id"],
+    )
+    return {
+        "status": "delete_scheduled", "team_id": team_id, "deleted_at": now,
+        "grace_hours": grace_hours,
+        "hard_delete_after": (
+            datetime.now(timezone.utc) + timedelta(hours=grace_hours)
+        ).isoformat(),
+        "note": "API keys revoked and memberships removed immediately; team "
+                 "graph + control-plane rows are hard-deleted after the grace "
+                 "period. Supabase auth user accounts are not deleted.",
+    }
+
+
+# ── Deleted-team purge (E2E-6-D, #302) — hard delete after grace ────────────
+
+def _drop_team_graph(team_id: str, graph_name: str | None = None) -> None:
+    """Best-effort drop of a team's FalkorDB graph.
+
+    graph_name wins when known (sdk.team_create stores ``team_{name}``);
+    the ``team_{team_id}`` fallback matches provision_tenant graphs.
+    """
+    try:
+        target = graph_name or f"team_{team_id}"
+        sdk = _make_sdk(namespace=team_id)
+        proj = sdk._get_proj()
+        if hasattr(proj.db, "delete_graph"):
+            proj.db.delete_graph(target)
+        else:
+            _logger.debug("delete_graph not available (FalkorDBLite) — skipped")
+    except Exception:  # noqa: BLE001
+        _logger.debug("team graph drop skipped for %s", team_id)
+
+
+def _purge_registry_team(sdk, team_id: str, graph_name: str | None = None) -> None:
+    """Cascade-delete a registry team + drop its graph (mirrors sdk.team_delete)."""
+    reg = sdk._get_registry()
+    reg.query(
+        "MATCH (m:Membership {team_id:$tid}) DETACH DELETE m",
+        params={"tid": team_id},
+    )
+    reg.query(
+        "MATCH (k:APIKey {team_id:$tid}) DETACH DELETE k",
+        params={"tid": team_id},
+    )
+    reg.query(
+        "MATCH (i:Invitation {team_id:$tid}) DETACH DELETE i",
+        params={"tid": team_id},
+    )
+    reg.query(
+        "MATCH (t:Team {id:$id}) DETACH DELETE t",
+        params={"id": team_id},
+    )
+    _drop_team_graph(team_id, graph_name)
+
+
+def _purge_deleted_teams() -> None:
+    """Hard-delete teams past the soft-delete grace window (#302 E2E-6-D).
+
+    Runs at boot + hourly inside the event-retention loop (via
+    asyncio.to_thread — sync DB work must not block the loop, #310). The
+    env cutoff pre-filters, then each team's STORED grace_hours (the
+    promise made at schedule time) decides — a config change mid-grace can
+    never hard-delete a team before its promised hard_delete_after.
+
+    Registry mode cascades Membership/APIKey/Invitation nodes and drops
+    the team graph; Supabase mode sweeps the registry nodes provision_tenant
+    writes in both modes AND deletes the control-plane rows via the
+    service-role seam (code-review P2, PR #873). Ordering matters in
+    Supabase mode: the registry sweep runs FIRST, the teams row is deleted
+    LAST — if the registry sweep or graph drop fails, the teams row survives
+    as the retry anchor and the next sweep finds the team again (no
+    registry/graph leak past the grace window). Immutable audit_events rows
+    survive (no FK). Fail-safe: per-team failures are logged and skipped —
+    a purge failure never crashes the loop.
+    """
+    try:
+        env_grace = float(os.environ.get("TORTOISE_TEAM_DELETE_GRACE_HOURS", "24"))
+        env_cutoff = (datetime.now(timezone.utc) - timedelta(hours=env_grace)).isoformat()
+        now_dt = datetime.now(timezone.utc)
+
+        def _past_grace(row_deleted_at, row_grace_hours) -> bool:
+            """Stored grace (promised at schedule time) wins over env."""
+            try:
+                deleted_dt = datetime.fromisoformat(row_deleted_at)
+            except Exception:  # noqa: BLE001
+                return True  # unparseable stamp → purge (defensive)
+            try:
+                gh = float(row_grace_hours) if row_grace_hours is not None else env_grace
+            except Exception:  # noqa: BLE001
+                gh = env_grace
+            return deleted_dt + timedelta(hours=gh) <= now_dt
+
+        from tortoise.supabase_control import (
+            get_control_plane, is_supabase_enabled, purge_team_control_plane,
+        )
+        if is_supabase_enabled():
+            cp = get_control_plane()
+            for row in cp.query(
+                "teams",
+                select=["id", "graph_name", "grace_hours", "deleted_at"],
+                filters=[("deleted_at", "lte", env_cutoff)],
+            ):
+                team_id = row["id"]
+                if not _past_grace(row.get("deleted_at"), row.get("grace_hours")):
+                    continue  # env shrank — honor the stored promise
+                try:
+                    # Registry sweep FIRST, control-plane LAST: the teams
+                    # row is the retry anchor — a failed registry purge or
+                    # graph drop leaves it in place, so the next sweep
+                    # retries instead of leaking nodes past the grace
+                    # window (code-review P2, PR #873).
+                    _purge_registry_team(
+                        _make_sdk(namespace="registry"), team_id,
+                        row.get("graph_name"),
+                    )
+                    purge_team_control_plane(cp, team_id)
+                    _audit_logger.append(
+                        team_id, None, "team_delete_purged",
+                        resource_type="team", resource_id=team_id,
+                    )
+                except Exception:  # noqa: BLE001
+                    _logger.warning("team purge failed for %s", team_id,
+                                    exc_info=True)
+            return
+        sdk = _make_sdk(namespace="registry")
+        rows = sdk._get_registry().query(
+            "MATCH (t:Team) WHERE t.deleted_at IS NOT NULL "
+            "AND t.deleted_at < $cutoff "
+            "RETURN t.id, t.graph_name, t.grace_hours, t.deleted_at",
+            params={"cutoff": env_cutoff},
+        ).result_set
+        for team_id, graph_name, stored_grace, row_deleted_at in rows:
+            if not _past_grace(row_deleted_at, stored_grace):
+                continue  # env shrank — honor the stored promise
+            try:
+                _purge_registry_team(sdk, team_id, graph_name)
+                _audit_logger.append(
+                    team_id, None, "team_delete_purged",
+                    resource_type="team", resource_id=team_id,
+                )
+            except Exception:  # noqa: BLE001
+                _logger.warning("team purge failed for %s", team_id,
+                                exc_info=True)
+    except Exception as exc:  # noqa: BLE001
+        _logger.warning("deleted-team purge sweep failed: %s", exc)
 
 
 # ── Reconciliation sweep (D9 #576) — one job, three purposes ──
