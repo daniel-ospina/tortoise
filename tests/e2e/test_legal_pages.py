@@ -478,7 +478,10 @@ def test_tos_pricing_page_hyperlink_resolves(page: Page) -> None:
     (reviewer P2: the relative '/#pricing-section' form breaks on premiselabs.co,
     where '/' serves index.html with NO pricing content — the anchor exists
     only in product.html). The fragment target must EXIST in the served
-    product page content, not just return HTTP 200."""
+    product page content — that half is gated and lives in
+    test_pricing_page_fragment_exists_on_tortoise_host (a stale tortoise DNS
+    must never red this post-deploy job; the /tos href half here is the
+    unconditional green signal, #657)."""
     _goto(page, BASE_URL + "/tos")
     anchors = page.evaluate(
         """() => [...document.querySelectorAll('a')]
@@ -492,21 +495,6 @@ def test_tos_pricing_page_hyperlink_resolves(page: Page) -> None:
             f"Pricing Page href must be the absolute canonical URL {PRICING_PAGE_URL!r} "
             f"(the relative '/#pricing-section' form breaks on premiselabs.co), got {a['href']!r}"
         )
-    # The fragment target must actually exist in the served product page (the
-    # document the tortoise host serves at '/') — a content assertion, not
-    # just an HTTP-200 status. /product.html is 404 on the premiselabs.co
-    # host (middleware blocks it — product lives on the tortoise host only).
-    # Raw request with Host spoof: browser navigations can't set Host, and in
-    # local emulation TORTISE_HOST is 127.0.0.1 (workers-sdk#165).
-    # Gated: a stale tortoise DNS must never red the post-deploy job — the
-    # premiselabs.co half above is the unconditional green signal (#657).
-    t_host = urlsplit(TORTISE_HOST).hostname or "tortoise.premiselabs.co"
-    t_spoof = t_host if t_host.startswith("tortoise.") else "tortoise.premiselabs.co"
-    product = page.request.get(TORTISE_HOST + "/", headers={"Host": t_spoof}, timeout=15_000).text()
-    assert 'id="pricing-section"' in product, \
-        "served product page is missing the id=\"pricing-section\" anchor — the Pricing Page href would break"
-    assert "write ops" in product, \
-        "served product page is missing the 'write ops' pricing tier data"
 
 
 @TORTOISE_HOST_SKIP
