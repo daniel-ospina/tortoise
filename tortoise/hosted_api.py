@@ -1717,7 +1717,12 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
 
 @app.get("/v1/team/keys")
 async def list_api_keys(team: dict = Depends(get_current_team)):
-    """List API keys for the team (hashes only — no plaintext)."""
+    """List API keys for the team (hashes only — no plaintext).
+
+    #767 review note (PR #851 P1, tracked by #765 plan Task 8 writer
+    inventory): reads the FalkorDB registry; in Supabase control-plane mode
+    this list will not show Supabase-minted session keys until the #765
+    writer flip (must land before the single-deploy flip #771)."""
     sdk = _make_sdk(namespace="registry")
     try:
         keys = sdk._get_registry().query(
@@ -1753,7 +1758,10 @@ async def revoke_api_key(key_id: str, team: dict = Depends(get_current_team)):
     Keys live in the control_plane registry graph (per #7873) — created via
     POST /v1/team/keys, listed via GET /v1/team/keys, revoked here, all on
     _get_registry(), consistent with the SDK's control-plane methods.
-    """
+    #767 review note (PR #851 P1, tracked by #765 plan Task 8 writer
+    inventory): registry-only until the writer flip; in Supabase mode a key
+    minted via /v1/session/key resolves via api_keys and is not revocable
+    here until #765 migrates this surface (PATCH revoked_at on api_keys)."""
     sdk = _make_sdk(namespace="registry")
     try:
         rows = sdk._get_registry().query(

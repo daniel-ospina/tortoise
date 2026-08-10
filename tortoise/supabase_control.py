@@ -147,21 +147,27 @@ class SupabaseControlPlane:
         }
         try:
             import httpx
-            with self._http as client:
-                if method == "GET":
-                    resp = client.get(url, params=params, headers=headers)
-                elif method == "PATCH":
-                    headers["Content-Type"] = "application/json"
-                    headers["Prefer"] = "return=minimal"
-                    resp = client.patch(url, params=params, headers=headers,
+            # NOTE: do NOT use `with self._http as client:` here — for a
+            # client constructed OUTSIDE the context manager, __exit__ CLOSES
+            # it (httpx 0.28.1: "Cannot reopen a client instance, once it has
+            # been closed"). resolve_api_key makes 2-3 queries per request;
+            # the second would raise and kill every auth resolution. Direct
+            # method calls on the persistent client are the documented pattern
+            # (re-review P0, PR #851).
+            if method == "GET":
+                resp = self._http.get(url, params=params, headers=headers)
+            elif method == "PATCH":
+                headers["Content-Type"] = "application/json"
+                headers["Prefer"] = "return=minimal"
+                resp = self._http.patch(url, params=params, headers=headers,
                                         json=json_body or {})
-                elif method == "POST":
-                    headers["Content-Type"] = "application/json"
-                    headers["Prefer"] = "return=representation"
-                    resp = client.post(url, params=params, headers=headers,
+            elif method == "POST":
+                headers["Content-Type"] = "application/json"
+                headers["Prefer"] = "return=representation"
+                resp = self._http.post(url, params=params, headers=headers,
                                        json=json_body or {})
-                else:
-                    raise ValueError(f"unsupported method {method!r}")
+            else:
+                raise ValueError(f"unsupported method {method!r}")
         except RuntimeError:
             raise
         except Exception as e:  # transport errors — fail closed

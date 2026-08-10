@@ -337,3 +337,49 @@ class TestClientConstruction:
         monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc")
         cp = get_control_plane()
         assert cp is get_control_plane()
+
+    def test_real_client_survives_multiple_queries(self):
+        """The REAL httpx client must serve 2+ queries on one instance — the
+        persistent-client regression (re-review P0, PR #851): `with client:`
+        on an externally-constructed httpx.Client CLOSES it on exit, so the
+        second resolve_api_key query raised "Cannot reopen a client" and
+        every auth resolution died. The FakeControlPlane cannot catch this
+        class of bug, so this test drives a local HTTP server with the real
+        client."""
+        import json
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        calls = {"n": 0}
+
+        class _Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                calls["n"] += 1
+                body = json.dumps([{"id": "team-1"}]).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):  # silence
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), _Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            from tortoise.supabase_control import SupabaseControlPlane
+            cp = SupabaseControlPlane(
+                url=f"http://127.0.0.1:{server.server_port}",
+                service_key="svc",
+            )
+            # resolve_api_key makes 2-3 queries per auth — the second one
+            # must not fail on a persistent client.
+            r1 = cp.query("teams", select=["id"], filters=[("id", "eq", "team-1")])
+            r2 = cp.query("teams", select=["id"], filters=[("id", "eq", "team-1")])
+            assert r1 == [{"id": "team-1"}] and r2 == [{"id": "team-1"}]
+            assert calls["n"] == 2
+        finally:
+            server.shutdown()
+            server.server_close()
