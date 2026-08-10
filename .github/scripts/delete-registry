@@ -48,6 +48,10 @@ if str(REPO_ROOT) not in sys.path:
 # namespace='registry' resolves to f"{ns}_control_plane" (tortoise/sdk.py
 # _get_registry); docs/registry-graph-schema.md documents the namespace.
 # WebhookEvent idempotency markers live in the same registry graph. This is
+# the FULL registry-writer surface as of the flip: the Stripe webhook's
+# Supabase-mode branch (PR #878, migration 0012) PATCHes the teams row via
+# the seam instead of writing here, so no live writer touches this graph
+# after the flip.
 # the ONLY set this script may ever delete.
 REGISTRY_GRAPHS = frozenset({"registry_control_plane"})
 

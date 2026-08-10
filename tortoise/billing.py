@@ -410,10 +410,30 @@ def apply_limits(sdk, team_id: str, tier: str) -> None:
     GAP-B mapping: ``max_points := tier_limits(tier)["max_graph_nodes"]`` —
     the points quota counter counts graph nodes (see module docstring).
     ``max_sessions`` is 1000 flat across tiers.
+
+    #771 review P1: Supabase mode PATCHes the teams row (tier + the quota
+    columns 0006 carries: max_users/max_graphs/ops_allowance/graph_size_cap;
+    max_api_keys/max_sessions fall back to pricing defaults in quota.py) —
+    the registry twin only for selfhost.
     """
     from tortoise.pricing import tier_limits
 
     lim = tier_limits(tier)
+    try:
+        from tortoise.supabase_control import (
+            get_control_plane, is_supabase_enabled, update_team_billing,
+        )
+        if is_supabase_enabled():
+            update_team_billing(get_control_plane(), team_id, {
+                "tier": tier,
+                "max_users": lim["max_users_per_team"],
+                "max_graphs": lim["max_graphs_per_team"],
+                "ops_allowance": lim["included_write_ops_per_month"],
+                "graph_size_cap": lim["max_graph_nodes"],
+            })
+            return
+    except ImportError:
+        pass
     sdk._get_registry().query(
         "MATCH (t:Team {id:$id}) SET t.tier=$tier, t.max_users=$max_users, "
         "t.max_graphs=$max_graphs, t.max_api_keys=$max_api_keys, "

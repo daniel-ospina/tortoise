@@ -90,19 +90,29 @@ if $LIVE; then
     echo "verify-cutover: CANNOT RUN (--live) — SUPABASE_URL and a service-role key are required." >&2
     exit 2
   fi
-  if [ -z "${TORTOISE_DB_URI:-}" ] && [ -z "${TORTOISE_DB_PATH:-}" ]; then
-    echo "verify-cutover: CANNOT RUN (--live) — TORTOISE_DB_URI (or TORTOISE_DB_PATH) is required to check the real registry." >&2
+  if [ -z "${TORTOISE_DB_URI:-}" ]; then
+    # TORTOISE_DB_PATH is REFUSED here (review P1, PR #878): an embedded
+    # dev DB is empty by construction — a stale TORTOISE_DB_PATH export
+    # would make the registry leg check the WRONG store and print a false
+    # PASS over a non-empty production registry. The live gate checks the
+    # REAL registry via TORTOISE_DB_URI only.
+    echo "verify-cutover: CANNOT RUN (--live) — TORTOISE_DB_URI is required to check the REAL registry (TORTOISE_DB_PATH is refused in --live: an embedded dev DB is empty by construction and would false-PASS)." >&2
     exit 2
   fi
   # NOTE: no ${PRECOND_ARGS[@]} expansion — macOS bash 3.2 + set -u errors on
   # empty arrays; the explicit branches below are portable.
   "$PYTHON" "$SCRIPT_DIR/verify-cutover-preconditions.py" --live
+  rc=$?
 else
   "$PYTHON" "$SCRIPT_DIR/verify-cutover-preconditions.py"
+  rc=$?
 fi
-if [ $? -ne 0 ]; then
-  echo "verify-cutover: FAIL — preconditions did not hold; the flip MUST NOT proceed." >&2
-  exit 1
+# set -e would exit on the python failure BEFORE this banner (review P2,
+# PR #878) — capture rc explicitly so the operator sees the FAIL banner
+# with the checker's own exit code (1 assertion / 2 could-not-run).
+if [ $rc -ne 0 ]; then
+  echo "verify-cutover: FAIL — preconditions did not hold (exit $rc); the flip MUST NOT proceed." >&2
+  exit $rc
 fi
 
 if $PRECONDITIONS_ONLY; then

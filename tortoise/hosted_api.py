@@ -4725,7 +4725,22 @@ def _now_iso() -> str:
 
 
 def _team_id_for_stripe_customer(customer_id: str) -> str | None:
-    """Registry lookup: Team node by stripe_customer_id (subscription events)."""
+    """Team id by stripe_customer_id — control-plane seam (#771 review P1).
+
+    Supabase mode: teams.stripe_customer_id via the service-role seam (the
+    webhook is a live registry writer post-#765 — without this branch it
+    would silently lose team bindings after the registry delete, or
+    recreate the registry graph via an unguarded write). Registry mode:
+    Team node lookup (selfhost).
+    """
+    from tortoise.supabase_control import (
+        get_control_plane, is_supabase_enabled, team_id_for_stripe_customer,
+    )
+    if is_supabase_enabled():
+        try:
+            return team_id_for_stripe_customer(get_control_plane(), customer_id)
+        except Exception:  # noqa: BLE001 — registry twin returns None on error
+            return None
     try:
         sdk = _make_sdk(namespace="registry")
         rows = sdk._get_registry().query(
@@ -4738,22 +4753,37 @@ def _team_id_for_stripe_customer(customer_id: str) -> str | None:
 
 
 def _webhook_apply_event(sdk, team_id: str, event: dict) -> str | None:
-    """Apply one verified Stripe event to the registry mirror (idempotent SETs).
+    """Apply one verified Stripe event to the control plane (idempotent).
 
+    Supabase mode: PATCH the teams row via the seam (tier / subscription
+    state — 0006 + 0012 columns). Registry mode: SET on the Team node.
     Returns the ops kind when a notification-worthy transition happened:
-    billing_upgrade | billing_downgrade | billing_payment_failed | billing_cancel.
-    Unknown price ids keep the stored tier + status and fire an ops
-    notification (review fix 7); cancel-at-period-end keeps tier until the end.
+    billing_upgrade | billing_downgrade | billing_payment_failed |
+    billing_cancel. Unknown price ids keep the stored tier + status and
+    fire an ops notification (review fix 7); cancel-at-period-end keeps
+    tier until the end.
+
+    #771 review P1: this is the LAST live registry writer — the webhook
+    previously wrote the registry unconditionally (silent billing loss +
+    registry-graph resurrection post-delete). Both modes write the same
+    fields; only the store differs.
     """
     import json as _json
     from tortoise.billing import PriceCatalog, StripeClient, apply_limits
+    from tortoise.supabase_control import (
+        get_control_plane, is_supabase_enabled, update_team_billing,
+    )
 
+    supabase_mode = is_supabase_enabled()
     etype = event.get("type", "")
     data = event.get("data", {}).get("object", {}) or {}
     notify_kind = None
 
     def _set(updates: dict) -> None:
         _json.dumps(updates)  # sanity: JSON-safe params
+        if supabase_mode:
+            update_team_billing(get_control_plane(), team_id, updates)
+            return
         sdk._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t += $props",
             params={"id": team_id, "props": updates},

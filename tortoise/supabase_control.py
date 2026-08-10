@@ -1066,3 +1066,50 @@ def graph_metadata(cp, team_id: str) -> list[dict]:
         "kind": "default",
         "namespace": rows[0]["graph_name"],
     }]
+
+
+# ── Stripe webhook billing state (plan Task 10 — #771 review P1) ───────────
+#
+# The Stripe webhook (_webhook_apply_event) writes billing state on the
+# control plane. Registry mode: Team node SETs. Supabase mode: PATCH the
+# teams row (0012 added subscription_status / customer_email / grace_until /
+# current_period_end next to 0006's tier / stripe_customer_id /
+# subscription_id). Without this branch the webhook would silently lose
+# billing state post-registry-delete — or recreate the registry graph via
+# an unguarded write (FalkorDB GRAPH.QUERY auto-creates missing graphs).
+
+
+def team_id_for_stripe_customer(cp, customer_id: str) -> str | None:
+    """Team id whose teams.stripe_customer_id matches (subscription events).
+
+    Registry twin: MATCH (t:Team {stripe_customer_id:$cid}) RETURN t.id.
+    None when no team is bound to the customer (webhook acks 200 "no team
+    binding" — Stripe stops retrying).
+    """
+    rows = cp.query(
+        "teams", select=["id"], filters=[("stripe_customer_id", "eq", customer_id)]
+    )
+    return rows[0]["id"] if rows else None
+
+
+def update_team_billing(cp, team_id: str, updates: dict) -> None:
+    """PATCH billing state on the teams row (webhook SET twin).
+
+    ``updates`` is a subset of {tier, stripe_customer_id, subscription_id,
+    subscription_status, customer_email, grace_until, current_period_end}
+    — only columns that exist on teams (0006 + 0012) are written. Raises on
+    failure (fail-closed): a dropped billing write must surface, not
+    silently lose an upgrade/downgrade/cancel.
+    """
+    allowed = {"tier", "stripe_customer_id", "subscription_id",
+               "subscription_status", "customer_email", "grace_until",
+               "current_period_end"}
+    body = {k: v for k, v in updates.items() if k in allowed}
+    if not body:
+        return
+    cp.query(
+        "teams",
+        method="PATCH",
+        filters=[("id", "eq", team_id)],
+        json_body=body,
+    )

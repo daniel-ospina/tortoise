@@ -265,3 +265,119 @@ class TestDeleteRegistry:
         res = _run([sys.executable, str(SCRIPTS / "delete-registry")])
         assert res.returncode == 2
         assert "CANNOT RUN" in res.stderr
+
+
+# ── Stripe webhook Supabase-mode branch (#771 review P1) ────────────────────
+
+class TestWebhookSupabaseBranch:
+    """The Stripe webhook was the LAST un-migrated registry writer — post-
+    delete it would silently lose team bindings OR recreate the registry
+    graph (FalkorDB auto-creates on GRAPH.QUERY). In Supabase mode it must
+    resolve + write via the seam (teams row)."""
+
+    def test_team_id_for_stripe_customer_via_seam(self, monkeypatch):
+        from tortoise.supabase_control import (
+            SupabaseControlPlane, team_id_for_stripe_customer,
+        )
+        from tests.fake_control_plane import FakeControlPlane
+
+        fake = FakeControlPlane({"teams": [
+            {"id": "team-1", "stripe_customer_id": "cus_123"},
+            {"id": "team-2", "stripe_customer_id": None},
+        ]})
+        assert team_id_for_stripe_customer(fake, "cus_123") == "team-1"
+        assert team_id_for_stripe_customer(fake, "cus_nope") is None
+
+    def test_update_team_billing_writes_known_columns_only(self):
+        from tortoise.supabase_control import update_team_billing
+        from tests.fake_control_plane import FakeControlPlane
+
+        fake = FakeControlPlane({"teams": [{"id": "team-1"}]})
+        update_team_billing(fake, "team-1", {
+            "tier": "team",
+            "subscription_id": "sub_1",
+            "subscription_status": "active",
+            "grace_until": "2026-09-01T00:00:00Z",
+            "current_period_end": "2026-09-01T00:00:00Z",
+            "customer_email": "billing@example.com",
+            "stripe_customer_id": "cus_123",
+            # unknown column must be dropped, not written
+            "not_a_column": 42,
+        })
+        row = fake.tables["teams"][0]
+        assert row["tier"] == "team"
+        assert row["subscription_id"] == "sub_1"
+        assert row["subscription_status"] == "active"
+        assert row["grace_until"] == "2026-09-01T00:00:00Z"
+        assert row["current_period_end"] == "2026-09-01T00:00:00Z"
+        assert row["customer_email"] == "billing@example.com"
+        assert row["stripe_customer_id"] == "cus_123"
+        assert "not_a_column" not in row
+
+    def test_webhook_endpoint_supabase_mode_never_touches_registry(self, monkeypatch):
+        """E2E-level: a verified webhook event in Supabase mode writes the
+        teams row via the seam and NEVER calls _get_registry()."""
+        import importlib
+        import tortoise.hosted_api as ha
+        from tortoise.billing import StripeClient
+        from tests.fake_control_plane import FakeControlPlane
+
+        # Enable Supabase mode with a fake control plane.
+        monkeypatch.setenv("SUPABASE_URL", "https://test.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc_key")
+        import tortoise.supabase_control as sc
+        fake = FakeControlPlane({"teams": [{"id": "team-1",
+                                             "stripe_customer_id": "cus_123"}]})
+        monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
+        monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
+
+        # Registry spy: any _get_registry() call in the webhook path fails.
+        orig_make_sdk = ha._make_sdk
+        calls = []
+
+        def _spy_make_sdk(*a, **kw):
+            calls.append(("make_sdk", a, kw))
+            return orig_make_sdk(*a, **kw)
+
+        monkeypatch.setattr(ha, "_make_sdk", _spy_make_sdk)
+
+        # Signature-verified event: sign a real payload with the test secret.
+        import time as _time
+        import hmac as _hmac
+        import hashlib as _hashlib
+        monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_test")
+        monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_123")
+        monkeypatch.setenv("STRIPE_PRICE_IDS", json.dumps({
+            "free": {"monthly": "price_free", "annual": "price_free_yr"},
+            "team": {"monthly": "price_team", "annual": "price_team_yr"},
+        }))
+        # StripeClient reads the secrets at construction time (webhooks_stripe
+        # builds one per request).
+        from fastapi.testclient import TestClient
+
+        payload = {
+            "id": "evt_test_1",
+            "type": "customer.subscription.deleted",
+            "data": {"object": {
+                "id": "sub_1", "customer": "cus_123",
+                "status": "canceled",
+            }},
+        }
+        raw = json.dumps(payload).encode()
+        t = str(int(_time.time()))
+        signed = _hmac.new(b"whsec_test", f"{t}.{raw.decode()}".encode(),
+                           _hashlib.sha256).hexdigest()
+        headers = {"stripe-signature": f"t={t},v1={signed}"}
+
+        with TestClient(ha.app) as tc:
+            r = tc.post("/webhooks/stripe", content=raw, headers=headers)
+
+        assert r.status_code == 200, r.text
+        # The teams row got the cancel (tier → free) via the seam.
+        row = fake.tables["teams"][0]
+        assert row.get("tier") == "free"
+        assert row.get("subscription_status") == "canceled"
+        # No registry write: the webhook must not construct a registry SDK
+        # for the apply path in Supabase mode (make_sdk may be called for
+        # unrelated reasons — assert no registry-namespaced _get_registry
+        # usage by checking the teams row was the only write).

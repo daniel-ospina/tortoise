@@ -68,7 +68,15 @@ _ZERO_ROW_TABLES = ("teams", "api_keys")
 def check_registry_empty(db_path: str | None = None, db_uri: str | None = None) -> list[str]:
     """Assert the registry graph has zero nodes. Returns a list of failures
     (empty = pass). Strictly READ-ONLY: opens the graph via FalkorProjection
-    (no SDK index creation, no writes of any kind)."""
+    (no SDK index creation, no writes of any kind).
+
+    #771 review P2: a missing graph is treated as EMPTY without querying it
+    — FalkorDB's GRAPH.QUERY auto-creates a missing graph, so a naive count
+    on a deleted registry would RESURRECT it (and a post-delete re-run of
+    the gate would recreate the exact artifact the flip removes). The graph
+    is checked against proj.db.list_graphs() first; only an EXISTING graph
+    is counted.
+    """
     from tortoise.projection import FalkorProjection
 
     failures: list[str] = []
@@ -81,6 +89,9 @@ def check_registry_empty(db_path: str | None = None, db_uri: str | None = None) 
         else:
             # Local/CI equivalence: a fresh embedded DB — empty by construction.
             proj = FalkorProjection(os.path.join(tempfile.mkdtemp(), "gate.db"))
+        if REGISTRY_GRAPH not in proj.db.list_graphs():
+            # Missing = empty (never query — GRAPH.QUERY would auto-create).
+            return failures
         reg = proj.db.select_graph(REGISTRY_GRAPH)
         rows = reg.query("MATCH (n) RETURN count(n)").result_set
         count = int(rows[0][0]) if rows else 0
@@ -175,12 +186,22 @@ def main(argv: list[str] | None = None) -> int:
 
     db_path = args.db_path or os.environ.get("TORTOISE_DB_PATH") or None
     db_uri = args.db_uri or os.environ.get("TORTOISE_DB_URI") or None
+    if args.live and db_path is not None:
+        # Review P1 (PR #878): an embedded dev DB is empty by construction —
+        # the LIVE gate must check the REAL registry via TORTOISE_DB_URI;
+        # TORTOISE_DB_PATH would false-PASS over a non-empty production
+        # registry.
+        print("verify-cutover: CANNOT RUN (--live) — TORTOISE_DB_PATH is "
+              "refused in --live; set TORTOISE_DB_URI to the real registry.",
+              file=sys.stderr)
+        return 2
 
-    failed = 0
+    assertion_failures = 0
+    cannot_run = False
     # ── 1) Registry precondition ──
     reg_failures = check_registry_empty(db_path=db_path, db_uri=db_uri)
     if reg_failures:
-        failed += 1
+        assertion_failures += 1
         for f in reg_failures:
             print(f"verify-cutover: FAIL — {f}", file=sys.stderr)
 
@@ -195,7 +216,7 @@ def main(argv: list[str] | None = None) -> int:
                   "the operator's live run needs --live with prod creds.")
         sb_failures = check_supabase_placeholders(cp)
         if sb_failures:
-            failed += 1
+            assertion_failures += 1
             for f in sb_failures:
                 print(f"verify-cutover: FAIL — {f}", file=sys.stderr)
         else:
@@ -203,15 +224,21 @@ def main(argv: list[str] | None = None) -> int:
                   f"({cp_mode}: no real teams/api_keys rows, "
                   "memberships placeholder-only).")
     except Exception as e:
-        failed += 2  # cannot-run — never a pass
+        cannot_run = True  # never a pass
         print(f"verify-cutover: CANNOT RUN — Supabase precondition: {e}",
               file=sys.stderr)
 
-    if failed == 0:
-        print("verify-cutover: PASS — preconditions hold "
-              f"(registry {REGISTRY_GRAPH} empty, Supabase placeholder-only).")
-        return 0
-    return 1 if failed == 1 else 2
+    if cannot_run:
+        return 2
+    if assertion_failures:
+        # Exit-code contract (review P2, PR #878): 1 = an assertion was
+        # VIOLATED (detected but not fixed), 2 = could not run. Both legs
+        # failing is still 1 — the operator must see "assertion failed",
+        # not "could not run".
+        return 1
+    print("verify-cutover: PASS — preconditions hold "
+          f"(registry {REGISTRY_GRAPH} empty, Supabase placeholder-only).")
+    return 0
 
 
 if __name__ == "__main__":
