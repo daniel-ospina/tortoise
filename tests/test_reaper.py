@@ -24,6 +24,104 @@ from tortoise.embedded_reaper import (
 pytest.importorskip("redislite")
 
 
+@pytest.fixture(autouse=True)
+def _clean_redislite_residue():
+    """Remove redislite servers + socket dirs spawned by THIS test.
+
+    These tests discover redislite servers via socket scans; servers/socket
+    dirs left behind by earlier tests in the same run (or prior runs) made
+    them order-flaky. Clean only the DELTA the test introduced — never pkill
+    pre-existing servers (session-shared fixtures, local dev daemons) or
+    delete their socket dirs (#493, code-review #803).
+    """
+    def _snapshot() -> tuple[set[int], set[str]]:
+        pids: set[int] = set()
+        try:
+            out = subprocess.run(
+                ["pgrep", "-f", "redislite/bin/redis-server"],
+                capture_output=True, text=True, timeout=10,
+            ).stdout
+            pids = {int(p) for p in out.split() if p.strip().isdigit()}
+        except Exception:
+            pass
+        dirs: set[str] = set()
+        tmp = tempfile.gettempdir()
+        try:
+            for entry in os.scandir(tmp):
+                if entry.is_dir() and (
+                    os.path.exists(os.path.join(entry.path, "redis.socket")) or
+                    os.path.exists(os.path.join(entry.path, "redis.pid"))
+                ):
+                    dirs.add(entry.path)
+        except Exception:
+            pass
+        return pids, dirs
+
+    before_pids, before_dirs = _snapshot()
+    yield
+    try:
+        after_pids, after_dirs = _snapshot()
+        for pid in after_pids - before_pids:
+            try:
+                os.kill(pid, 15)  # SIGTERM
+            except (ProcessLookupError, PermissionError):
+                pass
+        # Poll briefly so the rmtree below does not race a dying server.
+        for _ in range(6):
+            if not (after_pids - before_pids):
+                break
+            alive = set()
+            for pid in after_pids - before_pids:
+                try:
+                    os.kill(pid, 0)
+                    alive.add(pid)
+                except (ProcessLookupError, PermissionError):
+                    pass
+            after_pids = alive
+            if alive:
+                time.sleep(0.1)
+        time.sleep(0.2)
+        import shutil
+        for d in after_dirs - before_dirs:
+            shutil.rmtree(d, ignore_errors=True)
+    except Exception:
+        pass
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _sweep_stale_residue():
+    """Remove socket dirs whose server is already dead (module start).
+
+    Restores cross-run self-healing without ever touching LIVE servers:
+    a dir whose redis.pid does not belong to a running process is residue by
+    definition (crashed run, killed server) — remove it so later tests in
+    this module see the same clean state a fresh CI runner would.
+    """
+    tmp = tempfile.gettempdir()
+    try:
+        for entry in os.scandir(tmp):
+            if not entry.is_dir():
+                continue
+            pid_file = os.path.join(entry.path, "redis.pid")
+            if not os.path.exists(pid_file):
+                continue
+            try:
+                with open(pid_file) as f:
+                    pid = int(f.read().strip())
+                os.kill(pid, 0)  # alive?
+                continue  # live server (ours or another process) — leave alone
+            except ProcessLookupError:
+                # Provably dead — residue from a crashed/killed run.
+                import shutil
+                shutil.rmtree(entry.path, ignore_errors=True)
+            except (ValueError, OSError, PermissionError):
+                # Unreadable pid, or a live process we may not signal — leave alone.
+                continue
+    except Exception:
+        pass
+    yield
+
+
 def _make_no_path_server():
     """Start a no-path FalkorDB -> tempdir socket; return (db, socket_path).
 
@@ -318,28 +416,26 @@ def _spawn_orphan(monkeypatch=None):
     import subprocess as sp
     import sys as _sys
     code = (
-        "import os,time; os.environ.pop('TORTOISE_DB_URI',None);\n"
+        "import os,subprocess,sys,time; os.environ.pop('TORTOISE_DB_URI',None);\n"
         "from redislite.falkordb_client import FalkorDB; db=FalkorDB();\n"
-        "print('READY', flush=True); time.sleep(30)"
+        # Report OUR socket from the client itself — the redislite connection
+        # kwargs carry the authoritative path. The old post-kill mtime walk
+        # of /tmp raced concurrent suites' servers, and ps-line parsing can
+        # grab a foreign server's socket under load (#493).
+        "sock=db.connection.connection_pool.connection_kwargs.get('path','')\n"
+        "print('READY '+sock, flush=True); time.sleep(30)"
     )
     proc = sp.Popen([_sys.executable, "-c", code],
                     stdout=sp.PIPE, text=True)
-    proc.stdout.readline()  # wait READY
-    time.sleep(1)
+    line = proc.stdout.readline()  # wait READY + socket
+    parts = line.split()
+    sock = parts[1] if len(parts) > 1 else ""
     proc.kill()
     proc.wait()
     time.sleep(1)
-    # find the newest orphan socket
-    tmp = tempfile.gettempdir()
-    newest = None
-    for root, dirs, files in os.walk(tmp):
-        if "redis.socket" in files and "redis.pid" in files:
-            m = os.path.getmtime(os.path.join(root, "redis.socket"))
-            if newest is None or m > newest[0]:
-                newest = (m, os.path.join(root, "redis.socket"))
-    if newest is None:
-        raise AssertionError("no orphan created")
-    return os.path.realpath(newest[1])
+    if not sock or not os.path.exists(os.path.dirname(sock)):
+        raise AssertionError(f"no orphan created (line: {line!r})")
+    return os.path.realpath(sock)
 
 
 def test_reap_kills_idle_orphan(monkeypatch):

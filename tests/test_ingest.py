@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+
 from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
@@ -20,6 +21,27 @@ from tortoise.extractor import MockModel                                        
 from tortoise.ingest import build_model, main                                             # noqa: E402
 from tortoise.models import OllamaModel, OpenAICompatModel                                # noqa: E402
 from tortoise.projection import FalkorProjection                                          # noqa: E402
+
+# ── Live-FalkorDB availability (mirrors tests/test_hnsw_vector_index.py) ──
+# #125 capture/upgrade tests connect to docker://localhost:16379 (live
+# FalkorDB, not embedded). Probe at module load so they skip gracefully in
+# CI where no Docker FalkorDB is running (#493).
+FALKORDB_AVAILABLE = False
+try:
+    _old_uri = os.environ.get("TORTOISE_DB_URI")
+    os.environ["TORTOISE_DB_URI"] = "docker://:@localhost:16379/tortoise_test_ingest125"
+    _probe = FalkorProjection.from_uri(os.environ["TORTOISE_DB_URI"])
+    _probe.close()  # construction itself connects — raises on refusal
+    FALKORDB_AVAILABLE = True
+except Exception:
+    FALKORDB_AVAILABLE = False
+finally:
+    if _old_uri is not None:
+        os.environ["TORTOISE_DB_URI"] = _old_uri
+    else:
+        os.environ.pop("TORTOISE_DB_URI", None)
+
+_live_db = pytest.mark.skipif(not FALKORDB_AVAILABLE, reason="Live FalkorDB (Docker) not available")
 
 
 # ---------------------------------------------------------------------------
@@ -493,6 +515,7 @@ if __name__ == "__main__":
 # ------------------------------------------------------------------ #125 capture-metadata (live DB)
 
 
+@_live_db
 def test_capture_metadata_creates_document_no_points():
     """#125: --capture-metadata creates Document + sessionCaptured Event,
     ZERO Points, and does NOT block a later full extraction (no begin_ingest)."""
@@ -550,6 +573,7 @@ def test_capture_metadata_creates_document_no_points():
     assert not any("IngestStarted" in ln for ln in lines), "capture must not write IngestStarted"
 
 
+@_live_db
 def test_full_ingest_unaffected_and_not_blocked_by_capture():
     """#125: full ingest (no flag) extracts Points; a prior capture does NOT block it."""
     uri = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise_test_ingest125")
@@ -586,6 +610,7 @@ def test_full_ingest_unaffected_and_not_blocked_by_capture():
 # ------------------------------------------------------------------ #133 proportional extraction v1 (live DB)
 
 
+@_live_db
 def test_capture_defaults_doc_status_captured():
     """#133 P0: --capture-metadata with NO doc_status in frontmatter
     must default the Document to doc_status='captured' (not 'draft')."""
@@ -620,6 +645,7 @@ def test_capture_defaults_doc_status_captured():
         proj.close()
 
 
+@_live_db
 def test_needs_extraction_flag_surfaces_and_drives_upgrade_all():
     """#133: needs_extraction frontmatter → Document property → --upgrade-all
     discovers and upgrades the Document (e2e bridge)."""
@@ -654,6 +680,7 @@ def test_needs_extraction_flag_surfaces_and_drives_upgrade_all():
         proj.close()
 
 
+@_live_db
 def test_upgrade_on_already_extracted_is_noop():
     """#133: --upgrade on a Document already doc_status='extracted' → no-op
     'doc already extracted, skipped' (idempotency)."""

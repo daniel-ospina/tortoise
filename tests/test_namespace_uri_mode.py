@@ -30,7 +30,7 @@ try:
     _probe.close()
     FALKORDB_AVAILABLE = True
 except Exception:
-    pass
+    FALKORDB_AVAILABLE = False
 finally:
     if _OLD_URI is not None:
         os.environ["TORTOISE_DB_URI"] = _OLD_URI

@@ -79,6 +79,12 @@ def local_db(tmp_path, monkeypatch):
     monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
     db = tmp_path / "t.db"
     env = {**os.environ, "TORTOISE_DB_PATH": str(db)}
+    # Hermetic resolution: pin the repo root on PYTHONPATH so the CLI
+    # subprocess always imports the checkout's tortoise (a shadowed
+    # tortoise.config on CI made the key land elsewhere → 401s, #493).
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env["PYTHONPATH"] = os.pathsep.join(
+        [repo_root] + [p for p in env.get("PYTHONPATH", "").split(os.pathsep) if p])
     proc = subprocess.run(
         [sys.executable, "-m", "tortoise", "key", "create", "--name", "test"],
         capture_output=True, text=True, env=env, timeout=120,
@@ -640,7 +646,7 @@ def test_local_http_roundtrip_lands_in_team_graph(local_db, monkeypatch):
         # tools/list with the bootstrap key → 200, real tools
         r = c.post("/mcp", json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
                    headers=headers)
-        assert r.status_code == 200
+        assert r.status_code == 200, r.text
         body = _parse_sse_json(r)
         tools = body["result"]["tools"]
         names = {t["name"] for t in tools}

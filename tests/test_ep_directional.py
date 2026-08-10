@@ -9,20 +9,37 @@ import pytest
 from tortoise.sdk import TortoiseSDK
 
 # Requires live FalkorDB (Docker). Skip gracefully when unavailable so the
-# no-Docker embedded suite stays green (AGENTS.md). Mirrors the probe pattern
-# in tests/test_integration_search.py.
+# no-Docker embedded suite stays green (AGENTS.md). The probe targets the
+# DOCKER URI explicitly (embedded is "available" but lacks docker graph
+# semantics — the E019 numeric cascade is calibrated against live FalkorDB;
+# running embedded yields different drops, code-review #803). Mirrors
+# tests/test_directional_impl.py.
+_DB_URI = "docker://:falkordb@localhost:6379/tortoise_test_ep_directional"
 FALKORDB_AVAILABLE = False
+_OLD_URI = os.environ.get("TORTOISE_DB_URI")
 try:
+    os.environ["TORTOISE_DB_URI"] = _DB_URI
     from tortoise.sdk import TortoiseSDK as _ProbeSDK
     _probe = _ProbeSDK()
     _probe._get_proj().g.query("RETURN 1")
     _probe.close()
     FALKORDB_AVAILABLE = True
 except Exception:
-    pass
+    FALKORDB_AVAILABLE = False
+finally:
+    if _OLD_URI is not None:
+        os.environ["TORTOISE_DB_URI"] = _OLD_URI
+    else:
+        os.environ.pop("TORTOISE_DB_URI", None)
 
 pytestmark = pytest.mark.skipif(
     not FALKORDB_AVAILABLE, reason="Live FalkorDB (Docker) not available")
+
+
+@pytest.fixture(autouse=True)
+def _set_docker_uri(monkeypatch):
+    """Point SDK constructions at the isolated docker test graph per-test."""
+    monkeypatch.setenv("TORTOISE_DB_URI", _DB_URI)
 
 
 TIER_MAP = {
