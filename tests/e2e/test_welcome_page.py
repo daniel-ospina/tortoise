@@ -281,6 +281,54 @@ def test_returning_visitor_shows_dashboard_hub(page: Page) -> None:
     expect(page.locator("#reveal-block")).to_be_hidden(timeout=5_000)
 
 
+def test_reveal_shows_key_once_then_returning_state(page: Page) -> None:
+    """E2E-6 (#770): the welcome-page reveal shows the plaintext key exactly
+    once, and the server nulls it — a second visit must get the returning-
+    visitor state (no re-reveal). The nulled row keeps lookup_hash (asserted
+    in the 0010 SQL suite) so the API-key auth path can still resolve the key
+    (Task 3 wires the actual lookup). Stateful mock: first reveal RPC returns
+    the key, every later one returns null (what the nulled row produces)."""
+    user_id = _mock_supabase_success(page)  # default: static key per call
+    # Rebuild the mock statefully: reveal #1 returns the key, reveal #2+ null.
+    # (Reuse the session seeding by overriding the route handler afterwards.)
+    reveal_calls = {"n": 0}
+
+    def _handle(route):
+        url = route.request.url
+        method = route.request.method
+        if "team_memberships" in url and method == "GET":
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps({
+                              "team_id": f"team_{user_id[:8]}",
+                              "team_name": "Test Team",
+                              "graph_name": f"team_{user_id[:8]}",
+                              "status": "active",
+                          }))
+            return
+        if "rpc/reveal_api_key" in url and method == "POST":
+            reveal_calls["n"] += 1
+            body = "tt_e2e_mock_api_key_1234567890abcdef" if reveal_calls["n"] == 1 else None
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps(body))
+            return
+        route.continue_()
+
+    page.route("**/*", _handle)
+
+    # First visit: the plaintext key is shown once.
+    page.goto(WELCOME_URL, wait_until="domcontentloaded", timeout=30_000)
+    expect(page.locator("#success")).not_to_be_hidden(timeout=15_000)
+    expect(page.locator("#api-key")).to_contain_text("tt_", timeout=15_000)
+
+    # Second visit: the key was nulled server-side → returning state, no key.
+    page.reload(wait_until="domcontentloaded")
+    expect(page.locator("#returning-block")).not_to_be_hidden(timeout=15_000)
+    expect(page.locator("#reveal-block")).to_be_hidden(timeout=5_000)
+    assert reveal_calls["n"] == 2, (
+        f"expected exactly 2 reveal RPCs (one per visit), got {reveal_calls['n']}"
+    )
+
+
 # ── Live signup E2E (requires real Supabase creds + session) ────────
 
 LIVE_SIGNUP = pytest.mark.skipif(

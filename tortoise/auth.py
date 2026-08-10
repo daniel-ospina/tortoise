@@ -114,3 +114,24 @@ def verify_api_key(key: str, stored: str) -> bool:
         "sha256", key_material, per_key_salt, 100_000
     )
     return _hmac.compare_digest(computed.hex(), expected_hex)
+
+
+def lookup_hash(key: str) -> str:
+    """Instant key-lookup hash for the Supabase control plane (#669 plan P1-1).
+
+    lookup_hash := SHA-256(pepper + key), hex-encoded. Unlike the salted
+    PBKDF2 hash_api_key() (verification-only, iterated, salt per key), this
+    is a deterministic one-way digest used to LOOK UP a key at request time:
+    the presented key is hashed and matched against the indexed
+    lookup_hash column (team_memberships / api_keys) — O(1) index equality,
+    no scan. The pepper is held in app code (never the DB), so the DB cannot
+    reverse the digest without it.
+
+    Construction is "pepper first, then key" — the plan's exact spelling
+    ("SHA-256(pepper + key)"). The TS mirror lives in
+    supabase/functions/_shared/lookup.ts and MUST stay byte-identical;
+    supabase/tests/lookup_parity.test.mjs locks both sides to the same
+    test vectors. Do NOT change the order here without updating the mirror
+    and the parity vectors.
+    """
+    return hashlib.sha256(_PEPPER_BYTES + key.encode()).hexdigest()
