@@ -25,8 +25,11 @@ def client(tmp_path):
     # Patch TortoiseSDK to use the temp DB (mirrors test_hosted_api.py)
     orig_init = TortoiseSDK.__init__
 
-    def _patched(self, db_path_arg=None, *, namespace=None, **kw):
-        kw.pop("db_path", None)
+    def _patched(self, db_path_arg=None, *, namespace=None, db_path=None, **kw):
+        # Isolate EVERY SDK construction (registry included) to the fixture's
+        # temp DB — _make_sdk passes db_path= explicitly, and the registry
+        # must not fall back to the shared temp default (that leaks state
+        # across tests: "Team already exists").
         orig_init(self, db_path=db_path if db_path_arg is None else db_path_arg,
                   namespace=namespace, **kw)
 
@@ -48,8 +51,11 @@ def unauth_client(tmp_path):
     db_path = str(tmp_path / "unauth.db")
     orig_init = TortoiseSDK.__init__
 
-    def _patched(self, db_path_arg=None, *, namespace=None, **kw):
-        kw.pop("db_path", None)
+    def _patched(self, db_path_arg=None, *, namespace=None, db_path=None, **kw):
+        # Isolate EVERY SDK construction (registry included) to the fixture's
+        # temp DB — _make_sdk passes db_path= explicitly, and the registry
+        # must not fall back to the shared temp default (that leaks state
+        # across tests: "Team already exists").
         orig_init(self, db_path=db_path if db_path_arg is None else db_path_arg,
                   namespace=namespace, **kw)
 

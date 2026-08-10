@@ -1,7 +1,11 @@
 // Tenant provisioning Edge Function
 // Triggered on auth.users INSERT via the Supabase Auth `after_user_created`
-// webhook. Creates Team node in registry graph, provisions FalkorDB
-// namespace, generates API key.
+// webhook. Writes the master list into Supabase ONLY — teams +
+// team_memberships + api_keys in ONE atomic transaction via the
+// provision_team SECURITY DEFINER RPC (migration 0010, #669 plan Task 2 /
+// #770), then seeds the team's demo knowledge graph via the FastAPI data
+// plane (/internal/demo — FalkorDB knowledge graphs stay untouched; the
+// control_plane registry graph is NEVER written here: E2E-1).
 //
 // ── CALLER AUTH (#802) ─────────────────────────────────────────────────
 // The function MUST be deployed with verify_jwt=false (--no-verify-jwt):
@@ -24,6 +28,7 @@
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { Webhook } from "https://esm.sh/standardwebhooks@1.0.0";
+import { lookupHash } from "../_shared/lookup.ts";
 
 // Supabase Auth hook payload: { metadata: {...}, user: { id, email, user_metadata, ... } }
 // Also tolerates a direct { user_id, email, display_name } payload for manual testing.
@@ -209,8 +214,21 @@ Deno.serve(async (req: Request) => {
     // Ensure starts with alphanumeric per Team.name regex
     const safeName = /^[a-zA-Z0-9]/.test(teamName) ? teamName : `u-${teamName}`;
 
-    // Generate ULID for team_id
-    const teamId = crypto.randomUUID().replace(/-/g, "").substring(0, 26);
+    // Generate a DETERMINISTIC team_id per user — SHA-256(user_id) truncated
+    // to 26 hex chars. Retries (hook redelivery after a lost response, or a
+    // direct-JWT re-invocation) must be true same-payload retries: a fresh
+    // random id on every call would let provision_team's step-3 INSERT create
+    // a SECOND team + membership + api_keys row (code-review P2, PR #847 —
+    // the old update_user_team placeholder-only UPDATE could never duplicate,
+    // so this is a new idempotency requirement introduced by the RPC).
+    const teamIdDigest = await crypto.subtle.digest(
+      "SHA-256",
+      new TextEncoder().encode(user_id)
+    );
+    const teamId = Array.from(new Uint8Array(teamIdDigest))
+      .map(b => b.toString(16).padStart(2, "0"))
+      .join("")
+      .substring(0, 26);
 
     // Generate API key
     const apiKeyBytes = new Uint8Array(32);
@@ -234,60 +252,74 @@ Deno.serve(async (req: Request) => {
     }
     const fastApiKey = Deno.env.get("FASTAPI_INTERNAL_KEY") || "";
 
-    // Hash once, reuse for both consumers (each call mints a fresh salt —
-    // calling twice would store two different hashes for the same key).
+    // Fail CLOSED on a missing pepper at the lookupHash call site (not just
+    // via hashApiKey's own guard): without the pepper, lookup_hash would be
+    // SHA-256(key) — a digest that can never match tortoise/auth.py's
+    // lookup_hash() (real/dev pepper) → every provisioned key silently fails
+    // Task 3 auth. Explicit guard so reordering the two calls can't regress
+    // this (code-review P2, PR #847).
+    const pepper = Deno.env.get("TORTOISE_SECRET_PEPPER") || "";
+    if (!pepper) {
+      throw new Error(
+        "TORTOISE_SECRET_PEPPER is not set. Set it in Supabase secrets — " +
+        "provisioned lookup_hash values cannot be verified without a stable pepper."
+      );
+    }
+    // ── Fix #7852/#770: write the master list to Supabase in ONE atomic
+    // transaction (teams + team_memberships + api_keys) via the
+    // provision_team SECURITY DEFINER RPC (migration 0010). The RPC is
+    // idempotent: it reconciles the on_auth_user_created placeholder row
+    // (team_id='' / key_hash='pending') in place, so exactly one membership
+    // row and one api_keys row exist per provisioned team (plan §4.1 step 6,
+    // P2-5 concurrency contract). key_hash (salted PBKDF2, continuity) and
+    // lookup_hash (SHA-256(pepper + key) — the auth lookup anchor, E2E-6)
+    // are computed HERE, never in SQL (the pepper lives in app code only).
+    //
+    // Failure is FATAL now (unlike the old best-effort update_user_team
+    // write): the FalkorDB registry is no longer written, so without this
+    // transaction the team exists NOWHERE. The user can retry — the RPC is
+    // idempotent.
     const keyHash = await hashApiKey(apiKey);
+    const lookupHashHex = await lookupHash(apiKey, pepper);
 
-    const provisionRes = await fetch(`${fastApiUrl}/internal/provision`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${fastApiKey}`,
-      },
-      body: JSON.stringify({
-        team_id: teamId,
-        team_name: safeName,
-        api_key_hash: keyHash,
-        created_by: user_id,
-      }),
+    const supabase = createClient(
+      Deno.env.get("SUPABASE_URL")!,
+      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
+    );
+    const { error: provisionError } = await supabase.rpc("provision_team", {
+      p_user_id: user_id,
+      p_identity: null,
+      p_team_id: teamId,
+      p_team_name: safeName,
+      p_api_key: apiKey, // plaintext — shown once on welcome page, then nulled
+      p_key_hash: keyHash,
+      p_lookup_hash: lookupHashHex,
+      p_graph_name: `team_${teamId}`,
+      p_email: email,
+      p_key_prefix: apiKey.slice(0, 10),
     });
-
-    if (!provisionRes.ok) {
-      const errText = await provisionRes.text();
-      console.error(`Provision failed for ${safeName}: ${errText}`);
+    if (provisionError) {
+      console.error(
+        "provision_team failed for " + safeName + ":",
+        provisionError
+      );
       return new Response(
         JSON.stringify({ error: "Provisioning failed. Please try again." }),
         { status: 502, headers: { "Content-Type": "application/json" } }
       );
     }
 
-    // ── Fix #7852: Write plaintext API key to team_memberships ─────────────
-    const supabase = createClient(
-      Deno.env.get("SUPABASE_URL")!,
-      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
-    );
-    // M:N placeholder semantics (plan §4.1 step 6): the on_auth_user_created
-    // trigger pre-inserted a placeholder row (team_id='', key_hash='pending').
-    // Under uq_member_team (user_id, team_id), a direct upsert keyed on user_id
-    // would fail (no user_id-unique constraint) and an (user_id, team_id) upsert
-    // would create a PHANTOM second row. The update_user_team RPC updates the
-    // placeholder row (WHERE user_id = X AND team_id = '') and flips team_id to
-    // the real value in the same statement — exactly one membership row.
-    const { error: userTeamsError } = await supabase.rpc("update_user_team", {
-      p_user_id: user_id,
-      p_team_id: teamId,
-      p_team_name: safeName,
-      p_api_key: apiKey,  // plaintext — shown once on welcome page
-      p_key_hash: keyHash,
-      p_graph_name: `team_${teamId}`,
-    });
-    if (userTeamsError) {
-      console.error("Failed to write team_memberships:", userTeamsError);
-      // Don't fail the whole provisioning — the key is already in the response
-    }
-
     // ── Fix #7854: Trigger demo graph seeding ──────────────────────────
-    // (demo-404 fix: the FastAPI route is /internal/demo, NOT /v1/internal/demo)
+    // Data plane ONLY: /internal/demo writes the team's knowledge graph
+    // (FalkorDB, graph team_{team_id} — created on first write). It never
+    // touches the control_plane registry graph (E2E-1: zero registry
+    // writes). The old /internal/provision call is GONE — it wrote the
+    // registry (Team/APIKey/Membership nodes), which the plan moves to
+    // Supabase entirely. AbortSignal.timeout bounds the await so a slow
+    // demo seed can never blow the hook deadline mid-retry (code-review P2,
+    // PR #847 — the RPC has already committed at this point; the hook
+    // redelivers the whole request, and deterministic team_id makes that a
+    // harmless no-op).
     await fetch(`${fastApiUrl}/internal/demo`, {
       method: "POST",
       headers: {
@@ -295,6 +327,7 @@ Deno.serve(async (req: Request) => {
         "Authorization": `Bearer ${fastApiKey}`,
       },
       body: JSON.stringify({ team_id: teamId }),
+      signal: AbortSignal.timeout(10_000),
     }).catch((e) => console.error("Demo seed failed:", e));
 
     const response: ProvisionResponse = {

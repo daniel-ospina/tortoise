@@ -6,3 +6,6 @@
 .env.keys
 .env.local
 .env.*.local
+
+# Node test harness deps (PGlite) — installed on demand via npm install
+node_modules/
