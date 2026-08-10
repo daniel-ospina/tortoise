@@ -153,9 +153,15 @@ class TortoiseEP:
             return
         # #330: guard degenerate (0,0) params — uniform fallback instead of ZDE
         mean = round(alpha / (alpha + beta), 4) if (alpha + beta) > 0 else 0.5
+        # #852 round-6: mirror _flush_cache — baseline'd claims keep their
+        # immutable prior; posterior written separately for observability.
         self.g.query(
             "MATCH (n:Point {id:$id}) "
-            "SET n.ep_alpha=$a, n.ep_beta=$b, n.confidence=$c",
+            "SET n.confidence=$c, n.posterior_alpha=$a, n.posterior_beta=$b, "
+            "    n.ep_alpha=CASE WHEN coalesce(n.baseline_set,false) "
+            "                    THEN n.ep_alpha ELSE $a END, "
+            "    n.ep_beta =CASE WHEN coalesce(n.baseline_set,false) "
+            "                    THEN n.ep_beta  ELSE $b END",
             params={"id": node_id, "a": alpha, "b": beta, "c": mean},
         )
 
