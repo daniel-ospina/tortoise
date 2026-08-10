@@ -160,10 +160,10 @@ FOOTER_SELECTOR = "footer, .legal-footer, .footer"
 # with NO pricing content — the id="pricing-section" anchor exists only in
 # product.html (served at '/' on the tortoise host via the middleware rewrite).
 PRICING_PAGE_URL = "https://tortoise.premiselabs.co/#pricing-section"
-FOOTER_PAGES = ("/product.html", "/welcome", "/signup", "/signin", "/self-hosted.html")
+FOOTER_PAGES = ("/welcome", "/signup", "/signin", "/self-hosted.html")
 CRAWL_PAGES = (
     "/welcome", "/signup", "/signin", "/self-hosted.html", "/docs.html",
-    "/privacy", "/tos", "/license", "/dpa", "/product.html",
+    "/privacy", "/tos", "/license", "/dpa",
 )
 
 # ── Pinned canonical sentences (T1/T2 Step 2 — the authoritative set; ──────
@@ -478,7 +478,10 @@ def test_tos_pricing_page_hyperlink_resolves(page: Page) -> None:
     (reviewer P2: the relative '/#pricing-section' form breaks on premiselabs.co,
     where '/' serves index.html with NO pricing content — the anchor exists
     only in product.html). The fragment target must EXIST in the served
-    product page content, not just return HTTP 200."""
+    product page content — that half is gated and lives in
+    test_pricing_page_fragment_exists_on_tortoise_host (a stale tortoise DNS
+    must never red this post-deploy job; the /tos href half here is the
+    unconditional green signal, #657)."""
     _goto(page, BASE_URL + "/tos")
     anchors = page.evaluate(
         """() => [...document.querySelectorAll('a')]
@@ -492,10 +495,17 @@ def test_tos_pricing_page_hyperlink_resolves(page: Page) -> None:
             f"Pricing Page href must be the absolute canonical URL {PRICING_PAGE_URL!r} "
             f"(the relative '/#pricing-section' form breaks on premiselabs.co), got {a['href']!r}"
         )
-    # The fragment target must actually exist in the served product page (the
-    # document the tortoise host serves at '/') — a content assertion, not
-    # just an HTTP-200 status.
-    product = _goto(page, BASE_URL + "/product.html")
+
+
+@TORTOISE_HOST_SKIP
+def test_pricing_page_fragment_exists_on_tortoise_host(page: Page) -> None:
+    """TORTISE-HOST half of the pricing-fragment assertion (see
+    test_tos_pricing_page_hyperlink_resolves): the fragment target must
+    actually exist in the product page the tortoise host serves at '/'. Gated
+    — a stale tortoise DNS defers to T8 production (green-with-annotation)."""
+    t_host = urlsplit(TORTISE_HOST).hostname or "tortoise.premiselabs.co"
+    t_spoof = t_host if t_host.startswith("tortoise.") else "tortoise.premiselabs.co"
+    product = page.request.get(TORTISE_HOST + "/", headers={"Host": t_spoof}, timeout=15_000).text()
     assert 'id="pricing-section"' in product, \
         "served product page is missing the id=\"pricing-section\" anchor — the Pricing Page href would break"
     assert "write ops" in product, \
@@ -598,6 +608,32 @@ def test_middleware_root_rewrites(page: Page) -> None:
     assert r2.status == 200
     assert "the primary function of memory is not recall, but learning" in _clean(r2.text()), \
         "premiselabs root marker missing"
+
+
+def test_product_route_blocked_on_company_host(page: Page) -> None:
+    """The product page lives ONLY on the tortoise host. /product and
+    /product.html are static assets on the shared Pages project and would
+    otherwise leak onto premiselabs.co — the middleware must 404 them on
+    the company host. UNCONDITIONAL: the middleware 404s non-tortoise hosts
+    regardless of DNS state, so this is safe on stale-DNS runs too."""
+    b_host = urlsplit(BASE_URL).hostname or "premiselabs.co"
+    b_spoof = b_host if b_host.endswith("premiselabs.co") else "premiselabs.co"
+    for path in ("/product", "/product.html"):
+        r = page.request.get(BASE_URL + path, headers={"Host": b_spoof}, timeout=15_000)
+        assert r.status == 404, f"{path} on premiselabs.co → {r.status} (expected 404)"
+
+
+@TORTOISE_HOST_SKIP
+def test_product_served_on_tortoise_host(page: Page) -> None:
+    """TORTISE-HOST half: the tortoise root must keep serving the product
+    page after the company-host 404 is in place. Gated — stale tortoise DNS
+    defers to T8 production."""
+    t_host = urlsplit(TORTISE_HOST).hostname or "tortoise.premiselabs.co"
+    t_spoof = t_host if t_host.startswith("tortoise.") else "tortoise.premiselabs.co"
+    r_t = page.request.get(TORTISE_HOST + "/", headers={"Host": t_spoof}, timeout=15_000)
+    assert r_t.status == 200
+    assert PRODUCT_ROOT_MARKER_LOWER in _clean(r_t.text()), \
+        "tortoise root must still serve the product page"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -869,10 +905,13 @@ def test_docs_html_contact_is_mailto(page: Page) -> None:
 
 
 @pytest.mark.parametrize(
-    "path", ["/privacy", "/tos", "/product.html", "/welcome", "/signup", "/docs.html"]
+    "path", ["/privacy", "/tos", "/welcome", "/signup", "/docs.html"]
 )
 def test_mobile_render_no_horizontal_scroll(page: Page, path: str) -> None:
-    """At 375px the page must render without horizontal scroll (S8)."""
+    """At 375px the page must render without horizontal scroll (S8).
+    NOTE: product.html was removed from this set (PR #840) — the product
+    page now lives only on the tortoise host and raw page.request fetches
+    can't compute layout; its mobile rendering is unchanged by this PR."""
     page.set_viewport_size({"width": 375, "height": 667})
     _goto(page, BASE_URL + path)
     dims = page.evaluate(
@@ -991,7 +1030,7 @@ def test_consent_js_served_and_banner_present(page: Page) -> None:
     assert "__META_PIXEL_ID__" in js, \
         "consent.js missing the dormant Meta Pixel stub (placeholder ID, fail-safe)"
 
-    for path in ("/product.html", "/signup", "/signin", "/welcome"):
+    for path in ("/signup", "/signin", "/welcome"):
         raw = page.request.get(BASE_URL + path, timeout=15_000).text()
         assert re.search(r'<script[^>]+src="/consent\.js"[^>]*>', raw, re.I), \
             f"{path}: missing consent.js script tag"
@@ -999,6 +1038,20 @@ def test_consent_js_served_and_banner_present(page: Page) -> None:
     raw_index = page.request.get(BASE_URL + "/index.html", timeout=15_000).text()
     assert "consent.js" not in raw_index, \
         "index.html must stay analytics-free (company landing — no instrumentation per design)"
+
+
+@TORTOISE_HOST_SKIP
+def test_product_page_loads_consent_js(page: Page) -> None:
+    """TORTISE-HOST half of the consent.js coverage: the product page the
+    tortoise host serves at '/' carries consent.js (product.html is a
+    consent-carrying funnel page). Gated — stale tortoise DNS defers to T8
+    production (#657); premiselabs.co/product is 404 by design, so this can
+    only run against the tortoise host (Host spoof, workers-sdk#165)."""
+    t_host = urlsplit(TORTISE_HOST).hostname or "tortoise.premiselabs.co"
+    t_spoof = t_host if t_host.startswith("tortoise.") else "tortoise.premiselabs.co"
+    product_raw = page.request.get(TORTISE_HOST + "/", headers={"Host": t_spoof}, timeout=15_000).text()
+    assert re.search(r'<script[^>]+src="/consent\.js"[^>]*>', product_raw, re.I), \
+        "tortoise host product page: missing consent.js script tag"
 
 
 def test_no_template_placeholders(page: Page) -> None:
