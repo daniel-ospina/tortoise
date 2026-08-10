@@ -9,6 +9,7 @@ See: tortoise/research/reflection-agentic-systems/ep-implementation-plan.md
 from __future__ import annotations
 
 import logging
+import math
 import random
 
 from .quadrature import tilted_moments, moments_to_beta, phi_nand, phi_impl
@@ -294,16 +295,72 @@ class TortoiseEP:
         # input_ids are sorted by idx (source=0, targets=1..N).
         # For IMPL: only create source→target pairs (skip target↔target).
         # For NAND: create all pairwise combinations (full mutual contradiction).
-        if op_type == "IMPL" and len(input_ids) >= 2:
-            # Source is input_ids[0] (idx=0). Targets are input_ids[1:].
-            for j in range(1, len(input_ids)):
-                self._update_factor(op_id, op_type,
-                                    [input_ids[0], input_ids[j]], weight, label, direction)
+        n = len(input_ids)
+        if n < 2:
+            return
+        if op_type == "IMPL":
+            pairs = [(input_ids[0], input_ids[j]) for j in range(1, n)]
         else:
-            for i in range(len(input_ids)):
-                for j in range(i + 1, len(input_ids)):
-                    self._update_factor(op_id, op_type,
-                                        [input_ids[i], input_ids[j]], weight, label, direction)
+            pairs = [(input_ids[i], input_ids[j])
+                     for i in range(n) for j in range(i + 1, n)]
+        if not pairs:
+            return
+
+        # Cache-free fallback (direct graph-mode calls): keep the legacy
+        # per-pair behavior — run() always loads the cache first, so the
+        # conservation path below is the one that matters in practice.
+        if self._msg_cache is None:
+            for a, b in pairs:
+                self._update_factor(op_id, op_type, [a, b], weight, label, direction)
+            return
+
+        # Accumulate-then-scale (#326). The operator carries ONE weight w
+        # (ONTOLOGY v3.1 §3.1): the factor's TOTAL pull must equal the
+        # isolated 2-input factor's pull at the same weight, and the
+        # decomposition must be input-order-invariant.
+        #
+        # Each pairwise application is computed from a CLEAN cavity state
+        # (the pre-factor message cache is restored between pairs, and
+        # damping is temporarily disabled so raw messages are captured), so
+        # every pair contributes identically regardless of input order. The
+        # per-claim contributions are then summed (accumulate) and the whole
+        # factor is scaled once (scale) to conserve total pull.
+        saved = dict(self._msg_cache)
+        orig_damping = self.damping
+        acc: dict[str, tuple[float, float]] = {c: (0.0, 0.0) for c in input_ids}
+        try:
+            self.damping = 1.0  # capture raw (undamped) pair messages
+            for a, b in pairs:
+                self._msg_cache = dict(saved)  # clean per-pair state
+                self._update_factor(op_id, op_type, [a, b], weight, label, direction)
+                for c in (a, b):
+                    msg = self._msg_cache.get((op_id, c, op_type))
+                    if msg is not None:
+                        ea, eb = acc[c]
+                        acc[c] = (ea + msg[0], eb + msg[1])
+        finally:
+            self._msg_cache = saved
+            self.damping = orig_damping
+
+        # Conservation scale: NAND has C(n,2) pair applications with each
+        # claim touched by (n-1) of them -> scale 2/(n(n-1)) makes the total
+        # n*(n-1)*pair*scale = 2*pair = the binary factor's total. IMPL has
+        # (n-1) source→target pairs, source touched by all -> 1/(n-1) makes
+        # source total pair_src and each target pair_tgt/(n-1) (evidence
+        # dilution across siblings), conserving the binary total.
+        scale = (2.0 / (n * (n - 1))) if op_type != "IMPL" else (1.0 / (n - 1))
+        d = self.damping
+        for c in input_ids:
+            ea, eb = acc[c]
+            if ea == 0.0 and eb == 0.0:
+                continue
+            new_eta = (ea * scale, eb * scale)
+            new_eta = (max(min(new_eta[0], 1000), -1000),
+                       max(min(new_eta[1], 1000), -1000))
+            old_eta = saved.get((op_id, c, op_type), (0.0, 0.0))
+            damped = (d * new_eta[0] + (1 - d) * old_eta[0],
+                      d * new_eta[1] + (1 - d) * old_eta[1])
+            self._write_message(op_id, c, *damped, op_type)
 
     def _update_claim_posterior(self, claim_id: str,
                                  run_evidence: dict | None = None) -> None:
@@ -407,14 +464,27 @@ class TortoiseEP:
         Extractor confidence 0.8 → Beta(1+0.8k, 1+0.2k).
         Confidence near 0.5 → Beta(1,1) uniform (no information).
 
+        Malformed confidence (None, non-numeric, NaN/±inf, or out of [0,1])
+        falls back to the uniform Beta(1,1) — never a NaN/degenerate prior
+        that would silently zero downstream weights (#326).
+
         Args:
             confidence: extractor confidence in [0, 1]
             k: evidence strength multiplier (default 2 = mild prior)
             uniform_threshold: |c-0.5| < threshold → uniform prior
         """
-        if abs(confidence - 0.5) < uniform_threshold:
+        if confidence is None:
             return (1.0, 1.0)
-        return (1.0 + confidence * k, 1.0 + (1.0 - confidence) * k)
+        try:
+            conf = float(confidence)
+        except (TypeError, ValueError):
+            return (1.0, 1.0)
+        if not math.isfinite(conf):
+            return (1.0, 1.0)
+        conf = max(0.0, min(1.0, conf))
+        if abs(conf - 0.5) < uniform_threshold:
+            return (1.0, 1.0)
+        return (1.0 + conf * k, 1.0 + (1.0 - conf) * k)
 
     # ── Public API ────────────────────────────────────────────────
 

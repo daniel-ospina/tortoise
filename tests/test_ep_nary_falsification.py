@@ -167,14 +167,6 @@ def test_nary_nand_per_claim_pull_matches_binary_pair():
     )
 
 
-@pytest.mark.xfail(
-    reason="#326: n-ary NAND total pull scales with claim count — the "
-           "surviving per-claim messages (~0.20 each at w=3) sum to 1.8× "
-           "binary's total at n=4 and ~2.7× at n=6 instead of staying at "
-           "weight w; messages are also input-order-dependent "
-           "(max shift ~0.006 at w=3).",
-    strict=True,
-)
 def test_nary_nand_weight_not_overcounted():
     """Regression test for #326: n-ary weight over-counting corruption.
 
