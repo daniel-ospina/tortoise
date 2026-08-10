@@ -34,7 +34,7 @@ class TortoiseEP:
     """
 
     def __init__(self, projection, *, damping=0.5, n_quad=8,
-                 max_iter=50, tol=1e-3, evidence=None):
+                 max_iter=50, tol=1e-4, evidence=None):
         self.proj = projection
         self.g = projection.g
         self.damping = damping
@@ -273,27 +273,19 @@ class TortoiseEP:
         # Default and missing → bidirectional.
         bidirectional = (direction == "bidirectional")
 
-        # For bidirectional IMPL, the back-message to the source must
-        # carry the TARGET's state as a reduction signal — if the target is
-        # weakened (by NAND or low evidence), the source must be pulled DOWN,
-        # not given a weak positive agreement push. Recompute the back-message
-        # with NAND-style coupling (contradiction) when the target is below its
-        # cavity prior, so bidirectional operators propagate damage upward (#86).
-        if (op_type == "IMPL" and bidirectional and not self._is_strong(id_b)):
-            mom_bk, _ = tilted_moments(
-                alpha_a, beta_a, alpha_b, beta_b, weight, phi_nand, self.n_quad
-            )
-            new_a_bk, new_b_bk = moments_to_beta(*mom_bk)
-            new_eta_a = self._natural_from_beta(new_a_bk, new_b_bk)
-            raw_eta_a = (new_eta_a[0] - cav_eta_a[0], new_eta_a[1] - cav_eta_a[1])
-
         # Proportional boost: breaks EP fixed-point symmetry that forces
         # messages to near-zero for unevidenced targets. Fades as evidence
-        # accumulates: Beta(1,1)=7× boost, Beta(4,4)=1.5×, Beta(10,10)=1×.
+        # accumulates: Beta(1,1)=3× boost, Beta(4,4)=1.5×, Beta(10,10)=1×.
+        # Applied to IMPL agreement messages ONLY: boosting a NAND
+        # (contradiction) message to a weakly-evidenced claim would crush it
+        # to ~0 (T4 claim hit by a T0 NAND at w=8 collapses 0.52→0.15 raw,
+        # →0.001 boosted), cratering the whole downstream chain (#855).
         alpha_a, beta_a = self._beta_from_natural(*cav_eta_a)
         alpha_b, beta_b = self._beta_from_natural(*cav_eta_b)
         boost_a = 1.0 + 2.0 / max(alpha_a + beta_a - 1.0, 1.0)
         boost_b = 1.0 + 2.0 / max(alpha_b + beta_b - 1.0, 1.0)
+        if op_type == "NAND":
+            boost_a, boost_b = 1.0, 1.0
         raw_eta_a = (raw_eta_a[0] * boost_a, raw_eta_a[1] * boost_a)
         raw_eta_b = (raw_eta_b[0] * boost_b, raw_eta_b[1] * boost_b)
 

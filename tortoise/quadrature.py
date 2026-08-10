@@ -109,8 +109,17 @@ def phi_nand(ca, cb, w=8.0):
 def phi_impl(ca, cb, w=8.0):
     """IMPL coupling factor: promotes agreement between connected claims.
 
-    Product coupling exp(w * ca * cb) transmits confidence from strong to weak.
-    At w=5.5: a T0 source (91%) pushes a baseline target to 72-78%.
-    Previously w=3.0 was too weak, requiring a cavity boost hack.
+    Difference coupling exp(-w * (ca - cb)^2): the target is pulled toward
+    the source's LEVEL. Transmits the source's confidence state — when a
+    strong source weakens, the target's pull weakens with it, so damage
+    cascades through IMPL chains (E019 directional semantics). Matches the
+    canonical SVBP reference (impl_term = -w * (c_a - c_b)^2) and the
+    original E019-era implementation the directional tests were calibrated
+    against.
+
+    The previous product coupling exp(w * ca * cb) boosted weak targets up
+    but was nearly INSENSITIVE to source strength (message eta varied
+    ~0.18-0.15 for source mean 0.909-0.667 at w=1.0), so a contradicted
+    source produced essentially zero cascade downstream (#855).
     """
-    return np.exp(w * ca * cb)
+    return np.exp(-w * (ca - cb) ** 2)

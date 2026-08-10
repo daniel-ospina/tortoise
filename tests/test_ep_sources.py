@@ -627,9 +627,10 @@ class TestSituation9_Mitigation_Audit:
                 # plain operator -> w == 1.0 (no input operator)
                 w_plain = weights_mod.compute_operator_weight(sdk._get_proj(), op["id"])
                 assert w_plain == pytest.approx(1.0, rel=1e-9)
-                # operator targeting an operator -> w == 2.0
+                # operator targeting an operator -> w == 2.0 for IMPL;
+                # NAND base 8.0 (#855) × 2.0 mitigation = 16 → clamped 10.0
                 op2 = sdk.create_operator("NAND", a["id"], [op["id"]])
                 w_mit = weights_mod.compute_operator_weight(sdk._get_proj(), op2["id"])
-                assert w_mit == pytest.approx(2.0, rel=1e-9)
+                assert w_mit == pytest.approx(10.0, rel=1e-9)
             finally:
                 sdk.close()

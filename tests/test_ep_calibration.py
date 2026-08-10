@@ -148,15 +148,17 @@ class TestNANDCalibrationAtRealWeights:
         assert conf_b < 0.909, f"Claim B unchanged by NAND: {conf_b:.4f}"
 
     def test_nand_no_collapse_at_w2_mitigated(self, ep_graph):
-        """Two T0 claims + NAND at w=2.0 → confidence stays ≥ floor.
+        """Two T0 claims + NAND at the mitigated weight → confidence stays ≥ floor.
 
-        To exercise the w=2.0 code path, we create an additional NAND edge
+        To exercise the mitigation path, we create an additional NAND edge
         from the operator to another operator node. This triggers the
         input_ops > 0 branch in compute_operator_weight (w *= 2.0).
+        With the #855 NAND base weight (8.0) the mitigated weight is
+        8.0 × 2.0 = 16 → clamped to 10.0.
 
-        At w=2.0 the NAND penalty is stronger (φ ≈ 0.191 at T0), but EP
-        still converges above the collapse threshold (~0.895 measured for
-        Beta(10,1) priors).
+        At w=10.0 the NAND penalty is strong (φ ≈ 0.0002 at T0), but EP
+        still converges above the collapse threshold (two T0 claims
+        settle ≈ 0.81, well above the historical 0.12 collapse).
         """
         sdk, claim_a_id, claim_b_id, op_id = ep_graph
 
@@ -172,10 +174,11 @@ class TestNANDCalibrationAtRealWeights:
             params={"oid": op_id, "did": dummy["id"]},
         )
 
-        # Verify the weight is now 2.0
+        # Verify the weight: NAND base (8.0, #855) × 2.0 mitigation = 16,
+        # clamped to the [0.1, 10.0] range → 10.0.
         from tortoise.weights import compute_operator_weight
         w = compute_operator_weight(proj, op_id)
-        assert w == 2.0, f"Expected w=2.0 for mitigated NAND, got {w}"
+        assert w == 10.0, f"Expected w=10.0 for mitigated NAND, got {w}"
 
         result = sdk.compute_confidence(factors=[op_id])
         assert result["converged"], (
@@ -190,11 +193,11 @@ class TestNANDCalibrationAtRealWeights:
 
         assert conf_a > self.CONFIDENCE_FLOOR, (
             f"Claim A collapsed: {conf_a:.4f} ≤ {self.CONFIDENCE_FLOOR} "
-            f"(mitigated NAND at w=2.0)"
+            f"(mitigated NAND at w=10.0)"
         )
         assert conf_b > self.CONFIDENCE_FLOOR, (
             f"Claim B collapsed: {conf_b:.4f} ≤ {self.CONFIDENCE_FLOOR} "
-            f"(mitigated NAND at w=2.0)"
+            f"(mitigated NAND at w=10.0)"
         )
         # At w=2.0 the pull should be stronger than w=1.0.
         # Note: the dummy IMPL operator also connects to both claims,

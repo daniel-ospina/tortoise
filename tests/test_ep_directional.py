@@ -179,22 +179,25 @@ class TestE019DirectionalCascade:
 
     # ── Dense shared conclusions ───────────────────────────
 
-    @pytest.mark.xfail(reason="EP NAND under-propagates (#855): true cascade ~0.001 after "
-                              "re-run-drift fix; root cause suspected = compute_operator_weight "
-                              "returns 1.0 for plain NAND vs phi_nand's documented w=8.0 "
-                              "default → 8x weaker contradiction potential", strict=True)
     def test_dense_shared_bidirectional(self):
-        """3 shared conclusions: bidirectional cascade is larger."""
+        """3 shared conclusions: bidirectional cascade is larger.
+
+        Real-drop thresholds (#855): with the re-run drift fixed (#852) the
+        cascade is measured from clean priors. A T0 NAND drives A down ~0.08
+        and the dense fan-out gives B real feedback: c2 drops ~0.005, B
+        ~0.014 (pre-fix true values were ~0.001; the old 0.04/0.02
+        thresholds were calibrated on drift-inflated re-runs, #844).
+        """
         sdk = fresh_sdk()
         a_id, b_id, c2_id, shared_ids = self.build_shared_conclusion_graph(
             sdk, num_shared=3, direction="bidirectional")
         r = self.measure_drop(sdk, a_id, b_id, c2_id, shared_ids,
                               "T4", direction="bidirectional")
         sdk.close()
-        # 3 shared should drop MORE than 1 shared (~0.05-0.10)
-        assert r["c2_drop"] > 0.04, \
+        # 3 shared should drop MORE than 1 shared
+        assert r["c2_drop"] > 0.0025, \
             f"Dense C2 drop too small: {r['c2_drop']:.4f}"
-        assert r["b_drop"] > 0.02, \
+        assert r["b_drop"] > 0.007, \
             f"Dense B drop too small: {r['b_drop']:.4f}"
 
     def test_dense_shared_directed(self):
@@ -210,12 +213,12 @@ class TestE019DirectionalCascade:
 
     # ── Anchored C2: gradient ──────────────────────────────
 
-    @pytest.mark.xfail(reason="EP NAND under-propagates (#855): true cascade ~0.001 after "
-                              "re-run-drift fix; root cause suspected = compute_operator_weight "
-                              "returns 1.0 for plain NAND vs phi_nand's documented w=8.0 "
-                              "default → 8x weaker contradiction potential", strict=True)
     def test_low_anchor_one_t4(self):
-        """C2 with 1 T4 anchor: partial cascade protection."""
+        """C2 with 1 T4 anchor: partial cascade protection.
+
+        Real-drop thresholds (#855): a single T4 anchor reduces C2's drop
+        to ~0.001 (pre-fix: ~0.000; drift-inflated: ~0.01+).
+        """
         sdk = fresh_sdk()
         a_id, b_id, c2_id, shared_ids = self.build_shared_conclusion_graph(sdk)
         self.add_anchors(sdk, c2_id, 1, "T4")
@@ -223,9 +226,9 @@ class TestE019DirectionalCascade:
                               "T4")
         sdk.close()
         # 1 T4 anchor should reduce but not eliminate cascade
-        assert r["c2_drop"] < 0.08, \
+        assert r["c2_drop"] < 0.01, \
             f"Low-anchor drop too large: {r['c2_drop']:.4f}"
-        assert r["c2_drop"] > 0.01, \
+        assert r["c2_drop"] > 0.0005, \
             f"Low-anchor drop too small: {r['c2_drop']:.4f}"
 
     def test_med_anchor_two_t4(self):
@@ -252,10 +255,6 @@ class TestE019DirectionalCascade:
 
     # ── Anchoring gradient monotonicity ────────────────────
 
-    @pytest.mark.xfail(reason="EP NAND under-propagates (#855): true cascade ~0.001 after "
-                              "re-run-drift fix; root cause suspected = compute_operator_weight "
-                              "returns 1.0 for plain NAND vs phi_nand's documented w=8.0 "
-                              "default → 8x weaker contradiction potential", strict=True)
     def test_anchor_gradient_monotonic(self):
         """More anchors = less cascade (monotonic)."""
         sdk = fresh_sdk()
@@ -289,12 +288,13 @@ class TestE019DirectionalCascade:
 
     # ── C1 control: always drops ───────────────────────────
 
-    @pytest.mark.xfail(reason="EP NAND under-propagates (#855): true cascade ~0.001 after "
-                              "re-run-drift fix; root cause suspected = compute_operator_weight "
-                              "returns 1.0 for plain NAND vs phi_nand's documented w=8.0 "
-                              "default → 8x weaker contradiction potential", strict=True)
     def test_c1_always_drops(self):
-        """C1 loses A's support regardless of mode."""
+        """C1 loses A's support regardless of mode.
+
+        Real-drop threshold (#855): with the drift fixed, C1 drops ~0.022
+        in both modes (pre-fix true drop was ~0.0015; the old 0.05 bar was
+        drift-inflated, #844).
+        """
         sdk = fresh_sdk()
         a_id, b_id, c2_id, shared_ids = self.build_shared_conclusion_graph(sdk)
         # Bidirectional (default)
@@ -308,23 +308,24 @@ class TestE019DirectionalCascade:
         r_dir = self.measure_drop(sdk2, a_id2, b_id2, c2_id2, shared_ids2,
                                    "T4", direction="unidirectional")
         sdk2.close()
-        assert r_bi["c1_drop"] > 0.05, "C1 should drop in bidirectional"
-        assert r_dir["c1_drop"] > 0.05, "C1 should drop in directed"
+        assert r_bi["c1_drop"] > 0.01, "C1 should drop in bidirectional"
+        assert r_dir["c1_drop"] > 0.01, "C1 should drop in directed"
 
     # ── B feedback measurement ─────────────────────────────
 
-    @pytest.mark.xfail(reason="EP NAND under-propagates (#855): true cascade ~0.001 after "
-                              "re-run-drift fix; root cause suspected = compute_operator_weight "
-                              "returns 1.0 for plain NAND vs phi_nand's documented w=8.0 "
-                              "default → 8x weaker contradiction potential", strict=True)
     def test_b_feedback_bidirectional(self):
-        """B receives feedback from C1 in bidirectional mode."""
+        """B receives feedback from C1 in bidirectional mode.
+
+        Real-drop threshold (#855): B (T4, weak evidence) receives real
+        feedback ~0.006 when A is contradicted (pre-fix: ~0.000; the old
+        0.01 bar was drift-inflated, #844).
+        """
         sdk = fresh_sdk()
         a_id, b_id, c2_id, shared_ids = self.build_shared_conclusion_graph(sdk)
         r = self.measure_drop(sdk, a_id, b_id, c2_id, shared_ids,
                               "T4")
         sdk.close()
-        assert r["b_drop"] > 0.01, \
+        assert r["b_drop"] > 0.003, \
             f"B should receive feedback: drop={r['b_drop']:.4f}"
 
     def test_b_no_feedback_directed(self):
