@@ -1,15 +1,21 @@
 """TORT-MCP-001: MCP server wrapping TortoiseSDK. Stdio transport, ~10 tools."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import sys
+import threading
+import time as _time
 from pathlib import Path
 from typing import Any, Literal
 
 from fastmcp import FastMCP
+from fastmcp.exceptions import (AuthorizationError, FastMCPError, ToolError,
+                                ValidationError as FastMCPValidationError)
 from mcp.types import ToolAnnotations
+from pydantic import ValidationError as PydanticValidationError
 from tortoise.auth import is_dev_mode as _is_dev_mode
 from tortoise.sdk import TortoiseSDK
 from tortoise import monitoring
@@ -68,6 +74,171 @@ if "pytest" not in sys.modules:
 # idempotentHint=true: repeated calls have no extra side effects
 
 mcp = FastMCP("tortoise")
+
+# ── MCP tool-call telemetry (#889) ─────────────────────────────────
+# One structured analytics event per MCP tool call — friction evidence for the
+# surface-design epic (#888). Installed at mcp.call_tool, the single dispatch
+# point every transport (stdio, streamable HTTP, programmatic) funnels
+# through, so no per-tool instrumentation is needed. Transport-level auth
+# (TeamResolutionMiddleware) runs BEFORE this point in HTTP mode: latency
+# therefore measures tool execution only, and authenticated requests already
+# carry the team_id ContextVar (empty string for unauthenticated paths).
+# Fail-safe by construction: every emission path is try/except'd and
+# fire-and-forget, so a telemetry failure can never break a tool call.
+
+
+def _validation_error_kind(exc: PydanticValidationError) -> str:
+    """error_kind for a pydantic validation failure: '<error_type>:<field>'.
+
+    e.g. "missing:query" (required field absent) or "string_type:message"
+    (wrong type). The #888 root-cause diagnostic (COUNT vs NAMING vs
+    DESCRIPTIONS vs STEERING) needs bad calls distinguishable from execution
+    failures, and the offending field is the steering signal.
+    """
+    try:
+        errors = exc.errors()
+    except Exception:
+        return type(exc).__name__
+    if not errors:
+        return "validation"
+    first = errors[0]
+    err_type = str(first.get("type") or "validation")
+    loc = first.get("loc") or ()
+    field = ".".join(str(p) for p in loc)
+    return f"{err_type}:{field}" if field else err_type
+
+
+def _classify_mcp_call_error(exc: BaseException) -> tuple[str, str | None]:
+    """Map a dispatch exception to (status, error_kind).
+
+    validation_error → pydantic argument-validation failures (raised raw or
+        wrapped by fastmcp's ValidationError, whose __cause__ carries the
+        pydantic errors); error_kind = '<error_type>:<field>'.
+    auth_error → AuthorizationError.
+    exec_error → everything else; error_kind = the exception class name,
+        unwrapping fastmcp's ToolError/FastMCPError wrapper to the underlying
+        cause so the class stays diagnostic (RuntimeError, not ToolError).
+    """
+    if isinstance(exc, PydanticValidationError):
+        return "validation_error", _validation_error_kind(exc)
+    if isinstance(exc, FastMCPValidationError):
+        cause = exc.__cause__
+        if isinstance(cause, PydanticValidationError):
+            return "validation_error", _validation_error_kind(cause)
+        return "validation_error", type(exc).__name__
+    if isinstance(exc, AuthorizationError):
+        return "auth_error", type(exc).__name__
+    kind_exc = exc
+    for _ in range(5):  # bounded unwrap: ToolError → cause (RuntimeError etc.)
+        if (isinstance(kind_exc, (ToolError, FastMCPError))
+                and kind_exc.__cause__ is not None
+                and kind_exc.__cause__ is not kind_exc):
+            kind_exc = kind_exc.__cause__
+        else:
+            break
+    return "exec_error", type(kind_exc).__name__
+
+
+# In-flight telemetry writes (executor futures) — kept so verification/tests
+# can await them and so GC never collects a pending future mid-write.
+_pending_telemetry: set = set()
+
+
+def _emit_mcp_tool_call_telemetry(team_id: str, tool_name: str, status: str,
+                                  latency_ms: int, error_kind: str | None) -> None:
+    """Fire-and-forget, fail-safe analytics write. Never raises, never blocks.
+
+    The Supabase write (sync httpx POST, up to 5s timeout in
+    _track_analytics_event) runs OFF the tool-call hot path: on the default
+    executor when an event loop is running (all server transports), else on a
+    daemon thread. Any failure is logged and swallowed — telemetry must never
+    break a tool call.
+    """
+    props = {"tool_name": tool_name, "status": status,
+             "latency_ms": latency_ms, "error_kind": error_kind}
+
+    def _write() -> None:
+        try:
+            from tortoise.hosted_api import _track_analytics_event
+            _track_analytics_event(team_id, "mcp_tool_call", props)
+        except Exception:
+            _log.debug("mcp_tool_call telemetry write failed", exc_info=True)
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop is not None and not loop.is_closed():
+        try:
+            fut = loop.run_in_executor(None, _write)
+            _pending_telemetry.add(fut)
+            fut.add_done_callback(_pending_telemetry.discard)
+            return
+        except Exception:
+            _log.debug("mcp_tool_call telemetry schedule failed", exc_info=True)
+            return
+    try:
+        threading.Thread(target=_write, daemon=True).start()
+    except Exception:
+        _log.debug("mcp_tool_call telemetry thread start failed", exc_info=True)
+
+
+async def _flush_mcp_telemetry() -> None:
+    """Await all in-flight telemetry writes (verification / tests)."""
+    pending = list(_pending_telemetry)
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+
+
+# Captured before wrapping — the middleware chain re-dispatches
+# call_tool(run_middleware=False) internally; the wrapper passes those
+# through untouched so exactly ONE event is emitted per client tool call.
+_original_call_tool = mcp.call_tool
+
+
+async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None, *,
+                             version=None, run_middleware: bool = True,
+                             task_meta=None):
+    """Telemetry-instrumented single dispatch point (installed as mcp.call_tool).
+
+    Emits one mcp_tool_call analytics event per client tool call, with
+    latency measured around the tool execution only (transport auth runs
+    before this point and is excluded). Background-task dispatches
+    (task_meta) are measured at scheduling granularity — our tools never use
+    them, and the #888 evidence window runs normal synchronous clients.
+    """
+    if not run_middleware:
+        return await _original_call_tool(name, arguments, version=version,
+                                         run_middleware=False, task_meta=task_meta)
+    team_id = _current_team_id.get() or ""
+    status, error_kind = "ok", None
+    t0 = _time.perf_counter()
+    try:
+        result = await _original_call_tool(name, arguments, version=version,
+                                           run_middleware=True, task_meta=task_meta)
+        # The stdio auth gate (#236) returns an error dict instead of raising
+        # (TORTOISE_API_KEY set → every call is rejected). Classify it so
+        # unauthenticated stdio calls don't masquerade as ok.
+        payload = getattr(result, "structured_content", result)
+        if (isinstance(payload, dict)
+                and isinstance(payload.get("error"), str)
+                and payload["error"].startswith("Authentication required")):
+            status, error_kind = "auth_error", "stdio_auth_gate"
+        return result
+    except Exception as exc:
+        status, error_kind = _classify_mcp_call_error(exc)
+        raise
+    finally:
+        latency_ms = int((_time.perf_counter() - t0) * 1000)
+        try:
+            _emit_mcp_tool_call_telemetry(team_id, name, status, latency_ms,
+                                          error_kind)
+        except Exception:
+            # A telemetry bug must never mask or break the tool call itself.
+            _log.debug("mcp_tool_call telemetry emit failed", exc_info=True)
+
+
+mcp.call_tool = _wrapped_call_tool  # install at the single dispatch point
 
 # ── Lazy SDK initialization (#451) ─────────────────────────────────
 # sdk is None at import time — _get_sdk() lazily resolves and connects

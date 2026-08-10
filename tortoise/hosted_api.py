@@ -4432,6 +4432,8 @@ _ALLOWED_ANALYTICS_PROPS = {
     "elapsed_from_copy_s", "question_id", "answer", "source", "point_count",
     "session_id", "message_count", "elapsed_time_s", "steps_completed",
     "questions", "step", "error_type",
+    # #889: MCP tool-call telemetry (friction evidence for epic #888)
+    "tool_name", "status", "latency_ms", "error_kind",
 }
 
 _ANALYTICS_FALLBACK_PATH = None
