@@ -42,12 +42,20 @@ def _run_guard_subprocess(argv, cwd, timeout=60):
     loaded runner (CI fast job mid-suite, concurrent suites locally) the
     spawn can exceed a tight timeout and the crash is otherwise invisible
     (the tests only asserted the output file). Retry once, surface stderr
-    on failure (#493).
+    on failure. The env pins the repo root on PYTHONPATH (the editable
+    install's meta-path finder + runner user-site can otherwise shadow the
+    checkout's tortoise in the fresh interpreter — CI: ImportError
+    RELATIVE_PATH_ERROR from 'tortoise.config' (unknown location), #493).
     """
+    env = dict(os.environ)
+    repo_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
+    env["PYTHONPATH"] = os.pathsep.join(
+        [repo_root] + [p for p in env.get("PYTHONPATH", "").split(os.pathsep) if p])
+    env["PYTHONNOUSERSITE"] = "1"
     last = None
     for _ in range(2):
         proc = subprocess.run(argv, cwd=cwd, capture_output=True,
-                              text=True, timeout=timeout)
+                              text=True, timeout=timeout, env=env)
         if proc.returncode == 0:
             return proc
         last = proc
