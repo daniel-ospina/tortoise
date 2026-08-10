@@ -136,13 +136,27 @@ BEGIN
                 ON CONFLICT (user_id, team_id) DO NOTHING;
             ELSE
                 -- Identity path: NULL user_id + identity (uq_member_identity_team
-                -- partial unique index keeps re-invocation idempotent).
+                -- partial unique index keeps re-invocation idempotent). Unlike
+                -- the user path's step-1 refresh, steps 1-2 can never match a
+                -- NULL user_id, so the conflict branch REFRESHES the existing
+                -- row in place — symmetric with the user path: re-provisioning
+                -- an identity with a rotated key updates the membership's
+                -- key_hash/lookup_hash instead of silently going stale
+                -- (migration-review WARNING, PR #847).
                 INSERT INTO public.team_memberships
                     (user_id, team_id, team_name, api_key, key_hash, lookup_hash,
                      graph_name, role, status, identity)
                 VALUES (NULL, p_team_id, p_team_name, p_api_key, p_key_hash,
                         p_lookup_hash, p_graph_name, 'owner', 'active', p_identity)
-                ON CONFLICT (identity, team_id) WHERE user_id IS NULL DO NOTHING;
+                ON CONFLICT (identity, team_id) WHERE user_id IS NULL
+                DO UPDATE SET team_name   = EXCLUDED.team_name,
+                              api_key     = EXCLUDED.api_key,
+                              key_hash    = EXCLUDED.key_hash,
+                              lookup_hash = EXCLUDED.lookup_hash,
+                              graph_name  = EXCLUDED.graph_name,
+                              role        = 'owner',
+                              status      = 'active',
+                              updated_at  = now();
             END IF;
         END IF;
     END IF;

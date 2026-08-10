@@ -317,6 +317,40 @@ DO $$ BEGIN
     'identity path idempotent: exactly one api_keys row');
 END $$;
 
+-- rotation refresh (migration-review WARNING fix, PR #847): re-provisioning
+-- an identity with a NEW key must refresh the membership row in place — the
+-- membership's key_hash/lookup_hash follow the rotated key (symmetric with
+-- the user path step-1 refresh; api_keys accumulates both rows, and the
+-- api_keys row remains the canonical auth anchor).
+SELECT public.provision_team(
+  p_user_id     => NULL,
+  p_identity    => 'agent:anon-770-1',
+  p_team_id     => 'team-c-770',
+  p_team_name   => 'Agent C 770',
+  p_api_key     => 'tt_plaintext_c_770_rotated',
+  p_key_hash    => 'salt:hash-c-770-rotated',
+  p_lookup_hash => 'lkp-c-770-rotated',
+  p_graph_name  => 'team_team-c-770'
+);
+DO $$ BEGIN
+  PERFORM tests.assert(
+    (SELECT count(*) FROM public.team_memberships WHERE team_id='team-c-770') = 1,
+    'identity rotation: still exactly one membership row');
+  PERFORM tests.assert(
+    (SELECT lookup_hash FROM public.team_memberships
+      WHERE team_id='team-c-770' AND user_id IS NULL AND identity='agent:anon-770-1')
+      = 'lkp-c-770-rotated',
+    'identity rotation: membership lookup_hash follows the rotated key');
+  PERFORM tests.assert(
+    (SELECT key_hash FROM public.team_memberships
+      WHERE team_id='team-c-770' AND user_id IS NULL AND identity='agent:anon-770-1')
+      = 'salt:hash-c-770-rotated',
+    'identity rotation: membership key_hash follows the rotated key');
+  PERFORM tests.assert(
+    (SELECT count(*) FROM public.api_keys WHERE team_id='team-c-770') = 2,
+    'identity rotation: api_keys accumulates the rotated key row');
+END $$;
+
 -- two DIFFERENT identities may both join the same team (M:N agent members)
 SELECT public.provision_team(
   p_user_id     => NULL,
