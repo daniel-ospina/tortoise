@@ -15,13 +15,16 @@ import pytest
 from tortoise.sdk import TortoiseSDK
 
 # Requires live FalkorDB (Docker). Skip gracefully when unavailable so the
-# no-Docker embedded suite stays green (AGENTS.md). Mirrors the probe pattern
-# in tests/test_integration_search.py.
+# no-Docker embedded suite stays green (AGENTS.md). The probe targets the
+# DOCKER URI explicitly (embedded is "available" but lacks URI-mode graph
+# semantics) and ALWAYS restores the env (try/finally — import-time leaks
+# contaminate later test files, #176).
+_URI = "docker://:falkordb@localhost:6379/tortoise_test_221_namespace"
 FALKORDB_AVAILABLE = False
+_OLD_URI = os.environ.get("TORTOISE_DB_URI")
 try:
+    os.environ["TORTOISE_DB_URI"] = _URI
     from tortoise.sdk import TortoiseSDK as _ProbeSDK
-    _old_uri = os.environ.get("TORTOISE_DB_URI")
-    os.environ["TORTOISE_DB_URI"] = "docker://:falkordb@localhost:6379/tortoise_test_221_namespace"
     _probe = _ProbeSDK()
     _probe._get_proj().g.query("RETURN 1")
     _probe.close()
@@ -29,8 +32,8 @@ try:
 except Exception:
     FALKORDB_AVAILABLE = False
 finally:
-    if _old_uri is not None:
-        os.environ["TORTOISE_DB_URI"] = _old_uri
+    if _OLD_URI is not None:
+        os.environ["TORTOISE_DB_URI"] = _OLD_URI
     else:
         os.environ.pop("TORTOISE_DB_URI", None)
 

@@ -15,9 +15,9 @@ from tortoise.sdk import TortoiseSDK                    # noqa: E402
 from tortoise.domain_loader import known_kinds, register_kind, kind_is_known  # noqa: E402
 
 
-def test_known_kind_accepted(tmp_path):
+def test_known_kind_accepted():
     """Known kind values work without warnings."""
-    sdk = TortoiseSDK(str(tmp_path / "kinds.db"))
+    sdk = TortoiseSDK(":memory:")
     try:
         point = sdk.create_point("statement", "A test statement")
         assert point["pointKind"] == "statement"
@@ -26,9 +26,9 @@ def test_known_kind_accepted(tmp_path):
         sdk.close()
 
 
-def test_unrecognized_kind_warns_not_errors(tmp_path):
+def test_unrecognized_kind_warns_not_errors():
     """Unrecognized kind values are accepted but produce a warning."""
-    sdk = TortoiseSDK(str(tmp_path / "kinds.db"))
+    sdk = TortoiseSDK(":memory:")
     try:
         # Capture warnings from the sdk logger
         logger = logging.getLogger("tortoise.sdk")
@@ -47,12 +47,12 @@ def test_unrecognized_kind_warns_not_errors(tmp_path):
         sdk.close()
 
 
-def test_register_kind_suppresses_warning(tmp_path):
+def test_register_kind_suppresses_warning():
     """After register_kind(), the kind is known and produces no warning."""
     register_kind("auditFinding")
     assert kind_is_known("auditFinding")
     
-    sdk = TortoiseSDK(str(tmp_path / "kinds.db"))
+    sdk = TortoiseSDK(":memory:")
     try:
         logger = logging.getLogger("tortoise.sdk")
         logger.setLevel(logging.WARNING)

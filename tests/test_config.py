@@ -307,11 +307,18 @@ class TestGetSdkEnvPrecedence:
         env_file.write_text("TORTOISE_DB_URI=docker://:@dotenv:6379/tortoise\n")
 
         # Explicit env is ALREADY set before _load_dotenv runs
+        _old = os.environ.get("TORTOISE_DB_URI")
         monkeypatch.setenv("TORTOISE_DB_URI", "docker://:@explicit:6379/tortoise")
 
-        _load_dotenv(str(env_file))
+        try:
+            _load_dotenv(str(env_file))
 
-        assert os.environ["TORTOISE_DB_URI"] == "docker://:@explicit:6379/tortoise"
+            assert os.environ["TORTOISE_DB_URI"] == "docker://:@explicit:6379/tortoise"
+        finally:
+            if _old is not None:
+                os.environ["TORTOISE_DB_URI"] = _old
+            else:
+                os.environ.pop("TORTOISE_DB_URI", None)
 
     def test_dotenv_fills_when_env_unset(self, monkeypatch, tmp_path):
         """When TORTOISE_DB_URI is NOT set in process env, _load_dotenv()
@@ -321,17 +328,17 @@ class TestGetSdkEnvPrecedence:
         env_file = tmp_path / ".env"
         env_file.write_text("TORTOISE_DB_URI=docker://:@dotenv:6379/tortoise\n")
 
+        _old = os.environ.get("TORTOISE_DB_URI")
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
 
-        _load_dotenv(str(env_file))
-
         try:
+            _load_dotenv(str(env_file))
+
             assert os.environ["TORTOISE_DB_URI"] == "docker://:@dotenv:6379/tortoise"
         finally:
-            # _load_dotenv writes directly to os.environ — invisible to monkeypatch
-            # (the var was already unset at delenv time, so no restore was
-            # recorded; a post-hoc delenv would even RESTORE the leaked value).
-            # Pop it directly so the docker:// URI never leaks into the rest of
-            # the suite — even on assert failure (#493: it poisoned every later
-            # TortoiseSDK()).
-            os.environ.pop("TORTOISE_DB_URI", None)
+            # Explicit restore — the leaked dotenv URI (docker://...@dotenv:6379)
+            # contaminates every later test file if left set (#176).
+            if _old is not None:
+                os.environ["TORTOISE_DB_URI"] = _old
+            else:
+                os.environ.pop("TORTOISE_DB_URI", None)

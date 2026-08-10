@@ -4,7 +4,7 @@ type: index
 domain: data
 status: live
 created: 2026-07-09
-updated: 2026-08-07
+updated: 2026-08-10
 ---
 
 # Tortoise — Canonical Documents
@@ -19,7 +19,7 @@ updated: 2026-08-07
 - [Extractor](tortoise/extractor.py) — Semantic extraction from documents/transcripts
 
 ## Data
-- [ONTOLOGY v2.5](https://github.com/daniel-ospina/eldato/blob/main/docs/teams/organisation-design-team/domains%20(S1)/data/ONTOLOGY_v2.5.md) — Canonical entity & edge spec (external, in eldato/docs)
+- [ONTOLOGY v3.4](docs/ONTOLOGY.md) — Canonical entity & edge spec (co-located with the code it governs)
 - [Embedding & Retrieval](data/embedding-retrieval.md) — 3-tier model + query patterns
 - [Memory Types Taxonomy](data/MEMORY_TYPES.md) — Canonical 5-type taxonomy
 
@@ -40,7 +40,7 @@ updated: 2026-08-07
 Business Source License 1.1 (free self-hosted production use under $5,000,000 annual revenue; Mozilla Public License 2.0 conversion after 4 years) — see [LICENSE](LICENSE) and [license notes](docs/license-notes.md)
 
 ## Related Repositories
-- [eldato](https://github.com/daniel-ospina/eldato) — Main El Dato app + canonical ONTOLOGY v2.5
+- [eldato](https://github.com/daniel-ospina/eldato) — Main El Dato app
 - [eldato-outreach](https://github.com/daniel-ospina/eldato-outreach) — B2B WhatsApp outreach system
-- [dmer](https://github.com/daniel-ospina/dmer) — Instagram DM automation daemon
-- [org-data](https://github.com/daniel-ospina/org-data) — Multi-tenant org data (Supabase → Tortoise connector)
+- [DMeer](https://github.com/daniel-ospina/DMeer) — Instagram automation daemon with Electron tray app
+- [swarm](https://github.com/daniel-ospina/swarm) — Multi-tenant organizational data management (teams, products, roles, features; Supabase-backed, connectors for the Tortoise knowledge graph)

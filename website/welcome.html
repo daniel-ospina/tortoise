@@ -326,7 +326,7 @@
   <div class="topbar">
     <a class="logo" href="/">Tortoise<span>.</span></a>
     <nav>
-      <a href="/product.html">Product</a>
+      <a href="https://tortoise.premiselabs.co/">Product</a>
       <a href="/docs">Docs</a>
     </nav>
     <a class="login" href="https://app.premiselabs.co">Login</a>
@@ -346,7 +346,7 @@
     <!-- Error state -->
     <div id="error-state" class="error-state hidden" role="alert">
       <p id="error-message">Something went wrong during provisioning.</p>
-      <p><a href="/signup.html">Try signing up again</a></p>
+      <p><a href="/signup.html">Try signing up again</a> · <a href="mailto:hello@premiselabs.co">Contact support</a></p>
     </div>
 
     <!-- Success state -->
@@ -462,7 +462,14 @@ you up to 6 yes/no questions and set up your Tortoise memory.
     const SUPABASE_URL = "https://ybetwichurajbfswfeqa.supabase.co";
     const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InliZXR3aWNodXJhamJmc3dmZXFhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODUyNzgzNDYsImV4cCI6MjEwMDg1NDM0Nn0.YHysJAebPualDNDQTU5bnGBUHg5guLe8eBadm0LiEiY";
     const POLL_INTERVAL_MS = 1000;
-    const POLL_MAX_ATTEMPTS = 30; // 30 seconds max
+    // Client-side provisioning (#527): the after_user_created webhook is
+    // DISABLED on this Supabase plan (its Standard-Webhooks signature can't
+    // be verified — signup 500'd on hook invocation), so nothing server-side
+    // mints the team anymore. The page polls briefly for an EXISTING
+    // membership (returning users / hook-era rows), then calls the
+    // tenant-provision edge function with the user's JWT (#802).
+    const MEMBERSHIP_POLL_ATTEMPTS = 5;   // ~5s — existing-team window before provisioning
+    const PROVISION_REFRESH_ATTEMPTS = 3; // ~3s — membership-row visibility after a 201
     // On the email-confirmation / OAuth callback, the session arrives via the
     // URL fragment a moment after createClient. Current supabase-js awaits
     // its async init inside getSession(), but older browser-cached builds
@@ -478,6 +485,11 @@ you up to 6 yes/no questions and set up your Tortoise memory.
     const supabaseAnonKey = isLocal
       ? "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0"
       : SUPABASE_ANON_KEY;
+    // Edge function URL for client-side provisioning (JWT path, #802).
+    // Local dev: the local Supabase CLI serves functions on :54321 too.
+    const PROVISION_URL = isLocal
+      ? "http://127.0.0.1:54321/functions/v1/tenant-provision"
+      : SUPABASE_URL + "/functions/v1/tenant-provision";
 
     // Guard: check if the anon key placeholder was replaced at deploy time
     const isConfigured = supabaseAnonKey && !supabaseAnonKey.includes("{{");
@@ -545,7 +557,10 @@ you up to 6 yes/no questions and set up your Tortoise memory.
         .limit(1)
         .maybeSingle();
 
-      for (let attempt = 0; attempt < POLL_MAX_ATTEMPTS; attempt++) {
+      // Phase 1 — existing membership? (returning user, hook-era row, or a
+      // concurrent tab that already provisioned). Bounded short window: the
+      // old 30s webhook wait is gone — provisioning is now client-side (#527).
+      for (let attempt = 0; attempt < MEMBERSHIP_POLL_ATTEMPTS; attempt++) {
         const { data, error } = await activeMembershipQuery();
 
         if (error) {
@@ -562,19 +577,90 @@ you up to 6 yes/no questions and set up your Tortoise memory.
         await sleep(POLL_INTERVAL_MS);
       }
 
-      // Timed out — one final check, then reveal-or-error
-      const { data, error } = await activeMembershipQuery();
+      // Phase 2 — no membership row: provision client-side via the edge
+      // function's JWT path (#527). Idempotency guard: this runs ONLY when
+      // the membership query came back empty, so a team is never minted
+      // twice for the same user (the function would mint a NEW team per
+      // call — the page must not re-provision once a team exists).
+      await provisionViaEdgeFunction(session, userId, activeMembershipQuery);
+    }
 
-      if (error) {
-        showError("Couldn't check your provisioning status. Please refresh and try again.");
+    // ── Client-side provisioning (#527) ────────────────────────────────────
+    // The after_user_created webhook is disabled on this Supabase plan (its
+    // Svix/Standard-Webhooks signature can't be verified), so the welcome
+    // page calls tenant-provision directly with the user's access token:
+    // the function mints the team ONLY when the token's id+email match the
+    // provisioning target (#802). Never throws — every path lands in a
+    // display state. Errors are humanized (never raw JSON), retried ONCE,
+    // then a contact-support fallback.
+    async function provisionViaEdgeFunction(session, userId, activeMembershipQuery) {
+      const meta = session.user.user_metadata || {};
+      const displayName = meta.display_name || undefined;
+
+      const callProvision = () => fetch(PROVISION_URL, {
+        method: "POST",
+        headers: {
+          "Authorization": "Bearer " + session.access_token,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          user_id: userId,
+          email: session.user.email,
+          ...(displayName ? { display_name: displayName } : {}),
+        }),
+      });
+
+      // Attempt 1 — plus exactly ONE retry on 401/error (a second mint
+      // would be a second team; never loop).
+      let response = null;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          response = await callProvision();
+        } catch (e) {
+          response = null; // network failure — counts as a failed attempt
+        }
+        if (response && response.ok) break;
+        if (attempt === 0) await sleep(POLL_INTERVAL_MS);
+      }
+
+      if (response && response.ok) {
+        // Provisioned (201) — the function wrote the membership row before
+        // answering. Re-query and reveal through the canonical path (atomic
+        // reveal+null, A13) so the key is shown exactly once.
+        for (let attempt = 0; attempt < PROVISION_REFRESH_ATTEMPTS; attempt++) {
+          const { data, error } = await activeMembershipQuery();
+          if (!error && data && data.status === "active" && data.team_id) {
+            await revealKeyOnce(userId, data);
+            return;
+          }
+          await sleep(POLL_INTERVAL_MS);
+        }
+        // The function's team_memberships write failed (it still returns 201
+        // with the key) — the 201 body is the ONLY copy of the plaintext key
+        // (nothing was stored), so show it directly rather than losing it.
+        try {
+          const body = await response.json();
+          if (body && body.api_key && body.team_name) {
+            showSuccess({
+              team_name: body.team_name,
+              api_key: body.api_key,
+              graph_name: body.graph_name || "",
+              team_id: body.team_id || "",
+            });
+            return;
+          }
+        } catch (e) { /* fall through to error */ }
+        showError("Your team was created, but we couldn't load your API key. Please refresh — or contact support at hello@premiselabs.co.");
         return;
       }
 
-      if (data && data.status === "active" && data.team_id) {
-        await revealKeyOnce(userId, data);
-      } else {
-        showError("Provisioning is taking longer than expected. Your team is being set up — please refresh in a moment.");
-      }
+      // Both attempts failed — humanized message, never raw JSON.
+      const status = response ? response.status : null;
+      showError(
+        status === 401
+          ? "We couldn't verify your session to set up your team. Please sign out and sign in again — or contact support at hello@premiselabs.co."
+          : "We couldn't set up your team automatically. Please refresh and try again — or contact support at hello@premiselabs.co."
+      );
     }
 
     // ── Reveal key exactly once via the SECURITY DEFINER RPC (A13) ────────
