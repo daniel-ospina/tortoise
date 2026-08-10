@@ -51,7 +51,6 @@ def _run_guard_subprocess(argv, cwd, timeout=60):
     repo_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
     env["PYTHONPATH"] = os.pathsep.join(
         [repo_root] + [p for p in env.get("PYTHONPATH", "").split(os.pathsep) if p])
-    env["PYTHONNOUSERSITE"] = "1"
     last = None
     for _ in range(2):
         proc = subprocess.run(argv, cwd=cwd, capture_output=True,
