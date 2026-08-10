@@ -360,6 +360,14 @@
     const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InliZXR3aWNodXJhamJmc3dmZXFhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODUyNzgzNDYsImV4cCI6MjEwMDg1NDM0Nn0.YHysJAebPualDNDQTU5bnGBUHg5guLe8eBadm0LiEiY";
     const WELCOME_URL = "/welcome.html";
 
+    // #801: server-side signup — the hosted API creates the Supabase auth
+    // user via the GoTrue admin API with email_confirm=true so NO
+    // confirmation email is sent, bypassing Supabase's built-in SMTP per-IP
+    // send bucket (over_email_send_rate_limit 429s blocked every signup
+    // from an exhausted IP in production). api.premiselabs.co is the hosted
+    // API (CORS allows premiselabs.co; same hardcode as welcome.html).
+    const SIGNUP_API_URL = "https://api.premiselabs.co";
+
     // In dev/local, fall back to local Supabase
     const isLocal = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
     const supabaseUrl = isLocal
@@ -428,7 +436,7 @@
     const AUTH_ERROR_MAP = [
       {
         codes: ["over_email_send_rate_limit", "over_request_rate_limit", "over_request_rate_limit_ip", "rate_limit"],
-        message: "Too many attempts from this network. Please wait about an hour and try again.",
+        message: "Too many attempts from this network. Please wait about an hour — or get an instant zero-email key with: tortoise signup",
       },
       {
         codes: ["email_address_invalid"],
@@ -470,7 +478,7 @@
         return "An account with this email already exists. Please sign in instead.";
       }
       if (msg.includes("email rate limit") || msg.includes("rate limit")) {
-        return "Too many attempts from this network. Please wait about an hour and try again.";
+        return "Too many attempts from this network. Please wait about an hour — or get an instant zero-email key with: tortoise signup";
       }
       if (msg.includes("provider is not enabled") || msg.includes("provider disabled") || msg.includes("unsupported provider")) {
         return "This sign-in option is temporarily unavailable. Try email instead.";
@@ -539,9 +547,92 @@
     }
 
     // ── Email/password sign up ─────────────────────────────────────────────
+    // #801: server-first — the hosted API creates the auth user via the
+    // GoTrue admin API with email_confirm=true (no confirmation email, no
+    // SMTP rate-limit bucket). Falls back to client-side auth.signUp when
+    // the API doesn't offer the endpoint (selfhost / dev).
+
+    async function serverSignup(email, password) {
+      try {
+        const resp = await fetch(SIGNUP_API_URL + "/v1/signup/email", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email: email, password: password }),
+        });
+        if (resp.status === 404 || resp.status === 503) return "unavailable";
+        if (resp.ok) return "created";
+        let payload = {};
+        try { payload = await resp.json(); } catch (e) { /* non-JSON error body */ }
+        if (resp.status === 409) return "already";
+        if (resp.status === 429) return "ratelimited";
+        if (resp.status === 422) {
+          const detail = (payload && payload.detail) || "Please check your email and password and try again.";
+          showError(typeof detail === "string" ? detail : "Please check your email and password and try again.");
+          return "handled";
+        }
+        return "error";
+      } catch (err) {
+        console.warn("server signup unreachable:", err);
+        return "unavailable";
+      }
+    }
+
+    async function signInAndGo(email, password) {
+      // The account is created confirmed server-side (#801) — sign in
+      // directly and skip the check-your-inbox step entirely.
+      const { data, error } = await supabaseClient.auth.signInWithPassword({
+        email: email,
+        password: password,
+      });
+      if (error) {
+        // #801 review P1: the account ALREADY exists (created server-side) —
+        // a sign-in failure here is transient (network/clock), not a bad
+        // password. Point the user at the sign-in page instead of dead-ending.
+        showError("Account created — but signing you in failed. Please sign in at /signin.html.");
+        setTimeout(function () { window.location.href = "/signin.html"; }, 1500);
+        return;
+      }
+      if (data?.user) pushSignupEvents(data.user);
+      window.location.href = WELCOME_URL;
+    }
+
+    // Analytics (#528) + X conversion (#736 Path A): client-side tracking —
+    // only when the consent banner granted it (consent.js defines
+    // window.consentState; window.posthog is a no-op stub until consent).
+    // Server-side account telemetry (tenant_provisioned etc.) is not gated
+    // by the banner. Wrapped in try/catch (#527): a stub/analytics throw
+    // must never abort the signup success path. Shared by the #801
+    // server-first path and the legacy client-side fallback.
+    function pushSignupEvents(user) {
+      try {
+        if (user && user.identities && user.identities.length > 0) {
+          if (window.posthog && window.consentState && window.consentState() === "granted") {
+            window.posthog.identify(user.id);
+            window.posthog.capture("user_signed_up", { provider: "email" });
+          }
+        }
+      } catch (analyticsErr) {
+        console.warn("analytics skipped:", analyticsErr);
+      }
+      try {
+        window.dataLayer = window.dataLayer || [];
+        window.dataLayer.push({
+          event: "x_signup",
+          email: user?.email || "",
+          conversion_id: user?.id || "",
+        });
+      } catch (dlErr) {
+        console.warn("dataLayer push skipped:", dlErr);
+      }
+    }
+
+    let signupInFlight = false;  // #801 review P1: double-submit guard
+
     async function signUpWithEmail(event) {
       event.preventDefault();
-      if (!supabaseClient) { showError("Auth not configured."); return; }
+      if (signupInFlight) return;
+      signupInFlight = true;
+      if (!supabaseClient) { showError("Auth not configured."); signupInFlight = false; return; }
       clearError();
       setLoading(true);
       try {
@@ -553,6 +644,27 @@
           return;
         }
 
+        // #801: server-first signup (bypasses the SMTP rate-limit bucket).
+        const outcome = await serverSignup(email, password);
+        if (outcome === "created") {
+          await signInAndGo(email, password);
+          return;
+        }
+        if (outcome === "already") {
+          showError("An account with this email already exists. Please sign in instead.");
+          return;
+        }
+        if (outcome === "ratelimited") {
+          showError("Too many attempts from this network. Please wait about an hour — or get an instant zero-email key with: tortoise signup");
+          return;
+        }
+        if (outcome !== "unavailable") {
+          // "handled" (message already shown) or "error"
+          if (outcome === "error") showError("Signup failed. Please try again in a moment.");
+          return;
+        }
+
+        // ── Legacy fallback: client-side auth.signUp (selfhost / dev) ──
         const { data, error } = await supabaseClient.auth.signUp({
           email: email,
           password: password,
@@ -572,35 +684,10 @@
           return;
         }
 
-        // Analytics (#528): user_signed_up — CLIENT tracking, only when the
-        // consent banner granted it (consent.js defines window.consentState;
-        // window.posthog is a no-op stub until consent). Server-side account
-        // telemetry (tenant_provisioned etc.) is not gated by the banner.
-        // Runs AFTER the identities check so existing accounts re-submitting
+        // Analytics + conversion tracking (see pushSignupEvents above). Runs
+        // AFTER the identities check so existing accounts re-submitting
         // (identities.length === 0) are not counted as new signups (#732).
-        // Wrapped in try/catch (#527): a stub/analytics throw must never
-        // abort the signup success path (dataLayer push / inbox state).
-        if (data?.user?.identities?.length > 0) {
-          try {
-            if (window.posthog && window.consentState && window.consentState() === "granted") {
-              window.posthog.identify(data.user.id);
-              window.posthog.capture("user_signed_up", { provider: "email" });
-            }
-          } catch (analyticsErr) {
-            console.warn("analytics skipped:", analyticsErr);
-          }
-        }
-
-        // X conversion event (client-side, Path A of #736): the dataLayer push is
-        // local-only; GTM loads ONLY on consent so the X tag fires only for
-        // consenting users. conversion_id = Supabase user id (dedup key).
-        // Optional chaining guards against a missing user so this never throws.
-        window.dataLayer = window.dataLayer || [];
-        window.dataLayer.push({
-          event: "x_signup",
-          email: data.user?.email || "",
-          conversion_id: data.user?.id || "",
-        });
+        pushSignupEvents(data.user);
 
         // Email confirmation ON: signUp returns no session — show the
         // check-your-inbox state with resend (E2E-8). The confirmation link
@@ -617,6 +704,7 @@
         console.error("signUpWithEmail:", err);
         showError(humanizeAuthError(err));
       } finally {
+        signupInFlight = false;
         setLoading(false);
       }
     }
