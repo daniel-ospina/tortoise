@@ -48,9 +48,6 @@ jobs:
     env:
       SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
       SUPABASE_PROJECT_REF: ybetwichurajbfswfeqa
-      # Full percent-encoded session-pooler connection string (port 5432):
-      #   postgresql://postgres.<ref>:<urlencoded-password>@aws-0-us-east-1.pooler.supabase.com:5432/postgres
-      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
     steps:
       - uses: actions/checkout@v4
       - uses: supabase/setup-cli@v1
@@ -61,16 +58,20 @@ jobs:
       # Flip gating (#771): dispatch-only, so a routine supabase/** push can
       # never deploy the tenant-provision Edge Function ahead of the app
       # flip (auth-blackout window). See the flip sequence above.
+      - name: Link project
+        run: supabase link --project-ref "$SUPABASE_PROJECT_REF"
       - name: Apply migrations
-        if: github.event_name == 'workflow_dispatch' && env.SUPABASE_ACCESS_TOKEN != '' && env.SUPABASE_DB_URL != ''
-        run: supabase db push --db-url "$SUPABASE_DB_URL"
+        # Token-based push (login role) — no DB password secret needed.
+        # Proven 2026-08-10 against the premise-labs project.
+        if: github.event_name == 'workflow_dispatch' && env.SUPABASE_ACCESS_TOKEN != ''
+        run: supabase db push --linked --include-all
       - name: Deploy waitlist-subscribe edge function
-        if: github.event_name == 'workflow_dispatch' && env.SUPABASE_ACCESS_TOKEN != '' && env.SUPABASE_DB_URL != ''
+        if: github.event_name == 'workflow_dispatch' && env.SUPABASE_ACCESS_TOKEN != ''
         run: |
           supabase functions deploy waitlist-subscribe \
             --project-ref "$SUPABASE_PROJECT_REF" --no-verify-jwt
       - name: Deploy tenant-provision edge function
-        if: github.event_name == 'workflow_dispatch' && env.SUPABASE_ACCESS_TOKEN != '' && env.SUPABASE_DB_URL != ''
+        if: github.event_name == 'workflow_dispatch' && env.SUPABASE_ACCESS_TOKEN != ''
         # --no-verify-jwt is REQUIRED: the after_user_created auth hook sends
         # no user JWT. Caller auth is enforced inside the function (#802) via
         # the hook's Standard-Webhooks signature (AUTH_HOOK_SECRET secret)
