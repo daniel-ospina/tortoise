@@ -15,6 +15,11 @@ the read-side seam the hosted auth paths use AFTER the flip:
   graph_size_cap); fields the 0006 schema does not store (max_points →
   graph_size_cap, max_api_keys/max_sessions) fall back to
   ``tortoise.pricing.tier_limits`` defaults, mirroring the registry path.
+- Invitations (plan Task 4): mint/accept/rescind live here too — pending
+  invitations are redeemed by plaintext token via indexed lookup_hash
+  (SHA-256(pepper + token)), accept creates the real team_memberships row
+  with the INVITED role, and dedup (team, email) + 7-day expiry are
+  enforced (0008 partial unique index).
 - Onboarding/GitHub (plan Task 6): onboarding_state (jsonb) + email are
   read/patched on ``teams``; github_token_enc/github_org are read/written
   ONLY through the service-role seam here — the column is REVOKEd from
@@ -420,6 +425,306 @@ def revoke_api_key(cp, key_id: str, now: str | None = None) -> None:
         method="PATCH",
         filters=[("id", "eq", key_id)],
         json_body={"revoked_at": now or datetime.now(timezone.utc).isoformat()},
+    )
+
+
+# ── Invitations (plan Task 4: mint / accept / rescind via lookup_hash) ────
+
+class InvitationError(Exception):
+    """Semantic invitation rejection (dedup, expiry, single-use, role).
+
+    Carries an HTTP status so hosted_api can translate directly (409 for
+    dedup/already-member, 403 for role/email mismatch, 400 for
+    invalid/expired/used/revoked, 404 unknown, 422 bad role). Deliberately
+    NOT a RuntimeError: these are expected client outcomes, not control-
+    plane failures — the fail-closed contract (query errors → RuntimeError
+    → 500) is untouched.
+    """
+
+    def __init__(self, message: str, status: int = 400):
+        super().__init__(message)
+        self.status = status
+
+
+def invitation_mint(cp, team_id: str, email: str, role: str,
+                    invited_by: str, expires_days: int = 7) -> dict:
+    """Create a pending invitations row; returns the plaintext token ONCE.
+
+    The token is minted here and stored only as ``lookup_hash`` (SHA-256(pepper
+    + token), plan P1-1) — the hash is computed in-process via
+    ``tortoise.auth.lookup_hash``; the plaintext is returned to the caller
+    exactly once. Acceptance is an O(1) indexed lookup_hash match, no scan.
+
+    Dedup: the 0008 partial unique index (team_id, email) WHERE
+    status='pending' — a duplicate PENDING invite raises InvitationError(409);
+    accepted/revoked invites don't block a fresh re-invite.
+
+    Role: 0008 CHECK closes the enum to 'admin' | 'member' (owner is not
+    invitable — single-owner model, D7 #574).
+    """
+    import uuid
+    from datetime import datetime, timedelta
+    from tortoise.auth import lookup_hash as _lookup_hash
+
+    role = (role or "member").strip().lower()
+    email = (email or "").strip().lower()
+    if not team_id or not email or "@" not in email:
+        raise InvitationError("team_id and valid email required", status=422)
+    if role not in ("admin", "member"):
+        raise InvitationError("role must be 'admin' or 'member'", status=422)
+
+    dup = cp.query(
+        "invitations",
+        select=["id"],
+        filters=[("team_id", "eq", team_id), ("email", "eq", email),
+                 ("status", "eq", "pending")],
+    )
+    if dup:
+        raise InvitationError(
+            f"Pending invitation already exists for {email} in this team",
+            status=409,
+        )
+
+    token = str(uuid.uuid4())
+    iid = uuid.uuid4().hex[:26]
+    now = datetime.now(timezone.utc)
+    expires_at = (now + timedelta(days=expires_days)).isoformat()
+    try:
+        cp.query(
+            "invitations",
+            method="POST",
+            json_body={
+                "id": iid,
+                "team_id": team_id,
+                "lookup_hash": _lookup_hash(token),
+                "role": role,
+                "invited_by": invited_by,
+                "email": email,
+                "status": "pending",
+                "expires_at": expires_at,
+            },
+        )
+    except RuntimeError as e:
+        # Concurrent duplicate mint: the partial unique index (team_id, email)
+        # WHERE status='pending' rejects the loser with PostgREST 409 — map
+        # that to the documented InvitationError(409) instead of a 500
+        # (code-review P2, PR #864). The pre-check above is a friendly
+        # fast-path; the index is the authoritative dedup.
+        if "HTTP 409" in str(e):
+            raise InvitationError(
+                f"Pending invitation already exists for {email} in this team",
+                status=409,
+            ) from e
+        raise
+    return {"id": iid, "email": email, "role": role,
+            "expires_at": expires_at, "status": "pending",
+            "token": token}
+
+
+def invitation_accept(cp, token: str, user_id: str,
+                      user_email: str | None = None) -> dict:
+    """Accept a pending invitation by plaintext token (lookup_hash verify).
+
+    Atomic single-use (E2E-3): the invitation is PATCHed to status='accepted'
+    with a conditional ``WHERE status='pending'`` filter, then re-read to
+    verify — a concurrent accept loses the race and the verify fails. On
+    success the REAL team_memberships row is created with the INVITED role
+    (O/I/T: accepted membership carries the invited role), status='active'.
+
+    Rejects (InvitationError): unknown token (400), expired (400), used /
+    already accepted (400), revoked (400), already an active member (409),
+    JWT email vs invite email mismatch when the JWT carries an email (403).
+
+    A previously removed/invited membership row for (user, team) is
+    resurrected in place (registry MERGE semantics) rather than INSERTed —
+    uq_member_team (user_id, team_id) would reject a duplicate row.
+    """
+    import uuid
+    from tortoise.auth import lookup_hash as _lookup_hash
+
+    now = datetime.now(timezone.utc)
+    h = _lookup_hash(token)
+    rows = cp.query(
+        "invitations",
+        select=["id", "team_id", "email", "role", "status", "expires_at"],
+        filters=[("lookup_hash", "eq", h)],
+    )
+    if not rows:
+        raise InvitationError("Invalid or expired invite token")
+    inv = rows[0]
+
+    status = inv.get("status") or "pending"
+    if status != "pending":
+        if status == "accepted":
+            raise InvitationError("Invitation has already been accepted")
+        if status == "revoked":
+            raise InvitationError("Invitation has been revoked")
+        raise InvitationError("Invitation is not pending")
+    exp = _parse_ts(inv.get("expires_at"))
+    if exp is not None and exp <= now:
+        raise InvitationError("Invite token expired")
+
+    if user_email and user_email.strip().lower() != (inv.get("email") or "").lower():
+        # Invitee must be the invitee's account (registry-path guard, #574).
+        raise InvitationError("Invite email does not match this account",
+                              status=403)
+
+    # Existing membership for (user, team) — any status.
+    existing = cp.query(
+        "team_memberships",
+        select=["id", "status"],
+        filters=[("user_id", "eq", user_id), ("team_id", "eq", inv["team_id"])],
+    )
+    if existing and existing[0].get("status") == "active":
+        raise InvitationError("Already a member of this team", status=409)
+
+    # Quota/tier gate (code-review P2, PR #864): the registry accept path
+    # routes through membership_create → max_users gate → 402 on quota. An
+    # invite minted on Team tier and accepted after a downgrade to free must
+    # not exceed the free tier's 1-user limit — mirror the gate here.
+    team = team_by_id(cp, inv["team_id"])
+    if team is None:
+        raise InvitationError("Team no longer exists", status=404)
+    from tortoise.pricing import tier_limits
+    tier = team.get("tier") or "free"
+    lim = tier_limits(tier)
+    max_users = team.get("max_users")
+    if max_users is None:
+        max_users = lim.get("max_users_per_team")
+    if max_users is not None:
+        member_count = cp.query(
+            "team_memberships",
+            select=["id"],
+            filters=[("team_id", "eq", inv["team_id"]),
+                     ("status", "eq", "active")],
+        )
+        if len(member_count) >= int(max_users):
+            raise InvitationError(
+                "Team member limit reached", status=402)
+
+    # Single-use: conditional PATCH (status='pending' filter) then verify.
+    cp.query(
+        "invitations",
+        method="PATCH",
+        filters=[("id", "eq", inv["id"]), ("status", "eq", "pending")],
+        json_body={"status": "accepted", "accepted_at": now.isoformat()},
+    )
+    check = cp.query(
+        "invitations", select=["status"], filters=[("id", "eq", inv["id"])],
+    )
+    if not check or check[0].get("status") != "accepted":
+        # Lost the accept race — the invite was consumed in between.
+        raise InvitationError("Invitation has already been accepted")
+
+    membership_id = uuid.uuid4().hex[:26]
+    try:
+        if existing:
+            cp.query(
+                "team_memberships",
+                method="PATCH",
+                filters=[("id", "eq", existing[0]["id"])],
+                json_body={"role": inv["role"], "status": "active",
+                           "invited_email": inv.get("email"),
+                           "updated_at": now.isoformat()},
+            )
+        else:
+            cp.query(
+                "team_memberships",
+                method="POST",
+                json_body={
+                    "id": membership_id,
+                    "user_id": user_id,
+                    "team_id": inv["team_id"],
+                    # 0001 NOT NULL columns; key_hash='pending' is the
+                    # reconcilable-placeholder sentinel (an invited member has no
+                    # key of their own — session keys live in api_keys).
+                    "team_name": (team or {}).get("name") or "",
+                    "key_hash": "pending",
+                    "graph_name": (team or {}).get("graph_name") or "",
+                    "role": inv["role"],  # invited role preserved (O/I/T)
+                    "status": "active",
+                    "invited_email": inv.get("email"),
+                },
+            )
+    except Exception:
+        # Compensating write (code-review P2, PR #864): the invite was already
+        # consumed above — if the membership write fails (transient
+        # control-plane error), roll the invite back to pending so the invitee
+        # can retry instead of burning the invite permanently. Best-effort:
+        # if THIS rollback also fails, the original error propagates (500) and
+        # the invite stays consumed — an operator can re-mint.
+        try:
+            cp.query(
+                "invitations",
+                method="PATCH",
+                filters=[("id", "eq", inv["id"])],
+                json_body={"status": "pending", "accepted_at": None},
+            )
+        except Exception:
+            pass
+        raise
+    return {"team_id": inv["team_id"], "role": inv["role"]}
+
+
+def invitation_rescind(cp, invitation_id: str, team_id: str,
+                       actor_user_id: str) -> dict:
+    """Owner/admin rescind — set status='revoked' (soft delete).
+
+    Scoped to the actor's team (an invite id from another team is a 404).
+    Idempotent for already-revoked invites (mirrors the registry SDK); an
+    ACCEPTED (used) invite cannot be rescinded — the membership already
+    exists.
+    """
+    mem = membership_for_user_team(cp, actor_user_id, team_id)
+    if not mem or mem["role"] not in ("owner", "admin"):
+        raise InvitationError("Requires owner or admin role in team", status=403)
+
+    rows = cp.query(
+        "invitations",
+        select=["id", "status", "team_id"],
+        filters=[("id", "eq", invitation_id), ("team_id", "eq", team_id)],
+    )
+    if not rows:
+        raise InvitationError("Invitation not found", status=404)
+    inv = rows[0]
+    if inv.get("status") == "accepted":
+        raise InvitationError(
+            "Invitation already accepted — cannot rescind", status=409)
+    if inv.get("status") == "revoked":
+        return {"revoked": True, "already": True,
+                "invitation_id": invitation_id}
+    # Status-conditional PATCH + re-read (code-review P2, PR #864): a
+    # concurrent accept between our read and this PATCH must win — rescinding
+    # a just-consumed invite would leave a membership with an invite that
+    # says revoked. Only a row still 'pending' flips; otherwise 409.
+    cp.query(
+        "invitations",
+        method="PATCH",
+        filters=[("id", "eq", invitation_id), ("status", "eq", "pending")],
+        json_body={"status": "revoked"},
+    )
+    check = cp.query(
+        "invitations", select=["status"], filters=[("id", "eq", invitation_id)],
+    )
+    if not check or check[0].get("status") != "revoked":
+        raise InvitationError(
+            "Invitation no longer pending — cannot rescind", status=409)
+    return {"revoked": True, "invitation_id": invitation_id}
+
+
+def pending_invitations(cp, team_id: str) -> list[dict]:
+    """Pending (unused) invites for a team — dashboard surface, oldest first.
+
+    The actionable set: only status='pending' rows are returned (consumed /
+    revoked invites are excluded; list_members shows the resulting
+    memberships).
+    """
+    return cp.query(
+        "invitations",
+        select=["id", "team_id", "role", "invited_by", "email", "status",
+                "expires_at", "created_at"],
+        filters=[("team_id", "eq", team_id), ("status", "eq", "pending")],
+        order="created_at",
     )
 
 
