@@ -503,6 +503,7 @@
     const RATE_LIMIT_TIER_KEY = "tortoise_signup_rate_limit_tier";  // "email" | "short" — copy must not decay with remaining time
     let rateLimitTimer = null;
     let rateLimitUntil = 0;      // in-memory mirror — the lockout still holds when sessionStorage is unavailable (#801 code-review)
+    let rateLimitTier = "short"; // in-memory tier mirror — copy stays correct when storage is cleared mid-lockout (P4)
     let resendCooldownUntil = 0; // #527 60s resend cooldown (shared bucket, #801)
 
     function isEmailBucketError(error) {
@@ -539,16 +540,15 @@
       // Never-shrink invariant: a later 60s (or shorter) lockout must never
       // truncate an active longer lockout (both tiers share one key).
       rateLimitUntil = Math.max(rateLimitUntil, Date.now() + ms);
+      // Monotonic tier: the copy is pinned at set-time (a 1h lockout must
+      // keep its "about an hour" copy for its whole life, never decaying
+      // into the minute copy as time passes — code-review P2).
+      rateLimitTier = (rateLimitTier === "email" || isEmailBucketError(error)) ? "email" : "short";
       try {
         const existing = parseInt(sessionStorage.getItem(RATE_LIMIT_KEY) || "0", 10);
         const until = Math.max(Number.isFinite(existing) ? existing : 0, rateLimitUntil);
         sessionStorage.setItem(RATE_LIMIT_KEY, String(until));
-        // Monotonic tier: the copy is pinned at set-time (a 1h lockout must
-        // keep its "about an hour" copy for its whole life, never decaying
-        // into the minute copy as time passes — code-review P2).
-        const existingTier = sessionStorage.getItem(RATE_LIMIT_TIER_KEY);
-        const tier = (existingTier === "email" || isEmailBucketError(error)) ? "email" : "short";
-        sessionStorage.setItem(RATE_LIMIT_TIER_KEY, tier);
+        sessionStorage.setItem(RATE_LIMIT_TIER_KEY, rateLimitTier);
       } catch (e) {}
       applyRateLimitLockout();
     }
@@ -559,7 +559,7 @@
     // time) — deriving it from remaining time would decay the copy mid-lockout.
     function rateLimitMessage() {
       if (rateLimitRemainingMs() <= 0) return "";
-      let tier = "short";
+      let tier = rateLimitTier;
       try { tier = sessionStorage.getItem(RATE_LIMIT_TIER_KEY) || tier; } catch (e) {}
       if (tier === "email") {
         return "Too many attempts from this network. Please wait about an hour and try again.";
@@ -589,6 +589,7 @@
           // Lockout over: drop the stale rate-limit message + tier so the
           // form reads clean (code-review P4).
           clearError();
+          rateLimitTier = "short";
           try { sessionStorage.removeItem(RATE_LIMIT_TIER_KEY); } catch (e) {}
           if (rateLimitTimer) { clearInterval(rateLimitTimer); rateLimitTimer = null; }
           return;
@@ -598,7 +599,12 @@
           + String(Math.floor(totalSec / 60)).padStart(2, "0") + ":"
           + String(totalSec % 60).padStart(2, "0");
         if (btn) {
-          if (!btn.dataset.originalLabel) btn.dataset.originalLabel = btn.textContent;
+          // P2 hardening: never capture an empty label (setLoading's spinner
+          // swaps innerHTML → textContent "" mid-request). Guard on trimmed
+          // truthiness so the label restore can never blank the button.
+          if (!btn.dataset.originalLabel && btn.textContent.trim()) {
+            btn.dataset.originalLabel = btn.textContent;
+          }
           btn.textContent = label;
           btn.disabled = true;
         }
@@ -667,6 +673,10 @@
       } finally {
         setLoading(false);
         applyRateLimitLockout();   // re-apply the lockout state (#801)
+        // P4: signInWithProvider's clearError() wiped the lockout explanation
+        // — restore it when a lockout is still active so the user knows why
+        // the email form is disabled.
+        if (rateLimitRemainingMs() > 0) showError(rateLimitMessage());
       }
     }
 
