@@ -4,19 +4,19 @@ type: engineering
 domain: platform
 doc_status: live
 subjects.team: epistemic-team
-created: 2026-08-09
+created: 2026-08-07
 aboutSubjects: tortoise
 aboutObjects: tortoise, search-engine, topic-summarization, ontology, falkordb
 ---
 
 # Prior-Art Screening: Epistemic Topic Summarization (Settled vs Contested Retrieval)
 
-**Date:** 2026-08-09
+**Date:** 2026-08-07 (screening executed 2026-08-09)
 **Status:** Complete — screening memo; formal patent search still mandatory before filing
 **Type:** Prior-art / novelty screening (patent-adjacent)
 **Issue:** daniel-ospina/tortoise#598
 **Screened invention:** tortoise#592 "Epistemic topic summarization — settled vs contested structure" (shipped, merged via PR #816)
-**Sources:** 4 internal (search_engine.py, topic_summarization.py, ep.py, git history: patent drafts v1/v2) + 20 external (Perplexity ×12, Exa ×1 semantic sweep, arXiv/W3C direct)
+**Sources:** 8 internal code/docs (search_engine.py, topic_summarization.py, ep.py, sdk.py, mcp_server.py, hosted_api.py, selfhost_api.py, docs/ONTOLOGY.md) + git history (patent drafts v1/v2) + 20 external (Perplexity ×12, Exa ×1 semantic sweep, arXiv/W3C direct)
 
 ---
 
@@ -79,8 +79,8 @@ Verified by reading the shipped code on origin/main (bb585bb):
 
 ### 4.1 Probabilistic abstract argumentation (Hunter, Thimm) — CLOSEST CONCEPTUAL OVERLAP **[HIGH — multiple independent sources: Perplexity + UCL/mthimm primary PDFs]**
 
-- **Epistemic approach to probabilistic argumentation** (Hunter & Thimm, KR 2014 "Probabilistic Argumentation with Epistemic Extensions"): probabilities as *degrees of belief* in arguments; an epistemic extension = arguments with P(A) > 0.5; rationality constraints — e.g. if (a,b) is an attack and P(a) > 0.5 then P(b) ≤ 0.5 — a constraint semantically equivalent to a NAND factor.
-- **Probabilities on extensions** (Thimm, JAIR 2017 survey): constellations vs epistemic families.
+- **Epistemic approach to probabilistic argumentation** (Hunter & Thimm, DARe@ECAI 2014, arXiv:1405.3376): probabilities as *degrees of belief* in arguments; an epistemic extension = arguments with P(A) > 0.5; rationality constraints — e.g. if (a,b) is an attack and P(a) > 0.5 then P(b) ≤ 0.5 — a constraint semantically equivalent to a NAND factor.
+- **Probabilities on extensions** (Thimm, Baroni, Giacomin & Vicig, TAFA 2017, Springer LNCS); the constellations-vs-epistemic taxonomy is from Hunter & Thimm's "Probabilistic Argumentation" chapter (Handbook of Formal Argumentation, 2018).
 - **Overlap:** graph-propagated belief over attack/support relations; threshold-based classification (P > 0.5). 
 - **Gap:** scalar probabilities (point beliefs), **no Beta distributions, no variance (second-order uncertainty), no EP**, no per-claim settled/contested *zones*, no retrieval/topic scoping.
 
@@ -91,7 +91,7 @@ Verified by reading the shipped code on origin/main (bb585bb):
 - **Gap:** constraints are solved/aggregated (typically via non-linear constraint satisfaction or fixed-point iteration), **not EP message passing**; beliefs are scalars, **no Beta posteriors, no variance signal, no variance-threshold classification**; no topic-scoped retrieval primitive; no operator lifecycle.
 - **Filing implication:** claims must not be drafted at "propagate belief through support/attack graph" — that reads on epistemic graphs. Anchor on EP + Beta variance + zone classification.
 
-### 4.3 Nikooroo & Engel — "Belief Graphs with Reasoning Zones" — CLOSEST ON THE ZONE CONCEPT **[HIGH — arXiv 2510.10042 (Oct 2025) + 2508.03465 (Aug 2025), both fetched in full]**
+### 4.3 Nikooroo & Engel — "Belief Graphs with Reasoning Zones" — CLOSEST ON THE ZONE CONCEPT **[HIGH — arXiv 2510.10042 (Oct 2025, Nikooroo & Engel) + 2508.03465 (Aug 2025, Nikooroo alone), both fetched in full]**
 
 - Reasoning zones = **confidence-thresholded, structurally balanced subgraphs** on which classical inference is "safe" despite global contradictions; built by seeded thresholding + Harary-style parity (signed 2-coloring) balance test + greedy repair; contractive damped propagation guarantees a unique fixed point; shock updates re-localize zones.
 - Separates credibility (external trust) from confidence (structure-induced).
