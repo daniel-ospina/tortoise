@@ -387,3 +387,92 @@ def test_baseline_prior_preserved_posterior_observable():
     assert abs(conf["mean"] - pt["confidence"]) < 1e-4, \
         f"confidence {pt['confidence']} != posterior {conf['mean']}"
     sdk.close()
+
+
+# ── #855 regression: combined cascade + n-ary conservation ──────────────────
+
+def test_cascade_magnitude_and_nary_conservation_regression():
+    """#855 regression: NAND→IMPL cascade propagates at correct magnitude
+    AND #853 n-ary conservation is not re-broken by the phi_impl change.
+
+    Pre-fix (main): c1_drop ~0.001 (effectively zero), b_drop ~0.000.
+    Post-fix (#852 + #855): c1_drop 0.015–0.035, b_drop 0.003–0.012.
+    The upper bound prevents drift-inflated thresholds from masking
+    regressions (old thresholds >0.05 were drift artifacts per #844).
+
+    The n-ary conservation guard: test_ep_nary_falsification.py already
+    validates that NAND n-ary decomposition (phi_nand, unchanged) respects
+    weight conservation and input-order invariance. This test confirms
+    that the changed phi_impl does not cross-contaminate n-ary semantics
+    — IMPL n-ary (source→targets only) and NAND n-ary both use their own
+    phi functions independently.
+    """
+    # Build standard cascade graph: A→C1, B→C1, B→C2 + NAND attacking A.
+    # C1 shares A's evidence — when A is contradicted, C1 must drop
+    # measurably (the cascade). C2 is the control (should stay isolated).
+    sdk = fresh_sdk()
+    a = make_point(sdk, "A"); b = make_point(sdk, "B")
+    c1 = make_point(sdk, "C1"); c2 = make_point(sdk, "C2")
+    make_operator(sdk, a["id"], c1["id"], "IMPL")
+    make_operator(sdk, b["id"], c1["id"], "IMPL")
+    make_operator(sdk, b["id"], c2["id"], "IMPL")
+    for pt in (a, b):
+        sdk.set_point_baseline(pt["id"], *TIER_MAP["T4"])
+    nand = make_point(sdk, "NAND"); sdk.set_point_baseline(nand["id"], *TIER_MAP["T0"])
+    make_operator(sdk, nand["id"], a["id"], "NAND")
+
+    r = run_ep(sdk)
+    t4_mean = TIER_MAP["T4"][0] / (TIER_MAP["T4"][0] + TIER_MAP["T4"][1])  # 1.1/2.1 ≈ 0.5238
+    c1_drop = t4_mean - get_conf(r, c1["id"])
+    b_drop = t4_mean - get_conf(r, b["id"])
+    c2_drop = t4_mean - get_conf(r, c2["id"])
+    sdk.close()
+
+    # Cascade: C1 must drop measurably (lost A's support).
+    assert 0.015 <= c1_drop <= 0.035, \
+        f"C1 cascade outside expected band: {c1_drop:.4f}"
+    # Feedback: B receives ~0.006 from bidirectional IMPL with weakened C1.
+    assert 0.003 <= b_drop <= 0.012, \
+        f"B feedback outside expected band: {b_drop:.4f}"
+    # Isolation: C2 shares only B, its confidence is nearly unchanged.
+    assert c2_drop < 0.01, \
+        f"C2 should be isolated: drop={c2_drop:.4f}"
+
+    # N-ary conservation guard: run the key n-ary check inline to confirm
+    # the phi_impl change does not affect NAND n-ary (phi_nand is separate).
+    # Validates #853 is not re-broken at the new NAND base weight (8.0).
+    from tortoise.weights import NAND_BASE_WEIGHT
+    assert NAND_BASE_WEIGHT == 8.0, \
+        f"NAND_BASE_WEIGHT changed: {NAND_BASE_WEIGHT} — n-ary conservation may need recalibration"
+
+    # Verify the n-ary conservation at w=8.0: a 4-input NAND must conserve
+    # total pull vs binary pair at same weight. Uses the same pattern as
+    # test_ep_nary_falsification.test_nary_nand_weight_not_overcounted.
+    import types
+    from tortoise.ep import TortoiseEP
+
+    def _make_ep_local(nodes):
+        stub = types.SimpleNamespace(
+            g=types.SimpleNamespace(query=lambda *a, **k: types.SimpleNamespace(result_set=[]))
+        )
+        ep = TortoiseEP(stub, damping=1.0, max_iter=50, tol=1e-4, n_quad=8)
+        ep._node_cache = {cid: (1.0, 1.0) for cid in nodes}
+        ep._msg_cache = {}
+        return ep
+
+    def _total_local(ep):
+        return sum(abs(v[0]) + abs(v[1]) for v in ep._msg_cache.values())
+
+    w = NAND_BASE_WEIGHT  # 8.0
+    ep_bin = _make_ep_local(["a", "b"])
+    ep_bin._update_factor("op", "NAND", ["a", "b"], weight=w)
+    ep_nary = _make_ep_local(["a", "b", "c", "d"])
+    ep_nary._update_factor("op", "NAND", ["a", "b", "c", "d"], weight=w)
+    total_ratio = _total_local(ep_nary) / _total_local(ep_bin)
+    assert 0.90 <= total_ratio <= 1.10, \
+        f"n-ary conservation broken at w={w}: ratio={total_ratio:.4f}"
+    # Per-claim: n=4 → each claim gets 2/4 = 0.5× the binary per-claim pull.
+    msg_bin = abs(ep_bin._msg_cache[("op", "a", "NAND")][0]) + abs(ep_bin._msg_cache[("op", "a", "NAND")][1])
+    msg_nary = abs(ep_nary._msg_cache[("op", "a", "NAND")][0]) + abs(ep_nary._msg_cache[("op", "a", "NAND")][1])
+    assert 0.40 * msg_bin <= msg_nary <= 0.65 * msg_bin, \
+        f"per-claim nary pull drifted at w={w}: {msg_nary:.4f} vs binary {msg_bin:.4f}"
