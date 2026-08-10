@@ -545,7 +545,16 @@ class TortoiseEP:
             self.g.query(
                 "UNWIND $params AS p "
                 "MATCH (n:Point {id: p.id}) "
-                "SET n.ep_alpha = p.a, n.ep_beta = p.b",
+                # #852 round-4: mirror _flush_cache's keep_prior semantics —
+                # explicit baselines (baseline_set=true) are IMMUTABLE evidence
+                # priors; run-level evidence must not clobber them. Also clear
+                # any stale posterior so a changed prior is immediately
+                # observable (a successful run re-flushes posteriors).
+                "SET n.ep_alpha = CASE WHEN coalesce(n.baseline_set,false) "
+                "                    THEN n.ep_alpha ELSE p.a END, "
+                "    n.ep_beta  = CASE WHEN coalesce(n.baseline_set,false) "
+                "                    THEN n.ep_beta  ELSE p.b END, "
+                "    n.posterior_alpha = null, n.posterior_beta = null",
                 params={"params": params_list},
             )
 

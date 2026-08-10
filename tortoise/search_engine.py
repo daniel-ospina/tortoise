@@ -692,8 +692,8 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
             "    THEN toFloat(nand_count) / (impl_count + nand_count) "
             "    ELSE 0.0 "
             "  END AS contention, "
-            "  coalesce(n.ep_alpha, 1.0) AS alpha, coalesce(n.ep_beta, 1.0) AS beta, "
-            "  n.ep_alpha IS NOT NULL AS has_ep "
+            "  coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS alpha, coalesce(n.posterior_beta, n.ep_beta, 1.0) AS beta, "
+            "  (n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL) AS has_ep "
         )
         rows = graph.query(cypher, params={"ids": point_ids}).result_set
 
