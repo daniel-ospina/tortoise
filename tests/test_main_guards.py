@@ -35,6 +35,27 @@ def test_m0_main():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def _run_guard_subprocess(argv, cwd, timeout=60):
+    """Run a __main__-guard subprocess; retry once on failure.
+
+    The subprocess spawns a fresh redislite server for --db paths; under a
+    loaded runner (CI fast job mid-suite, concurrent suites locally) the
+    spawn can exceed a tight timeout and the crash is otherwise invisible
+    (the tests only asserted the output file). Retry once, surface stderr
+    on failure (#493).
+    """
+    last = None
+    for _ in range(2):
+        proc = subprocess.run(argv, cwd=cwd, capture_output=True,
+                              text=True, timeout=timeout)
+        if proc.returncode == 0:
+            return proc
+        last = proc
+    raise AssertionError(
+        f"guard subprocess failed (rc={last.returncode}):\n"
+        f"stdout: {last.stdout[-500:]}\nstderr: {last.stderr[-500:]}")
+
+
 def test_m0_main_guard():
     """Hit the __main__ guard by running m0.py as a script."""
     d = tempfile.mkdtemp(prefix="tortoise_m0g_")
@@ -47,11 +68,10 @@ def test_m0_main_guard():
             f.write("Alice: This is a test because we need coverage.\n"
                     "Bob: But however we should verify everything.\n")
 
-        subprocess.run(
+        _run_guard_subprocess(
             [sys.executable, "-m", "tortoise.m0", transcript,
              "--out", out_path, "--log", log_path],
             cwd=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."),
-            capture_output=True, timeout=30
         )
         assert os.path.exists(out_path)
         print("PASS test_m0_main_guard")
@@ -104,14 +124,14 @@ def test_ingest_main_guard():
             f.write("Alice: This is a test because we need to verify.\n"
                     "Bob: But however the coverage needs improvement.\n")
 
-        subprocess.run(
+        _run_guard_subprocess(
             [sys.executable, "-m", "tortoise.ingest", transcript,
              "--point-model", "mock:cheap",
              "--relation-model", "mock:reason",
              "--out", out_path, "--log", log_path, "--db", db_path],
             cwd=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."),
-            capture_output=True, timeout=30
         )
+
         assert os.path.exists(out_path)
         print("PASS test_ingest_main_guard")
     finally:
