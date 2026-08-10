@@ -12,14 +12,23 @@ from tortoise.exceptions import CalibrationError
 
 _CAL_URI = "docker://:falkordb@localhost:6379/tortoise_test_calibration"
 FALKORDB_AVAILABLE = False
+_old_uri = os.environ.get("TORTOISE_DB_URI")
 try:
-    os.environ.setdefault("TORTOISE_DB_URI", _CAL_URI)
+    os.environ["TORTOISE_DB_URI"] = _CAL_URI
     _probe_sdk = TortoiseSDK()
     _probe_sdk._get_proj().g.query("RETURN 1")
     _probe_sdk.close()
     FALKORDB_AVAILABLE = True
 except Exception:
-    pass
+    FALKORDB_AVAILABLE = False
+finally:
+    # Never leak the docker URI into the rest of the suite (#493: a
+    # module-level setdefault on a fresh env poisoned every later test —
+    # TortoiseSDK(namespace=...) then connected to localhost:6379).
+    if _old_uri is not None:
+        os.environ["TORTOISE_DB_URI"] = _old_uri
+    else:
+        os.environ.pop("TORTOISE_DB_URI", None)
 
 pytestmark = pytest.mark.skipif(
     not FALKORDB_AVAILABLE, reason="Live FalkorDB (Docker) not available")

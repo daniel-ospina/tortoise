@@ -109,13 +109,24 @@ def _get_sdk():
     if _db_uri.startswith(("docker://", "redis://", "rediss://")):
         from tortoise.projection import FalkorProjection
         import time as _time
-        _sdk = TortoiseSDK()
-        # Retry Docker connection 3x with backoff; exit on exhaustion (#25 P3a, #32)
+        # Retry Docker connection 3x with backoff; exit on exhaustion (#25 P3a, #32).
+        # _sdk is cached ONLY on success — assigning before the retry loop left a
+        # poisoned docker-URI SDK cached when the connection failed and a caller
+        # caught the SystemExit, breaking every later tool call (localhost:6379
+        # connection refused across the whole suite, #493).
         for attempt in range(3):
             try:
-                _sdk._proj = FalkorProjection.from_uri(_db_uri)
+                # Connect FIRST (FalkorProjection.from_uri probes eagerly), then
+                # commit to the global — TortoiseSDK() is lazy and never
+                # connects, so assigning it before from_uri left a poisoned
+                # docker-URI SDK cached when the connection failed and a caller
+                # caught the SystemExit, breaking every later tool call
+                # (localhost:6379 connection refused across the whole suite, #493).
+                _proj = FalkorProjection.from_uri(_db_uri)
                 if attempt > 0:
                     _log.warning("Docker connection succeeded on attempt %d", attempt + 1)
+                _sdk = TortoiseSDK()
+                _sdk._proj = _proj
                 break
             except Exception as e:
                 if attempt < 2:

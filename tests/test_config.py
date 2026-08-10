@@ -297,3 +297,9 @@ class TestGetSdkEnvPrecedence:
         _load_dotenv(str(env_file))
 
         assert os.environ["TORTOISE_DB_URI"] == "docker://:@dotenv:6379/tortoise"
+        # _load_dotenv writes directly to os.environ — invisible to monkeypatch
+        # (the var was already unset at delenv time, so no restore was
+        # recorded; a post-hoc delenv would even RESTORE the leaked value).
+        # Pop it directly so the docker:// URI never leaks into the rest of
+        # the suite (#493: it poisoned every later TortoiseSDK()).
+        os.environ.pop("TORTOISE_DB_URI", None)
