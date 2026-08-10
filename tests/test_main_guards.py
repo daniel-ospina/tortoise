@@ -58,9 +58,29 @@ def _run_guard_subprocess(argv, cwd, timeout=60):
         if proc.returncode == 0:
             return proc
         last = proc
+    diag = ""
+    try:
+        d = subprocess.run(
+            [sys.executable, "-c", (
+                "import sys, os; "
+                "print('PYTHONPATH=', sys.path[:5]); "
+                "import tortoise; "
+                "print('tortoise.file=', tortoise.__file__); "
+                "print('tortoise.path=', list(tortoise.__path__)); "
+                "p=os.path.join(os.path.dirname(tortoise.__file__),'config.py'); "
+                "print('config.py exists=', os.path.exists(p)); "
+                "import importlib.util as u; "
+                "s=u.find_spec('tortoise.config'); "
+                "print('config.spec.origin=', s.origin if s else None, 'loc=', s.submodule_search_locations if s else None)"
+            )],
+            cwd=cwd, capture_output=True, text=True, timeout=30, env=env,
+        )
+        diag = f"\nDIAG (rc={d.returncode}): {d.stdout[-700:]} {d.stderr[-300:]}"
+    except Exception as e:
+        diag = f"\nDIAG failed: {e}"
     raise AssertionError(
         f"guard subprocess failed (rc={last.returncode}):\n"
-        f"stdout: {last.stdout[-500:]}\nstderr: {last.stderr[-500:]}")
+        f"stdout: {last.stdout[-500:]}\nstderr: {last.stderr[-500:]}{diag}")
 
 
 def test_m0_main_guard():
