@@ -73,11 +73,16 @@ def _matches(row: dict, filters: list[tuple[str, str, object]]) -> bool:
 
 
 class ErrorControlPlane(FakeControlPlane):
-    """Control plane whose query() always raises — fail-closed testing."""
+    """Control plane whose query() always raises — fail-closed testing.
+
+    Keeps the PostgREST dialect signature (first positional = ``table``) so
+    the #669 backup seam's dialect detection recognizes it as a Supabase
+    source.
+    """
 
     def __init__(self, exc: Exception | None = None):
         super().__init__()
         self._exc = exc or RuntimeError("Supabase unreachable (simulated)")
 
-    def query(self, *args: Any, **kwargs: Any) -> list[dict]:
+    def query(self, table: str, *args: Any, **kwargs: Any) -> list[dict]:
         raise self._exc

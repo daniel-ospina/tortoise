@@ -5,15 +5,19 @@ conditions that need an operator's attention (size-guard abort, data-loss
 candidate, P0-guard failure, team-universe shrink) are RETURNED as incidents;
 the caller (the internal endpoint, Task 7) routes them to the alert store.
 
-Team enumeration is the seam for the #669 control-plane migration: the current
-implementation reads the FalkorDB registry graph (``registry_control_plane``);
-post-#669 it reads the Supabase ``teams`` table. Fail-closed: an enumeration
-failure is NEVER classified as the chronic NO_TEAMS state.
+Team enumeration is the seam for the #669 control-plane migration: the
+source is an adapter exposing ``query()`` — the FalkorDB registry graph
+handle (``registry_control_plane``, pre-#669) or the Supabase control plane
+(``teams`` table, post-#669). The dialect is auto-detected; a CI fake
+(``tests.fake_control_plane.FakeControlPlane``) implements the same
+interface so the #596 suite runs with zero network. Fail-closed: an
+enumeration failure is NEVER classified as the chronic NO_TEAMS state.
 
 Per-team protection (all guards from the reviewed plan):
 - Size guard: abort before dump if the graph exceeds the configured max nodes.
-- P0 guard: ``manifest.graph_name`` must equal ``team_{id}`` (derived from the
-  seam, independent of the dump projection) AND ``node_count >= 1`` — a backup
+- P0 guard: ``manifest.graph_name`` must equal the seam-derived graph name
+  (``team_{id}`` from the registry, ``teams.graph_name`` post-#669 —
+  independent of the dump projection) AND ``node_count >= 1`` — a backup
   of the wrong/empty graph never stands; the just-uploaded objects are deleted.
 - Empty-content transition guard: DATA_LOSS_CANDIDATE fires only on a
   transition (>0 → 0 nodes, or >50% drop vs the team's prior persisted count);
@@ -38,7 +42,7 @@ from types import SimpleNamespace
 from typing import Any, Callable
 
 from .backup_config import BackupConfig
-from .hosted_backup import create_backup, prune_backups
+from .hosted_backup import _is_supabase_source, create_backup, prune_backups
 
 logger = logging.getLogger(__name__)
 
@@ -118,37 +122,85 @@ def _check_per_label_drift(
     return breaches or None
 
 
-def enumerate_teams(registry) -> list[str]:
-    """Seam: list Team ids from the control-plane registry (pre-#669 source).
+def enumerate_teams(source) -> list[str]:
+    """Seam: list Team ids from the control-plane source (#669).
 
-    Post-#669 this becomes a Supabase ``teams`` query — the seam is the single
-    swap point for the migration. Confirmed-empty returns []; a query failure
-    raises RuntimeError (fail-closed — never chronic NO_TEAMS).
+    ``source`` is an adapter exposing ``query()``: the FalkorDB registry
+    graph handle (pre-#669) or the Supabase control plane (post-#669) — the
+    single swap point for the migration, dialect auto-detected. Supabase
+    mode selects ``graph_name`` alongside ``id``: the sweep reads the graph
+    name from ``teams`` (the column is the source of truth — SDK team
+    creation names graphs ``team_{name}``, not ``team_{id}``; see #770).
+
+    Confirmed-empty returns []; a query failure raises RuntimeError
+    (fail-closed — never chronic NO_TEAMS).
     """
     try:
-        rows = registry.query("MATCH (t:Team) RETURN t.id").result_set
+        if _is_supabase_source(source):
+            rows = source.query("teams", select=["id", "graph_name"])
+            return [str(r["id"]) for r in rows if r.get("id")]
+        rows = source.query("MATCH (t:Team) RETURN t.id").result_set
+        return [str(r[0]) for r in rows if r and r[0]]
     except Exception as e:
         raise RuntimeError(f"team enumeration failed: {e}") from e
-    return [str(r[0]) for r in rows if r and r[0]]
 
 
-def enumerate_eligible_teams(registry) -> list[str]:
+def enumerate_eligible_teams(source) -> list[str]:
     """List Pro teams eligible for hosted backup (#655).
 
-    Eligibility: tier != 'free' AND backup_enabled = true. The second
-    predicate is gated on #296 (entitlement path) — today every provision
-    path hardcodes ``backup_enabled: false``, so this returns [].
+    Eligibility: tier != 'free' AND backup_enabled = true — registry Cypher
+    or Supabase ``teams`` filters, dialect auto-detected (same seam as
+    ``enumerate_teams``).
 
     Fail-closed: a query failure raises RuntimeError (same contract as
     ``enumerate_teams``).
     """
     try:
-        rows = registry.query(
+        if _is_supabase_source(source):
+            rows = source.query(
+                "teams",
+                select=["id", "graph_name"],
+                filters=[("tier", "neq", "free"), ("backup_enabled", "eq", True)],
+            )
+            return [str(r["id"]) for r in rows if r.get("id")]
+        rows = source.query(
             "MATCH (t:Team) WHERE t.tier <> 'free' AND t.backup_enabled = true RETURN t.id"
         ).result_set
+        return [str(r[0]) for r in rows if r and r[0]]
     except Exception as e:
         raise RuntimeError(f"eligible-team enumeration failed: {e}") from e
-    return [str(r[0]) for r in rows if r and r[0]]
+
+
+def team_graph_name(source, team_id: str) -> str:
+    """Graph name for a team, read from the seam source (#669).
+
+    Registry mode: deterministic ``team_{id}`` (the registry stores no graph
+    name — provision writes ``team_{team_id}``, #770). Supabase mode:
+    ``teams.graph_name`` is the source of truth (SDK team creation names
+    graphs ``team_{name}`` — a sweep that assumed ``team_{id}`` would back up
+    a nonexistent graph for SDK-created teams).
+
+    Fail-closed: a query error or a vanished/missing ``graph_name`` row
+    raises RuntimeError — the sweep never guesses a graph name.
+    """
+    if _is_supabase_source(source):
+        try:
+            rows = source.query(
+                "teams", select=["graph_name"], filters=[("id", "eq", team_id)]
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"team graph-name lookup failed for {team_id}: {e}"
+            ) from e
+        if not rows:
+            raise RuntimeError(f"team {team_id} vanished from the control plane")
+        graph_name = rows[0].get("graph_name")
+        if not graph_name:
+            raise RuntimeError(
+                f"team {team_id} has no graph_name in the control plane"
+            )
+        return str(graph_name)
+    return f"team_{team_id}"
 
 
 def _read_json(storage, key: str) -> dict[str, Any]:
@@ -187,11 +239,10 @@ def _backup_team(
     storage,
     config: BackupConfig,
     team_id: str,
+    graph_name: str,
     now: datetime,
     incidents: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    graph_name = f"team_{team_id}"
-
     # ── Size guard: cheap COUNT before any dump (the #545 OOM blast radius). ──
     try:
         g = db.select_graph(graph_name)
@@ -236,10 +287,11 @@ def _backup_team(
         return {"status": "error", "team_id": team_id, "error": str(e)}
 
     # ── P0 guard: the manifest must name the seam-derived graph and carry data.
-    # The graph name is deterministic (team_{id} from the seam enumeration), so
-    # this is a broken-pipeline tripwire rather than an independent wrong-graph
-    # detector — the independent teeth are the non-empty requirement plus the
-    # restore-time isolation checks (review P2-1). ──
+    # The graph name comes from the enumeration seam (registry: team_{id};
+    # Supabase: teams.graph_name — #669), so this is a broken-pipeline tripwire
+    # rather than an independent wrong-graph detector — the independent teeth
+    # are the non-empty requirement plus the restore-time isolation checks
+    # (review P2-1). ──
     if manifest.get("graph_name") != graph_name:
         backup_id = manifest.get("backup_id", "")
         if backup_id:
@@ -429,18 +481,55 @@ def run_backup_sweep(
         }
 
     results: dict[str, Any] = {}
+    resolution_failures = 0
     for team_id in sorted(team_ids):
         ctx = lock_for(team_id) if lock_for else nullcontext()
         with ctx:
+            # Seam per-team resolution (#669): read graph_name from the
+            # control plane BEFORE the dump (Supabase mode reads
+            # teams.graph_name; registry mode is the deterministic team_{id}
+            # and never raises). Resolution failures are per-team isolated
+            # like every other error.
+            try:
+                graph_name = team_graph_name(registry, team_id)
+            except Exception as e:
+                resolution_failures += 1
+                results[team_id] = {
+                    "status": "error", "team_id": team_id, "error": str(e),
+                }
+                continue
             try:
                 results[team_id] = _backup_team(
                     db=db, registry=registry, storage=storage, config=config,
-                    team_id=team_id, now=now, incidents=incidents,
+                    team_id=team_id, graph_name=graph_name, now=now,
+                    incidents=incidents,
                 )
             except Exception as e:  # per-team isolation: one bad team never
                 # aborts the sweep for the others (review P3-2)
                 logger.exception("sweep of %s failed: %s", team_id, e)
                 results[team_id] = {"status": "error", "team_id": team_id, "error": str(e)}
+
+    # ── Control-plane flapping alarm (#669): every enumerated team failing
+    # graph-name resolution means the control plane died between enumeration
+    # and the per-team phase. Without this, the sweep would return a clean
+    # ``no_work`` with a fresh ops heartbeat — a chronic no-op that looks
+    # healthy to the #596 watcher (the same silent-degradation class the
+    # ENUM_DELTA / NO_ELIGIBLE_TEAMS guards exist to prevent). ──
+    if resolution_failures and resolution_failures == len(team_ids):
+        incidents.append(
+            {
+                "kind": "GRAPH_NAME_RESOLUTION_FAIL",
+                "team_id": "",
+                "detail": {
+                    "message": (
+                        "control-plane graph-name resolution failed for every "
+                        "enumerated team — sweep degraded to no_work"
+                    ),
+                    "total": len(team_ids),
+                    "failed": resolution_failures,
+                },
+            }
+        )
 
     _write_json(
         storage, OPS_STATE_KEY,
