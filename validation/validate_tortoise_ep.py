@@ -152,8 +152,8 @@ def _build_nand_strong_graph():
     (Stale pre-#855: 'resolution-event context → w=3.0' — that context
     multiplier system was removed; EP NAND is now a flat 8.0.)
 
-    The EP weight is graph-derived (not hardcoded). resolution-event context
-    gives the highest single multiplier (3.0×). With both claims at Beta(1,1)
+    The EP weight is graph-derived (not hardcoded): plain NAND carries the
+    #855 base weight 8.0. With both claims at Beta(1,1)
     (uniform prior, mean=0.5), w=8.0 NAND pushes confidence down measurably.
     """
     tmpdir = tempfile.mkdtemp(prefix="tortoise_ep_nand_strong_")
@@ -200,8 +200,8 @@ def _build_frustrated_cycle_graph():
 # Test 1: TortoiseEP W₂ vs HMC on 10-claim graph
 # ═══════════════════════════════════════════════════════════════════
 
-def test_tortoise_ep_nand_w3():
-    """TortoiseEP vs HMC on 10-claim graph (2 NAND w=3, 3 IMPL).
+def test_tortoise_ep_w2_vs_hmc():
+    """TortoiseEP vs HMC on 10-claim graph (2 NAND w=8, 3 IMPL).
 
     W₂ < 0.20 for IMPL claims (Beta approximation, limited by quadrature resolution).
     W₂ < 0.35 for NAND claims (EP unimodal Beta inherently has higher W₂ vs
@@ -238,7 +238,9 @@ def test_tortoise_ep_nand_w3():
             # EP approximates the posterior as unimodal Beta, but NAND constraints
             # create bimodal HMC posteriors (both claims low, or one high/one low).
             # A single Beta cannot capture this bimodality → structural W₂ floor.
-            # 0.35 is the empirical ceiling across 10+ runs with w=3 NAND.
+            # 0.35 was the empirical ceiling at legacy w=3; #855 ships w=8 —
+            # W2 threshold should be re-validated at w=8 (stronger
+            # contradiction → more HMC bimodality → possibly higher floor).
             # IMPL threshold 0.20:
             # IMPL constraints produce unimodal posteriors that Beta fits well,
             # but quadrature discretization (n_quad=8) and EP moment matching
@@ -677,8 +679,8 @@ def test_tortoise_ep_chain_propagation():
     )
 
     # IMPL chain: c0→c1, c1→c2, ..., c8→c9
-    # #855: plain NAND carries the 8.0 base weight, so evidence
-    # propagates measurably through the chain.
+    # IMPL keeps base w=1.0; difference coupling exp(-w·(ca-cb)²)
+    # transmits level through the chain (#855).
     op_ids = []
     for i in range(n - 1):
         op_id = api.add_operator(
@@ -821,8 +823,8 @@ def test_tortoise_ep_random_graphs():
 if __name__ == "__main__":
     print("═══ TortoiseEP vs HMC Validation ═══\n")
 
-    print("Test 1: NAND w=3 + IMPL (W₂ vs HMC)")
-    test_tortoise_ep_nand_w3()
+    print("Test 1: NAND w=8 + IMPL (W₂ vs HMC)")
+    test_tortoise_ep_w2_vs_hmc()
     print("  ✓ PASS\n")
 
     print("Test 2: Strong NAND (w=8.0)")

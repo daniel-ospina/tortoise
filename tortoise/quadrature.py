@@ -107,7 +107,7 @@ def phi_nand(ca, cb, w=8.0):
     return np.exp(-w * ca * cb)
 
 
-def phi_impl(ca, cb, w=8.0):
+def phi_impl(ca, cb, w=1.0):
     """IMPL coupling factor: promotes agreement between connected claims.
 
     Difference coupling exp(-w * (ca - cb)^2): the target is pulled toward
