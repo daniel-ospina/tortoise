@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -43,17 +44,49 @@ if str(_TORTOISE_ROOT) not in sys.path:
     sys.path.insert(0, str(_TORTOISE_ROOT))
 
 
+# Errors that mean "Tortoise is unavailable", not a bug: missing optional DB
+# backend (ImportError), unset/invalid TORTOISE_DB_URI (ValueError), an
+# unset URI in production (RuntimeError — the SDK's P0 data-loss guard), and
+# unreachable DB (builtin ConnectionError/OSError + the redis driver's OWN
+# ConnectionError/TimeoutError, which are NOT subclasses of the builtins —
+# a real unreachable docker:// URI surfaces as redis.exceptions.ConnectionError;
+# + sqlite3.OperationalError for embedded lock contention / DB-state failures).
+# These degrade gracefully — the client's contract is "tortoise unavailable"
+# + exit 0, never a traceback (issue #343).
+_UNAVAILABLE_ERRORS = (
+    ImportError, ValueError, RuntimeError, ConnectionError, OSError, sqlite3.OperationalError,
+)
+try:
+    from redis.exceptions import ConnectionError as _RedisConnectionError
+    from redis.exceptions import TimeoutError as _RedisTimeoutError
+    _UNAVAILABLE_ERRORS += (_RedisConnectionError, _RedisTimeoutError)
+except ImportError:
+    pass  # redis not installed — SDK import will fail and degrade anyway
+
+_UNAVAILABLE_MESSAGE = (
+    "Tortoise SDK unavailable — TORTOISE_DB_URI not set or DB unreachable. "
+    "Run `tortoise init` or set the env var."
+)
+
+
 def _get_sdk() -> "TortoiseSDK":
     """Lazy-import TortoiseSDK. Returns None if unavailable."""
     try:
         from tortoise.sdk import TortoiseSDK
         return TortoiseSDK()  # uses TORTOISE_DB_URI from env
-    except ImportError:
+    except _UNAVAILABLE_ERRORS as e:
+        _log_unavailable(reason=e)
         return None
 
 
 def _check_available() -> bool:
-    return _get_sdk() is not None
+    """True iff Tortoise operations would work.
+
+    A real first-use probe: status() exercises summarize_structure, so an
+    unreachable DB reports unavailable — a construction-only check would
+    return True for the #343 failure shape (the SDK constructor is lazy
+    and succeeds without a reachable DB)."""
+    return status()["available"]
 
 
 # ── §6.3 Contract: queryPriorResearch ───────────────────
@@ -64,12 +97,22 @@ def query_prior_research(domain: str) -> list[dict]:
     Searches Points by kind (fuzzy match). Returns list of dicts:
     {id, content, pointKind, confidence, status}.
     """
+    if not domain:
+        # Empty domain would hit the SDK's falsy-kind fallback and dump
+        # the WHOLE graph — never serve that (agent-facing contract, #343).
+        return []
     sdk = _get_sdk()
     if sdk is None:
         return []
 
-    # Query by kind — domain is used as a keyword search in content
-    return sdk.query(kind=domain)
+    # Query by kind — domain is used as a keyword search in content.
+    # Projection init is lazy — a missing/unreachable DB surfaces here,
+    # not at construction; degrade instead of crashing (#343).
+    try:
+        return sdk.query(kind=domain)
+    except _UNAVAILABLE_ERRORS as e:
+        _log_unavailable(reason=e)
+        return []
 
 
 # ── §6.3 Contract: writeStrategyPoints ──────────────────
@@ -83,20 +126,20 @@ def write_strategy_points(points: list[dict], kind: str = "strategy") -> list[di
     """
     sdk = _get_sdk()
     if sdk is None:
-        _log_unavailable()
         return []
 
-    created: list[dict] = []
-    for p in points:
-        content = p["content"]
-        props = {}
-        if p.get("authoredBy"):
-            props["authoredBy"] = p["authoredBy"]
-        if p.get("confidence") is not None:
-            props["confidence"] = float(p["confidence"])
-        pt = _create_with_retry(sdk, kind, content, **props)
-        created.append(pt)
-    return created
+    # Client-side input validation happens BEFORE the SDK try/except so an
+    # input error (e.g. bad confidence) surfaces loudly instead of being
+    # masked as "tortoise unavailable" (#343).
+    prepared = [(_prepare_point(p, kind)) for p in points]
+    try:
+        created: list[dict] = []
+        for point_kind_, content, props in prepared:
+            created.append(_create_with_retry(sdk, point_kind_, content, **props))
+        return created
+    except _UNAVAILABLE_ERRORS as e:
+        _log_unavailable(reason=e)
+        return []
 
 
 # ── §6.3 Contract: queryExistingStrategies ──────────────
@@ -106,7 +149,11 @@ def query_existing_strategies() -> list[dict]:
     sdk = _get_sdk()
     if sdk is None:
         return []
-    return sdk.query(kind="strategy")
+    try:
+        return sdk.query(kind="strategy")
+    except _UNAVAILABLE_ERRORS as e:
+        _log_unavailable(reason=e)
+        return []
 
 
 # ── Vision queries (from E2E-10 pattern) ───────────────
@@ -116,9 +163,13 @@ def query_existing_visions(point_kind: str | None = None) -> list[dict]:
     sdk = _get_sdk()
     if sdk is None:
         return []
-    if point_kind:
-        return sdk.query(kind=point_kind)
-    return sdk.query(kind="vision")
+    try:
+        if point_kind:
+            return sdk.query(kind=point_kind)
+        return sdk.query(kind="vision")
+    except _UNAVAILABLE_ERRORS as e:
+        _log_unavailable(reason=e)
+        return []
 
 
 # ── Generic claim writing ──────────────────────────────
@@ -135,7 +186,11 @@ def write_claim(content: str, kind: str = "statement", *,
         props["authoredBy"] = authored_by
     if confidence is not None:
         props["confidence"] = float(confidence)
-    return sdk.create_point(kind, content, **props)
+    try:
+        return sdk.create_point(kind, content, **props)
+    except _UNAVAILABLE_ERRORS as e:
+        _log_unavailable(reason=e)
+        return {"error": "tortoise_unavailable", "id": "", "written": False}
 
 
 # ── Status ──────────────────────────────────────────────
@@ -144,9 +199,14 @@ def status() -> dict:
     """Report whether Tortoise is available and basic graph stats."""
     sdk = _get_sdk()
     if sdk is None:
-        return {"available": False, "message": "Tortoise SDK not installed. PYTHONPATH missing premise-labs/tortoise."}
+        return {"available": False, "message": _UNAVAILABLE_MESSAGE}
     try:
         chain = sdk.summarize_structure()
+    except _UNAVAILABLE_ERRORS as e:
+        # SDK constructed but the DB is unreachable on first use — report
+        # unavailability instead of masking it as available (#343).
+        _log_unavailable(reason=e)
+        return {"available": False, "message": _UNAVAILABLE_MESSAGE}
     except Exception:
         chain = {"error": "query failed"}
     return {
@@ -158,9 +218,25 @@ def status() -> dict:
 
 # ── Helpers ─────────────────────────────────────────────
 
+def _prepare_point(p: dict, kind: str) -> tuple[str, str, dict]:
+    """Extract (kind, content, props) from a write-point dict.
+
+    Client-side input normalization — intentionally OUTSIDE the SDK
+    degradation try/except so bad inputs raise loudly instead of being
+    masked as "tortoise unavailable" (#343)."""
+    content = p["content"]
+    props = {}
+    if p.get("authoredBy"):
+        props["authoredBy"] = p["authoredBy"]
+    if p.get("confidence") is not None:
+        props["confidence"] = float(p["confidence"])
+    return kind, content, props
+
+
 def _create_with_retry(sdk, kind: str, content: str, **props) -> dict:
     """Create point with retry for concurrent-write lock contention."""
-    # ponytail: 3 attempts with 100ms/200ms/400ms backoff.
+    # ponytail: 3 attempts; lock-only retry with 100ms/200ms backoff
+    # (attempt 3 re-raises — no 400ms sleep).
     # FalkorDBLite uses SQLite — file lock under concurrent processes.
     import time
     for attempt in range(3):
@@ -174,8 +250,14 @@ def _create_with_retry(sdk, kind: str, content: str, **props) -> dict:
     raise RuntimeError("unreachable")
 
 
-def _log_unavailable() -> None:
-    print(json.dumps({"warning": "tortoise unavailable — write skipped", "status": "noop"}), file=sys.stderr)
+def _log_unavailable(reason: Exception) -> None:
+    """Emit the graceful-degradation warning (JSON on stderr, exit stays 0)."""
+    warning = (
+        "tortoise unavailable — TORTOISE_DB_URI not set or DB unreachable. "
+        "Run `tortoise init` or set the env var "
+        f"({type(reason).__name__}: {reason})"
+    )
+    print(json.dumps({"warning": warning, "status": "noop"}), file=sys.stderr)
 
 
 def _to_json(data) -> str:
@@ -210,7 +292,7 @@ def _build_parser() -> argparse.ArgumentParser:
     wc.add_argument("--content", required=True, help="Claim content")
     wc.add_argument("--kind", default="statement", help="Point kind")
     wc.add_argument("--authored-by", default="", help="Who authored this claim")
-    wc.add_argument("--confidence", type=float, default=None, help="Confidence 0.0-1.0")
+    wc.add_argument("--confidence", type=str, default=None, help="Confidence 0.0-1.0")
 
     # status
     sub.add_parser("status", help="Check Tortoise availability and graph stats")
@@ -240,14 +322,24 @@ def main():
         except json.JSONDecodeError as e:
             print(_to_json({"error": "invalid-json", "detail": str(e)}), file=sys.stderr)
             sys.exit(1)
-        results = write_strategy_points(points, kind=args.kind)
+        try:
+            results = write_strategy_points(points, kind=args.kind)
+        except (KeyError, TypeError, ValueError) as e:
+            # Input errors (bad confidence, missing content) surface as JSON
+            # + exit 1 — never a raw traceback (agent-facing contract, #343).
+            print(_to_json({"error": "invalid-input", "detail": str(e)}), file=sys.stderr)
+            sys.exit(1)
         print(_to_json({"written": len(results), "results": results}))
 
     elif args.command == "write-claim":
-        result = write_claim(
-            args.content, kind=args.kind,
-            authored_by=args.authored_by, confidence=args.confidence,
-        )
+        try:
+            result = write_claim(
+                args.content, kind=args.kind,
+                authored_by=args.authored_by, confidence=args.confidence,
+            )
+        except (KeyError, TypeError, ValueError) as e:
+            print(_to_json({"error": "invalid-input", "detail": str(e)}), file=sys.stderr)
+            sys.exit(1)
         print(_to_json(result))
 
     elif args.command == "status":

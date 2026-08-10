@@ -75,7 +75,7 @@ KNOWN_REL_TYPES: frozenset[str] = frozenset({
     "mitigates", "resolves",
     # about* edges (ontology v3.1 §3.2)
     "aboutSubject", "aboutObject", "aboutEvent", "aboutPoint",
-    "aboutDocument", "aboutAction",
+    "aboutDocument", "aboutAction", "aboutSource",
     # Structural (edges.valid_predicates + legacy)
     "performs", "produces", "uses", "authoredBy", "ownedBy", "managedBy",
     "hasMember", "holdsRole", "memberOf", "reportsTo", "participatesIn",

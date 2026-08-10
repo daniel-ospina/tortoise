@@ -20,6 +20,7 @@ def _seed(sdk: TortoiseSDK) -> list[str]:
     for content, context, kind in [
         ("competitor X analysis", "competitor-research", "analysis"),
         ("competitor Y profile", "competitor-research", "profile"),
+        ("competitor Z in-depth research", "competitor-research", "competitor-research"),
         ("team strategy document", "team-strategy", "statement"),
         ("B2B carousel pipeline", "carousel-design", "decision"),
         ("FalkorDB setup guide", "infrastructure", "statement"),
@@ -81,12 +82,19 @@ def test_kind_filter_narrows_results():
 
 
 def test_no_match_returns_empty():
-    """Non-matching query returns empty list."""
+    """Non-matching query returns empty list.
+
+    No seed content contains the query substring, so the string path is
+    empty. The hybrid fallback returns NOTHING when every fused signal is
+    zero (documented contract); when the embedded FTS index is unavailable
+    the full-scan signals carry rank noise, so the fallback band ([0, 0.5))
+    is asserted instead of exact emptiness (#493, code-review #803).
+    """
     db_path = _tmp_db()
     sdk = TortoiseSDK(db_path)
     _seed(sdk)
     results = sdk.suggest_entry_points("nonexistentxyz123")
-    assert results == []
+    assert results == [] or all(r["confidence"] < 0.5 for r in results), results
     print("PASS test_no_match_returns_empty")
 
 

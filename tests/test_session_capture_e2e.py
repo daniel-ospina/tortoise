@@ -9,9 +9,28 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import pytest
 from tortoise.sdk import TortoiseSDK
 from tortoise.projection import FalkorProjection
 import tortoise.search_engine as se
+
+# ── Live-FalkorDB availability (mirrors tests/test_hnsw_vector_index.py) ──
+# This file's e2e capture test connects to docker://localhost:16379 (live
+# FalkorDB). Probe at module load so it skips gracefully in embedded-only CI (#493).
+FALKORDB_AVAILABLE = False
+try:
+    _old_uri = os.environ.get("TORTOISE_DB_URI")
+    os.environ["TORTOISE_DB_URI"] = "docker://:@localhost:16379/tortoise_test_e2e125"
+    _probe = FalkorProjection.from_uri(os.environ["TORTOISE_DB_URI"])
+    _probe.close()
+    FALKORDB_AVAILABLE = True
+except Exception:
+    FALKORDB_AVAILABLE = False
+finally:
+    if _old_uri is not None:
+        os.environ["TORTOISE_DB_URI"] = _old_uri
+    else:
+        os.environ.pop("TORTOISE_DB_URI", None)
 
 
 def _proj():
@@ -25,6 +44,7 @@ def _proj():
     return proj
 
 
+@pytest.mark.skipif(not FALKORDB_AVAILABLE, reason="Live FalkorDB (Docker) not available")
 def test_capture_e2e():
     """Full #125 path: capture → Document+Event+edges → searchable → idempotent."""
     proj = _proj()
