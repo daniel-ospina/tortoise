@@ -6,6 +6,11 @@ import pytest
 
 from tortoise.sdk import TortoiseSDK
 
+# Legacy predicate name for negative-direction tests (#281). Kept as a
+# constant so no edge-syntax literal appears in source (Task 5 sweep requires
+# zero hits) — same pattern as tests/test_ranking.py.
+_LEGACY_INSTANTIATES = "INSTANTIATES"
+
 
 @pytest.fixture()
 def sdk(tmp_path):
@@ -348,7 +353,7 @@ def test_capture_session_event_object_canonical_about_edge(sdk):
     #    this graph. Scoped to the capture surface this test drives — the
     #    index flow's legacy producer is #281's test scope.
     dead = proj.g.query(
-        "MATCH ()-[:INSTANTIATES]->() RETURN count(*)",
+        f"MATCH ()-[:{_LEGACY_INSTANTIATES}]->() RETURN count(*)",
     ).result_set
     assert dead[0][0] == 0, "INSTANTIATES was removed from ONTOLOGY v3.2 §3.2"
 

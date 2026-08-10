@@ -25,7 +25,55 @@ register_kind("option")    # used by file_decision (#133)
 register_kind("evidence")  # used by file_decision (#133)
 
 # Valid status values for Point nodes (used by update_point status validation)
-POINT_STATUS_VALUES = frozenset({'live', 'draft', 'outdated', 'archived', 'retracted'})
+# #432: claim lifecycle vocabulary — draft → live → retracted → superseded
+# (plus outdated/archived). challenged is a DERIVED condition (NAND operator
+# edge on a live point), NOT a stored status.
+POINT_STATUS_VALUES = frozenset({'draft', 'live', 'retracted', 'superseded', 'outdated', 'archived'})
+
+# #432: declarative spec for the retract/supersede transition guards. NOT
+# consulted by update_point per-call (update_point only promotes draft→live);
+# every claim transition is observable via a Task 3 emit hook, and no
+# transition can slip through update_point unemitted.
+_ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
+    # P2 (code-review): guards allow draft→retracted/superseded (a draft point
+    # can be terminal before ever going live); keep the declarative spec
+    # aligned with the retract/supersede guards.
+    "draft": frozenset({"live", "retracted", "superseded"}),  # promote + terminal
+    "live": frozenset({"retracted", "superseded"}),    # via retract_point / supersede_point
+    "retracted": frozenset(),                            # terminal
+    "superseded": frozenset(),                           # terminal
+    "outdated": frozenset({"retracted"}),               # outdated stays a flag; retract allowed
+    "archived": frozenset(),                             # terminal (reserved — no v1 write path)
+}
+
+# Event types that write to the :GraphEvent store (#432). Other types
+# (e.g. PointRevised) only write to the JSONL event log (#548).
+_GRAPH_EVENT_TYPES = frozenset({
+    "PointAdded",
+    "OperatorAdded",
+    "PointRetracted",
+    "PointSuperseded",
+    "OperatorAnnotated",
+})
+
+
+def _raise_update_point_status_error(proj, id: str) -> None:
+    """#432: error path for the update_point draft→live promote guard.
+
+    Runs a diagnostic existence read ONLY when the guarded SET returned no
+    rows, so the happy path stays a single round trip. Missing point →
+    ValueError matching the historical missing-point behavior; present but
+    not draft → illegal-transition ValueError.
+    """
+    exists = proj.g.query(
+        "MATCH (n:Point {id:$id}) RETURN count(n)", params={"id": id},
+    ).result_set[0][0]
+    if not exists:
+        raise ValueError(f"No point {id!r}")
+    raise ValueError(
+        f"Illegal status transition — update_point only promotes draft→live; "
+        f"use retract_point()/supersede_point() for lifecycle transitions"
+    )
 
 _logger = logging.getLogger(__name__)
 
@@ -277,65 +325,6 @@ class TortoiseSDK:
             self._event_log = EventLog(self._event_log_path)
         return self._event_log
 
-    def _emit_event(self, type_: str, *, point: dict | None = None,
-                    id: str | None = None, **payload) -> dict | None:
-        """Append an event to the SDK event log for rebuild parity (#548).
-
-        Returns the event dict (for caller inspection), or None when no
-        event log is configured (backward-compatible — no log, no event).
-
-        Events emitted by the SDK use ``initiated_by="sdk"`` to distinguish
-        them from extractor/user events produced by EventAPI.
-
-        The *point* dict should be a complete snapshot of the Point's
-        properties (as returned by :meth:`get_point`) so that replay via
-        :meth:`~tortoise.projection.FalkorProjection.rebuild_all` can
-        reconstruct the node and its edges identically.
-        """
-        log = self._get_event_log()
-        if log is None:
-            return None
-        from .ids import ulid, now_iso
-        event: dict = {
-            "event_id": ulid(),
-            "ts": now_iso(),
-            "type": type_,
-            "initiated_by": "sdk",
-            "projection_version": 2,
-        }
-        if point is not None:
-            # Strip embedding — it is recomputed on replay by
-            # _upsert_point_props (vecf32 serialization is fragile).
-            # content_hash is also stripped — it is derived from content.
-            clean = {k: v for k, v in point.items()
-                     if k not in ("embedding", "content_hash")}
-            # Operators may not store 'content' as a node property (#548);
-            # _upsert_point_props requires it — synthesize a fallback.
-            if "content" not in clean:
-                op_type = clean.get("op_type", "IMPL")
-                op_inputs = (point.get("operator") or {}).get("inputs", [])
-                clean["content"] = f"{op_type}({', '.join(op_inputs)})"
-            # Similarly, operators may lack 'pointKind' — default to empty.
-            if "pointKind" not in clean:
-                clean["pointKind"] = ""
-            event["point"] = clean
-        if id is not None:
-            event["id"] = id
-        event.update(payload)
-        try:
-            log.append(event)
-        except Exception as exc:
-            # The graph mutation already succeeded — a log-write failure must
-            # not crash the caller or pretend the write failed. Rebuild parity
-            # is best-effort here: rebuild_all's graph snapshot catches any
-            # point missing from the log on the next rebuild (#548).
-            _logger.warning(
-                "failed to append %s event to SDK log %s: %s",
-                type_, self._event_log_path, exc,
-            )
-            return None
-        return event
-
     def test_guard(self) -> None:
         """Assert the connected graph is safe for destructive test teardowns.
 
@@ -457,6 +446,201 @@ class TortoiseSDK:
         if removed:
             proj.g.query("MATCH (t:Tag) WHERE NOT (t)<-[:TAGGED]-() DELETE t")
 
+    # ── Events: cursor-based poll (Task 5) ────────────────────────────
+
+    @staticmethod
+    def _encode_cursor(seq: int) -> str:
+        """Opaque cursor: base64url JSON {v:1, seq:N} — ONE format for every
+        cursor incl. the empty graph ({v:1, seq:0}). Plan-review P2."""
+        import base64
+        import json
+
+        raw = json.dumps({"v": 1, "seq": int(seq)}, separators=(",", ":"))
+        return base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
+
+    @staticmethod
+    def _decode_cursor(cursor: str) -> int:
+        """Decode an opaque cursor → seq. Raises ValueError('invalid cursor')."""
+        import base64
+        import json
+
+        try:
+            raw = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4))
+            data = json.loads(raw)
+            if data.get("v") != 1 or "seq" not in data:
+                raise ValueError
+            seq = int(data["seq"])
+            if seq < 0:  # P2 (Qwen): negative cursors must not bypass expiry
+                raise ValueError
+            return seq
+        except Exception:  # noqa: BLE001
+            raise ValueError("invalid cursor") from None
+
+    def events_poll(self, after: str | None = None, types: list[str] | None = None,
+                    limit: int = 100) -> dict:
+        """Poll graph/claim events after a cursor (at-least-once; idempotent on replay).
+
+        Returns {"events": [payload dicts ordered by seq], "next_cursor": opaque}.
+        after=None → tail (oldest retained). Expired cursor → ValueError(
+        'cursor expired — replay from tail'); malformed → ValueError('invalid cursor').
+        Types are validated against the EventCodec registry (unknown → ValueError).
+        Events live in THIS SDK's graph namespace (the team partition).
+        """
+        from .event_store import read_after
+
+        after_seq = 0 if after is None else self._decode_cursor(after)
+        if types:
+            from .shared_state.events import event_types
+
+            registered = event_types()
+            unknown = [t for t in types if t not in registered]
+            if unknown:
+                raise ValueError(f"unknown event type: {unknown[0]}")
+        proj = self._get_proj()
+        # Lazy retention (plan-review P2 / Task 6 readOnlyHint tension):
+        # maintenance purge at most once per TORTOISE_EVENT_RETENTION_INTERVAL
+        # per process, so steady-state polls are read-only. Best-effort — a
+        # purge failure never blocks the poll.
+        self._maybe_purge_events(proj)
+        # Expired-cursor check: a NON-ZERO cursor pointing below the graph's
+        # min seq was purged/compacted. after_seq == 0 is the "from the start"
+        # sentinel (after=None) — it never expires, it just returns all
+        # retained events.
+        if after_seq != 0:
+            # Watermark: first_seq on GraphEventMeta (maintained by purges) —
+            # a cursor below it was purged/compacted → expired (410). Works
+            # even when the graph is empty after a full purge.
+            rows = proj.g.query(
+                "MATCH (m:GraphEventMeta) RETURN m.first_seq"
+            ).result_set
+            first_seq = rows[0][0] if rows and rows[0][0] is not None else None
+            if first_seq is not None and after_seq < int(first_seq):
+                raise ValueError("cursor expired — replay from tail")
+        evs = read_after(proj, after_seq, types=types, limit=limit)
+        last = evs[-1]["seq"] if evs else after_seq
+        return {"events": evs, "next_cursor": self._encode_cursor(last)}
+
+    _EVENT_PURGE_ATTR = "_tortoise_last_purge"
+    _EVENT_PURGE_LAST: float = 0.0  # process-level gate (P1 review fix)
+
+    def _maybe_purge_events(self, proj) -> None:
+        """Best-effort, interval-gated retention purge (see events_poll).
+
+        Runs at most once per TORTOISE_EVENT_RETENTION_INTERVAL seconds per
+        PROCESS (module-global monotonic — NOT per-projection: hosted REST/MCP
+        build a fresh SDK+projection per request, so a per-projection gate
+        would fire the purge on EVERY poll). Reads config via env with
+        defaults (30d retention, 500k cap, 3600s interval).
+        """
+        import os
+        import time
+
+        interval = int(os.environ.get("TORTOISE_EVENT_RETENTION_INTERVAL", "3600"))
+        now = time.monotonic()
+        if now - TortoiseSDK._EVENT_PURGE_LAST < interval:
+            return
+        TortoiseSDK._EVENT_PURGE_LAST = now
+        try:
+            from .event_store import purge_expired, purge_overflow
+
+            days = int(os.environ.get("TORTOISE_EVENT_RETENTION_DAYS", "30"))
+            cap = int(os.environ.get("TORTOISE_EVENT_MAX_PER_TEAM", "500000"))
+            purge_expired(proj, retention_days=days)
+            purge_overflow(proj, max_events=cap)
+        except Exception:  # noqa: BLE001 — best-effort
+            _logger.warning("event retention purge failed — continuing", exc_info=True)
+
+    def _emit_event(self, type_: str, payload: dict | None = None, *,
+                    point: dict | None = None,
+                    id: str | None = None, **extra) -> None:
+        """Unified event emission: JSONL rebuild log (#548) + graph event store (#432).
+
+        Both stores are best-effort — failures log and continue (never crash
+        the mutation).
+
+        Two call styles supported:
+        1. ``_emit_event("PointAdded", {"id": ..., ...})``
+           — #432: domain payload for the :GraphEvent store.
+        2. ``_emit_event("PointAdded", point=point_dict)``
+           — #548: full point snapshot for JSONL rebuild replay.
+        3. ``_emit_event("PointRevised", id=pid, **props)``
+           — #548: id + extra fields for JSONL.
+
+        **Graph event store (#432):** written when *type_* is in
+        ``_GRAPH_EVENT_TYPES`` (PointAdded, OperatorAdded, PointRetracted,
+        PointSuperseded, OperatorAnnotated). The payload is taken from
+        *payload* if given, otherwise synthesized from ``point["id"]`` or
+        *id* + *extra*.
+
+        **JSONL event log (#548):** written when *point* is provided (cleaned
+        and appended as the ``"point"`` key) or *id* is provided. Events with
+        neither are skipped (nothing meaningful to log). The full point
+        snapshot is needed for ``rebuild_all`` replay.
+        """
+        # ── Graph event store (#432) ──────────────────────────────
+        if type_ in _GRAPH_EVENT_TYPES:
+            graph_payload = payload
+            if graph_payload is None:
+                if point is not None:
+                    graph_payload = {"id": point.get("id")}
+                elif id is not None:
+                    graph_payload = {"id": id, **extra}
+                else:
+                    graph_payload = {}
+            try:
+                from .event_store import append_event, ensure_event_schema, next_seq
+                proj = self._get_proj()
+                ensure_event_schema(proj)
+                seq = next_seq(proj)
+                append_event(proj, seq, type_, graph_payload, self.ulid())
+            except Exception:  # noqa: BLE001 — best-effort
+                _logger.warning("event emission failed for %s — continuing", type_)
+
+        # ── JSONL event log (#548) ─────────────────────────────────
+        if point is None and id is None:
+            return  # nothing meaningful to log
+        log = self._get_event_log()
+        if log is None:
+            return
+        from .ids import ulid, now_iso
+        event: dict = {
+            "event_id": ulid(),
+            "ts": now_iso(),
+            "type": type_,
+            "initiated_by": "sdk",
+            "projection_version": 2,
+        }
+        if point is not None:
+            # Strip embedding — it is recomputed on replay by
+            # _upsert_point_props (vecf32 serialization is fragile).
+            # content_hash is also stripped — it is derived from content.
+            clean = {k: v for k, v in point.items()
+                     if k not in ("embedding", "content_hash")}
+            # Operators may not store 'content' as a node property (#548);
+            # _upsert_point_props requires it — synthesize a fallback.
+            if "content" not in clean:
+                op_type = clean.get("op_type", "IMPL")
+                op_inputs = (point.get("operator") or {}).get("inputs", [])
+                clean["content"] = f"{op_type}({', '.join(op_inputs)})"
+            # Similarly, operators may lack 'pointKind' — default to empty.
+            if "pointKind" not in clean:
+                clean["pointKind"] = ""
+            event["point"] = clean
+        if id is not None:
+            event["id"] = id
+        event.update(extra)
+        try:
+            log.append(event)
+        except Exception as exc:
+            # The graph mutation already succeeded — a log-write failure must
+            # not crash the caller or pretend the write failed. Rebuild parity
+            # is best-effort here: rebuild_all's graph snapshot catches any
+            # point missing from the log on the next rebuild (#548).
+            _logger.warning(
+                "failed to append %s event to SDK log %s: %s",
+                type_, self._event_log_path, exc,
+            )
+
     def create_point(self, kind: str, content: str, **props) -> dict:
         """Create a new Point node. Raises ValueError if kind is invalid.
 
@@ -577,8 +761,10 @@ class TortoiseSDK:
         # Dreaming (#85): a new point can carry confidence-affecting props;
         # mark it dirty so the next dream/lazy-read stabilizes it.
         self._mark_dirty([pid])
-        # #548: emit PointAdded event for rebuild parity
-        self._emit_event("PointAdded", point=self.get_point(pid))
+        # #432+#548 unified: domain payload + full point snapshot for both
+        # the :GraphEvent store (subscriptions/poll) and JSONL (rebuild_all).
+        self._emit_event("PointAdded", {"id": pid, "kind": kind, "content_hash": ch},
+                         point=self.get_point(pid))
         return self.get_point(pid)
 
     def create_or_update_point(self, kind: str, content: str, **props) -> dict:
@@ -821,26 +1007,63 @@ class TortoiseSDK:
                 f"Must be one of: {', '.join(sorted(POINT_STATUS_VALUES))}"
             )
 
+        # #432 plan-review P1: update_point is non-status except the draft→live
+        # promote (matches the create_operator promote). Any other status value
+        # is rejected BEFORE the query — lifecycle transitions go through
+        # retract_point()/supersede_point() (which emit events). This keeps
+        # every claim transition observable via an emit hook.
+        if 'status' in props:
+            if props['status'] != 'live':
+                raise ValueError(
+                    "update_point only promotes draft→live — use "
+                    "retract_point()/supersede_point() for lifecycle transitions"
+                )
+
         # Check if node carries :Object label (entity node with version tracking)
         has_object = proj.g.query(
             "MATCH (n:Point:Object {id:$id}) RETURN count(n) > 0",
             params={"id": id},
         ).result_set[0][0]
 
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+
         if has_object:
-            from datetime import datetime, timezone
-            now = datetime.now(timezone.utc).isoformat()
-            proj.g.query(
-                "MATCH (n:Point:Object {id:$id}) "
-                "SET n += $props, n.version = coalesce(n.version, 0) + 1, n.updatedAt = $now",
-                params={"id": id, "props": props, "now": now},
-            )
-        else:
-            for key, val in props.items():
-                proj.g.query(
-                    "MATCH (n:Point {id:$id}) SET n += $props",
-                    params={"id": id, "props": {key: val}},
+            if 'status' in props:
+                # Promote guard folded INTO the WHERE clause (plan-review P2:
+                # single round trip, no widened write window).
+                res = proj.g.query(
+                    "MATCH (n:Point:Object {id:$id}) "
+                    "WHERE (n.status IS NULL OR n.status = 'draft') "
+                    "SET n.status = 'live', n.updatedAt = $now, "
+                    "n.version = coalesce(n.version, 0) + 1 RETURN n",
+                    params={"id": id, "now": now},
                 )
+                if not res.result_set:
+                    _raise_update_point_status_error(proj, id)
+            else:
+                proj.g.query(
+                    "MATCH (n:Point:Object {id:$id}) "
+                    "SET n += $props, n.version = coalesce(n.version, 0) + 1, n.updatedAt = $now",
+                    params={"id": id, "props": props, "now": now},
+                )
+        else:
+            if 'status' in props:
+                # Promote guard folded INTO the WHERE clause (plan-review P2).
+                res = proj.g.query(
+                    "MATCH (n:Point {id:$id}) "
+                    "WHERE (n.status IS NULL OR n.status = 'draft') "
+                    "SET n.status = 'live', n.updatedAt = $now RETURN n",
+                    params={"id": id, "now": now},
+                )
+                if not res.result_set:
+                    _raise_update_point_status_error(proj, id)
+            else:
+                for key, val in props.items():
+                    proj.g.query(
+                        "MATCH (n:Point {id:$id}) SET n += $props",
+                        params={"id": id, "props": {key: val}},
+                    )
         # Tag sync (#485): keep TAGGED edges consistent with the n.tags
         # property — update_point previously set the property but left edges
         # stale, so query_points_by_tag missed updated points. Falsy tag
@@ -955,6 +1178,43 @@ class TortoiseSDK:
         proj = self._get_proj()
         now = datetime.now(timezone.utc).isoformat()
 
+        # #432: transition guard — old point must exist, be a statement (not
+        # an operator), and not already be terminal (mirrors the retract
+        # guard; supersede is already multi-query so the read is cheap).
+        guard = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.is_operator, n.status",
+            params={"id": old_id},
+        ).result_set
+        if not guard:
+            raise ValueError(f"No point {old_id!r}")
+        is_op, cur = guard[0][0], guard[0][1]
+        if is_op:
+            raise ValueError(
+                f"Point {old_id!r} is an operator — supersession is for statement points")
+        if cur in ("retracted", "superseded", "archived"):
+            raise ValueError(
+                f"Point {old_id!r} is already terminal ({cur!r}) — supersession is terminal")
+
+        # P1 (Qwen review): validate the NEW point too — it must exist, be a
+        # statement, not be terminal, and differ from the old point. A missing /
+        # self / terminal successor would terminalize the old point with no valid
+        # replacement (phantom PointSuperseded).
+        if old_id == new_id:
+            raise ValueError("supersede_point: old_id and new_id must differ")
+        new_guard = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.is_operator, n.status",
+            params={"id": new_id},
+        ).result_set
+        if not new_guard:
+            raise ValueError(f"No point {new_id!r}")
+        n_is_op, n_cur = new_guard[0][0], new_guard[0][1]
+        if n_is_op:
+            raise ValueError(
+                f"Point {new_id!r} is an operator — supersession target must be a statement")
+        if n_cur in ("retracted", "superseded", "archived"):
+            raise ValueError(
+                f"Point {new_id!r} is already terminal ({n_cur!r}) — cannot supersede into it")
+
         # 0. #329: collect + validate ALL edge types BEFORE any mutation.
         #    The edge types are interpolated into query structure (no params
         #    possible) — an unvalidated type (e.g. from a crafted edge) is a
@@ -970,32 +1230,17 @@ class TortoiseSDK:
         for row in edges_result.result_set:
             validate_rel_type(row[1])  # raises ValueError before any mutation
 
-        # 0b. #547: validate both endpoints BEFORE any write (same contract as
-        #    invalidate_point #330).  Missing old → {"invalidated": False} with
-        #    no writes; missing new → ValueError; self-edge → ValueError.
-        if old_id == new_id:
-            raise ValueError(
-                f"supersede_point: new_id cannot be the same as old_id ({old_id!r})"
-            )
-        old_exists = proj.g.query(
-            "MATCH (n:Point {id:$id}) RETURN count(n) > 0", params={"id": old_id},
-        ).result_set[0][0]
-        if not old_exists:
-            return {"invalidated": False, "id": old_id, "corrected_by": new_id,
-                    "edges_transferred": 0}
-        new_exists = proj.g.query(
-            "MATCH (n:Point {id:$id}) RETURN count(n) > 0",
-            params={"id": new_id},
-        ).result_set[0][0]
-        if not new_exists:
-            raise ValueError(
-                f"supersede_point: new point {new_id!r} does not exist — "
-                f"refusing to orphan outdated point {old_id!r}"
-            )
+        # #432 Task 3: durable PointSuperseded event (append-before-mutation,
+        # AFTER the guard + edge-type validation — P2 review fix: emitting
+        # before validation produced phantoms on corrupt-edge data).
+        self._emit_event("PointSuperseded", {"id": old_id, "new_id": new_id}, id=old_id)
 
-        # 1. Mark old outdated + create CORRECTS edge (same as invalidate)
+        # 1. Mark old superseded + outdated + create CORRECTS edge (same as invalidate)
+        # #432: status='superseded' alongside the legacy outdated=true flag
+        # (back-compat for consumers reading the flag; #690 will consolidate).
         proj.g.query(
-            "MATCH (n:Point {id:$id}) SET n.outdated = true, n.updatedAt = $now",
+            "MATCH (n:Point {id:$id}) SET n.status = 'superseded', "
+            "n.outdated = true, n.updatedAt = $now",
             params={"id": old_id, "now": now},
         )
         proj.g.query(
@@ -1061,6 +1306,53 @@ class TortoiseSDK:
             "edges_transferred": transferred,
         }
 
+    def retract_point(self, id: str) -> dict:
+        """Tombstone-retract a Point: status='retracted' (point stays in graph).
+
+        #432: retraction is a TERMINAL state transition, not a deletion — the
+        projection keeps the point with status='retracted' and default query
+        surfaces exclude it (opt-in via include_retracted). Single atomic
+        conditional query on the happy path; diagnostic read only on the error
+        path.
+
+        Raises ValueError if the point is missing, is an operator node, or is
+        already terminal (retracted/superseded/archived).
+        """
+        from datetime import datetime, timezone
+        proj = self._get_proj()
+        # P1 (code-review): validate FIRST, then emit, then mutate — the emit
+        # before the guard produced phantom PointRetracted events on the
+        # NORMAL invalid-input path (missing / operator / terminal), which
+        # poll consumers would see as retractions that never happened.
+        row = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.is_operator, n.status",
+            params={"id": id}).result_set
+        if not row:
+            raise ValueError(f"No point {id!r}")
+        is_op, cur = row[0][0], row[0][1]
+        if is_op:
+            raise ValueError(
+                f"Point {id!r} is an operator — retraction is for statement points")
+        if cur in ("retracted", "superseded", "archived"):
+            raise ValueError(
+                f"Point {id!r} is already terminal ({cur!r}) — retraction is terminal")
+        # #432 Task 3: durable PointRetracted event (append-before-mutation;
+        # only after the input contract validates).
+        self._emit_event("PointRetracted", {"id": id}, id=id)
+        # P1 (Qwen review): CAS the SET — the WHERE re-checks terminal state so
+        # a concurrent retract/supersede can't both pass validation and have a
+        # terminal overwrite (retracted overwriting superseded, or vice versa).
+        r = proj.g.query(
+            "MATCH (n:Point {id:$id}) "
+            "WHERE (n.status IS NULL OR NOT (n.status IN $terminal)) "
+            "SET n.status = 'retracted', n.updatedAt = $now RETURN properties(n)",
+            params={"id": id, "now": datetime.now(timezone.utc).isoformat(),
+                    "terminal": ["retracted", "superseded", "archived"]})
+        if not r.result_set:
+            raise ValueError(
+                f"Point {id!r} is already terminal — retraction is terminal")
+        return r.result_set[0][0]  # updated node props (no trailing get_point round trip)
+
     # ── Operators ─────────────────────────────────────────────────
 
     def create_operator(self, op_type: str, source_id: str, target_ids: list[str],
@@ -1095,7 +1387,10 @@ class TortoiseSDK:
         inputs = [source_id] + list(target_ids)
         proj = self._get_proj()
 
-        # Validate all source/target Points exist (fail loudly, not silently)
+        # Validate all source/target Points exist FIRST (fail loudly, not
+        # silently) — then emit, then mutate. P1 (code-review): emitting
+        # before validation produced phantom OperatorAdded events on missing
+        # inputs, visible to subscription poll consumers.
         existing = proj.g.query(
             "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id",
             params={"ids": inputs},
@@ -1125,20 +1420,26 @@ class TortoiseSDK:
                 params={"oid": pid, "sid": inp_id, "i": i},
             )
         # Draft → live lifecycle (#131): source point goes live when first edge created
+        # P1 (code-review): draft → live promote ONLY for draft/null sources —
+        # an unconditional promote resurrected retracted (terminal) sources,
+        # violating the terminal-state contract with no event in the stream.
         proj.g.query(
-            "MATCH (s:Point {id:$sid}) SET s.status = 'live'",
+            "MATCH (s:Point {id:$sid}) "
+            "WHERE (s.status IS NULL OR s.status = 'draft') "
+            "SET s.status = 'live'",
             params={"sid": source_id},
         )
         # Dreaming (#85): new edges change propagation — mark all inputs dirty.
         self._mark_dirty(inputs)
         result = self.get_point(pid)
-        # #548: emit OperatorAdded event for rebuild parity.
-        # The operator.inputs dict must be constructed manually — it is not
-        # stored as a node property but is required by _upsert_point_edges
-        # during replay.
+        # #432+#548 unified: domain payload + full point snapshot for both
+        # the :GraphEvent store (subscriptions/poll) and JSONL (rebuild_all).
         event_point = dict(result)
         event_point["operator"] = {"op_type": op_type, "inputs": list(inputs)}
-        self._emit_event("OperatorAdded", point=event_point)
+        self._emit_event("OperatorAdded", {
+            "id": pid, "op_type": op_type, "source_id": source_id,
+            "target_ids": list(target_ids),
+        }, point=event_point)
         return result
 
     def annotate_operator(self, id: str, bias: float, precision: float,
@@ -1163,6 +1464,11 @@ class TortoiseSDK:
                           ("consistency", consistency), ("directness", directness)):
             if not 0 <= val <= 1:
                 raise ValueError(f"{name} must be 0-1, got {val}")
+        # #432 Task 3: durable OperatorAnnotated event (append-before-mutation).
+        self._emit_event("OperatorAnnotated", {
+            "id": id, "bias": bias, "precision": precision,
+            "consistency": consistency, "directness": directness,
+        })
         return self.update_point(id,
             annotator_bias=bias, annotator_precision=precision,
             annotator_consistency=consistency, annotator_directness=directness)
@@ -1226,8 +1532,13 @@ class TortoiseSDK:
     # ── Query ─────────────────────────────────────────────────────
 
     def query(self, kind: str | None = None,
+              *, include_retracted: bool = False,
               **filters) -> list[dict]:
         """Query points by pointKind and/or custom property filters.
+
+        #432 Task 2: retracted points (status='retracted') are EXCLUDED by
+        default — pass include_retracted=True, or an explicit status= filter
+        (e.g. status='retracted'), to surface tombstones.
 
         For confidence-aware queries, use tortoise_fts_query() with query=None
         for full-scan mode with EP annotation.
@@ -1236,11 +1547,12 @@ class TortoiseSDK:
         query via proj.g.query() to inspect retracted tombstones.
         """
         proj = self._get_proj()
-        clauses = [
-            "(n.is_operator IS NULL OR n.is_operator = false)",
-            "(n.status IS NULL OR n.status <> 'retracted')",  # #689: hide retracted
-        ]
+        clauses = ["(n.is_operator IS NULL OR n.is_operator = false)"]
         params: dict[str, Any] = {}
+        # #432 Task 2: retracted exclusion — skipped when the caller explicitly
+        # filters by status (their filter controls visibility).
+        if not include_retracted and "status" not in filters:
+            clauses.append("(n.status IS NULL OR n.status <> 'retracted')")
         if kind:
             expanded = self._expand_kind(kind)
             if len(expanded) == 1:
@@ -1268,18 +1580,22 @@ class TortoiseSDK:
         return [r[0] for r in rows]
 
     def paginated_query(self, kind: str | None = None,
-                         skip: int = 0, limit: int = 20, **filters) -> dict:
+                        skip: int = 0, limit: int = 20,
+                        *, include_retracted: bool = False,
+                        **filters) -> dict:
         """Query points with pagination. Returns {results, total, hasMore}.
 
-        Retracted points (status='retracted') are excluded. Use a raw Cypher
-        query via proj.g.query() to inspect retracted tombstones.
+        #432 Task 2: retracted points (status='retracted') are EXCLUDED by
+        default — pass include_retracted=True, or an explicit status= filter,
+        to surface tombstones.
         """
         proj = self._get_proj()
-        clauses = [
-            "(n.is_operator IS NULL OR n.is_operator = false)",
-            "(n.status IS NULL OR n.status <> 'retracted')",  # #689: hide retracted
-        ]
+        clauses = ["(n.is_operator IS NULL OR n.is_operator = false)"]
         params: dict[str, Any] = {}
+        # #432 Task 2: retracted exclusion — skipped when the caller explicitly
+        # filters by status (their filter controls visibility).
+        if not include_retracted and "status" not in filters:
+            clauses.append("(n.status IS NULL OR n.status <> 'retracted')")
         if kind:
             expanded = self._expand_kind(kind)
             if len(expanded) == 1:
@@ -1316,21 +1632,16 @@ class TortoiseSDK:
     def get_point(self, id: str) -> dict:
         """Get a Point by ID. Returns dict of all properties, or {} if not found.
 
-        Retracted points (status='retracted') return {} — they are hidden
-        from normal reads but remain queryable via raw Cypher (#689).
+        #432: retracted points (status='retracted') ARE returned by get_point
+        — they are tombstoned, not deleted. Query surfaces exclude them by
+        default (opt-in via include_retracted).
         """
         proj = self._get_proj()
         rows = proj.g.query(
             "MATCH (n:Point {id:$id}) RETURN properties(n)",
             params={"id": id},
         ).result_set
-        if not rows:
-            return {}
-        props = rows[0][0]
-        # #689: hide retracted points from normal reads
-        if props.get("status") == "retracted":
-            return {}
-        return props
+        return rows[0][0] if rows else {}
 
     def traverse(self, id: str, relationship_type: str, direction: str = "outgoing") -> list[dict]:
         """Traverse relationships from a Point. Returns connected point dicts.
@@ -1576,6 +1887,40 @@ class TortoiseSDK:
         """entityProfile lite for an entity. Returns {id, pointKind, context, neighbors, neighborCounts}."""
         from .taxonomy import list_topics as _list_topics
         return _list_topics(self._get_proj(), entity_id)
+
+    def topic_summarize(
+        self,
+        topic: str,
+        *,
+        max_seeds: int = 50,
+        max_hops: int = 1,
+        include_relationships: bool = True,
+    ) -> dict:
+        """Epistemic topic summarization — settled vs contested structure (#592).
+
+        For a topic query, returns the epistemic structure: what is significant
+        (settled — high confidence, strong connections) and what is contested
+        (elevated variance, NAND conflicts), plus the argument topology.
+
+        Args:
+            topic: Topic string (e.g. "pricing", "architecture").
+            max_seeds: Max seed Points to retrieve from about* edges + content match.
+            max_hops: Operator-chain expansion depth (0 = seeds only, 1 = neighbors).
+            include_relationships: Whether to include argument topology.
+
+        Returns:
+            dict with keys: topic, total_points, significant, contested,
+            disputed_pairs, argument_structure, meta.
+        """
+        from .topic_summarization import topic_summarize as _summarize
+        result = _summarize(
+            self._get_proj().g,
+            topic,
+            max_seeds=max_seeds,
+            max_hops=max_hops,
+            include_relationships=include_relationships,
+        )
+        return result.to_dict()
 
     # ── Bulk ──────────────────────────────────────────────────────
 
@@ -2490,7 +2835,9 @@ class TortoiseSDK:
                 room=item.get("room", ""),
                 content_hash=ch,
             )
-            # GAP-07: emit EventRecorded for provenance
+            # GAP-07 (partially closed by #432 _emit_event — graph mutations
+            # now emit :GraphEvent; this EventRecorded path is session-capture
+            # provenance and stays separate)
             try:
                 proj.apply({
                     "type": "EventRecorded",
@@ -2602,7 +2949,6 @@ class TortoiseSDK:
         When eventKind='AgentSession' and extract_metadata=True, runs LLM/fallback
         metadata extraction on session content before creating the Event.
         """
-        import re
         import os as _os
         import json as _json
         from pathlib import Path
@@ -2634,7 +2980,10 @@ class TortoiseSDK:
                     f"progress_file {progress_file!r} not under TORTOISE_INGEST_BASE_DIR."
                 )
 
-        _FM_RE = re.compile(r'^---\s*\n(.*?)\n---', re.DOTALL)
+        # Canonical boundary regex lives in session_indexer (#280 review round 6):
+        # hoisted so extract/health/ingest can never drift apart again (the round-5
+        # bug was exactly two copies diverging → permanent sweep non-convergence).
+        from .session_indexer import _FM_RE
         ingested, updated, skipped, failed = 0, 0, 0, 0
         errors: list[dict] = []
         now = datetime.now(timezone.utc).isoformat()
@@ -2652,6 +3001,15 @@ class TortoiseSDK:
             except Exception:
                 pass
         processed_set = set(completed_files)
+
+        # #280 review P2: two corpus files sharing a sessionId (duplicated
+        # frontmatter, or rglob picking up copies) used to make the sweep
+        # permanently non-convergent — MERGE is last-writer-wins, so the
+        # losing copy stays hash-stale and every run re-merges both. Dedupe
+        # the scan to ONE primary file per sessionId (first in sorted order);
+        # non-primary copies are surfaced by session_index_health()'s
+        # `duplicates` bucket instead of being re-indexed every run.
+        _primary_sessions: dict[str, str] = {}
 
         for i, filepath in enumerate(files):
             rel_path = str(filepath)
@@ -2691,185 +3049,226 @@ class TortoiseSDK:
             if eventKind == "AgentSession":
                 # AgentSession branch — session indexing with metadata extraction
                 session_id = frontmatter.get("sessionId") or frontmatter.get("session_id") or f"file_{filepath.stem}"
+                # #280 review P2: non-primary copy of a duplicated sessionId —
+                # skip deterministically (retryable:False — re-running changes
+                # nothing); the duplicate is surfaced, not silently re-indexed.
+                _primary = _primary_sessions.get(session_id)
+                if _primary is not None and _primary != rel_path:
+                    skipped += 1
+                    errors.append({"file": rel_path,
+                                   "error": f"duplicate sessionId '{session_id}' "
+                                            f"(primary file: {_primary}) — non-primary "
+                                            f"copy skipped (see session_index_health "
+                                            f"'duplicates')",
+                                   "retryable": False})
+                    continue
+                _primary_sessions.setdefault(session_id, rel_path)
                 event_id = f"session_{session_id}"
                 name = frontmatter.get("title", filepath.stem)
+                # #280: per-session flock — serialize against the session-end hook's
+                # single-file writer and concurrent sweeps (MATCH->SET is not MERGE-atomic).
+                # A live holder -> skip WITHOUT marking the file complete (retried later).
+                from .index_lock import SessionIndexLock
+                _lock = SessionIndexLock(session_id)
+                try:
+                    _lock_status = _lock.acquire()
+                except (OSError, AttributeError, ImportError) as _lock_err:
+                    # #280 review P2 (robustness): an unusable lock path must
+                    # never abort the batch sweep — unwritable/blocked lock dir
+                    # (EACCES/EROFS/ENOSPC/EMFILE) or a planted symlink (ELOOP
+                    # from O_NOFOLLOW) is recorded as a retryable error and the
+                    # sweep continues (same as the held path).
+                    skipped += 1
+                    errors.append({"file": rel_path,
+                                   "error": f"session lock unavailable: {_lock_err}",
+                                   "retryable": True})
+                    continue
+                if _lock_status == "held":
+                    skipped += 1
+                    errors.append({"file": rel_path,
+                                   "error": f"session lock held: {_lock.detail}",
+                                   "retryable": True})
+                    continue
+                try:
 
-                # Check dedup
-                exists_rows = proj.g.query(
-                    "MATCH (e:Event {eventId:$eid}) RETURN properties(e)",
-                    params={"eid": event_id},
-                ).result_set
-
-                if exists_rows:
-                    existing_props = exists_rows[0][0]
-                    # #330: skip unchanged + complete events. has_keywords is the
-                    # sole completeness signal (an eventStatus disjunct would skip
-                    # incomplete sessions that still need enrichment).
-                    has_keywords = bool(existing_props.get("keywords"))
-                    if existing_props.get("file_hash") == file_hash and has_keywords:
-                        skipped += 1
-                        completed_files.append(rel_path)
-                        continue
-                    # Always extract keywords (even without LLM)
-                    from .session_indexer import extract_keywords_from_frontmatter as _kw_fallback
-                    if extract_metadata:
-                        from .session_indexer import extract_metadata as _extract
-                        try:
-                            metadata = _extract(text, llm_model)
-                        except Exception:
-                            metadata = _kw_fallback(text)
-                    else:
-                        metadata = _kw_fallback(text)
-
-                    merged_keywords = list(dict.fromkeys(
-                        existing_props.get("keywords", []) + metadata.get("keywords", [])
-                    ))[:20]
-                    existing_arc = existing_props.get("content_metadata", "{}")
-                    try:
-                        existing_arc = _json.loads(existing_arc) if isinstance(existing_arc, str) else existing_arc
-                    except Exception:
-                        existing_arc = {}
-                    # #330: dedup + cap the narrative arc so repeated enrichment
-                    # of unchanged files never grows it unboundedly (and the
-                    # state-change comparison below stays deterministic). Arc
-                    # entries may be dicts (phase/topic/decisions), so dedup via
-                    # a canonical JSON key (str-sorted to tolerate mixed-type
-                    # keys), not dict.fromkeys.
-                    _arc_seen = {}
-                    for _phase in (existing_arc.get("narrative_arc", [])
-                                   + metadata.get("narrative_arc", [])):
-                        _key = _json.dumps(_phase, sort_keys=True, default=str)
-                        _arc_seen.setdefault(_key, _phase)
-                    _merged_phases = list(_arc_seen.values())
-                    # Cap while preferring genuinely-new phases: keep existing
-                    # ones first (already-merged), then append new ones up to
-                    # the cap so a full arc never starves fresh phases.
-                    _existing_phases = existing_arc.get("narrative_arc", [])
-                    _new_only = [p for p in _merged_phases
-                                 if _json.dumps(p, sort_keys=True, default=str)
-                                 not in {_json.dumps(e, sort_keys=True, default=str)
-                                         for e in _existing_phases}]
-                    new_phases = (_merged_phases[:len(_existing_phases)]
-                                  + _new_only)[:50]
-
-                    # Normalize topics to a comparable, hashable form (#330):
-                    # LLM output is unvalidated — a list-of-dicts would crash
-                    # set() and abort the whole run.
-                    def _norm_topics(t) -> list:
-                        t = t or []
-                        if not isinstance(t, list):
-                            t = [t]
-                        return [str(x) for x in t]
-                    _new_topics = _norm_topics(metadata.get("topics",
-                                                            existing_props.get("topics", [])))
-                    _stored_topics = _norm_topics(existing_props.get("topics"))
-                    _stored_keywords = _norm_topics(existing_props.get("keywords"))
-                    _new_name = metadata.get("summary", existing_props.get("name", name))
-
-                    update_props = {
-                        "name": _new_name,
-                        "keywords": merged_keywords,
-                        "topics": _new_topics,
-                        "file_hash": file_hash,
-                        "content_metadata": _json.dumps({
-                            "schema_version": 1,
-                            "summary": metadata.get("summary", ""),
-                            "narrative_arc": new_phases,
-                            "issues": metadata.get("issues", []),
-                            "prs": metadata.get("prs", []),
-                            "critical_decisions": metadata.get("critical_decisions", []),
-                        }),
-                        "message_count": frontmatter.get("message_count", 0),
-                    }
-                    # #330: unchanged content whose enrichment produced nothing
-                    # new counts as skipped, not updated (counter honesty).
-                    # Compare the FULL payload that would be written (keywords,
-                    # normalized topics, name, narrative_arc, issues/prs/
-                    # critical_decisions — the latter feed _connect_issue_objects)
-                    # so a real change in any persisted field is never
-                    # miscounted as a skip.
-                    if existing_props.get("file_hash") == file_hash:
-                        _old_meta = existing_arc
-                        changed = (
-                            set(_norm_topics(merged_keywords)) != set(_stored_keywords)
-                            or set(_new_topics) != set(_stored_topics)
-                            or _new_name != existing_props.get("name", name)
-                            or new_phases != list(existing_arc.get("narrative_arc", []))
-                            or _norm_topics(metadata.get("issues", [])) != _norm_topics(_old_meta.get("issues", []))
-                            or _norm_topics(metadata.get("prs", [])) != _norm_topics(_old_meta.get("prs", []))
-                            or _norm_topics(metadata.get("critical_decisions", [])) != _norm_topics(_old_meta.get("critical_decisions", []))
-                        )
-                        if not changed:
+                    # Check dedup
+                    exists_rows = proj.g.query(
+                        "MATCH (e:Event {eventId:$eid}) RETURN properties(e)",
+                        params={"eid": event_id},
+                    ).result_set
+    
+                    if exists_rows:
+                        existing_props = exists_rows[0][0]
+                        # #330: skip unchanged + complete events. has_keywords is the
+                        # sole completeness signal (an eventStatus disjunct would skip
+                        # incomplete sessions that still need enrichment).
+                        has_keywords = bool(existing_props.get("keywords"))
+                        if existing_props.get("file_hash") == file_hash and has_keywords:
                             skipped += 1
                             completed_files.append(rel_path)
                             continue
-
-                    # #244: (re)compute the session embedding from the merged
-                    # surface and store as vecf32 — None when model unavailable.
-                    embedding = self._session_embedding(
-                        update_props["name"], metadata.get("summary", ""),
-                        merged_keywords, update_props["topics"],
-                    )
-                    proj.g.query(
-                        "MATCH (e:Event {eventId:$eid}) SET e += $props, "
-                        "e.embedding = CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE e.embedding END",
-                        params={"eid": event_id, "props": update_props, "embedding": embedding},
-                    )
-                    updated += 1
-                    completed_files.append(rel_path)
-                    # Connect issue/PR references to Objects
-                    self._connect_issue_objects(event_id, metadata)
-                else:
-                    # New session Event — always extract keywords
-                    from .session_indexer import extract_keywords_from_frontmatter as _kw_fallback
-                    if extract_metadata:
-                        from .session_indexer import extract_metadata as _extract
-                        try:
-                            metadata = _extract(text, llm_model)
-                        except Exception:
+                        # Always extract keywords (even without LLM)
+                        from .session_indexer import extract_keywords_from_frontmatter as _kw_fallback
+                        if extract_metadata:
+                            from .session_indexer import extract_metadata as _extract
+                            try:
+                                metadata = _extract(text, llm_model)
+                            except Exception:
+                                metadata = _kw_fallback(text)
+                        else:
                             metadata = _kw_fallback(text)
+    
+                        merged_keywords = list(dict.fromkeys(
+                            existing_props.get("keywords", []) + metadata.get("keywords", [])
+                        ))[:20]
+                        existing_arc = existing_props.get("content_metadata", "{}")
+                        try:
+                            existing_arc = _json.loads(existing_arc) if isinstance(existing_arc, str) else existing_arc
+                        except Exception:
+                            existing_arc = {}
+                        # #330: dedup + cap the narrative arc so repeated enrichment
+                        # of unchanged files never grows it unboundedly (and the
+                        # state-change comparison below stays deterministic). Arc
+                        # entries may be dicts (phase/topic/decisions), so dedup via
+                        # a canonical JSON key (str-sorted to tolerate mixed-type
+                        # keys), not dict.fromkeys.
+                        _arc_seen = {}
+                        for _phase in (existing_arc.get("narrative_arc", [])
+                                       + metadata.get("narrative_arc", [])):
+                            _key = _json.dumps(_phase, sort_keys=True, default=str)
+                            _arc_seen.setdefault(_key, _phase)
+                        _merged_phases = list(_arc_seen.values())
+                        # Cap while preferring genuinely-new phases: keep existing
+                        # ones first (already-merged), then append new ones up to
+                        # the cap so a full arc never starves fresh phases.
+                        _existing_phases = existing_arc.get("narrative_arc", [])
+                        _new_only = [p for p in _merged_phases
+                                     if _json.dumps(p, sort_keys=True, default=str)
+                                     not in {_json.dumps(e, sort_keys=True, default=str)
+                                             for e in _existing_phases}]
+                        new_phases = (_merged_phases[:len(_existing_phases)]
+                                      + _new_only)[:50]
+    
+                        # Normalize topics to a comparable, hashable form (#330):
+                        # LLM output is unvalidated — a list-of-dicts would crash
+                        # set() and abort the whole run.
+                        def _norm_topics(t) -> list:
+                            t = t or []
+                            if not isinstance(t, list):
+                                t = [t]
+                            return [str(x) for x in t]
+                        _new_topics = _norm_topics(metadata.get("topics",
+                                                                existing_props.get("topics", [])))
+                        _stored_topics = _norm_topics(existing_props.get("topics"))
+                        _stored_keywords = _norm_topics(existing_props.get("keywords"))
+                        _new_name = metadata.get("summary", existing_props.get("name", name))
+    
+                        update_props = {
+                            "name": _new_name,
+                            "keywords": merged_keywords,
+                            "topics": _new_topics,
+                            "file_hash": file_hash,
+                            "content_metadata": _json.dumps({
+                                "schema_version": 1,
+                                "summary": metadata.get("summary", ""),
+                                "narrative_arc": new_phases,
+                                "issues": metadata.get("issues", []),
+                                "prs": metadata.get("prs", []),
+                                "critical_decisions": metadata.get("critical_decisions", []),
+                            }),
+                            "message_count": frontmatter.get("message_count", 0),
+                        }
+                        # #330: unchanged content whose enrichment produced nothing
+                        # new counts as skipped, not updated (counter honesty).
+                        # Compare the FULL payload that would be written (keywords,
+                        # normalized topics, name, narrative_arc, issues/prs/
+                        # critical_decisions — the latter feed _connect_issue_objects)
+                        # so a real change in any persisted field is never
+                        # miscounted as a skip.
+                        if existing_props.get("file_hash") == file_hash:
+                            _old_meta = existing_arc
+                            changed = (
+                                set(_norm_topics(merged_keywords)) != set(_stored_keywords)
+                                or set(_new_topics) != set(_stored_topics)
+                                or _new_name != existing_props.get("name", name)
+                                or new_phases != list(existing_arc.get("narrative_arc", []))
+                                or _norm_topics(metadata.get("issues", [])) != _norm_topics(_old_meta.get("issues", []))
+                                or _norm_topics(metadata.get("prs", [])) != _norm_topics(_old_meta.get("prs", []))
+                                or _norm_topics(metadata.get("critical_decisions", [])) != _norm_topics(_old_meta.get("critical_decisions", []))
+                            )
+                            if not changed:
+                                skipped += 1
+                                completed_files.append(rel_path)
+                                continue
+    
+                        # #244: (re)compute the session embedding from the merged
+                        # surface and store as vecf32 — None when model unavailable.
+                        embedding = self._session_embedding(
+                            update_props["name"], metadata.get("summary", ""),
+                            merged_keywords, update_props["topics"],
+                        )
+                        proj.g.query(
+                            "MATCH (e:Event {eventId:$eid}) SET e += $props, "
+                            "e.embedding = CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE e.embedding END",
+                            params={"eid": event_id, "props": update_props, "embedding": embedding},
+                        )
+                        updated += 1
+                        completed_files.append(rel_path)
+                        # Connect issue/PR references to Objects
+                        self._connect_issue_objects(event_id, metadata)
                     else:
-                        metadata = _kw_fallback(text)
-
-                    props = {
-                        "name": metadata.get("summary", name),
-                        "eventKind": eventKind,
-                        "session_id": session_id,
-                        "agent": frontmatter.get("agent", "pi"),
-                        "source_file": rel_path,
-                        "file_hash": file_hash,
-                        "keywords": metadata.get("keywords", []),
-                        "topics": metadata.get("topics", []),
-                        "message_count": frontmatter.get("message_count", 0),
-                        "startedAt": now,
-                        "content_metadata": _json.dumps({
-                            "schema_version": 1,
-                            "summary": metadata.get("summary", ""),
-                            "narrative_arc": metadata.get("narrative_arc", []),
-                            "issues": metadata.get("issues", []),
-                            "prs": metadata.get("prs", []),
-                            "critical_decisions": metadata.get("critical_decisions", []),
-                        }),
-                        "eventStatus": "completed",
-                        "classificationLevel": "internal",
-                        "format": "markdown",
-                    }
-                    # #244: compute the session embedding (name + summary +
-                    # keywords + topics) and store as vecf32 — None when the
-                    # model is unavailable (indexing never depends on it).
-                    embedding = self._session_embedding(
-                        props["name"], metadata.get("summary", ""),
-                        props["keywords"], props["topics"],
-                    )
-                    proj.g.query(
-                        "MERGE (e:Event {eventId:$eid}) SET e += $props, "
-                        "e.embedding = CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE e.embedding END",
-                        params={"eid": event_id, "props": props, "embedding": embedding},
-                    )
-                    ingested += 1
-                    completed_files.append(rel_path)
-                    # Connect issue/PR references to Objects
-                    self._connect_issue_objects(event_id, metadata)
+                        # New session Event — always extract keywords
+                        from .session_indexer import extract_keywords_from_frontmatter as _kw_fallback
+                        if extract_metadata:
+                            from .session_indexer import extract_metadata as _extract
+                            try:
+                                metadata = _extract(text, llm_model)
+                            except Exception:
+                                metadata = _kw_fallback(text)
+                        else:
+                            metadata = _kw_fallback(text)
+    
+                        props = {
+                            "name": metadata.get("summary", name),
+                            "eventKind": eventKind,
+                            "session_id": session_id,
+                            "agent": frontmatter.get("agent", "pi"),
+                            "source_file": rel_path,
+                            "file_hash": file_hash,
+                            "keywords": metadata.get("keywords", []),
+                            "topics": metadata.get("topics", []),
+                            "message_count": frontmatter.get("message_count", 0),
+                            "startedAt": now,
+                            "content_metadata": _json.dumps({
+                                "schema_version": 1,
+                                "summary": metadata.get("summary", ""),
+                                "narrative_arc": metadata.get("narrative_arc", []),
+                                "issues": metadata.get("issues", []),
+                                "prs": metadata.get("prs", []),
+                                "critical_decisions": metadata.get("critical_decisions", []),
+                            }),
+                            "eventStatus": "completed",
+                            "classificationLevel": "internal",
+                            "format": "markdown",
+                        }
+                        # #244: compute the session embedding (name + summary +
+                        # keywords + topics) and store as vecf32 — None when the
+                        # model is unavailable (indexing never depends on it).
+                        embedding = self._session_embedding(
+                            props["name"], metadata.get("summary", ""),
+                            props["keywords"], props["topics"],
+                        )
+                        proj.g.query(
+                            "MERGE (e:Event {eventId:$eid}) SET e += $props, "
+                            "e.embedding = CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE e.embedding END",
+                            params={"eid": event_id, "props": props, "embedding": embedding},
+                        )
+                        ingested += 1
+                        completed_files.append(rel_path)
+                        # Connect issue/PR references to Objects
+                        self._connect_issue_objects(event_id, metadata)
+                finally:
+                    _lock.release()
             else:
                 # Original DocumentCreated logic
                 doc_id = str(filepath.relative_to(directory))
@@ -4502,8 +4901,131 @@ class TortoiseSDK:
                                   llm_model=llm_model,
                                   progress_file=progress_file)
 
+    def session_index_health(self, directory: str | None = None) -> dict:
+        """Compare session .md files against indexed AgentSession Events.
+
+        #280 item 2 — the ``tortoise doctor`` health surface. Scans the
+        canonical corpus (``~/.tortoise/docs/conversations/`` by default,
+        ``TORTOISE_SESSION_CORPUS`` override) and matches each file to its
+        expected Event by session_id + file_hash.
+
+        Returns ``{directory, file_count, indexed_events, matched, unindexed,
+        stale, up_to_date, duplicates}`` — ``stale`` = Event exists but hash
+        differs (re-index needed); ``unindexed`` = no Event at all.
+
+        ``indexed_events`` is CORPUS-SCOPED (#280 review P3): the count of
+        AgentSession Events whose eventId matches a corpus file — not all
+        AgentSession Events in the graph (other sessions would make the
+        doctor arithmetic misleading). ``duplicates`` surfaces sessionIds
+        claimed by more than one corpus file (rglob copies / duplicated
+        frontmatter): those copies made the sweep permanently non-convergent
+        (MERGE is last-writer-wins) — they are surfaced here and skipped in
+        ingest_corpus, never silently re-indexed (#280 review P2).
+        """
+        from pathlib import Path
+        from .session_indexer import (
+            compute_file_hash, extract_session_id, session_corpus_dir,
+        )
+
+        dir_path = Path(directory or session_corpus_dir())
+        if not dir_path.is_dir():
+            return {"directory": str(dir_path), "file_count": 0,
+                    "indexed_events": 0, "matched": 0,
+                    "unindexed": [], "stale": [], "up_to_date": [],
+                    "duplicates": []}
+
+        proj = self._get_proj()
+        rows = proj.g.query(
+            "MATCH (e:Event {eventKind:'AgentSession'}) "
+            "RETURN e.eventId, e.file_hash"
+        ).result_set
+        by_event = {r[0]: r[1] for r in rows}
+
+        files = sorted(dir_path.rglob("*.md"))
+        # Group by session id: two files may share a sessionId (rglob picking
+        # up copies, or duplicated frontmatter). Classify only the PRIMARY
+        # file (first in sorted order) so the delta drives the sweep to
+        # convergence; non-primary copies surface in the `duplicates` bucket.
+        by_sid: dict[str, list[str]] = {}
+        for f in files:
+            # str() coercion keeps the value hashable as a dict key (a YAML
+            # list/dict frontmatter sessionId would raise TypeError) while
+            # preserving the base event_id derivation (str() == repr() for
+            # str/int/float/bool/list/dict), so health stays consistent with
+            # ingest_corpus's frontmatter coercion. Only a read failure
+            # (extract returns None) falls back to the file-stem id.
+            _sid_raw = extract_session_id(str(f))
+            sid = str(_sid_raw) if _sid_raw is not None else f"file_{f.stem}"
+            by_sid.setdefault(sid, []).append(str(f))
+        unindexed: list[str] = []
+        stale: list[str] = []
+        up_to_date: list[str] = []
+        duplicates: list[dict] = []
+        for sid, flist in by_sid.items():
+            event_id = f"session_{sid}"
+            if len(flist) > 1:
+                duplicates.append({"session_id": sid, "event_id": event_id,
+                                   "files": flist})
+            primary = flist[0]
+            file_hash = compute_file_hash(primary)
+            existing = by_event.get(event_id)
+            if existing is None:
+                unindexed.append(primary)
+            elif existing == file_hash:
+                up_to_date.append(primary)
+            else:
+                stale.append(primary)
+        corpus_event_ids = {f"session_{sid}" for sid in by_sid}
+        return {"directory": str(dir_path),
+                "file_count": len(files),
+                "indexed_events": sum(1 for eid in corpus_event_ids
+                                       if eid in by_event),
+                "matched": len(up_to_date),
+                "unindexed": unindexed,
+                "stale": stale,
+                "up_to_date": up_to_date,
+                "duplicates": duplicates}
+
+    def reconcile_sessions(self, directory: str | None = None,
+                           extract_metadata: bool = False,
+                           llm_model: str | None = "gpt-5-mini") -> dict:
+        """Reconciliation sweep (#280 item 3) — scan for unindexed session
+        files and re-index them.
+
+        Scan-then-replay: ``session_index_health()`` computes the delta
+        (unindexed + hash-stale files), then ``ingest_corpus()`` replays the
+        directory — its dedup skips everything up-to-date and the per-session
+        flock (#280 item 1) serializes against concurrent hook writers. No
+        cron infra needed: the sweep triggers from the same hook/CLI surface
+        (align decision) — run it manually via ``tortoise index sessions`` or
+        from session-end.sh.
+
+        ``extract_metadata`` defaults to False so sweeps use the cheap
+        keyword fallback — never burn LLM tokens on bulk retry.
+        """
+        from pathlib import Path
+        from .session_indexer import session_corpus_dir
+
+        directory = str(Path(directory or session_corpus_dir()).resolve())
+        health = self.session_index_health(directory)
+        result: dict = {}
+        if health["unindexed"] or health["stale"]:
+            result = self.ingest_corpus(
+                directory, eventKind="AgentSession",
+                extract_metadata=extract_metadata, llm_model=llm_model,
+            )
+        return {**health, "reindex": result}
+
+
     def _connect_issue_objects(self, event_id: str, metadata: dict) -> int:
-        """Create INSTANTIATES edges from an AgentSession Event to issue/PR Objects."""
+        """Create aboutObject edges from an AgentSession Event to issue/PR Objects (ONTOLOGY §3.2).
+
+        The Object node carries its identifying props (``name``, ``objectKind`` and — for
+        dict items — ``repo``/``issue_number``/``url``) so the references are resolvable
+        outside the edge itself. Only successfully-resolved connections are counted; a
+        resolution failure is logged at debug (the session_indexer call site otherwise
+        swallows it).
+        """
         proj = self._get_proj()
         connected = 0
         for key in ("issues", "prs"):
@@ -4511,20 +5033,36 @@ class TortoiseSDK:
                 if isinstance(item, dict):
                     oid = item.get("id") or item.get("number")
                     name = item.get("title") or item.get("name") or str(item)
+                    repo = item.get("repo")
+                    try:
+                        issue_number = int(item.get("number")) if item.get("number") is not None else None
+                    except (TypeError, ValueError):
+                        issue_number = item.get("number")
+                    url = item.get("url")
                 else:
                     oid = None
                     name = str(item)
+                    repo = None
+                    issue_number = None
+                    url = None
                 if not oid:
                     # Deterministic hash (builtin hash() is salted per-process →
                     # would create duplicate Objects on every run).
                     oid = f"{key.rstrip('s')}_{hashlib.sha256(name.encode()).hexdigest()[:8]}"
                 okind = "pr" if key == "prs" else "issue"
                 proj.g.query(
-                    "MERGE (o:Object {id:$oid}) SET o.name=$name, o.objectKind=$okind "
-                    "WITH o MATCH (e:Event {eventId:$eid}) MERGE (e)-[:INSTANTIATES]->(o)",
-                    params={"oid": oid, "name": name[:200], "eid": event_id, "okind": okind},
+                    "MERGE (o:Object {id:$oid}) SET o.name=$name, o.objectKind=$okind, "
+                    "o.repo=$repo, o.issue_number=$issue_number, o.url=$url",
+                    params={"oid": oid, "name": name[:200], "okind": okind,
+                            "repo": repo, "issue_number": issue_number, "url": url},
                 )
-                connected += 1
+                if proj.create_about_edge(event_id, oid, "aboutObject"):
+                    connected += 1
+                else:
+                    _logger.debug(
+                        "connect_issue_objects: unresolved aboutObject target %s for event %s",
+                        oid, event_id,
+                    )
         return connected
 
 

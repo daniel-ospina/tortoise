@@ -53,12 +53,13 @@
       padding: 2rem;
     }
 
-    /* CTA beat: the fixed full-screen overlay must never swallow clicks when
-       invisible — only its interactive children get pointer events (#744).
-       Other beats have no interactive children and inherit pointer-events:
-       none from .beat, so no further overrides are needed. */
+    /* Interactive beats: the fixed full-screen overlays must never swallow
+       clicks when invisible — only their interactive children get pointer
+       events (#744). Beats without interactive children inherit
+       pointer-events: none from .beat. */
     #beat-cta { pointer-events: none; }
     #beat-cta form, #beat-cta a, #beat-cta button { pointer-events: auto; }
+    #beat-tortoise a { pointer-events: auto; }
 
     #beat-hero { opacity: 1; }
 
@@ -109,6 +110,26 @@
     }
     #beat-tortoise h2 span { color: var(--accent); }
 
+    /* Learn more CTA below the Tortoise reveal */
+    #beat-tortoise .cta-start {
+      display: inline-block;
+      margin-top: 2rem;
+      background: var(--accent);
+      color: var(--bg);
+      border: none;
+      padding: 0.85rem 2rem;
+      font-family: var(--mono);
+      font-size: 0.95rem;
+      font-weight: 600;
+      text-decoration: none;
+      cursor: pointer;
+      transition: background 0.2s, transform 0.2s;
+    }
+    #beat-tortoise .cta-start:hover {
+      background: #0891b2;
+      transform: scale(1.02);
+    }
+
     /* Lab name */
     #beat-lab h3 {
       font-family: var(--mono);
@@ -120,31 +141,8 @@
       text-transform: uppercase;
     }
     #beat-lab h3 strong { color: var(--text); font-weight: 400; }
-    #beat-lab p { margin-top: 1.25rem; }
 
     /* CTA */
-    #beat-cta .cta-start {
-      display: inline-block;
-      background: var(--accent);
-      color: var(--bg);
-      border: none;
-      padding: 0.85rem 2rem;
-      font-family: var(--mono);
-      font-size: 0.95rem;
-      font-weight: 600;
-      text-decoration: none;
-      cursor: pointer;
-      transition: background 0.2s;
-      margin-bottom: 2rem;
-    }
-    #beat-cta .cta-start:hover {
-      background: var(--accent-hover);
-    }
-    #beat-cta .cta-subtle {
-      font-size: 0.75rem;
-      color: var(--text-dim);
-      margin-bottom: 1rem;
-    }
     #beat-cta form {
       display: flex; gap: 0.75rem; max-width: 400px; width: 100%;
     }
@@ -218,35 +216,6 @@
       cursor: wait;
     }
 
-    #waitlist-form .consent-note {
-      font-size: 0.7rem;
-      color: var(--text-dim);
-      margin-top: 0.6rem;
-      max-width: 400px;
-      width: 100%;
-    }
-
-    /* CTA button */
-    #beat-cta .cta-start {
-      display: inline-block;
-      background: var(--accent);
-      color: var(--bg);
-      padding: 0.9rem 2rem;
-      font-family: var(--mono);
-      font-size: 1rem;
-      text-decoration: none;
-      transition: background 0.2s, transform 0.2s;
-    }
-    #beat-cta .cta-start:hover {
-      background: #0891b2;
-      transform: scale(1.02);
-    }
-    #beat-cta .cta-subtle {
-      margin-top: 1rem;
-      color: var(--text-dim);
-      font-size: 0.8rem;
-    }
-
     /* CLI snippet */
     #beat-cta .cli-snippet {
       margin-top: 1.5rem;
@@ -265,16 +234,6 @@
       line-height: 1.8;
     }
 
-    /* Self-hosting link */
-    #beat-cta .selfhost-link {
-      margin-top: 1.25rem;
-      color: var(--text-dim);
-      text-decoration: none;
-      font-size: 0.78rem;
-      transition: color 0.2s;
-    }
-    #beat-cta .selfhost-link:hover { color: var(--accent); }
-
     /* Mobile */
     @media (max-width: 640px) {
       #beat-cta form { flex-direction: column; }
@@ -287,7 +246,6 @@
        form stack to scroll instead of clipping the email input / links */
     @media (max-height: 520px) {
       #beat-cta { justify-content: flex-start; overflow-y: auto; }
-      #beat-cta .cta-start { margin-top: 0.5rem; }
     }
 
     /* Subtle fade at bottom edges */
@@ -312,6 +270,7 @@
     </section>
     <section id="beat-tortoise" class="beat">
       <h2><span>Tortoise</span> — a memory system where agents learn.</h2>
+      <a href="https://tortoise.premiselabs.co" class="cta-start">Learn more →</a>
     </section>
     <section id="beat-lab" class="beat">
       <h3><strong>Premise Labs</strong></h3>
@@ -324,12 +283,6 @@
       </form>
       <p class="success-msg" id="waitlist-msg" role="status"></p>
       <p class="error-msg" id="waitlist-error" role="alert"></p>
-      <p class="consent-note">Joining the waitlist means you'd like launch updates from Premise Labs — you can unsubscribe at any time.</p>
-      <a href="https://tortoise.premiselabs.co" class="cta-start">Learn more →</a>
-      <p class="cta-subtle">Meet Tortoise — the memory graph for AI agents.</p>
-      <a class="selfhost-link" href="/docs">Docs</a>
-      <a class="selfhost-link" href="/self-hosted">Self-hosting docs →</a>
-      <a class="selfhost-link" href="https://app.premiselabs.co">Login →</a>
       <a class="twitter-link" href="https://x.com/premiselabs" target="_blank" rel="noopener">@premiselabs</a>
     </section>
   </div>

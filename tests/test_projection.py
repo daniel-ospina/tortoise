@@ -2150,7 +2150,8 @@ def test_retract_tombstone_falkor():
 
 
 def test_retract_tombstone_get_point_hidden():
-    """SDK get_point returns {} for retracted points (hidden from normal reads)."""
+    """SDK get_point returns the retracted tombstone (full fidelity per #432);
+    query/paginated_query hide it by default (see test_retract_tombstone_skipped_in_query)."""
     if _skip_if_no_falkor():
         return
     from tortoise.sdk import TortoiseSDK
@@ -2161,9 +2162,10 @@ def test_retract_tombstone_get_point_hidden():
         assert sdk.get_point(pid) != {}
         # Apply retraction via the projection raw path (simulates event replay)
         sdk._get_proj().apply({"type": "PointRetracted", "id": pid})
-        # get_point hides the retracted point
-        assert sdk.get_point(pid) == {}
-        # But raw query can still find it
+        # #432 contract: get_point keeps returning the tombstone (full fidelity)
+        assert sdk.get_point(pid) != {}
+        assert sdk.get_point(pid).get("status") == "retracted"
+        # Raw query can also find it
         r = sdk._get_proj().query(
             "MATCH (n:Point {id:$id}) RETURN n.status", id=pid
         ).result_set

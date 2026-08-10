@@ -157,6 +157,10 @@ class EpBreakdown:
     # as a first-class flag so agents treat the claim as disputed, not merely
     # high/low probability.
     contested: bool = False
+    # Whether this point has persisted EP data (ep_alpha / ep_beta).
+    # False means the point is uncalibrated — Beta(1,1) default priors
+    # produce variance 0.0833 but that is NOT a signal of contestation.
+    has_ep: bool = False
 
     def __post_init__(self):
         if self.evidence is None:
@@ -708,6 +712,7 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
                 # (no persisted α/β → defaults to 1/1 → v=1/12) is NOT
                 # contested, it's unmeasured.
                 contested=bool(has_ep) and variance > CONTESTED_VARIANCE_THRESHOLD,
+                has_ep=bool(has_ep),
             )
 
         # Fill in defaults for IDs with no edges

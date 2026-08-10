@@ -1876,6 +1876,32 @@ def _cmd_doctor(args):
                     results.append(("Graph: health", "✅", f"{points} Points, {total} entities"))
                 else:
                     results.append(("Graph: health", "⚠️", "0 Points — graph is empty (expected for new setups)"))
+                # #280 check 4: session-indexing health runs HERE, while the
+                # projection is still open — #720's finally-close would kill
+                # the embedded server before the session check could connect.
+                try:
+                    _chk4 = sdk.session_index_health()
+                    _fc = _chk4["file_count"]
+                    if _fc == 0:
+                        results.append(("Session indexing", "⚠️",
+                                        "corpus empty — nothing indexed (expected for new setups)"))
+                    else:
+                        _delta = len(_chk4["unindexed"]) + len(_chk4["stale"])
+                        _dup = (f" — {len(_chk4.get('duplicates', []))} duplicate "
+                                f"sessionId(s) surfaced (merge/remove copies)"
+                                if _chk4.get("duplicates") else "")
+                        if _delta == 0:
+                            results.append(("Session indexing", "✅",
+                                            f"{_fc} corpus files all indexed "
+                                            f"({_chk4['indexed_events']} AgentSession Events total){_dup}"))
+                        else:
+                            results.append(("Session indexing", "❌",
+                                            f"{_fc} files vs {_chk4['indexed_events']} Events — {_delta} unindexed/stale "
+                                            f"(run `tortoise index sessions`){_dup}"))
+                except Exception as _e:
+                    results.append(("Session indexing", "⚠️",
+                                    f"check unavailable: {str(_e)[:60]}"))
+
             finally:
                 # conf 52: close the projection in BOTH branches — the URI
                 # branch's from_uri projection must not leak.
@@ -1884,7 +1910,7 @@ def _cmd_doctor(args):
         except Exception as e:
             results.append(("Graph: health", "❌", str(e)[:60]))
 
-    # 4. MCP server
+    # 5. MCP server
     mcp_running = False
     try:
         import subprocess
@@ -1900,7 +1926,7 @@ def _cmd_doctor(args):
     else:
         results.append(("MCP server", "⚠️", "not running — tortoise serve"))
 
-    # 5. Harness detection
+    # 6. Harness detection
     home = Path.home()
     detections: list[str] = []
     if (home / ".pi" / "agent" / "extensions" / "tortoise-context").exists():
@@ -1999,6 +2025,85 @@ def _cmd_list_sources(args) -> int:
         if sdk._proj:
             sdk._proj.close()
     return 0
+
+
+def _cmd_index_sessions(args) -> int:
+    """Reconciliation sweep — index unindexed/stale session files (#280 item 3).
+
+    tortoise index sessions [--dir DIR] [--db URI] [--metadata]
+
+    Scan-then-replay: reports the corpus-vs-graph delta, re-indexes
+    missing/hash-stale files via the SDK (dedup + per-session flock), and
+    prints the report. The sweep is the "periodic scan + retry" surface —
+    trigger it manually, from cron, or from session-end.sh (align decision:
+    no cron infra in-tree).
+    """
+    import sys as _sys
+
+    from tortoise.sdk import TortoiseSDK
+
+    # #715 P2 conf 75: resolve the same target init/index use (env URI >
+    # FALKORDB_* > embedded path).
+    try:
+        target = _resolve_db_target(args.db)
+    except ValueError as e:
+        print(f"  ❌ Invalid DB target: {e}", file=_sys.stderr)
+        return 1
+    # Round-9: an unreachable graph (dead host, down DB) must produce a clean
+    # CLI error, not a raw ConnectionError traceback — mirroring doctor
+    # check-3's pattern. The hook fires this on every session end, so a down
+    # DB would otherwise spawn one noisy failing process per close.
+    # Round-11: sdk pre-initialized to None, constructor INSIDE the try — a
+    # constructor raise (FLY_APP_NAME production guard with an empty URI)
+    # must produce a clean CLI error, not a raw traceback; the finally never
+    # sees an unbound sdk.
+    sdk: TortoiseSDK | None = None
+    try:
+        sdk = TortoiseSDK()
+        sdk._proj = _projection_for(target)
+        report = sdk.reconcile_sessions(directory=args.dir,
+                                        extract_metadata=args.metadata)
+    except Exception as e:
+        print(f"  ❌ graph unreachable: {e}", file=_sys.stderr)
+        return 1
+    finally:
+        if sdk is not None and sdk._proj:
+            sdk._proj.close()
+
+    print(f"Session corpus: {report['directory']}")
+    print(f"  .md files:          {report['file_count']}")
+    print(f"  AgentSession Events: {report['indexed_events']}")
+    print(f"  up-to-date:         {report['matched']}")
+    print(f"  unindexed:          {len(report['unindexed'])}")
+    print(f"  stale (hash drift): {len(report['stale'])}")
+    for f in report["unindexed"]:
+        print(f"    - {f}")
+    for f in report["stale"]:
+        print(f"    ~ {f}")
+    if report.get("duplicates"):
+        print(f"  duplicate sessionIds: {len(report['duplicates'])}")
+        for d in report["duplicates"]:
+            print(f"    ! {d['session_id']}: {", ".join(d['files'])}")
+    if report.get("reindex"):
+        r = report["reindex"]
+        print(f"Re-index: {r.get('ingested', 0)} ingested, "
+              f"{r.get('updated', 0)} updated, "
+              f"{r.get('skipped', 0)} skipped, "
+              f"{r.get('failed', 0)} failed")
+        # Review follow-up: surface per-file errors (lock unavailable / held /
+        # duplicate sessionId) — a sweep that skipped everything must not look
+        # green. Retryable errors are retried on the next sweep.
+        if r.get("errors"):
+            _n_retry = sum(1 for e in r["errors"] if e.get("retryable"))
+            print(f"  {len(r['errors'])} error(s) "
+                  f"({_n_retry} retryable — retried next sweep):")
+            for e in r["errors"][:5]:
+                print(f"    ! {e['file']}: {e['error']}")
+            if len(r["errors"]) > 5:
+                print(f"    ... and {len(r['errors']) - 5} more")
+    else:
+        print("Re-index: nothing to do (corpus fully indexed)")
+    return 1 if (report.get("reindex") or {}).get("failed") else 0
 
 
 def _cmd_decide(args) -> int:
@@ -2661,6 +2766,14 @@ def main(argv: list[str] | None = None) -> int:
                          "(default: TORTOISE_DB_URI / FALKORDB_* / embedded path)")
     ig.add_argument("--branch", default="main", help="Git branch to index")
     ig.add_argument("--background", action="store_true", help="Run in background")
+    # tortoise index sessions — reconciliation sweep (#280 item 3)
+    isess = idx_sp.add_parser("sessions", help="Reconciliation sweep: index unindexed/stale session files")
+    isess.add_argument("--dir", default=None,
+                       help="Session corpus directory (default: ~/.tortoise/docs/conversations)")
+    isess.add_argument("--db", default=None,
+                       help="DB target override (default: TORTOISE_DB_URI / FALKORDB_* / embedded path)")
+    isess.add_argument("--metadata", action="store_true",
+                       help="Run LLM metadata extraction (default: keyword-only — sweep never burns LLM tokens)")
     # tortoise create-point <content> --kind <kind>
     cp = sp.add_parser("create-point", help="Create a Point via Tortoise Cloud API")
     cp.add_argument("content", help="Point content (text)")
@@ -2789,6 +2902,8 @@ def main(argv: list[str] | None = None) -> int:
     elif args.cmd == "index":
         if args.index_cmd == "github":
             return _cmd_index_github(args)
+        elif args.index_cmd == "sessions":
+            return _cmd_index_sessions(args)
         idx.print_help()
         return 1
     elif args.cmd == "list-kinds":
