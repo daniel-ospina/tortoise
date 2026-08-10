@@ -40,7 +40,9 @@ The system under test is the epistemic layer in three compositions, each with it
 
 ## 1. Calibration baseline — measured behavior of the current engine (2026-08-09)
 
-All numbers measured by running the real code (`.venv/bin/python`, embedded FalkorDBLite, `compute_confidence()`: damping=0.5, n_quad=8, max_iter=50, tol=1e-3). Tiers: T0=Beta(10,1)→0.909, T1=(5,1)→0.833, T2=(3,1)→0.750, T3=(2,1)→0.667, T4=(1.1,1)→0.524.
+> **Baseline note (2026-08-09):** this section documents the PRE-#855 engine (product coupling, w=1.0 NAND, drift-inflated re-runs). The #855 fix (NAND base 8.0, difference coupling, drift fix #852) changes the measured values — T0↔T0 NAND now settles ~0.82 (was 0.915), T4 hit by T0 NAND → ~0.15. Verdicts marked 'INVERTED'/'P0 blocker'/'blocks v1' no longer describe the shipped engine.
+
+All numbers measured by running the real code (`.venv/bin/python`, embedded FalkorDBLite, `compute_confidence()`: damping=0.5, n_quad=8, max_iter=50, tol=1e-4 (#855 tightened from 1e-3)). Tiers: T0=Beta(10,1)→0.909, T1=(5,1)→0.833, T2=(3,1)→0.750, T3=(2,1)→0.667, T4=(1.1,1)→0.524.
 
 | Behavior | Measured today | Required (this spec) | Verdict |
 |---|---|---|---|
