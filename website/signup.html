@@ -500,6 +500,7 @@
     const RATE_LIMIT_LOCKOUT_MS = 60 * 60 * 1000;   // email bucket — 1h (matches the hourly window)
     const SHORT_RATE_LIMIT_LOCKOUT_MS = 60 * 1000;  // per-IP auth-attempt limits — 60s
     const RATE_LIMIT_KEY = "tortoise_signup_rate_limited_until";
+    const RATE_LIMIT_TIER_KEY = "tortoise_signup_rate_limit_tier";  // "email" | "short" — copy must not decay with remaining time
     let rateLimitTimer = null;
     let rateLimitUntil = 0;      // in-memory mirror — the lockout still holds when sessionStorage is unavailable (#801 code-review)
     let resendCooldownUntil = 0; // #527 60s resend cooldown (shared bucket, #801)
@@ -542,17 +543,25 @@
         const existing = parseInt(sessionStorage.getItem(RATE_LIMIT_KEY) || "0", 10);
         const until = Math.max(Number.isFinite(existing) ? existing : 0, rateLimitUntil);
         sessionStorage.setItem(RATE_LIMIT_KEY, String(until));
+        // Monotonic tier: the copy is pinned at set-time (a 1h lockout must
+        // keep its "about an hour" copy for its whole life, never decaying
+        // into the minute copy as time passes — code-review P2).
+        const existingTier = sessionStorage.getItem(RATE_LIMIT_TIER_KEY);
+        const tier = (existingTier === "email" || isEmailBucketError(error)) ? "email" : "short";
+        sessionStorage.setItem(RATE_LIMIT_TIER_KEY, tier);
       } catch (e) {}
       applyRateLimitLockout();
     }
 
     // Tier-aware lockout copy: the email bucket maps to the #527 pinned
     // "about an hour" literal; the short per-IP tier must not contradict the
-    // live countdown it shows (code-review P2).
+    // live countdown it shows. Tier is read from storage (set at lockout
+    // time) — deriving it from remaining time would decay the copy mid-lockout.
     function rateLimitMessage() {
-      const ms = rateLimitRemainingMs();
-      if (ms <= 0) return "";
-      if (ms >= 55 * 60 * 1000) {
+      if (rateLimitRemainingMs() <= 0) return "";
+      let tier = "short";
+      try { tier = sessionStorage.getItem(RATE_LIMIT_TIER_KEY) || tier; } catch (e) {}
+      if (tier === "email") {
         return "Too many attempts from this network. Please wait about an hour and try again.";
       }
       return "Too many attempts from this network. Please try again in a minute.";
@@ -577,6 +586,10 @@
           // would strand users after lockout expiry (disabled buttons swallow
           // clicks, so the cooldown timer alone could never recover it).
           if (resend) resend.disabled = (Date.now() < resendCooldownUntil);
+          // Lockout over: drop the stale rate-limit message + tier so the
+          // form reads clean (code-review P4).
+          clearError();
+          try { sessionStorage.removeItem(RATE_LIMIT_TIER_KEY); } catch (e) {}
           if (rateLimitTimer) { clearInterval(rateLimitTimer); rateLimitTimer = null; }
           return;
         }

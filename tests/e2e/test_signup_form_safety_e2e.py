@@ -108,6 +108,9 @@ def test_429_signup_rate_limit_is_humanized(page: Page) -> None:
     # be ~1h — a regression to the 60s tier would fail the lower bound.
     assert until - now_ms >= 50 * 60 * 1000, f"lockout NOT 1h tier: until={until}"
     assert until <= now_ms + 3_600_000 + 5_000, f"lockout until={until}"
+    tier = page.evaluate(
+        "sessionStorage.getItem('tortoise_signup_rate_limit_tier')")
+    assert tier == "email", f"1h lockout tier mismatch: {tier!r}"
     # early-return guard: re-dispatching submit must NOT fire a second request
     page.evaluate("document.getElementById('email-form')"
                   ".dispatchEvent(new Event('submit', {cancelable: true}))")
@@ -151,17 +154,24 @@ def test_429_short_tier_lockout_60s_then_expiry(page: Page) -> None:
     now_ms = time.time() * 1000
     # short tier: remaining must be ~60s (≤ 2 min), NOT the 1h tier
     assert 0 < until - now_ms <= 2 * 60 * 1000, f"lockout NOT 60s tier: until={until}"
+    tier = page.evaluate(
+        "sessionStorage.getItem('tortoise_signup_rate_limit_tier')")
+    assert tier == "short", f"60s lockout tier mismatch: {tier!r}"
     # short-tier copy: not the pinned 1h sentence
     assert "about an hour" not in page.locator("#error").inner_text(), \
         "short-tier lockout shows the 1h copy"
     # expiry: force the stored timestamp AND the in-memory mirror into the
-    # past, then re-apply — the ms<=0 branch must restore the button + label
-    # and clear the timer (rateLimitUntil is a top-level let in the inline
-    # script — visible from the main world).
+    # past, then re-apply — the ms<=0 branch must restore the button + label,
+    # clear the timer, drop the stale message, and remove the tier key.
     page.evaluate("() => { sessionStorage.setItem('tortoise_signup_rate_limited_until', '1'); rateLimitUntil = 1; applyRateLimitLockout(); }")
     expect(page.locator("#btn-submit")).to_be_enabled(timeout=5_000)
     assert page.locator("#btn-submit").inner_text() == "Create account", \
         page.locator("#btn-submit").inner_text()
+    # stale lockout message dropped (clearError removes the visible class;
+    # inner_text would still show textContent for a hidden element)
+    expect(page.locator("#error")).to_be_hidden(timeout=5_000)
+    assert page.evaluate("sessionStorage.getItem('tortoise_signup_rate_limit_tier')") is None, \
+        "tier key survived expiry"
     assert console_errors == [], f"page JS errors: {console_errors}"
 
 
