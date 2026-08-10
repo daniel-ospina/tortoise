@@ -223,10 +223,18 @@ class TestEnvGating:
         assert is_supabase_enabled() is False
 
     def test_supabase_mode_requires_creds(self, monkeypatch):
+        """Explicit TORTOISE_CONTROL_PLANE=supabase with missing creds is
+        FAIL-CLOSED (code-review P2, PR #851): enabled=True so
+        get_control_plane() raises RuntimeError (→ REST 500 / MCP 503) — a
+        Supabase-only deployment must never silently authenticate via the
+        registry."""
         monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "supabase")
         monkeypatch.delenv("SUPABASE_URL", raising=False)
         monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
-        assert is_supabase_enabled() is False
+        assert is_supabase_enabled() is True
+        from tortoise.supabase_control import SupabaseControlPlane
+        with pytest.raises(RuntimeError, match="not configured"):
+            SupabaseControlPlane()
 
     def test_legacy_service_key_env_accepted(self, monkeypatch):
         monkeypatch.delenv("TORTOISE_CONTROL_PLANE", raising=False)

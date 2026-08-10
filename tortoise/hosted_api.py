@@ -1661,7 +1661,15 @@ async def create_demo_graph(request: Request):
 
 @app.post("/v1/team/keys", response_model=CreateKeyResponse)
 async def create_api_key(request: Request, response: Response, team: dict = Depends(get_current_team)):
-    """Generate a new API key for the team."""
+    """Generate a new API key for the team.
+
+    #767 review note (PR #851 P1, tracked by #765 plan Task 8 writer
+    inventory): in Supabase control-plane mode this endpoint still mints
+    into the FalkorDB registry ONLY — a key minted here would 401 against
+    Supabase-backed auth until the writer flip lands. #765 migrates this
+    writer (api_keys insert with lookup_hash + created_via) BEFORE the
+    single-deploy flip (#771), so no production window exists. Do not use
+    in Supabase mode until then."""
     _check_team_limit(team, "api_keys")
     import uuid
     from tortoise.auth import hash_api_key
@@ -2579,7 +2587,15 @@ async def reconcile(request: Request):
 
 @app.post("/v1/agent/signup")
 async def agent_signup(request: Request):
-    """Mint a team + API key for an anonymous device (no email/dashboard)."""
+    """Mint a team + API key for an anonymous device (no email/dashboard).
+
+    #767 review note (PR #851 P1, tracked by #765 plan Task 8 writer
+    inventory): in Supabase control-plane mode this endpoint still writes
+    the FalkorDB registry ONLY — the identity path (NULL user_id + identity
+    via provision_team, shipped in #770/0010) is exercised by the Supabase
+    writer flip in #765, which must land BEFORE the single-deploy flip
+    (#771). No production window exists; do not run Supabase mode against
+    this endpoint until then."""
     # #741(a): identity is ALWAYS server-side — client-supplied identity and
     # x-device-id are ignored (a client-chosen identity trivially bypasses the
     # per-identity rate limit). The CLI generates its own identity server-side.

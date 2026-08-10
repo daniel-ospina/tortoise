@@ -70,13 +70,20 @@ def is_supabase_enabled() -> bool:
     ``TORTOISE_CONTROL_PLANE=registry`` forces the registry (selfhost).
     ``=supabase`` (or unset with creds configured) uses Supabase. Unset with
     no creds → registry (selfhost default, plan Task 8 env split).
+
+    FAIL-CLOSED on explicit misconfiguration: ``TORTOISE_CONTROL_PLANE=
+    supabase`` with missing creds returns True so ``get_control_plane()``
+    raises → REST 500 / MCP 503 (code-review P2, PR #851). A deployment that
+    opted into Supabase-only must NEVER silently authenticate via the
+    registry — that would let registry-only keys pass in a Supabase-only
+    deployment.
     """
     mode = os.environ.get("TORTOISE_CONTROL_PLANE", "").strip().lower()
     if mode == "registry":
         return False
     configured = bool(os.environ.get("SUPABASE_URL")) and bool(_service_key())
     if mode == "supabase":
-        return configured
+        return True  # get_control_plane() raises when creds are missing
     return configured
 
 
@@ -99,6 +106,13 @@ class SupabaseControlPlane:
                 "service-role key (SUPABASE_SERVICE_ROLE_KEY/SUPABASE_SERVICE_KEY) "
                 "are required"
             )
+        # Persistent client — one connection pool per control-plane instance
+        # (created on first use via get_control_plane). Per-request clients
+        # would pay a fresh TCP+TLS handshake on EVERY auth resolution
+        # (resolve_api_key makes 2-3 queries per request; code-review P2,
+        # PR #851). httpx.Client is safe for concurrent use.
+        import httpx
+        self._http = httpx.Client(timeout=self._timeout)
 
     def query(self, table: str, *, select: list[str] | None = None,
               filters: list[tuple[str, str, object]] | None = None,
@@ -133,7 +147,7 @@ class SupabaseControlPlane:
         }
         try:
             import httpx
-            with httpx.Client(timeout=self._timeout) as client:
+            with self._http as client:
                 if method == "GET":
                     resp = client.get(url, params=params, headers=headers)
                 elif method == "PATCH":
