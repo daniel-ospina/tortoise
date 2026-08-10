@@ -284,6 +284,23 @@ def test_confidence_to_prior_calibration():
         f"0.0 → (1,3), got ({a},{b})"
 
 
+def test_confidence_to_prior_malformed_inputs():
+    """Malformed confidence must fall back to uniform — never NaN/degenerate
+    priors that silently zero downstream weights (#326)."""
+    for bad in (None, True, False, float("nan"), float("inf"),
+                float("-inf"), "not-a-number", object()):
+        a, b = TortoiseEP.confidence_to_prior(bad)
+        assert a == 1.0 and b == 1.0, f"{bad!r} → uniform, got ({a},{b})"
+
+    # Out-of-range values are clamped to [0,1] before conversion.
+    a, b = TortoiseEP.confidence_to_prior(3.0)
+    assert abs(a - 3.0) < 0.01 and abs(b - 1.0) < 0.01, \
+        f"3.0 clamps to 1.0 → (3,1), got ({a},{b})"
+    a, b = TortoiseEP.confidence_to_prior(-2.0)
+    assert abs(a - 1.0) < 0.01 and abs(b - 3.0) < 0.01, \
+        f"-2.0 clamps to 0.0 → (1,3), got ({a},{b})"
+
+
 # ═══════════════════════════════════════════════════════════════════
 # Test 7: EP with evidence + IMPL chain (integration)
 # ═══════════════════════════════════════════════════════════════════
