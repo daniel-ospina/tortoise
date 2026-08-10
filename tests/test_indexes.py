@@ -128,13 +128,27 @@ def test_get_entity_parity_all_types(sdk):
     assert sdk.get_entity(eid).get("eventKind") == "meeting"
     # Source by url
     assert sdk.get_entity("http://parity").get("url") == "http://parity"
-    # every node in the graph is resolvable by one of id/eventId/url
+    # every CANONICAL entity node is resolvable by one of id/eventId/url.
+    # Internal event-store nodes (:GraphEvent/:GraphEventMeta — emitted by
+    # create_point's PointAdded via event_store, #432) and registry nodes
+    # (Session/APIKey/Team/Tag, separate registry graph) are intentionally OUT
+    # of scope for entity resolution (_get_entity resolves only the 6
+    # canonical labels; GraphEvent keys on event_id, not id/eventId/url —
+    # #647 sweep catch).
     rows = proj.g.query(
         "MATCH (n) RETURN n.id, labels(n)[0], n.url, n.eventId").result_set
     assert rows, "no nodes created"
+    INTERNAL = {"GraphEvent", "GraphEventMeta"}
     for r in rows:
+        label = r[1]
+        if label in INTERNAL:
+            continue  # internal event-store records, not user entities
         ident = r[0] or r[2] or r[3]
-        assert sdk.get_entity(ident), f"get_entity({ident}) returned empty"
+        # Robustness (#647 review P2): a non-canonical node WITHOUT any
+        # identifier must fail as a clean labeled assertion, not call
+        # get_entity(None) (unbound param-binding error).
+        assert ident is not None, f"node {label} has no id/url/eventId and is not in INTERNAL"
+        assert sdk.get_entity(ident), f"get_entity({ident}) returned empty for {label}"
 
 
 def test_get_entity_stub_source_by_url(sdk):
