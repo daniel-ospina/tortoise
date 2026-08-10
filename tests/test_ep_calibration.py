@@ -116,7 +116,7 @@ class TestNANDCalibrationAtRealWeights:
         yield sdk, claim_a["id"], claim_b["id"], op["id"]
         sdk.close()
 
-    def test_nand_no_collapse_at_w1(self, ep_graph):
+    def test_nand_no_collapse_at_base_weight(self, ep_graph):
         """Two T0 claims + plain NAND → confidence stays ≥ floor.
 
         A plain NAND operator (no mitigations, no input_ops) gets the
@@ -158,7 +158,7 @@ class TestNANDCalibrationAtRealWeights:
         assert conf_a < 0.909, f"Claim A unchanged by NAND: {conf_a:.4f}"
         assert conf_b < 0.909, f"Claim B unchanged by NAND: {conf_b:.4f}"
 
-    def test_nand_no_collapse_at_w2_mitigated(self, ep_graph):
+    def test_nand_no_collapse_at_mitigated_weight(self, ep_graph):
         """Two T0 claims + NAND at the mitigated weight → confidence stays ≥ floor.
 
         To exercise the mitigation path, we create an additional NAND edge

@@ -98,12 +98,9 @@ def phi_nand(ca, cb, w=8.0):
     At w=8.0 the contradiction is strong (φ≈0.0013 at T0): a T0 claim
     contradicted by a T0 NAND settles ~0.82 (meaningful drop from 0.91,
     well above collapse); a T4 claim hit by a T0 NAND drops to ~0.15.
-    Legacy w=1.0/2.0 values (φ≈0.437/0.191) are the pre-#855 reference
-    regime and no longer occur in production.
-
-    At the legacy w=1.0 the NAND penalty was mild (φ≈0.437 at T0); at
-    legacy w=2.0 (mitigated) two T0 claims converged to ~0.90 (tilted
-    mean ~0.895). Both regimes no longer occur in production since #855.
+    Legacy w=1.0/2.0 (φ≈0.437/0.191 at T0; mitigated w=2.0 converged to
+    ~0.90) are the pre-#855 reference regime and no longer occur in
+    production.
     The historical overshoot failure mode (91% → 12%) is definitively
     eliminated. Calibration validated in test_ep_calibration.py.
     """

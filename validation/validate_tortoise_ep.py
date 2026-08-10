@@ -148,11 +148,13 @@ def _build_10claim_graph():
 
 
 def _build_nand_strong_graph():
-    """Strong NAND: resolution-event context → compute_operator_weight returns w=3.0.
+    """Strong NAND: #855 NAND base weight (8.0) drives the constraint.
+    (Stale pre-#855: 'resolution-event context → w=3.0' — that context
+    multiplier system was removed; EP NAND is now a flat 8.0.)
 
     The EP weight is graph-derived (not hardcoded). resolution-event context
     gives the highest single multiplier (3.0×). With both claims at Beta(1,1)
-    (uniform prior, mean=0.5), w=3.0 NAND pushes confidence down measurably.
+    (uniform prior, mean=0.5), w=8.0 NAND pushes confidence down measurably.
     """
     tmpdir = tempfile.mkdtemp(prefix="tortoise_ep_nand_strong_")
     db_path = os.path.join(tmpdir, "falkor.db")
@@ -256,11 +258,11 @@ def test_tortoise_ep_nand_w3():
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Test 2: strong NAND (w=3.0) — constraint is working
+# Test 2: strong NAND (w=8.0) — constraint is working
 # ═══════════════════════════════════════════════════════════════════
 
 def test_tortoise_ep_nand_strong():
-    """Strong NAND (w=3.0 from resolution-event context in graph builder).
+    """Strong NAND (w=8.0, #855 NAND base weight).
 
     The NAND constraint pushes both claims below the default 0.5 prior.
     Verify: max confidence < 0.45 (NAND working), no NaN.
@@ -675,7 +677,7 @@ def test_tortoise_ep_chain_propagation():
     )
 
     # IMPL chain: c0→c1, c1→c2, ..., c8→c9
-    # Use "resolution-event" context for higher weight (w≈3.0) so evidence
+    # #855: plain NAND carries the 8.0 base weight, so evidence
     # propagates measurably through the chain.
     op_ids = []
     for i in range(n - 1):
@@ -823,7 +825,7 @@ if __name__ == "__main__":
     test_tortoise_ep_nand_w3()
     print("  ✓ PASS\n")
 
-    print("Test 2: Strong NAND (w=3.0)")
+    print("Test 2: Strong NAND (w=8.0)")
     test_tortoise_ep_nand_strong()
     print("  ✓ PASS\n")
 
