@@ -2459,7 +2459,8 @@ class TortoiseSDK:
         proj.g.query(
             "MATCH (n:Point {id: $id}) "
             "SET n.ep_alpha = $a, n.ep_beta = $b, n.baseline_set = true, "
-            "    n.baseline_source = $src",
+            "    n.baseline_source = $src, "
+            "    n.posterior_alpha = null, n.posterior_beta = null",
             params={"id": claim_id, "a": alpha, "b": beta, "src": source},
         )
         # Dreaming (#85, P1): a baseline change alters the prior — neighbors
@@ -2627,7 +2628,8 @@ class TortoiseSDK:
                     continue  # within interval and not dirty-marked → keep
             proj.g.query(
                 "MATCH (n:Point {id:$id}) REMOVE n.ep_alpha, n.ep_beta, "
-                "n.baseline_set, n.baseline_source, n.inherited_at",
+                "n.baseline_set, n.baseline_source, n.inherited_at, "
+                "n.posterior_alpha, n.posterior_beta",
                 params={"id": pid},
             )
             # Clear the stale prior from in-memory evidence cache (#652).

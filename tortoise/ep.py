@@ -496,7 +496,8 @@ class TortoiseEP:
         rows = self.g.query(
             "MATCH (n:Point) "
             "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
-            "WITH n, coalesce(n.ep_alpha,1.0) AS a, coalesce(n.ep_beta,1.0) AS b "
+            "WITH n, coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS a, "
+            "     coalesce(n.posterior_beta, n.ep_beta, 1.0) AS b "
             "WITH n, a, b, (a*b)/((a+b)*(a+b)*(a+b+1)) AS v "
             "WHERE v > $t RETURN n.id, n.content, a, b, v ORDER BY v DESC",
             params={"t": variance_threshold},
