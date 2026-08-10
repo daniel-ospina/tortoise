@@ -792,7 +792,13 @@
         }
 
         // #801: server-first signup (bypasses the SMTP rate-limit bucket).
-        const outcome = await serverSignup(email, password);
+        // Only for the hosted API — local/dev runs the legacy client-side
+        // flow against local Supabase (api.premiselabs.co is not reachable
+        // from localhost; a cross-origin call there would just CORS-fail).
+        let outcome = "unavailable";  // local/dev → legacy client-side flow
+        if (!isLocal) {
+          outcome = await serverSignup(email, password);
+        }
         if (outcome === "created") {
           await signInAndGo(email, password);
           return;
