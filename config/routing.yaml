@@ -21,9 +21,6 @@ repo_routing:
   daniel-ospina/swarm:
     product: vsm-infra
     default_team: organisation-design-team
-  daniel-ospina/org-data:
-    product: org-data
-    default_team: organisation-design-team
   daniel-ospina/shared-workflows:
     product: vsm-infra
     default_team: organisation-design-team
@@ -54,10 +51,6 @@ products:
     - eldato-outreach-team
   vsm-infra:
     name: VSM Infrastructure
-    teams:
-    - organisation-design-team
-  org-data:
-    name: Org Data
     teams:
     - organisation-design-team
 label_routing:

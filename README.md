@@ -4,7 +4,7 @@ type: readme
 domain: epistemic
 status: live
 created: 2026-07-24
-updated: 2026-08-08
+updated: 2026-08-10
 ---
 
 # Tortoise
@@ -104,8 +104,8 @@ Tortoise is **Business Source License 1.1** — see [LICENSE](LICENSE) and the [
 
 - `tortoise/` — the SDK, MCP server, projection, search engine, backup/restore, and the self-host daemon (`tortoise/selfhost.py`)
 - `integrations/` — thin connectors that talk to Tortoise over MCP (not SDK imports)
-- `premise-labs/` — the hosted product's landing pages + dashboard (deploys to Cloudflare Pages)
-- `docs/ONTOLOGY.md` — **canonical ontology v3.1** (co-located with the code it governs)
+- `website/` — the hosted product's landing pages + dashboard (deploys to Cloudflare Pages)
+- `docs/ONTOLOGY.md` — **canonical ontology v3.4** (co-located with the code it governs)
 - `tests/` — test suite
 
 ## Canonical ontology
@@ -114,7 +114,7 @@ Tortoise is **Business Source License 1.1** — see [LICENSE](LICENSE) and the [
 
 ## Repository layout
 
-**`daniel-ospina/tortoise` (this repo)** is the **full product** — graph runtime, SDK, MCP server, self-host daemon + docker compose, Fly.io deployment config (`fly.toml`), Dockerfile.selfhost, embedded reaper, Supabase edge functions (`supabase/functions/tenant-provision/`), backup pipeline, and the hosted dashboard (`premise-labs/` dir → Cloudflare Pages). This is the canonical source of truth. If you want to deploy Tortoise (self-host or hosted), this is the only repo you need.
+**`daniel-ospina/tortoise` (this repo)** is the **full product** — graph runtime, SDK, MCP server, self-host daemon + docker compose, Fly.io deployment config (`fly.toml`), Dockerfile.selfhost, embedded reaper, Supabase edge functions (`supabase/functions/tenant-provision/`), backup pipeline, and the hosted dashboard (`website/` dir → Cloudflare Pages). This is the canonical source of truth. If you want to deploy Tortoise (self-host or hosted), this is the only repo you need.
 
 **`daniel-ospina/premise-labs`** is a **partial copy** of the tortoise tree used as an **SDK-import surface** by dependent repos (notably `daniel-ospina/swarm`, which sets `PYTHONPATH` to import `tortoise/projection.py`, `tortoise/ids.py`, `tortoise/pipeline_cli.py`, and `config/` from it). It is **not** the full product — it lacks `docker-compose.yml`, `Dockerfile.selfhost`, `tortoise/embedded_reaper.py`, `tortoise/selfhost.py`, `fly.toml`, and `supabase/functions/tenant-provision/`. It also carries an outdated `.env.example` (port `:6379` in the URI example vs `FALKORDB_PORT=16379`; this repo uses `:16379` consistently).
 
@@ -131,4 +131,4 @@ File issues in the repo that owns the code:
 | **daniel-ospina/premise-labs** | Premise Labs internal ops: meetings recorder, CRM (Twenty), bridge scripts, health checks; also an SDK-import surface for the swarm (partial tortoise tree — see above) | Ops tooling, CRM, meeting pipeline |
 | **daniel-ospina/eldato** | El Dato app (eldato.com.mx): scanner, webapp, deals/offers, notifications, ads, SEO | El Dato product work |
 
-**Rule of thumb:** if the issue is about Tortoise code (this repo's `tortoise/` or `premise-labs/` dirs), file it here. If it's about agent tooling, file in agent-infra. If it's about Premise Labs ops (meetings/CRM), file in premise-labs.
+**Rule of thumb:** if the issue is about Tortoise code (this repo's `tortoise/` or `website/` dirs), file it here. If it's about agent tooling, file in agent-infra. If it's about Premise Labs ops (meetings/CRM), file in premise-labs.
