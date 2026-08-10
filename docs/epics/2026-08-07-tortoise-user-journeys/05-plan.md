@@ -2,9 +2,11 @@
 title: "Epic Plan — Tortoise Product User Journeys"
 type: engineering
 domain: platform
-doc_status: complete
+doc_status: live
 subjects.team: organisation-design-team
 created: 2026-08-07
+aboutSubjects: tortoise
+aboutObjects: signup-page, welcome-page, tenant-provision, tortoise-rest
 ---
 
 <!-- epic: tortoise-user-journeys → issues #518 + #519 -->
@@ -841,6 +843,7 @@ Each test: **Setup** (concrete preconditions) · **Steps** (verifiable actions) 
 
 ## E2E-1: Hosted signup (email/password) → provision → key revealed once
 - **Setup:** remote Supabase with email confirmation **OFF** (assert the actual setting in setup — flipped toggle fails loudly, not confusingly), fresh browser profile, no account for test-email
+- **STALE 2026-08-10 (#801):** prod confirmations are ON (SMTP-era, #832) — the OFF variant is retired for hosted prod. The mocked welcome suite (`tests/e2e/test_welcome_page.py`) + the live no-429 smoke own this journey (see `docs/plans/2026-08-10-801-signup-rate-plan.md`); a live OFF run would require toggling prod auth config (rejected, Approach B).
 - **Steps:** 1) land on /signup 2) fill email+password 3) Create account 4) land on /welcome.html 5) read key, refresh page
 - **Assertions (user-visible primary):** `tt_` key shown once with copy button · refresh shows returning-user state (no re-reveal) · key authenticates against GET /v1/team. **Supporting (DB-level):** `team_memberships` row exists (pin the post-migration name; role=owner, status=active) · FalkorDB team + default graph exist · demo points present (**after demo-seed 404 fix**) · **service-role check: `api_key IS NULL` after reveal**
 - **Poll strategy (async provisioning):** welcome shows the pending/retry state first, then bounded poll — wait for key-reveal or error state within N seconds (deterministic regardless of provisioning latency)
@@ -889,6 +892,7 @@ Each test: **Setup** (concrete preconditions) · **Steps** (verifiable actions) 
 
 ## E2E-8: Email confirmation branch (if remote setting ON)
 - **Setup:** **flip remote Supabase email-confirmation ON for the run, restore OFF after** (driven from test config; assert the actual setting in setup so E2E-1 fails loudly if the toggle wasn't restored); OR run against a second Supabase project. **E2E-1 (OFF) and E2E-8 (ON) are mutually exclusive on the same project — never both green without the toggle+restore step.**
+- **STATUS 2026-08-10 (#801):** prod setting is ON — E2E-8 is the live reality; the live smoke asserts its entry state (check-your-inbox, no 429) per-push, with Admin-API user cleanup. The toggle+restore mechanism is retired (would downgrade prod's confirmed-email posture mid-run).
 - **Steps:** signup email/password → check-your-inbox state → click confirmation link → return
 - **Assertions:** "check your inbox" + resend (rate-limited) · returning via link completes exchange → welcome with provisioned key · key reveal gated on email_confirmed
 - **Negative:** never-confirmed account → `tenant_cleaned_up` after expiry · resend rate-limited (429)

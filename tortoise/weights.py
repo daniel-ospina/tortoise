@@ -6,6 +6,17 @@ context tags, and optionally post-convergence message strengths.
 import math
 
 
+# NAND operators carry a dedicated base weight (#855). The generic base of
+# 1.0 leaves the contradiction potential exp(-w·ca·cb) too weak: a T0-vs-T0
+# contradiction pulls the target only ~0.006 (message η ≈ -0.6 against
+# evidence (10,1)) — essentially zero cascade through IMPL chains. The
+# legacy phi_nand default was w=8.0; at that weight a strong contradiction
+# drives the target down ~0.08 (meaningful) while Dung reinstatement
+# (#753) still holds once re-run drift is fixed (#852). IMPL keeps its
+# generic base of 1.0.
+NAND_BASE_WEIGHT = 8.0  # applied BEFORE the dynamic post-convergence multiplier (0.5-3.0): for NAND, any dyn >= 1.25 lands on the 10.0 clamp, so dynamic mode can only down-modulate NAND within [4.0, 10.0] (latent — no caller uses use_dynamic today)
+
+
 def compute_operator_weight(proj, op_id: str, use_dynamic: bool = False) -> float:
     """Compute EP factor weight w in [0.1, 10.0] from graph structure."""
     g = proj.g
@@ -22,6 +33,10 @@ def compute_operator_weight(proj, op_id: str, use_dynamic: bool = False) -> floa
         return 1.0
     op_type, bias, precision, consistency, directness = rows[0]
     w = 1.0
+
+    # NAND base weight (#855): see NAND_BASE_WEIGHT above.
+    if op_type == "NAND":
+        w *= NAND_BASE_WEIGHT
 
     # Mitigation: operator targets another operator
     input_ops = g.query(

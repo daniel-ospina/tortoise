@@ -34,7 +34,7 @@ def analyze_density_penalty():
     print()
     print("  For n=2: each operator weight = 1/log₂(3) = 0.631")
     print("  Total effective = 2 × 0.631 = 1.262")
-    print("  But EP messages are NON-linear in weight — phi = exp(w * ca * cb)")
+    print("  But EP messages are NON-linear in weight — IMPL: phi = exp(-w·(ca-cb)²), NAND: phi = exp(-w·ca·cb) (#855 couplings)")
     print("  2 weak messages (w=0.631) ≠ 1 strong message (w=1.262)")
 
 
