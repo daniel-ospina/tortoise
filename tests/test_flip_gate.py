@@ -379,9 +379,11 @@ class TestWebhookSupabaseBranch:
         assert row.get("subscription_status") == "canceled"
         # ZERO registry writes (re-review P1, PR #878): the webhook must not
         # construct a registry-namespaced SDK in Supabase mode — the marker
-        # (webhook_events) and tier read go through the seam.
+        # (webhook_events) and tier read go through the seam. _make_sdk is
+        # KEYWORD-ONLY (*, namespace=...) — check kwargs, not positional args
+        # (re-review P2, PR #878: the positional check could never fire).
         assert not any(
-            a[0] == "make_sdk" and a[1] and a[1][0] == "registry"
+            a[0] == "make_sdk" and a[2].get("namespace") == "registry"
             for a in calls
         ), f"webhook built a registry SDK in Supabase mode: {calls}"
         # The first-seen marker landed in the seam store, not the registry.
