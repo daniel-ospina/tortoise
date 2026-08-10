@@ -45,9 +45,12 @@ no new deps, matching the analytics-write pattern in hosted_api.py.
 
 Query dialect: ``query(table, select, filters, method, json_body, order,
 limit)`` where filters are ``(column, op, value)`` tuples with ops
-``eq | neq | is`` (None → ``IS NULL``). The test fake implements the SAME
-interface over in-memory rows, so the resolution logic is shared verbatim
-between CI and production.
+``eq | neq | is`` (None → ``IS NULL``) and ``lte`` (ISO-8601 cutoff,
+used by the deleted-team purge sweep, #302). ``method`` supports
+``GET | POST | PATCH | DELETE`` (DELETE is used only by the post-grace
+hard-delete purge). The test fake implements the SAME interface over
+in-memory rows, so the resolution logic is shared verbatim between CI
+and production.
 """
 from __future__ import annotations
 
@@ -146,6 +149,8 @@ class SupabaseControlPlane:
                 params[col] = f"eq.{value}"
             elif op == "neq":
                 params[col] = f"neq.{value}"
+            elif op == "lte":
+                params[col] = f"lte.{value}"
             else:
                 raise ValueError(f"unsupported filter op {op!r}")
         if order:
@@ -178,6 +183,11 @@ class SupabaseControlPlane:
                 headers["Prefer"] = "return=representation"
                 resp = self._http.post(url, params=params, headers=headers,
                                        json=json_body or {})
+            elif method == "DELETE":
+                # PostgREST row delete (service role). Only used by the
+                # post-grace hard-delete purge (#302) — soft paths PATCH.
+                headers["Prefer"] = "return=minimal"
+                resp = self._http.delete(url, params=params, headers=headers)
             else:
                 raise ValueError(f"unsupported method {method!r}")
         except RuntimeError:
@@ -377,7 +387,7 @@ def team_by_id(cp, team_id: str) -> dict | None:
         select=["id", "name", "tier", "email", "graph_name", "max_users",
                 "max_teams", "max_graphs", "ops_allowance", "graph_size_cap",
                 "backup_enabled", "backup_latest_at", "backup_restored_at",
-                "created_at"],
+                "created_at", "deleted_at"],
         filters=[("id", "eq", team_id)],
     )
     return rows[0] if rows else None
@@ -832,3 +842,89 @@ def store_github_credentials(cp, team_id: str, *, token_enc: str, org: str) -> N
         filters=[("id", "eq", team_id)],
         json_body={"github_token_enc": token_enc, "github_org": org},
     )
+
+
+# ── Team deletion cascade (E2E-6-D, issue #302 security baseline) ──────────
+#
+# Two-phase deletion: soft delete (immediate access kill + grace stamp) then
+# hard delete (post-grace purge). All soft phases are PATCH-based — rows stay
+# for audit/forensics until the grace window elapses; the purge then DELETEs
+# the control-plane rows. Immutable ``audit_events`` rows are preserved by
+# design (no FK to teams — the delete trail survives the team).
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def soft_delete_team(cp, team_id: str, now: str | None = None) -> None:
+    """Stamp ``teams.deleted_at`` — the soft-delete marker (#302).
+
+    Every read path checks this column (export/delete 410) or fails closed
+    anyway (keys revoked, memberships removed). Idempotent: re-stamping an
+    already-deleted team is a no-op PATCH.
+    """
+    cp.query(
+        "teams",
+        method="PATCH",
+        filters=[("id", "eq", team_id)],
+        json_body={"deleted_at": now or _now_iso()},
+    )
+
+
+def revoke_team_api_keys(cp, team_id: str, now: str | None = None) -> None:
+    """Revoke every non-revoked ``api_keys`` row for the team.
+
+    The key-plane kill switch: ``resolve_api_key`` treats ``revoked_at`` as
+    authoritative (P1-2), so all ``tt_`` keys for the team fail closed the
+    moment the delete is requested.
+    """
+    cp.query(
+        "api_keys",
+        method="PATCH",
+        filters=[("team_id", "eq", team_id), ("revoked_at", "is", None)],
+        json_body={"revoked_at": now or _now_iso()},
+    )
+
+
+def remove_team_memberships(cp, team_id: str, now: str | None = None) -> None:
+    """Mark active ``team_memberships`` removed (session-plane kill switch).
+
+    ``user_memberships``/``membership_for_user_team`` only match
+    ``status='active'``, so JWT-session access (teams list, invites, owner
+    checks) stops resolving immediately.
+    """
+    cp.query(
+        "team_memberships",
+        method="PATCH",
+        filters=[("team_id", "eq", team_id), ("status", "eq", "active")],
+        json_body={"status": "removed", "removed_at": now or _now_iso()},
+    )
+
+
+def revoke_team_invitations(cp, team_id: str, now: str | None = None) -> None:
+    """Revoke pending ``invitations`` for the team (no redemption post-delete).
+
+    ``invitation_accept`` rejects status != 'pending', so a pending invite
+    can never mint a membership in a deleted team.
+    """
+    cp.query(
+        "invitations",
+        method="PATCH",
+        filters=[("team_id", "eq", team_id), ("status", "eq", "pending")],
+        json_body={"status": "revoked", "revoked_at": now or _now_iso()},
+    )
+
+
+def purge_team_control_plane(cp, team_id: str) -> None:
+    """Hard-delete all control-plane rows for a team (post-grace purge, #302).
+
+    Deletes ``teams`` + ``api_keys`` + ``team_memberships`` + ``invitations``
+    rows via the service-role seam. Only called once the soft-delete grace
+    window has elapsed. Raises on failure (fail-closed) — the purge sweep
+    logs and skips, never crashes.
+    """
+    cp.query("teams", method="DELETE", filters=[("id", "eq", team_id)])
+    cp.query("api_keys", method="DELETE", filters=[("team_id", "eq", team_id)])
+    cp.query("team_memberships", method="DELETE", filters=[("team_id", "eq", team_id)])
+    cp.query("invitations", method="DELETE", filters=[("team_id", "eq", team_id)])
