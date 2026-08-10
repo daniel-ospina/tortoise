@@ -214,8 +214,21 @@ Deno.serve(async (req: Request) => {
     // Ensure starts with alphanumeric per Team.name regex
     const safeName = /^[a-zA-Z0-9]/.test(teamName) ? teamName : `u-${teamName}`;
 
-    // Generate ULID for team_id
-    const teamId = crypto.randomUUID().replace(/-/g, "").substring(0, 26);
+    // Generate a DETERMINISTIC team_id per user — SHA-256(user_id) truncated
+    // to 26 hex chars. Retries (hook redelivery after a lost response, or a
+    // direct-JWT re-invocation) must be true same-payload retries: a fresh
+    // random id on every call would let provision_team's step-3 INSERT create
+    // a SECOND team + membership + api_keys row (code-review P2, PR #847 —
+    // the old update_user_team placeholder-only UPDATE could never duplicate,
+    // so this is a new idempotency requirement introduced by the RPC).
+    const teamIdDigest = await crypto.subtle.digest(
+      "SHA-256",
+      new TextEncoder().encode(user_id)
+    );
+    const teamId = Array.from(new Uint8Array(teamIdDigest))
+      .map(b => b.toString(16).padStart(2, "0"))
+      .join("")
+      .substring(0, 26);
 
     // Generate API key
     const apiKeyBytes = new Uint8Array(32);
@@ -239,6 +252,19 @@ Deno.serve(async (req: Request) => {
     }
     const fastApiKey = Deno.env.get("FASTAPI_INTERNAL_KEY") || "";
 
+    // Fail CLOSED on a missing pepper at the lookupHash call site (not just
+    // via hashApiKey's own guard): without the pepper, lookup_hash would be
+    // SHA-256(key) — a digest that can never match tortoise/auth.py's
+    // lookup_hash() (real/dev pepper) → every provisioned key silently fails
+    // Task 3 auth. Explicit guard so reordering the two calls can't regress
+    // this (code-review P2, PR #847).
+    const pepper = Deno.env.get("TORTOISE_SECRET_PEPPER") || "";
+    if (!pepper) {
+      throw new Error(
+        "TORTOISE_SECRET_PEPPER is not set. Set it in Supabase secrets — " +
+        "provisioned lookup_hash values cannot be verified without a stable pepper."
+      );
+    }
     // ── Fix #7852/#770: write the master list to Supabase in ONE atomic
     // transaction (teams + team_memberships + api_keys) via the
     // provision_team SECURITY DEFINER RPC (migration 0010). The RPC is
@@ -290,7 +316,11 @@ Deno.serve(async (req: Request) => {
     // touches the control_plane registry graph (E2E-1: zero registry
     // writes). The old /internal/provision call is GONE — it wrote the
     // registry (Team/APIKey/Membership nodes), which the plan moves to
-    // Supabase entirely.
+    // Supabase entirely. AbortSignal.timeout bounds the await so a slow
+    // demo seed can never blow the hook deadline mid-retry (code-review P2,
+    // PR #847 — the RPC has already committed at this point; the hook
+    // redelivers the whole request, and deterministic team_id makes that a
+    // harmless no-op).
     await fetch(`${fastApiUrl}/internal/demo`, {
       method: "POST",
       headers: {
@@ -298,6 +328,7 @@ Deno.serve(async (req: Request) => {
         "Authorization": `Bearer ${fastApiKey}`,
       },
       body: JSON.stringify({ team_id: teamId }),
+      signal: AbortSignal.timeout(10_000),
     }).catch((e) => console.error("Demo seed failed:", e));
 
     const response: ProvisionResponse = {
