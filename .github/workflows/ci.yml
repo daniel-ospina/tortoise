@@ -75,6 +75,9 @@ jobs:
         uses: astral-sh/setup-uv@v7
         with:
           python-version: '3.12'
+          # Pin the uv version that generated uv.lock — a patch bump (e.g.
+          # 0.12.2 → 0.12.3) can flag the lock as stale under --check.
+          version: '0.12.3'
       - name: Lockfile coherence check (uv.lock vs pyproject.toml)
         run: uv lock --check
       - name: Frozen sync (dev group)
