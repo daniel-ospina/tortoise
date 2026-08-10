@@ -416,28 +416,26 @@ def _spawn_orphan(monkeypatch=None):
     import subprocess as sp
     import sys as _sys
     code = (
-        "import os,time; os.environ.pop('TORTOISE_DB_URI',None);\n"
+        "import os,subprocess,sys,time; os.environ.pop('TORTOISE_DB_URI',None);\n"
         "from redislite.falkordb_client import FalkorDB; db=FalkorDB();\n"
-        "print('READY', flush=True); time.sleep(30)"
+        # Report OUR socket from the client itself — the redislite connection
+        # kwargs carry the authoritative path. The old post-kill mtime walk
+        # of /tmp raced concurrent suites' servers, and ps-line parsing can
+        # grab a foreign server's socket under load (#493).
+        "sock=db.connection.connection_pool.connection_kwargs.get('path','')\n"
+        "print('READY '+sock, flush=True); time.sleep(30)"
     )
     proc = sp.Popen([_sys.executable, "-c", code],
                     stdout=sp.PIPE, text=True)
-    proc.stdout.readline()  # wait READY
-    time.sleep(1)
+    line = proc.stdout.readline()  # wait READY + socket
+    parts = line.split()
+    sock = parts[1] if len(parts) > 1 else ""
     proc.kill()
     proc.wait()
     time.sleep(1)
-    # find the newest orphan socket
-    tmp = tempfile.gettempdir()
-    newest = None
-    for root, dirs, files in os.walk(tmp):
-        if "redis.socket" in files and "redis.pid" in files:
-            m = os.path.getmtime(os.path.join(root, "redis.socket"))
-            if newest is None or m > newest[0]:
-                newest = (m, os.path.join(root, "redis.socket"))
-    if newest is None:
-        raise AssertionError("no orphan created")
-    return os.path.realpath(newest[1])
+    if not sock or not os.path.exists(os.path.dirname(sock)):
+        raise AssertionError(f"no orphan created (line: {line!r})")
+    return os.path.realpath(sock)
 
 
 def test_reap_kills_idle_orphan(monkeypatch):

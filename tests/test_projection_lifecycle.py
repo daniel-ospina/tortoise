@@ -76,25 +76,29 @@ def test_atexit_cleanup_fires_on_process_exit():
     normally must NOT leave an orphaned redis-server (atexit fires)."""
     from tortoise.projection import FalkorProjection
     path = _tmp_db("atexit.db")
+    dbname = os.path.basename(path)
     code = f"""
-import sys
+import subprocess, sys
 sys.path.insert(0, {os.getcwd()!r})
 from tortoise.projection import FalkorProjection
 proj = FalkorProjection({path!r})
 # no close(), no with — atexit must clean up on normal exit
+out = subprocess.run(["ps", "-eo", "args"], capture_output=True, text=True).stdout
+# The server must be ALIVE while the projection is open (self-contained
+# sanity — no dependency on other tests' servers being up, #493).
+print("ALIVE" if ("redis-server" in out and {dbname!r} in out) else "DEAD")
 """
     proc = subprocess.run([sys.executable, "-c", code],
                           capture_output=True, text=True, timeout=30)
     assert proc.returncode == 0, proc.stderr
+    assert "ALIVE" in proc.stdout, \
+        f"server not alive during subprocess (ps: {proc.stdout[:200]})"
     time.sleep(1)
-    # No redis-server should be bound to this db's socket
+    # the specific socket for this db should be gone
     out = subprocess.run(["ps", "-eo", "args"], capture_output=True,
                          text=True).stdout
-    assert f"unixsocket" in out  # sanity
-    # the specific socket for this db should be gone
-    import glob
     leftovers = [l for l in out.splitlines()
-                 if "redis-server" in l and path.split("/")[-1] in l]
+                 if "redis-server" in l and dbname in l]
     assert not leftovers, f"orphan redis-server left: {leftovers}"
 
 

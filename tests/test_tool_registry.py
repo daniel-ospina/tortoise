@@ -81,9 +81,10 @@ class TestRegistryEquivalence:
             assert excluded not in HTTP_ALLOWED, f"{excluded} must be HTTP-excluded"
 
     def test_registry_count(self):
-        """68 tools — 60 existing + 6 onboarding (#498/#499/#500) + 1 human-approval (#531) + 1 #540."""
+        """70 tools — 60 existing + 6 onboarding (#498/#499/#500) + 1
+        human-approval (#531) + 1 #540 + 2 #432 (events_poll, retract_point)."""
         from tortoise.tool_registry import TOOL_REGISTRY
-        assert len(TOOL_REGISTRY) == 68, f"Expected 68, got {len(TOOL_REGISTRY)}"
+        assert len(TOOL_REGISTRY) == 70, f"Expected 70, got {len(TOOL_REGISTRY)}"
         names = {t.name for t in TOOL_REGISTRY}
         onboarding = {"tortoise_onboarding_demo_create", "tortoise_onboarding_state",
                       "tortoise_onboarding_session_recording",
@@ -92,6 +93,8 @@ class TestRegistryEquivalence:
                       "tortoise_onboarding_github_index"}
         assert onboarding <= names, f"Missing onboarding tools: {onboarding - names}"
         assert "tortoise_file_human_approval" in names, "Missing #531 human-approval tool"
+        assert "tortoise_events_poll" in names, "Missing #432 events_poll tool"
+        assert "tortoise_retract_point" in names, "Missing #432 retract_point tool"
 
     def test_no_duplicate_names(self):
         """No two registry entries share the same name."""

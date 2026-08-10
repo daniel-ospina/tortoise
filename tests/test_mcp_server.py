@@ -162,9 +162,20 @@ class TestToolIntegration:
         tortoise_delete_point(point_id)
 
     def test_query_returns_list(self):
-        from tortoise.mcp_server import tortoise_query
-        result = tortoise_query(kind="observation")
-        assert isinstance(result, list) or isinstance(result.get("error"), str)
+        from tortoise.mcp_server import (tortoise_create_point,
+                                         tortoise_delete_point, tortoise_query)
+        # Seed an observation point first: on an empty graph the tool returns
+        # the empty-result suggestion dict instead of a list, so the assertion
+        # was order-dependent on the shared default-path DB (#493).
+        created = tortoise_create_point(
+            kind="observation", content="query-list-test", authoredBy="test-suite")
+        point_id = created.get("id") if isinstance(created, dict) else None
+        try:
+            result = tortoise_query(kind="observation")
+            assert isinstance(result, list) or isinstance(result.get("error"), str), result
+        finally:
+            if point_id:
+                tortoise_delete_point(point_id)
 
     def test_search_returns_list(self):
         from tortoise.mcp_server import tortoise_search
