@@ -118,7 +118,10 @@ jobs:
       - run: pip install -e '.[test]'
       - run: python -m playwright install --with-deps chromium
       - name: Run legal pages E2E suite
-        run: python -m pytest tests/e2e/test_legal_pages.py -v
+        # test_signup_form_safety_e2e.py joined here (#801): the 429-mock test
+        # intercepts requests in the browser — no real signup against prod — but
+        # verifies the DEPLOYED lockout code post-deploy.
+        run: python -m pytest tests/e2e/test_legal_pages.py tests/e2e/test_signup_form_safety_e2e.py -v
         env:
           RUN_LEGAL_E2E: '1'
           ALLOW_PROD: '1'

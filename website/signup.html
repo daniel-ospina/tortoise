@@ -487,6 +487,143 @@
       return "Something went wrong. Please try again in a moment.";
     }
 
+    // ── Rate-limit lockout (#801) ──────────────────────────────────────────
+    // The GoTrue email-send bucket is PROJECT-WIDE (custom SMTP: 30 sends/hr
+    // for ALL users) — a client that re-submits after a 429 burns the shared
+    // bucket for every other visitor. On an EMAIL-bucket rate-limit error,
+    // lock THIS browser out of email signup for 1h (sessionStorage-persisted),
+    // disable submit/resend, and show a live countdown. Per-IP auth-attempt
+    // limits (over_request_rate_limit*) self-reset in seconds/minutes — they
+    // get a short 60s lockout only (two-tier; do NOT flatten them into the
+    // 1h email-bucket lockout).
+    const RATE_LIMIT_CODES = ["over_email_send_rate_limit", "over_request_rate_limit", "over_request_rate_limit_ip", "rate_limit"];
+    const RATE_LIMIT_LOCKOUT_MS = 60 * 60 * 1000;   // email bucket — 1h (matches the hourly window)
+    const SHORT_RATE_LIMIT_LOCKOUT_MS = 60 * 1000;  // per-IP auth-attempt limits — 60s
+    const RATE_LIMIT_KEY = "tortoise_signup_rate_limited_until";
+    const RATE_LIMIT_TIER_KEY = "tortoise_signup_rate_limit_tier";  // "email" | "short" — copy must not decay with remaining time
+    let rateLimitTimer = null;
+    let rateLimitUntil = 0;      // in-memory mirror — the lockout still holds when sessionStorage is unavailable (#801 code-review)
+    let rateLimitTier = "short"; // in-memory tier mirror — copy stays correct when storage is cleared mid-lockout (P4)
+    let resendCooldownUntil = 0; // #527 60s resend cooldown (shared bucket, #801)
+
+    function isEmailBucketError(error) {
+      if (!error) return false;
+      const code = error.code || "";
+      const msg = (error.message || error.msg || error.error_description || "").toLowerCase();
+      return code === "over_email_send_rate_limit"
+        || msg.includes("email rate limit")
+        || (code === "rate_limit" && msg.includes("email"));
+    }
+
+    function isRateLimitError(error) {
+      if (!error) return false;
+      const code = error.code || "";
+      const msg = (error.message || error.msg || error.error_description || "").toLowerCase();
+      if (RATE_LIMIT_CODES.includes(code)) return true;
+      for (const c of RATE_LIMIT_CODES) {
+        if (msg.includes(c.replace(/_/g, " "))) return true;
+      }
+      return msg.includes("email rate limit") || msg.includes("rate limit");
+    }
+
+    function rateLimitRemainingMs() {
+      try {
+        const stored = parseInt(sessionStorage.getItem(RATE_LIMIT_KEY) || "0", 10);
+        const until = Number.isFinite(stored) ? Math.max(stored, rateLimitUntil) : rateLimitUntil;
+        return Math.max(0, until - Date.now());
+      } catch (e) { return Math.max(0, rateLimitUntil - Date.now()); }
+    }
+
+    function setRateLimitLockout(error) {
+      // Two-tier: email-bucket exhaustion → 1h; per-IP auth-attempt limits → 60s.
+      const ms = isEmailBucketError(error) ? RATE_LIMIT_LOCKOUT_MS : SHORT_RATE_LIMIT_LOCKOUT_MS;
+      // Never-shrink invariant: a later 60s (or shorter) lockout must never
+      // truncate an active longer lockout (both tiers share one key).
+      rateLimitUntil = Math.max(rateLimitUntil, Date.now() + ms);
+      // Monotonic tier: the copy is pinned at set-time (a 1h lockout must
+      // keep its "about an hour" copy for its whole life, never decaying
+      // into the minute copy as time passes — code-review P2).
+      rateLimitTier = (rateLimitTier === "email" || isEmailBucketError(error)) ? "email" : "short";
+      try {
+        const existing = parseInt(sessionStorage.getItem(RATE_LIMIT_KEY) || "0", 10);
+        const until = Math.max(Number.isFinite(existing) ? existing : 0, rateLimitUntil);
+        sessionStorage.setItem(RATE_LIMIT_KEY, String(until));
+        sessionStorage.setItem(RATE_LIMIT_TIER_KEY, rateLimitTier);
+      } catch (e) {}
+      applyRateLimitLockout();
+    }
+
+    // Tier-aware lockout copy: the email bucket maps to the #527 pinned
+    // "about an hour" literal; the short per-IP tier must not contradict the
+    // live countdown it shows. Tier is read from storage (set at lockout
+    // time) — deriving it from remaining time would decay the copy mid-lockout.
+    function rateLimitMessage() {
+      if (rateLimitRemainingMs() <= 0) return "";
+      let tier = rateLimitTier;
+      try { tier = sessionStorage.getItem(RATE_LIMIT_TIER_KEY) || tier; } catch (e) {}
+      if (tier === "email") {
+        return "Too many attempts from this network. Please wait about an hour and try again.";
+      }
+      return "Too many attempts from this network. Please try again in a minute.";
+    }
+
+    function applyRateLimitLockout() {
+      if (rateLimitTimer) { clearInterval(rateLimitTimer); rateLimitTimer = null; }
+      const btn = document.getElementById("btn-submit");
+      const resend = document.getElementById("btn-resend");
+      const update = function () {
+        const ms = rateLimitRemainingMs();
+        if (ms <= 0) {
+          if (btn && btn.dataset.originalLabel) {
+            btn.textContent = btn.dataset.originalLabel;
+            delete btn.dataset.originalLabel;
+          }
+          if (btn) btn.disabled = false;
+          // #btn-resend: re-enable ONLY when no 60s resend cooldown is pending
+          // (resendCooldownUntil set by resendConfirmation). Never re-enable it
+          // blindly — a blind re-enable would defeat the #527 cooldown and
+          // re-open the shared-bucket burn (#801); leaving it disabled forever
+          // would strand users after lockout expiry (disabled buttons swallow
+          // clicks, so the cooldown timer alone could never recover it).
+          if (resend) resend.disabled = (Date.now() < resendCooldownUntil);
+          // Lockout over: drop the stale rate-limit message + tier so the
+          // form reads clean (code-review P4).
+          clearError();
+          rateLimitTier = "short";
+          try { sessionStorage.removeItem(RATE_LIMIT_TIER_KEY); } catch (e) {}
+          if (rateLimitTimer) { clearInterval(rateLimitTimer); rateLimitTimer = null; }
+          return;
+        }
+        const totalSec = Math.max(0, Math.floor(ms / 1000));
+        const label = "Try again in "
+          + String(Math.floor(totalSec / 60)).padStart(2, "0") + ":"
+          + String(totalSec % 60).padStart(2, "0");
+        if (btn) {
+          // P2 hardening: never capture an empty label (setLoading's spinner
+          // swaps innerHTML → textContent "" mid-request). Guard on trimmed
+          // truthiness so the label restore can never blank the button.
+          if (!btn.dataset.originalLabel && btn.textContent.trim()) {
+            btn.dataset.originalLabel = btn.textContent;
+          }
+          btn.textContent = label;
+          btn.disabled = true;
+        }
+        if (resend) resend.disabled = true;
+      };
+      update();
+      // Only run the ticking interval while a lockout is actually pending — an
+      // idle interval's first tick could re-enable #btn-submit mid-request
+      // (double-submit → duplicate confirmation email → bucket burn, #801).
+      if (rateLimitRemainingMs() > 0) rateLimitTimer = setInterval(update, 1000);
+    }
+    // On load: honor a persisted lockout (and explain why the button is off).
+    // Skip when the CDN guard already surfaced "temporarily unavailable"
+    // (#527 — a blocked supabase-js CDN must stay in its fail-closed state).
+    if (window.supabaseClient && rateLimitRemainingMs() > 0) {
+      showError(rateLimitMessage());
+      applyRateLimitLockout();
+    }
+
     // ── Loading state ──────────────────────────────────────────────────────
     // Saves the full innerHTML (provider SVG icons included) and restores it,
     // so OAuth button icons survive an error cycle (#751).
@@ -535,6 +672,11 @@
         showError(humanizeAuthError(err));
       } finally {
         setLoading(false);
+        applyRateLimitLockout();   // re-apply the lockout state (#801)
+        // P4: signInWithProvider's clearError() wiped the lockout explanation
+        // — restore it when a lockout is still active so the user knows why
+        // the email form is disabled.
+        if (rateLimitRemainingMs() > 0) showError(rateLimitMessage());
       }
     }
 
@@ -542,6 +684,11 @@
     async function signUpWithEmail(event) {
       event.preventDefault();
       if (!supabaseClient) { showError("Auth not configured."); return; }
+      if (rateLimitRemainingMs() > 0) {
+        showError(rateLimitMessage());
+        applyRateLimitLockout();
+        return;
+      }
       clearError();
       setLoading(true);
       try {
@@ -562,7 +709,15 @@
         });
 
         if (error) {
-          showError(humanizeAuthError(error));
+          if (isRateLimitError(error)) {
+            setRateLimitLockout(error);
+            // Tier-aware copy: humanizeAuthError maps ALL rate-limit codes to
+            // the pinned "about an hour" literal — the short per-IP tier must
+            // show its own minute-scoped message (code-review P2).
+            showError(isEmailBucketError(error) ? humanizeAuthError(error) : rateLimitMessage());
+          } else {
+            showError(humanizeAuthError(error));
+          }
           return;
         }
 
@@ -618,6 +773,7 @@
         showError(humanizeAuthError(err));
       } finally {
         setLoading(false);
+        applyRateLimitLockout();
       }
     }
 
@@ -639,18 +795,54 @@
       const email = document.getElementById("confirm-email").textContent;
       const btn = document.getElementById("btn-resend");
       if (!email || !btn) return;
+      if (rateLimitRemainingMs() > 0) { applyRateLimitLockout(); return; }
       btn.disabled = true;
       try {
-        await supabaseClient.auth.resend({
+        // supabase-js v2 returns {data, error} for HTTP errors (429 included) —
+        // it does NOT throw (only network failures throw). Destructure so a
+        // rate-limited resend is handled, not silently reported as success
+        // (code-review P1: the old catch-only path burned the shared bucket
+        // while claiming "Resent").
+        const { error } = await supabaseClient.auth.resend({
           type: 'signup',
           email: email,
           options: { emailRedirectTo: window.location.origin + WELCOME_URL },
         });
+        if (error) {
+          if (isRateLimitError(error)) {
+            setRateLimitLockout(error);
+            document.getElementById("resend-note").textContent = isEmailBucketError(error)
+              ? "Email limit reached — try again in about an hour."
+              : "Email limit reached — try again in a minute.";
+          } else {
+            document.getElementById("resend-note").textContent = "Could not resend — try again shortly.";
+          }
+          return;
+        }
         document.getElementById("resend-note").textContent = "Resent — check your inbox (limit applies).";
       } catch (e) {
-        document.getElementById("resend-note").textContent = "Could not resend — try again shortly.";
+        if (isRateLimitError(e)) {
+          setRateLimitLockout(e);
+          document.getElementById("resend-note").textContent = isEmailBucketError(e)
+            ? "Email limit reached — try again in about an hour."
+            : "Email limit reached — try again in a minute.";
+        } else {
+          document.getElementById("resend-note").textContent = "Could not resend — try again shortly.";
+        }
       } finally {
-        setTimeout(() => { btn.disabled = false; }, 60000); // rate-limit resend
+        // ⛔ SET THE COOLDOWN FIRST so applyRateLimitLockout()'s update()
+        // sees it when deciding whether to re-enable #btn-resend — setting it
+        // after would let the first click's cooldown go unenforced (#527/#801).
+        resendCooldownUntil = Date.now() + 60000;
+        applyRateLimitLockout();
+        // Guarded re-enable: never re-enable during an active lockout
+        // (the interval would re-disable on the next tick, but avoid the
+        // flicker); never re-enable before the 60s cooldown is over.
+        setTimeout(() => {
+          if (rateLimitRemainingMs() <= 0 && Date.now() >= resendCooldownUntil) {
+            btn.disabled = false;
+          }
+        }, 60000); // rate-limit resend
       }
     }
   </script>
