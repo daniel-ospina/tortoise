@@ -463,8 +463,25 @@ async def provision_tenant(request: Request):
     """Provision a new team: create Team node + FalkorDB namespace + store API key.
 
     Called by the tenant-provision Supabase Edge Function on user signup.
+
+    #765 (plan Task 8 writer inventory — "provision"): the Edge Function
+    stopped calling this endpoint in #770 — it now writes Supabase ONLY via
+    the atomic provision_team RPC (migration 0010; asserted by
+    test_provisioning_edge_function.py). In Supabase control-plane mode this
+    endpoint is DISABLED (fail-closed 503 — a registry write here would
+    violate the zero-registry-writes cutover contract). The registry path
+    stays for selfhost (TORTOISE_CONTROL_PLANE=registry / no Supabase
+    creds), where the Edge Function is not used.
     """
     _check_internal(request)
+    from tortoise.supabase_control import is_supabase_enabled
+    if is_supabase_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail="Provisioning now happens via the provision_team RPC "
+                   "(Edge Function → Supabase). /internal/provision is "
+                   "disabled in Supabase control-plane mode (#765).",
+        )
 
     body = await request.json()
     team_id = body.get("team_id")
@@ -1404,9 +1421,16 @@ async def team_info(team: dict = Depends(get_current_team)):
 async def register_user(request: Request, response: Response):
     """Self-service key provisioning — public variant of /internal/provision.
 
-    Creates a Team node + API key + tenant graph in FalkorDB. Does NOT
-    create a Supabase user (that's handled separately by the welcome page
-    via Supabase client-side auth). Rate limited at 3 registrations/hour/IP.
+    Creates a Team + API key + tenant graph. Does NOT create a Supabase
+    user (that's handled separately by the welcome page via Supabase
+    client-side auth). Rate limited at 3 registrations/hour/IP.
+
+    #765 (plan Task 8 writer inventory): Supabase mode provisions via the
+    atomic provision_team RPC (migration 0010) with the identity path —
+    no JWT user exists on this public endpoint, so the membership is
+    anchored to a deterministic per-email identity (``reg-<sha256(email)[:12]>``)
+    and the email lands on ``teams.email``. The registry path (Team +
+    APIKey nodes) stays for selfhost.
     """
     await _check_register_rate_limit(request)
 
@@ -1419,17 +1443,37 @@ async def register_user(request: Request, response: Response):
     email = reg.email
     password = reg.password  # noqa: F841 — validated, not stored (Supabase handles auth)
 
-    # Idempotency: check if email already registered via Team node property
-    sdk_check = _make_sdk(namespace="registry")
-    existing = sdk_check._get_registry().query(
-        "MATCH (t:Team) WHERE t.email = $email RETURN t.id",
-        params={"email": email},
-    ).result_set
-    if existing:
-        raise HTTPException(
-            status_code=409,
-            detail={"message": "already_registered", "email": email},
-        )
+    # Idempotency: check if email already registered (teams.email in
+    # Supabase mode; Team node property in registry mode)
+    from tortoise.supabase_control import (
+        get_control_plane, is_supabase_enabled, provision_team,
+        team_by_email,
+    )
+    if is_supabase_enabled():
+        cp = get_control_plane()
+        try:
+            if team_by_email(cp, email):
+                raise HTTPException(
+                    status_code=409,
+                    detail={"message": "already_registered", "email": email},
+                )
+        except HTTPException:
+            raise
+        except Exception:
+            # Fail-closed: an idempotency-read error is a 500, never a
+            # registry fallback and never a silent duplicate.
+            raise HTTPException(status_code=500, detail="Registration failed")
+    else:
+        sdk_check = _make_sdk(namespace="registry")
+        existing = sdk_check._get_registry().query(
+            "MATCH (t:Team) WHERE t.email = $email RETURN t.id",
+            params={"email": email},
+        ).result_set
+        if existing:
+            raise HTTPException(
+                status_code=409,
+                detail={"message": "already_registered", "email": email},
+            )
 
     # Derive team_id from email (slugified)
     import re
@@ -1439,83 +1483,122 @@ async def register_user(request: Request, response: Response):
 
     # Generate API key
     import uuid
-    from tortoise.auth import hash_api_key
+    from tortoise.auth import hash_api_key, lookup_hash
     api_key = f"tt_{uuid.uuid4().hex}"
     key_hash = hash_api_key(api_key)
-    sdk = _make_sdk(namespace="registry")
     now = datetime.now(timezone.utc).isoformat()
     graph_name = f"team_{team_id}"
 
-    try:
-        # Create Team node with email and default onboarding state
-        sdk._get_registry().query(
-            """
-            CREATE (t:Team {
-                id: $id, name: $name, email: $email, tier: 'free',
-                created_at: $now, backup_enabled: false,
-                max_users: 1, max_graphs: 1,
-                onboarding_state: $onboarding_state
-            })
-            """,
-            params={
-                "id": team_id, "name": team_name, "email": email,
-                "now": now, "onboarding_state": _json.dumps(DEFAULT_ONBOARDING_STATE),
-            },
-        )
-
-        # Create APIKey node
-        api_key_id = _short_id()
-        sdk._get_registry().query(
-            """
-            CREATE (k:APIKey {
-                id: $id, team_id: $team_id, key_hash: $hash,
-                key_prefix: $prefix, created_by: $created_by,
-                created_at: $now
-            })
-            """,
-            params={
-                "id": api_key_id,
-                "team_id": team_id,
-                "hash": key_hash,
-                "prefix": team_id[:8],
-                "created_by": email,
-                "now": now,
-            },
-        )
-
-        # Provision FalkorDB namespace for the team
-        team_graph = sdk._get_proj().db.select_graph(graph_name)
-        team_graph.query(
-            "CREATE (:TeamMeta {name: $name, created: $now})",
-            params={"name": team_name, "now": now},
-        )
-
-        # Log audit event
-        await _async_audit(
-            request, team_id, "tenant_register",
-            resource_type="team", resource_id=team_id,
-        )
-
-        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
-
-        return {"api_key": api_key, "team_id": team_id, "graph_name": graph_name}
-
-    except HTTPException:
-        raise
-    except Exception:
-        # Rollback on failure
-        sdk._get_registry().query(
-            "MATCH (t:Team {id: $id}) DETACH DELETE t", params={"id": team_id}
-        )
-        sdk._get_registry().query(
-            "MATCH (k:APIKey {team_id: $id}) DETACH DELETE k", params={"id": team_id}
-        )
+    if is_supabase_enabled():
+        # Data-plane graph FIRST (idempotent), then the atomic RPC — a
+        # provision failure leaves NO Supabase rows (one transaction) and
+        # we compensate by dropping the graph; a graph failure leaves no
+        # master-list rows at all. Never the reverse order: an orphaned
+        # teams row (team without a resolvable graph) is worse than an
+        # unreferenced namespace.
+        import hashlib as _hashlib
         try:
-            team_graph = sdk._get_proj().db.select_graph(graph_name)
-            team_graph.delete()
+            team_graph = _make_sdk(namespace=team_id)._get_proj().db.select_graph(graph_name)
+            team_graph.query(
+                "CREATE (:TeamMeta {name: $name, created: $now})",
+                params={"name": team_name, "now": now},
+            )
         except Exception:
-            pass
-        raise HTTPException(status_code=500, detail="Registration failed")
+            raise HTTPException(status_code=500, detail="Registration failed")
+        try:
+            provision_team(cp, **{
+                "p_user_id": None,
+                # deterministic per-email anchor: a re-register after a
+                # failed/rolled-back attempt reconciles the same membership
+                # row instead of accumulating anon rows (0010 identity
+                # upsert refreshes in place).
+                "p_identity": f"reg-{_hashlib.sha256(email.lower().encode()).hexdigest()[:12]}",
+                "p_team_id": team_id,
+                "p_team_name": team_name,
+                "p_api_key": api_key,
+                "p_key_hash": key_hash,
+                "p_lookup_hash": lookup_hash(api_key),
+                "p_graph_name": graph_name,
+                "p_email": email,
+                "p_key_prefix": team_id[:8],
+            })
+        except Exception:
+            try:
+                _make_sdk(namespace=team_id)._get_proj().db.select_graph(graph_name).delete()
+            except Exception:
+                pass
+            raise HTTPException(status_code=500, detail="Registration failed")
+    else:
+        sdk = _make_sdk(namespace="registry")
+        try:
+            # Create Team node with email and default onboarding state
+            sdk._get_registry().query(
+                """
+                CREATE (t:Team {
+                    id: $id, name: $name, email: $email, tier: 'free',
+                    created_at: $now, backup_enabled: false,
+                    max_users: 1, max_graphs: 1,
+                    onboarding_state: $onboarding_state
+                })
+                """,
+                params={
+                    "id": team_id, "name": team_name, "email": email,
+                    "now": now, "onboarding_state": _json.dumps(DEFAULT_ONBOARDING_STATE),
+                },
+            )
+
+            # Create APIKey node
+            api_key_id = _short_id()
+            sdk._get_registry().query(
+                """
+                CREATE (k:APIKey {
+                    id: $id, team_id: $team_id, key_hash: $hash,
+                    key_prefix: $prefix, created_by: $created_by,
+                    created_at: $now
+                })
+                """,
+                params={
+                    "id": api_key_id,
+                    "team_id": team_id,
+                    "hash": key_hash,
+                    "prefix": team_id[:8],
+                    "created_by": email,
+                    "now": now,
+                },
+            )
+
+            # Provision FalkorDB namespace for the team
+            team_graph = sdk._get_proj().db.select_graph(graph_name)
+            team_graph.query(
+                "CREATE (:TeamMeta {name: $name, created: $now})",
+                params={"name": team_name, "now": now},
+            )
+        except HTTPException:
+            raise
+        except Exception:
+            # Rollback on failure
+            sdk._get_registry().query(
+                "MATCH (t:Team {id: $id}) DETACH DELETE t", params={"id": team_id}
+            )
+            sdk._get_registry().query(
+                "MATCH (k:APIKey {team_id: $id}) DETACH DELETE k", params={"id": team_id}
+            )
+            try:
+                team_graph = sdk._get_proj().db.select_graph(graph_name)
+                team_graph.delete()
+            except Exception:
+                pass
+            raise HTTPException(status_code=500, detail="Registration failed")
+
+    # Log audit event
+    await _async_audit(
+        request, team_id, "tenant_register",
+        resource_type="team", resource_id=team_id,
+    )
+
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+
+    return {"api_key": api_key, "team_id": team_id, "graph_name": graph_name}
 
 
 def _seed_demo_graph(team_id: str) -> dict:
@@ -1707,46 +1790,86 @@ async def create_demo_graph(request: Request):
 async def create_api_key(request: Request, response: Response, team: dict = Depends(get_current_team)):
     """Generate a new API key for the team.
 
-    #767 review note (PR #851 P1, tracked by #765 plan Task 8 writer
-    inventory): in Supabase control-plane mode this endpoint still mints
-    into the FalkorDB registry ONLY — a key minted here would 401 against
-    Supabase-backed auth until the writer flip lands. #765 migrates this
-    writer (api_keys insert with lookup_hash + created_via) BEFORE the
-    single-deploy flip (#771), so no production window exists. Do not use
-    in Supabase mode until then."""
+    #765 (plan Task 8 writer inventory): Supabase mode inserts the api_keys
+    row via the seam (lookup_hash + key_prefix + created_via='provisioned'),
+    so the minted key RESOLVES via lookup_hash and is revocable via
+    api_keys.revoked_at — identical response shape to the registry path,
+    which stays for selfhost. The registry path is the #767 review note
+    (PR #851 P1) surface this migration closes: no production window exists
+    because #765 lands before the single-deploy flip (#771)."""
     _check_team_limit(team, "api_keys")
     import uuid
-    from tortoise.auth import hash_api_key
-    sdk = _make_sdk(namespace="registry")
+    from tortoise.auth import hash_api_key, lookup_hash
+    from tortoise.supabase_control import (
+        get_control_plane, insert_api_key, is_supabase_enabled,
+    )
     api_key = f"tt_{uuid.uuid4().hex}"
     key_hash = hash_api_key(api_key)
     key_prefix = api_key[:10]
     kid = _short_id()
     now = datetime.now(timezone.utc).isoformat()
-    sdk._get_registry().query(
-        "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, key_prefix:$kp, created_by:$cb, created_at:$now})",
-        params={"id": kid, "tid": team["team_id"], "kh": key_hash, "kp": key_prefix, "cb": "api", "now": now},
-    )
-    # Log audit event
+    if is_supabase_enabled():
+        cp = get_control_plane()
+        insert_api_key(cp, {
+            "id": kid,
+            "team_id": team["team_id"],
+            "lookup_hash": lookup_hash(api_key),
+            "key_prefix": key_prefix,
+            "created_via": "provisioned",  # NOT NULL in 0007; counts vs the
+            # recovery-mint cap like the registry's NULL created_via rows
+            "created_by": "api",  # registry parity (created_by=user on
+            # session mints; team/keys mints are key-scoped, not user-scoped)
+            "created_at": now,
+            "revoked_at": None,
+            "expires_at": None,
+        })
+        # #528 analytics — actor id from the team's active memberships when
+        # resolvable (one seam query), else a team_id-prefixed id (request.
+        # state only carries team_id here). Registry path below reads the
+        # Membership graph instead.
+        try:
+            rows = cp.query(
+                "team_memberships",
+                select=["user_id", "identity"],
+                filters=[("team_id", "eq", team["team_id"]),
+                         ("status", "eq", "active")],
+            )
+            actor = next((r.get("user_id") or r.get("identity")
+                          for r in rows if r.get("user_id") or r.get("identity")),
+                         None)
+            distinct_id = actor or f"team:{team['team_id']}"
+        except Exception:
+            distinct_id = f"team:{team['team_id']}"
+        await asyncio.to_thread(
+            api_key_created,
+            distinct_id, team["team_id"], key_prefix, kid, "team_keys",
+        )
+    else:
+        sdk = _make_sdk(namespace="registry")
+        sdk._get_registry().query(
+            "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, key_prefix:$kp, created_by:$cb, created_at:$now})",
+            params={"id": kid, "tid": team["team_id"], "kh": key_hash, "kp": key_prefix, "cb": "api", "now": now},
+        )
+        # #528 analytics — actor user id from the team's Membership graph when
+        # resolvable (key creation is rare; one extra registry lookup), else a
+        # team_id-prefixed id (request.state only carries team_id here).
+        try:
+            actor = sdk._get_registry().query(
+                "MATCH (m:Membership {team_id:$tid}) RETURN m.user_id LIMIT 1",
+                params={"tid": team["team_id"]},
+            ).result_set
+            distinct_id = actor[0][0] if actor else f"team:{team['team_id']}"
+        except Exception:
+            distinct_id = f"team:{team['team_id']}"
+        await asyncio.to_thread(
+            api_key_created,
+            distinct_id, team["team_id"], key_prefix, kid, "team_keys",
+        )
+
+    # Log audit event (both modes — after the key lands)
     await _async_audit(
         request, team["team_id"], "api_key_create",
         resource_type="api_key", resource_id=kid,
-    )
-
-    # #528 analytics — actor user id from the team's Membership graph when
-    # resolvable (key creation is rare; one extra registry lookup), else a
-    # team_id-prefixed id (request.state only carries team_id here).
-    try:
-        actor = sdk._get_registry().query(
-            "MATCH (m:Membership {team_id:$tid}) RETURN m.user_id LIMIT 1",
-            params={"tid": team["team_id"]},
-        ).result_set
-        distinct_id = actor[0][0] if actor else f"team:{team['team_id']}"
-    except Exception:
-        distinct_id = f"team:{team['team_id']}"
-    await asyncio.to_thread(
-        api_key_created,
-        distinct_id, team["team_id"], key_prefix, kid, "team_keys",
     )
 
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
@@ -1763,10 +1886,32 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
 async def list_api_keys(team: dict = Depends(get_current_team)):
     """List API keys for the team (hashes only — no plaintext).
 
-    #767 review note (PR #851 P1, tracked by #765 plan Task 8 writer
-    inventory): reads the FalkorDB registry; in Supabase control-plane mode
-    this list will not show Supabase-minted session keys until the #765
-    writer flip (must land before the single-deploy flip #771)."""
+    #765 (plan Task 8 reader inventory): Supabase mode reads api_keys via
+    the seam (ALL rows incl. revoked — the dashboard shows revoked keys
+    with their revoked_at; registry parity). Registry path stays for
+    selfhost."""
+    from tortoise.supabase_control import (
+        get_control_plane, is_supabase_enabled, team_api_keys,
+    )
+    if is_supabase_enabled():
+        try:
+            keys = team_api_keys(get_control_plane(), team["team_id"])
+        except Exception as e:
+            import logging
+            logging.getLogger("tortoise.api").exception("list_api_keys failed")
+            raise HTTPException(status_code=500, detail="Internal server error")
+        return {
+            "keys": [
+                {
+                    "id": row["id"],
+                    "key_prefix": row.get("key_prefix"),
+                    "created_at": row.get("created_at"),
+                    "last_used_at": row.get("last_used_at"),
+                    "revoked_at": row.get("revoked_at"),
+                }
+                for row in keys
+            ]
+        }
     sdk = _make_sdk(namespace="registry")
     try:
         keys = sdk._get_registry().query(
@@ -1799,13 +1944,33 @@ async def list_api_keys(team: dict = Depends(get_current_team)):
 async def revoke_api_key(key_id: str, team: dict = Depends(get_current_team)):
     """Revoke an API key (soft delete — sets revoked_at). Team-scoped.
 
-    Keys live in the control_plane registry graph (per #7873) — created via
-    POST /v1/team/keys, listed via GET /v1/team/keys, revoked here, all on
-    _get_registry(), consistent with the SDK's control-plane methods.
-    #767 review note (PR #851 P1, tracked by #765 plan Task 8 writer
-    inventory): registry-only until the writer flip; in Supabase mode a key
-    minted via /v1/session/key resolves via api_keys and is not revocable
-    here until #765 migrates this surface (PATCH revoked_at on api_keys)."""
+    #765 (plan Task 8 writer inventory): Supabase mode PATCHes
+    api_keys.revoked_at via the seam — api_keys.revoked_at is the
+    authoritative revocation source (P1-2), so a revoked key 401s on both
+    REST and MCP. The registry path (per #7873, on _get_registry()) stays
+    for selfhost."""
+    from tortoise.supabase_control import (
+        api_key_by_id, get_control_plane, is_supabase_enabled, revoke_api_key as _sb_revoke,
+    )
+    if is_supabase_enabled():
+        try:
+            row = api_key_by_id(get_control_plane(), key_id)
+            if row is None:
+                raise HTTPException(status_code=404, detail="API key not found")
+            if row.get("team_id") != team["team_id"]:
+                raise HTTPException(status_code=403, detail="Not your API key")
+            if row.get("revoked_at") is not None:
+                return {"revoked": True, "already": True, "key_id": key_id}
+            from datetime import datetime, timedelta, timezone
+            now = datetime.now(timezone.utc).isoformat()
+            _sb_revoke(get_control_plane(), key_id, now)
+        except HTTPException:
+            raise
+        except Exception as e:
+            import logging
+            logging.getLogger("tortoise.api").exception("revoke_api_key failed")
+            raise HTTPException(status_code=500, detail="Internal server error")
+        return {"revoked": True, "key_id": key_id, "revoked_at": now}
     sdk = _make_sdk(namespace="registry")
     try:
         rows = sdk._get_registry().query(
@@ -2285,7 +2450,12 @@ def _team_limits_from_node(team_node: dict) -> dict:
 
 @app.get("/v1/teams")
 async def list_my_teams(user: dict = Depends(get_current_user)):
-    """E6 — list my memberships (team switcher). Placeholder rows excluded."""
+    """E6 — list my memberships (team switcher). Placeholder rows excluded.
+
+    #765 (plan Task 8 reader inventory): graph_list resolves via the
+    mode-aware SDK (Supabase → teams.graph_name derivation via the seam;
+    registry → Graph nodes), so this endpoint never touches the registry in
+    Supabase mode."""
     memberships = await _user_memberships(user["user_id"])
     out = []
     for m in memberships:
@@ -2308,7 +2478,13 @@ async def list_my_teams(user: dict = Depends(get_current_user)):
 async def create_team(body: dict, user: dict = Depends(get_current_user)):
     """E2 — create a team (zero-teams state). Tier defaults Free; team
     creation is rate-limited per user (abuse posture), not tier-capped —
-    multi-team is a user capability (per-team billing)."""
+    multi-team is a user capability (per-team billing).
+
+    #765 (plan Task 8 writer inventory): Supabase mode routes the write
+    through the atomic provision_team RPC with the USER path (the JWT user
+    owns the team — membership user_id=JWT sub, role owner/active, exactly
+    like the registry membership_create). The registry path (sdk.team_create
+    + membership_create) stays for selfhost."""
     name = (body.get("name") or "").strip()
     if not name:
         raise HTTPException(status_code=422, detail="Team name required")
@@ -2319,6 +2495,62 @@ async def create_team(body: dict, user: dict = Depends(get_current_user)):
     # them here too (stricter wins; surface as 422 not a 500 ControlPlaneError).
     if not _re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$", name):
         raise HTTPException(status_code=422, detail="Invalid team name")
+
+    from datetime import datetime, timedelta as _td, timezone as _tz
+    from tortoise.auth import hash_api_key, lookup_hash
+    from tortoise.supabase_control import (
+        get_control_plane, is_supabase_enabled, membership_count_since,
+        provision_team, team_by_name,
+    )
+    import uuid as _uuid
+
+    if is_supabase_enabled():
+        cp = get_control_plane()
+        # Per-user team-creation rate limit (abuse posture) — the Supabase
+        # twin of the registry owner-membership count (#743(b) semantics:
+        # role='owner' rows created within the last hour).
+        since = (datetime.now(_tz.utc) - _td(hours=1)).isoformat()
+        recent = membership_count_since(
+            cp, cutoff=since, user_id=user["user_id"])
+        if recent >= 3:
+            raise HTTPException(status_code=429,
+                                detail="Too many teams created — try again later")
+        # Duplicate-name 409 (registry team_create raises ControlPlaneError
+        # 'already exists'; teams.name has no unique index in 0006, so the
+        # pre-check is the parity guard).
+        if team_by_name(cp, name):
+            raise HTTPException(status_code=409, detail="Team name already exists")
+
+        team_id = str(_uuid.uuid4().hex[:26])
+        graph_name = f"team_{name}"  # sdk.team_create parity (0006 note: team_{name})
+        api_key = f"tt_{_uuid.uuid4().hex}"
+        try:
+            provision_team(cp, **{
+                "p_user_id": user["user_id"],
+                "p_identity": None,
+                "p_team_id": team_id,
+                "p_team_name": name,
+                "p_api_key": api_key,
+                "p_key_hash": hash_api_key(api_key),
+                "p_lookup_hash": lookup_hash(api_key),
+                "p_graph_name": graph_name,
+                "p_tier": "free",
+            })
+            # Eager default-graph TeamMeta (sdk.team_create parity — the
+            # backup sweep reads graph_name from teams and expects the
+            # namespace to exist).
+            proj = _make_sdk(namespace=team_id)._get_proj()
+            proj.db.select_graph(graph_name).query(
+                "CREATE (:TeamMeta {name: $name, created: $now})",
+                params={"name": name, "now": datetime.now(_tz.utc).isoformat()},
+            )
+        except Exception as e:
+            from tortoise.exceptions import ControlPlaneError
+            if isinstance(e, ControlPlaneError) and "already exists" in str(e):
+                raise HTTPException(status_code=409, detail="Team name already exists")
+            raise HTTPException(status_code=500, detail="Team creation failed")
+        return {"team_id": team_id, "graph_name": graph_name,
+                "tier": "free", "name": name}
 
     sdk = _make_sdk(namespace="registry")
     reg = sdk._get_registry()
@@ -2658,8 +2890,21 @@ async def rescind_invite(invitation_id: str, team_id: str,
 
 @app.get("/v1/teams/{team_id}/members")
 async def list_members(team_id: str, user: dict = Depends(get_current_user)):
-    """E8a — list team members."""
+    """E8a — list team members.
+
+    #765 (plan Task 8 reader inventory): Supabase mode reads team_memberships
+    via the seam (active + invited; identity rows surface their anon anchor
+    as user_id so the members API can round-trip against agents). The
+    registry path stays for selfhost."""
     await _require_owner_admin(user["user_id"], team_id)
+    from tortoise.supabase_control import (
+        get_control_plane, is_supabase_enabled, team_members,
+    )
+    if is_supabase_enabled():
+        try:
+            return team_members(get_control_plane(), team_id)
+        except Exception:
+            raise HTTPException(status_code=500, detail="Internal server error")
     sdk = _make_sdk(namespace="registry")
     rows = sdk._get_registry().query(
         "MATCH (m:Membership {team_id:$tid}) WHERE m.status = 'active' OR m.status = 'invited' "
@@ -2672,8 +2917,30 @@ async def list_members(team_id: str, user: dict = Depends(get_current_user)):
 
 @app.delete("/v1/teams/{team_id}/members/{user_id}")
 async def remove_member(team_id: str, user_id: str, user: dict = Depends(get_current_user)):
-    """E8b — remove a member (owner cannot be removed)."""
+    """E8b — remove a member (owner cannot be removed).
+
+    #765 (plan Task 8 writer inventory): Supabase mode PATCHes
+    team_memberships status='removed' via the seam (matched by user_id OR
+    identity so anon-agent members are removable like registry-mode rows).
+    The registry path stays for selfhost."""
     membership = await _require_owner_admin(user["user_id"], team_id)
+    from tortoise.supabase_control import (
+        get_control_plane, is_supabase_enabled, membership_role,
+        set_membership,
+    )
+    if is_supabase_enabled():
+        try:
+            role = membership_role(get_control_plane(), team_id, user_id)
+            if role is None:
+                raise HTTPException(status_code=404, detail="Member not found")
+            if role == "owner":
+                raise HTTPException(status_code=409, detail="Owner cannot be removed")
+            set_membership(get_control_plane(), team_id, user_id, status="removed")
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(status_code=500, detail="Internal server error")
+        return {"status": "removed"}
     sdk = _make_sdk(namespace="registry")
     target = sdk._get_registry().query(
         "MATCH (m:Membership {team_id:$tid, user_id:$uid}) RETURN m.role",
@@ -2692,11 +2959,32 @@ async def remove_member(team_id: str, user_id: str, user: dict = Depends(get_cur
 
 @app.patch("/v1/teams/{team_id}/members/{user_id}")
 async def change_member_role(team_id: str, user_id: str, body: dict, user: dict = Depends(get_current_user)):
-    """E8c — change a member's role (admin/member; owner cannot be demoted)."""
+    """E8c — change a member's role (admin/member; owner cannot be demoted).
+
+    #765 (plan Task 8 writer inventory): Supabase mode PATCHes
+    team_memberships role via the seam (user_id OR identity match). The
+    registry path stays for selfhost."""
     await _require_owner_admin(user["user_id"], team_id)
     new_role = (body or {}).get("role")
     if new_role not in ("admin", "member"):
         raise HTTPException(status_code=422, detail="role must be 'admin' or 'member'")
+    from tortoise.supabase_control import (
+        get_control_plane, is_supabase_enabled, membership_role,
+        set_membership,
+    )
+    if is_supabase_enabled():
+        try:
+            role = membership_role(get_control_plane(), team_id, user_id)
+            if role is None:
+                raise HTTPException(status_code=404, detail="Member not found")
+            if role == "owner":
+                raise HTTPException(status_code=409, detail="Owner role cannot be changed")
+            set_membership(get_control_plane(), team_id, user_id, role=new_role)
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(status_code=500, detail="Internal server error")
+        return {"user_id": user_id, "role": new_role}
     sdk = _make_sdk(namespace="registry")
     target = sdk._get_registry().query(
         "MATCH (m:Membership {team_id:$tid, user_id:$uid}) RETURN m.role",
@@ -2721,12 +3009,38 @@ async def change_member_role(team_id: str, user_id: str, body: dict, user: dict 
 
 @app.post("/v1/internal/reconcile")
 async def reconcile(request: Request):
+    """Reconciliation sweep (D9 #576) — one job, three purposes:
+
+    1. Re-provision stuck-pending rows (idempotent keyed on user_id, plan §8.3-4)
+    2. Sweep expired bootstrap keys (D3 #618 contract)
+    3. Clean up never-confirmed accounts (A11)
+    Called by an external cron; internal-key protected.
+
+    #765 (plan Task 8 writer inventory): Supabase mode sweeps api_keys with
+    the same predicate (created_via='bootstrap' AND revoked_at IS NULL AND
+    expires_at < now) via the seam — api_keys.revoked_at is the
+    authoritative revocation source (P1-2). The registry path stays for
+    selfhost.
+    """
     _check_internal(request)
     from datetime import datetime, timedelta, timezone as _tz
-    sdk = _make_sdk(namespace="registry")
-    reg = sdk._get_registry()
+    from tortoise.supabase_control import (
+        expired_bootstrap_keys, get_control_plane, is_supabase_enabled,
+        revoke_api_key,
+    )
     now = datetime.now(_tz.utc).isoformat()
     result = {"reprovisioned": 0, "expired_keys_swept": 0, "notes": []}
+
+    if is_supabase_enabled():
+        expired = expired_bootstrap_keys(get_control_plane(), now)
+        for row in expired:
+            revoke_api_key(get_control_plane(), row["id"], now)
+            result["expired_keys_swept"] += 1
+        result["notes"].append("bootstrap-expiry sweep complete")
+        return result
+
+    sdk = _make_sdk(namespace="registry")
+    reg = sdk._get_registry()
 
     # 2. Sweep expired bootstrap keys
     expired = reg.query(
@@ -2760,13 +3074,12 @@ async def reconcile(request: Request):
 async def agent_signup(request: Request):
     """Mint a team + API key for an anonymous device (no email/dashboard).
 
-    #767 review note (PR #851 P1, tracked by #765 plan Task 8 writer
-    inventory): in Supabase control-plane mode this endpoint still writes
-    the FalkorDB registry ONLY — the identity path (NULL user_id + identity
-    via provision_team, shipped in #770/0010) is exercised by the Supabase
-    writer flip in #765, which must land BEFORE the single-deploy flip
-    (#771). No production window exists; do not run Supabase mode against
-    this endpoint until then."""
+    #765 (plan Task 8 writer inventory): Supabase mode routes the write
+    through the atomic provision_team RPC with the IDENTITY path —
+    NULL user_id + identity (shipped in #770/0010) — so teams +
+    team_memberships + api_keys land in one transaction and the minted key
+    resolves via api_keys.lookup_hash. No registry write, no half-team.
+    The registry path stays for selfhost."""
     # #741(a): identity is ALWAYS server-side — client-supplied identity and
     # x-device-id are ignored (a client-chosen identity trivially bypasses the
     # per-identity rate limit). The CLI generates its own identity server-side.
@@ -2776,25 +3089,42 @@ async def agent_signup(request: Request):
     import uuid as _uuid
     identity = f"anon-{_uuid.uuid4().hex[:12]}"
 
-    # Per-identity rate limit: max 3 signups per identity per hour
     from datetime import datetime, timezone as _tz, timedelta
-    sdk = _make_sdk(namespace="registry")
-    reg = sdk._get_registry()
+    from tortoise.auth import hash_api_key as _hash, lookup_hash as _lookup_hash
+    from tortoise.pricing import tier_limits
+    from tortoise.supabase_control import (
+        get_control_plane, is_supabase_enabled, membership_count_since,
+        provision_team,
+    )
+
+    # Per-identity rate limit: max 3 signups per identity per hour. The
+    # server-side identity is fresh per request (#741), so the count is 0 by
+    # construction — the limit is dead by design; the query is kept for
+    # shape parity (Supabase: identity-based count on team_memberships;
+    # registry: Membership node count).
     cutoff = (datetime.now(_tz.utc) - timedelta(hours=1)).isoformat()
-    recent = reg.query(
-        "MATCH (m:Membership {user_id:$uid}) WHERE m.created_at > $cutoff RETURN count(m)",
-        params={"uid": identity, "cutoff": cutoff},
-    ).result_set[0][0]
+    if is_supabase_enabled():
+        try:
+            recent = membership_count_since(
+                get_control_plane(), cutoff=cutoff, identity=identity)
+        except Exception:
+            # Fail-closed: a rate-limit read error is a 500, never a pass.
+            raise HTTPException(status_code=500, detail="Agent signup failed")
+    else:
+        sdk = _make_sdk(namespace="registry")
+        reg = sdk._get_registry()
+        recent = reg.query(
+            "MATCH (m:Membership {user_id:$uid}) WHERE m.created_at > $cutoff RETURN count(m)",
+            params={"uid": identity, "cutoff": cutoff},
+        ).result_set[0][0]
     if recent >= 3:
         raise HTTPException(status_code=429, detail="Too many signups from this device — try again later")
-
-    from tortoise.auth import hash_api_key as _hash
-    from tortoise.pricing import tier_limits
 
     team_id = _uuid.uuid4().hex[:26]
     team_name = f"agent-{team_id[:6]}"
     api_key = f"tt_{_uuid.uuid4().hex}"
     key_hash = _hash(api_key)
+    lookup_hash = _lookup_hash(api_key)
     now = datetime.now(_tz.utc).isoformat()
     graph_name = f"team_{team_id}"
     lim = tier_limits("free")
@@ -2806,6 +3136,37 @@ async def agent_signup(request: Request):
     ops = lim.get("included_write_ops_per_month")
     nodes = lim.get("max_graph_nodes")
 
+    if is_supabase_enabled():
+        try:
+            # Atomic provision (0010): teams + membership (NULL user_id +
+            # identity) + api_keys in ONE transaction — a failure leaves
+            # nothing behind, so no compensating rollback is needed. The
+            # default-graph metadata is NOT written anywhere (no graphs
+            # table in the plan data model — graph_list derives it from
+            # teams.graph_name; see graph_metadata).
+            provision_team(get_control_plane(), **{
+                "p_user_id": None,
+                "p_identity": identity,
+                "p_team_id": team_id,
+                "p_team_name": team_name,
+                "p_api_key": api_key,
+                "p_key_hash": key_hash,
+                "p_lookup_hash": lookup_hash,
+                "p_graph_name": graph_name,
+                "p_tier": "free",
+                "p_max_users": mu,
+                "p_max_graphs": mg,
+                "p_ops_allowance": ops,
+                "p_graph_size_cap": nodes,
+            })
+        except Exception:
+            raise HTTPException(status_code=500, detail="Agent signup failed")
+        await _async_audit(request, team_id, "agent_signup", resource_type="team", resource_id=team_id)
+        return {"key": api_key, "team_id": team_id, "team_name": team_name, "graph_name": graph_name,
+                "identity": identity, "tier": "free"}
+
+    sdk = _make_sdk(namespace="registry")
+    reg = sdk._get_registry()
     try:
         # Team node
         reg.query(
@@ -3213,13 +3574,47 @@ async def set_session_recording(body: dict, team: dict = Depends(get_current_tea
 
 @app.post("/v1/onboarding/team")
 async def create_onboarding_team(body: dict, team: dict = Depends(get_current_team)):
-    """Create a sub-team for the user (Q5 hosted equivalent of tortoise_team_create)."""
+    """Create a sub-team for the user (Q5 hosted equivalent of tortoise_team_create).
+
+    #765 (plan Task 8 writer inventory: demo/onboarding): Supabase mode
+    routes the write through the atomic provision_team RPC with the
+    identity path — a tt_-key request has no JWT user to own the team, and
+    the registry path (sdk.team_create) never created an owner membership
+    either (the sub-team is key-less until a session-key mint). The
+    registry path stays for selfhost."""
     name = (body.get("name") or "").strip()
     if not name or len(name) > 64:
         raise HTTPException(status_code=400, detail="name is required (max 64 chars)")
     import re
     if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$", name):
         raise HTTPException(status_code=400, detail="Invalid team name")
+    from tortoise.supabase_control import (
+        get_control_plane, is_supabase_enabled, provision_team,
+    )
+    if is_supabase_enabled():
+        import uuid as _uuid
+        from tortoise.auth import hash_api_key, lookup_hash
+        try:
+            team_id = str(_uuid.uuid4().hex[:26])
+            graph_name = f"team_{name}"  # sdk.team_create parity
+            api_key = f"tt_{_uuid.uuid4().hex}"
+            provision_team(get_control_plane(), **{
+                "p_user_id": None,
+                "p_identity": f"anon-{_uuid.uuid4().hex[:12]}",
+                "p_team_id": team_id,
+                "p_team_name": name,
+                "p_api_key": api_key,
+                "p_key_hash": hash_api_key(api_key),
+                "p_lookup_hash": lookup_hash(api_key),
+                "p_graph_name": graph_name,
+                "p_tier": "free",
+            })
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Team create failed: {e}")
+        _update_onboarding_state(team["team_id"], team_created=True)
+        _track_onboarding_event(team, "question_answered",
+                                question_id="create_team", answer="yes")
+        return {"team_id": team_id, "name": name, "graph_name": graph_name}
     sdk = _make_sdk(namespace=team["team_id"])
     try:
         result = sdk.team_create(name)

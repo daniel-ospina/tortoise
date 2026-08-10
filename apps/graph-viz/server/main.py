@@ -335,6 +335,25 @@ SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 REGISTRY_GRAPH = os.environ.get("TORTOISE_REGISTRY_GRAPH", "registry")
 
 
+def _provision_disabled() -> bool:
+    """True when the tenant-provision writer must be disabled (#765).
+
+    The Supabase Edge Function stopped calling /api/provision in #770 — it
+    provisions via the atomic provision_team RPC (migration 0010) and only
+    calls the FastAPI /internal/demo for the data plane. In Supabase
+    control-plane mode (TORTOISE_CONTROL_PLANE=supabase or creds
+    configured) this endpoint would be a registry WRITE — a violation of
+    the zero-registry-writes cutover contract (plan Task 8: graph-viz
+    /api/provision is migrated or DISABLED at cutover). Selfhost
+    (TORTOISE_CONTROL_PLANE=registry / no creds) keeps the registry path.
+    """
+    try:
+        from tortoise.supabase_control import is_supabase_enabled
+        return is_supabase_enabled()
+    except Exception:
+        return False
+
+
 class ProvisionRequest(BaseModel):
     team_name: str
     user_id: str
@@ -353,7 +372,21 @@ def provision_tenant(body: ProvisionRequest, authorization: str | None = None):
 
     Called by the Supabase Edge Function tenant-provision after user signup.
     Requires Supabase service role key for authentication.
+
+    #765 (plan Task 8 writer inventory — graph-viz /api/provision):
+    DISABLED when the Supabase control plane is active — the Edge Function
+    provisions via the provision_team RPC since #770 and never calls this
+    endpoint; in Supabase mode a registry write here would violate the
+    zero-registry-writes cutover contract. Selfhost (registry control
+    plane) keeps the historical behavior.
     """
+    if _provision_disabled():
+        raise HTTPException(
+            410,
+            "Provisioning now happens via the provision_team RPC "
+            "(Edge Function → Supabase). /api/provision is disabled in "
+            "Supabase control-plane mode (#765).",
+        )
     # Auth: require service role key
     if not SUPABASE_SERVICE_ROLE_KEY:
         raise HTTPException(500, "SUPABASE_SERVICE_ROLE_KEY not configured")
