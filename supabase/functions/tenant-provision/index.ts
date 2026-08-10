@@ -279,7 +279,6 @@ Deno.serve(async (req: Request) => {
     // write): the FalkorDB registry is no longer written, so without this
     // transaction the team exists NOWHERE. The user can retry — the RPC is
     // idempotent.
-    const pepper = Deno.env.get("TORTOISE_SECRET_PEPPER") || "";
     const keyHash = await hashApiKey(apiKey);
     const lookupHashHex = await lookupHash(apiKey, pepper);
 

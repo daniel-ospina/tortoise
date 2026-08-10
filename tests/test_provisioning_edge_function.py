@@ -11,11 +11,37 @@ lookup_hash via the shared TS mirror (parity with tortoise/auth.py).
 """
 from __future__ import annotations
 
+import shutil
+import subprocess
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 EDGE_FN = _REPO_ROOT / "supabase" / "functions" / "tenant-provision" / "index.ts"
 SHARED_LOOKUP = _REPO_ROOT / "supabase" / "functions" / "_shared" / "lookup.ts"
+
+
+def test_edge_function_parses():
+    """The Edge Function must at least PARSE as TypeScript — a syntax error
+    would make every signup 500 at deploy time. Regression guard for the
+    duplicate-`const pepper` P0 caught in review (PR #847): string-assertion
+    tests above cannot see redeclarations, and CI has no deno/tsc step, so
+    node's type-stripping parser is the cheapest gate (node >= 22.18).
+    Skips when node is absent."""
+    node = shutil.which("node")
+    if node is None:
+        import pytest
+
+        pytest.skip("node not available — edge-function parse check skipped")
+    result = subprocess.run(
+        [node, "--experimental-strip-types", "--check", str(EDGE_FN)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, (
+        f"tenant-provision/index.ts does not parse (exit {result.returncode}):\n"
+        f"{result.stderr}"
+    )
 
 
 def test_edge_function_writes_supabase_only():
