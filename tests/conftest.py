@@ -142,3 +142,18 @@ def shared_embedded_db():
     yield db_path
 
 
+
+
+@pytest.fixture(autouse=True)
+def _reset_register_rate_limit():
+    """/v1/register rate limiter is in-memory per process (3/hour/IP, #498).
+
+    pytest runs all test files in ONE process, so onboarding/register tests
+    in earlier files consume the budget of later files (429s in
+    test_onboarding_integration, #493). Reset per test — the limiter's
+    cross-test persistence has no value here (each test uses a fresh IP-less
+    TestClient context).
+    """
+    from tortoise.hosted_api import _register_buckets
+    _register_buckets.clear()
+    yield

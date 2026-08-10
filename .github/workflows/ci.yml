@@ -63,6 +63,31 @@ jobs:
         with:
           args: --no-progress ${{ steps.changed.outputs.files }}
 
+  uv-lock-check:
+    # #493: the committed uv.lock is the dev-environment source of truth —
+    # gate on lockfile/pyproject drift. The suite itself runs in the
+    # dedicated python-ci.yml workflow (pip); this job enforces the uv lock
+    # contract so the lockfile never silently drifts again.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv (Python 3.12)
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: '3.12'
+          # Pin the uv version that generated uv.lock — a patch bump (e.g.
+          # 0.12.2 → 0.12.3) can flag the lock as stale under --check.
+          version: '0.12.3'
+      - name: Lockfile coherence check (uv.lock vs pyproject.toml)
+        run: uv lock --check
+      - name: Frozen sync (dev group)
+        run: uv sync --frozen --group dev
+      - name: Dev-group collection check
+        # Cheap (no servers): proves the dev group is sufficient for the
+        # suite's imports, so `uv run pytest` cannot silently drift from
+        # the pip CI path (#493).
+        run: uv run pytest tests/ --collect-only -q --ignore=tests/e2e
+
   test-isolation:
     runs-on: ubuntu-latest
     steps:

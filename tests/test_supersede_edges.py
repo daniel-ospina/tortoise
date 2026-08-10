@@ -179,7 +179,11 @@ def test_supersede_no_edges_transfers_zero(sdk):
 # ── Idempotency guard: double supersede ────────────────────────────
 
 def test_supersede_then_supersede_again_transfers_zero(sdk):
-    """Superseding an already-superseded point has no edges left to transfer."""
+    """Superseding an already-superseded point raises (#432 terminal guard).
+
+    The old point is terminal after the first supersede, so a second
+    supersede is rejected — guaranteeing no duplicate edge transfers
+    (updated from the #547 no-op contract, code-review #803)."""
     claim_a = _make_point(sdk, content="Claim A")
     evidence = _make_point(sdk, kind="evidence", content="Evidence")
     sdk.create_operator("IMPL", evidence["id"], [claim_a["id"]])
@@ -191,10 +195,11 @@ def test_supersede_then_supersede_again_transfers_zero(sdk):
     r1 = sdk.supersede_point(claim_a["id"], claim_b["id"])
     assert r1["edges_transferred"] == 1
 
-    # Second supersede: A → C (A already outdated, edges already transferred)
-    r2 = sdk.supersede_point(claim_a["id"], claim_c["id"])
-    # A has no operator edges left — nothing to transfer
-    assert r2["edges_transferred"] == 0
+    # Second supersede: A → C — A is terminal ('superseded'), the guard
+    # rejects the transition, so no duplicate edge writes can occur (#432).
+    import pytest
+    with pytest.raises(ValueError, match="already terminal"):
+        sdk.supersede_point(claim_a["id"], claim_c["id"])
 
 
 # ── #329: edge-type validation (two-pass, zero mutation on failure) ────
