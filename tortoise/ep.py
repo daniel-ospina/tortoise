@@ -222,7 +222,9 @@ class TortoiseEP:
             mean = a / (a + b) if (a + b) > 0 else 0.5
             return mean >= threshold
         rows = self.g.query(
-            "MATCH (n:Point {id:$id}) RETURN n.ep_alpha, n.ep_beta",
+            "MATCH (n:Point {id:$id}) "
+            "RETURN coalesce(n.posterior_alpha, n.ep_alpha, 1.0), "
+            "       coalesce(n.posterior_beta, n.ep_beta, 1.0)",
             params={"id": claim_id},
         ).result_set
         if not rows or rows[0][0] is None:
@@ -554,7 +556,15 @@ class TortoiseEP:
                 "                    THEN n.ep_alpha ELSE p.a END, "
                 "    n.ep_beta  = CASE WHEN coalesce(n.baseline_set,false) "
                 "                    THEN n.ep_beta  ELSE p.b END, "
-                "    n.posterior_alpha = null, n.posterior_beta = null",
+                # #852 round-5: clear stale posterior ONLY when the prior
+                # actually changed (baseline'd claims keep their posterior —
+                # it is the observable EP result and not stale if the prior
+                # was rejected). set_point_baseline already clears it on a
+                # genuine baseline change.
+                "    n.posterior_alpha = CASE WHEN coalesce(n.baseline_set,false) "
+                "                           THEN n.posterior_alpha ELSE null END, "
+                "    n.posterior_beta  = CASE WHEN coalesce(n.baseline_set,false) "
+                "                           THEN n.posterior_beta  ELSE null END",
                 params={"params": params_list},
             )
 
