@@ -56,7 +56,7 @@ connectors:
 
   supabase_org:
     name: "Supabase Org Data → Tortoise"
-    module: "org_data.connectors.supabase_org"
+    module: "connectors.supabase_org"
     class: "SupabaseOrgConnector"
     active: true
     config:

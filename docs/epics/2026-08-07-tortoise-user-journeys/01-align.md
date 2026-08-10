@@ -32,7 +32,7 @@ The seed issues describe a state from earlier the same day. **Live verification 
 | `tenant-provision` edge function | EXISTS + deployed (405 on GET ⇒ function live) — PBKDF2 hash matching auth.py, upserts user_teams, seeds demo graph |
 | Migration `0001_user_teams.sql` | EXISTS — user_teams table + `handle_new_user()` trigger + RLS |
 | Hosted API `api.premiselabs.co` | `/internal/provision`, `/v1/team`, `/v1/team/keys` (POST/GET/DELETE), `/v1/sessions`, `/v1/context` — health: pepper + internal key + api auth all configured |
-| Dashboard `app.premiselabs.co` | React SPA exists (`premise-labs/apps/dashboard/src/main.jsx`) with **API-key auth** ("Enter your API key" in deployed bundle) + Overview/Keys/Sessions tabs |
+| Dashboard `app.premiselabs.co` | React SPA exists (`website/apps/dashboard/src/main.jsx`) with **API-key auth** ("Enter your API key" in deployed bundle) + Overview/Keys/Sessions tabs |
 
 ### What is still genuinely missing (the real scope)
 
