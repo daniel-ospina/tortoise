@@ -20,17 +20,15 @@ live FalkorDB while still exercising the real factor-update arithmetic
 and the real run() loop.
 
 Measured behavior (w=3, neutral Beta(1,1) cavities, damping=1.0;
-message norms are L1 = |η1|+|η2|):
-  - isolated 2-input NAND:   per-claim msg |η| ≈ 0.218, factor total 0.436
-  - 4-input NAND:             per-claim |η| ≈ 0.193–0.205, factor total 0.785
-                              (1.80× binary — claim-count-scaled over-pull, #326)
-  - 6-input NAND:             factor total 1.172 (2.69× binary, #326)
-  - reversed input order → per-claim messages shift by up to 0.0057
-                              (order-dependent decomposition, #326)
-  - the per-claim message is NOT amplified 3×: _msg_cache is keyed per
-    claim, so pair writes overwrite (last-pair-wins) and the posterior
-    sees one message per claim. Over-counting appears at factor level:
-    n surviving per-claim messages (~0.20 each) vs 2 (~0.218) in binary.
+message norms are L1 = |η1|+|η2|) — AFTER the #326 fix:
+  - isolated 2-input NAND:   per-claim msg |η| = 1.158, factor total 2.316
+  - 4-input NAND:             factor total EXACTLY 2.316 (ratio 1.000 —
+                              weight conserved across C(4,2) pairs, #326)
+  - 6-input NAND:             factor total EXACTLY 2.316 (ratio 1.000)
+  - per-claim after scaling:  binary/nary-per-claim × 2/n (0.579 for n=4),
+                              i.e. the binary total shared across n claims
+  - reversed input order → per-claim messages identical (diff 0.0 —
+                              clean-state accumulation, #326)
 """
 from __future__ import annotations
 
@@ -145,13 +143,13 @@ def test_nary_impl_only_source_to_targets():
 
 
 def test_nary_nand_per_claim_pull_matches_binary_pair():
-    """Per-claim surviving pull ≈ isolated binary pair (cache overwrite).
+    """Per-claim pull stays within a bounded band of the binary pair's.
 
-    Characterization test: despite C(4,2)=6 pair applications, each claim
-    accumulates ONE message (per-claim cache key, last-pair-wins), so the
-    per-claim pull stays close to the isolated binary pair at the same
-    weight rather than amplifying 3×. The over-counting manifests at
-    FACTOR level (total pull) — see test_nary_nand_weight_not_overcounted.
+    After #326's accumulate-then-scale conservation fix, each claim of an
+    n-ary factor receives (2/n) × the binary per-claim pull (the binary
+    TOTAL is shared across n claims). For n=4 that is exactly 0.5× the
+    binary per-claim — the band below is widened to 0.4× to leave margin
+    for numerical noise while still pinning the conservation semantics.
     """
     w = 3.0
     ep_nary = _make_ep(["a", "b", "c", "d"])
@@ -162,7 +160,8 @@ def test_nary_nand_per_claim_pull_matches_binary_pair():
 
     msg_bin = _msg_norm(ep_bin._msg_cache[("op", "a", "NAND")])
     msg_nary = _msg_norm(ep_nary._msg_cache[("op", "a", "NAND")])
-    assert 0.5 * msg_bin <= msg_nary <= 2.0 * msg_bin, (
+    # n=4: per-claim = 2/n × binary = 0.5×; band [0.4, 2.0]× leaves margin
+    assert 0.4 * msg_bin <= msg_nary <= 2.0 * msg_bin, (
         f"per-claim nary pull {msg_nary:.4f} drifted from binary {msg_bin:.4f}"
     )
 
@@ -178,10 +177,9 @@ def test_nary_nand_weight_not_overcounted():
     order (same participants, same weight) must not change per-claim
     messages.
 
-    Current code violates both (measured at w=3: total pull 1.80× binary;
-    reversed order shifts per-claim |η| by up to 0.0057). This test FAILS
-    on current code (hence xfail) and must start PASSING when #326 lands
-    (weight normalized across pairs, order-independent decomposition).
+    The accumulate-then-scale fix (#326) computes every pair from a clean
+    cavity state (input-order-invariant), accumulates per claim, and
+    scales by 2/(n(n-1)) so the total equals the binary factor's exactly.
     """
     w = 3.0
 
