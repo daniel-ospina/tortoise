@@ -387,7 +387,7 @@ def team_by_id(cp, team_id: str) -> dict | None:
         select=["id", "name", "tier", "email", "graph_name", "max_users",
                 "max_teams", "max_graphs", "ops_allowance", "graph_size_cap",
                 "backup_enabled", "backup_latest_at", "backup_restored_at",
-                "created_at", "deleted_at"],
+                "created_at", "deleted_at", "grace_hours"],
         filters=[("id", "eq", team_id)],
     )
     return rows[0] if rows else None
@@ -595,6 +595,12 @@ def invitation_accept(cp, token: str, user_id: str,
     team = team_by_id(cp, inv["team_id"])
     if team is None:
         raise InvitationError("Team no longer exists", status=404)
+    if team.get("deleted_at"):
+        # #302: a soft-deleted team must not mint memberships. Closes the
+        # race between the delete cascade and a concurrent accept (the
+        # membership kill-switch and the invitation revoke are separate
+        # writes).
+        raise InvitationError("Team is scheduled for deletion", status=410)
     from tortoise.pricing import tier_limits
     tier = team.get("tier") or "free"
     lim = tier_limits(tier)
@@ -857,18 +863,20 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def soft_delete_team(cp, team_id: str, now: str | None = None) -> None:
-    """Stamp ``teams.deleted_at`` — the soft-delete marker (#302).
+def soft_delete_team(cp, team_id: str, now: str | None = None,
+                     grace_hours: float = 24.0) -> None:
+    """Stamp ``teams.deleted_at`` + persist the grace window (#302).
 
-    Every read path checks this column (export/delete 410) or fails closed
-    anyway (keys revoked, memberships removed). Idempotent: re-stamping an
-    already-deleted team is a no-op PATCH.
+    ``grace_hours`` is stored so the purge sweep and the idempotent replay
+    honor the hard_delete_after the API promised at schedule time, even if
+    TORTOISE_TEAM_DELETE_GRACE_HOURS changes before the sweep runs.
+    Idempotent: re-stamping an already-deleted team is a no-op PATCH.
     """
     cp.query(
         "teams",
         method="PATCH",
         filters=[("id", "eq", team_id)],
-        json_body={"deleted_at": now or _now_iso()},
+        json_body={"deleted_at": now or _now_iso(), "grace_hours": grace_hours},
     )
 
 
@@ -892,13 +900,17 @@ def remove_team_memberships(cp, team_id: str, now: str | None = None) -> None:
 
     ``user_memberships``/``membership_for_user_team`` only match
     ``status='active'``, so JWT-session access (teams list, invites, owner
-    checks) stops resolving immediately.
+    checks) stops resolving immediately. ``now`` is accepted for signature
+    symmetry but not written: team_memberships has no removed_at column
+    (migration 0003/0009), and the owner-replay authz check distinguishes
+    cascade-removal by role (owner can never be removed/demoted by any
+    other path).
     """
     cp.query(
         "team_memberships",
         method="PATCH",
         filters=[("team_id", "eq", team_id), ("status", "eq", "active")],
-        json_body={"status": "removed", "removed_at": now or _now_iso()},
+        json_body={"status": "removed"},
     )
 
 
@@ -906,25 +918,33 @@ def revoke_team_invitations(cp, team_id: str, now: str | None = None) -> None:
     """Revoke pending ``invitations`` for the team (no redemption post-delete).
 
     ``invitation_accept`` rejects status != 'pending', so a pending invite
-    can never mint a membership in a deleted team.
+    can never mint a membership in a deleted team. invitations.status is
+    NOT NULL DEFAULT 'pending' (migration 0008) — a single eq.pending
+    PATCH covers every live row; the registry path additionally guards
+    legacy NULL status (registry nodes have no NOT NULL constraint).
+    ``now`` is accepted for signature symmetry but not written —
+    invitations has no revoked_at column.
     """
     cp.query(
         "invitations",
         method="PATCH",
         filters=[("team_id", "eq", team_id), ("status", "eq", "pending")],
-        json_body={"status": "revoked", "revoked_at": now or _now_iso()},
+        json_body={"status": "revoked"},
     )
 
 
 def purge_team_control_plane(cp, team_id: str) -> None:
     """Hard-delete all control-plane rows for a team (post-grace purge, #302).
 
-    Deletes ``teams`` + ``api_keys`` + ``team_memberships`` + ``invitations``
-    rows via the service-role seam. Only called once the soft-delete grace
+    Deletes ``api_keys`` + ``team_memberships`` + ``invitations`` FIRST and
+    the ``teams`` row LAST via the service-role seam: a partial failure
+    leaves the teams row as the retry anchor (the sweep re-scans
+    ``deleted_at <= cutoff`` and finds the team again) — mirroring
+    ``_purge_registry_team``. Only called once the soft-delete grace
     window has elapsed. Raises on failure (fail-closed) — the purge sweep
     logs and skips, never crashes.
     """
-    cp.query("teams", method="DELETE", filters=[("id", "eq", team_id)])
     cp.query("api_keys", method="DELETE", filters=[("team_id", "eq", team_id)])
     cp.query("team_memberships", method="DELETE", filters=[("team_id", "eq", team_id)])
     cp.query("invitations", method="DELETE", filters=[("team_id", "eq", team_id)])
+    cp.query("teams", method="DELETE", filters=[("id", "eq", team_id)])

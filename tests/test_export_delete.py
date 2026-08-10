@@ -230,11 +230,13 @@ class TestExportSupabase:
         as_user()
         assert tc.get(f"/v1/teams/{TEAM_ID}/export").status_code == 403
 
-    def test_export_unknown_team_404(self, sb_client, as_user):
+    def test_export_unknown_team_403(self, sb_client, as_user):
+        """AuthZ-first: a non-member gets 403 for an unknown team (no
+        existence oracle — security review, PR #873)."""
         tc, _, _ = sb_client
         as_user()
         r = tc.get("/v1/teams/nope/export")
-        assert r.status_code == 404
+        assert r.status_code == 403
 
     def test_export_deleted_team_410(self, sb_client, as_user):
         tc, fake, _ = sb_client
@@ -243,6 +245,33 @@ class TestExportSupabase:
         as_user()
         r = tc.get(f"/v1/teams/{TEAM_ID}/export")
         assert r.status_code == 410
+
+    def test_export_deleted_team_non_owner_403(self, sb_client, as_user):
+        """Non-owner probing a deleted team gets 403, not the 410/deletion
+        schedule (no info disclosure — security review, PR #873)."""
+        tc, fake, _ = sb_client
+        _seed_supabase_team(
+            fake, role="member", deleted_at=datetime.now(timezone.utc).isoformat())
+        as_user()
+        r = tc.get(f"/v1/teams/{TEAM_ID}/export")
+        assert r.status_code == 403
+
+    def test_export_events_truncated(self, sb_client, as_user, monkeypatch):
+        """Event cap: newest-by-seq window kept + truncation flags."""
+        monkeypatch.setattr(ha_mod, "_EXPORT_MAX_EVENTS", 3)
+        tc, fake, db_path = sb_client
+        _seed_supabase_team(fake)
+        _seed_graph(db_path, n_events=5)
+        as_user()
+        r = tc.get(f"/v1/teams/{TEAM_ID}/export")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["summary"]["events"] == 3
+        assert body["summary"]["events_total"] == 5
+        assert body["summary"]["events_truncated"] is True
+        # newest-by-seq kept (traversal order is unspecified — sorted)
+        seqs = sorted(e["seq"] for e in body["events"])
+        assert seqs == [3, 4, 5]
 
     def test_export_happy_path(self, sb_client, as_user):
         tc, fake, db_path = sb_client
@@ -317,10 +346,11 @@ class TestDeleteSupabase:
         r = tc.delete(f"/v1/teams/{TEAM_ID}")
         assert r.status_code == 403
 
-    def test_delete_unknown_team_404(self, sb_client, as_user):
+    def test_delete_unknown_team_403(self, sb_client, as_user):
+        """AuthZ-first: unknown team → 403 for non-members (no oracle)."""
         tc, _, _ = sb_client
         as_user()
-        assert tc.delete("/v1/teams/nope").status_code == 404
+        assert tc.delete("/v1/teams/nope").status_code == 403
 
     def test_delete_cascade(self, sb_client, as_user, capture_audit):
         """Soft delete: deleted_at stamp + keys revoked + memberships
@@ -339,6 +369,7 @@ class TestDeleteSupabase:
 
         by_id = {row["id"]: row for row in fake.tables["teams"]}
         assert by_id[TEAM_ID]["deleted_at"] == body["deleted_at"]
+        assert by_id[TEAM_ID]["grace_hours"] == 24  # persisted promise
         assert fake.tables["api_keys"][0]["revoked_at"] == body["deleted_at"]
         assert fake.tables["team_memberships"][0]["status"] == "removed"
         assert fake.tables["invitations"][0]["status"] == "revoked"
@@ -358,6 +389,21 @@ class TestDeleteSupabase:
         assert tc.delete(f"/v1/teams/{TEAM_ID}").status_code == 202
         r = tc.get("/v1/team/keys", headers={"Authorization": f"Bearer {TOKEN}"})
         assert r.status_code == 401
+
+    def test_delete_replay_non_owner_403(self, sb_client, as_user):
+        """Idempotent replay is owner-gated too — a non-owner probing a
+        delete-pending team gets 403, never the deletion schedule."""
+        tc, fake, _ = sb_client
+        _seed_supabase_team(fake, deleted_at=datetime.now(timezone.utc).isoformat())
+        as_user()
+        # owner replay still works (removed-owner state accepted)
+        r = tc.delete(f"/v1/teams/{TEAM_ID}")
+        assert r.status_code == 200
+        assert r.json()["already"] is True
+        # non-owner → 403
+        app.dependency_overrides[get_current_user] = lambda: {"user_id": "intruder"}
+        r2 = tc.delete(f"/v1/teams/{TEAM_ID}")
+        assert r2.status_code == 403
 
     def test_delete_idempotent(self, sb_client, as_user, capture_audit):
         tc, fake, _ = sb_client
@@ -401,20 +447,53 @@ class TestExportDeleteRegistry:
         as_user(user_id="someone-else")  # no membership at all
         assert tc.get("/v1/teams/reg-team-1/export").status_code == 403
 
+    def test_export_uses_stored_graph_name(self, reg_client, as_user):
+        """Teams created via sdk.team_create store graph_name=team_{name} —
+        export must read THAT graph, not team_{id} (code-review P1, #873)."""
+        tc, db_path = reg_client
+        sdk = TortoiseSDK(db_path, namespace="registry")
+        reg = sdk._get_registry()
+        reg.query(
+            "CREATE (t:Team {id:'reg-named', name:'Acme', tier:'free', "
+            "graph_name:'team_Acme'})"
+        )
+        reg.query(
+            "CREATE (m:Membership {id:'m-2', user_id:'u-owner', "
+            "team_id:'reg-named', role:'owner', status:'active'})"
+        )
+        _seed_graph(db_path, team_id="Acme", n_points=1, n_events=0)
+        as_user(user_id="u-owner")
+        r = tc.get("/v1/teams/reg-named/export")
+        assert r.status_code == 200, r.text
+        assert r.json()["summary"]["points"] == 1
+
+    def test_export_deleted_team_410_registry(self, reg_client, as_user):
+        tc, db_path = reg_client
+        _seed_registry(db_path, deleted_at=datetime.now(timezone.utc).isoformat())
+        as_user(user_id="u-owner")
+        r = tc.get("/v1/teams/reg-team-1/export")
+        assert r.status_code == 410
+
     def test_delete_cascade_registry(self, reg_client, as_user):
         tc, db_path = reg_client
         _seed_registry(db_path)
+        # pending invitation must be revoked too (registry branch)
+        sdk = TortoiseSDK(db_path, namespace="registry")
+        sdk._get_registry().query(
+            "CREATE (i:Invitation {id:'inv-r', team_id:'reg-team-1', "
+            "email:'bob@example.com', role:'member', status:'pending'})"
+        )
         as_user(user_id="u-owner")
         r = tc.delete("/v1/teams/reg-team-1")
         assert r.status_code == 202, r.text
         assert r.json()["status"] == "delete_scheduled"
 
-        sdk = TortoiseSDK(db_path, namespace="registry")
         reg = sdk._get_registry()
         rows = reg.query(
-            "MATCH (t:Team {id:'reg-team-1'}) RETURN t.deleted_at"
+            "MATCH (t:Team {id:'reg-team-1'}) RETURN t.deleted_at, t.grace_hours"
         ).result_set
-        assert rows and rows[0][0]
+        assert rows and rows[0][0]  # deleted_at stamped
+        assert rows[0][1] == 24  # persisted grace promise
         assert _registry_count(db_path, "APIKey", "reg-team-1") == 1
         rev = reg.query(
             "MATCH (k:APIKey {team_id:'reg-team-1'}) RETURN k.revoked_at"
@@ -424,6 +503,10 @@ class TestExportDeleteRegistry:
             "MATCH (m:Membership {team_id:'reg-team-1'}) RETURN m.status"
         ).result_set
         assert mem and mem[0][0] == "removed"
+        inv = reg.query(
+            "MATCH (i:Invitation {team_id:'reg-team-1'}) RETURN i.status"
+        ).result_set
+        assert inv and inv[0][0] == "revoked"
 
     def test_delete_idempotent_registry(self, reg_client, as_user):
         tc, db_path = reg_client
@@ -465,12 +548,16 @@ class TestExportDeleteRegistry:
 
 class TestPurge:
     def test_purge_hard_deletes_past_grace_registry(self, reg_client,
-                                                    capture_audit):
+                                                    capture_audit, monkeypatch):
         tc, db_path = reg_client
         past = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()
         _seed_registry(db_path, team_id="reg-old", deleted_at=past)
         _seed_registry(db_path, team_id="reg-recent",
                        deleted_at=datetime.now(timezone.utc).isoformat())
+        # wiring check: the graph drop is invoked for the purged team only
+        dropped: list[str] = []
+        monkeypatch.setattr(ha_mod, "_drop_team_graph",
+                            lambda team_id, graph_name=None: dropped.append(team_id))
 
         ha_mod._purge_deleted_teams()
 
@@ -479,9 +566,31 @@ class TestPurge:
         assert _registry_count(db_path, "APIKey", "reg-old") == 0
         # within grace → untouched
         assert _registry_count(db_path, "Team", "reg-recent") == 1
+        assert dropped == ["reg-old"]  # never the within-grace team
         ops = [e["operation"] for e in capture_audit]
         assert ops.count("team_delete_purged") == 1
         assert capture_audit[-1]["team_id"] == "reg-old"
+
+    def test_purge_honors_stored_grace(self, reg_client, capture_audit,
+                                       monkeypatch):
+        """A config change mid-grace must not hard-delete before the
+        promised hard_delete_after (code-review P1, PR #873): env shrinks
+        to 1h but the team was promised 24h 10h ago → NOT purged."""
+        monkeypatch.setenv("TORTOISE_TEAM_DELETE_GRACE_HOURS", "1")
+        tc, db_path = reg_client
+        ten_hours = (datetime.now(timezone.utc) - timedelta(hours=10)).isoformat()
+        _seed_registry(db_path, team_id="reg-promised", deleted_at=ten_hours)
+        sdk = TortoiseSDK(db_path, namespace="registry")
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:'reg-promised'}) SET t.grace_hours=24"
+        )
+        _seed_registry(db_path, team_id="reg-env-old",
+                       deleted_at=ten_hours)  # no stored grace → env 1h
+
+        ha_mod._purge_deleted_teams()
+
+        assert _registry_count(db_path, "Team", "reg-promised") == 1  # kept
+        assert _registry_count(db_path, "Team", "reg-env-old") == 0  # purged
 
     def test_purge_deletes_rows_past_grace_supabase(self, sb_client,
                                                     capture_audit):
@@ -532,9 +641,26 @@ class TestSensitiveRateLimit:
         tc, _, _ = sb_client
         as_user()
         for _ in range(5):
-            r = tc.delete("/v1/teams/nope")  # unknown team → 404, not 429
-            assert r.status_code == 404
+            r = tc.delete("/v1/teams/nope")  # unknown team → 403, not 429
+            assert r.status_code == 403
         r = tc.delete("/v1/teams/nope")
         assert r.status_code == 429
         assert "Retry-After" in r.headers
+        ha_mod._SENSITIVE_BUCKETS.clear()
+
+    def test_export_rate_limited_independently(self, sb_client, monkeypatch,
+                                               as_user):
+        """Export has its own budget; delete calls don't consume it
+        (per-op keying)."""
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+        monkeypatch.setitem(ha_mod._SENSITIVE_OP_LIMITS, "export", 2)
+        ha_mod._SENSITIVE_BUCKETS.clear()
+        tc, _, _ = sb_client
+        as_user()
+        # burn the delete budget first — export must be unaffected
+        for _ in range(5):
+            assert tc.delete("/v1/teams/nope").status_code == 403
+        assert tc.get("/v1/teams/nope/export").status_code == 403  # budget 1
+        assert tc.get("/v1/teams/nope/export").status_code == 403  # budget 2
+        assert tc.get("/v1/teams/nope/export").status_code == 429  # exhausted
         ha_mod._SENSITIVE_BUCKETS.clear()

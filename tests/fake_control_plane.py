@@ -80,6 +80,9 @@ def _matches(row: dict, filters: list[tuple[str, str, object]]) -> bool:
             return False
         if op == "is" and (row.get(col) is None) != (value is None):
             return False
+        if op == "lte" and (row.get(col) is None or row.get(col) > value):
+            # ISO-8601 cutoff (mirrors the GET path — #302 purge).
+            return False
     return True
 
 
