@@ -4010,9 +4010,16 @@ class TortoiseSDK:
         )
 
         if not raw_results:
-            # All strategies failed — fallback to in-memory TF-IDF (Point only)
+            # All strategies failed — fallback to in-memory TF-IDF (Point only).
             if query and entity_type == "point":
                 points = self.query(kind=kind)
+                if exclude_status and points:
+                    # Same status exclusion as step 5d (#898 review round-2):
+                    # the degraded fallback must not leak superseded/deprecated
+                    # into the UC1 state view. self.query returns raw node
+                    # dicts carrying the status property.
+                    points = [p for p in points
+                              if (p.get("status") or "") not in set(exclude_status)]
                 return fallback_tfidf(query, points, limit=limit)
             return []
 
@@ -4386,7 +4393,11 @@ class TortoiseSDK:
             if object_centric else []
         )
 
-        points = [dict(r, entity_type="point") for r in point_results]
+        # UC1 state view: hide mitigation bookkeeping points (they are
+        # surfaced ATTACHED to results as context, not standalone claims —
+        # review round-2 P3).
+        points = [dict(r, entity_type="point") for r in point_results
+                  if not (r.get("content") or "").startswith("[MITIGATION]")]
         objects = [dict(r, entity_type="object") for r in object_results]
 
         # 3. Multiplicative-gate ranking over the merged pool.
@@ -4400,10 +4411,8 @@ class TortoiseSDK:
         ][:limit]
 
         # 5. State context surfacing (batched, not N+1).
-        top_ids = [r["id"] for r in ranked]
         point_ids = [r["id"] for r in ranked if r.get("entity_type") == "point"]
         object_ids = [r["id"] for r in ranked if r.get("entity_type") == "object"]
-        by_id = {r["id"]: r for r in ranked}
 
         counter_evidence = self._state_counter_evidence(point_ids)
         arguments, nands = self._state_arguments(point_ids)
@@ -4492,6 +4501,7 @@ class TortoiseSDK:
             args[nid] = args[nid][:3]
         for nid in nands:
             nands[nid].sort(key=lambda o: o["precision"], reverse=True)
+            nands[nid] = nands[nid][:5]  # bounded high-contention list
         return args, nands
 
     def _state_mitigations(self, arguments: dict[str, list[dict]],
@@ -4517,13 +4527,20 @@ class TortoiseSDK:
                 {"id": mid, "content": content or "",
                  "strength": float(strength) if strength is not None else None})
         # Attach under the owning result point (via its surfaced operator).
+        # Dedup: an operator can appear in BOTH arguments and nands for the
+        # same target (mixed IMPL+NAND edges) — mitigations must not double.
         by_point: dict[str, list[dict]] = {}
+        seen: set[tuple[str, str]] = set()
         for nid, ops in list(arguments.items()) + list((nands or {}).items()):
             for op in ops:
-                if op["id"] in out:
-                    for m in out[op["id"]]:
-                        by_point.setdefault(nid, []).append(
-                            dict(m, operator_id=op["id"]))
+                if op["id"] not in out:
+                    continue
+                for m in out[op["id"]]:
+                    if (nid, m["id"]) in seen:
+                        continue
+                    seen.add((nid, m["id"]))
+                    by_point.setdefault(nid, []).append(
+                        dict(m, operator_id=op["id"]))
         return by_point
 
     def _state_related_objects(self, point_ids: list[str]) -> dict[str, list[dict]]:
