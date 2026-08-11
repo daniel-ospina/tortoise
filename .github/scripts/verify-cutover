@@ -124,8 +124,18 @@ fi
 # The audit suite's Postgres-gated tests skip without TEST_AUDIT_DB_URI; the
 # mock-based E2E-9 assertions run everywhere. test_provisioning_edge_function
 # needs node for the TS-parse guard (skips when absent).
-echo "verify-cutover: running the E2E-1..6/8/9 + #596 pytest legs..."
-if ! "$PYTHON" -m pytest -q -p no:cacheprovider \
+#
+# ISOLATION (fix, #878): the pytest legs must NEVER see the live control-plane
+# env — they run against FalkorDBLite + the seam fakes by design. When the
+# operator runs --live, TORTOISE_DB_URI / SUPABASE_URL / SUPABASE_SERVICE_*
+# are exported for the PRECONDITION leg; clearing them here keeps the E2E
+# legs hermetic (otherwise tests that seed/assert embedded state would hit
+# the live DB — e.g. test_main_registry_violation_exits_nonzero expects to
+# create a violation locally).
+echo "verify-cutover: running the E2E-1..6/8/9 + #596 pytest legs (hermetic — live env cleared)..."
+if ! env -u TORTOISE_DB_URI -u TORTOISE_DB_PATH -u SUPABASE_URL \
+     -u SUPABASE_SERVICE_ROLE_KEY -u SUPABASE_SERVICE_KEY \
+     -u TEST_AUDIT_DB_URI "$PYTHON" -m pytest -q -p no:cacheprovider \
     tests/test_writer_inventory.py \
     tests/test_auth_flip.py \
     tests/test_supabase_control.py \
