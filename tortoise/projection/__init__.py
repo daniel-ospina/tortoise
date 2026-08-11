@@ -313,14 +313,18 @@ class FalkorProjection(
             #    artifact — restores/migrates must remove a stale one at the
             #    target path (Redis loads AOF in preference to RDB).
             #  - :memory: is exempt (no file to persist).
+            aof_enabled = (
+                os.environ.get("TORTOISE_EMBEDDED_AOF", "").strip().lower()
+                in ("1", "true", "yes")
+            )
             aof_dir = (
                 os.path.basename(os.path.abspath(path)) + "-appendonlydir"
-            ) if path != ":memory:" else None
+            ) if (path != ":memory:" and aof_enabled) else None
             self.db = FalkorDB(
                 path,
                 serverconfig=(
                     {"appendonly": "yes", "appenddirname": aof_dir}
-                    if path != ":memory:" else None
+                    if (path != ":memory:" and aof_enabled) else None
                 ),
             )
         elif host is not None:

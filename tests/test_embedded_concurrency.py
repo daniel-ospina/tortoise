@@ -455,6 +455,7 @@ def test_kill9_server_durability_fresh_db(monkeypatch):
     server crash, not the #879 writer-death (daemon survives killpg)."""
     canonical = _canonical_path()
     monkeypatch.setenv("TORTOISE_DB_PATH", canonical)
+    monkeypatch.setenv("TORTOISE_EMBEDDED_AOF", "1")  # #915: exercise the AOF durability path
     from tortoise.projection import FalkorProjection
 
     proj = FalkorProjection()
@@ -493,6 +494,7 @@ def test_kill9_warm_db_aof_carries_post_save_writes(monkeypatch):
     write 3 more, kill -9. AOF must carry the post-RDB-save writes (8/8)."""
     canonical = _canonical_path()
     monkeypatch.setenv("TORTOISE_DB_PATH", canonical)
+    monkeypatch.setenv("TORTOISE_EMBEDDED_AOF", "1")  # #915: exercise the AOF durability path
     from tortoise.projection import FalkorProjection
 
     # Graceful close → RDB saved
@@ -525,6 +527,7 @@ def test_jsonl_recovery_after_total_graph_loss(monkeypatch):
     in the db's directory. Green pre-fix BY DESIGN (verification test)."""
     canonical = _canonical_path()
     monkeypatch.setenv("TORTOISE_DB_PATH", canonical)
+    monkeypatch.setenv("TORTOISE_EMBEDDED_AOF", "1")  # #915: exercise the AOF durability path
     monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
     from tortoise.sdk import TortoiseSDK
     from tortoise.consistency import recover_from_log
@@ -578,6 +581,7 @@ def test_restore_removes_stale_aof(monkeypatch):
     import shutil
     canonical = _canonical_path()
     monkeypatch.setenv("TORTOISE_DB_PATH", canonical)
+    monkeypatch.setenv("TORTOISE_EMBEDDED_AOF", "1")  # #915: exercise the AOF durability path
     monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
     from tortoise.projection import FalkorProjection
     from tortoise.backup import restore
