@@ -51,6 +51,10 @@ class TortoiseEP:
         """Load all node params and edge messages into Python dicts."""
         self._node_cache: dict[str, tuple[float, float]] = {}
         self._msg_cache: dict[tuple[str, str, str], tuple[float, float]] = {}
+        # Operator-less direct-edge back-messages (#888 W5): the back-message
+        # of a direct edge lives ON the edge (r.back_msg_alpha/beta) so each
+        # edge has its own slot (fan-out sources don't collide).
+        self._back_cache: dict[tuple[str, str, str], tuple[float, float]] = {}
 
         self._immutable_priors: set[str] = set()
         if affected_claims:
@@ -79,6 +83,18 @@ class TortoiseEP:
             ).result_set
             for oid, cid, ma, mb in rows:
                 self._msg_cache[(oid, cid, rel)] = (float(ma), float(mb))
+
+        if affected_claims:
+            back_rows = self.g.query(
+                "MATCH (a:Point)-[r:IMPL|NAND]->(b:Point) "
+                "WHERE coalesce(r.direction, 'bidirectional') = 'bidirectional' "
+                "AND (a.id IN $ids OR b.id IN $ids) "
+                "RETURN a.id, b.id, type(r), "
+                "       coalesce(r.back_msg_alpha,0.0), coalesce(r.back_msg_beta,0.0)",
+                params={"ids": list(affected_claims)},
+            ).result_set
+            for src, tgt, rel, ma, mb in back_rows:
+                self._back_cache[(src, tgt, rel)] = (float(ma), float(mb))
 
     def _flush_cache(self):
         """Write all cached data back to FalkorDB in batch.
@@ -124,9 +140,24 @@ class TortoiseEP:
                         params={"params": params_list},
                     )
 
+        if getattr(self, "_back_cache", None):
+            for rel in ("IMPL", "NAND"):
+                params_list = [
+                    {"src": src, "tgt": tgt, "a": ma, "b": mb}
+                    for (src, tgt, r), (ma, mb) in self._back_cache.items()
+                    if r == rel
+                ]
+                if params_list:
+                    self.g.query(
+                        f"UNWIND $params AS p "
+                        f"MATCH (o:Point {{id:p.src}})-[r:{rel}]->(c:Point {{id:p.tgt}}) "
+                        "SET r.back_msg_alpha = p.a, r.back_msg_beta = p.b",
+                        params={"params": params_list},
+                    )
+
     def _clear_caches(self) -> None:
         """Remove the batch caches so post-run reads hit the graph (#330)."""
-        for _attr in ("_node_cache", "_msg_cache"):
+        for _attr in ("_node_cache", "_msg_cache", "_back_cache"):
             if hasattr(self, _attr):
                 delattr(self, _attr)
 
@@ -193,6 +224,39 @@ class TortoiseEP:
             params={"oid": op_id, "cid": claim_id, "a": msg_alpha, "b": msg_beta},
         )
 
+    # ── Operator-less direct-edge back-messages (#888 W5) ──────────
+    # The back-message of a direct edge (src)-[r]->(tgt) lives ON the edge
+    # as r.back_msg_alpha/r.back_msg_beta (distinct from the forward
+    # message r.msg_alpha/r.msg_beta), so every direct edge has its own
+    # back-message slot and fan-out sources do not collide.
+
+    def _read_back_message(self, src_id: str, tgt_id: str,
+                           rel_type: str = "IMPL") -> tuple[float, float]:
+        key = (src_id, tgt_id, rel_type)
+        _cache = getattr(self, '_back_cache', None)
+        if _cache is not None and key in _cache:
+            return _cache[key]
+        rows = self.g.query(
+            f"MATCH (o:Point {{id:$oid}})-[r:{rel_type}]->(c:Point {{id:$cid}}) "
+            "RETURN coalesce(r.back_msg_alpha, 0.0), coalesce(r.back_msg_beta, 0.0)",
+            params={"oid": src_id, "cid": tgt_id},
+        ).result_set
+        return (float(rows[0][0]), float(rows[0][1])) if rows else (0.0, 0.0)
+
+    def _write_back_message(self, src_id: str, tgt_id: str,
+                            msg_alpha: float, msg_beta: float,
+                            rel_type: str = "IMPL") -> None:
+        key = (src_id, tgt_id, rel_type)
+        _cache = getattr(self, '_back_cache', None)
+        if _cache is not None:
+            _cache[key] = (msg_alpha, msg_beta)
+            return
+        self.g.query(
+            f"MATCH (o:Point {{id:$oid}})-[r:{rel_type}]->(c:Point {{id:$cid}}) "
+            "SET r.back_msg_alpha=$a, r.back_msg_beta=$b",
+            params={"oid": src_id, "cid": tgt_id, "a": msg_alpha, "b": msg_beta},
+        )
+
     # ── Natural parameter helpers ─────────────────────────────────
 
     @staticmethod
@@ -253,7 +317,19 @@ class TortoiseEP:
 
         id_a, id_b = input_ids
 
-        cav_eta_a = self._cavity_natural(id_a, op_id, op_type)
+        # Operator-less direct edge (#888 W5): the factor's "op" endpoint is
+        # the source point itself (op_id == id_a). The forward message stays
+        # on the edge (r.msg_alpha/r.msg_beta, key (src, tgt, rel)); the
+        # back-message gets its OWN per-edge slot (r.back_msg_*), so fan-out
+        # sources with several bidirectional direct edges do not collide.
+        direct = (op_id == id_a)
+
+        if direct:
+            post_eta_a = self._posterior_natural(id_a)
+            back_a = self._read_back_message(id_a, id_b, op_type)
+            cav_eta_a = (post_eta_a[0] - back_a[0], post_eta_a[1] - back_a[1])
+        else:
+            cav_eta_a = self._cavity_natural(id_a, op_id, op_type)
         cav_eta_b = self._cavity_natural(id_b, op_id, op_type)
         alpha_a, beta_a = self._beta_from_natural(*cav_eta_a)
         alpha_b, beta_b = self._beta_from_natural(*cav_eta_b)
@@ -299,7 +375,10 @@ class TortoiseEP:
         raw_eta_b = (raw_eta_b[0] * boost_b, raw_eta_b[1] * boost_b)
 
         d = self.damping
-        old_eta_a = self._read_message(op_id, id_a, op_type)
+        if direct:
+            old_eta_a = self._read_back_message(id_a, id_b, op_type)
+        else:
+            old_eta_a = self._read_message(op_id, id_a, op_type)
         old_eta_b = self._read_message(op_id, id_b, op_type)
 
         damped_a = (d * raw_eta_a[0] + (1 - d) * old_eta_a[0],
@@ -314,7 +393,10 @@ class TortoiseEP:
 
         self._write_message(op_id, id_b, *damped_b, op_type)
         if bidirectional:
-            self._write_message(op_id, id_a, *damped_a, op_type)
+            if direct:
+                self._write_back_message(id_a, id_b, *damped_a, op_type)
+            else:
+                self._write_message(op_id, id_a, *damped_a, op_type)
 
     def _update_nary_factor(self, op_id: str, op_type: str,
                             input_ids: list[str], weight: float = 1.0,
@@ -445,11 +527,29 @@ class TortoiseEP:
                 if cid == claim_id:
                     total_eta1 += ma
                     total_eta2 += mb
+            # Operator-less direct edges (#888 W5): the back-message of the
+            # claim's OWN outgoing direct edges also bears on its posterior
+            # (it is the factor's message to the source endpoint).
+            if hasattr(self, '_back_cache'):
+                for (src, tgt, rel), (ma, mb) in self._back_cache.items():
+                    if src == claim_id:
+                        total_eta1 += ma
+                        total_eta2 += mb
         else:
             for rel in ("IMPL", "NAND"):
                 rows = self.g.query(
                     f"MATCH (o:Point)-[r:{rel}]->(c:Point {{id:$cid}}) "
                     "RETURN coalesce(r.msg_alpha,0.0), coalesce(r.msg_beta,0.0)",
+                    params={"cid": claim_id},
+                ).result_set
+                for ma, mb in rows:
+                    total_eta1 += float(ma)
+                    total_eta2 += float(mb)
+                rows = self.g.query(
+                    f"MATCH (a:Point)-[r:{rel}]->(b:Point) "
+                    "WHERE a.id = $cid "
+                    "AND coalesce(r.direction, 'bidirectional') = 'bidirectional' "
+                    "RETURN coalesce(r.back_msg_alpha,0.0), coalesce(r.back_msg_beta,0.0)",
                     params={"cid": claim_id},
                 ).result_set
                 for ma, mb in rows:
@@ -462,13 +562,44 @@ class TortoiseEP:
 
     def _affected_claims(self, operator_ids: list[str],
                          max_hops: int = 2) -> set[str]:
+        """Affected claims for a run, seeded from operator and/or point ids.
+
+        Seeds may be operator ids (legacy) or plain point ids (#888 W5): a
+        plain-point seed discovers operator-less direct edges in both
+        directions (an operator-less edge is a factor shared by BOTH of its
+        endpoints) AND its operator-mediated neighborhood, so seeding a claim
+        runs every factor it participates in.
+        """
         affected: set[str] = set()
-        for op_id in operator_ids:
-            rows = self.g.query(
-                "MATCH (o:Point {id:$oid})-[r:IMPL|NAND]->(c:Point) "
-                "RETURN DISTINCT c.id",
-                params={"oid": op_id},
+        for seed_id in operator_ids:
+            is_op = self.g.query(
+                "MATCH (n:Point {id:$id}) RETURN (n.is_operator = true)",
+                params={"id": seed_id},
             ).result_set
+            if is_op and is_op[0][0]:
+                # Operator seed — legacy behavior: follow outgoing edges to
+                # the operator's inputs (the operator's factor).
+                rows = self.g.query(
+                    "MATCH (o:Point {id:$oid})-[r:IMPL|NAND]->(c:Point) "
+                    "RETURN DISTINCT c.id",
+                    params={"oid": seed_id},
+                ).result_set
+            else:
+                # Plain-point seed (#888 W5): direct edges in BOTH directions
+                # (an operator-less edge is a factor shared by its endpoints),
+                # plus the seed's operator-mediated neighborhood via
+                # _neighbors so a seed whose only connections are
+                # operator-mediated still runs its incident factors.
+                rows = self.g.query(
+                    "MATCH (a:Point {id:$id})-[r:IMPL|NAND]-(b:Point) "
+                    "WHERE b.id <> $id "
+                    "AND (b.is_operator IS NULL OR b.is_operator = false) "
+                    "AND b.op_type IS NULL "
+                    "RETURN DISTINCT b.id",
+                    params={"id": seed_id},
+                ).result_set
+                for nid in self.proj._neighbors(seed_id):
+                    affected.add(nid)
             affected.update(r[0] for r in rows)
 
         if max_hops > 0 and affected:
@@ -477,6 +608,22 @@ class TortoiseEP:
                 new_frontier: list[str] = []
                 for claim_id in frontier:
                     for nid in self.proj._neighbors(claim_id):
+                        if nid not in affected:
+                            affected.add(nid)
+                            new_frontier.append(nid)
+                    # Operator-less hops (#888 W5): direct IMPL/NAND edges
+                    # between plain Points (operator-mediated hops above).
+                    dir_rows = self.g.query(
+                        "MATCH (a:Point {id:$id})-[r:IMPL|NAND]-(b:Point) "
+                        "WHERE b.id <> $id "
+                        "AND (a.is_operator IS NULL OR a.is_operator = false) "
+                        "AND a.op_type IS NULL "
+                        "AND (b.is_operator IS NULL OR b.is_operator = false) "
+                        "AND b.op_type IS NULL "
+                        "RETURN DISTINCT b.id",
+                        params={"id": claim_id},
+                    ).result_set
+                    for (nid,) in dir_rows:
                         if nid not in affected:
                             affected.add(nid)
                             new_frontier.append(nid)
@@ -489,9 +636,11 @@ class TortoiseEP:
                           ) -> list[tuple[str, str, list[str], float, str | None, str]]:
         """Extract EP factors from the affected claims subgraph.
 
-        Two batch queries replace the original per-claim N+1 pattern (#400 follow-up):
+        Three batch queries replace the original per-claim N+1 pattern (#400 follow-up):
         1. Single query for all operators connected to any affected claim.
         2. Single query for all inputs of those operators, ordered by idx.
+        3. Single query for operator-less direct edges between plain Points
+           (binary factors keyed on the source endpoint, #888 W5).
 
         Semantics are preserved: same affected set, same factor list, same
         ordering guarantees (source idx=0 first for directional IMPL).
@@ -500,17 +649,58 @@ class TortoiseEP:
         if not affected_claims:
             return factors
 
-        # Batch 1: all operators connected to any affected claim.
+        from .weights import compute_operator_weight, NAND_BASE_WEIGHT
+
+        # Batch 1: all operators connected to any affected claim. An operator
+        # is a Point with is_operator=true OR an op_type (legacy nodes — the
+        # projection layer treats bool(is_operator or op_type) as operator,
+        # projection/__init__.py). Plain-point sources of IMPL/NAND edges are
+        # operator-less direct edges (#888 W5) handled by Batch 3 below.
+        # (Pre-#910 graphs are unaffected: plain points had no outgoing
+        # IMPL/NAND edges, so the exclusion is behavior-neutral there.)
         op_info: dict[str, tuple[str, str | None, str | None]] = {}
         rows = self.g.query(
             "MATCH (o:Point)-[r:IMPL|NAND]->(c:Point) "
-            "WHERE c.id IN $ids "
+            "WHERE (o.is_operator = true OR o.op_type IS NOT NULL) "
+            "AND c.id IN $ids "
             "RETURN DISTINCT o.id, o.op_type, o.label, o.direction",
             params={"ids": list(affected_claims)},
         ).result_set
         for op_id, op_type, label, direction in rows:
             if op_id not in op_info:
                 op_info[op_id] = (op_type, label, direction)
+
+        # Batch 3: operator-less direct edges (#888 W5, ONTOLOGY v3.5 §8
+        # reification rule). A direct IMPL/NAND edge between two plain Points
+        # (no is_operator, no op_type) is itself a binary factor: the source
+        # endpoint plays the factor's role, messages live ON the edge
+        # (forward: r.msg_alpha/r.msg_beta; back: r.back_msg_*), and
+        # _update_factor computes the forward message from the source's belief
+        # (its cavity, with no self-edge message) exactly as for an
+        # operator-mediated factor. DIRECTION is read from the EDGE
+        # (r.direction), defaulting to bidirectional when absent — the
+        # operator node's direction applies only when an operator exists
+        # (Batch 1 above). Weight parity with operator-mediated factors: an
+        # explicit r.weight wins; otherwise the operator base weight applies
+        # (NAND_BASE_WEIGHT — #855 — for NAND, 1.0 for IMPL). Parallel direct
+        # edges between the same pair share one message slot (last-writer
+        # wins) — unsupported; creation paths must not duplicate edges.
+        dir_rows = self.g.query(
+            "MATCH (a:Point)-[r:IMPL|NAND]->(b:Point) "
+            "WHERE (a.is_operator IS NULL OR a.is_operator = false) "
+            "AND a.op_type IS NULL "
+            "AND (b.is_operator IS NULL OR b.is_operator = false) "
+            "AND b.op_type IS NULL "
+            "AND (a.id IN $ids OR b.id IN $ids) "
+            "RETURN a.id, b.id, type(r), coalesce(r.direction, 'bidirectional'), "
+            "       r.weight",
+            params={"ids": list(affected_claims)},
+        ).result_set
+        for src_id, tgt_id, rel, direction, weight in dir_rows:
+            if weight is None:
+                weight = (NAND_BASE_WEIGHT if rel == "NAND" else 1.0)
+            factors.append((src_id, rel, [src_id, tgt_id], float(weight),
+                            None, direction))
 
         if not op_info:
             return factors
@@ -531,7 +721,6 @@ class TortoiseEP:
             op_inputs[op_id].append(claim_id)
 
         # Assemble factors (single compute_operator_weight per operator).
-        from .weights import compute_operator_weight
         for op_id, (op_type, label, direction) in op_info.items():
             # Defensive: pre-migration operators without direction default to bidirectional
             if direction is None:
@@ -614,7 +803,10 @@ class TortoiseEP:
         """Run EP to convergence. Batch I/O avoids SQLite crashes (#6761).
 
         Args:
-            operator_ids: operator node IDs to include
+            operator_ids: operator node IDs to include — plain point IDs are
+                also accepted as seeds: a plain seed runs the operator-less
+                direct edges it participates in plus its operator-mediated
+                neighborhood (#888 W5)
             max_hops: how far to extend the affected subgraph
             evidence: optional {claim_id: (alpha, beta)} priors —
                 merged with any evidence set at construction time.
@@ -628,12 +820,12 @@ class TortoiseEP:
         if evidence:
             run_evidence.update(evidence)
 
-        # Cache lifecycle (#330): _node_cache/_msg_cache are a per-run working
-        # set. Remove them at entry (before the evidence pre-write and the
-        # early returns) so a run that exits early never leaves stale cache
-        # behind for public reads (_read_node/_write_node fall through to the
-        # graph when the attribute is absent).
-        for _attr in ("_node_cache", "_msg_cache"):
+        # Cache lifecycle (#330): _node_cache/_msg_cache/_back_cache are a
+        # per-run working set. Remove them at entry (before the evidence
+        # pre-write and the early returns) so a run that exits early never
+        # leaves stale cache behind for public reads (_read_node/_write_node
+        # fall through to the graph when the attribute is absent).
+        for _attr in ("_node_cache", "_msg_cache", "_back_cache"):
             if hasattr(self, _attr):
                 delattr(self, _attr)
 
