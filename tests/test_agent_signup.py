@@ -123,8 +123,11 @@ class TestProvisionMembershipStatus:
     the E6 /v1/teams listing (which filters on status='active') shows it."""
 
     def test_provisioned_team_lists_in_teams_e6(self, client, monkeypatch):
-        old_key = ha_mod._INTERNAL_KEY
-        ha_mod._INTERNAL_KEY = _INTERNAL_KEY
+        # #880: _check_internal reads FASTAPI_INTERNAL_KEY lazily (was a
+        # module-import constant). Set the env var directly — the old
+        # ha_mod._INTERNAL_KEY attribute patch is dead post-fix.
+        old_key = os.environ.get("FASTAPI_INTERNAL_KEY", "")
+        monkeypatch.setenv("FASTAPI_INTERNAL_KEY", _INTERNAL_KEY)
         try:
             r = client.post(
                 "/internal/provision",
@@ -157,4 +160,4 @@ class TestProvisionMembershipStatus:
             finally:
                 app.dependency_overrides.pop(get_current_user, None)
         finally:
-            ha_mod._INTERNAL_KEY = old_key
+            os.environ["FASTAPI_INTERNAL_KEY"] = old_key
