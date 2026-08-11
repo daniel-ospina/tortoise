@@ -124,7 +124,51 @@ class TestCheckpoint:
         assert result["duplicates"] == 1
         assert result["filed"] == 0
 
+
+    def test_semantic_dedup_model_load_failure_offline_degrades_to_tfidf(
+            self, sdk, monkeypatch, caplog):
+        """#880 regression: sentence_transformers installed + model missing under
+        HF_HUB_OFFLINE raises LocalEntryNotFoundError (an OSError, NOT ImportError).
+        """
+        import logging
+        import tempfile
+        import pytest
+        from tortoise.embeddings import EmbeddingModel
+
+        # This path needs BOTH sklearn (TF-IDF fallback) and sentence_transformers
+        # (the load-failure mechanism). MUST run before the huggingface_hub import
+        # below (which itself requires the embeddings extra): in a bare dev
+        # env this test must SKIP, not error (#880, reviewer finding 2026-08-10).
+        pytest.importorskip("sklearn")
+        pytest.importorskip("sentence_transformers")
+        import huggingface_hub.constants as hf_const
+
+        EmbeddingModel._reset()
+        try:
+            with tempfile.TemporaryDirectory() as empty_hf:
+                # huggingface_hub bakes HF_HUB_OFFLINE/HF_HUB_CACHE at import
+                # time — setenv AFTER import is INERT (is_offline_mode() reads
+                # the module attribute at call time). Patch the runtime
+                # constants so the pin is deterministic on every machine (#880).
+                monkeypatch.setattr(hf_const, "HF_HUB_CACHE", empty_hf)
+                monkeypatch.setattr(hf_const, "HF_HUB_OFFLINE", True)
+                sdk.checkpoint([{"content":
+                                 "deploy the new feature to production servers tonight"}])
+                with caplog.at_level(logging.WARNING, logger="tortoise.embeddings"):
+                    result = sdk.checkpoint(
+                        [{"content":
+                          "deploy the new feature to production servers today"}],
+                        threshold=0.7,
+                    )
+        finally:
+            EmbeddingModel._reset()
+
+        assert result["duplicates"] == 1, "near-duplicate must be caught via TF-IDF degrade"
+        assert result["filed"] == 0
+        assert any("unavailable" in r.message for r in caplog.records),             "load failure must be observable (WARNING, #330)"
+
     def test_semantic_dedup_threshold_disables(self, sdk):
+
         """GAP-08: threshold=1.0 disables semantic dedup — hash-only fallback."""
         original = "original content about deployment strategy"
         sdk.checkpoint([{"content": original}])

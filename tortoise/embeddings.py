@@ -106,8 +106,18 @@ class EmbeddingModel:
             try:
                 from sentence_transformers import SentenceTransformer
                 result["model"] = SentenceTransformer("all-MiniLM-L6-v2")
+            except ImportError:
+                # Designed zero-dependency path — INFO, no traceback noise.
+                logger.info("sentence-transformers not installed — embeddings degrade")
+                result["model"] = None
             except Exception as e:  # noqa: BLE001
-                logger.info("sentence-transformers unavailable: %s", e)
+                # #880: a load failure (e.g. LocalEntryNotFoundError when the
+                # model is missing under HF_HUB_OFFLINE) is a real degrade —
+                # warn with traceback so it stays observable (#330 contract).
+                logger.warning(
+                    "sentence-transformers unavailable — embeddings degrade: %s",
+                    e, exc_info=True,
+                )
                 result["model"] = None
 
         t = threading.Thread(target=_load, daemon=True)

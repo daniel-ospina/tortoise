@@ -2871,16 +2871,17 @@ class TortoiseSDK:
             return candidates
 
         new_texts = [item["content"] for item, _ch in candidates]
-        # ponytail: prefer sentence_transformers; TF-IDF fallback for zero-dependency path
-        try:
-            from sentence_transformers import SentenceTransformer
-            model = SentenceTransformer("all-MiniLM-L6-v2")
-            vecs = model.encode(existing + new_texts, show_progress_bar=False)
-        except ImportError:
-            from sklearn.feature_extraction.text import TfidfVectorizer
-            vecs = TfidfVectorizer().fit_transform(existing + new_texts).toarray()
+        # Single degrade chain (embeddings._encode): real model → TF-IDF → zeros.
+        # #880: this used to instantiate SentenceTransformer directly. A missing
+        # model under HF_HUB_OFFLINE raises LocalEntryNotFoundError (an OSError,
+        # NOT ImportError) → checkpoint()'s except Exception silently dropped
+        # semantic dedup to hash-only and near-duplicates were filed. Reuse the
+        # EmbeddingModel singleton + degrade chain so any load/encode failure
+        # degrades to deterministic TF-IDF instead of hash-only.
+        from .embeddings import _encode
+        all_vecs, _degraded = _encode(existing + new_texts)
 
-        e_vecs, n_vecs = vecs[:len(existing)], vecs[len(existing):]
+        e_vecs, n_vecs = all_vecs[:len(existing)], all_vecs[len(existing):]
 
         def _norm(v):
             n = np.linalg.norm(v, axis=1, keepdims=True)
