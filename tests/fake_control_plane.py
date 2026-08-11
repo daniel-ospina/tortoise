@@ -44,6 +44,20 @@ class FakeControlPlane:
         shared row store, so auth resolution and listing see the rows.
         """
         self.rpc_calls.append((fn, dict(body or {})))
+        if fn == "metering_increment":
+            # Emulate migration 0014's SQL function: atomic upsert + increment.
+            p = body or {}
+            rows = self.tables.setdefault("metering_records", [])
+            row = next((r for r in rows if r["team_id"] == p.get("p_team_id")
+                        and r["period"] == p.get("p_period")), None)
+            n = int(p.get("p_n") or 1)
+            if row:
+                row["write_ops"] = row.get("write_ops", 0) + n
+            else:
+                rows.append({"team_id": p.get("p_team_id"),
+                             "period": p.get("p_period"),
+                             "write_ops": n})
+            return None  # PostgREST minimal — no echo
         if fn != "provision_team":
             return None
         p = body or {}

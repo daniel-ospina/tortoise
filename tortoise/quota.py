@@ -151,15 +151,19 @@ def resolve_team_limits(team_id: str) -> dict:
         tier = row.get("tier") or "free"
         from tortoise.pricing import tier_limits
         lim = tier_limits(tier)
-        # Mirror the registry shape: max_points ← graph_size_cap (GAP-B),
-        # max_api_keys/max_sessions fall back to pricing/defaults.
+        # Mirror the registry shape EXACTLY (review P2, PR #911): NULL
+        # max_users/max_graphs = UNLIMITED (Team tier) — preserve None,
+        # never substitute pricing defaults (enforce_team_limit treats an
+        # explicit None limit as unlimited; substituting finite caps would
+        # hard-cap legacy/migrated rows). max_points ← graph_size_cap
+        # (GAP-B); max_api_keys/max_sessions fall back to pricing/defaults.
         mu = row.get("max_users")
         mg = row.get("max_graphs")
         mp = row.get("graph_size_cap")
         return {
             "team_id": team_id, "tier": tier,
-            "max_users": mu if mu is not None else lim["max_users_per_team"],
-            "max_graphs": mg if mg is not None else lim["max_graphs_per_team"],
+            "max_users": int(mu) if mu is not None else None,
+            "max_graphs": int(mg) if mg is not None else None,
             "max_points": int(mp) if mp is not None else lim["max_graph_nodes"],
             "max_api_keys": lim["max_api_keys"],
             "max_sessions": DEFAULT_MAX_SESSIONS,

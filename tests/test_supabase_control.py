@@ -1151,3 +1151,115 @@ class TestClientConstruction:
         finally:
             server.shutdown()
             server.server_close()
+
+
+# ── Metering (post-#669 flip — PR #911) ─────────────────────────────────────
+
+class TestMeteringSeam:
+    """metering_records read/increment via the seam (the registry path is
+    deleted post-flip; these cover the Supabase branches the reviewer noted
+    had zero direct tests)."""
+
+    def test_metering_get_absent_is_zero(self):
+        from tortoise.supabase_control import metering_get
+        from tests.fake_control_plane import FakeControlPlane
+
+        fake = FakeControlPlane({"metering_records": []})
+        assert metering_get(fake, "team-1", "2026-08") == 0
+
+    def test_metering_increment_creates_and_reads_back(self):
+        from tortoise.supabase_control import metering_get, metering_increment
+        from tests.fake_control_plane import FakeControlPlane
+
+        fake = FakeControlPlane({"metering_records": []})
+        n = metering_increment(fake, "team-1", "2026-08", 3)
+        assert n == 3
+        assert metering_get(fake, "team-1", "2026-08") == 3
+        # increment again → 5
+        assert metering_increment(fake, "team-1", "2026-08", 2) == 5
+        # different period isolated
+        assert metering_get(fake, "team-1", "2026-07") == 0
+
+    def test_metering_rpc_called_with_args(self):
+        """The atomic increment goes through the RPC path (not GET-PATCH)."""
+        from tortoise.supabase_control import metering_increment
+        from tests.fake_control_plane import FakeControlPlane
+
+        class _Spy(FakeControlPlane):
+            def __init__(self):
+                super().__init__({"metering_records": []})
+                self.rpc_calls = []
+
+            def rpc(self, fn, body):
+                self.rpc_calls.append((fn, body))
+                # emulate the SQL function: upsert + increment
+                rows = self.tables["metering_records"]
+                row = next((r for r in rows
+                            if r["team_id"] == body["p_team_id"]
+                            and r["period"] == body["p_period"]), None)
+                if row:
+                    row["write_ops"] += body["p_n"]
+                else:
+                    rows.append({"team_id": body["p_team_id"],
+                                 "period": body["p_period"],
+                                 "write_ops": body["p_n"]})
+                return None  # PostgREST minimal — no echo
+
+        spy = _Spy()
+        assert metering_increment(spy, "team-1", "2026-08", 2) == 2
+        assert metering_increment(spy, "team-1", "2026-08", 4) == 6
+        assert spy.rpc_calls == [
+            ("metering_increment", {"p_team_id": "team-1",
+                                    "p_period": "2026-08", "p_n": 2}),
+            ("metering_increment", {"p_team_id": "team-1",
+                                    "p_period": "2026-08", "p_n": 4}),
+        ]
+
+
+# ── resolve_team_limits Supabase mode (PR #911 review P2) ───────────────────
+
+class TestResolveTeamLimitsSupabase:
+    def test_supabase_mode_never_touches_registry(self, monkeypatch):
+        """resolve_team_limits reads the teams row via the seam in Supabase
+        mode; a registry-namespaced SDK must NOT be constructed."""
+        import tortoise.quota as q
+        from tests.fake_control_plane import FakeControlPlane
+
+        monkeypatch.setenv("SUPABASE_URL", "https://test.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc_key")
+        import tortoise.supabase_control as sc
+        fake = FakeControlPlane({"teams": [{"id": "team-1", "tier": "free",
+                                             "max_users": 1, "max_graphs": 1,
+                                             "graph_size_cap": 10000,
+                                             "ops_allowance": 1000}]})
+        monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
+
+        class _Boom:
+            def _get_registry(self):
+                raise AssertionError("registry touched in Supabase mode")
+
+        monkeypatch.setattr(q, "_make_sdk", lambda **kw: _Boom())
+        limits = q.resolve_team_limits("team-1")
+        assert limits["team_id"] == "team-1"
+        assert limits["tier"] == "free"
+        assert limits["max_users"] == 1
+        assert limits["max_points"] == 10000
+
+    def test_supabase_mode_preserves_none_as_unlimited(self, monkeypatch):
+        """NULL max_users/max_graphs = UNLIMITED (registry parity, PR #911
+        review P2) — never substitute pricing defaults."""
+        import tortoise.quota as q
+        from tests.fake_control_plane import FakeControlPlane
+
+        monkeypatch.setenv("SUPABASE_URL", "https://test.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc_key")
+        import tortoise.supabase_control as sc
+        fake = FakeControlPlane({"teams": [{"id": "team-1", "tier": "team",
+                                             "max_users": None,
+                                             "max_graphs": None,
+                                             "graph_size_cap": 500000}]})
+        monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
+        limits = q.resolve_team_limits("team-1")
+        assert limits["max_users"] is None  # unlimited, not pricing default
+        assert limits["max_graphs"] is None
+        assert limits["max_points"] == 500000

@@ -26,3 +26,34 @@ CREATE POLICY metering_service_role_all ON public.metering_records
     TO service_role
     USING (true)
     WITH CHECK (true);
+
+-- Atomic increment (review P2, PR #911): a GET-then-PATCH increment loses
+-- updates under concurrency (two readers see N, both write N+1 → net +1
+-- instead of +2). This SECURITY DEFINER RPC does the increment in SQL —
+-- write_ops = write_ops + n is atomic under Postgres row locking. The
+-- caller (tortoise/metering.py metering_increment) invokes it via the
+-- seam's rpc(); the registry MERGE it replaces had the same atomicity.
+CREATE OR REPLACE FUNCTION public.metering_increment(
+    p_team_id text,
+    p_period  text,
+    p_n       integer DEFAULT 1
+)
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE v_ops integer;
+BEGIN
+    INSERT INTO public.metering_records (team_id, period, write_ops)
+    VALUES (p_team_id, p_period, p_n)
+    ON CONFLICT (team_id, period)
+    DO UPDATE SET write_ops = public.metering_records.write_ops + p_n,
+                  updated_at = now()
+    RETURNING write_ops INTO v_ops;
+    RETURN v_ops;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.metering_increment FROM public, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.metering_increment TO service_role;

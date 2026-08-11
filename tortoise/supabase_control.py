@@ -1291,28 +1291,15 @@ def metering_get(cp, team_id: str, period: str) -> int:
 
 def metering_increment(cp, team_id: str, period: str, n: int = 1) -> int:
     """Increment the team's write-op counter for the period; returns the new
-    count. Best-effort by contract (metering failures never block a write):
-    the caller swallows exceptions — but the PATCH+verify here is atomic
-    enough for the single-writer app model (one Fly app instance processes
-    writes; the registry MERGE had the same property)."""
-    rows = cp.query(
-        "metering_records",
-        select=["write_ops"],
-        filters=[("team_id", "eq", team_id), ("period", "eq", period)],
+    count. ATOMIC (review P2, PR #911): delegates to the metering_increment
+    SQL RPC (0014) — write_ops = write_ops + n under Postgres row locking —
+    so concurrent increments can never undercount (a GET-then-PATCH would
+    lose updates). Best-effort by contract (metering failures never block a
+    write): the caller swallows exceptions."""
+    cp.rpc(
+        "metering_increment",
+        {"p_team_id": team_id, "p_period": period, "p_n": n},
     )
-    if rows:
-        new = int(rows[0]["write_ops"]) + n
-        cp.query(
-            "metering_records",
-            method="PATCH",
-            filters=[("team_id", "eq", team_id), ("period", "eq", period)],
-            json_body={"write_ops": new,
-                       "updated_at": datetime.now(timezone.utc).isoformat()},
-        )
-        return new
-    cp.query(
-        "metering_records",
-        method="POST",
-        json_body={"team_id": team_id, "period": period, "write_ops": n},
-    )
-    return n
+    # PostgREST does not echo SECURITY DEFINER RPC results with
+    # return=minimal — read back the atomic new value.
+    return metering_get(cp, team_id, period)
