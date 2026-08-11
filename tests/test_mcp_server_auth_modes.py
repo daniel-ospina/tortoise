@@ -165,7 +165,7 @@ class TestToolGroupFiltering:
         names = self._list_tool_names(tc)
         assert names, "expected tools"
         assert all(GROUP_BY_NAME.get(n) == "memory" for n in names)
-        assert len(names) <= 17  # memory group size
+        assert len(names) <= 24  # memory group size (grew with #888/#913 consolidation train; #939)
 
     def test_no_group_lists_all_http_tools(self, make_client):
         tc = make_client(auth_mode="none")
