@@ -265,7 +265,7 @@ class AuditLogger:
             # restart where some rows landed) re-appended the same events to
             # the fallback forever — the duplicate-key flood seen when
             # TORTOISE_AUDIT_DSN came online.
-            success_count = 0
+            failed: list[dict] = []
             for event in events:
                 try:
                     with self._conn.cursor() as cur:
@@ -281,21 +281,18 @@ class AuditLogger:
                                ON CONFLICT (id) DO NOTHING""",
                             event,
                         )
-                    success_count += 1
                 except Exception as e:
                     _logger.warning("AuditLogger: replay insert failed: %s", e)
-                    # Write failed events back to fallback
-                    with open(self._fallback_path, "a") as f:
-                        f.write(json.dumps(event, default=str) + "\n")
+                    failed.append(event)
 
-            # Truncate fallback file on full success
-            if success_count == len(events):
+            # Rewrite the fallback with ONLY the genuinely-failed events
+            # (review P2, PR #919 — the old contiguous-tail truncation could
+            # drop a mid-list failure when a later event succeeded).
+            if not failed:
                 self._fallback_path.write_text("")
-            elif success_count > 0:
-                # Partial success — only keep failed events
-                remaining = events[success_count:]
+            else:
                 self._fallback_path.write_text(
-                    "\n".join(json.dumps(e, default=str) for e in remaining) + "\n"
+                    "\n".join(json.dumps(e, default=str) for e in failed) + "\n"
                 )
         except Exception as e:
             _logger.error("AuditLogger: replay failed: %s", e)
