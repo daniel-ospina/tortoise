@@ -14,9 +14,11 @@ from __future__ import annotations
 
 import re
 import os
+import shutil
 import logging
 from collections import defaultdict
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 logger = logging.getLogger(__name__)
@@ -101,6 +103,32 @@ from tortoise.projection.propagation import _PropagationMixin
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def remove_stale_aof(db_path: str | os.PathLike) -> None:
+    """#915 — remove a stale ``appendonlydir/`` adjacent to an embedded DB.
+
+    With AOF enabled (see FalkorProjection embedded serverconfig), Redis loads
+    the AOF in PREFERENCE to the RDB on cold start. A stale AOF at the target
+    path therefore makes restore/migrate silently serve pre-restore data
+    (e.g. ``backup.restore`` copying an RDB snapshot into a path whose
+    ``appendonlydir/`` still holds the OLD live graph). Restore semantics =
+    "the restored snapshot wins" — call this on the target path before any
+    open/copy. No-op when the DB path is ``:memory:`` or has no adjacent dir.
+    """
+    if not db_path or str(db_path) == ":memory:":
+        return
+    aof_dir = Path(str(db_path)).with_name(
+        Path(str(db_path)).name + "-appendonlydir"
+    )
+    # Redislite also derives the dir from the db filename; tolerate both the
+    # suffix form and a literal ``appendonlydir`` sibling (falkordblite >= 0.10
+    # uses the ``<db>-appendonlydir`` convention; older builds the latter).
+    candidates = [aof_dir, Path(str(db_path)).parent / "appendonlydir"]
+    for d in candidates:
+        if d.exists():
+            shutil.rmtree(d, ignore_errors=True)
+            logger.warning("removed stale AOF dir %s (restore/migrate contract, #915)", d)
 
 
 def _norm(ev: dict) -> dict:
@@ -266,7 +294,24 @@ class FalkorProjection(
             # the plain falkordb.FalkorDB treats a positional path arg as a HOST
             # (IDNA crash: redis tries to resolve the file path as a hostname, #82).
             from redislite.falkordb_client import FalkorDB  # lazy: keep import optional
-            self.db = FalkorDB(path)
+            # #915 — embedded durability: enable AOF (appendonly) so a kill -9 of
+            # the redis-server daemon loses at most the last ~1s of writes instead
+            # of the whole graph since the last RDB save (RDB snapshots never fire
+            # for small graphs: save 900 1 / 300 100 / 60 200 / 15 1000).
+            #
+            # Durability contract (embedded file-backed mode):
+            #  - AOF binds at daemon COLD start (redislite reuses a live daemon
+            #    via .settings without re-applying serverconfig). Restart any
+            #    long-running embedded daemon after deploying this change.
+            #  - AOF everysec fsync = ≤1s residual loss window on kill -9.
+            #  - appendonlydir/ is a LIVE durability artifact, NOT a backup
+            #    artifact — restores/migrates must remove a stale one at the
+            #    target path (Redis loads AOF in preference to RDB).
+            #  - :memory: is exempt (no file to persist).
+            self.db = FalkorDB(
+                path,
+                serverconfig={"appendonly": "yes"} if path != ":memory:" else None,
+            )
         elif host is not None:
             # Docker FalkorDB
             from falkordb import FalkorDB  # ponytail: lazy import, only needed for Docker mode
