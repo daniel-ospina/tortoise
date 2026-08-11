@@ -135,12 +135,24 @@ mcp_http_app = create_http_app(
 
 
 def _iter_registered_teams() -> list[dict]:
-    """List registered teams from the control_plane registry (best-effort).
+    """List registered teams from the control plane (best-effort).
 
     Used by the event-retention sweep (#432 Task 7) and boot reconcile.
+    Supabase mode (post-#669 flip): enumerates from Supabase teams via the
+    seam — the registry is DELETED and querying it would auto-recreate the
+    empty graph. Registry mode: the Team nodes, as before.
     Returns [] on any failure — the sweep is best-effort.
     """
     try:
+        from tortoise.supabase_control import (
+            get_control_plane, is_supabase_enabled,
+        )
+        if is_supabase_enabled():
+            rows = get_control_plane().query(
+                "teams", select=["id", "name"],
+                filters=[("deleted_at", "is", None)],
+            )
+            return [{"team_id": r["id"], "name": r.get("name")} for r in rows]
         from tortoise.sdk import TortoiseSDK
 
         sdk = TortoiseSDK()
@@ -3732,15 +3744,22 @@ def _purge_deleted_teams() -> None:
                 if not _past_grace(row.get("deleted_at"), row.get("grace_hours")):
                     continue  # env shrank — honor the stored promise
                 try:
-                    # Registry sweep FIRST, control-plane LAST: the teams
+                    # Registry cascade FIRST, control-plane LAST: the teams
                     # row is the retry anchor — a failed registry purge or
                     # graph drop leaves it in place, so the next sweep
                     # retries instead of leaking nodes past the grace
                     # window (code-review P2, PR #873).
-                    _purge_registry_team(
-                        _make_sdk(namespace="registry"), team_id,
-                        row.get("graph_name"),
-                    )
+                    # Post-#669 flip: the registry is DELETED — skip the
+                    # cascade (querying it would auto-recreate the empty
+                    # graph); the teams row + knowledge-graph drop are the
+                    # whole purge now.
+                    if not is_supabase_enabled():
+                        _purge_registry_team(
+                            _make_sdk(namespace="registry"), team_id,
+                            row.get("graph_name"),
+                        )
+                    else:
+                        _drop_team_graph(team_id, row.get("graph_name"))
                     purge_team_control_plane(cp, team_id)
                     _audit_logger.append(
                         team_id, None, "team_delete_purged",
