@@ -3673,17 +3673,37 @@ def _drop_team_graph(team_id: str, graph_name: str | None = None) -> None:
 
     graph_name wins when known (sdk.team_create stores ``team_{name}``);
     the ``team_{team_id}`` fallback matches provision_tenant graphs.
+    Errors are logged and swallowed — callers that need a drop failure
+    to be fatal (Supabase purge retry anchor, #926) use
+    :func:`_drop_team_graph_strict` instead.
     """
     try:
-        target = graph_name or f"team_{team_id}"
-        sdk = _make_sdk(namespace=team_id)
-        proj = sdk._get_proj()
-        if hasattr(proj.db, "delete_graph"):
-            proj.db.delete_graph(target)
-        else:
-            _logger.debug("delete_graph not available (FalkorDBLite) — skipped")
+        _drop_team_graph_impl(team_id, graph_name)
     except Exception:  # noqa: BLE001
         _logger.debug("team graph drop skipped for %s", team_id)
+
+
+def _drop_team_graph_strict(team_id: str, graph_name: str | None = None) -> None:
+    """Strict drop of a team's FalkorDB graph — raises on failure.
+
+    Used by the Supabase purge sweep (#926): the best-effort variant
+    silently swallows drop errors, which would let the sweep delete the
+    teams row and orphan the FalkorDB graph with no retry. Raising keeps
+    the teams row as the retry anchor — the next sweep finds the team
+    again and retries the drop. FalkorDBLite (no ``delete_graph``) is
+    not an error — it is skipped exactly like the best-effort variant.
+    """
+    _drop_team_graph_impl(team_id, graph_name)
+
+
+def _drop_team_graph_impl(team_id: str, graph_name: str | None = None) -> None:
+    target = graph_name or f"team_{team_id}"
+    sdk = _make_sdk(namespace=team_id)
+    proj = sdk._get_proj()
+    if hasattr(proj.db, "delete_graph"):
+        proj.db.delete_graph(target)
+    else:
+        _logger.debug("delete_graph not available (FalkorDBLite) — skipped")
 
 
 def _purge_registry_team(sdk, team_id: str, graph_name: str | None = None) -> None:
@@ -3767,14 +3787,16 @@ def _purge_deleted_teams() -> None:
                     # Post-#669 flip: the registry is DELETED — skip the
                     # cascade (querying it would auto-recreate the empty
                     # graph); the teams row + knowledge-graph drop are the
-                    # whole purge now.
+                    # whole purge now. The graph drop is STRICT (#926): a
+                    # silently-failed best-effort drop would delete the
+                    # row and orphan the FalkorDB graph with no retry.
                     if not is_supabase_enabled():
                         _purge_registry_team(
                             _make_sdk(namespace="registry"), team_id,
                             row.get("graph_name"),
                         )
                     else:
-                        _drop_team_graph(team_id, row.get("graph_name"))
+                        _drop_team_graph_strict(team_id, row.get("graph_name"))
                     purge_team_control_plane(cp, team_id)
                     _audit_logger.append(
                         team_id, None, "team_delete_purged",
