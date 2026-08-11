@@ -6628,8 +6628,14 @@ class TortoiseSDK:
     def create_document(self, title: str, documentKind: str, **props) -> dict:
         """Thin alias for create_entity(type='document') — epic #888 W2."""
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
-        return self.create_entity("document", title,
-                                  documentKind=documentKind, **props)["node"]
+
+        did = self.ulid()
+        result = self._create_entity("Document", did, {"title": title, "documentKind": documentKind, "objectKind": "document", "status": "draft", **props}, "DocumentCreated")
+        # #394: provenance parity with create_point — link Document → Source
+        # via extractedFrom (Ontology v3.3) when the caller passes a source ref.
+        if props.get("extractedFrom"):
+            self._get_proj()._link_source(did, props["extractedFrom"], label="Document")
+        return result
 
     def create_source(self, url: str, sourceKind: str, *,
                       tier: str | None = None, sourceDate: str | None = None,
