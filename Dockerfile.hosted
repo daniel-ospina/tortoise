@@ -29,7 +29,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # requirements.txt (deploy-slim intent). Lock-pinning the extras too is a
 # separate follow-up if the index drift ever bites.
 COPY pyproject.toml .
-RUN pip install --no-cache-dir '.[embeddings]' '.[backups]' \
+RUN pip install --no-cache-dir '.[embeddings]' '.[backups]' '.[postgres]' \
     # Both HF_HOME and SENTENCE_TRANSFORMERS_HOME must point at /app/model so
     # the build-time download lands EXACTLY where runtime looks: ST uses
     # SENTENCE_TRANSFORMERS_HOME directly as its cache dir
