@@ -81,7 +81,15 @@ def local_db(tmp_path, monkeypatch, capsys):
     apikey_verify returned None (401). In-process, the CLI's SDK handle stays
     alive in this process and every test handle connects to the SAME live
     server — no RDB reload, no handoff, no second process. The real CLI
-    wiring (parser → _cmd_key_create → sdk.apikey_create) is still exercised.
+    function (key_create → sdk.team_create + apikey_create) is still
+    exercised; the parser itself is covered by the subprocess consumers
+    (key_create output tests spawn `python -m tortoise key create`).
+
+    Yields (db, key, env, cli_sdk): cli_sdk is the SDK handle the CLI
+    function opened (the live-server owner). Consumers needing a TRUE
+    restart (test_bootstrap_key_persists_and_verifies) close it before
+    spawning — redislite shuts the server down when the last connection
+    closes.
     """
     # Pin to the tmp embedded DB — a TORTOISE_DB_URI in the host env would
     # otherwise steer the CLI and the roundtrip tests at a live DB.
@@ -90,8 +98,21 @@ def local_db(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("TORTOISE_DB_PATH", str(db))
 
     import argparse
-    from tortoise.__main__ import _cmd_key_create
+    from tortoise.sdk import TortoiseSDK as RealSDK
 
+    # Capture the SDK handle _cmd_key_create opens (the live-server owner)
+    # so consumers can close it for a genuine restart. Patch the class at its
+    # source — _cmd_key_create does `from tortoise.sdk import TortoiseSDK`
+    # inside the function, which picks up the patched attribute.
+    captured = {}
+
+    class _CaptureSDK(RealSDK):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            captured["sdk"] = self
+
+    monkeypatch.setattr("tortoise.sdk.TortoiseSDK", _CaptureSDK)
+    from tortoise.__main__ import _cmd_key_create
     args = argparse.Namespace(name="test", bind="127.0.0.1", port=8000)
     rc = _cmd_key_create(args)
     assert rc == 0
@@ -99,7 +120,8 @@ def local_db(tmp_path, monkeypatch, capsys):
     match = [l for l in out.out.splitlines() if "Created API key:" in l]
     assert match, out.out
     key = match[0].split(":", 1)[1].strip()
-    yield db, key, {**os.environ, "TORTOISE_DB_PATH": str(db)}
+    assert captured.get("sdk") is not None, "CLI SDK handle not captured"
+    yield db, key, {**os.environ, "TORTOISE_DB_PATH": str(db)}, captured["sdk"]
 
 
 # ── 1. stdio-refusal message content ──────────────────────────────────────
@@ -629,7 +651,7 @@ def test_local_http_roundtrip_lands_in_team_graph(local_db, monkeypatch):
     orphaned namespace); Origin header accepted."""
     from fastapi.testclient import TestClient
 
-    db, key, env = local_db
+    db, key, env, _cli_sdk = local_db
     # env mutation restored even on failure (monkeypatch = pytest try/finally)
     monkeypatch.setenv("TORTOISE_DB_PATH", str(db))
 
@@ -694,7 +716,7 @@ def test_key_create_wildcard_bind_prints_lan_note(local_db, bind, port):
     the printed wildcard URL is unusable for clients, and the note used to
     fire only on full defaults (suppressed exactly when needed most).
     Wildcard + non-default port must also show it."""
-    db, key, env = local_db
+    db, key, env, _cli_sdk = local_db
     env["TORTOISE_DB_PATH"] = str(db)
     proc = subprocess.run(
         [sys.executable, "-m", "tortoise", "key", "create", "--name", "test",
@@ -710,7 +732,7 @@ def test_key_create_wildcard_bind_prints_lan_note(local_db, bind, port):
 def test_key_create_default_bind_still_prints_mirror_hint(local_db):
     """The defaults case keeps the mirror hint (pass --bind/--port to match
     a custom serve setup) — regression guard for the elif branch."""
-    db, key, env = local_db
+    db, key, env, _cli_sdk = local_db
     env["TORTOISE_DB_PATH"] = str(db)
     proc = subprocess.run(
         [sys.executable, "-m", "tortoise", "key", "create", "--name", "test"],
@@ -723,8 +745,12 @@ def test_key_create_default_bind_still_prints_mirror_hint(local_db):
 def test_bootstrap_key_persists_and_verifies(local_db):
     """The key printed by `tortoise key create` authenticates via apikey_verify
     in a FRESH process (survives restart on the canonical DB)."""
-    db, key, env = local_db
+    db, key, env, cli_sdk = local_db
     env["TORTOISE_DB_PATH"] = str(db)
+    # #880 (approach C): close the fixture's in-process CLI server first so
+    # the subprocess below genuinely restarts from the RDB file (redislite
+    # shuts down when the last connection closes).
+    cli_sdk.close()
     code = (
         "import os\n"
         "from tortoise.sdk import TortoiseSDK\n"
