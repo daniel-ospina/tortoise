@@ -596,32 +596,38 @@ def tortoise_paginated_query(kind: str | None = None,
 
 
 def tortoise_check_structure() -> list[dict]:
-    """Check Gate 0→4 chain integrity (orphans, dangling refs)."""
+    """Check Gate 0→4 chain integrity (orphans, dangling refs).
+    Alias → overview(section='structure_check') (epic #888 W3)."""
     return _safe(_get_team_sdk().check_structure)
 
 
 def tortoise_summarize_structure() -> dict:
-    """Count points per Gate (by pointKind). Returns {gateN_*, total}."""
+    """Count points per Gate (by pointKind). Returns {gateN_*, total}.
+    Alias → overview(section='structure') (epic #888 W3)."""
     return _safe(_get_team_sdk().summarize_structure)
 
 
 def tortoise_list_pointkinds() -> list[dict]:
-    """List all pointKinds present in the graph with counts. What EXISTS."""
+    """List all pointKinds present in the graph with counts. What EXISTS.
+    Alias → overview(section='pointkinds') (epic #888 W3)."""
     return _safe(_get_team_sdk().list_pointkinds)
 
 
 def tortoise_list_sources() -> list[dict]:
-    """List all Sources with point counts. Where data came FROM."""
+    """List all Sources with point counts. Where data came FROM.
+    Alias → overview(section='sources') (epic #888 W3)."""
     return _safe(_get_team_sdk().list_sources)
 
 
 def tortoise_list_namespaces() -> list[dict]:
-    """List installed pack namespaces."""
+    """List installed pack namespaces.
+    Alias → overview(section='namespaces') (epic #888 W3)."""
     return _safe(_get_team_sdk().list_namespaces)
 
 
 def tortoise_list_tags() -> list[dict]:
-    """List all Tag names with count of tagged Points. Where tags are USED."""
+    """List all Tag names with count of tagged Points. Where tags are USED.
+    Alias → overview(section='tags') (epic #888 W3)."""
     return _safe(_get_team_sdk().list_tags)
 
 
@@ -631,7 +637,8 @@ def tortoise_query_points_by_tag(tag: str) -> list[dict]:
 
 
 def tortoise_get_point(id: str) -> dict:
-    """Get a single Point by ID. Returns all properties, or empty dict."""
+    """Get a single Point by ID. Returns all properties, or empty dict.
+    Alias → get(id, type='point') (epic #888 W3)."""
     return _safe(_get_team_sdk().get_point, id)
 
 
@@ -927,7 +934,8 @@ def tortoise_annotate_operator(id: str, bias: float, precision: float,
 
 def tortoise_get_operator(id: str) -> dict:
     """Get an operator Point by ID. Returns all properties including annotation dimensions.
-    Raises error if the Point is not an operator."""
+    Raises error if the Point is not an operator.
+    Alias → get(id, type='operator') (epic #888 W3)."""
     point = _safe(_get_team_sdk().get_point, id)
     if isinstance(point, dict) and point and not point.get("is_operator"):
         return {"error": f"Point {id!r} is not an operator"}
@@ -1158,7 +1166,8 @@ def tortoise_diary_read(agent_name: str, last_n: int = 10,
 def tortoise_list_graphs() -> list[str]:
     """List graph names. HTTP: only the calling team's own graphs (exact
     team_{team_id} equality — no cross-tenant enumeration). Stdio: full list
-    (operator context)."""
+    (operator context).
+    Alias → overview(section='graphs') (epic #888 W3)."""
     graphs = _safe(_get_team_sdk().list_graphs)
     if not isinstance(graphs, list):
         return graphs
@@ -1173,12 +1182,14 @@ def tortoise_list_graphs() -> list[str]:
 def tortoise_status() -> dict:
     """Graph health + entity counts + FalkorDB connectivity.
     Returns {connected, counts: {Point, Event, ...}, total_entities}.
+    Alias → overview(section='status') (epic #888 W3).
     """
     return _safe(_get_team_sdk().status)
 
 
 def tortoise_health() -> dict:
-    """Health check + basic metrics: graph_size, last_ingest, error_count, uptime."""
+    """Health check + basic metrics: graph_size, last_ingest, error_count, uptime.
+    Alias → overview(section='health') (epic #888 W3)."""
     # #236: route through _safe() so every tool is gated (defense-in-depth;
     # reachable only post-auth over HTTP).
     return _safe(monitoring.metrics)
@@ -1206,12 +1217,14 @@ def tortoise_ingest_corpus(directory: str) -> dict:
 # ── Taxonomy ─────────────────────────────────────────────────
 
 def tortoise_taxonomy() -> dict[str, int]:
-    """Count entities by node label. Returns {Point: N, Event: N, Subject: N, Object: N, Document: N}."""
+    """Count entities by node label. Returns {Point: N, Event: N, Subject: N, Object: N, Document: N}.
+    Alias → overview(section='taxonomy') (epic #888 W3)."""
     return _safe(_get_team_sdk().taxonomy)
 
 
 def tortoise_list_topics(entity_id: str) -> dict:
-    """entityProfile lite for an entity. Returns {id, pointKind, neighbors, neighborCounts}."""
+    """entityProfile lite for an entity. Returns {id, pointKind, neighbors, neighborCounts}.
+    Alias → overview(section='topics', entity_id=...) (epic #888 W3)."""
     return _safe(_get_team_sdk().list_topics, entity_id)
 
 
@@ -1309,7 +1322,8 @@ def tortoise_analyze(question: str,
 # ── P1-3: Staleness Detection ─────────────────────────────────
 
 def tortoise_stale(days: int = 30, limit: int = 50) -> dict:
-    """Find Points not updated in N days. Returns {stale, count, cutoff, limit}."""
+    """Find Points not updated in N days. Returns {stale, count, cutoff, limit}.
+    Alias → overview(section='stale', days=, limit=) (epic #888 W3)."""
     return _safe(_get_team_sdk().stale_points, days=days, limit=limit)
 
 
@@ -1431,11 +1445,13 @@ def tortoise_create_event(name: str, eventKind: str, props: Any = None) -> dict:
 
 
 def tortoise_get_events(eventKind: str | None = None, limit: int = 20) -> list[dict]:
-    """Get recent Events, optionally filtered by eventKind (e.g. 'AgentSession')."""
+    """Get recent Events, optionally filtered by eventKind (e.g. 'AgentSession').
+    Alias → get(id, type='events', limit=) (epic #888 W3)."""
     return _safe(_get_team_sdk().get_events, eventKind=eventKind, limit=limit)
 
 def tortoise_get_session(session_id: str) -> dict:
-    """Get a single agent session Event by session_id."""
+    """Get a single agent session Event by session_id.
+    Alias → get(id, type='session') (epic #888 W3)."""
     return _safe(_get_team_sdk().get_session, session_id)
 
 def tortoise_index_sessions(directory: str, extract_metadata: bool = True, llm_model: str | None = None) -> dict:
@@ -1533,7 +1549,8 @@ def tortoise_set_source_tier(url: str, tier: str) -> dict:
     return _safe(_get_team_sdk().set_source_tier, url, tier)
 
 def tortoise_get_entity(id: str) -> dict:
-    """Get any entity by ID, eventId, or url."""
+    """Get any entity by ID, eventId, or url.
+    Alias → get(id, type='entity') (epic #888 W3)."""
     return _safe(_get_team_sdk().get_entity, id)
 
 def tortoise_update_entity(id: str, props: Any = None) -> dict:
@@ -1558,8 +1575,153 @@ def tortoise_create_edge(source_id: str, target_id: str, predicate: str) -> dict
                  predicate, source_id, target_id)
 
 def tortoise_get_governance(subject_id: str) -> list:
-    """Get all entities owned by a Subject."""
+    """Get all entities owned by a Subject.
+    Alias → get(id, type='governance') (epic #888 W3)."""
     return _safe(_get_team_sdk().get_owned_entities, subject_id)
+
+
+# ── Orient / Direct consolidation (epic #888 W3) ─────────────────────
+# PR #912 design: the list_* zoo + status/health/taxonomy/structure fold
+# into ONE overview(section=) tool; the get_* zoo folds into ONE
+# get(id, type=) tool with id auto-detection. The old tools below remain
+# registered as thin aliases for one release (identical shapes).
+
+_OVERVIEW_SECTIONS = (
+    "taxonomy", "structure", "structure_check", "pointkinds", "tags",
+    "sources", "namespaces", "graphs", "topics", "health", "status",
+    "stale",
+)
+
+
+def _overview_section(section: str, entity_id: str | None,
+                      days: int, limit: int) -> Any:
+    """Dispatch one overview section to its original tool body."""
+    if section == "taxonomy":
+        return tortoise_taxonomy()
+    if section == "structure":
+        return tortoise_summarize_structure()
+    if section == "structure_check":
+        return tortoise_check_structure()
+    if section == "pointkinds":
+        return tortoise_list_pointkinds()
+    if section == "tags":
+        return tortoise_list_tags()
+    if section == "sources":
+        return tortoise_list_sources()
+    if section == "namespaces":
+        return tortoise_list_namespaces()
+    if section == "graphs":
+        return tortoise_list_graphs()
+    if section == "topics":
+        if not entity_id:
+            return {"error": "overview(section='topics') requires entity_id"}
+        return tortoise_list_topics(entity_id)
+    if section == "health":
+        return tortoise_health()
+    if section == "status":
+        return tortoise_status()
+    if section == "stale":
+        return tortoise_stale(days=days, limit=limit)
+    return {"error": f"overview: unknown section {section!r}. "
+                      f"Valid sections: {', '.join(_OVERVIEW_SECTIONS)}"}
+
+
+def tortoise_overview(section: str | None = None,
+                      entity_id: str | None = None,
+                      days: int = 30,
+                      limit: int = 50) -> Any:
+    """Graph orientation in one call — consolidates the list_*/status/health/
+    taxonomy/structure zoo (epic #888 W3, PR #912).
+
+    section selects one orient surface:
+      taxonomy | structure | structure_check | pointkinds | tags | sources |
+      namespaces | graphs | topics | health | status | stale
+    Each section returns exactly what the legacy tool returned.
+
+    Omit section → compact combined summary: {section: result} for every
+    section except topics (which requires entity_id).
+
+    topics: entityProfile lite for an entity — requires entity_id.
+    stale: Points not updated in N days — honors days/limit.
+    """
+    if section is None:
+        combined: dict[str, Any] = {}
+        for sec in _OVERVIEW_SECTIONS:
+            if sec == "topics":
+                continue  # requires entity_id — not part of the default summary
+            combined[sec] = _overview_section(sec, entity_id, days, limit)
+        return combined
+    if not isinstance(section, str):
+        return {"error": f"overview: section must be a string, got {type(section).__name__}"}
+    return _overview_section(section.strip().lower(), entity_id, days, limit)
+
+
+_GET_TYPES = ("point", "operator", "entity", "event", "session",
+              "events", "governance")
+
+
+def _get_auto_detect(id: str) -> dict:
+    """Resolve a node id to its properties without a type hint.
+
+    Order: canonical entity resolution (id | eventId | url, Point priority)
+    then AgentSession lookup by session_id/sessionId. Returns {} when the
+    id matches nothing (same contract as get_point/get_entity).
+    """
+    sdk = _get_team_sdk()
+    try:
+        resolved = sdk._get_proj()._resolve_entity(
+            id, by_id=True, by_eventId=True, by_url=True)
+    except Exception:
+        resolved = []
+    if resolved:
+        return dict(resolved[0]["properties"])
+    session = _safe(sdk.get_session, id)
+    if isinstance(session, dict) and session:
+        return session
+    return {}
+
+
+def tortoise_get(id: str, type: str | None = None,
+                 limit: int = 20) -> Any:
+    """Fetch a node by id — consolidates get_point/get_entity/get_operator/
+    get_events/get_session/get_governance (epic #888 W3, PR #912).
+
+    type selects the node kind:
+      point | operator | entity | event | session | events | governance
+    Omitted type → auto-detect by id lookup (Point/Subject/Object/Document/
+    Source/Event by id|eventId|url; AgentSession by session_id|sessionId).
+
+    Returns the node properties (same shape as the legacy tool it replaces).
+    type='events': id is optional — recent Events list, id used as an
+        eventKind filter when given (get_events(eventKind=id, limit=limit)).
+    type='governance': entities owned by the Subject id.
+    """
+    if not isinstance(type, str) or not type.strip():
+        if not isinstance(id, str) or not id.strip():
+            return {"error": "get: 'id' is required when type is omitted"}
+        return _get_auto_detect(id.strip())
+    t = type.strip().lower()
+    if t == "events":
+        # get_events is a list surface — id is an optional eventKind filter
+        return tortoise_get_events(eventKind=id or None, limit=limit)
+    if not isinstance(id, str) or not id.strip():
+        return {"error": f"get: 'id' is required for type={t!r}"}
+    id = id.strip()
+    if t == "point":
+        return tortoise_get_point(id)
+    if t == "operator":
+        return tortoise_get_operator(id)
+    if t == "entity":
+        return tortoise_get_entity(id)
+    if t == "event":
+        return tortoise_get_entity(id)  # Event nodes resolve via get_entity
+    if t == "session":
+        return _safe(_get_team_sdk().get_session, id)
+    if t == "governance":
+        return tortoise_get_governance(id)
+    return {"error": f"get: unknown type {type!r}. "
+                      f"Valid types: {', '.join(_GET_TYPES)}"}
+
 
 def tortoise_backfill_v25(dry_run: bool = True) -> dict:
     """Backfill database to ONTOLOGY v2.5 schema.
