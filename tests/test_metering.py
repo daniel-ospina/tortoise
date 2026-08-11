@@ -313,24 +313,39 @@ class TestGetCurrentUsageSupabaseDegrade:
         )
 
     def test_erroring_cp_with_used_ops_still_degrades(self, monkeypatch):
-        """Even a team with recorded usage gets the zero-usage view when the
+        """Even a team WITH recorded usage gets the zero-usage view when the
         control plane errors — reads never fail, usage may read stale-low."""
         from tests.fake_control_plane import ErrorControlPlane
 
         monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "supabase")
         monkeypatch.setenv("SUPABASE_URL", "https://x.supabase.co")
         monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc")
+
+        # Seed a team that HAS usage, then make the control plane error on
+        # the READ (after the seed) — the degradation must still return the
+        # zero-usage view, not the seeded value, and must not raise.
+        class _ErrorAfterSeed(ErrorControlPlane):
+            def __init__(self, seeded):
+                super().__init__()
+                self._seeded = seeded
+
+            def query(self, *a, **k):
+                # First call (the seed read) succeeds; afterwards raise.
+                if not hasattr(self, "_seeded_read"):
+                    self._seeded_read = True
+                    return self._seeded
+                raise RuntimeError("Supabase down (simulated blip)")
+
+        seeded = [{"team_id": "team-blip-002", "period": _current_period(),
+                   "write_ops": 55000}]
         monkeypatch.setattr(
             "tortoise.supabase_control.get_control_plane",
-            lambda: ErrorControlPlane(),
+            lambda: _ErrorAfterSeed(seeded),
         )
 
         usage = get_current_usage("team-blip-002")
-        assert usage["write_ops_used"] == 0
+        assert usage["write_ops_used"] == 0  # degrades, does NOT surface 55000
         assert usage["overage_cost_usd"] is None
-
-
-# ── Period rollover ─────────────────────────────────────────────────────────
 
     def test_healthy_cp_returns_real_usage(self, monkeypatch):
         """Control test (VGATE #923): a healthy Supabase control plane must
@@ -362,6 +377,8 @@ class TestGetCurrentUsageSupabaseDegrade:
         assert usage["overage_cost_usd"] is not None
         assert usage["overage_cost_usd"] > 0
 
+
+# ── Period rollover ─────────────────────────────────────────────────────────
 
 class TestPeriodRollover:
     def test_period_is_calendar_month_utc(self):
