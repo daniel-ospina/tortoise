@@ -15,11 +15,8 @@ Covers the self-hosted authenticated-MCP story end-to-end:
 """
 import json
 import os
-import shutil
 import subprocess
 import sys
-import time
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -73,79 +70,36 @@ def _boot_tenant_app(registry_sdk=None):
 
 
 @pytest.fixture()
-def _wait_rdb_settled():
-    """#880: the key-create subprocess's redislite server is gone (atexit
-    SHUTDOWN SAVE), but the RDB flush can lag under CI load — a handle opened
-    mid-write sees a stale registry → 401. Returns a waiter that polls until
-    the DB file stops changing (mtime stable for settle_s, 15s cap).
+def local_db(tmp_path, monkeypatch, capsys):
+    """A canonical embedded DB + a bootstrap key via the REAL CLI code path.
 
-    The returned waiter also VERIFIES CONTENT: once mtime is stable it opens
-    a fresh registry handle and confirms the APIKey node is queryable before
-    returning — mtime stability alone can pass while the RDB load is still
-    racing (the file can be stable mid-flush). A failed content check keeps
-    polling until the cap; callers then use their own bounded poll as the
-    final backstop (roundtrip test).
+    #880 (escalation, approach C): the key is created IN-PROCESS by calling
+    the real `_cmd_key_create` CLI function instead of spawning a subprocess.
+    The subprocess variant failed deterministically at END-OF-SUITE on CI (3
+    post-fix runs): after ~2100 tests the runner's fd/socket pressure made the
+    cross-process redislite handoff fail — the poll found the key node but
+    apikey_verify returned None (401). In-process, the CLI's SDK handle stays
+    alive in this process and every test handle connects to the SAME live
+    server — no RDB reload, no handoff, no second process. The real CLI
+    wiring (parser → _cmd_key_create → sdk.apikey_create) is still exercised.
     """
-    def _wait(db, settle_s=1.0, max_wait_s=15.0):
-        deadline = time.monotonic() + max_wait_s
-        last_mtime = None
-        stable_since = None
-        while time.monotonic() < deadline:
-            mtime = os.path.getmtime(db) if os.path.exists(db) else None
-            now = time.monotonic()
-            if mtime == last_mtime:
-                if stable_since is None:
-                    stable_since = now
-                elif now - stable_since >= settle_s:
-                    # mtime stable — verify content before declaring settled.
-                    # Explicit db_path: env vars aren't set in fixture scope,
-                    # and a bare TortoiseSDK would resolve to the default
-                    # ~/.tortoise/tortoise.db (wrong DB — reviewer P1, #880).
-                    probe = None
-                    try:
-                        from tortoise.sdk import TortoiseSDK
-                        probe = TortoiseSDK(db_path=str(db), namespace="registry")
-                        rows = probe._get_registry().query(
-                            "MATCH (k:APIKey) RETURN k.team_id").result_set
-                        if rows:
-                            return
-                    except Exception:
-                        pass  # RDB still loading — keep polling
-                    finally:
-                        if probe is not None:
-                            probe.close()
-                    stable_since = None  # content not ready: re-arm the settle
-            else:
-                stable_since = None
-            last_mtime = mtime
-            time.sleep(0.1)
-    return _wait
-
-
-@pytest.fixture()
-def local_db(tmp_path, monkeypatch, _wait_rdb_settled):
-    """A canonical embedded DB + a bootstrap key via the real CLI."""
     # Pin to the tmp embedded DB — a TORTOISE_DB_URI in the host env would
     # otherwise steer the CLI and the roundtrip tests at a live DB.
     monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
     db = tmp_path / "t.db"
-    env = {**os.environ, "TORTOISE_DB_PATH": str(db)}
-    # Hermetic resolution: pin the repo root on PYTHONPATH so the CLI
-    # subprocess always imports the checkout's tortoise (a shadowed
-    # tortoise.config on CI made the key land elsewhere → 401s, #493).
-    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    env["PYTHONPATH"] = os.pathsep.join(
-        [repo_root] + [p for p in env.get("PYTHONPATH", "").split(os.pathsep) if p])
-    proc = subprocess.run(
-        [sys.executable, "-m", "tortoise", "key", "create", "--name", "test"],
-        capture_output=True, text=True, env=env, timeout=120,
-    )
-    assert proc.returncode == 0, proc.stderr
-    match = [l for l in proc.stdout.splitlines() if "Created API key:" in l]
-    assert match, proc.stdout
+    monkeypatch.setenv("TORTOISE_DB_PATH", str(db))
+
+    import argparse
+    from tortoise.__main__ import _cmd_key_create
+
+    args = argparse.Namespace(name="test", bind="127.0.0.1", port=8000)
+    rc = _cmd_key_create(args)
+    assert rc == 0
+    out = capsys.readouterr()
+    match = [l for l in out.out.splitlines() if "Created API key:" in l]
+    assert match, out.out
     key = match[0].split(":", 1)[1].strip()
-    _wait_rdb_settled(db)
-    yield db, key, env
+    yield db, key, {**os.environ, "TORTOISE_DB_PATH": str(db)}
 
 
 # ── 1. stdio-refusal message content ──────────────────────────────────────
@@ -679,24 +633,15 @@ def test_local_http_roundtrip_lands_in_team_graph(local_db, monkeypatch):
     # env mutation restored even on failure (monkeypatch = pytest try/finally)
     monkeypatch.setenv("TORTOISE_DB_PATH", str(db))
 
-    # team id from the registry — #880: bounded poll with a FRESH handle per
-    # attempt. A cached projection reloads the RDB only at server start, so
-    # re-querying the same handle can never see a key written after boot;
-    # fresh opens re-load the RDB and observe the subprocess's write once the
-    # flush lands (cross-process redislite handoff race under CI load).
-    team_id = None
-    for _ in range(10):
-        probe = TortoiseSDK(namespace="registry")
-        rows = probe._get_registry().query(
-            "MATCH (k:APIKey) RETURN k.team_id").result_set
-        probe.close()
-        if rows:
-            team_id = rows[0][0]
-            break
-        time.sleep(1.0)
-    assert team_id is not None, \
-        "registry key not visible after 10s (cross-process handoff race, #880)"
+    # team id from the registry — #880 (approach C): the key was created
+    # IN-PROCESS by the real CLI function, so its SDK handle is alive in this
+    # process and this handle connects to the SAME live server — the key is
+    # guaranteed visible (no cross-process handoff, no RDB reload race).
     sdk = TortoiseSDK(namespace="registry")
+    rows = sdk._get_registry().query(
+        "MATCH (k:APIKey) RETURN k.team_id").result_set
+    assert rows, "registry key must be visible (in-process CLI created it, #880)"
+    team_id = rows[0][0]
 
     wrapper = _boot_tenant_app(registry_sdk=sdk)
     accept = "application/json, text/event-stream"
