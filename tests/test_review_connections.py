@@ -119,7 +119,7 @@ def test_add_below_threshold_excluded(sdk_factory, tmp_path):
     p2 = sdk.create_point("statement", "beta")
     result = sdk.review_connections(
         mode="add",
-        similarity_fn=_sim({(p1["id"], p2["id"]): 0.4}),  # < default 0.55
+        similarity_fn=_sim({(p1["id"], p2["id"]): 0.3}),  # < default 0.40
     )
     assert result["add"] == []
 
@@ -267,11 +267,13 @@ def test_prune_flags_contested_high_variance(sdk_factory, tmp_path):
 
 
 def test_prune_flags_contested_incoming_nand(sdk_factory, tmp_path):
-    """A claim challenged by an incoming NAND operator edge is contested
-    (derived `challenged` condition, ontology §5) even at low variance."""
+    """A live claim challenged by an incoming NAND operator edge is
+    contested (derived `challenged` condition, ontology §5 — NAND on a LIVE
+    point) even at low variance."""
     sdk = sdk_factory(tmp_path)
     x = sdk.create_point("statement", "attacked claim")
     y = sdk.create_point("statement", "attacker claim")
+    sdk.update_point(x["id"], status="live")  # challenged requires LIVE
     sdk.create_operator("NAND", y["id"], [x["id"]])
     # Control pair: IMPL-only, uncalibrated → neither contested nor
     # contradictory.
@@ -281,8 +283,9 @@ def test_prune_flags_contested_incoming_nand(sdk_factory, tmp_path):
 
     result = sdk.review_connections(mode="prune")
     contested = _edge_prune(result["prune"], "contested")
-    # The NAND links attacker→attacked; BOTH endpoints carry the incoming
-    # NAND edge (operator node fans out to both) → both are contested.
+    # The NAND links attacker→attacked; BOTH endpoints are live and carry
+    # the incoming NAND edge (operator node fans out to both) → both are
+    # contested, so the single NAND edge yields one entry.
     assert len(contested) == 1, f"expected 1 contested NAND entry, got {result['prune']}"
     e = contested[0]
     assert {e["from"], e["to"]} == {x["id"], y["id"]}
@@ -294,7 +297,82 @@ def test_prune_flags_contested_incoming_nand(sdk_factory, tmp_path):
         {c["id"], d["id"]} == {f["from"], f["to"]} for f in result["prune"])
 
 
-def test_prune_flags_contradictory_impl_nand(sdk_factory, tmp_path):
+def test_prune_nand_on_draft_not_contested(sdk_factory, tmp_path):
+    """NAND into a DRAFT point is not `challenged` (ontology §5 requires
+    live) — the draft victim is never the contested endpoint. (The live
+    attacker y is challenged by its own NAND fan-out — that IS flagged.)"""
+    sdk = sdk_factory(tmp_path)
+    x = sdk.create_point("statement", "draft victim")  # stays draft
+    y = sdk.create_point("statement", "attacker claim")  # promoted to live
+    sdk.create_operator("NAND", y["id"], [x["id"]])
+    result = sdk.review_connections(mode="prune")
+    contested = _edge_prune(result["prune"], "contested")
+    assert len(contested) == 1
+    assert contested[0]["detail"]["contested_endpoint"] == y["id"]
+    assert all(e["detail"]["contested_endpoint"] != x["id"] for e in contested)
+
+
+def test_prune_flags_stale_outdated_flag(sdk_factory, tmp_path):
+    """Legacy invalidate (outdated=true, status stays 'live') is reported
+    stale with status 'outdated' (the signal that made it stale)."""
+    sdk = sdk_factory(tmp_path)
+    src = sdk.create_point("statement", "live source claim")
+    victim = sdk.create_point("statement", "old claim")
+    replacement = sdk.create_point("statement", "new claim")
+    sdk.create_operator("IMPL", src["id"], [victim["id"]])
+    sdk.invalidate_point(victim["id"], replacement["id"])  # outdated=true, status stays live
+
+    result = sdk.review_connections(mode="prune")
+    stale = _edge_prune(result["prune"], "stale")
+    assert len(stale) == 1
+    e = stale[0]
+    assert e["to"] == victim["id"]
+    assert e["detail"]["status"] == "outdated"
+    assert e["suggested_action"] == "re-point"
+    assert e["detail"]["successor"] == replacement["id"]
+
+
+def test_prune_legacy_operator_without_idx(sdk_factory, tmp_path):
+    """Legacy operators whose edges lack the idx property (pre-idx graphs)
+    are still reviewed — all inputs degrade to unordered pairs (#913 review
+    round 1: dict-keyed-by-None collapsed them to nothing)."""
+    sdk = sdk_factory(tmp_path)
+    src = sdk.create_point("statement", "legacy source")
+    t1 = sdk.create_point("statement", "legacy target 1")
+    t2 = sdk.create_point("statement", "legacy target 2")
+    sdk.retract_point(t2["id"])
+    # Raw-write a legacy operator node with IMPL edges but NO idx property.
+    proj = sdk._get_proj()
+    proj.g.query(
+        "CREATE (op:Point {id:'legacy-op-1', is_operator:true, op_type:'IMPL'})"
+    )
+    for pid in (src["id"], t1["id"], t2["id"]):
+        proj.g.query(
+            "MATCH (op:Point {id:'legacy-op-1'}), (p:Point {id:$pid}) "
+            "CREATE (op)-[:IMPL]->(p)",
+            params={"pid": pid},
+        )
+
+    result = sdk.review_connections(mode="prune")
+    stale = _edge_prune(result["prune"], "stale")
+    # t2 is retracted → every pair involving t2 is stale (src-t2 and t1-t2).
+    hits = [e for e in stale if t2["id"] in (e["from"], e["to"])]
+    assert len(hits) == 2, f"expected 2 stale entries for legacy op, got {result['prune']}"
+    assert all(e["relation"] == "IMPL" for e in hits)
+    assert all(e["detail"]["via"] == "legacy-op-1" for e in hits)
+
+
+def test_prune_scope_empty_pool_returns_empty(sdk_factory, tmp_path):
+    """A scoped prune whose scope matches nothing returns [] — never the
+    whole-graph flag list (fail quiet, consistent with mode=add)."""
+    sdk = sdk_factory(tmp_path)
+    src = sdk.create_point("statement", "live source claim")
+    victim = sdk.create_point("statement", "doomed claim")
+    sdk.create_operator("IMPL", src["id"], [victim["id"]])
+    sdk.retract_point(victim["id"])
+
+    result = sdk.review_connections(mode="prune", scope="zzz-no-such-topic-xyz")
+    assert result["prune"] == []
     """A pair linked by BOTH an IMPL and a NAND operator is contradictory."""
     sdk = sdk_factory(tmp_path)
     a = sdk.create_point("statement", "the deployment succeeded")

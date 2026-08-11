@@ -179,7 +179,11 @@ def _encode(texts: list[str]) -> tuple[np.ndarray, bool]:
     model = EmbeddingModel.get()
     if model is not None:
         try:
-            vecs = model.encode(texts, show_progress_bar=False)
+            # NOTE: no show_progress_bar kwarg here — EmbeddingModel.encode
+            # already forwards it to SentenceTransformer internally; passing
+            # it again raised TypeError whenever the model WAS loaded,
+            # silently degrading every caller to TF-IDF (#913 review).
+            vecs = model.encode(texts)
             if vecs is not None and len(vecs) > 0:
                 return np.asarray(vecs, dtype=np.float64), False
         except Exception:  # noqa: BLE001 — model failures degrade, never raise
@@ -269,8 +273,9 @@ def search_points(
     model = EmbeddingModel.get()
     if model is not None:
         try:
-            vecs = np.asarray(model.encode([query] + texts, show_progress_bar=False),
-                              dtype=np.float64)
+            # Same kwarg fix as _encode (#913 review) — the wrapper already
+            # forwards show_progress_bar to SentenceTransformer.
+            vecs = np.asarray(model.encode([query] + texts), dtype=np.float64)
             query_vec, doc_vecs = vecs[0], vecs[1:]
         except Exception:  # noqa: BLE001 — model failures degrade, never raise
             model = None

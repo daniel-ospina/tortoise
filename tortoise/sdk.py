@@ -37,6 +37,14 @@ POINT_STATUS_VALUES = frozenset({'draft', 'live', 'retracted', 'superseded', 'ou
 STALE_TERMINAL_STATUSES = frozenset(
     {'retracted', 'superseded', 'outdated', 'archived'})
 
+# #913: whole-graph mode=add cap — pairwise scoring is O(n²) in time AND
+# memory (dense cosine matrix + pair dict); a read-only MCP call must not
+# OOM a hosted server (#329/#579 bounding precedent). The unscoped candidate
+# pool is truncated to the cap most-recently-updated Points (deterministic:
+# updatedAt desc, id tie-break); callers with larger graphs should pass a
+# scope (bounded at 200 by hybrid retrieval).
+REVIEW_ADD_POOL_CAP = 1000
+
 # #432: declarative spec for the retract/supersede transition guards. NOT
 # consulted by update_point per-call (update_point only promotes draft→live);
 # every claim transition is observable via a Task 3 emit hook, and no
@@ -2283,8 +2291,10 @@ class TortoiseSDK:
             {from, to, suggested_relation: "IMPL", reason, similarity}.
             Suggestions only — nudge, don't enforce (design principle 4).
             Scope: ``scope`` (topic text or Point id) narrows the candidate
-            pool via hybrid retrieval; None = whole graph (non-terminal,
-            non-operator Points).
+            pool via hybrid retrieval; None = whole graph, capped at
+            REVIEW_ADD_POOL_CAP most-recently-updated non-terminal,
+            non-operator Points (pairwise scoring is O(n²) — bound the work;
+            pass a scope for larger graphs).
         mode=prune: find ILLOGICAL/stale connections to fix or prune, using
             EP signals. Flags IMPL/NAND edges (operator-mediated OR direct
             per the reification rule) where:
@@ -2312,10 +2322,14 @@ class TortoiseSDK:
             mode: "add", "prune" or "both" (default "both").
             scope: optional topic text or Point id — narrows the review.
             similarity_threshold: minimum cosine similarity for mode=add
-                (default 0.55).
+                (default 0.40 — the #399-calibrated "semantically related"
+                band for all-MiniLM-L6-v2 is 0.35-0.51; near-duplicates are
+                0.75+, see tortoise/embeddings.py).
             variance_threshold: posterior variance above which a claim is
-                contested (default 0.04 — matches TortoiseEP
-                get_contested_claims / search_engine).
+                contested (default 0.04 — same signal as search_engine's
+                has_ep-guarded contested flag; deliberately NOT
+                TortoiseEP.get_contested_claims, which flags unmeasured
+                uniform priors — an unmeasured claim is not contested).
             add_limit: max suggestions (default 20).
             prune_limit: max flagged entries (default 50).
             similarity_fn: injectable pairwise-similarity function for
@@ -2362,16 +2376,25 @@ class TortoiseSDK:
             "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
             "  AND (n.status IS NULL OR n.status IN ['draft', 'live']) "
             "  AND (n.outdated IS NULL OR n.outdated = false) "
-            "RETURN n.id, n.content, n.status",
+            "RETURN n.id, n.content, n.status, n.updatedAt",
         ).result_set
         pool = {}
-        for pid, content, status in rows:
+        for pid, content, status, updated_at in rows:
             content = content or ""
             if content.startswith("[MITIGATION]"):
                 continue  # mitigation bookkeeping — not a standalone claim
-            pool[pid] = {"id": pid, "content": content, "status": status or "draft"}
+            pool[pid] = {"id": pid, "content": content,
+                          "status": status or "draft",
+                          "updated_at": updated_at or ""}
         if not scope:
-            return pool
+            # Whole-graph scan: cap at the most-recently-updated points so
+            # the O(n²) pairwise pass stays bounded (REVIEW_ADD_POOL_CAP).
+            ordered = sorted(pool.values(),
+                             key=lambda p: (p["updated_at"], p["id"]),
+                             reverse=True)
+            return {p["id"]: p for p in ordered[:REVIEW_ADD_POOL_CAP]}
+        pool = {pid: {k: v for k, v in meta.items() if k != "updated_at"}
+                for pid, meta in pool.items()}
 
         resolved = self.resolve_id(scope)
         query_text = (resolved or {}).get("content") or scope
@@ -2438,7 +2461,8 @@ class TortoiseSDK:
                     out[(points[i]["id"], points[j]["id"])] = s
         return out
 
-    def _review_add(self, scope, similarity_threshold, add_limit, similarity_fn):
+    def _review_add(self, scope: str | None, similarity_threshold: float,
+                    add_limit: int, similarity_fn) -> list[dict]:
         """mode=add: related-but-MISSING connection suggestions (no writes)."""
         pool = self._review_pool(scope)
         if len(pool) < 2:
@@ -2487,26 +2511,30 @@ class TortoiseSDK:
             "MATCH (op:Point {is_operator:true})-[r:IMPL|NAND]->(p:Point) "
             "RETURN op.id, type(r), p.id, r.idx",
         ).result_set
-        by_op: dict[str, dict[str, dict]] = {}
+        # Group per (operator, relation) as (idx, pid) rows — NOT keyed by
+        # idx: legacy edges without the idx property all carry None, and a
+        # dict keyed by None collapses them (silently dropping inputs —
+        # #913 review round 1).
+        by_op: dict[tuple[str, str], list[tuple]] = {}
         for op_id, rel, pid, idx in rows:
-            by_op.setdefault(op_id, {}).setdefault(rel, {})[idx] = pid
-        for op_id, rels in by_op.items():
-            for rel, idx_map in rels.items():
-                src = idx_map.get(0)
-                if src is not None:
-                    for idx, pid in sorted(idx_map.items()):
-                        if idx == 0 or pid == src:
-                            continue
-                        edges.append({"from": src, "to": pid,
+            by_op.setdefault((op_id, rel), []).append((idx, pid))
+        for (op_id, rel), inputs in by_op.items():
+            sources = [pid for idx, pid in inputs if idx == 0]
+            if sources:
+                # Fast path: idx=0 is the source; every other input (idx'd
+                # or legacy None) is a target.
+                src = sources[0]
+                for pid in sorted({pid for idx, pid in inputs if pid != src}):
+                    edges.append({"from": src, "to": pid,
+                                  "relation": rel, "via": op_id})
+            else:
+                # Legacy operator without idx — degrade to one entry per
+                # unordered input pair (deterministic: sorted ids).
+                pids = sorted({pid for _, pid in inputs})
+                for i in range(len(pids)):
+                    for j in range(i + 1, len(pids)):
+                        edges.append({"from": pids[i], "to": pids[j],
                                       "relation": rel, "via": op_id})
-                else:
-                    # Legacy operator without idx — degrade to one entry per
-                    # unordered input pair (deterministic: sorted ids).
-                    inputs = sorted(idx_map.values())
-                    for i in range(len(inputs)):
-                        for j in range(i + 1, len(inputs)):
-                            edges.append({"from": inputs[i], "to": inputs[j],
-                                          "relation": rel, "via": op_id})
         rows = proj.g.query(
             "MATCH (a:Point)-[r:IMPL|NAND]->(b:Point) "
             "WHERE (a.is_operator IS NULL OR a.is_operator = false) "
@@ -2517,7 +2545,8 @@ class TortoiseSDK:
             edges.append({"from": a, "to": b, "relation": rel, "via": "direct"})
         return edges
 
-    def _review_prune(self, scope, variance_threshold, prune_limit) -> list[dict]:
+    def _review_prune(self, scope: str | None, variance_threshold: float,
+                      prune_limit: int) -> list[dict]:
         """mode=prune: flag illogical/stale connections (no writes).
 
         Entry shape: {from, to, relation, issue, suggested_action, detail}
@@ -2555,24 +2584,30 @@ class TortoiseSDK:
 
         # Contested claims: high posterior variance (stored EP params only —
         # an unmeasured uniform prior is NOT contested) OR an incoming NAND
-        # operator edge (derived `challenged` condition, ontology §5).
+        # operator edge on a LIVE point (the derived `challenged` condition,
+        # ontology §5).
         contested: dict[str, dict] = {}
         rows = proj.g.query(
             "MATCH (n:Point) "
             "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
             "  AND (n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL) "
+            "  AND (n.posterior_beta IS NOT NULL OR n.ep_beta IS NOT NULL) "
             "WITH n, coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS a, "
             "     coalesce(n.posterior_beta, n.ep_beta, 1.0) AS b "
             "WITH n, a, b, (a*b)/((a+b)*(a+b)*(a+b+1)) AS v "
-            "WHERE v > $t RETURN n.id, v",
+            "WHERE a > 0 AND b > 0 AND v > $t RETURN n.id, v",
             params={"t": variance_threshold},
         ).result_set
         for pid, v in rows:
             contested[pid] = {"variance": round(v, 8),
                               "reason": "high posterior variance"}
+        # #913 round-1: the derived `challenged` condition (ontology §5) is
+        # a NAND edge on a LIVE point — draft/terminal endpoints are already
+        # handled by stale/draft semantics and must not double-flag.
         rows = proj.g.query(
             "MATCH (op:Point {is_operator:true})-[r:NAND]->(n:Point) "
             "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "  AND (n.status IS NULL OR n.status = 'live') "
             "RETURN DISTINCT n.id",
         ).result_set
         for (pid,) in rows:
@@ -2597,13 +2632,20 @@ class TortoiseSDK:
                 })
             for pid in (frm, to):
                 if pid in stale_endpoint:
+                    display_status = statuses.get(pid)
+                    if display_status not in STALE_TERMINAL_STATUSES:
+                        # Legacy invalidate: status stayed 'live' but the
+                        # outdated=true flag marks it stale — report the
+                        # signal that actually made it stale.
+                        display_status = "outdated" if outdated.get(pid) \
+                            else (display_status or "unknown")
                     entries.append({
                         "from": frm, "to": to, "relation": rel,
                         "issue": "stale",
                         "suggested_action": "re-point" if pid in successors else "prune",
                         "detail": {
                             "via": via, "stale_endpoint": pid,
-                            "status": statuses.get(pid) or "outdated",
+                            "status": display_status,
                             **({"successor": successors[pid]} if pid in successors else {}),
                         },
                     })
@@ -2634,11 +2676,13 @@ class TortoiseSDK:
         unique.sort(key=lambda x: (issue_order[x["issue"]], x["from"], x["to"]))
 
         # Optional scope narrowing: keep entries touching the scoped pool.
+        # An EMPTY scoped pool means "nothing in scope" (retrieval failure or
+        # zero hits) — filter to [] then, never fall back to the whole-graph
+        # list (fail quiet, consistent with mode=add; #913 review round 1).
         if scope:
             pool = self._review_pool(scope)
-            if pool:
-                unique = [e for e in unique
-                          if e["from"] in pool or e["to"] in pool]
+            unique = [e for e in unique
+                      if e["from"] in pool or e["to"] in pool]
         return unique[:prune_limit]
 
     # ── EP Belief Propagation (#6908) ────────────────────────────
