@@ -30,6 +30,13 @@ register_kind("evidence")  # used by file_decision (#133)
 # edge on a live point), NOT a stored status.
 POINT_STATUS_VALUES = frozenset({'draft', 'live', 'retracted', 'superseded', 'outdated', 'archived'})
 
+# #913: statuses that make a Point STALE for review_connections(mode=prune)
+# — terminal states plus the legacy outdated flag (supersede/invalidate set
+# status='superseded'/'outdated' AND/OR outdated=true). draft/live are the
+# only statuses a connection to is NOT stale.
+STALE_TERMINAL_STATUSES = frozenset(
+    {'retracted', 'superseded', 'outdated', 'archived'})
+
 # #432: declarative spec for the retract/supersede transition guards. NOT
 # consulted by update_point per-call (update_point only promotes draft→live);
 # every claim transition is observable via a Task 3 emit hook, and no
@@ -2249,6 +2256,390 @@ class TortoiseSDK:
         stale = proj.stale_points(days=days, limit=limit)
         return {"stale": stale, "count": len(stale),
                 "cutoff": f"{days} days", "limit": limit}
+
+    # ── Connection review (#913 W6) ─────────────────────────────────
+
+    def review_connections(
+        self,
+        mode: str = "both",
+        scope: str | None = None,
+        *,
+        similarity_threshold: float = 0.55,
+        variance_threshold: float = 0.04,
+        add_limit: int = 20,
+        prune_limit: int = 50,
+        similarity_fn=None,
+    ) -> dict:
+        """Review graph connections — the hygiene counterpart to connect
+        (#913 W6, design: product/2026-08-11-tooling-surface-consolidation.md).
+
+        READ-ONLY: surfaces suggestions and flags; never mutates the graph.
+        The agent decides, then acts via create_operator / supersede / delete.
+
+        mode=add: find relevant-but-MISSING connections. Pairs of Points that
+            are semantically related (embedding cosine similarity above
+            ``similarity_threshold``) but NOT yet connected (no shared
+            operator, no direct edge) are surfaced as suggested connections:
+            {from, to, suggested_relation: "IMPL", reason, similarity}.
+            Suggestions only — nudge, don't enforce (design principle 4).
+            Scope: ``scope`` (topic text or Point id) narrows the candidate
+            pool via hybrid retrieval; None = whole graph (non-terminal,
+            non-operator Points).
+        mode=prune: find ILLOGICAL/stale connections to fix or prune, using
+            EP signals. Flags IMPL/NAND edges (operator-mediated OR direct
+            per the reification rule) where:
+              * stale         — edge incident to a retracted/superseded/
+                                outdated/archived Point (or legacy
+                                outdated=true flag). suggested_action is
+                                "re-point" when a CORRECTS successor exists,
+                                else "prune".
+              * contested     — edge incident to a claim with high posterior
+                                variance (stored EP params only — an
+                                unmeasured uniform prior is NOT contested)
+                                or a claim with an incoming NAND operator
+                                edge (the derived `challenged` condition,
+                                ontology §5). suggested_action "review".
+              * contradictory — the same pair is BOTH IMPL- and NAND-linked
+                                (implication + mutual exclusion at once).
+                                suggested_action "review".
+        mode=both: run both, return {add: [...], prune: [...]}.
+
+        Returns {add: [{from, to, suggested_relation, reason, similarity}],
+                 prune: [{from, to, relation, issue, suggested_action,
+                          detail}]} — only the key(s) for the requested mode.
+
+        Args:
+            mode: "add", "prune" or "both" (default "both").
+            scope: optional topic text or Point id — narrows the review.
+            similarity_threshold: minimum cosine similarity for mode=add
+                (default 0.55).
+            variance_threshold: posterior variance above which a claim is
+                contested (default 0.04 — matches TortoiseEP
+                get_contested_claims / search_engine).
+            add_limit: max suggestions (default 20).
+            prune_limit: max flagged entries (default 50).
+            similarity_fn: injectable pairwise-similarity function for
+                mode=add (tests / tuning). Signature:
+                similarity_fn(points: list[dict]) -> {(a_id, b_id): score}
+                with a_id < b_id. Default: embedding cosine via
+                tortoise.embeddings._encode (TF-IDF fallback when the model
+                is unavailable).
+
+        Raises ValueError on an invalid mode or out-of-range parameters.
+        """
+        if mode not in ("add", "prune", "both"):
+            raise ValueError(f"mode must be 'add', 'prune' or 'both', got {mode!r}")
+        if not (0.0 <= similarity_threshold <= 1.0):
+            raise ValueError(
+                f"similarity_threshold must be 0.0-1.0, got {similarity_threshold!r}")
+        if variance_threshold < 0:
+            raise ValueError(
+                f"variance_threshold must be >= 0, got {variance_threshold!r}")
+        if add_limit < 1 or prune_limit < 1:
+            raise ValueError(
+                f"add_limit and prune_limit must be >= 1, got {add_limit!r}/{prune_limit!r}")
+
+        result: dict = {}
+        if mode in ("add", "both"):
+            result["add"] = self._review_add(
+                scope, similarity_threshold, add_limit, similarity_fn)
+        if mode in ("prune", "both"):
+            result["prune"] = self._review_prune(
+                scope, variance_threshold, prune_limit)
+        return result
+
+    def _review_pool(self, scope: str | None) -> dict[str, dict]:
+        """Candidate pool for a review: non-operator, non-terminal Points.
+
+        Whole graph when scope is None; otherwise the hybrid-retrieval pool
+        for the scope (topic text, or the resolved Point's content when
+        scope is a node id). Retrieval failure degrades to an EMPTY pool
+        (fail quiet — never crash a read-only review).
+        """
+        proj = self._get_proj()
+        rows = proj.g.query(
+            "MATCH (n:Point) "
+            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "  AND (n.status IS NULL OR n.status IN ['draft', 'live']) "
+            "  AND (n.outdated IS NULL OR n.outdated = false) "
+            "RETURN n.id, n.content, n.status",
+        ).result_set
+        pool = {}
+        for pid, content, status in rows:
+            content = content or ""
+            if content.startswith("[MITIGATION]"):
+                continue  # mitigation bookkeeping — not a standalone claim
+            pool[pid] = {"id": pid, "content": content, "status": status or "draft"}
+        if not scope:
+            return pool
+
+        resolved = self.resolve_id(scope)
+        query_text = (resolved or {}).get("content") or scope
+        try:
+            results = self.tortoise_fts_query(
+                query_text, entity_type="point", limit=200)
+        except Exception:  # noqa: BLE001 — retrieval is best-effort
+            return {}
+        scoped = {}
+        for r in results:
+            pid = r.get("id")
+            if pid is None or pid not in pool:
+                continue
+            scores = r.get("scores") or {}
+            score = scores.get("rrf") if isinstance(scores, dict) else None
+            if score is None:
+                score = r.get("match_score", 0.0) or 0.0
+            if float(score) <= 0:
+                continue  # zero-score tail is not "in scope"
+            scoped[pid] = pool[pid]
+        return scoped
+
+    def _connected_pairs(self, ids: list[str]) -> set[frozenset]:
+        """Unordered pairs of pool Points that already share a connection:
+        a common operator node (any edge type) or a direct edge (any type)."""
+        proj = self._get_proj()
+        pairs: set[frozenset] = set()
+        rows = proj.g.query(
+            "MATCH (op:Point {is_operator:true})-[r1]->(a:Point), "
+            "      (op)-[r2]->(b:Point) "
+            "WHERE a.id IN $ids AND b.id IN $ids AND a.id < b.id "
+            "RETURN DISTINCT a.id, b.id",
+            params={"ids": ids},
+        ).result_set
+        for a, b in rows:
+            pairs.add(frozenset((a, b)))
+        rows = proj.g.query(
+            "MATCH (a:Point)-[r]-(b:Point) "
+            "WHERE a.id IN $ids AND b.id IN $ids AND a.id < b.id "
+            "RETURN DISTINCT a.id, b.id",
+            params={"ids": ids},
+        ).result_set
+        for a, b in rows:
+            pairs.add(frozenset((a, b)))
+        return pairs
+
+    @staticmethod
+    def _default_pairwise_similarity(points: list[dict]) -> dict[tuple[str, str], float]:
+        """Embedding cosine for every unordered pair (a_id < b_id).
+
+        Degrades to deterministic TF-IDF when the embedding model is
+        unavailable (embeddings stay OPTIONAL — #399 contract).
+        """
+        from .embeddings import _encode, cosine_similarity_matrix
+        contents = [p.get("content") or "" for p in points]
+        vecs, _ = _encode(contents)
+        mat = cosine_similarity_matrix(vecs)
+        out: dict[tuple[str, str], float] = {}
+        n = len(points)
+        for i in range(n):
+            for j in range(i + 1, n):
+                s = float(mat[i][j])
+                if s > 0:
+                    out[(points[i]["id"], points[j]["id"])] = s
+        return out
+
+    def _review_add(self, scope, similarity_threshold, add_limit, similarity_fn):
+        """mode=add: related-but-MISSING connection suggestions (no writes)."""
+        pool = self._review_pool(scope)
+        if len(pool) < 2:
+            return []
+        points = [pool[pid] for pid in sorted(pool)]
+        connected = self._connected_pairs([p["id"] for p in points])
+        sim_fn = similarity_fn or self._default_pairwise_similarity
+        scores = sim_fn(points) or {}
+
+        suggestions = []
+        for (a, b), s in scores.items():
+            if a not in pool or b not in pool:
+                continue
+            if frozenset((a, b)) in connected:
+                continue  # already connected — nothing to suggest
+            try:
+                score = float(s)
+            except (TypeError, ValueError):
+                continue
+            if score < similarity_threshold:
+                continue
+            ordered = tuple(sorted((a, b)))
+            suggestions.append({
+                "from": ordered[0],
+                "to": ordered[1],
+                "suggested_relation": "IMPL",
+                "reason": (
+                    f"semantically related (similarity={score:.2f}) with no "
+                    "existing connection — candidate for operator_action"
+                ),
+                "similarity": round(score, 6),
+            })
+        suggestions.sort(key=lambda x: (-x["similarity"], x["from"], x["to"]))
+        return suggestions[:add_limit]
+
+    def _epistemic_edges(self) -> list[dict]:
+        """Every IMPL/NAND connection as {from, to, relation, via}.
+
+        Operator-mediated (operator node, idx=0 is the source) and direct
+        operator-less edges (reification rule, ontology v3.5 §8). Legacy
+        operators lacking idx degrade to one entry per unordered input pair.
+        """
+        proj = self._get_proj()
+        edges: list[dict] = []
+        rows = proj.g.query(
+            "MATCH (op:Point {is_operator:true})-[r:IMPL|NAND]->(p:Point) "
+            "RETURN op.id, type(r), p.id, r.idx",
+        ).result_set
+        by_op: dict[str, dict[str, dict]] = {}
+        for op_id, rel, pid, idx in rows:
+            by_op.setdefault(op_id, {}).setdefault(rel, {})[idx] = pid
+        for op_id, rels in by_op.items():
+            for rel, idx_map in rels.items():
+                src = idx_map.get(0)
+                if src is not None:
+                    for idx, pid in sorted(idx_map.items()):
+                        if idx == 0 or pid == src:
+                            continue
+                        edges.append({"from": src, "to": pid,
+                                      "relation": rel, "via": op_id})
+                else:
+                    # Legacy operator without idx — degrade to one entry per
+                    # unordered input pair (deterministic: sorted ids).
+                    inputs = sorted(idx_map.values())
+                    for i in range(len(inputs)):
+                        for j in range(i + 1, len(inputs)):
+                            edges.append({"from": inputs[i], "to": inputs[j],
+                                          "relation": rel, "via": op_id})
+        rows = proj.g.query(
+            "MATCH (a:Point)-[r:IMPL|NAND]->(b:Point) "
+            "WHERE (a.is_operator IS NULL OR a.is_operator = false) "
+            "  AND (b.is_operator IS NULL OR b.is_operator = false) "
+            "RETURN a.id, type(r), b.id",
+        ).result_set
+        for a, rel, b in rows:
+            edges.append({"from": a, "to": b, "relation": rel, "via": "direct"})
+        return edges
+
+    def _review_prune(self, scope, variance_threshold, prune_limit) -> list[dict]:
+        """mode=prune: flag illogical/stale connections (no writes).
+
+        Entry shape: {from, to, relation, issue, suggested_action, detail}
+        with issue in (contradictory, stale, contested) — a single edge may
+        carry multiple issues (one entry each, deduped).
+        """
+        edges = self._epistemic_edges()
+        if not edges:
+            return []
+        proj = self._get_proj()
+        ids = sorted({e["from"] for e in edges} | {e["to"] for e in edges})
+
+        # Endpoint statuses (terminal / legacy outdated flag).
+        rows = proj.g.query(
+            "MATCH (n:Point) WHERE n.id IN $ids "
+            "RETURN n.id, n.status, coalesce(n.outdated, false)",
+            params={"ids": ids},
+        ).result_set
+        statuses = {r[0]: r[1] for r in rows}
+        outdated = {r[0]: bool(r[2]) for r in rows}
+        stale_endpoint = {
+            pid for pid in ids
+            if statuses.get(pid) in STALE_TERMINAL_STATUSES or outdated.get(pid)
+        }
+        # CORRECTS successors for stale endpoints → re-point vs prune.
+        successors: dict[str, str] = {}
+        if stale_endpoint:
+            rows = proj.g.query(
+                "MATCH (s:Point)-[:CORRECTS]->(o:Point) "
+                "WHERE o.id IN $ids RETURN o.id, s.id",
+                params={"ids": sorted(stale_endpoint)},
+            ).result_set
+            for oid, sid in rows:
+                successors[oid] = sid
+
+        # Contested claims: high posterior variance (stored EP params only —
+        # an unmeasured uniform prior is NOT contested) OR an incoming NAND
+        # operator edge (derived `challenged` condition, ontology §5).
+        contested: dict[str, dict] = {}
+        rows = proj.g.query(
+            "MATCH (n:Point) "
+            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "  AND (n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL) "
+            "WITH n, coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS a, "
+            "     coalesce(n.posterior_beta, n.ep_beta, 1.0) AS b "
+            "WITH n, a, b, (a*b)/((a+b)*(a+b)*(a+b+1)) AS v "
+            "WHERE v > $t RETURN n.id, v",
+            params={"t": variance_threshold},
+        ).result_set
+        for pid, v in rows:
+            contested[pid] = {"variance": round(v, 8),
+                              "reason": "high posterior variance"}
+        rows = proj.g.query(
+            "MATCH (op:Point {is_operator:true})-[r:NAND]->(n:Point) "
+            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "RETURN DISTINCT n.id",
+        ).result_set
+        for (pid,) in rows:
+            contested.setdefault(pid, {"reason": "incoming NAND (challenged)"})
+
+        # Contradiction: pairs linked by BOTH IMPL and NAND.
+        pair_rels: dict[frozenset, set] = {}
+        for e in edges:
+            pair_rels.setdefault(frozenset((e["from"], e["to"])), set()).add(
+                e["relation"])
+        contradictory = {k for k, v in pair_rels.items()
+                         if {"IMPL", "NAND"} <= v}
+
+        entries: list[dict] = []
+        for e in edges:
+            frm, to, rel, via = e["from"], e["to"], e["relation"], e["via"]
+            if frozenset((frm, to)) in contradictory:
+                entries.append({
+                    "from": frm, "to": to, "relation": rel,
+                    "issue": "contradictory", "suggested_action": "review",
+                    "detail": {"via": via, "reason": "pair is both IMPL- and NAND-linked"},
+                })
+            for pid in (frm, to):
+                if pid in stale_endpoint:
+                    entries.append({
+                        "from": frm, "to": to, "relation": rel,
+                        "issue": "stale",
+                        "suggested_action": "re-point" if pid in successors else "prune",
+                        "detail": {
+                            "via": via, "stale_endpoint": pid,
+                            "status": statuses.get(pid) or "outdated",
+                            **({"successor": successors[pid]} if pid in successors else {}),
+                        },
+                    })
+                    break  # one stale entry per edge
+            for pid in (frm, to):
+                if pid in contested:
+                    detail = {"via": via, "contested_endpoint": pid,
+                              "reason": contested[pid]["reason"]}
+                    if "variance" in contested[pid]:
+                        detail["variance"] = contested[pid]["variance"]
+                    entries.append({
+                        "from": frm, "to": to, "relation": rel,
+                        "issue": "contested", "suggested_action": "review",
+                        "detail": detail,
+                    })
+                    break  # one contested entry per edge
+
+        # Dedupe + deterministic order: contradictory > stale > contested.
+        seen = set()
+        unique = []
+        for e in entries:
+            k = (e["issue"], e["from"], e["to"], e["relation"])
+            if k in seen:
+                continue
+            seen.add(k)
+            unique.append(e)
+        issue_order = {"contradictory": 0, "stale": 1, "contested": 2}
+        unique.sort(key=lambda x: (issue_order[x["issue"]], x["from"], x["to"]))
+
+        # Optional scope narrowing: keep entries touching the scoped pool.
+        if scope:
+            pool = self._review_pool(scope)
+            if pool:
+                unique = [e for e in unique
+                          if e["from"] in pool or e["to"] in pool]
+        return unique[:prune_limit]
 
     # ── EP Belief Propagation (#6908) ────────────────────────────
 
