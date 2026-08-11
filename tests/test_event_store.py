@@ -131,14 +131,22 @@ def test_seq_is_monotonic_under_concurrency(sdk_factory, tmp_path):
     events at all (non-vacuous). TRUE cross-worker atomicity on ONE shared
     graph needs a live FalkorDB (TORTOISE_DB_URI=docker://...) — the embedded
     redislite client is not multi-connection-safe (documented on sdk_factory).
+
+    #915: SDK construction is serialized (a lock) — 8 simultaneous embedded
+    redislite server starts with AOF init can trip the 10s start window
+    (Connection refused on the unix socket). The per-worker WRITES stay
+    concurrent; only the server boots serialize, which is not what this test
+    measures.
     """
     import threading
     errors = []
     per_worker: list[list[int]] = []
+    _sdk_lock = threading.Lock()
 
     def worker(i):
         try:
-            s = sdk_factory(tmp_path)
+            with _sdk_lock:
+                s = sdk_factory(tmp_path)
             s.create_point("statement", f"c{i}")
             per_worker.append([e["seq"] for e in _events(s._get_proj())])
         except Exception as e:  # pragma: no cover
