@@ -67,15 +67,20 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_query",
-        description="Query points by pointKind and/or property filters. "
-                    "When text is provided, routes through tortoise_fts_query() for hybrid search.",
+        description="Query points by pointKind and/or property filters — structural exact-match "
+                    "retrieval for known shapes (Epic #888: paginated_query + query_points_by_tag "
+                    "merged in). Pagination via offset=/limit= (or 1-based page=); tag= filters "
+                    "Points by TAGGED edge; include_retracted=True surfaces tombstones. For "
+                    "semantic relevance use tortoise_search; for a single known ID use "
+                    "tortoise_get_point.",
         annotations=_ro(),
         http_policy=True,
         sdk_method="query",
     ),
     ToolDefinition(
         name="tortoise_paginated_query",
-        description="Query points with SKIP/LIMIT pagination. Returns {results, total, hasMore}.",
+        description="DEPRECATED (Epic #888) — thin alias for tortoise_query(offset=, limit=). "
+                    "Kept for one release; will be removed in the next release — migrate now.",
         annotations=_ro(),
         http_policy=True,
         sdk_method="paginated_query",
@@ -125,7 +130,8 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_query_points_by_tag",
-        description="Return Points connected to a Tag via TAGGED edge.",
+        description="DEPRECATED (Epic #888) — thin alias for tortoise_query(tag=). "
+                    "Kept for one release; will be removed in the next release — migrate now.",
         annotations=_ro(),
         http_policy=True,
         sdk_method="query_points_by_tag",
@@ -148,7 +154,9 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     # ── Semantic Search (#6990) ───────────────────────────────────
     ToolDefinition(
         name="tortoise_search",
-        description="Hybrid search with RRF fusion + EP annotation. "
+        description="Hybrid semantic search — FTS + vector + structural RRF fusion with EP "
+                    "confidence annotation. Use when matching by MEANING (natural-language "
+                    "query); for exact structural/filter queries use tortoise_query. "
                     "Full-scan mode: omit query, set kind → all Points of kind.",
         annotations=_ro(),
         http_policy=True,
@@ -330,8 +338,9 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     # ── Navigation (#6962, #6963, #6964) ──────────────────────────
     ToolDefinition(
         name="tortoise_entity_profile",
-        description="Entity-centric traversal — BFS from entity node, categorize connected nodes. "
-                    "Returns {entity, connected: {points, documents, events, subjects, objects}}.",
+        description="Multi-hop BFS from an entity with optional filters (pointKind, "
+                    "confidenceMin) — full neighborhood categorized by node type. Use for deep "
+                    "entity analysis; for a fast neighbor list use tortoise_list_topics.",
         annotations=_ro(),
         http_policy=True,
         sdk_method="entity_profile",  # navigation.entityProfile — not a direct SDK method
@@ -435,8 +444,9 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_list_topics",
-        description="entityProfile lite for an entity. "
-                    "Returns {id, pointKind, neighbors, neighborCounts}.",
+        description="Fast one-hop neighbor enumeration for an entity — quick discovery and "
+                    "navigation. Use for shallow context; for multi-hop filtered BFS use "
+                    "tortoise_entity_profile.",
         annotations=_ro(),
         http_policy=True,
         sdk_method="list_topics",
@@ -880,7 +890,8 @@ GROUP_BY_NAME: dict[str, str] = {
     "tortoise_paginated_query": "memory", "tortoise_query_points_by_tag": "memory",
     "tortoise_delete_point": "memory", "tortoise_delete": "memory",
     "tortoise_supersede": "memory",
-    "tortoise_invalidate": "memory", "tortoise_list_tags": "memory",
+    "tortoise_invalidate": "memory", "tortoise_retract_point": "memory",
+    "tortoise_list_tags": "memory",
     "tortoise_list_pointkinds": "memory", "tortoise_search": "memory",
     "tortoise_recall": "memory",
     "tortoise_compute_confidence": "memory", "tortoise_get_confidence": "memory",
@@ -911,6 +922,7 @@ GROUP_BY_NAME: dict[str, str] = {
     "tortoise_session_context": "sessions", "tortoise_get_session": "sessions",
     "tortoise_index_sessions": "sessions", "tortoise_search_sessions": "sessions",
     "tortoise_list_graphs": "sessions", "tortoise_list_namespaces": "sessions",
+    "tortoise_events_poll": "sessions",  # #432 CDC/subscription — not a memory tool
     # journal
     "tortoise_checkpoint": "journal", "tortoise_diary_write": "journal",
     "tortoise_diary_read": "journal", "tortoise_file_decision": "journal",

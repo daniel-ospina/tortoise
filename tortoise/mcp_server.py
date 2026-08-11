@@ -560,23 +560,85 @@ def tortoise_query(kind: str | None = None,
                    order_by: str | None = None,
                    min_confidence: float | None = None,
                    entity_type: str = "point",
-                   limit: int = 100) -> list[dict] | dict:
-    """Query points by pointKind and/or property filters.
+                   tag: str | None = None,
+                   include_retracted: bool = False,
+                   offset: int | None = None,
+                   limit: int | None = None,
+                   page: int | None = None) -> list[dict] | dict:
+    """Query points by pointKind and/or property filters — structural exact-match
+    retrieval for known shapes (Epic #888 consolidation of paginated_query +
+    query_points_by_tag into this one tool).
 
-    When text is provided, routes through tortoise_fts_query() for hybrid search.
-    When text is None, uses existing structural query.
-    entity_type: 'point' (default), 'event', 'subject', 'document', 'object', 'operator', or 'source'.
+    - Structural path (text=None): property-filter query via sdk.query().
+    - tag=<name>: filter Points by TAGGED edge (previously
+      tortoise_query_points_by_tag). Tag mode takes precedence over text and
+      ignores kind/filters/min_confidence/entity_type/order_by.
+    - Pagination: pass offset=/limit= (or 1-based page=). When any pagination
+      param is set, returns {results, total, hasMore} (previously
+      tortoise_paginated_query); a plain list is returned otherwise. Not
+      combinable with text= (fts has no offset/skip) — error dict returned.
+    - text=<query>: routes through tortoise_fts_query() for hybrid search
+      (unchanged behavior; limit defaults to 100).
+    - include_retracted=True surfaces tombstones on every path (structural,
+      paginated, and tag modes); default False excludes them.
 
-    When results are empty and a kind filter was provided, a 'suggestion'
-    key is added to the response with a hint or "did you mean" suggestion.
+    Validation: page must be >= 1, offset >= 0, limit >= 1 — violations return
+    a structured error dict.
+
+    Use tortoise_query for known shapes; use tortoise_search for semantic
+    relevance; use tortoise_get_point for a single known ID.
     """
     filters = _parse(filters)
+    if page is not None and page < 1:
+        return {"error": "page must be >= 1 (1-based), got " + str(page)}
+    if offset is not None and offset < 0:
+        return {"error": "offset must be >= 0, got " + str(offset)}
+    if limit is not None and limit < 1:
+        return {"error": "limit must be >= 1, got " + str(limit)}
+    # Resolve include_retracted (#888): explicit param wins; else the filters-dict
+    # value (don't silently drop a caller's True intent — review P2-2); else False.
+    # Guard non-dict filters: a malformed-JSON string from _parse passes the substring
+    # `in` check but has no .pop -> unguarded AttributeError (review P1-1).
+    if isinstance(filters, dict) and "include_retracted" in filters:
+        if not include_retracted:
+            include_retracted = bool(filters.pop("include_retracted"))
+        else:
+            filters.pop("include_retracted")
+    paginated = offset is not None or page is not None
+    eff_limit = limit if limit is not None else (20 if paginated else 100)
+    if tag is not None:
+        rows = _safe(_get_team_sdk().query_points_by_tag, tag)
+        if not isinstance(rows, list):
+            return rows
+        # query_points_by_tag has no retracted exclusion in the SDK — mirror
+        # the tombstone contract of the other paths here (Epic #888).
+        if not include_retracted:
+            rows = [r for r in rows if r.get("status") != "retracted"]
+        if not paginated:
+            return rows
+        eff_offset = offset if offset is not None else 0
+        if page is not None:
+            eff_offset = (page - 1) * eff_limit
+        total = len(rows)
+        return {"results": rows[eff_offset:eff_offset + eff_limit],
+                "total": total,
+                "hasMore": eff_offset + eff_limit < total}
     if text:
+        if paginated:
+            return {"error": "offset/page not supported with text — use limit only, or tortoise_search"}
         return _safe(_get_team_sdk().tortoise_fts_query, text, kind=kind,
-                     entity_type=entity_type, limit=limit,
+                     entity_type=entity_type, limit=eff_limit,
                      min_confidence=min_confidence or 0.0,
                      order_by=order_by or "relevance")
-    result = _safe(_get_team_sdk().query, kind, **(filters or {}))
+    if paginated:
+        eff_offset = offset if offset is not None else 0
+        if page is not None:
+            eff_offset = (page - 1) * eff_limit
+        return _safe(_get_team_sdk().paginated_query, kind, skip=eff_offset,
+                     limit=eff_limit, include_retracted=include_retracted,
+                     **(filters or {}))
+    result = _safe(_get_team_sdk().query, kind,
+                   include_retracted=include_retracted, **(filters or {}))
     # If empty results and a kind filter was provided, attach suggestion
     if isinstance(result, list) and len(result) == 0 and kind is not None:
         from tortoise.query_suggestions import compute_suggestion
@@ -588,11 +650,16 @@ def tortoise_query(kind: str | None = None,
 
 def tortoise_paginated_query(kind: str | None = None,
                              skip: int = 0, limit: int = 20,
-                             filters: Any = None) -> dict:
-    """Query points with SKIP/LIMIT pagination. Returns {results, total, hasMore}."""
+                             filters: Any = None,
+                             include_retracted: bool = False) -> dict:
+    """DEPRECATED (Epic #888) — thin alias for tortoise_query(offset=, limit=).
+
+    Kept for one release with grace; will be removed in the next release.
+    Migrate to: tortoise_query(kind=..., offset=skip, limit=limit, filters=...)
+    """
     filters = _parse(filters)
-    return _safe(_get_team_sdk().paginated_query, kind, skip=skip, limit=limit,
-                 **(filters or {}))
+    return tortoise_query(kind=kind, filters=filters, offset=skip, limit=limit,
+                          include_retracted=include_retracted)
 
 
 def tortoise_check_structure() -> list[dict]:
@@ -632,8 +699,16 @@ def tortoise_list_tags() -> list[dict]:
 
 
 def tortoise_query_points_by_tag(tag: str) -> list[dict]:
-    """Return Points connected to a Tag via TAGGED edge."""
-    return _safe(_get_team_sdk().query_points_by_tag, tag)
+    """DEPRECATED (Epic #888) — thin alias for tortoise_query(tag=...).
+
+    Kept for one release with grace; will be removed in the next release.
+    Migrate to: tortoise_query(tag=tag)
+
+    Note: passes include_retracted=True to preserve this tool's pre-#888 behavior
+    (raw tag results incl. tombstones); the new tortoise_query(tag=...) default
+    excludes retracted points.
+    """
+    return tortoise_query(tag=tag, include_retracted=True)
 
 
 def tortoise_get_point(id: str) -> dict:
@@ -1763,7 +1838,7 @@ def tortoise_backfill_v25(dry_run: bool = True) -> dict:
 # Function bodies remain module-level callables; the adapter wraps each
 # via FunctionTool.from_function() and registers them on the shared mcp.
 # Must execute AFTER all tool function definitions (at module bottom).
-from tortoise.tool_registry import TOOL_REGISTRY, FastMCPAdapter
+from tortoise.tool_registry import TOOL_REGISTRY, GROUP_BY_NAME, FastMCPAdapter
 
 _adapter = FastMCPAdapter(mcp)
 _adapter.register_all(TOOL_REGISTRY, {
@@ -1778,6 +1853,52 @@ _adapter.register_all(TOOL_REGISTRY, {
 # Wrappers for the hosted onboarding flow. These call the team-scoped SDK
 # directly (same pattern as all tools) — the REST endpoints in hosted_api.py
 # expose the same operations to the welcome page.
+
+# Epic #888 no-regret: once a team's onboarding completes, the six
+# tortoise_onboarding_* tools retire from that team's steady-state MCP
+# surface (tools/list) — the REST /v1/onboarding/* endpoints remain for the
+# web onboarding flow. Definitions and handlers are untouched; only the
+# listing hides them. See _HTTPToolFilter.list_tools.
+_ONBOARDING_TOOL_NAMES: frozenset[str] = frozenset({
+    "tortoise_onboarding_demo_create", "tortoise_onboarding_state",
+    "tortoise_onboarding_session_recording", "tortoise_onboarding_github_connect",
+    "tortoise_onboarding_github_index", "tortoise_onboarding_github_status",
+})
+
+# 60s per-team TTL cache for the tools/list gate — the onboarding-state read
+# hits the control plane (Supabase teams row / registry Team node); tools/list
+# is called once per session but bounding the read to 1/min/team avoids any
+# amplification (review fix, Epic #888). Staleness is fine: the gate is
+# surface cosmetics and already fails open.
+_onboarding_state_cache: dict[str, tuple[float, bool]] = {}
+_ONBOARDING_STATE_TTL = 60.0
+
+
+def _team_onboarding_complete() -> bool:
+    """True when the current HTTP team's onboarding is complete.
+
+    Fail-open: stdio/selfhost (no tenant Team row) and transient control-plane
+    read failures return False — a read hiccup must never hide the tools a
+    team still needs to finish onboarding. Reads the canonical onboarding
+    state via hosted_api._get_onboarding_state (Supabase teams row or registry
+    Team node), cached 60s per team.
+    """
+    from tortoise.mcp_auth import SELFHOST_TEAM_ID, _current_team_id
+    team_id = _current_team_id.get()
+    if not team_id or team_id == SELFHOST_TEAM_ID:
+        return False
+    now = _time.time()
+    cached = _onboarding_state_cache.get(team_id)
+    if cached is not None and now - cached[0] < _ONBOARDING_STATE_TTL:
+        return cached[1]
+    try:
+        from tortoise.hosted_api import _get_onboarding_state
+        complete = bool(_get_onboarding_state(team_id).get("onboarding_complete"))
+    except Exception:
+        return False  # never cache a failed read — retry next list
+    _onboarding_state_cache[team_id] = (now, complete)
+    return complete
+
 
 def _onboarding_state() -> dict:
     """Read this team's onboarding progress from the registry Team node."""
@@ -1988,12 +2109,26 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
         async def list_tools(self, tools):
             from tortoise.mcp_auth import _tool_group
             group = _tool_group.get()
-            if group:
-                from tortoise.tool_registry import GROUP_BY_NAME
-                return [t for t in tools
-                        if t.name in HTTP_ALLOWED
-                        and GROUP_BY_NAME.get(t.name) == group]
-            return [t for t in tools if t.name in HTTP_ALLOWED]
+            # Skip the control-plane read when it can't change the outcome: in
+            # a curation-group-scoped app (other than "onboarding") the group
+            # filter below already excludes the onboarding tools.
+            onboarding_done = False
+            if not (group and group != "onboarding"):
+                onboarding_done = _team_onboarding_complete()
+
+            def _visible(t):
+                if t.name not in HTTP_ALLOWED:
+                    return False
+                if group and GROUP_BY_NAME.get(t.name) != group:
+                    return False
+                # Epic #888: onboarding tools retire from the steady-state
+                # surface once this team's onboarding is complete (fail-open
+                # — state read errors keep them visible).
+                if onboarding_done and t.name in _ONBOARDING_TOOL_NAMES:
+                    return False
+                return True
+
+            return [t for t in tools if _visible(t)]
 
     # Guard against transform accumulation: create_http_app() is called at
     # hosted_api import AND in every test fixture — each call would append a
