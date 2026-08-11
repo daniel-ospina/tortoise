@@ -1295,11 +1295,30 @@ def metering_increment(cp, team_id: str, period: str, n: int = 1) -> int:
     SQL RPC (0014) — write_ops = write_ops + n under Postgres row locking —
     so concurrent increments can never undercount (a GET-then-PATCH would
     lose updates). Best-effort by contract (metering failures never block a
-    write): the caller swallows exceptions."""
+    write): the caller swallows exceptions.
+
+    #925: the read-back is the only best-effort step. The RPC call itself
+    still raises when it fails — though if the response is lost the write
+    may still have committed, so callers treat a raise as best-effort (as
+    before). If the RPC succeeded but the read-back fails (network blip),
+    the stored counter is already correct server-side — only the current
+    total is unknown — so return the known delta *n* instead of raising
+    (the returned total is then approximate; a raising read-back would
+    make record_write_ops return None and a caller retry would
+    double-count).
+    """
     cp.rpc(
         "metering_increment",
         {"p_team_id": team_id, "p_period": period, "p_n": n},
     )
     # PostgREST does not echo SECURITY DEFINER RPC results with
-    # return=minimal — read back the atomic new value.
-    return metering_get(cp, team_id, period)
+    # return=minimal — read back the atomic new value. The RPC above already
+    # committed; if this read-back fails, fall back to the known delta (#925).
+    try:
+        return metering_get(cp, team_id, period)
+    except Exception:
+        _logger.warning(
+            "metering read-back failed after committed increment "
+            "(non-fatal): team=%s period=%s n=%s", team_id, period, n,
+        )
+        return n

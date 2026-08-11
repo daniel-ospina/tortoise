@@ -1215,6 +1215,50 @@ class TestMeteringSeam:
                                     "p_period": "2026-08", "p_n": 4}),
         ]
 
+    def test_metering_increment_readback_failure_returns_delta(self):
+        """#925: the atomic RPC committed but the read-back fails (network
+        blip) → return the known delta instead of raising. The stored
+        counter is correct server-side; only the current total is unknown.
+        A raising read-back would make record_write_ops return None and a
+        caller retry would double-count."""
+        from tortoise.supabase_control import metering_increment
+        from tests.fake_control_plane import FakeControlPlane
+
+        class _ReadbackFails(FakeControlPlane):
+            """rpc() succeeds (SQL increment emulated); the subsequent
+            metering_records read-back query raises."""
+
+            def __init__(self):
+                super().__init__({"metering_records": []})
+                self.fail_readback = False
+
+            def rpc(self, fn, body):
+                result = super().rpc(fn, body)
+                self.fail_readback = True
+                return result
+
+            def query(self, table, *args, **kwargs):
+                if self.fail_readback:
+                    raise RuntimeError("read-back failed (simulated blip)")
+                return super().query(table, *args, **kwargs)
+
+        fake = _ReadbackFails()
+        n = metering_increment(fake, "team-1", "2026-08", 3)
+        assert n == 3
+        # the atomic increment really did land server-side
+        assert fake.tables["metering_records"][0]["write_ops"] == 3
+
+    def test_metering_increment_rpc_failure_still_raises(self):
+        """#925: the RPC call itself is NOT best-effort — if the atomic
+        write genuinely failed, metering_increment raises (record_write_ops
+        turns that into a logged None; nobody retries a failed write)."""
+        import pytest
+        from tortoise.supabase_control import metering_increment
+        from tests.fake_control_plane import ErrorControlPlane
+
+        with pytest.raises(RuntimeError):
+            metering_increment(ErrorControlPlane(), "team-1", "2026-08", 1)
+
 
 # ── resolve_team_limits Supabase mode (PR #911 review P2) ───────────────────
 
