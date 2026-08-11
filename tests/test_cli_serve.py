@@ -77,9 +77,16 @@ def _wait_rdb_settled():
     """#880: the key-create subprocess's redislite server is gone (atexit
     SHUTDOWN SAVE), but the RDB flush can lag under CI load — a handle opened
     mid-write sees a stale registry → 401. Returns a waiter that polls until
-    the DB file stops changing (mtime stable for settle_s, 10s cap).
+    the DB file stops changing (mtime stable for settle_s, 15s cap).
+
+    The returned waiter also VERIFIES CONTENT: once mtime is stable it opens
+    a fresh registry handle and confirms the APIKey node is queryable before
+    returning — mtime stability alone can pass while the RDB load is still
+    racing (the file can be stable mid-flush). A failed content check keeps
+    polling until the cap; callers then use their own bounded poll as the
+    final backstop (roundtrip test).
     """
-    def _wait(db, settle_s=1.0, max_wait_s=10.0):
+    def _wait(db, settle_s=1.0, max_wait_s=15.0):
         deadline = time.monotonic() + max_wait_s
         last_mtime = None
         stable_since = None
@@ -90,7 +97,24 @@ def _wait_rdb_settled():
                 if stable_since is None:
                     stable_since = now
                 elif now - stable_since >= settle_s:
-                    return
+                    # mtime stable — verify content before declaring settled.
+                    # Explicit db_path: env vars aren't set in fixture scope,
+                    # and a bare TortoiseSDK would resolve to the default
+                    # ~/.tortoise/tortoise.db (wrong DB — reviewer P1, #880).
+                    probe = None
+                    try:
+                        from tortoise.sdk import TortoiseSDK
+                        probe = TortoiseSDK(db_path=str(db), namespace="registry")
+                        rows = probe._get_registry().query(
+                            "MATCH (k:APIKey) RETURN k.team_id").result_set
+                        if rows:
+                            return
+                    except Exception:
+                        pass  # RDB still loading — keep polling
+                    finally:
+                        if probe is not None:
+                            probe.close()
+                    stable_since = None  # content not ready: re-arm the settle
             else:
                 stable_since = None
             last_mtime = mtime
