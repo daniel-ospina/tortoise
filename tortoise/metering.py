@@ -274,23 +274,39 @@ def get_current_usage(team_id: str) -> dict:
         from tortoise.supabase_control import (
             get_control_plane, metering_get, team_tier,
         )
-        cp = get_control_plane()
-        ops_used = metering_get(cp, team_id, period)
-        tier = team_tier(cp, team_id) or "free"
-        ops_limit = _ops_allowance(tier)
-        eligible = _overage_eligible(tier)
-        overage_cost = None
-        if eligible and ops_used > ops_limit:
-            from tortoise.pricing import overage_price_per_10k
-            overage_units = (ops_used - ops_limit + 9999) // 10000
-            overage_cost = overage_units * overage_price_per_10k()
-        return {
-            "write_ops_used": ops_used,
-            "write_ops_limit": ops_limit,
-            "period": period,
-            "overage_eligible": eligible,
-            "overage_cost_usd": overage_cost,
-        }
+        try:
+            cp = get_control_plane()
+            ops_used = metering_get(cp, team_id, period)
+            tier = team_tier(cp, team_id) or "free"
+            ops_limit = _ops_allowance(tier)
+            eligible = _overage_eligible(tier)
+            overage_cost = None
+            if eligible and ops_used > ops_limit:
+                from tortoise.pricing import overage_price_per_10k
+                overage_units = (ops_used - ops_limit + 9999) // 10000
+                overage_cost = overage_units * overage_price_per_10k()
+            return {
+                "write_ops_used": ops_used,
+                "write_ops_limit": ops_limit,
+                "period": period,
+                "overage_eligible": eligible,
+                "overage_cost_usd": overage_cost,
+            }
+        except Exception as e:
+            # Metering is best-effort by contract — a control-plane blip must
+            # never 500 the /v1/team hot path (#923). Degrade to the
+            # free-tier zero-usage view, mirroring the registry path below.
+            _logger.warning(
+                "metering usage query failed: team=%s period=%s error=%s",
+                team_id, period, e,
+            )
+            return {
+                "write_ops_used": 0,
+                "write_ops_limit": _ops_allowance("free"),
+                "period": period,
+                "overage_eligible": False,
+                "overage_cost_usd": None,
+            }
     try:
         sdk = _reg_sdk()
         reg = sdk._get_registry()
