@@ -34,12 +34,12 @@ try:
             "content": "w{writer_id}-content-" + str(i),
             "context": "ctx",
         }})
-        # Explicit SAVE per write: SIGKILL (the crash-recovery test) can
-        # lose un-flushed data — redis RDB snapshots are not on the hot
-        # path. The crash test asserts pre-crash keys survive, so the
-        # killed writer must make its writes durable BEFORE the kill
-        # (fresh servers load the RDB on start).
-        proj.db.execute_command("SAVE")
+        # WROTE = completion handshake (de-flake #819): printed only AFTER
+        # the write is applied server-side, so a kill on the first WROTE
+        # line always leaves >=1 completed write behind. No explicit SAVE
+        # per write — forcing RDB durability here would mask the embedded
+        # durability gap tracked in #915 (graceful close() still persists
+        # via redislite's shutdown(save=True)).
         print("WROTE", i, flush=True)
         time.sleep(0.1)
     print("DONE", {writer_id}, flush=True)
@@ -49,8 +49,10 @@ finally:
     return subprocess.Popen(
         [sys.executable, "-c", code],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-        start_new_session=True)  # own process group: crash tests kill the
-    # writer AND its redis-server child with one killpg (a real crash).
+        start_new_session=True)  # own process group: the writer-death test
+    # killpg's the writer. The redis-server child is daemonized (fork +
+    # setsid, own session) and SURVIVES the killpg — that's exactly the
+    # contract the writer-death test documents (see #879).
 
 
 def _count_redis_servers(path=None):
@@ -157,20 +159,26 @@ def test_concurrent_writers_documented_limitation():
     assert True
 
 
-def test_crash_recovery_keys_intact(monkeypatch):
-    """SIGKILL a writer mid-run -> its pre-crash keys + survivors' keys intact.
+def test_writer_death_keys_survive_reconnect(monkeypatch):
+    """Writer-death / stable-path contract: SIGKILL a writer mid-run -> its
+    COMPLETED writes remain visible to reconnects, and teardown shuts the
+    daemon down.
 
     Uses STAGGERED writes (the safe embedded pattern — sequential single
     writers). Concurrent multi-writer on one embedded file is a documented
     redislite limitation (loses data); the plan routes concurrent writes to
-    Docker (Tier D). This proves crash recovery for the supported pattern.
+    Docker (Tier D).
 
-    Durability note: redis RDB snapshots are periodic, so a SIGKILLed
-    process can lose writes that never reached the RDB (that is redis'
-    documented contract, not a bug). The writers SAVE after each write, so
-    "pre-crash" here means "durably persisted before the kill" — the
-    assertion is deterministic on every host (fresh servers load the RDB,
-    reconnects see live memory)."""
+    Honest contract note (#879): redislite daemonizes redis-server
+    (fork+setsid, own session), so killpg on the writer kills ONLY the
+    python writer — the redis-server survives and a fresh projection REUSES
+    it via redislite's .settings registry. "Pre-crash keys survive" here
+    means "survive in the daemon's LIVE MEMORY", NOT "reloaded from the
+    RDB". This test does NOT exercise the RDB-load / crash-recovery path,
+    and the per-write SAVE that would mask that gap is deliberately absent.
+    The real embedded-mode durability gap (kill -9 of the server loses the
+    whole graph; JSONL rebuild covers only log-backed writes) is tracked in
+    #915 — do not add SAVE-per-write or RDB assertions to this test."""
     canonical = _canonical_path()
     monkeypatch.setenv("TORTOISE_DB_PATH", canonical)
     # Staggered survivors (safe embedded pattern): each writes 10, closes
@@ -179,17 +187,19 @@ def test_crash_recovery_keys_intact(monkeypatch):
         w.wait(timeout=60)
         time.sleep(1)  # stagger so each persists before the next
 
-    # SIGKILL writer 2's ENTIRE process group mid-run (real crash: python
-    # writer + its redis-server child both die). Wait for the first WROTE
-    # line first so >=1 write is durably SAVE'd before the crash — killing
-    # on a blind sleep raced server boot and made this test flaky (#819).
+    # SIGKILL writer 2's process group mid-run (writer-death): the python
+    # writer dies; the daemonized redis-server survives (own session, see
+    # docstring) and the fresh projection below reuses it — live-memory
+    # reuse, not RDB reload. Wait for the first WROTE line so >=1 write
+    # completed before the kill — killing on a blind sleep raced server
+    # boot and made this test flaky (#819).
     k = _spawn_writer(canonical, 2, writes=10)
     for line in k.stdout:
         if line.startswith("WROTE"):
             break
     os.killpg(k.pid, signal.SIGKILL)
     k.wait()
-    time.sleep(2)  # RDB settle
+    time.sleep(2)  # let the daemon settle before reconnecting
 
     os.environ["TORTOISE_DB_PATH"] = canonical
     from tortoise.projection import FalkorProjection

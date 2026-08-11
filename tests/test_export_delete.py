@@ -627,6 +627,53 @@ class TestPurge:
         ops = [e["operation"] for e in capture_audit]
         assert "team_delete_purged" in ops
 
+    def test_purge_keeps_row_anchor_on_graph_drop_failure_supabase(
+            self, sb_client, capture_audit, monkeypatch):
+        """#926: a silent graph-drop failure must not orphan the FalkorDB
+        graph. The Supabase-mode drop is strict — on failure the sweep
+        skips the team, the teams row survives as the retry anchor
+        (control-plane rows untouched, no purge audit event), and the
+        next sweep retries the drop to completion."""
+        tc, fake, _ = sb_client
+        past = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()
+        fake.seed("teams", [dict(FREE_TEAM, deleted_at=past),
+                             dict(FREE_TEAM, id="team-other",
+                                  deleted_at=past)])
+        fake.seed("team_memberships", [_membership_row(),
+                                        _membership_row(team_id="team-other")])
+        fake.seed("api_keys", [_key_row(),
+                                _key_row(team_id="team-other")])
+
+        def _flaky(team_id, graph_name=None):
+            if team_id == TEAM_ID:
+                raise RuntimeError("graph drop failed (fault injection, #926)")
+            return None
+
+        monkeypatch.setattr(ha_mod, "_drop_team_graph_strict", _flaky)
+
+        ha_mod._purge_deleted_teams()
+
+        # retry anchor survives: teams row + child rows NOT purged
+        assert any(r["id"] == TEAM_ID for r in fake.tables["teams"])
+        assert any(r["team_id"] == TEAM_ID for r in fake.tables["api_keys"])
+        assert any(r["team_id"] == TEAM_ID
+                   for r in fake.tables["team_memberships"])
+        # ...and a failed drop never blocks OTHER past-grace teams
+        assert all(r["id"] != "team-other" for r in fake.tables["teams"])
+        assert all(r["team_id"] != "team-other"
+                   for r in fake.tables["api_keys"])
+        ops = [e["operation"] for e in capture_audit]
+        assert ops.count("team_delete_purged") == 1
+        assert capture_audit[-1]["team_id"] == "team-other"
+
+        # next sweep (drop healed, real strict impl) → row purged
+        monkeypatch.setattr(ha_mod, "_drop_team_graph_strict",
+                            ha_mod._drop_team_graph_impl)
+        ha_mod._purge_deleted_teams()
+        assert all(r["id"] != TEAM_ID for r in fake.tables["teams"])
+        ops = [e["operation"] for e in capture_audit]
+        assert ops.count("team_delete_purged") == 2
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Sensitive-op rate limits
