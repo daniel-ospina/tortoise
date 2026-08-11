@@ -177,7 +177,8 @@ class AuditLogger:
                        VALUES (%(id)s, %(team_id)s, %(actor_user_id)s,
                                %(operation)s, %(resource_type)s,
                                %(resource_id)s, %(ip_address)s,
-                               %(user_agent)s, %(created_at)s)""",
+                               %(user_agent)s, %(created_at)s)
+                       ON CONFLICT (id) DO NOTHING""",
                     event,
                 )
             return True
@@ -246,7 +247,12 @@ class AuditLogger:
             if self._conn is None and not self._connect():
                 return
 
-            # Insert all events
+            # Insert all events — IDEMPOTENT (post-flip fix, #669): ON CONFLICT
+            # (id) DO NOTHING means already-replayed events are SKIPPED, not
+            # re-queued. Without this, a replay after a partial success (or a
+            # restart where some rows landed) re-appended the same events to
+            # the fallback forever — the duplicate-key flood seen when
+            # TORTOISE_AUDIT_DSN came online.
             success_count = 0
             for event in events:
                 try:
@@ -259,7 +265,8 @@ class AuditLogger:
                                VALUES (%(id)s, %(team_id)s, %(actor_user_id)s,
                                        %(operation)s, %(resource_type)s,
                                        %(resource_id)s, %(ip_address)s,
-                                       %(user_agent)s, %(created_at)s)""",
+                                       %(user_agent)s, %(created_at)s)
+                               ON CONFLICT (id) DO NOTHING""",
                             event,
                         )
                     success_count += 1
