@@ -115,6 +115,68 @@ class TestRegistryEquivalence:
             assert by_name[name].http_policy is False, f"{name} should be excluded"
 
 
+class TestCurationGroups:
+    """Epic #888 no-regret: GROUP_BY_NAME coherence fixes (#888 item 3).
+
+    retract_point and events_poll previously fell through to the implicit
+    "memory" default via GROUP_BY_NAME.get(t.name, "memory") — events_poll is
+    a CDC/subscription tool that belongs in "sessions", and retract_point
+    belongs explicitly with the lifecycle tools in "memory" (#432).
+    """
+
+    def test_retract_point_explicitly_in_memory(self):
+        from tortoise.tool_registry import TOOL_REGISTRY
+        entry = next(t for t in TOOL_REGISTRY if t.name == "tortoise_retract_point")
+        assert entry.group == "memory", f"got {entry.group}"
+
+    def test_events_poll_in_sessions_group(self):
+        from tortoise.tool_registry import TOOL_REGISTRY
+        entry = next(t for t in TOOL_REGISTRY if t.name == "tortoise_events_poll")
+        assert entry.group == "sessions", f"got {entry.group}"
+
+    def test_groups_reachable_via_helpers(self):
+        """tools_by_group / tool_groups expose the corrected groups (#523)."""
+        from tortoise.tool_registry import tools_by_group, tool_groups
+        memory = {t.name for t in tools_by_group("memory")}
+        assert "tortoise_retract_point" in memory
+        groups = tool_groups()
+        assert "tortoise_events_poll" in groups["sessions"]
+
+
+class TestDescriptionImprovements:
+    """Epic #888 no-regret item 4: sharpened descriptions for the top-confused
+    tools (query family, search, entity_profile vs list_topics) so agents can
+    pick the right tool from the tools/list descriptions alone.
+    """
+
+    @staticmethod
+    def _desc(name: str) -> str:
+        from tortoise.tool_registry import TOOL_REGISTRY
+        return next(t for t in TOOL_REGISTRY if t.name == name).description
+
+    def test_query_description_covers_merged_params(self):
+        d = self._desc("tortoise_query")
+        assert "offset" in d and "limit" in d and "tag" in d, d
+        assert "tortoise_search" in d, "must point at the semantic alternative"
+
+    def test_search_description_distinguishes_from_query(self):
+        d = self._desc("tortoise_search")
+        assert "semantic" in d.lower(), d
+        assert "tortoise_query" in d, "must point at the structural alternative"
+
+    def test_entity_profile_distinguished_from_list_topics(self):
+        ep = self._desc("tortoise_entity_profile")
+        lt = self._desc("tortoise_list_topics")
+        assert "BFS" in ep and "tortoise_list_topics" in ep, ep
+        assert "neighbor" in lt.lower() and "tortoise_entity_profile" in lt, lt
+
+    def test_query_aliases_marked_deprecated(self):
+        pq = self._desc("tortoise_paginated_query")
+        qt = self._desc("tortoise_query_points_by_tag")
+        assert "DEPRECATED" in pq and "tortoise_query" in pq, pq
+        assert "DEPRECATED" in qt and "tortoise_query" in qt, qt
+
+
 class TestFastMCPAdapter:
     """Gate 2: MCP adapter emits correct tools from registry."""
 
