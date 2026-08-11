@@ -5041,8 +5041,26 @@ async def backups_restore(body: BackupRestoreRequest, team: dict = Depends(get_c
             # Rebuild indexes on the restored live graph (range/FTS/vector) —
             # the logical dump + GRAPH.COPY restores data, not schema. Off the
             # event loop: a large graph's index build must not stall all tenants.
+            # #924 review P2: bind the rebuild to the RESOLVED graph (the SDK
+            # projection bound to namespace=team_id would index the phantom
+            # team_{id} graph for team_{name} teams — same class of bug as the
+            # dump binding P1).
             try:
-                await asyncio.to_thread(sdk._get_proj()._ensure_indexes)
+                db_uri = os.environ.get("TORTOISE_DB_URI")
+                if db_uri:
+                    from tortoise.projection import FalkorProjection
+                    dump_proj = FalkorProjection.from_uri(db_uri, graph_name=graph_name)
+                else:
+                    proj = sdk._get_proj()
+                    if getattr(proj, "_path", None):
+                        from tortoise.projection import FalkorProjection
+                        dump_proj = FalkorProjection(
+                            path=proj._path, graph_name=graph_name,
+                            skip_health_check=True,
+                        )
+                    else:
+                        dump_proj = proj
+                await asyncio.to_thread(dump_proj._ensure_indexes)
             except Exception as e:
                 _logger.warning(
                     "index rebuild after restore failed for team %s: %s", team_id, e
