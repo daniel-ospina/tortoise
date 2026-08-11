@@ -205,14 +205,26 @@ async def _lifespan(app):
                 from tortoise.backup_sweep import read_team_state
                 from tortoise.backup_watcher import BackupWatcher, WatcherThread
 
-                reg_sdk = _registry_sdk()
-                registry = reg_sdk._get_registry()
+                # #669 post-flip: the watcher's team enumeration must use the
+                # SAME seam as the sweep driver — Supabase teams in Supabase
+                # control-plane mode, the registry handle for selfhost. The
+                # raw registry handle would read an EMPTY graph post-flip
+                # (registry deleted) and file spurious staleness incidents
+                # (post-flip verification finding, #669).
+                from tortoise.supabase_control import (
+                    get_control_plane, is_supabase_enabled,
+                )
+                if is_supabase_enabled():
+                    team_source = get_control_plane()
+                else:
+                    reg_sdk = _registry_sdk()
+                    team_source = reg_sdk._get_registry()
 
                 def _sweep_teams() -> list[str]:
                     from tortoise.backup_sweep import enumerate_teams
 
                     try:
-                        return enumerate_teams(registry)
+                        return enumerate_teams(team_source)
                     except Exception as exc:  # noqa: BLE001 — fail-closed, never crash
                         _logger.warning("watcher team enumeration failed: %s", exc)
                         return []
@@ -230,7 +242,8 @@ async def _lifespan(app):
                 )
                 _WATCHER = WatcherThread(watcher, interval_seconds=cfg.watcher_poll_seconds)
                 _WATCHER.start()
-                _boot_gc_drill_graphs(reg_sdk._get_proj().db)
+                if not is_supabase_enabled():
+                    _boot_gc_drill_graphs(reg_sdk._get_proj().db)
         except Exception as exc:  # noqa: BLE001 — never crash the app
             _logger.warning("backup watcher could not start: %s", exc)
         # #432 Task 7: event retention — boot purge + interval task. Best-effort
@@ -4880,10 +4893,21 @@ async def backups_create(team: dict = Depends(get_current_team)):
     registry_sdk = None
     try:
         sdk = _make_sdk(namespace=team_id)
-        registry_sdk = _registry_sdk()
+        # #669 post-flip: the backup stamp seam is dialect-aware — pass the
+        # Supabase control plane in Supabase mode (the registry handle would
+        # stamp the DELETED registry and auto-recreate the empty graph).
+        from tortoise.supabase_control import (
+            get_control_plane, is_supabase_enabled,
+        )
+        if is_supabase_enabled():
+            registry_sdk = None
+            cp_source = get_control_plane()
+        else:
+            registry_sdk = _registry_sdk()
+            cp_source = registry_sdk._get_registry()
         storage = _backup_storage()
         manifest = await asyncio.to_thread(
-            create_backup, sdk._get_proj(), registry_sdk._get_registry(), storage,
+            create_backup, sdk._get_proj(), cp_source, storage,
             team_id=team_id, graph_name=graph_name,
         )
         # Retention: prune after a successful backup so storage stays bounded
@@ -4929,12 +4953,18 @@ async def backups_restore(body: BackupRestoreRequest, team: dict = Depends(get_c
     lock = await _team_restore_lock(team_id)
     sdk = None
     registry_sdk = None
+    from tortoise.supabase_control import (
+        get_control_plane, is_supabase_enabled,
+    )
     async with lock:
         try:
             sdk = _make_sdk(namespace=team_id)
-            registry_sdk = _registry_sdk()
+            if not is_supabase_enabled():
+                registry_sdk = _registry_sdk()
             result = await asyncio.to_thread(
-                restore_backup, sdk._get_proj().db, registry_sdk._get_registry(),
+                restore_backup, sdk._get_proj().db,
+                (get_control_plane() if is_supabase_enabled()
+                 else registry_sdk._get_registry()),
                 _backup_storage(),
                 body.backup_key, team_id=team_id, graph_name=graph_name,
             )
