@@ -2043,6 +2043,375 @@ class TortoiseSDK:
         """Create multiple points. Each dict needs {kind, content, **props}."""
         return [self.create_point(**p) for p in points_list]
 
+    # ── Heterogeneous bulk write — ingest (epic #888 W4) ─────────────
+
+    # Operator vocabularies accepted by connection specs (create_operator's
+    # op_type whitelist — kept in sync with create_operator's validation).
+    _INGEST_OPERATOR_TYPES = frozenset(
+        ("IMPL", "NAND", "composedOf", "decomposesInto", "contains", "wraps")
+    )
+
+    def ingest(self, bundle: dict, granularity: str = "bulk") -> dict:
+        """Heterogeneous bulk write (epic #888 W4, design ref PR #912).
+
+        One call writes points + entities + sources + connections coherently:
+        all nodes first, then the connections between them. Indexing many
+        interconnected items is ONE operation, not N.
+
+        bundle = {
+          points:      [{kind, content, ref?, status?, **props}],
+          entities:    [{type: subject|object|event|document, name, ref?, **props}],
+          sources:     [{url, sourceKind, tier?, sourceDate?, ref?, **props}],
+          connections: [{from, to, relation, ...} | {from, to, operator, label?, direction?}],
+        }
+
+        - ``ref``: optional local addressing label usable in any connection's
+          from/to (and in entity authoredBy/ownedBy/managedBy + about* props,
+          and point extractedFrom) instead of the created id/url. Must be
+          unique within the bundle. Never stored as a node property.
+        - Connections resolve from/to by local ref first, then pass through as
+          raw ids/urls to the underlying primitive (create_operator /
+          create_edge / _link_source).
+        - Reification rule (ontology v3.5 §8): a connection carrying
+          ``operator`` (IMPL/NAND, ...) creates an operator Point (Point↔Point
+          support/contradict reify); a connection carrying ``relation`` stays
+          a PLAIN structural edge (structural edges never reify).
+        - granularity='bulk' (default): whole bundle in one coherent pass,
+          returns aggregated {created, ids, nudges}. granularity='granular':
+          additionally returns per-item ``results`` for agent step-by-step
+          control (each item's primitive result + deduped flag).
+        - Idempotent-ish: points dedup by (content_hash, pointKind) via
+          create_point(dedup=True); sources merge by url; Subject/Object
+          merge by name; operator connections dedup by (op_type, input set);
+          structural edges MERGE. Document/Event entities are append-only
+          occurrence records — re-ingest duplicates them by design.
+        - EP-safe: created points default to status='draft' (#131 draft→live
+          lifecycle) unless the item carries status=... — pass status='live'
+          explicitly to opt into EP propagation.
+
+        Returns {granularity, created: {points, entities, sources, connections},
+        deduped: {...}, ids: {points, entities, sources, connections, refs},
+        nudges: [...]} (+ results for granularity='granular').
+        """
+        if granularity not in ("bulk", "granular"):
+            raise ValueError(
+                f"ingest: granularity must be 'bulk' or 'granular', got {granularity!r}"
+            )
+        if not isinstance(bundle, dict):
+            raise ValueError(
+                f"ingest: bundle must be a dict with points/entities/sources/"
+                f"connections sections, got {type(bundle).__name__}"
+            )
+        from .projection.edges import _VALID_EDGE_PREDICATES
+
+        proj = self._get_proj()
+        refs: dict[str, str] = {}          # ref → canonical id (or url for sources)
+        source_refs: set[str] = set()      # refs that address Source nodes (url-keyed)
+        ids = {"points": [], "entities": [], "sources": [],
+               "connections": [], "refs": {}}
+        created = {"points": 0, "entities": 0, "sources": 0, "connections": 0}
+        deduped = {"points": 0, "entities": 0, "sources": 0, "connections": 0}
+        results = [] if granularity == "granular" else None
+
+        def _register_ref(ref: str, cid: str, section: str) -> None:
+            if ref in refs:
+                raise ValueError(
+                    f"ingest: duplicate bundle ref {ref!r} "
+                    f"({section}) — refs must be unique across the bundle"
+                )
+            refs[ref] = cid
+            ids["refs"][ref] = cid
+
+        # ── Pre-scan refs: source refs resolve to their url (the canonical
+        # Source key, known BEFORE creation); point/entity refs resolve to ids
+        # registered as nodes are created.
+        for item in bundle.get("sources") or []:
+            ref = item.get("ref") if isinstance(item, dict) else None
+            if ref:
+                if ref in refs:
+                    raise ValueError(
+                        f"ingest: duplicate bundle ref {ref!r} (sources)"
+                    )
+                refs[ref] = item.get("url", "")
+                ids["refs"][ref] = item.get("url", "")
+                source_refs.add(ref)
+
+        # ── 1. Sources (first: points may reference them via extractedFrom) ──
+        for i, item in enumerate(bundle.get("sources") or []):
+            if not isinstance(item, dict):
+                raise ValueError(f"ingest: sources[{i}] must be a dict")
+            item = dict(item)
+            ref = item.pop("ref", None)
+            url = item.pop("url", None)
+            source_kind = item.pop("sourceKind", None)
+            if not url or not isinstance(url, str):
+                raise ValueError(f"ingest: sources[{i}] requires a non-empty 'url'")
+            if not source_kind:
+                raise ValueError(f"ingest: sources[{i}] requires 'sourceKind'")
+            existed = proj.g.query(
+                "MATCH (s:Source {url:$url}) RETURN count(s)",
+                params={"url": url},
+            ).result_set
+            node = self.create_source(url, source_kind, **item)
+            canonical = node.get("id") or node.get("url") or url
+            if ref:
+                # Pre-registered in the ref pre-scan (url known upfront) —
+                # refresh the canonical value (id may differ from url).
+                refs[ref] = canonical
+                ids["refs"][ref] = canonical
+                source_refs.add(ref)
+            ids["sources"].append(canonical)
+            if existed and existed[0][0]:
+                deduped["sources"] += 1
+            else:
+                created["sources"] += 1
+            if results is not None:
+                results.append({"section": "sources", "index": i, "ref": ref,
+                                "item": item, "result": node,
+                                "deduped": bool(existed and existed[0][0])})
+
+        # ── 2. Points (default status='draft', #131) ────────────────────
+        for i, item in enumerate(bundle.get("points") or []):
+            if not isinstance(item, dict):
+                raise ValueError(f"ingest: points[{i}] must be a dict")
+            item = dict(item)
+            ref = item.pop("ref", None)
+            kind = item.pop("kind", None)
+            content = item.pop("content", None)
+            if not kind:
+                raise ValueError(f"ingest: points[{i}] requires 'kind'")
+            if content is None:
+                raise ValueError(f"ingest: points[{i}] requires 'content'")
+            # extractedFrom may address a bundle source by its local ref
+            if isinstance(item.get("extractedFrom"), str) \
+                    and item["extractedFrom"] in source_refs:
+                item["extractedFrom"] = refs[item["extractedFrom"]]
+            existed = proj.g.query(
+                "MATCH (n:Point {content_hash:$ch}) "
+                "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+                "AND n.pointKind = $kind RETURN n.id",
+                params={"ch": _content_hash(content), "kind": kind},
+            ).result_set
+            point = self.create_point(kind, content, dedup=True, **item)
+            pid = point["id"]
+            if ref:
+                _register_ref(ref, pid, "points")
+            ids["points"].append(pid)
+            if existed:
+                deduped["points"] += 1
+            else:
+                created["points"] += 1
+            if results is not None:
+                results.append({"section": "points", "index": i, "ref": ref,
+                                "item": item, "result": point,
+                                "deduped": bool(existed)})
+
+        # ── 3. Entities (subject/object merge by name; event/document append) ─
+        for i, item in enumerate(bundle.get("entities") or []):
+            if not isinstance(item, dict):
+                raise ValueError(f"ingest: entities[{i}] must be a dict")
+            item = dict(item)
+            ref = item.pop("ref", None)
+            etype = (item.pop("type", None) or "").strip().lower()
+            name = item.pop("name", None)
+            if not etype:
+                raise ValueError(f"ingest: entities[{i}] requires 'type' "
+                                 f"(subject|object|event|document)")
+            if not name:
+                raise ValueError(f"ingest: entities[{i}] requires 'name'")
+            # Entity props that wire edges may address earlier bundle items
+            # by local ref (points + entities are registered by now).
+            for key in ("authoredBy", "ownedBy", "managedBy",
+                        "aboutSubject", "aboutObject", "aboutPoint",
+                        "aboutDocument"):
+                if isinstance(item.get(key), str) and item[key] in refs:
+                    item[key] = refs[item[key]]
+            if etype == "subject":
+                existed = proj.g.query(
+                    "MATCH (n:Subject {name:$name}) RETURN n.id",
+                    params={"name": name},
+                ).result_set
+                node = self.create_subject(name, **item)
+                canonical = node.get("id") or name
+            elif etype == "object":
+                existed = proj.g.query(
+                    "MATCH (n:Object {name:$name}) RETURN n.id",
+                    params={"name": name},
+                ).result_set
+                node = self.create_object(name, **item)
+                canonical = node.get("id") or name
+            elif etype == "event":
+                event_kind = item.pop("eventKind", None)
+                if not event_kind:
+                    raise ValueError(f"ingest: entities[{i}] type='event' "
+                                     f"requires 'eventKind'")
+                node = self.create_event(name, event_kind, **item)
+                canonical = node.get("eventId") or node.get("id") or name
+                existed = []  # Event records are append-only — never deduped
+            elif etype == "document":
+                doc_kind = item.pop("documentKind", None)
+                if not doc_kind:
+                    raise ValueError(f"ingest: entities[{i}] type='document' "
+                                     f"requires 'documentKind'")
+                node = self.create_document(name, doc_kind, **item)
+                canonical = node.get("id") or name
+                existed = []  # Document records are append-only — never deduped
+            else:
+                raise ValueError(
+                    f"ingest: entities[{i}] type must be subject|object|event|"
+                    f"document, got {etype!r}"
+                )
+            if ref:
+                _register_ref(ref, canonical, "entities")
+            ids["entities"].append(canonical)
+            if existed:
+                deduped["entities"] += 1
+            else:
+                created["entities"] += 1
+            if results is not None:
+                results.append({"section": "entities", "index": i, "ref": ref,
+                                "item": item, "result": node,
+                                "deduped": bool(existed)})
+
+        # ── 4. Connections (nodes exist — resolve refs, apply reification) ──
+        for i, conn in enumerate(bundle.get("connections") or []):
+            if not isinstance(conn, dict):
+                raise ValueError(f"ingest: connections[{i}] must be a dict")
+            if "from" not in conn or "to" not in conn:
+                raise ValueError(f"ingest: connections[{i}] requires 'from' and 'to'")
+            has_rel, has_op = "relation" in conn, "operator" in conn
+            if has_rel == has_op:
+                raise ValueError(
+                    f"ingest: connections[{i}] must carry exactly one of "
+                    f"'relation' (structural edge) or 'operator' "
+                    f"(IMPL/NAND reification)"
+                )
+            src = refs.get(conn["from"], conn["from"])
+            to_list = conn["to"] if isinstance(conn["to"], list) else [conn["to"]]
+            dsts = [refs.get(x, x) for x in to_list]
+            if has_op:
+                op_type = conn["operator"]
+                if op_type not in self._INGEST_OPERATOR_TYPES:
+                    raise ValueError(
+                        f"ingest: connections[{i}] operator must be one of "
+                        f"{sorted(self._INGEST_OPERATOR_TYPES)}, got {op_type!r}"
+                    )
+                label = conn.get("label")
+                direction = conn.get("direction")
+                existing = self._find_operator(op_type, [src] + dsts,
+                                               label=label, direction=direction)
+                if existing is not None:
+                    oid = existing
+                    deduped["connections"] += 1
+                    conn_result = {"operator_id": oid, "deduped": True}
+                else:
+                    op = self.create_operator(op_type, src, dsts,
+                                              label=label, direction=direction)
+                    oid = op["id"]
+                    created["connections"] += 1
+                    conn_result = {"operator_id": oid, "deduped": False}
+                ids["connections"].append(oid)
+            else:
+                rel = conn["relation"]
+                if rel == "extractedFrom":
+                    # (Point)-[:extractedFrom]->(Source) — MERGE-based, so
+                    # re-ingest is safe. Source side resolves by url/ref.
+                    existed = proj.g.query(
+                        "MATCH (n:Point {id:$pid})-[:extractedFrom]->"
+                        "(s:Source {url:$url}) RETURN count(*)",
+                        params={"pid": src, "url": dsts[0]},
+                    ).result_set
+                    if not existed or not existed[0][0]:
+                        proj._link_source(src, dsts[0])
+                        created["connections"] += 1
+                    else:
+                        deduped["connections"] += 1
+                    conn_result = {"relation": rel, "from": src, "to": dsts[0],
+                                   "deduped": bool(existed and existed[0][0])}
+                else:
+                    if rel not in _VALID_EDGE_PREDICATES:
+                        raise ValueError(
+                            f"ingest: connections[{i}] unknown relation {rel!r} — "
+                            f"must be a structural predicate or 'extractedFrom'"
+                        )
+                    existed = proj.g.query(
+                        f"MATCH (a)-[r:{rel}]->(b) "
+                        "WHERE (a.id = $f OR a.eventId = $f OR a.url = $f) "
+                        "AND (b.id = $t OR b.eventId = $t OR b.url = $t) "
+                        "RETURN count(r)",
+                        params={"f": src, "t": dsts[0]},
+                    ).result_set
+                    ok = proj.create_edge(src, dsts[0], rel)
+                    if not ok:
+                        raise ValueError(
+                            f"ingest: connections[{i}] could not create "
+                            f"{rel!r} edge — endpoints not found"
+                        )
+                    if existed and existed[0][0]:
+                        deduped["connections"] += 1
+                    else:
+                        created["connections"] += 1
+                    conn_result = {"relation": rel, "from": src, "to": dsts[0],
+                                   "deduped": bool(existed and existed[0][0])}
+                ids["connections"].append(conn_result)
+            if results is not None:
+                results.append({"section": "connections", "index": i,
+                                "ref": conn.get("ref"), "item": conn,
+                                "result": conn_result,
+                                "deduped": bool(conn_result.get("deduped"))})
+
+        # ── Nudges (write nudges, PR #912): populated once W2's
+        # _nudge_candidates lands — advisory only, never enforced.
+        nudges: list[dict] = []
+        if hasattr(self, "_nudge_candidates"):
+            try:
+                for pid in ids["points"]:
+                    nudges.extend(self._nudge_candidates(
+                        "related", exclude_ids=[pid])[:2])
+            except Exception:
+                pass  # nudges are advisory — never fail the ingest
+
+        out = {
+            "granularity": granularity,
+            "created": created,
+            "deduped": deduped,
+            "ids": ids,
+            "nudges": nudges,
+        }
+        if results is not None:
+            out["results"] = results
+        return out
+
+    def _find_operator(self, op_type: str, inputs: list[str],
+                       label: str | None = None,
+                       direction: str | None = None) -> str | None:
+        """Return the id of an existing operator Point with the same
+        (op_type, input set) — or None. Used by ingest to keep re-ingests
+        idempotent (operators are not content-hash dedupable).
+        """
+        proj = self._get_proj()
+        edge_rel = "hasPart" if op_type not in ("IMPL", "NAND") else op_type
+        conds = [
+            "size(targets) = size($inputs)",
+            "all(x IN targets WHERE x IN $inputs)",
+        ]
+        params = {"op": op_type, "inputs": list(inputs)}
+        if label is not None:
+            conds.append("o.label = $label")
+            params["label"] = label
+        if direction is not None:
+            conds.append("o.direction = $direction")
+            params["direction"] = direction
+        rows = proj.g.query(
+            f"MATCH (o:Point {{is_operator:true, op_type:$op}}) "
+            f"OPTIONAL MATCH (o)-[r:{edge_rel}]->(t:Point) "
+            f"WITH o, collect(t.id) AS targets "
+            f"WHERE {' AND '.join(conds)} "
+            f"RETURN o.id LIMIT 1",
+            params=params,
+        ).result_set
+        return rows[0][0] if rows else None
+
     def file_decision(self, options: list[str], evidence: list[str],
                       choice: int) -> dict:
         """File a simple decision directly to the graph — no EP, no calibration,

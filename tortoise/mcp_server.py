@@ -1574,6 +1574,31 @@ def tortoise_create_edge(source_id: str, target_id: str, predicate: str) -> dict
     return _safe(_quota_gated(_get_team_sdk().create_edge, "points"),
                  predicate, source_id, target_id)
 
+
+def tortoise_ingest(bundle: Any = None, granularity: str = "bulk") -> dict:
+    """Heterogeneous bulk write (epic #888 W4) — one call writes points +
+    entities + sources + connections coherently. Nodes are written first, then
+    the connections between them; connections carrying 'operator' (IMPL/NAND)
+    create operator Points (reification rule v3.5 §8), connections carrying
+    'relation' stay plain structural edges. Local refs address bundle items.
+
+    granularity='bulk' (default): aggregated {created, ids, nudges}.
+    granularity='granular': per-item results for agent step-by-step control.
+    Idempotent-ish: points dedup by content hash + kind, sources by url,
+    operators by input set.
+    """
+    bundle = _parse(bundle)
+    if bundle is None:
+        bundle = {}
+    if not isinstance(bundle, dict):
+        return {"error": "bundle must be a dict with points/entities/sources/"
+                          "connections sections", "code": ERR_INVALID}
+    if granularity not in ("bulk", "granular"):
+        return {"error": f"granularity must be 'bulk' or 'granular', got "
+                          f"{granularity!r}", "code": ERR_INVALID}
+    return _safe(_quota_gated(_get_team_sdk().ingest, "points"),
+                 bundle, granularity=granularity)
+
 def tortoise_get_governance(subject_id: str) -> list:
     """Get all entities owned by a Subject.
     Alias → get(id, type='governance') (epic #888 W3)."""

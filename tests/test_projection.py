@@ -1637,16 +1637,19 @@ class TestVocabEdgeValidation:
             proj.close()
 
     def test_valid_predicates_no_longer_contains_instantiates(self):
-        """#214: validate that valid_predicates set no longer includes instantiates."""
+        """#214: validate that valid_predicates set no longer includes instantiates.
+
+        Vocabulary lives in the module-level _VALID_EDGE_PREDICATES (hoisted from
+        create_edge for SDK reuse — epic #888 W4 ingest); create_edge validates
+        against the same constant.
+        """
         if _skip_if_no_falkor():
             return
-        import inspect
-        from tortoise.projection.edges import _EdgeHandlers
-        src = inspect.getsource(_EdgeHandlers.create_edge)
-        assert "'instantiates'" not in src
-        assert "'dependsOn'" in src
-        assert "'reportsTo'" in src
-        assert "'related'" in src
+        from tortoise.projection.edges import _VALID_EDGE_PREDICATES
+        assert "instantiates" not in _VALID_EDGE_PREDICATES
+        assert "dependsOn" in _VALID_EDGE_PREDICATES
+        assert "reportsTo" in _VALID_EDGE_PREDICATES
+        assert "related" in _VALID_EDGE_PREDICATES
 
 
 class TestCreateEdgeAboutPredicates:
