@@ -4922,7 +4922,6 @@ async def backups_create(team: dict = Depends(get_current_team)):
     if not team_id:
         raise HTTPException(status_code=401, detail="Missing Authorization header")
     _require_backup_tier(team)
-    graph_name = f"team_{team_id}"
     sdk = None
     registry_sdk = None
     try:
@@ -4939,6 +4938,13 @@ async def backups_create(team: dict = Depends(get_current_team)):
         else:
             registry_sdk = _registry_sdk()
             cp_source = registry_sdk._get_registry()
+        # #924: graph name resolved from the control plane via the SAME seam
+        # as the sweep (team_graph_name) — Supabase mode reads teams.graph_name
+        # (SDK team creation names graphs team_{name}, NOT team_{id}; #768/#770),
+        # registry mode is the deterministic team_{id}. Fail-closed: a
+        # resolution error 503s rather than backing up a wrong/nonexistent graph.
+        from tortoise.backup_sweep import team_graph_name
+        graph_name = team_graph_name(cp_source, team_id)
         storage = _backup_storage()
         manifest = await asyncio.to_thread(
             create_backup, sdk._get_proj(), cp_source, storage,
@@ -4983,7 +4989,6 @@ async def backups_restore(body: BackupRestoreRequest, team: dict = Depends(get_c
         raise HTTPException(
             status_code=400, detail="confirm=true required — restore replaces the live graph"
         )
-    graph_name = f"team_{team_id}"
     lock = await _team_restore_lock(team_id)
     sdk = None
     registry_sdk = None
@@ -4995,10 +5000,15 @@ async def backups_restore(body: BackupRestoreRequest, team: dict = Depends(get_c
             sdk = _make_sdk(namespace=team_id)
             if not is_supabase_enabled():
                 registry_sdk = _registry_sdk()
+            cp_source = (get_control_plane() if is_supabase_enabled()
+                         else registry_sdk._get_registry())
+            # #924: same seam as backups_create — teams.graph_name in Supabase
+            # mode (the old team_{id} hardcode would reject the restore as
+            # cross-graph for SDK-created teams), team_{id} in registry mode.
+            from tortoise.backup_sweep import team_graph_name
+            graph_name = team_graph_name(cp_source, team_id)
             result = await asyncio.to_thread(
-                restore_backup, sdk._get_proj().db,
-                (get_control_plane() if is_supabase_enabled()
-                 else registry_sdk._get_registry()),
+                restore_backup, sdk._get_proj().db, cp_source,
                 _backup_storage(),
                 body.backup_key, team_id=team_id, graph_name=graph_name,
             )
