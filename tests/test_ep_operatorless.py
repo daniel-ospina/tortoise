@@ -26,18 +26,23 @@ Measured (embedded FalkorDBLite, damping=0.5, n_quad=12, tol=1e-3):
     when the target is (12,1); unidirectional source stays at 0.667
   - direct-edge NAND drop matches the operator-mediated equivalent
     (0.206 vs 0.205) — weight parity via NAND_BASE_WEIGHT
+  - fan-out: a source with TWO bidirectional direct IMPL edges to strong
+    targets accumulates both back-messages (per-edge r.back_msg_* slots)
 """
+from __future__ import annotations
+
 import pytest
 
 from tortoise.sdk import TortoiseSDK
 from tortoise.ep import TortoiseEP
 
 
-def make_point(sdk, content, kind="statement"):
+def make_point(sdk: TortoiseSDK, content: str, kind: str = "statement") -> dict:
     return sdk.create_point(kind, content)
 
 
-def make_direct_edge(sdk, src_id, tgt_id, rel="IMPL", direction=None):
+def make_direct_edge(sdk: TortoiseSDK, src_id: str, tgt_id: str,
+                     rel: str = "IMPL", direction: str | None = None) -> None:
     """Create an operator-less direct edge (no operator node).
 
     Mirrors what create_edge writes per the reification rule; the
@@ -52,14 +57,14 @@ def make_direct_edge(sdk, src_id, tgt_id, rel="IMPL", direction=None):
     )
 
 
-def set_evidence(sdk, pid, alpha, beta):
+def set_evidence(sdk: TortoiseSDK, pid: str, alpha: float, beta: float) -> None:
     sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) SET n.ep_alpha=$al, n.ep_beta=$be, n.baseline_set=true",
         params={"id": pid, "al": alpha, "be": beta},
     )
 
 
-def run_ep(sdk, seeds=None):
+def run_ep(sdk: TortoiseSDK, seeds: list[str] | None = None) -> dict[str, float]:
     """Run EP. Seeds default to all operator ids; plain point ids may be
     passed to run EP over operator-less direct edges (#888 W5)."""
     proj = sdk._get_proj()
@@ -82,7 +87,8 @@ def run_ep(sdk, seeds=None):
     return {r[0]: r[1] for r in rows} if rows else {}
 
 
-def edge_msg(sdk, src_id, tgt_id, rel="IMPL"):
+def edge_msg(sdk: TortoiseSDK, src_id: str, tgt_id: str,
+             rel: str = "IMPL") -> tuple[float, float] | None:
     """Read (msg_alpha, msg_beta) off a direct edge, or None."""
     rows = sdk._get_proj().g.query(
         f"MATCH (:Point {{id:$src}})-[r:{rel}]->(:Point {{id:$tgt}}) "
@@ -140,10 +146,11 @@ def test_direct_impl_initializes_edge_message(sdk):
 
 def test_direct_impl_seeded_from_target(sdk):
     """Plain-point seeds discover direct edges in BOTH directions: seeding
-    with the target still runs the factor (back-pressure graph)."""
+    with the (neutral) target still runs the factor and pulls it up."""
     a = make_point(sdk, "strong source")
     b = make_point(sdk, "target")
     set_evidence(sdk, a["id"], 12.0, 1.0)
+    set_evidence(sdk, b["id"], 1.0, 1.0)   # neutral — rises only via the factor
     make_direct_edge(sdk, a["id"], b["id"], "IMPL", direction="bidirectional")
 
     res = run_ep(sdk, seeds=[b["id"]])
@@ -282,6 +289,80 @@ def test_direct_edge_without_direction_defaults_bidirectional(sdk):
     assert res.get(a["id"], 0.5) > baseline + 0.02, (
         f"missing direction must fall back to bidirectional (source moves): "
         f"{res.get(a['id'], 0.5):.4f} vs {baseline:.4f}"
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 4b. Fan-out bidirectional direct edges — per-edge back-message slots
+# ═══════════════════════════════════════════════════════════════════
+
+def test_direct_fanout_back_messages_accumulate(sdk, tmp_path):
+    """A source with TWO bidirectional direct IMPL edges to strong targets
+    accumulates BOTH back-messages (each edge owns its r.back_msg_* slot).
+    Two edges must pull the source higher than one edge alone — the same
+    accumulation an operator-mediated twin achieves."""
+    # One-edge control
+    sdk_1 = TortoiseSDK(db_path=str(tmp_path / "one.db"))
+    a1 = make_point(sdk_1, "source")
+    b1 = make_point(sdk_1, "target1")
+    set_evidence(sdk_1, a1["id"], 2.0, 1.0)
+    set_evidence(sdk_1, b1["id"], 12.0, 1.0)
+    make_direct_edge(sdk_1, a1["id"], b1["id"], "IMPL", direction="bidirectional")
+    res_1 = run_ep(sdk_1, seeds=[a1["id"]])
+    a_one = res_1.get(a1["id"], 0.5)
+    sdk_1.close()
+
+    # Two-edge fan-out
+    sdk_2 = TortoiseSDK(db_path=str(tmp_path / "two.db"))
+    a2 = make_point(sdk_2, "source")
+    b2 = make_point(sdk_2, "target1")
+    c2 = make_point(sdk_2, "target2")
+    set_evidence(sdk_2, a2["id"], 2.0, 1.0)
+    set_evidence(sdk_2, b2["id"], 12.0, 1.0)
+    set_evidence(sdk_2, c2["id"], 12.0, 1.0)
+    make_direct_edge(sdk_2, a2["id"], b2["id"], "IMPL", direction="bidirectional")
+    make_direct_edge(sdk_2, a2["id"], c2["id"], "IMPL", direction="bidirectional")
+    res_2 = run_ep(sdk_2, seeds=[a2["id"]])
+    a_two = res_2.get(a2["id"], 0.5)
+    sdk_2.close()
+
+    baseline = 2.0 / 3.0
+    assert a_one > baseline + 0.02, f"single back-message must pull: {a_one:.4f}"
+    assert a_two > a_one + 0.01, (
+        f"fan-out back-messages must accumulate: 2-edge {a_two:.4f} "
+        f"must exceed 1-edge {a_one:.4f}"
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 4c. Legacy operators without is_operator — Batch 1 op_type fallback
+# ═══════════════════════════════════════════════════════════════════
+
+def test_legacy_operator_without_is_operator_propagates(sdk):
+    """A pre-migration operator node (op_type set, is_operator MISSING) is
+    still treated as an operator by Batch 1 (op_type fallback, same rule as
+    the projection layer) and propagates as before — the is_operator=true
+    filter must not silently drop legacy operators."""
+    a = make_point(sdk, "strong source")
+    b = make_point(sdk, "target")
+    set_evidence(sdk, a["id"], 12.0, 1.0)
+    set_evidence(sdk, b["id"], 1.0, 1.0)   # neutral — rises only via the factor
+    # Raw legacy operator: op_type, NO is_operator property, edges to both
+    # inputs (pre-#753 era wiring)
+    sdk._get_proj().g.query(
+        "CREATE (op:Point {id:$id, op_type:'IMPL', content:'legacy op'})",
+        params={"id": "legacy-op-1"},
+    )
+    sdk._get_proj().g.query(
+        "MATCH (op:Point {id:'legacy-op-1'}), (a:Point {id:$a}), (b:Point {id:$b}) "
+        "CREATE (op)-[:IMPL]->(a), (op)-[:IMPL]->(b)",
+        params={"a": a["id"], "b": b["id"]},
+    )
+
+    res = run_ep(sdk, seeds=["legacy-op-1"])
+
+    assert res.get(b["id"], 0.5) > 0.55, (
+        f"legacy operator factor must still propagate: {res.get(b['id'], 0.5):.3f}"
     )
 
 
