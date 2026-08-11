@@ -2272,7 +2272,7 @@ class TortoiseSDK:
         mode: str = "both",
         scope: str | None = None,
         *,
-        similarity_threshold: float = 0.55,
+        similarity_threshold: float = 0.40,
         variance_threshold: float = 0.04,
         add_limit: int = 20,
         prune_limit: int = 50,
@@ -2630,26 +2630,32 @@ class TortoiseSDK:
                     "issue": "contradictory", "suggested_action": "review",
                     "detail": {"via": via, "reason": "pair is both IMPL- and NAND-linked"},
                 })
-            for pid in (frm, to):
-                if pid in stale_endpoint:
-                    display_status = statuses.get(pid)
-                    if display_status not in STALE_TERMINAL_STATUSES:
-                        # Legacy invalidate: status stayed 'live' but the
-                        # outdated=true flag marks it stale — report the
-                        # signal that actually made it stale.
-                        display_status = "outdated" if outdated.get(pid) \
-                            else (display_status or "unknown")
-                    entries.append({
-                        "from": frm, "to": to, "relation": rel,
-                        "issue": "stale",
-                        "suggested_action": "re-point" if pid in successors else "prune",
-                        "detail": {
-                            "via": via, "stale_endpoint": pid,
-                            "status": display_status,
-                            **({"successor": successors[pid]} if pid in successors else {}),
-                        },
-                    })
-                    break  # one stale entry per edge
+            # Prefer the stale endpoint that HAS a CORRECTS successor (so
+            # the actionable re-point surfaces); otherwise the first stale
+            # endpoint (Qwen gate, PR #933).
+            stale_pids = [p for p in (frm, to) if p in stale_endpoint]
+            chosen = next((p for p in stale_pids if p in successors), None)
+            if chosen is None and stale_pids:
+                chosen = stale_pids[0]
+            if chosen is not None:
+                pid = chosen
+                display_status = statuses.get(pid)
+                if display_status not in STALE_TERMINAL_STATUSES:
+                    # Legacy invalidate: status stayed 'live' but the
+                    # outdated=true flag marks it stale — report the
+                    # signal that actually made it stale.
+                    display_status = "outdated" if outdated.get(pid) \
+                        else (display_status or "unknown")
+                entries.append({
+                    "from": frm, "to": to, "relation": rel,
+                    "issue": "stale",
+                    "suggested_action": "re-point" if pid in successors else "prune",
+                    "detail": {
+                        "via": via, "stale_endpoint": pid,
+                        "status": display_status,
+                        **({"successor": successors[pid]} if pid in successors else {}),
+                    },
+                })
             for pid in (frm, to):
                 if pid in contested:
                     detail = {"via": via, "contested_endpoint": pid,
@@ -2673,7 +2679,8 @@ class TortoiseSDK:
             seen.add(k)
             unique.append(e)
         issue_order = {"contradictory": 0, "stale": 1, "contested": 2}
-        unique.sort(key=lambda x: (issue_order[x["issue"]], x["from"], x["to"]))
+        unique.sort(key=lambda x: (issue_order[x["issue"]], x["from"],
+                                   x["to"], x["relation"]))
 
         # Optional scope narrowing: keep entries touching the scoped pool.
         # An EMPTY scoped pool means "nothing in scope" (retrieval failure or

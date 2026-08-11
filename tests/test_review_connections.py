@@ -124,6 +124,20 @@ def test_add_below_threshold_excluded(sdk_factory, tmp_path):
     assert result["add"] == []
 
 
+def test_add_default_threshold_boundary(sdk_factory, tmp_path):
+    """A pair at 0.45 (inside the #399-calibrated 'semantically related'
+    band 0.35-0.51) IS suggested under the default threshold 0.40."""
+    sdk = sdk_factory(tmp_path)
+    p1 = sdk.create_point("statement", "alpha")
+    p2 = sdk.create_point("statement", "beta")
+    result = sdk.review_connections(
+        mode="add",
+        similarity_fn=_sim({(p1["id"], p2["id"]): 0.45}),
+    )
+    assert len(result["add"]) == 1
+    assert result["add"][0]["similarity"] == pytest.approx(0.45)
+
+
 def test_add_surfaces_iml_only_for_similar_unconnected(sdk_factory, tmp_path):
     """Every suggestion carries suggested_relation IMPL + a reason."""
     sdk = sdk_factory(tmp_path)
@@ -373,6 +387,9 @@ def test_prune_scope_empty_pool_returns_empty(sdk_factory, tmp_path):
 
     result = sdk.review_connections(mode="prune", scope="zzz-no-such-topic-xyz")
     assert result["prune"] == []
+
+
+def test_prune_flags_contradictory_impl_nand(sdk_factory, tmp_path):
     """A pair linked by BOTH an IMPL and a NAND operator is contradictory."""
     sdk = sdk_factory(tmp_path)
     a = sdk.create_point("statement", "the deployment succeeded")
