@@ -2576,7 +2576,7 @@ class TortoiseSDK:
         if stale_endpoint:
             rows = proj.g.query(
                 "MATCH (s:Point)-[:CORRECTS]->(o:Point) "
-                "WHERE o.id IN $ids RETURN o.id, s.id",
+                "WHERE o.id IN $ids RETURN o.id, s.id ORDER BY s.id",
                 params={"ids": sorted(stale_endpoint)},
             ).result_set
             for oid, sid in rows:

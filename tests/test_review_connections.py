@@ -376,6 +376,28 @@ def test_prune_legacy_operator_without_idx(sdk_factory, tmp_path):
     assert all(e["detail"]["via"] == "legacy-op-1" for e in hits)
 
 
+def test_prune_stale_prefers_successor_endpoint(sdk_factory, tmp_path):
+    """When BOTH endpoints of an edge are stale, the entry reports the
+    endpoint WITH a CORRECTS successor (action re-point), not the first
+    stale endpoint (Qwen gate, PR #933)."""
+    sdk = sdk_factory(tmp_path)
+    old_a = sdk.create_point("statement", "retracted claim")   # no successor
+    old_b = sdk.create_point("statement", "superseded claim")  # successor
+    repl = sdk.create_point("statement", "replacement claim")
+    sdk.retract_point(old_a["id"])
+    sdk.supersede_point(old_b["id"], repl["id"])
+    sdk.create_operator("IMPL", old_a["id"], [old_b["id"]])
+
+    result = sdk.review_connections(mode="prune")
+    stale = _edge_prune(result["prune"], "stale")
+    hit = [e for e in stale
+           if {e["from"], e["to"]} == {old_a["id"], old_b["id"]}]
+    assert len(hit) == 1, f"expected 1 stale entry for the pair, got {stale}"
+    assert hit[0]["detail"]["stale_endpoint"] == old_b["id"]
+    assert hit[0]["suggested_action"] == "re-point"
+    assert hit[0]["detail"]["successor"] == repl["id"]
+
+
 def test_prune_scope_empty_pool_returns_empty(sdk_factory, tmp_path):
     """A scoped prune whose scope matches nothing returns [] — never the
     whole-graph flag list (fail quiet, consistent with mode=add)."""
