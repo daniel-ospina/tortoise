@@ -28,6 +28,18 @@ except ImportError:
     psycopg2 = None  # type: ignore
     _HAS_PSYCOPG2 = False
 
+# Post-flip guard (#669): if TORTOISE_AUDIT_DSN is configured but psycopg2 is
+# NOT installed, the logger would silently operate in JSONL-only mode — the
+# exact failure seen when the audit DSN came online and the hosted image
+# lacked the postgres extra. Be LOUD at import so a misconfiguration cannot
+# hide (the fallback still works; this is a boot-time warning, not a crash).
+if os.environ.get("TORTOISE_AUDIT_DSN") and not _HAS_PSYCOPG2:
+    _logger.warning(
+        "TORTOISE_AUDIT_DSN is set but psycopg2 is not installed — audit "
+        "will fall back to JSONL. Install the 'postgres' extra "
+        "(pip install -e '.[postgres]')."
+    )
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
