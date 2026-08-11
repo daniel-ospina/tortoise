@@ -1269,3 +1269,50 @@ def team_tier(cp, team_id: str) -> str | None:
     registry tier read)."""
     rows = cp.query("teams", select=["tier"], filters=[("id", "eq", team_id)])
     return rows[0].get("tier") if rows else None
+
+
+# ── Write-op metering (post-#669 flip fix — #669) ───────────────────────────
+#
+# Metering previously stored MeteringRecord nodes in the registry graph —
+# post-flip that RECREATES the deleted registry on every /v1/team call and
+# every write-op increment. Supabase mode stores rows in metering_records
+# (0014): PK (team_id, period), service-role RLS.
+
+
+def metering_get(cp, team_id: str, period: str) -> int:
+    """Write-ops used by a team in a billing period (0 when absent)."""
+    rows = cp.query(
+        "metering_records",
+        select=["write_ops"],
+        filters=[("team_id", "eq", team_id), ("period", "eq", period)],
+    )
+    return int(rows[0]["write_ops"]) if rows else 0
+
+
+def metering_increment(cp, team_id: str, period: str, n: int = 1) -> int:
+    """Increment the team's write-op counter for the period; returns the new
+    count. Best-effort by contract (metering failures never block a write):
+    the caller swallows exceptions — but the PATCH+verify here is atomic
+    enough for the single-writer app model (one Fly app instance processes
+    writes; the registry MERGE had the same property)."""
+    rows = cp.query(
+        "metering_records",
+        select=["write_ops"],
+        filters=[("team_id", "eq", team_id), ("period", "eq", period)],
+    )
+    if rows:
+        new = int(rows[0]["write_ops"]) + n
+        cp.query(
+            "metering_records",
+            method="PATCH",
+            filters=[("team_id", "eq", team_id), ("period", "eq", period)],
+            json_body={"write_ops": new,
+                       "updated_at": datetime.now(timezone.utc).isoformat()},
+        )
+        return new
+    cp.query(
+        "metering_records",
+        method="POST",
+        json_body={"team_id": team_id, "period": period, "write_ops": n},
+    )
+    return n
