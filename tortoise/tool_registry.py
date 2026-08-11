@@ -409,6 +409,21 @@ TOOL_REGISTRY: list[ToolDefinition] = [
         http_policy=False,
         sdk_method="ingest_corpus",
     ),
+    ToolDefinition(
+        name="tortoise_ingest",
+        description="Heterogeneous bulk write (epic #888 W4) — one call writes points + "
+                    "entities + sources + connections coherently (nodes first, then "
+                    "connections). Connections carrying 'operator' (IMPL/NAND) create "
+                    "operator Points per the reification rule (v3.5 §8); connections "
+                    "carrying 'relation' stay plain structural edges. Local refs address "
+                    "bundle items. granularity='bulk' (default) returns aggregated counts; "
+                    "granularity='granular' returns per-item results. Idempotent-ish: "
+                    "points dedup by content hash + kind, sources by url, operators by "
+                    "input set.",
+        annotations=_idem(),
+        http_policy=True,
+        sdk_method="ingest",
+    ),
     # ── Taxonomy ──────────────────────────────────────────────────
     ToolDefinition(
         name="tortoise_taxonomy",
@@ -891,6 +906,7 @@ GROUP_BY_NAME: dict[str, str] = {
     "tortoise_update_entity": "graph", "tortoise_delete_entity": "graph",
     "tortoise_list_sources": "sources", "tortoise_create_source": "sources",
     "tortoise_create_document": "sources", "tortoise_ingest_corpus": "sources",
+    "tortoise_ingest": "graph",
     # sessions
     "tortoise_session_context": "sessions", "tortoise_get_session": "sessions",
     "tortoise_index_sessions": "sessions", "tortoise_search_sessions": "sessions",

@@ -8,6 +8,21 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# Canonical structural-edge predicate vocabulary (ONTOLOGY §3.2/§3.3 + #391).
+# Hoisted from create_edge so SDK surfaces (e.g. TortoiseSDK.ingest, epic #888
+# W4) can validate relation names WITHOUT string-duplicating the set.
+_VALID_EDGE_PREDICATES = frozenset({
+    'performs', 'produces', 'uses', 'authoredBy', 'ownedBy', 'managedBy',
+    'hasMember', 'holdsRole', 'memberOf', 'reportsTo',
+    'participatesIn', 'hasPart', 'related', 'dependsOn', 'references',
+    'wasDerivedFrom',
+    # #391: about* edges (ONTOLOGY §3.2/§3.3) were only creatable via
+    # create_about_edge — the generic create_edge set missed them.
+    'aboutSubject', 'aboutObject', 'aboutEvent', 'aboutDocument',
+    'aboutSource', 'aboutAction',
+})
+
+
 class _EdgeHandlers:
     """Mixin: edge creation, about edges, source linking, edge stats."""
 
@@ -250,16 +265,7 @@ class _EdgeHandlers:
     def create_edge(self, source_id: str, target_id: str, predicate: str) -> bool:
         """Create a named edge between two entities by their IDs.
         Matches target by id OR eventId (Event nodes use eventId as key)."""
-        valid_predicates = {
-            'performs', 'produces', 'uses', 'authoredBy', 'ownedBy', 'managedBy',
-            'hasMember', 'holdsRole', 'memberOf', 'reportsTo',
-            'participatesIn', 'hasPart', 'related', 'dependsOn', 'references',
-            'wasDerivedFrom',
-            # #391: about* edges (ONTOLOGY §3.2/§3.3) were only creatable via
-            # create_about_edge — the generic create_edge set missed them.
-            'aboutSubject', 'aboutObject', 'aboutEvent', 'aboutDocument',
-            'aboutSource', 'aboutAction',
-        }
+        valid_predicates = _VALID_EDGE_PREDICATES
         if predicate not in valid_predicates:
             raise ValueError(f"Unknown predicate: {predicate}")
         # Resolve endpoints via index-backed labeled lookups (issue #327).
