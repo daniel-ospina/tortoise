@@ -546,6 +546,430 @@ class StateRanker:
         return out
 
 
+# ── GapsRanker (recall UC2, #898 Wave B) ──────────────────────────────
+# UC2 "gaps" recall surfaces the weak links of a reasoning cycle: claims that
+# are LOAD-BEARING (the graph leans on them — they provide confidence to
+# others via IMPL, or actively attack via a strong NAND) but are themselves
+# POORLY SUPPORTED (few incoming IMPL, no Source, low confidence). This is a
+# graph-STRUCTURE query (epistemic load vs epistemic support), not semantic
+# similarity:
+#
+#     load    = outgoing IMPL + outgoing NAND edge count
+#     support = incoming IMPL + extractedFrom→Source edge count
+#     score   = load / (1 + support)          # "load high AND support low"
+#
+# Reification rule (ontology v3.5 §8): operator-less IMPL/NAND edges may
+# exist, so load/support read IMPL/NAND edges WHETHER operator-mediated or
+# direct:
+#   * operator-mediated: the operator Point carries IMPL/NAND edges to its
+#     inputs with ``idx`` (0 = source, >=1 = target) — an edge with idx=0
+#     INTO n means n is the operator's source (n implies/attacks the
+#     targets → load); an IMPL edge with idx>=1 INTO n means n is a target
+#     (n is supported → support).
+#   * direct (reification): a bare (s)-[:IMPL]->(n) edge from a non-operator
+#     Point or an Event is incoming support; (n)-[:IMPL|NAND]->(t) to a
+#     non-operator Point is outgoing load.
+# Incoming NAND is NOT support (it is contradiction/contention) — surfaced
+# separately as ``incoming_nand`` + ``contested``, never scored as support.
+#
+# Confidence (EP posterior mean, same read as StateRanker) is surfaced in the
+# breakdown as a diagnostic — the rank itself stays structural. The
+# min_load / max_support thresholds that define a "gap" are enforced by the
+# caller (recall_gaps), mirroring recall_state's min_confidence floor.
+#
+# ``projection`` may be None for pure unit testing — graph signals are then
+# read from the result dicts themselves (keys ``gaps_outgoing_impl``,
+# ``gaps_outgoing_nand``, ``gaps_incoming_impl``, ``gaps_incoming_nand``,
+# ``gaps_source_count``, ``gaps_confidence``, ``gaps_has_ep``,
+# ``gaps_variance``, ``gaps_contested``). Absent keys degrade to zero/neutral
+# — never a penalty.
+
+# Default gap thresholds (enforced by recall_gaps, not the ranker).
+DEFAULT_GAPS_MIN_LOAD = 1       # load-bearing: ≥1 outgoing IMPL/NAND edge
+DEFAULT_GAPS_MAX_SUPPORT = 2    # "few incoming IMPL, no Source" boundary
+
+
+class GapsRanker:
+    """UC2 "gaps" recall ranking — epistemic load vs epistemic support (#898).
+
+    score = load / (1 + support)
+
+    High load AND low support → high score (a gap worth investigating).
+    Zero load → score 0.0 (an isolated claim is NOT a gap — nothing leans
+    on it). High support collapses the score (a claim the graph already
+    supports is not under-supported).
+
+    ``projection`` may be None for pure unit testing — graph signals are
+    then read from the result dicts themselves (keys ``gaps_*``, see class
+    docstring).
+    """
+
+    def __init__(self, projection=None):
+        self.projection = projection
+
+    # ── Public API ────────────────────────────────────────────────────
+
+    def rerank(self, results: list[dict]) -> list[dict]:
+        """Score claim results with the load/support formula.
+
+        Each result needs at least ``id``. Returns the list sorted by score
+        descending; input dicts are NOT mutated — annotated copies are
+        returned with a ``gaps_ranking`` breakdown:
+
+        ``{outgoing_impl, outgoing_nand, load, incoming_impl, incoming_nand,
+          source_count, support, confidence, confidence_source, score}``
+        """
+        if not results:
+            return results
+
+        signals = {}
+        if self.projection is not None:
+            ids = [r.get("id") for r in results if r.get("id")]
+            try:
+                # Per-signal dicts carry per-id sub-dicts — merge the FIELDS
+                # (dict.update would REPLACE the whole value for an id,
+                # dropping earlier signals).
+                for part in (
+                    self._fetch_load_signals(ids),
+                    self._fetch_support_signals(ids),
+                    self._fetch_confidence_signals(ids),
+                ):
+                    for pid, fields in part.items():
+                        signals.setdefault(pid, {}).update(fields)
+            except Exception as e:  # pragma: no cover — defensive
+                logger.warning("GapsRanker signal fetch failed: %s", e)
+        else:
+            signals = self._embedded_signals(results)
+
+        ann: list[dict] = []
+        for r in results:
+            sig = signals.get(r.get("id"), {})
+            outgoing_impl = int(sig.get("outgoing_impl", 0))
+            outgoing_nand = int(sig.get("outgoing_nand", 0))
+            incoming_impl = int(sig.get("incoming_impl", 0))
+            incoming_nand = int(sig.get("incoming_nand", 0))
+            source_count = int(sig.get("source_count", 0))
+            load = outgoing_impl + outgoing_nand
+            support = incoming_impl + source_count
+            score = load / (1.0 + support)
+            confidence, conf_source = self._confidence_of(r, sig)
+            copy = dict(r)
+            copy["gaps_ranking"] = {
+                "outgoing_impl": outgoing_impl,
+                "outgoing_nand": outgoing_nand,
+                "load": load,
+                "incoming_impl": incoming_impl,
+                "incoming_nand": incoming_nand,
+                "source_count": source_count,
+                "support": support,
+                "confidence": round(confidence, 6),
+                "confidence_source": conf_source,
+                "score": round(score, 6),
+            }
+            if "variance" in sig:
+                copy["gaps_ranking"]["variance"] = round(sig["variance"], 6)
+                copy["gaps_ranking"]["contested"] = sig.get("contested", False)
+            ann.append(copy)
+
+        ann.sort(key=lambda r: r["gaps_ranking"]["score"], reverse=True)
+        return ann
+
+    # ── Signal computation ────────────────────────────────────────────
+
+    def _confidence_of(self, result: dict, signals: dict) -> tuple[float, str]:
+        """Confidence (posterior mean) + source label for one result.
+
+        Uncalibrated points fall back to the documented neutral 0.5 — same
+        convention as StateRanker (absence of measurement is NOT low support;
+        the STRUCTURE is what makes a gap)."""
+        has_ep = signals.get("has_ep")
+        if has_ep is None:
+            has_ep = bool(result.get("gaps_has_ep", False))
+        if "confidence" in signals:
+            conf = float(signals["confidence"])
+            return conf, ("posterior" if has_ep else "neutral")
+        embedded = result.get("gaps_confidence")
+        if isinstance(embedded, (int, float)):
+            return float(embedded), result.get("gaps_confidence_source", "posterior")
+        return NEUTRAL_CONFIDENCE, "neutral"
+
+    def _fetch_load_signals(self, ids: list[str]) -> dict[str, dict]:
+        """Outgoing epistemic load: IMPL/NAND edges where the claim is the
+        SOURCE — operator-mediated (idx=0) or direct to a non-operator Point.
+        count(DISTINCT edge) keeps each signal correct despite the optional
+        cross-product (an edge belongs to exactly one pattern)."""
+        if not ids:
+            return {}
+        rows = self.projection.g.query(
+            "MATCH (n:Point) WHERE n.id IN $ids "
+            "OPTIONAL MATCH (op:Point {is_operator:true})-[r1:IMPL|NAND]->(n) "
+            "  WHERE coalesce(r1.idx, 1) = 0 "
+            "OPTIONAL MATCH (n)-[r2:IMPL|NAND]->(m:Point) "
+            "  WHERE (m.is_operator IS NULL OR m.is_operator = false) "
+            "RETURN n.id, "
+            "  count(DISTINCT CASE WHEN type(r1) = 'IMPL' THEN r1 "
+            "                      WHEN type(r2) = 'IMPL' THEN r2 END) AS outgoing_impl, "
+            "  count(DISTINCT CASE WHEN type(r1) = 'NAND' THEN r1 "
+            "                      WHEN type(r2) = 'NAND' THEN r2 END) AS outgoing_nand",
+            params={"ids": ids},
+        ).result_set
+        return {row[0]: {"outgoing_impl": int(row[1]), "outgoing_nand": int(row[2])}
+                for row in rows}
+
+    def _fetch_support_signals(self, ids: list[str]) -> dict[str, dict]:
+        """Incoming epistemic support: IMPL edges where the claim is a TARGET
+        (operator-mediated idx>=1, or direct from a non-operator Point/Event),
+        plus extractedFrom→Source count. Incoming NAND is counted separately
+        (contention — never support)."""
+        if not ids:
+            return {}
+        rows = self.projection.g.query(
+            "MATCH (n:Point) WHERE n.id IN $ids "
+            "OPTIONAL MATCH (op:Point {is_operator:true, op_type:'IMPL'})-[r3:IMPL]->(n) "
+            "  WHERE coalesce(r3.idx, 0) >= 1 "
+            "OPTIONAL MATCH (s)-[r4:IMPL]->(n) "
+            "  WHERE (s:Point AND (s.is_operator IS NULL OR s.is_operator = false)) "
+            "     OR (s:Event) "
+            "OPTIONAL MATCH (n)-[r5:extractedFrom]->(src:Source) "
+            "OPTIONAL MATCH (opn:Point {is_operator:true, op_type:'NAND'})-[r6:NAND]->(n) "
+            "  WHERE coalesce(r6.idx, 1) >= 1 "
+            "RETURN n.id, "
+            "  count(DISTINCT r3) AS op_support, "
+            "  count(DISTINCT r4) AS direct_support, "
+            "  count(DISTINCT r5) AS source_count, "
+            "  count(DISTINCT r6) AS incoming_nand",
+            params={"ids": ids},
+        ).result_set
+        return {
+            row[0]: {
+                "incoming_impl": int(row[1]) + int(row[2]),
+                "source_count": int(row[3]),
+                "incoming_nand": int(row[4]),
+            }
+            for row in rows
+        }
+
+    def _fetch_confidence_signals(self, ids: list[str]) -> dict[str, dict]:
+        """EP posterior mean + contested — same read as StateRanker."""
+        if not ids:
+            return {}
+        rows = self.projection.g.query(
+            "MATCH (n:Point) WHERE n.id IN $ids "
+            "RETURN n.id, "
+            "  coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS alpha, "
+            "  coalesce(n.posterior_beta, n.ep_beta, 1.0) AS beta, "
+            "  (n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL) AS has_ep",
+            params={"ids": ids},
+        ).result_set
+        out = {}
+        for row in rows:
+            pid, alpha, beta, has_ep = row[0], float(row[1]), float(row[2]), bool(row[3])
+            variance = _beta_variance(alpha, beta)
+            out[pid] = {
+                "confidence": round(alpha / (alpha + beta), 6) if (alpha + beta) > 0 else NEUTRAL_CONFIDENCE,
+                "has_ep": has_ep,
+                "variance": variance,
+                "contested": has_ep and variance > CONTESTED_VARIANCE_THRESHOLD,
+            }
+        return out
+
+    def _embedded_signals(self, results: list[dict]) -> dict[str, dict]:
+        """Read gaps signals embedded in result dicts (projection=None)."""
+        out = {}
+        for r in results:
+            rid = r.get("id")
+            if not rid:
+                continue
+            sig = {}
+            for key in ("outgoing_impl", "outgoing_nand", "incoming_impl",
+                        "incoming_nand", "source_count"):
+                if isinstance(r.get(f"gaps_{key}"), (int, float)):
+                    sig[key] = int(r[f"gaps_{key}"])
+            if isinstance(r.get("gaps_confidence"), (int, float)):
+                sig["confidence"] = float(r["gaps_confidence"])
+            sig["has_ep"] = bool(r.get("gaps_has_ep", False))
+            if isinstance(r.get("gaps_variance"), (int, float)):
+                sig["variance"] = float(r["gaps_variance"])
+                sig["contested"] = bool(r.get("gaps_contested", False))
+            out[rid] = sig
+        return out
+
+
+# ── SubgraphExpander (recall UC3, #898 Wave B) ─────────────────────────
+# UC3 "subgraph" recall returns the COMPLETE connected subgraph for a
+# seed/topic — completeness-optimized (high recall, precision secondary).
+# Used before connecting a new document to the graph: the agent needs the
+# deep picture first, not a precision-ranked slice.
+#
+# Operation: resolve seed(s) → BFS-expand along ALL relationship types up to
+# ``depth`` hops → return the collected nodes PLUS the edges between them.
+#
+#   * ``completeness="full"`` (default): every relationship type is an edge
+#     of the subgraph (about*, extractedFrom, hasPart, mitigated_by, ...).
+#   * ``completeness="core"``: epistemic core only — IMPL|NAND edges.
+#   * Session/Tag nodes are bookkeeping containers, not knowledge — excluded
+#     from expansion; their CONTAINS/TAGGED edges never appear.
+#
+# Bounded, not exhaustive-until-crash: ``max_nodes`` caps the node count
+# (default 500) and ``depth`` is capped at 5. `truncated` in stats reports
+# whether the cap was hit.
+
+# Node labels that participate in the knowledge subgraph.
+SUBNODE_LABELS = (
+    "Point", "Object", "Subject", "Event", "Source", "Document",
+)
+_SUBNODE_LABEL_WHERE = " OR ".join(f"m:{lab}" for lab in SUBNODE_LABELS)
+
+
+class SubgraphExpander:
+    """Complete connected-subgraph expansion for a seed (#898 UC3)."""
+
+    def __init__(self, projection):
+        self.projection = projection
+
+    # ── Public API ────────────────────────────────────────────────────
+
+    def expand(self, seeds: list[str], *,
+               depth: int = 2,
+               completeness: str = "full",
+               max_nodes: int = 500) -> dict:
+        """Expand from seed node ids to the connected subgraph.
+
+        Returns ``{nodes, edges, stats}``:
+        - nodes: [{id, type, content, kind, is_operator, status, confidence}]
+        - edges: [{source, type, target}] — BOTH endpoints in the node set
+        - stats: {node_count, edge_count, depth, seed_count, truncated}
+        """
+        if depth < 1 or depth > 5:
+            raise ValueError(f"depth must be 1-5, got {depth}")
+        if completeness not in ("core", "full"):
+            raise ValueError(
+                f"completeness must be 'core' or 'full', got {completeness!r}")
+        if max_nodes < 10 or max_nodes > 5000:
+            raise ValueError(f"max_nodes must be 10-5000, got {max_nodes}")
+        if not seeds:
+            return {"nodes": [], "edges": [],
+                    "stats": {"node_count": 0, "edge_count": 0, "depth": 0,
+                               "seed_count": 0, "truncated": False}}
+
+        rel_pattern = ":IMPL|NAND" if completeness == "core" else ""
+        # Seeds are part of the subgraph — never dropped from the node set.
+        nodes: dict[str, dict] = {sid: {"id": sid} for sid in seeds if sid}
+        edges: dict[tuple[str, str, str], dict] = {}
+        frontier: list[str] = [s for s in seeds if s]
+        truncated = False
+
+        for _hop in range(depth):
+            if not frontier:
+                break
+            next_frontier: list[str] = []
+            # Batch-fetch neighbors (both directions) + node payloads.
+            neighbor_ids = self._neighbors(frontier, rel_pattern, edges)
+            for nid in neighbor_ids:
+                if nid in nodes:
+                    continue
+                if len(nodes) >= max_nodes:
+                    truncated = True
+                    break
+                nodes[nid] = {"id": nid}
+                next_frontier.append(nid)
+            if truncated:
+                break
+            frontier = next_frontier
+
+        # Node payloads (single batch query for display + metadata).
+        self._enrich(nodes)
+        # Drop seeds that did not resolve to a graph node (dangling id).
+        for nid in [nid for nid, n in nodes.items() if "type" not in n]:
+            del nodes[nid]
+        # Keep only edges whose endpoints are both in the final node set
+        # (a capped expansion may have dangling edges to excluded nodes).
+        node_ids = set(nodes)
+        kept = [
+            e for e in edges.values()
+            if e["source"] in node_ids and e["target"] in node_ids
+        ]
+        kept.sort(key=lambda e: (e["source"], e["type"], e["target"]))
+        return {
+            "nodes": list(nodes.values()),
+            "edges": kept,
+            "stats": {
+                "node_count": len(nodes),
+                "edge_count": len(kept),
+                "depth": depth,
+                "seed_count": len(seeds),
+                "truncated": truncated,
+            },
+        }
+
+    # ── Expansion internals ───────────────────────────────────────────
+
+    def _neighbors(self, frontier: list[str], rel_pattern: str,
+                   edges: dict[tuple[str, str, str], dict]) -> list[str]:
+        """One BFS hop: all neighbors of the frontier via (optionally
+        restricted) relationship types, recording edges as we go.
+
+        ``rel_pattern`` is the edge-type pattern inside [ ] — empty string
+        for all types, ":IMPL|NAND" for the epistemic core."""
+        edge_decl = f"[r{rel_pattern}]"
+        ids: list[str] = []
+        # out: edges FROM frontier nodes (n)-[r]->(m) → record n→m, neighbor m.
+        rows = self.projection.g.query(
+            f"MATCH (n) WHERE n.id IN $frontier "
+            f"MATCH (n)-{edge_decl}->(m) "
+            f"WHERE {_SUBNODE_LABEL_WHERE} RETURN n.id, type(r), m.id",
+            params={"frontier": frontier},
+        ).result_set
+        for src_id, rel, tgt_id in rows:
+            edges.setdefault((src_id, rel, tgt_id),
+                             {"source": src_id, "type": rel, "target": tgt_id})
+            ids.append(tgt_id)
+        # in: edges INTO frontier nodes (m)-[r]->(n) → record m→n, neighbor m.
+        rows = self.projection.g.query(
+            f"MATCH (n) WHERE n.id IN $frontier "
+            f"MATCH (m)-{edge_decl}->(n) "
+            f"WHERE {_SUBNODE_LABEL_WHERE} RETURN m.id, type(r), n.id",
+            params={"frontier": frontier},
+        ).result_set
+        for src_id, rel, tgt_id in rows:
+            edges.setdefault((src_id, rel, tgt_id),
+                             {"source": src_id, "type": rel, "target": tgt_id})
+            ids.append(src_id)
+        return ids
+
+    def _enrich(self, nodes: dict[str, dict]) -> None:
+        """Fill node metadata (type label, display content, kind, status,
+        confidence) in one batch query."""
+        if not nodes:
+            return
+        rows = self.projection.g.query(
+            "MATCH (n) WHERE n.id IN $ids "
+            "RETURN n.id, labels(n)[0] AS label, "
+            "  coalesce(n.content, n.name, n.title, n.url, '') AS display, "
+            "  coalesce(n.pointKind, n.objectKind, n.subjectKind, "
+            "           n.eventKind, n.documentKind, n.sourceKind, '') AS kind, "
+            "  coalesce(n.is_operator, false) AS is_operator, "
+            "  coalesce(n.status, '') AS status, "
+            "  CASE WHEN labels(n)[0] = 'Point' THEN coalesce(n.confidence, 0.5) "
+            "       ELSE null END AS confidence",
+            params={"ids": list(nodes)},
+        ).result_set
+        for nid, label, display, kind, is_op, status, confidence in rows:
+            node = nodes.get(nid)
+            if node is None:
+                continue
+            node["type"] = (label or "").lower()
+            node["content"] = display or ""
+            if kind:
+                node["kind"] = kind
+            if is_op:
+                node["is_operator"] = True
+            if status:
+                node["status"] = status
+            if confidence is not None:
+                node["confidence"] = round(float(confidence), 6)
+
+
 def _similarity_of(result: dict) -> float:
     """Extract the similarity signal from a result dict.
 

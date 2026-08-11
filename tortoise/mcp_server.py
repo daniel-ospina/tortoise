@@ -704,6 +704,12 @@ def tortoise_search(query: str | None = None, kind: str | None = None,
 # UC1 default exponents/weights for the multiplicative gate (Wave A).
 _RECALL_STATE_DEFAULTS = {"relevance_exp": 1.0, "confidence_exp": 1.0,
                           "centrality_weight": 0.10}
+# UC2 gap thresholds (Wave B).
+_RECALL_GAPS_DEFAULTS = {"min_load": 1, "max_support": 2}
+# UC3 subgraph expansion (Wave B).
+_RECALL_SUBGRAPH_DEFAULTS = {"depth": 2, "completeness": "full"}
+# Valid recall modes (preset + override pattern, #898 design-decision comment).
+_RECALL_MODES = ("state", "gaps", "subgraph", "custom")
 
 
 def tortoise_recall(query: str | None = None,
@@ -714,8 +720,13 @@ def tortoise_recall(query: str | None = None,
                     min_confidence: float = 0.0,
                     relevance_exp: float | None = None,
                     confidence_exp: float | None = None,
-                    centrality_weight: float | None = None) -> dict:
-    """Epistemic recall — three intents via mode (preset + override pattern).
+                    centrality_weight: float | None = None,
+                    seed: str | None = None,
+                    depth: int | None = None,
+                    completeness: str | None = None,
+                    min_load: int | None = None,
+                    max_support: int | None = None) -> dict:
+    """Epistemic recall — four intents via mode (preset + override pattern).
 
     mode="state" (default, UC1): "what is true and high-confidence right
     now". Multiplicative confidence gate
@@ -726,34 +737,80 @@ def tortoise_recall(query: str | None = None,
     high-contention NANDs and mitigations, and flags contested claims with
     attached counter-evidence (never rank-penalized).
 
-    mode="gaps" / mode="subgraph" (UC2/UC3) are Wave B intents — scaffolded
-    here, not yet implemented.
+    mode="gaps" (UC2): load-bearing but under-supported claims — the weak
+    links of a reasoning cycle. Graph-structure query (epistemic load vs
+    epistemic support): score = load / (1 + support), with load = outgoing
+    IMPL + outgoing NAND edges and support = incoming IMPL +
+    extractedFrom→Source edges (reads IMPL/NAND whether operator-mediated
+    or direct — reification rule). Requires ``query`` (topic scope) or
+    ``kind`` (population scan). Preset: min_load=1, max_support=2, limit=20
+    (all overridable).
 
-    Per-mode defaults for relevance_exp/confidence_exp/centrality_weight are
-    set by the mode preset; every param is individually overridable.
+    mode="subgraph" (UC3): the COMPLETE connected subgraph for a
+    seed/topic — completeness-optimized (high recall, precision secondary),
+    used before connecting a new document. Requires ``seed`` (node id,
+    Source url, or topic text). Returns {nodes, edges, stats}.
 
-    Returns {"mode": ..., "results": [...]}; each result carries the
-    standard SearchResult shape plus recall_ranking + state-context keys.
+    mode="custom": raw parameters, full control — no preset defaults are
+    applied; every param must be set explicitly (or falls back to the
+    underlying function default).
+
+    Per-mode defaults are set by the preset; every param is individually
+    overridable per call.
+
+    Returns {"mode": ..., "results": [...]} (state/gaps/custom — each result
+    carries the standard SearchResult shape plus recall_ranking /
+    gaps_ranking breakdowns) or {"mode": "subgraph", "nodes": [...],
+    "edges": [...], "stats": {...}}.
     """
-    if mode not in ("state",):
+    if mode not in _RECALL_MODES:
         return {
             "mode": mode,
-            "error": f"recall mode {mode!r} is a Wave B intent (UC2 gaps / "
-                     f"UC3 subgraph) — not implemented in Wave A. Use "
-                     f"mode='state'.",
+            "error": f"recall mode {mode!r} not recognized — use "
+                     f"state|gaps|subgraph|custom.",
         }
-    defaults = _RECALL_STATE_DEFAULTS
-    results = _safe(
-        _get_team_sdk().recall_state, query, kind=kind, limit=limit,
-        include_superseded=include_superseded,
-        min_confidence=min_confidence,
-        relevance_exp=relevance_exp if relevance_exp is not None else defaults["relevance_exp"],
-        confidence_exp=confidence_exp if confidence_exp is not None else defaults["confidence_exp"],
-        centrality_weight=centrality_weight if centrality_weight is not None else defaults["centrality_weight"],
-    )
+
+    if mode == "gaps":
+        results = _safe(
+            _get_team_sdk().recall_gaps, query, kind=kind,
+            limit=limit if limit is not None else 20,
+            min_load=min_load if min_load is not None else _RECALL_GAPS_DEFAULTS["min_load"],
+            max_support=max_support if max_support is not None else _RECALL_GAPS_DEFAULTS["max_support"],
+            include_superseded=include_superseded,
+        )
+    elif mode == "subgraph":
+        results = _safe(
+            _get_team_sdk().recall_subgraph, seed or query,
+            depth=depth if depth is not None else _RECALL_SUBGRAPH_DEFAULTS["depth"],
+            completeness=completeness if completeness is not None else _RECALL_SUBGRAPH_DEFAULTS["completeness"],
+        )
+    elif mode == "custom":
+        # Raw params, full control — no preset clamping.
+        results = _safe(
+            _get_team_sdk().recall_state, query, kind=kind, limit=limit,
+            include_superseded=include_superseded,
+            min_confidence=min_confidence,
+            relevance_exp=relevance_exp if relevance_exp is not None else _RECALL_STATE_DEFAULTS["relevance_exp"],
+            confidence_exp=confidence_exp if confidence_exp is not None else _RECALL_STATE_DEFAULTS["confidence_exp"],
+            centrality_weight=centrality_weight if centrality_weight is not None else _RECALL_STATE_DEFAULTS["centrality_weight"],
+        )
+    else:  # state
+        defaults = _RECALL_STATE_DEFAULTS
+        results = _safe(
+            _get_team_sdk().recall_state, query, kind=kind, limit=limit,
+            include_superseded=include_superseded,
+            min_confidence=min_confidence,
+            relevance_exp=relevance_exp if relevance_exp is not None else defaults["relevance_exp"],
+            confidence_exp=confidence_exp if confidence_exp is not None else defaults["confidence_exp"],
+            centrality_weight=centrality_weight if centrality_weight is not None else defaults["centrality_weight"],
+        )
+
     # _safe returns an error dict on SDK exceptions — surface it at the TOP
-    # level so consumers never mis-parse results as a dict instead of a list.
+    # level so consumers never mis-parse results.
     if isinstance(results, dict) and "error" in results:
+        return {"mode": mode, **results}
+    if mode == "subgraph":
+        # recall_subgraph returns {nodes, edges, stats} — spread flat.
         return {"mode": mode, **results}
     return {"mode": mode, "results": results}
 
