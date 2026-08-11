@@ -181,10 +181,11 @@
     /* CTA */
     /* Hero CTA — same look as the CTA section's button, centered in the beat.
        The .beat overlay is pointer-events:none (fixed crossfade layers), so
-       re-enable on the interactive hero CTA — otherwise clicks pass through
-       and the button does nothing. */
+       the CTA must only receive events while its beat is visible. .beat.pe-on
+       (toggled by GSAP from the scrubbed opacity) sets pointer-events:auto on
+       the beat, which inherits to this link; when the beat fades out the link
+       becomes click-through — no mid-scroll accidental navigation (#881). */
     #beat-hero .cta-start {
-      pointer-events: auto;
       display: inline-block;
       background: var(--accent);
       color: var(--bg);
