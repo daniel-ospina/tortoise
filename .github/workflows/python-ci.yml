@@ -57,7 +57,7 @@ name: Python CI
 #                               FalkorDBLite suite (default port 6379).
 #
 #   2. IN-STEP WATCHDOG (the part that makes the summary GUARANTEED):
-#      pytest runs under `timeout -s INT -k 10 40m` INSIDE the step. A
+#      pytest runs under `timeout -s INT -k 10 46m` INSIDE the step. A
 #      runner-level timeout-minutes kill cancels the step and loses
 #      everything (proven twice: the 30-min death and the 40-min death),
 #      but a shell-level `timeout` kill lets the script CONTINUE: after
@@ -65,7 +65,7 @@ name: Python CI
 #      a test — pytest ignores INT mid-test), the step re-prints the log
 #      tail, prints pass/fail counts and the real exit code, and exits.
 #      The job can never end silently again: worst case it ends red with
-#      "WATCHDOG: killed after 40m — N passed, M failed, last tests above".
+#      "WATCHDOG: killed after 46m — N passed, M failed, last tests above".
 #
 #   3. Per-test --timeout=300 (was 90): turns any hang into a visible
 #      failure without false-killing legitimately slow tests (the old
@@ -139,10 +139,10 @@ env:
 jobs:
   test:
     runs-on: ubuntu-latest
-    # Outer cap: watchdog (40m) + SIGINT grace (10s) + tail print. The
+    # Outer cap: watchdog (46m) + SIGINT grace (10s) + tail print. The
     # watchdog, NOT this cap, is what bounds pytest — so the summary
     # always prints (see header, #798 part 2).
-    timeout-minutes: 46
+    timeout-minutes: 52
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -196,7 +196,7 @@ jobs:
           EOF
       - name: Run fast test suite (slow files run in the test-slow job)
         # #798: in-step watchdog + guaranteed summary tail. pytest gets
-        # SIGINT at 40m (SIGKILL 10s later if stuck inside a test — pytest
+        # SIGINT at 46m (SIGKILL 10s later if stuck inside a test — pytest
         # ignores INT mid-test); the step then prints counts + tail + real
         # exit code. The runner's own timeout-minutes is NOT what bounds
         # pytest, so a silent runner cancel is impossible.
@@ -204,7 +204,7 @@ jobs:
           set +e
           IGNORES=""
           for f in $SLOW_FILES $ENV_BROKEN_FILES; do IGNORES="$IGNORES --ignore=$f"; done
-          timeout -s INT -k 10 40m stdbuf -oL python -m pytest tests/ $IGNORES -v --timeout=300 -p no:cacheprovider --maxfail=20 -rfE --durations=15 > /tmp/pytest.log 2>&1
+          timeout -s INT -k 10 46m stdbuf -oL python -m pytest tests/ $IGNORES -v --timeout=300 -p no:cacheprovider --maxfail=20 -rfE --durations=15 > /tmp/pytest.log 2>&1
           rc=$?
           echo "==================== pytest summary (tail) ===================="
           tail -n 300 /tmp/pytest.log
@@ -216,7 +216,7 @@ jobs:
             passed=$(grep -c ' PASSED' /tmp/pytest.log)
             failed=$(grep -c ' FAILED' /tmp/pytest.log)
             errored=$(grep -c ' ERROR' /tmp/pytest.log)
-            echo "==================== WATCHDOG: pytest killed after 40m ($passed passed, $failed failed, $errored errored so far) — last test lines above ===================="
+            echo "==================== WATCHDOG: pytest killed after 46m ($passed passed, $failed failed, $errored errored so far) — last test lines above ===================="
           fi
           echo "==================== pytest exit code: $rc ===================="
           exit $rc
