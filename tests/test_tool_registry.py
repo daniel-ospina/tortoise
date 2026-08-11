@@ -81,11 +81,12 @@ class TestRegistryEquivalence:
             assert excluded not in HTTP_ALLOWED, f"{excluded} must be HTTP-excluded"
 
     def test_registry_count(self):
-        """71 tools — 60 existing + 6 onboarding (#498/#499/#500) + 1
+        """79 tools — 60 existing + 6 onboarding (#498/#499/#500) + 1
         human-approval (#531) + 1 #540 + 2 #432 (events_poll, retract_point)
-        + 1 #913 (review_connections)."""
+        + 1 #913 (review_connections) + 8 from the #888/#913 consolidation
+        train (W2/W3/W4 write+bulk consolidation, no-regret surfaces)."""
         from tortoise.tool_registry import TOOL_REGISTRY
-        assert len(TOOL_REGISTRY) == 71, f"Expected 71, got {len(TOOL_REGISTRY)}"
+        assert len(TOOL_REGISTRY) == 79, f"Expected 79, got {len(TOOL_REGISTRY)}"
         names = {t.name for t in TOOL_REGISTRY}
         onboarding = {"tortoise_onboarding_demo_create", "tortoise_onboarding_state",
                       "tortoise_onboarding_session_recording",
