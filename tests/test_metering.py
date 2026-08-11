@@ -13,6 +13,7 @@ import pytest
 
 from tortoise.metering import (
     _current_period,
+    _ops_allowance,
     _reset_thresholds_for_tests,
     _thresholds_fired,
     get_current_usage,
@@ -273,7 +274,94 @@ class TestGetCurrentUsage:
         sdk.close()
 
 
+# ── Supabase-mode degradation (fault injection, #923) ────────────────────
+
+class TestGetCurrentUsageSupabaseDegrade:
+    """A control-plane blip must never block reads: the Supabase branch of
+    get_current_usage degrades to the zero-usage dict (mirroring the
+    registry path) instead of raising (which 500'd /v1/team)."""
+
+    def test_erroring_cp_returns_zero_usage_dict(self, monkeypatch, caplog):
+        from tortoise.supabase_control import is_supabase_enabled
+        from tests.fake_control_plane import ErrorControlPlane
+
+        # Force the Supabase branch
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "supabase")
+        monkeypatch.setenv("SUPABASE_URL", "https://x.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc")
+        assert is_supabase_enabled() is True
+
+        # Fault injection: every control-plane read raises (metering_get AND
+        # team_tier both query through cp.query → RuntimeError).
+        monkeypatch.setattr(
+            "tortoise.supabase_control.get_control_plane",
+            lambda: ErrorControlPlane(),
+        )
+
+        with caplog.at_level(logging.WARNING):
+            usage = get_current_usage("team-blip-001")  # must not raise
+
+        assert usage["write_ops_used"] == 0
+        assert usage["write_ops_limit"] == _ops_allowance("free")
+        assert usage["period"] == _current_period()
+        assert usage["overage_eligible"] is False
+        assert usage["overage_cost_usd"] is None
+        # The failure is logged, not raised
+        assert any(
+            "metering usage query failed" in r.message
+            for r in caplog.records
+        )
+
+    def test_erroring_cp_with_used_ops_still_degrades(self, monkeypatch):
+        """Even a team with recorded usage gets the zero-usage view when the
+        control plane errors — reads never fail, usage may read stale-low."""
+        from tests.fake_control_plane import ErrorControlPlane
+
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "supabase")
+        monkeypatch.setenv("SUPABASE_URL", "https://x.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc")
+        monkeypatch.setattr(
+            "tortoise.supabase_control.get_control_plane",
+            lambda: ErrorControlPlane(),
+        )
+
+        usage = get_current_usage("team-blip-002")
+        assert usage["write_ops_used"] == 0
+        assert usage["overage_cost_usd"] is None
+
+
 # ── Period rollover ─────────────────────────────────────────────────────────
+
+    def test_healthy_cp_returns_real_usage(self, monkeypatch):
+        """Control test (VGATE #923): a healthy Supabase control plane must
+        return REAL usage — the fault-injection tests above must not mask a
+        broken happy path."""
+        import tortoise.metering as m
+        from tests.fake_control_plane import FakeControlPlane
+
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "supabase")
+        monkeypatch.setenv("SUPABASE_URL", "https://x.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc")
+        import tortoise.supabase_control as sc
+
+        # pro tier: 55,000 ops used this period — over the allowance → overage
+        fake = FakeControlPlane({
+            "metering_records": [
+                {"team_id": "team-1", "period": _current_period(),
+                 "write_ops": 55000},
+            ],
+            "teams": [{"id": "team-1", "tier": "pro"}],
+        })
+        monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
+
+        usage = m.get_current_usage("team-1")
+        assert usage["write_ops_used"] == 55000
+        assert usage["period"] == _current_period()
+        assert usage["overage_eligible"] is True  # pro tier
+        # overage beyond the pro allowance, rounded up to the 10k block
+        assert usage["overage_cost_usd"] is not None
+        assert usage["overage_cost_usd"] > 0
+
 
 class TestPeriodRollover:
     def test_period_is_calendar_month_utc(self):
