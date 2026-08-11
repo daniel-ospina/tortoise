@@ -950,8 +950,6 @@ def internal_client():
 
     old_key = os.environ.get("FASTAPI_INTERNAL_KEY", "")
     os.environ["FASTAPI_INTERNAL_KEY"] = _INTERNAL_KEY
-    # Force reload the module-level constant
-    ha_mod._INTERNAL_KEY = _INTERNAL_KEY
 
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test.db")
@@ -966,7 +964,6 @@ def internal_client():
             _restore_tortoise_sdk_init(_orig_init)
             app.dependency_overrides.clear()
             os.environ["FASTAPI_INTERNAL_KEY"] = old_key
-            ha_mod._INTERNAL_KEY = old_key
 
 
 class TestInternalProvision:
