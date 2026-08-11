@@ -1,120 +1,102 @@
 ---
-title: "Mining System Requirements v1 — from owner review (2026-08-09)"
+title: "Mining System Requirements v2 — from owner review (2026-08-09)"
 type: requirements
 domain: operations
 doc_status: draft
 created: 2026-08-09
+updated: 2026-08-09 (v2 — R5 corrected, R6 expanded, R8 testability contract)
 ownedBy: epistemic-team
 governingAgreement: "#753, #312"
+epic: value-first mining system (TBD — filed via epic pipeline)
 ---
 
 > **These are REQUIREMENTS for the value-first mining system, derived from the product
-> owner's review of the gold-window draft.** Each requirement is traced to the review
-> comment that produced it. The system is NON-DETERMINISTIC — these requirements define
-> the *behavior contract*; testing is distributional (precision/recall over labeled
-> windows), not exact-match. A gold window is a rubric definition, not an oracle.
+> owner's review.** This is a FRAMING document — the basis for epic research, scoping,
+> and planning. It deliberately does NOT specify solutions. The system is stochastic;
+> requirements define the *behavior contract*; testability is defined in R8.
 
 ---
 
 ## R1 — Decisions are not Events
 
-**Review input:** *"D1: it's not a decision. It's just an event 'repaired a thing'"* … *"D12: not a decision, just an event, might be redundant with an issue-completion event."*
+**Review input:** *"D1: it's not a decision. It's just an event 'repaired a thing'"* … *"D12: not a decision, just an event."*
 
-**Requirement:** The extractor MUST distinguish **epistemic decisions** (commitments made: "we decided to X", "we will X") from **episodic events** (things that happened: "repaired X", "shipped X", "fixed X").
+**Requirement:** The extractor MUST distinguish **epistemic decisions** (commitments made) from **episodic events** (things that happened).
 
-- A decision becomes a **Point** (pointKind `decision`): durable, propagates confidence, queryable as belief.
-- An event becomes an **Event node** (occurrence): recorded, linked to what it produced, but NOT a belief with confidence.
-- Trigger distinction: "did / repaired / fixed / shipped / completed" → event; "decided / will / should / chose / we're going with" → decision. The classifier must NOT stamp every "we did X" as a decision.
-- Output shape: the mining system emits a typed stream `{decisions[], events[], claims[], entities[]}` — layer-correct from the start.
+- Decision → Point (`decision`): durable, propagates confidence.
+- Event → Event node (occurrence): recorded, linked to what it produced, not a belief.
+- "did / repaired / fixed / shipped / completed" → event; "decided / will / should / chose" → decision. "We did X" is NOT a decision.
+- Output is layer-correct from the start: a typed stream `{decisions[], events[], claims[], entities[]}`.
 
 ## R2 — One point, one decision (atomicity)
 
-**Review input:** *"D6: it's not one decision, more like 3 that shouldn't be lumped together"* … *"D7: 'warrants deferred' + 'break-even via cost cut' — looks like trying to put too much into a single point"* … *"D10: sounds like 2 decisions."*
+**Review input:** *"D6: more like 3 that shouldn't be lumped together."*
 
-**Requirement:** Each extracted decision Point MUST be **atomic — a single commitment**.
-
-- Compound statements ("tiers are feature baselines AND usage is metered AND no capture caps") MUST be split into separate Points.
-- Rationale/mechanism must not be fused into the decision point (the *what* and the *why-it-pays-for-itself* are different decisions if they're independently made).
-- Splitting is the extractor's job at classification time — do not post-process compound points.
-- Acceptance proxy: per-window, the number of distinct commitments the extractor emits approximates the number a careful human would list (measured distributionally, not exactly).
+**Requirement:** Each decision Point is **atomic — a single commitment.** Compound statements split. The *what* and the *why-it-pays-for-itself* are different decisions when independently made. Splitting happens at classification time.
 
 ## R3 — Process decisions attach to the work item, not the graph
 
-**Review input:** *"D11: ok but it's a process decision and those need to be attached to the right place (the epic/issue/work item)."*
+**Review input:** *"D11: attach to the right place (the epic/issue/work item)."*
 
-**Requirement:** The extractor MUST distinguish **product-knowledge decisions** from **process/governance decisions** ("validate the rubric on 2 windows first", "record this on the issue").
+**Requirement:** The extractor MUST distinguish **product-knowledge decisions** from **process/governance decisions**. Process decisions are NOT epistemic Points; they route to the work item (issue/epic) where an integration exists, or are dropped with a logged reason.
 
-- Process decisions are NOT emitted as epistemic Points. At most, they surface as a tagged note (e.g., pointKind or a `process: true` flag, `status: draft`, not propagated) — and the system's routing records them on the relevant work item where an integration exists.
-- The ontology's `pointKind` vocabulary should include or allow a process variant, OR the extractor drops them with a logged reason. Decide in design; default = drop from graph, route to work item.
+## R4 — Evidence is a SOURCE, not a Point; every belief cites its source
 
-## R4 — Every claim cites its source via the ontology
+**Review input:** *"C1: what's the source? use our ontology"* + *"R5 correction: evidence (the raw data that supports a belief) is most likely a SOURCE, and we have a specific setup for that in our ontology."*
 
-**Review input:** *"C1: what's the source? we need to use our ontology when possible."*
+**Requirement:** Evidence — the raw data supporting a belief — lives in **Source nodes**, linked by the ontology's provenance structure: `(Point)-[:extractedFrom]->(Source)` (Source carries `sourceKind`, `credibilityTier`). **Evidence is NEVER minted as a Point.** The epistemic layer holds beliefs; Sources hold the raw data behind them.
 
-**Requirement:** Every extracted claim MUST carry ontology-based source provenance: `(Point)-[:extractedFrom]->(Source)` with the Source carrying `sourceKind` (measurement, analysis, paper, decision-record, conversation) and `credibilityTier`.
+- Every extracted claim/decision MUST cite the Source it came from (reference + span). `extractedFrom` must always resolve to a Source node.
+- "Keeping the cost tables connected to the Flash decision" = **index the cost data as a Source and link the decision to it** — not create a claim Point for the raw numbers.
+- Consequence: R4 and R5 are the SAME requirement (the reviewer flagged the conflation risk). The rule: **never pollute the epistemic layer with raw evidence-as-Points; evidence belongs in Sources.**
 
-- The extractor emits the source reference with each claim (what source + span), not just free text.
-- Measured findings ("regex = 88% noise") reference the specific measurement/analysis source, not a vague "analysis".
-- Source node creation is part of the mining write (per the capture architecture: Source = content node with summary; claims extractFrom it).
+## R5 — (merged into R4) — see above. Evidence = Source, linked via ontology provenance.
 
-## R5 — Evidence attaches to decisions; never discard supporting evidence
+## R6 — Entities are typed by the expansion packs' business logic (read + softly enforced); pack mapping is in scope
 
-**Review input:** *"Specific token-cost tables for GLM/Qwen — this was a valuable point (ideally connected to the source) to keep connected to the decision."*
+**Review input:** *"Object:product are not identifying the product… 'value-first extraction' no idea what that is"* + *"missing the product-strategy expansion pack logic (usecase-feature-user journey-workflow-requirement-architecture)"* + *"we need the mechanism to READ (and enforce — not 100%, too hard a gate frustrates agents, but quite strongly) the expansion packs' business logic; the packs might not currently have that logic properly mapped, so we need to figure out how it should be mapped — that becomes part of the scope."*
 
-**Requirement:** Evidence that supports a kept decision MUST be preserved and linked (IMPL: evidence → decision), not dropped as "noise."
+**Requirement:**
 
-- Cost comparisons, measurements, and research findings are evidence claims that support decisions — they get Points (or source-cited claims) with IMPL edges to the decisions they justify.
-- The "nothing" list must never include *evidence for a kept decision*. The value gate's selectivity applies to noise, not to supporting material.
-- Consequence: the value brief's "NEW/REVISES/CONNECTS/RESOLVES" gate must classify evidence-for-a-decision as CONNECTS (keep), not DROP.
-
-## R6 — Entities are typed by the pack ontology, not free-form
-
-**Review input:** *"Object:product are not identifying the product (tortoise) but are more like decisions about architecture… 'value-first extraction' no idea what that is"* … *"missing everything related to the product-strategy expansion pack which should give us the logic for usecase-feature-user journey-workflow-requirement-architecture."*
-
-**Requirement:** Entity classification is a **closed vocabulary** from the active pack(s):
-
-- "value-first extraction" and "capture architecture (local/remote)" are **features** — not product objects, not free-form labels.
-- The product-strategy pack provides the kind chain: `useCase → feature → userJourney → workflow → requirement → architecture`. Extracted entities MUST be assigned one of these kinds when the content is product/strategy; the pack's objectKinds otherwise.
-- Never let the LLM mint kinds (SPIRES lesson). Unknown entity → `other` → hold/review → pack proposal (the 3-strike loop), not a new kind.
+- **Read:** Entity/kind classification reads the expansion packs' business logic (the pack manifests' kind chain — e.g., product-strategy: useCase → feature → userJourney → workflow → requirement → architecture). The packs define what kinds exist and their relationships; the extractor classifies INTO that vocabulary. Never free-form kinds, never LLM-minted kinds.
+- **Enforce, softly:** enforcement is strong but NOT a 100% hard gate. Too-hard gates frustrate agents. Near-misses warn/flag/retry; only truly out-of-schema hazards block. The exact enforcement levels (warn vs retry vs block, and the thresholds) are a scoping decision.
+- **Pack mapping is in scope:** the expansion packs may NOT currently encode their business logic in a form the extractor can read for this purpose. Figuring out how packs should be mapped (the manifest schema, kind-relation representation, per-pack extraction-active vocabularies) is PART of the epic scope — research + design + pack-schema work, not assumed solved.
 
 ## R7 — Sources are indexed as Source nodes, always
 
-**Review input:** *"what happened with adding sources to the graph (not the full data but at least indexing the source so we know where data came from)… currently this is a massive gap, our graph shouldn't have that."*
+**Review input:** *"what happened with adding sources to the graph… at least indexing the source so we know where data came from — currently a massive gap."*
 
-**Requirement:** Research reports, papers, and other source artifacts MUST be indexed as **Source nodes** in the graph — even when their full content is not extracted.
+**Requirement:** Research reports, papers, and source artifacts MUST be indexed as **Source nodes** — even when full content is not extracted. The graph must never contain a claim whose source is untraceable. Source indexing is a first-class mining output.
 
-- The graph must never contain a claim whose source is untraceable: `extractedFrom` must always resolve to a Source node.
-- Source indexing is a first-class mining output (create the Source node + metadata: sourceKind, title, url/ref, tier), separate from content extraction.
-- This closes the provenance gap: "where did this claim come from" is always answerable, for every claim, at every tier.
+## R8 — The system is stochastic; testability is a two-layer contract
 
-## R8 — The system is stochastic; tests are distributional
+**Review input:** *"editing the doc is pointless, the system is non-deterministic"* + *"how can behavioral contract tests determine a pass/fail?"*
 
-**Review input:** *"editing the doc is kind of pointless because the system is non-deterministic."*
+**Requirement:** Testing has two layers with different determinism:
 
-**Requirement:** The gold set defines the **rubric**, not an oracle. Testing is distributional:
-
-- Precision/recall/F1 over labeled windows with fuzzy matching (embedding similarity ≥0.90 + kind match), never exact-string.
-- Behavioral contract tests (the requirements above as pass/fail probes): given a crafted window with decisions+events, does the extractor classify layer-correct (R1)? split compounds (R2)? route process decisions (R3)? cite sources (R4)? preserve evidence (R5)? use pack kinds (R6)? index sources (R7)?
-- These behavioral tests are deterministic-enough (property-style) and run in CI alongside the distributional eval.
+- **Layer 1 — CONTRACT (deterministic, binary pass/fail):** the output must conform to the typed-stream schema (`{decisions[], events[], claims[], entities[]}`); every item carries required fields (kind ∈ closed vocabulary, source_ref present, atomic single commitment). **Schema validation is deterministic** — the LLM either emitted a valid-shaped stream or it didn't. Non-conforming output → retry once → fail with reason. This is a genuine pass/fail gate.
+- **Layer 2 — SEMANTIC (statistical, threshold pass/fail):** semantic correctness (is "we fixed X" classified as event? is the split atomic? is the right kind chosen?) is measured as a RATE over N trials/windows and compared to a threshold (e.g., layer-correct rate ≥0.90 on a probe set, measured over multiple runs). Pass/fail = threshold on a measured rate — honest about stochasticity, never a single-run assertion.
+- The two layers are explicit: contract gates are CI blockers (shape), semantic thresholds are eval gates (quality). Both defined per-requirement in the epic's scoping stage.
+- Reliability levers that raise determinism (few-shot exemplars, structured-output constraints, consistency checks) are DESIGN considerations for the plan — not requirements.
 
 ---
 
 ## Requirements traceability
 
-| Requirement | Owner review source | Design doc section |
+| Req | Owner review source | Framing status |
 |---|---|---|
-| R1 decisions ≠ events | D1, D12 comments | pipeline: classification stage (layer-correct output) |
-| R2 atomic decisions | D6, D7, D10 comments | pipeline: value gate + extraction prompt (atomicity instruction) |
-| R3 process decisions → work item | D11 comment | pipeline: process-decision routing |
-| R4 source provenance via ontology | C1 comment | pipeline: provenance contract (Source + extractedFrom) |
-| R5 evidence preserved + linked | cost-tables comment | pipeline: CONNECTS gate + IMPL evidence edges |
-| R6 pack-typed entities | entities comments | pipeline: entity classification (closed vocab) |
-| R7 sources indexed as nodes | bibliographies comment | pipeline: Source indexing output |
-| R8 stochastic, distributional tests | meta comment | evaluation: fuzzy matching + behavioral contract tests |
+| R1 decisions ≠ events | D1, D12 | framed |
+| R2 atomic decisions | D6, D7, D10 | framed |
+| R3 process decisions → work item | D11 | framed |
+| R4 evidence = Source, provenance | C1 + R5 correction | framed (R5 merged) |
+| R6 pack-typed entities + soft enforcement + pack mapping in scope | entities comments | framed (expanded) |
+| R7 sources indexed as nodes | bibliographies comment | framed |
+| R8 testability contract (2 layers) | meta comment + pass/fail question | framed |
 
-## Open design decisions (to resolve in the design pass)
+## Open framing questions (for epic research/scoping, NOT to resolve here)
 
-1. Process-decision representation: drop-from-graph+route-to-work-item vs `process: true` tagged Point (R3).
-2. Event vs decision classification threshold: what trigger cues + what confidence (R1).
-3. Evidence claims: always Points, or source-cited claims only when they exceed a value floor (R5 vs extract-nothing).
-4. Source indexing: automatic for any referenced artifact vs explicit (R7).
+1. R1: event vs decision classification thresholds and trigger cues — research question.
+2. R3: process-decision representation — drop+route vs tagged — scoping decision.
+3. R6: pack manifest schema for extractor-readable business logic — research + design (the mapping work).
+4. R6: enforcement levels per error class (warn/retry/block) — scoping decision.
+5. R8: per-requirement semantic thresholds and probe-set construction — scoping decision (feeds the gold set).
