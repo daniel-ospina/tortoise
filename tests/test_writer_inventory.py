@@ -807,3 +807,131 @@ class TestZeroRegistryInventory:
         # registry — a spy hit is an AssertionError, which is the failure.
         spy.assert_clean()
         assert r.status_code < 500 or r.status_code in (500,), r.text
+
+
+# ── /backups + /backups/restore in Supabase mode (#924) ─────────────────────
+
+class TestBackupEndpointsSupabaseGraphName:
+    """#924: the on-demand backup endpoints resolve the graph name from the
+    control plane via the SAME seam as the sweep (backup_sweep.team_graph_name)
+    — Supabase mode reads teams.graph_name (SDK team creation names graphs
+    team_{name}, NOT team_{id}; #768), registry mode is team_{id}. The old
+    team_{id} hardcode targeted a nonexistent graph for SDK-created teams
+    (P0-guard trip on the sweep, cross-graph rejection on restore).
+    """
+
+    @pytest.fixture
+    def pro_backup_client(self, client, monkeypatch):
+        """Supabase-mode client, Pro tier, in-memory backup storage, and a
+        teams row whose graph_name differs from the team_{id} convention."""
+        import base64 as _b64
+        import tortoise.hosted_api as ha_mod
+        from tortoise import pricing as _pricing
+        from tortoise.hosted_backup import MemoryStorage
+
+        tc, fake, spy = client
+        monkeypatch.setenv(
+            "TORTOISE_BACKUP_KEY", _b64.b64encode(os.urandom(32)).decode()
+        )
+        store = MemoryStorage()  # SHARED — _backup_storage is called per request
+        monkeypatch.setattr(ha_mod, "_backup_storage", lambda: store)
+        # Backups gate: pro passes (pricing.json still marks daily_backups
+        # "planned", so the allowlist is patched like test_hosted_api does).
+        monkeypatch.setattr(
+            _pricing, "daily_backups_enabled", lambda tier: tier == "pro"
+        )
+        # SDK-created team: the graph is named per teams.graph_name — NOT
+        # team_{id} (#768). team_myapp != team_team-pro-924, so a team_{id}
+        # hardcode is provably wrong here.
+        fake.seed("teams", [{
+            "id": "team-pro-924", "name": "myapp",
+            "graph_name": "team_myapp", "tier": "pro", "backup_enabled": True,
+        }])
+        app.dependency_overrides[get_current_team] = lambda: dict(
+            TEST_TEAM, team_id="team-pro-924", tier="pro")
+        yield tc, fake, store
+        app.dependency_overrides.clear()
+
+    def test_backup_create_uses_teams_graph_name(self, pro_backup_client):
+        """POST /backups names the archive per teams.graph_name, not team_{id}."""
+        tc, fake, _ = pro_backup_client
+        r = tc.post("/backups")
+        assert r.status_code == 201, r.text
+        manifest = r.json()
+        assert manifest["team_id"] == "team-pro-924"
+        # The teams row wins: team_myapp, never team_team-pro-924.
+        assert manifest["graph_name"] == "team_myapp"
+        assert manifest["backup_id"].startswith("team-pro-924/")
+
+    def test_backup_restore_uses_teams_graph_name(self, pro_backup_client):
+        """Round trip: the restore resolves the SAME teams.graph_name, so the
+        backup it just created passes the cross-graph isolation check (the
+        old team_{id} hardcode rejected it with a 400 cross-graph error)."""
+        tc, fake, _ = pro_backup_client
+        r = tc.post("/backups")
+        assert r.status_code == 201, r.text
+        manifest = r.json()
+        backup_key = f"backups/{manifest['backup_id']}/dump.enc"
+        r = tc.post(
+            "/backups/restore", json={"backup_key": backup_key, "confirm": True}
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["restored"] == {"nodes": 0, "edges": 0}
+
+    def test_restore_binds_live_graph_to_teams_graph_name(self, pro_backup_client):
+        """The restore's live-graph bound is teams.graph_name, not team_{id}:
+        the on-demand backup dumps the REAL team_myapp graph (node_count > 0)
+        and a restore round-trips against it (200, node restored). With the
+        old team_{id} hardcode the backup dumped the phantom team_{id} graph
+        (always empty) — a real graph named team_{name} would never be
+        backed up, exactly the #924 data-loss hazard (review P1 #935: the
+        fix binds the dump to the resolved graph, so the data IS captured)."""
+        import tortoise.hosted_api as ha_mod
+
+        tc, fake, _ = pro_backup_client
+        # Seed the REAL (SDK-created) live graph — named team_myapp per
+        # teams.graph_name, NOT team_{id} (#768).
+        sdk = ha_mod._make_sdk(namespace="team-pro-924")
+        try:
+            live = sdk._get_proj().db.select_graph("team_myapp")
+            live.query(
+                "CREATE (p:Point {id:'seed-1', content:'real decision'})"
+            )
+        finally:
+            sdk.close()
+        # The backup dumps the RESOLVED graph (teams.graph_name), so the
+        # seeded node IS captured (review P1 #935: the old dump came from the
+        # SDK-namespace phantom team_{id} graph and was always empty).
+        r = tc.post("/backups")
+        assert r.status_code == 201, r.text
+        manifest = r.json()
+        assert manifest["graph_name"] == "team_myapp"
+        assert manifest["node_count"] == 1, (
+            "backup must dump the resolved teams.graph_name graph, not the "
+            "phantom team_{id} SDK namespace"
+        )
+        backup_key = f"backups/{manifest['backup_id']}/dump.enc"
+        # Restore binds the live graph = team_myapp → the non-empty backup
+        # round-trips (200, 1 node restored) — with the old phantom-team_{id}
+        # hardcode the backup was empty and the restore "succeeded" on
+        # nothing, silently losing the real graph.
+        r = tc.post(
+            "/backups/restore", json={"backup_key": backup_key, "confirm": True}
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["restored"]["nodes"] == 1
+        assert body["restored"]["edges"] == 0
+
+    def test_backup_create_fail_closed_when_team_vanished(self, pro_backup_client):
+        """A team missing from teams (or without graph_name) 503s — never a
+        backup of a guessed/wrong graph."""
+        tc, fake, _ = pro_backup_client
+        app.dependency_overrides[get_current_team] = lambda: dict(
+            TEST_TEAM, team_id="team-ghost", tier="pro")
+        try:
+            r = tc.post("/backups")
+            assert r.status_code == 503, r.text
+            assert "vanished from the control plane" in r.json()["detail"]
+        finally:
+            app.dependency_overrides.clear()

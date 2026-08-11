@@ -4944,7 +4944,6 @@ async def backups_create(team: dict = Depends(get_current_team)):
     if not team_id:
         raise HTTPException(status_code=401, detail="Missing Authorization header")
     _require_backup_tier(team)
-    graph_name = f"team_{team_id}"
     sdk = None
     registry_sdk = None
     try:
@@ -4961,9 +4960,42 @@ async def backups_create(team: dict = Depends(get_current_team)):
         else:
             registry_sdk = _registry_sdk()
             cp_source = registry_sdk._get_registry()
+        # #924: graph name resolved from the control plane via the SAME seam
+        # as the sweep (team_graph_name) — Supabase mode reads teams.graph_name
+        # (SDK team creation names graphs team_{name}, NOT team_{id}; #768/#770),
+        # registry mode is the deterministic team_{id}. Fail-closed: a
+        # resolution error 503s rather than backing up a wrong/nonexistent graph.
+        from tortoise.backup_sweep import team_graph_name
+        graph_name = team_graph_name(cp_source, team_id)
+        # #924 review P1: create_backup dumps proj.g — the SDK bound to
+        # namespace=team_id resolves team_{team_id}, NOT the resolved graph.
+        # For a team_{name} team the dump would be the EMPTY phantom graph
+        # while the manifest claims team_{name}. Bind the dump projection to
+        # the RESOLVED graph (the sweep's _backup_team does db.select_graph
+        # on the same name). from_uri reuses the configured connection with
+        # graph_name override (#7886 multi-tenant isolation).
+        import os as _os
+        from tortoise.projection import FalkorProjection
+        db_uri = _os.environ.get("TORTOISE_DB_URI")
+        proj = sdk._get_proj()
+        if db_uri:
+            dump_proj = FalkorProjection.from_uri(db_uri, graph_name=graph_name)
+        elif getattr(proj, "_path", None):
+            # Embedded: re-open the same DB on the resolved graph name.
+            dump_proj = FalkorProjection(
+                path=proj._path, graph_name=graph_name,
+                skip_health_check=True,
+            )
+        else:
+            # No path (unusual) — bind the existing db handle to the graph.
+            from tortoise.projection import _GuardedGraph
+            dump_proj = type("_DumpProj", (), {
+                "g": _GuardedGraph(proj.db.select_graph(graph_name), proj),
+                "graph_name": graph_name,
+            })()
         storage = _backup_storage()
         manifest = await asyncio.to_thread(
-            create_backup, sdk._get_proj(), cp_source, storage,
+            create_backup, dump_proj, cp_source, storage,
             team_id=team_id, graph_name=graph_name,
         )
         # Retention: prune after a successful backup so storage stays bounded
@@ -5005,7 +5037,6 @@ async def backups_restore(body: BackupRestoreRequest, team: dict = Depends(get_c
         raise HTTPException(
             status_code=400, detail="confirm=true required — restore replaces the live graph"
         )
-    graph_name = f"team_{team_id}"
     lock = await _team_restore_lock(team_id)
     sdk = None
     registry_sdk = None
@@ -5017,18 +5048,41 @@ async def backups_restore(body: BackupRestoreRequest, team: dict = Depends(get_c
             sdk = _make_sdk(namespace=team_id)
             if not is_supabase_enabled():
                 registry_sdk = _registry_sdk()
+            cp_source = (get_control_plane() if is_supabase_enabled()
+                         else registry_sdk._get_registry())
+            # #924: same seam as backups_create — teams.graph_name in Supabase
+            # mode (the old team_{id} hardcode would reject the restore as
+            # cross-graph for SDK-created teams), team_{id} in registry mode.
+            from tortoise.backup_sweep import team_graph_name
+            graph_name = team_graph_name(cp_source, team_id)
             result = await asyncio.to_thread(
-                restore_backup, sdk._get_proj().db,
-                (get_control_plane() if is_supabase_enabled()
-                 else registry_sdk._get_registry()),
+                restore_backup, sdk._get_proj().db, cp_source,
                 _backup_storage(),
                 body.backup_key, team_id=team_id, graph_name=graph_name,
             )
             # Rebuild indexes on the restored live graph (range/FTS/vector) —
             # the logical dump + GRAPH.COPY restores data, not schema. Off the
             # event loop: a large graph's index build must not stall all tenants.
+            # #924 review P2: bind the rebuild to the RESOLVED graph (the SDK
+            # projection bound to namespace=team_id would index the phantom
+            # team_{id} graph for team_{name} teams — same class of bug as the
+            # dump binding P1).
             try:
-                await asyncio.to_thread(sdk._get_proj()._ensure_indexes)
+                db_uri = os.environ.get("TORTOISE_DB_URI")
+                if db_uri:
+                    from tortoise.projection import FalkorProjection
+                    dump_proj = FalkorProjection.from_uri(db_uri, graph_name=graph_name)
+                else:
+                    proj = sdk._get_proj()
+                    if getattr(proj, "_path", None):
+                        from tortoise.projection import FalkorProjection
+                        dump_proj = FalkorProjection(
+                            path=proj._path, graph_name=graph_name,
+                            skip_health_check=True,
+                        )
+                    else:
+                        dump_proj = proj
+                await asyncio.to_thread(dump_proj._ensure_indexes)
             except Exception as e:
                 _logger.warning(
                     "index rebuild after restore failed for team %s: %s", team_id, e
