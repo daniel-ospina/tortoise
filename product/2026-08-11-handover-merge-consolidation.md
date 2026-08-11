@@ -62,3 +62,18 @@ agents' work, so re-check `git ls-remote origin main` before starting.
 ## Done when
 All six PRs merged to main, and a final `git ls-remote origin main` shows the last merge. Then
 report: each PR merged (sha) + tests run + conflicts resolved.
+
+## ✅ COMPLETE — 2026-08-11 (merge-execution session)
+
+All 6 PRs merged to main in order, each rebased onto current main and squash-merged via REST:
+
+| PR | Merged sha | Tests run |
+|---|---|---|
+| #907 recall Wave A | 82e05b5 | 58 passed |
+| #918 recall Wave B | 077a5c9 | 80 passed |
+| #920 EP operator-less | af8af32 | 31 passed, 16 skipped |
+| #922 write/revise | 8e7a33a | 125 passed |
+| #927 orient/get | 71762fa | 78 passed |
+| #932 ingest bulk | c5b20aa | 165 passed, 7 skipped |
+
+All conflicts resolved keep-all (none dropped). #918 base retargeted to main; #920 was a draft (GraphQL markReady). Also merged afterward: #910/#912/#894 (docs) and #896 (no-regret surface, incl. stale count-test fix 71→79). Merged branches and worktrees cleaned up.
