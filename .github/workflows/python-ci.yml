@@ -224,7 +224,7 @@ jobs:
           # Run only this half's files (matrix.files) — collection is
           # halved and each job leaks ~half the embedded servers.
           FILES=""
-          for f in ${{ matrix.files }}; do FILES="$FILES tests/test_$f.py"; done
+          for f in ${{ matrix.files }}; do FILES="$FILES tests/$f.py"; done
           timeout -s INT -k 10 30m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider --maxfail=20 -rfE --durations=15 > /tmp/pytest.log 2>&1
           rc=$?
           echo "==================== pytest summary (tail) ===================="
