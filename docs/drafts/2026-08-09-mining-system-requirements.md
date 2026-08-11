@@ -88,6 +88,36 @@ epic: value-first mining system (TBD — filed via epic pipeline)
 
 ---
 
+## R9 — Mitigate relations: the relevance reduction on argument edges (owner correction)
+
+**Review input:** *"Mitigations are one of the primary forms argument graphs get built. In
+your analysis you're both under-identifying them and the document misses them."* +
+the canonical example (X IMPL Option A "cheap"; Z MITIGATES the X→A connection "we can
+raise the price"; Y IMPL Z "customers aren't price-sensitive").
+
+**Requirement:** The extractor MUST emit **MITIGATES** relations — the ontology's
+`mitigate_operator` semantics (how-to-use-tortoise skill table):
+
+- **NAND ≠ MITIGATE.** NAND attacks the claim's truth (Correctness — "this claim is
+  FALSE"); **MITIGATE reduces the EDGE's relevance** (Relevance — "this claim is TRUE but
+  matters LESS than it seems", confidence reduction on the IMPL connection, bias 0.10-0.50).
+- **MITIGATES targets an OPERATOR edge (the IMPL connection), not a point.** The premise
+  stays true; its weight as an argument drops. (Maps to the research's undercut: attack
+  the inference link, not the claim.)
+- The extractor's relation stream is therefore **IMPL / NAND / MITIGATES** (the primary
+  argument-graph operations), with MITIGATES emitted when the conversation tempers the
+  relevance of an argument ("we can raise the price", "weaker than it sounds", "less
+  important given X").
+- Supporting evidence for a mitigation is a normal claim IMPL-ing the mitigation
+  (the canonical example's Y → Z).
+- **This is a PRIMARY extraction target, not an afterthought** — undercuts are how
+  argument graphs get built; under-identifying them makes the mined graph structurally
+  incomplete.
+
+**Test case (canonical, from the owner):** X "it's cheap" IMPL Option A; Z "we can raise
+the price" MITIGATES [X→A]; Y "customers aren't price-sensitive" IMPL Z. The extractor
+must emit all three, with MITIGATES on the edge.
+
 ## Requirements traceability
 
 | Req | Owner review source | Framing status |
@@ -99,8 +129,13 @@ epic: value-first mining system (TBD — filed via epic pipeline)
 | R6 pack-typed entities + soft enforcement + pack mapping in scope | entities comments | framed (expanded) |
 | R7 sources indexed as nodes | bibliographies comment | framed |
 | R8 testability contract (2 layers) | meta comment + pass/fail question | framed |
+| R9 mitigate relations (edge relevance; NAND≠MITIGATE) | owner correction: mitigations under-identified | framed |
 
 ## Open framing questions (for epic research/scoping, NOT to resolve here)
+
+0. **R9 mitigation extraction** — the extraction cues for MITIGATES (relevance-tempering
+   language vs NAND truth-attack language) and the bias/range assignment — research
+   question for the plan stage (feeds the classification model).
 
 1. R1: event vs decision classification thresholds and trigger cues — research question.
 2. R3: process-decision representation — drop+route vs tagged — scoping decision.
