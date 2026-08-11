@@ -104,8 +104,11 @@ env:
   TORTOISE_SECRET_PEPPER: test-static-pepper
   # Known-slow files (test time > ~60s each, measured on a clean machine
   # 2026-08-09 against origin/main; last 6 added by size/test-count proxy
-  # after the 40-min fast-job death, see header). Excluded from the `test`
-  # job and run in parallel in `test-slow` (#798, tracked slow files: #647).
+  # after the 40-min fast-job death, see header; test_ep_sources +
+  # test_sdk_group3 added 2026-08-10 by measured duration — ep_sources 140s
+  # EP compute, sdk_group3 ~120-220s redislite teardown, both > 60s bar, #880).
+  # Excluded from the `test` job and run in parallel in `test-slow`
+  # (#798, tracked slow files: #647).
   SLOW_FILES: >-
     tests/test_about_edges.py
     tests/test_control_plane.py
@@ -125,6 +128,8 @@ env:
     tests/test_source_inheritance_own.py
     tests/test_sdk.py
     tests/test_cli_context.py
+    tests/test_ep_sources.py
+    tests/test_sdk_group3.py
   # Env-broken in this job; excluded from `test` (see header, #798 part 0).
   # Tracked in #647.
   ENV_BROKEN_FILES: >-
@@ -203,7 +208,11 @@ jobs:
           rc=$?
           echo "==================== pytest summary (tail) ===================="
           tail -n 300 /tmp/pytest.log
-          if [ "$rc" -eq 124 ]; then
+          # #880: 124 = timeout SIGINT kill; 137 = -k 10 SIGKILL after pytest
+          # ignored INT mid-test; 2 = pytest's own SIGINT summary — the count
+          # banner must print for all three (previously only 124 matched,
+          # so the banner never printed on the real kill path).
+          if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ] || [ "$rc" -eq 2 ]; then
             passed=$(grep -c ' PASSED' /tmp/pytest.log)
             failed=$(grep -c ' FAILED' /tmp/pytest.log)
             errored=$(grep -c ' ERROR' /tmp/pytest.log)
@@ -223,7 +232,8 @@ jobs:
     # Slow files run serially here; generous caps so the summary is
     # guaranteed to print (a runner kill would lose it — the #798 mode).
     # Watchdog (75m) + SIGINT grace + tail print; ~17 min for the original
-    # 12 files, ~30 min expected with the 6 added by the fast-job rebalance.
+    # 12 files, ~30 min expected with the 6 added by the fast-job rebalance,
+    # ~36-38 min with test_ep_sources + test_sdk_group3 added 2026-08-10 (#880).
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -275,7 +285,11 @@ jobs:
           rc=$?
           echo "==================== pytest summary (tail) ===================="
           tail -n 300 /tmp/pytest.log
-          if [ "$rc" -eq 124 ]; then
+          # #880: 124 = timeout SIGINT kill; 137 = -k 10 SIGKILL after pytest
+          # ignored INT mid-test; 2 = pytest's own SIGINT summary — the count
+          # banner must print for all three (previously only 124 matched,
+          # so the banner never printed on the real kill path).
+          if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ] || [ "$rc" -eq 2 ]; then
             passed=$(grep -c ' PASSED' /tmp/pytest.log)
             failed=$(grep -c ' FAILED' /tmp/pytest.log)
             errored=$(grep -c ' ERROR' /tmp/pytest.log)
