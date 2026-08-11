@@ -4945,9 +4945,35 @@ async def backups_create(team: dict = Depends(get_current_team)):
         # resolution error 503s rather than backing up a wrong/nonexistent graph.
         from tortoise.backup_sweep import team_graph_name
         graph_name = team_graph_name(cp_source, team_id)
+        # #924 review P1: create_backup dumps proj.g — the SDK bound to
+        # namespace=team_id resolves team_{team_id}, NOT the resolved graph.
+        # For a team_{name} team the dump would be the EMPTY phantom graph
+        # while the manifest claims team_{name}. Bind the dump projection to
+        # the RESOLVED graph (the sweep's _backup_team does db.select_graph
+        # on the same name). from_uri reuses the configured connection with
+        # graph_name override (#7886 multi-tenant isolation).
+        import os as _os
+        from tortoise.projection import FalkorProjection
+        db_uri = _os.environ.get("TORTOISE_DB_URI")
+        proj = sdk._get_proj()
+        if db_uri:
+            dump_proj = FalkorProjection.from_uri(db_uri, graph_name=graph_name)
+        elif getattr(proj, "_path", None):
+            # Embedded: re-open the same DB on the resolved graph name.
+            dump_proj = FalkorProjection(
+                path=proj._path, graph_name=graph_name,
+                skip_health_check=True,
+            )
+        else:
+            # No path (unusual) — bind the existing db handle to the graph.
+            from tortoise.projection import _GuardedGraph
+            dump_proj = type("_DumpProj", (), {
+                "g": _GuardedGraph(proj.db.select_graph(graph_name), proj),
+                "graph_name": graph_name,
+            })()
         storage = _backup_storage()
         manifest = await asyncio.to_thread(
-            create_backup, sdk._get_proj(), cp_source, storage,
+            create_backup, dump_proj, cp_source, storage,
             team_id=team_id, graph_name=graph_name,
         )
         # Retention: prune after a successful backup so storage stays bounded

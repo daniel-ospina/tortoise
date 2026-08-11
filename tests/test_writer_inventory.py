@@ -880,11 +880,12 @@ class TestBackupEndpointsSupabaseGraphName:
 
     def test_restore_binds_live_graph_to_teams_graph_name(self, pro_backup_client):
         """The restore's live-graph bound is teams.graph_name, not team_{id}:
-        a live team_myapp graph with data must trip the empty-backup-over-live
-        guard (409). With the old team_{id} hardcode the restore bound the
-        phantom team_{id} graph (empty) and "succeeded" — exactly the #924
-        data-loss hazard: a real graph named team_{name} would never be
-        protected or restored."""
+        the on-demand backup dumps the REAL team_myapp graph (node_count > 0)
+        and a restore round-trips against it (200, node restored). With the
+        old team_{id} hardcode the backup dumped the phantom team_{id} graph
+        (always empty) — a real graph named team_{name} would never be
+        backed up, exactly the #924 data-loss hazard (review P1 #935: the
+        fix binds the dump to the resolved graph, so the data IS captured)."""
         import tortoise.hosted_api as ha_mod
 
         tc, fake, _ = pro_backup_client
@@ -898,19 +899,29 @@ class TestBackupEndpointsSupabaseGraphName:
             )
         finally:
             sdk.close()
-        # Empty backup (the endpoint dumps its SDK namespace graph — empty).
+        # The backup dumps the RESOLVED graph (teams.graph_name), so the
+        # seeded node IS captured (review P1 #935: the old dump came from the
+        # SDK-namespace phantom team_{id} graph and was always empty).
         r = tc.post("/backups")
         assert r.status_code == 201, r.text
         manifest = r.json()
         assert manifest["graph_name"] == "team_myapp"
-        assert manifest["node_count"] == 0
+        assert manifest["node_count"] == 1, (
+            "backup must dump the resolved teams.graph_name graph, not the "
+            "phantom team_{id} SDK namespace"
+        )
         backup_key = f"backups/{manifest['backup_id']}/dump.enc"
-        # Restore binds the live graph = team_myapp → empty-over-live → 409.
+        # Restore binds the live graph = team_myapp → the non-empty backup
+        # round-trips (200, 1 node restored) — with the old phantom-team_{id}
+        # hardcode the backup was empty and the restore "succeeded" on
+        # nothing, silently losing the real graph.
         r = tc.post(
             "/backups/restore", json={"backup_key": backup_key, "confirm": True}
         )
-        assert r.status_code == 409, r.text
-        assert "empty backup" in r.json()["detail"]
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["restored"]["nodes"] == 1
+        assert body["restored"]["edges"] == 0
 
     def test_backup_create_fail_closed_when_team_vanished(self, pro_backup_client):
         """A team missing from teams (or without graph_name) 503s — never a
