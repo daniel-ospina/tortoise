@@ -416,6 +416,21 @@ TOOL_REGISTRY: list[ToolDefinition] = [
         sdk_method="stale_points",
     ),
     ToolDefinition(
+        name="tortoise_review_connections",
+        description="Review graph connections (READ-ONLY — never mutates the graph). "
+                    "Hygiene counterpart to connect: mode=add surfaces related-but-missing "
+                    "connections as suggestions {from, to, suggested_relation, reason, "
+                    "similarity} (nudge, don't enforce); mode=prune flags illogical/stale "
+                    "IMPL/NAND connections {from, to, relation, issue, suggested_action, "
+                    "detail} with issue in (contradictory, stale, contested) and action in "
+                    "(review, prune, re-point); mode=both runs both and returns "
+                    "{add: [...], prune: [...]}. Optional scope (topic text or Point id) "
+                    "narrows the candidate pool.",
+        annotations=_ro(),
+        http_policy=True,
+        sdk_method="review_connections",
+    ),
+    ToolDefinition(
         name="tortoise_provenance",
         description="Provenance chain — 'Who decided this?' "
                     "Follows authoredBy → Subject → delegation.",
@@ -770,6 +785,7 @@ GROUP_BY_NAME: dict[str, str] = {
     "tortoise_analyze": "reasoning", "tortoise_taxonomy": "reasoning",
     "tortoise_list_topics": "reasoning", "tortoise_provenance": "reasoning",
     "tortoise_stale": "reasoning", "tortoise_dream": "reasoning",
+    "tortoise_review_connections": "reasoning",
     # graph
     "tortoise_create_operator": "graph", "tortoise_annotate_operator": "graph",
     "tortoise_get_operator": "graph", "tortoise_mitigate_operator": "graph",

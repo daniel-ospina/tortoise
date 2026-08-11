@@ -1186,6 +1186,24 @@ def tortoise_stale(days: int = 30, limit: int = 50) -> dict:
     return _safe(_get_team_sdk().stale_points, days=days, limit=limit)
 
 
+def tortoise_review_connections(mode: str = "both", scope: str | None = None) -> dict:
+    """Review graph connections (READ-ONLY) — the hygiene counterpart to connect.
+
+    mode=add: surface related-but-MISSING connections as suggestions
+        {from, to, suggested_relation, reason, similarity} — nudge, don't
+        enforce (the agent decides, then acts via operator_action/create_edge).
+    mode=prune: flag illogical/stale IMPL/NAND connections
+        {from, to, relation, issue, suggested_action, detail} with
+        issue in (contradictory, stale, contested) and suggested_action in
+        (review, prune, re-point).
+    mode=both: run both, return {add: [...], prune: [...]}.
+    scope: optional topic text or Point id — narrows the candidate pool.
+
+    Never mutates the graph.
+    """
+    return _safe(_get_team_sdk().review_connections, mode=mode, scope=scope)
+
+
 def tortoise_provenance(point_id: str) -> dict:
     """Provenance chain — "Who decided this?" Follows authoredBy → Subject → delegation."""
     return _safe(_get_team_sdk().provenance, point_id)
