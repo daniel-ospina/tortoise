@@ -102,11 +102,21 @@ def _overage_eligible(tier: str) -> bool:
 
 # ── Registry SDK helper ─────────────────────────────────────────────────────
 
+def _supabase_mode() -> bool:
+    """True when metering should use the Supabase control plane (post-#669
+    flip: the registry is deleted — MeteringRecord nodes there would
+    recreate it on every /v1/team call)."""
+    from tortoise.supabase_control import is_supabase_enabled
+    return is_supabase_enabled()
+
+
 def _reg_sdk():
     """Build a TortoiseSDK pointing at the registry namespace.
 
     Same precedence as ``quota._make_sdk``: URI mode when TORTOISE_DB_URI is
     set; else embedded via TORTOISE_DB_PATH with tempfile fallback.
+    SUPABASE MODE (post-#669 flip): metering uses the metering_records table
+    (0014) via the seam — never the registry (which is deleted).
     """
     from tortoise.sdk import TortoiseSDK
     if os.environ.get("TORTOISE_DB_URI"):
@@ -144,6 +154,20 @@ def record_write_ops(team_id: str, tier: str | None = None, n: int = 1) -> dict 
     period = _current_period()
     now_iso = datetime.now(timezone.utc).isoformat()
     try:
+        if _supabase_mode():
+            from tortoise.supabase_control import (
+                get_control_plane, metering_increment,
+            )
+            write_ops = metering_increment(
+                get_control_plane(), team_id, period, n)
+            result = {
+                "write_ops": write_ops,
+                "period": period,
+                "ops_allowance": _ops_allowance(tier) if tier else 0,
+                "overage_eligible": _overage_eligible(tier) if tier else False,
+            }
+            _check_thresholds(team_id, tier, result, n)
+            return result
         sdk = _reg_sdk()
         reg = sdk._get_registry()
         reg.query(
@@ -246,6 +270,27 @@ def get_current_usage(team_id: str) -> dict:
     """
     period = _current_period()
     ops_used = 0
+    if _supabase_mode():
+        from tortoise.supabase_control import (
+            get_control_plane, metering_get, team_tier,
+        )
+        cp = get_control_plane()
+        ops_used = metering_get(cp, team_id, period)
+        tier = team_tier(cp, team_id) or "free"
+        ops_limit = _ops_allowance(tier)
+        eligible = _overage_eligible(tier)
+        overage_cost = None
+        if eligible and ops_used > ops_limit:
+            from tortoise.pricing import overage_price_per_10k
+            overage_units = (ops_used - ops_limit + 9999) // 10000
+            overage_cost = overage_units * overage_price_per_10k()
+        return {
+            "write_ops_used": ops_used,
+            "write_ops_limit": ops_limit,
+            "period": period,
+            "overage_eligible": eligible,
+            "overage_cost_usd": overage_cost,
+        }
     try:
         sdk = _reg_sdk()
         reg = sdk._get_registry()

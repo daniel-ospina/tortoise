@@ -135,12 +135,24 @@ mcp_http_app = create_http_app(
 
 
 def _iter_registered_teams() -> list[dict]:
-    """List registered teams from the control_plane registry (best-effort).
+    """List registered teams from the control plane (best-effort).
 
     Used by the event-retention sweep (#432 Task 7) and boot reconcile.
+    Supabase mode (post-#669 flip): enumerates from Supabase teams via the
+    seam — the registry is DELETED and querying it would auto-recreate the
+    empty graph. Registry mode: the Team nodes, as before.
     Returns [] on any failure — the sweep is best-effort.
     """
     try:
+        from tortoise.supabase_control import (
+            get_control_plane, is_supabase_enabled,
+        )
+        if is_supabase_enabled():
+            rows = get_control_plane().query(
+                "teams", select=["id", "name"],
+                filters=[("deleted_at", "is", None)],
+            )
+            return [{"team_id": r["id"], "name": r.get("name")} for r in rows]
         from tortoise.sdk import TortoiseSDK
 
         sdk = TortoiseSDK()
@@ -205,14 +217,26 @@ async def _lifespan(app):
                 from tortoise.backup_sweep import read_team_state
                 from tortoise.backup_watcher import BackupWatcher, WatcherThread
 
-                reg_sdk = _registry_sdk()
-                registry = reg_sdk._get_registry()
+                # #669 post-flip: the watcher's team enumeration must use the
+                # SAME seam as the sweep driver — Supabase teams in Supabase
+                # control-plane mode, the registry handle for selfhost. The
+                # raw registry handle would read an EMPTY graph post-flip
+                # (registry deleted) and file spurious staleness incidents
+                # (post-flip verification finding, #669).
+                from tortoise.supabase_control import (
+                    get_control_plane, is_supabase_enabled,
+                )
+                if is_supabase_enabled():
+                    team_source = get_control_plane()
+                else:
+                    reg_sdk = _registry_sdk()
+                    team_source = reg_sdk._get_registry()
 
                 def _sweep_teams() -> list[str]:
                     from tortoise.backup_sweep import enumerate_teams
 
                     try:
-                        return enumerate_teams(registry)
+                        return enumerate_teams(team_source)
                     except Exception as exc:  # noqa: BLE001 — fail-closed, never crash
                         _logger.warning("watcher team enumeration failed: %s", exc)
                         return []
@@ -230,7 +254,8 @@ async def _lifespan(app):
                 )
                 _WATCHER = WatcherThread(watcher, interval_seconds=cfg.watcher_poll_seconds)
                 _WATCHER.start()
-                _boot_gc_drill_graphs(reg_sdk._get_proj().db)
+                if not is_supabase_enabled():
+                    _boot_gc_drill_graphs(reg_sdk._get_proj().db)
         except Exception as exc:  # noqa: BLE001 — never crash the app
             _logger.warning("backup watcher could not start: %s", exc)
         # #432 Task 7: event retention — boot purge + interval task. Best-effort
@@ -698,7 +723,13 @@ async def health_ready():
     """
     db_ok = False
     try:
-        sdk = _make_sdk(namespace="registry")
+        # #669 post-flip: the FalkorDB data-plane probe must NOT open the
+        # registry namespace — FalkorDB auto-creates the graph on select, so
+        # a registry-namespaced probe RECREATED the deleted
+        # registry_control_plane on every health check (post-flip
+        # verification finding, #669). Probe the data plane via the default
+        # graph (never the registry namespace).
+        sdk = _make_sdk(namespace=None)
         sdk._get_proj().g.query("RETURN 1")
         db_ok = True
     except Exception:
@@ -3728,15 +3759,22 @@ def _purge_deleted_teams() -> None:
                 if not _past_grace(row.get("deleted_at"), row.get("grace_hours")):
                     continue  # env shrank — honor the stored promise
                 try:
-                    # Registry sweep FIRST, control-plane LAST: the teams
+                    # Registry cascade FIRST, control-plane LAST: the teams
                     # row is the retry anchor — a failed registry purge or
                     # graph drop leaves it in place, so the next sweep
                     # retries instead of leaking nodes past the grace
                     # window (code-review P2, PR #873).
-                    _purge_registry_team(
-                        _make_sdk(namespace="registry"), team_id,
-                        row.get("graph_name"),
-                    )
+                    # Post-#669 flip: the registry is DELETED — skip the
+                    # cascade (querying it would auto-recreate the empty
+                    # graph); the teams row + knowledge-graph drop are the
+                    # whole purge now.
+                    if not is_supabase_enabled():
+                        _purge_registry_team(
+                            _make_sdk(namespace="registry"), team_id,
+                            row.get("graph_name"),
+                        )
+                    else:
+                        _drop_team_graph(team_id, row.get("graph_name"))
                     purge_team_control_plane(cp, team_id)
                     _audit_logger.append(
                         team_id, None, "team_delete_purged",
@@ -4889,10 +4927,21 @@ async def backups_create(team: dict = Depends(get_current_team)):
     registry_sdk = None
     try:
         sdk = _make_sdk(namespace=team_id)
-        registry_sdk = _registry_sdk()
+        # #669 post-flip: the backup stamp seam is dialect-aware — pass the
+        # Supabase control plane in Supabase mode (the registry handle would
+        # stamp the DELETED registry and auto-recreate the empty graph).
+        from tortoise.supabase_control import (
+            get_control_plane, is_supabase_enabled,
+        )
+        if is_supabase_enabled():
+            registry_sdk = None
+            cp_source = get_control_plane()
+        else:
+            registry_sdk = _registry_sdk()
+            cp_source = registry_sdk._get_registry()
         storage = _backup_storage()
         manifest = await asyncio.to_thread(
-            create_backup, sdk._get_proj(), registry_sdk._get_registry(), storage,
+            create_backup, sdk._get_proj(), cp_source, storage,
             team_id=team_id, graph_name=graph_name,
         )
         # Retention: prune after a successful backup so storage stays bounded
@@ -4938,12 +4987,18 @@ async def backups_restore(body: BackupRestoreRequest, team: dict = Depends(get_c
     lock = await _team_restore_lock(team_id)
     sdk = None
     registry_sdk = None
+    from tortoise.supabase_control import (
+        get_control_plane, is_supabase_enabled,
+    )
     async with lock:
         try:
             sdk = _make_sdk(namespace=team_id)
-            registry_sdk = _registry_sdk()
+            if not is_supabase_enabled():
+                registry_sdk = _registry_sdk()
             result = await asyncio.to_thread(
-                restore_backup, sdk._get_proj().db, registry_sdk._get_registry(),
+                restore_backup, sdk._get_proj().db,
+                (get_control_plane() if is_supabase_enabled()
+                 else registry_sdk._get_registry()),
                 _backup_storage(),
                 body.backup_key, team_id=team_id, graph_name=graph_name,
             )

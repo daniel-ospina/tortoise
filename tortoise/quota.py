@@ -122,14 +122,52 @@ class QuotaCheckError(Exception):
 
 
 def resolve_team_limits(team_id: str) -> dict:
-    """Resolve a team's limits from the registry Team node.
+    """Resolve a team's limits from the control plane.
 
-    Missing Team node → QuotaCheckError (fail-closed; the auth layer should
+    Supabase mode (post-#669 flip): the teams row via the service-role
+    seam — the registry is DELETED and querying it would auto-recreate the
+    empty graph (post-flip verification finding, #669). Registry mode: the
+    Team node, as before.
+
+    Missing Team → QuotaCheckError (fail-closed; the auth layer should
     guarantee key→team mapping). Missing attributes → defaults
     (aligned with product/pricing.json free tier).
     """
     if not team_id:
         raise QuotaCheckError("resolve_team_limits requires a team_id")
+    from tortoise.supabase_control import (
+        get_control_plane, is_supabase_enabled,
+    )
+    if is_supabase_enabled():
+        rows = get_control_plane().query(
+            "teams",
+            select=["tier", "max_users", "max_graphs", "graph_size_cap",
+                    "ops_allowance"],
+            filters=[("id", "eq", team_id)],
+        )
+        if not rows:
+            raise QuotaCheckError(f"Team {team_id!r} not found in control plane")
+        row = rows[0]
+        tier = row.get("tier") or "free"
+        from tortoise.pricing import tier_limits
+        lim = tier_limits(tier)
+        # Mirror the registry shape EXACTLY (review P2, PR #911): NULL
+        # max_users/max_graphs = UNLIMITED (Team tier) — preserve None,
+        # never substitute pricing defaults (enforce_team_limit treats an
+        # explicit None limit as unlimited; substituting finite caps would
+        # hard-cap legacy/migrated rows). max_points ← graph_size_cap
+        # (GAP-B); max_api_keys/max_sessions fall back to pricing/defaults.
+        mu = row.get("max_users")
+        mg = row.get("max_graphs")
+        mp = row.get("graph_size_cap")
+        return {
+            "team_id": team_id, "tier": tier,
+            "max_users": int(mu) if mu is not None else None,
+            "max_graphs": int(mg) if mg is not None else None,
+            "max_points": int(mp) if mp is not None else lim["max_graph_nodes"],
+            "max_api_keys": lim["max_api_keys"],
+            "max_sessions": DEFAULT_MAX_SESSIONS,
+        }
     reg = _make_sdk(namespace="registry")
     rows = reg._get_registry().query(
         "MATCH (t:Team {id:$id}) "

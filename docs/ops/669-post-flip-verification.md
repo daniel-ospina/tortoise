@@ -475,6 +475,34 @@ while set, a real enumeration wipe would be silently suppressed.)
 
 ---
 
+
+---
+
+## 15. EXECUTION LOG — what the 2026-08-11 flip actually found (live)
+
+The flip was executed 2026-08-11. Beyond the checks above, live verification
+surfaced **six code paths that still read the deleted registry in Supabase
+mode** — each silently recreated the empty `registry_control_plane` graph
+(FalkorDB auto-creates graphs on query). All were fixed and redeployed
+(PR #911); **no runtime or boot path reads the registry anymore** (verified:
+after one `GRAPH.DELETE`, a full health+signup+REST+MCP exercise over 60s
+left the graph absent).
+
+| # | Path | Why it recreated the registry | Fix |
+|---|---|---|---|
+| 1 | backup watcher (boot) | passed the raw registry handle to the #768 seam | Supabase control plane in Supabase mode |
+| 2 | `POST /backups` + `/backups/restore` | stamp seam got the raw registry handle | Supabase control plane |
+| 3 | `_iter_registered_teams` + `_purge_deleted_teams` | boot event-retention + deleted-team purge read the registry | Supabase teams (deleted_at IS NULL); purge skips the registry cascade post-flip |
+| 4 | `/health/ready` | the data-plane probe opened the registry namespace | probe the default (`tortoise`) graph |
+| 5 | **metering** (`/v1/team` → `get_current_usage`, `record_write_ops`) | MeteringRecord nodes lived in the registry — every authenticated request recreated it | migration `0014_metering_records` + seam; atomic `metering_increment` RPC |
+| 6 | `quota.resolve_team_limits` (MCP tool enforcement) | read the registry Team node | teams row via the seam (NULL = unlimited parity) |
+
+Also applied during the flip: migration 0014, Edge Function secrets verified,
+`TORTOISE_SUPPRESS_ENUM_DELTA=1` active for the window. **Remaining follow-up:
+`TORTOISE_AUDIT_DSN` needs the Supabase pooler DB password (owner) — audit
+falls back to JSONL safely until then.** Migrations 0006–0014 are live;
+`webhook_events` + `metering_records` tables verified.
+
 ## 14. NEXT STEP — step 5: registry delete (only after all of the above passes)
 
 Hand off to the owner, then run the flip's final step:
