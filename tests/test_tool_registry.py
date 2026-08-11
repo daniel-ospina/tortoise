@@ -81,11 +81,13 @@ class TestRegistryEquivalence:
             assert excluded not in HTTP_ALLOWED, f"{excluded} must be HTTP-excluded"
 
     def test_registry_count(self):
-        """71 tools — 60 existing + 6 onboarding (#498/#499/#500) + 1
+        """79 tools — 60 existing + 6 onboarding (#498/#499/#500) + 1
         human-approval (#531) + 1 #540 + 2 #432 (events_poll, retract_point)
-        + 1 #913 (review_connections)."""
+        + 1 #913 (review_connections) + 8 W1–W4 consolidations (#907/#918
+        recall, #922 update/delete/operator_action/create_edge, #927
+        overview/get, #932 ingest)."""
         from tortoise.tool_registry import TOOL_REGISTRY
-        assert len(TOOL_REGISTRY) == 71, f"Expected 71, got {len(TOOL_REGISTRY)}"
+        assert len(TOOL_REGISTRY) == 79, f"Expected 79, got {len(TOOL_REGISTRY)}"
         names = {t.name for t in TOOL_REGISTRY}
         onboarding = {"tortoise_onboarding_demo_create", "tortoise_onboarding_state",
                       "tortoise_onboarding_session_recording",
@@ -97,6 +99,17 @@ class TestRegistryEquivalence:
         assert "tortoise_review_connections" in names, "Missing #913 review_connections tool"
         assert "tortoise_events_poll" in names, "Missing #432 events_poll tool"
         assert "tortoise_retract_point" in names, "Missing #432 retract_point tool"
+        # W1–W4 consolidated tools (#888): recall (W1), update/delete/
+        # operator_action/create_edge (W2), overview/get (W3), ingest (W4)
+        w_consolidations = {"tortoise_recall", "tortoise_update", "tortoise_delete",
+                            "tortoise_operator_action", "tortoise_create_edge",
+                            "tortoise_overview", "tortoise_get", "tortoise_ingest"}
+        assert w_consolidations <= names, (
+            f"Missing W1–W4 tools: {w_consolidations - names}")
+        # #454-era surface tools covered by this PR's tests
+        for name in ("tortoise_list_tags", "tortoise_suggest_entry_points",
+                     "tortoise_get_events"):
+            assert name in names, f"Missing tool: {name}"
 
     def test_no_duplicate_names(self):
         """No two registry entries share the same name."""
