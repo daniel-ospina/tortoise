@@ -646,6 +646,27 @@ TOOL_REGISTRY: list[ToolDefinition] = [
         http_policy=True,
         sdk_method="get_owned_entities",
     ),
+    # ── Orient / Direct consolidation (epic #888 W3) ────────────────
+    ToolDefinition(
+        name="tortoise_overview",
+        description="Graph orientation in one call — consolidates the list_*/status/health/"
+                    "taxonomy/structure zoo. section: taxonomy|structure|structure_check|"
+                    "pointkinds|tags|sources|namespaces|graphs|topics|health|status|stale. "
+                    "Omit section → compact combined summary. topics requires entity_id.",
+        annotations=_ro(),
+        http_policy=True,
+        sdk_method="",  # custom handler in mcp_server.py (dispatches to legacy tools)
+    ),
+    ToolDefinition(
+        name="tortoise_get",
+        description="Fetch a node by id — consolidates get_point/get_entity/get_operator/"
+                    "get_events/get_session/get_governance. type: point|operator|entity|"
+                    "event|session|events|governance. Omitted type → auto-detect by id "
+                    "lookup (id|eventId|url, then session_id/sessionId).",
+        annotations=_ro(),
+        http_policy=True,
+        sdk_method="",  # custom handler in mcp_server.py (dispatches to legacy tools)
+    ),
     ToolDefinition(
         name="tortoise_backfill_v25",
         description="Backfill database to ONTOLOGY v2.5 schema. "
@@ -852,6 +873,7 @@ GROUP_BY_NAME: dict[str, str] = {
     "tortoise_suggest_entry_points": "memory",
     # reasoning
     "tortoise_check_structure": "reasoning", "tortoise_summarize_structure": "reasoning",
+    "tortoise_overview": "reasoning",
     "tortoise_traverse": "reasoning", "tortoise_entity_profile": "reasoning",
     "tortoise_analyze": "reasoning", "tortoise_taxonomy": "reasoning",
     "tortoise_list_topics": "reasoning", "tortoise_provenance": "reasoning",
@@ -861,6 +883,7 @@ GROUP_BY_NAME: dict[str, str] = {
     "tortoise_create_operator": "graph", "tortoise_annotate_operator": "graph",
     "tortoise_get_operator": "graph", "tortoise_mitigate_operator": "graph",
     "tortoise_operator_action": "graph",
+    "tortoise_get": "graph",
     "tortoise_create_subject": "graph", "tortoise_create_object": "graph",
     "tortoise_create_event": "graph", "tortoise_create_entity": "graph",
     "tortoise_get_events": "graph",
