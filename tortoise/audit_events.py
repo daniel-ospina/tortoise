@@ -28,6 +28,18 @@ except ImportError:
     psycopg2 = None  # type: ignore
     _HAS_PSYCOPG2 = False
 
+# Post-flip guard (#669): if TORTOISE_AUDIT_DSN is configured but psycopg2 is
+# NOT installed, the logger would silently operate in JSONL-only mode — the
+# exact failure seen when the audit DSN came online and the hosted image
+# lacked the postgres extra. Be LOUD at import so a misconfiguration cannot
+# hide (the fallback still works; this is a boot-time warning, not a crash).
+if os.environ.get("TORTOISE_AUDIT_DSN") and not _HAS_PSYCOPG2:
+    _logger.warning(
+        "TORTOISE_AUDIT_DSN is set but psycopg2 is not installed — audit "
+        "will fall back to JSONL. Install the 'postgres' extra "
+        "(pip install -e '.[postgres]')."
+    )
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -177,7 +189,8 @@ class AuditLogger:
                        VALUES (%(id)s, %(team_id)s, %(actor_user_id)s,
                                %(operation)s, %(resource_type)s,
                                %(resource_id)s, %(ip_address)s,
-                               %(user_agent)s, %(created_at)s)""",
+                               %(user_agent)s, %(created_at)s)
+                       ON CONFLICT (id) DO NOTHING""",
                     event,
                 )
             return True
@@ -246,8 +259,13 @@ class AuditLogger:
             if self._conn is None and not self._connect():
                 return
 
-            # Insert all events
-            success_count = 0
+            # Insert all events — IDEMPOTENT (post-flip fix, #669): ON CONFLICT
+            # (id) DO NOTHING means already-replayed events are SKIPPED, not
+            # re-queued. Without this, a replay after a partial success (or a
+            # restart where some rows landed) re-appended the same events to
+            # the fallback forever — the duplicate-key flood seen when
+            # TORTOISE_AUDIT_DSN came online.
+            failed: list[dict] = []
             for event in events:
                 try:
                     with self._conn.cursor() as cur:
@@ -259,24 +277,22 @@ class AuditLogger:
                                VALUES (%(id)s, %(team_id)s, %(actor_user_id)s,
                                        %(operation)s, %(resource_type)s,
                                        %(resource_id)s, %(ip_address)s,
-                                       %(user_agent)s, %(created_at)s)""",
+                                       %(user_agent)s, %(created_at)s)
+                               ON CONFLICT (id) DO NOTHING""",
                             event,
                         )
-                    success_count += 1
                 except Exception as e:
                     _logger.warning("AuditLogger: replay insert failed: %s", e)
-                    # Write failed events back to fallback
-                    with open(self._fallback_path, "a") as f:
-                        f.write(json.dumps(event, default=str) + "\n")
+                    failed.append(event)
 
-            # Truncate fallback file on full success
-            if success_count == len(events):
+            # Rewrite the fallback with ONLY the genuinely-failed events
+            # (review P2, PR #919 — the old contiguous-tail truncation could
+            # drop a mid-list failure when a later event succeeded).
+            if not failed:
                 self._fallback_path.write_text("")
-            elif success_count > 0:
-                # Partial success — only keep failed events
-                remaining = events[success_count:]
+            else:
                 self._fallback_path.write_text(
-                    "\n".join(json.dumps(e, default=str) for e in remaining) + "\n"
+                    "\n".join(json.dumps(e, default=str) for e in failed) + "\n"
                 )
         except Exception as e:
             _logger.error("AuditLogger: replay failed: %s", e)
