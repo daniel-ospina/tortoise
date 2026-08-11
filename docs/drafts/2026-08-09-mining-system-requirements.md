@@ -40,17 +40,24 @@ epic: value-first mining system (TBD — filed via epic pipeline)
 
 **Requirement:** The extractor MUST distinguish **product-knowledge decisions** from **process/governance decisions**. Process decisions are NOT epistemic Points; they route to the work item (issue/epic) where an integration exists, or are dropped with a logged reason.
 
-## R4 — Evidence is a SOURCE, not a Point; every belief cites its source
+## R4 — Every claim and decision cites its source (provenance chain)
 
-**Review input:** *"C1: what's the source? use our ontology"* + *"R5 correction: evidence (the raw data that supports a belief) is most likely a SOURCE, and we have a specific setup for that in our ontology."*
+**Review input:** *"C1: what's the source? use our ontology"* + *"R4/5 refinement: maybe the source is just an agentSession, and the table is the claim, which then connects to another claim. The question is where did that data come from — let's try to always connect claims to the source (the source is when it's external to us, or can just be generated in an internal conversation — but even a decision needs a source)."*
 
-**Requirement:** Evidence — the raw data supporting a belief — lives in **Source nodes**, linked by the ontology's provenance structure: `(Point)-[:extractedFrom]->(Source)` (Source carries `sourceKind`, `credibilityTier`). **Evidence is NEVER minted as a Point.** The epistemic layer holds beliefs; Sources hold the raw data behind them.
+**Requirement:** The provenance model is a **chain**, not a binary:
 
-- Every extracted claim/decision MUST cite the Source it came from (reference + span). `extractedFrom` must always resolve to a Source node.
-- "Keeping the cost tables connected to the Flash decision" = **index the cost data as a Source and link the decision to it** — not create a claim Point for the raw numbers.
-- Consequence: R4 and R5 are the SAME requirement (the reviewer flagged the conflation risk). The rule: **never pollute the epistemic layer with raw evidence-as-Points; evidence belongs in Sources.**
+```
+(Claim/Decision Point) -[:extractedFrom]-> (Source: agentSession | external artifact)
+(Claim) -[:IMPL]-> (Decision)
+(agentSession Source) -[:references]-> (external Source)     §3.4
+```
 
-## R5 — (merged into R4) — see above. Evidence = Source, linked via ontology provenance.
+- **The agentSession is itself a Source.** Every claim and every decision extracted from a conversation cites it via `extractedFrom → Source {sourceKind: "agentSession"}`. Even a decision needs a source — decisions are made in a conversation; the conversation is the source.
+- **A stated fact is a CLAIM, not a Source.** The cost table *as asserted in the conversation* ("GLM is $0.60/M") is an asserted belief → a claim Point. Claims connect to claims (IMPL: evidence claim → decision claim). It is NOT raw evidence to bury in a Source.
+- **Raw data is a SOURCE.** The artifact behind the fact (the pricing page, the paper) is a Source node. The session references it (`references` edge) or the claim's provenance resolves through it. External-to-us artifacts get their own Source nodes with `sourceKind` + `credibilityTier`.
+- **The system must always answer: "where did that data come from?"** Every claim/decision has a resolvable `extractedFrom` → at minimum the agentSession Source, through to any external artifact.
+
+## R5 — (merged into R4) — see above. Stated facts = claims; raw data = sources; provenance chain connects them.
 
 ## R6 — Entities are typed by the expansion packs' business logic (read + softly enforced); pack mapping is in scope
 
@@ -88,7 +95,7 @@ epic: value-first mining system (TBD — filed via epic pipeline)
 | R1 decisions ≠ events | D1, D12 | framed |
 | R2 atomic decisions | D6, D7, D10 | framed |
 | R3 process decisions → work item | D11 | framed |
-| R4 evidence = Source, provenance | C1 + R5 correction | framed (R5 merged) |
+| R4/R5 provenance chain (claims cite sources; agentSession is a Source; stated facts = claims, raw data = sources) | C1 + R4/5 refinement | framed |
 | R6 pack-typed entities + soft enforcement + pack mapping in scope | entities comments | framed (expanded) |
 | R7 sources indexed as nodes | bibliographies comment | framed |
 | R8 testability contract (2 layers) | meta comment + pass/fail question | framed |
