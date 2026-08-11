@@ -485,7 +485,15 @@ app.add_middleware(SecurityHeadersMiddleware)
 
 app.add_middleware(AnalyticsMiddleware)
 # Internal auth key for Edge Function → API communication
-_INTERNAL_KEY = os.environ.get("FASTAPI_INTERNAL_KEY", "")
+# Read lazily (not at import): tests and multi-app processes set
+# FASTAPI_INTERNAL_KEY after tortoise.hosted_api may already be imported,
+# and an import-time read froze the empty value forever (#880, exposed by
+# the CI matrix split — import order became non-deterministic).
+_INTERNAL_KEY: str | None = None  # deprecated import-time cache; see _check_internal
+
+
+def _get_internal_key() -> str:
+    return os.environ.get("FASTAPI_INTERNAL_KEY", "")
 
 
 # ── Audit Event Logger ───────────────────────────────────────────
@@ -527,10 +535,11 @@ async def _async_audit(
 
 def _check_internal(request: Request) -> None:
     """Verify internal auth — only Edge Functions call this."""
-    if not _INTERNAL_KEY:
+    key = _get_internal_key()
+    if not key:
         raise HTTPException(status_code=503, detail="Internal API not configured")
     auth = request.headers.get("authorization", "")
-    if not auth.startswith("Bearer ") or not hmac.compare_digest(auth[7:], _INTERNAL_KEY):
+    if not auth.startswith("Bearer ") or not hmac.compare_digest(auth[7:], key):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 

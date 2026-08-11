@@ -35,7 +35,6 @@ def client():
     """TestClient with the internal key configured + a temp FalkorDBLite DB."""
     old_key = os.environ.get("FASTAPI_INTERNAL_KEY", "")
     os.environ["FASTAPI_INTERNAL_KEY"] = _INTERNAL_KEY
-    ha_mod._INTERNAL_KEY = _INTERNAL_KEY
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test.db")
         _orig_init = ha_mod.TortoiseSDK.__init__
@@ -50,7 +49,6 @@ def client():
         finally:
             ha_mod.TortoiseSDK.__init__ = _orig_init
             os.environ["FASTAPI_INTERNAL_KEY"] = old_key
-            ha_mod._INTERNAL_KEY = old_key
 
 
 @pytest.fixture(autouse=True)
@@ -63,7 +61,6 @@ def dr_env(monkeypatch):
     for k, v in GOOD_ENV.items():
         monkeypatch.setenv(k, v)
     monkeypatch.setenv("FASTAPI_INTERNAL_KEY", _INTERNAL_KEY)
-    ha_mod._INTERNAL_KEY = _INTERNAL_KEY
     yield
 
 
