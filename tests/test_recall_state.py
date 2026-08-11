@@ -203,7 +203,10 @@ def _set_posterior(sdk, pid: str, alpha: float, beta: float):
 
 def _build_golden_graph(sdk):
     """(i) well-supported: 2 IMPL operators, posterior 12/1 ≈ 0.923.
-    (ii) low-support: 1 IMPL operator, posterior 2/1 ≈ 0.667.
+    (ii) low-support: 1 IMPL operator, posterior 3/1 = 0.75 (variance
+    3/80 ≈ 0.0375 < CONTESTED_VARIANCE_THRESHOLD → NOT contested — a
+    weakly-measured claim with no competing evidence must not read as
+    disputed).
     (iii) contradicted: 1 IMPL + 1 NAND operator, posterior 2/2 = 0.5
     (variance 0.05 → contested). Evidence sources use pointKind="evidence"
     so the kind="statement" full-scan retrieves ONLY the three claims
@@ -221,7 +224,7 @@ def _build_golden_graph(sdk):
     sdk.create_operator("IMPL", ev[0]["id"], [cont["id"]])
     sdk.create_operator("NAND", ev[1]["id"], [cont["id"]])
     _set_posterior(sdk, well["id"], 12.0, 1.0)
-    _set_posterior(sdk, low["id"], 2.0, 1.0)
+    _set_posterior(sdk, low["id"], 3.0, 1.0)
     _set_posterior(sdk, cont["id"], 2.0, 2.0)
     return {"well": well["id"], "low": low["id"], "cont": cont["id"]}
 
@@ -239,9 +242,13 @@ def test_golden_set_integration():
         assert ids[0] == g["well"]
         assert ids.index(g["low"]) < ids.index(g["cont"])  # low-support above contradicted
         by_id = {r["id"]: r for r in results}
-        # Contested surfacing: flag + not demoted (same formula as uncontested).
-        assert by_id[g["cont"]]["contested"] is True
+        # Contested surfacing: EXACTLY the contradicted claim is flagged — a
+        # weakly-measured low-support claim (no competing evidence) is NOT
+        # contested (review ISSUE-2).
+        flagged = [pid for pid in ids if by_id[pid]["contested"]]
+        assert flagged == [g["cont"]]
         assert by_id[g["cont"]]["ep"]["contested"] is True
+        assert by_id[g["low"]]["contested"] is False
         rr = by_id[g["cont"]]["recall_ranking"]
         assert rr["confidence_source"] == "posterior"
         # Well-supported strictly outranks low-support on the gate score.
@@ -304,6 +311,117 @@ def test_state_filter_excludes_superseded_deprecated():
         assert superseded["id"] in include_ids
         assert deprecated["id"] in include_ids
         assert retracted["id"] not in include_ids  # retracted is hard-excluded (#689)
+    finally:
+        sdk.close()
+
+
+def test_state_filter_does_not_shrink_pool_behind_superseded():
+    """Review P1 (#898): the status filter runs BEFORE pool truncation — when
+    superseded claims dominate the top of the retrieval pool, live claims
+    ranked behind them must still surface (the state view stays complete)."""
+    sdk = _fresh_sdk()
+    try:
+        proj = sdk._get_proj()
+        # 30 superseded high-relevance claims + 5 live claims, same kind.
+        superseded_ids = []
+        for i in range(30):
+            p = sdk.create_point("statement", f"nova engine coolant spec revision {i} old")
+            proj.g.query("MATCH (n:Point {id:$id}) SET n.status = 'superseded'",
+                         params={"id": p["id"]})
+            superseded_ids.append(p["id"])
+        live = [sdk.create_point(
+            "statement", f"nova engine coolant spec current target {i}")["id"]
+            for i in range(5)]
+        results = sdk.recall_state(kind="statement", limit=10)
+        ids = [r["id"] for r in results]
+        # Pool not shrunk by the status filter: ALL 5 live claims surface even
+        # though 30 superseded claims dominated the candidate pool.
+        assert len(ids) == 5
+        assert all(pid in ids for pid in live)
+        assert not (set(superseded_ids) & set(ids))
+        # include_superseded → superseded claims flow back into the pool.
+        inc = sdk.recall_state(kind="statement", limit=10, include_superseded=True)
+        assert len(inc) == 10
+        assert any(pid in superseded_ids for r in inc for pid in [r["id"]])
+    finally:
+        sdk.close()
+
+
+def test_mitigation_on_nand_operator_surfaced():
+    """Review P2 (#898): a mitigation on the very NAND that contradicts a
+    surfaced claim is attached (high-contention NANDs/mitigations context)."""
+    sdk = _fresh_sdk()
+    try:
+        g = _build_golden_graph(sdk)
+        # Find the NAND operator attached to the contradicted claim.
+        proj = sdk._get_proj()
+        rows = proj.g.query(
+            "MATCH (op:Point {is_operator:true, op_type:'NAND'})-[r:NAND]->(n:Point {id:$id}) "
+            "RETURN op.id",
+            params={"id": g["cont"]},
+        ).result_set
+        assert rows, "golden graph must have a NAND operator on the contradicted claim"
+        nand_op_id = rows[0][0]
+        sdk.mitigate_operator(nand_op_id, "source credibility disputed", strength=0.3)
+
+        results = sdk.recall_state(kind="statement", limit=10)
+        cont = next(r for r in results if r["id"] == g["cont"])
+        mit = cont.get("mitigations", [])
+        assert mit, "mitigation on the NAND operator must be surfaced"
+        assert any(m["operator_id"] == nand_op_id for m in mit)
+        assert any("source credibility" in (m.get("content") or "") for m in mit)
+    finally:
+        sdk.close()
+
+
+def test_mixed_pool_points_and_objects_ranked_together():
+    """Object-centric: a Point and the Object about it compete in ONE ranked
+    list when both are retrieved (not just objects alone). Embedded FTS cannot
+    retrieve Objects (no TF-IDF fallback), so retrieval is mocked deterministi-
+    cally (same pattern as test_suggest_entry_points_with_graph_ranker)."""
+    sdk = _fresh_sdk()
+    try:
+        obj = sdk.create_object("atlas launcher", "product")
+        claim = sdk.create_point("statement", "atlas launcher reuses vega avionics")
+        _set_posterior(sdk, claim["id"], 8.0, 1.0)  # ≈0.889
+        proj = sdk._get_proj()
+        proj.create_about_edge(claim["id"], obj["id"], "aboutObject")
+
+        sdk.tortoise_fts_query = lambda q, **kw: (
+            [{"id": claim["id"], "content": "atlas launcher reuses vega avionics",
+              "point_kind": "statement", "scores": {"rrf": 0.05}}]
+            if kw.get("entity_type") == "point"
+            else [{"id": obj["id"], "content": "atlas launcher",
+                   "point_kind": "product", "scores": {"rrf": 0.05}}]
+        )
+        results = sdk.recall_state("atlas launcher", limit=10, object_centric=True)
+        types = [r.get("entity_type") for r in results]
+        assert "object" in types and "point" in types
+        obj_res = next(r for r in results if r.get("entity_type") == "object")
+        assert obj_res["id"] == obj["id"]
+        # Object confidence = mean posterior of its about-Point.
+        assert obj_res["recall_ranking"]["confidence"] == pytest.approx(8.0 / 9.0, abs=1e-3)
+        # Object surfacing: related points attached.
+        rp = {p["id"] for p in obj_res.get("related_points", [])}
+        assert claim["id"] in rp
+        # Point surfacing: related objects attached.
+        pt = next(r for r in results if r.get("entity_type") == "point")
+        ro = {o["id"] for o in pt.get("related_objects", [])}
+        assert obj["id"] in ro
+    finally:
+        sdk.close()
+
+
+def test_min_confidence_floor_applies():
+    """min_confidence is an explicit floor orthogonal to the multiplicative
+    gate: claims below it are dropped from the state view."""
+    sdk = _fresh_sdk()
+    try:
+        g = _build_golden_graph(sdk)
+        results = sdk.recall_state(kind="statement", limit=10, min_confidence=0.6)
+        ids = [r["id"] for r in results]
+        assert g["well"] in ids and g["low"] in ids  # 0.923, 0.75 ≥ 0.6
+        assert g["cont"] not in ids  # 0.5 < 0.6 — dropped
     finally:
         sdk.close()
 

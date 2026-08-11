@@ -743,17 +743,19 @@ def tortoise_recall(query: str | None = None,
                      f"mode='state'.",
         }
     defaults = _RECALL_STATE_DEFAULTS
-    return {
-        "mode": mode,
-        "results": _safe(
-            _get_team_sdk().recall_state, query, kind=kind, limit=limit,
-            include_superseded=include_superseded,
-            min_confidence=min_confidence,
-            relevance_exp=relevance_exp if relevance_exp is not None else defaults["relevance_exp"],
-            confidence_exp=confidence_exp if confidence_exp is not None else defaults["confidence_exp"],
-            centrality_weight=centrality_weight if centrality_weight is not None else defaults["centrality_weight"],
-        ),
-    }
+    results = _safe(
+        _get_team_sdk().recall_state, query, kind=kind, limit=limit,
+        include_superseded=include_superseded,
+        min_confidence=min_confidence,
+        relevance_exp=relevance_exp if relevance_exp is not None else defaults["relevance_exp"],
+        confidence_exp=confidence_exp if confidence_exp is not None else defaults["confidence_exp"],
+        centrality_weight=centrality_weight if centrality_weight is not None else defaults["centrality_weight"],
+    )
+    # _safe returns an error dict on SDK exceptions — surface it at the TOP
+    # level so consumers never mis-parse results as a dict instead of a list.
+    if isinstance(results, dict) and "error" in results:
+        return {"mode": mode, **results}
+    return {"mode": mode, "results": results}
 
 
 # ── EP Belief Propagation (#6908) ────────────────────────────────

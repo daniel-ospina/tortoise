@@ -3934,6 +3934,7 @@ class TortoiseSDK:
         threshold: float = 0.0,
         relationship_filter: str | None = None,
         traversal_path: str | None = None,
+        exclude_status: list[str] | None = None,
     ) -> list[dict]:
         """Hybrid search with RRF fusion + EP annotation.
 
@@ -3949,6 +3950,11 @@ class TortoiseSDK:
             target_id via an operator with label=predicate (e.g., 'addresses:customerSegment-1').
         traversal_path: 'FromKind→ToKind' — only return points that participate in a
             pack-declared relation chain (e.g., 'Product→Feature'). Resolved via pack registry.
+        exclude_status: Point status values to EXCLUDE from results, applied to the
+            fused candidate set BEFORE the final limit truncation (so filtering cannot
+            silently shrink the result count — epic #898 recall_state). Default None =
+            no filtering (existing behavior unchanged; retracted is already excluded at
+            the retrieval layer, #689). Points with no status property are kept.
         """
         from .search_engine import (
             classify_query, degradation_chain, rrf_fusion,
@@ -4091,6 +4097,24 @@ class TortoiseSDK:
                     "traversal_path %r could not be resolved to a pack relation",
                     traversal_path,
                 )
+
+        # 5d. Apply exclude_status BEFORE truncation (#898): filtering after the
+        #     limit cut would silently shrink results when superseded/deprecated
+        #     points dominate the pool. Points with no status are kept; only
+        #     Point-label entities have status (operators are Points too).
+        if exclude_status and result_ids and graph_label == "Point":
+            try:
+                excluded = set(exclude_status)
+                status_rows = graph.query(
+                    "MATCH (n:Point) WHERE n.id IN $ids AND n.status IN $statuses "
+                    "RETURN n.id",
+                    params={"ids": result_ids, "statuses": sorted(excluded)},
+                ).result_set
+                status_excluded_ids = {row[0] for row in status_rows}
+                if status_excluded_ids:
+                    result_ids = [pid for pid in result_ids if pid not in status_excluded_ids]
+            except Exception:
+                _logger.warning("exclude_status filter failed — pass-through", exc_info=True)
 
         # Truncate AFTER filtering
         result_ids = result_ids[:limit]
@@ -4344,40 +4368,25 @@ class TortoiseSDK:
         )
 
         # 1. Candidate pool (Points + Objects), hybrid retrieval per entity.
+        #    State filter applied INSIDE retrieval (exclude_status is enforced
+        #    before pool truncation, so live claims ranked behind superseded
+        #    ones are not dropped — #898 review P1). retracted is already
+        #    hard-excluded at the retrieval layer (#689).
         pool = max(limit * 3, 30)
+        # retracted stays hard-excluded at the retrieval layer (#689);
+        # superseded/deprecated are excluded here unless include_superseded.
+        exclude_status = None if include_superseded else sorted(
+            self.STATE_EXCLUDED_STATUS - {"retracted"})
         point_results = self.tortoise_fts_query(
-            query, kind=kind, entity_type="point", limit=pool)
+            query, kind=kind, entity_type="point", limit=pool,
+            exclude_status=exclude_status)
         object_results = (
             self.tortoise_fts_query(
                 query, kind=kind, entity_type="object", limit=pool)
             if object_centric else []
         )
 
-        # 2. State filter: exclude superseded/deprecated/retracted unless
-        #    include_superseded (retracted hard-excluded regardless — #689).
-        #    SearchResult dicts do not carry status — batch-fetch it.
-        point_ids_all = [r["id"] for r in point_results]
-        status_by_id: dict[str, str | None] = {}
-        if point_ids_all:
-            try:
-                status_rows = proj.g.query(
-                    "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, n.status",
-                    params={"ids": point_ids_all},
-                ).result_set
-                status_by_id = {row[0]: row[1] for row in status_rows}
-            except Exception:
-                status_by_id = {}  # pass-through on fetch failure (defensive)
-
-        def _keep(p: dict) -> bool:
-            status = status_by_id.get(p["id"])
-            if status in self.STATE_EXCLUDED_STATUS:
-                return include_superseded and status != "retracted"
-            return True
-
-        points = [
-            dict(r, entity_type="point")
-            for r in point_results if _keep(r)
-        ]
+        points = [dict(r, entity_type="point") for r in point_results]
         objects = [dict(r, entity_type="object") for r in object_results]
 
         # 3. Multiplicative-gate ranking over the merged pool.
@@ -4398,7 +4407,7 @@ class TortoiseSDK:
 
         counter_evidence = self._state_counter_evidence(point_ids)
         arguments, nands = self._state_arguments(point_ids)
-        mitigations = self._state_mitigations(arguments)
+        mitigations = self._state_mitigations(arguments, nands)
         related_objects = self._state_related_objects(point_ids)
         related_points = self._state_related_points(object_ids)
 
@@ -4440,11 +4449,15 @@ class TortoiseSDK:
             "MATCH (c:Point)-[r:NAND]->(n:Point) "
             "WHERE n.id IN $ids "
             "RETURN n.id, c.id, coalesce(c.label, c.content, ''), "
-            "  coalesce(c.is_operator, false)",
+            "  coalesce(c.is_operator, false), coalesce(c.op_type, '')",
             params={"ids": point_ids},
         ).result_set
         out: dict[str, list[dict]] = {}
-        for target_id, cid, text, is_op in rows:
+        for target_id, cid, text, is_op, op_type in rows:
+            if is_op and not text:
+                # Unlabeled NAND operators: give the counter-evidence a
+                # meaningful default so the content half is never empty.
+                text = f"[NAND operator{(' ' + op_type) if op_type else ''}]"
             out.setdefault(target_id, []).append(
                 {"id": cid, "content": text or "", "is_operator": bool(is_op)})
         return out
@@ -4481,9 +4494,16 @@ class TortoiseSDK:
             nands[nid].sort(key=lambda o: o["precision"], reverse=True)
         return args, nands
 
-    def _state_mitigations(self, arguments: dict[str, list[dict]]) -> dict[str, list[dict]]:
-        """Mitigation points attached to surfaced operators (top points)."""
-        op_ids = sorted({op["id"] for ops in arguments.values() for op in ops})
+    def _state_mitigations(self, arguments: dict[str, list[dict]],
+                           nands: dict[str, list[dict]] | None = None) -> dict[str, list[dict]]:
+        """Mitigation points attached to surfaced operators (top points).
+
+        Includes operators surfaced as arguments AND as high-contention NANDs
+        — a mitigation on the very NAND that contradicts a surfaced claim is
+        exactly the epistemic context the state view should show.
+        """
+        op_ids = sorted({op["id"] for ops in arguments.values() for op in ops}
+                        | {op["id"] for ops in (nands or {}).values() for op in ops})
         if not op_ids:
             return {}
         rows = self._get_proj().g.query(
@@ -4498,7 +4518,7 @@ class TortoiseSDK:
                  "strength": float(strength) if strength is not None else None})
         # Attach under the owning result point (via its surfaced operator).
         by_point: dict[str, list[dict]] = {}
-        for nid, ops in arguments.items():
+        for nid, ops in list(arguments.items()) + list((nands or {}).items()):
             for op in ops:
                 if op["id"] in out:
                     for m in out[op["id"]]:
