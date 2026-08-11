@@ -688,6 +688,10 @@ class TestIntrospectiveQuotaCompleteness:
             ".invalidate_point", ".file_human_approval", ".assess_source",
             ".ingest_corpus", ".index_sessions",
             ".backfill_v25",
+            # epic #888 W2 consolidated write surface (node/edge-creating)
+            ".create_entity", ".operator_action",
+            ".update",  # consolidated update (also re-catches update_point/entity)
+            ".supersede",  # consolidated supersede (also re-catches supersede_point)
         )
         bulk_only = (".ingest_corpus", ".index_sessions", ".backfill_v25")
 

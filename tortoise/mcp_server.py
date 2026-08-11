@@ -335,6 +335,8 @@ _QUOTA_GATED: frozenset[str] = frozenset({
     # edge-creating tools — edge growth is the same graph-flood family
     "tortoise_create_edge", "tortoise_supersede", "tortoise_invalidate",
     "tortoise_retract_point",
+    # epic #888 W2 consolidated write surface
+    "tortoise_create_entity", "tortoise_update", "tortoise_operator_action",
     # delegates to hosted_api._seed_demo_graph (creates the 4-layer demo graph)
     "tortoise_onboarding_demo_create",
     # #684: node-creating tools that were missed in the original #329 audit
@@ -1007,14 +1009,17 @@ def tortoise_invalidate(id: str, corrected_by_id: str) -> dict:
     return _safe(_quota_gated(_get_team_sdk().invalidate_point, "points"), id, corrected_by_id)
 
 
-def tortoise_supersede(old_id: str, new_id: str) -> dict:
+def tortoise_supersede(old_id: str, new_id: str, transfer_edges: bool = True) -> dict:
     """Atomically replace old Point with new — CORRECTS edge + outdated flag.
 
-    Equivalent to invalidate(old_id, new_id) — marks old outdated,
-    creates CORRECTS edge from new to old.
-    Returns {invalidated, id, corrected_by}.
+    transfer_edges=True (default): full supersede — all edges move from old to
+    new. transfer_edges=False: invalidate behavior — mark old outdated with a
+    CORRECTS edge only (no edge transfer). Absorbs tortoise_invalidate.
+    Returns {invalidated, id, corrected_by} (+ edges_transferred when
+    transfer_edges=True).
     """
-    return _safe(_quota_gated(_get_team_sdk().supersede_point, "points"), old_id, new_id)
+    return _safe(_quota_gated(_get_team_sdk().supersede, "points"),
+                 old_id, new_id, transfer_edges=transfer_edges)
 
 
 def tortoise_retract_point(id: str) -> dict:
@@ -1350,6 +1355,65 @@ def tortoise_team_create(name: str) -> dict:
 
 # ── Entity CRUD (ONTOLOGY v2.5) ───────────────────────────────
 
+# ── Write/revise consolidation (epic #888 W2) ──────────────────────
+
+def tortoise_create_entity(type: str, name: str, props: Any = None) -> dict:
+    """Create an entity — type: subject|object|event|document.
+
+    Event entities wire about* edges from aboutSubject/aboutObject/aboutPoint/
+    aboutDocument props. Returns {node, nudges} — nudges suggest IMPL/NAND/
+    mitigate connections to related Points (advisory, not enforced).
+    """
+    props = _parse(props)
+    return _safe(_quota_gated(_get_team_sdk().create_entity, "points"),
+                 type, name, **(props or {}))
+
+
+def tortoise_update(id: str, props: Any = None) -> dict:
+    """Update a Point OR entity by id. Points get point-lifecycle semantics
+    (draft→live promote via status, version increment for Point:Object,
+    status validation); entities get a plain property update."""
+    props = _parse(props)
+    return _safe(_quota_gated(_get_team_sdk().update, "points"),
+                 id, **(props or {}))
+
+
+def tortoise_delete(id: str) -> dict:
+    """Delete a Point or entity by id. DESTRUCTIVE — requires human confirmation."""
+    result = _safe(_get_team_sdk().delete, id)
+    if isinstance(result, dict) and "error" in result:
+        return result
+    return {"deleted": bool(result), "id": id}
+
+
+def tortoise_operator_action(action: str, id: str, reason: str | None = None,
+                             strength: float = 0.5,
+                             bias: float | None = None,
+                             precision: float | None = None,
+                             consistency: float | None = None,
+                             directness: float | None = None) -> dict:
+    """Consolidated operator write action — action=mitigate|annotate.
+
+    mitigate: reason (required) + strength (0-1, default 0.5) — creates/updates
+    the mitigation Point (idempotent). annotate: bias/precision/consistency/
+    directness (all required, 0-1).
+    """
+    if action == "mitigate":
+        if not reason:
+            return {"error": "operator_action(action='mitigate') requires 'reason'"}
+        return _safe(_quota_gated(_get_team_sdk().mitigate_operator, "points"),
+                     id, reason, strength)
+    if action == "annotate":
+        dims = (bias, precision, consistency, directness)
+        if any(d is None for d in dims):
+            return {"error": "operator_action(action='annotate') requires "
+                              "bias, precision, consistency, directness"}
+        return _safe(_quota_gated(_get_team_sdk().annotate_operator, "points"),
+                     id, *dims)
+    return {"error": f"operator_action: unknown action {action!r} — "
+                      f"must be 'mitigate' or 'annotate'"}
+
+
 def tortoise_create_subject(name: str, subjectKind: str, props: Any = None) -> dict:
     """Create a Subject node (team, role, organization, person)."""
     props = _parse(props)
@@ -1481,9 +1545,17 @@ def tortoise_delete_entity(id: str) -> bool:
     """Delete any entity by ID."""
     return _safe(_get_team_sdk().delete_entity, id)
 
-def tortoise_create_edge(source_id: str, target_id: str, predicate: str) -> bool:
-    """Create an edge between two entities. Predicate: performs, produces, ownedBy, managedBy, etc."""
-    return _safe(_quota_gated(_get_team_sdk()._get_proj().create_edge, "points"), source_id, target_id, predicate)
+def tortoise_create_edge(source_id: str, target_id: str, predicate: str) -> dict:
+    """Create a typed structural edge between two entities (reification rule).
+
+    Relation (predicate): performs, produces, uses, memberOf, ownedBy, managedBy,
+    about*, related, dependsOn, etc. Operator-less by default — lazy promotion
+    via operator_action(action='mitigate') when mitigation becomes needed.
+    Returns {edge, created, nudges}. (Param order kept from the legacy surface:
+    source_id, target_id, predicate → SDK create_edge(relation, from_id, to_id).)
+    """
+    return _safe(_quota_gated(_get_team_sdk().create_edge, "points"),
+                 predicate, source_id, target_id)
 
 def tortoise_get_governance(subject_id: str) -> list:
     """Get all entities owned by a Subject."""
