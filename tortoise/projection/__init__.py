@@ -106,25 +106,27 @@ def _now_iso() -> str:
 
 
 def remove_stale_aof(db_path: str | os.PathLike) -> None:
-    """#915 — remove a stale ``appendonlydir/`` adjacent to an embedded DB.
+    """#915 — remove a stale AOF dir adjacent to an embedded DB.
 
     With AOF enabled (see FalkorProjection embedded serverconfig), Redis loads
     the AOF in PREFERENCE to the RDB on cold start. A stale AOF at the target
     path therefore makes restore/migrate silently serve pre-restore data
-    (e.g. ``backup.restore`` copying an RDB snapshot into a path whose
-    ``appendonlydir/`` still holds the OLD live graph). Restore semantics =
+    (e.g. ``backup.restore`` copying an RDB snapshot into a path whose AOF
+    dir still holds the OLD live graph). Restore semantics =
     "the restored snapshot wins" — call this on the target path before any
     open/copy. No-op when the DB path is ``:memory:`` or has no adjacent dir.
     """
     if not db_path or str(db_path) == ":memory:":
         return
-    aof_dir = Path(str(db_path)).with_name(
-        Path(str(db_path)).name + "-appendonlydir"
-    )
-    # Redislite also derives the dir from the db filename; tolerate both the
-    # suffix form and a literal ``appendonlydir`` sibling (falkordblite >= 0.10
-    # uses the ``<db>-appendonlydir`` convention; older builds the latter).
-    candidates = [aof_dir, Path(str(db_path)).parent / "appendonlydir"]
+    # The projection sets appenddirname to "<db-filename>-appendonlydir" (#915)
+    # so multiple embedded DBs in one directory keep isolated AOF dirs.
+    # Also tolerate the old literal "appendonlydir" sibling and the
+    # "<db>-appendonlydir" suffix form (pre-appenddirname builds).
+    db = Path(str(db_path))
+    candidates = [
+        db.with_name(db.name + "-appendonlydir"),
+        db.parent / "appendonlydir",
+    ]
     for d in candidates:
         if d.exists():
             shutil.rmtree(d, ignore_errors=True)
@@ -304,13 +306,22 @@ class FalkorProjection(
             #    via .settings without re-applying serverconfig). Restart any
             #    long-running embedded daemon after deploying this change.
             #  - AOF everysec fsync = ≤1s residual loss window on kill -9.
-            #  - appendonlydir/ is a LIVE durability artifact, NOT a backup
+            #  - appenddirname is PER-DB-FILENAME (default "appendonlydir" is a
+            #    per-directory name — two embedded DBs in one directory would
+            #    share the AOF dir and leak nodes across graphs, #915).
+            #  - The AOF dir is a LIVE durability artifact, NOT a backup
             #    artifact — restores/migrates must remove a stale one at the
             #    target path (Redis loads AOF in preference to RDB).
             #  - :memory: is exempt (no file to persist).
+            aof_dir = (
+                os.path.basename(os.path.abspath(path)) + "-appendonlydir"
+            ) if path != ":memory:" else None
             self.db = FalkorDB(
                 path,
-                serverconfig={"appendonly": "yes"} if path != ":memory:" else None,
+                serverconfig=(
+                    {"appendonly": "yes", "appenddirname": aof_dir}
+                    if path != ":memory:" else None
+                ),
             )
         elif host is not None:
             # Docker FalkorDB
