@@ -172,9 +172,15 @@ def migrate(force: bool = False) -> dict:
             logger.warning(
                 "no JSONL event log found — falling back to RDB snapshot copy "
                 "(best-effort recovery)")
+            # #915 — remove any stale AOF at the target: with AOF enabled,
+            # Redis loads the AOF in preference to the RDB, so a stale
+            # appendonlydir/ would shadow the copied snapshot.
+            from tortoise.projection import remove_stale_aof
+            remove_stale_aof(target)
             shutil.copy2(backup_path, target)
         else:
-            from tortoise.projection import FalkorProjection
+            from tortoise.projection import remove_stale_aof, FalkorProjection
+            remove_stale_aof(target)
             proj = FalkorProjection(target, allow_nonstandard_path=True)
             try:
                 proj.rebuild_all(events_dir)

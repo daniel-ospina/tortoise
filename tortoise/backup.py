@@ -112,6 +112,12 @@ def restore(backup_dir: str, db_path: str,
     # Copy files to target
     shutil.copy2(events_file, events_path)
     if db_file.exists():
+        # #915 — with AOF enabled, Redis loads the AOF in preference to the
+        # RDB. A stale appendonlydir/ at the target path would make this
+        # restore silently serve the OLD live graph instead of the snapshot.
+        # Restore semantics = "the restored snapshot wins".
+        from tortoise.projection import remove_stale_aof
+        remove_stale_aof(db_path)
         shutil.copy2(db_file, db_path)
 
     # Count events
