@@ -4640,8 +4640,10 @@ class TortoiseSDK:
 
         if query:
             # Topic scope: hybrid retrieval pool (operators can surface via
-            # point retrieval — batch-filter them out below).
-            pool = max(limit * 3, 50)
+            # point retrieval — batch-filter them out below). Capped at the
+            # retrieval layer's 10000 limit (P2: a valid large limit must
+            # not blow the internal pool past it).
+            pool = min(max(limit * 3, 50), 10000)
             results = self.tortoise_fts_query(
                 query, kind=kind, entity_type="point", limit=pool,
                 exclude_status=exclude_status)
@@ -4712,12 +4714,23 @@ class TortoiseSDK:
         """
         from .ranking import SubgraphExpander
 
+        # Validate bounds BEFORE seed resolution so an unresolvable seed
+        # cannot silently skip validation (P2: depth=6 on a bogus seed must
+        # error consistently, not depend on retrieval luck).
+        if depth < 1 or depth > 5:
+            raise ValueError(f"depth must be 1-5, got {depth}")
+        if completeness not in ("core", "full"):
+            raise ValueError(
+                f"completeness must be 'core' or 'full', got {completeness!r}")
+        if max_nodes < 10 or max_nodes > 5000:
+            raise ValueError(f"max_nodes must be 10-5000, got {max_nodes}")
+
         seeds = self._resolve_subgraph_seed(seed)
         if not seeds:
             return {
                 "nodes": [], "edges": [],
                 "stats": {"node_count": 0, "edge_count": 0,
-                           "depth": depth, "seed_count": 0,
+                           "depth": 0, "seed_count": 0,
                            "truncated": False},
             }
         expander = SubgraphExpander(self._get_proj())
@@ -4733,7 +4746,10 @@ class TortoiseSDK:
                              "(node id or topic text)")
         proj = self._get_proj()
         rows = proj.g.query(
-            "MATCH (n) WHERE n.id = $seed OR n.url = $seed RETURN n.id",
+            "MATCH (n) WHERE (n.id = $seed OR n.url = $seed) "
+            "AND labels(n)[0] IN ['Point', 'Object', 'Subject', 'Event', "
+            "                      'Source', 'Document'] "
+            "RETURN n.id",
             params={"seed": seed.strip()},
         ).result_set
         if rows:

@@ -715,7 +715,7 @@ _RECALL_MODES = ("state", "gaps", "subgraph", "custom")
 def tortoise_recall(query: str | None = None,
                     mode: str = "state",
                     kind: str | None = None,
-                    limit: int = 10,
+                    limit: int | None = None,
                     include_superseded: bool = False,
                     min_confidence: float = 0.0,
                     relevance_exp: float | None = None,
@@ -725,7 +725,8 @@ def tortoise_recall(query: str | None = None,
                     depth: int | None = None,
                     completeness: str | None = None,
                     min_load: int | None = None,
-                    max_support: int | None = None) -> dict:
+                    max_support: int | None = None,
+                    max_nodes: int | None = None) -> dict:
     """Epistemic recall — four intents via mode (preset + override pattern).
 
     mode="state" (default, UC1): "what is true and high-confidence right
@@ -751,9 +752,11 @@ def tortoise_recall(query: str | None = None,
     used before connecting a new document. Requires ``seed`` (node id,
     Source url, or topic text). Returns {nodes, edges, stats}.
 
-    mode="custom": raw parameters, full control — no preset defaults are
-    applied; every param must be set explicitly (or falls back to the
-    underlying function default).
+    mode="custom": raw parameters, full control — params pass straight
+    through to the state machinery with NO mode tuning (the underlying
+    function defaults apply to anything unset). Mode-specific params
+    (seed/depth/completeness/min_load/max_support/max_nodes) are NOT
+    applicable to custom (custom is state-shaped).
 
     Per-mode defaults are set by the preset; every param is individually
     overridable per call.
@@ -783,11 +786,13 @@ def tortoise_recall(query: str | None = None,
             _get_team_sdk().recall_subgraph, seed or query,
             depth=depth if depth is not None else _RECALL_SUBGRAPH_DEFAULTS["depth"],
             completeness=completeness if completeness is not None else _RECALL_SUBGRAPH_DEFAULTS["completeness"],
+            max_nodes=max_nodes if max_nodes is not None else 500,
         )
     elif mode == "custom":
         # Raw params, full control — no preset clamping.
         results = _safe(
-            _get_team_sdk().recall_state, query, kind=kind, limit=limit,
+            _get_team_sdk().recall_state, query, kind=kind,
+            limit=limit if limit is not None else 10,
             include_superseded=include_superseded,
             min_confidence=min_confidence,
             relevance_exp=relevance_exp if relevance_exp is not None else _RECALL_STATE_DEFAULTS["relevance_exp"],
@@ -797,7 +802,8 @@ def tortoise_recall(query: str | None = None,
     else:  # state
         defaults = _RECALL_STATE_DEFAULTS
         results = _safe(
-            _get_team_sdk().recall_state, query, kind=kind, limit=limit,
+            _get_team_sdk().recall_state, query, kind=kind,
+            limit=limit if limit is not None else 10,
             include_superseded=include_superseded,
             min_confidence=min_confidence,
             relevance_exp=relevance_exp if relevance_exp is not None else defaults["relevance_exp"],

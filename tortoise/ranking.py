@@ -696,8 +696,9 @@ class GapsRanker:
     def _fetch_load_signals(self, ids: list[str]) -> dict[str, dict]:
         """Outgoing epistemic load: IMPL/NAND edges where the claim is the
         SOURCE — operator-mediated (idx=0) or direct to a non-operator Point.
-        count(DISTINCT edge) keeps each signal correct despite the optional
-        cross-product (an edge belongs to exactly one pattern)."""
+        Operator and direct edges are counted in SEPARATE columns (chained
+        OPTIONAL MATCHes cross-product; a single per-row CASE over both
+        patterns would drop one of two same-type edges — P0 fix)."""
         if not ids:
             return {}
         rows = self.projection.g.query(
@@ -707,14 +708,19 @@ class GapsRanker:
             "OPTIONAL MATCH (n)-[r2:IMPL|NAND]->(m:Point) "
             "  WHERE (m.is_operator IS NULL OR m.is_operator = false) "
             "RETURN n.id, "
-            "  count(DISTINCT CASE WHEN type(r1) = 'IMPL' THEN r1 "
-            "                      WHEN type(r2) = 'IMPL' THEN r2 END) AS outgoing_impl, "
-            "  count(DISTINCT CASE WHEN type(r1) = 'NAND' THEN r1 "
-            "                      WHEN type(r2) = 'NAND' THEN r2 END) AS outgoing_nand",
+            "  count(DISTINCT CASE WHEN type(r1) = 'IMPL' THEN r1 END) AS op_load_impl, "
+            "  count(DISTINCT CASE WHEN type(r1) = 'NAND' THEN r1 END) AS op_load_nand, "
+            "  count(DISTINCT CASE WHEN type(r2) = 'IMPL' THEN r2 END) AS direct_load_impl, "
+            "  count(DISTINCT CASE WHEN type(r2) = 'NAND' THEN r2 END) AS direct_load_nand",
             params={"ids": ids},
         ).result_set
-        return {row[0]: {"outgoing_impl": int(row[1]), "outgoing_nand": int(row[2])}
-                for row in rows}
+        return {
+            row[0]: {
+                "outgoing_impl": int(row[1]) + int(row[3]),
+                "outgoing_nand": int(row[2]) + int(row[4]),
+            }
+            for row in rows
+        }
 
     def _fetch_support_signals(self, ids: list[str]) -> dict[str, dict]:
         """Incoming epistemic support: IMPL edges where the claim is a TARGET
@@ -733,18 +739,24 @@ class GapsRanker:
             "OPTIONAL MATCH (n)-[r5:extractedFrom]->(src:Source) "
             "OPTIONAL MATCH (opn:Point {is_operator:true, op_type:'NAND'})-[r6:NAND]->(n) "
             "  WHERE coalesce(r6.idx, 1) >= 1 "
+            "OPTIONAL MATCH (s2)-[r7:NAND]->(n) "
+            "  WHERE (s2:Point AND (s2.is_operator IS NULL OR s2.is_operator = false)) "
+            "     OR (s2:Event) "
             "RETURN n.id, "
             "  count(DISTINCT r3) AS op_support, "
             "  count(DISTINCT r4) AS direct_support, "
             "  count(DISTINCT r5) AS source_count, "
-            "  count(DISTINCT r6) AS incoming_nand",
+            "  count(DISTINCT r6) AS op_nand, "
+            "  count(DISTINCT r7) AS direct_nand",
             params={"ids": ids},
         ).result_set
         return {
             row[0]: {
                 "incoming_impl": int(row[1]) + int(row[2]),
                 "source_count": int(row[3]),
-                "incoming_nand": int(row[4]),
+                # Operator-mediated AND direct (reification) NAND into the
+                # claim — both are contention, surfaced never scored.
+                "incoming_nand": int(row[4]) + int(row[5]),
             }
             for row in rows
         }
@@ -837,8 +849,14 @@ class SubgraphExpander:
 
         Returns ``{nodes, edges, stats}``:
         - nodes: [{id, type, content, kind, is_operator, status, confidence}]
-        - edges: [{source, type, target}] — BOTH endpoints in the node set
-        - stats: {node_count, edge_count, depth, seed_count, truncated}
+        - edges: [{source, type, target}] — BOTH endpoints in the node set;
+          deduplicated per (source, type, target) pair (parallel same-type
+          edges between the same two nodes are collapsed in the edge list
+          — the epistemic count is available via GapsRanker/StateRanker).
+        - stats: {node_count, edge_count, depth, seed_count, truncated} —
+          depth = hops actually expanded (<= requested depth; 0 when the
+          seed resolved to nothing), seed_count = seeds that resolved to
+          graph nodes.
         """
         if depth < 1 or depth > 5:
             raise ValueError(f"depth must be 1-5, got {depth}")
@@ -858,10 +876,12 @@ class SubgraphExpander:
         edges: dict[tuple[str, str, str], dict] = {}
         frontier: list[str] = [s for s in seeds if s]
         truncated = False
+        reached = 0  # hops actually expanded (a 1-node graph reaches 1)
 
         for _hop in range(depth):
             if not frontier:
                 break
+            reached += 1
             next_frontier: list[str] = []
             # Batch-fetch neighbors (both directions) + node payloads.
             neighbor_ids = self._neighbors(frontier, rel_pattern, edges)
@@ -880,8 +900,10 @@ class SubgraphExpander:
         # Node payloads (single batch query for display + metadata).
         self._enrich(nodes)
         # Drop seeds that did not resolve to a graph node (dangling id).
+        resolved_seeds = [sid for sid in seeds if sid in nodes]
         for nid in [nid for nid, n in nodes.items() if "type" not in n]:
             del nodes[nid]
+        resolved_seeds = [sid for sid in resolved_seeds if sid in nodes]
         # Keep only edges whose endpoints are both in the final node set
         # (a capped expansion may have dangling edges to excluded nodes).
         node_ids = set(nodes)
@@ -896,8 +918,8 @@ class SubgraphExpander:
             "stats": {
                 "node_count": len(nodes),
                 "edge_count": len(kept),
-                "depth": depth,
-                "seed_count": len(seeds),
+                "depth": reached,
+                "seed_count": len(resolved_seeds),
                 "truncated": truncated,
             },
         }

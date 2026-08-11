@@ -243,6 +243,54 @@ def test_gaps_reification_rule_direct_edges():
         sdk.close()
 
 
+def test_gaps_mixed_edges_count_twice():
+    """P0 regression: a claim that is BOTH operator-source (idx=0) AND has a
+    direct outgoing IMPL edge is load-bearing twice — the cross-product must
+    not collapse the two same-type edges into one count."""
+    sdk = _fresh_sdk()
+    try:
+        proj = sdk._get_proj()
+        a = sdk.create_point("statement", "mixed load claim")
+        c = sdk.create_point("statement", "mixed load target")
+        sdk.create_operator("IMPL", a["id"], [c["id"]])          # op idx=0
+        proj.g.query(
+            "MATCH (x:Point {id:$s}), (y:Point {id:$t}) CREATE (x)-[:IMPL]->(y)",
+            params={"s": a["id"], "t": c["id"]},
+        )                                                            # direct
+        results = sdk.recall_gaps(kind="statement", limit=20)
+        rr = next(r for r in results if r["id"] == a["id"])["gaps_ranking"]
+        assert rr["outgoing_impl"] == 2 and rr["load"] == 2
+        assert rr["score"] == pytest.approx(2.0)
+    finally:
+        sdk.close()
+
+
+def test_gaps_direct_nand_incoming_surfaced():
+    """P1 regression: a direct (reification) operator-less NAND edge into a
+    claim is contention — surfaced as incoming_nand, never support."""
+    sdk = _fresh_sdk()
+    try:
+        proj = sdk._get_proj()
+        a = sdk.create_point("statement", "directly attacked claim")
+        b = sdk.create_point("statement", "direct attacker")
+        c = sdk.create_point("statement", "load target")
+        # a is load-bearing (supports c) AND directly NANDed by b.
+        proj.g.query(
+            "MATCH (x:Point {id:$s}), (y:Point {id:$t}) CREATE (x)-[:IMPL]->(y)",
+            params={"s": a["id"], "t": c["id"]},
+        )
+        proj.g.query(
+            "MATCH (x:Point {id:$s}), (y:Point {id:$t}) CREATE (x)-[:NAND]->(y)",
+            params={"s": b["id"], "t": a["id"]},
+        )
+        results = sdk.recall_gaps(kind="statement", limit=20)
+        rr = next(r for r in results if r["id"] == a["id"])["gaps_ranking"]
+        assert rr["incoming_nand"] == 1
+        assert rr["support"] == 0  # NAND never counts as support
+    finally:
+        sdk.close()
+
+
 def test_gaps_topic_scope_uses_hybrid_pool():
     """Topic-scoped gaps: retrieval pool scoped by query (mocked
     deterministically, same pattern as test_recall_state's mixed-pool test)
@@ -410,8 +458,37 @@ def test_subgraph_unresolvable_seed_returns_empty():
         res = sdk.recall_subgraph("no-such-id-anywhere")
         assert res["nodes"] == [] and res["edges"] == []
         assert res["stats"]["node_count"] == 0
+        assert res["stats"]["depth"] == 0
         with pytest.raises(ValueError):
             sdk.recall_subgraph("")
+        # Bounds validated even when the seed does not resolve (P2).
+        with pytest.raises(ValueError):
+            sdk.recall_subgraph("no-such-id-anywhere", depth=6)
+        with pytest.raises(ValueError):
+            sdk.recall_subgraph("no-such-id-anywhere", completeness="bogus")
+        with pytest.raises(ValueError):
+            sdk.recall_subgraph("no-such-id-anywhere", max_nodes=5)
+    finally:
+        sdk.close()
+
+
+def test_subgraph_max_nodes_truncation():
+    """max_nodes bounds the expansion and reports truncated — bounded, not
+    exhaustive-until-crash (UC3 completeness with a safety valve)."""
+    sdk = _fresh_sdk()
+    try:
+        proj = sdk._get_proj()
+        hub = sdk.create_point("statement", "hub claim")
+        for i in range(8):
+            leaf = sdk.create_point("statement", f"leaf claim {i}")
+            sdk.create_operator("IMPL", hub["id"], [leaf["id"]])
+        res = sdk.recall_subgraph(hub["id"], depth=2, max_nodes=10)
+        assert res["stats"]["truncated"] is True
+        assert res["stats"]["node_count"] <= 10
+        # A comfortable cap gets everything (hub + 8 leaves + 8 ops).
+        res2 = sdk.recall_subgraph(hub["id"], depth=2, max_nodes=50)
+        assert res2["stats"]["truncated"] is False
+        assert res2["stats"]["node_count"] == 17
     finally:
         sdk.close()
 
@@ -485,6 +562,34 @@ def test_tortoise_recall_gaps_defaults_overridable():
         # Custom depth override on subgraph.
         r = tortoise_recall(mode="subgraph", seed=g["gap"], depth=1)
         assert r["stats"]["depth"] == 1
+        # max_nodes override passes through (P2: subgraph cap overridable).
+        r = tortoise_recall(mode="subgraph", seed=g["gap"], max_nodes=50)
+        assert "error" not in r
+    finally:
+        mcp_mod.sdk = orig_sdk
+        sdk.close()
+
+
+def test_tortoise_recall_gaps_preset_limit_is_20():
+    """P1 regression: mode='gaps' without an explicit limit must use the
+    gaps preset (limit=20), not the state default (10)."""
+    from tortoise import mcp_server as mcp_mod
+    from tortoise.mcp_server import tortoise_recall
+    sdk = _fresh_sdk()
+    orig_sdk = mcp_mod.sdk
+    mcp_mod.sdk = sdk
+    try:
+        # 12 load-bearing-unsupported claims (each supports a shared target).
+        target = sdk.create_point("statement", "shared load target")
+        for i in range(12):
+            c = sdk.create_point("statement", f"gap claim {i} unsupported")
+            sdk.create_operator("IMPL", c["id"], [target["id"]])
+        r = tortoise_recall(mode="gaps", kind="statement")
+        assert r["mode"] == "gaps"
+        assert len(r["results"]) == 12, "gaps preset must not truncate at 10"
+        # Explicit limit override still wins.
+        r = tortoise_recall(mode="gaps", kind="statement", limit=5)
+        assert len(r["results"]) == 5
     finally:
         mcp_mod.sdk = orig_sdk
         sdk.close()
