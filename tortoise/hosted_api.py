@@ -714,7 +714,13 @@ async def health_ready():
     """
     db_ok = False
     try:
-        sdk = _make_sdk(namespace="registry")
+        # #669 post-flip: the FalkorDB data-plane probe must NOT open the
+        # registry namespace — FalkorDB auto-creates the graph on select, so
+        # a registry-namespaced probe RECREATED the deleted
+        # registry_control_plane on every health check (post-flip
+        # verification finding, #669). Probe the data plane via the default
+        # graph (never the registry namespace).
+        sdk = _make_sdk(namespace=None)
         sdk._get_proj().g.query("RETURN 1")
         db_ok = True
     except Exception:
