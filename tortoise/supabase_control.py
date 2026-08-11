@@ -1297,12 +1297,15 @@ def metering_increment(cp, team_id: str, period: str, n: int = 1) -> int:
     lose updates). Best-effort by contract (metering failures never block a
     write): the caller swallows exceptions.
 
-    #925: the read-back is the only best-effort step. The RPC itself still
-    raises when the atomic write genuinely failed. If the RPC committed but
-    the read-back fails (network blip), the stored counter is already
-    correct server-side — only the current total is unknown — so return the
-    known delta *n* instead of raising (a raising read-back would make
-    record_write_ops return None and a caller retry would double-count).
+    #925: the read-back is the only best-effort step. The RPC call itself
+    still raises when it fails — though if the response is lost the write
+    may still have committed, so callers treat a raise as best-effort (as
+    before). If the RPC succeeded but the read-back fails (network blip),
+    the stored counter is already correct server-side — only the current
+    total is unknown — so return the known delta *n* instead of raising
+    (the returned total is then approximate; a raising read-back would
+    make record_write_ops return None and a caller retry would
+    double-count).
     """
     cp.rpc(
         "metering_increment",
