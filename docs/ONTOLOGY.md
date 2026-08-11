@@ -1,5 +1,5 @@
 ---
-title: "Tortoise — Canonical Ontology v3.4"
+title: "Tortoise — Canonical Ontology v3.5"
 type: data
 domain: data
 status: live
@@ -9,10 +9,18 @@ ownedBy: epistemic-team
 doc_status: live
 ---
 
-# Tortoise — Canonical Ontology v3.4
+# Tortoise — Canonical Ontology v3.5
 
 > **Status:** LIVE — canonical. Co-located with the code it governs (tortoise repo).
 > **Supersedes:** ONTOLOGY_v2.5.md (eldato repo, deprecated).
+>
+> **Changelog v3.5 (2026-08-11, epic #898 — reification rule):**
+> - §8: Reification rule added — an edge carries an operator only when it needs
+>   mitigation (or is a Point↔Point support/contradict). Structural edges stay
+>   plain and carry confidence as an edge attribute. IMPL/NAND may be direct
+>   Point→Point (operator-less). Direction lives on the operator node when
+>   present, else on the edge. EP note: operator-less edges read direction from
+>   the edge and initialize edge messages directly.
 >
 > **Changelog v3.4 (2026-08-10, issue #690 — status vocabulary reconciliation):**
 > - §5: Point status vocabulary upgraded from narrative note to canonical table
@@ -423,7 +431,33 @@ Bidirectional: querying `dev:issue` also returns `pm:task`, and vice versa.
 
 ## §8. Semantic-Epistemic Edge Model
 
-Every relationship operates on two layers through a single operator Point:
+A relationship operates on two layers — **semantic** (relation type) and **epistemic**
+(confidence / contradiction). It carries an operator **only when it needs one**.
+
+#### Reification rule — when an edge gets an operator
+
+**An edge carries an operator iff it needs mitigation, or is a Point↔Point
+support/contradict.** All other edges stay plain and carry confidence as an
+edge attribute.
+
+| Edge | Operator? | Confidence |
+|---|---|---|
+| Point↔Point support / contradict (IMPL/NAND) | **Yes** | EP over the IMPL/NAND edge |
+| Any edge needing mitigation (+/− relevance) | **Yes** — mitigations attach to the operator | EP over IMPL/NAND |
+| Structural edge without mitigation (about\*, performs/produces/uses, memberOf/ownedBy, provenance) | **No** — plain edge | confidence edge attribute |
+
+- **Operator-less propagation:** an IMPL/NAND edge may be direct Point→Point
+  (no operator); EP propagates over it the same way.
+- **Direction:** `bidirectional` (default) / `unidirectional`. Lives on the
+  operator node when present, else on the edge. EP reads the operator node
+  first, falls back to the edge.
+- **Lazy promotion:** a plain edge gains an operator only when mitigation
+  becomes needed.
+- **EP:** for operator-less edges, EP reads direction from the edge and
+  initializes the edge message directly (operator-mediated edges compute
+  messages on operator update).
+
+Operator-mediated case (support/contradict, with mitigation anchor):
 
 ```
 Semantic:   (Feature) ──[addresses]──→ (CustomerNeed)    ← operator.label
