@@ -36,10 +36,13 @@ try:
         }})
         # WROTE = completion handshake (de-flake #819): printed only AFTER
         # the write is applied server-side, so a kill on the first WROTE
-        # line always leaves >=1 completed write behind. No explicit SAVE
-        # per write — forcing RDB durability here would mask the embedded
-        # durability gap tracked in #915 (graceful close() still persists
-        # via redislite's shutdown(save=True)).
+        # line always leaves >=1 completed write behind. The explicit SAVE
+        # keeps RDB + AOF in sync for the writer-death test's survivor-
+        # reconnect assertion (deterministic on every host, #879); the #915
+        # kill-9 tests deliberately do NOT use this helper (they prove AOF
+        # durability with raw _upsert and no SAVE). Graceful close() also
+        # persists via redislite's shutdown(save=True).
+        proj.db.execute_command("SAVE")
         print("WROTE", i, flush=True)
         time.sleep(0.1)
     print("DONE", {writer_id}, flush=True)
@@ -388,3 +391,240 @@ def test_guard_bypass_all_use_projection(monkeypatch):
     src = inspect.getsource(_spawn_writer)
     assert "FalkorProjection" in src
     assert "redislite.falkordb_client import FalkorDB" not in src
+
+
+# ── #915 embedded durability (AOF) ────────────────────────────────────────
+
+def _server_pid(proj) -> int | None:
+    """Redis server PID via INFO server — the daemonized server's process id."""
+    try:
+        info = proj.db.execute_command("INFO", "server")
+        # falkordblite returns a dict; older redislite returns bytes lines.
+        if isinstance(info, dict):
+            return int(info.get("process_id")) if info.get("process_id") else None
+        text = info if isinstance(info, str) else info.decode()
+        for line in text.splitlines():
+            if "process_id" in line:
+                return int(line.split(":")[1].strip())
+    except Exception:
+        return None
+    return None
+
+
+def _wait_aof_settled(proj, max_wait_s=10.0):
+    """Poll persistence state until AOF is flushed (aof_rewrite_in_progress
+    == 0, aof_pending_bio_fsync == 0, aof_last_write_status == ok). Not a
+    blind sleep — deterministic settle per #819/#880 precedent."""
+    deadline = time.monotonic() + max_wait_s
+    while time.monotonic() < deadline:
+        try:
+            info = proj.db.execute_command("INFO", "persistence")
+            # falkordblite returns a dict here (older redislite: bytes).
+            if isinstance(info, dict):
+                d = {str(k): str(v) for k, v in info.items()}
+            else:
+                text = info if isinstance(info, str) else info.decode()
+                d = dict(l.split(":") for l in text.splitlines() if ":" in l)
+            if (d.get("aof_enabled") == "1"
+                    and d.get("aof_rewrite_in_progress") == "0"
+                    and d.get("aof_pending_bio_fsync") == "0"
+                    and d.get("aof_last_write_status") == "ok"):
+                return
+        except Exception:
+            pass
+        time.sleep(0.2)
+    raise AssertionError("AOF did not settle within %ss" % max_wait_s)
+
+
+def _wait_server_exit(pid, max_wait_s=10.0):
+    deadline = time.monotonic() + max_wait_s
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.1)
+    raise AssertionError("server pid %s did not exit within %ss" % (pid, max_wait_s))
+
+
+def test_kill9_server_durability_fresh_db(monkeypatch):
+    """#915 — kill -9 of the embedded redis-server with NO SAVE must NOT lose
+    the graph: AOF (appendonly) carries the writes. Pre-fix this lost 0/5 keys
+    (RDB was the empty initial snapshot — snapshots never fire for small
+    graphs). Uses the server's OWN pid (INFO server) so this is a genuine
+    server crash, not the #879 writer-death (daemon survives killpg)."""
+    canonical = _canonical_path()
+    monkeypatch.setenv("TORTOISE_DB_PATH", canonical)
+    from tortoise.projection import FalkorProjection
+
+    proj = FalkorProjection()
+    # Raw _upsert writes — NO SAVE (proves AOF, not RDB). Server kept alive
+    # deliberately (no close) so the kill -9 below is a genuine crash.
+    for i in range(5):
+        proj._upsert({"id": f"k{i}", "content": f"c{i}", "context": "ctx"})
+    # One operator edge + one CREATE INDEX: module-command AOF replay breadth.
+    proj.g.query("CREATE (:Op {name: 'op1'})")
+    proj.g.query("CREATE INDEX FOR (n:Op) ON (n.name)")
+    _wait_aof_settled(proj)
+    pid = _server_pid(proj)
+    assert pid, "could not determine server pid"
+
+    os.kill(pid, signal.SIGKILL)
+    _wait_server_exit(pid)
+
+    fresh = FalkorProjection()
+    try:
+        new_pid = _server_pid(fresh)
+        assert new_pid and new_pid != pid, "reopen must cold-start (killed daemon)"
+        rows = fresh.g.query("MATCH (n:Point) RETURN count(n)").result_set
+        assert rows and rows[0][0] == 5, f"expected 5 points, got {rows}"
+        rows = fresh.g.query("MATCH (n:Op) RETURN count(n)").result_set
+        assert rows and rows[0][0] == 1, "operator node lost"
+        # CREATE INDEX survived replay
+        idx = fresh.g.query(
+            "CALL db.indexes() YIELD label, properties RETURN count(*)").result_set
+        assert idx and idx[0][0] >= 1, "index lost"
+    finally:
+        fresh.close()
+
+
+def test_kill9_warm_db_aof_carries_post_save_writes(monkeypatch):
+    """#915 — warm-DB loss shape: after a graceful close (RDB saved), reopen,
+    write 3 more, kill -9. AOF must carry the post-RDB-save writes (8/8)."""
+    canonical = _canonical_path()
+    monkeypatch.setenv("TORTOISE_DB_PATH", canonical)
+    from tortoise.projection import FalkorProjection
+
+    # Graceful close → RDB saved
+    proj = FalkorProjection()
+    for i in range(5):
+        proj._upsert({"id": f"w{i}", "content": f"c{i}", "context": "ctx"})
+    proj.close()
+
+    # Reopen, write 3 more (post-RDB-save), kill -9
+    proj = FalkorProjection()
+    for i in range(5, 8):
+        proj._upsert({"id": f"w{i}", "content": f"c{i}", "context": "ctx"})
+    _wait_aof_settled(proj)
+    pid = _server_pid(proj)
+    assert pid
+    os.kill(pid, signal.SIGKILL)
+    _wait_server_exit(pid)
+
+    fresh = FalkorProjection()
+    try:
+        rows = fresh.g.query("MATCH (n:Point) RETURN count(n)").result_set
+        assert rows and rows[0][0] == 8, f"expected 8 points (AOF carries post-save), got {rows}"
+    finally:
+        fresh.close()
+
+
+def test_jsonl_recovery_after_total_graph_loss(monkeypatch):
+    """#915 indicator 2 — JSONL event-log rebuild is the recovery path for
+    LOG-BACKED writes. Pinned write path: sdk.create_point with event_log_path
+    in the db's directory. Green pre-fix BY DESIGN (verification test)."""
+    canonical = _canonical_path()
+    monkeypatch.setenv("TORTOISE_DB_PATH", canonical)
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    from tortoise.sdk import TortoiseSDK
+    from tortoise.consistency import recover_from_log
+    from tortoise.projection import FalkorProjection
+
+    events_path = os.path.join(os.path.dirname(canonical), "events.jsonl")
+    sdk = TortoiseSDK(db_path=canonical, event_log_path=events_path)
+    for i in range(3):
+        sdk.create_point("observation", f"log-{i}")
+    sdk.close()
+
+    # Guard: adjacency + non-empty log preconditions
+    assert os.path.exists(events_path), "events.jsonl missing"
+    with open(events_path) as fh:
+        assert sum(1 for _ in fh) == 3, "log line count mismatch"
+
+    # Total graph loss: delete db + BOTH AOF-dir conventions (the installed
+    # redislite uses the literal "appendonlydir" sibling; the falkordblite
+    # fork uses <db>-appendonlydir) — otherwise the graph survives via AOF
+    # replay and the JSONL rebuild path is never exercised (reviewer P2,
+    # #915). Assert the loss so the test fails loudly if the deletion misses.
+    import shutil
+    for p in (canonical,
+              os.path.join(os.path.dirname(canonical), "appendonlydir"),
+              canonical + "-appendonlydir"):
+        if os.path.isdir(p):
+            shutil.rmtree(p, ignore_errors=True)
+        elif os.path.exists(p):
+            os.remove(p)
+    assert not os.path.exists(canonical), "db must be deleted for total graph loss"
+    assert not os.path.isdir(
+        os.path.join(os.path.dirname(canonical), "appendonlydir")), \
+        "AOF dir must be deleted for total graph loss"
+    assert not os.path.isdir(canonical + "-appendonlydir"), \
+        "fork-convention AOF dir must be deleted too (reviewer nit, #915)"
+
+    # Reopen triggers _auto_health_recover → recover_from_log rebuild
+    proj = FalkorProjection()
+    try:
+        rows = proj.g.query("MATCH (n:Point) RETURN count(n)").result_set
+        assert rows and rows[0][0] == 3, f"JSONL rebuild failed: {rows}"
+    finally:
+        proj.close()
+
+
+def test_restore_removes_stale_aof(monkeypatch):
+    """#915 restore contract — with AOF enabled, a stale appendonlydir/ at
+    the target path must NOT shadow a restored RDB snapshot. Verifies
+    remove_stale_aof is invoked by restore() before opening the target
+    (restore semantics = the restored snapshot wins)."""
+    import shutil
+    canonical = _canonical_path()
+    monkeypatch.setenv("TORTOISE_DB_PATH", canonical)
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    from tortoise.projection import FalkorProjection
+    from tortoise.backup import restore
+    import tortoise.backup as backup_mod
+
+    # Build a live AOF session at the target path (the "stale" state)
+    proj = FalkorProjection()
+    proj._upsert({"id": "stale-1", "content": "old", "context": "ctx"})
+    _wait_aof_settled(proj)
+    proj.close()
+    # falkordblite uses a literal "appendonlydir" sibling (older: <db>-appendonlydir)
+    aof_dir = os.path.join(os.path.dirname(canonical), "appendonlydir")
+    assert os.path.isdir(aof_dir), "AOF dir should exist with appendonly on"
+
+    # restore() must remove the stale AOF before opening the target — patch
+    # remove_stale_aof (imported lazily from tortoise.projection inside
+    # restore) to record the call and prove the contract wiring.
+    calls = []
+    import tortoise.projection as proj_mod
+    real_remove = proj_mod.remove_stale_aof
+
+    def _spy_remove(db_path):
+        calls.append(str(db_path))
+        real_remove(db_path)
+
+    proj_mod.remove_stale_aof = _spy_remove
+    try:
+        # Minimal backup dir with an events.jsonl (restore copies then returns
+        # early: no events.jsonl → error before touching the target). Use a
+        # real backup dir with events.jsonl so restore proceeds to the copy.
+        import tempfile as _tf
+        bdir = _tf.mkdtemp(prefix="tortoise-backup-")
+        with open(os.path.join(bdir, "events.jsonl"), "w") as fh:
+            fh.write("\n")
+        with open(os.path.join(bdir, "manifest.json"), "w") as fh:
+            fh.write('{"db": "tortoise.db", "events": "events.jsonl"}')
+        # Fake a snapshot RDB in the backup (restore copies it to target)
+        open(os.path.join(bdir, "tortoise.db"), "wb").write(b"RDB")
+        res = restore(str(bdir), canonical, events_path=os.path.join(
+            os.path.dirname(canonical), "events.jsonl"), into_falkor=False)
+        assert calls, "restore() must call remove_stale_aof on the target path"
+        assert str(canonical) in calls, f"remove_stale_aof called on {calls}"
+        # The stale AOF dir is gone after restore
+        assert not os.path.isdir(aof_dir), "stale AOF dir must be removed"
+        # The snapshot RDB was copied over the target
+        with open(canonical, "rb") as fh:
+            assert fh.read() == b"RDB", "snapshot RDB must win after restore"
+    finally:
+        proj_mod.remove_stale_aof = real_remove
+        shutil.rmtree(bdir, ignore_errors=True)
