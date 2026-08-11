@@ -997,9 +997,55 @@ class TortoiseSDK:
             "points": extracted,
         }
 
+    # ── Update / Delete consolidation (epic #888 W2, PR #912) ─────────
+    # One update()/delete() for Points AND entities. The legacy methods
+    # (update_point/update_entity/delete_point/delete_entity) remain the
+    # implementations — update()/delete() resolve the node label and dispatch
+    # to them, so behavior is bit-identical for existing callers while the
+    # consolidated surface stays the canonical entry.
+
+    def update(self, id: str, **props) -> dict:
+        """One update for a Point OR an entity (epic #888 W2).
+
+        Detects the node type by label:
+          - Point → point-lifecycle semantics (delegates to update_point):
+            draft→live promote via status (only transition allowed), version
+            increment for :Point:Object nodes, status validation against
+            POINT_STATUS_VALUES, context rejected.
+          - Entity (Subject/Object/Event/Document/Source) → plain property
+            update (delegates to update_entity).
+          - Unknown id → returns {} (no write) — legacy-compatible.
+        """
+        resolved = self._get_proj()._resolve_entity(
+            id, by_id=True, by_eventId=True)
+        if not resolved:
+            return {}
+        if resolved[0]["label"] == "Point":
+            return self.update_point(id, **props)
+        return self.update_entity(id, **props)
+
+    def delete(self, id: str) -> bool:
+        """One delete for a Point OR an entity (epic #888 W2).
+
+        Destructive. Detects the node type by label:
+          - Point → delete_point (tag GC + PointRetracted event)
+          - Entity → delete_entity
+        Returns True if a node was found and deleted, False otherwise.
+        """
+        resolved = self._get_proj()._resolve_entity(
+            id, by_id=True, by_eventId=True)
+        if not resolved:
+            return False
+        if resolved[0]["label"] == "Point":
+            return self.delete_point(id)
+        return self.delete_entity(id)
+
     def update_point(self, id: str, **props) -> dict:
         """Update properties on an existing Point. Returns updated point dict.
-        
+
+        Implementation behind update(id, ...) — the consolidated Point/entity
+        update (epic #888 W2).
+
         For :Object-labeled nodes, version is auto-incremented on every update.
         Status changes are validated against POINT_STATUS_VALUES.
         """
@@ -1095,7 +1141,11 @@ class TortoiseSDK:
         return result
 
     def delete_point(self, id: str) -> bool:
-        """Delete a Point and its relationships. Returns True if found."""
+        """Delete a Point and its relationships. Returns True if found.
+
+        Implementation behind delete(id) — the consolidated Point/entity
+        delete (epic #888 W2).
+        """
         proj = self._get_proj()
         exists = proj.g.query(
             "MATCH (n:Point {id:$id}) RETURN count(n) > 0",
@@ -1178,6 +1228,29 @@ class TortoiseSDK:
         # Dreaming (#85): invalidation changes the propagation graph.
         self._mark_dirty([id, corrected_by_id])
         return {"invalidated": True, "id": id, "corrected_by": corrected_by_id}
+
+    # ── Supersede / Invalidate consolidation (epic #888 W2) ───────────
+    # supersede() is the unified node-lifecycle entry; transfer_edges picks the
+    # full transfer (supersede_point) or the invalidate behavior
+    # (invalidate_point). Legacy methods remain the implementations.
+
+    def supersede(self, old_id: str, new_id: str,
+                  transfer_edges: bool = True) -> dict:
+        """Unified supersede / invalidate (epic #888 W2, PR #912).
+
+        transfer_edges=True  → full supersede (supersede_point): CORRECTS edge
+        + outdated flag + ALL edges transferred from old to new.
+        transfer_edges=False → invalidate behavior (invalidate_point): mark
+        old outdated + CORRECTS edge only, NO edge transfer. This absorbs the
+        legacy invalidate surface.
+
+        Returns {invalidated, id, corrected_by} (+ edges_transferred when
+        transfer_edges=True). Raises ValueError on missing/self/terminal input
+        (the underlying point-level guards, unchanged).
+        """
+        if transfer_edges:
+            return self.supersede_point(old_id, new_id)
+        return self.invalidate_point(old_id, new_id)
 
     def supersede_point(self, old_id: str, new_id: str) -> dict:
         """Atomically replace old Point with new — CORRECTS edge + outdated flag + edge transfer.
@@ -1456,6 +1529,33 @@ class TortoiseSDK:
             "target_ids": list(target_ids),
         }, point=event_point)
         return result
+
+    # ── Operator action consolidation (epic #888 W2) ──────────────────
+    # operator_action() is the unified operator write entry; the legacy
+    # mitigate_operator/annotate_operator remain the implementations.
+
+    def operator_action(self, action: str, **kwargs) -> dict:
+        """Consolidated operator write action (epic #888 W2, PR #912).
+
+        action='mitigate' → mitigate_operator(id=..., reason=..., strength=)
+            Creates/updates the mitigation Point modulating an operator's edge
+            strength (idempotent).
+        action='annotate' → annotate_operator(id=..., bias=..., precision=...,
+            consistency=..., directness=...) — structured epistemic dims.
+
+        Unknown action raises ValueError.
+        """
+        if action == "mitigate":
+            return self.mitigate_operator(
+                kwargs["id"], kwargs["reason"],
+                kwargs.get("strength", 0.5))
+        if action == "annotate":
+            return self.annotate_operator(
+                kwargs["id"], kwargs["bias"], kwargs["precision"],
+                kwargs["consistency"], kwargs["directness"])
+        raise ValueError(
+            f"operator_action: unknown action {action!r} — must be "
+            f"'mitigate' or 'annotate'")
 
     def annotate_operator(self, id: str, bias: float, precision: float,
                           consistency: float, directness: float) -> dict:
@@ -5640,17 +5740,154 @@ class TortoiseSDK:
                 total += r.result_set[0][0]
         return bool(total)
 
-    def create_subject(self, name: str, subjectKind: str = "other", **props) -> dict:
+    def create_entity(self, type: str, name: str, **props) -> dict:
+        """Create an entity — consolidated surface (epic #888 W2, PR #912).
+
+        ``type`` routes to the right entity kind:
+          - subject  → Subject node (subjectKind, status='live')
+          - object   → Object node (objectKind, status='live')
+          - event    → Event node (eventKind required) — preserves the legacy
+            about* edge wiring: aboutSubject/aboutObject/aboutPoint/
+            aboutDocument props are extracted and wired as typed edges
+            (Event)-[:aboutSubject]->(Subject) etc. rather than stored as
+            string properties (ID or name resolution, legacy behavior).
+          - document → Document node (documentKind required, status='draft')
+
+        Write nudges (nudge, don't enforce): returns ``{node, nudges}`` where
+        ``nudges`` lists top related Points (by name/content token overlap) with
+        a suggested IMPL/NAND/mitigate relation — advisory only, never enforced.
+        """
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
-        return self._create_entity("Subject", self.ulid(), {"name": name, "subjectKind": subjectKind, "status": "live", **props}, "SubjectAdded")
+        t = (type or "").strip().lower()
+        if t == "subject":
+            node = self._create_entity("Subject", self.ulid(), {
+                "name": name, "subjectKind": props.pop("subjectKind", "other"),
+                "status": "live", **props}, "SubjectAdded")
+        elif t == "object":
+            node = self._create_entity("Object", self.ulid(), {
+                "name": name, "objectKind": props.pop("objectKind", "other"),
+                "status": "live", **props}, "ObjectRegistered")
+        elif t == "event":
+            eventKind = props.pop("eventKind", None)
+            if not eventKind:
+                raise ValueError(
+                    "create_entity(type='event') requires eventKind")
+            # Legacy create_event about* wiring — preserved verbatim (#888 W2).
+            eid = self.ulid()
+            about_subject = props.pop("aboutSubject", None)
+            about_object = props.pop("aboutObject", None)
+            about_point = props.pop("aboutPoint", None)
+            about_document = props.pop("aboutDocument", None)
+            node = self._create_entity("Event", eid, {
+                "eventId": eid, "name": name, "eventKind": eventKind,
+                "eventStatus": "scheduled", **props}, "EventRecorded")
+            proj = self._get_proj()
+            if about_subject:
+                proj.create_about_edge(eid, about_subject, "aboutSubject")
+                # Only name-resolve if it looks like a plain name, not an ID
+                if isinstance(about_subject, str) and not _is_ulid(about_subject):
+                    proj._create_about_edges(eid, about_subject)
+            if about_object:
+                proj.create_about_edge(eid, about_object, "aboutObject")
+                if isinstance(about_object, str) and not _is_ulid(about_object):
+                    proj._create_about_edges(eid, about_object)
+            if about_point:
+                proj.create_about_edge(eid, about_point, "aboutPoint")
+                if isinstance(about_point, str) and not _is_ulid(about_point):
+                    proj._create_about_edges(eid, about_point)
+            if about_document:
+                proj.create_about_edge(eid, about_document, "aboutDocument")
+                if isinstance(about_document, str) and not _is_ulid(about_document):
+                    proj._create_about_edges(eid, about_document)
+        elif t == "document":
+            documentKind = props.pop("documentKind", None)
+            if not documentKind:
+                raise ValueError(
+                    "create_entity(type='document') requires documentKind")
+            did = self.ulid()
+            node = self._create_entity("Document", did, {
+                "title": name, "documentKind": documentKind,
+                "objectKind": "document", "status": "draft", **props},
+                "DocumentCreated")
+        else:
+            raise ValueError(
+                f"create_entity: unknown type {type!r} — must be one of "
+                f"subject, object, event, document")
+        return {
+            "node": node,
+            "nudges": self._nudge_candidates(
+                name, exclude_ids=[node.get("id") or node.get("eventId")]),
+        }
+
+    # ── Write nudges (epic #888 W2 — nudge, don't enforce) ───────────
+
+    _NUDGE_NAND_MARKERS = ("contradict", "disagree", "oppos", "invalid",
+                           "incorrect", "false claim")
+
+    def _nudge_candidates(self, text: str, *, exclude_ids: list[str] | None = None,
+                          limit: int = 3) -> list[dict]:
+        """Lightweight candidate finder for write nudges (epic #888 W2).
+
+        Deterministic token-overlap match — no model dependency: the new node's
+        name/content tokens are matched against existing Points' content/name/
+        label. Bounded scan (400 rows), top-``limit`` candidates by shared-token
+        count. Suggested relation:
+          - IMPL     — statement Point candidate (default support link)
+          - NAND     — either side carries contradiction markers
+          - mitigate — candidate is an operator Point (mitigation anchor)
+        Nudges are advisory only — surfaced in the write response, never
+        enforced (the agent acts via operator_action/create_edge if it wants).
+        """
+        tokens = {w for w in re.findall(r"[a-z0-9]{4,}", (text or "").lower())}
+        if not tokens:
+            return []
+        proj = self._get_proj()
+        excluded = set(exclude_ids or [])
+        rows = proj.g.query(
+            "MATCH (n:Point) WHERE NOT n.id IN $ex "
+            "RETURN n.id, n.content, n.name, n.label, n.is_operator LIMIT 400",
+            params={"ex": list(excluded)},
+        ).result_set
+        scored = []
+        for nid, content, pname, plabel, is_op in rows:
+            if not nid or nid in excluded:
+                continue
+            blob = " ".join(str(x) for x in (pname, content, plabel) if x)
+            wt = {w for w in re.findall(r"[a-z0-9]{4,}", blob.lower())}
+            overlap = len(tokens & wt)
+            if not overlap:
+                continue
+            if is_op:
+                rel = "mitigate"
+            elif any(m in (text or "").lower() or m in blob.lower()
+                     for m in self._NUDGE_NAND_MARKERS):
+                rel = "NAND"
+            else:
+                rel = "IMPL"
+            scored.append({
+                "candidate": nid,
+                "suggested_relation": rel,
+                "score": overlap,
+                "reason": f"{overlap} shared term(s) with {text[:40]!r}",
+            })
+        scored.sort(key=lambda r: (-r["score"], r["candidate"]))
+        return [{k: r[k] for k in ("candidate", "suggested_relation", "reason")}
+                for r in scored[:limit]]
+
+    def create_subject(self, name: str, subjectKind: str = "other", **props) -> dict:
+        """Thin alias for create_entity(type='subject') — epic #888 W2."""
+        _coerce_props(props)  # accept MCP-style nested props= dict (#218)
+        return self.create_entity("subject", name,
+                                  subjectKind=subjectKind, **props)["node"]
 
     def create_object(self, name: str, objectKind: str = "other", **props) -> dict:
+        """Thin alias for create_entity(type='object') — epic #888 W2."""
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
-        return self._create_entity("Object", self.ulid(), {"name": name, "objectKind": objectKind, "status": "live", **props}, "ObjectRegistered")
+        return self.create_entity("object", name,
+                                  objectKind=objectKind, **props)["node"]
 
     def create_event(self, name: str, eventKind: str, **props) -> dict:
-        _coerce_props(props)  # accept MCP-style nested props= dict (#218)
-        """Create an Event node.
+        """Create an Event node (alias for create_entity(type='event')).
 
         If aboutSubject, aboutObject, aboutPoint, or aboutDocument are provided
         in **props, they are extracted and wired as graph edges:
@@ -5660,31 +5897,9 @@ class TortoiseSDK:
           (Event)-[:aboutDocument]->(Document)
         rather than stored as string properties.
         """
-        eid = self.ulid()
-        about_subject = props.pop("aboutSubject", None)
-        about_object = props.pop("aboutObject", None)
-        about_point = props.pop("aboutPoint", None)
-        about_document = props.pop("aboutDocument", None)
-        result = self._create_entity("Event", eid, {"eventId": eid, "name": name, "eventKind": eventKind, "eventStatus": "scheduled", **props}, "EventRecorded")
-        proj = self._get_proj()
-        if about_subject:
-            proj.create_about_edge(eid, about_subject, "aboutSubject")
-            # Only name-resolve if it looks like a plain name, not an ID
-            if isinstance(about_subject, str) and not _is_ulid(about_subject):
-                proj._create_about_edges(eid, about_subject)
-        if about_object:
-            proj.create_about_edge(eid, about_object, "aboutObject")
-            if isinstance(about_object, str) and not _is_ulid(about_object):
-                proj._create_about_edges(eid, about_object)
-        if about_point:
-            proj.create_about_edge(eid, about_point, "aboutPoint")
-            if isinstance(about_point, str) and not _is_ulid(about_point):
-                proj._create_about_edges(eid, about_point)
-        if about_document:
-            proj.create_about_edge(eid, about_document, "aboutDocument")
-            if isinstance(about_document, str) and not _is_ulid(about_document):
-                proj._create_about_edges(eid, about_document)
-        return result
+        _coerce_props(props)  # accept MCP-style nested props= dict (#218)
+        return self.create_entity("event", name,
+                                  eventKind=eventKind, **props)["node"]
 
 
     # ── Session Indexing (AgentSession) ─────────────────────────
@@ -6042,9 +6257,10 @@ class TortoiseSDK:
 
 
     def create_document(self, title: str, documentKind: str, **props) -> dict:
+        """Thin alias for create_entity(type='document') — epic #888 W2."""
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
-        did = self.ulid()
-        return self._create_entity("Document", did, {"title": title, "documentKind": documentKind, "objectKind": "document", "status": "draft", **props}, "DocumentCreated")
+        return self.create_entity("document", title,
+                                  documentKind=documentKind, **props)["node"]
 
     def create_source(self, url: str, sourceKind: str, *,
                       tier: str | None = None, sourceDate: str | None = None,
@@ -6506,11 +6722,44 @@ class TortoiseSDK:
         return self._get_entity(id_val)
 
     def update_entity(self, id_val: str, **props) -> dict:
+        """Update any entity's properties. Implementation behind
+        update(id, ...) — the consolidated Point/entity update (epic #888 W2)."""
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
         return self._update_entity(id_val, **props)
 
     def delete_entity(self, id_val: str) -> bool:
+        """Delete any entity by ID. Implementation behind delete(id) — the
+        consolidated Point/entity delete (epic #888 W2)."""
         return self._delete_entity(id_val)
+
+    # ── Typed structural edges (epic #888 W2, reification rule v3.5 §8) ──
+
+    def create_edge(self, relation: str, from_id: str, to_id: str) -> dict:
+        """Create a typed structural edge (epic #888 W2, PR #912).
+
+        Reification rule (ontology v3.5 §8): structural edges stay PLAIN — no
+        operator is created (operator iff mitigation, or Point↔Point
+        support/contradict). Lazy promotion: when mitigation becomes needed,
+        create the operator via create_operator and mitigate it with
+        operator_action(action='mitigate').
+
+        ``relation`` must be one of the typed structural relations:
+        performs, produces, uses, authoredBy, ownedBy, managedBy, hasMember,
+        holdsRole, memberOf, reportsTo, participatesIn, hasPart, related,
+        dependsOn, references, wasDerivedFrom, aboutSubject, aboutObject,
+        aboutEvent, aboutDocument, aboutSource, aboutAction
+        (``from``/``to`` are Python keywords — mapped to from_id/to_id).
+
+        Returns {edge: {relation, from, to}, created: bool, nudges: [...]}.
+        """
+        proj = self._get_proj()
+        created = proj.create_edge(from_id, to_id, relation)  # validates relation
+        return {
+            "edge": {"relation": relation, "from": from_id, "to": to_id},
+            "created": created,
+            "nudges": self._nudge_candidates(
+                relation, exclude_ids=[from_id, to_id]),
+        }
 
     # ── Query Helpers ─────────────────────────────────────────────
 

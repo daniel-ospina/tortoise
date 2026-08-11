@@ -301,10 +301,12 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ToolDefinition(
         name="tortoise_supersede",
         description="Atomically replace old Point with new — CORRECTS edge + outdated flag. "
-                    "Equivalent to invalidate(old_id, new_id).",
+                    "transfer_edges=True (default): full supersede — all edges move from "
+                    "old to new. transfer_edges=False: invalidate behavior — outdated flag "
+                    "+ CORRECTS edge only, no edge transfer.",
         annotations=_rw(),
         http_policy=True,
-        sdk_method="supersede_point",
+        sdk_method="supersede",
     ),
     # ── Subscriptions / claim lifecycle (#432) ─────────────────────
     ToolDefinition(
@@ -590,12 +592,52 @@ TOOL_REGISTRY: list[ToolDefinition] = [
         sdk_method="delete_entity",
     ),
     ToolDefinition(
-        name="tortoise_create_edge",
-        description="Create an edge between two entities. "
-                    "Predicate: performs, produces, ownedBy, managedBy, etc.",
+        name="tortoise_create_entity",
+        description="Create an entity — type: subject|object|event|document. "
+                    "Event entities wire about* edges from aboutSubject/aboutObject/"
+                    "aboutPoint/aboutDocument props. Returns {node, nudges} — nudges "
+                    "suggest IMPL/NAND/mitigate connections to related Points (advisory).",
         annotations=_rw(),
         http_policy=True,
-        sdk_method="create_edge",  # proj.create_edge — not a direct SDK method
+        sdk_method="create_entity",
+    ),
+    ToolDefinition(
+        name="tortoise_update",
+        description="Update a Point OR entity by id. Points get point-lifecycle semantics "
+                    "(draft→live promote via status, version increment for Point:Object, "
+                    "status validation); entities get a plain property update.",
+        annotations=_rw(),
+        http_policy=True,
+        sdk_method="update",
+    ),
+    ToolDefinition(
+        name="tortoise_delete",
+        description="Delete a Point or entity by id. DESTRUCTIVE — requires human "
+                    "confirmation. Cannot be undone.",
+        annotations=_rw(),
+        http_policy=True,
+        sdk_method="delete",
+    ),
+    ToolDefinition(
+        name="tortoise_operator_action",
+        description="Consolidated operator write action — action=mitigate|annotate. "
+                    "mitigate: reason + strength (0-1) — creates/updates the mitigation "
+                    "Point (idempotent). annotate: bias/precision/consistency/directness "
+                    "(0-1).",
+        annotations=_rw(),
+        http_policy=True,
+        sdk_method="operator_action",
+    ),
+    ToolDefinition(
+        name="tortoise_create_edge",
+        description="Create a typed structural edge between two entities. "
+                    "Relation: performs, produces, uses, memberOf, ownedBy, managedBy, "
+                    "about*, related, dependsOn, etc. Operator-less per the reification "
+                    "rule (v3.5 §8) — lazy promotion via operator_action when mitigation "
+                    "is needed. Returns {edge, created, nudges}.",
+        annotations=_rw(),
+        http_policy=True,
+        sdk_method="create_edge",
     ),
     ToolDefinition(
         name="tortoise_get_governance",
@@ -797,9 +839,11 @@ class FastAPIRouterAdapter:
 GROUP_BY_NAME: dict[str, str] = {
     # memory
     "tortoise_create_point": "memory", "tortoise_update_point": "memory",
+    "tortoise_update": "memory",
     "tortoise_get_point": "memory", "tortoise_query": "memory",
     "tortoise_paginated_query": "memory", "tortoise_query_points_by_tag": "memory",
-    "tortoise_delete_point": "memory", "tortoise_supersede": "memory",
+    "tortoise_delete_point": "memory", "tortoise_delete": "memory",
+    "tortoise_supersede": "memory",
     "tortoise_invalidate": "memory", "tortoise_list_tags": "memory",
     "tortoise_list_pointkinds": "memory", "tortoise_search": "memory",
     "tortoise_recall": "memory",
@@ -816,8 +860,10 @@ GROUP_BY_NAME: dict[str, str] = {
     # graph
     "tortoise_create_operator": "graph", "tortoise_annotate_operator": "graph",
     "tortoise_get_operator": "graph", "tortoise_mitigate_operator": "graph",
+    "tortoise_operator_action": "graph",
     "tortoise_create_subject": "graph", "tortoise_create_object": "graph",
-    "tortoise_create_event": "graph", "tortoise_get_events": "graph",
+    "tortoise_create_event": "graph", "tortoise_create_entity": "graph",
+    "tortoise_get_events": "graph",
     "tortoise_create_edge": "graph", "tortoise_get_entity": "graph",
     "tortoise_update_entity": "graph", "tortoise_delete_entity": "graph",
     "tortoise_list_sources": "sources", "tortoise_create_source": "sources",
