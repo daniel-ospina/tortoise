@@ -108,6 +108,8 @@ Per-type edges (chosen over single polymorphic edge — FalkorDB matrix-per-type
 | `aboutEvent` | Point/Document → Event | unidirectional | many→many | `schema:about` (typed) | What Event this describes. Event is a target only — Events don't describe other Events |
 | `aboutPoint` | Event → Point | unidirectional | many→many | `schema:about` (typed) | What Point this Event describes. Event-only edge |
 | `aboutDocument` | Event → Document | unidirectional | many→many | `schema:about` (typed) | What Document this Event describes |
+| `aboutSource` | Point/Document/Event → Source | unidirectional | many→many | `schema:about` (typed) | What Source this describes. Creatable via `create_edge` (#391); provenance-flavored about edge — links a claim to the source that backs it alongside `extractedFrom` |
+| `aboutAction` | Point → Point (legacy) | unidirectional | many→many | `schema:about` (typed) | Legacy predicate retained for pre-v3.0 Action edges (Action entity dissolved in v3.0). Endpoints are whatever the resolver finds; not produced by new writes |
 | `TAGGED` | Point → Tag | unidirectional | many→many | `schema:keywords` | Free-form label on a Point. Tags are `:Tag` nodes (Object subclass, `objectKind: tag`) shared across Points via MERGE. Created by hosted-api point ingestion (hosted_api.py:695-787). ⚠️ **Write-only today — no tag-filter query surfaced yet** (see follow-up). |
 
 > **Legacy:** `aboutEntities` property → per-type `about*` edges. `_create_about_edges()` auto-detects Subject/Object from the legacy property. `schema:about` is polymorphic; we split per-type for graph performance.
@@ -197,7 +199,7 @@ wasDerivedFrom
 > for kind expansion). All three remain valid for `create_edge()`.
 ```
 
-Epistemic edges (operators): `IMPL`, `NAND` (+ semantic label). About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDocument`.
+Epistemic edges (operators): `IMPL`, `NAND` (+ semantic label). About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDocument`, `aboutSource` (Point/Document/Event → Source), `aboutAction` (legacy).
 
 ---
 
