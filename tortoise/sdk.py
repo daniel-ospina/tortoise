@@ -4271,6 +4271,273 @@ class TortoiseSDK:
 
         return [r.to_dict() for r in results[:limit]]
 
+    # ── Recall (epic #898) — UC1 STATE ──────────────────────────────
+
+    # Status values excluded from the UC1 "current state" view by default.
+    # `retracted` is additionally hard-excluded at the retrieval layer (#689).
+    STATE_EXCLUDED_STATUS = frozenset({"superseded", "deprecated", "retracted"})
+    # About-edge family used for object-centric linking (mirrors
+    # ranking.ABOUT_EDGE_TYPES and supersede_point's about* structural rels).
+    _ABOUT_TYPES = "aboutSubject|aboutObject|aboutAction|aboutEvent|aboutPoint|aboutDocument"
+
+    def recall_state(
+        self,
+        query: str | None = None,
+        *,
+        kind: str | None = None,
+        limit: int = 10,
+        include_superseded: bool = False,
+        min_confidence: float = 0.0,
+        relevance_exp: float = 1.0,
+        confidence_exp: float = 1.0,
+        centrality_weight: float = 0.10,
+        object_centric: bool = True,
+        state_ranker=None,
+    ) -> list[dict]:
+        """UC1 "state" recall (epic #898 Wave A) — what is true and
+        high-confidence right now.
+
+        Retrieves Points + Objects (hybrid search), then re-ranks the merged
+        pool with the multiplicative confidence gate (StateRanker):
+
+            base  = relevance_norm^a × confidence^b
+            score = base × (1 + w_c × centrality_norm)
+
+        State semantics:
+        - Excludes status in (superseded, deprecated, retracted) by default;
+          ``include_superseded=True`` brings superseded/deprecated back
+          (retracted stays excluded — #689 leak guard).
+        - Object-centric: Objects and the Points about them are ranked
+          together; an Object's confidence is the mean EP posterior of the
+          Points about it (neutral 0.5 when none).
+        - Contested claims are SURFACED, never buried: ``contested:true`` +
+          ``counter_evidence`` (NANDing point id/content) attached.
+        - Most important arguments (operators, by annotator_precision) and
+          high-contention NANDs / mitigations attached to top results.
+        - Uncalibrated points fall back to documented neutral confidence 0.5
+          (absence of measurement is NOT low support).
+
+        Returns the same SearchResult shape as ``tortoise_fts_query`` (list
+        of dicts), each annotated with ``entity_type``, ``recall_ranking``
+        (score breakdown), and state-context keys (``contested``,
+        ``counter_evidence``, ``arguments``, ``nands``, ``mitigations``,
+        ``related_objects`` / ``related_points``).
+        """
+        from .ranking import StateRanker
+
+        if limit < 1 or limit > 10000:
+            raise ValueError(f"limit must be 1-10000, got {limit}")
+        if not (0.0 <= min_confidence <= 1.0):
+            raise ValueError(f"min_confidence must be 0.0-1.0, got {min_confidence}")
+        if relevance_exp <= 0 or confidence_exp <= 0:
+            raise ValueError(
+                f"relevance_exp/confidence_exp must be > 0, got {relevance_exp}/{confidence_exp}")
+        if not 0.0 <= centrality_weight <= 1.0:
+            raise ValueError(f"centrality_weight must be 0-1, got {centrality_weight}")
+
+        proj = self._get_proj()
+        ranker = state_ranker or StateRanker(
+            proj,
+            relevance_exp=relevance_exp,
+            confidence_exp=confidence_exp,
+            centrality_weight=centrality_weight,
+        )
+
+        # 1. Candidate pool (Points + Objects), hybrid retrieval per entity.
+        pool = max(limit * 3, 30)
+        point_results = self.tortoise_fts_query(
+            query, kind=kind, entity_type="point", limit=pool)
+        object_results = (
+            self.tortoise_fts_query(
+                query, kind=kind, entity_type="object", limit=pool)
+            if object_centric else []
+        )
+
+        # 2. State filter: exclude superseded/deprecated/retracted unless
+        #    include_superseded (retracted hard-excluded regardless — #689).
+        #    SearchResult dicts do not carry status — batch-fetch it.
+        point_ids_all = [r["id"] for r in point_results]
+        status_by_id: dict[str, str | None] = {}
+        if point_ids_all:
+            try:
+                status_rows = proj.g.query(
+                    "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, n.status",
+                    params={"ids": point_ids_all},
+                ).result_set
+                status_by_id = {row[0]: row[1] for row in status_rows}
+            except Exception:
+                status_by_id = {}  # pass-through on fetch failure (defensive)
+
+        def _keep(p: dict) -> bool:
+            status = status_by_id.get(p["id"])
+            if status in self.STATE_EXCLUDED_STATUS:
+                return include_superseded and status != "retracted"
+            return True
+
+        points = [
+            dict(r, entity_type="point")
+            for r in point_results if _keep(r)
+        ]
+        objects = [dict(r, entity_type="object") for r in object_results]
+
+        # 3. Multiplicative-gate ranking over the merged pool.
+        merged = points + objects
+        ranked = ranker.rerank(merged, entity_type="point")
+
+        # 4. Explicit confidence floor (orthogonal to the multiplicative gate).
+        ranked = [
+            r for r in ranked
+            if r["recall_ranking"]["confidence"] >= min_confidence
+        ][:limit]
+
+        # 5. State context surfacing (batched, not N+1).
+        top_ids = [r["id"] for r in ranked]
+        point_ids = [r["id"] for r in ranked if r.get("entity_type") == "point"]
+        object_ids = [r["id"] for r in ranked if r.get("entity_type") == "object"]
+        by_id = {r["id"]: r for r in ranked}
+
+        counter_evidence = self._state_counter_evidence(point_ids)
+        arguments, nands = self._state_arguments(point_ids)
+        mitigations = self._state_mitigations(arguments)
+        related_objects = self._state_related_objects(point_ids)
+        related_points = self._state_related_points(object_ids)
+
+        out: list[dict] = []
+        for r in ranked:
+            rid = r["id"]
+            copy = dict(r)
+            if rid in counter_evidence:
+                copy["counter_evidence"] = counter_evidence[rid]
+            if rid in arguments:
+                copy["arguments"] = arguments[rid]
+            if rid in nands:
+                copy["nands"] = nands[rid]
+            if rid in mitigations:
+                copy["mitigations"] = mitigations[rid]
+            if rid in related_objects:
+                copy["related_objects"] = related_objects[rid]
+            if rid in related_points:
+                copy["related_points"] = related_points[rid]
+            # Contestation surfaced at top level (ep carries variance/contested
+            # for points; mirror it here so state consumers can flag without
+            # digging into ep). Never a ranking demoter.
+            ep = copy.get("ep")
+            contested = bool(ep.get("contested")) if isinstance(ep, dict) else False
+            copy["contested"] = contested
+            out.append(copy)
+        return out
+
+    def _state_counter_evidence(self, point_ids: list[str]) -> dict[str, list[dict]]:
+        """NANDing points (id/content) for contested targets.
+
+        Includes both statement-point NANDers and NAND operators (label used
+        as content) — a NAND operator IS the counter-claim in the Tortoise
+        model. Contestation is surfaced, never a ranking demoter.
+        """
+        if not point_ids:
+            return {}
+        rows = self._get_proj().g.query(
+            "MATCH (c:Point)-[r:NAND]->(n:Point) "
+            "WHERE n.id IN $ids "
+            "RETURN n.id, c.id, coalesce(c.label, c.content, ''), "
+            "  coalesce(c.is_operator, false)",
+            params={"ids": point_ids},
+        ).result_set
+        out: dict[str, list[dict]] = {}
+        for target_id, cid, text, is_op in rows:
+            out.setdefault(target_id, []).append(
+                {"id": cid, "content": text or "", "is_operator": bool(is_op)})
+        return out
+
+    def _state_arguments(self, point_ids: list[str]) -> tuple[dict[str, list[dict]], dict[str, list[dict]]]:
+        """Operators (arguments) attached to top points + NAND operators.
+
+        Returns (arguments, nands): arguments = operators sorted by
+        annotator_precision desc (most important first, capped 3 per result);
+        nands = NAND-edge operators (contradictions) with target ids.
+        """
+        if not point_ids:
+            return {}, {}
+        rows = self._get_proj().g.query(
+            "MATCH (op:Point {is_operator:true})-[r:IMPL|NAND|hasPart]-(n:Point) "
+            "WHERE n.id IN $ids "
+            "RETURN n.id, op.id, op.label, op.op_type, "
+            "  coalesce(op.annotator_precision, op.precision, 0.5), type(r)",
+            params={"ids": point_ids},
+        ).result_set
+        args: dict[str, list[dict]] = {}
+        nands: dict[str, list[dict]] = {}
+        for nid, op_id, label, op_type, precision, rel in rows:
+            op = {"id": op_id, "label": label or "", "op_type": op_type or "",
+                  "precision": round(float(precision), 4), "mechanism": rel}
+            if rel == "NAND":
+                nands.setdefault(nid, []).append(op)
+            else:
+                args.setdefault(nid, []).append(op)
+        for nid in args:
+            args[nid].sort(key=lambda o: o["precision"], reverse=True)
+            args[nid] = args[nid][:3]
+        for nid in nands:
+            nands[nid].sort(key=lambda o: o["precision"], reverse=True)
+        return args, nands
+
+    def _state_mitigations(self, arguments: dict[str, list[dict]]) -> dict[str, list[dict]]:
+        """Mitigation points attached to surfaced operators (top points)."""
+        op_ids = sorted({op["id"] for ops in arguments.values() for op in ops})
+        if not op_ids:
+            return {}
+        rows = self._get_proj().g.query(
+            "MATCH (op:Point {is_operator:true})-[r:mitigated_by]->(m:Point) "
+            "WHERE op.id IN $ids RETURN op.id, m.id, m.content, m.mitigation_strength",
+            params={"ids": op_ids},
+        ).result_set
+        out: dict[str, list[dict]] = {}
+        for op_id, mid, content, strength in rows:
+            out.setdefault(op_id, []).append(
+                {"id": mid, "content": content or "",
+                 "strength": float(strength) if strength is not None else None})
+        # Attach under the owning result point (via its surfaced operator).
+        by_point: dict[str, list[dict]] = {}
+        for nid, ops in arguments.items():
+            for op in ops:
+                if op["id"] in out:
+                    for m in out[op["id"]]:
+                        by_point.setdefault(nid, []).append(
+                            dict(m, operator_id=op["id"]))
+        return by_point
+
+    def _state_related_objects(self, point_ids: list[str]) -> dict[str, list[dict]]:
+        """Objects/entities a point is about (about* edge targets)."""
+        if not point_ids:
+            return {}
+        rows = self._get_proj().g.query(
+            "MATCH (n:Point)-[a:" + self._ABOUT_TYPES + "]->(t) "
+            "WHERE n.id IN $ids "
+            "RETURN n.id, labels(t)[0], t.id, coalesce(t.name, t.title, t.content, '')",
+            params={"ids": point_ids},
+        ).result_set
+        out: dict[str, list[dict]] = {}
+        for pid, tlabel, tid, display in rows:
+            out.setdefault(pid, []).append(
+                {"id": tid, "entity_type": (tlabel or "").lower(),
+                 "content": display or ""})
+        return out
+
+    def _state_related_points(self, object_ids: list[str]) -> dict[str, list[dict]]:
+        """Points about an Object (about* edges from Points to the Object)."""
+        if not object_ids:
+            return {}
+        rows = self._get_proj().g.query(
+            "MATCH (p:Point)-[a:" + self._ABOUT_TYPES + "]->(o:Object) "
+            "WHERE o.id IN $ids RETURN o.id, p.id, p.content, p.pointKind",
+            params={"ids": object_ids},
+        ).result_set
+        out: dict[str, list[dict]] = {}
+        for oid, pid, content, pkind in rows:
+            out.setdefault(oid, []).append(
+                {"id": pid, "content": content or "", "point_kind": pkind or ""})
+        return out
+
     # ── Multi-tenancy (#7001) ─────────────────────────────────
 
     # ── Control Plane: Team CRUD ───────────────────────────────────

@@ -699,6 +699,63 @@ def tortoise_search(query: str | None = None, kind: str | None = None,
                  min_confidence=min_confidence, order_by=order_by)
 
 
+# ── Recall — epistemic intents (epic #898) ─────────────────────
+
+# UC1 default exponents/weights for the multiplicative gate (Wave A).
+_RECALL_STATE_DEFAULTS = {"relevance_exp": 1.0, "confidence_exp": 1.0,
+                          "centrality_weight": 0.10}
+
+
+def tortoise_recall(query: str | None = None,
+                    mode: str = "state",
+                    kind: str | None = None,
+                    limit: int = 10,
+                    include_superseded: bool = False,
+                    min_confidence: float = 0.0,
+                    relevance_exp: float | None = None,
+                    confidence_exp: float | None = None,
+                    centrality_weight: float | None = None) -> dict:
+    """Epistemic recall — three intents via mode (preset + override pattern).
+
+    mode="state" (default, UC1): "what is true and high-confidence right
+    now". Multiplicative confidence gate
+    (score = relevance^a × confidence^b × (1 + w_c·centrality)), excludes
+    superseded/deprecated/retracted by default (include_superseded=True
+    brings them back), object-centric (Objects + the Points about them
+    ranked together), surfaces the most important arguments (operators),
+    high-contention NANDs and mitigations, and flags contested claims with
+    attached counter-evidence (never rank-penalized).
+
+    mode="gaps" / mode="subgraph" (UC2/UC3) are Wave B intents — scaffolded
+    here, not yet implemented.
+
+    Per-mode defaults for relevance_exp/confidence_exp/centrality_weight are
+    set by the mode preset; every param is individually overridable.
+
+    Returns {"mode": ..., "results": [...]}; each result carries the
+    standard SearchResult shape plus recall_ranking + state-context keys.
+    """
+    if mode not in ("state",):
+        return {
+            "mode": mode,
+            "error": f"recall mode {mode!r} is a Wave B intent (UC2 gaps / "
+                     f"UC3 subgraph) — not implemented in Wave A. Use "
+                     f"mode='state'.",
+        }
+    defaults = _RECALL_STATE_DEFAULTS
+    return {
+        "mode": mode,
+        "results": _safe(
+            _get_team_sdk().recall_state, query, kind=kind, limit=limit,
+            include_superseded=include_superseded,
+            min_confidence=min_confidence,
+            relevance_exp=relevance_exp if relevance_exp is not None else defaults["relevance_exp"],
+            confidence_exp=confidence_exp if confidence_exp is not None else defaults["confidence_exp"],
+            centrality_weight=centrality_weight if centrality_weight is not None else defaults["centrality_weight"],
+        ),
+    }
+
+
 # ── EP Belief Propagation (#6908) ────────────────────────────────
 
 def tortoise_compute_confidence(factors: Any = None,

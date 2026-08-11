@@ -155,6 +155,22 @@ TOOL_REGISTRY: list[ToolDefinition] = [
         sdk_method="tortoise_fts_query",
         rest_spec=RestSpec(method="GET", path="/v1/search"),
     ),
+    ToolDefinition(
+        name="tortoise_recall",
+        description="Epistemic recall — UC1 state (Wave A) + UC2 gaps / UC3 subgraph "
+                    "(Wave B, scaffolded). mode='state': current high-confidence "
+                    "state — multiplicative confidence gate "
+                    "(score = relevance^a × confidence^b × (1 + w_c·centrality)), "
+                    "excludes superseded/deprecated/retracted by default "
+                    "(include_superseded=True brings them back), object-centric "
+                    "(Objects + their Points ranked together), surfaces the most "
+                    "important arguments (operators), high-contention NANDs and "
+                    "mitigations, and flags contested claims with counter-evidence "
+                    "attached (never rank-penalized).",
+        annotations=_ro(),
+        http_policy=True,
+        sdk_method="recall_state",
+    ),
     # ── EP Belief Propagation (#6908) ─────────────────────────────
     ToolDefinition(
         name="tortoise_compute_confidence",
@@ -776,6 +792,7 @@ GROUP_BY_NAME: dict[str, str] = {
     "tortoise_delete_point": "memory", "tortoise_supersede": "memory",
     "tortoise_invalidate": "memory", "tortoise_list_tags": "memory",
     "tortoise_list_pointkinds": "memory", "tortoise_search": "memory",
+    "tortoise_recall": "memory",
     "tortoise_compute_confidence": "memory", "tortoise_get_confidence": "memory",
     "tortoise_set_point_baseline": "memory", "tortoise_calibrate_summary": "memory",
     "tortoise_suggest_entry_points": "memory",
