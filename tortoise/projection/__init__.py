@@ -14,9 +14,11 @@ from __future__ import annotations
 
 import re
 import os
+import shutil
 import logging
 from collections import defaultdict
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 logger = logging.getLogger(__name__)
@@ -101,6 +103,34 @@ from tortoise.projection.propagation import _PropagationMixin
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def remove_stale_aof(db_path: str | os.PathLike) -> None:
+    """#915 — remove a stale AOF dir adjacent to an embedded DB.
+
+    With AOF enabled (see FalkorProjection embedded serverconfig), Redis loads
+    the AOF in PREFERENCE to the RDB on cold start. A stale AOF at the target
+    path therefore makes restore/migrate silently serve pre-restore data
+    (e.g. ``backup.restore`` copying an RDB snapshot into a path whose AOF
+    dir still holds the OLD live graph). Restore semantics =
+    "the restored snapshot wins" — call this on the target path before any
+    open/copy. No-op when the DB path is ``:memory:`` or has no adjacent dir.
+    """
+    if not db_path or str(db_path) == ":memory:":
+        return
+    # The projection sets appenddirname to "<db-filename>-appendonlydir" (#915)
+    # so multiple embedded DBs in one directory keep isolated AOF dirs.
+    # Also tolerate the old literal "appendonlydir" sibling and the
+    # "<db>-appendonlydir" suffix form (pre-appenddirname builds).
+    db = Path(str(db_path))
+    candidates = [
+        db.with_name(db.name + "-appendonlydir"),
+        db.parent / "appendonlydir",
+    ]
+    for d in candidates:
+        if d.exists():
+            shutil.rmtree(d, ignore_errors=True)
+            logger.warning("removed stale AOF dir %s (restore/migrate contract, #915)", d)
 
 
 def _norm(ev: dict) -> dict:
@@ -266,7 +296,37 @@ class FalkorProjection(
             # the plain falkordb.FalkorDB treats a positional path arg as a HOST
             # (IDNA crash: redis tries to resolve the file path as a hostname, #82).
             from redislite.falkordb_client import FalkorDB  # lazy: keep import optional
-            self.db = FalkorDB(path)
+            # #915 — embedded durability: enable AOF (appendonly) so a kill -9 of
+            # the redis-server daemon loses at most the last ~1s of writes instead
+            # of the whole graph since the last RDB save (RDB snapshots never fire
+            # for small graphs: save 900 1 / 300 100 / 60 200 / 15 1000).
+            #
+            # Durability contract (embedded file-backed mode):
+            #  - AOF binds at daemon COLD start (redislite reuses a live daemon
+            #    via .settings without re-applying serverconfig). Restart any
+            #    long-running embedded daemon after deploying this change.
+            #  - AOF everysec fsync = ≤1s residual loss window on kill -9.
+            #  - appenddirname is PER-DB-FILENAME (default "appendonlydir" is a
+            #    per-directory name — two embedded DBs in one directory would
+            #    share the AOF dir and leak nodes across graphs, #915).
+            #  - The AOF dir is a LIVE durability artifact, NOT a backup
+            #    artifact — restores/migrates must remove a stale one at the
+            #    target path (Redis loads AOF in preference to RDB).
+            #  - :memory: is exempt (no file to persist).
+            aof_enabled = (
+                os.environ.get("TORTOISE_EMBEDDED_AOF", "").strip().lower()
+                in ("1", "true", "yes")
+            )
+            aof_dir = (
+                os.path.basename(os.path.abspath(path)) + "-appendonlydir"
+            ) if (path != ":memory:" and aof_enabled) else None
+            self.db = FalkorDB(
+                path,
+                serverconfig=(
+                    {"appendonly": "yes", "appenddirname": aof_dir}
+                    if (path != ":memory:" and aof_enabled) else None
+                ),
+            )
         elif host is not None:
             # Docker FalkorDB
             from falkordb import FalkorDB  # ponytail: lazy import, only needed for Docker mode
