@@ -509,12 +509,30 @@ def test_tortoise_recall_mode_state_shape():
 
 
 def test_tortoise_recall_scaffolds_wave_b_modes():
-    """gaps/subgraph are Wave B — scaffolded with a clear error, not silent."""
+    """gaps/subgraph landed in Wave B: they route to their real intents now
+    (previously scaffolded with a "Wave B" error). state/custom still route."""
+    from tortoise import mcp_server as mcp_mod
     from tortoise.mcp_server import tortoise_recall
-    for mode in ("gaps", "subgraph"):
-        result = tortoise_recall("x", mode=mode)
-        assert result["mode"] == mode
-        assert "error" in result and "Wave B" in result["error"]
+    sdk = _fresh_sdk()
+    orig_sdk = mcp_mod.sdk
+    mcp_mod.sdk = sdk
+    try:
+        _build_golden_graph(sdk)
+        # gaps: returns a results list (content assertions live in
+        # test_recall_gaps_subgraph.py; here we pin the routing shape).
+        r = tortoise_recall(mode="gaps", kind="statement")
+        assert r["mode"] == "gaps"
+        assert isinstance(r.get("results"), list)
+        # subgraph: flat {nodes, edges, stats} shape.
+        r = tortoise_recall(mode="subgraph", seed="any-seed", depth=1)
+        assert r["mode"] == "subgraph"
+        assert "nodes" in r and "edges" in r and "stats" in r
+        # Invalid modes still error loudly (never silently fall back to state).
+        r = tortoise_recall(mode="nope")
+        assert "error" in r
+    finally:
+        mcp_mod.sdk = orig_sdk
+        sdk.close()
 
 
 def test_tortoise_recall_state_returns_ranked_results():

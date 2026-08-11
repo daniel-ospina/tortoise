@@ -157,16 +157,26 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_recall",
-        description="Epistemic recall — UC1 state (Wave A) + UC2 gaps / UC3 subgraph "
-                    "(Wave B, scaffolded). mode='state': current high-confidence "
-                    "state — multiplicative confidence gate "
+        description="Epistemic recall — four intents via mode (preset + override). "
+                    "mode='state' (UC1): current high-confidence state — "
+                    "multiplicative confidence gate "
                     "(score = relevance^a × confidence^b × (1 + w_c·centrality)), "
                     "excludes superseded/deprecated/retracted by default "
                     "(include_superseded=True brings them back), object-centric "
                     "(Objects + their Points ranked together), surfaces the most "
                     "important arguments (operators), high-contention NANDs and "
                     "mitigations, and flags contested claims with counter-evidence "
-                    "attached (never rank-penalized).",
+                    "attached (never rank-penalized). mode='gaps' (UC2): "
+                    "load-bearing but under-supported claims — graph-structure "
+                    "query (score = load/(1+support); load = outgoing IMPL+NAND, "
+                    "support = incoming IMPL + Source edges; reads IMPL/NAND "
+                    "operator-mediated or direct per the reification rule); needs "
+                    "query (topic scope) or kind (population scan). mode='subgraph' "
+                    "(UC3): complete connected subgraph for a seed/topic — "
+                    "completeness-optimized (high recall, precision secondary), "
+                    "returns {nodes, edges, stats}; needs seed (node id, Source url, "
+                    "or topic text); depth 1-5, completeness core|full. "
+                    "mode='custom': raw params, full control.",
         annotations=_ro(),
         http_policy=True,
         sdk_method="recall_state",
