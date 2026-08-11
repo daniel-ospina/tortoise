@@ -208,9 +208,17 @@ class TestOverviewDefaultSummary:
         from tortoise.mcp_server import tortoise_overview
         _seed_graph(sdk)
         combined = tortoise_overview()
+
+        def _stable(d):
+            # uptime is time-varying (increases between calls) — strip it so
+            # the comparison is deterministic; everything else is stable.
+            if isinstance(d, dict) and "uptime" in d:
+                d = {k: v for k, v in d.items() if k != "uptime"}
+            return d
+
         for sec in ("taxonomy", "structure", "pointkinds", "tags", "sources",
                     "namespaces", "graphs", "health", "status", "stale"):
-            assert combined[sec] == tortoise_overview(section=sec), sec
+            assert _stable(combined[sec]) == _stable(tortoise_overview(section=sec)), sec
 
 
 # ── get: type routing + auto-detect ────────────────────────────────
