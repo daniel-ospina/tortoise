@@ -81,7 +81,7 @@ python -m tortoise.selfhost # run the daemon locally (see env table below)
 | Env var | Default | Purpose |
 |---|---|---|
 | `TORTOISE_DB_URI` | — | Durable FalkorDB connection string (recommended) |
-| `TORTOISE_DB_PATH` | `/data/tortoise.db` | Embedded FalkorDBLite eval path (AOF-durable to ≤1s since #915; delete the db + appendonlydir to reset) |
+| `TORTOISE_DB_PATH` | `/data/tortoise.db` | Embedded FalkorDBLite eval path (AOF-durable to ≤1s since #915; delete the db + `<db>-appendonlydir` to reset) |
 | `TORTOISE_API_KEY` | unset | Set → `auth_mode=static` (Bearer key); unset → `auth_mode=none` — ⚠️ a non-localhost bind with no key exposes an unauthenticated engine |
 | `TORTOISE_HOST` / `TORTOISE_PORT` | `127.0.0.1` / `8000` | Daemon bind |
 | `TORTOISE_RATE_LIMIT` | `100` | Requests per minute per IP (MCP SSE bursts ≈ 5–10 req/call) |

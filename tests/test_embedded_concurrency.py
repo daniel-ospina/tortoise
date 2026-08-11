@@ -588,8 +588,8 @@ def test_restore_removes_stale_aof(monkeypatch):
     proj._upsert({"id": "stale-1", "content": "old", "context": "ctx"})
     _wait_aof_settled(proj)
     proj.close()
-    # falkordblite uses a literal "appendonlydir" sibling (older: <db>-appendonlydir)
-    aof_dir = os.path.join(os.path.dirname(canonical), "appendonlydir")
+    # The projection sets appenddirname to "<db-filename>-appendonlydir" (#915)
+    aof_dir = canonical + "-appendonlydir"
     assert os.path.isdir(aof_dir), "AOF dir should exist with appendonly on"
 
     # restore() must remove the stale AOF before opening the target — patch
