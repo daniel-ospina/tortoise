@@ -462,13 +462,39 @@ class TortoiseEP:
 
     def _affected_claims(self, operator_ids: list[str],
                          max_hops: int = 2) -> set[str]:
+        """Affected claims for a run, seeded from operator and/or point ids.
+
+        Seeds may be operator ids (legacy) or plain point ids (#888 W5): an
+        operator-less direct IMPL/NAND edge is a factor shared by BOTH of its
+        endpoints, so plain-point seeds discover direct edges in both
+        directions (operator-mediated hops still run through _neighbors).
+        """
         affected: set[str] = set()
-        for op_id in operator_ids:
-            rows = self.g.query(
-                "MATCH (o:Point {id:$oid})-[r:IMPL|NAND]->(c:Point) "
-                "RETURN DISTINCT c.id",
-                params={"oid": op_id},
+        for seed_id in operator_ids:
+            is_op = self.g.query(
+                "MATCH (n:Point {id:$id}) RETURN (n.is_operator = true)",
+                params={"id": seed_id},
             ).result_set
+            if is_op and is_op[0][0]:
+                # Operator seed — legacy behavior: follow outgoing edges to
+                # the operator's inputs (the operator's factor).
+                rows = self.g.query(
+                    "MATCH (o:Point {id:$oid})-[r:IMPL|NAND]->(c:Point) "
+                    "RETURN DISTINCT c.id",
+                    params={"oid": seed_id},
+                ).result_set
+            else:
+                # Plain-point seed (#888 W5): direct edges in BOTH directions
+                # (an operator-less edge is a factor shared by its endpoints).
+                # Operator endpoints are excluded — operator-mediated edges
+                # are reached via _neighbors in the BFS below.
+                rows = self.g.query(
+                    "MATCH (a:Point {id:$id})-[r:IMPL|NAND]-(b:Point) "
+                    "WHERE b.id <> $id "
+                    "AND (b.is_operator IS NULL OR b.is_operator = false) "
+                    "RETURN DISTINCT b.id",
+                    params={"id": seed_id},
+                ).result_set
             affected.update(r[0] for r in rows)
 
         if max_hops > 0 and affected:
@@ -477,6 +503,20 @@ class TortoiseEP:
                 new_frontier: list[str] = []
                 for claim_id in frontier:
                     for nid in self.proj._neighbors(claim_id):
+                        if nid not in affected:
+                            affected.add(nid)
+                            new_frontier.append(nid)
+                    # Operator-less hops (#888 W5): direct IMPL/NAND edges
+                    # between plain Points (operator-mediated hops above).
+                    dir_rows = self.g.query(
+                        "MATCH (a:Point {id:$id})-[r:IMPL|NAND]-(b:Point) "
+                        "WHERE b.id <> $id "
+                        "AND (a.is_operator IS NULL OR a.is_operator = false) "
+                        "AND (b.is_operator IS NULL OR b.is_operator = false) "
+                        "RETURN DISTINCT b.id",
+                        params={"id": claim_id},
+                    ).result_set
+                    for (nid,) in dir_rows:
                         if nid not in affected:
                             affected.add(nid)
                             new_frontier.append(nid)
@@ -489,9 +529,11 @@ class TortoiseEP:
                           ) -> list[tuple[str, str, list[str], float, str | None, str]]:
         """Extract EP factors from the affected claims subgraph.
 
-        Two batch queries replace the original per-claim N+1 pattern (#400 follow-up):
+        Three batch queries replace the original per-claim N+1 pattern (#400 follow-up):
         1. Single query for all operators connected to any affected claim.
         2. Single query for all inputs of those operators, ordered by idx.
+        3. Single query for operator-less direct edges between plain Points
+           (binary factors keyed on the source endpoint, #888 W5).
 
         Semantics are preserved: same affected set, same factor list, same
         ordering guarantees (source idx=0 first for directional IMPL).
@@ -500,17 +542,52 @@ class TortoiseEP:
         if not affected_claims:
             return factors
 
-        # Batch 1: all operators connected to any affected claim.
+        from .weights import compute_operator_weight, NAND_BASE_WEIGHT
+
+        # Batch 1: all operators connected to any affected claim. Restricted
+        # to actual operator nodes (is_operator=true): plain-point sources of
+        # IMPL/NAND edges are operator-less direct edges (#888 W5) handled by
+        # Batch 3 below. (Previously an unfiltered match would surface plain
+        # sources as pseudo-operators with op_type=NULL; their single-input
+        # "factors" were silently dropped by _update_factor's <2-input guard,
+        # so excluding them here is behavior-neutral for existing graphs.)
         op_info: dict[str, tuple[str, str | None, str | None]] = {}
         rows = self.g.query(
             "MATCH (o:Point)-[r:IMPL|NAND]->(c:Point) "
-            "WHERE c.id IN $ids "
+            "WHERE o.is_operator = true AND c.id IN $ids "
             "RETURN DISTINCT o.id, o.op_type, o.label, o.direction",
             params={"ids": list(affected_claims)},
         ).result_set
         for op_id, op_type, label, direction in rows:
             if op_id not in op_info:
                 op_info[op_id] = (op_type, label, direction)
+
+        # Batch 3: operator-less direct edges (#888 W5, ONTOLOGY v3.5 §8
+        # reification rule). A direct IMPL/NAND edge between two plain Points
+        # is itself a binary factor: the source endpoint plays the factor's
+        # role, messages live ON the edge (r.msg_alpha/r.msg_beta), and
+        # _update_factor computes the forward message from the source's belief
+        # (its cavity, with no self-edge message) exactly as for an
+        # operator-mediated factor. DIRECTION is read from the EDGE
+        # (r.direction), defaulting to bidirectional when absent — the
+        # operator node's direction applies only when an operator exists
+        # (Batch 1 above). Weight parity with operator-mediated factors: an
+        # explicit r.weight wins; otherwise the operator base weight applies
+        # (NAND_BASE_WEIGHT — #855 — for NAND, 1.0 for IMPL).
+        dir_rows = self.g.query(
+            "MATCH (a:Point)-[r:IMPL|NAND]->(b:Point) "
+            "WHERE (a.is_operator IS NULL OR a.is_operator = false) "
+            "AND (b.is_operator IS NULL OR b.is_operator = false) "
+            "AND (a.id IN $ids OR b.id IN $ids) "
+            "RETURN a.id, b.id, type(r), coalesce(r.direction, 'bidirectional'), "
+            "       r.weight",
+            params={"ids": list(affected_claims)},
+        ).result_set
+        for src_id, tgt_id, rel, direction, weight in dir_rows:
+            if weight is None:
+                weight = (NAND_BASE_WEIGHT if rel == "NAND" else 1.0)
+            factors.append((src_id, rel, [src_id, tgt_id], float(weight),
+                            None, direction))
 
         if not op_info:
             return factors
@@ -531,7 +608,6 @@ class TortoiseEP:
             op_inputs[op_id].append(claim_id)
 
         # Assemble factors (single compute_operator_weight per operator).
-        from .weights import compute_operator_weight
         for op_id, (op_type, label, direction) in op_info.items():
             # Defensive: pre-migration operators without direction default to bidirectional
             if direction is None:
@@ -614,7 +690,8 @@ class TortoiseEP:
         """Run EP to convergence. Batch I/O avoids SQLite crashes (#6761).
 
         Args:
-            operator_ids: operator node IDs to include
+            operator_ids: operator node IDs to include — plain point IDs are
+                also accepted as seeds for operator-less direct edges (#888 W5)
             max_hops: how far to extend the affected subgraph
             evidence: optional {claim_id: (alpha, beta)} priors —
                 merged with any evidence set at construction time.
