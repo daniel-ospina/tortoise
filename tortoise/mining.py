@@ -1,22 +1,38 @@
-"""Conversation mining pipeline — transcript → Events + Points.
+"""Conversation mining pipeline — transcript → Events + Points (+ Objects).
 
 GAP-15 / #7003: Wire extractor.py Tier1/Tier2 → transcript → EventRecorded events.
 Gate: ≥3 events/session (meeting + decision + friction/milestone).
 
+Phase-2 (#782 / epic #264 plan W-1): an EntityStage pass reifies extracted
+entities as Object nodes (deterministic obj_sha256 canonical id via
+ObjectRegistered), wires aboutObject Point+Event side, aboutEvent provenance
+anchors, and the extractedFrom → Source → references → Event chain. No
+Subject stubs (legacy auto-detect bypassed). Dedup is a later stage — the
+dedup_hits key is counted only.
+
 Architecture (from plan WF4):
   Conversation transcript → extractor (Points + Operators) →
   Event derivation (meeting, decision, friction) → JSONL append → projection.apply()
+  → EntityStage (Objects + aboutObject/aboutEvent wiring)
 """
 from __future__ import annotations
 
+import logging
 import re
 from datetime import datetime, timezone
 
 from typing import Any
 
 from .api import EventAPI
-from .extractor import MockExtractor, LLMExtractor
-from .ids import ulid, now_iso
+from .extractor import (
+    MockExtractor,
+    LLMExtractor,
+    extract_conversation_entities,
+    _canonical_name,
+)
+from .ids import ulid, now_iso, content_hash
+
+logger = logging.getLogger(__name__)
 
 
 def _now() -> str:
@@ -63,10 +79,22 @@ class ConversationMiner:
         *,
         participants: list[str] | None = None,
         session_started_at: str | None = None,
+        extract_entities: bool = True,
+        entity_stage=None,
     ) -> dict:
         """Run extraction pipeline on a conversation transcript.
 
-        Returns: {events: N, points: M, operators: K, event_ids: [...]}
+        Returns (plan §6.1, back-compatible): the Phase-1 keys
+        {events, points, operators, event_ids} plus the Phase-2 extension
+        {entities, objects, dedup_hits, drafts}:
+          - entities: number of extracted entity mentions
+          - objects:  number of Object nodes reified/wired for those entities
+          - dedup_hits: 0 — the dedup stage is a later issue; key counted only
+          - drafts:  number of extraction Points created with status 'draft'
+
+        ``entity_stage`` injects a deterministic mock (EntityStageMock, plan
+        §7 preamble) for tests; None → LLM stage (or rule fallback when no
+        model is configured).
         """
         started_at = session_started_at or _now()
 
@@ -90,12 +118,112 @@ class ConversationMiner:
             event_ids.append(ev["eventId"])
             self._emit_event(api, ev)
 
+        # 5. Phase-2 entity extraction + Object reification (W-1, DE2E-1)
+        entities: list[dict] = []
+        objects_wired = 0
+        dedup_hits = 0  # dedup stage is a later issue (#784-ish) — key counted only
+        drafts = sum(1 for p in points if p.get("status", "draft") == "draft")
+        if extract_entities:
+            try:
+                entities = extract_conversation_entities(
+                    transcript, source_id, api,
+                    model=self.model, entity_stage=entity_stage,
+                )
+            except Exception:
+                logger.exception("entity extraction failed for %s", source_id)
+                entities = []
+            objects_wired = self._reify_entities(
+                transcript, source_id, api, entities, points, events,
+            )
+
         return {
             "events": len(events),
             "points": len(points),
             "operators": len(operators),
             "event_ids": event_ids,
+            "entities": len(entities),
+            "objects": objects_wired,
+            "dedup_hits": dedup_hits,
+            "drafts": drafts,
         }
+
+    # ── Phase-2 entity reification (W-1 write phase, DE2E-1) ──────
+
+    @staticmethod
+    def _object_id(name: str) -> str:
+        """Deterministic canonical Object id (plan §4.1/§4.4): ``obj_`` +
+        sha256 of the domain-separated canonical name, truncated to 12 hex
+        chars — via the existing ids.content_hash helper (no third sha256)."""
+        return "obj_" + content_hash(f"obj:{_canonical_name(name)}")[:12]
+
+    def _reify_entities(
+        self,
+        transcript: str,
+        source_id: str,
+        api: EventAPI,
+        entities: list[dict],
+        points: list[dict],
+        events: list[dict],
+    ) -> int:
+        """W-1 write phase (plan §4.1/§4.4, DE2E-1): reify each extracted
+        entity as an Object node via the reification rule (ObjectRegistered
+        event + deterministic canonical id), then wire:
+
+          - (Point)-[:aboutObject]->(Object) for Points mentioning the entity
+          - (Event)-[:aboutObject]->(Object) for session events about the entity
+          - (Point)-[:aboutEvent]->(meeting Event) provenance anchor
+          - (Source)-[:references]->(Event) completing the chain
+            Point -[:extractedFrom]-> Source -[:references]-> Event
+
+        Deliberately bypasses the legacy _create_about_edges auto-detect path
+        (projection/edges.py:69-111) so no :Subject stub nodes are created for
+        extracted entities (DE2E-1 step 6). Returns the number of Object nodes
+        reified. In log-only mode (no projection) ObjectRegistered events are
+        emitted for the audit trail and the count is returned without wiring.
+        """
+        proj = api.projection
+        if proj is None:
+            # Log-only mode: emit ObjectRegistered events for the audit trail;
+            # graph wiring is projection-bound.
+            for ent in entities:
+                name = ent["name"]
+                api.add_object(name, ent["objectKind"], id=self._object_id(name),
+                               canonical_name=_canonical_name(name), title=name)
+            return len(entities)
+
+        meeting_event = f"meeting-{source_id}"
+        wired = 0
+        for ent in entities:
+            name = ent["name"]
+            canonical = _canonical_name(name)
+            api.add_object(name, ent["objectKind"], id=self._object_id(name),
+                           canonical_name=canonical, title=name)
+            # MERGE-by-name: re-fetch the canonical node id (a prior run's id
+            # wins — no duplicate Objects, DE2E-8 idempotency)
+            r = proj.g.query("MATCH (o:Object {name:$name}) RETURN o.id",
+                             params={"name": name})
+            oid = r.result_set[0][0] if r.result_set and r.result_set[0] \
+                else self._object_id(name)
+            # Point side: deterministic mention-based wiring
+            for p in points:
+                content = p.get("content", "")
+                if name.lower() in content.lower():
+                    proj.create_about_edge(p["id"], oid, "aboutObject")
+            # Event side: the meeting event always; derived events whose
+            # object text mentions the entity
+            proj.create_about_edge(meeting_event, oid, "aboutObject")
+            for ev in events:
+                if ev.get("eventId") != meeting_event and \
+                        name.lower() in str(ev.get("object", "")).lower():
+                    proj.create_about_edge(ev["eventId"], oid, "aboutObject")
+            wired += 1
+
+        # Point → aboutEvent → meeting Event (session-occurrence anchor, DE2E-1)
+        for p in points:
+            proj.create_about_edge(p["id"], meeting_event, "aboutEvent")
+        # Complete the provenance chain: Source -[:references]-> Event
+        proj.link_source_to_entity(source_id, meeting_event, "Event")
+        return wired
 
     # ── Internal helpers ───────────────────────────────────────────
 
@@ -352,10 +480,175 @@ def mine_conversation(
     *,
     model: Any | None = None,
     participants: list[str] | None = None,
+    extract_entities: bool = True,
+    entity_stage=None,
+    content_dedup: bool = True,
+    dedup_threshold: float | None = None,
 ) -> dict:
-    """Convenience: mine a conversation transcript → Events + Points.
+    """Convenience: mine a conversation transcript → Events + Points + Objects.
 
-    Returns: {events: N, points: M, operators: K, event_ids: [...]}
+    Returns (plan §6.1, back-compatible): Phase-1 keys {events, points,
+    operators, event_ids} plus Phase-2 {entities, objects, dedup_hits, drafts}.
+    ``content_dedup``/``dedup_threshold`` are accepted for the pinned API
+    surface but the dedup stage itself is a later issue — dedup_hits is
+    always 0 from this entry point.
     """
     miner = ConversationMiner(model)
-    return miner.mine(transcript, source_id, api, participants=participants)
+    return miner.mine(transcript, source_id, api,
+                      participants=participants,
+                      extract_entities=extract_entities,
+                      entity_stage=entity_stage)
+
+
+def mine_corpus(
+    directory: str,
+    *,
+    extract_entities: bool = True,
+    progress_file: str | None = None,
+    model: Any | None = None,
+) -> dict:
+    """Batch-mine a session corpus (J-1, plan §6.1) into a fresh embedded DB.
+
+    Convenience wrapper over :func:`mine_corpus_with_sdk` — creates an
+    isolated embedded graph next to the corpus directory. Callers that want
+    to mine into an existing team graph use ``TortoiseSDK.mine_corpus``.
+    """
+    import os as _os
+    import hashlib as _hashlib
+    from tortoise.sdk import TortoiseSDK
+
+    db_path = _os.path.join(
+        _os.path.dirname(_os.path.abspath(directory)) or ".",
+        f".mine-{_hashlib.md5(directory.encode()).hexdigest()[:8]}.db",
+    )
+    sdk = TortoiseSDK(db_path)
+    try:
+        return mine_corpus_with_sdk(
+            sdk, directory,
+            extract_entities=extract_entities,
+            progress_file=progress_file,
+            model=model,
+        )
+    finally:
+        sdk.close()
+
+
+def mine_corpus_with_sdk(
+    sdk,
+    directory: str,
+    *,
+    extract_entities: bool = True,
+    progress_file: str | None = None,
+    model: Any | None = None,
+) -> dict:
+    """Batch-mine a session corpus (J-1, plan §6.1) through an existing SDK.
+
+    COMPOSES the SDK's ingest_corpus (security, resume, file_hash — R17): the
+    directory is validated and files ingested (AgentSession event index) by
+    the shared machinery; this pass then mines every file whose content hash
+    does not already match its indexed Event (file_hash skip — DE2E-N8).
+
+    Returns {sessions, ingested, updated, skipped, failed, entities, objects,
+    dedup_hits, drafts, errors:[{file, error, retryable}]}.
+    """
+    import os as _os
+    import hashlib as _hashlib
+    from pathlib import Path
+
+    from tortoise.api import EventAPI
+    from tortoise.log import EventLog
+
+    # ── Pre-ingest scan: capture which files are ALREADY indexed with the
+    # CURRENT content hash (unchanged re-run / duplicate session file,
+    # DE2E-N8). Must run BEFORE ingest_corpus so first-run files are not
+    # mistaken for already-indexed. ──
+    from .session_indexer import _FM_RE
+    files = sorted(Path(directory).rglob("*.md"))
+    proj = sdk._get_proj()
+    pre_indexed: set[str] = set()
+    _frontmatter_of: dict[str, dict] = {}
+    for fp in files:
+        rel = str(fp)
+        try:
+            text = fp.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        m = _FM_RE.match(text)
+        frontmatter: dict = {}
+        if m:
+            try:
+                import yaml as _yaml
+                parsed = _yaml.safe_load(m.group(1))
+                if isinstance(parsed, dict):
+                    frontmatter = parsed
+            except Exception:
+                pass
+        _frontmatter_of[rel] = frontmatter
+        session_id = frontmatter.get("sessionId") or frontmatter.get("session_id") \
+            or f"file_{fp.stem}"
+        file_hash = _hashlib.sha256(text.encode()).hexdigest()
+        rows = proj.g.query(
+            "MATCH (e:Event {eventId:$eid}) RETURN e.file_hash",
+            params={"eid": f"session_{session_id}"},
+        ).result_set
+        if rows and rows[0] and rows[0][0] == file_hash:
+            pre_indexed.add(rel)
+
+    ingest = sdk.ingest_corpus(
+        directory, eventKind="AgentSession", extract_metadata=False,
+        progress_file=progress_file,
+    )
+
+    log = sdk._get_event_log()
+    if log is None:
+        log = EventLog(_os.path.join(
+            _os.path.dirname(_os.path.abspath(directory)) or ".",
+            f".mine-events-{_hashlib.md5(directory.encode()).hexdigest()[:8]}.jsonl",
+        ))
+    api = EventAPI(log, initiated_by="extractor", agent_id="mining-pilot",
+                   projection=proj)
+    api._ingest_cache = {}  # mining always processes fresh (CLI parity)
+
+    miner = ConversationMiner(model)
+    entities = objects = dedup_hits = drafts = 0
+    errors: list[dict] = []
+    for fp in files:
+        rel = str(fp)
+        if rel in pre_indexed:
+            continue  # unchanged re-run — ingest reported it as skipped
+        try:
+            text = fp.read_text(encoding="utf-8")
+        except Exception as e:
+            errors.append({"file": rel, "error": str(e), "retryable": False})
+            continue
+        frontmatter = _frontmatter_of.get(rel, {})
+        session_id = frontmatter.get("sessionId") or frontmatter.get("session_id") \
+            or f"file_{fp.stem}"
+        try:
+            res = miner.mine(text, f"session_{session_id}", api,
+                             extract_entities=extract_entities,
+                             participants=ConversationMiner._extract_participants(text))
+            entities += res["entities"]
+            objects += res["objects"]
+            dedup_hits += res["dedup_hits"]
+            drafts += res["drafts"]
+        except Exception as e:
+            errors.append({"file": rel, "error": str(e), "retryable": True})
+
+    # failed = union of per-file failures across both passes (a file that
+    # fails ingest AND mining is counted once)
+    failed_files = {e.get("file") for e in ingest.get("errors", [])} | \
+        {e.get("file") for e in errors}
+
+    return {
+        "sessions": len(files),
+        "ingested": ingest.get("ingested", 0),
+        "updated": ingest.get("updated", 0),
+        "skipped": ingest.get("skipped", 0),
+        "failed": len(failed_files),
+        "entities": entities,
+        "objects": objects,
+        "dedup_hits": dedup_hits,
+        "drafts": drafts,
+        "errors": errors,
+    }
