@@ -206,6 +206,21 @@ class TestEmailSignup:
         assert r.status_code == 429, r.text
         assert r.json()["detail"]["error_code"] == expected
 
+    def test_gotrue_429_error_description_only_maps_email_bucket(self, client, monkeypatch):
+        """#863 (review P2): a body with ONLY error_description (prose, no
+        error_code/msg) must classify as the email bucket when it mentions
+        email — the description belongs in the message scan, and the
+        "email"-in-code fallback catches it. Regression: it was previously
+        slotted as a code and fell through to the per-IP default."""
+        _configured(monkeypatch)
+        fake, _ = _fake_post(httpx.Response(
+            429, json={"code": 429, "error_description": "Email rate limit exceeded"}))
+        monkeypatch.setattr(httpx, "post", fake)
+
+        r = client.post("/v1/signup/email", json={"email": "a@b.co", "password": "password123"})
+        assert r.status_code == 429, r.text
+        assert r.json()["detail"]["error_code"] == "over_email_send_rate_limit"
+
     def test_gotrue_429_error_code_wins_over_numeric_code(self, client, monkeypatch):
         """#863: real GoTrue bodies carry the HTTP status in `code` (numeric) —
         the stable error_code must win, or the known-code passthrough is dead

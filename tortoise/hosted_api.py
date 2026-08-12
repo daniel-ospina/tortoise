@@ -1869,19 +1869,22 @@ async def email_signup(request: Request):
     # `error_code` ({code: 429, error_code: "over_email_send_rate_limit", ...})
     # — so `error_code` MUST be read first, and a pure-numeric `code` skipped
     # (#863: a known-code passthrough keyed on `code` would be dead code).
-    raw_code = gb.get("error_code") or gb.get("error_description") or ""
+    # `error_description` is NOT a code source (review P2): it is human
+    # readable prose that would misclassify via the heuristic — it belongs in
+    # the message scan, not the code slot.
+    raw_code = gb.get("error_code") or ""
     code = str(raw_code).lower() if raw_code is not None else ""
     if not code:
         c = gb.get("code")
         if c is not None and not str(c).strip().isdigit():
             code = str(c).lower()
-    msg = str(gb.get("msg") or gb.get("message") or "").lower()
+    msg = str(gb.get("msg") or gb.get("message") or gb.get("error_description") or "").lower()
     if status == 429 or "rate_limit" in code or "rate limit" in msg:
         # #863: carry the mechanism so the client can pick the right lockout
         # tier + copy — email bucket (project-wide) vs per-IP request limits.
         if code in ("over_email_send_rate_limit", "over_request_rate_limit", "over_request_rate_limit_ip"):
             err_code = code
-        elif "email" in msg:
+        elif "email" in msg or "email" in code:
             err_code = "over_email_send_rate_limit"
         else:
             err_code = "over_request_rate_limit"
