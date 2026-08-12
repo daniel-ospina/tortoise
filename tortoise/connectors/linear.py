@@ -6,11 +6,14 @@ Requires: LINEAR_API_KEY env var. Zero Python deps outside stdlib.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import urllib.request
 import urllib.error
 from datetime import datetime, timezone
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 def _now_iso() -> str:
@@ -54,9 +57,18 @@ class LinearConnector:
             with urllib.request.urlopen(req, timeout=30) as resp:
                 data = json.loads(resp.read())
                 if "errors" in data:
-                    return {}  # ponytail: GraphQL-level errors, surface if needed
+                    # #331: GraphQL-level errors (e.g. undeclared variables,
+                    # schema drift) must be visible — a silent {} looks like
+                    # "no data" and hides broken queries.
+                    logger.warning(
+                        "Linear GraphQL errors: %s",
+                        "; ".join(e.get("message", str(e)) for e in data["errors"]),
+                    )
+                    return {}
                 return data
-        except (urllib.error.URLError, json.JSONDecodeError, OSError):
+        except (urllib.error.URLError, json.JSONDecodeError, OSError) as e:
+            # #331: transport/HTTP failures must be logged, not swallowed.
+            logger.warning("Linear GraphQL request failed: %s", e)
             return {}
 
     # ── Polling ────────────────────────────────────────────────────
@@ -107,8 +119,8 @@ class LinearConnector:
 
     def _poll_cycles(self) -> list[dict]:
         query = """
-        query Cycles($first: Int!) {
-          cycles(first: $first) {
+        query Cycles($first: Int!, $teamId: String) {
+          cycles(first: $first, teamId: $teamId) {
             nodes {
               id
               number

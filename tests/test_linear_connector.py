@@ -171,3 +171,66 @@ def test_now_iso():
 def test_query_without_api_key_returns_empty():
     lc = LinearConnector(config={})
     assert lc._query("query { issues { nodes { id } } }") == {}
+
+
+# ── #331: undeclared GraphQL variable + swallowed HTTP errors ──────
+
+def test_cycles_query_declares_team_id_variable():
+    """#331: the Cycles query must DECLARE $teamId before passing it as a
+    variable — an undeclared variable is a GraphQL validation error."""
+    lc = LinearConnector(config={"api_key": "lin_api_test", "team_id": "team-1"})
+    captured: dict = {}
+
+    def fake_query(query, variables=None):
+        captured["query"] = query
+        captured["variables"] = variables
+        return {"data": {"cycles": {"nodes": []}}}
+
+    lc._query = fake_query
+    assert lc._poll_cycles() == []
+    assert captured["variables"].get("teamId") == "team-1"
+    assert "$teamId: String" in captured["query"], \
+        "query must declare $teamId: String"
+    assert "teamId: $teamId" in captured["query"], \
+        "query must pass teamId: $teamId to cycles()"
+
+
+def test_query_logs_http_errors(caplog):
+    """#331: HTTP errors must be LOGGED, not silently swallowed as 'no data'."""
+    import json as _json
+    import urllib.error
+    import urllib.request
+    import unittest.mock as mock
+
+    lc = LinearConnector(config={"api_key": "lin_api_test"})
+    with mock.patch(
+        "urllib.request.urlopen",
+        side_effect=urllib.error.URLError("connection refused"),
+    ):
+        with caplog.at_level("WARNING", logger="tortoise.connectors.linear"):
+            # Still degrades to empty (polling must not crash), but the failure
+            # must be visible in the logs.
+            assert lc.poll() == []
+    assert any("connection refused" in r.message for r in caplog.records), \
+        "HTTP error must be logged"
+
+
+def test_query_logs_graphql_errors(caplog):
+    """#331: GraphQL-level errors must be logged, not silently dropped."""
+    import json as _json
+    import urllib.request
+    import unittest.mock as mock
+
+    lc = LinearConnector(config={"api_key": "lin_api_test"})
+    resp = mock.MagicMock()
+    resp.read.return_value = _json.dumps(
+        {"errors": [{"message": "Variable $teamId is not declared"}]}
+    ).encode()
+    cm = resp.__enter__.return_value
+    cm.read.return_value = resp.read.return_value
+    with mock.patch("urllib.request.urlopen", return_value=resp):
+        with caplog.at_level("WARNING", logger="tortoise.connectors.linear"):
+            result = lc._query("query X { x }")
+    assert result == {}
+    assert any("GraphQL" in r.message for r in caplog.records), \
+        "GraphQL errors must be logged"
