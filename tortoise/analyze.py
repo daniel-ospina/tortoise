@@ -565,7 +565,7 @@ def mean_grounding(proj=None) -> float:
     proj = _resolve_proj(proj)
     rows = proj.g.query(
         "MATCH (p:Point) "
-        f"WHERE (p.is_operator IS NULL OR p.is_operator = false) AND {_live_only('p.status')} "
+        f"WHERE p.is_operator = false AND {_live_only('p.status')} "
         "RETURN coalesce(p.confidence, 0.5)"
     ).result_set
     if not rows:
@@ -587,7 +587,7 @@ def grounding_snapshot(proj=None) -> dict:
     proj = _resolve_proj(proj)
     rows = proj.g.query(
         "MATCH (p:Point) "
-        f"WHERE (p.is_operator IS NULL OR p.is_operator = false) AND {_live_only('p.status')} "
+        f"WHERE p.is_operator = false AND {_live_only('p.status')} "
         "RETURN p.id, coalesce(p.confidence, 0.5)"
     ).result_set
     points = {r[0]: float(r[1]) for r in rows}

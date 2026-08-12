@@ -1622,7 +1622,7 @@ class TortoiseSDK:
         # so match on absence-or-false, not the literal property value.
         rows = proj.g.query(
             "MATCH (n:Point) "
-            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "WHERE n.is_operator = false "
             "AND n.status = 'draft' "
             "RETURN properties(n) ORDER BY n.createdAt DESC LIMIT $limit",
             params={"limit": limit},
@@ -2414,7 +2414,7 @@ class TortoiseSDK:
                 item["extractedFrom"] = refs[item["extractedFrom"]]
             existed = proj.g.query(
                 "MATCH (n:Point {content_hash:$ch}) "
-                "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+                "WHERE n.is_operator = false "
                 "AND n.pointKind = $kind RETURN n.id",
                 params={"ch": _content_hash(content), "kind": kind},
             ).result_set
