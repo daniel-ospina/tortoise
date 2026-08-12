@@ -1061,7 +1061,12 @@ tortoise create-point "Hello world" --kind statement`;
     // ── Harness-optimal configs + per-harness onboarding variants ────────
     // (#497 shapes replaced by epic #529: each harness gets its optimal
     // paste path — CLI one-liner / file pair — plus its own variant prompt.)
-    const MCP_URL = "https://api.premiselabs.co/mcp";
+    // TRAILING SLASH IS LOAD-BEARING: POST /mcp gets a 307 whose Location is
+    // scheme-downgraded (http://) behind the proxy; some HTTP stacks then
+    // convert the follow-up 301 (http→https) POST→GET, landing on the GET
+    // metadata route (405 for SSE-accepts) instead of the JSON-RPC endpoint.
+    // /mcp/ posts directly — no redirect, no method change (epic #529 E2E).
+    const MCP_URL = "https://api.premiselabs.co/mcp/";
     // Analytics/beacon enum (short names — #235 artifact_copied schema) →
     // variant artifact slug. SINGLE mapping point (epic plan Substep 4);
     // only claude → claude-code is non-identity.
@@ -1078,7 +1083,7 @@ tortoise create-point "Hello world" --kind statement`;
     const CURSOR_MCP_CONFIG_ENV = {
       "mcpServers": {
         "tortoise": {
-          "url": "https://api.premiselabs.co/mcp",
+          "url": "https://api.premiselabs.co/mcp/",
           "headers": { "Authorization": "Bearer ${env:TORTOISE_API_KEY}" }
         }
       }
@@ -1088,7 +1093,7 @@ tortoise create-point "Hello world" --kind statement`;
     const PI_MCP_CONFIG_ENV = {
       "mcpServers": {
         "tortoise": {
-          "url": "https://api.premiselabs.co/mcp",
+          "url": "https://api.premiselabs.co/mcp/",
           "headers": { "Authorization": "Bearer ${TORTOISE_API_KEY}" }
         }
       }

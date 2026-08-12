@@ -68,3 +68,4 @@ Also post-deploy: (a) re-run the T8 pi-session connect leg (needs the GET-405 fi
 
 - `hosted_api` TestClient suites hang on this machine (pre-existing: unchanged `tests/test_onboarding_endpoints.py` reproduces; congested redislite environment from the parallel swarm). CI is the venue for T5–T7.
 - Claude/Codex CLIs: cmux shims only — real binaries not installed.
+- MCP URL trailing slash is load-bearing: POST /mcp 307-redirects with a scheme-downgraded Location (http://) behind the proxy; some HTTP stacks (Node fetch observed) convert the follow-up http→https 301 POST→GET and land on the GET metadata route instead of JSON-RPC. All Block A URLs ship with the trailing slash (follow-up fix PR); server-side proxy-headers/redirect hardening filed separately.

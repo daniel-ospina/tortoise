@@ -24,5 +24,5 @@ Prefer standing instructions over a one-time chat paste:
   project-scope `.mcp.json` entry — `"type": "http"` (a `url` without `type`
   is a config error and the server is skipped), with `${VAR}` env expansion in
   `url`/`headers` so no literal key is committed:
-  `{"mcpServers": {"tortoise": {"type": "http", "url": "https://api.premiselabs.co/mcp", "headers": {"Authorization": "Bearer ${TORTOISE_API_KEY}"}}}}`.
+  `{"mcpServers": {"tortoise": {"type": "http", "url": "https://api.premiselabs.co/mcp/", "headers": {"Authorization": "Bearer ${TORTOISE_API_KEY}"}}}}`.
   Note: project-scope servers require a one-time approval on first use.
