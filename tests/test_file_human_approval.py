@@ -32,8 +32,8 @@ def _setup_approval(sdk):
     """Create approver, artifact, claims; file an approval; return ids."""
     subj = sdk.create_subject("daniel", "engineer")
     doc = sdk.create_document("customer-profile-cp-001", "artifact")
-    c1 = sdk.create_point("statement", "CP-001 targets the SMB segment")
-    c2 = sdk.create_point("statement", "CP-001 addresses the onboarding pain")
+    c1 = sdk.create_point("statement", "CP-001 targets the SMB segment", status="live")  # #992: live — draft stripped by EP filter
+    c2 = sdk.create_point("statement", "CP-001 addresses the onboarding pain", status="live")
     result = sdk.file_human_approval(
         approver_id=subj["id"],
         artifact_id=doc["id"],
