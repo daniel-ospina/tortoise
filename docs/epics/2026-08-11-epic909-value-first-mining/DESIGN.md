@@ -25,13 +25,14 @@ Event (agentSession) ──produces──▶ Document (transcript: summary, stor
 Source (provenance bridge: sourceKind,   │  references
        credibilityTier, url, contentHash)─┘
       ▲
-      └── extractedFrom ◀── Points (decisions/claims, IMPL/NAND/MITIGATES)
+      └── extractedFrom ◀── Points (decisions/claims; operators IMPL/NAND,
+                            MITIGATES edge-targeted — never point-targeted)
 ```
 
 - **The conversation = a Document** (`documentKind: transcript`, summary/arc/sessionId — fields exist).
 - **Source = the bridge** (provenance, NOT content) — per the owner's ontology reading.
 - **Points = the epistemic layer** (beliefs; evidence lives in Sources, never as Points).
-- **NAND semantics:** bidirectional default (logical mutual, #807); `unidirectional` = agent-declared directed attack (no back-pressure). **Extraction-emitted NANDs are ALWAYS `unidirectional`** (new-claim-attacks-existing; surfacing depends on it).
+- **NAND semantics:** bidirectional default for API users (#807); `unidirectional` = agent-declared directed attack (no back-pressure). **Extraction-emitted NANDs are `unidirectional` by default** (new-claim-attacks-existing; surfacing depends on it), with `bidirectional` ONLY for the rare explicit mutual-restatement case (the conversation itself declares mutual exclusivity — research addendum §1).
 
 **Capture architecture — Local Intelligence / Remote Graph:**
 - Extraction runs on the user's machine with THEIR key + model (BYOK is THE default; we provide the process).
@@ -49,13 +50,15 @@ S1  Value gate (cheap model) — keep/drop per the value brief (pack vocab); ext
 S2  Classification (two-axis) — decisions (commissive) vs events (past-perfective) vs
     claims (stative); "did/fixed/shipped" = event; "should" = recommendation (not
     decision); atomicity via EDU propositionize-before-classify (compound → split).
-S3  Relations — IMPL (support) / NAND (attack, ALWAYS unidirectional when emitted) /
-    MITIGATES (edge-relevance reduction, bias 0.10-0.50). Deep-miss convention:
+S3  Relations — IMPL (support) / NAND (attack, unidirectional by default when
+    emitted; bidirectional only for explicit mutual-restatement) / MITIGATES
+    (edge-relevance reduction, bias 0.10-0.50). Deep-miss convention:
     EXTRACT SUPPORT EDGES FIRST, then mitigations attach. Canonical: X "cheap" IMPL
     Option A; Z "we can raise the price" MITIGATES [X→A]; Y "not price-sensitive" IMPL Z.
 S4  (DEFERRED) warrants/implicit premises — dangerous, research-grade; user-opted toggle later.
-S5  Grounding/resolution — entity frequency gate; claim dedup (content-hash); REVISES/
-    supersede (never hard-delete); process decisions (R3) → drop-with-log (work-item routing later).
+S5  Grounding/resolution — entity frequency gate; claim dedup (content-hash);
+    supersede via supersede_point (CORRECTS edge + outdated flag + edge transfer;
+    never hard-delete); process decisions (R3) → drop-with-log (work-item routing later).
 S6  Derived-commit serializer — the payload for POST /v1/sessions/commit.
 ```
 
@@ -66,13 +69,17 @@ entity-type mismatch, missing provenance, malformed stream). Block-rate >15% →
 ## 3. The session-commit endpoint
 
 `POST /v1/sessions/commit` (tt_ auth). Derived payload — no raw text. Two-level idempotency
-(content-addressed `client_commit_id` replay → zero writes; re-capture → MERGE by
-deterministic `pt_<sha>` + REVISES). Cumulative per-session budget: soft 15 / hard 25 /
-ceiling 50 (overflow → hold queue, never dropped). Dual-counter metering (write_ops billed
-unit unchanged; nodes_written cost driver). Layer-1 deterministic schema validation
-(retry once → 422 with reasons). Telemetry block (extractor version, keep-ratio, counts,
-buckets — no conversation content). **The quota fix ships with it** (`_count_resource`
-sessions branch + is_episodic exemption).
+(content-addressed `client_commit_id` replay — duplicate only for fully-written commits,
+zero writes, zero write-ops → zero writes; re-capture → MERGE by deterministic `pt_<sha>`
++ supersede_point on changed content, `reason: REVISES` is the semantic label). Cumulative
+per-session budget: soft 15 / hard 25 / ceiling 50 (overflow → hold queue, never dropped;
+held re-submission re-checks the 50 ceiling only). Dual-counter metering (write_ops billed
+unit unchanged — non-duplicate commits only; nodes_written cost driver). Layer-1
+deterministic schema validation (retry once → 422 with reasons). Telemetry block
+(extractor version, keep-ratio, counts, buckets — no conversation content). **The quota
+fix ships with it** (`_count_resource` sessions branch + is_episodic exemption).
+**MITIGATES is a first-class payload op_type** (edge-targeted → server-side
+mitigate_operator semantics; REPHRASE = dedup label only).
 
 ## 4. The evaluation contract (stochastic system — two layers)
 
