@@ -1,9 +1,10 @@
 # Tortoise Self-Host — durable reference topology (#338 D2/T4.3)
 #
 # daemon + falkordb sidecar (AOF on, named volume, healthcheck). This is the
-# RECOMMENDED durable path — the embedded-FalkorDBLite single `docker run`
-# (see README quickstart) is EVAL/DEV only (not durable; 2026-08-05 incident
-# #101: AOF-off + no backups failed to prevent data loss).
+# RECOMMENDED durable path — the embedded-FalkorDBLite path (see
+# docs/quickstart-selfhosted.md Option C) is single-writer eval only: durable
+# for ONE process since #915, but concurrent writers LOSE data (2026-08-05
+# incident #101 is the historical context: AOF-off + no backups).
 #
 # FalkorDB is intentionally NOT bundled inside the Tortoise image — its
 # official image is SSPLv1 (license interaction) and the sidecar lets AOF +
@@ -17,6 +18,9 @@
 # Usage:  docker compose up -d
 #         tortoise daemon → http://localhost:8000 (MCP at /mcp)
 #         set TORTOISE_API_KEY below before exposing beyond localhost.
+#         Host-side clients reach the sidecar at
+#         TORTOISE_DB_URI=docker://:falkordb@localhost:6379/tortoise
+#         (the falkordb service publishes 127.0.0.1:6379, loopback only).
 services:
   tortoise:
     build:
@@ -38,6 +42,8 @@ services:
   falkordb:
     # server-only image (no browser UI surface); honors REDIS_ARGS env
     image: falkordb/falkordb-server:latest
+    ports:
+      - "127.0.0.1:6379:6379"   # loopback only — host-side MCP configs reach the sidecar
     environment:
       # Entrypoint expands $REDIS_ARGS — `command:` is ignored by run.sh.
       REDIS_ARGS: "--requirepass falkordb --appendonly yes"

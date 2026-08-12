@@ -104,8 +104,11 @@ point local tooling at the hosted (cloud) DB — a remote connection from a loca
 install defeats the purpose of hosting locally.
 
 - Local tooling (MCP server, SDK scripts, graph-scripts) resolves its DB target
-  from `TORTOISE_DB_URI`, defaulting to the local container
-  `docker://:@localhost:16379/tortoise` (`.mcp.json`, `.env.example`).
+  from `TORTOISE_DB_URI` — canonical local form
+  `docker://:falkordb@localhost:6379/tortoise` (compose publishes 127.0.0.1:6379;
+  `.mcp.json`, `.env.example`). The legacy `FALKORDB_*` trio defaults to the
+  same port (`FALKORDB_PORT=6379` in `.env.example`; code defaults stay
+  on the legacy port — env-overridable — for backward compat with older local containers).
 - The MCP server loads a repo-root `.env` if present and **fails loud** when the
   URI is unset — it never silently connects to an empty embedded graph.
 - `FalkorProjection.from_uri` accepts `docker://`, `redis://`, and `rediss://`.
@@ -115,12 +118,19 @@ install defeats the purpose of hosting locally.
 
 **Self-hosted authenticated MCP (`serve --http`, #702):** local stdio is
 dev-mode only (no auth tokens on stdio — setting `TORTOISE_API_KEY` disables
-it). For an authenticated local MCP endpoint:
+it). For an authenticated local MCP endpoint, the DURABLE path is the compose
+daemon (docker-compose.yml — set `TORTOISE_API_KEY` there, connect to
+`http://localhost:8000/mcp`). For a single-agent eval setup without Docker:
 
 ```bash
 tortoise key create                    # bootstrap a local registry team + tt_ key
 TORTOISE_DB_PATH=~/.tortoise/tortoise.db tortoise serve --http   # tenant auth, binds 127.0.0.1:8000
 ```
+
+> ⚠️ **Embedded FalkorDBLite (TORTOISE_DB_PATH) is SINGLE-WRITER, EVAL ONLY**
+> (#942): fine for ONE agent; concurrent writers lose data. The embedded+tenant
+> combo above is a single-agent eval setup — NOT a supported team deployment.
+> Teams/multi-agent/production use the compose sidecar or managed Cloud.
 
 - Client config: `url http://127.0.0.1:8000/mcp`, header `Authorization: Bearer tt_<key>`.
 - HTTP (tenant) mode uses a fresh `team_{id}` namespace — existing stdio data

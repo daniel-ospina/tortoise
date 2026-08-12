@@ -187,6 +187,23 @@ class TestCliOnboardDbTarget:
         assert "Embedded mode initialized" not in out
         assert "Traceback" not in out
 
+    def test_init_embedded_success_carries_eval_note(self, monkeypatch, capsys, tmp_path):
+        """#942: `tortoise init` on embedded labels the success line
+        single-writer eval-only — the entry point the flipped docs push
+        toward must never look first-class."""
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "init.db"))
+        _delenv_falkordb(monkeypatch)
+        from tortoise import __main__ as m
+
+        rc = m._cmd_init(mock.Mock(
+            path=None, cmd="init", yes=True, api_key=None, no_index=True))
+
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "Embedded mode initialized" in out
+        assert "single-writer, eval only" in out
+
     def test_falkordb_env_honored_as_docker_uri(self, monkeypatch, capsys):
         """#715 P2 conf 55: legacy FALKORDB_* trio (still in .env.example,
         still probed by doctor) set without TORTOISE_DB_URI must be HONORED

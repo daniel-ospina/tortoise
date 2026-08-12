@@ -98,6 +98,72 @@ def _count_redis_servers(path=None):
     return n
 
 
+def _spawn_live_writer(writer_id, writes=10):
+    """Spawn a subprocess that writes `writes` keys to the LIVE sidecar graph
+    (test_live_mw_tortoise) via FalkorProjection.from_uri (#942).
+
+    Inherits the parent env verbatim (TORTOISE_DB_URI must pass through) —
+    deliberately NOT the embedded _spawn_writer helper, which pops
+    TORTOISE_DB_URI and forces TORTOISE_DB_PATH (embedded by design)."""
+    code = f"""
+import os, time
+from tortoise.projection import FalkorProjection
+uri = os.environ["TORTOISE_DB_URI"]
+proj = FalkorProjection.from_uri(uri, graph_name="test_live_mw_tortoise")
+try:
+    for i in range({writes}):
+        proj._upsert({{
+            "id": "w{writer_id}-k" + str(i),
+            "content": "w{writer_id}-content-" + str(i),
+            "context": "ctx",
+        }})
+        print("WROTE", i, flush=True)
+    print("DONE", {writer_id}, flush=True)
+finally:
+    proj.close()
+"""
+    return subprocess.Popen(
+        [sys.executable, "-c", code],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+
+def test_concurrent_writers_live_falkor_no_lost_writes():
+    """5 concurrent subprocess writers on ONE live server — no lost writes (#942).
+
+    The embedded failure mode (concurrent multi-process writers lose data on
+    one file) must not exist on the durable path. CI's test-concurrency-falkor
+    job sets TORTOISE_DB_URI; elsewhere this skips visibly.
+    """
+    from _live_utils import _skip_unless_live_uri
+    from tortoise.projection import FalkorProjection
+
+    _skip_unless_live_uri()
+    uri = os.environ["TORTOISE_DB_URI"]
+
+    # Reset the shared graph (test-prefixed name passes _assert_test_graph).
+    proj = FalkorProjection.from_uri(uri, graph_name="test_live_mw_tortoise")
+    proj.g.query("MATCH (n) DETACH DELETE n")
+    proj.close()
+
+    procs = [_spawn_live_writer(i, writes=10) for i in range(5)]
+    for p_ in procs:
+        p_.wait(timeout=90)
+        assert p_.returncode == 0, p_.stderr.read()
+
+    proj = FalkorProjection.from_uri(uri, graph_name="test_live_mw_tortoise")
+    try:
+        rows = proj.g.query("MATCH (n:Point) RETURN count(n)").result_set
+        assert rows and rows[0][0] == 50, f"expected 50 points (5x10), got {rows}"
+        rows = proj.g.query("MATCH (n:Point) RETURN n.id").result_set
+        ids = {r[0] for r in rows}
+        expected = {f"w{i}-k{j}" for i in range(5) for j in range(10)}
+        missing = expected - ids
+        assert not missing, f"lost writes: {len(missing)} of {len(expected)} missing"
+        assert len(ids) == 50, f"duplicate ids: {len(ids)} unique of 50"
+    finally:
+        proj.close()
+
+
 def _canonical_path():
     d = tempfile.mkdtemp(prefix="tortoise-concurrency-")
     return os.path.join(d, "canonical.db")
