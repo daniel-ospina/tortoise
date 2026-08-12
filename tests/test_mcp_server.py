@@ -6,6 +6,11 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+# #942: import mcp_server FIRST at module level (import-order is the
+# contract — mcp_server must load before selfhost ever could, so the
+# import cycle can never be masked).
+import tortoise.mcp_server as mcp_mod
+
 # Check if FalkorDB is available for integration tests
 try:
     from tortoise.sdk import TortoiseSDK
@@ -34,6 +39,50 @@ def _transport_context():
     _transport_mode.set(None)
     _current_team_id.set(None)
     _current_team_limits.set(None)
+
+
+def test_stdio_embedded_banner(monkeypatch, capsys, tmp_path):
+    """#942: the stdio entrypoint (tortoise serve / python -m tortoise.mcp_server)
+    prints the loud SINGLE-WRITER / EVAL-ONLY banner when running embedded.
+    main() blocks in mcp.run — monkeypatch the module instance's run so the
+    test returns. Instance-attribute functions are NEVER bound, so the fake
+    is **kw-only (a method-shaped fake would TypeError)."""
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "eval.db"))
+    called = {}
+
+    def fake_run(**kw):
+        called["run"] = True
+
+    monkeypatch.setattr(mcp_mod.mcp, "run", fake_run)
+    mcp_mod.main()
+    assert called.get("run"), "stdio main() must reach mcp.run"
+    err = capsys.readouterr().err
+    assert "SINGLE-WRITER" in err and "EVAL ONLY" in err
+    # main() registers _get_sdk() with monitoring — reset the cached module
+    # SDK so later tests in this file don't silently reuse the embedded one.
+    mcp_mod.sdk = None
+    mcp_mod._sdk = None
+
+
+def test_stdio_uri_mode_no_banner(monkeypatch, capsys, tmp_path):
+    """#942 negative pin: no banner when TORTOISE_DB_URI is a supported URI.
+    _get_sdk EAGERLY connects (from_uri retry loop, mcp_server.py:305-309) —
+    patch it so the test doesn't need a live sidecar."""
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:falkordb@localhost:6379/tortoise")
+    monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+    called = {}
+
+    def fake_run(**kw):
+        called["run"] = True
+
+    monkeypatch.setattr(mcp_mod.mcp, "run", fake_run)
+    monkeypatch.setattr(mcp_mod, "_get_sdk", lambda: object())
+    monkeypatch.setattr(mcp_mod.monitoring, "register", lambda *a, **kw: None)
+    mcp_mod.main()
+    assert called.get("run")
+    assert "SINGLE-WRITER" not in capsys.readouterr().err
+
 
 
 class TestSafeWrapper:

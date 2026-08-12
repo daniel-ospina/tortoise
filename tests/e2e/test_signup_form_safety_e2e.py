@@ -89,8 +89,11 @@ def test_429_signup_rate_limit_is_humanized(page: Page) -> None:
     page.locator("#password").fill("RatePass-527!")
     page.locator("#btn-submit").click()
 
+    # #863: over_email_send_rate_limit is the PROJECT-WIDE email bucket —
+    # the page must show the mechanism-accurate email-bucket copy, not the
+    # network-attribution sentence.
     expect(page.locator("#error")).to_contain_text(
-        "Too many attempts from this network", timeout=10_000)
+        "Signup emails are temporarily exhausted", timeout=10_000)
     assert "email=" not in page.url and "password=" not in page.url
     assert "Email rate limit exceeded" not in page.locator("#error").inner_text()
 

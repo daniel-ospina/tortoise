@@ -74,6 +74,57 @@ CANONICAL_KINDS = {
     # "actionKinds": CANONICAL_ACTION_KINDS,  # DEPRECATED (#122)
 }
 
+# ── Manifest v3 vocabulary (research-r6 §3, epic #909) ────────────────────
+
+# Core entity types (ONTOLOGY §1) — the five conceptual nodes plus Object/
+# Action. Valid subclassOf parents AND expansion roots (R6 §6.2a: named
+# Document/Source/Subject/Point/Event; Object/Action included so every parent
+# the validator accepts also expands).
+# Alias of VALID_ENTITY_TYPES (review P2, PR #978) — one source of truth.
+CORE_ENTITY_TYPES = VALID_ENTITY_TYPES
+
+# Everything a bare kind reference may resolve to without a namespace.
+CORE_KINDS = (
+    CANONICAL_OBJECT_KINDS | CANONICAL_EVENT_KINDS | CANONICAL_POINT_KINDS
+    | CANONICAL_DOCUMENT_KINDS | CANONICAL_ACTION_KINDS | CORE_ENTITY_TYPES
+)
+
+# kindDefs value keys (R6 §3.1/§3.5)
+VALID_KINDDEF_KEYS = frozenset({
+    "description", "synonyms", "examples", "nearMisses",
+    "extractable", "storeAs", "enforcement",
+})
+
+# storeAs values — what stream bucket a kind belongs to (R6 §3.1)
+VALID_STORE_AS = frozenset({"claim", "decision", "entity", "tag", "event"})
+
+# Enforcement ladder (R6 §5.3): warn | retry | block
+VALID_ENFORCEMENT_LEVELS = frozenset({"warn", "retry", "block"})
+
+# pointKinds whose inferred storeAs is `decision` (R6 §3.1)
+DECISION_POINT_KINDS = frozenset({
+    "decision", "vision", "strategy", "plan", "goal", "target", "humanApproval",
+})
+
+# sourceKind vocabulary (ONTOLOGY §4.6) — extraction.sourceTypes must be ⊂ this
+# (R6 §6.1#3: v1 restrict to conversation/document + allowlist of the
+# connector-registered source kinds).
+KNOWN_SOURCE_TYPES = frozenset({
+    "conversation", "document",
+    "github_issue", "slack_message", "linear_card",
+})
+
+# Escape hatch for future connectors (R6 §3.5): packs may reference these
+# without a registry release. Anything outside KNOWN_SOURCE_TYPES ∪
+# SOURCE_TYPE_ESCAPE_HATCH is a validation error (typo protection).
+SOURCE_TYPE_ESCAPE_HATCH = frozenset({
+    "email", "webpage", "discord_message", "notion_page",
+})
+
+# Core mechanism predicates (S3 pipeline emits IMPL/NAND; MITIGATES for
+# mitigations) — valid chain-edge / enforcement targets without a pack relation.
+CORE_PREDICATES = frozenset({"IMPL", "NAND", "MITIGATES"})
+
 
 # ── Pack data model ───────────────────────────────────────────────────────
 
@@ -94,6 +145,31 @@ class PackManifest:
     document_kinds: list[str] = dataclasses.field(default_factory=list)
     action_kinds: list[str] = dataclasses.field(default_factory=list)
     relations: list[dict] = dataclasses.field(default_factory=list)
+
+    # Manifest v3 (R6 §3.1): per-kind extractor metadata, keyed by pack-local
+    # kind name. Allowed value keys: description, synonyms, examples,
+    # nearMisses, extractable, storeAs, enforcement.
+    kind_defs: dict[str, dict] = dataclasses.field(default_factory=dict)
+
+    # Manifest v3 (R6 §3.2): first-class business-logic chains.
+    # [{id, name?, description?, steps[], enforcement?, edges?}]
+    chains: list[dict] = dataclasses.field(default_factory=list)
+
+    # Manifest v3 (R6 §3.4): extraction activation + enforcement config,
+    # normalized — always present with defaults (backward compat: absent in
+    # v2 manifests → active: true, sourceTypes: [], enforcement default warn).
+    extraction: dict = dataclasses.field(
+        default_factory=lambda: {
+            "active": True,
+            "sourceTypes": [],
+            "enforcement": {
+                "default": "warn",
+                "kinds": {},
+                "relations": {},
+                "chains": {},
+            },
+        }
+    )
 
     # Subclass declarations: {kind: parent_kind} — e.g., {"epic": "Project"}
     # Parent must exist in core CANONICAL_OBJECT_KINDS or another pack's kinds.
@@ -122,6 +198,70 @@ class PackManifest:
     # Dependencies
     depends_on: list[str] = dataclasses.field(default_factory=list)
 
+    # ── Manifest v3 read-side helpers (consumed by the value-brief compiler) ──
+
+    def is_extractable(self, kind: str) -> bool:
+        """kindDefs[].extractable — default True (R6 §3.1)."""
+        kd = self.kind_defs.get(kind, {})
+        if isinstance(kd, dict) and "extractable" in kd:
+            return bool(kd["extractable"])
+        return True
+
+    def relation_is_extractable(self, rel: dict) -> bool:
+        """relations[].extractable — default False (R6 §3.3)."""
+        return bool(rel.get("extractable", False))
+
+    def store_as(self, kind: str) -> str:
+        """Resolved storeAs for a pack-local kind (R6 §3.1).
+
+        Explicit kindDefs[].storeAs wins; otherwise inferred from list
+        placement: pointKinds → claim (decision/vision/strategy/plan/goal/
+        target/humanApproval → decision), objectKinds/documentKinds → entity,
+        eventKinds → event.
+        """
+        kd = self.kind_defs.get(kind, {})
+        if isinstance(kd, dict) and kd.get("storeAs"):
+            return kd["storeAs"]
+        if kind in self.point_kinds:
+            return "decision" if kind in DECISION_POINT_KINDS else "claim"
+        if kind in self.event_kinds:
+            return "event"
+        if kind in self.document_kinds or kind in self.object_kinds:
+            return "entity"
+        return "claim"
+
+    def enforcement_for(self, kind: str) -> str:
+        """Kind-level enforcement resolution order (R6 §3.4):
+        kindDefs[].enforcement → extraction.enforcement.kinds → default → warn."""
+        kd = self.kind_defs.get(kind, {})
+        if isinstance(kd, dict) and kd.get("enforcement"):
+            return kd["enforcement"]
+        kinds_cfg = self.extraction["enforcement"].get("kinds", {})
+        if kind in kinds_cfg:
+            return kinds_cfg[kind]
+        return self.extraction["enforcement"].get("default", "warn")
+
+    def enforcement_for_relation(self, predicate: str) -> str:
+        """Relation-level enforcement: extraction.enforcement.relations → default → warn."""
+        rel_cfg = self.extraction["enforcement"].get("relations", {})
+        return rel_cfg.get(predicate, self.extraction["enforcement"].get("default", "warn"))
+
+    def enforcement_for_chain(self, chain_id: str) -> str:
+        """Chain-level enforcement: chain.enforcement → extraction.enforcement.chains
+        → default → warn (R6 §3.2/§3.4)."""
+        for chain in self.chains:
+            if chain.get("id") == chain_id and chain.get("enforcement"):
+                return chain["enforcement"]
+        chains_cfg = self.extraction["enforcement"].get("chains", {})
+        return chains_cfg.get(chain_id, self.extraction["enforcement"].get("default", "warn"))
+
+    def is_active_for(self, source_type: str) -> bool:
+        """§3.4 activation: active AND (sourceTypes empty or contains source_type)."""
+        if not self.extraction.get("active", True):
+            return False
+        source_types = self.extraction.get("sourceTypes") or []
+        return not source_types or source_type in source_types
+
 
 # ── Registry ──────────────────────────────────────────────────────────────
 
@@ -143,9 +283,23 @@ class PackRegistry:
     # ── Load ──────────────────────────────────────────────────────────
 
     def load_all(self) -> int:
-        """Load all packs/*/manifest.yaml. Returns count of successfully loaded packs."""
+        """Load all packs/*/manifest.yaml. Returns count of successfully loaded packs.
+
+        Per-pack load isolation (R-16, epic #909): a manifest that fails
+        validation fails THAT pack only — the registry keeps loading every
+        other pack, and any pack with a recorded error (load-time or
+        cross-pack) is excluded from self.packs so the compiled vocabulary
+        (expansions, brief, register_kinds) only ever sees healthy packs.
+        Errors remain queryable via self.errors.
+        """
         if not self.packs_dir.exists():
             return 0
+        # Reset state up front (review P1, PR #978): a re-entry previously
+        # accumulated stale errors and the isolation drop loop wiped every
+        # pack that had ANY recorded error — including errors from an earlier
+        # call. Reload must be idempotent.
+        self.packs = {}
+        self.errors = {}
         count = 0
         for manifest_path in sorted(self.packs_dir.glob("*/manifest.yaml")):
             ns = manifest_path.parent.name
@@ -160,8 +314,22 @@ class PackRegistry:
                 count += 1
             except Exception as e:
                 self.errors[ns] = [str(e)]
-        self._build_kind_expansions()
         self._validate_cross_pack_refs()
+        # R-16 isolation: drop packs that failed cross-pack validation so the
+        # compiled registry only contains healthy packs.
+        for ns in [ns for ns, pack in self.packs.items() if ns in self.errors]:
+            del self.packs[ns]
+            count -= 1
+        # Fixpoint (review P2, PR #978): a pack whose cross-pack references
+        # pointed at a now-dropped pack must also be excluded — re-validate
+        # against the surviving set so the compiled vocabulary never carries
+        # dangling references.
+        if self.errors:
+            self._validate_cross_pack_refs()
+            for ns in [ns for ns, pack in self.packs.items() if ns in self.errors]:
+                del self.packs[ns]
+                count -= 1
+        self._build_kind_expansions()
         return count
 
     def _load_one(self, path: Path) -> PackManifest:
@@ -184,12 +352,34 @@ class PackRegistry:
             document_kinds=ont.get("documentKinds", []),
             action_kinds=ont.get("actionKinds", []),
             relations=ont.get("relations", []),
+            kind_defs=ont.get("kindDefs", {}),
+            chains=ont.get("chains", []),
+            extraction=self._normalize_extraction(raw.get("extraction")),
             kind_subclasses=ont.get("subclassOf", {}),
             kind_equivalences=ont.get("equivalentTo", {}),
             connectors=raw.get("connectors", []),
             tools=raw.get("tools", []),
             depends_on=raw.get("depends_on", []),
         )
+
+    @staticmethod
+    def _normalize_extraction(ext: Any) -> dict:
+        """Normalize the extraction section to its default shape (R6 §3.4).
+
+        Absent in v2 manifests → active: true, no sourceTypes, warn default.
+        """
+        ext = ext or {}
+        enforcement = ext.get("enforcement") or {}
+        return {
+            "active": ext.get("active", True),
+            "sourceTypes": list(ext.get("sourceTypes") or []),
+            "enforcement": {
+                "default": enforcement.get("default", "warn"),
+                "kinds": dict(enforcement.get("kinds") or {}),
+                "relations": dict(enforcement.get("relations") or {}),
+                "chains": dict(enforcement.get("chains") or {}),
+            },
+        }
 
     # ── Validate ───────────────────────────────────────────────────────
 
@@ -209,6 +399,11 @@ class PackRegistry:
             errors.append("namespace must not contain ':'")
 
         ont = raw.get("ontology", {})
+
+        # Collect all pack-declared kinds (used by relation + subclassOf +
+        # kindDefs + extraction validation). Empty when ontology is absent.
+        all_pack_kinds: set[str] = set()
+        seen_chain_ids: set[str] = set()
 
         # Validate ontology section
         if ont:
@@ -238,19 +433,14 @@ class PackRegistry:
                             f"vocabulary — no need to register"
                         )
 
-            # Collect all pack-declared kinds (used by relation + subclassOf validation)
-            all_pack_kinds: set[str] = set()
+            # Collect all pack-declared kinds (used by relation, subclassOf,
+            # kindDefs, and extraction validation)
             for kf in ["objectKinds", "eventKinds", "pointKinds",
                         "documentKinds", "actionKinds"]:
                 all_pack_kinds.update(ont.get(kf, []))
 
             # Pre-built core kind set for relation validation
-            ALL_CORE_KINDS = (CANONICAL_OBJECT_KINDS | CANONICAL_EVENT_KINDS |
-                              CANONICAL_POINT_KINDS | CANONICAL_DOCUMENT_KINDS |
-                              CANONICAL_ACTION_KINDS |
-                              {"Subject", "Object", "Action", "Event",
-                               "Point", "Document", "Source",
-                               "Project", "WorkItem"})
+            ALL_CORE_KINDS = CORE_KINDS
 
             # Validate relations (new format: fromKind/toKind/mechanism)
             for rel in ont.get("relations", []):
@@ -323,6 +513,12 @@ class PackRegistry:
                         f"relation '{pred}': invalid cardinality: {rel.get('cardinality')}"
                     )
 
+                # Manifest v3 (R6 §3.3): extractable must be a boolean when present
+                if "extractable" in rel and not isinstance(rel["extractable"], bool):
+                    errors.append(
+                        f"relation '{pred}': 'extractable' must be a boolean"
+                    )
+
             # Validate hierarchies
             hierarchies = ont.get("hierarchies", [])
             if not isinstance(hierarchies, list):
@@ -338,6 +534,178 @@ class PackRegistry:
                         errors.append("hierarchies: entry missing 'path' field")
                     if not h.get("type"):
                         errors.append("hierarchies: entry missing 'type' field")
+
+            # ── Manifest v3 (R6 §3.1/§3.5): kindDefs validation ──────────
+            kind_defs = ont.get("kindDefs", {})
+            if not isinstance(kind_defs, dict):
+                errors.append("ontology.kindDefs must be a map keyed by kind name")
+            else:
+                for kind, spec in kind_defs.items():
+                    if kind not in all_pack_kinds and kind not in CORE_KINDS:
+                        errors.append(
+                            f"kindDefs: '{kind}' is not declared in this pack's "
+                            f"*Kinds lists (nor a core kind)"
+                        )
+                    if not isinstance(spec, dict):
+                        errors.append(f"kindDefs: value for '{kind}' must be a map")
+                        continue
+                    for key in spec:
+                        if key not in VALID_KINDDEF_KEYS:
+                            errors.append(
+                                f"kindDefs '{kind}': unknown key '{key}' (allowed: "
+                                f"{', '.join(sorted(VALID_KINDDEF_KEYS))})"
+                            )
+                    if "description" in spec and not isinstance(spec["description"], str):
+                        errors.append(
+                            f"kindDefs '{kind}': 'description' must be a string "
+                            f"(it is prompt material for the extractor, R6 §3.1)"
+                        )
+                    for list_field in ("synonyms", "examples", "nearMisses"):
+                        if list_field in spec:
+                            val = spec[list_field]
+                            if (not isinstance(val, list)
+                                    or not all(isinstance(x, str) and x for x in val)):
+                                errors.append(
+                                    f"kindDefs '{kind}': '{list_field}' must be a "
+                                    f"list of non-empty strings"
+                                )
+                    if "extractable" in spec and not isinstance(spec["extractable"], bool):
+                        errors.append(
+                            f"kindDefs '{kind}': 'extractable' must be a boolean"
+                        )
+                    if ("storeAs" in spec
+                            and spec["storeAs"] not in VALID_STORE_AS):
+                        errors.append(
+                            f"kindDefs '{kind}': 'storeAs' must be one of "
+                            f"{', '.join(sorted(VALID_STORE_AS))}, "
+                            f"got {spec['storeAs']!r}"
+                        )
+                    if ("enforcement" in spec
+                            and spec["enforcement"] not in VALID_ENFORCEMENT_LEVELS):
+                        errors.append(
+                            f"kindDefs '{kind}': 'enforcement' must be one of "
+                            f"{', '.join(sorted(VALID_ENFORCEMENT_LEVELS))}, "
+                            f"got {spec['enforcement']!r}"
+                        )
+                    # nearMisses targets resolve post-load (cross-pack pass)
+
+            # ── Manifest v3 (R6 §3.2/§3.5): chains validation ────────────
+            chains = ont.get("chains", [])
+            if not isinstance(chains, list):
+                errors.append("ontology.chains must be a list")
+            else:
+                for i, chain in enumerate(chains):
+                    if not isinstance(chain, dict):
+                        errors.append(f"chains[{i}]: expected a map, got {type(chain).__name__}")
+                        continue
+                    cid = chain.get("id", "")
+                    if not isinstance(cid, str) or not cid:
+                        errors.append(f"chains[{i}]: missing required 'id'")
+                    elif cid in seen_chain_ids:
+                        errors.append(f"chains: duplicate id '{cid}'")
+                    else:
+                        seen_chain_ids.add(cid)
+                    steps = chain.get("steps", [])
+                    if (not isinstance(steps, list) or not steps
+                            or not all(isinstance(s, str) and s for s in steps)):
+                        errors.append(
+                            f"chains: '{cid or i}': 'steps' must be a non-empty "
+                            f"list of kind names"
+                        )
+                    if ("enforcement" in chain
+                            and chain["enforcement"] not in VALID_ENFORCEMENT_LEVELS):
+                        errors.append(
+                            f"chains: '{cid or i}': 'enforcement' must be one of "
+                            f"{', '.join(sorted(VALID_ENFORCEMENT_LEVELS))}"
+                        )
+                    if "edges" in chain:
+                        edges = chain["edges"]
+                        if not isinstance(edges, list) or not all(
+                                isinstance(e, str) and e for e in edges):
+                            errors.append(
+                                f"chains: '{cid or i}': 'edges' must be a list of "
+                                f"predicate names"
+                            )
+                        else:
+                            declared_preds = {
+                                r.get("predicate") for r in ont.get("relations", [])
+                            }
+                            for edge in edges:
+                                if edge not in declared_preds and edge not in CORE_PREDICATES:
+                                    errors.append(
+                                        f"chains: '{cid or i}': edge '{edge}' is not a "
+                                        f"declared relation predicate nor a core "
+                                        f"predicate ({', '.join(sorted(CORE_PREDICATES))})"
+                                    )
+                    # steps resolve post-load (cross-pack pass)
+
+        # ── Manifest v3 (R6 §3.4/§3.5): extraction validation (top-level) ──
+        extraction = raw.get("extraction")
+        if extraction is not None and not isinstance(extraction, dict):
+            errors.append("extraction must be a map")
+        else:
+            extraction = extraction or {}
+            if "active" in extraction and not isinstance(extraction["active"], bool):
+                errors.append("extraction.active must be a boolean")
+            source_types = extraction.get("sourceTypes", [])
+            if not isinstance(source_types, list) or not all(
+                    isinstance(s, str) and s for s in source_types):
+                errors.append("extraction.sourceTypes must be a list of strings")
+            else:
+                for st in source_types:
+                    if st not in KNOWN_SOURCE_TYPES and st not in SOURCE_TYPE_ESCAPE_HATCH:
+                        errors.append(
+                            f"extraction.sourceTypes: '{st}' is not a known source "
+                            f"type (known: {', '.join(sorted(KNOWN_SOURCE_TYPES))}; "
+                            f"escape hatch: {', '.join(sorted(SOURCE_TYPE_ESCAPE_HATCH))})"
+                        )
+            enforcement = extraction.get("enforcement", {})
+            if not isinstance(enforcement, dict):
+                errors.append("extraction.enforcement must be a map")
+            else:
+                for key in enforcement:
+                    if key not in ("default", "kinds", "relations", "chains"):
+                        errors.append(
+                            f"extraction.enforcement: unknown key '{key}' "
+                            f"(allowed: default, kinds, relations, chains)"
+                        )
+                if ("default" in enforcement
+                        and enforcement["default"] not in VALID_ENFORCEMENT_LEVELS):
+                    errors.append(
+                        f"extraction.enforcement.default must be one of "
+                        f"{', '.join(sorted(VALID_ENFORCEMENT_LEVELS))}, "
+                        f"got {enforcement['default']!r}"
+                    )
+                # Per-key overrides: level validated; keys typo-protected.
+                declared_preds = {
+                    r.get("predicate") for r in ont.get("relations", [])
+                } if ont else set()
+                for section, valid_keys, label in (
+                        ("kinds", all_pack_kinds | CORE_KINDS, "kind"),
+                        ("relations", declared_preds | CORE_PREDICATES, "predicate"),
+                        ("chains", seen_chain_ids, "chain id"),
+                ):
+                    if section not in enforcement:
+                        continue
+                    mapping = enforcement[section]
+                    if not isinstance(mapping, dict):
+                        errors.append(
+                            f"extraction.enforcement.{section} must be a map"
+                        )
+                        continue
+                    for key, level in mapping.items():
+                        if level not in VALID_ENFORCEMENT_LEVELS:
+                            errors.append(
+                                f"extraction.enforcement.{section}: level for "
+                                f"'{key}' must be one of "
+                                f"{', '.join(sorted(VALID_ENFORCEMENT_LEVELS))}, "
+                                f"got {level!r}"
+                            )
+                        if key not in valid_keys:
+                            errors.append(
+                                f"extraction.enforcement.{section}: '{key}' is not "
+                                f"a declared {label}"
+                            )
 
         # Validate connectors
         for conn in raw.get("connectors", []):
@@ -382,8 +750,7 @@ class PackRegistry:
                         f"(core kinds use PascalCase)"
                     )
                 # Check parent exists in core object kinds or core concepts
-                core_parents = CANONICAL_OBJECT_KINDS | {"Project", "WorkItem",
-                    "Document", "Subject", "Object", "Action", "Event", "Point", "Source"}
+                core_parents = CANONICAL_OBJECT_KINDS | CORE_ENTITY_TYPES
                 if parent not in core_parents:
                     errors.append(
                         f"subclassOf: parent kind '{parent}' not found in core "
@@ -422,33 +789,22 @@ class PackRegistry:
         Called after load_all() populates all packs. Checks:
           1. Every relation's fromKind/toKind values reference known kinds.
           2. Every equivalentTo target references a kind in another loaded pack.
+          3. Every kindDefs nearMisses target resolves (R6 §3.5).
+          4. Every chain step resolves — bare steps may be this pack's own
+             kinds, core kinds, or kinds declared by exactly ONE other pack
+             (ambiguous bare names are errors, R6 §3.2 / plan W-5 failure b).
         Adds errors to self.errors keyed by pack namespace.
         """
         # Build the set of all known kinds (core + all packs)
-        all_known: set[str] = set()
+        all_known = self._all_known_kinds()
 
-        # Core entity types and core kinds
-        all_known |= {"Subject", "Object", "Action", "Event",
-                       "Point", "Document", "Source",
-                       "Project", "WorkItem"}
-        all_known |= CANONICAL_OBJECT_KINDS
-        all_known |= CANONICAL_EVENT_KINDS
-        all_known |= CANONICAL_POINT_KINDS
-        all_known |= CANONICAL_DOCUMENT_KINDS
-        all_known |= CANONICAL_ACTION_KINDS
-
-        # All pack-prefixed kinds
-        for ns, pack in self.packs.items():
-            for kind in pack.object_kinds:
-                all_known.add(f"{ns}:{kind}")
-            for kind in pack.event_kinds:
-                all_known.add(f"{ns}:{kind}")
-            for kind in pack.point_kinds:
-                all_known.add(f"{ns}:{kind}")
-            for kind in pack.document_kinds:
-                all_known.add(f"{ns}:{kind}")
-            for kind in pack.action_kinds:
-                all_known.add(f"{ns}:{kind}")
+        # Bare-name index for single-namespace resolution (chain steps,
+        # nearMisses): bare kind name → full 'ns:kind' forms.
+        bare_index: dict[str, list[str]] = {}
+        for full in all_known:
+            if ":" in full:
+                _ns, kind = full.split(":", 1)
+                bare_index.setdefault(kind, []).append(full)
 
         # Check every relation's fromKind/toKind
         for ns, pack in self.packs.items():
@@ -476,6 +832,86 @@ class PackRegistry:
                             f"(core or loaded pack)"
                         )
                         self.errors.setdefault(ns, []).append(msg)
+
+            # Manifest v3 (R6 §3.1/§3.5): every nearMisses target resolves
+            pack_kinds = self._pack_kind_set(pack)
+            for kind, kd in pack.kind_defs.items():
+                for target in kd.get("nearMisses", []):
+                    status = self._resolve_kind_ref(
+                        target, pack_kinds, all_known, bare_index
+                    )
+                    if status == "unknown":
+                        msg = (
+                            f"kindDefs '{kind}': nearMisses target '{target}' "
+                            f"does not resolve to any known kind "
+                            f"(core or loaded pack)"
+                        )
+                        self.errors.setdefault(ns, []).append(msg)
+                    elif status == "ambiguous":
+                        msg = (
+                            f"kindDefs '{kind}': nearMisses target '{target}' is "
+                            f"ambiguous — declared by multiple packs; "
+                            f"use 'namespace:kind'"
+                        )
+                        self.errors.setdefault(ns, []).append(msg)
+
+            # Manifest v3 (R6 §3.2/§3.5): every chain step resolves
+            for chain in pack.chains:
+                cid = chain.get("id", "?")
+                for step in chain.get("steps", []):
+                    status = self._resolve_kind_ref(
+                        step, pack_kinds, all_known, bare_index
+                    )
+                    if status == "unknown":
+                        msg = (
+                            f"chain '{cid}': step '{step}' does not resolve to "
+                            f"any known kind (core or loaded pack)"
+                        )
+                        self.errors.setdefault(ns, []).append(msg)
+                    elif status == "ambiguous":
+                        msg = (
+                            f"chain '{cid}': step '{step}' is ambiguous — "
+                            f"declared by multiple packs; use 'namespace:kind'"
+                        )
+                        self.errors.setdefault(ns, []).append(msg)
+
+    @staticmethod
+    def _pack_kind_set(pack: PackManifest) -> set[str]:
+        """All kinds a pack declares (all five categories)."""
+        kinds: set[str] = set()
+        for kind_list in (pack.object_kinds, pack.event_kinds, pack.point_kinds,
+                          pack.document_kinds, pack.action_kinds):
+            kinds.update(kind_list)
+        return kinds
+
+    def _all_known_kinds(self) -> set[str]:
+        """Core kinds + every loaded pack's prefixed kinds."""
+        all_known: set[str] = set(CORE_KINDS)
+        for pack in self.packs.values():
+            ns = pack.namespace
+            for kind in self._pack_kind_set(pack):
+                all_known.add(f"{ns}:{kind}")
+        return all_known
+
+    def _resolve_kind_ref(self, ref: str, pack_kinds: set[str],
+                          all_known: set[str],
+                          bare_index: dict[str, list[str]]) -> str:
+        """Resolve a kind reference to "ok" | "unknown" | "ambiguous".
+
+        Namespaced refs must be in all_known. Bare refs resolve against: the
+        pack's own kinds, core kinds, then kinds declared by exactly one
+        other pack (single-namespace); more than one match → ambiguous.
+        """
+        if ":" in ref:
+            return "ok" if ref in all_known else "unknown"
+        if ref in pack_kinds or ref in CORE_KINDS:
+            return "ok"
+        fulls = bare_index.get(ref, [])
+        if len(fulls) == 1:
+            return "ok"
+        if not fulls:
+            return "unknown"
+        return "ambiguous"
 
     # Keep backward-compatible alias
     _validate_cross_pack_relations = _validate_cross_pack_refs
@@ -561,6 +997,10 @@ class PackRegistry:
                           CANONICAL_EVENT_KINDS, CANONICAL_DOCUMENT_KINDS,
                           CANONICAL_ACTION_KINDS):
             all_canonical.extend(kind_set)
+        # R6 §6.2a (#949): core ENTITY types are subclass parents too —
+        # `architecture: Document` validated but did NOT expand because
+        # Document/Source/Subject/Point/Event were not expansion roots.
+        all_canonical.extend(CORE_ENTITY_TYPES)
         for parent in all_canonical:
             subs = self.get_subclasses(parent)
             expansions[parent] = [parent] + subs
@@ -663,6 +1103,8 @@ class PackRegistry:
                     entry["fromKind"] = r["fromKind"]
                     entry["toKind"] = r["toKind"]
                     entry["mechanism"] = r.get("mechanism", "IMPL")
+                    # Manifest v3 (R6 §3.3): extractable flag — default false
+                    entry["extractable"] = r.get("extractable", False)
                 # Old format (backward compat)
                 else:
                     entry["from"] = r.get("from")

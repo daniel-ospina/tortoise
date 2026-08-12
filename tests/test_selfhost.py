@@ -15,8 +15,9 @@ import pytest
 def _client_for_env(monkeypatch, tmp_path, **env):
     """Build a TestClient over the selfhost app with the given env.
 
-    conftest.py globally sets TORTOISE_DB_URI (test container) — clear it for
-    embedded-mode tests so selfhost's URI check falls through to TORTOISE_DB_PATH.
+    conftest.py sets only TORTOISE_SECRET_PEPPER (no URI); clear
+    TORTOISE_DB_URI for embedded-mode tests so selfhost's URI check falls
+    through to TORTOISE_DB_PATH.
     """
     from starlette.testclient import TestClient
 
@@ -34,6 +35,28 @@ def _client_for_env(monkeypatch, tmp_path, **env):
 
     importlib.reload(selfhost)
     return TestClient(selfhost.app)
+
+
+def test_embedded_banner_stderr(monkeypatch, tmp_path, capsys):
+    """#942: the selfhost daemon prints the loud SINGLE-WRITER / EVAL-ONLY
+    banner to stderr when started in embedded mode (no TORTOISE_DB_URI)."""
+    tc = _client_for_env(monkeypatch, tmp_path)
+    with tc:
+        pass
+    err = capsys.readouterr().err
+    assert "SINGLE-WRITER" in err and "EVAL ONLY" in err
+
+
+def test_uri_mode_no_banner(monkeypatch, tmp_path, capsys):
+    """#942 negative pin: no banner when TORTOISE_DB_URI is set."""
+    tc = _client_for_env(
+        monkeypatch, tmp_path,
+        TORTOISE_DB_URI="docker://:falkordb@localhost:6379/tortoise",
+    )
+    with tc:
+        pass
+    err = capsys.readouterr().err
+    assert "SINGLE-WRITER" not in err
 
 
 class TestHealth:

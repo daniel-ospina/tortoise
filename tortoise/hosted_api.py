@@ -1945,7 +1945,7 @@ def _signup_email_confirm() -> bool:
 
     TORTOISE_SIGNUP_EMAIL_CONFIRM defaults to true — the account is created
     with email_confirm=true so NO confirmation email is sent (bypasses
-    Supabase's SMTP per-IP bucket). false|0|no|off (case-insensitive) opt
+    Supabase's SMTP project-wide email-send bucket). false|0|no|off (case-insensitive) opt
     back into the confirmation-email funnel.
     """
     val = os.environ.get("TORTOISE_SIGNUP_EMAIL_CONFIRM", "true").strip().lower()
@@ -1957,7 +1957,7 @@ def _supabase_admin_create_user(email: str, password: str) -> tuple[int, dict]:
 
     #801: admin create_user with email_confirm=true creates the account
     WITHOUT sending a confirmation email — bypassing Supabase's built-in
-    SMTP per-IP send bucket (over_email_send_rate_limit 429s, the P1
+    SMTP project-wide email-send bucket (over_email_send_rate_limit 429s, the P1
     production signup blocker). Atomic: GoTrue either creates the user or
     returns an error — no partial state to roll back.
 
@@ -1991,10 +1991,11 @@ async def email_signup(request: Request):
 
     The web form previously created auth users client-side via anon-key
     auth.signUp, which makes GoTrue send a confirmation email through
-    Supabase's built-in SMTP. That path is IP-bucketed (30 sends/hr/IP,
-    configurable in the dashboard): once the bucket is exhausted EVERY
-    signup from that IP 429s (over_email_send_rate_limit) and no account
-    is created — the P1 production signup blocker.
+    Supabase's built-in SMTP. That path is project-wide-bucketed (30 sends/hr
+    shared by ALL users of the project, configurable in the dashboard): once
+    the bucket is exhausted EVERY signup from ANY network 429s
+    (over_email_send_rate_limit) and no account is created — the P1
+    production signup blocker.
 
     This endpoint creates the user server-side via the GoTrue ADMIN API
     (service-role key) with email_confirm=true (default): the account is
@@ -2010,7 +2011,22 @@ async def email_signup(request: Request):
     - 429 pass-through carries a clear message pointing at the zero-email
       `tortoise signup` path (issue #663).
     """
-    await _check_register_rate_limit(request)
+    try:
+        await _check_register_rate_limit(request)
+    except HTTPException as exc:
+        # #863: the shared limiter's 429 carries a bare string detail; enrich
+        # it with the mechanism code so the client can tier its lockout/copy.
+        # /v1/register's own consumption of the limiter is untouched.
+        if exc.status_code == 429:
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    "message": "Too many registration attempts. Please try again later.",
+                    "error_code": "over_request_rate_limit_ip",
+                },
+                headers={"Retry-After": "3600"},
+            ) from exc
+        raise
 
     try:
         body = await request.json()
@@ -2062,14 +2078,37 @@ async def email_signup(request: Request):
             "message": "user_created",
         }
 
-    # GoTrue error mapping (error body: {code, error_code, msg}).
-    code = str(gb.get("code") or gb.get("error_code") or "").lower()
-    msg = str(gb.get("msg") or gb.get("message") or "").lower()
+    # GoTrue error mapping (error body: {code, error_code, msg}). Real GoTrue
+    # bodies carry the numeric HTTP status in `code` and the stable code in
+    # `error_code` ({code: 429, error_code: "over_email_send_rate_limit", ...})
+    # — so `error_code` MUST be read first, and a pure-numeric `code` skipped
+    # (#863: a known-code passthrough keyed on `code` would be dead code).
+    # `error_description` is NOT a code source (review P2): it is human
+    # readable prose that would misclassify via the heuristic — it belongs in
+    # the message scan, not the code slot.
+    raw_code = gb.get("error_code") or ""
+    code = str(raw_code).lower() if raw_code is not None else ""
+    if not code:
+        c = gb.get("code")
+        if c is not None and not str(c).strip().isdigit():
+            code = str(c).lower()
+    msg = str(gb.get("msg") or gb.get("message") or gb.get("error_description") or "").lower()
     if status == 429 or "rate_limit" in code or "rate limit" in msg:
+        # #863: carry the mechanism so the client can pick the right lockout
+        # tier + copy — email bucket (project-wide) vs per-IP request limits.
+        if code in ("over_email_send_rate_limit", "over_request_rate_limit", "over_request_rate_limit_ip"):
+            err_code = code
+        elif "email" in msg or "email" in code:
+            err_code = "over_email_send_rate_limit"
+        else:
+            err_code = "over_request_rate_limit"
         raise HTTPException(
             status_code=429,
-            detail=("Signup is rate-limited right now. Try again in about an hour — "
-                    "or get an instant zero-email key with: tortoise signup"),
+            detail={
+                "message": ("Signup is rate-limited right now. Try again in about an hour — "
+                            "or get an instant zero-email key with: tortoise signup"),
+                "error_code": err_code,
+            },
             headers={"Retry-After": "3600"},
         )
     if status == 422 or status == 400:
@@ -2600,9 +2639,10 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
             detail=f"Session turn cap exceeded: {len(body.conversation)} > {MAX_SESSION_TURNS}.",
         )
 
-    # Extraction-aware estimate (pre-write, fail-closed count):
-    #   est = 1 Session + 1 Event + Σ_turns (1 turn Point
-    #         + min(decisions, cap) + min(claims, cap))
+    # Extraction-aware estimate (pre-write, fail-closed count) — review P2,
+    # PR #976: the points quota counts NON-episodic Points only, and turn
+    # Points/Session/Event are episodic — the estimate is the EXTRACTED set:
+    #   est = Σ_turns (min(decisions, cap) + min(claims, cap))
     decisions = [
         r"(?i)(?:let'?s|we will|we should|I will|I'm going to|decided|decision)\s+[^.!?]+[.!?]",
         r"(?i)(?:plan is|next steps?:|action item:)\s+[^.!?]+[.!?]",
@@ -2611,14 +2651,19 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
         r"(?i)(?:I think|I believe|my understanding is|the problem is|the key insight)\s+[^.!?]+[.!?]",
         r"(?i)(?:evidence suggests|data shows|we found that|this means)\s+[^.!?]+[.!?]",
     ]
-    est = 2
+    est = 0
     for turn in body.conversation:
-        # #329: estimate scans the SAME full content the extraction loop uses
-        # (must be an upper bound — a truncation mismatch would under-count).
+        # #329/#947 (review P2, PR #976): the points quota counts NON-episodic
+        # Points only, and turn Points are written with is_episodic=true — the
+        # estimate must count the EXTRACTED (non-episodic) points only. The
+        # Session/Event base and the per-turn +1 are episodic; including them
+        # caused false pre-write 402s for teams near the limit. Still an upper
+        # bound for the extracted set (same full content the loop scans — a
+        # truncation mismatch would under-count).
         content = turn.get("content", "")
         n_dec = sum(len(re.findall(p, content)) for p in decisions)
         n_clm = sum(len(re.findall(p, content)) for p in claims)
-        est += 1 + min(n_dec, MAX_EXTRACTIONS_PER_TURN) + min(n_clm, MAX_EXTRACTIONS_PER_TURN)
+        est += min(n_dec, MAX_EXTRACTIONS_PER_TURN) + min(n_clm, MAX_EXTRACTIONS_PER_TURN)
     from tortoise.quota import count_team_usage
     sdk_team = _make_sdk(namespace=team["team_id"])
     try:
@@ -2640,7 +2685,8 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
     now = datetime.now(timezone.utc).isoformat()
 
     proj.g.query(
-        "MERGE (s:Session {id:$sid}) SET s.created_at=$now, s.turn_count=$tc",
+        "MERGE (s:Session {id:$sid}) SET s.created_at=$now, s.turn_count=$tc, "
+        "    s.is_episodic=true",
         params={"sid": session_id, "now": now, "tc": len(body.conversation)},
     )
 
@@ -2671,6 +2717,7 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
         proj.g.query(
             "MERGE (t:Point {id:$id}) "
             "SET t.content=$c, t.pointKind=$k, t.is_operator=false, "
+            "    t.is_episodic=true, "
             "    t.status=coalesce(t.status, $s), "
             "    t.createdAt=coalesce(t.createdAt, $now), "
             "    t.updatedAt=$now, t.content_hash=$ch",
@@ -2731,6 +2778,7 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
             startedAt=now,
             endedAt=now,
             sessionId=session_id,
+            is_episodic=True,
         )
         event_id = event.get("id") or event.get("eventId")
         for p in extracted:
@@ -4481,6 +4529,12 @@ _ONBOARDING_DEFAULT_STATE = {
 
 _ALLOWED_STATE_KEYS = set(_ONBOARDING_DEFAULT_STATE.keys())
 
+# Epic #529: copy-attribution enums (#235 artifact_copied schema, verbatim).
+# Not state keys — the PATCH handler pops harness/section and emits an
+# analytics event instead of persisting them.
+_HARNESS_ANALYTICS_VALUES = {"claude", "codex", "cursor", "pi"}
+_SECTION_ANALYTICS_VALUES = {"config", "prompt", "both"}
+
 
 def _get_onboarding_state(team_id: str) -> dict:
     """Read onboarding_state — Supabase ``teams.onboarding_state`` (jsonb,
@@ -4568,6 +4622,11 @@ class OnboardingStatePatchRequest(BaseModel):
     # E2E-5 (plan Task 6): email read-patch from the control plane (teams
     # row in Supabase mode, Team node in registry mode). #764 review P2.
     email: str | None = None
+    # Epic #529 copy-attribution beacon (analytics-only, NEVER persisted):
+    # welcome.html fires this on copy with the displayed key. Enums match
+    # #235's artifact_copied schema verbatim (align cycle-3 conformance).
+    harness: str | None = None   # "claude"|"codex"|"cursor"|"pi"
+    section: str | None = None   # "config"|"prompt"|"both"
 
 
 @app.get("/v1/onboarding/state", response_model=OnboardingStateResponse)
@@ -4585,6 +4644,15 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
     """Merge provided onboarding fields into the team's state."""
     updates = {k: v for k, v in body.model_dump().items() if v is not None}
     email = updates.pop("email", None)  # state keys only — email is a teams column
+    # Epic #529 copy-attribution beacon: analytics-only fields — pop before
+    # the state merge (email pattern) and emit artifact_copied for enum-valid
+    # pairs; invalid values are ignored (no event, no error) so a stale or
+    # malformed beacon can never break the copy UX or pollute state.
+    harness = updates.pop("harness", None)
+    section = updates.pop("section", None)
+    if harness in _HARNESS_ANALYTICS_VALUES and section in _SECTION_ANALYTICS_VALUES:
+        _track_analytics_event(team["team_id"], "artifact_copied",
+                               {"harness": harness, "section": section})
     state = _update_onboarding_state(team["team_id"], **updates)
     if email is not None:
         _write_team_email(team["team_id"], email)

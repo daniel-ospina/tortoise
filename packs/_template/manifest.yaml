@@ -49,6 +49,49 @@ ontology:
   #     issue: WorkItem
   subclassOf: {}
 
+  # ── Manifest v3 (epic #909 / research-r6 §3.1): per-kind extractor metadata ──
+  # Map keyed by pack-local kind name. Keys must be declared in one of this
+  # pack's *Kinds lists (or be a core kind this pack's chains reference, e.g.
+  # `workflow`). All fields optional. Allowed keys: description, synonyms,
+  # examples, nearMisses, extractable, storeAs, enforcement.
+  #   - description:  one line of what the kind IS (this is prompt material)
+  #   - synonyms:     normalized aliases — deterministic near-miss catch
+  #   - examples:     concrete instance examples for the classifier
+  #   - nearMisses:   confusable kinds (own pack, `ns:kind`, or core) — prompt
+  #                   guidance + retry trigger
+  #   - extractable:  bool, default true — false = registered but never minted
+  #                   by extraction
+  #   - storeAs:      claim|decision|entity|tag|event — default inferred from
+  #                   list placement (pointKinds → claim, with
+  #                   decision/vision/strategy/plan/goal/target/humanApproval
+  #                   → decision; objectKinds/subjectKinds/documentKinds →
+  #                   entity; eventKinds → event) — review P2, PR #978
+  #   - enforcement:  warn|retry|block — overrides the pack-wide default
+  # Example:
+  #   kindDefs:
+  #     concept:
+  #       description: "A reusable idea the domain cares about"
+  #       synonyms: ["notion"]
+  #       examples: ["..."]
+  #       nearMisses: [otherKind]
+  #       extractable: true
+  #       storeAs: entity
+  #       enforcement: retry
+  kindDefs: {}
+
+  # ── Manifest v3 (epic #909 / research-r6 §3.2): business-logic chains ──
+  # Ordered kind sequences the extractor must respect. Steps may be this
+  # pack's kinds (bare), other packs (`ns:kind`), or core kinds (bare, e.g.
+  # `workflow`). Bare steps must resolve to a single namespace post-load.
+  # Example:
+  #   chains:
+  #     - id: myChain
+  #       name: "My Chain"
+  #       description: "What the sequence captures"
+  #       steps: [stepA, stepB, workflow]
+  #       enforcement: warn        # warn|retry|block
+  chains: []
+
   # Equivalence declarations: {kind: [other_ns:kind, ...]}
   # Declares this pack's kind is semantically equivalent to another pack's kind.
   # Bidirectional — the registry makes it symmetric at query time.
@@ -82,7 +125,45 @@ ontology:
   #       fromKind: myapp:concept
   #       toKind: myapp:subconcept
   #       cardinality: one_to_many
+  #     - predicate: dependsOn
+  #       mechanism: IMPL
+  #       fromKind: myapp:concept
+  #       toKind: myapp:subconcept
+  #       extractable: true      # v3 (R6 §3.3): may the extractor assert this
+  #                              # edge? bool, default FALSE — opt-in only
   relations: []
+
+# ── Manifest v3 (epic #909 / research-r6 §3.4): extraction activation + enforcement ──
+#   active:       bool, default true — false = this pack's kinds never enter
+#                 the extraction brief
+#   sourceTypes:  list of sourceKind values (conversation, document,
+#                 github_issue, slack_message, linear_card, ...) that activate
+#                 this pack; empty = all source types
+#   enforcement:
+#     default:    pack-wide level — warn|retry|block
+#     kinds:      per-kind override: { kind: level }
+#     relations:  per-predicate override: { predicate: level }
+#     chains:     per-chain override: { chainId: level }
+#   Resolution order (kinds): kindDefs[].enforcement → enforcement.kinds
+#   → enforcement.default → warn
+# Example:
+#   extraction:
+#     active: true
+#     sourceTypes: [conversation, document]
+#     enforcement:
+#       default: warn
+#       kinds:
+#         useCase: retry
+#       relations: {}
+#       chains: {}
+extraction:
+  active: true
+  sourceTypes: []
+  enforcement:
+    default: warn
+    kinds: {}
+    relations: {}
+    chains: {}
 
 # ── Layer 2: Connectors ──────────────────────────────────────────────────
 connectors: []

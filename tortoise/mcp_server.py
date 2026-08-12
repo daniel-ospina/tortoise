@@ -17,6 +17,7 @@ from fastmcp.exceptions import (AuthorizationError, FastMCPError, ToolError,
 from mcp.types import ToolAnnotations
 from pydantic import ValidationError as PydanticValidationError
 from tortoise.auth import is_dev_mode as _is_dev_mode
+from tortoise.config import is_db_uri as _is_db_uri
 from tortoise.sdk import TortoiseSDK
 from tortoise import monitoring
 from tortoise.mcp_auth import (_current_team_id, _current_team_limits,
@@ -1249,6 +1250,16 @@ def main():
                 "Override with TORTOISE_ALLOW_EMBEDDED=1 (test only)."
             )
             sys.exit(1)
+    # #942: embedded FalkorDBLite is SINGLE-WRITER / EVAL-ONLY. `not uri` is
+    # NOT the predicate — _get_sdk treats a bare-path TORTOISE_DB_URI as
+    # embedded (backward compat), and that path must warn too. Placed AFTER
+    # the config-error guard above so a missing-config exit stays clean.
+    # Single-fire: `tortoise serve` stdio and the tortoise-serve console
+    # script both funnel here; no other entrypoint prints it for stdio.
+    if not _is_db_uri(uri):
+        from tortoise._embedded import EMBEDDED_EVAL_BANNER
+
+        print(EMBEDDED_EVAL_BANNER, file=sys.stderr)
     mcp.run(transport="stdio")
 
 
@@ -2197,6 +2208,17 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
 
     @mcp.custom_route("/", methods=["GET"])
     async def mcp_metadata(request):
+        # Epic #529 E2E (T8): real Streamable HTTP clients (MCP TS SDK —
+        # pi mcp-client v1.29.0 observed) open a GET listener that expects
+        # an SSE stream. Returning the JSON self-test there fails their
+        # JSON-RPC parse and aborts the whole connection. Per the
+        # Streamable HTTP spec, a server that offers no SSE stream answers
+        # GET with 405 — SDKs handle that gracefully. Non-SSE GETs (curl,
+        # browsers, the self-test probe) keep the JSON metadata response.
+        if "text/event-stream" in request.headers.get("accept", ""):
+            return JSONResponse(
+                {"error": "no SSE stream offered; use POST for JSON-RPC"},
+                status_code=405)
         return JSONResponse({"status": "ok", "protocol": "mcp",
                              "transport": "streamable-http",
                              "endpoint": "/mcp"})

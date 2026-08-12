@@ -38,7 +38,7 @@ from tortoise.ep import TortoiseEP
 
 
 def make_point(sdk: TortoiseSDK, content: str, kind: str = "statement") -> dict:
-    return sdk.create_point(kind, content)
+    return sdk.create_point(kind, content, status="live")  # EP tests model live claims (#780 default excludes drafts)
 
 
 def make_direct_edge(sdk: TortoiseSDK, src_id: str, tgt_id: str,

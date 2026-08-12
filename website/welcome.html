@@ -292,6 +292,94 @@
     .hidden {
       display: none;
     }
+
+    /* #863: password-reset landing (recovery links redirect here). */
+    #reset-panel {
+      text-align: center;
+      padding: 0.5rem 0;
+    }
+
+    #reset-panel h1 {
+      font-family: var(--serif, Georgia, serif);
+      font-size: 1.4rem;
+      font-weight: 400;
+      color: var(--text, #cbd5e1);
+      margin-bottom: 1.5rem;
+    }
+
+    #reset-panel .form-group {
+      margin-bottom: 1rem;
+      text-align: left;
+    }
+
+    #reset-panel .form-group label {
+      display: block;
+      font-size: 12px;
+      color: var(--text-dim, #94a3b8);
+      margin-bottom: 0.375rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    #reset-panel .form-group input {
+      width: 100%;
+      padding: 0.75rem 1rem;
+      border: 1px solid var(--border, #1e293b);
+      border-radius: 8px;
+      background: var(--surface, #0d1a2d);
+      color: var(--text, #cbd5e1);
+      font-family: var(--mono, monospace);
+      font-size: 14px;
+    }
+
+    #reset-panel .form-group input:focus {
+      outline: none;
+      border-color: var(--accent, #06b6d4);
+    }
+
+    #reset-panel .btn-submit {
+      width: 100%;
+      padding: 0.75rem;
+      border: none;
+      border-radius: 8px;
+      background: var(--accent, #06b6d4);
+      color: var(--bg, #060b14);
+      font-family: var(--mono, monospace);
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      margin-bottom: 1rem;
+    }
+
+    #reset-panel .btn-submit:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    #reset-error {
+      text-align: center;
+      padding: 1rem;
+      margin-bottom: 1rem;
+    }
+
+    #reset-error p {
+      color: var(--red, #ef4444);
+      margin: 0;
+    }
+
+    #reset-success {
+      padding: 1rem 0;
+    }
+
+    #reset-success p {
+      color: var(--green, #4ade80);
+      margin-bottom: 0.75rem;
+    }
+
+    #reset-success a {
+      color: var(--accent, #06b6d4);
+      text-decoration: none;
+    }
   
     /* Mobile (#497): single column, full-width buttons, scrollable tabs */
     @media (max-width: 640px) {
@@ -424,10 +512,11 @@ you up to 6 yes/no questions and set up your Tortoise memory.
         <button class="btn-copy" id="btn-copy-prompt" onclick="copyPrompt()" style="width:100%;margin-bottom:0.75rem;">
           <span>Copy onboarding prompt</span>
         </button>
+        <p id="harness-delivery-steps" style="font-size:0.72rem;color:var(--text-dim);line-height:1.4;"></p>
         <p style="font-size:0.72rem;color:var(--text-dim);line-height:1.4;">
-          Block A = MCP config (tab per harness). Block B = onboarding prompt.
-          Paste both into your agent: config in the settings/mcp.json, prompt in chat.
-          <!-- TODO(#502): prompt fetched from deployed URL once live; fallback text above -->
+          Block A = MCP config for your harness. Block B = that harness's
+          onboarding variant (the canonical question flow + how this harness
+          delivers it). Two actions total — see the steps above.
         </p>
       </div>
 
@@ -453,6 +542,36 @@ you up to 6 yes/no questions and set up your Tortoise memory.
       <p style="margin-top:1.25rem;font-size:0.8rem;color:var(--text-dim);text-align:center;">
         Prefer your own infrastructure? <a href="/self-hosted" style="color:var(--accent);">Self-host Tortoise →</a>
       </p>
+    </div>
+
+    <!-- #863: password-reset landing — recovery emails redirect here
+         (origin + /welcome.html, the same allow-listed target the #801
+         signup confirmation flow uses). Recovery mode short-circuits
+         provisioning: a valid recovery link establishes a real session, and
+         the membership poll / team mint / API-key reveal must NEVER run
+         mid-password-reset. method=post + action per the #527 form-safety
+         contract (no GET echo). -->
+    <div id="reset-panel" class="hidden">
+      <h1>Reset your password</h1>
+      <div id="reset-error" class="error-state hidden" role="alert">
+        <p id="reset-error-text"></p>
+        <p><a href="/signin.html">Back to sign in</a></p>
+      </div>
+      <div id="reset-success" class="hidden" role="status">
+        <p id="reset-success-text"></p>
+        <p><a href="/signin.html">Sign in with your new password →</a></p>
+      </div>
+      <form id="reset-form" method="post" action="/welcome" onsubmit="resetPassword(event)">
+        <div class="form-group">
+          <label for="reset-password">New password</label>
+          <input type="password" id="reset-password" name="reset-password" placeholder="••••••••" required autocomplete="new-password" minlength="8">
+        </div>
+        <div class="form-group">
+          <label for="reset-confirm">Confirm new password</label>
+          <input type="password" id="reset-confirm" name="reset-confirm" placeholder="••••••••" required autocomplete="new-password" minlength="8">
+        </div>
+        <button type="submit" class="btn-submit" id="btn-reset">Update password</button>
+      </form>
     </div>
   </div>
 
@@ -494,6 +613,14 @@ you up to 6 yes/no questions and set up your Tortoise memory.
     // Guard: check if the anon key placeholder was replaced at deploy time
     const isConfigured = supabaseAnonKey && !supabaseAnonKey.includes("{{");
 
+    // #863: recovery-mode detection. supabase-js consumes the URL fragment
+    // during createClient init — snapshot the hash FIRST so a recovery-link
+    // landing (type=recovery) is recognized even when PASSWORD_RECOVERY is
+    // not emitted (supabase/auth#1948). Recovery mode short-circuits
+    // provisioning below.
+    const recoveryLanding = /[?&#]type=recovery/.test(window.location.hash);
+    let recoveryMode = recoveryLanding;
+
     let supabaseClient = null;
     if (isConfigured) {
       supabaseClient = window.supabase.createClient(supabaseUrl, supabaseAnonKey);
@@ -530,7 +657,23 @@ you up to 6 yes/no questions and set up your Tortoise memory.
 
     // ── Poll for provisioning ──────────────────────────────────────────────
     async function waitForProvisioning() {
+      // #863: recovery-mode guard — a PASSWORD_RECOVERY event that arrives
+      // after the start branch must still stop the provisioning pipeline.
+      if (recoveryMode) {
+        showResetPanel();
+        return;
+      }
       const session = await waitForSession(SESSION_WAIT_MS);
+
+      // #863 (review P2): re-check recoveryMode AFTER the await — the
+      // PASSWORD_RECOVERY event fires asynchronously during supabase-js
+      // init, i.e. while this poll is suspended. Without this second check
+      // the event-driven fallback path would still run revealKeyOnce /
+      // provisionViaEdgeFunction mid-password-reset.
+      if (recoveryMode) {
+        showResetPanel();
+        return;
+      }
 
       if (!session) {
         showError("No active session. Please sign up first — or if you just clicked a confirmation link, refresh this page in a few seconds.");
@@ -570,6 +713,7 @@ you up to 6 yes/no questions and set up your Tortoise memory.
         }
 
         if (data && data.status === "active" && data.team_id) {
+          if (recoveryMode) { showResetPanel(); return; }
           await revealKeyOnce(userId, data);
           return;
         }
@@ -582,6 +726,7 @@ you up to 6 yes/no questions and set up your Tortoise memory.
       // the membership query came back empty, so a team is never minted
       // twice for the same user (the function would mint a NEW team per
       // call — the page must not re-provision once a team exists).
+      if (recoveryMode) { showResetPanel(); return; }
       await provisionViaEdgeFunction(session, userId, activeMembershipQuery);
     }
 
@@ -701,11 +846,14 @@ you up to 6 yes/no questions and set up your Tortoise memory.
       if (returningEl) returningEl.classList.remove("hidden");
       const dashBtn = document.getElementById("btn-dashboard");
       if (dashBtn) dashBtn.classList.remove("hidden");
-      // Returning visitor: the key was shown exactly once and is nulled —
-      // hide the artifact cards so their copy buttons can't copy a masked
-      // `Bearer ••••••` / `--api-key ••••••` (#745c).
+      // Returning visitor: the key was shown exactly once and is nulled.
+      // #745c hid the artifact cards entirely; epic #529 (J5/T7b) keeps the
+      // MCP card visible with env-indirection Block A forms (no literal key —
+      // HARNESS_CONFIGS detect the masked placeholder and never interpolate
+      // it). The build card still hides: its CLI snippet has no env form and
+      // would render a masked `--api-key ••••••`.
       const mcpCard = document.getElementById("mcp-card");
-      if (mcpCard) mcpCard.classList.add("hidden");
+      if (mcpCard) { mcpCard.classList.remove("hidden"); renderMcpConfig(); renderDeliverySteps(); }
       const buildCard = document.getElementById("build-card");
       if (buildCard) buildCard.classList.add("hidden");
     }
@@ -817,59 +965,205 @@ tortoise create-point "Hello world" --kind statement`;
       }, 2000);
     }
 
+    // ── Password-reset landing (#863) ─────────────────────────────────────
+    // Shown in recovery mode (hash type=recovery or PASSWORD_RECOVERY
+    // event). All feedback renders in the panel-local #reset-error/
+    // #reset-success elements — the page-level showError/showSuccess state
+    // machine (loading/error/success) must never run in recovery mode.
+    function showResetPanel() {
+      document.getElementById("loading").classList.add("hidden");
+      document.getElementById("error-state").classList.add("hidden");
+      document.getElementById("success").classList.add("hidden");
+      document.getElementById("reset-panel").classList.remove("hidden");
+      const el = document.getElementById("reset-password");
+      if (el) el.focus();
+    }
+
+    let resetInFlight = false;  // #863: double-submit guard
+
+    function resetShowError(message) {
+      const errText = document.getElementById("reset-error-text");
+      if (errText) errText.textContent = message;
+      document.getElementById("reset-error").classList.remove("hidden");
+      document.getElementById("reset-success").classList.add("hidden");
+    }
+
+    async function resetPassword(event) {
+      event.preventDefault();
+      if (resetInFlight) return;
+      resetInFlight = true;
+      try {
+        document.getElementById("reset-error").classList.add("hidden");
+        const pw = document.getElementById("reset-password").value;
+        const confirm = document.getElementById("reset-confirm").value;
+        if (!pw) { resetShowError("Please choose a new password."); return; }
+        if (pw.length < 8 || !/[A-Za-z]/.test(pw) || !/\d/.test(pw) || !/[^A-Za-z0-9]/.test(pw)) {
+          resetShowError("Password is too weak. Use at least 8 characters with a mix of letters, numbers, and symbols.");
+          return;
+        }
+        if (pw !== confirm) { resetShowError("Passwords don't match."); return; }
+        const { error } = await supabaseClient.auth.updateUser({ password: pw });
+        if (error) {
+          const code = String(error.code || error.name || "").toLowerCase();
+          const msg = String(error.message || "").toLowerCase();
+          if (error.status === 401 || code.includes("invalid_jwt") || code.includes("auth_session_missing")
+              || msg.includes("expired") || msg.includes("invalid jwt") || msg.includes("session")) {
+            // Expired / invalid link, or the recovery session was dropped
+            // client-side (auth_session_missing — supabase/auth#1948-era
+            // builds) — either way the user must request a new link.
+            resetShowError("This reset link has expired or is invalid. Request a new one.");
+          } else if (code.includes("weak_password") || msg.includes("weak password")) {
+            resetShowError("Password is too weak. Use at least 8 characters with a mix of letters, numbers, and symbols.");
+          } else {
+            resetShowError("Something went wrong. Please try again — or request a new reset link.");
+          }
+          return;
+        }
+        // Success: swap the form for the panel-local success state.
+        document.getElementById("reset-form").classList.add("hidden");
+        document.getElementById("reset-error").classList.add("hidden");
+        document.getElementById("reset-success-text").textContent = "Password updated — sign in with your new password.";
+        document.getElementById("reset-success").classList.remove("hidden");
+      } catch (err) {
+        // #863 (review P2): network failures throw out of updateUser — the
+        // {error} contract only covers API responses. Never leave the user
+        // with a silently re-enabled button and no feedback.
+        console.error("resetPassword:", err);
+        resetShowError("Something went wrong. Please try again — or request a new reset link.");
+      } finally {
+        resetInFlight = false;
+      }
+    }
+
     // ── Start ──────────────────────────────────────────────────────────────
     if (isConfigured && supabaseClient) {
-      waitForProvisioning();
+      // #863: recovery-mode landing — short-circuit provisioning entirely.
+      // The PASSWORD_RECOVERY event (own subscription — NOT inside
+      // waitForSession, which unsubscribes on settle) also flips recoveryMode
+      // for event-driven landings where the hash snapshot missed.
+      supabaseClient.auth.onAuthStateChange((event) => {
+        if (event === "PASSWORD_RECOVERY") {
+          recoveryMode = true;
+          showResetPanel();
+        }
+      });
+      if (recoveryMode) {
+        showResetPanel();
+      } else {
+        waitForProvisioning();
+      }
     } else {
       document.getElementById("loading").classList.add("hidden");
       document.getElementById("error-state").classList.remove("hidden");
       document.getElementById("error-message").textContent = "This page is not configured yet. Please contact support.";
     }
   
-    // ── Harness configs (Streamable HTTP — #497) ─────────────────────────
-    const HARNESS_CONFIGS = {
-      claude: (key) => JSON.stringify({
-        mcpServers: {
-          tortoise: {
-            type: "streamable-http",
-            url: "https://api.premiselabs.co/mcp",
-            headers: { Authorization: "Bearer " + key }
-          }
-        }
-      }, null, 2),
-      codex: (key) => `# Set your API key (never paste the literal into shell history)
-export TORTOISE_API_KEY=${key}
+    // ── Harness-optimal configs + per-harness onboarding variants ────────
+    // (#497 shapes replaced by epic #529: each harness gets its optimal
+    // paste path — CLI one-liner / file pair — plus its own variant prompt.)
+    const MCP_URL = "https://api.premiselabs.co/mcp";
+    // Analytics/beacon enum (short names — #235 artifact_copied schema) →
+    // variant artifact slug. SINGLE mapping point (epic plan Substep 4);
+    // only claude → claude-code is non-identity.
+    const HARNESS_VARIANT_SLUG = { claude: "claude-code", codex: "codex", cursor: "cursor", pi: "pi" };
+    // True only for a freshly revealed key; returning visits keep the masked
+    // placeholder and get env-indirection forms only (#529 J5/T7b).
+    function _usableKey(key) { return typeof key === "string" && key.startsWith("tt_"); }
 
-# Add the MCP server
-codex mcp add tortoise --url https://api.premiselabs.co/mcp --bearer-token-env-var TORTOISE_API_KEY`,
-      cursor: (key) => JSON.stringify({
-        mcpServers: {
-          tortoise: {
-            url: "https://api.premiselabs.co/mcp",
-            headers: { Authorization: "Bearer " + key }
-          }
+    // Canonical cursor/pi JSON blocks, wrapped in TORTOISE_CFG_BEGIN/END
+    // markers so tests extract+parse exactly what the user copies (epic #529
+    // T3/T10 — no free-standing fixtures, no drift). Quoted-key JSON is valid
+    // JS, so the same literal renders and parses. Env forms carry NO key.
+    /* TORTOISE_CFG_BEGIN:cursor */
+    const CURSOR_MCP_CONFIG_ENV = {
+      "mcpServers": {
+        "tortoise": {
+          "url": "https://api.premiselabs.co/mcp",
+          "headers": { "Authorization": "Bearer ${env:TORTOISE_API_KEY}" }
         }
-      }, null, 2),
-      pi: (key) => JSON.stringify({
-        mcpServers: {
-          tortoise: {
-            type: "streamable-http",
-            url: "https://api.premiselabs.co/mcp",
-            headers: { Authorization: "Bearer " + key }
-          }
-        }
-      }, null, 2),
+      }
     };
+    /* TORTOISE_CFG_END:cursor */
+    /* TORTOISE_CFG_BEGIN:pi */
+    const PI_MCP_CONFIG_ENV = {
+      "mcpServers": {
+        "tortoise": {
+          "url": "https://api.premiselabs.co/mcp",
+          "headers": { "Authorization": "Bearer ${TORTOISE_API_KEY}" }
+        }
+      }
+    };
+    /* TORTOISE_CFG_END:pi */
+
+    const HARNESS_CONFIGS = {
+      claude: (key) => _usableKey(key) ? `# Step 1 — run this ONE command in your terminal:
+claude mcp add --transport http tortoise ${MCP_URL} --header "Authorization: Bearer ${key}"
+
+# File alternative (.mcp.json) — env expansion, no literal key on disk:
+# {"mcpServers":{"tortoise":{"type":"http","url":"${MCP_URL}","headers":{"Authorization":"Bearer \${TORTOISE_API_KEY}"}}}}
+# Note: a url entry without "type" is skipped by Claude Code; project-scope
+# .mcp.json servers ask for a one-time approval on first use.`
+        : `# Key already revealed once — use the env form:
+export TORTOISE_API_KEY=tt_YOUR_KEY
+claude mcp add --transport http tortoise ${MCP_URL} --header "Authorization: Bearer $TORTOISE_API_KEY"
+
+# Or .mcp.json with env expansion (no literal key on disk):
+# {"mcpServers":{"tortoise":{"type":"http","url":"${MCP_URL}","headers":{"Authorization":"Bearer \${TORTOISE_API_KEY}"}}}}`,
+      codex: (key) => `# Step 1 — set your API key, then add the server (stores the env-var NAME, never the secret):
+export TORTOISE_API_KEY=${_usableKey(key) ? key : "tt_YOUR_KEY"}
+codex mcp add tortoise --url ${MCP_URL} --bearer-token-env-var TORTOISE_API_KEY`,
+      cursor: (key) => {
+        let text = `# Step 1 — save as .cursor/mcp.json in your project (env form — no literal key on disk).
+# First: export TORTOISE_API_KEY=${_usableKey(key) ? key : "tt_YOUR_KEY"}
+${JSON.stringify(CURSOR_MCP_CONFIG_ENV, null, 2)}`;
+        if (_usableKey(key)) {
+          text += `
+
+# Alternative — paste-session only (literal key; do NOT commit this file):
+${JSON.stringify({ mcpServers: { tortoise: { url: MCP_URL, headers: { Authorization: "Bearer " + key } } } }, null, 2)}`;
+        }
+        return text;
+      },
+      pi: (key) => {
+        let text = `# Step 1 — save as .mcp.json in your project root (env form — no literal key on disk).
+# If a .mcp.json already exists, MERGE this entry into its mcpServers object.
+# First: export TORTOISE_API_KEY=${_usableKey(key) ? key : "tt_YOUR_KEY"}
+${JSON.stringify(PI_MCP_CONFIG_ENV, null, 2)}`;
+        if (_usableKey(key)) {
+          text += `
+
+# Alternative — paste-session only (literal key; do NOT commit this file):
+${JSON.stringify({ mcpServers: { tortoise: { url: MCP_URL, headers: { Authorization: "Bearer " + key } } } }, null, 2)}`;
+        }
+        return text;
+      },
+    };
+
+    // Per-harness Block B delivery instructions (exactly 2 actions each —
+    // epic #529 E2E-7; counting convention verbatim from 03-scope.md).
+    const HARNESS_DELIVERY_STEPS = {
+      claude: "Step 1: run the command above in your terminal. Step 2: paste the onboarding prompt below into Claude Code chat — if the flow doesn't start, paste: \"Start Tortoise onboarding\". Persistent alternative: add the prompt to CLAUDE.md instead.",
+      codex: "Step 1: run the two commands above (env export counted within). Step 2: paste the onboarding prompt below into Codex chat — if the flow doesn't start, paste: \"Start Tortoise onboarding\". Persistent alternative: add the prompt to AGENTS.md instead.",
+      cursor: "Step 1: save Block A as .cursor/mcp.json (+ export the key). Step 2: save Block B as .cursor/rules/tortoise-onboarding.mdc — it loads automatically in every chat, no paste into chat needed.",
+      pi: "Step 1: save Block A as .mcp.json (merge if one exists; export the key). Step 2: append Block B to AGENTS.md — it loads automatically in your next pi session, no paste into chat needed.",
+    };
+
     let currentHarness = "claude";
     // Render the default (Claude Code) MCP config on load so the box is never
     // empty (#745a) — switchHarness/copyMcpConfig re-render on interaction,
     // and showSuccess() re-renders once the real key is revealed.
     renderMcpConfig();
+    renderDeliverySteps();
     // Canonical onboarding prompt (#540): served by the premise-labs Pages
     // project from tortoise/onboarding/AGENT_ONBOARDING.md via deploy-pages.yml.
     // premiselabs.co is the project's active custom domain (tortoise.premiselabs.co
     // still CNAMEs to the legacy tortoise-landing-v2 project — see #540).
+    // Epic #529: per-harness variants live at /onboarding/<slug>.md (staged by
+    // stage_variants.py); the canonical URL stays the fallback for all tabs.
     const PROMPT_URL = "https://premiselabs.co/onboarding-prompt.md";
+    function variantPromptUrl(harness) {
+      return "https://premiselabs.co/onboarding/" + HARNESS_VARIANT_SLUG[harness] + ".md";
+    }
 
     function switchHarness(name) {
       currentHarness = name;
@@ -879,6 +1173,8 @@ codex mcp add tortoise --url https://api.premiselabs.co/mcp --bearer-token-env-v
         t.setAttribute("aria-pressed", String(active));
       });
       renderMcpConfig();
+      renderDeliverySteps();
+      loadVariantPrompt();
     }
 
     function renderMcpConfig() {
@@ -887,12 +1183,50 @@ codex mcp add tortoise --url https://api.premiselabs.co/mcp --bearer-token-env-v
       document.getElementById("mcp-config-text").textContent = text;
     }
 
+    function renderDeliverySteps() {
+      const el = document.getElementById("harness-delivery-steps");
+      if (el) el.textContent = HARNESS_DELIVERY_STEPS[currentHarness];
+    }
+
+    // Block B: fetch the active harness's variant prompt; on ANY failure fall
+    // back to the canonical prompt URL (unchanged UX — plan Substep 5).
+    let promptLoadedFor = null;
+    function loadVariantPrompt() {
+      const el = document.getElementById("prompt-text");
+      const btn = document.getElementById("btn-copy-prompt");
+      if (!el) return;
+      el.textContent = "(Loading prompt…)";
+      if (btn) btn.disabled = true;
+      const harness = currentHarness;
+      fetch(variantPromptUrl(harness))
+        .then(r => { if (!r.ok) throw new Error("variant " + r.status); return r.text(); })
+        .catch(() => fetch(PROMPT_URL).then(r => { if (!r.ok) throw new Error("canonical " + r.status); return r.text(); }))
+        .then(text => { if (harness === currentHarness) { el.textContent = text; promptLoadedFor = harness; } })
+        .catch(() => { if (harness === currentHarness) el.textContent = "(Prompt unavailable — copy from premiselabs.co/onboarding-prompt.md)"; })
+        .finally(() => { if (harness === currentHarness && btn) btn.disabled = false; });
+    }
+
+    // Epic #529 copy-attribution beacon: authenticated PATCH with the
+    // displayed key + {harness, section} body (the pre-#529 beacon had
+    // neither and 401'd silently). Key not visible (re-visit) → skip: the
+    // event semantics are copy-with-key-visible. Never blocks the copy.
+    function fireCopyBeacon(section) {
+      try {
+        const key = document.getElementById("api-key").textContent.trim();
+        if (!_usableKey(key)) return;
+        fetch("https://api.premiselabs.co/v1/onboarding/state", {
+          method: "PATCH",
+          headers: { "Authorization": "Bearer " + key, "Content-Type": "application/json" },
+          body: JSON.stringify({ harness: currentHarness, section: section }),
+        });
+      } catch(e) {}
+    }
+
     async function copyMcpConfig() {
       renderMcpConfig();
       const text = document.getElementById("mcp-config-text").textContent;
       if (!(await copyWithFallback(text, "btn-copy-mcp"))) return;
-      // Analytics: artifact_copied (config)
-      try { fetch("https://api.premiselabs.co/v1/onboarding/state", {method:"PATCH"}); } catch(e) {}
+      fireCopyBeacon("config");
       flashCopied("btn-copy-mcp");
     }
 
@@ -901,17 +1235,24 @@ codex mcp add tortoise --url https://api.premiselabs.co/mcp --bearer-token-env-v
       let text = el.textContent;
       if (text.includes("Loading prompt")) {
         try {
+          const r = await fetch(variantPromptUrl(currentHarness));
+          if (r.ok) text = await r.text();
+        } catch(e) {}
+      }
+      if (text.includes("Loading prompt")) {
+        try {
           const r = await fetch(PROMPT_URL);
           if (r.ok) text = await r.text();
         } catch(e) {}
       }
       // Never copy the load-time placeholder (#751): if the prompt still
       // hasn't loaded, tell the user instead.
-      if (text.includes("Loading prompt")) {
-        flashCopyFailure("btn-copy-prompt", "prompt is still loading — try again in a moment");
+      if (text.includes("Loading prompt") || text.startsWith("(Prompt unavailable")) {
+        flashCopyFailure("btn-copy-prompt", "prompt didn't load — copy it from premiselabs.co/onboarding-prompt.md");
         return;
       }
       if (!(await copyWithFallback(text, "btn-copy-prompt"))) return;
+      fireCopyBeacon("prompt");
       flashCopied("btn-copy-prompt");
     }
 
@@ -922,15 +1263,11 @@ codex mcp add tortoise --url https://api.premiselabs.co/mcp --bearer-token-env-v
       setTimeout(() => { btn.textContent = old; }, 1500);
     }
 
-    // Fetch the prompt on load (best-effort; fallback text remains). The copy
-    // button stays disabled until the fetch settles so it can't copy the
-    // "(Loading prompt…)" placeholder (#751).
-    const promptBtn = document.getElementById("btn-copy-prompt");
-    if (promptBtn) promptBtn.disabled = true;
-    fetch(PROMPT_URL).then(r => { if (r.ok) return r.text(); })
-      .then(t => { if (t) document.getElementById("prompt-text").textContent = t; })
-      .catch(() => {})
-      .finally(() => { if (promptBtn) promptBtn.disabled = false; });
+    // Fetch the default harness's variant prompt on load (best-effort;
+    // canonical fallback inside loadVariantPrompt). The copy button stays
+    // disabled until the fetch settles so it can't copy the "(Loading
+    // prompt…)" placeholder (#751).
+    loadVariantPrompt();
 
 </script>
 

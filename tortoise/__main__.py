@@ -503,7 +503,7 @@ def _cmd_init(args):
             from tortoise.projection import FalkorProjection
             _proj = FalkorProjection(db_path)
             _proj.g.query("RETURN 1")
-            print(f"  ✅ Embedded mode initialized at {db_path}")
+            print(f"  ✅ Embedded mode initialized at {db_path} (single-writer, eval only — docker compose for durable multi-writer)")
             graph_ready = True
         except ImportError:
             # Reachable when falkordblite is actually missing: tortoise/__init__
@@ -2970,6 +2970,11 @@ def _cmd_serve_http(args) -> int:
         # real path, not a shell-unescaped '~' (fixes the exists-check miss).
         db_path = os.path.expanduser(os.environ.get("TORTOISE_DB_PATH") or resolve_db_path())
         print(f"serve --http: DB target = {db_path}")
+        # #942: embedded FalkorDBLite is SINGLE-WRITER / EVAL-ONLY. Loud,
+        # auth-mode-independent, stderr-only (no stdout asserts break; the
+        # literal 'reachable on your network' is asserted absent elsewhere).
+        from tortoise._embedded import EMBEDDED_EVAL_BANNER
+        print(EMBEDDED_EVAL_BANNER, file=sys.stderr)
 
     # ── HTTP mode: note the fresh-namespace semantics for existing stdio data ──
     # EVERY HTTP auth mode serves an isolated namespace, never the stdio
@@ -3098,6 +3103,11 @@ def _cmd_key_create(args) -> int:
     else:
         from tortoise.config import resolve_db_path
         print(f"key create: registry at {os.environ.get('TORTOISE_DB_PATH') or resolve_db_path()}")
+        # #942: team keys on embedded = single-writer eval only. The key-mint
+        # moment is the enforcement point — interactive/foreground, unlike a
+        # daemonized serve's stderr.
+        from tortoise._embedded import EMBEDDED_EVAL_BANNER
+        print(EMBEDDED_EVAL_BANNER, file=sys.stderr)
 
     sdk = TortoiseSDK(namespace="registry")
     reg = sdk._get_registry()
