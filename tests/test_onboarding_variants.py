@@ -142,3 +142,125 @@ def test_stage_variants_fails_on_missing_header(tmp_path, monkeypatch):
         assert "pi-header.md" in result.stderr
     finally:
         missing.write_text(saved, encoding="utf-8")
+
+
+# ── welcome.html ref tests (issue #967 — plan T3/T4/T7b) ──────────────────
+# welcome.html is a static artifact: these tests pin the harness-optimal
+# Block A shapes, the authenticated beacon, and the env-indirection contract
+# for returning visits, straight from the shipped HTML (no fixtures — the
+# page IS the surface users copy from).
+
+WELCOME = REPO_ROOT / "website" / "welcome.html"
+
+
+def _welcome() -> str:
+    return WELCOME.read_text(encoding="utf-8")
+
+
+def _extract_marker_json(html: str, harness: str) -> dict:
+    """Pull the canonical JSON block between TORTOISE_CFG markers (T3/T10)."""
+    pattern = (r"/\* TORTOISE_CFG_BEGIN:" + harness +
+               r" \*/(.*?)/\* TORTOISE_CFG_END:" + harness + r" \*/")
+    match = re.search(pattern, html, re.S)
+    assert match, f"TORTOISE_CFG markers missing for {harness}"
+    block = match.group(1).strip()
+    block = re.sub(r"^const\s+\w+\s*=\s*", "", block)
+    block = block.rstrip().rstrip(";")
+    import json as _json
+    return _json.loads(block)
+
+
+def test_welcome_harness_configs_are_optimal():
+    """T3: semantic fragments per harness (tolerates flag reorder/whitespace)."""
+    html = _welcome()
+    # Claude: CLI one-liner shape
+    for frag in ("claude mcp add", "--transport http",
+                 "https://api.premiselabs.co/mcp", "Authorization: Bearer"):
+        assert frag in html, f"claude block missing fragment: {frag}"
+    # .mcp.json alternative pins type:http (whitespace-tolerant)
+    assert re.search(r'"type"\s*:\s*"http"', html), \
+        "claude .mcp.json alternative must pin type:http"
+    # Codex: CLI + env export (URL composed via the MCP_URL constant)
+    assert 'const MCP_URL = "https://api.premiselabs.co/mcp"' in html
+    for frag in ("codex mcp add tortoise --url",
+                 "--bearer-token-env-var TORTOISE_API_KEY",
+                 "export TORTOISE_API_KEY="):
+        assert frag in html, f"codex block missing fragment: {frag}"
+    # File paths named
+    for frag in (".cursor/mcp.json", ".cursor/rules/tortoise-onboarding.mdc",
+                 ".mcp.json"):
+        assert frag in html, f"missing file path: {frag}"
+    # Variant URLs + enum→slug mapping (claude → claude-code is the only
+    # non-identity mapping; owned by welcome.html per plan Substep 4)
+    assert "/onboarding/\"" in html or "\"https://premiselabs.co/onboarding/\"" in html
+    for slug in ("claude-code", "codex", "cursor", "pi"):
+        assert f'"{slug}"' in html.replace("'", '"'), f"slug {slug} unmapped"
+    assert "HARNESS_VARIANT_SLUG" in html
+    # Cursor canonical JSON: shape + env expansion
+    cursor_cfg = _extract_marker_json(html, "cursor")
+    tortoise = cursor_cfg["mcpServers"]["tortoise"]
+    assert tortoise["url"] == "https://api.premiselabs.co/mcp"
+    assert tortoise["headers"]["Authorization"] == "Bearer ${env:TORTOISE_API_KEY}"
+    # Pi canonical JSON: shape + env expansion
+    pi_cfg = _extract_marker_json(html, "pi")
+    tortoise = pi_cfg["mcpServers"]["tortoise"]
+    assert tortoise["url"] == "https://api.premiselabs.co/mcp"
+    assert tortoise["headers"]["Authorization"] == "Bearer ${TORTOISE_API_KEY}"
+    # paste-session-only labeling on the literal-key alternatives
+    assert html.count("paste-session only") >= 2, (
+        "cursor + pi literal-key alternatives must be labeled paste-session only")
+
+
+def test_welcome_env_form_blocks_carry_no_literal_key():
+    """T3/T10 negative: the canonical (env) JSON blocks contain no tt_ key."""
+    html = _welcome()
+    for harness in ("cursor", "pi"):
+        match = re.search(
+            r"/\* TORTOISE_CFG_BEGIN:" + harness + r" \*/(.*?)/\* TORTOISE_CFG_END:" + harness + r" \*/",
+            html, re.S)
+        assert match
+        assert "tt_" not in match.group(1), (
+            f"{harness} canonical env block must not contain a literal key")
+
+
+def test_welcome_beacon_authenticated_with_body():
+    """T4: the copy beacon carries Bearer auth + {harness, section} body."""
+    html = _welcome()
+    assert "fireCopyBeacon" in html
+    # The beacon function: auth header + JSON body with both fields.
+    beacon = re.search(r"function fireCopyBeacon[\s\S]*?\n    \}", html)
+    assert beacon, "fireCopyBeacon function missing"
+    body = beacon.group(0)
+    assert '"Authorization": "Bearer " + key' in body or "'Authorization'" in body
+    assert "Authorization" in body and "Bearer" in body
+    assert "harness" in body and "section" in body
+    assert "JSON.stringify" in body
+    # Both copy actions fire it with distinct sections.
+    assert 'fireCopyBeacon("config")' in html
+    assert 'fireCopyBeacon("prompt")' in html
+
+
+def test_key_already_shown_env_indirection():
+    """T7b/J5: returning visits keep the MCP card with env-indirection forms.
+
+    The masked placeholder must never be interpolated into Block A: all
+    fallback branches use env expansion + the tt_YOUR_KEY placeholder.
+    """
+    html = _welcome()
+    # Returning-visit handler keeps mcp-card visible (no classList.add("hidden") on it).
+    returning = re.search(r"function showAlreadyProvisioned[\s\S]*?\n    \}", html)
+    assert returning
+    body = returning.group(0)
+    mcp_hide = re.search(r'mcpCard\)\s*mcpCard\.classList\.add\("hidden"\)', body)
+    assert not mcp_hide, "mcp-card must stay visible for returning visitors (#529)"
+    assert "renderMcpConfig()" in body, "returning visit must re-render env forms"
+    # The masked placeholder never feeds a config: HARNESS_CONFIGS guard on tt_ prefix.
+    assert "_usableKey" in html
+    configs = re.search(r"const HARNESS_CONFIGS = \{[\s\S]*?\n    \};", html)
+    assert configs
+    cfg_block = configs.group(0)
+    assert "_usableKey(key)" in cfg_block
+    assert "•" not in cfg_block, "masked placeholder must never reach Block A"
+    # Fallback branches offer env indirection + the placeholder, never a secret.
+    assert "tt_YOUR_KEY" in cfg_block
+    assert "${env:TORTOISE_API_KEY}" in cfg_block or "CURSOR_MCP_CONFIG_ENV" in cfg_block
