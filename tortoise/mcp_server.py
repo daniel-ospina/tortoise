@@ -2140,6 +2140,17 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
 
     @mcp.custom_route("/", methods=["GET"])
     async def mcp_metadata(request):
+        # Epic #529 E2E (T8): real Streamable HTTP clients (MCP TS SDK —
+        # pi mcp-client v1.29.0 observed) open a GET listener that expects
+        # an SSE stream. Returning the JSON self-test there fails their
+        # JSON-RPC parse and aborts the whole connection. Per the
+        # Streamable HTTP spec, a server that offers no SSE stream answers
+        # GET with 405 — SDKs handle that gracefully. Non-SSE GETs (curl,
+        # browsers, the self-test probe) keep the JSON metadata response.
+        if "text/event-stream" in request.headers.get("accept", ""):
+            return JSONResponse(
+                {"error": "no SSE stream offered; use POST for JSON-RPC"},
+                status_code=405)
         return JSONResponse({"status": "ok", "protocol": "mcp",
                              "transport": "streamable-http",
                              "endpoint": "/mcp"})

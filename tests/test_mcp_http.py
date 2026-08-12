@@ -227,11 +227,28 @@ class TestGetMetadata:
     def test_get_metadata_no_auth(self, mcp_client):
         tc, _ = mcp_client
         tc.headers.pop("Authorization", None)
+        # Non-SSE Accept (curl/browser/self-test probe). SDK-style Accepts
+        # containing text/event-stream get 405 instead — see the next test.
+        tc.headers["Accept"] = "application/json"
         r = tc.get("/mcp")
         assert r.status_code == 200
         body = r.json()
         assert body["protocol"] == "mcp"
         assert body["transport"] == "streamable-http"
+
+    def test_get_sse_accept_returns_405_not_json(self, mcp_client):
+        """Epic #529 (T8): Streamable HTTP clients open a GET listener with
+        Accept: text/event-stream. The JSON self-test body there fails their
+        JSON-RPC parse and aborts the connection (observed with the MCP TS
+        SDK / pi mcp-client). Spec answer for servers without an SSE stream
+        is 405 — SDKs continue without server-initiated notifications."""
+        tc, _ = mcp_client  # authed, as a real client's GET listener is
+        r = tc.get("/mcp", headers={"Accept": "text/event-stream"})
+        assert r.status_code == 405
+        # Plain (non-SSE) GET still serves the metadata self-test.
+        r2 = tc.get("/mcp", headers={"Accept": "application/json"})
+        assert r2.status_code == 200
+        assert r2.json()["protocol"] == "mcp"
 
 
 # ── Team isolation ──────────────────────────────────────────────────────────
