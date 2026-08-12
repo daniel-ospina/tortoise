@@ -162,6 +162,13 @@ jobs:
     # watchdog, NOT this cap, is what bounds pytest — so the summary
     # always prints (see header, #798 part 2).
     timeout-minutes: 36
+    # #964: "no job activity" has two distinct causes, neither of which is a
+    # missing timeout (timeouts have existed since #798/#880): (1) pytest
+    # output is buffered to /tmp/pytest.log so the job log shows NOTHING for
+    # 25-50 min — the heartbeat in the run step below now surfaces liveness;
+    # (2) a "pending" run is the GitHub runner QUEUE (main runs serialize via
+    # the concurrency group; a backlog of merges queues them) — queue wait is
+    # not a job hang and cannot be fixed in-repo.
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -190,7 +197,12 @@ jobs:
         # the runtime already degrades gracefully to TF-IDF fallback
         # (embeddings.py catches load failure), so a failed download is a
         # WARNING, never a job failure.
+        # #964: a hung HF download (stalled TCP, no error raised) would
+        # otherwise stall the step for the full 36-min job cap with no
+        # output — step-level timeout bounds it; continue-on-error turns the
+        # timeout into a warning, not a failure.
         continue-on-error: true
+        timeout-minutes: 10
         run: |
           python - <<'EOF'
           import os, time
@@ -219,14 +231,32 @@ jobs:
         # ignores INT mid-test); the step then prints counts + tail + real
         # exit code. The runner's own timeout-minutes is NOT what bounds
         # pytest, so a silent runner cancel is impossible.
+        # #964: liveness heartbeat. pytest writes to /tmp/pytest.log (for
+        # the guaranteed tail), so the job log shows no output for 25-50
+        # min — previously read as "stuck in_progress". The background
+        # loop below prints a progress line to the LIVE job log every 5 min
+        # so GitHub surfaces activity and stall-vs-progress is visible.
         run: |
           set +e
           # Run only this half's files (matrix.files) — collection is
           # halved and each job leaks ~half the embedded servers.
           FILES=""
           for f in ${{ matrix.files }}; do FILES="$FILES tests/$f.py"; done
+          # #964 heartbeat: killed when pytest exits (kill+wait below).
+          # Counts are rough live liveness signals — the -rfE summary block
+          # re-lists failures, so FAILED may double-count on the last tick;
+          # the authoritative numbers are the tail + WATCHDOG banner below.
+          ( while true; do
+              sleep 300
+              p=$(grep -c ' PASSED' /tmp/pytest.log 2>/dev/null || true)
+              f=$(grep -c ' FAILED' /tmp/pytest.log 2>/dev/null || true)
+              echo "HEARTBEAT: pytest still running — $p passed, $f failed so far"
+            done ) &
+          HB_PID=$!
           timeout -s INT -k 10 30m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider --maxfail=20 -rfE --durations=15 > /tmp/pytest.log 2>&1
           rc=$?
+          kill $HB_PID 2>/dev/null || true
+          wait $HB_PID 2>/dev/null || true
           echo "==================== pytest summary (tail) ===================="
           tail -n 300 /tmp/pytest.log
           # #880: 124 = timeout SIGINT kill; 137 = -k 10 SIGKILL after pytest
@@ -273,7 +303,11 @@ jobs:
       - name: Pre-cache embedding model (all-MiniLM-L6-v2)
         # Same best-effort contract as the fast job: no mid-suite HF access;
         # download failure is a warning (TF-IDF fallback), never a failure.
+        # #964: step-level timeout bounds a hung download (stalled TCP with
+        # no error) that would otherwise stall the step for the full 90-min
+        # job cap; continue-on-error makes the timeout a warning.
         continue-on-error: true
+        timeout-minutes: 10
         run: |
           python - <<'EOF'
           import os, time
@@ -300,10 +334,27 @@ jobs:
         # Same guaranteed-summary treatment as the fast job (#798).
         # Per-test --timeout=300: these files have tests/setups that
         # legitimately take >90s; 300s still caps any hang.
+        # #964: liveness heartbeat — see the fast job's run step. pytest
+        # output is buffered to /tmp/pytest.log for the guaranteed tail, so
+        # the job log was silent for 30-50 min; the loop below prints
+        # progress to the live job log every 5 min.
         run: |
           set +e
+          # #964 heartbeat: killed when pytest exits (kill+wait below).
+          # Counts are rough live liveness signals — the -rfE summary block
+          # re-lists failures, so FAILED may double-count on the last tick;
+          # the authoritative numbers are the tail + WATCHDOG banner below.
+          ( while true; do
+              sleep 300
+              p=$(grep -c ' PASSED' /tmp/pytest.log 2>/dev/null || true)
+              f=$(grep -c ' FAILED' /tmp/pytest.log 2>/dev/null || true)
+              echo "HEARTBEAT: pytest still running — $p passed, $f failed so far"
+            done ) &
+          HB_PID=$!
           timeout -s INT -k 10 75m stdbuf -oL python -m pytest $SLOW_FILES -v --timeout=300 -p no:cacheprovider --maxfail=20 -rfE --durations=15 > /tmp/pytest.log 2>&1
           rc=$?
+          kill $HB_PID 2>/dev/null || true
+          wait $HB_PID 2>/dev/null || true
           echo "==================== pytest summary (tail) ===================="
           tail -n 300 /tmp/pytest.log
           # #880: 124 = timeout SIGINT kill; 137 = -k 10 SIGKILL after pytest
@@ -369,7 +420,11 @@ jobs:
       - name: Pre-cache embedding model (all-MiniLM-L6-v2)
         # Same best-effort contract as the sibling jobs: no mid-suite HF
         # access; the live seq test exercises compute_embedding via create_point.
+        # #964 (review): same hung-download guard as test/test-slow — this
+        # job's 15-min cap makes a stalled download strictly worse (it would
+        # burn the whole budget and cancel the run step with NO summary).
         continue-on-error: true
+        timeout-minutes: 10
         run: |
           python - <<'EOF'
           import os, time
