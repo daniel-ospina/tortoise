@@ -559,17 +559,18 @@ names at implementation against `sdk._link_source`/EventAPI (slice 5).
 ### 4.3 Ontology amendments (slice 3 — registration, not new design)
 
 1. `AgentSession` registered in ONTOLOGY §4.5 core eventKind vocabulary — EXACT code spelling (capital A; sdk.py:3963, session_indexer.py); `sessionCaptured` (the legacy core kind, still written by the regex path) declared an alias of the same concept — both remain valid kinds, no migration.
-2. `capturedAt` + content-addressed Event ID documented in §4.5 (bi-temporal capture).
-3. Document `summary`/`story-arc`/`sessionId` — §4.4 fields; `story_arc` registered as an explicit §4.4 field (capture usage note; summary = short, story_arc = arc continuation).
-4. NAND direction policy documented (pipeline spec — extraction-emitted default `unidirectional`, mutual-restatement exception).
-5. Source = provenance bridge confirmation — PLUS: `sourceKind: agentSession` value registered in the §5 source-type vocabulary (with its credibility-tier resolution — #398 inheritance is keyed on sourceKind); `provenance_spans` registered as a §4.6 Source property.
-6. `mitigated_by` predicate registered (ONTOLOGY §3.9 valid-predicate list — used by the existing mitigate_operator; currently unregistered).
-7. `references` target extended: Source allowed as a `references` target (producer extension in `link_source_to_entity`, which today validates entity_label ∈ {Document, Event, Object} — projection/edges.py:212).
-8. `pointKind: event` registered in the §5 Point Kind Vocabulary (code uses it today for episodic turn points — sdk.py:883 — but it is NOT in the ontology vocab; registration also puts it in the compiled value brief so the enforcer does not block event-class items).
-9. Content-addressed Point ids (`pt_<sha>`) registered as a sanctioned id form (§4.1 — create_point's ULID preference note; deterministic ids are the commit-endpoint idempotency anchor).
-10. NEW Point fields registered in §4.1: `c_cal` (calibrated confidence) and stored `quote` (provenance quote ≤200 chars — today only payload-level metadata).
-11. `passes_frequency_gate` registered on §4.3 Object (S5 gate-result flag; false entities are still written, flagged).
-12. `is_episodic` registered on Session/Event/Source/Point (quota exemption discriminator — §4.4; episodic Points from the regex path carry it too).
+2. `capturedAt` documented in §4.5 (bi-temporal capture).
+3. Content-addressed Event ID documented in §4.5 (deterministic MERGE anchor for the agentSession Event).
+4. Document `summary`/`story-arc`/`sessionId` — §4.4 fields; `story_arc` registered as an explicit §4.4 field (capture usage note; summary = short, story_arc = arc continuation).
+5. NAND direction policy documented (pipeline spec — extraction-emitted default `unidirectional`, mutual-restatement exception).
+6. Source = provenance bridge confirmation — PLUS: `sourceKind: agentSession` value registered in the §5 source-type vocabulary (with its credibility-tier resolution — #398 inheritance is keyed on sourceKind); `provenance_spans` registered as a §4.6 Source property.
+7. `mitigated_by` predicate registered (ONTOLOGY §3.9 valid-predicate list — used by the existing mitigate_operator; currently unregistered).
+8. `references` target extended: Source allowed as a `references` target (producer extension in `link_source_to_entity`, which today validates entity_label ∈ {Document, Event, Object} — projection/edges.py:212).
+9. `pointKind: event` registered in the §5 Point Kind Vocabulary (code uses it today for episodic turn points — sdk.py:883 — but it is NOT in the ontology vocab; registration also puts it in the compiled value brief so the enforcer does not block event-class items).
+10. Content-addressed Point ids (`pt_<sha>`) registered as a sanctioned id form (§4.1 — create_point's ULID preference note; deterministic ids are the commit-endpoint idempotency anchor).
+11. NEW Point fields registered in §4.1: `c_cal` (calibrated confidence) and stored `quote` (provenance quote ≤200 chars — today only payload-level metadata).
+12. `passes_frequency_gate` registered on §4.3 Object (S5 gate-result flag; false entities are still written, flagged).
+13. `is_episodic` registered on Session/Event/Source/Point (quota exemption discriminator — §4.4; episodic Points from the regex path carry it too).
 
 ### 4.4 Quota + budget data (slice 2 — P0)
 
@@ -586,7 +587,7 @@ names at implementation against `sdk._link_source`/EventAPI (slice 5).
 | Constraint | Enforcement | Where |
 |---|---|---|
 | `pointKind` ∈ closed vocab (compiled brief); `sourceKind` ∈ ontology §5 source-type vocabulary (amendment #5) | BLOCK item (E1) / 422 at API | enforcer + Pydantic mirror (`commit_schema.py` — §5.1) |
-| Entity/operator payload caps: entities ≤ `MAX_ENTITIES`, operators ≤ `MAX_OPERATORS` | 400 | payload check (§6.1) |
+| Entity/operator payload caps: entities ≤ `MAX_ENTITIES`, operators ≤ `MAX_OPERATORS` | 422 | Layer-1 (§6.1 — caps resolution: per-type caps are Layer-1; 400 is reserved for missing required payload fields) |
 | `source_ref` present on every point | BLOCK item (E8) / 422 | Layer-1 |
 | Atomicity (no coordination cues, ≤1 commissive predicate) | retry once → run fails (E9) | Layer-1 |
 | Required fields present (schema_version, session_id, client_commit_id, captured_at, extractor, points, telemetry) | 422 | Layer-1 |
@@ -732,9 +733,9 @@ Responses:
        nodes_created, nodes_merged, held: [point_ids], duplicate: bool}
       # duplicate:true ⇒ zero writes, zero write-ops billed (R4)
       # held non-empty ⇒ overflow (R3): client-side, re-commit checks 50-ceiling only
-  400  payload-level errors — {detail: str} (missing session_id/client_commit_id,
-       or points > MAX_PAYLOAD_POINTS OR entities > MAX_ENTITIES OR operators >
-       MAX_OPERATORS — per-type caps, independent; constants in quota.py §4.4)
+  400  payload-level errors — {detail: str} (missing session_id/client_commit_id —
+       the per-type caps MAX_PAYLOAD_POINTS/MAX_ENTITIES/MAX_OPERATORS are LAYER-1
+       → 422, NOT 400; constants in quota.py §4.4)
       # NOTE: the derived payload has NO turns — the legacy turn cap does not apply
   401  invalid/missing tt_ key — {detail: str}; client re-auths; the SAME
        client_commit_id is replay-safe on retry
