@@ -22,19 +22,19 @@ workload. Window #1 is converged (mitigation coverage 0→29→100%); **window #
 be run** — scheduled in §2 W-6 and §8.1 as the first action of the build, before slice 6
 (extractor) starts.
 
-**Plan-stage resolutions (resolving gaps between the research docs and the codebase —
+**Plan-stage resolutions P1-P4 (resolving gaps between the research docs and the codebase —
 recorded here so implementation does not re-derive):**
-- **R1.** MITIGATES is a first-class payload op_type — edge-targeted via the
+- **P1.** MITIGATES is a first-class payload op_type — edge-targeted via the
   (src, dst, op_type) identity triple (operator MERGE key; NO `op_<sha>` ids —
   `create_operator` hardcodes ULIDs and that is unchanged). Server-side maps to the
   EXISTING `mitigate_operator` mechanism: mitigation Point + `(m)-[:IMPL]->(op)` +
   `(op)-[:mitigated_by]->(m)`, `mitigation_strength` 0-1 (extractor bias 0.10-0.50
   maps into it). Not eval-only.
-- **R2.** L2 re-capture supersession maps to the EXISTING `supersede_point` mechanism
+- **P2.** L2 re-capture supersession maps to the EXISTING `supersede_point` mechanism
   (CORRECTS edge + `outdated` flag + edge transfer). The payload `reason: REVISES` is a
   semantic label; there is NO new REVISES edge in v1. `REPHRASE` is a dedup label only
   (no graph operator — matches scope.md §1).
-- **R3.** Hold queue is client-side in v1 (items returned in `held[]`, never dropped,
+- **P3.** Hold queue is client-side in v1 (items returned in `held[]`, never dropped,
   never silently written). A commit with held items is NOT an L1 replay: re-submitting
   the same `client_commit_id` writes the held items (L1 `duplicate` applies only to
   fully-written commits). **Promotion semantics:** a re-submission of a previously-held
@@ -42,7 +42,7 @@ recorded here so implementation does not re-derive):**
   write); the hard-25 band does NOT re-trigger for previously-held payloads (they were
   already adjudicated — the hold is a deferral, not a re-adjudication). Ceiling-raise
   /promote endpoint is v1.1.
-- **R4.** `write_ops` is billed +1 per NON-DUPLICATE commit call, EXCEPT overflow-to-hold
+- **P4.** `write_ops` is billed +1 per NON-DUPLICATE commit call, EXCEPT overflow-to-hold
   commits which bill zero (their re-submission bills the single +1 — one logical
   payload is billed exactly once). An L1 replay bills zero write-ops (never
   double-charged). `nodes_written` += net-new non-episodic.
@@ -111,11 +111,11 @@ recorded here so implementation does not re-derive):**
 | Step | Actor | Action | System | Exit condition |
 |---|---|---|---|---|
 | 1 | P4 | Re-captures the same session (retry after network failure, or re-run after extractor bump) | New commit, same `session_id` | — |
-| 2 | System | Exact replay (same `client_commit_id`, previous commit fully written) → zero writes | L1 idempotency | 200 `{duplicate: true}`, zero write-ops billed (R4) |
+| 2 | System | Exact replay (same `client_commit_id`, previous commit fully written) → zero writes | L1 idempotency | 200 `{duplicate: true}`, zero write-ops billed (P4) |
 | 3 | System | Re-capture with changed commit_id (extractor version bump) → MERGE reconciliation | L2: points upsert by deterministic `pt_<sha>` (same id → MERGE bump updatedAt/version, keep createdAt); changed content → new id → **`supersede_point` (CORRECTS edge + outdated flag + edge transfer)**; entities/operators MERGE by key | No duplicate points; old versions superseded (never hard-deleted); MERGE hits burn zero budget |
 | 4 | P4 | Receives duplicate:true / 402 / 422 and acts | — | duplicate:true → no retry needed; 422 → retry once with corrected shape; 402 → hold locally (same `client_commit_id` is replay-safe on retry) |
 
-**Edge cases:** (a) same content re-committed after extractor bump → all points dedup by content-hash, zero net-new nodes; (b) partially changed session → only net-new non-episodic nodes counted against budget; (c) concurrent commits for same session → deterministic ids make same-content commits safe (identical pt_<sha> MERGE); different-content concurrent commits → tie-break = **server arrival order assigned at write time**; the later-arriving version supersedes (REVISES direction = arrival order); (d) a commit that overflowed into the hold queue is NOT an L1 replay on re-submission (R3).
+**Edge cases:** (a) same content re-committed after extractor bump → all points dedup by content-hash, zero net-new nodes; (b) partially changed session → only net-new non-episodic nodes counted against budget; (c) concurrent commits for same session → deterministic ids make same-content commits safe (identical pt_<sha> MERGE); different-content concurrent commits → tie-break = **server arrival order assigned at write time**; the later-arriving version supersedes (REVISES direction = arrival order); (d) a commit that overflowed into the hold queue is NOT an L1 replay on re-submission (P3).
 
 #### J-6 — Budget overflow is held, never dropped (E2E-7) — P2
 
@@ -124,7 +124,7 @@ recorded here so implementation does not re-derive):**
 | 1 | P2 | Team uses capture heavily in one session | Cumulative per-session counter (net-new non-episodic, computed post-reconciliation) | Counter crosses soft 15 → WARN telemetry |
 | 2 | System | Counter crosses hard 25 | budget_overflow: net-new items returned in `held[]`, NOT written | Commit still 200 with `held[]` list; nothing dropped |
 | 3 | System | Counter would exceed ceiling 50 | Fail-closed | 402 with budget reason; nothing written |
-| 4 | P2 | Reviews held items (from `held[]`); the client re-commits the held payload with the same `client_commit_id` | Re-submission is NOT an L1 replay and is NOT re-adjudicated against the hard-25 band — only the 50 ceiling applies (R3) | Held items written (already-written + delta ≤ 50); held items never dropped, never silently written; ceiling-raise/promote endpoint deferred to v1.1 |
+| 4 | P2 | Reviews held items (from `held[]`); the client re-commits the held payload with the same `client_commit_id` | Re-submission is NOT an L1 replay and is NOT re-adjudicated against the hard-25 band — only the 50 ceiling applies (P3) | Held items written (already-written + delta ≤ 50); held items never dropped, never silently written; ceiling-raise/promote endpoint deferred to v1.1 |
 
 **Edge cases:** (a) held items remain client-side in v1 (the response's `held[]` + client logs are the visibility surface — "queryable" means via those, not via the graph, since held items are not written); (b) quota (`max_sessions`) and budget are independent — budget is per-session cumulative, quota is per-team count of Session nodes (post-fix); (c) a held payload that never re-commits stays client-side forever — never dropped, never written (no server-side GC in v1).
 
@@ -189,7 +189,7 @@ recorded here so implementation does not re-derive):**
      ↓
 [S5] Grounding/resolution — entity frequency gate · claim dedup (content-hash) ·
      supersede via supersede_point (never hard-delete) · process decisions →
-     drop-with-log (R3)
+     drop-with-log (P3)
      ↓
 [S6] Derived-commit serializer — the POST /v1/sessions/commit payload
 ```
@@ -217,7 +217,7 @@ Deterministic validation AFTER the LLM stage (S2/S3 outputs), BEFORE write (S5/S
 | E9 | Malformed stream (shape) | **BLOCK** | retry once → RUN FAILS (R8 Layer-1) — the ONLY run-level class |
 | E10 | Vague superclass | **WARN** | accept + suggestion; feeds prompt-improvement loop |
 
-> **Atomicity (R2) is an R8 Layer-1 field, enforced at S2 deterministically
+> **Atomicity (P2) is an R8 Layer-1 field, enforced at S2 deterministically
 > (propositionize-before-classify) and at the stream level:** coordination cues or >1
 > commissive predicate in an emitted decision → retry once with the split error →
 > split into N atomic points (pass) or the stream fails Layer-1 (E9 semantics). It is
@@ -242,8 +242,8 @@ POST /v1/sessions/commit (tt_ auth)
     shape) → non-conforming → retry once → 422 with field reasons
        ↓
 [2] Idempotency L1: :CommitRecord {client_commit_id} exists AND status ==
-    fully_written → 200 {duplicate:true}, zero writes, zero write-ops billed (R4).
-    A previous commit with status held|partial is NOT "fully written" (R3) — the
+    fully_written → 200 {duplicate:true}, zero writes, zero write-ops billed (P4).
+    A previous commit with status held|partial is NOT "fully written" (P3) — the
     :CommitRecord MERGE is the atomic concurrency serialization point.
        ↓
 [3] L2 MERGE reconciliation computed IN MEMORY (no writes yet): points by pt_<sha>
@@ -279,7 +279,7 @@ POST /v1/sessions/commit (tt_ auth)
         event pointKind (the four-node chain's Event = the agentSession container,
         not per-item events)
        ↓
-[6] Metering + telemetry: write_ops +1 per NON-duplicate commit call (R4) — an
+[6] Metering + telemetry: write_ops +1 per NON-duplicate commit call (P4) — an
     overflow-to-hold commit bills ZERO write_ops (nothing written) and its eventual
     re-submission bills the single +1: one logical payload is billed exactly once.
     nodes_written +net-new non-episodic (cost driver; 0 on hold commits; supersede-
@@ -297,9 +297,9 @@ POST /v1/sessions/commit (tt_ auth)
 ### W-4 — Budget + quota accounting (J-6)
 
 - **Per-session cumulative budget** (net-new non-episodic nodes post-dedup, computed post-reconciliation): soft 15 / hard 25 / ceiling 50. Counters live on the Session node (`value_nodes_created`, `value_nodes_held`, `draft_count`, `commit_count`). MERGE hits + dedup burn zero budget.
-- **Hold semantics (R3):** >25 → `held[]` in the commit response; items NOT written; never dropped; re-submission of the same `client_commit_id` writes them — checked against the 50 CEILING only (the hard-25 band does not re-trigger for previously-held payloads). Overflow-to-hold commits bill zero `write_ops`; the re-submission bills the single +1 (one logical payload billed exactly once). v1 visibility = response + client logs; promotion/ceiling endpoint v1.1.
+- **Hold semantics (P3):** >25 → `held[]` in the commit response; items NOT written; never dropped; re-submission of the same `client_commit_id` writes them — checked against the 50 CEILING only (the hard-25 band does not re-trigger for previously-held payloads). Overflow-to-hold commits bill zero `write_ops`; the re-submission bills the single +1 (one logical payload billed exactly once). v1 visibility = response + client logs; promotion/ceiling endpoint v1.1.
 - **Quota fix (P0, ships with the endpoint):** `_count_resource` gains a `sessions` branch counting `MATCH (s:Session)` (currently falls through to `MATCH (n)` counting ALL nodes — ~40 captures × 25 nodes = false 402). `is_episodic: true` on Session/Event/Source/Point (decided scope — amendment §4.3 #12); the `points` branch counts non-episodic only (the Point-level flag is the discriminator). `MAX_VALUE_POINTS_PER_SESSION` + `MAX_PAYLOAD_POINTS` + `MAX_ENTITIES`/`MAX_OPERATORS` constants land in quota.py.
-- **Metering (R4):** `write_ops` +1 per NON-duplicate commit call (published billed unit — unchanged); `nodes_written` += net-new non-episodic (cost driver) on the existing MeteringRecord. Prevents the 25× per-node arbitrage vs create_point.
+- **Metering (P4):** `write_ops` +1 per NON-duplicate commit call (published billed unit — unchanged); `nodes_written` += net-new non-episodic (cost driver) on the existing MeteringRecord. Prevents the 25× per-node arbitrage vs create_point.
 
 **Manual intervention:** hold-queue review (P2) — v1 surface is the `held[]` response + logs; dashboard is separate work.
 
@@ -535,7 +535,7 @@ run-level: only E9 (malformed stream shape) fails the RUN — retry once → fai
 ```
 (Event:AgentSession)-[:produces]->(Document:transcript)         # Event → Document
 (Document)<-[:references]-(Source)                               # Document ← Source
-(Point)-[:extractedFrom]->(Source)                               # provenance (R4) — EXISTS (sdk.py:759)
+(Point)-[:extractedFrom]->(Source)                               # provenance (P4) — EXISTS (sdk.py:759)
 (Point)-[:aboutObject]->(Object)                                 # entity linkage — the canonical
                                                                  # predicate (ONTOLOGY §3.2); aboutEntity
                                                                  # does NOT exist — never use it
@@ -642,11 +642,11 @@ names at implementation against `sdk._link_source`/EventAPI (slice 5).
 | Block-rate >15% (vocab misconfigured) | violation-event stats | fail-closed to empty + alarm |
 | LLM nondeterminism | Layer-1 vs Layer-2 split | deterministic schema gates (CI blockers) + statistical watch-gates (eval) |
 | Retry storms (5xx/rate limits) | telemetry retry_count | bounded retries (≤5/session), replay-safe client_commit_id |
-| Budget overflow | Session counters | held[], never dropped (R3) |
+| Budget overflow | Session counters | held[], never dropped (P3) |
 | Quota false-402 | fixed `_count_resource` | sessions branch ships with the endpoint (P0) |
 | Dead code paths (`domain_kinds`, `known_kinds` 2-arg) | slice-4 tests | domain_loader unification fixes them |
 | `architecture: Document` subclass expansion gap | slice-4 tests | `_build_kind_expansions` gains core entity types |
-| L1 replay undecidable / held re-submission loops | :CommitRecord (unique MERGE key) | status fully_written\|held\|partial per commit; hard-25 band applies at first adjudication only (R3) |
+| L1 replay undecidable / held re-submission loops | :CommitRecord (unique MERGE key) | status fully_written\|held\|partial per commit; hard-25 band applies at first adjudication only (P3) |
 | Concurrent commits (TOCTOU on duplicate check) | :CommitRecord MERGE = atomic serialization point; Session.commit_count atomic increment | loser sees existing record → duplicate:true; commit_count sequence defines supersede direction |
 | Stale local brief → 422 on valid kinds | calibration_version in payload | 422 with `code: calibration_mismatch` → client refreshes the brief (J-1 edge f) |
 | 429 rate limit (RateLimitMiddleware, 100 req/min/key) | middleware | retry with backoff; replay-safe via client_commit_id; consider a higher bucket for commit (batch op) |
@@ -731,8 +731,8 @@ Canonicalization (client_commit_id — deterministic across clients):
 Responses:
   200 {session_id, commit_id (= client_commit_id — stable per logical commit),
        nodes_created, nodes_merged, held: [point_ids], duplicate: bool}
-      # duplicate:true ⇒ zero writes, zero write-ops billed (R4)
-      # held non-empty ⇒ overflow (R3): client-side, re-commit checks 50-ceiling only
+      # duplicate:true ⇒ zero writes, zero write-ops billed (P4)
+      # held non-empty ⇒ overflow (P3): client-side, re-commit checks 50-ceiling only
   400  payload-level errors — {detail: str} (missing session_id/client_commit_id —
        the per-type caps MAX_PAYLOAD_POINTS/MAX_ENTITIES/MAX_OPERATORS are LAYER-1
        → 422, NOT 400; constants in quota.py §4.4)
@@ -786,7 +786,7 @@ SEMANTICS (references elsewhere point here):
 
 Metering: write_ops +1 per non-duplicate commit call; overflow-to-hold commits
 bill 0 (recorded as write_ops_billed: 0 on the :CommitRecord); nodes_written +=
-net-new non-episodic. (R4)
+net-new non-episodic. (P4)
 ```
 
 ### 6.2 SDK surface
@@ -982,7 +982,7 @@ kappa(a_labels: list[Label], b_labels: list[Label]) -> float
 
 ### DE2E-4 — Atomicity (compound split)
 
-**Purpose:** One point = one decision (R2). | Scope E2E-4
+**Purpose:** One point = one decision (P2). | Scope E2E-4
 
 **Setup:** fixture: "A AND B AND C" serial-list compound; "X because Y" (rationale subordination); a single clean decision (control).
 
@@ -1040,7 +1040,7 @@ kappa(a_labels: list[Label], b_labels: list[Label]) -> float
 - Budget (Session C): held re-submission exceeding the ceiling → 402, items remain held client-side (never dropped).
 - Bump-then-re-capture (R-14): supersede-only delta does NOT increment net-new → budget unchanged after the re-capture; superseded points carry outdated:true.
 - Legacy nodes (R-18): backfilled is_episodic flag → quota counts legacy episodic points as episodic (no false 402).
-- Held-path billing (R4): overflow commit → MeteringRecord.write_ops unchanged + `write_ops_billed: 0` on the held :CommitRecord; re-submission → exactly +1.
+- Held-path billing (P4): overflow commit → MeteringRecord.write_ops unchanged + `write_ops_billed: 0` on the held :CommitRecord; re-submission → exactly +1.
 - Quota: 41st commit → 402; count query returns Session-node count (post-fix) — pre-fix all-nodes count regression test on `_count_resource`.
 - Layer-1: malformed payload → 422 with field reasons; retry once with corrected shape → 200; client_commit_id mismatch (recomputed hash differs) → 422 `commit_id_mismatch`; **stale-brief payload (kind valid in old brief, absent in new) → 422 `{code: calibration_mismatch}` → client refreshes brief → regenerates → 200**; **51-point payload → 422 (MAX_PAYLOAD_POINTS raw cap — independent of the budget ceiling)**.
 
@@ -1130,7 +1130,7 @@ kappa(a_labels: list[Label], b_labels: list[Label]) -> float
 | Concept | Canonical term | Where defined | Consistent across |
 |---|---|---|---|
 | Four-node chain | Event AgentSession → Document transcript ← Source bridge ← extractedFrom Points | §4.2 + §4.3 #1 | J-1/J-4, W-3 [5], 3.1, DE2E-2 |
-| NAND direction | unidirectional DEFAULT; bidirectional only for explicit mutual restatement | R-block, §4.2, DESIGN §1/§2 | J-1 step 4, W-1 S3, W-3 [5], DE2E-6 |
+| NAND direction | unidirectional DEFAULT; bidirectional only for explicit mutual restatement | P-block, §4.2, DESIGN §1/§2 | J-1 step 4, W-1 S3, W-3 [5], DE2E-6 |
 | MITIGATES | payload op_type, target = (src,dst,op_type) triple; mitigation Point + mitigated_by | R1, §4.1/§4.2, §6.1 | W-3 [5], DE2E-11 |
 | Supersession | supersede_point: CORRECTS new→old + outdated + edge transfer; `reason: REVISES` = label only | R2, §4.1/§4.2 | J-5 step 3, W-3 [5], 3.2/3.3, DE2E-7 |
 | L1 replay | :CommitRecord status fully_written; duplicate:true → zero writes + zero write-ops | R3/R4, §4.1, §6.1 | J-1(c), J-5, W-3 [2], 3.3, DE2E-7 |
@@ -1228,4 +1228,17 @@ The 9 slices decompose into issues with these boundaries (each slice = 1-3 issue
 
 ---
 
-*Plan complete — all 8 substeps with review gates. Reviewers' issues fixed to convergence (0 open P0/P1 across the last gates).*
+*Plan complete — all 8 substeps with review gates.*
+
+## Review record (verification audit, 2026-08-11)
+
+| Phase | Reviewers (fresh-context) | Cycles | Findings | Outcome |
+|---|---|---|---|---|
+| §1-3 (journeys/workflows/prototype) | ux-coverage, ux-consistency, ux-realism | 2 | ~21 | all fixed (P0×2 incl. hold-queue promotion + MITIGATES payload gap) |
+| §4-6 (data model/architecture/interfaces) | schema-correctness, ontology-alignment, architectural-soundness, integration, contract-completeness | 2 | ~35 | all fixed (P0×2: CORRECTS direction, aboutEntity; P0: :CommitRecord storage) |
+| §7 (detailed E2E) | e2e-coverage, e2e-reproducibility, test-quality | 2 | ~30 | all fixed (P0: canonical MITIGATES probe missing → DE2E-11 added; Layer-2 N-source + fixtures hardened) |
+| §8 (coherence/risk) | cross-substep-drift, risk-completeness, improvement-opportunities | 1 | ~30 | all fixed (P1s: R4 hold-billing, version-trigger, process-routing band; R-13..R-21 added) |
+| Decompose | per-issue batches (×5) + MECE (×2) | 2 | ~19 | all fixed → MECE CLEAN (05-decompose.md) |
+| Verify audit | verification reviewer | 1 | 5×P2 | all fixed (this record + P1-P4 rename + table rebuild) |
+
+Final state: 0 open P0/P1 across all gates (P2s resolved in-line or recorded as v1.1 deferrals).
