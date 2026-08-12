@@ -1019,8 +1019,8 @@ ${JSON.stringify({ mcpServers: { tortoise: { url: MCP_URL, headers: { Authorizat
       }
       // Never copy the load-time placeholder (#751): if the prompt still
       // hasn't loaded, tell the user instead.
-      if (text.includes("Loading prompt")) {
-        flashCopyFailure("btn-copy-prompt", "prompt is still loading — try again in a moment");
+      if (text.includes("Loading prompt") || text.startsWith("(Prompt unavailable")) {
+        flashCopyFailure("btn-copy-prompt", "prompt didn't load — copy it from premiselabs.co/onboarding-prompt.md");
         return;
       }
       if (!(await copyWithFallback(text, "btn-copy-prompt"))) return;

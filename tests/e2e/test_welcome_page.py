@@ -197,7 +197,10 @@ def test_welcome_success_shows_key_and_artifacts(page: Page) -> None:
     # by switchHarness, not by showSuccess)
     page.locator('.harness-tab[data-harness="claude"]').click()
     config = page.locator("#mcp-config-text").inner_text()
-    assert '"url": "https://api.premiselabs.co/mcp"' in config
+    # Epic #529: Claude Block A is the CLI one-liner (not a JSON blob).
+    assert "claude mcp add" in config
+    assert "--transport http" in config
+    assert "https://api.premiselabs.co/mcp" in config
     assert "Bearer" in config
 
 
@@ -215,37 +218,38 @@ def test_harness_tabs_switch_config(page: Page) -> None:
     default = page.locator("#mcp-config-text").inner_text()
     assert 'https://api.premiselabs.co/mcp' in default
 
-    # Each harness renders one of the known config variants. Note: claude and
-    # pi intentionally share the same streamable-http JSON (only the harness
-    # label differs), so assert membership in the known set, not inequality.
+    # Each harness renders its own optimal variant (epic #529): claude =
+    # CLI one-liner, codex = export + codex mcp add, cursor/pi = env-form
+    # JSON — all four renderings are now distinct.
     seen: set[str] = set()
     for harness in ("claude", "codex", "cursor", "pi"):
         page.locator(f'.harness-tab[data-harness="{harness}"]').click()
         text = page.locator("#mcp-config-text").inner_text()
         assert 'https://api.premiselabs.co/mcp' in text, f"bad config for {harness}"
         seen.add(text)
-    # claude/cursor/pi produce JSON configs; codex produces a shell snippet —
-    # expect at least 2 distinct renderings (JSON vs shell) and a shell block
-    # from the codex tab.
-    assert len(seen) >= 2, f"expected distinct configs, got {len(seen)}"
+    # All four harnesses render distinct optimal variants (epic #529).
+    assert len(seen) >= 4, f"expected 4 distinct configs, got {len(seen)}"
     page.locator('.harness-tab[data-harness="codex"]').click()
-    assert page.locator("#mcp-config-text").inner_text().startswith("# Set your API key")
+    codex_text = page.locator("#mcp-config-text").inner_text()
+    assert codex_text.startswith("# Step 1")
+    assert "codex mcp add" in codex_text
+    assert "--bearer-token-env-var TORTOISE_API_KEY" in codex_text
 
 
-def test_mcp_config_copy_puts_bearer_json_on_clipboard(page: Page) -> None:
-    """Clicking Copy MCP config must place valid JSON with the Bearer header
-    (tt_ key) on the clipboard."""
+def test_mcp_config_copy_puts_cli_one_liner_on_clipboard(page: Page) -> None:
+    """Clicking Copy MCP config (Claude tab, default) must place the CLI
+    one-liner with the Bearer key on the clipboard (epic #529 shape)."""
     _mock_supabase_success(page)
     page.goto(WELCOME_URL, wait_until="domcontentloaded", timeout=30_000)
     expect(page.locator("#success")).not_to_be_hidden(timeout=15_000)
     page.context.grant_permissions(["clipboard-read", "clipboard-write"],
                                    origin=_clipboard_origin())
+    page.locator(".harness-tab[data-harness=\"claude\"]").click()
     page.locator("#btn-copy-mcp").click()
     clip = page.evaluate("navigator.clipboard.readText()")
-    parsed = json.loads(clip)
-    servers = parsed["mcpServers"]["tortoise"]
-    assert servers["url"] == "https://api.premiselabs.co/mcp"
-    assert "Bearer tt_" in servers["headers"]["Authorization"]
+    assert "claude mcp add --transport http tortoise" in clip
+    assert "https://api.premiselabs.co/mcp" in clip
+    assert "Authorization: Bearer tt_" in clip
 
 
 def test_prompt_copy_uses_fetched_markdown(page: Page) -> None:
