@@ -243,6 +243,9 @@ jobs:
           FILES=""
           for f in ${{ matrix.files }}; do FILES="$FILES tests/$f.py"; done
           # #964 heartbeat: killed when pytest exits (kill+wait below).
+          # Counts are rough live liveness signals — the -rfE summary block
+          # re-lists failures, so FAILED may double-count on the last tick;
+          # the authoritative numbers are the tail + WATCHDOG banner below.
           ( while true; do
               sleep 300
               p=$(grep -c ' PASSED' /tmp/pytest.log 2>/dev/null || true)
@@ -338,6 +341,9 @@ jobs:
         run: |
           set +e
           # #964 heartbeat: killed when pytest exits (kill+wait below).
+          # Counts are rough live liveness signals — the -rfE summary block
+          # re-lists failures, so FAILED may double-count on the last tick;
+          # the authoritative numbers are the tail + WATCHDOG banner below.
           ( while true; do
               sleep 300
               p=$(grep -c ' PASSED' /tmp/pytest.log 2>/dev/null || true)
@@ -414,7 +420,11 @@ jobs:
       - name: Pre-cache embedding model (all-MiniLM-L6-v2)
         # Same best-effort contract as the sibling jobs: no mid-suite HF
         # access; the live seq test exercises compute_embedding via create_point.
+        # #964 (review): same hung-download guard as test/test-slow — this
+        # job's 15-min cap makes a stalled download strictly worse (it would
+        # burn the whole budget and cancel the run step with NO summary).
         continue-on-error: true
+        timeout-minutes: 10
         run: |
           python - <<'EOF'
           import os, time
