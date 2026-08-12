@@ -320,12 +320,12 @@ class TestDecideContextFree:
         ranked output within tolerance (not identical — different EP scopes —
         but same relative ordering)."""
         # Options
-        opt_a = sdk.create_point("option", "Option A")
-        opt_b = sdk.create_point("option", "Option B")
+        opt_a = sdk.create_point("option", "Option A", status="live")
+        opt_b = sdk.create_point("option", "Option B", status="live")
 
         # Findings
-        f1 = sdk.create_point("evidence", "A is good")
-        f2 = sdk.create_point("evidence", "B is bad")
+        f1 = sdk.create_point("evidence", "A is good", status="live")
+        f2 = sdk.create_point("evidence", "B is bad", status="live")
 
         operator_ids: list[str] = []
 
@@ -353,18 +353,23 @@ class TestDecideContextFree:
         a_an = get_mean(anchor_confs, opt_a["id"])
         b_an = get_mean(anchor_confs, opt_b["id"])
 
-        # Both modes should rank Option A above Option B
-        if all(v is not None for v in [a_cf, b_cf, a_an, b_an]):
-            assert a_cf > b_cf, (
-                f"Context-free: Expected A ({a_cf:.4f}) > B ({b_cf:.4f})"
-            )
-            assert a_an > b_an, (
-                f"Anchors: Expected A ({a_an:.4f}) > B ({b_an:.4f})"
-            )
-            # Confidences should be within reasonable tolerance
-            assert abs(a_cf - a_an) < 0.5, (
-                f"A confidence divergence: cf={a_cf:.4f} anchors={a_an:.4f}"
-            )
+        # Both modes should rank Option A above Option B. Fail loudly
+        # instead of passing vacuously if EP produced no confidences
+        # (draft-filter degeneracy would silently zero them — #992).
+        assert all(v is not None for v in [a_cf, b_cf, a_an, b_an]), (
+            f"EP produced no confidences (a_cf={a_cf}, b_cf={b_cf}, "
+            f"a_an={a_an}, b_an={b_an}) — draft-filter degeneracy?"
+        )
+        assert a_cf > b_cf, (
+            f"Context-free: Expected A ({a_cf:.4f}) > B ({b_cf:.4f})"
+        )
+        assert a_an > b_an, (
+            f"Anchors: Expected A ({a_an:.4f}) > B ({b_an:.4f})"
+        )
+        # Confidences should be within reasonable tolerance
+        assert abs(a_cf - a_an) < 0.5, (
+            f"A confidence divergence: cf={a_cf:.4f} anchors={a_an:.4f}"
+        )
 
 
 class TestIssue400EPFixes:
