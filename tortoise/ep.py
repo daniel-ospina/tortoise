@@ -821,6 +821,10 @@ class TortoiseEP:
         # operators (pre-existing behavior: _update_factor no-ops <2 inputs).
         op_inputs: dict[str, list[str]] = {op_id: [] for op_id in op_info}
         op_input_live: dict[str, list[bool]] = {op_id: [] for op_id in op_info}
+        # Raw input statuses (None/live/draft) for diagnostic surfacing (#992):
+        # when an operator goes degenerate we name every input's status so the
+        # silent-confidence-zero is traceable to the offending draft inputs.
+        op_input_status: dict[str, list[str | None]] = {op_id: [] for op_id in op_info}
         # idx_known flags operators whose EVERY input edge carries an idx —
         # create_operator always writes idx (source=0 first). Legacy/migrated
         # operators may have idx-less edges (all coalesce to 0): position 0
@@ -839,6 +843,7 @@ class TortoiseEP:
             op_input_live[op_id].append(
                 include_draft or status is None or status != "draft"
             )
+            op_input_status[op_id].append(status)
             if idx is None:
                 op_idx_known[op_id] = False
 
@@ -877,10 +882,16 @@ class TortoiseEP:
                         # Draft-caused degradation below 2 live inputs — a
                         # draft-connected operator must change NO live
                         # posterior (#780); matches the SVBP-path convention.
+                        # Name the operator + every input's status so the
+                        # silent zero-confidence is traceable (#992).
                         logger.warning(
                             "Operator %s: %d/%d inputs draft — factor skipped "
-                            "(degenerate, #780)",
+                            "(degenerate, #780). Inputs: [%s]",
                             op_id, stripped, len(full_inputs),
+                            ", ".join(
+                                f"{cid[:8]}={s or 'live'}"
+                                for cid, s in zip(full_inputs, op_input_status[op_id])
+                            ),
                         )
                         continue
             else:
