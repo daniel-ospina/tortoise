@@ -14,9 +14,11 @@ from __future__ import annotations
 
 import re
 import os
+import shutil
 import logging
 from collections import defaultdict
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 logger = logging.getLogger(__name__)
@@ -79,6 +81,7 @@ class _GuardedGraph:
         return getattr(self._g, name)
 
 from tortoise.config import RELATIVE_PATH_ERROR, SUPPORTED_URI_SCHEMES
+from tortoise.live import _live_only
 
 # Backward-compat alias: the canonical scheme set lives in tortoise.config
 # (SUPPORTED_URI_SCHEMES) so URI-routing and connection-layer validation share
@@ -103,12 +106,45 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def remove_stale_aof(db_path: str | os.PathLike) -> None:
+    """#915 — remove a stale AOF dir adjacent to an embedded DB.
+
+    With AOF enabled (see FalkorProjection embedded serverconfig), Redis loads
+    the AOF in PREFERENCE to the RDB on cold start. A stale AOF at the target
+    path therefore makes restore/migrate silently serve pre-restore data
+    (e.g. ``backup.restore`` copying an RDB snapshot into a path whose AOF
+    dir still holds the OLD live graph). Restore semantics =
+    "the restored snapshot wins" — call this on the target path before any
+    open/copy. No-op when the DB path is ``:memory:`` or has no adjacent dir.
+    """
+    if not db_path or str(db_path) == ":memory:":
+        return
+    # The projection sets appenddirname to "<db-filename>-appendonlydir" (#915)
+    # so multiple embedded DBs in one directory keep isolated AOF dirs.
+    # Also tolerate the old literal "appendonlydir" sibling and the
+    # "<db>-appendonlydir" suffix form (pre-appenddirname builds).
+    db = Path(str(db_path))
+    candidates = [
+        db.with_name(db.name + "-appendonlydir"),
+        db.parent / "appendonlydir",
+    ]
+    for d in candidates:
+        if d.exists():
+            shutil.rmtree(d, ignore_errors=True)
+            logger.warning("removed stale AOF dir %s (restore/migrate contract, #915)", d)
+
+
 def _norm(ev: dict) -> dict:
     """Normalize event shape — tolerates API (flat) and script (nested point).
 
     Only splices point fields when ``point`` is a dict — a non-dict ``point``
     (e.g. a legacy string ID) must not crash normalization (issue #325).
     """
+    if not isinstance(ev, dict):
+        # #331 (review r4): a non-dict event (raw JSON null/array line in
+        # the log) degrades to an empty event — callers skip it via the
+        # type guard instead of AttributeError in ev.get().
+        return {}
     if isinstance(ev.get("point"), dict):
         return {**ev, **ev["point"]}
     return ev
@@ -116,22 +152,37 @@ def _norm(ev: dict) -> dict:
 
 def _apply_one(points: dict[str, dict], ev: dict) -> None:
     ev = _norm(ev)
-    t = ev["type"]
+    t = ev.get("type")
+    if not isinstance(t, str):
+        # #331: events without a 'type' key (or with a non-string type)
+        # must be skipped, not crash the fold.
+        return
     if t in ("PointAdded", "OperatorAdded"):
-        p = ev["point"]
+        # #331 (review r3): ev.get — a valid type with NO 'point' key at all
+        # must be handled by the isinstance guard below, not KeyError here.
+        p = ev.get("point")
         if not isinstance(p, dict):
-            # Malformed event (non-dict point) — skip, don't crash (issue #325)
+            # Malformed event (non-dict/missing point) — skip, don't crash
+            # (issue #325)
+            return
+        # #331: no id → nothing to index by; skip rather than KeyError.
+        # #331 (review r4): str-only — a truthy non-string id (list/dict)
+        # raised TypeError (unhashable) in the index op below.
+        if not isinstance(p.get("id"), str):
             return
         # Phase 1 stop-writes: strip context from v2+ events (#49)
         if ev.get("projection_version", 0) >= 2:
             p.pop("context", None)
         points[p["id"]] = p
         # Flatten speaker from point's provenance into node data
+        # #331: non-dict provenance (null/string) must not crash flattening.
         prov = p.get("provenance", {})
-        if prov.get("speaker"):
+        if isinstance(prov, dict) and prov.get("speaker"):
             p["speaker"] = prov["speaker"]
     elif t == "PointRevised":
-        p = points.get(ev["id"])
+        # #331 (review r4): str-only lookup — dict.get(unhashable) raises.
+        rid = ev.get("id")
+        p = points.get(rid) if isinstance(rid, str) else None
         if p:
             if ev.get("new_content") is not None:
                 p["content"] = ev["new_content"]
@@ -144,12 +195,18 @@ def _apply_one(points: dict[str, dict], ev: dict) -> None:
         # this change is irreversible (already-hard-deleted points cannot
         # be reconstructed from the event log alone — the content existed
         # only in the projection, and the projection deleted it).
-        p = points.get(ev["id"])
+        # #331 (review r4): str-only lookup — dict.get(unhashable) raises.
+        rid = ev.get("id")
+        p = points.get(rid) if isinstance(rid, str) else None
         if p:
             p["status"] = "retracted"
     elif t == "PointsMerged":
-        for mid in ev.get("merge_ids", []):
-            points.pop(mid, None)
+        # #331 (review r2): `or []` also covers an explicit "merge_ids": null
+        # in the log — dict.get(key, []) only covers the missing key.
+        for mid in ev.get("merge_ids") or []:
+            # #331 (review r4): str-only — dict.pop(unhashable) raises.
+            if isinstance(mid, str):
+                points.pop(mid, None)
     # IngestStarted: no graph effect
 
 
@@ -266,7 +323,37 @@ class FalkorProjection(
             # the plain falkordb.FalkorDB treats a positional path arg as a HOST
             # (IDNA crash: redis tries to resolve the file path as a hostname, #82).
             from redislite.falkordb_client import FalkorDB  # lazy: keep import optional
-            self.db = FalkorDB(path)
+            # #915 — embedded durability: enable AOF (appendonly) so a kill -9 of
+            # the redis-server daemon loses at most the last ~1s of writes instead
+            # of the whole graph since the last RDB save (RDB snapshots never fire
+            # for small graphs: save 900 1 / 300 100 / 60 200 / 15 1000).
+            #
+            # Durability contract (embedded file-backed mode):
+            #  - AOF binds at daemon COLD start (redislite reuses a live daemon
+            #    via .settings without re-applying serverconfig). Restart any
+            #    long-running embedded daemon after deploying this change.
+            #  - AOF everysec fsync = ≤1s residual loss window on kill -9.
+            #  - appenddirname is PER-DB-FILENAME (default "appendonlydir" is a
+            #    per-directory name — two embedded DBs in one directory would
+            #    share the AOF dir and leak nodes across graphs, #915).
+            #  - The AOF dir is a LIVE durability artifact, NOT a backup
+            #    artifact — restores/migrates must remove a stale one at the
+            #    target path (Redis loads AOF in preference to RDB).
+            #  - :memory: is exempt (no file to persist).
+            aof_enabled = (
+                os.environ.get("TORTOISE_EMBEDDED_AOF", "").strip().lower()
+                in ("1", "true", "yes")
+            )
+            aof_dir = (
+                os.path.basename(os.path.abspath(path)) + "-appendonlydir"
+            ) if (path != ":memory:" and aof_enabled) else None
+            self.db = FalkorDB(
+                path,
+                serverconfig=(
+                    {"appendonly": "yes", "appenddirname": aof_dir}
+                    if (path != ":memory:" and aof_enabled) else None
+                ),
+            )
         elif host is not None:
             # Docker FalkorDB
             from falkordb import FalkorDB  # ponytail: lazy import, only needed for Docker mode
@@ -439,6 +526,10 @@ class FalkorProjection(
 
     def _norm(self, ev: dict) -> dict:
         """Normalize event shape — tolerates API (flat) and script (nested point)."""
+        if not isinstance(ev, dict):
+            # #331 (review r4): non-dict event → empty event → skipped by
+            # the type guard below (no AttributeError in ev.get()).
+            return {}
         if isinstance(ev.get("point"), dict):
             # Script format: id lives inside point
             return {**ev, **ev["point"]}
@@ -446,11 +537,33 @@ class FalkorProjection(
 
     def apply(self, event: dict) -> None:
         ev = self._norm(event)
-        t = ev["type"]
+        t = ev.get("type")
+        if not isinstance(t, str):
+            # #331: malformed event (no/non-string 'type') — skip, don't crash.
+            # Visible at the I/O boundary: silent skips corrupt recovery
+            # accounting (recover_from_log counts "did apply raise", code-review r2).
+            logger.warning(
+                "FalkorProjection.apply: skipping malformed event with "
+                "missing/non-string 'type' (event_id=%s)", ev.get("event_id"))
+            return
         if t in ("PointAdded", "OperatorAdded"):
-            p = ev["point"]
+            # #331 (review r3): ev.get — missing 'point' key handled by the
+            # isinstance guard, not KeyError.
+            p = ev.get("point")
             if not isinstance(p, dict):
-                # Malformed event (non-dict point) — skip, don't crash (issue #325)
+                # Malformed event (non-dict/missing point) — skip, don't crash
+                # (issue #325)
+                logger.warning(
+                    "FalkorProjection.apply: skipping %s with non-dict point "
+                    "(event_id=%s)", t, ev.get("event_id"))
+                return
+            # #331 (review r2): parity with _apply_one — no id → nothing to
+            # index by; skip rather than KeyError in _upsert.
+            # #331 (review r4): str-only ids (non-str would break Cypher params).
+            if not isinstance(p.get("id"), str):
+                logger.warning(
+                    "FalkorProjection.apply: skipping %s with missing point "
+                    "id (event_id=%s)", t, ev.get("event_id"))
                 return
             # Phase 1 stop-writes: strip context from v2+ events (#49)
             if ev.get("projection_version", 0) >= 2:
@@ -462,10 +575,38 @@ class FalkorProjection(
                 ev.pop("new_context", None)
             self._revise_point(ev, set_updated_at=True)
         elif t == "PointRetracted":
-            self._retract(ev["id"])
+            rid = ev.get("id")
+            if isinstance(rid, str):
+                # #331: missing id must be skipped, not crash the handler.
+                # #331 (review r2): NO event_id fallback — an event id is not
+                # a point id, and the fallback diverged from _apply_one (the
+                # fold is the single source of truth, module contract).
+                self._retract(rid)
+        elif t == "PointPromoted":
+            # #785: re-apply the full promoted snapshot (status live +
+            # reviewed + promotedAt) — rebuild parity for reviewer-gated
+            # promotions (PointRetracted-style lifecycle event).
+            p = ev.get("point")
+            if isinstance(p, dict) and p.get("id"):
+                self._upsert(p)
+        elif t == "OperatorPromoted":
+            # #785/R16: restore the operator's live status on replay.
+            p = ev.get("point")
+            if isinstance(p, dict) and p.get("id"):
+                self._upsert(p)
+            else:
+                oid = ev.get("id") or ev.get("event_id")
+                if oid is not None:
+                    self.g.query(
+                        "MATCH (n:Point {id:$id}) SET n.status = 'live'",
+                        params={"id": oid},
+                    )
         elif t == "PointsMerged":
-            for mid in ev.get("merge_ids", []):
-                self._delete(mid)
+            # #331 (review r2): `or []` also covers "merge_ids": null.
+            for mid in ev.get("merge_ids") or []:
+                # #331 (review r4): str-only ids.
+                if isinstance(mid, str):
+                    self._delete(mid)
         elif t == "EventRecorded":
             self._upsert_event(ev)
         elif t == "SubjectAdded":
@@ -593,11 +734,22 @@ class FalkorProjection(
         # (skip edges), so cross-file PointRevised always has a node to revise (#21).
         for ev in events:
             ev = self._norm(ev)
-            t = ev["type"]
+            t = ev.get("type")
             if t in ("PointAdded", "OperatorAdded"):
-                p = ev["point"]
+                # #331 (review r3): ev.get — missing 'point' key handled by
+                # the isinstance guard, not KeyError.
+                p = ev.get("point")
                 if not isinstance(p, dict):
-                    # Malformed event (non-dict point) — skip (issue #325)
+                    # Malformed event (non-dict/missing point) — skip (#325)
+                    continue
+                # #331 (review r2): parity with apply()/_apply_one — no id →
+                # nothing to index by; skip rather than KeyError in
+                # _upsert_point_props.
+                # #331 (review r4): str-only ids.
+                if not isinstance(p.get("id"), str):
+                    logger.warning(
+                        "rebuild: skipping %s with missing point id "
+                        "(event_id=%s)", t, ev.get("event_id"))
                     continue
                 # Phase 1 stop-writes: strip context from v2+ events (#49)
                 # (identical to apply() — parity between rebuild and apply)
@@ -611,17 +763,44 @@ class FalkorProjection(
         # Pass 1b: apply revisions + other non-edge events AFTER all nodes exist
         for ev in events:
             ev = self._norm(ev)
-            t = ev["type"]
+            t = ev.get("type")
             if t in ("PointAdded", "OperatorAdded"):
                 continue  # already handled in pass 1a
             elif t == "PointRetracted":
-                # #689: tombstone instead of hard delete
-                rid = ev.get("id") or ev.get("event_id")
-                if rid is not None:
+                # #689: tombstone instead of hard delete.
+                # #331 (review r3): NO event_id fallback — parity with
+                # apply()/_apply_one (fold is the single source of truth).
+                # #331 (review r4): str-only ids.
+                rid = ev.get("id")
+                if isinstance(rid, str):
                     self._retract(rid)
+            elif t == "PointPromoted":
+                # #785: rebuild parity — re-apply the promoted snapshot.
+                p = ev.get("point")
+                if isinstance(p, dict) and p.get("id"):
+                    if ev.get("projection_version", 0) >= 2:
+                        p.pop("context", None)
+                    self._upsert_point_props(p)
+            elif t == "OperatorPromoted":
+                # #785/R16: restore the operator's live status on replay.
+                p = ev.get("point")
+                if isinstance(p, dict) and p.get("id"):
+                    if ev.get("projection_version", 0) >= 2:
+                        p.pop("context", None)
+                    self._upsert_point_props(p)
+                else:
+                    oid = ev.get("id") or ev.get("event_id")
+                    if oid is not None:
+                        self.g.query(
+                            "MATCH (n:Point {id:$id}) SET n.status = 'live'",
+                            params={"id": oid},
+                        )
             elif t == "PointsMerged":
-                for mid in ev.get("merge_ids", []):
-                    self._delete(mid)
+                # #331 (review r2): `or []` also covers "merge_ids": null.
+                for mid in ev.get("merge_ids") or []:
+                    # #331 (review r4): str-only ids.
+                    if isinstance(mid, str):
+                        self._delete(mid)
             elif t == "PointRevised":
                 # Phase 1: discard new_context for v2+ events (#49)
                 if ev.get("projection_version", 0) >= 2:
@@ -645,10 +824,21 @@ class FalkorProjection(
         # (shared _upsert_point_edges — single source of truth with apply, #330).
         for ev in events:
             ev = self._norm(ev)
-            if ev["type"] in ("PointAdded", "OperatorAdded"):
-                p = ev["point"]
+            if ev.get("type") in ("PointAdded", "OperatorAdded"):
+                # #331 (review r3): ev.get — missing 'point' key handled by
+                # the isinstance guard, not KeyError.
+                p = ev.get("point")
                 if not isinstance(p, dict):
-                    # Malformed event (non-dict point) — skip (issue #325)
+                    # Malformed event (non-dict/missing point) — skip (#325)
+                    continue
+                # #331 (review r3): parity with apply()/pass 1a — edge
+                # wiring indexes by p["id"]; skip rather than KeyError.
+                # #331 (review r4): str-only ids.
+                if not isinstance(p.get("id"), str):
+                    logger.warning(
+                        "rebuild: skipping edge wiring for event with "
+                        "missing point id (event_id=%s)",
+                        ev.get("event_id"))
                     continue
                 if ev.get("projection_version", 0) >= 2:
                     p.pop("context", None)
@@ -959,8 +1149,11 @@ class FalkorProjection(
         """Apply PointRevised event — update content, context, and re-compute embedding."""
         new_content = ev.get("new_content")
         new_context = ev.get("new_context")
-        pid = ev.get("id") or ev.get("event_id")
-        if pid is None:
+        # #331 (review r3): NO event_id fallback — parity with _apply_one
+        # (fold is the single source of truth, module contract).
+        # #331 (review r4): str-only ids.
+        pid = ev.get("id")
+        if not isinstance(pid, str):
             # Malformed PointRevised — skip rather than crash (issue #325)
             return
         params: dict = {"id": pid, "c": new_content}
@@ -995,7 +1188,7 @@ class FalkorProjection(
 
     # ── SVBP integration (Gate 4) ─────────────────────────────────
 
-    def extract_svbp_factors(self):
+    def extract_svbp_factors(self, include_draft: bool = False):
         """Extract factor list for TortoiseSVBP from the graph.
 
         Returns (factors, evidence) where:
@@ -1005,12 +1198,22 @@ class FalkorProjection(
         Uses batch I/O (2 queries regardless of operator count) to avoid
         the N+1 query pattern that timed out on graphs with 1,800+ operators
         (#400). Operators with <2 inputs are excluded with a warning.
+
+        With include_draft=False (default, #780): draft operators and draft
+        claim inputs are excluded — the shared live-only filter applied at
+        ALL four factor-extraction call sites.
         """
         # Query 1: all operator IDs and types (single query, O(1) round-trip).
         # #689: retracted operators never feed EP factors.
+        # #780: draft operators never feed EP factors (unless opted in).
+        # Shared predicate from tortoise/live.py — one definition of the
+        # live-only rule across all four factor-extraction call sites.
+        draft_o = f"AND {_live_only('o.status', include_draft)}" if not include_draft else ""
+        draft_c = f"AND {_live_only('c.status', include_draft)}" if not include_draft else ""
         op_rows = self.g.query(
             "MATCH (o:Point) WHERE o.is_operator = true "
             "AND (o.status IS NULL OR o.status <> 'retracted') "
+            f"{draft_o} "
             "RETURN o.id, o.op_type"
         ).result_set
 
@@ -1018,10 +1221,13 @@ class FalkorProjection(
         # Avoids the N+1 pattern: previously this was a per-operator loop.
         # #689: retracted claims never appear as operator inputs (an operator
         # whose inputs all retract becomes degenerate and is excluded below).
+        # #780: draft claims never appear as inputs; draft operators' edges
+        # are excluded too.
         input_rows = self.g.query(
             "MATCH (o:Point)-[r:IMPL|NAND]->(c:Point) "
             "WHERE o.is_operator = true "
             "AND (c.status IS NULL OR c.status <> 'retracted') "
+            f"{draft_c} {draft_o} "
             "RETURN o.id, c.id "
             "ORDER BY o.id, c.id"
         ).result_set

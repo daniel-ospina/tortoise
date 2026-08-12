@@ -162,6 +162,13 @@ jobs:
     # watchdog, NOT this cap, is what bounds pytest — so the summary
     # always prints (see header, #798 part 2).
     timeout-minutes: 36
+    # #964: "no job activity" has two distinct causes, neither of which is a
+    # missing timeout (timeouts have existed since #798/#880): (1) pytest
+    # output is buffered to /tmp/pytest.log so the job log shows NOTHING for
+    # 25-50 min — the heartbeat in the run step below now surfaces liveness;
+    # (2) a "pending" run is the GitHub runner QUEUE (main runs serialize via
+    # the concurrency group; a backlog of merges queues them) — queue wait is
+    # not a job hang and cannot be fixed in-repo.
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -190,7 +197,12 @@ jobs:
         # the runtime already degrades gracefully to TF-IDF fallback
         # (embeddings.py catches load failure), so a failed download is a
         # WARNING, never a job failure.
+        # #964: a hung HF download (stalled TCP, no error raised) would
+        # otherwise stall the step for the full 36-min job cap with no
+        # output — step-level timeout bounds it; continue-on-error turns the
+        # timeout into a warning, not a failure.
         continue-on-error: true
+        timeout-minutes: 10
         run: |
           python - <<'EOF'
           import os, time
@@ -219,14 +231,32 @@ jobs:
         # ignores INT mid-test); the step then prints counts + tail + real
         # exit code. The runner's own timeout-minutes is NOT what bounds
         # pytest, so a silent runner cancel is impossible.
+        # #964: liveness heartbeat. pytest writes to /tmp/pytest.log (for
+        # the guaranteed tail), so the job log shows no output for 25-50
+        # min — previously read as "stuck in_progress". The background
+        # loop below prints a progress line to the LIVE job log every 5 min
+        # so GitHub surfaces activity and stall-vs-progress is visible.
         run: |
           set +e
           # Run only this half's files (matrix.files) — collection is
           # halved and each job leaks ~half the embedded servers.
           FILES=""
           for f in ${{ matrix.files }}; do FILES="$FILES tests/$f.py"; done
+          # #964 heartbeat: killed when pytest exits (kill+wait below).
+          # Counts are rough live liveness signals — the -rfE summary block
+          # re-lists failures, so FAILED may double-count on the last tick;
+          # the authoritative numbers are the tail + WATCHDOG banner below.
+          ( while true; do
+              sleep 300
+              p=$(grep -c ' PASSED' /tmp/pytest.log 2>/dev/null || true)
+              f=$(grep -c ' FAILED' /tmp/pytest.log 2>/dev/null || true)
+              echo "HEARTBEAT: pytest still running — $p passed, $f failed so far"
+            done ) &
+          HB_PID=$!
           timeout -s INT -k 10 30m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider --maxfail=20 -rfE --durations=15 > /tmp/pytest.log 2>&1
           rc=$?
+          kill $HB_PID 2>/dev/null || true
+          wait $HB_PID 2>/dev/null || true
           echo "==================== pytest summary (tail) ===================="
           tail -n 300 /tmp/pytest.log
           # #880: 124 = timeout SIGINT kill; 137 = -k 10 SIGKILL after pytest
@@ -273,7 +303,11 @@ jobs:
       - name: Pre-cache embedding model (all-MiniLM-L6-v2)
         # Same best-effort contract as the fast job: no mid-suite HF access;
         # download failure is a warning (TF-IDF fallback), never a failure.
+        # #964: step-level timeout bounds a hung download (stalled TCP with
+        # no error) that would otherwise stall the step for the full 90-min
+        # job cap; continue-on-error makes the timeout a warning.
         continue-on-error: true
+        timeout-minutes: 10
         run: |
           python - <<'EOF'
           import os, time
@@ -300,10 +334,27 @@ jobs:
         # Same guaranteed-summary treatment as the fast job (#798).
         # Per-test --timeout=300: these files have tests/setups that
         # legitimately take >90s; 300s still caps any hang.
+        # #964: liveness heartbeat — see the fast job's run step. pytest
+        # output is buffered to /tmp/pytest.log for the guaranteed tail, so
+        # the job log was silent for 30-50 min; the loop below prints
+        # progress to the live job log every 5 min.
         run: |
           set +e
+          # #964 heartbeat: killed when pytest exits (kill+wait below).
+          # Counts are rough live liveness signals — the -rfE summary block
+          # re-lists failures, so FAILED may double-count on the last tick;
+          # the authoritative numbers are the tail + WATCHDOG banner below.
+          ( while true; do
+              sleep 300
+              p=$(grep -c ' PASSED' /tmp/pytest.log 2>/dev/null || true)
+              f=$(grep -c ' FAILED' /tmp/pytest.log 2>/dev/null || true)
+              echo "HEARTBEAT: pytest still running — $p passed, $f failed so far"
+            done ) &
+          HB_PID=$!
           timeout -s INT -k 10 75m stdbuf -oL python -m pytest $SLOW_FILES -v --timeout=300 -p no:cacheprovider --maxfail=20 -rfE --durations=15 > /tmp/pytest.log 2>&1
           rc=$?
+          kill $HB_PID 2>/dev/null || true
+          wait $HB_PID 2>/dev/null || true
           echo "==================== pytest summary (tail) ===================="
           tail -n 300 /tmp/pytest.log
           # #880: 124 = timeout SIGINT kill; 137 = -k 10 SIGKILL after pytest
@@ -321,3 +372,151 @@ jobs:
         env:
           HF_HUB_OFFLINE: "1"
           TRANSFORMERS_OFFLINE: "1"
+
+  test-concurrency-falkor:
+    # #942 target 2: prove concurrent-writer atomicity on the REAL FalkorDB
+    # sidecar — the durable path the flipped docs now default to. Runs ONLY
+    # the two live docker:// tests — never whole files (test_embedded_concurrency.py
+    # is also in test-slow, and whole-file runs would start embedded redislite
+    # servers against the live 6379 — the #798 collision mode). The skip-fail
+    # guard turns a future skip regression RED instead of green: it matches
+    # BOTH pytest 8.x output formats (-v progress: "nodeid SKIPPED (reason)";
+    # -rs summary: "SKIPPED [N] tests/file.py:line").
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      TORTOISE_DB_URI: "docker://:falkordb@localhost:6379/tortoise"
+    services:
+      falkordb:
+        image: falkordb/falkordb-server:latest
+        env:
+          REDIS_ARGS: "--requirepass falkordb"
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli -a falkordb ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install package + test extras
+        # [test,embeddings] — NOT just [test]: the pre-cache step imports
+        # sentence_transformers (embeddings extra), and create_point calls
+        # compute_embedding. Matches the sibling jobs exactly.
+        run: pip install -e '.[test,embeddings]'
+      - name: Cache HF embedding model (all-MiniLM-L6-v2)
+        # Sibling parity (test/test-slow both cache BEFORE pre-caching) —
+        # without the restore step every run downloads ~90MB.
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-embedding-cache-v1-${{ runner.os }}
+          restore-keys: |
+            hf-embedding-cache-v1-${{ runner.os }}-
+      - name: Pre-cache embedding model (all-MiniLM-L6-v2)
+        # Same best-effort contract as the sibling jobs: no mid-suite HF
+        # access; the live seq test exercises compute_embedding via create_point.
+        # #964 (review): same hung-download guard as test/test-slow — this
+        # job's 15-min cap makes a stalled download strictly worse (it would
+        # burn the whole budget and cancel the run step with NO summary).
+        continue-on-error: true
+        timeout-minutes: 10
+        run: |
+          python - <<'EOF'
+          import os, time
+          os.environ["HF_HUB_OFFLINE"] = "1"
+          from sentence_transformers import SentenceTransformer
+          try:
+              SentenceTransformer("all-MiniLM-L6-v2")
+              print("embedding model: cached, no download needed")
+          except Exception:
+              print("embedding model: not cached — downloading (with retries)")
+              del os.environ["HF_HUB_OFFLINE"]
+              for attempt in range(1, 6):
+                  try:
+                      SentenceTransformer("all-MiniLM-L6-v2")
+                      print("embedding model: downloaded")
+                      break
+                  except Exception as e:
+                      print(f"download attempt {attempt}/5 failed: {e}")
+                      if attempt == 5:
+                          raise
+                      time.sleep(10 * attempt)
+          EOF
+      - name: Run live concurrency tests (real FalkorDB sidecar)
+        env:
+          HF_HUB_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
+        run: |
+          set +e
+          timeout -s INT -k 10 10m stdbuf -oL python -m pytest \
+            tests/test_event_store.py::test_seq_is_monotonic_under_concurrency_live_falkor \
+            tests/test_embedded_concurrency.py::test_concurrent_writers_live_falkor_no_lost_writes \
+            -v -rs --timeout=300 -p no:cacheprovider --maxfail=10 -rfE --durations=15 > /tmp/pytest.log 2>&1
+          rc=$?
+          echo "==================== pytest summary (tail) ===================="
+          tail -n 120 /tmp/pytest.log
+          # Skip-fail guard: live tests must RUN here, never skip (vacuity).
+          # Matches BOTH pytest output formats (-v progress: "nodeid SKIPPED";
+          # -rs summary: "SKIPPED [N] tests/file.py:line").
+          if grep -E '(test_seq_is_monotonic_under_concurrency_live_falkor|test_concurrent_writers_live_falkor_no_lost_writes) SKIPPED|SKIPPED \[[0-9]+\] tests/(test_event_store|test_embedded_concurrency)\.py' /tmp/pytest.log; then
+            echo "❌ live tests SKIPPED — the job would be green while testing nothing"
+            rc=1
+          fi
+          echo "==================== pytest exit code: $rc ===================="
+          exit $rc
+      - name: Validate docker-compose.yml (ports + header edits)
+        # T1 Step 6 ships with zero other verification — no workflow validates
+        # compose today. ubuntu-latest has docker + the repo checked out.
+        run: docker compose config -q && echo "compose config OK"
+      - name: Docs-consistency guard (embedded must never be "default" again)
+        # #942 T1 enforcement: the flipped onboarding surfaces must not regress.
+        # Runs even when the pytest step fails (if: always()) — it is the
+        # cheap gate that keeps the flip honest. Scope = the SAME 5 files as
+        # T1 Step 9. EXCLUDED by design: docs/plans|epics|migrations (historical
+        # records), website/docs.html (hosted sample), graph-scripts/setup.py
+        # (legacy installer on a deliberately distinct port).
+        if: always()
+        run: |
+          HITS=$(grep -rn "Embedded (default)\|recommended to start\|multi-node\|16379\|passwordless URI is\|docker://localhost:6379\|docker://:@localhost:6379" README.md docs/quickstart-selfhosted.md docs/infra-runbook.md website/self-hosted.html .env.example || true)
+          if [ -n "$HITS" ]; then
+            echo "❌ embedded-first/16379 leftovers in flipped onboarding docs:"
+            echo "$HITS"
+            exit 1
+          fi
+          echo "docs-consistency guard OK"
+
+  # Whole-registry compile gate for pack manifests (epic #909, R-16).
+  # Every pack PR must load the ENTIRE registry (all packs/*/manifest.yaml)
+  # with zero validation errors — a broken manifest must fail CI at PR time,
+  # not the shared registry at runtime. Runs on every PR (cheap: seconds).
+  packs-compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'   # pyproject requires-python >= 3.12
+      - name: Install package
+        run: pip install -e .
+      - name: Whole-registry compile (all packs, zero validation errors)
+        run: |
+          python - <<'EOF'
+          from pathlib import Path
+          from tortoise.pack_registry import PackRegistry
+
+          registry = PackRegistry(Path("packs"))
+          loaded = registry.load_all()
+          if registry.errors:
+              for ns, errs in sorted(registry.errors.items()):
+                  for err in errs:
+                      print(f"ERROR [{ns}]: {err}")
+              raise SystemExit(
+                  f"packs-compile FAILED: {len(registry.errors)} pack(s) with validation errors"
+              )
+          print(f"packs-compile OK: {loaded} packs loaded, 0 validation errors")
+          EOF

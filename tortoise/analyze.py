@@ -9,6 +9,8 @@ from __future__ import annotations
 import json, os, re
 from typing import Any
 
+from .live import _live_only
+
 
 # ═══════════════════════════════════════════════════════════════════
 # Template Registry
@@ -329,13 +331,18 @@ def _inject_subgraph_filter(cypher: str, vars: list[str],
 
 def _bfs_select_operators(proj, anchors: list[str], max_hops: int = 1,
                           rel_filter: str = "IMPL|NAND",
-                          direction: str = "both") -> set[str]:
+                          direction: str = "both",
+                          include_draft: bool = False) -> set[str]:
     """BFS subgraph selection from anchor Points — returns set of operator Point IDs.
 
     Shared helper for both compute_confidence and tortoise_analyze.
     Expands from anchor Points along operator edges (IMPL|NAND) for max_hops hops.
     IMPL edges respect direction; NAND always traversed bidirectionally.
     Capped at 200 operator IDs.
+
+    With include_draft=False (default, #780): draft anchors, draft operators
+    and draft frontier points are excluded — the shared live-only filter at
+    the analyze-path call site of the four-factor-extraction set.
     """
     import logging
     _log = logging.getLogger(__name__)
@@ -343,6 +350,20 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int = 1,
     frontier: set[str] = set(anchors)
     visited: set[str] = set(anchors)
     rel_types = set(rel_filter.split("|"))
+
+    live_op = f"AND {_live_only('op.status', include_draft)}" if not include_draft else ""
+    live_t = f"AND {_live_only('target.status', include_draft)}" if not include_draft else ""
+    live_p = f"AND {_live_only('p.status', include_draft)}" if not include_draft else ""
+
+    if not include_draft and frontier:
+        rows = proj.g.query(
+            "MATCH (n:Point) WHERE n.id IN $ids AND n.status = 'draft' RETURN n.id",
+            params={"ids": list(frontier)},
+        ).result_set
+        draft_anchors = {r[0] for r in rows}
+        if draft_anchors:
+            frontier -= draft_anchors
+            visited -= draft_anchors
 
     for hop in range(max_hops):
         if not frontier:
@@ -367,7 +388,7 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int = 1,
                 if d == "incoming":
                     rows = proj.g.query(
                         f"MATCH (op:Point {{is_operator:true}})-[:{rel}]->(p:Point) "
-                        "WHERE p.id IN $frontier "
+                        f"WHERE p.id IN $frontier {live_op} "
                         "RETURN DISTINCT op.id",
                         params={"frontier": frontier_list},
                     ).result_set
@@ -377,7 +398,7 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int = 1,
                 else:  # outgoing
                     rows = proj.g.query(
                         f"MATCH (op:Point {{is_operator:true}})-[:{rel}]->(target:Point) "
-                        "WHERE op.id IN $frontier "
+                        f"WHERE op.id IN $frontier {live_op} {live_t} "
                         "RETURN DISTINCT target.id",
                         params={"frontier": frontier_list},
                     ).result_set
@@ -401,7 +422,7 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int = 1,
             ops_list = list(new_ops)
             rows = proj.g.query(
                 "MATCH (op:Point {is_operator:true})-[r:IMPL|NAND]->(p:Point) "
-                "WHERE op.id IN $ops "
+                f"WHERE op.id IN $ops {live_p} "
                 "RETURN DISTINCT p.id",
                 params={"ops": ops_list},
             ).result_set
@@ -495,4 +516,154 @@ def analyze(question: str, proj=None, *,
         "raw": [[str(v) for v in row] for row in rows[:20]],
         "pattern": pattern_name,
         "query": cypher,
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Gate B Tooling (epic-264 #779) — mean grounding + drift snapshot
+# ═══════════════════════════════════════════════════════════════════
+
+# Mean-absolute drift ceiling. MUST stay 0.02 — EpSafeCommit's
+# max_grounding_drift (#785 seam) consumes this contract; tests pin the value.
+MAX_GROUNDING_DRIFT = 0.02
+# Max single-point absolute delta ceiling (R12: mean-absolute can mask
+# per-point flips — the ≤5% max single-point target from the #779 issue).
+MAX_POINT_DRIFT = 0.05
+
+
+def _resolve_proj(proj):
+    """Resolve a projection when None (lazy import — sdk/analyze are
+    mutually imported at call sites, never at module load)."""
+    if proj is not None:
+        return proj
+    from tortoise.sdk import TortoiseSDK
+    return TortoiseSDK()._get_proj()
+
+
+def mean_grounding(proj=None) -> float:
+    """Mean over ``confidence`` of live non-operator Points (DE2E-4, #779).
+
+    Gate B snapshot metric: sample = full live Point set, mean of the
+    ``confidence`` property. Live semantics follow the #780 shared
+    ``_live_only`` filter — legacy NULL-status Points are LIVE
+    (``coalesce($st, n.status, 'live')`` write default), ``status: draft``
+    Points are excluded. Operator Points (``is_operator: true``) are
+    excluded. An empty live set returns 0.0.
+
+    Missing-confidence extension (DELIBERATE, beyond the pinned DE2E-4
+    formula): a live Point with no ``confidence`` contributes 0.5 to the
+    mean (``coalesce(p.confidence, 0.5)`` — repo-wide NULL-confidence
+    convention). The DE2E-4 plan formula assumes every Point carries a
+    confidence; this implementation deliberately extends it so a
+    confidence-less Point degrades the mean toward neutral 0.5 instead of
+    erroring or being silently dropped (which would skew the mean upward).
+    Asserted in ``test_mean_grounding_null_confidence_imputed_zero_five``.
+
+    Consumed by #785's EpSafeCommit seam (resolves
+    ``tortoise.analyze.mean_grounding``) for the pre/post batch check.
+    """
+    proj = _resolve_proj(proj)
+    rows = proj.g.query(
+        "MATCH (p:Point) "
+        f"WHERE (p.is_operator IS NULL OR p.is_operator = false) AND {_live_only('p.status')} "
+        "RETURN coalesce(p.confidence, 0.5)"
+    ).result_set
+    if not rows:
+        return 0.0
+    return sum(float(r[0]) for r in rows) / len(rows)
+
+
+def grounding_snapshot(proj=None) -> dict:
+    """Pre/post batch grounding sample (Gate B tooling).
+
+    Returns per-point confidences so BOTH ceilings can be checked: the
+    ≤2% mean-absolute ceiling (``MAX_GROUNDING_DRIFT``) and the ≤5% max
+    single-point absolute delta (``MAX_POINT_DRIFT``, R12).
+
+    Returns:
+        {"count": int, "mean": float, "points": {id: confidence},
+         "sampled_at": ISO-8601 UTC}
+    """
+    proj = _resolve_proj(proj)
+    rows = proj.g.query(
+        "MATCH (p:Point) "
+        f"WHERE (p.is_operator IS NULL OR p.is_operator = false) AND {_live_only('p.status')} "
+        "RETURN p.id, coalesce(p.confidence, 0.5)"
+    ).result_set
+    points = {r[0]: float(r[1]) for r in rows}
+    mean = sum(points.values()) / len(points) if points else 0.0
+    from datetime import datetime, timezone
+    return {
+        "count": len(points),
+        "mean": mean,
+        "points": points,
+        "sampled_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def grounding_drift(pre: dict, post: dict, *,
+                    max_mean_drift: float = MAX_GROUNDING_DRIFT,
+                    max_point_drift: float = MAX_POINT_DRIFT) -> dict:
+    """Compare pre/post batch grounding snapshots (Gate B drift check).
+
+    Ceilings: ≤2% mean absolute (matches EpSafeCommit's
+    ``max_grounding_drift=0.02`` — the #785 seam) and ≤5% max single-point
+    absolute delta (R12 — a mean-absolute check alone can mask per-point
+    flips). Both the per-point deltas AND the mean term are computed over
+    the ID intersection (``common``) only: a Point created or deleted
+    between snapshots is new/removed content, not a regression, and must
+    not fail the check — a set-size change must not shift the mean past
+    the ≤2% ceiling either. ``mean_abs_delta`` is the intersection-scoped
+    delta (ignores pre/post ``mean`` fields; recomputed from ``points``).
+
+    Returns:
+        {"passed": bool, "mean_abs_delta": float,
+         "max_point_abs_delta": float, "mean_ceiling": float,
+         "point_ceiling": float, "pre_count": int, "post_count": int,
+         "overlap": int} — plus "reason": "no_common_points" when the ID
+        intersection is empty (review round 2: a total replacement must
+        FAIL CLOSED, never vacuously pass).
+    """
+    pre_points = pre.get("points", {})
+    post_points = post.get("points", {})
+    # Means are recomputed over the ID intersection only — a set-size
+    # change (created/deleted Points) must not shift the mean past the
+    # ceiling (review P2: full-set means can drift on add/remove alone).
+    common = set(pre_points) & set(post_points)
+    if not common:
+        # Zero shared Point ids (total replacement): both recomputed means
+        # are 0.0, so the ceilings would trivially pass — a vacuous pass
+        # (pre 0.90 → post 0.30 reported True before this fix). Fail closed
+        # with an explicit signal instead of a silent 0.0-delta pass.
+        return {
+            "passed": False,
+            "reason": "no_common_points",
+            "overlap": 0,
+            "mean_abs_delta": 0.0,
+            "max_point_abs_delta": 0.0,
+            "mean_ceiling": max_mean_drift,
+            "point_ceiling": max_point_drift,
+            "pre_count": pre.get("count", 0),
+            "post_count": post.get("count", 0),
+        }
+    pre_mean = sum(float(pre_points[pid]) for pid in common) / len(common)
+    post_mean = sum(float(post_points[pid]) for pid in common) / len(common)
+    mean_abs_delta = abs(post_mean - pre_mean)
+    max_point_abs_delta = max(
+        (abs(float(post_points[pid]) - float(pre_points[pid])) for pid in common),
+        default=0.0,
+    )
+    passed = (
+        mean_abs_delta <= max_mean_drift
+        and max_point_abs_delta <= max_point_drift
+    )
+    return {
+        "passed": passed,
+        "mean_abs_delta": mean_abs_delta,
+        "max_point_abs_delta": max_point_abs_delta,
+        "mean_ceiling": max_mean_drift,
+        "point_ceiling": max_point_drift,
+        "pre_count": pre.get("count", 0),
+        "post_count": post.get("count", 0),
+        "overlap": len(common),
     }

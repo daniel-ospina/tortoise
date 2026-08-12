@@ -77,7 +77,7 @@ def fresh_sdk():
 
 def tier_source(sdk, url: str, tier: str, source_date: str = FRESH) -> str:
     """Create a Point extracted from a tiered Source. Returns point id."""
-    p = sdk.create_point("statement", f"claim from {url}", extractedFrom=url)
+    p = sdk.create_point("statement", f"claim from {url}", extractedFrom=url, status="live")
     sdk._get_proj().g.query(
         "MATCH (s:Source {url:$url}) SET s.credibilityTier = $t, s.sourceDate = $sd, "
         "s.ingestedAt = $sd",
@@ -100,7 +100,7 @@ def inherited_alpha(sdk, pid: str) -> float | None:
 
 
 def make_point(sdk: TortoiseSDK, content: str, kind: str = "statement") -> dict:
-    return sdk.create_point(kind, content)
+    return sdk.create_point(kind, content, status="live")  # #780 default excludes drafts
 
 
 def make_operator(sdk: TortoiseSDK, source_id: str, target_id: str,

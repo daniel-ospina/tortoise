@@ -2588,6 +2588,7 @@ quadrature = [
     { name = "jax" },
 ]
 test = [
+    { name = "cryptography" },
     { name = "playwright" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -2611,6 +2612,7 @@ dev = [
 requires-dist = [
     { name = "boto3", marker = "extra == 'backups'", specifier = ">=1.34" },
     { name = "cryptography", marker = "extra == 'backups'", specifier = ">=42" },
+    { name = "cryptography", marker = "extra == 'test'", specifier = ">=42" },
     { name = "falkordb", specifier = ">=1.0" },
     { name = "falkordblite", specifier = ">=0.10" },
     { name = "fastapi", specifier = ">=0.100.0" },

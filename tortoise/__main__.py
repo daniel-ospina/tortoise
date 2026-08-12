@@ -256,7 +256,7 @@ def _cmd_init(args):
                         "team_id": existing.get("team_id"),
                         "api_url": existing_api_url,
                         "mcp": {
-                            "endpoint": f"{existing_api_url}/mcp",
+                            "endpoint": f"{existing_api_url}/mcp/",
                             "auth_header": f"Bearer {args.api_key}",
                             "configs": {
                                 "claude": {"file": ".mcp.json", "config": _harness_mcp_config("claude", args.api_key, existing_api_url)},
@@ -328,7 +328,13 @@ def _cmd_init(args):
                             body = e.read().decode()
                         except Exception:
                             pass
-                        fail = ("key_rejected", f"API rejected the key ({e.code}): {body.strip() or e.reason}", e.code)
+                        # #308: suspended teams get a structured 403 — surface
+                        # the appeal link instead of the generic rejection.
+                        sus = _suspended_info(body)
+                        if sus is not None:
+                            fail = ("team_suspended", f"Team suspended — {sus[0]}", e.code)
+                        else:
+                            fail = ("key_rejected", f"API rejected the key ({e.code}): {body.strip() or e.reason}", e.code)
                         if not json_mode:
                             print(f"❌ {fail[1]}", file=sys.stderr)
                             print(f"   Config NOT saved. Double-check the key or run:", file=sys.stderr)
@@ -398,7 +404,7 @@ def _cmd_init(args):
                 "team_id": team_id,
                 "api_url": base_url,
                 "mcp": {
-                    "endpoint": f"{base_url}/mcp",
+                    "endpoint": f"{base_url}/mcp/",
                     "auth_header": f"Bearer {args.api_key}",
                     "configs": {
                         "claude": {"file": ".mcp.json", "config": _harness_mcp_config("claude", args.api_key, base_url)},
@@ -497,7 +503,7 @@ def _cmd_init(args):
             from tortoise.projection import FalkorProjection
             _proj = FalkorProjection(db_path)
             _proj.g.query("RETURN 1")
-            print(f"  ✅ Embedded mode initialized at {db_path}")
+            print(f"  ✅ Embedded mode initialized at {db_path} (single-writer, eval only — docker compose for durable multi-writer)")
             graph_ready = True
         except ImportError:
             # Reachable when falkordblite is actually missing: tortoise/__init__
@@ -744,6 +750,23 @@ def _cmd_fail(json_mode: bool, error: str, message: str, **extra: object) -> int
     return 1
 
 
+def _suspended_info(body: str) -> tuple[str, str | None] | None:
+    """#308 (R5): parse a 403 body for the SUSPENDED detail code.
+
+    Returns (message, appeal_url) when the team is suspended, else None —
+    unparseable/other bodies keep each caller's pre-#308 behavior."""
+    try:
+        import json as _j
+        detail = (_j.loads(body) or {}).get("detail")
+    except Exception:
+        return None
+    if not isinstance(detail, dict) or detail.get("code") != "SUSPENDED":
+        return None
+    msg = detail.get("message") or "This team has been suspended due to unusual activity."
+    url = detail.get("appeal_url")
+    return (f"{msg} Appeal: {url}" if url else msg, url)
+
+
 def _harness_mcp_config(harness: str, api_key: str, api_url: str) -> dict:
     """MCP config for one harness — mirrors website/welcome.html (#497).
 
@@ -752,7 +775,7 @@ def _harness_mcp_config(harness: str, api_key: str, api_url: str) -> dict:
     - cursor: same but WITHOUT `type` (Cursor's client doesn't use it)
     - codex: shell command — Codex manages its own config (no file to write)
     """
-    endpoint = api_url.rstrip("/") + "/mcp"
+    endpoint = api_url.rstrip("/") + "/mcp/"
     if harness == "codex":
         return {"command": f"codex mcp add tortoise --url {endpoint} --bearer-token-env-var TORTOISE_API_KEY"}
     server: dict = {
@@ -761,6 +784,27 @@ def _harness_mcp_config(harness: str, api_key: str, api_url: str) -> dict:
     }
     if harness in ("claude", "pi"):
         server = {"type": "streamable-http", **server}
+    return {"mcpServers": {"tortoise": server}}
+
+
+def _harness_stdio_config(harness: str) -> dict:
+    """Stdio MCP config for one harness (self-hosted) — mirrors website/self-hosted.html (#529).
+
+    Shapes:
+    - claude / pi: {"command", "args", "env"} — neither client requires `type`
+    - cursor: same but WITH `type: "stdio"` — Cursor docs mark `type` required
+      for stdio servers (remote url-based servers must NOT have it)
+    - codex: shell command — Codex manages its own config (no file to write)
+    """
+    if harness == "codex":
+        return {"command": "codex mcp add tortoise -- python3 -m tortoise.mcp_server"}
+    server: dict = {
+        "command": "python3",
+        "args": ["-m", "tortoise.mcp_server"],
+        "env": {"TORTOISE_DB_URI": "docker://localhost:6379"},
+    }
+    if harness == "cursor":
+        server = {"type": "stdio", **server}
     return {"mcpServers": {"tortoise": server}}
 
 
@@ -774,7 +818,7 @@ def _print_mcp_configs(api_key: str, api_url: str, harness: str | None) -> None:
     With --harness, print only that harness; without, print the selector UI.
     """
     import json as _json
-    endpoint = api_url.rstrip("/") + "/mcp"
+    endpoint = api_url.rstrip("/") + "/mcp/"
     if harness:
         print(f"── MCP Configuration (Streamable HTTP) — {_harness_label(harness)} ──")
         if harness == "codex":
@@ -871,6 +915,11 @@ def _cmd_team_keys_list(args) -> int:
     except HTTPError as e:
         body = e.read().decode() if e.fp else ""
         if e.code in (401, 403):
+            sus = _suspended_info(body)  # #308
+            if sus is not None:
+                return _cmd_fail(json_mode, "team_suspended",
+                                 f"Team suspended — {sus[0]}", http_code=e.code,
+                                 appeal_url=sus[1])
             return _cmd_fail(json_mode, "key_rejected",
                              "API key rejected — re-run tortoise init --api-key", http_code=e.code)
         return _cmd_fail(json_mode, "api_error", f"API error ({e.code}): {body}", http_code=e.code)
@@ -932,6 +981,11 @@ def _cmd_team_keys_create(args) -> int:
             return _cmd_fail(json_mode, "rate_limited",
                              "Too many keys created recently — try again in 60s.", http_code=429)
         if e.code in (401, 403):
+            sus = _suspended_info(body)  # #308
+            if sus is not None:
+                return _cmd_fail(json_mode, "team_suspended",
+                                 f"Team suspended — {sus[0]}", http_code=e.code,
+                                 appeal_url=sus[1])
             return _cmd_fail(json_mode, "key_rejected",
                              "API key rejected — re-run tortoise init --api-key", http_code=e.code)
         return _cmd_fail(json_mode, "api_error", f"API error ({e.code}): {body}", http_code=e.code)
@@ -997,6 +1051,13 @@ def _cmd_team_keys_revoke(args) -> int:
         if e.code == 404:
             return _cmd_fail(json_mode, "not_found", "API key not found", http_code=404)
         if e.code == 403:
+            # #308: a suspended team's revoke also 403s — the SUSPENDED
+            # detail (with appeal link) must not masquerade as cross-team.
+            sus = _suspended_info(body)
+            if sus is not None:
+                return _cmd_fail(json_mode, "team_suspended",
+                                 f"Team suspended — {sus[0]}", http_code=403,
+                                 appeal_url=sus[1])
             return _cmd_fail(json_mode, "cross_team",
                              "Cannot revoke — this key belongs to a different team", http_code=403)
         if e.code == 401:
@@ -1958,34 +2019,41 @@ def _cmd_setup(args) -> int:
 
 
 def _print_harness_instructions(harness: str) -> None:
-    """Print harness-specific setup instructions."""
+    """Print harness-specific setup instructions (self-hosted stdio, #529).
+
+    Uses the canonical _harness_stdio_config() shapes — cursor includes
+    `type: "stdio"` (Cursor docs require it), codex uses `codex mcp add`.
+    """
+    import json as _json
+
     if harness == "pi" or harness == "multiple":
         print()
         print("Pi:")
         print("  ✅ tortoise-context extension auto-injects context when you mention issues.")
         print("  Run /reload in Pi to activate.")
         print("  Or call tortoise_help() anytime.")
+        print("  Add tortoise MCP to your .mcp.json:")
+        print("    " + _json.dumps(_harness_stdio_config("pi"), indent=4).replace("\n", "\n    "))
     if harness == "claude" or harness == "multiple":
         print()
         print("Claude Code:")
         print("  Add tortoise MCP to your .mcp.json:")
-        print('    {"tortoise": {"command": "python3", "args": ["-m", "tortoise.mcp_server"]}}')
+        print("    " + _json.dumps(_harness_stdio_config("claude"), indent=4).replace("\n", "\n    "))
         print("  Claude Code will auto-discover MCP tools on restart.")
         print("  Optional: add .claude/hooks/session-start.sh for auto-injection.")
         print("    cp tortoise/claude-hooks/session-start.sh .claude/hooks/session-start.sh")
     if harness == "codex" or harness == "multiple":
         print()
         print("Codex:")
-        print("  Add tortoise MCP to ~/.codex/config.toml:")
-        print("    [mcp_servers.tortoise]")
-        print('    command = "python3"')
-        print('    args = ["-m", "tortoise.mcp_server"]')
+        print("  Add tortoise MCP (Codex manages its own config):")
+        print("    " + _harness_stdio_config("codex")["command"])
         print("  AGENTS.md is auto-loaded by Codex — Tortoise instructions are already there.")
         print("  autoRecall will pick up Tortoise Points automatically.")
     if harness == "cursor" or harness == "multiple":
         print()
         print("Cursor:")
-        print("  Add tortoise MCP to your .mcp.json (same format as Pi/Claude Code).")
+        print("  Add tortoise MCP to your .mcp.json (type: stdio is required):")
+        print("    " + _json.dumps(_harness_stdio_config("cursor"), indent=4).replace("\n", "\n    "))
         print("  Create .cursor/rules/tortoise.mdc with agent instructions:")
         print("    When working on issues, call mcp__tortoise__tortoise_suggest_entry_points()")
         print("    to find related context. File decisions with tortoise_create_point().")
@@ -2930,6 +2998,11 @@ def _cmd_serve_http(args) -> int:
         # real path, not a shell-unescaped '~' (fixes the exists-check miss).
         db_path = os.path.expanduser(os.environ.get("TORTOISE_DB_PATH") or resolve_db_path())
         print(f"serve --http: DB target = {db_path}")
+        # #942: embedded FalkorDBLite is SINGLE-WRITER / EVAL-ONLY. Loud,
+        # auth-mode-independent, stderr-only (no stdout asserts break; the
+        # literal 'reachable on your network' is asserted absent elsewhere).
+        from tortoise._embedded import EMBEDDED_EVAL_BANNER
+        print(EMBEDDED_EVAL_BANNER, file=sys.stderr)
 
     # ── HTTP mode: note the fresh-namespace semantics for existing stdio data ──
     # EVERY HTTP auth mode serves an isolated namespace, never the stdio
@@ -3058,6 +3131,11 @@ def _cmd_key_create(args) -> int:
     else:
         from tortoise.config import resolve_db_path
         print(f"key create: registry at {os.environ.get('TORTOISE_DB_PATH') or resolve_db_path()}")
+        # #942: team keys on embedded = single-writer eval only. The key-mint
+        # moment is the enforcement point — interactive/foreground, unlike a
+        # daemonized serve's stderr.
+        from tortoise._embedded import EMBEDDED_EVAL_BANNER
+        print(EMBEDDED_EVAL_BANNER, file=sys.stderr)
 
     sdk = TortoiseSDK(namespace="registry")
     reg = sdk._get_registry()

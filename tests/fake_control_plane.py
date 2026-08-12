@@ -42,8 +42,42 @@ class FakeControlPlane:
         api_keys row with the deterministic id 'key_<team>_<hash12>' and
         ON CONFLICT (lookup_hash) DO NOTHING. All writes happen on the
         shared row store, so auth resolution and listing see the rows.
+
+        #308: also emulates migration 0015 — the api_keys INSERT trigger
+        (key_create abuse_events row unless created_via='bootstrap') and the
+        abuse_suspend/abuse_unsuspend RPCs (teams.suspended_at/flagged_at).
         """
         self.rpc_calls.append((fn, dict(body or {})))
+        if fn == "abuse_suspend":
+            # Mirrors the SQL: set suspended_at only when NULL; flagged_at is
+            # NOT touched (the engine's flag-episode state is event-derived).
+            tid = (body or {}).get("p_team_id")
+            for t in self.tables.get("teams", []):
+                if t.get("id") == tid and t.get("suspended_at") is None:
+                    from datetime import datetime, timezone
+                    t["suspended_at"] = datetime.now(timezone.utc).isoformat()
+            from datetime import datetime, timezone
+            self.tables.setdefault("abuse_events", []).append(
+                {"team_id": tid, "event_type": "suspend", "weight": 1,
+                 "created_at": datetime.now(timezone.utc).isoformat()})
+            return None
+        if fn == "abuse_unsuspend":
+            tid = (body or {}).get("p_team_id")
+            for t in self.tables.get("teams", []):
+                if t.get("id") == tid:
+                    t["suspended_at"] = None
+                    t["flagged_at"] = None
+            from datetime import datetime, timezone
+            now_iso = datetime.now(timezone.utc).isoformat()
+            events = self.tables.setdefault("abuse_events", [])
+            events.append({"team_id": tid, "event_type": "unsuspend",
+                           "weight": 1, "created_at": now_iso})
+            # end every flag episode (mirrors the SQL)
+            for rule in ("point_create", "key_create"):
+                events.append({"team_id": tid, "event_type": "flag_clear",
+                               "rule": rule, "weight": 1,
+                               "created_at": now_iso})
+            return None
         if fn == "metering_increment":
             # Emulate migration 0014's SQL function: atomic upsert + increment.
             p = body or {}
@@ -121,6 +155,8 @@ class FakeControlPlane:
                         "status": "active"})
 
         # api_keys: deterministic id, ON CONFLICT (lookup_hash) DO NOTHING
+        # (a re-provision inserts nothing → the 0015 trigger fires nothing —
+        # no duplicate key_create event; cycle-2 test note).
         key_rows = self.tables.setdefault("api_keys", [])
         if not any(k.get("lookup_hash") == lookup for k in key_rows):
             key_rows.append({
@@ -134,7 +170,21 @@ class FakeControlPlane:
                 "expires_at": None,
                 "revoked_at": None,
             })
+            self._trigger_key_create(team_id, f"key_{team_id}_{lookup[:12]}",
+                                     "provisioned")
         return None
+
+    def _trigger_key_create(self, team_id: str, key_id: str,
+                            created_via: str | None) -> None:
+        """Migration 0015 trigger emulation: AFTER INSERT on api_keys →
+        key_create abuse event, EXCLUDING created_via='bootstrap'."""
+        if created_via == "bootstrap":
+            return
+        from datetime import datetime, timezone
+        self.tables.setdefault("abuse_events", []).append(
+            {"team_id": team_id, "event_type": "key_create", "weight": 1,
+             "key_id": key_id,
+             "created_at": datetime.now(timezone.utc).isoformat()})
 
     def query(self, table: str, *, select: list[str] | None = None,
               filters: list[tuple[str, str, object]] | None = None,
@@ -149,7 +199,16 @@ class FakeControlPlane:
             return []
         if method == "POST":
             row = dict(json_body or {})
+            if table == "abuse_events" and row.get("created_at") is None:
+                # mirror the DB column default now() — window gt-filters need it
+                from datetime import datetime, timezone
+                row["created_at"] = datetime.now(timezone.utc).isoformat()
             self.tables.setdefault(table, []).append(row)
+            if table == "api_keys":
+                # migration 0015 trigger emulation (#308)
+                self._trigger_key_create(row.get("team_id", ""),
+                                         row.get("id", ""),
+                                         row.get("created_via"))
             return [row]
         if method == "DELETE":
             # PostgREST row-delete semantics (used by the #302 purge).

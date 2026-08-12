@@ -39,6 +39,7 @@ import hmac
 from tortoise.sdk import TortoiseSDK, _content_hash
 from tortoise.mcp_server import create_http_app
 from tortoise.hosted_backup import (
+    MemoryStorage,
     RestoreVerificationError,
     R2Storage,
     create_backup,
@@ -395,13 +396,30 @@ class AnalyticsMiddleware(BaseHTTPMiddleware):
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
-    """In-memory token bucket rate limiter. 100 Points/min per API key."""
+    """In-memory token bucket rate limiter. 100 Points/min per API key.
+
+    R-13 (epic #909, slice 5): the commit endpoint (POST /v1/sessions/commit)
+    is EXEMPT from the general 100/min key bucket via a dedicated 300/min/key
+    bucket — catch-up commits after offline capture and hold re-submissions
+    can exceed the general rate (plan §6.1, R-13: "dedicated higher bucket
+    300 req/min/key, decided + tested in slice 5"). The commit path gets its
+    OWN bucket key (``<key>@/v1/sessions/commit``) so commit requests neither
+    consume nor are consumed by the general per-key budget.
+    """
 
     SKIP = {"/health", "/health/ready", "/docs", "/openapi.json", "/v1/register", "/v1/signup/email"}
+    # R-13: path → dedicated per-key limit. The commit endpoint's bucket is
+    # keyed on ``<key>@<path>`` (see _bucket_key) — fully separate from the
+    # general 100/min bucket.
+    PATH_LIMITS = {"/v1/sessions/commit": 300}
 
-    def __init__(self, app, max_per_minute=100):
+    def __init__(self, app, max_per_minute=100, path_limits: dict | None = None):
         super().__init__(app)
         self.max_per_minute = max_per_minute
+        self.path_limits = dict(self.PATH_LIMITS)
+        if path_limits:
+            # test seam: override the per-path limits (R-13 bucket testing)
+            self.path_limits.update(path_limits)
         self._buckets: dict[str, list[float]] = defaultdict(list)
         self._last_cleanup = time.time()
         self._lock = asyncio.Lock()
@@ -410,6 +428,26 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         # tripping 429 in full-suite runs. Production keeps the limit.
         self._disabled = os.environ.get("RATE_LIMIT_DISABLED") == "1"
 
+    def _limit_for(self, path: str) -> int:
+        """Per-path rate limit (dedicated 300/min bucket for the commit
+        endpoint, R-13; everything else keeps the general 100/min)."""
+        return self.path_limits.get(path, self.max_per_minute)
+
+    def _bucket_key(self, path: str, auth: str, client_host: str | None) -> str | None:
+        """Deterministic bucket-key selection (mirrored by the rate-limit
+        tests). Valid-format tt_ keys bucket per key; the commit endpoint
+        gets a DEDICATED per-key bucket (``<key>@<path>``) so it is exempt
+        from the general 100/min key budget (R-13). Invalid/missing keys
+        fall to a per-IP bucket; no client host → no bucket (blocked)."""
+        if auth.startswith("Bearer ") and auth[7:].startswith("tt_"):
+            key = auth[7:]
+            if path in self.path_limits:
+                return f"{key}@{path}"
+            return key
+        if client_host:
+            return f"ip:{client_host}"
+        return None
+
     async def dispatch(self, request: Request, call_next):
         if self._disabled:
             return await call_next(request)
@@ -417,15 +455,12 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         auth = request.headers.get("Authorization", "")
-        if not auth.startswith("Bearer ") or not auth[7:].startswith("tt_"):
-            # IP-based fallback for unauthenticated requests
-            if request.client and request.client.host:
-                key_id = f"ip:{request.client.host}"
-            else:
-                return await call_next(request)
-        else:
-            # Use API key as bucket key (per-key limits, avoids hashing in hot path)
-            key_id = auth[7:]
+        path = request.url.path
+        key_id = self._bucket_key(path, auth,
+                                  request.client.host if request.client else None)
+        if key_id is None:
+            return await call_next(request)
+        limit = self._limit_for(path)
         now = time.time()
 
         async with self._lock:
@@ -443,10 +478,19 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             bucket = self._buckets[key_id]
             bucket[:] = [t for t in bucket if now - t < 60]
 
-            if len(bucket) >= self.max_per_minute:
-                raise HTTPException(
+            if len(bucket) >= limit:
+                # Return the 429 response directly: an HTTPException raised in
+                # a BaseHTTPMiddleware.dispatch is NOT converted by
+                # ExceptionMiddleware (it sits inside this middleware) — in
+                # this Starlette generation it bubbles to
+                # ServerErrorMiddleware and mis-renders as 500. Returning a
+                # JSONResponse is the canonical BaseHTTPMiddleware pattern and
+                # keeps the §6.1 429 contract ({detail}, Retry-After).
+                return JSONResponse(
                     status_code=429,
-                    detail="Rate limit exceeded. 100 points/minute per API key.",
+                    content={"detail": (
+                        f"Rate limit exceeded. {limit} points/minute per "
+                        "API key.")},
                     headers={"Retry-After": "60"},
                 )
 
@@ -914,29 +958,42 @@ async def get_current_team(request: Request) -> dict:
         team = sdk._get_registry().query(
             # #329: quota fields read with tier in one round-trip. max_teams is
             # NOT read — multi-team is a user capability, not a tier field (D1).
+            # #308: suspended_at/flagged_at/email ride the same round-trip.
             "MATCH (t:Team {id: $id}) RETURN t.tier, t.max_users, t.max_graphs, "
-            "t.max_points, t.max_api_keys, t.max_sessions",
+            "t.max_points, t.max_api_keys, t.max_sessions, t.suspended_at, "
+            "t.flagged_at, t.email",
             params={"id": team_id},
         )
         row = team.result_set[0] if team.result_set else None
         if row:
-            tier, mu, mg, mp, mak, ms = row
+            tier, mu, mg, mp, mak, ms, t_suspended, t_flagged, t_email = row
         else:
             tier, mu, mg, mp, mak, ms = ("free", None, None, None, None, None)
+            t_suspended = t_flagged = t_email = None
+        # #308 (R5): durable suspension check (registry mode — the
+        # MemoryAbuseStore registry_write callback wired in
+        # supabase_control.get_abuse_store writes these props).
+        if t_suspended is not None:
+            raise HTTPException(status_code=403, detail=_suspended_detail())
         from tortoise.pricing import tier_limits
         request.state.team_id = team_id
         request.state.tier = tier or "free"
         lim = tier_limits(tier or "free")
         # max_teams removed: multi-team is a USER capability, not a tier field
         # (per-team billing; tier limits come from pricing.json)
-        return {"team_id": team_id, "key_id": key_id, "tier": tier or "free",
+        team_dict = {"team_id": team_id, "key_id": key_id, "tier": tier or "free",
                 # max_users: preserve None from pricing (Team tier = unlimited)
                 "max_users": mu if mu is not None else lim["max_users_per_team"],
                 "max_graphs": mg if mg is not None else lim["max_graphs_per_team"],
                 # points counter counts graph nodes → max_graph_nodes (#310 GAP-B)
                 "max_points": int(mp) if mp is not None else lim["max_graph_nodes"],
                 "max_api_keys": int(mak) if mak is not None else lim["max_api_keys"],
-                "max_sessions": int(ms) if ms is not None else DEFAULT_MAX_SESSIONS}
+                "max_sessions": int(ms) if ms is not None else DEFAULT_MAX_SESSIONS,
+                # #308 additive: enforcement state + owner email
+                "suspended_at": t_suspended, "flagged_at": t_flagged,
+                "email": t_email}
+        await _abuse_post_auth(request, team_dict)
+        return team_dict
     except HTTPException:
         raise
     except Exception:
@@ -961,6 +1018,16 @@ async def _get_current_team_supabase(request: Request, token: str) -> dict:
             await _audit_auth_failure(request, "invalid_key")
             raise HTTPException(status_code=401, detail="Invalid API key")
         team_id = team["team_id"]
+        # #308 (R5): durable suspension check — the ONLY rejection authority
+        # (the in-process signal set merely forces fresh resolution, scoping
+        # delta 14; REST resolves fresh every request anyway).
+        from tortoise.abuse import clear_suspended, is_suspended_signal
+        if team.get("suspended_at") is not None:
+            raise HTTPException(status_code=403, detail=_suspended_detail())
+        if is_suspended_signal(team_id):
+            # Un-suspended: the fresh resolution returned NULL → self-heal
+            # the signal entry (AC8 next-request restore).
+            clear_suspended(team_id)
         # #685: last_used_at write-through on api_keys.id — best-effort
         # (telemetry must never gate auth). Membership-only resolutions have
         # no api_keys row (key_id=None) → no write.
@@ -977,6 +1044,9 @@ async def _get_current_team_supabase(request: Request, token: str) -> dict:
             )
         request.state.team_id = team_id
         request.state.tier = team["tier"]
+        # #308: R3 read velocity + R4 geo (best-effort, off the critical
+        # path via to_thread).
+        await _abuse_post_auth(request, team)
         return team
     except HTTPException:
         raise
@@ -1025,18 +1095,133 @@ def _check_team_limit(team: dict, resource: str) -> None:
         raise HTTPException(status_code=500, detail=f"Quota check failed: {e}")
 
 
-def _record_write_op(team: dict) -> None:
+def _record_write_op(team: dict, nodes_written: int = 0) -> None:
     """Best-effort write-op metering for overage billing (#681).
 
     Call AFTER a successful write. Non-fatal — metering failures are logged
     and swallowed; they never block the caller.
+
+    nodes_written: net-new non-episodic nodes written by this call (the
+    value-first commit cost driver, epic #909 §4.4/W-4/PL4 — the commit
+    endpoint passes the reconciled net-new delta; hold commits bill 0 and
+    skip this entirely).
     """
     try:
         from tortoise.metering import record_write_ops
-        record_write_ops(team.get("team_id", ""), tier=team.get("tier"))
+        record_write_ops(team.get("team_id", ""), tier=team.get("tier"),
+                         nodes_written=nodes_written)
     except Exception:
         pass  # best-effort — never block the write path
 
+
+def _suspended_detail() -> dict:
+    """#308 (R5): 403 detail for suspended teams — code + appeal link."""
+    from tortoise.abuse import appeal_url, suspended_message
+    return {"code": "SUSPENDED", "message": suspended_message(),
+            "appeal_url": appeal_url()}
+
+
+def _abuse_post_auth_sync(method: str, headers: dict, team: dict) -> None:
+    """#308 post-auth hooks (run via asyncio.to_thread): R3 read velocity
+    (GET only — writes never count as reads, scoping delta 11) + R4 geo
+    (every request). Best-effort; TORTOISE_ABUSE_DISABLED kills both."""
+    from tortoise import abuse as _abuse
+    if _abuse.abuse_disabled():
+        return
+    team_id = team.get("team_id")
+    if not team_id:
+        return
+    if method == "GET":
+        _abuse.record_read(team.get("key_id"), team_id)
+    country = _abuse.resolve_country(headers)
+    if country:
+        _abuse.check_new_country(team_id, country, _abuse.get_engine().store)
+
+
+async def _abuse_post_auth(request: Request, team: dict) -> None:
+    """Async wrapper — never raises into the auth path."""
+    try:
+        headers = dict(request.headers)
+        await asyncio.to_thread(_abuse_post_auth_sync, request.method, headers, team)
+    except Exception:
+        pass  # best-effort — abuse telemetry never breaks auth
+
+
+def _abuse_record_points_sync(team: dict, n: int) -> None:
+    """#308 R1 recording + evaluation (delta 8 weights; delta 13 staging).
+    The engine piggybacks R2 evaluation (signup-path key creates evaluate on
+    the team's next hooked request)."""
+    from tortoise import abuse as _abuse
+    _abuse.get_engine().record_point_create(team.get("team_id", ""), n)
+
+
+async def _abuse_record_points(request: Request, team: dict, n: int) -> None:
+    try:
+        await asyncio.to_thread(_abuse_record_points_sync, team, n)
+    except Exception:
+        pass  # best-effort — never block the write path
+
+
+def _abuse_evaluate_keys_sync(team_id: str) -> None:
+    """#308 R2 evaluation after a key mint (the trigger recorded the event)."""
+    from tortoise import abuse as _abuse
+    _abuse.get_engine().evaluate_key_creates(team_id)
+
+
+async def _abuse_evaluate_keys(team_id: str) -> None:
+    try:
+        await asyncio.to_thread(_abuse_evaluate_keys_sync, team_id)
+    except Exception:
+        pass
+
+
+# ── Turnstile CAPTCHA (#308 R6) ─────────────────────────────────
+_TURNSTILE_VERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
+_turnstile_open_logged = False
+
+
+async def _verify_turnstile(token: str | None, ip: str | None) -> bool:
+    """Server-side Turnstile siteverify (waitlist pattern). Fail-open ONLY
+    when TURNSTILE_SECRET_KEY is unset (the widget is hidden too); set secret
+    + missing/invalid token or unreachable siteverify → fail-closed."""
+    global _turnstile_open_logged
+    secret = os.environ.get("TURNSTILE_SECRET_KEY", "").strip()
+    if not secret:
+        if not _turnstile_open_logged:
+            _turnstile_open_logged = True
+            _logger.warning(
+                "turnstile: TURNSTILE_SECRET_KEY unset — CAPTCHA verification "
+                "disabled (fail-open)")
+        return True
+    if not token:
+        return False
+    import httpx as _httpx
+
+    def _post() -> dict:
+        resp = _httpx.post(
+            _TURNSTILE_VERIFY_URL,
+            data={"secret": secret, "response": token,
+                  **({"remoteip": ip} if ip else {})},
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    try:
+        body = await asyncio.to_thread(_post)
+    except Exception:
+        return False  # fail-closed when the check cannot run
+    return bool(body.get("success"))
+
+
+async def _check_turnstile(request: Request, body: dict) -> None:
+    """400 when the secret is configured and the challenge fails."""
+    token = body.get("cf-turnstile-response") or body.get("turnstile_token")
+    ip = request.client.host if request.client else None
+    if not await _verify_turnstile(token, ip):
+        raise HTTPException(
+            status_code=400,
+            detail="Please complete the security check (CAPTCHA) and try again.")
 
 
 # ── Pydantic Models ───────────────────────────────────────────────
@@ -1053,7 +1238,9 @@ class CreatePointRequest(BaseModel):
     @classmethod
     def valid_kind(cls, v: str) -> str:
         from tortoise.domain_loader import known_kinds
-        allowed = known_kinds()
+        # #951: consume the same compiled vocabulary as the SDK — the adapter's
+        # pointKind bucket (pack_registry canonical). Block posture unchanged.
+        allowed = known_kinds("pointKind")
         if v not in allowed:
             raise ValueError(f"kind must be one of {sorted(allowed)}")
         return v
@@ -1082,6 +1269,10 @@ class TeamInfoResponse(BaseModel):
     max_users: int
     max_graphs: int | None
     max_teams: int | None
+    # #308 (R7): "active" | "flagged" over HTTP — a suspended team never
+    # reaches this handler (403 SUSPENDED fires in get_current_team first);
+    # suspension renders from the 403 detail (scoping delta 12).
+    status: str = "active"
     point_count: int = 0
     write_ops_used: int = 0
     write_ops_limit: int = 0
@@ -1313,7 +1504,8 @@ async def create_point(body: CreatePointRequest, request: Request, team: dict = 
     )
     # Metering (#681): best-effort write-op count for overage billing.
     _record_write_op(team)
-
+    # #308 (R1, delta 8): one Point created → one point_create event.
+    await _abuse_record_points(request, team, 1)
 
     return {
         "id": result["id"],
@@ -1559,6 +1751,9 @@ async def team_info(team: dict = Depends(get_current_team)):
         tier=team["tier"],
         max_users=team["max_users"],
         max_graphs=team["max_graphs"],
+        # #308 (R7): flagged status rides /v1/team (suspended never reaches
+        # here — the auth dependency 403s first; scoping delta 12).
+        status="flagged" if team.get("flagged_at") is not None else "active",
         # max_teams removed (D1): multi-team is a user capability, not a tier field.
         # TeamInfoResponse.max_teams is optional — omit rather than KeyError (pre-existing
         # 500 on every /v1/team call, exposed by the zero-email signup verification).
@@ -1570,6 +1765,24 @@ async def team_info(team: dict = Depends(get_current_team)):
         overage_eligible=usage["overage_eligible"],
         overage_cost_usd=usage["overage_cost_usd"],
     )
+
+
+@app.get("/v1/team/alerts")
+async def team_alerts(team_id: str, user: dict = Depends(get_current_user)):
+    """#308 (R7) — suspicious-activity alert history for the dashboard.
+
+    Session-authed (NOT API-key authed) by design: it must stay reachable
+    while the team is suspended so the owner can see what happened and find
+    the appeal path (scoping delta 12)."""
+    membership = await _membership_team(user["user_id"], team_id)
+    if membership is None:
+        raise HTTPException(status_code=403, detail="No membership in team")
+    try:
+        from tortoise.supabase_control import get_abuse_store
+        alerts = get_abuse_store().recent_alerts(team_id, limit=20)
+    except Exception:
+        alerts = []  # best-effort — an alert-history failure is not a 500
+    return {"team_id": team_id, "alerts": alerts}
 
 
 # ── Onboarding: Self-Service Registration (#498) ──────────────────
@@ -1592,6 +1805,8 @@ async def register_user(request: Request, response: Response):
     await _check_register_rate_limit(request)
 
     body = await request.json()
+    # #308 (R6): Turnstile siteverify — fail-open only when secret unset.
+    await _check_turnstile(request, body if isinstance(body, dict) else {})
     try:
         reg = RegisterRequest.model_validate(body)
     except Exception as e:
@@ -1770,6 +1985,8 @@ async def register_user(request: Request, response: Response):
 
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
 
+    # #308 (R2): the trigger recorded the provision key create — evaluate.
+    await _abuse_evaluate_keys(team_id)
     return {"api_key": api_key, "team_id": team_id, "graph_name": graph_name}
 
 
@@ -1780,7 +1997,7 @@ def _signup_email_confirm() -> bool:
 
     TORTOISE_SIGNUP_EMAIL_CONFIRM defaults to true — the account is created
     with email_confirm=true so NO confirmation email is sent (bypasses
-    Supabase's SMTP per-IP bucket). false|0|no|off (case-insensitive) opt
+    Supabase's SMTP project-wide email-send bucket). false|0|no|off (case-insensitive) opt
     back into the confirmation-email funnel.
     """
     val = os.environ.get("TORTOISE_SIGNUP_EMAIL_CONFIRM", "true").strip().lower()
@@ -1792,7 +2009,7 @@ def _supabase_admin_create_user(email: str, password: str) -> tuple[int, dict]:
 
     #801: admin create_user with email_confirm=true creates the account
     WITHOUT sending a confirmation email — bypassing Supabase's built-in
-    SMTP per-IP send bucket (over_email_send_rate_limit 429s, the P1
+    SMTP project-wide email-send bucket (over_email_send_rate_limit 429s, the P1
     production signup blocker). Atomic: GoTrue either creates the user or
     returns an error — no partial state to roll back.
 
@@ -1826,10 +2043,11 @@ async def email_signup(request: Request):
 
     The web form previously created auth users client-side via anon-key
     auth.signUp, which makes GoTrue send a confirmation email through
-    Supabase's built-in SMTP. That path is IP-bucketed (30 sends/hr/IP,
-    configurable in the dashboard): once the bucket is exhausted EVERY
-    signup from that IP 429s (over_email_send_rate_limit) and no account
-    is created — the P1 production signup blocker.
+    Supabase's built-in SMTP. That path is project-wide-bucketed (30 sends/hr
+    shared by ALL users of the project, configurable in the dashboard): once
+    the bucket is exhausted EVERY signup from ANY network 429s
+    (over_email_send_rate_limit) and no account is created — the P1
+    production signup blocker.
 
     This endpoint creates the user server-side via the GoTrue ADMIN API
     (service-role key) with email_confirm=true (default): the account is
@@ -1845,10 +2063,34 @@ async def email_signup(request: Request):
     - 429 pass-through carries a clear message pointing at the zero-email
       `tortoise signup` path (issue #663).
     """
-    await _check_register_rate_limit(request)
+    try:
+        await _check_register_rate_limit(request)
+    except HTTPException as exc:
+        # #863: the shared limiter's 429 carries a bare string detail; enrich
+        # it with the mechanism code so the client can tier its lockout/copy.
+        # /v1/register's own consumption of the limiter is untouched.
+        if exc.status_code == 429:
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    "message": "Too many registration attempts. Please try again later.",
+                    "error_code": "over_request_rate_limit_ip",
+                },
+                headers={"Retry-After": "3600"},
+            ) from exc
+        raise
 
     try:
         body = await request.json()
+    except Exception:
+        raise HTTPException(
+            status_code=422,
+            detail="Invalid email or password. Check the email format and that the password is at least 6 characters.",
+        )
+    # #308 (R6): Turnstile siteverify — fail-open only when secret unset.
+    # OUTSIDE the 422 try-block: its 400 must not be remapped.
+    await _check_turnstile(request, body if isinstance(body, dict) else {})
+    try:
         req = EmailSignupRequest.model_validate(body)
     except Exception:
         # #801 review P1: never echo str(ValidationError) — Pydantic v2 embeds
@@ -1888,14 +2130,37 @@ async def email_signup(request: Request):
             "message": "user_created",
         }
 
-    # GoTrue error mapping (error body: {code, error_code, msg}).
-    code = str(gb.get("code") or gb.get("error_code") or "").lower()
-    msg = str(gb.get("msg") or gb.get("message") or "").lower()
+    # GoTrue error mapping (error body: {code, error_code, msg}). Real GoTrue
+    # bodies carry the numeric HTTP status in `code` and the stable code in
+    # `error_code` ({code: 429, error_code: "over_email_send_rate_limit", ...})
+    # — so `error_code` MUST be read first, and a pure-numeric `code` skipped
+    # (#863: a known-code passthrough keyed on `code` would be dead code).
+    # `error_description` is NOT a code source (review P2): it is human
+    # readable prose that would misclassify via the heuristic — it belongs in
+    # the message scan, not the code slot.
+    raw_code = gb.get("error_code") or ""
+    code = str(raw_code).lower() if raw_code is not None else ""
+    if not code:
+        c = gb.get("code")
+        if c is not None and not str(c).strip().isdigit():
+            code = str(c).lower()
+    msg = str(gb.get("msg") or gb.get("message") or gb.get("error_description") or "").lower()
     if status == 429 or "rate_limit" in code or "rate limit" in msg:
+        # #863: carry the mechanism so the client can pick the right lockout
+        # tier + copy — email bucket (project-wide) vs per-IP request limits.
+        if code in ("over_email_send_rate_limit", "over_request_rate_limit", "over_request_rate_limit_ip"):
+            err_code = code
+        elif "email" in msg or "email" in code:
+            err_code = "over_email_send_rate_limit"
+        else:
+            err_code = "over_request_rate_limit"
         raise HTTPException(
             status_code=429,
-            detail=("Signup is rate-limited right now. Try again in about an hour — "
-                    "or get an instant zero-email key with: tortoise signup"),
+            detail={
+                "message": ("Signup is rate-limited right now. Try again in about an hour — "
+                            "or get an instant zero-email key with: tortoise signup"),
+                "error_code": err_code,
+            },
             headers={"Retry-After": "3600"},
         )
     if status == 422 or status == 400:
@@ -2195,6 +2460,10 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
         request, team["team_id"], "api_key_create",
         resource_type="api_key", resource_id=kid,
     )
+    # #308 (R2): evaluate key-create velocity after a successful mint —
+    # the trigger recorded the event; a key-rotation attacker who only mints
+    # (no point creates) must still be evaluated (code-review P2).
+    await _abuse_evaluate_keys(team["team_id"])
 
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
 
@@ -2422,9 +2691,10 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
             detail=f"Session turn cap exceeded: {len(body.conversation)} > {MAX_SESSION_TURNS}.",
         )
 
-    # Extraction-aware estimate (pre-write, fail-closed count):
-    #   est = 1 Session + 1 Event + Σ_turns (1 turn Point
-    #         + min(decisions, cap) + min(claims, cap))
+    # Extraction-aware estimate (pre-write, fail-closed count) — review P2,
+    # PR #976: the points quota counts NON-episodic Points only, and turn
+    # Points/Session/Event are episodic — the estimate is the EXTRACTED set:
+    #   est = Σ_turns (min(decisions, cap) + min(claims, cap))
     decisions = [
         r"(?i)(?:let'?s|we will|we should|I will|I'm going to|decided|decision)\s+[^.!?]+[.!?]",
         r"(?i)(?:plan is|next steps?:|action item:)\s+[^.!?]+[.!?]",
@@ -2433,14 +2703,19 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
         r"(?i)(?:I think|I believe|my understanding is|the problem is|the key insight)\s+[^.!?]+[.!?]",
         r"(?i)(?:evidence suggests|data shows|we found that|this means)\s+[^.!?]+[.!?]",
     ]
-    est = 2
+    est = 0
     for turn in body.conversation:
-        # #329: estimate scans the SAME full content the extraction loop uses
-        # (must be an upper bound — a truncation mismatch would under-count).
+        # #329/#947 (review P2, PR #976): the points quota counts NON-episodic
+        # Points only, and turn Points are written with is_episodic=true — the
+        # estimate must count the EXTRACTED (non-episodic) points only. The
+        # Session/Event base and the per-turn +1 are episodic; including them
+        # caused false pre-write 402s for teams near the limit. Still an upper
+        # bound for the extracted set (same full content the loop scans — a
+        # truncation mismatch would under-count).
         content = turn.get("content", "")
         n_dec = sum(len(re.findall(p, content)) for p in decisions)
         n_clm = sum(len(re.findall(p, content)) for p in claims)
-        est += 1 + min(n_dec, MAX_EXTRACTIONS_PER_TURN) + min(n_clm, MAX_EXTRACTIONS_PER_TURN)
+        est += min(n_dec, MAX_EXTRACTIONS_PER_TURN) + min(n_clm, MAX_EXTRACTIONS_PER_TURN)
     from tortoise.quota import count_team_usage
     sdk_team = _make_sdk(namespace=team["team_id"])
     try:
@@ -2462,7 +2737,8 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
     now = datetime.now(timezone.utc).isoformat()
 
     proj.g.query(
-        "MERGE (s:Session {id:$sid}) SET s.created_at=$now, s.turn_count=$tc",
+        "MERGE (s:Session {id:$sid}) SET s.created_at=$now, s.turn_count=$tc, "
+        "    s.is_episodic=true",
         params={"sid": session_id, "now": now, "tc": len(body.conversation)},
     )
 
@@ -2493,6 +2769,7 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
         proj.g.query(
             "MERGE (t:Point {id:$id}) "
             "SET t.content=$c, t.pointKind=$k, t.is_operator=false, "
+            "    t.is_episodic=true, "
             "    t.status=coalesce(t.status, $s), "
             "    t.createdAt=coalesce(t.createdAt, $now), "
             "    t.updatedAt=$now, t.content_hash=$ch",
@@ -2553,6 +2830,7 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
             startedAt=now,
             endedAt=now,
             sessionId=session_id,
+            is_episodic=True,
         )
         event_id = event.get("id") or event.get("eventId")
         for p in extracted:
@@ -2569,6 +2847,11 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
     )
     # Metering (#681): best-effort write-op count for overage billing.
     _record_write_op(team)
+    # #308 (R1, delta 8): capture_session creates one Point per turn plus the
+    # extracted decision/statement Points — weight by the actual count.
+    # Conservative over-count when turns dedupe is accepted (the dedup check
+    # runs inside the SDK write; recounting here would cost a second query).
+    await _abuse_record_points(request, team, len(body.conversation) + len(extracted))
 
     # #722: report the EFFECTIVE method actually used, not the configured
     # policy. The extraction loop above is the deterministic regex path — the
@@ -2579,6 +2862,511 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
     return {"session_id": session_id, "turns": len(body.conversation),
             "extracted": len(extracted), "points": extracted,
             "extraction_mode": effective_mode}
+
+
+# ── POST /v1/sessions/commit — epic #909 slice 5b (plan §6.1, W-3, W-7) ────
+# The derived-commit receiver: Layer-1 via commit_schema.py (the SHARED
+# module — same models the local extractor mirrors, §5.2 boundary 4), L1/L2
+# idempotency via :CommitRecord (commit_idempotency.py), the four-node write
+# chain (Session counters → Event AgentSession → Document transcript → Source
+# bridge → extractedFrom Points + entities + operators), budget adjudication
+# (adjudicate_budget on the RECONCILED net-new delta), metering (write_ops +1
+# per non-duplicate; nodes_written += net-new; hold commits bill 0 — PL4) and
+# content-free telemetry (W-7: no conversation content, no graph-side counts,
+# judge_summary dropped from v1).
+
+# Privacy helpers (W-7 / §6.1): provenance paths are BASENAME only — the full
+# local path never leaves the machine; the session Source url derives from the
+# basename (+ contentHash), never the full path.
+
+
+def _session_source_basename(payload: "CommitPayload") -> str:
+    """The session Source identity = the FIRST provenance basename (privacy,
+    W-7). Empty when the payload has no provenance_refs (valid empty commit)."""
+    if not payload.provenance_refs:
+        return ""
+    return os.path.basename(payload.provenance_refs[0].path.rstrip("/"))
+
+
+def _commit_response(
+    payload: "CommitPayload",
+    *,
+    duplicate: bool,
+    nodes_created: int = 0,
+    nodes_merged: int = 0,
+    held: list[str] | None = None,
+    warn: bool = False,
+) -> dict:
+    """§6.1 200 response body — commit_id = client_commit_id (stable per
+    logical commit); duplicate:true ⇒ zero writes, zero write-ops billed
+    (PL4); held non-empty ⇒ overflow (PL3), client-side, re-commit checks
+    the 50-ceiling only."""
+    return {
+        "session_id": payload.session_id,
+        "commit_id": payload.client_commit_id,
+        "nodes_created": nodes_created,
+        "nodes_merged": nodes_merged,
+        "held": held or [],
+        "duplicate": duplicate,
+        "warn": warn,
+    }
+
+
+def _load_commit_graph_state(sdk: TortoiseSDK, payload: "CommitPayload"):
+    """L2 read surface (W-3 [3]) — same-session/global MERGE state the
+    reconciliation needs, computed IN MEMORY (nothing written here).
+
+    - Session counters + is_episodic (budget numerator + quota discriminator);
+    - Points by pt_<sha> (content-addressed — global dedup, matching
+      create_point's content-hash dedup across sessions);
+    - Entities by (name, kind); operators by the (src, dst, op_type) MERGE key
+      (PL1 — no op_<sha> ids);
+    - MITIGATES: key (src, dst, MITIGATES) when the target IMPL edge already
+      carries a mitigation (the existing mitigate_operator mechanism).
+    """
+    from tortoise.commit_schema import GraphState
+
+    proj = sdk._get_proj()
+    state = GraphState()
+    rows = proj.g.query(
+        "MATCH (s:Session {id:$sid}) RETURN s.is_episodic, "
+        "coalesce(s.value_nodes_created, 0), coalesce(s.value_nodes_held, 0)",
+        params={"sid": payload.session_id},
+    ).result_set
+    if rows:
+        state.is_episodic = bool(rows[0][0])
+        state.value_nodes_created = int(rows[0][1] or 0)
+        state.value_nodes_held = int(rows[0][2] or 0)
+    point_ids = [p.id for p in payload.points]
+    if point_ids:
+        rows = proj.g.query(
+            "MATCH (p:Point) WHERE p.id IN $ids RETURN p.id, p.content",
+            params={"ids": point_ids},
+        ).result_set
+        state.points = {r[0]: r[1] for r in rows}
+    rows = proj.g.query(
+        "MATCH (o:Object) RETURN o.name, o.objectKind",
+    ).result_set
+    state.entities = {(r[0], r[1] or "") for r in rows}
+    rows = proj.g.query(
+        "MATCH (o:Point {is_operator:true})-[r]->(t:Point) "
+        "WHERE type(r) IN ['IMPL','NAND'] "
+        "RETURN o.id, o.op_type, r.idx, t.id ORDER BY o.id, r.idx",
+    ).result_set
+    ops: dict[str, dict] = {}
+    for oid, op_type, idx, tid in rows:
+        ops.setdefault(oid, {"op_type": op_type, "inputs": {}})
+        ops[oid]["inputs"][idx] = tid
+    for op in ops.values():
+        inputs = op["inputs"]
+        if 0 in inputs and 1 in inputs:
+            state.operators.add((inputs[0], inputs[1], op["op_type"]))
+    # MITIGATES — the payload key (src, dst, MITIGATES) exists when the target
+    # IMPL edge (target triple) already has a mitigation attached.
+    for op in payload.operators:
+        if op.op_type != "MITIGATES" or op.target is None:
+            continue
+        t = op.target
+        mit_rows = proj.g.query(
+            "MATCH (o:Point {is_operator:true, op_type:'IMPL'}) "
+            "MATCH (o)-[:IMPL {idx:0}]->(s:Point {id:$src}) "
+            "MATCH (o)-[:IMPL {idx:1}]->(d:Point {id:$dst}) "
+            "MATCH (o)-[:mitigated_by]->(m) RETURN count(m)",
+            params={"src": t.src, "dst": t.dst},
+        ).result_set
+        if mit_rows and mit_rows[0][0]:
+            state.operators.add((op.src, op.dst, "MITIGATES"))
+    return state
+
+
+def _store_commit_telemetry(proj, client_commit_id: str, payload: "CommitPayload",
+                            *, warn: bool = False) -> None:
+    """Content-free telemetry store (W-7): the payload telemetry block is
+    stored on the :CommitRecord — the schema has NO text-bearing fields (#963
+    guards it) and NO graph-side counts (the server derives
+    merge/supersede/held/draft/live from the Session counters — no second
+    source of truth). judge_summary is DROPPED from v1. ``budget_warn`` is a
+    server-side annotation (soft-15 WARN), not part of the client schema."""
+    telemetry = payload.telemetry.model_dump()
+    proj.g.query(
+        "MATCH (r:CommitRecord {client_commit_id:$cid}) "
+        "SET r.telemetry=$t, r.budget_warn=$warn",
+        params={"cid": client_commit_id, "t": _json.dumps(telemetry),
+                "warn": warn},
+    )
+
+
+def _point_content_by_id(payload: "CommitPayload", pid: str) -> str:
+    for pt in payload.points:
+        if pt.id == pid:
+            return pt.content
+    return ""
+
+
+def _execute_commit_writes(sdk: TortoiseSDK, payload: "CommitPayload", plan):
+    """W-3 [5] — the graph write phase for an adjudicated (budget=ok) commit.
+
+    Order matters: chain nodes first (Session counters → Event AgentSession →
+    Document transcript → Sources), then Points (new/merge/supersede), then
+    entities + aboutObject edges, then operators — IMPL/NAND BEFORE MITIGATES
+    (v1 targets must be same-commit emitted operators, Layer-1 enforced).
+
+    Runs inside the handler's fail-closed guard — any graph error surfaces as
+    a redacted 500 and the client retries with the same client_commit_id
+    (safe by L1; the record stays partial until the write completes).
+    """
+    from tortoise.ids import content_hash
+
+    proj = sdk._get_proj()
+    now = datetime.now(timezone.utc).isoformat()
+    session_id = payload.session_id
+    reconcile = plan.reconcile
+    event_id = content_hash(f"{session_id}:{payload.captured_at}")
+    doc_id = f"doc_{content_hash(f'{session_id}:{payload.captured_at}')}"
+    session_basename = _session_source_basename(payload)
+
+    # ── 1. Session node + budget counters (is_episodic: true — MECE ISSUE 2;
+    # the value-chain container is episodic; the VALUE Points below are the
+    # non-episodic quota/budget discriminator). ──
+    drafts = sum(1 for pr in reconcile.points
+                 if pr.action in ("new", "supersede")
+                 and pr.point.status == "draft")
+    proj.g.query(
+        "MERGE (s:Session {id:$sid}) "
+        "SET s.is_episodic=true, s.created_at=coalesce(s.created_at, $now), "
+        "    s.value_nodes_created = coalesce(s.value_nodes_created, 0) + $created, "
+        "    s.draft_count = coalesce(s.draft_count, 0) + $drafts, "
+        "    s.commit_count = coalesce(s.commit_count, 0) + 1, "
+        "    s.updated_at=$now",
+        params={"sid": session_id, "now": now, "created": reconcile.net_new,
+                "drafts": drafts},
+    )
+
+    # ── 2. Document transcript (deterministic id — replay-safe MERGE). NO
+    # content on the derived path (§4.1: summary/story_arc/sessionId only). ──
+    proj.g.query(
+        "MERGE (d:Document {id:$did}) "
+        "SET d.documentKind='transcript', d.title=$title, d.summary=$summary, "
+        "    d.story_arc=$arc, d.sessionId=$sid, d.eventId=$eid, "
+        "    d.sourcePath=$srcpath, d.doc_status='extracted', d.is_episodic=true, "
+        "    d.updatedAt=$now",
+        params={"did": doc_id, "title": payload.summary or session_id,
+                "summary": payload.summary, "arc": payload.story_arc,
+                "sid": session_id, "eid": event_id,
+                "srcpath": session_basename, "now": now},
+    )
+
+    # ── 3. Event AgentSession (content-addressed eventId — MERGE anchor,
+    # amendment §4.3 #3) — produces the Document. Written via raw Cypher:
+    # create_entity generates its own ULID and the projection prefers the
+    # generated id over a passed eventId, so the deterministic anchor would
+    # never land (review fix, PR #953). The Event is REQUIRED — a write
+    # failure fails the commit closed (no non-fatal wrapper). ──
+    proj.g.query(
+        "MERGE (e:Event {eventId:$eid}) "
+        "SET e.id=$eid, e.eventKind='AgentSession', e.name=$name, "
+        "    e.capturedAt=$cap, e.startedAt=$cap, e.endedAt=$cap, "
+        "    e.sessionId=$sid, e.summary=$sum, e.story_arc=$arc, "
+        "    e.is_episodic=true, e.keywords=$kw, e.eventStatus='scheduled', "
+        "    e.updatedAt=$now",
+        params={"eid": event_id, "name": payload.summary or session_id,
+                "cap": payload.captured_at, "sid": session_id,
+                "sum": payload.summary, "arc": payload.story_arc,
+                "kw": [session_id], "now": now},
+    )
+    proj.g.query(
+        "MATCH (e:Event {eventId:$eid}), (d:Document {id:$did}) "
+        "MERGE (e)-[:produces]->(d)",
+        params={"eid": event_id, "did": doc_id},
+    )
+
+    # ── 4. Source bridge: the session Source (basename url — privacy, W-7)
+    # + external artifacts from sources[]; the session Source references the
+    # Document AND the external artifacts (DE2E-5 chain). ──
+    session_urls: list[str] = []
+    for ref in payload.provenance_refs:
+        url = os.path.basename(ref.path.rstrip("/"))
+        if url not in session_urls:
+            session_urls.append(url)
+        sdk.create_source(
+            url, "agentSession",
+            contentHash=content_hash(url) if url else "",
+            provenance_spans=list(ref.spans), is_episodic=True,
+            sourceDate=payload.captured_at,
+        )
+    external_urls: list[str] = []
+    for src in payload.sources:
+        external_urls.append(src.url)
+        sdk.create_source(
+            src.url, src.sourceKind, tier=src.credibilityTier,
+            contentHash=src.contentHash or "", is_episodic=True,
+        )
+    for url in session_urls:
+        sdk.link_source_to_entity(url, doc_id, "Document")
+    for session_url in session_urls:
+        for external_url in external_urls:
+            proj.g.query(
+                "MATCH (a:Source {url:$u1}), (b:Source {url:$u2}) "
+                "MERGE (a)-[:references]->(b)",
+                params={"u1": session_url, "u2": external_url},
+            )
+
+    # ── 5. Points — deterministic pt_<sha> ids; content-hash dedup (global,
+    # matching create_point); supersede candidates (changed content) get a NEW
+    # content-addressed id + supersede_point (CORRECTS + outdated + edge
+    # transfer, PL2). Non-episodic (the quota discriminator). ──
+    for pr in reconcile.points:
+        pid = pr.point.id
+        if pr.action == "merge":
+            # MERGE bump (zero budget, PL3): updatedAt touch ONLY — never
+            # re-write status (update_point refuses non-promoting transitions;
+            # a live re-capture would 500 — review fix, PR #953).
+            proj.g.query(
+                "MATCH (p:Point {id:$pid}) SET p.updatedAt=$now",
+                params={"pid": pid, "now": now},
+            )
+        elif pr.action == "supersede":
+            pid = pr.supersede_id
+            sdk.create_point(
+                pr.point.pointKind, pr.point.content, dedup=True, id=pid,
+                status=pr.point.status, confidence=pr.point.confidence,
+                c_cal=pr.point.c_cal, quote=pr.point.quote,
+                source_ref=pr.point.source_ref,
+                extractedFrom=pr.point.source_ref, is_episodic=False,
+            )
+            sdk.supersede_point(pr.existing_id, pid)
+        else:
+            sdk.create_point(
+                pr.point.pointKind, pr.point.content, dedup=True, id=pid,
+                status=pr.point.status, confidence=pr.point.confidence,
+                c_cal=pr.point.c_cal, quote=pr.point.quote,
+                source_ref=pr.point.source_ref,
+                extractedFrom=pr.point.source_ref, is_episodic=False,
+            )
+        proj.g.query(
+            "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
+            "MERGE (s)-[:CONTAINS]->(p)",
+            params={"sid": session_id, "pid": pid},
+        )
+
+    # ── 6. Entities — :Object nodes MERGE by name (#452); objectKind + the
+    # S5 gate-result flag (passes_frequency_gate written WITH flag, amendment
+    # §4.3 #12); aboutObject edges (the canonical predicate — aboutEntity does
+    # NOT exist, §4.2). ──
+    for er in reconcile.entities:
+        sdk.create_entity(
+            "object", er.entity.name,
+            objectKind=er.entity.kind,
+            passes_frequency_gate=er.entity.passes_frequency_gate,
+            is_episodic=False,
+        )
+    for pr in reconcile.points:
+        pid = pr.point.id if pr.action != "supersede" else pr.supersede_id
+        for name in pr.point.about_entities:
+            proj.g.query(
+                "MATCH (p:Point {id:$pid}), (o:Object {name:$name}) "
+                "MERGE (p)-[:aboutObject]->(o)",
+                params={"pid": pid, "name": name},
+            )
+
+    # ── 7. Operators — (src,dst,op_type) MERGE key (PL1, no op_<sha> ids).
+    # IMPL/NAND first (draft extraction operators, promote_source=False — #780
+    # convention); MITIGATES second (targets a same-commit IMPL edge — the
+    # existing mitigate_operator mechanism: mitigation Point + (m)-[:IMPL]->(op)
+    # + (op)-[:mitigated_by]->(m), §4.2). ──
+    target_op_ids: dict[tuple, str] = {}
+    for op_rec in reconcile.operators:
+        op = op_rec.operator
+        if op_rec.action != "new" or op.op_type == "MITIGATES":
+            continue
+        try:
+            result = sdk.create_operator(
+                op.op_type, op.src, [op.dst],
+                direction=op.direction or "unidirectional",
+                promote_source=False,
+            )
+        except ValueError as e:
+            _logger.warning(
+                "commit: operator write skipped (inputs missing?): %s", e)
+            continue
+        target_op_ids[(op.src, op.dst, op.op_type)] = result["id"]
+    for op_rec in reconcile.operators:
+        op = op_rec.operator
+        if op_rec.action != "new" or op.op_type != "MITIGATES":
+            continue
+        t = op.target
+        op_id = target_op_ids.get((t.src, t.dst, t.op_type))
+        if op_id is None:
+            rows = proj.g.query(
+                "MATCH (o:Point {is_operator:true, op_type:'IMPL'}) "
+                "MATCH (o)-[:IMPL {idx:0}]->(s:Point {id:$src}) "
+                "MATCH (o)-[:IMPL {idx:1}]->(d:Point {id:$dst}) "
+                "RETURN o.id LIMIT 1",
+                params={"src": t.src, "dst": t.dst},
+            ).result_set
+            op_id = rows[0][0] if rows else None
+        if op_id is None:
+            # Deep-miss (DE2E-11 negative): the target IMPL edge is absent —
+            # the mitigation must NOT attach (support-edge-first convention).
+            _logger.warning(
+                "commit: MITIGATES target edge (%s,%s,IMPL) not found — "
+                "mitigation dropped", t.src, t.dst)
+            continue
+        reason = _point_content_by_id(payload, op.src) or f"[MITIGATION] {op.src}"
+        sdk.mitigate_operator(op_id, reason=reason, strength=op.strength or 0.5)
+
+
+@app.post("/v1/sessions/commit")
+async def commit_session(request: Request, team: dict = Depends(get_current_team)):
+    """Derived-commit receiver (epic #909 slice 5b — plan §6.1 + W-3).
+
+    Flow: [1] Layer-1 via commit_schema (400 missing_required_fields /
+    422 field reasons incl. commit_id_mismatch + calibration_mismatch;
+    retry-once semantics documented) → [2] L1 replay via :CommitRecord
+    (fully_written → 200 duplicate:true, zero writes, zero write-ops) →
+    [3] L2 reconciliation IN MEMORY → [4] sessions quota (402) + budget
+    adjudication on the reconciled net-new delta (soft 15 → WARN telemetry;
+    >25 first-adjudication → held[], NOT written; >50 → 402) → [5] the
+    four-node chain + entities + operators + supersede_point + Session
+    counters → [6] metering (write_ops +1 non-duplicate; nodes_written
+    += net-new; held bills 0 → write_ops_billed:0) + content-free telemetry.
+
+    Response contract (§6.1): 200 {session_id, commit_id, nodes_created,
+    nodes_merged, held[], duplicate} · 400 missing required fields ·
+    401 bad/missing key (get_current_team) · 402 budget ceiling or sessions
+    quota · 422 Layer-1 (retry once; code calibration_mismatch /
+    commit_id_mismatch) · 429 dedicated 300/min/key bucket (R-13) ·
+    500 fail-closed, redacted.
+    """
+    from tortoise.commit_schema import (
+        validate_payload_dict, plan_commit,
+    )
+    from tortoise.commit_idempotency import CommitRecordStore
+
+    # [1] Layer-1 (400 class = missing required fields; 422 class = shape +
+    # semantic violations with field reasons). The derived payload has NO
+    # turns — the legacy turn cap (POST /v1/sessions) does not apply.
+    try:
+        raw = await request.json()
+    except Exception:
+        raise HTTPException(
+            status_code=400, detail="Request body must be a JSON object")
+    result, payload = validate_payload_dict(raw)
+    if result.code == "missing_required_fields":
+        raise HTTPException(
+            status_code=400,
+            detail="; ".join(reasons for reasons in result.errors.get("required", [])))
+    if not result.ok or payload is None:
+        detail: dict = {k: list(v) for k, v in result.errors.items()}
+        if result.code:
+            detail["code"] = result.code
+        raise HTTPException(status_code=422, detail=detail)
+
+    sdk = _make_sdk(namespace=team["team_id"])
+    proj = sdk._get_proj()
+    store = CommitRecordStore(sdk)
+
+    # [2] L1 replay — a fully_written :CommitRecord is the idempotency proof:
+    # 200 {duplicate:true}, zero writes, zero write-ops billed (PL4). A
+    # record with status held|partial is NOT fully written (PL3).
+    record = store.get(payload.client_commit_id)
+    if record is not None and record.status == "fully_written":
+        return _commit_response(payload, duplicate=True)
+
+    # [3] L2 reconciliation IN MEMORY (W-3 [3]) + budget adjudication on the
+    # reconciled net-new delta — computed BEFORE any write (the ceiling check
+    # must count net-new, which only the reconciliation knows).
+    state = _load_commit_graph_state(sdk, payload)
+    plan = plan_commit(payload, state, record)
+
+    # :CommitRecord MERGE = the atomic concurrency serialization point (W-3
+    # [2], DE2E-7 neg a): the loser of the MERGE sees the winner's record →
+    # duplicate (if fully_written) or completes the remainder (held|partial).
+    rec, created = store.acquire(
+        payload.client_commit_id, session_id=payload.session_id,
+        status="partial", write_ops_billed=0)
+    if not created:
+        rec = store.get(payload.client_commit_id) or rec
+        if rec.status == "fully_written":
+            return _commit_response(payload, duplicate=True)
+        plan = plan_commit(payload, state, rec)  # PL3: ceiling-only
+    if plan.duplicate:
+        return _commit_response(payload, duplicate=True)
+
+    # [4a] Sessions quota (post-fix count — 402). Replays already returned
+    # above: quota never gates a duplicate (zero writes).
+    _check_team_limit(team, "sessions")
+
+    # [4b] Budget — the authoritative §6.1 semantics live in adjudicate_budget.
+    if plan.budget.outcome == "fail":
+        # Ceiling exceeded (>50): nothing written; the record stays partial
+        # (re-submission 402s deterministically — DE2E-7 Session B/C).
+        raise HTTPException(status_code=402, detail=plan.budget.reason)
+
+    now = datetime.now(timezone.utc).isoformat()
+    if plan.budget.outcome == "held":
+        # >25 (first adjudication only, PL3): items NOT written — the held
+        # count lives on the Session counter (value_nodes_held, §4.1 — NOT on
+        # the record); re-submission checks the 50-ceiling only. Bills zero
+        # write-ops (write_ops_billed: 0 on the record, PL4).
+        proj.g.query(
+            "MERGE (s:Session {id:$sid}) "
+            "SET s.is_episodic=true, s.created_at=coalesce(s.created_at, $now), "
+            "    s.value_nodes_held = coalesce(s.value_nodes_held, 0) + $n, "
+            "    s.updated_at=$now",
+            params={"sid": payload.session_id, "n": len(plan.budget.held_point_ids),
+                    "now": now},
+        )
+        store.update(payload.client_commit_id, status="held")
+        _store_commit_telemetry(proj, payload.client_commit_id, payload,
+                                warn=plan.budget.warn)
+        return _commit_response(
+            payload, duplicate=False, held=list(plan.budget.held_point_ids),
+            warn=plan.budget.warn)
+
+    # [5] Graph writes — fail-closed: any write error → redacted 500 (the
+    # client retries with the same client_commit_id — safe by L1; the record
+    # stays partial).
+    try:
+        _execute_commit_writes(sdk, payload, plan)
+    except HTTPException:
+        raise
+    except Exception as e:
+        _logger.exception(
+            "commit write failed (fail-closed 500): team=%s session=%s",
+            team["team_id"], payload.session_id)
+        raise HTTPException(
+            status_code=500,
+            detail="Commit write failed — the commit is replay-safe (retry "
+                   "with the same client_commit_id; L1 idempotency). Details "
+                   "logged server-side (fail-closed, redacted).")
+
+    # :CommitRecord → fully_written + billing (the single +1 for this logical
+    # payload — PL4) + content-free telemetry (W-7).
+    store.update(payload.client_commit_id, status="fully_written")
+    proj.g.query(
+        "MATCH (r:CommitRecord {client_commit_id:$cid}) "
+        "SET r.write_ops_billed=1",
+        params={"cid": payload.client_commit_id},
+    )
+    _store_commit_telemetry(proj, payload.client_commit_id, payload,
+                            warn=plan.budget.warn)
+
+    # [6] Metering — write_ops +1 per NON-duplicate commit call; nodes_written
+    # += net-new non-episodic (cost driver; supersede-only deltas exempt, R-14).
+    _record_write_op(team, nodes_written=plan.reconcile.net_new)
+
+    merged = (
+        sum(1 for pr in plan.reconcile.points if pr.action == "merge")
+        + sum(1 for er in plan.reconcile.entities if er.action == "merge")
+        + sum(1 for op in plan.reconcile.operators if op.action == "merge")
+    )
+    return _commit_response(
+        payload, duplicate=False,
+        nodes_created=plan.reconcile.net_new,
+        nodes_merged=merged,
+        warn=plan.budget.warn,
+    )
 
 
 @app.get("/v1/sessions")
@@ -3908,6 +4696,14 @@ async def agent_signup(request: Request):
     team_memberships + api_keys land in one transaction and the minted key
     resolves via api_keys.lookup_hash. No registry write, no half-team.
     The registry path stays for selfhost."""
+    # #308 (R6 security-review fix): the per-identity limit below is dead by
+    # design (#741: identity is server-side and fresh per request), so the
+    # shared per-IP register bucket (3/hour) is the compensating control for
+    # this mint seam. CAPTCHA itself is intentionally NOT applied here —
+    # headless agents cannot solve a challenge; the IP bucket bounds the
+    # automated team+key minting vector instead.
+    await _check_register_rate_limit(request)
+
     # #741(a): identity is ALWAYS server-side — client-supplied identity and
     # x-device-id are ignored (a client-chosen identity trivially bypasses the
     # per-identity rate limit). The CLI generates its own identity server-side.
@@ -4094,9 +4890,12 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
         raise HTTPException(status_code=403, detail="No membership in team")
 
     team_row = reg.query(
-        "MATCH (t:Team {id:$id}) RETURN t.tier", params={"id": tid},
+        "MATCH (t:Team {id:$id}) RETURN t.tier, t.suspended_at", params={"id": tid},
     ).result_set
     tier = team_row[0][0] if team_row else "free"
+    # #308 (R5): a suspended team cannot re-mint keys (scoping delta 12).
+    if team_row and team_row[0][1] is not None:
+        raise HTTPException(status_code=403, detail=_suspended_detail())
 
     api_key = f"tt_{_uuid.uuid4().hex}"
     key_hash = _hash(api_key)
@@ -4152,6 +4951,9 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
                 "cb": user_id, "now": now, "exp": expires_at, "cv": created_via},
     )
     await _async_audit(request, tid, "api_key_mint", resource_type="api_key", resource_id=kid)
+    # #308 (R2): evaluate key-create velocity after a successful mint
+    # (bootstrap mints are trigger-excluded but evaluation is harmless).
+    await _abuse_evaluate_keys(tid)
 
     return {"key": api_key, "key_prefix": api_key[:10], "expires_at": expires_at,
             "team_id": tid, "purpose": purpose}
@@ -4200,6 +5002,9 @@ async def _session_key_supabase(body: dict, request: Request, user: dict) -> dic
 
     team_row = team_by_id(cp, tid)
     tier = (team_row or {}).get("tier") or "free"
+    # #308 (R5): a suspended team cannot re-mint keys (scoping delta 12).
+    if (team_row or {}).get("suspended_at") is not None:
+        raise HTTPException(status_code=403, detail=_suspended_detail())
 
     api_key = f"tt_{_uuid.uuid4().hex}"
     kid = _short_id()
@@ -4243,6 +5048,8 @@ async def _session_key_supabase(body: dict, request: Request, user: dict) -> dic
         "expires_at": expires_at,
     })
     await _async_audit(request, tid, "api_key_mint", resource_type="api_key", resource_id=kid)
+    # #308 (R2): evaluate key-create velocity after a successful mint.
+    await _abuse_evaluate_keys(tid)
 
     return {"key": api_key, "key_prefix": api_key[:10], "expires_at": expires_at,
             "team_id": tid, "purpose": purpose}
@@ -4278,6 +5085,12 @@ _ONBOARDING_DEFAULT_STATE = {
 }
 
 _ALLOWED_STATE_KEYS = set(_ONBOARDING_DEFAULT_STATE.keys())
+
+# Epic #529: copy-attribution enums (#235 artifact_copied schema, verbatim).
+# Not state keys — the PATCH handler pops harness/section and emits an
+# analytics event instead of persisting them.
+_HARNESS_ANALYTICS_VALUES = {"claude", "codex", "cursor", "pi"}
+_SECTION_ANALYTICS_VALUES = {"config", "prompt", "both"}
 
 
 def _get_onboarding_state(team_id: str) -> dict:
@@ -4366,6 +5179,11 @@ class OnboardingStatePatchRequest(BaseModel):
     # E2E-5 (plan Task 6): email read-patch from the control plane (teams
     # row in Supabase mode, Team node in registry mode). #764 review P2.
     email: str | None = None
+    # Epic #529 copy-attribution beacon (analytics-only, NEVER persisted):
+    # welcome.html fires this on copy with the displayed key. Enums match
+    # #235's artifact_copied schema verbatim (align cycle-3 conformance).
+    harness: str | None = None   # "claude"|"codex"|"cursor"|"pi"
+    section: str | None = None   # "config"|"prompt"|"both"
 
 
 @app.get("/v1/onboarding/state", response_model=OnboardingStateResponse)
@@ -4383,6 +5201,15 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
     """Merge provided onboarding fields into the team's state."""
     updates = {k: v for k, v in body.model_dump().items() if v is not None}
     email = updates.pop("email", None)  # state keys only — email is a teams column
+    # Epic #529 copy-attribution beacon: analytics-only fields — pop before
+    # the state merge (email pattern) and emit artifact_copied for enum-valid
+    # pairs; invalid values are ignored (no event, no error) so a stale or
+    # malformed beacon can never break the copy UX or pollute state.
+    harness = updates.pop("harness", None)
+    section = updates.pop("section", None)
+    if harness in _HARNESS_ANALYTICS_VALUES and section in _SECTION_ANALYTICS_VALUES:
+        _track_analytics_event(team["team_id"], "artifact_copied",
+                               {"harness": harness, "section": section})
     state = _update_onboarding_state(team["team_id"], **updates)
     if email is not None:
         _write_team_email(team["team_id"], email)
@@ -4882,8 +5709,45 @@ async def index_job_status(job_id: str, team: dict = Depends(get_current_team)):
 # ── Backups: endpoints (#305) ────────────────────────────────────
 
 
-def _backup_storage() -> R2Storage:
-    """R2 storage from env (R2_ACCOUNT_ID / R2_ACCESS_KEY_ID / ...)."""
+# Test seam (#303 E2E): TORTOISE_BACKUP_STORAGE=memory swaps the R2 object
+# store for an in-process MemoryStorage so the backup→restore journey can run
+# hermetic (no R2 creds). Precedent: RATE_LIMIT_DISABLED. Any other value
+# fails closed (loud) so a typo can never silently downgrade durability.
+# Durability guard (#101 incident class): on Fly (FLY_APP_NAME set) the seam
+# REFUSES — memory backups vanish on restart, the exact silent-data-loss mode
+# the #101 postmortem documents (mirrors the sdk.py embedded-on-Fly guard).
+if os.environ.get("TORTOISE_BACKUP_STORAGE", "").strip().lower() == "memory":
+    if os.environ.get("FLY_APP_NAME"):
+        raise RuntimeError(
+            "TORTOISE_BACKUP_STORAGE=memory is a test seam and refuses to run "
+            "on Fly (FLY_APP_NAME set) — memory backups are lost on restart"
+        )
+    _logger.warning(
+        "TORTOISE_BACKUP_STORAGE=memory active at startup — backups live in "
+        "process memory only and are LOST on restart (test seam, #303)"
+    )
+_MEMORY_BACKUP_STORE: MemoryStorage | None = None
+
+
+def _backup_storage() -> R2Storage | MemoryStorage:
+    """Backup object store. R2 from env (R2_ACCOUNT_ID / ...) by default.
+
+    TORTOISE_BACKUP_STORAGE=memory → process-wide MemoryStorage singleton
+    (E2E seam, #303). Unknown value → RuntimeError (fail-closed)."""
+    global _MEMORY_BACKUP_STORE
+    mode = os.environ.get("TORTOISE_BACKUP_STORAGE", "").strip().lower()
+    if mode == "memory":
+        if _MEMORY_BACKUP_STORE is None:
+            _logger.warning(
+                "TORTOISE_BACKUP_STORAGE=memory — backups live in process "
+                "memory only and are LOST on restart (test seam, #303)"
+            )
+            _MEMORY_BACKUP_STORE = MemoryStorage()
+        return _MEMORY_BACKUP_STORE
+    if mode:
+        raise RuntimeError(
+            f"TORTOISE_BACKUP_STORAGE={mode!r} unknown — use 'memory' or unset for R2"
+        )
     return R2Storage()
 
 

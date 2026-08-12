@@ -21,7 +21,7 @@ Want to run it yourself instead? See [quickstart-selfhosted.md](quickstart-selfh
 
 ## 2. Connect your agent (MCP, streamable-http)
 
-The hosted endpoint is `https://api.premiselabs.co/mcp`, and it only speaks **streamable-http** — that's the only correct hosted pattern. Auth is a Bearer header with your API key.
+The hosted endpoint is `https://api.premiselabs.co/mcp/`, and it only speaks **streamable-http** — that's the only correct hosted pattern. Auth is a Bearer header with your API key.
 
 Add this to your client's `.mcp.json` (Claude Code, Cursor, and most MCP clients read this file):
 
@@ -30,7 +30,7 @@ Add this to your client's `.mcp.json` (Claude Code, Cursor, and most MCP clients
   "mcpServers": {
     "tortoise": {
       "type": "streamable-http",
-      "url": "https://api.premiselabs.co/mcp",
+      "url": "https://api.premiselabs.co/mcp/",
       "headers": {
         "Authorization": "Bearer tt_YOUR_KEY"
       }
@@ -42,7 +42,7 @@ Add this to your client's `.mcp.json` (Claude Code, Cursor, and most MCP clients
 **Codex** instead:
 
 ```bash
-codex mcp add tortoise --url https://api.premiselabs.co/mcp --bearer-token-env-var TORTOISE_API_KEY
+codex mcp add tortoise --url https://api.premiselabs.co/mcp/ --bearer-token-env-var TORTOISE_API_KEY
 # then export TORTOISE_API_KEY=tt_YOUR_KEY in your shell
 ```
 

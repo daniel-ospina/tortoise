@@ -325,10 +325,10 @@ class _RecordingEP(TortoiseEP):
         self._factors = []
 
     # ── Stubbed I/O boundary ──
-    def _affected_claims(self, operator_ids, max_hops=2):
+    def _affected_claims(self, operator_ids, max_hops=2, include_draft=False):
         return set(self._affected)
 
-    def _affected_factors(self, affected_claims):
+    def _affected_factors(self, affected_claims, include_draft=False):
         return list(self._factors)
 
     def _load_cache(self, affected_claims):

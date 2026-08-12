@@ -1,9 +1,10 @@
 # Development Domain Extension
 # Software development concepts — epics, issues, code, APIs, infrastructure.
+# Manifest v3 (epic #909, research-r6 §6.2) — epic→issue→code chain + kindDefs.
 
 namespace: dev
 name: "Development"
-version: "0.1.0"
+version: "0.2.0"          # bumped: extractor-readable business logic (R6)
 tier: free
 description: "Software development concepts — epics, issues, code, APIs, databases, deployments"
 
@@ -37,6 +38,33 @@ ontology:
     - architectureDoc
     - apiSpec
     - deployRunbook
+
+  # ── NEW: per-kind extractor metadata ─────────────────────────────────────
+  kindDefs:
+    epic:
+      description: "A large body of work decomposed into issues"
+      nearMisses: [issue]
+    issue:
+      description: "A tracked unit of work (≡ pm:issue)"
+      synonyms: ["ticket"]
+      nearMisses: [code]
+    code:
+      description: "Source code that implements features"
+      nearMisses: [api, software]
+    requirement:
+      description: "A stated need a feature must satisfy (≡ product-strategy:requirement)"
+      nearMisses: [bug]
+    architectureDoc:
+      description: "Documentation of architecture decisions (link: the architecture artifact kind is product-strategy:architecture)"
+      nearMisses: [architecture]
+
+  # ── NEW: engineering delivery chain, first-class ────────────────────────
+  chains:
+    - id: epicToCode
+      name: "Epic-to-Code Chain"
+      description: "How planned work flows from epics through issues into shipped code"
+      steps: [epic, issue, code]
+      enforcement: warn
 
   relations:
     - predicate: decomposesInto

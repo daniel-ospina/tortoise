@@ -1,9 +1,10 @@
 # Marketing Domain Extension
 # Campaigns, Content, Channels, Audiences, Keywords.
+# Manifest v3 (epic #909, research-r6 §6.2) — campaign→content→channel chain + kindDefs.
 
 namespace: marketing
 name: "Marketing"
-version: "0.1.0"
+version: "0.2.0"          # bumped: extractor-readable business logic (R6)
 tier: free
 description: "Marketing concepts — campaigns, content, channels, audiences, keywords"
 
@@ -30,6 +31,29 @@ ontology:
     - contentCalendar
     - performanceReport
     - brandGuide
+
+  # ── NEW: per-kind extractor metadata ─────────────────────────────────────
+  kindDefs:
+    campaign:
+      description: "A coordinated marketing effort that produces content for an audience"
+      nearMisses: [content]
+    content:
+      description: "A piece of marketing material (post, article, video) produced by a campaign"
+      nearMisses: [competitorContent]
+    channel:
+      description: "The distribution surface through which content reaches an audience"
+      nearMisses: [audience]
+    audience:
+      description: "The group of people a campaign targets"
+      nearMisses: [customerSegment]
+
+  # ── NEW: content pipeline chain, first-class ────────────────────────────
+  chains:
+    - id: campaignToChannel
+      name: "Campaign-to-Channel Chain"
+      description: "How marketing campaigns produce content distributed via channels"
+      steps: [campaign, content, channel]
+      enforcement: warn
 
   relations:
     - predicate: contains

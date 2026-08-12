@@ -93,14 +93,25 @@ class _EntityHandlers:
         never drift from the incrementally-applied graph on node properties.
         """
         op = p.get("operator")
-        prov = p.get("provenance", {})
+        if not isinstance(op, dict):
+            # #331 (review r5): parity with _create_edges' r4 guard — a
+            # truthy non-dict operator (e.g. a bare string) must degrade
+            # to no-operator, not AttributeError in op.get("op_type").
+            op = None
+        prov = p.get("provenance")
+        if not isinstance(prov, dict):
+            # #331 (review r3): explicit null / string provenance must not
+            # crash the Falkor path (parity with _apply_one's guard).
+            prov = {}
 
         # Compute embedding for non-operator Points (#7778)
         embedding = None
-        if not op:
+        # #331 (review r4): only embed real content — an empty string
+        # produced a junk vector in the HNSW index.
+        if not op and p.get("content"):
             try:
                 from tortoise.embeddings import compute_embedding
-                embedding = compute_embedding(p["content"])
+                embedding = compute_embedding(p.get("content", ""))
             except Exception:
                 pass
 
@@ -120,8 +131,8 @@ class _EntityHandlers:
             "n.updatedAt=$now",
         ]
         params = {
-            "id": p["id"], "content": p["content"],
-            "isop": bool(op), "opt": op["op_type"] if op else None,
+            "id": p["id"], "content": p.get("content", ""),
+            "isop": bool(op), "opt": op.get("op_type") if op else None,
             "pk": p.get("pointKind"),
             "st": p.get("status"),
             "ab": p.get("authoredBy"),

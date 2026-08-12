@@ -6,6 +6,11 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+# #942: import mcp_server FIRST at module level (import-order is the
+# contract — mcp_server must load before selfhost ever could, so the
+# import cycle can never be masked).
+import tortoise.mcp_server as mcp_mod
+
 # Check if FalkorDB is available for integration tests
 try:
     from tortoise.sdk import TortoiseSDK
@@ -34,6 +39,50 @@ def _transport_context():
     _transport_mode.set(None)
     _current_team_id.set(None)
     _current_team_limits.set(None)
+
+
+def test_stdio_embedded_banner(monkeypatch, capsys, tmp_path):
+    """#942: the stdio entrypoint (tortoise serve / python -m tortoise.mcp_server)
+    prints the loud SINGLE-WRITER / EVAL-ONLY banner when running embedded.
+    main() blocks in mcp.run — monkeypatch the module instance's run so the
+    test returns. Instance-attribute functions are NEVER bound, so the fake
+    is **kw-only (a method-shaped fake would TypeError)."""
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "eval.db"))
+    called = {}
+
+    def fake_run(**kw):
+        called["run"] = True
+
+    monkeypatch.setattr(mcp_mod.mcp, "run", fake_run)
+    mcp_mod.main()
+    assert called.get("run"), "stdio main() must reach mcp.run"
+    err = capsys.readouterr().err
+    assert "SINGLE-WRITER" in err and "EVAL ONLY" in err
+    # main() registers _get_sdk() with monitoring — reset the cached module
+    # SDK so later tests in this file don't silently reuse the embedded one.
+    mcp_mod.sdk = None
+    mcp_mod._sdk = None
+
+
+def test_stdio_uri_mode_no_banner(monkeypatch, capsys, tmp_path):
+    """#942 negative pin: no banner when TORTOISE_DB_URI is a supported URI.
+    _get_sdk EAGERLY connects (from_uri retry loop, mcp_server.py:305-309) —
+    patch it so the test doesn't need a live sidecar."""
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:falkordb@localhost:6379/tortoise")
+    monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+    called = {}
+
+    def fake_run(**kw):
+        called["run"] = True
+
+    monkeypatch.setattr(mcp_mod.mcp, "run", fake_run)
+    monkeypatch.setattr(mcp_mod, "_get_sdk", lambda: object())
+    monkeypatch.setattr(mcp_mod.monitoring, "register", lambda *a, **kw: None)
+    mcp_mod.main()
+    assert called.get("run")
+    assert "SINGLE-WRITER" not in capsys.readouterr().err
+
 
 
 class TestSafeWrapper:
@@ -71,6 +120,237 @@ class TestSafeWrapper:
         # Error count should have incremented
         after = mon.metrics().get("error_count", 0)
         assert after >= initial
+
+
+class _StubQuerySDK:
+    """Minimal SDK double for the query-family handlers (Epic #888)."""
+
+    def __init__(self):
+        self.calls = []
+        self.points = [{"id": f"p{i}"} for i in range(5)]
+        self.tag_points = [{"id": f"t{i}"} for i in range(3)]
+
+    def query(self, kind=None, **kwargs):
+        self.calls.append(("query", kind, kwargs))
+        return self.points
+
+    def paginated_query(self, kind=None, skip=0, limit=20, **kwargs):
+        self.calls.append(("paginated_query", kind, skip, limit, kwargs))
+        total = len(self.points)
+        return {"results": self.points[skip:skip + limit], "total": total,
+                "hasMore": skip + limit < total}
+
+    def query_points_by_tag(self, tag):
+        self.calls.append(("query_points_by_tag", tag))
+        return self.tag_points
+
+    def tortoise_fts_query(self, query=None, **kwargs):
+        self.calls.append(("fts", query, kwargs))
+        return []
+
+
+@pytest.fixture
+def query_sdk(monkeypatch):
+    """Swap _get_team_sdk for a stub; return the stub to assert on calls."""
+    from tortoise import mcp_server
+    stub = _StubQuerySDK()
+    monkeypatch.setattr(mcp_server, "_get_team_sdk", lambda: stub)
+    return stub
+
+
+class TestQueryConsolidation:
+    """Epic #888 item 1: query + paginated_query + query_points_by_tag merge
+    into one tortoise_query with offset/limit/page/tag params. Old call shapes
+    (plain list, no pagination) must behave unchanged.
+    """
+
+    def test_structural_query_returns_plain_list(self, query_sdk):
+        from tortoise.mcp_server import tortoise_query
+        result = tortoise_query(kind="statement")
+        assert result == query_sdk.points
+        name, kind, kwargs = query_sdk.calls[-1]
+        assert (name, kind) == ("query", "statement")
+        assert kwargs.get("include_retracted") is False
+
+    def test_pagination_params_route_to_paginated_query(self, query_sdk):
+        from tortoise.mcp_server import tortoise_query
+        result = tortoise_query(kind="statement", offset=5, limit=10)
+        name, kind, skip, limit, kwargs = query_sdk.calls[-1]
+        assert (name, kind, skip, limit) == ("paginated_query", "statement", 5, 10)
+        assert result == {"results": [], "total": 5, "hasMore": False}
+
+    def test_page_1_maps_to_offset_0(self, query_sdk):
+        from tortoise.mcp_server import tortoise_query
+        tortoise_query(kind="statement", page=1, limit=10)
+        name, kind, skip, limit, kwargs = query_sdk.calls[-1]
+        assert (name, kind, skip, limit) == ("paginated_query", "statement", 0, 10)
+
+    def test_page_is_1_based_and_overrides_offset(self, query_sdk):
+        """Both page and offset set -> page wins (review P1-2: the previous
+        version never passed offset, so the precedence branch was untested)."""
+        from tortoise.mcp_server import tortoise_query
+        tortoise_query(kind="statement", page=2, offset=5, limit=10)
+        name, kind, skip, limit, kwargs = query_sdk.calls[-1]
+        assert (name, skip, limit) == ("paginated_query", 10, 10)
+        # zero offset must not bypass the page override either
+        tortoise_query(kind="statement", page=3, offset=0, limit=10)
+        name, kind, skip, limit, kwargs = query_sdk.calls[-1]
+        assert (name, skip, limit) == ("paginated_query", 20, 10)
+
+    def test_tag_filter_uses_tag_path(self, query_sdk):
+        from tortoise.mcp_server import tortoise_query
+        result = tortoise_query(tag="pricing")
+        assert result == query_sdk.tag_points
+        assert query_sdk.calls[-1] == ("query_points_by_tag", "pricing")
+
+    def test_tag_takes_precedence_over_text(self, query_sdk):
+        """Documented precedence: tag mode wins when both are provided."""
+        from tortoise.mcp_server import tortoise_query
+        result = tortoise_query(tag="pricing", text="semantic query")
+        assert result == query_sdk.tag_points
+        assert query_sdk.calls[-1][0] == "query_points_by_tag"
+
+    def test_tag_with_pagination_returns_dict(self, query_sdk):
+        from tortoise.mcp_server import tortoise_query
+        result = tortoise_query(tag="pricing", offset=1, limit=1)
+        assert result == {"results": [{"id": "t1"}], "total": 3, "hasMore": True}
+
+    def test_tag_excludes_retracted_by_default(self, query_sdk):
+        """Tombstone contract: tag mode mirrors the other query paths —
+        status='retracted' points excluded unless include_retracted=True."""
+        from tortoise.mcp_server import tortoise_query
+        query_sdk.tag_points = [{"id": "t0"},
+                                {"id": "tomb", "status": "retracted"},
+                                {"id": "t1"}]
+        result = tortoise_query(tag="pricing")
+        assert result == [{"id": "t0"}, {"id": "t1"}]
+        result = tortoise_query(tag="pricing", include_retracted=True)
+        assert len(result) == 3
+
+    def test_tag_with_pagination_counts_post_filter_total(self, query_sdk):
+        from tortoise.mcp_server import tortoise_query
+        query_sdk.tag_points = [{"id": "t0"},
+                                {"id": "tomb", "status": "retracted"},
+                                {"id": "t1"}]
+        result = tortoise_query(tag="pricing", offset=0, limit=1)
+        assert result == {"results": [{"id": "t0"}], "total": 2, "hasMore": True}
+
+    def test_text_routes_to_fts_with_previous_default_limit(self, query_sdk):
+        from tortoise.mcp_server import tortoise_query
+        tortoise_query(text="hello")
+        name, q, kwargs = query_sdk.calls[-1]
+        assert (name, q) == ("fts", "hello")
+        assert kwargs.get("limit") == 100  # old default preserved for search path
+
+    def test_text_with_pagination_returns_error(self, query_sdk):
+        """fts has no offset/skip — reject the combination instead of silently
+        dropping the pagination params (review fix)."""
+        from tortoise.mcp_server import tortoise_query
+        result = tortoise_query(text="hello", offset=10, limit=10)
+        assert isinstance(result, dict) and "error" in result, result
+        assert query_sdk.calls == [], "must not hit the SDK for a rejected call"
+
+    def test_include_retracted_passthrough(self, query_sdk):
+        from tortoise.mcp_server import tortoise_query
+        tortoise_query(kind="statement", include_retracted=True, offset=0, limit=5)
+        name, kind, skip, limit, kwargs = query_sdk.calls[-1]
+        assert kwargs.get("include_retracted") is True
+
+    def test_filters_include_retracted_key_does_not_typeerror(self, query_sdk):
+        """A caller passing include_retracted inside filters must not collide
+        with the explicit kwarg (duplicate-keyword TypeError) — and the True
+        intent is honored when the explicit param is unset (review P2-2)."""
+        from tortoise.mcp_server import tortoise_query
+        result = tortoise_query(kind="statement", filters={"include_retracted": True})
+        assert result == query_sdk.points
+        name, kind, kwargs = query_sdk.calls[-1]
+        assert kwargs.get("include_retracted") is True  # filters value honored
+
+    def test_explicit_include_retracted_wins_over_filters(self, query_sdk):
+        """Explicit param True + filters False -> explicit wins (precedence)."""
+        from tortoise.mcp_server import tortoise_query
+        tortoise_query(kind="statement", include_retracted=True,
+                       filters={"include_retracted": False})
+        name, kind, kwargs = query_sdk.calls[-1]
+        assert kwargs.get("include_retracted") is True
+
+    def test_malformed_json_filters_does_not_raise(self, query_sdk):
+        """Malformed-JSON filters string containing the substring
+        'include_retracted' must not hit the P1-1 AttributeError on the
+        non-dict .pop() path. (The pre-existing **unpack TypeError for
+        non-mapping filters may still surface — that predates #888.)"""
+        from tortoise.mcp_server import tortoise_query
+        try:
+            tortoise_query(kind="statement", filters='{"include_retracted": true')
+        except TypeError:
+            pass  # pre-existing malformed-filters behavior, not P1-1
+        except AttributeError as e:  # pragma: no cover
+            raise AssertionError(f"P1-1 regression: {e}")
+
+    @pytest.mark.parametrize("kwargs,msg", [
+        ({"page": 0}, "page"),
+        ({"page": -2}, "page"),
+        ({"offset": -1}, "offset"),
+        ({"limit": 0}, "limit"),
+        ({"limit": -5}, "limit"),
+    ])
+    def test_invalid_pagination_values_return_error(self, query_sdk, kwargs, msg):
+        """page >= 1, offset >= 0, limit >= 1 — violations are structured
+        errors, never silent wrong data (review fix)."""
+        from tortoise.mcp_server import tortoise_query
+        result = tortoise_query(kind="statement", **kwargs)
+        assert isinstance(result, dict) and "error" in result, result
+        assert msg in result["error"]
+        assert query_sdk.calls == [], "must not hit the SDK for a rejected call"
+
+    def test_empty_structural_result_with_unknown_kind_returns_list(self, query_sdk):
+        """Empty result + unknown kind → compute_suggestion returns None → the
+        empty list is returned untouched."""
+        from tortoise.mcp_server import tortoise_query
+        query_sdk.points = []
+        result = tortoise_query(kind="definitely-not-a-real-kind-xyz")
+        assert result == []
+
+    def test_empty_result_with_suggestion_attaches_suggestion(self, query_sdk, monkeypatch):
+        """The empty-result suggestion behavior must survive the merge: when
+        compute_suggestion finds a near-miss kind, the tool returns
+        {results: [], suggestion: ...}."""
+        from tortoise.mcp_server import tortoise_query
+        query_sdk.points = []
+        monkeypatch.setattr(
+            "tortoise.query_suggestions.compute_suggestion",
+            lambda kind: {"hint": "did you mean 'decision'?"})
+        result = tortoise_query(kind="decisoin")
+        assert result == {"results": [], "suggestion": {"hint": "did you mean 'decision'?"}}
+
+
+class TestDeprecatedAliases:
+    """Epic #888 item 1: old query tools stay as thin aliases for one release
+    (deprecation-with-grace), delegating to the consolidated tortoise_query.
+    """
+
+    def test_paginated_query_alias_delegates(self, query_sdk):
+        from tortoise.mcp_server import tortoise_paginated_query
+        result = tortoise_paginated_query(kind="statement", skip=2, limit=5,
+                                          filters={"status": "active"})
+        name, kind, skip, limit, kwargs = query_sdk.calls[-1]
+        assert (name, kind, skip, limit) == ("paginated_query", "statement", 2, 5)
+        assert kwargs.get("status") == "active"
+        assert result["hasMore"] is False
+
+    def test_paginated_query_alias_defaults_keep_old_shape(self, query_sdk):
+        """Default call (skip=0, limit=20) → paginated dict, same as before."""
+        from tortoise.mcp_server import tortoise_paginated_query
+        result = tortoise_paginated_query()
+        name, kind, skip, limit, kwargs = query_sdk.calls[-1]
+        assert (name, skip, limit) == ("paginated_query", 0, 20)
+        assert "results" in result and "total" in result and "hasMore" in result
+
+    def test_query_points_by_tag_alias_delegates(self, query_sdk):
+        from tortoise.mcp_server import tortoise_query_points_by_tag
+        result = tortoise_query_points_by_tag("pricing")
+        assert result == query_sdk.tag_points
+        assert query_sdk.calls[-1] == ("query_points_by_tag", "pricing")
 
 
 class TestToolFunctions:
@@ -470,3 +750,84 @@ class TestEventsHttpSurface:
 
         assert "tortoise_events_poll" in HTTP_ALLOWED
         assert "tortoise_retract_point" in HTTP_ALLOWED
+
+
+class TestStdioEntrypointToolRegistration:
+    """#993 regression — `python -m tortoise.mcp_server` must serve the tool
+    registry. The __main__ guard previously sat ABOVE the @mcp.tool
+    decorators and FastMCPAdapter.register_all(), so the stdio loop entered
+    with ZERO tools registered (onboarding Step 0 = tortoise_health failed
+    with "Can't connect to Tortoise"). Spawns the real entrypoint as a
+    subprocess and asserts tools/list returns the full registry."""
+
+    def test_stdio_entrypoint_serves_full_registry(self):
+        import json
+        import os
+        import select
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        env = dict(os.environ)
+        for k in ("TORTOISE_DB_URI", "TORTOISE_DB_PATH", "TORTOISE_API_KEY"):
+            env.pop(k, None)
+        # #942 test-only escape hatch: tools/list needs no DB; avoid a
+        # hard error from main()'s missing-config guard.
+        env["TORTOISE_ALLOW_EMBEDDED"] = "1"
+        repo_root = Path(__file__).resolve().parents[1]
+
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "tortoise.mcp_server"],
+            cwd=str(repo_root),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,  # never drained — avoid pipe-buffer deadlock (reviewer, #993)
+            env=env,
+            text=True,
+            bufsize=1,
+        )
+        try:
+            def send(payload: dict) -> None:
+                proc.stdin.write(json.dumps(payload) + "\n")
+                proc.stdin.flush()
+
+            def read_line(timeout: float = 30) -> dict:
+                ready, _, _ = select.select([proc.stdout], [], [], timeout)
+                assert ready, f"no MCP response within {timeout}s"
+                return json.loads(proc.stdout.readline())
+
+            send({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "tortoise-regression-test", "version": "0.0.0"},
+            }})
+            init = read_line()
+            assert "result" in init and "serverInfo" in init["result"], init
+
+            send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+            send({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
+            resp = read_line()
+            tools = resp.get("result", {}).get("tools", [])
+            names = [t["name"] for t in tools]
+
+            # Issue #993 target (1): tools/list >= 70 on this entrypoint.
+            assert len(names) >= 70, f"expected >=70 tools, got {len(names)}"
+            # Onboarding-critical tools must be present (Step 0 + the set).
+            assert "tortoise_health" in names
+            onboarding = {
+                "tortoise_onboarding_demo_create",
+                "tortoise_onboarding_state",
+                "tortoise_onboarding_session_recording",
+                "tortoise_onboarding_github_connect",
+                "tortoise_onboarding_github_index",
+                "tortoise_onboarding_github_status",
+            }
+            missing = onboarding - set(names)
+            assert not missing, f"missing onboarding tools: {sorted(missing)}"
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)

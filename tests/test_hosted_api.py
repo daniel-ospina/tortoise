@@ -1463,13 +1463,13 @@ class TestSessionFloodGate:
     def test_extraction_amplifier_402_zero_growth(self, client):
         """Dense decision content → extraction-aware estimate exceeds the
         points quota → 402 BEFORE any write (zero node growth)."""
-        # est = 2 + Σ_turns(1 + min(decisions,200)) — 5 dense turns × ~300
-        # matches = 2 + 5×201 = 1007 > 1000 (default max_points) → 402.
+        # Review P2, PR #976: the estimate counts the EXTRACTED set only
+        # (turn Points/Session/Event are episodic) — est = Σ_turns
+        # (min(decisions, cap) + min(claims, cap)). 50 dense turns × 200 cap
+        # = exactly 10000 = max_points → NOT > → no 402 (boundary). 51 turns
+        # = 10200 > 10000 → 402 (Free max_points per #662 pricing).
         dense = ("we should go. " * 300)  # 4500 chars < 5000 turn limit
-        # 50 dense turns × ~300 matches = est 10052 > 10000 (Free max_points
-        # per #662 pricing) → 402. (Was 5 turns × est 1007, which no longer
-        # exceeds the 10000 cap after the Free-tier pricing raise.)
-        conversation = [{"role": "user", "content": dense}] * 50
+        conversation = [{"role": "user", "content": dense}] * 51
         r = client.post("/v1/sessions", json={
             "session_id": "dense-session", "conversation": conversation,
         })
@@ -2016,3 +2016,43 @@ class TestInviteEndpointsRegistry:
         session_user("user-2", "bob@example.com")
         r = tc.post("/v1/invites/accept", json={"token": token})
         assert r.status_code == 400
+
+
+class TestBackupStorageSeam:
+    """#303 — TORTOISE_BACKUP_STORAGE env seam in _backup_storage().
+
+    Default (unset) → R2Storage; 'memory' → process-wide MemoryStorage
+    singleton (hermetic E2E); unknown value → RuntimeError (fail-closed,
+    never a silent durability downgrade)."""
+
+    def test_default_returns_r2(self, monkeypatch):
+        from tortoise import hosted_api as _ha
+        from tortoise.hosted_backup import R2Storage
+
+        monkeypatch.delenv("TORTOISE_BACKUP_STORAGE", raising=False)
+        # R2Storage needs its env to construct — provide dummy config.
+        monkeypatch.setenv("R2_ACCOUNT_ID", "acct")
+        monkeypatch.setenv("R2_ACCESS_KEY_ID", "ak")
+        monkeypatch.setenv("R2_SECRET_ACCESS_KEY", "sk")
+        monkeypatch.setenv("R2_BUCKET", "bkt")
+        store = _ha._backup_storage()
+        assert isinstance(store, R2Storage)
+
+    def test_memory_mode_returns_shared_singleton(self, monkeypatch):
+        from tortoise import hosted_api as _ha
+        from tortoise.hosted_backup import MemoryStorage
+
+        monkeypatch.setenv("TORTOISE_BACKUP_STORAGE", "memory")
+        monkeypatch.setattr(_ha, "_MEMORY_BACKUP_STORE", None)
+        a = _ha._backup_storage()
+        b = _ha._backup_storage()
+        assert isinstance(a, MemoryStorage)
+        assert a is b, "memory store must be a singleton (per-request callers share state)"
+        monkeypatch.setattr(_ha, "_MEMORY_BACKUP_STORE", None)
+
+    def test_unknown_value_fails_closed(self, monkeypatch):
+        from tortoise import hosted_api as _ha
+
+        monkeypatch.setenv("TORTOISE_BACKUP_STORAGE", "s3-ish")
+        with pytest.raises(RuntimeError, match="unknown"):
+            _ha._backup_storage()

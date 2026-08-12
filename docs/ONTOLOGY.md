@@ -1,18 +1,42 @@
 ---
-title: "Tortoise — Canonical Ontology v3.4"
+title: "Tortoise — Canonical Ontology v3.6"
 type: data
 domain: data
 status: live
 created: 2026-08-05
-updated: 2026-08-10
+updated: 2026-08-11
 ownedBy: epistemic-team
 doc_status: live
 ---
 
-# Tortoise — Canonical Ontology v3.4
+# Tortoise — Canonical Ontology v3.6
 
 > **Status:** LIVE — canonical. Co-located with the code it governs (tortoise repo).
 > **Supersedes:** ONTOLOGY_v2.5.md (eldato repo, deprecated).
+>
+> **Changelog v3.6 (2026-08-11, epic #909 slice 3 — 13 ontology amendments, issue #948):**
+> Registration only — no new design (plan §4.3, numbered exactly 13):
+> 1. §4.5/§5: eventKind `AgentSession` (EXACT code spelling — capital A, sdk.py/session_indexer.py) + `sessionCaptured` declared an alias of the same concept — both remain valid kinds, no migration.
+> 2. §4.5: `capturedAt` field (transaction time — bi-temporal capture).
+> 3. §4.5: content-addressed Event ID (deterministic MERGE anchor for the agentSession Event).
+> 4. §4.4: `story_arc` field registered (summary = short, story_arc = arc continuation).
+> 5. §3.1: NAND direction policy — extraction-emitted NANDs default `unidirectional`; `bidirectional` only for explicit mutual restatement (SDK creation default stays bidirectional, #807).
+> 6. §4.6/§5: `provenance_spans` Source property + `sourceKind: agentSession` value (credibility-tier inheritance keyed on sourceKind, #398).
+> 7. §3.9: `mitigated_by` predicate registered (existing `mitigate_operator` edge — currently unregistered).
+> 8. §3.4: `references` target extended — Source allowed (producer extension `link_source_to_entity`).
+> 9. §5: `pointKind: event` registered (episodic turn Points — regex capture path, sdk.py:924).
+> 10. §4.1: content-addressed Point ids (`pt_<sha>`) sanctioned as an id form (ULID preference retained).
+> 11. §4.1: `c_cal` (calibrated confidence) + stored `quote` (≤200 chars provenance quote) registered.
+> 12. §4.3: `passes_frequency_gate` registered on Object (S5 gate-result flag).
+> 13. §4.1/§4.5/§4.6: `is_episodic` registered on Point/Event/Source — plus the `:Session` capture node (§4.5 note) (quota exemption discriminator; NOT on Object/Document — plan §4.3 #13 entity set, review P2 PR #973).
+>
+> **Changelog v3.5 (2026-08-11, epic #898 — reification rule):**
+> - §8: Reification rule added — an edge carries an operator only when it needs
+>   mitigation (or is a Point↔Point support/contradict). Structural edges stay
+>   plain and carry confidence as an edge attribute. IMPL/NAND may be direct
+>   Point→Point (operator-less). Direction lives on the operator node when
+>   present, else on the edge. EP note: operator-less edges read direction from
+>   the edge and initialize edge messages directly.
 >
 > **Changelog v3.4 (2026-08-10, issue #690 — status vocabulary reconciliation):**
 > - §5: Point status vocabulary upgraded from narrative note to canonical table
@@ -32,7 +56,19 @@ doc_status: live
 >   (documented derivation cache — see §11) and `sourceDate` (evidence-age clock).
 > - §5: pointKind vocabulary gains `assessment` (agent source evaluations).
 > - §10: recency-modulation decision log (per-field/per-sourceType decay deferred).
-> **Convention:** camelCase throughout. `kind` = classification tag on an entity. `predicate` = named edge between entities.
+> > **Changelog v3.7 (2026-08-12, core hypothesis — state-centric model):**
+> - §2: state-centric model block — the graph stores STATE (Objects + lifecycle
+>   + derived confidence) + POINTS (the logic) + EVENTS (timeline incl.
+>   decision-as-event); decisions are NOT first-class Points.
+> - §5: Point kinds — extraction write kinds = statement/observation/hypothesis;
+>   decision/vision/strategy/plan/goal/target/humanApproval/event marked LEGACY
+>   (write-compat only). Object kinds gain the commitment-state family
+>   (strategy/plan/goal/target). Event kinds gain `occurrence` + `turn`; the
+>   decision-as-event semantics documented.
+> - Pack-mapping item: product-strategy option pointKinds (useCase/userJourney/
+>   jobToBeDone/valueProposition) → objectKinds.
+
+**Convention:** camelCase throughout. `kind` = classification tag on an entity. `predicate` = named edge between entities. Capture-path/pipeline fields keep their code spelling (snake_case) — e.g. `doc_status`, `file_hash`, `is_episodic`, `c_cal`, `story_arc`, `passes_frequency_gate`, `provenance_spans` (v3.6, #909).
 
 ---
 
@@ -63,6 +99,24 @@ Each layer answers a different question. All four are live mechanisms.
 | **Episodic** | What happened when? | Event | Verbs. Append-only, timestamped. Reified middle node: (Subject)-[performs]->(Event)-[produces]->(Object). |
 | **Procedural** | What is the current state of work? | Event + projected status on Object | **Status is derived, not stored.** An Object's status (in_progress, completed, failed) is projected at query time from its event stream — the events are the truth, the status is a read-only projection. |
 
+> **State-centric model (core hypothesis, 2026-08-12 — the graph stores STATE, not decisions):**
+> The record is three layers. **State** — Objects/options carry their lifecycle
+> (promoted/deprecated/superseded — the Episodic layer's events are the truth;
+> status is a read-only projection) and their **confidence** (derived from the
+> attached Points). **Points** — the logic: statements/observations/hypotheses
+> connected to the state they argue about (aboutObject); IMPL/NAND/MITIGATES
+> among them move the object's confidence. **Events** — what happened, for
+> context: occurrences AND the **decision-as-event** (eventKind `decision`,
+> aboutObject → the object(s) it resolved). The graph says *"this state is
+> based on these reasons"* — never *"this decision was made because of these
+> reasons"*. The decision dimension stays queryable as a timeline (events),
+> but decisions are NOT first-class Points. Point kinds `decision`/`vision`/
+> `strategy`/`plan`/`goal`/`target`/`humanApproval`/`event` are LEGACY write
+> kinds (§5) — extraction emits `statement`/`observation`/`hypothesis` Points,
+> Event nodes, and lifecycle writes on Objects. State confidence is derived at
+> read time from the attached Points' EP confidence (§11) — never stored
+> independently on the Object.
+
 **Structural vs Epistemic Edges**
 
 | Edge | Type | Confidence | Example |
@@ -81,13 +135,18 @@ Each layer answers a different question. All four are live mechanisms.
 | Predicate | From → To | Direction | Cardinality | Standard alignment | Meaning |
 |-----------|-----------|-----------|-------------|--------------------|---------|
 | `IMPL` | Point → Point | default bidirectional; optional unidirectional | N-ary | Epistemic (EP confidence) | A supports/implies B. Direction is an explicit operator flag — **default bidirectional**, option to declare unidirectional (source→target only). Not inferred from label. |
-| `NAND` | Point → Point | default bidirectional; optional unidirectional | N-ary | Epistemic (EP confidence) | A contradicts B (logically mutual — "A and B can't both be true"). Default bidirectional; an agent may declare `unidirectional` for a directed attack (attacker's truth penalizes the target, no back-pressure — #753). |
+| `NAND` | Point → Point | default bidirectional; optional unidirectional | N-ary | Epistemic (EP confidence) | A contradicts B (logically mutual — "A and B can't both be true"). Default bidirectional; an agent may declare `unidirectional` for a directed attack (attacker's truth penalizes the target, no back-pressure — #753). **Extraction-emitted NANDs default `unidirectional`** — see extraction policy in the direction-flag note below (#909 §4.3 #5). |
 | `hasPart` | Point → Point | bidirectional (composition) | N-ary | Structural via operator label | A contains B (parts/whole cascade). |
 | `CORRECTS` | Point → Point | unidirectional | 1→1 | — | New point **corrects/replaces** an outdated point (supersession). Marks target `outdated: true`; all edges transfer from old to new. Created by `supersede_point` / `invalidate_point` (sdk.py:448-485). |
 
 > **Supersession semantics:** `CORRECTS` is the structural replacement edge. `supersede_point(old, new)` = mark old `outdated:true` + create `(new)-[:CORRECTS]->(old)` + transfer all old edges (IMPL/NAND/hasPart operators + structural edges) to new. `invalidate_point(id, corrected_by)` = mark outdated + CORRECTS only (no edge transfer). Old point retains only the CORRECTS edge as provenance.
 
 > **Direction flag (code note):** operator direction is an explicit flag on the operator Point. Creation default is **bidirectional** for all op types (#753 — NAND is logically mutual; `unidirectional` is the agent-declared directed attack). Pre-migration operators lacking the property are read as bidirectional (legacy semantics preserved).
+>
+> **Extraction NAND direction policy (epic #909 §4.3 #5 / research addendum §1 — pipeline spec):** the EXTRACTOR explicitly sets direction per this policy; the SDK creation default stays `bidirectional` (#807 — API-user path):
+> - **New-claim-attacks-existing-claim → `unidirectional`** (directed): "you now claim ¬D against D" is an attack on an existing belief — the new claim attacks the old. This is the common, measured-correct case (the one that makes contradiction surfacing work; `nand_precision` A11 measures it).
+> - **Mutual restatement → `bidirectional`**: when both claims are asserted together as mutually exclusive (e.g., the conversation itself declares "A and B can't both be true").
+> - **Default for extraction-emitted NANDs: `unidirectional`** — extraction is always asserting something NEW against something EXISTING; mutual is the rare explicit case.
 
 ### §3.2 Point ↔ Entity (Cross — Semantic ↔ Epistemic)
 
@@ -100,6 +159,8 @@ Per-type edges (chosen over single polymorphic edge — FalkorDB matrix-per-type
 | `aboutEvent` | Point/Document → Event | unidirectional | many→many | `schema:about` (typed) | What Event this describes. Event is a target only — Events don't describe other Events |
 | `aboutPoint` | Event → Point | unidirectional | many→many | `schema:about` (typed) | What Point this Event describes. Event-only edge |
 | `aboutDocument` | Event → Document | unidirectional | many→many | `schema:about` (typed) | What Document this Event describes |
+| `aboutSource` | Point/Document/Event → Source | unidirectional | many→many | `schema:about` (typed) | What Source this describes (e.g., an evaluation of a source). Creatable via `create_edge` (#391); may coexist with `extractedFrom` when the claim's text was also retrieved from that source |
+| `aboutAction` | Point → Point (legacy) | unidirectional | many→many | `schema:about` (typed) | Legacy predicate retained for pre-v3.0 Action edges (Action entity dissolved in v3.0). No automatic producer — creatable only via explicit `create_edge` (#391); endpoints are whatever the resolver finds |
 | `TAGGED` | Point → Tag | unidirectional | many→many | `schema:keywords` | Free-form label on a Point. Tags are `:Tag` nodes (Object subclass, `objectKind: tag`) shared across Points via MERGE. Created by hosted-api point ingestion (hosted_api.py:695-787). ⚠️ **Write-only today — no tag-filter query surfaced yet** (see follow-up). |
 
 > **Legacy:** `aboutEntities` property → per-type `about*` edges. `_create_about_edges()` auto-detects Subject/Object from the legacy property. `schema:about` is polymorphic; we split per-type for graph performance.
@@ -114,7 +175,7 @@ Per-type edges (chosen over single polymorphic edge — FalkorDB matrix-per-type
 
 | Predicate | From → To | Direction | Cardinality | Standard alignment | Meaning |
 |-----------|-----------|-----------|-------------|--------------------|---------|
-| `references` | Source → Entity | unidirectional | 1→many | — | The source document links to / references this entity. Wired in the ingest path — `_upsert_document` links `(Source {url:doc_id})-[:references]->(Document {id:doc_id})` (#205). |
+| `references` | Source → Document/Event/Object/Source | unidirectional | 1→many | — | The source links to / references this entity — target may be a Document, Event, Object, **or another Source** (producer extension in `link_source_to_entity`, #909 §4.3 #8 — previously validated only Document/Event/Object). Wired in the ingest path — `_upsert_document` links `(Source {url:doc_id})-[:references]->(Document {id:doc_id})` (#205); external artifacts referenced in a captured conversation become external Source nodes that the session Source `references` (referential chain, #909). |
 
 `(Point)-[:extractedFrom]->(Source)-[:references]->(Entity)` — layered provenance. Source carries `sourceKind` (extensible source TYPE vocabulary, e.g. `github_issue`, `slack_message`, `document`) and `credibilityTier` (T0-T4 credibility tier — see §4.6, #398).
 
@@ -189,7 +250,11 @@ wasDerivedFrom
 > for kind expansion). All three remain valid for `create_edge()`.
 ```
 
-Epistemic edges (operators): `IMPL`, `NAND` (+ semantic label). About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDocument`.
+Epistemic edges (operators): `IMPL`, `NAND` (+ semantic label).
+
+Mitigation edge: `mitigated_by` — Point → Point (operator → mitigation Point), written by `mitigate_operator` (sdk.py:1613): `(op:Point {is_operator:true})-[:mitigated_by]->(m:Point)`, with the mitigation Point back-linking `-[:IMPL]->` the operator (#909 §4.3 #7 — registered; previously unregistered).
+
+About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDocument`, `aboutSource` (Point/Document/Event → Source), `aboutAction` (legacy).
 
 ---
 
@@ -201,18 +266,21 @@ Epistemic edges (operators): `IMPL`, `NAND` (+ semantic label). About edges: `ab
 
 | Field | Type | Required | ISO/PROV/DC | Impl | Meaning |
 |-------|------|----------|-------------|------|---------|
-| `id` | ULID | ✅ | `dc:identifier` | ✅ | Unique identifier |
+| `id` | ULID | ✅ | `dc:identifier` | ✅ | Unique identifier — ULID preferred (`create_point`); content-addressed `pt_<sha>` ids are a **sanctioned id form** (deterministic — the commit endpoint's idempotency anchor, #909 §4.3 #10) |
 | `content` | string | ✅ | `schema:text` | ✅ | The claim text |
 | `pointKind` | string | ✅ | — | ✅ | Classification tag: statement, decision, vision, strategy, plan, goal, target, observation, hypothesis + pack pointKinds |
 | `is_operator` | bool | — | — | ✅ | true for operator Points |
 | `op_type` | string | — | — | ✅ | IMPL / NAND (operator Points only) |
 | `status` | string | — | `pav:status` | ✅ | Lifecycle: draft, live, retracted, superseded, outdated, archived (#432). **challenged is a derived condition** (presence of a NAND operator edge on a live point), not a stored status (§5). draft inert for computation; retracted/superseded/archived are terminal |
 | `confidence` | float 0..1 | — | — | ⚠️ | EP posterior mean, computed by propagation |
+| `c_cal` | float 0..1 | — | — | ❌ | Calibrated confidence — calibrated counterpart to the EP posterior `confidence` (registered #909 §4.3 #11; written by the calibrated pipeline, slice 5+) |
+| `quote` | string ≤200 | — | — | ⚠️ | Provenance quote — the source text this claim was drawn from; payload-level metadata today (SDK extraction path / EventAPI `provenance()` payloads — extractor.py, api.py), stored Point property per #909 §4.3 #11 (secret-scanned) |
 | `authoredBy` | SubjectID | — | `dc:creator` | ✅ | Who created the claim |
 | `validFrom` / `validTo` | ISO8601 | — | — | ✅ | Temporal validity window |
 | `createdAt` / `updatedAt` | ISO8601 | ✅ | `dc:created` / `dc:modified` | ✅ | Timestamps |
 | `embedding` | vector | — | — | ✅ | Semantic embedding (FTS + vector search) |
 | `speaker` | string | — | — | ✅ | Role tag on episodic turn Points (user/assistant/…) — written by SDK `capture_session` (delta 5), not by hosted capture |
+| `is_episodic` | bool | — | — | ❌ | Quota exemption discriminator — true on episodic turn Points from the regex capture path (the `points` branch counts non-episodic only, #909 §4.3 #13/§4.4; legacy nodes lack the flag — one-query backfill migration ships with #947) |
 
 ### §4.2 Subject
 
@@ -238,7 +306,7 @@ Epistemic edges (operators): `IMPL`, `NAND` (+ semantic label). About edges: `ab
 | `status` | string | — | `pav:status` | ❌ | Projected from event stream (in_progress, completed, failed) — **derived at query time, NOT stored** |
 | `createdAt` | ISO8601 | ✅ | `dc:created` | ✅ | Timestamp (set ON CREATE) |
 | `updatedAt` | ISO8601 | — | `dc:modified` | ❌ | **Not written by `_upsert_object`** — planned follow-up |
-
+| `passes_frequency_gate` | bool | — | — | ❌ | S5 frequency-gate result flag — false entities are still written, flagged (registered #909 §4.3 #12; planned for the capture path, slice 5+) |
 > **Responsibility fields (authoredBy / ownedBy / managedBy) are EDGES, not node properties** — see §3.5-3.6. `_upsert_object` does not store them as properties; they exist as graph edges to Subject nodes.
 
 ### §4.4 Document (subclass of Object)
@@ -254,6 +322,7 @@ Epistemic edges (operators): `IMPL`, `NAND` (+ semantic label). About edges: `ab
 | `content` | string | — | `schema:text` | ✅ | Raw document text |
 | `topics` | list[str] | — | — | ✅ | Searchable topic labels (session/discussion index). FTS-indexed metadata — NOT Points, never EP-participating |
 | `summary` | string | — | — | ✅ | Story-arch summary (bullet "what was done" for captured sessions). Searchable via FTS |
+| `story_arc` | string | — | — | ❌ | Arc continuation of the captured session — `summary` = short ("what was done"), `story_arc` = the full arc continuation (registered #909 §4.3 #4; planned for the capture path, slice 5+) |
 | `doc_status` | string | — | `pav:status` | ✅ | Capture lifecycle: captured (metadata-only) / extracted (full analysis) / draft |
 | `sessionId` | string | — | — | ✅ | Source session identifier (for `documentKind: transcript` captures) |
 | `eventId` | string | — | — | ✅ | Link to the producing Event's log record — 1-hop audit to the mechanism snapshot |
@@ -264,13 +333,17 @@ Epistemic edges (operators): `IMPL`, `NAND` (+ semantic label). About edges: `ab
 
 | Field | Type | Required | ISO/PROV/DC | Impl | Meaning |
 |-------|------|----------|-------------|------|---------|
-| `eventId` | ULID | ✅ | `dc:identifier` | ✅ | Unique occurrence ID |
-| `eventKind` | string | ✅ | — | ✅ | meeting, decision, experiment, deployment, review, friction, extraction, documentCreated, roleCreated, pointAdded, sessionCaptured + pack eventKinds |
+| `eventId` | ULID / content-addressed | ✅ | `dc:identifier` | ✅ | Unique occurrence ID — ULID by default; the **agentSession Event uses a content-addressed form** (hash of session_id + captured_at — deterministic MERGE anchor, #909 §4.3 #3) |
+| `eventKind` | string | ✅ | — | ✅ | meeting, decision, experiment, deployment, review, friction, extraction, documentCreated, roleCreated, pointAdded, sessionCaptured, AgentSession + pack eventKinds |
 | `format` | string | — | `dc:format` | ✅ | Storage format (jsonl default, markdown) |
 | `startedAt` / `endedAt` | ISO8601 | — | `prov:startedAtTime` / `schema:startDate` | ✅ | Temporal extent |
+| `capturedAt` | ISO8601 | — | — | ❌ | Transaction time of the capture — bi-temporal complement to `startedAt`/`endedAt` (valid time). Registered #909 §4.3 #2; written by the agentSession capture path (endpoint payload field, slice 5) |
 | `subject` | SubjectID | — | `prov:wasAssociatedWith` (inverse) | ✅ | Who performed the event (mirrors `performs` edge) |
 | `object_name` / `object_type` | string | — | `prov:used` | ✅ | What was acted on / produced |
 | `file_hash` | string | — | — | ✅ | SHA-256 of the ingested file's raw bytes — ingest idempotency anchor (`ingest_corpus` skips byte-identical re-ingests; written by the DocumentCreated/AgentSession ingest paths, #330) |
+| `is_episodic` | bool | — | — | ❌ | Quota exemption discriminator — true on capture-path episodic Events (registered #909 §4.3 #13; planned for the capture path, slice 5+) |
+
+> **agentSession Event (#909 §4.3 #1):** the canonical eventKind for session-capture Events is **`AgentSession`** — EXACT code spelling (capital A; sdk.py `ingest_corpus`, session_indexer.py); `sessionCaptured` (the core kind still written by the regex capture path) is an **alias of the same concept** — both remain valid kinds, **no migration**. The capture graph's `:Session` node (session container, `CONTAINS` → turn Points) also carries `is_episodic: true` — the quota `sessions` branch counts `MATCH (s:Session)` (plan §4.4, slice 2).
 
 ### §4.6 Source
 
@@ -285,6 +358,8 @@ Epistemic edges (operators): `IMPL`, `NAND` (+ semantic label). About edges: `ab
 | `updatedAt` | ISO8601 | — | `dc:modified` | ✅ | Last modified (set ON MATCH by `_upsert_source`) |
 | `externalId` | string | — | `dc:identifier` (external) | ⚠️ | System-of-record ID (Slack ts, GitHub issue #) |
 | `sourceDate` | ISO8601 | — | `dc:date` | ⚠️ | Evidence-age clock for recency decay (falls back to `ingestedAt` — the pipeline-arrival proxy, #398) |
+| `provenance_spans` | JSON | — | — | ❌ | Window spans derived from the capture path's `provenance_refs` (plan-defined, #909 §4.3 #6; written by the capture path, slice 5+) |
+| `is_episodic` | bool | — | — | ❌ | Quota exemption discriminator — true on the session Source (registered #909 §4.3 #13; planned for the capture path, slice 5+) |
 | `reliability` | float 0..1 | — | — | ⚠️ | DERIVED query-time projection (mean of the modulated Beta prior) — documented cache, never authoritative (v3.2, #398) |
 | `reliabilityComponents` | JSON | — | — | ⚠️ | Cache metadata: tier, decay, factor, assessment_count, derivation time (#398) |
 | `reliability_derived_at` | ISO8601 | — | — | ⚠️ | Cache freshness stamp (#398) |
@@ -305,6 +380,8 @@ Epistemic edges (operators): `IMPL`, `NAND` (+ semantic label). About edges: `ab
 | format | — | — | — | format | format | — |
 | aboutEdges | ✅ | — | ✅ | ✅ | ✅ | — |
 | temporal | validFrom/To | — | — | — | startedAt/endedAt | — |
+| is_episodic | ✅ | — | ❌ | — | ✅ | ✅ |
+| passes_frequency_gate | — | — | ❌ | ❌ (inherits Object) | — | — |
 
 ---
 
@@ -313,22 +390,46 @@ Epistemic edges (operators): `IMPL`, `NAND` (+ semantic label). About edges: `ab
 ### Point Kind Vocabulary (core)
 
 ```
-statement, decision, vision, strategy, plan, goal, target, observation, hypothesis,
-humanApproval   # #531: decision Point for a filed human approval
+statement, observation, hypothesis    # the LOGIC layer — extraction write kinds (state-centric, 2026-08-12)
+decision, vision, strategy, plan, goal, target, humanApproval, event   # LEGACY write kinds (write-compat only)
 ```
+> **State-centric alignment (2026-08-12):** Points are the LOGIC layer only.
+> `decision`/`humanApproval` are TIMELINE kinds → Event nodes (eventKind
+> `decision`/`humanApproval`); `vision`/`strategy`/`plan`/`goal`/`target` are
+> STATE kinds → Object kinds (commitment-state family, below); `event` is
+> removed (issue #1013 — episodic records are Event nodes with eventKind
+> `occurrence`/`turn`). The legacy kinds remain valid write kinds for
+> compatibility; extraction never emits them.
 
 ### Object Kind Vocabulary (core)
 
 ```
-Project, WorkItem, document, tag, user, skill, tool, agent, workflow, agreement, standard, other
+Project, WorkItem, document, tag, user, skill, tool, agent, workflow, agreement, standard, other,
+strategy, plan, goal, target    # commitment-state family (state-centric, 2026-08-12) — states that
+                                # commitments produce; carry lifecycle + derived confidence
 ```
+> **State-centric alignment (2026-08-12):** `strategy`/`plan`/`goal`/`target`
+> are STATE objects (superseded when a new commitment lands — the old strategy
+> is deprecated, the new one promoted). Pack pointKinds used as options
+> (product-strategy: useCase, userJourney, jobToBeDone, valueProposition) are
+> OPTION/STATE kinds — pack-mapping item: promote to objectKinds (near-miss
+> convention until the pack amendment).
 
 ### Event Kind Vocabulary (core)
 
 ```
 meeting, decision, experiment, deployment, review, friction, extraction,
-documentCreated, roleCreated, pointAdded, sessionCaptured, humanApproval  # #531
+documentCreated, roleCreated, pointAdded, sessionCaptured, AgentSession, humanApproval,  # #531
+occurrence, turn    # state-centric (2026-08-12): occurrence = generic extracted occurrence;
+                    # turn = capture turn records (replaces pointKind 'event', issue #1013)
 ```
+> **State-centric alignment (2026-08-12):** eventKind `decision` is the
+> TIMELINE record of a commitment (the resolution is expressed as lifecycle
+> writes on the state objects); `occurrence` covers extracted happenings;
+> `turn` covers capture turn records. The Episodic layer is the truth for
+> lifecycle: Object status is projected from its event stream (§2).
+
+> **#909 §4.3 #1:** `AgentSession` (EXACT code spelling — capital A; sdk.py `ingest_corpus`/session_indexer.py) is the canonical kind for session-capture Events; `sessionCaptured` (the core kind written by the regex capture path) is an **alias of the same concept** — both remain valid kinds, **no migration**.
 
 ### Document Kind Vocabulary (core)
 
@@ -358,6 +459,8 @@ T0 (meta-analysis), T1 (peer-reviewed), T2 (expert), T3 (anecdotal), T4 (unverif
 > (docs/ep-source-credibility-experiment.md §1.1).
 
 > **Expansion-pack kinds live in the packs, not here.** Pack-declared kinds (dev:epic, product-strategy:product, etc.) are defined in their pack manifests (§9) and registered at load time via the pack registry. This file documents only the core vocabulary; it is not the home for pack kinds.
+
+> **#909 §4.3 #6:** `sourceKind: agentSession` is a registered source-type VALUE (the four-node capture model's session Source — the provenance bridge — carries it; the value belongs to the extensible sourceKind vocabulary above, alongside github_issue/slack_message/linear_card/…). Credibility-tier inheritance is keyed on **sourceKind** (#398): the tier resolves via the kind's registered tier default (`register_source_kind_default`) or an explicit `credibilityTier` assignment; unregistered kinds stay neutral (no inheritance).
 
 ### Point Status Vocabulary (canonical, #432/#690)
 
@@ -423,7 +526,33 @@ Bidirectional: querying `dev:issue` also returns `pm:task`, and vice versa.
 
 ## §8. Semantic-Epistemic Edge Model
 
-Every relationship operates on two layers through a single operator Point:
+A relationship operates on two layers — **semantic** (relation type) and **epistemic**
+(confidence / contradiction). It carries an operator **only when it needs one**.
+
+#### Reification rule — when an edge gets an operator
+
+**An edge carries an operator iff it needs mitigation, or is a Point↔Point
+support/contradict.** All other edges stay plain and carry confidence as an
+edge attribute.
+
+| Edge | Operator? | Confidence |
+|---|---|---|
+| Point↔Point support / contradict (IMPL/NAND) | **Yes** | EP over the IMPL/NAND edge |
+| Any edge needing mitigation (+/− relevance) | **Yes** — mitigations attach to the operator | EP over IMPL/NAND |
+| Structural edge without mitigation (about\*, performs/produces/uses, memberOf/ownedBy, provenance) | **No** — plain edge | confidence edge attribute |
+
+- **Operator-less propagation:** an IMPL/NAND edge may be direct Point→Point
+  (no operator); EP propagates over it the same way.
+- **Direction:** `bidirectional` (default) / `unidirectional`. Lives on the
+  operator node when present, else on the edge. EP reads the operator node
+  first, falls back to the edge.
+- **Lazy promotion:** a plain edge gains an operator only when mitigation
+  becomes needed.
+- **EP:** for operator-less edges, EP reads direction from the edge and
+  initializes the edge message directly (operator-mediated edges compute
+  messages on operator update).
+
+Operator-mediated case (support/contradict, with mitigation anchor):
 
 ```
 Semantic:   (Feature) ──[addresses]──→ (CustomerNeed)    ← operator.label
@@ -532,7 +661,9 @@ supersede_point / invalidate_point          (§3.1: mark old outdated:true,
 
 Direction-aware EP (§3.1, #86) is the prerequisite that makes reverse
 traversal well-defined: IMPL is unidirectional (source→target), NAND
-symmetric, hasPart bidirectional — `_affected_claims` follows these directions.
+symmetric by default (directed `unidirectional` NANDs traverse one-way
+per §3.1 — extraction-emitted NANDs default directed, #909), hasPart
+bidirectional — `_affected_claims` follows these directions.
 
 ---
 

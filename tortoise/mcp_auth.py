@@ -81,6 +81,8 @@ ERR_UNAUTHORIZED = -32001
 ERR_RATE_LIMIT = -32002
 ERR_EXCLUDED = -32004
 ERR_REGISTRY = -32005
+# #308 (R5): suspended team — mirrors REST 403 SUSPENDED (appeal link in data)
+ERR_SUSPENDED = -32006
 
 
 def _jsonrpc_error(code: int, message: str, data: dict | None = None,
@@ -141,6 +143,13 @@ class TeamResolutionMiddleware(BaseHTTPMiddleware):
         now = time.time()
         cached = self._cache.get(token)
         if cached and now - cached[0] < 60:
+            # #308 (delta 14): a suspension signal forces a FRESH resolution —
+            # a cached entry can never serve a suspended team. The set is a
+            # cache-invalidation signal only; durable suspended_at decides.
+            from tortoise.abuse import is_suspended_signal
+            if is_suspended_signal(cached[1].get("team_id") or ""):
+                cached = None
+        if cached and now - cached[0] < 60:
             team, limits = cached[1], cached[2]
             self._cache.move_to_end(token)  # true LRU
         else:
@@ -172,6 +181,34 @@ class TeamResolutionMiddleware(BaseHTTPMiddleware):
                     "Expected format: Authorization: Bearer tt_<key>",
                     status=401,
                 )
+            # #308 (R5): durable suspension check — the sole rejection
+            # authority. Pop the LRU entry so a re-resolution is required
+            # after un-suspension; clear the signal when the fresh
+            # resolution says the team is NOT suspended (AC8 self-heal).
+            from tortoise.abuse import (appeal_url, clear_suspended,
+                                        is_suspended_signal, suspended_message)
+            suspended_at = team.get("suspended_at")
+            if suspended_at is None and not is_supabase_enabled():
+                # Registry mode: apikey_verify returns no suspension state —
+                # read the durable Team prop the abuse store writes (delta 4).
+                try:
+                    sdk = await self._get_registry_sdk()
+                    rows = sdk._get_registry().query(
+                        "MATCH (t:Team {id: $id}) RETURN t.suspended_at",
+                        params={"id": team.get("team_id")},
+                    ).result_set
+                    suspended_at = rows[0][0] if rows else None
+                except Exception:
+                    suspended_at = None  # best-effort selfhost enforcement
+            if suspended_at is not None:
+                self._cache.pop(token, None)
+                return _jsonrpc_error(
+                    ERR_SUSPENDED, suspended_message(),
+                    {"code": "SUSPENDED", "appeal_url": appeal_url()},
+                    status=403,
+                )
+            if is_suspended_signal(team.get("team_id") or ""):
+                clear_suspended(team.get("team_id") or "")
             if is_supabase_enabled():
                 # The Supabase resolution already carries tier/quota from the
                 # teams row (one round-trip) — use it directly as the limits
@@ -191,6 +228,20 @@ class TeamResolutionMiddleware(BaseHTTPMiddleware):
         _current_team_id.set(team["team_id"])
         _current_team_limits.set(limits)
         _transport_mode.set("http")
+        # #308 (R4, delta 10): geo check on EVERY post-auth request —
+        # cache-hit and cache-miss alike, so an IP-rotation burst cannot ride
+        # the 60s LRU past detection. Best-effort; in-process seen-cache makes
+        # the hot path allocation-free (durable lookup once/team/24h).
+        try:
+            from tortoise import abuse as _abuse
+            if not _abuse.abuse_disabled():
+                country = _abuse.resolve_country(request.headers)
+                if country and team.get("team_id"):
+                    await asyncio.to_thread(
+                        _abuse.check_new_country, team["team_id"], country,
+                        _abuse.get_engine().store)
+        except Exception:
+            pass  # best-effort — geo telemetry never breaks the request
         # No .reset() needed: Starlette creates a fresh asyncio task per request;
         # ContextVars are copy-on-write per task (verified by
         # test_contextvar_not_leaked_to_next_request).

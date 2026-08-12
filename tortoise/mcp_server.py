@@ -17,10 +17,12 @@ from fastmcp.exceptions import (AuthorizationError, FastMCPError, ToolError,
 from mcp.types import ToolAnnotations
 from pydantic import ValidationError as PydanticValidationError
 from tortoise.auth import is_dev_mode as _is_dev_mode
+from tortoise.config import is_db_uri as _is_db_uri
 from tortoise.sdk import TortoiseSDK
 from tortoise import monitoring
-from tortoise.mcp_auth import (_current_team_id, _transport_mode, _get_team_sdk,
-                               HTTP_ALLOWED, ERR_EXCLUDED)
+from tortoise.mcp_auth import (_current_team_id, _current_team_limits,
+                               _transport_mode, _get_team_sdk,
+                               HTTP_ALLOWED, ERR_EXCLUDED, SELFHOST_TEAM_ID)
 
 _log = logging.getLogger(__name__)
 
@@ -211,6 +213,7 @@ async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None,
         return await _original_call_tool(name, arguments, version=version,
                                          run_middleware=False, task_meta=task_meta)
     team_id = _current_team_id.get() or ""
+    maybe_record_mcp_read(name, team_id, _current_team_limits.get())
     status, error_kind = "ok", None
     t0 = _time.perf_counter()
     try:
@@ -335,11 +338,26 @@ _QUOTA_GATED: frozenset[str] = frozenset({
     # edge-creating tools — edge growth is the same graph-flood family
     "tortoise_create_edge", "tortoise_supersede", "tortoise_invalidate",
     "tortoise_retract_point",
+    # epic #888 W2 consolidated write surface
+    "tortoise_create_entity", "tortoise_update", "tortoise_operator_action",
     # delegates to hosted_api._seed_demo_graph (creates the 4-layer demo graph)
     "tortoise_onboarding_demo_create",
     # #684: node-creating tools that were missed in the original #329 audit
     "tortoise_file_human_approval",  # creates Event + decision Point + IMPL edges
     "tortoise_assess_source",        # creates assessment Point
+})
+
+
+# #308 (R3, scoping delta 11): the explicit WRITE set for read-velocity
+# classification — tools/call for a tool NOT in this set counts as a read.
+# NOT derived as the complement of _QUOTA_GATED: tortoise_ingest is
+# _quota_gated-wrapped but absent from that frozenset, and the demo-create
+# tool writes Points via _enforce_quota without the wrapper. Membership is
+# asserted by an introspective test (plan Task 11) so a new write tool cannot
+# silently be counted as a read.
+WRITE_TOOL_NAMES: frozenset[str] = _QUOTA_GATED | frozenset({
+    "tortoise_ingest",               # bulk write (wrapped, not in _QUOTA_GATED)
+    "tortoise_onboarding_demo_create",  # seeds the 4-layer demo graph
 })
 
 
@@ -395,7 +413,7 @@ def _enforce_quota(resource: str = "points") -> None:
     enforce_team_limit(limits, resource, sdk=_get_team_sdk())
 
 
-def _quota_gated(fn, resource: str = "points"):
+def _quota_gated(fn, resource: str = "points", abuse_weight=None):
     """Wrap a bound SDK method with a pre-write quota check + metering.
 
     Preserves the bound-callable style (_safe(_get_team_sdk().name, ...)):
@@ -405,6 +423,12 @@ def _quota_gated(fn, resource: str = "points"):
     #681: after a successful write (fn returns without raising), records a
     write op for overage metering. Best-effort — metering failures are
     swallowed and never block the tool.
+
+    #308 (R1, scoping delta 8): ``abuse_weight`` records a WEIGHTED
+    point_create event after a successful Point-creating write — int for a
+    fixed weight, or callable(result, args, kwargs) -> int for bulk ops
+    (ingest/checkpoint/file_decision). Tools that do not create Points pass
+    None and record nothing (an edit/update burst must never trip R1).
     """
     def _gated(*args, **kwargs):
         _enforce_quota(resource)
@@ -417,10 +441,43 @@ def _quota_gated(fn, resource: str = "points"):
                 limits = _current_team_limits.get() or {}
                 from tortoise.metering import record_write_ops
                 record_write_ops(team_id, tier=limits.get("tier"))
+                # #308 (R1): weighted point_create recording + evaluation.
+                # The engine piggybacks R2 evaluation on the same call.
+                if abuse_weight is not None and not _abuse_off():
+                    n = (int(abuse_weight(result, args, kwargs) or 0)
+                         if callable(abuse_weight) else int(abuse_weight))
+                    if n > 0:
+                        from tortoise import abuse as _abuse
+                        _abuse.get_engine().record_point_create(team_id, n)
         except Exception:
             pass  # best-effort — never block the tool
         return result
     return _gated
+
+
+def _abuse_off() -> bool:
+    try:
+        from tortoise.abuse import abuse_disabled
+        return abuse_disabled()
+    except Exception:
+        return True
+
+
+def maybe_record_mcp_read(name: str, team_id: str, limits: dict | None) -> None:
+    """#308 (R3, scoping delta 11): read-velocity counting for non-write
+    tools/call. Explicit write set (WRITE_TOOL_NAMES) — writes never count
+    as reads. key_id rides the limits ContextVar (Supabase resolutions carry
+    it; registry resolutions may not → per-team counting only there).
+    Best-effort: telemetry never breaks the tool call."""
+    try:
+        if not team_id or team_id == SELFHOST_TEAM_ID or _abuse_off():
+            return
+        if name in WRITE_TOOL_NAMES:
+            return
+        from tortoise import abuse as _abuse
+        _abuse.record_read((limits or {}).get("key_id"), team_id)
+    except Exception:
+        pass
 
 
 def _safe(fn, *args, **kwargs):
@@ -453,7 +510,7 @@ def _safe(fn, *args, **kwargs):
                     "Options: (1) self-hosted authenticated MCP — run "
                     "'tortoise serve --http' (tenant mode; bootstrap a key with "
                     "'tortoise key create'); (2) hosted — point your MCP client "
-                    "at https://api.premiselabs.co/mcp with 'Authorization: "
+                    "at https://api.premiselabs.co/mcp/ with 'Authorization: "
                     "Bearer <tt_key>'; (3) local stdio dev mode — unset "
                     "TORTOISE_API_KEY."
                 )
@@ -549,7 +606,7 @@ def tortoise_create_point(kind: str, content: str,
             if not isinstance(t, str) or not t.strip() or len(t) > 200:
                 return {"error": f"invalid tag value: {t!r} (must be a non-empty string ≤ 200 chars)"}
     merged["dedup"] = dedup
-    return _safe(_quota_gated(_get_team_sdk().create_point, "points"), kind, content, **merged)
+    return _safe(_quota_gated(_get_team_sdk().create_point, "points", abuse_weight=1), kind, content, **merged)
 
 
 def tortoise_query(kind: str | None = None,
@@ -558,23 +615,85 @@ def tortoise_query(kind: str | None = None,
                    order_by: str | None = None,
                    min_confidence: float | None = None,
                    entity_type: str = "point",
-                   limit: int = 100) -> list[dict] | dict:
-    """Query points by pointKind and/or property filters.
+                   tag: str | None = None,
+                   include_retracted: bool = False,
+                   offset: int | None = None,
+                   limit: int | None = None,
+                   page: int | None = None) -> list[dict] | dict:
+    """Query points by pointKind and/or property filters — structural exact-match
+    retrieval for known shapes (Epic #888 consolidation of paginated_query +
+    query_points_by_tag into this one tool).
 
-    When text is provided, routes through tortoise_fts_query() for hybrid search.
-    When text is None, uses existing structural query.
-    entity_type: 'point' (default), 'event', 'subject', 'document', 'object', 'operator', or 'source'.
+    - Structural path (text=None): property-filter query via sdk.query().
+    - tag=<name>: filter Points by TAGGED edge (previously
+      tortoise_query_points_by_tag). Tag mode takes precedence over text and
+      ignores kind/filters/min_confidence/entity_type/order_by.
+    - Pagination: pass offset=/limit= (or 1-based page=). When any pagination
+      param is set, returns {results, total, hasMore} (previously
+      tortoise_paginated_query); a plain list is returned otherwise. Not
+      combinable with text= (fts has no offset/skip) — error dict returned.
+    - text=<query>: routes through tortoise_fts_query() for hybrid search
+      (unchanged behavior; limit defaults to 100).
+    - include_retracted=True surfaces tombstones on every path (structural,
+      paginated, and tag modes); default False excludes them.
 
-    When results are empty and a kind filter was provided, a 'suggestion'
-    key is added to the response with a hint or "did you mean" suggestion.
+    Validation: page must be >= 1, offset >= 0, limit >= 1 — violations return
+    a structured error dict.
+
+    Use tortoise_query for known shapes; use tortoise_search for semantic
+    relevance; use tortoise_get_point for a single known ID.
     """
     filters = _parse(filters)
+    if page is not None and page < 1:
+        return {"error": "page must be >= 1 (1-based), got " + str(page)}
+    if offset is not None and offset < 0:
+        return {"error": "offset must be >= 0, got " + str(offset)}
+    if limit is not None and limit < 1:
+        return {"error": "limit must be >= 1, got " + str(limit)}
+    # Resolve include_retracted (#888): explicit param wins; else the filters-dict
+    # value (don't silently drop a caller's True intent — review P2-2); else False.
+    # Guard non-dict filters: a malformed-JSON string from _parse passes the substring
+    # `in` check but has no .pop -> unguarded AttributeError (review P1-1).
+    if isinstance(filters, dict) and "include_retracted" in filters:
+        if not include_retracted:
+            include_retracted = bool(filters.pop("include_retracted"))
+        else:
+            filters.pop("include_retracted")
+    paginated = offset is not None or page is not None
+    eff_limit = limit if limit is not None else (20 if paginated else 100)
+    if tag is not None:
+        rows = _safe(_get_team_sdk().query_points_by_tag, tag)
+        if not isinstance(rows, list):
+            return rows
+        # query_points_by_tag has no retracted exclusion in the SDK — mirror
+        # the tombstone contract of the other paths here (Epic #888).
+        if not include_retracted:
+            rows = [r for r in rows if r.get("status") != "retracted"]
+        if not paginated:
+            return rows
+        eff_offset = offset if offset is not None else 0
+        if page is not None:
+            eff_offset = (page - 1) * eff_limit
+        total = len(rows)
+        return {"results": rows[eff_offset:eff_offset + eff_limit],
+                "total": total,
+                "hasMore": eff_offset + eff_limit < total}
     if text:
+        if paginated:
+            return {"error": "offset/page not supported with text — use limit only, or tortoise_search"}
         return _safe(_get_team_sdk().tortoise_fts_query, text, kind=kind,
-                     entity_type=entity_type, limit=limit,
+                     entity_type=entity_type, limit=eff_limit,
                      min_confidence=min_confidence or 0.0,
                      order_by=order_by or "relevance")
-    result = _safe(_get_team_sdk().query, kind, **(filters or {}))
+    if paginated:
+        eff_offset = offset if offset is not None else 0
+        if page is not None:
+            eff_offset = (page - 1) * eff_limit
+        return _safe(_get_team_sdk().paginated_query, kind, skip=eff_offset,
+                     limit=eff_limit, include_retracted=include_retracted,
+                     **(filters or {}))
+    result = _safe(_get_team_sdk().query, kind,
+                   include_retracted=include_retracted, **(filters or {}))
     # If empty results and a kind filter was provided, attach suggestion
     if isinstance(result, list) and len(result) == 0 and kind is not None:
         from tortoise.query_suggestions import compute_suggestion
@@ -586,50 +705,70 @@ def tortoise_query(kind: str | None = None,
 
 def tortoise_paginated_query(kind: str | None = None,
                              skip: int = 0, limit: int = 20,
-                             filters: Any = None) -> dict:
-    """Query points with SKIP/LIMIT pagination. Returns {results, total, hasMore}."""
+                             filters: Any = None,
+                             include_retracted: bool = False) -> dict:
+    """DEPRECATED (Epic #888) — thin alias for tortoise_query(offset=, limit=).
+
+    Kept for one release with grace; will be removed in the next release.
+    Migrate to: tortoise_query(kind=..., offset=skip, limit=limit, filters=...)
+    """
     filters = _parse(filters)
-    return _safe(_get_team_sdk().paginated_query, kind, skip=skip, limit=limit,
-                 **(filters or {}))
+    return tortoise_query(kind=kind, filters=filters, offset=skip, limit=limit,
+                          include_retracted=include_retracted)
 
 
 def tortoise_check_structure() -> list[dict]:
-    """Check Gate 0→4 chain integrity (orphans, dangling refs)."""
+    """Check Gate 0→4 chain integrity (orphans, dangling refs).
+    Alias → overview(section='structure_check') (epic #888 W3)."""
     return _safe(_get_team_sdk().check_structure)
 
 
 def tortoise_summarize_structure() -> dict:
-    """Count points per Gate (by pointKind). Returns {gateN_*, total}."""
+    """Count points per Gate (by pointKind). Returns {gateN_*, total}.
+    Alias → overview(section='structure') (epic #888 W3)."""
     return _safe(_get_team_sdk().summarize_structure)
 
 
 def tortoise_list_pointkinds() -> list[dict]:
-    """List all pointKinds present in the graph with counts. What EXISTS."""
+    """List all pointKinds present in the graph with counts. What EXISTS.
+    Alias → overview(section='pointkinds') (epic #888 W3)."""
     return _safe(_get_team_sdk().list_pointkinds)
 
 
 def tortoise_list_sources() -> list[dict]:
-    """List all Sources with point counts. Where data came FROM."""
+    """List all Sources with point counts. Where data came FROM.
+    Alias → overview(section='sources') (epic #888 W3)."""
     return _safe(_get_team_sdk().list_sources)
 
 
 def tortoise_list_namespaces() -> list[dict]:
-    """List installed pack namespaces."""
+    """List installed pack namespaces.
+    Alias → overview(section='namespaces') (epic #888 W3)."""
     return _safe(_get_team_sdk().list_namespaces)
 
 
 def tortoise_list_tags() -> list[dict]:
-    """List all Tag names with count of tagged Points. Where tags are USED."""
+    """List all Tag names with count of tagged Points. Where tags are USED.
+    Alias → overview(section='tags') (epic #888 W3)."""
     return _safe(_get_team_sdk().list_tags)
 
 
 def tortoise_query_points_by_tag(tag: str) -> list[dict]:
-    """Return Points connected to a Tag via TAGGED edge."""
-    return _safe(_get_team_sdk().query_points_by_tag, tag)
+    """DEPRECATED (Epic #888) — thin alias for tortoise_query(tag=...).
+
+    Kept for one release with grace; will be removed in the next release.
+    Migrate to: tortoise_query(tag=tag)
+
+    Note: passes include_retracted=True to preserve this tool's pre-#888 behavior
+    (raw tag results incl. tombstones); the new tortoise_query(tag=...) default
+    excludes retracted points.
+    """
+    return tortoise_query(tag=tag, include_retracted=True)
 
 
 def tortoise_get_point(id: str) -> dict:
-    """Get a single Point by ID. Returns all properties, or empty dict."""
+    """Get a single Point by ID. Returns all properties, or empty dict.
+    Alias → get(id, type='point') (epic #888 W3)."""
     return _safe(_get_team_sdk().get_point, id)
 
 
@@ -697,6 +836,128 @@ def tortoise_search(query: str | None = None, kind: str | None = None,
                  threshold=threshold, limit=limit,
                  entity_type=entity_type,
                  min_confidence=min_confidence, order_by=order_by)
+
+
+# ── Recall — epistemic intents (epic #898) ─────────────────────
+
+# UC1 default exponents/weights for the multiplicative gate (Wave A).
+_RECALL_STATE_DEFAULTS = {"relevance_exp": 1.0, "confidence_exp": 1.0,
+                          "centrality_weight": 0.10}
+# UC2 gap thresholds (Wave B).
+_RECALL_GAPS_DEFAULTS = {"min_load": 1, "max_support": 2}
+# UC3 subgraph expansion (Wave B).
+_RECALL_SUBGRAPH_DEFAULTS = {"depth": 2, "completeness": "full"}
+# Valid recall modes (preset + override pattern, #898 design-decision comment).
+_RECALL_MODES = ("state", "gaps", "subgraph", "custom")
+
+
+def tortoise_recall(query: str | None = None,
+                    mode: str = "state",
+                    kind: str | None = None,
+                    limit: int | None = None,
+                    include_superseded: bool = False,
+                    min_confidence: float = 0.0,
+                    relevance_exp: float | None = None,
+                    confidence_exp: float | None = None,
+                    centrality_weight: float | None = None,
+                    seed: str | None = None,
+                    depth: int | None = None,
+                    completeness: str | None = None,
+                    min_load: int | None = None,
+                    max_support: int | None = None,
+                    max_nodes: int | None = None) -> dict:
+    """Epistemic recall — four intents via mode (preset + override pattern).
+
+    mode="state" (default, UC1): "what is true and high-confidence right
+    now". Multiplicative confidence gate
+    (score = relevance^a × confidence^b × (1 + w_c·centrality)), excludes
+    superseded/deprecated/retracted by default (include_superseded=True
+    brings them back), object-centric (Objects + the Points about them
+    ranked together), surfaces the most important arguments (operators),
+    high-contention NANDs and mitigations, and flags contested claims with
+    attached counter-evidence (never rank-penalized).
+
+    mode="gaps" (UC2): load-bearing but under-supported claims — the weak
+    links of a reasoning cycle. Graph-structure query (epistemic load vs
+    epistemic support): score = load / (1 + support), with load = outgoing
+    IMPL + outgoing NAND edges and support = incoming IMPL +
+    extractedFrom→Source edges (reads IMPL/NAND whether operator-mediated
+    or direct — reification rule). Requires ``query`` (topic scope) or
+    ``kind`` (population scan). Preset: min_load=1, max_support=2, limit=20
+    (all overridable).
+
+    mode="subgraph" (UC3): the COMPLETE connected subgraph for a
+    seed/topic — completeness-optimized (high recall, precision secondary),
+    used before connecting a new document. Requires ``seed`` (node id,
+    Source url, or topic text). Returns {nodes, edges, stats}.
+
+    mode="custom": raw parameters, full control — params pass straight
+    through to the state machinery with NO mode tuning (the underlying
+    function defaults apply to anything unset). Mode-specific params
+    (seed/depth/completeness/min_load/max_support/max_nodes) are NOT
+    applicable to custom (custom is state-shaped).
+
+    Per-mode defaults are set by the preset; every param is individually
+    overridable per call.
+
+    Returns {"mode": ..., "results": [...]} (state/gaps/custom — each result
+    carries the standard SearchResult shape plus recall_ranking /
+    gaps_ranking breakdowns) or {"mode": "subgraph", "nodes": [...],
+    "edges": [...], "stats": {...}}.
+    """
+    if mode not in _RECALL_MODES:
+        return {
+            "mode": mode,
+            "error": f"recall mode {mode!r} not recognized — use "
+                     f"state|gaps|subgraph|custom.",
+        }
+
+    if mode == "gaps":
+        results = _safe(
+            _get_team_sdk().recall_gaps, query, kind=kind,
+            limit=limit if limit is not None else 20,
+            min_load=min_load if min_load is not None else _RECALL_GAPS_DEFAULTS["min_load"],
+            max_support=max_support if max_support is not None else _RECALL_GAPS_DEFAULTS["max_support"],
+            include_superseded=include_superseded,
+        )
+    elif mode == "subgraph":
+        results = _safe(
+            _get_team_sdk().recall_subgraph, seed or query,
+            depth=depth if depth is not None else _RECALL_SUBGRAPH_DEFAULTS["depth"],
+            completeness=completeness if completeness is not None else _RECALL_SUBGRAPH_DEFAULTS["completeness"],
+            max_nodes=max_nodes if max_nodes is not None else 500,
+        )
+    elif mode == "custom":
+        # Raw params, full control — no preset clamping.
+        results = _safe(
+            _get_team_sdk().recall_state, query, kind=kind,
+            limit=limit if limit is not None else 10,
+            include_superseded=include_superseded,
+            min_confidence=min_confidence,
+            relevance_exp=relevance_exp if relevance_exp is not None else _RECALL_STATE_DEFAULTS["relevance_exp"],
+            confidence_exp=confidence_exp if confidence_exp is not None else _RECALL_STATE_DEFAULTS["confidence_exp"],
+            centrality_weight=centrality_weight if centrality_weight is not None else _RECALL_STATE_DEFAULTS["centrality_weight"],
+        )
+    else:  # state
+        defaults = _RECALL_STATE_DEFAULTS
+        results = _safe(
+            _get_team_sdk().recall_state, query, kind=kind,
+            limit=limit if limit is not None else 10,
+            include_superseded=include_superseded,
+            min_confidence=min_confidence,
+            relevance_exp=relevance_exp if relevance_exp is not None else defaults["relevance_exp"],
+            confidence_exp=confidence_exp if confidence_exp is not None else defaults["confidence_exp"],
+            centrality_weight=centrality_weight if centrality_weight is not None else defaults["centrality_weight"],
+        )
+
+    # _safe returns an error dict on SDK exceptions — surface it at the TOP
+    # level so consumers never mis-parse results.
+    if isinstance(results, dict) and "error" in results:
+        return {"mode": mode, **results}
+    if mode == "subgraph":
+        # recall_subgraph returns {nodes, edges, stats} — spread flat.
+        return {"mode": mode, **results}
+    return {"mode": mode, "results": results}
 
 
 # ── EP Belief Propagation (#6908) ────────────────────────────────
@@ -785,7 +1046,7 @@ def tortoise_create_operator(op_type: str, source_id: str, target_ids: Any,
     if isinstance(target_ids, list) and len(target_ids) > MAX_OPERATOR_TARGETS:
         return {"error": f"create_operator target_ids exceed the cap ({MAX_OPERATOR_TARGETS})",
                 "code": ERR_QUOTA}
-    return _safe(_quota_gated(_get_team_sdk().create_operator, "points"), op_type, source_id, target_ids,
+    return _safe(_quota_gated(_get_team_sdk().create_operator, "points", abuse_weight=1), op_type, source_id, target_ids,
                  direction=direction)
 
 
@@ -803,7 +1064,8 @@ def tortoise_annotate_operator(id: str, bias: float, precision: float,
 
 def tortoise_get_operator(id: str) -> dict:
     """Get an operator Point by ID. Returns all properties including annotation dimensions.
-    Raises error if the Point is not an operator."""
+    Raises error if the Point is not an operator.
+    Alias → get(id, type='operator') (epic #888 W3)."""
     point = _safe(_get_team_sdk().get_point, id)
     if isinstance(point, dict) and point and not point.get("is_operator"):
         return {"error": f"Point {id!r} is not an operator"}
@@ -817,7 +1079,7 @@ def tortoise_mitigate_operator(id: str, reason: str, strength: float = 0.5) -> d
     strength: 0-1 — 0=fully neutralized, 1=fully intact (default 0.5).
     Idempotent — second call updates existing mitigation.
     """
-    return _safe(_quota_gated(_get_team_sdk().mitigate_operator, "points"), id, reason, strength)
+    return _safe(_quota_gated(_get_team_sdk().mitigate_operator, "points", abuse_weight=1), id, reason, strength)
 
 
 def tortoise_file_decision(options: Any, evidence: Any,
@@ -844,7 +1106,8 @@ def tortoise_file_decision(options: Any, evidence: Any,
     if isinstance(evidence, list) and len(evidence) > MAX_FILE_DECISION_EVIDENCE:
         return {"error": f"file_decision evidence exceeds the cap ({MAX_FILE_DECISION_EVIDENCE})",
                 "code": ERR_QUOTA}
-    return _safe(_quota_gated(_get_team_sdk().file_decision, "points"), options, evidence, choice)
+    return _safe(_quota_gated(_get_team_sdk().file_decision, "points",
+                          abuse_weight=lambda r, a, k: 1 + len(a[0] or []) + len(a[1] or [])), options, evidence, choice)
 
 
 def tortoise_file_human_approval(approver_id: str, artifact_id: str,
@@ -867,7 +1130,7 @@ def tortoise_file_human_approval(approver_id: str, artifact_id: str,
     Returns {event_id, decision_point_id, impl_operator_ids, confidence_delta}.
     """
     point_ids = _parse(point_ids)
-    return _safe(_quota_gated(_get_team_sdk().file_human_approval, "points"),
+    return _safe(_quota_gated(_get_team_sdk().file_human_approval, "points", abuse_weight=1),
                  approver_id, artifact_id, point_ids, decision_content)
 
 
@@ -885,14 +1148,17 @@ def tortoise_invalidate(id: str, corrected_by_id: str) -> dict:
     return _safe(_quota_gated(_get_team_sdk().invalidate_point, "points"), id, corrected_by_id)
 
 
-def tortoise_supersede(old_id: str, new_id: str) -> dict:
+def tortoise_supersede(old_id: str, new_id: str, transfer_edges: bool = True) -> dict:
     """Atomically replace old Point with new — CORRECTS edge + outdated flag.
 
-    Equivalent to invalidate(old_id, new_id) — marks old outdated,
-    creates CORRECTS edge from new to old.
-    Returns {invalidated, id, corrected_by}.
+    transfer_edges=True (default): full supersede — all edges move from old to
+    new. transfer_edges=False: invalidate behavior — mark old outdated with a
+    CORRECTS edge only (no edge transfer). Absorbs tortoise_invalidate.
+    Returns {invalidated, id, corrected_by} (+ edges_transferred when
+    transfer_edges=True).
     """
-    return _safe(_quota_gated(_get_team_sdk().supersede_point, "points"), old_id, new_id)
+    return _safe(_quota_gated(_get_team_sdk().supersede, "points"),
+                 old_id, new_id, transfer_edges=transfer_edges)
 
 
 def tortoise_retract_point(id: str) -> dict:
@@ -984,11 +1250,18 @@ def main():
                 "Override with TORTOISE_ALLOW_EMBEDDED=1 (test only)."
             )
             sys.exit(1)
+    # #942: embedded FalkorDBLite is SINGLE-WRITER / EVAL-ONLY. `not uri` is
+    # NOT the predicate — _get_sdk treats a bare-path TORTOISE_DB_URI as
+    # embedded (backward compat), and that path must warn too. Placed AFTER
+    # the config-error guard above so a missing-config exit stays clean.
+    # Single-fire: `tortoise serve` stdio and the tortoise-serve console
+    # script both funnel here; no other entrypoint prints it for stdio.
+    if not _is_db_uri(uri):
+        from tortoise._embedded import EMBEDDED_EVAL_BANNER
+
+        print(EMBEDDED_EVAL_BANNER, file=sys.stderr)
     mcp.run(transport="stdio")
 
-
-if __name__ == "__main__":
-    main()
 
 # ── P0 Group 3: Checkpoint, Diary, Status, Ingest ──────────────
 
@@ -1009,7 +1282,8 @@ def tortoise_checkpoint(items: Any,
     if isinstance(items, list) and len(items) > MAX_CHECKPOINT_ITEMS:
         return {"error": f"checkpoint items exceed the batch cap ({MAX_CHECKPOINT_ITEMS})",
                 "code": ERR_QUOTA}
-    return _safe(_quota_gated(_get_team_sdk().checkpoint, "points"), items,
+    return _safe(_quota_gated(_get_team_sdk().checkpoint, "points",
+                          abuse_weight=lambda r, a, k: int((r or {}).get("filed") or 0)), items,
                  agent_name=agent_name, threshold=threshold)
 
 
@@ -1019,7 +1293,7 @@ def tortoise_diary_write(agent_name: str, entry: str,
     """Write an agent diary entry (AAAK format suggested).
     Creates a Point with pointKind=diary, authoredBy=agent.
     """
-    return _safe(_quota_gated(_get_team_sdk().diary_write, "points"), agent_name, entry, topic=topic, wing=wing)
+    return _safe(_quota_gated(_get_team_sdk().diary_write, "points", abuse_weight=1), agent_name, entry, topic=topic, wing=wing)
 
 
 def tortoise_diary_read(agent_name: str, last_n: int = 10,
@@ -1031,7 +1305,8 @@ def tortoise_diary_read(agent_name: str, last_n: int = 10,
 def tortoise_list_graphs() -> list[str]:
     """List graph names. HTTP: only the calling team's own graphs (exact
     team_{team_id} equality — no cross-tenant enumeration). Stdio: full list
-    (operator context)."""
+    (operator context).
+    Alias → overview(section='graphs') (epic #888 W3)."""
     graphs = _safe(_get_team_sdk().list_graphs)
     if not isinstance(graphs, list):
         return graphs
@@ -1046,12 +1321,14 @@ def tortoise_list_graphs() -> list[str]:
 def tortoise_status() -> dict:
     """Graph health + entity counts + FalkorDB connectivity.
     Returns {connected, counts: {Point, Event, ...}, total_entities}.
+    Alias → overview(section='status') (epic #888 W3).
     """
     return _safe(_get_team_sdk().status)
 
 
 def tortoise_health() -> dict:
-    """Health check + basic metrics: graph_size, last_ingest, error_count, uptime."""
+    """Health check + basic metrics: graph_size, last_ingest, error_count, uptime.
+    Alias → overview(section='health') (epic #888 W3)."""
     # #236: route through _safe() so every tool is gated (defense-in-depth;
     # reachable only post-auth over HTTP).
     return _safe(monitoring.metrics)
@@ -1079,12 +1356,14 @@ def tortoise_ingest_corpus(directory: str) -> dict:
 # ── Taxonomy ─────────────────────────────────────────────────
 
 def tortoise_taxonomy() -> dict[str, int]:
-    """Count entities by node label. Returns {Point: N, Event: N, Subject: N, Object: N, Document: N}."""
+    """Count entities by node label. Returns {Point: N, Event: N, Subject: N, Object: N, Document: N}.
+    Alias → overview(section='taxonomy') (epic #888 W3)."""
     return _safe(_get_team_sdk().taxonomy)
 
 
 def tortoise_list_topics(entity_id: str) -> dict:
-    """entityProfile lite for an entity. Returns {id, pointKind, neighbors, neighborCounts}."""
+    """entityProfile lite for an entity. Returns {id, pointKind, neighbors, neighborCounts}.
+    Alias → overview(section='topics', entity_id=...) (epic #888 W3)."""
     return _safe(_get_team_sdk().list_topics, entity_id)
 
 
@@ -1182,7 +1461,8 @@ def tortoise_analyze(question: str,
 # ── P1-3: Staleness Detection ─────────────────────────────────
 
 def tortoise_stale(days: int = 30, limit: int = 50) -> dict:
-    """Find Points not updated in N days. Returns {stale, count, cutoff, limit}."""
+    """Find Points not updated in N days. Returns {stale, count, cutoff, limit}.
+    Alias → overview(section='stale', days=, limit=) (epic #888 W3)."""
     return _safe(_get_team_sdk().stale_points, days=days, limit=limit)
 
 
@@ -1228,6 +1508,65 @@ def tortoise_team_create(name: str) -> dict:
 
 # ── Entity CRUD (ONTOLOGY v2.5) ───────────────────────────────
 
+# ── Write/revise consolidation (epic #888 W2) ──────────────────────
+
+def tortoise_create_entity(type: str, name: str, props: Any = None) -> dict:
+    """Create an entity — type: subject|object|event|document.
+
+    Event entities wire about* edges from aboutSubject/aboutObject/aboutPoint/
+    aboutDocument props. Returns {node, nudges} — nudges suggest IMPL/NAND/
+    mitigate connections to related Points (advisory, not enforced).
+    """
+    props = _parse(props)
+    return _safe(_quota_gated(_get_team_sdk().create_entity, "points"),
+                 type, name, **(props or {}))
+
+
+def tortoise_update(id: str, props: Any = None) -> dict:
+    """Update a Point OR entity by id. Points get point-lifecycle semantics
+    (draft→live promote via status, version increment for Point:Object,
+    status validation); entities get a plain property update."""
+    props = _parse(props)
+    return _safe(_quota_gated(_get_team_sdk().update, "points"),
+                 id, **(props or {}))
+
+
+def tortoise_delete(id: str) -> dict:
+    """Delete a Point or entity by id. DESTRUCTIVE — requires human confirmation."""
+    result = _safe(_get_team_sdk().delete, id)
+    if isinstance(result, dict) and "error" in result:
+        return result
+    return {"deleted": bool(result), "id": id}
+
+
+def tortoise_operator_action(action: str, id: str, reason: str | None = None,
+                             strength: float = 0.5,
+                             bias: float | None = None,
+                             precision: float | None = None,
+                             consistency: float | None = None,
+                             directness: float | None = None) -> dict:
+    """Consolidated operator write action — action=mitigate|annotate.
+
+    mitigate: reason (required) + strength (0-1, default 0.5) — creates/updates
+    the mitigation Point (idempotent). annotate: bias/precision/consistency/
+    directness (all required, 0-1).
+    """
+    if action == "mitigate":
+        if not reason:
+            return {"error": "operator_action(action='mitigate') requires 'reason'"}
+        return _safe(_quota_gated(_get_team_sdk().mitigate_operator, "points", abuse_weight=1),
+                     id, reason, strength)
+    if action == "annotate":
+        dims = (bias, precision, consistency, directness)
+        if any(d is None for d in dims):
+            return {"error": "operator_action(action='annotate') requires "
+                              "bias, precision, consistency, directness"}
+        return _safe(_quota_gated(_get_team_sdk().annotate_operator, "points"),
+                     id, *dims)
+    return {"error": f"operator_action: unknown action {action!r} — "
+                      f"must be 'mitigate' or 'annotate'"}
+
+
 def tortoise_create_subject(name: str, subjectKind: str, props: Any = None) -> dict:
     """Create a Subject node (team, role, organization, person)."""
     props = _parse(props)
@@ -1245,11 +1584,13 @@ def tortoise_create_event(name: str, eventKind: str, props: Any = None) -> dict:
 
 
 def tortoise_get_events(eventKind: str | None = None, limit: int = 20) -> list[dict]:
-    """Get recent Events, optionally filtered by eventKind (e.g. 'AgentSession')."""
+    """Get recent Events, optionally filtered by eventKind (e.g. 'AgentSession').
+    Alias → get(id, type='events', limit=) (epic #888 W3)."""
     return _safe(_get_team_sdk().get_events, eventKind=eventKind, limit=limit)
 
 def tortoise_get_session(session_id: str) -> dict:
-    """Get a single agent session Event by session_id."""
+    """Get a single agent session Event by session_id.
+    Alias → get(id, type='session') (epic #888 W3)."""
     return _safe(_get_team_sdk().get_session, session_id)
 
 def tortoise_index_sessions(directory: str, extract_metadata: bool = True, llm_model: str | None = None) -> dict:
@@ -1347,7 +1688,8 @@ def tortoise_set_source_tier(url: str, tier: str) -> dict:
     return _safe(_get_team_sdk().set_source_tier, url, tier)
 
 def tortoise_get_entity(id: str) -> dict:
-    """Get any entity by ID, eventId, or url."""
+    """Get any entity by ID, eventId, or url.
+    Alias → get(id, type='entity') (epic #888 W3)."""
     return _safe(_get_team_sdk().get_entity, id)
 
 def tortoise_update_entity(id: str, props: Any = None) -> dict:
@@ -1359,13 +1701,192 @@ def tortoise_delete_entity(id: str) -> bool:
     """Delete any entity by ID."""
     return _safe(_get_team_sdk().delete_entity, id)
 
-def tortoise_create_edge(source_id: str, target_id: str, predicate: str) -> bool:
-    """Create an edge between two entities. Predicate: performs, produces, ownedBy, managedBy, etc."""
-    return _safe(_quota_gated(_get_team_sdk()._get_proj().create_edge, "points"), source_id, target_id, predicate)
+def tortoise_create_edge(source_id: str, target_id: str, predicate: str) -> dict:
+    """Create a typed structural edge between two entities (reification rule).
+
+    Relation (predicate): performs, produces, uses, memberOf, ownedBy, managedBy,
+    about*, related, dependsOn, etc. Operator-less by default — lazy promotion
+    via operator_action(action='mitigate') when mitigation becomes needed.
+    Returns {edge, created, nudges}. (Param order kept from the legacy surface:
+    source_id, target_id, predicate → SDK create_edge(relation, from_id, to_id).)
+    """
+    return _safe(_quota_gated(_get_team_sdk().create_edge, "points"),
+                 predicate, source_id, target_id)
+
+
+def tortoise_ingest(bundle: Any = None, granularity: str = "bulk") -> dict:
+    """Heterogeneous bulk write (epic #888 W4) — one call writes points +
+    entities + sources + connections coherently. Nodes are written first, then
+    the connections between them; connections carrying 'operator' (IMPL/NAND)
+    create operator Points (reification rule v3.5 §8), connections carrying
+    'relation' stay plain structural edges. Local refs address bundle items.
+
+    granularity='bulk' (default): aggregated {created, ids, nudges}.
+    granularity='granular': per-item results for agent step-by-step control.
+    Idempotent-ish: points dedup by content hash + kind, sources by url,
+    operators by input set.
+    """
+    bundle = _parse(bundle)
+    if bundle is None:
+        bundle = {}
+    if not isinstance(bundle, dict):
+        return {"error": "bundle must be a dict with points/entities/sources/"
+                          "connections sections", "code": ERR_INVALID}
+    if granularity not in ("bulk", "granular"):
+        return {"error": f"granularity must be 'bulk' or 'granular', got "
+                          f"{granularity!r}", "code": ERR_INVALID}
+    return _safe(_quota_gated(_get_team_sdk().ingest, "points",
+                          abuse_weight=lambda r, a, k: int(((r or {}).get("created") or {}).get("points") or 0)),
+                 bundle, granularity=granularity)
 
 def tortoise_get_governance(subject_id: str) -> list:
-    """Get all entities owned by a Subject."""
+    """Get all entities owned by a Subject.
+    Alias → get(id, type='governance') (epic #888 W3)."""
     return _safe(_get_team_sdk().get_owned_entities, subject_id)
+
+
+# ── Orient / Direct consolidation (epic #888 W3) ─────────────────────
+# PR #912 design: the list_* zoo + status/health/taxonomy/structure fold
+# into ONE overview(section=) tool; the get_* zoo folds into ONE
+# get(id, type=) tool with id auto-detection. The old tools below remain
+# registered as thin aliases for one release (identical shapes).
+
+_OVERVIEW_SECTIONS = (
+    "taxonomy", "structure", "structure_check", "pointkinds", "tags",
+    "sources", "namespaces", "graphs", "topics", "health", "status",
+    "stale",
+)
+
+
+def _overview_section(section: str, entity_id: str | None,
+                      days: int, limit: int) -> Any:
+    """Dispatch one overview section to its original tool body."""
+    if section == "taxonomy":
+        return tortoise_taxonomy()
+    if section == "structure":
+        return tortoise_summarize_structure()
+    if section == "structure_check":
+        return tortoise_check_structure()
+    if section == "pointkinds":
+        return tortoise_list_pointkinds()
+    if section == "tags":
+        return tortoise_list_tags()
+    if section == "sources":
+        return tortoise_list_sources()
+    if section == "namespaces":
+        return tortoise_list_namespaces()
+    if section == "graphs":
+        return tortoise_list_graphs()
+    if section == "topics":
+        if not entity_id:
+            return {"error": "overview(section='topics') requires entity_id"}
+        return tortoise_list_topics(entity_id)
+    if section == "health":
+        return tortoise_health()
+    if section == "status":
+        return tortoise_status()
+    if section == "stale":
+        return tortoise_stale(days=days, limit=limit)
+    return {"error": f"overview: unknown section {section!r}. "
+                      f"Valid sections: {', '.join(_OVERVIEW_SECTIONS)}"}
+
+
+def tortoise_overview(section: str | None = None,
+                      entity_id: str | None = None,
+                      days: int = 30,
+                      limit: int = 50) -> Any:
+    """Graph orientation in one call — consolidates the list_*/status/health/
+    taxonomy/structure zoo (epic #888 W3, PR #912).
+
+    section selects one orient surface:
+      taxonomy | structure | structure_check | pointkinds | tags | sources |
+      namespaces | graphs | topics | health | status | stale
+    Each section returns exactly what the legacy tool returned.
+
+    Omit section → compact combined summary: {section: result} for every
+    section except topics (which requires entity_id).
+
+    topics: entityProfile lite for an entity — requires entity_id.
+    stale: Points not updated in N days — honors days/limit.
+    """
+    if section is None:
+        combined: dict[str, Any] = {}
+        for sec in _OVERVIEW_SECTIONS:
+            if sec == "topics":
+                continue  # requires entity_id — not part of the default summary
+            combined[sec] = _overview_section(sec, entity_id, days, limit)
+        return combined
+    if not isinstance(section, str):
+        return {"error": f"overview: section must be a string, got {type(section).__name__}"}
+    return _overview_section(section.strip().lower(), entity_id, days, limit)
+
+
+_GET_TYPES = ("point", "operator", "entity", "event", "session",
+              "events", "governance")
+
+
+def _get_auto_detect(id: str) -> dict:
+    """Resolve a node id to its properties without a type hint.
+
+    Order: canonical entity resolution (id | eventId | url, Point priority)
+    then AgentSession lookup by session_id/sessionId. Returns {} when the
+    id matches nothing (same contract as get_point/get_entity).
+    """
+    sdk = _get_team_sdk()
+    try:
+        resolved = sdk._get_proj()._resolve_entity(
+            id, by_id=True, by_eventId=True, by_url=True)
+    except Exception:
+        resolved = []
+    if resolved:
+        return dict(resolved[0]["properties"])
+    session = _safe(sdk.get_session, id)
+    if isinstance(session, dict) and session:
+        return session
+    return {}
+
+
+def tortoise_get(id: str, type: str | None = None,
+                 limit: int = 20) -> Any:
+    """Fetch a node by id — consolidates get_point/get_entity/get_operator/
+    get_events/get_session/get_governance (epic #888 W3, PR #912).
+
+    type selects the node kind:
+      point | operator | entity | event | session | events | governance
+    Omitted type → auto-detect by id lookup (Point/Subject/Object/Document/
+    Source/Event by id|eventId|url; AgentSession by session_id|sessionId).
+
+    Returns the node properties (same shape as the legacy tool it replaces).
+    type='events': id is optional — recent Events list, id used as an
+        eventKind filter when given (get_events(eventKind=id, limit=limit)).
+    type='governance': entities owned by the Subject id.
+    """
+    if not isinstance(type, str) or not type.strip():
+        if not isinstance(id, str) or not id.strip():
+            return {"error": "get: 'id' is required when type is omitted"}
+        return _get_auto_detect(id.strip())
+    t = type.strip().lower()
+    if t == "events":
+        # get_events is a list surface — id is an optional eventKind filter
+        return tortoise_get_events(eventKind=id or None, limit=limit)
+    if not isinstance(id, str) or not id.strip():
+        return {"error": f"get: 'id' is required for type={t!r}"}
+    id = id.strip()
+    if t == "point":
+        return tortoise_get_point(id)
+    if t == "operator":
+        return tortoise_get_operator(id)
+    if t == "entity":
+        return tortoise_get_entity(id)
+    if t == "event":
+        return tortoise_get_entity(id)  # Event nodes resolve via get_entity
+    if t == "session":
+        return _safe(_get_team_sdk().get_session, id)
+    if t == "governance":
+        return tortoise_get_governance(id)
+    return {"error": f"get: unknown type {type!r}. "
+                      f"Valid types: {', '.join(_GET_TYPES)}"}
+
 
 def tortoise_backfill_v25(dry_run: bool = True) -> dict:
     """Backfill database to ONTOLOGY v2.5 schema.
@@ -1382,7 +1903,7 @@ def tortoise_backfill_v25(dry_run: bool = True) -> dict:
 # Function bodies remain module-level callables; the adapter wraps each
 # via FunctionTool.from_function() and registers them on the shared mcp.
 # Must execute AFTER all tool function definitions (at module bottom).
-from tortoise.tool_registry import TOOL_REGISTRY, FastMCPAdapter
+from tortoise.tool_registry import TOOL_REGISTRY, GROUP_BY_NAME, FastMCPAdapter
 
 _adapter = FastMCPAdapter(mcp)
 _adapter.register_all(TOOL_REGISTRY, {
@@ -1397,6 +1918,52 @@ _adapter.register_all(TOOL_REGISTRY, {
 # Wrappers for the hosted onboarding flow. These call the team-scoped SDK
 # directly (same pattern as all tools) — the REST endpoints in hosted_api.py
 # expose the same operations to the welcome page.
+
+# Epic #888 no-regret: once a team's onboarding completes, the six
+# tortoise_onboarding_* tools retire from that team's steady-state MCP
+# surface (tools/list) — the REST /v1/onboarding/* endpoints remain for the
+# web onboarding flow. Definitions and handlers are untouched; only the
+# listing hides them. See _HTTPToolFilter.list_tools.
+_ONBOARDING_TOOL_NAMES: frozenset[str] = frozenset({
+    "tortoise_onboarding_demo_create", "tortoise_onboarding_state",
+    "tortoise_onboarding_session_recording", "tortoise_onboarding_github_connect",
+    "tortoise_onboarding_github_index", "tortoise_onboarding_github_status",
+})
+
+# 60s per-team TTL cache for the tools/list gate — the onboarding-state read
+# hits the control plane (Supabase teams row / registry Team node); tools/list
+# is called once per session but bounding the read to 1/min/team avoids any
+# amplification (review fix, Epic #888). Staleness is fine: the gate is
+# surface cosmetics and already fails open.
+_onboarding_state_cache: dict[str, tuple[float, bool]] = {}
+_ONBOARDING_STATE_TTL = 60.0
+
+
+def _team_onboarding_complete() -> bool:
+    """True when the current HTTP team's onboarding is complete.
+
+    Fail-open: stdio/selfhost (no tenant Team row) and transient control-plane
+    read failures return False — a read hiccup must never hide the tools a
+    team still needs to finish onboarding. Reads the canonical onboarding
+    state via hosted_api._get_onboarding_state (Supabase teams row or registry
+    Team node), cached 60s per team.
+    """
+    from tortoise.mcp_auth import SELFHOST_TEAM_ID, _current_team_id
+    team_id = _current_team_id.get()
+    if not team_id or team_id == SELFHOST_TEAM_ID:
+        return False
+    now = _time.time()
+    cached = _onboarding_state_cache.get(team_id)
+    if cached is not None and now - cached[0] < _ONBOARDING_STATE_TTL:
+        return cached[1]
+    try:
+        from tortoise.hosted_api import _get_onboarding_state
+        complete = bool(_get_onboarding_state(team_id).get("onboarding_complete"))
+    except Exception:
+        return False  # never cache a failed read — retry next list
+    _onboarding_state_cache[team_id] = (now, complete)
+    return complete
+
 
 def _onboarding_state() -> dict:
     """Read this team's onboarding progress from the registry Team node."""
@@ -1607,12 +2174,26 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
         async def list_tools(self, tools):
             from tortoise.mcp_auth import _tool_group
             group = _tool_group.get()
-            if group:
-                from tortoise.tool_registry import GROUP_BY_NAME
-                return [t for t in tools
-                        if t.name in HTTP_ALLOWED
-                        and GROUP_BY_NAME.get(t.name) == group]
-            return [t for t in tools if t.name in HTTP_ALLOWED]
+            # Skip the control-plane read when it can't change the outcome: in
+            # a curation-group-scoped app (other than "onboarding") the group
+            # filter below already excludes the onboarding tools.
+            onboarding_done = False
+            if not (group and group != "onboarding"):
+                onboarding_done = _team_onboarding_complete()
+
+            def _visible(t):
+                if t.name not in HTTP_ALLOWED:
+                    return False
+                if group and GROUP_BY_NAME.get(t.name) != group:
+                    return False
+                # Epic #888: onboarding tools retire from the steady-state
+                # surface once this team's onboarding is complete (fail-open
+                # — state read errors keep them visible).
+                if onboarding_done and t.name in _ONBOARDING_TOOL_NAMES:
+                    return False
+                return True
+
+            return [t for t in tools if _visible(t)]
 
     # Guard against transform accumulation: create_http_app() is called at
     # hosted_api import AND in every test fixture — each call would append a
@@ -1624,6 +2205,17 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
 
     @mcp.custom_route("/", methods=["GET"])
     async def mcp_metadata(request):
+        # Epic #529 E2E (T8): real Streamable HTTP clients (MCP TS SDK —
+        # pi mcp-client v1.29.0 observed) open a GET listener that expects
+        # an SSE stream. Returning the JSON self-test there fails their
+        # JSON-RPC parse and aborts the whole connection. Per the
+        # Streamable HTTP spec, a server that offers no SSE stream answers
+        # GET with 405 — SDKs handle that gracefully. Non-SSE GETs (curl,
+        # browsers, the self-test probe) keep the JSON metadata response.
+        if "text/event-stream" in request.headers.get("accept", ""):
+            return JSONResponse(
+                {"error": "no SSE stream offered; use POST for JSON-RPC"},
+                status_code=405)
         return JSONResponse({"status": "ok", "protocol": "mcp",
                              "transport": "streamable-http",
                              "endpoint": "/mcp"})
@@ -1658,3 +2250,14 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
         path="/",
         middleware=middleware,
     )
+
+
+# #993: the stdio entrypoint guard MUST run AFTER every @mcp.tool decorator
+# and the FastMCPAdapter.register_all() call above. Placing it earlier (was
+# line ~1211) made `python -m tortoise.mcp_server` enter mcp.run() with ZERO
+# tools registered — onboarding's Step 0 (tortoise_health) failed with
+# "Can't connect to Tortoise". Importing callers (tortoise serve via
+# __main__.py, deployment.py) are unaffected: they import the module first
+# (which executes register_all), then call main().
+if __name__ == "__main__":
+    main()

@@ -72,21 +72,49 @@ def test_no_supabase_identifier_shadowing() -> None:
 
 # ── Error humanization: raw Supabase messages must never surface ───────────
 
+# #863 mechanism-accurate copy: the email-send limit is PROJECT-WIDE, not
+# per-network. These are the exact acceptance-(b) literals the pages must
+# carry (email bucket vs per-IP request throttling).
+EMAIL_BUCKET_COPY = "Signup emails are temporarily exhausted (too many signups right now). Try again in about an hour."
+NETWORK_COPY = "Too many attempts from this network. Please wait about an hour and try again."
+
 
 def test_humanize_auth_error_present_with_rate_limit_mapping() -> None:
     """humanizeAuthError() must exist on both auth pages, reference at least
-    3 error codes, and specifically map the production-verified 429
-    over_email_send_rate_limit (the confirmed real-user signup failure) to
-    friendly copy instead of the raw "Email rate limit exceeded"."""
+    3 error codes, and map the production-verified 429 codes to friendly
+    copy instead of the raw "Email rate limit exceeded". #863: BOTH the
+    email-bucket copy and the per-IP network copy must be present, and the
+    mechanism codes must be pinned separately (over_email_send_rate_limit
+    vs over_request_rate_limit_ip)."""
     for name, html in (("signup", SIGNUP), ("signin", SIGNIN)):
         assert "humanizeAuthError" in html, f"{name}.html missing humanizeAuthError()"
         # Literal error codes (stable — the function keys on error_code first)
-        for code in ("over_email_send_rate_limit", "invalid_credentials",
-                     "email_not_confirmed", "weak_password"):
+        for code in ("over_email_send_rate_limit", "over_request_rate_limit_ip",
+                     "invalid_credentials", "email_not_confirmed", "weak_password"):
             assert code in html, f"{name}.html missing literal error code {code!r}"
-        # Friendly copy for the rate-limit case
-        assert "Too many attempts from this network" in html, \
-            f"{name}.html missing friendly rate-limit copy"
+        # #863: friendly copy for BOTH mechanisms — email bucket (project-wide
+        # exhaustion) and per-IP request throttling (network attribution).
+        assert EMAIL_BUCKET_COPY in html, \
+            f"{name}.html missing the email-bucket exhaustion copy"
+        assert NETWORK_COPY in html, \
+            f"{name}.html missing the per-IP network-attribution copy"
+
+
+def test_email_bucket_copy_mechanism_split() -> None:
+    """#863: the two 429 copies must be distinct literals on both pages — the
+    email-bucket copy must not contain the network attribution and vice
+    versa, and the email code must not share a mapping entry with the per-IP
+    codes (the pseudo-code email_rate_limit entry comes first)."""
+    assert EMAIL_BUCKET_COPY != NETWORK_COPY
+    assert "from this network" not in EMAIL_BUCKET_COPY, \
+        "email-bucket copy still blames the network (#863 misattribution)"
+    for name, html in (("signup", SIGNUP), ("signin", SIGNIN)):
+        # The email-bucket entry must be a separate array entry from the
+        # per-IP entry: pin the pseudo-code + code separation.
+        assert '"email_rate_limit"' in html, \
+            f"{name}.html missing the email_rate_limit pseudo-code (substring-fallback trap)"
+        assert "over_email_send_rate_limit" in html
+        assert "over_request_rate_limit_ip" in html
 
 
 def test_no_raw_error_message_leakage() -> None:
@@ -99,9 +127,10 @@ def test_no_raw_error_message_leakage() -> None:
 
 
 def test_rate_limit_lockout_guards_present() -> None:
-    """#801: after a 429 (project-wide email bucket) the client must lock
-    out email signup for ~1h — sessionStorage timestamp, disabled submit,
-    countdown label, early-return guard. Literal pins (no regex)."""
+    """#801/#863: after a 429 (project-wide email bucket) the client must lock
+    out email signup (signup.html, #801) and the recovery surface (signin.html,
+    #863) for ~1h — sessionStorage timestamp, disabled submit, countdown
+    label, early-return guard. Literal pins (no regex)."""
     assert "tortoise_signup_rate_limited_until" in SIGNUP
     assert "RATE_LIMIT_LOCKOUT_MS" in SIGNUP
     assert "SHORT_RATE_LIMIT_LOCKOUT_MS" in SIGNUP  # two-tier: per-IP limits ≠ email bucket
@@ -109,6 +138,53 @@ def test_rate_limit_lockout_guards_present() -> None:
     assert "sessionStorage" in SIGNUP
     # the guard runs before any request: top-of-handler early return
     assert "rateLimitRemainingMs() > 0" in SIGNUP
+    # #863: signin.html carries the same two-tier machinery with page-scoped
+    # keys + the recovery surface wired in.
+    assert "tortoise_signin_rate_limited_until" in SIGNIN
+    assert "tortoise_signin_rate_limit_tier" in SIGNIN
+    assert "RATE_LIMIT_LOCKOUT_MS" in SIGNIN
+    assert "SHORT_RATE_LIMIT_LOCKOUT_MS" in SIGNIN
+    assert "applyRateLimitLockout" in SIGNIN
+    assert "rateLimitRemainingMs() > 0" in SIGNIN
+    assert "resetPasswordForEmail" in SIGNIN
+
+
+def test_recovery_flow_present() -> None:
+    """#863: the recovery request-link flow on signin.html (POST
+    /auth/v1/recover surface) and the reset-password landing on welcome.html
+    (recovery-link redirect target) must exist with the #527 form-safety
+    contract and the #863 double-submit guards + expired-link copy."""
+    assert 'id="forgot-link"' in SIGNIN
+    assert 'id="recovery-form"' in SIGNIN
+    assert 'id="btn-recovery"' in SIGNIN
+    assert "recoveryInFlight" in SIGNIN  # double-submit guard (bucket burn)
+    # #527 contract: recovery form must be method=post with explicit action
+    recovery_form = re.search(r'<form[^>]*id="recovery-form"[^>]*>', SIGNIN).group(0)
+    assert re.search(r'method="post"', recovery_form), "recovery form must be method=post"
+    assert re.search(r'action="/signin"', recovery_form), "recovery form must action=/signin"
+    # welcome.html: recovery-landing reset panel
+    assert 'id="reset-form"' in WELCOME
+    assert 'id="reset-error"' in WELCOME
+    assert 'id="btn-reset"' in WELCOME
+    assert "PASSWORD_RECOVERY" in WELCOME
+    assert "updateUser" in WELCOME
+    assert "resetInFlight" in WELCOME
+    # recovery mode must short-circuit provisioning (no team mint mid-reset)
+    assert "waitForProvisioning" in WELCOME
+    assert "recoveryMode" in WELCOME
+    assert "This reset link has expired or is invalid. Request a new one." in WELCOME
+
+
+def test_server_429_tier_parsing_pins() -> None:
+    """#863: the server-first signup 429 path (signup.html) must resolve the
+    mechanism from the API's detail payload — the one layer that is neither
+    e2e-testable nor unit-tested (no JS test harness): error_code read,
+    string-detail hint scan, and the fail-safe email-bucket default."""
+    assert "lastServer429Code" in SIGNUP
+    assert "lastServer429Message" in SIGNUP
+    assert "detail.error_code" in SIGNUP
+    assert "resolveServer429Code" in SIGNUP
+    assert 'return "over_email_send_rate_limit"' in SIGNUP  # fail-safe default
 
 
 # ── CDN / script-failure guards ────────────────────────────────────────────
@@ -175,7 +251,11 @@ pytestmark = [
 @pytest.mark.parametrize("fname", ["signup.html", "signin.html", "welcome.html"])
 def test_inline_scripts_pass_node_syntax_check(fname: str) -> None:
     html = (WEBSITE / fname).read_text()
-    scripts = re.findall(r"<script>(.*?)</script>", html, re.S)
+    # #863 review: match attribute-bearing <script> tags too (a <script defer> or
+    # <script type="module"> block would otherwise be silently skipped — the
+    # exact regression class this gate exists for). External <script src=...>
+    # blocks (CDN supabase-js) have empty bodies and are skipped below.
+    scripts = re.findall(r"<script\b[^>]*>(.*?)</script>", html, re.S)
     assert scripts, f"{fname}: expected at least one inline script block"
     for i, body in enumerate(scripts):
         if not body.strip():

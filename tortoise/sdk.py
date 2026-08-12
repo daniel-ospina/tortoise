@@ -69,6 +69,8 @@ _GRAPH_EVENT_TYPES = frozenset({
     "PointRetracted",
     "PointSuperseded",
     "OperatorAnnotated",
+    "PointPromoted",   # #785: reviewer-gated draft→live promotion
+    "OperatorPromoted",  # #785: R16 zombie-operator prevention
 })
 
 
@@ -684,6 +686,12 @@ class TortoiseSDK:
         # existing-point lookup, not hash persistence (fix #80).
         ch = _content_hash(content)
         props["content_hash"] = ch
+        # Explicit id must be popped BEFORE the dedup branch: the dedup-hit
+        # path calls update_point(pid, **props) and a residual 'id' in props
+        # crashed with "multiple values for argument 'id'" (review fix, PR
+        # #953 — the commit endpoint writes deterministic pt_<sha> ids with
+        # dedup=True).
+        explicit_id = props.pop("id", None)
         # Idempotency guard: dedup by content hash when requested
         dedup = props.pop("dedup", False)
         if dedup:
@@ -716,7 +724,6 @@ class TortoiseSDK:
                 return self.get_point(pid)
 
         # Issue #52 — warn when caller passes an explicit non-ULID id
-        explicit_id = props.pop("id", None)
         if explicit_id is not None:
             if not _is_ulid(explicit_id):
                 _logger.warning(
@@ -865,7 +872,8 @@ class TortoiseSDK:
                 f"Session turn cap exceeded: {len(conversation)} > {max_turns}")
 
         proj.g.query(
-            "MERGE (s:Session {id:$sid}) SET s.created_at=$now, s.turn_count=$tc",
+            "MERGE (s:Session {id:$sid}) SET s.created_at=$now, s.turn_count=$tc, "
+            "    s.is_episodic=true",
             params={"sid": session_id, "now": now, "tc": len(conversation)},
         )
 
@@ -918,6 +926,7 @@ class TortoiseSDK:
                 "MERGE (t:Point {id:$id}) "
                 "SET t.content=$c, t.pointKind=$k, t.is_operator=false, "
                 "    t.speaker=$speaker, "
+                "    t.is_episodic=true, "
                 "    t.status=coalesce(t.status, $s), "
                 "    t.createdAt=coalesce(t.createdAt, $now), "
                 "    t.updatedAt=$now, t.content_hash=$ch",
@@ -977,6 +986,7 @@ class TortoiseSDK:
             event = self.create_event(
                 f"session_{session_id}", "sessionCaptured",
                 startedAt=now, endedAt=now, sessionId=session_id,
+                is_episodic=True,
             )
             event_id = event.get("id") or event.get("eventId")
             for p in extracted:
@@ -997,9 +1007,55 @@ class TortoiseSDK:
             "points": extracted,
         }
 
+    # ── Update / Delete consolidation (epic #888 W2, PR #912) ─────────
+    # One update()/delete() for Points AND entities. The legacy methods
+    # (update_point/update_entity/delete_point/delete_entity) remain the
+    # implementations — update()/delete() resolve the node label and dispatch
+    # to them, so behavior is bit-identical for existing callers while the
+    # consolidated surface stays the canonical entry.
+
+    def update(self, id: str, **props) -> dict:
+        """One update for a Point OR an entity (epic #888 W2).
+
+        Detects the node type by label:
+          - Point → point-lifecycle semantics (delegates to update_point):
+            draft→live promote via status (only transition allowed), version
+            increment for :Point:Object nodes, status validation against
+            POINT_STATUS_VALUES, context rejected.
+          - Entity (Subject/Object/Event/Document/Source) → plain property
+            update (delegates to update_entity).
+          - Unknown id → returns {} (no write) — legacy-compatible.
+        """
+        resolved = self._get_proj()._resolve_entity(
+            id, by_id=True, by_eventId=True)
+        if not resolved:
+            return {}
+        if resolved[0]["label"] == "Point":
+            return self.update_point(id, **props)
+        return self.update_entity(id, **props)
+
+    def delete(self, id: str) -> bool:
+        """One delete for a Point OR an entity (epic #888 W2).
+
+        Destructive. Detects the node type by label:
+          - Point → delete_point (tag GC + PointRetracted event)
+          - Entity → delete_entity
+        Returns True if a node was found and deleted, False otherwise.
+        """
+        resolved = self._get_proj()._resolve_entity(
+            id, by_id=True, by_eventId=True)
+        if not resolved:
+            return False
+        if resolved[0]["label"] == "Point":
+            return self.delete_point(id)
+        return self.delete_entity(id)
+
     def update_point(self, id: str, **props) -> dict:
         """Update properties on an existing Point. Returns updated point dict.
-        
+
+        Implementation behind update(id, ...) — the consolidated Point/entity
+        update (epic #888 W2).
+
         For :Object-labeled nodes, version is auto-incremented on every update.
         Status changes are validated against POINT_STATUS_VALUES.
         """
@@ -1095,7 +1151,11 @@ class TortoiseSDK:
         return result
 
     def delete_point(self, id: str) -> bool:
-        """Delete a Point and its relationships. Returns True if found."""
+        """Delete a Point and its relationships. Returns True if found.
+
+        Implementation behind delete(id) — the consolidated Point/entity
+        delete (epic #888 W2).
+        """
         proj = self._get_proj()
         exists = proj.g.query(
             "MATCH (n:Point {id:$id}) RETURN count(n) > 0",
@@ -1178,6 +1238,29 @@ class TortoiseSDK:
         # Dreaming (#85): invalidation changes the propagation graph.
         self._mark_dirty([id, corrected_by_id])
         return {"invalidated": True, "id": id, "corrected_by": corrected_by_id}
+
+    # ── Supersede / Invalidate consolidation (epic #888 W2) ───────────
+    # supersede() is the unified node-lifecycle entry; transfer_edges picks the
+    # full transfer (supersede_point) or the invalidate behavior
+    # (invalidate_point). Legacy methods remain the implementations.
+
+    def supersede(self, old_id: str, new_id: str,
+                  transfer_edges: bool = True) -> dict:
+        """Unified supersede / invalidate (epic #888 W2, PR #912).
+
+        transfer_edges=True  → full supersede (supersede_point): CORRECTS edge
+        + outdated flag + ALL edges transferred from old to new.
+        transfer_edges=False → invalidate behavior (invalidate_point): mark
+        old outdated + CORRECTS edge only, NO edge transfer. This absorbs the
+        legacy invalidate surface.
+
+        Returns {invalidated, id, corrected_by} (+ edges_transferred when
+        transfer_edges=True). Raises ValueError on missing/self/terminal input
+        (the underlying point-level guards, unchanged).
+        """
+        if transfer_edges:
+            return self.supersede_point(old_id, new_id)
+        return self.invalidate_point(old_id, new_id)
 
     def supersede_point(self, old_id: str, new_id: str) -> dict:
         """Atomically replace old Point with new — CORRECTS edge + outdated flag + edge transfer.
@@ -1368,11 +1451,207 @@ class TortoiseSDK:
                 f"Point {id!r} is already terminal — retraction is terminal")
         return r.result_set[0][0]  # updated node props (no trailing get_point round trip)
 
+    # ── Promotion (Phase-4 EP-safe lifecycle, #785) ────────────────
+
+    def promote_point(self, point_id: str) -> dict:
+        """Reviewer-gated draft→live promotion (plan §6.1, J-5, DE2E-8).
+
+        The ONLY path a draft extraction Point may go live — never via the
+        SDK #131 edge auto-promotion for extraction paths
+        (`create_operator(promote_source=False)`, #780).
+
+        Semantics (all responses include id + status + promoted + blocked):
+          - already live → NO-OP {promoted: False, blocked: False,
+            reason: "already_live"} — DE2E-N9
+          - operator node → blocked {blocked: True, reason: "is_operator"} —
+            operators only go live via the R16 endpoint gate (matching
+            retract_point's operator rejection)
+          - terminal (retracted/superseded/outdated/archived) → blocked
+            {blocked: True, reason: "not_draft"}
+          - Point belongs to a QUARANTINED batch → blocked
+            {blocked: True, reason: "batch_quarantined", batch_id} — quarantine
+            is batch-level (plan §3): the batch's Points stay draft until the
+            W-3 re-run passes (EpSafeCommit recovery loop)
+          - otherwise → status draft→live, `reviewed: true` derived flag set,
+            PointPromoted event emitted, and R16 zombie prevention:
+            incident DRAFT operator nodes (status 'draft' — the post-#780
+            extraction shape) are promoted to live ONCE ALL their endpoint
+            Points are live, so a contradiction never stays a dead draft
+            operator after its claims go live.
+
+        NOTE (review #944): the quarantine lock is a read-then-CAS — a
+        quarantine landing between the batch_status read and the CAS can race
+        a promotion through (window is milliseconds; the flow is
+        single-operator). Fully atomic batch+point locking is tracked with
+        the W-3 pipeline wiring (#785 follow-up).
+
+        Raises ValueError if the Point does not exist.
+        """
+        proj = self._get_proj()
+        row = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN properties(n)",
+            params={"id": point_id},
+        ).result_set
+        if not row:
+            raise ValueError(f"No point {point_id!r}")
+        point = row[0][0]
+        status = point.get("status")
+
+        # Operators go live ONLY via the R16 endpoint gate — promoting a
+        # draft operator directly would create the live-operator-with-draft-
+        # endpoints state R16 exists to prevent (review #944).
+        if point.get("is_operator") or point.get("op_type"):
+            return {"id": point_id, "status": status, "promoted": False,
+                    "blocked": True, "reason": "is_operator"}
+        # DE2E-N9: already-live promote → no-op, no error.
+        if status == "live":
+            return {"id": point_id, "status": "live", "promoted": False,
+                    "blocked": False, "reason": "already_live"}
+        # Terminal states cannot be promoted back to live.
+        if status != "draft":
+            return {"id": point_id, "status": status, "promoted": False,
+                    "blocked": True, "reason": "not_draft"}
+
+        # Quarantine lock (batch-level): a quarantined batch's Points stay
+        # draft until re-review (W-3 recovery).
+        batch_id = point.get("batch_id")
+        if batch_id:
+            from .mining import batch_status  # lazy: no module-level sdk↔mining cycle
+            bs = batch_status(proj, batch_id)
+            if bs is not None and bs["status"] == "quarantined":
+                return {"id": point_id, "status": status, "promoted": False,
+                        "blocked": True, "reason": "batch_quarantined",
+                        "batch_id": batch_id}
+
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        # CAS-guarded SET (concurrent promote can't double-fire); reviewed is
+        # the DERIVED reviewer flag (plan §3 — no new stored status).
+        r = proj.g.query(
+            "MATCH (n:Point {id:$id}) WHERE n.status = 'draft' "
+            "SET n.status = 'live', n.reviewed = true, n.promotedAt = $now, "
+            "n.updatedAt = $now RETURN n.id",
+            params={"id": point_id, "now": now},
+        )
+        if not r.result_set:
+            # Raced with a concurrent promote — re-read and report the outcome.
+            re = self.get_point(point_id)
+            if re.get("status") == "live":
+                return {"id": point_id, "status": "live", "promoted": False,
+                        "blocked": False, "reason": "already_live"}
+            return {"id": point_id, "status": re.get("status"),
+                    "promoted": False, "blocked": True,
+                    "reason": "not_draft"}
+
+        # R16 zombie-operator prevention: promote incident draft operators
+        # once ALL their endpoint Points are live.
+        promoted_ops = self._promote_incident_operators(proj, point_id, now)
+
+        self._emit_event("PointPromoted", point=self.get_point(point_id))
+        return {"id": point_id, "status": "live", "promoted": True,
+                "reviewed": True,
+                "operator_nodes_promoted": promoted_ops}
+
+    def _promote_incident_operators(self, proj, point_id: str, now: str) -> list[str]:
+        """R16: promote draft operator nodes incident to a freshly-live Point.
+
+        An operator is promoted only when it carries EXPLICIT status 'draft'
+        (the post-#780 `create_operator(promote_source=False)` shape) AND
+        every endpoint Point is live — otherwise the draft endpoints would
+        inherit a live edge (the exact pollution the draft lifecycle
+        prevents). Unset-status operators are LIVE under the canonical read
+        model (projection coalesce default; #944 review) and are skipped —
+        never re-promoted into the event stream.
+        """
+        rows = proj.g.query(
+            "MATCH (o:Point {is_operator:true})-[r]->(n:Point {id:$id}) "
+            "WHERE o.status = 'draft' RETURN DISTINCT o.id",
+            params={"id": point_id},
+        ).result_set
+        promoted = []
+        for (oid,) in rows:
+            eps = proj.g.query(
+                "MATCH (o:Point {id:$oid})-[r]->(s:Point) "
+                "RETURN s.id, s.status",
+                params={"oid": oid},
+            ).result_set
+            if not eps:
+                continue  # no endpoints — nothing to gate on
+            all_live = all((st or "live") == "live" for _, st in eps)
+            if not all_live:
+                continue  # keep draft until every endpoint is live
+            # CAS-guarded SET: only an explicitly-draft operator may flip,
+            # and only once (concurrent endpoint promotions can't double-emit).
+            r = proj.g.query(
+                "MATCH (o:Point {id:$oid}) WHERE o.status = 'draft' "
+                "SET o.status = 'live', o.promotedAt = $now, o.updatedAt = $now "
+                "RETURN o.id",
+                params={"oid": oid, "now": now},
+            )
+            if not r.result_set:
+                continue  # lost a race — another promote already flipped it
+            # Full snapshot for JSONL rebuild parity (#548, review #944).
+            self._emit_event("OperatorPromoted", id=oid,
+                             point=self.get_point(oid))
+            promoted.append(oid)
+        return promoted
+
+    def quarantine_batch(self, batch_id: str, *, reason: str) -> dict:
+        """Quarantine a batch (W-3 fail path) — blocks promote_point on its
+        Points until a re-run passes (plan §6.1 pinned SDK signature).
+
+        Thin delegate to tortoise.mining.quarantine_batch — batch lifecycle
+        state lives on :Batch marker nodes (operational metadata).
+        """
+        from .mining import quarantine_batch as _qb
+        return _qb(self._get_proj(), batch_id, reason=reason)
+
+    def list_drafts(self, *, limit: int = 50) -> list[dict]:
+        """Draft queue for promotion review (J-5 companion, plan §6.1).
+
+        Returns up to `limit` non-operator Points with status 'draft' (newest
+        first), each shaped as {id, content, pointKind, provenance,
+        dedup_context, batch_id}. `provenance` is the node's extractedFrom/
+        provenance property when present; `dedup_context` is assembled from the
+        #782 dedup candidate properties when the Point is a dedup candidate.
+        """
+        if limit < 1:
+            raise ValueError(f"limit must be >= 1, got {limit}")
+        proj = self._get_proj()
+        # Plain points carry NO is_operator property (only operators set it),
+        # so match on absence-or-false, not the literal property value.
+        rows = proj.g.query(
+            "MATCH (n:Point) "
+            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "AND n.status = 'draft' "
+            "RETURN properties(n) ORDER BY n.createdAt DESC LIMIT $limit",
+            params={"limit": limit},
+        ).result_set
+        out = []
+        for (props,) in rows:
+            dedup_context = None
+            if props.get("dedup_candidate"):
+                dedup_context = {
+                    k: props.get(k) for k in (
+                        "dedup_method", "dedup_similarity", "dedup_target_id")
+                }
+            out.append({
+                "id": props.get("id"),
+                "content": props.get("content"),
+                "pointKind": props.get("pointKind"),
+                "provenance": props.get("provenance")
+                or props.get("extractedFrom"),
+                "dedup_context": dedup_context,
+                "batch_id": props.get("batch_id"),
+            })
+        return out
+
     # ── Operators ─────────────────────────────────────────────────
 
     def create_operator(self, op_type: str, source_id: str, target_ids: list[str],
                         label: str | None = None,
-                        direction: str = "bidirectional") -> dict:
+                        direction: str = "bidirectional",
+                        promote_source: bool = True) -> dict:
         """Create an operator Point with optional semantic label.
 
         Semantic-epistemic edge model (#7801):
@@ -1383,6 +1662,17 @@ class TortoiseSDK:
             Default bidirectional (mutual) for all op types; pass
             "unidirectional" for a directed attack (no back-pressure).
           - Operator carries the label and direction; IMPL/NAND edges carry confidence via EP.
+          - promote_source: default True preserves the #131 draft→live lifecycle
+            (source point goes live when its first edge is created). Pass
+            False for extraction paths (#780): the operator node itself is
+            created with status:'draft' AND the source is NOT auto-promoted —
+            a draft must never wire an operator to a live Point. NOTE: there is
+            currently NO public promote API for draft operators — they stay
+            draft until the reviewer-gated promotion path lands (#785
+            promote_point); run(include_draft=True) is the only sanctioned
+            escape hatch today. The emitted OperatorAdded event carries the
+            draft status so JSONL replay preserves it
+            (projection/entities.py coalesce default is 'live').
         """
         if op_type not in ("IMPL", "NAND", "composedOf", "decomposesInto", "contains", "wraps"):
             raise ValueError(
@@ -1415,12 +1705,18 @@ class TortoiseSDK:
         if missing:
             raise ValueError(f"Cannot create operator: Points {missing} do not exist")
 
-        # Build operator node with direction + optional label (context is NOT written — P1 #49)
+        # Build operator node with direction + optional label (context is NOT written — P1 #49).
+        # #780: extraction operators (promote_source=False) carry status:'draft' so
+        # the EP draft filter excludes them; the event path default ('live',
+        # projection/entities.py coalesce) is overridden by the explicit status.
         extra_props = []
         params = {"id": pid, "op": op_type, "direction": direction}
         if label:
             extra_props.append("label:$label")
             params["label"] = label
+        if not promote_source:
+            extra_props.append("status:$st")
+            params["st"] = "draft"
         props_clause = ", " + ", ".join(extra_props) if extra_props else ""
         proj.g.query(
             f"CREATE (o:Point {{id:$id, is_operator:true, op_type:$op, direction:$direction{props_clause}}})",
@@ -1434,16 +1730,19 @@ class TortoiseSDK:
                 f"CREATE (o)-[:{edge_type} {{idx:$i}}]->(s)",
                 params={"oid": pid, "sid": inp_id, "i": i},
             )
-        # Draft → live lifecycle (#131): source point goes live when first edge created
+        # Draft → live lifecycle (#131): source point goes live when first edge created.
         # P1 (code-review): draft → live promote ONLY for draft/null sources —
         # an unconditional promote resurrected retracted (terminal) sources,
         # violating the terminal-state contract with no event in the stream.
-        proj.g.query(
-            "MATCH (s:Point {id:$sid}) "
-            "WHERE (s.status IS NULL OR s.status = 'draft') "
-            "SET s.status = 'live'",
-            params={"sid": source_id},
-        )
+        # #780: extraction paths (promote_source=False) skip this entirely —
+        # the source stays draft and the draft operator node carries the status.
+        if promote_source:
+            proj.g.query(
+                "MATCH (s:Point {id:$sid}) "
+                "WHERE (s.status IS NULL OR s.status = 'draft') "
+                "SET s.status = 'live'",
+                params={"sid": source_id},
+            )
         # Dreaming (#85): new edges change propagation — mark all inputs dirty.
         self._mark_dirty(inputs)
         result = self.get_point(pid)
@@ -1456,6 +1755,33 @@ class TortoiseSDK:
             "target_ids": list(target_ids),
         }, point=event_point)
         return result
+
+    # ── Operator action consolidation (epic #888 W2) ──────────────────
+    # operator_action() is the unified operator write entry; the legacy
+    # mitigate_operator/annotate_operator remain the implementations.
+
+    def operator_action(self, action: str, **kwargs) -> dict:
+        """Consolidated operator write action (epic #888 W2, PR #912).
+
+        action='mitigate' → mitigate_operator(id=..., reason=..., strength=)
+            Creates/updates the mitigation Point modulating an operator's edge
+            strength (idempotent).
+        action='annotate' → annotate_operator(id=..., bias=..., precision=...,
+            consistency=..., directness=...) — structured epistemic dims.
+
+        Unknown action raises ValueError.
+        """
+        if action == "mitigate":
+            return self.mitigate_operator(
+                kwargs["id"], kwargs["reason"],
+                kwargs.get("strength", 0.5))
+        if action == "annotate":
+            return self.annotate_operator(
+                kwargs["id"], kwargs["bias"], kwargs["precision"],
+                kwargs["consistency"], kwargs["directness"])
+        raise ValueError(
+            f"operator_action: unknown action {action!r} — must be "
+            f"'mitigate' or 'annotate'")
 
     def annotate_operator(self, id: str, bias: float, precision: float,
                           consistency: float, directness: float) -> dict:
@@ -1942,6 +2268,375 @@ class TortoiseSDK:
     def batch_create_points(self, points_list: list[dict]) -> list[dict]:
         """Create multiple points. Each dict needs {kind, content, **props}."""
         return [self.create_point(**p) for p in points_list]
+
+    # ── Heterogeneous bulk write — ingest (epic #888 W4) ─────────────
+
+    # Operator vocabularies accepted by connection specs (create_operator's
+    # op_type whitelist — kept in sync with create_operator's validation).
+    _INGEST_OPERATOR_TYPES = frozenset(
+        ("IMPL", "NAND", "composedOf", "decomposesInto", "contains", "wraps")
+    )
+
+    def ingest(self, bundle: dict, granularity: str = "bulk") -> dict:
+        """Heterogeneous bulk write (epic #888 W4, design ref PR #912).
+
+        One call writes points + entities + sources + connections coherently:
+        all nodes first, then the connections between them. Indexing many
+        interconnected items is ONE operation, not N.
+
+        bundle = {
+          points:      [{kind, content, ref?, status?, **props}],
+          entities:    [{type: subject|object|event|document, name, ref?, **props}],
+          sources:     [{url, sourceKind, tier?, sourceDate?, ref?, **props}],
+          connections: [{from, to, relation, ...} | {from, to, operator, label?, direction?}],
+        }
+
+        - ``ref``: optional local addressing label usable in any connection's
+          from/to (and in entity authoredBy/ownedBy/managedBy + about* props,
+          and point extractedFrom) instead of the created id/url. Must be
+          unique within the bundle. Never stored as a node property.
+        - Connections resolve from/to by local ref first, then pass through as
+          raw ids/urls to the underlying primitive (create_operator /
+          create_edge / _link_source).
+        - Reification rule (ontology v3.5 §8): a connection carrying
+          ``operator`` (IMPL/NAND, ...) creates an operator Point (Point↔Point
+          support/contradict reify); a connection carrying ``relation`` stays
+          a PLAIN structural edge (structural edges never reify).
+        - granularity='bulk' (default): whole bundle in one coherent pass,
+          returns aggregated {created, ids, nudges}. granularity='granular':
+          additionally returns per-item ``results`` for agent step-by-step
+          control (each item's primitive result + deduped flag).
+        - Idempotent-ish: points dedup by (content_hash, pointKind) via
+          create_point(dedup=True); sources merge by url; Subject/Object
+          merge by name; operator connections dedup by (op_type, input set);
+          structural edges MERGE. Document/Event entities are append-only
+          occurrence records — re-ingest duplicates them by design.
+        - EP-safe: created points default to status='draft' (#131 draft→live
+          lifecycle) unless the item carries status=... — pass status='live'
+          explicitly to opt into EP propagation.
+
+        Returns {granularity, created: {points, entities, sources, connections},
+        deduped: {...}, ids: {points, entities, sources, connections, refs},
+        nudges: [...]} (+ results for granularity='granular').
+        """
+        if granularity not in ("bulk", "granular"):
+            raise ValueError(
+                f"ingest: granularity must be 'bulk' or 'granular', got {granularity!r}"
+            )
+        if not isinstance(bundle, dict):
+            raise ValueError(
+                f"ingest: bundle must be a dict with points/entities/sources/"
+                f"connections sections, got {type(bundle).__name__}"
+            )
+        from .projection.edges import _VALID_EDGE_PREDICATES
+
+        proj = self._get_proj()
+        refs: dict[str, str] = {}          # ref → canonical id (or url for sources)
+        source_refs: set[str] = set()      # refs that address Source nodes (url-keyed)
+        ids = {"points": [], "entities": [], "sources": [],
+               "connections": [], "refs": {}}
+        created = {"points": 0, "entities": 0, "sources": 0, "connections": 0}
+        deduped = {"points": 0, "entities": 0, "sources": 0, "connections": 0}
+        results = [] if granularity == "granular" else None
+
+        def _register_ref(ref: str, cid: str, section: str) -> None:
+            if ref in refs:
+                raise ValueError(
+                    f"ingest: duplicate bundle ref {ref!r} "
+                    f"({section}) — refs must be unique across the bundle"
+                )
+            refs[ref] = cid
+            ids["refs"][ref] = cid
+
+        # ── Pre-scan refs: source refs resolve to their url (the canonical
+        # Source key, known BEFORE creation); point/entity refs resolve to ids
+        # registered as nodes are created.
+        for item in bundle.get("sources") or []:
+            ref = item.get("ref") if isinstance(item, dict) else None
+            if ref:
+                if ref in refs:
+                    raise ValueError(
+                        f"ingest: duplicate bundle ref {ref!r} (sources)"
+                    )
+                refs[ref] = item.get("url", "")
+                ids["refs"][ref] = item.get("url", "")
+                source_refs.add(ref)
+
+        # ── 1. Sources (first: points may reference them via extractedFrom) ──
+        for i, item in enumerate(bundle.get("sources") or []):
+            if not isinstance(item, dict):
+                raise ValueError(f"ingest: sources[{i}] must be a dict")
+            item = dict(item)
+            ref = item.pop("ref", None)
+            url = item.pop("url", None)
+            source_kind = item.pop("sourceKind", None)
+            if not url or not isinstance(url, str):
+                raise ValueError(f"ingest: sources[{i}] requires a non-empty 'url'")
+            if not source_kind:
+                raise ValueError(f"ingest: sources[{i}] requires 'sourceKind'")
+            existed = proj.g.query(
+                "MATCH (s:Source {url:$url}) RETURN count(s)",
+                params={"url": url},
+            ).result_set
+            node = self.create_source(url, source_kind, **item)
+            canonical = node.get("id") or node.get("url") or url
+            if ref:
+                # Pre-registered in the ref pre-scan (url known upfront) —
+                # refresh the canonical value (id may differ from url).
+                refs[ref] = canonical
+                ids["refs"][ref] = canonical
+                source_refs.add(ref)
+            ids["sources"].append(canonical)
+            if existed and existed[0][0]:
+                deduped["sources"] += 1
+            else:
+                created["sources"] += 1
+            if results is not None:
+                results.append({"section": "sources", "index": i, "ref": ref,
+                                "item": item, "result": node,
+                                "deduped": bool(existed and existed[0][0])})
+
+        # ── 2. Points (default status='draft', #131) ────────────────────
+        for i, item in enumerate(bundle.get("points") or []):
+            if not isinstance(item, dict):
+                raise ValueError(f"ingest: points[{i}] must be a dict")
+            item = dict(item)
+            ref = item.pop("ref", None)
+            kind = item.pop("kind", None)
+            content = item.pop("content", None)
+            if not kind:
+                raise ValueError(f"ingest: points[{i}] requires 'kind'")
+            if content is None:
+                raise ValueError(f"ingest: points[{i}] requires 'content'")
+            # extractedFrom may address a bundle source by its local ref
+            if isinstance(item.get("extractedFrom"), str) \
+                    and item["extractedFrom"] in source_refs:
+                item["extractedFrom"] = refs[item["extractedFrom"]]
+            existed = proj.g.query(
+                "MATCH (n:Point {content_hash:$ch}) "
+                "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+                "AND n.pointKind = $kind RETURN n.id",
+                params={"ch": _content_hash(content), "kind": kind},
+            ).result_set
+            point = self.create_point(kind, content, dedup=True, **item)
+            pid = point["id"]
+            if ref:
+                _register_ref(ref, pid, "points")
+            ids["points"].append(pid)
+            if existed:
+                deduped["points"] += 1
+            else:
+                created["points"] += 1
+            if results is not None:
+                results.append({"section": "points", "index": i, "ref": ref,
+                                "item": item, "result": point,
+                                "deduped": bool(existed)})
+
+        # ── 3. Entities (subject/object merge by name; event/document append) ─
+        for i, item in enumerate(bundle.get("entities") or []):
+            if not isinstance(item, dict):
+                raise ValueError(f"ingest: entities[{i}] must be a dict")
+            item = dict(item)
+            ref = item.pop("ref", None)
+            etype = (item.pop("type", None) or "").strip().lower()
+            name = item.pop("name", None)
+            if not etype:
+                raise ValueError(f"ingest: entities[{i}] requires 'type' "
+                                 f"(subject|object|event|document)")
+            if not name:
+                raise ValueError(f"ingest: entities[{i}] requires 'name'")
+            # Entity props that wire edges may address earlier bundle items
+            # by local ref (points + entities are registered by now).
+            for key in ("authoredBy", "ownedBy", "managedBy",
+                        "aboutSubject", "aboutObject", "aboutPoint",
+                        "aboutDocument"):
+                if isinstance(item.get(key), str) and item[key] in refs:
+                    item[key] = refs[item[key]]
+            if etype == "subject":
+                existed = proj.g.query(
+                    "MATCH (n:Subject {name:$name}) RETURN n.id",
+                    params={"name": name},
+                ).result_set
+                node = self.create_subject(name, **item)
+                canonical = node.get("id") or name
+            elif etype == "object":
+                existed = proj.g.query(
+                    "MATCH (n:Object {name:$name}) RETURN n.id",
+                    params={"name": name},
+                ).result_set
+                node = self.create_object(name, **item)
+                canonical = node.get("id") or name
+            elif etype == "event":
+                event_kind = item.pop("eventKind", None)
+                if not event_kind:
+                    raise ValueError(f"ingest: entities[{i}] type='event' "
+                                     f"requires 'eventKind'")
+                node = self.create_event(name, event_kind, **item)
+                canonical = node.get("eventId") or node.get("id") or name
+                existed = []  # Event records are append-only — never deduped
+            elif etype == "document":
+                doc_kind = item.pop("documentKind", None)
+                if not doc_kind:
+                    raise ValueError(f"ingest: entities[{i}] type='document' "
+                                     f"requires 'documentKind'")
+                node = self.create_document(name, doc_kind, **item)
+                canonical = node.get("id") or name
+                existed = []  # Document records are append-only — never deduped
+            else:
+                raise ValueError(
+                    f"ingest: entities[{i}] type must be subject|object|event|"
+                    f"document, got {etype!r}"
+                )
+            if ref:
+                _register_ref(ref, canonical, "entities")
+            ids["entities"].append(canonical)
+            if existed:
+                deduped["entities"] += 1
+            else:
+                created["entities"] += 1
+            if results is not None:
+                results.append({"section": "entities", "index": i, "ref": ref,
+                                "item": item, "result": node,
+                                "deduped": bool(existed)})
+
+        # ── 4. Connections (nodes exist — resolve refs, apply reification) ──
+        for i, conn in enumerate(bundle.get("connections") or []):
+            if not isinstance(conn, dict):
+                raise ValueError(f"ingest: connections[{i}] must be a dict")
+            if "from" not in conn or "to" not in conn:
+                raise ValueError(f"ingest: connections[{i}] requires 'from' and 'to'")
+            has_rel, has_op = "relation" in conn, "operator" in conn
+            if has_rel == has_op:
+                raise ValueError(
+                    f"ingest: connections[{i}] must carry exactly one of "
+                    f"'relation' (structural edge) or 'operator' "
+                    f"(IMPL/NAND reification)"
+                )
+            src = refs.get(conn["from"], conn["from"])
+            to_list = conn["to"] if isinstance(conn["to"], list) else [conn["to"]]
+            dsts = [refs.get(x, x) for x in to_list]
+            if has_op:
+                op_type = conn["operator"]
+                if op_type not in self._INGEST_OPERATOR_TYPES:
+                    raise ValueError(
+                        f"ingest: connections[{i}] operator must be one of "
+                        f"{sorted(self._INGEST_OPERATOR_TYPES)}, got {op_type!r}"
+                    )
+                label = conn.get("label")
+                direction = conn.get("direction")
+                existing = self._find_operator(op_type, [src] + dsts,
+                                               label=label, direction=direction)
+                if existing is not None:
+                    oid = existing
+                    deduped["connections"] += 1
+                    conn_result = {"operator_id": oid, "deduped": True}
+                else:
+                    op = self.create_operator(op_type, src, dsts,
+                                              label=label, direction=direction)
+                    oid = op["id"]
+                    created["connections"] += 1
+                    conn_result = {"operator_id": oid, "deduped": False}
+                ids["connections"].append(oid)
+            else:
+                rel = conn["relation"]
+                if rel == "extractedFrom":
+                    # (Point)-[:extractedFrom]->(Source) — MERGE-based, so
+                    # re-ingest is safe. Source side resolves by url/ref.
+                    existed = proj.g.query(
+                        "MATCH (n:Point {id:$pid})-[:extractedFrom]->"
+                        "(s:Source {url:$url}) RETURN count(*)",
+                        params={"pid": src, "url": dsts[0]},
+                    ).result_set
+                    if not existed or not existed[0][0]:
+                        proj._link_source(src, dsts[0])
+                        created["connections"] += 1
+                    else:
+                        deduped["connections"] += 1
+                    conn_result = {"relation": rel, "from": src, "to": dsts[0],
+                                   "deduped": bool(existed and existed[0][0])}
+                else:
+                    if rel not in _VALID_EDGE_PREDICATES:
+                        raise ValueError(
+                            f"ingest: connections[{i}] unknown relation {rel!r} — "
+                            f"must be a structural predicate or 'extractedFrom'"
+                        )
+                    existed = proj.g.query(
+                        f"MATCH (a)-[r:{rel}]->(b) "
+                        "WHERE (a.id = $f OR a.eventId = $f OR a.url = $f) "
+                        "AND (b.id = $t OR b.eventId = $t OR b.url = $t) "
+                        "RETURN count(r)",
+                        params={"f": src, "t": dsts[0]},
+                    ).result_set
+                    ok = proj.create_edge(src, dsts[0], rel)
+                    if not ok:
+                        raise ValueError(
+                            f"ingest: connections[{i}] could not create "
+                            f"{rel!r} edge — endpoints not found"
+                        )
+                    if existed and existed[0][0]:
+                        deduped["connections"] += 1
+                    else:
+                        created["connections"] += 1
+                    conn_result = {"relation": rel, "from": src, "to": dsts[0],
+                                   "deduped": bool(existed and existed[0][0])}
+                ids["connections"].append(conn_result)
+            if results is not None:
+                results.append({"section": "connections", "index": i,
+                                "ref": conn.get("ref"), "item": conn,
+                                "result": conn_result,
+                                "deduped": bool(conn_result.get("deduped"))})
+
+        # ── Nudges (write nudges, PR #912): populated once W2's
+        # _nudge_candidates lands — advisory only, never enforced.
+        nudges: list[dict] = []
+        if hasattr(self, "_nudge_candidates"):
+            try:
+                for pid in ids["points"]:
+                    nudges.extend(self._nudge_candidates(
+                        "related", exclude_ids=[pid])[:2])
+            except Exception:
+                pass  # nudges are advisory — never fail the ingest
+
+        out = {
+            "granularity": granularity,
+            "created": created,
+            "deduped": deduped,
+            "ids": ids,
+            "nudges": nudges,
+        }
+        if results is not None:
+            out["results"] = results
+        return out
+
+    def _find_operator(self, op_type: str, inputs: list[str],
+                       label: str | None = None,
+                       direction: str | None = None) -> str | None:
+        """Return the id of an existing operator Point with the same
+        (op_type, input set) — or None. Used by ingest to keep re-ingests
+        idempotent (operators are not content-hash dedupable).
+        """
+        proj = self._get_proj()
+        edge_rel = "hasPart" if op_type not in ("IMPL", "NAND") else op_type
+        conds = [
+            "size(targets) = size($inputs)",
+            "all(x IN targets WHERE x IN $inputs)",
+        ]
+        params = {"op": op_type, "inputs": list(inputs)}
+        if label is not None:
+            conds.append("o.label = $label")
+            params["label"] = label
+        if direction is not None:
+            conds.append("o.direction = $direction")
+            params["direction"] = direction
+        rows = proj.g.query(
+            f"MATCH (o:Point {{is_operator:true, op_type:$op}}) "
+            f"OPTIONAL MATCH (o)-[r:{edge_rel}]->(t:Point) "
+            f"WITH o, collect(t.id) AS targets "
+            f"WHERE {' AND '.join(conds)} "
+            f"RETURN o.id LIMIT 1",
+            params=params,
+        ).result_set
+        return rows[0][0] if rows else None
 
     def file_decision(self, options: list[str], evidence: list[str],
                       choice: int) -> dict:
@@ -2772,15 +3467,19 @@ class TortoiseSDK:
 
     def _select_subgraph(self, anchors: list[str], max_hops: int = 1,
                          rel_filter: str = "IMPL|NAND",
-                         direction: str = "both") -> list[str]:
+                         direction: str = "both",
+                         include_draft: bool = False) -> list[str]:
         """BFS subgraph selection from anchor Points to collect operator IDs.
 
         Delegates to the shared _bfs_select_operators in tortoise.analyze.
+        With include_draft=False (default, #780) draft anchors, operators and
+        frontier points are excluded.
         """
         from .analyze import _bfs_select_operators
         proj = self._get_proj()
         result = _bfs_select_operators(proj, anchors, max_hops=max_hops,
-                                        rel_filter=rel_filter, direction=direction)
+                                        rel_filter=rel_filter, direction=direction,
+                                        include_draft=include_draft)
         return list(result)
 
     def compute_confidence(self, factors=None, evidence=None,
@@ -2791,6 +3490,11 @@ class TortoiseSDK:
                            require_calibration: bool = False,
                            recency_decay: float | None = None) -> dict:
         """Compute confidence via EP belief propagation. Returns {iterations, converged, confidences}.
+
+        #780: draft Points/operators are EXCLUDED by default (EP only runs
+        over live claims); there is no include_draft escape hatch on this
+        surface — call TortoiseEP.run(include_draft=True) directly for
+        legacy behavior.
 
         Args:
             factors: operator IDs (list[str]) or factor tuples. If None, auto-extracts.
@@ -3462,6 +4166,22 @@ class TortoiseSDK:
                 skipped += 1
                 continue
 
+            if eventKind == "AgentSession" and filepath.is_symlink():
+                # R17 parity with mining.py's pre-scan: a symlinked *.md is
+                # never read (host-file read + LLM exfiltration when
+                # extract_metadata/llm_model is set) and never participates in
+                # primary-session selection — otherwise a symlink sorting
+                # before a real file sharing its sessionId becomes ingest's
+                # primary (target content read+indexed) while mining picks the
+                # real file → hash never matches → re-mined every run (point
+                # stacking; round-2 review).
+                skipped += 1
+                errors.append({"file": rel_path,
+                               "error": "symlinked file skipped (R17: the corpus "
+                                         "walk must not follow symlinks)",
+                               "retryable": False})
+                continue
+
             try:
                 text = filepath.read_text(encoding="utf-8")
             except Exception as e:
@@ -3784,6 +4504,31 @@ class TortoiseSDK:
         return {"ingested": ingested, "updated": updated, "skipped": skipped,
                 "failed": failed, "errors": errors}
 
+    def mine_corpus(self, directory: str, *, extract_entities: bool = True,
+                    progress_file: str | None = None, model=None,
+                    event_log_path: str | None = None) -> dict:
+        """Batch-mine a session corpus (J-1, plan §6.1) into this graph.
+
+        COMPOSES :meth:`ingest_corpus` (security, resume, file_hash — R17):
+        each file is first indexed as an AgentSession Event by the shared
+        machinery, then mined via ConversationMiner (Points/Operators/Events +
+        Phase-2 entity Objects with aboutObject/aboutEvent wiring, DE2E-1).
+        ``event_log_path`` routes mining events to the given JSONL log
+        (default: this SDK's configured event log, else a fallback next to
+        the DB path).
+
+        Returns: {sessions, ingested, updated, skipped, failed, entities,
+        objects, dedup_hits, drafts, errors:[{file, error, retryable}]}.
+        Unchanged re-runs report ``skipped`` via file_hash and add no new
+        entities/objects (DE2E-N8).
+        """
+        from tortoise.mining import mine_corpus_with_sdk
+        return mine_corpus_with_sdk(
+            self, directory, extract_entities=extract_entities,
+            progress_file=progress_file, model=model,
+            event_log_path=event_log_path,
+        )
+
     # ── Entity Resolution (GAP-01 #6987) ──────────────────────
 
     def suggest_entry_points(self, query: str, *, limit: int = 5,
@@ -3934,6 +4679,7 @@ class TortoiseSDK:
         threshold: float = 0.0,
         relationship_filter: str | None = None,
         traversal_path: str | None = None,
+        exclude_status: list[str] | None = None,
     ) -> list[dict]:
         """Hybrid search with RRF fusion + EP annotation.
 
@@ -3949,6 +4695,11 @@ class TortoiseSDK:
             target_id via an operator with label=predicate (e.g., 'addresses:customerSegment-1').
         traversal_path: 'FromKind→ToKind' — only return points that participate in a
             pack-declared relation chain (e.g., 'Product→Feature'). Resolved via pack registry.
+        exclude_status: Point status values to EXCLUDE from results, applied to the
+            fused candidate set BEFORE the final limit truncation (so filtering cannot
+            silently shrink the result count — epic #898 recall_state). Default None =
+            no filtering (existing behavior unchanged; retracted is already excluded at
+            the retrieval layer, #689). Points with no status property are kept.
         """
         from .search_engine import (
             classify_query, degradation_chain, rrf_fusion,
@@ -4004,9 +4755,16 @@ class TortoiseSDK:
         )
 
         if not raw_results:
-            # All strategies failed — fallback to in-memory TF-IDF (Point only)
+            # All strategies failed — fallback to in-memory TF-IDF (Point only).
             if query and entity_type == "point":
                 points = self.query(kind=kind)
+                if exclude_status and points:
+                    # Same status exclusion as step 5d (#898 review round-2):
+                    # the degraded fallback must not leak superseded/deprecated
+                    # into the UC1 state view. self.query returns raw node
+                    # dicts carrying the status property.
+                    points = [p for p in points
+                              if (p.get("status") or "") not in set(exclude_status)]
                 return fallback_tfidf(query, points, limit=limit)
             return []
 
@@ -4091,6 +4849,24 @@ class TortoiseSDK:
                     "traversal_path %r could not be resolved to a pack relation",
                     traversal_path,
                 )
+
+        # 5d. Apply exclude_status BEFORE truncation (#898): filtering after the
+        #     limit cut would silently shrink results when superseded/deprecated
+        #     points dominate the pool. Points with no status are kept; only
+        #     Point-label entities have status (operators are Points too).
+        if exclude_status and result_ids and graph_label == "Point":
+            try:
+                excluded = set(exclude_status)
+                status_rows = graph.query(
+                    "MATCH (n:Point) WHERE n.id IN $ids AND n.status IN $statuses "
+                    "RETURN n.id",
+                    params={"ids": result_ids, "statuses": sorted(excluded)},
+                ).result_set
+                status_excluded_ids = {row[0] for row in status_rows}
+                if status_excluded_ids:
+                    result_ids = [pid for pid in result_ids if pid not in status_excluded_ids]
+            except Exception:
+                _logger.warning("exclude_status filter failed — pass-through", exc_info=True)
 
         # Truncate AFTER filtering
         result_ids = result_ids[:limit]
@@ -4270,6 +5046,463 @@ class TortoiseSDK:
         # Default: RRF relevance order (already in fused order)
 
         return [r.to_dict() for r in results[:limit]]
+
+    # ── Recall (epic #898) — UC1 STATE ──────────────────────────────
+
+    # Status values excluded from the UC1 "current state" view by default.
+    # `retracted` is additionally hard-excluded at the retrieval layer (#689).
+    STATE_EXCLUDED_STATUS = frozenset({"superseded", "deprecated", "retracted"})
+    # About-edge family used for object-centric linking (mirrors
+    # ranking.ABOUT_EDGE_TYPES and supersede_point's about* structural rels).
+    _ABOUT_TYPES = "aboutSubject|aboutObject|aboutAction|aboutEvent|aboutPoint|aboutDocument"
+
+    def recall_state(
+        self,
+        query: str | None = None,
+        *,
+        kind: str | None = None,
+        limit: int = 10,
+        include_superseded: bool = False,
+        min_confidence: float = 0.0,
+        relevance_exp: float = 1.0,
+        confidence_exp: float = 1.0,
+        centrality_weight: float = 0.10,
+        object_centric: bool = True,
+        state_ranker=None,
+    ) -> list[dict]:
+        """UC1 "state" recall (epic #898 Wave A) — what is true and
+        high-confidence right now.
+
+        Retrieves Points + Objects (hybrid search), then re-ranks the merged
+        pool with the multiplicative confidence gate (StateRanker):
+
+            base  = relevance_norm^a × confidence^b
+            score = base × (1 + w_c × centrality_norm)
+
+        State semantics:
+        - Excludes status in (superseded, deprecated, retracted) by default;
+          ``include_superseded=True`` brings superseded/deprecated back
+          (retracted stays excluded — #689 leak guard).
+        - Object-centric: Objects and the Points about them are ranked
+          together; an Object's confidence is the mean EP posterior of the
+          Points about it (neutral 0.5 when none).
+        - Contested claims are SURFACED, never buried: ``contested:true`` +
+          ``counter_evidence`` (NANDing point id/content) attached.
+        - Most important arguments (operators, by annotator_precision) and
+          high-contention NANDs / mitigations attached to top results.
+        - Uncalibrated points fall back to documented neutral confidence 0.5
+          (absence of measurement is NOT low support).
+
+        Returns the same SearchResult shape as ``tortoise_fts_query`` (list
+        of dicts), each annotated with ``entity_type``, ``recall_ranking``
+        (score breakdown), and state-context keys (``contested``,
+        ``counter_evidence``, ``arguments``, ``nands``, ``mitigations``,
+        ``related_objects`` / ``related_points``).
+        """
+        from .ranking import StateRanker
+
+        if limit < 1 or limit > 10000:
+            raise ValueError(f"limit must be 1-10000, got {limit}")
+        if not (0.0 <= min_confidence <= 1.0):
+            raise ValueError(f"min_confidence must be 0.0-1.0, got {min_confidence}")
+        if relevance_exp <= 0 or confidence_exp <= 0:
+            raise ValueError(
+                f"relevance_exp/confidence_exp must be > 0, got {relevance_exp}/{confidence_exp}")
+        if not 0.0 <= centrality_weight <= 1.0:
+            raise ValueError(f"centrality_weight must be 0-1, got {centrality_weight}")
+
+        proj = self._get_proj()
+        ranker = state_ranker or StateRanker(
+            proj,
+            relevance_exp=relevance_exp,
+            confidence_exp=confidence_exp,
+            centrality_weight=centrality_weight,
+        )
+
+        # 1. Candidate pool (Points + Objects), hybrid retrieval per entity.
+        #    State filter applied INSIDE retrieval (exclude_status is enforced
+        #    before pool truncation, so live claims ranked behind superseded
+        #    ones are not dropped — #898 review P1). retracted is already
+        #    hard-excluded at the retrieval layer (#689).
+        pool = max(limit * 3, 30)
+        # retracted stays hard-excluded at the retrieval layer (#689);
+        # superseded/deprecated are excluded here unless include_superseded.
+        exclude_status = None if include_superseded else sorted(
+            self.STATE_EXCLUDED_STATUS - {"retracted"})
+        point_results = self.tortoise_fts_query(
+            query, kind=kind, entity_type="point", limit=pool,
+            exclude_status=exclude_status)
+        object_results = (
+            self.tortoise_fts_query(
+                query, kind=kind, entity_type="object", limit=pool)
+            if object_centric else []
+        )
+
+        # UC1 state view: hide mitigation bookkeeping points (they are
+        # surfaced ATTACHED to results as context, not standalone claims —
+        # review round-2 P3).
+        points = [dict(r, entity_type="point") for r in point_results
+                  if not (r.get("content") or "").startswith("[MITIGATION]")]
+        objects = [dict(r, entity_type="object") for r in object_results]
+
+        # 3. Multiplicative-gate ranking over the merged pool.
+        merged = points + objects
+        ranked = ranker.rerank(merged, entity_type="point")
+
+        # 4. Explicit confidence floor (orthogonal to the multiplicative gate).
+        ranked = [
+            r for r in ranked
+            if r["recall_ranking"]["confidence"] >= min_confidence
+        ][:limit]
+
+        # 5. State context surfacing (batched, not N+1).
+        point_ids = [r["id"] for r in ranked if r.get("entity_type") == "point"]
+        object_ids = [r["id"] for r in ranked if r.get("entity_type") == "object"]
+
+        counter_evidence = self._state_counter_evidence(point_ids)
+        arguments, nands = self._state_arguments(point_ids)
+        mitigations = self._state_mitigations(arguments, nands)
+        related_objects = self._state_related_objects(point_ids)
+        related_points = self._state_related_points(object_ids)
+
+        out: list[dict] = []
+        for r in ranked:
+            rid = r["id"]
+            copy = dict(r)
+            if rid in counter_evidence:
+                copy["counter_evidence"] = counter_evidence[rid]
+            if rid in arguments:
+                copy["arguments"] = arguments[rid]
+            if rid in nands:
+                copy["nands"] = nands[rid]
+            if rid in mitigations:
+                copy["mitigations"] = mitigations[rid]
+            if rid in related_objects:
+                copy["related_objects"] = related_objects[rid]
+            if rid in related_points:
+                copy["related_points"] = related_points[rid]
+            # Contestation surfaced at top level (ep carries variance/contested
+            # for points; mirror it here so state consumers can flag without
+            # digging into ep). Never a ranking demoter.
+            ep = copy.get("ep")
+            contested = bool(ep.get("contested")) if isinstance(ep, dict) else False
+            copy["contested"] = contested
+            out.append(copy)
+        return out
+
+    def _state_counter_evidence(self, point_ids: list[str]) -> dict[str, list[dict]]:
+        """NANDing points (id/content) for contested targets.
+
+        Includes both statement-point NANDers and NAND operators (label used
+        as content) — a NAND operator IS the counter-claim in the Tortoise
+        model. Contestation is surfaced, never a ranking demoter.
+        """
+        if not point_ids:
+            return {}
+        rows = self._get_proj().g.query(
+            "MATCH (c:Point)-[r:NAND]->(n:Point) "
+            "WHERE n.id IN $ids "
+            "RETURN n.id, c.id, coalesce(c.label, c.content, ''), "
+            "  coalesce(c.is_operator, false), coalesce(c.op_type, '')",
+            params={"ids": point_ids},
+        ).result_set
+        out: dict[str, list[dict]] = {}
+        for target_id, cid, text, is_op, op_type in rows:
+            if is_op and not text:
+                # Unlabeled NAND operators: give the counter-evidence a
+                # meaningful default so the content half is never empty.
+                text = f"[NAND operator{(' ' + op_type) if op_type else ''}]"
+            out.setdefault(target_id, []).append(
+                {"id": cid, "content": text or "", "is_operator": bool(is_op)})
+        return out
+
+    def _state_arguments(self, point_ids: list[str]) -> tuple[dict[str, list[dict]], dict[str, list[dict]]]:
+        """Operators (arguments) attached to top points + NAND operators.
+
+        Returns (arguments, nands): arguments = operators sorted by
+        annotator_precision desc (most important first, capped 3 per result);
+        nands = NAND-edge operators (contradictions) with target ids.
+        """
+        if not point_ids:
+            return {}, {}
+        rows = self._get_proj().g.query(
+            "MATCH (op:Point {is_operator:true})-[r:IMPL|NAND|hasPart]-(n:Point) "
+            "WHERE n.id IN $ids "
+            "RETURN n.id, op.id, op.label, op.op_type, "
+            "  coalesce(op.annotator_precision, op.precision, 0.5), type(r)",
+            params={"ids": point_ids},
+        ).result_set
+        args: dict[str, list[dict]] = {}
+        nands: dict[str, list[dict]] = {}
+        for nid, op_id, label, op_type, precision, rel in rows:
+            op = {"id": op_id, "label": label or "", "op_type": op_type or "",
+                  "precision": round(float(precision), 4), "mechanism": rel}
+            if rel == "NAND":
+                nands.setdefault(nid, []).append(op)
+            else:
+                args.setdefault(nid, []).append(op)
+        for nid in args:
+            args[nid].sort(key=lambda o: o["precision"], reverse=True)
+            args[nid] = args[nid][:3]
+        for nid in nands:
+            nands[nid].sort(key=lambda o: o["precision"], reverse=True)
+            nands[nid] = nands[nid][:5]  # bounded high-contention list
+        return args, nands
+
+    def _state_mitigations(self, arguments: dict[str, list[dict]],
+                           nands: dict[str, list[dict]] | None = None) -> dict[str, list[dict]]:
+        """Mitigation points attached to surfaced operators (top points).
+
+        Includes operators surfaced as arguments AND as high-contention NANDs
+        — a mitigation on the very NAND that contradicts a surfaced claim is
+        exactly the epistemic context the state view should show.
+        """
+        op_ids = sorted({op["id"] for ops in arguments.values() for op in ops}
+                        | {op["id"] for ops in (nands or {}).values() for op in ops})
+        if not op_ids:
+            return {}
+        rows = self._get_proj().g.query(
+            "MATCH (op:Point {is_operator:true})-[r:mitigated_by]->(m:Point) "
+            "WHERE op.id IN $ids RETURN op.id, m.id, m.content, m.mitigation_strength",
+            params={"ids": op_ids},
+        ).result_set
+        out: dict[str, list[dict]] = {}
+        for op_id, mid, content, strength in rows:
+            out.setdefault(op_id, []).append(
+                {"id": mid, "content": content or "",
+                 "strength": float(strength) if strength is not None else None})
+        # Attach under the owning result point (via its surfaced operator).
+        # Dedup: an operator can appear in BOTH arguments and nands for the
+        # same target (mixed IMPL+NAND edges) — mitigations must not double.
+        by_point: dict[str, list[dict]] = {}
+        seen: set[tuple[str, str]] = set()
+        for nid, ops in list(arguments.items()) + list((nands or {}).items()):
+            for op in ops:
+                if op["id"] not in out:
+                    continue
+                for m in out[op["id"]]:
+                    if (nid, m["id"]) in seen:
+                        continue
+                    seen.add((nid, m["id"]))
+                    by_point.setdefault(nid, []).append(
+                        dict(m, operator_id=op["id"]))
+        return by_point
+
+    def _state_related_objects(self, point_ids: list[str]) -> dict[str, list[dict]]:
+        """Objects/entities a point is about (about* edge targets)."""
+        if not point_ids:
+            return {}
+        rows = self._get_proj().g.query(
+            "MATCH (n:Point)-[a:" + self._ABOUT_TYPES + "]->(t) "
+            "WHERE n.id IN $ids "
+            "RETURN n.id, labels(t)[0], t.id, coalesce(t.name, t.title, t.content, '')",
+            params={"ids": point_ids},
+        ).result_set
+        out: dict[str, list[dict]] = {}
+        for pid, tlabel, tid, display in rows:
+            out.setdefault(pid, []).append(
+                {"id": tid, "entity_type": (tlabel or "").lower(),
+                 "content": display or ""})
+        return out
+
+    def _state_related_points(self, object_ids: list[str]) -> dict[str, list[dict]]:
+        """Points about an Object (about* edges from Points to the Object)."""
+        if not object_ids:
+            return {}
+        rows = self._get_proj().g.query(
+            "MATCH (p:Point)-[a:" + self._ABOUT_TYPES + "]->(o:Object) "
+            "WHERE o.id IN $ids RETURN o.id, p.id, p.content, p.pointKind",
+            params={"ids": object_ids},
+        ).result_set
+        out: dict[str, list[dict]] = {}
+        for oid, pid, content, pkind in rows:
+            out.setdefault(oid, []).append(
+                {"id": pid, "content": content or "", "point_kind": pkind or ""})
+        return out
+
+    def recall_gaps(
+        self,
+        query: str | None = None,
+        *,
+        kind: str | None = None,
+        limit: int = 20,
+        min_load: int = 1,
+        max_support: int = 2,
+        include_superseded: bool = False,
+        gaps_ranker=None,
+    ) -> list[dict]:
+        """UC2 "gaps" recall (epic #898 Wave B) — load-bearing claims that
+        are themselves under-supported.
+
+        Finds the weak links of a reasoning cycle: claims the graph leans on
+        (they provide confidence to others via IMPL, or actively attack via a
+        strong NAND) but that are poorly sourced/supported themselves (few
+        incoming IMPL, no Source). This is a graph-STRUCTURE query (epistemic
+        load vs epistemic support), NOT semantic similarity:
+
+            load    = outgoing IMPL + outgoing NAND edge count
+            support = incoming IMPL + extractedFrom→Source edge count
+            score   = load / (1 + support)      # "load high AND support low"
+
+        Reads IMPL/NAND edges whether operator-mediated or DIRECT (reification
+        rule, ontology v3.5 §8) — see GapsRanker docstring for the edge
+        semantics. Incoming NAND is surfaced as contention, never support.
+
+        Args:
+            query: optional topic scope (hybrid retrieval). One of query or
+                kind must be provided — the population scan (kind) or the
+                topic scope (query) defines the candidate pool.
+            kind: pointKind to scan (full-scan mode, complete population).
+            limit: max results (1-10000).
+            min_load: only claims with load >= min_load are gaps (default 1
+                — an isolated claim nothing leans on is NOT a gap).
+            max_support: only claims with support <= max_support are gaps
+                (default 2 — "few incoming IMPL, no Source" boundary).
+            include_superseded: bring superseded/deprecated back (retracted
+                stays hard-excluded, #689).
+            gaps_ranker: injectable GapsRanker (tests / tuning).
+
+        Returns the SearchResult shape (list of dicts), each annotated with
+        ``entity_type`` and ``gaps_ranking`` (score breakdown).
+        """
+        from .ranking import GapsRanker
+
+        if query is None and kind is None:
+            raise ValueError(
+                "recall_gaps needs a topic query (topic scope) or a kind "
+                "(population scan) to define the candidate pool")
+        if limit < 1 or limit > 10000:
+            raise ValueError(f"limit must be 1-10000, got {limit}")
+        if min_load < 0:
+            raise ValueError(f"min_load must be >= 0, got {min_load}")
+        if max_support < 0:
+            raise ValueError(f"max_support must be >= 0, got {max_support}")
+
+        proj = self._get_proj()
+        exclude_status = None if include_superseded else sorted(
+            self.STATE_EXCLUDED_STATUS - {"retracted"})
+        excluded_set = set(exclude_status or [])
+
+        if query:
+            # Topic scope: hybrid retrieval pool (operators can surface via
+            # point retrieval — batch-filter them out below). Capped at the
+            # retrieval layer's 10000 limit (P2: a valid large limit must
+            # not blow the internal pool past it).
+            pool = min(max(limit * 3, 50), 10000)
+            results = self.tortoise_fts_query(
+                query, kind=kind, entity_type="point", limit=pool,
+                exclude_status=exclude_status)
+            pool_ids = [r["id"] for r in results if r.get("id")]
+            op_ids = {
+                row[0] for row in proj.g.query(
+                    "MATCH (n:Point {is_operator:true}) WHERE n.id IN $ids "
+                    "RETURN n.id", params={"ids": pool_ids}).result_set
+            } if pool_ids else set()
+            pool_results = [dict(r, entity_type="point") for r in results
+                            if r["id"] not in op_ids]
+        else:
+            # Population scan: raw claim nodes (self.query already excludes
+            # operators + retracted).
+            nodes = self.query(kind=kind)
+            pool_results = []
+            for n in nodes:
+                if (n.get("status") or "") in excluded_set:
+                    continue
+                pool_results.append({
+                    "id": n["id"],
+                    "content": n.get("content") or "",
+                    "point_kind": n.get("pointKind") or (kind or ""),
+                    "status": n.get("status") or "",
+                    "entity_type": "point",
+                })
+
+        # Mitigation bookkeeping points are surfaced attached to results, not
+        # as standalone claims — same convention as recall_state.
+        claims = [r for r in pool_results
+                  if not (r.get("content") or "").startswith("[MITIGATION]")]
+
+        ranker = gaps_ranker or GapsRanker(proj)
+        ranked = ranker.rerank(claims)
+        ranked = [
+            r for r in ranked
+            if r["gaps_ranking"]["load"] >= min_load
+            and r["gaps_ranking"]["support"] <= max_support
+        ][:limit]
+        return ranked
+
+    def recall_subgraph(self, seed: str, *,
+                        depth: int = 2,
+                        completeness: str = "full",
+                        max_nodes: int = 500) -> dict:
+        """UC3 "subgraph" recall (epic #898 Wave B) — the COMPLETE connected
+        subgraph for a seed/topic, completeness-optimized (high recall,
+        precision secondary). Used before connecting a new document to the
+        graph: deep understanding first.
+
+        Args:
+            seed: a node id (Point/Object/Subject/Event/Document id, Source
+                url) OR a topic text (resolved via hybrid retrieval).
+            depth: BFS expansion depth, 1-5 (default 2).
+            completeness: "full" (default — every relationship type is an
+                edge: about*, extractedFrom, hasPart, mitigated_by, ...) or
+                "core" (epistemic core only: IMPL|NAND).
+            max_nodes: node-count cap (10-5000, default 500) — bounded, not
+                exhaustive-until-crash.
+
+        Returns ``{nodes, edges, stats}``:
+            nodes: [{id, type, content, kind, is_operator?, status?,
+                confidence?}] — type is the lowercased graph label
+                (point/object/subject/event/source/document).
+            edges: [{source, type, target}] — every edge with BOTH endpoints
+                in the node set (the subgraph is closed over its edges).
+            stats: {node_count, edge_count, depth, seed_count, truncated}.
+        """
+        from .ranking import SubgraphExpander
+
+        # Validate bounds BEFORE seed resolution so an unresolvable seed
+        # cannot silently skip validation (P2: depth=6 on a bogus seed must
+        # error consistently, not depend on retrieval luck).
+        if depth < 1 or depth > 5:
+            raise ValueError(f"depth must be 1-5, got {depth}")
+        if completeness not in ("core", "full"):
+            raise ValueError(
+                f"completeness must be 'core' or 'full', got {completeness!r}")
+        if max_nodes < 10 or max_nodes > 5000:
+            raise ValueError(f"max_nodes must be 10-5000, got {max_nodes}")
+
+        seeds = self._resolve_subgraph_seed(seed)
+        if not seeds:
+            return {
+                "nodes": [], "edges": [],
+                "stats": {"node_count": 0, "edge_count": 0,
+                           "depth": 0, "seed_count": 0,
+                           "truncated": False},
+            }
+        expander = SubgraphExpander(self._get_proj())
+        return expander.expand(seeds, depth=depth, completeness=completeness,
+                               max_nodes=max_nodes)
+
+    def _resolve_subgraph_seed(self, seed: str) -> list[str]:
+        """Resolve a subgraph seed: exact node id/url match first, then topic
+        text via hybrid retrieval (top 5 points). Returns a list of node ids
+        (empty when nothing resolves)."""
+        if not seed or not seed.strip():
+            raise ValueError("recall_subgraph requires a seed "
+                             "(node id or topic text)")
+        proj = self._get_proj()
+        rows = proj.g.query(
+            "MATCH (n) WHERE (n.id = $seed OR n.url = $seed) "
+            "AND labels(n)[0] IN ['Point', 'Object', 'Subject', 'Event', "
+            "                      'Source', 'Document'] "
+            "RETURN n.id",
+            params={"seed": seed.strip()},
+        ).result_set
+        if rows:
+            return [row[0] for row in rows]
+        # Topic text → hybrid retrieval (points about the topic are the seeds;
+        # the expansion pulls in the entities they touch).
+        return [r["id"] for r in self.tortoise_fts_query(
+            seed.strip(), entity_type="point", limit=5)]
 
     # ── Multi-tenancy (#7001) ─────────────────────────────────
 
@@ -5053,11 +6286,13 @@ class TortoiseSDK:
     def _validate_kind(kind: str) -> None:
         # ponytail: open-ended kind vocabularies — any string accepted.
         # Warning for unrecognized values; domain_loader.register_kind() can suppress.
-        if kind not in known_kinds():
+        # #951: vocabulary source is the domain_loader adapter — the compiled
+        # pack pointKind bucket (pack_registry canonical, plan §5.2 boundary 4).
+        if kind not in known_kinds("pointKind"):
             _logger.warning(
                 "Unrecognized pointKind %r. Known values: %s. "
                 "Use tortoise.domain_loader.register_kind(%r) to register it.",
-                kind, sorted(known_kinds()), kind,
+                kind, sorted(known_kinds("pointKind")), kind,
             )
 
 
@@ -5152,17 +6387,154 @@ class TortoiseSDK:
                 total += r.result_set[0][0]
         return bool(total)
 
-    def create_subject(self, name: str, subjectKind: str = "other", **props) -> dict:
+    def create_entity(self, type: str, name: str, **props) -> dict:
+        """Create an entity — consolidated surface (epic #888 W2, PR #912).
+
+        ``type`` routes to the right entity kind:
+          - subject  → Subject node (subjectKind, status='live')
+          - object   → Object node (objectKind, status='live')
+          - event    → Event node (eventKind required) — preserves the legacy
+            about* edge wiring: aboutSubject/aboutObject/aboutPoint/
+            aboutDocument props are extracted and wired as typed edges
+            (Event)-[:aboutSubject]->(Subject) etc. rather than stored as
+            string properties (ID or name resolution, legacy behavior).
+          - document → Document node (documentKind required, status='draft')
+
+        Write nudges (nudge, don't enforce): returns ``{node, nudges}`` where
+        ``nudges`` lists top related Points (by name/content token overlap) with
+        a suggested IMPL/NAND/mitigate relation — advisory only, never enforced.
+        """
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
-        return self._create_entity("Subject", self.ulid(), {"name": name, "subjectKind": subjectKind, "status": "live", **props}, "SubjectAdded")
+        t = (type or "").strip().lower()
+        if t == "subject":
+            node = self._create_entity("Subject", self.ulid(), {
+                "name": name, "subjectKind": props.pop("subjectKind", "other"),
+                "status": "live", **props}, "SubjectAdded")
+        elif t == "object":
+            node = self._create_entity("Object", self.ulid(), {
+                "name": name, "objectKind": props.pop("objectKind", "other"),
+                "status": "live", **props}, "ObjectRegistered")
+        elif t == "event":
+            eventKind = props.pop("eventKind", None)
+            if not eventKind:
+                raise ValueError(
+                    "create_entity(type='event') requires eventKind")
+            # Legacy create_event about* wiring — preserved verbatim (#888 W2).
+            eid = self.ulid()
+            about_subject = props.pop("aboutSubject", None)
+            about_object = props.pop("aboutObject", None)
+            about_point = props.pop("aboutPoint", None)
+            about_document = props.pop("aboutDocument", None)
+            node = self._create_entity("Event", eid, {
+                "eventId": eid, "name": name, "eventKind": eventKind,
+                "eventStatus": "scheduled", **props}, "EventRecorded")
+            proj = self._get_proj()
+            if about_subject:
+                proj.create_about_edge(eid, about_subject, "aboutSubject")
+                # Only name-resolve if it looks like a plain name, not an ID
+                if isinstance(about_subject, str) and not _is_ulid(about_subject):
+                    proj._create_about_edges(eid, about_subject)
+            if about_object:
+                proj.create_about_edge(eid, about_object, "aboutObject")
+                if isinstance(about_object, str) and not _is_ulid(about_object):
+                    proj._create_about_edges(eid, about_object)
+            if about_point:
+                proj.create_about_edge(eid, about_point, "aboutPoint")
+                if isinstance(about_point, str) and not _is_ulid(about_point):
+                    proj._create_about_edges(eid, about_point)
+            if about_document:
+                proj.create_about_edge(eid, about_document, "aboutDocument")
+                if isinstance(about_document, str) and not _is_ulid(about_document):
+                    proj._create_about_edges(eid, about_document)
+        elif t == "document":
+            documentKind = props.pop("documentKind", None)
+            if not documentKind:
+                raise ValueError(
+                    "create_entity(type='document') requires documentKind")
+            did = self.ulid()
+            node = self._create_entity("Document", did, {
+                "title": name, "documentKind": documentKind,
+                "objectKind": "document", "status": "draft", **props},
+                "DocumentCreated")
+        else:
+            raise ValueError(
+                f"create_entity: unknown type {type!r} — must be one of "
+                f"subject, object, event, document")
+        return {
+            "node": node,
+            "nudges": self._nudge_candidates(
+                name, exclude_ids=[node.get("id") or node.get("eventId")]),
+        }
+
+    # ── Write nudges (epic #888 W2 — nudge, don't enforce) ───────────
+
+    _NUDGE_NAND_MARKERS = ("contradict", "disagree", "oppos", "invalid",
+                           "incorrect", "false claim")
+
+    def _nudge_candidates(self, text: str, *, exclude_ids: list[str] | None = None,
+                          limit: int = 3) -> list[dict]:
+        """Lightweight candidate finder for write nudges (epic #888 W2).
+
+        Deterministic token-overlap match — no model dependency: the new node's
+        name/content tokens are matched against existing Points' content/name/
+        label. Bounded scan (400 rows), top-``limit`` candidates by shared-token
+        count. Suggested relation:
+          - IMPL     — statement Point candidate (default support link)
+          - NAND     — either side carries contradiction markers
+          - mitigate — candidate is an operator Point (mitigation anchor)
+        Nudges are advisory only — surfaced in the write response, never
+        enforced (the agent acts via operator_action/create_edge if it wants).
+        """
+        tokens = {w for w in re.findall(r"[a-z0-9]{4,}", (text or "").lower())}
+        if not tokens:
+            return []
+        proj = self._get_proj()
+        excluded = set(exclude_ids or [])
+        rows = proj.g.query(
+            "MATCH (n:Point) WHERE NOT n.id IN $ex "
+            "RETURN n.id, n.content, n.name, n.label, n.is_operator LIMIT 400",
+            params={"ex": list(excluded)},
+        ).result_set
+        scored = []
+        for nid, content, pname, plabel, is_op in rows:
+            if not nid or nid in excluded:
+                continue
+            blob = " ".join(str(x) for x in (pname, content, plabel) if x)
+            wt = {w for w in re.findall(r"[a-z0-9]{4,}", blob.lower())}
+            overlap = len(tokens & wt)
+            if not overlap:
+                continue
+            if is_op:
+                rel = "mitigate"
+            elif any(m in (text or "").lower() or m in blob.lower()
+                     for m in self._NUDGE_NAND_MARKERS):
+                rel = "NAND"
+            else:
+                rel = "IMPL"
+            scored.append({
+                "candidate": nid,
+                "suggested_relation": rel,
+                "score": overlap,
+                "reason": f"{overlap} shared term(s) with {text[:40]!r}",
+            })
+        scored.sort(key=lambda r: (-r["score"], r["candidate"]))
+        return [{k: r[k] for k in ("candidate", "suggested_relation", "reason")}
+                for r in scored[:limit]]
+
+    def create_subject(self, name: str, subjectKind: str = "other", **props) -> dict:
+        """Thin alias for create_entity(type='subject') — epic #888 W2."""
+        _coerce_props(props)  # accept MCP-style nested props= dict (#218)
+        return self.create_entity("subject", name,
+                                  subjectKind=subjectKind, **props)["node"]
 
     def create_object(self, name: str, objectKind: str = "other", **props) -> dict:
+        """Thin alias for create_entity(type='object') — epic #888 W2."""
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
-        return self._create_entity("Object", self.ulid(), {"name": name, "objectKind": objectKind, "status": "live", **props}, "ObjectRegistered")
+        return self.create_entity("object", name,
+                                  objectKind=objectKind, **props)["node"]
 
     def create_event(self, name: str, eventKind: str, **props) -> dict:
-        _coerce_props(props)  # accept MCP-style nested props= dict (#218)
-        """Create an Event node.
+        """Create an Event node (alias for create_entity(type='event')).
 
         If aboutSubject, aboutObject, aboutPoint, or aboutDocument are provided
         in **props, they are extracted and wired as graph edges:
@@ -5172,31 +6544,9 @@ class TortoiseSDK:
           (Event)-[:aboutDocument]->(Document)
         rather than stored as string properties.
         """
-        eid = self.ulid()
-        about_subject = props.pop("aboutSubject", None)
-        about_object = props.pop("aboutObject", None)
-        about_point = props.pop("aboutPoint", None)
-        about_document = props.pop("aboutDocument", None)
-        result = self._create_entity("Event", eid, {"eventId": eid, "name": name, "eventKind": eventKind, "eventStatus": "scheduled", **props}, "EventRecorded")
-        proj = self._get_proj()
-        if about_subject:
-            proj.create_about_edge(eid, about_subject, "aboutSubject")
-            # Only name-resolve if it looks like a plain name, not an ID
-            if isinstance(about_subject, str) and not _is_ulid(about_subject):
-                proj._create_about_edges(eid, about_subject)
-        if about_object:
-            proj.create_about_edge(eid, about_object, "aboutObject")
-            if isinstance(about_object, str) and not _is_ulid(about_object):
-                proj._create_about_edges(eid, about_object)
-        if about_point:
-            proj.create_about_edge(eid, about_point, "aboutPoint")
-            if isinstance(about_point, str) and not _is_ulid(about_point):
-                proj._create_about_edges(eid, about_point)
-        if about_document:
-            proj.create_about_edge(eid, about_document, "aboutDocument")
-            if isinstance(about_document, str) and not _is_ulid(about_document):
-                proj._create_about_edges(eid, about_document)
-        return result
+        _coerce_props(props)  # accept MCP-style nested props= dict (#218)
+        return self.create_entity("event", name,
+                                  eventKind=eventKind, **props)["node"]
 
 
     # ── Session Indexing (AgentSession) ─────────────────────────
@@ -5554,9 +6904,16 @@ class TortoiseSDK:
 
 
     def create_document(self, title: str, documentKind: str, **props) -> dict:
+        """Thin alias for create_entity(type='document') — epic #888 W2."""
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
+
         did = self.ulid()
-        return self._create_entity("Document", did, {"title": title, "documentKind": documentKind, "objectKind": "document", "status": "draft", **props}, "DocumentCreated")
+        result = self._create_entity("Document", did, {"title": title, "documentKind": documentKind, "objectKind": "document", "status": "draft", **props}, "DocumentCreated")
+        # #394: provenance parity with create_point — link Document → Source
+        # via extractedFrom (Ontology v3.3) when the caller passes a source ref.
+        if props.get("extractedFrom"):
+            self._get_proj()._link_source(did, props["extractedFrom"], label="Document")
+        return result
 
     def create_source(self, url: str, sourceKind: str, *,
                       tier: str | None = None, sourceDate: str | None = None,
@@ -6018,11 +7375,44 @@ class TortoiseSDK:
         return self._get_entity(id_val)
 
     def update_entity(self, id_val: str, **props) -> dict:
+        """Update any entity's properties. Implementation behind
+        update(id, ...) — the consolidated Point/entity update (epic #888 W2)."""
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
         return self._update_entity(id_val, **props)
 
     def delete_entity(self, id_val: str) -> bool:
+        """Delete any entity by ID. Implementation behind delete(id) — the
+        consolidated Point/entity delete (epic #888 W2)."""
         return self._delete_entity(id_val)
+
+    # ── Typed structural edges (epic #888 W2, reification rule v3.5 §8) ──
+
+    def create_edge(self, relation: str, from_id: str, to_id: str) -> dict:
+        """Create a typed structural edge (epic #888 W2, PR #912).
+
+        Reification rule (ontology v3.5 §8): structural edges stay PLAIN — no
+        operator is created (operator iff mitigation, or Point↔Point
+        support/contradict). Lazy promotion: when mitigation becomes needed,
+        create the operator via create_operator and mitigate it with
+        operator_action(action='mitigate').
+
+        ``relation`` must be one of the typed structural relations:
+        performs, produces, uses, authoredBy, ownedBy, managedBy, hasMember,
+        holdsRole, memberOf, reportsTo, participatesIn, hasPart, related,
+        dependsOn, references, wasDerivedFrom, aboutSubject, aboutObject,
+        aboutEvent, aboutDocument, aboutSource, aboutAction
+        (``from``/``to`` are Python keywords — mapped to from_id/to_id).
+
+        Returns {edge: {relation, from, to}, created: bool, nudges: [...]}.
+        """
+        proj = self._get_proj()
+        created = proj.create_edge(from_id, to_id, relation)  # validates relation
+        return {
+            "edge": {"relation": relation, "from": from_id, "to": to_id},
+            "created": created,
+            "nudges": self._nudge_candidates(
+                relation, exclude_ids=[from_id, to_id]),
+        }
 
     # ── Query Helpers ─────────────────────────────────────────────
 
@@ -6146,3 +7536,110 @@ class TortoiseSDK:
         report["point_count"] = r.result_set[0][0]
 
         return report
+
+    # ── Gate B Calibration Milestone (epic-264 #779) ───────────────
+
+    _CALIBRATION_MARKER_KEY = "calibration_milestone"
+    # Gate B criterion (epic-264 align): ≥70% human-reviewed precision.
+    # Enforced at write time — a below-target record would falsely open
+    # Gate B via calibration_passed().
+    _CALIBRATION_PRECISION_TARGET = 0.70
+
+    def record_calibration(self, *, precision: float | None = None,
+                           sample_size: int | None = None,
+                           mean_grounding_delta: float | None = None,
+                           notes: str | None = None) -> dict:
+        """Record the Gate B calibration milestone as a persisted :Meta marker.
+
+        Persists a ``:Meta {key: 'calibration_milestone'}`` node in the graph
+        DB (the ``event_fts_v2`` marker pattern, projection/__init__.py) so the
+        marker survives restarts and is visible to any SDK instance on the
+        same DB. ``calibration_passed()`` reads it.
+
+        The 50-session calibration RUN with ≥70% human-reviewed precision is
+        an ops follow-up (issue #779) — this writer exists so the milestone
+        can be recorded when that run completes. A ``CalibrationRecorded``
+        event is emitted when an event log is configured (#548 best-effort).
+
+        Args:
+            precision: measured extraction precision in [0, 1]. REQUIRED
+                (review round 2) and ENFORCED at write time — must be ≥ 0.70
+                (Gate B criterion); a missing value or a below-target value
+                raises ValueError and leaves no marker.
+            sample_size: sessions in the human-reviewed sample (> 0).
+            mean_grounding_delta: measured pre/post drift. REQUIRED (review
+                round 2) and ENFORCED at write time — must be ≤ 0.02
+                (``MAX_GROUNDING_DRIFT``, the #785 seam); a missing value or
+                an above-ceiling value raises ValueError and leaves no marker.
+            notes: free-form ops documentation (e.g. reviewer count, corpus).
+
+        Returns:
+            The stored marker properties (key + recordedAt + given fields).
+        """
+        # Measured metrics are REQUIRED (review round 2): a marker written
+        # with no precision/mean_grounding_delta (e.g. notes only) would
+        # skip every gate check and flip calibration_passed() True with zero
+        # measured evidence — refuse BEFORE any gate check can be bypassed.
+        if precision is None or mean_grounding_delta is None:
+            raise ValueError(
+                "record_calibration requires measured metrics: precision and "
+                "mean_grounding_delta are both required (Gate B must not "
+                "open without measured evidence)"
+            )
+        if not 0.0 <= precision <= 1.0:
+            raise ValueError(f"precision must be in [0, 1], got {precision}")
+        # Gate B criterion enforcement (review round 1): the docstring
+        # documents ≥0.70 precision / ≤0.02 drift as binding — enforce them
+        # BEFORE the MERGE so a below-target marker cannot open Gate B.
+        if precision < self._CALIBRATION_PRECISION_TARGET:
+            raise ValueError(
+                f"precision {precision} is below the Gate B target of "
+                f"{self._CALIBRATION_PRECISION_TARGET:.2f} (≥70% human-reviewed "
+                "precision) — refusing to record a calibration milestone that "
+                "does not pass the gate"
+            )
+        if sample_size is not None and sample_size <= 0:
+            raise ValueError(f"sample_size must be positive, got {sample_size}")
+        # Lazy import: sdk/analyze are mutually imported at call sites, never
+        # at module load (analyze.py contract). MAX_GROUNDING_DRIFT is the
+        # #785 seam constant, pinned at 0.02 by tests.
+        from tortoise.analyze import MAX_GROUNDING_DRIFT
+        if mean_grounding_delta > MAX_GROUNDING_DRIFT:
+            raise ValueError(
+                f"mean_grounding_delta {mean_grounding_delta} exceeds the "
+                f"MAX_GROUNDING_DRIFT ceiling of {MAX_GROUNDING_DRIFT} (≤2% "
+                "mean absolute drift) — refusing to record a calibration "
+                "milestone that does not pass the gate"
+            )
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        proj = self._get_proj()
+        props: dict[str, Any] = {"recordedAt": now}
+        # precision / mean_grounding_delta are guaranteed non-None above.
+        props["precision"] = precision
+        if sample_size is not None:
+            props["sample_size"] = sample_size
+        props["mean_grounding_delta"] = mean_grounding_delta
+        if notes is not None:
+            props["notes"] = notes
+        proj.g.query(
+            "MERGE (m:Meta {key:$key}) SET m += $props RETURN m",
+            params={"key": self._CALIBRATION_MARKER_KEY, "props": props},
+        )
+        self._emit_event("CalibrationRecorded",
+                         id=self._CALIBRATION_MARKER_KEY, **props)
+        return {"key": self._CALIBRATION_MARKER_KEY, **props}
+
+    def calibration_passed(self) -> bool:
+        """True once the Gate B calibration milestone marker is stored.
+
+        Local SDK contract (DE2E-7, epic-264 §6.3): no GitHub dependency —
+        the workflow-layer ``check_gates`` helper composes this with #320's
+        state. #787 re-uses this reader; it does NOT re-implement it.
+        """
+        proj = self._get_proj()
+        rows = proj.g.query(
+            "MATCH (m:Meta {key:$key}) RETURN m.recordedAt",
+            params={"key": self._CALIBRATION_MARKER_KEY},
+        ).result_set
+        return bool(rows)

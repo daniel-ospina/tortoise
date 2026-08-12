@@ -11,6 +11,29 @@ updated: 2026-08-10
 
 A graph engine for agent memory: claims are **Points**, relationships are **edges**, and belief scores are computed by propagating evidence through the graph (EP — Evidence Propagation).
 
+## Core hypothesis: the graph is the memory, not the summaries
+
+The graph stores **STATE, not decisions**. Competitors store decision objects
+("Decision X was made because of Reasons"); we do not. The record is: state
+(objects/options with queryable lifecycle events — promoted/deprecated/
+superseded — and confidence) + points (the logic: claims connected to the
+state, the arguments that move confidence) + events (what happened, including
+the decision moment as an Event node, so the decision dimension stays
+queryable as a timeline). The graph says "this state is based on these
+reasons" — never "this decision was made because of these reasons". The
+narrative lives in the graph's content **and** its metadata; agents are the
+computational layer that reads and maintains it; semantic summaries are
+derived projections, never the record. Evidence stays authoritative: every
+Point keeps its quoted source span, and the graph is an auditable index over
+unrewritten evidence.
+
+This is the product's core, falsifiable hypothesis (evidence: temporal-KG
+memory beats vector-summary memory — Graphiti arXiv:2501.13956; n26modi
+head-to-head: staleness error 87%→20%, historical-belief retrieval 60%→100%;
+event sourcing precedent). Full framing + the falsification experiments:
+`docs/drafts/2026-08-12-graph-as-memory-hypothesis.md`. Every epic takes it
+into account (filed 2026-08-12).
+
 Tortoise runs **as a service** — self-hosted or hosted — and your tools **connect** to it over MCP (Model Context Protocol). You don't import it into your application; you run it and point your agent at it, the way you'd run MongoDB and connect a driver.
 
 A product of [Premise Labs](https://premiselabs.co).
@@ -22,11 +45,24 @@ A product of [Premise Labs](https://premiselabs.co).
 New to Tortoise? Choose a path:
 
 - **Hosted (managed)** — no install, just connect your agent: [docs/quickstart-cloud.md](docs/quickstart-cloud.md)
-- **Self-hosted (run it yourself)** — requires **Python ≥ 3.12**:
+- **Self-hosted — durable (recommended): Docker compose.** Runs the daemon
+  plus a FalkorDB sidecar (AOF, named volume, healthcheck) from the repo root:
+
+  ```bash
+  git clone https://github.com/daniel-ospina/tortoise.git && cd tortoise
+  docker compose up -d          # daemon on http://localhost:8000 (MCP at /mcp)
+  ```
+
+  Durable multi-writer: the compose sidecar is the supported team/production
+  path. For a single-agent eval without Docker, use the pip path below —
+  embedded FalkorDBLite is SINGLE-WRITER / EVAL-ONLY (concurrent writers lose data).
+
+- **Self-hosted — single-agent eval (no Docker):** requires **Python ≥ 3.12**:
 
   ```bash
   git clone https://github.com/daniel-ospina/tortoise.git && cd tortoise
   pip install -e .                         # or: pip install -e '.[embeddings]' for vector search
+  python -m tortoise.selfhost              # embedded FalkorDBLite — SINGLE-WRITER, eval only
   # or straight from GitHub (no clone):
   pip install git+https://github.com/daniel-ospina/tortoise.git
   ```
@@ -39,7 +75,7 @@ Point your agent at Tortoise over MCP:
 
 ```bash
 # Hosted
-claude mcp add tortoise https://api.premiselabs.co/mcp
+claude mcp add tortoise https://api.premiselabs.co/mcp/
 # or self-hosted
 claude mcp add tortoise http://localhost:8000/mcp
 ```
@@ -80,8 +116,8 @@ python -m tortoise.selfhost # run the daemon locally (see env table below)
 
 | Env var | Default | Purpose |
 |---|---|---|
-| `TORTOISE_DB_URI` | — | Durable FalkorDB connection string (recommended) |
-| `TORTOISE_DB_PATH` | `/data/tortoise.db` | Embedded FalkorDBLite eval path (⚠️ not durable) |
+| `TORTOISE_DB_URI` | — | Durable FalkorDB connection string — the recommended path (docker compose sidecar or managed Cloud); multi-writer safe |
+| `TORTOISE_DB_PATH` | `~/.tortoise/tortoise.db` | Embedded FalkorDBLite eval path — SINGLE-WRITER, eval only (concurrent writers lose data); AOF-durable to ≤1s for ONE process since #915; delete the db + `<db>-appendonlydir` to reset |
 | `TORTOISE_API_KEY` | unset | Set → `auth_mode=static` (Bearer key); unset → `auth_mode=none` — ⚠️ a non-localhost bind with no key exposes an unauthenticated engine |
 | `TORTOISE_HOST` / `TORTOISE_PORT` | `127.0.0.1` / `8000` | Daemon bind |
 | `TORTOISE_RATE_LIMIT` | `100` | Requests per minute per IP (MCP SSE bursts ≈ 5–10 req/call) |
@@ -116,7 +152,7 @@ Tortoise is **Business Source License 1.1** — see [LICENSE](LICENSE) and the [
 
 **`daniel-ospina/tortoise` (this repo)** is the **full product** — graph runtime, SDK, MCP server, self-host daemon + docker compose, Fly.io deployment config (`fly.toml`), Dockerfile.selfhost, embedded reaper, Supabase edge functions (`supabase/functions/tenant-provision/`), backup pipeline, and the hosted dashboard (`website/` dir → Cloudflare Pages). This is the canonical source of truth. If you want to deploy Tortoise (self-host or hosted), this is the only repo you need.
 
-**`daniel-ospina/premise-labs`** is a **partial copy** of the tortoise tree used as an **SDK-import surface** by dependent repos (notably `daniel-ospina/swarm`, which sets `PYTHONPATH` to import `tortoise/projection.py`, `tortoise/ids.py`, `tortoise/pipeline_cli.py`, and `config/` from it). It is **not** the full product — it lacks `docker-compose.yml`, `Dockerfile.selfhost`, `tortoise/embedded_reaper.py`, `tortoise/selfhost.py`, `fly.toml`, and `supabase/functions/tenant-provision/`. It also carries an outdated `.env.example` (port `:6379` in the URI example vs `FALKORDB_PORT=16379`; this repo uses `:16379` consistently).
+**`daniel-ospina/premise-labs`** is a **partial copy** of the tortoise tree used as an **SDK-import surface** by dependent repos (notably `daniel-ospina/swarm`, which sets `PYTHONPATH` to import `tortoise/projection.py`, `tortoise/ids.py`, `tortoise/pipeline_cli.py`, and `config/` from it). It is **not** the full product — it lacks `docker-compose.yml`, `Dockerfile.selfhost`, `tortoise/embedded_reaper.py`, `tortoise/selfhost.py`, `fly.toml`, and `supabase/functions/tenant-provision/`. It also carries an outdated `.env.example` (a passwordless `:6379` URI example vs this repo's canonical `docker://:falkordb@localhost:6379/tortoise` — compose publishes 127.0.0.1:6379).
 
 **Guidance:** if you clone `premise-labs` for swarm imports, also clone `tortoise` for deployment infrastructure. `premise-labs` is SDK-only — it cannot run a Tortoise server. (#761)
 

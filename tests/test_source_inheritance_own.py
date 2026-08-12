@@ -227,7 +227,10 @@ class TestNANDRealPath:
         def build(tier):
             with fresh_sdk() as sdk:
                 a = tier_source(sdk, f"https://{tier}.example", tier)
-                b = sdk.create_point("statement", "contradiction target")
+                # #992: target must be live — draft inputs are stripped by the EP
+                # draft filter (create_point defaults to draft since #943), making
+                # the NAND operator degenerate and silently excluded from EP.
+                b = sdk.create_point("statement", "contradiction target", status="live")
                 op = sdk.create_operator("NAND", a, [b["id"]])
                 sdk._apply_source_inheritance(recency_decay=1.0)
                 result = sdk.compute_confidence()

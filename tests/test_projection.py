@@ -7,7 +7,9 @@ Runnable without pytest:  .venv/bin/python tests/test_projection.py
 """
 from __future__ import annotations
 
+import json
 import os
+import shutil
 import sys
 import tempfile
 
@@ -1637,16 +1639,19 @@ class TestVocabEdgeValidation:
             proj.close()
 
     def test_valid_predicates_no_longer_contains_instantiates(self):
-        """#214: validate that valid_predicates set no longer includes instantiates."""
+        """#214: validate that valid_predicates set no longer includes instantiates.
+
+        Vocabulary lives in the module-level _VALID_EDGE_PREDICATES (hoisted from
+        create_edge for SDK reuse — epic #888 W4 ingest); create_edge validates
+        against the same constant.
+        """
         if _skip_if_no_falkor():
             return
-        import inspect
-        from tortoise.projection.edges import _EdgeHandlers
-        src = inspect.getsource(_EdgeHandlers.create_edge)
-        assert "'instantiates'" not in src
-        assert "'dependsOn'" in src
-        assert "'reportsTo'" in src
-        assert "'related'" in src
+        from tortoise.projection.edges import _VALID_EDGE_PREDICATES
+        assert "instantiates" not in _VALID_EDGE_PREDICATES
+        assert "dependsOn" in _VALID_EDGE_PREDICATES
+        assert "reportsTo" in _VALID_EDGE_PREDICATES
+        assert "related" in _VALID_EDGE_PREDICATES
 
 
 class TestCreateEdgeAboutPredicates:
@@ -2526,3 +2531,246 @@ def test_retract_tombstone_hosted_list_excludes_retracted():
         assert "h_ret" not in ids, "retracted point must NOT appear in list"
     finally:
         proj.close()
+
+
+# ── #331: missing event keys ──
+
+def test_apply_one_missing_type_skipped():
+    """#331: events without a 'type' key must not crash fold/apply."""
+    points = {}
+    _apply_one(points, {})
+    _apply_one(points, {"point": {"id": "p1", "content": "x"}})  # nested point, no type
+    _apply_one(points, {"type": None})
+    _apply_one(points, {"type": 42})
+    assert points == {}
+
+
+def test_apply_one_point_added_missing_id_skipped():
+    """#331: PointAdded without an id must not crash (no key to index by)."""
+    points = {}
+    _apply_one(points, {"type": "PointAdded", "point": {"content": "no id"}})
+    assert points == {}
+    _apply_one(points, {"type": "OperatorAdded", "point": {"operator": {"op_type": "IMPL"}}})
+    assert points == {}
+
+
+def test_apply_one_non_dict_provenance_no_crash():
+    """#331: null/non-dict provenance must not crash speaker flattening."""
+    points = {}
+    _apply_one(points, {"type": "PointAdded",
+                        "point": {"id": "p1", "content": "x", "provenance": None}})
+    assert points["p1"]["id"] == "p1"
+    _apply_one(points, {"type": "PointAdded",
+                        "point": {"id": "p2", "content": "y", "provenance": "junk"}})
+    assert points["p2"]["id"] == "p2"
+
+
+def test_falkor_apply_non_dict_operator_no_crash():
+    """#331 (review r5): a truthy non-dict operator (bare string) must
+    degrade to no-operator in _upsert_point_props — parity with the r4
+    guard in _create_edges — not AttributeError in op.get('op_type')."""
+    if _skip_if_no_falkor():
+        return
+    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    try:
+        proj.apply({"type": "PointAdded",
+                    "point": {"id": "p-op-str", "content": "x", "operator": "IMPL"}})
+        # Point written, flagged as non-operator
+        row = proj.g.query(
+            "MATCH (n:Point {id:'p-op-str'}) RETURN n.is_operator"
+        ).result_set
+        assert row and row[0][0] is False, \
+            "non-dict operator must degrade to is_operator=false"
+    finally:
+        proj.close()
+
+
+def test_fold_missing_type_events_skipped():
+    """#331: fold over a log containing malformed events must not raise."""
+    pts = fold([
+        {},
+        {"type": "PointAdded", "point": {"id": "a", "content": "x", "provenance": {}}},
+        {"type": "NopeUnknown"},
+    ])
+    assert set(pts) == {"a"}
+
+
+def test_inmemory_apply_missing_keys_no_crash():
+    """#331: InMemoryProjection.apply tolerates missing event keys."""
+    proj = InMemoryProjection()
+    proj.apply({})
+    proj.apply({"type": "PointRetracted"})  # no id
+    proj.apply({"type": "PointRevised"})    # no id
+    proj.apply({"type": "PointsMerged"})    # no merge_ids
+    assert proj.points == {}
+
+
+def test_falkor_apply_missing_keys_no_crash():
+    """#331: FalkorProjection.apply tolerates missing event keys (embedded)."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    proj = FalkorProjection(_tmp("tortoise.db"))
+    try:
+        proj.apply({})
+        proj.apply({"type": "PointRetracted"})  # no id — no crash
+        proj.apply({"type": "PointRevised"})    # no id — no crash
+        proj.apply({"type": "PointsMerged"})    # no merge_ids
+        proj.apply({"type": "PointsMerged", "keep_id": "p9",
+                    "merge_ids": None})          # explicit null
+        proj.apply({"type": "PointAdded"})        # no 'point' key at all
+        proj.apply(None)                          # r4: non-dict event
+        proj.apply([])                            # r4: non-dict event
+        # r3: non-dict provenance must not AttributeError in the Falkor path
+        proj.apply({"type": "PointAdded",
+                    "point": {"id": "pn1", "content": "null prov",
+                              "provenance": None}})
+        proj.apply({"type": "PointAdded",
+                    "point": {"id": "pn2", "content": "string prov",
+                              "provenance": "junk"}})
+        # a valid event still lands
+        proj.apply({"type": "PointAdded",
+                    "point": {"id": "p1", "content": "x", "provenance": {}}})
+        rows = proj.g.query("MATCH (n:Point {id:'p1'}) RETURN count(n)").result_set
+        assert rows[0][0] == 1
+        rows = proj.g.query("MATCH (n:Point) WHERE n.id IN ['pn1','pn2'] "
+                            "RETURN count(n)").result_set
+        assert rows[0][0] == 2, "non-dict-provenance points must land"
+    finally:
+        proj.close()
+
+
+# ── #331 (review r2): backend-parity regression tests ──
+
+def test_apply_one_merge_ids_explicit_null_no_crash():
+    """#331 (review r2): an explicit "merge_ids": null in the log must not
+    raise TypeError in the fold (dict.get(key, []) only covers missing)."""
+    points = {"p1": {"id": "p1"}}
+    _apply_one(points, {"type": "PointsMerged", "keep_id": "p9",
+                        "merge_ids": None})
+    assert points == {"p1": {"id": "p1"}}
+
+
+def test_falkor_apply_point_added_missing_id_no_crash():
+    """#331 (review r2): FalkorProjection.apply with a PointAdded whose
+    point dict has no id must skip, not KeyError in _upsert."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    proj = FalkorProjection(_tmp("tortoise.db"))
+    try:
+        proj.apply({"type": "PointAdded", "point": {"content": "no id"}})
+        proj.apply({"type": "OperatorAdded", "point": {"content": "no id"}})
+        # nothing landed
+        rows = proj.g.query("MATCH (n:Point) RETURN count(n)").result_set
+        assert rows[0][0] == 0
+        # and a valid event still lands after the skips
+        proj.apply({"type": "PointAdded",
+                    "point": {"id": "p2", "content": "y", "provenance": {}}})
+        rows = proj.g.query("MATCH (n:Point {id:'p2'}) RETURN count(n)").result_set
+        assert rows[0][0] == 1
+    finally:
+        proj.close()
+
+
+def test_falkor_apply_merge_ids_explicit_null_no_crash():
+    """#331 (review r2): explicit "merge_ids": null must not crash the
+    Falkor handler either."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    proj = FalkorProjection(_tmp("tortoise.db"))
+    try:
+        proj.apply({"type": "PointAdded",
+                    "point": {"id": "p1", "content": "x", "provenance": {}}})
+        proj.apply({"type": "PointsMerged", "keep_id": "p9",
+                    "merge_ids": None})
+        rows = proj.g.query("MATCH (n:Point {id:'p1'}) RETURN count(n)").result_set
+        assert rows[0][0] == 1  # untouched, no crash
+    finally:
+        proj.close()
+
+
+def test_apply_one_non_dict_events_skipped():
+    """#331 (review r4): non-dict events (raw JSON null/array/string lines)
+    must be skipped by the fold, not AttributeError in _norm."""
+    points = {}
+    for bad in (None, [], "x", 42):
+        _apply_one(points, bad)
+    assert points == {}
+    # fold over a mixed log survives
+    result = fold([None, {"type": "PointAdded",
+                          "point": {"id": "p1", "content": "x"}}, [], "junk"])
+    assert set(result.keys()) == {"p1"}
+
+
+def test_apply_one_non_string_ids_skipped():
+    """#331 (review r4): truthy non-string ids (list/dict) must be skipped,
+    not raise TypeError (unhashable) in the fold's index ops."""
+    points = {}
+    _apply_one(points, {"type": "PointAdded", "point": {"id": ["x"], "content": "c"}})
+    _apply_one(points, {"type": "PointAdded", "point": {"id": {"a": 1}, "content": "c"}})
+    _apply_one(points, {"type": "PointRevised", "id": ["x"], "new_content": "n"})
+    _apply_one(points, {"type": "PointRetracted", "id": ["x"]})
+    _apply_one(points, {"type": "PointsMerged", "keep_id": "p",
+                        "merge_ids": [["x"], {"a": 1}, None]})
+    assert points == {}
+
+
+def test_apply_one_point_key_missing_entirely():
+    """#331 (review r3): a valid type with NO 'point' key must be skipped
+    by the isinstance guard, not KeyError at ev['point']."""
+    points = {}
+    _apply_one(points, {"type": "PointAdded"})
+    _apply_one(points, {"type": "OperatorAdded"})
+    assert points == {}
+
+
+def test_retract_without_id_skipped_everywhere():
+    """#331 (review r3): a PointRetracted carrying only event_id must NOT
+    retract anything — fold parity (an event id is not a point id)."""
+    points = {"p1": {"id": "p1", "status": "live"}}
+    _apply_one(points, {"type": "PointRetracted", "event_id": "ev-999"})
+    assert points["p1"]["status"] == "live"
+
+
+def test_rebuild_all_tolerates_malformed_events():
+    """#331 (review r3): rebuild_all must skip, not crash, on:
+    - PointAdded/OperatorAdded with missing point id (incl. operator-carrying)
+    - explicit null merge_ids
+    - PointRetracted carrying only event_id (must NOT retract p1)
+    """
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    d = tempfile.mkdtemp(prefix="tortoise_rebuild_331_")
+    try:
+        events = [
+            None,           # r4: raw JSON null line
+            [],             # r4: raw JSON array line
+            {"type": "PointAdded",
+             "point": {"id": "p1", "content": "valid", "provenance": {}}},
+            {"type": "PointAdded", "point": {"content": "no id"}},
+            {"type": "OperatorAdded",
+             "point": {"content": "no id",
+                       "operator": {"op_type": "IMPL", "inputs": ["p1"]}}},
+            {"type": "PointAdded"},  # no point key at all
+            {"type": "PointsMerged", "keep_id": "p1", "merge_ids": None},
+            {"type": "PointRetracted", "event_id": "ev-999"},
+        ]
+        with open(os.path.join(d, "events.jsonl"), "w") as f:
+            for ev in events:
+                f.write(json.dumps(ev) + "\n")
+            f.write(json.dumps({"type": "PointAdded",
+                                "point": {"id": ["x"], "content": "bad id"}}) + "\n")
+        proj = FalkorProjection(_tmp("g_rebuild_331.db"), graph_name="test")
+        try:
+            result = proj.rebuild_all(d)
+            assert result["nodes"] >= 1
+            rows = proj.g.query(
+                "MATCH (n:Point {id:'p1'}) RETURN n.status").result_set
+            # p1 landed and was NOT retracted by the event_id-only event
+            assert rows and rows[0][0] != "retracted"
+            rows = proj.g.query("MATCH (n:Point) RETURN count(n)").result_set
+            assert rows[0][0] == 1, "malformed points must not land"
+        finally:
+            proj.close()
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+

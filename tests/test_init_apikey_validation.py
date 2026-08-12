@@ -186,7 +186,7 @@ class TestInitApiKeyEnhancements:
         assert out["status"] == "connected"
         assert out["team_id"] == "team123"
         assert out["api_url"] == "https://api.premiselabs.co"
-        assert out["mcp"]["endpoint"] == "https://api.premiselabs.co/mcp"
+        assert out["mcp"]["endpoint"] == "https://api.premiselabs.co/mcp/"
         assert out["mcp"]["auth_header"] == "Bearer tt_testkey"
         assert set(out["mcp"]["configs"]) == {"claude", "codex", "cursor", "pi"}
         claude = out["mcp"]["configs"]["claude"]
@@ -270,7 +270,7 @@ class TestInitApiKeyEnhancements:
         mcp = json.loads((tmp_path / ".mcp.json").read_text())
         tortoise = mcp["mcpServers"]["tortoise"]
         assert tortoise["type"] == "streamable-http"
-        assert tortoise["url"] == "https://api.premiselabs.co/mcp"
+        assert tortoise["url"] == "https://api.premiselabs.co/mcp/"
         assert tortoise["headers"]["Authorization"] == "Bearer tt_testkey"
         captured = capsys.readouterr()
         assert "Wrote MCP config" in captured.out
@@ -327,7 +327,7 @@ class TestInitApiKeyEnhancements:
                            ["init", "--api-key", "tt_testkey", "--harness", "codex", "--write-mcp-config"])
         assert rc == 0
         out = capsys.readouterr().out
-        assert "codex mcp add tortoise --url https://api.premiselabs.co/mcp --bearer-token-env-var TORTOISE_API_KEY" in out
+        assert "codex mcp add tortoise --url https://api.premiselabs.co/mcp/ --bearer-token-env-var TORTOISE_API_KEY" in out
         assert not (tmp_path / ".mcp.json").exists()  # codex is command-based
 
     def test_json_output_with_write_mcp_config_keeps_stdout_pure(self, monkeypatch, tmp_path, capsys):
@@ -360,7 +360,7 @@ class TestInitApiKeyEnhancements:
         assert out["status"] == "connected"
         assert out["already_connected"] is True
         assert out["api_url"] == "https://api.premiselabs.co"
-        assert out["mcp"]["endpoint"] == "https://api.premiselabs.co/mcp"
+        assert out["mcp"]["endpoint"] == "https://api.premiselabs.co/mcp/"
         assert set(out["mcp"]["configs"]) == {"claude", "codex", "cursor", "pi"}
         assert out["onboarding_prompt_url"] == "https://premiselabs.co/onboarding-prompt.md"
         assert out["next_steps"]

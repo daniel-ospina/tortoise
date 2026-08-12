@@ -96,6 +96,19 @@ MAX_EXTRACTIONS_PER_TURN = 200
 MAX_ANALYZE_LLM_PER_MIN = 60
 MAX_DREAM_FULL_PER_HOUR = 6
 
+# ── Value-first mining budget + Layer-1 payload caps (epic #909 §4.4) ────
+# Per-session CUMULATIVE budget: net-new non-episodic delta, post-
+# reconciliation (consumed by the commit endpoint, epic #909 slice 5).
+# soft → WARN telemetry at 15; hard 25 → hold (PL3); ceiling 50 → 402.
+MAX_VALUE_POINTS_PER_SESSION = {"soft": 15, "hard": 25, "ceiling": 50}
+# Layer-1 RAW payload point count cap → 422. Deliberately NAMED differently
+# from the budget ceiling (also 50) to prevent wiring the wrong 50 (plan
+# R-decoupling, §4.4): the raw cap is independent of the budget check.
+MAX_PAYLOAD_POINTS = 50
+# Layer-1 per-type payload caps → 422 (independent, not summed).
+MAX_ENTITIES = 500
+MAX_OPERATORS = 500
+
 # ── Default limits ──────────────────────────────────────────────────────────
 # max_points/max_api_keys have NO constant here — they resolve from
 # tortoise.pricing.tier_limits (product/pricing.json) so a legacy team without
@@ -208,9 +221,14 @@ def _count_resource(team_id: str, resource: str, sdk=None) -> int:
     """Count current usage for a resource. Raises QuotaCheckError on failure.
 
     Supported resources:
-    - points: total nodes in tenant graph (MATCH (n) RETURN count(n))
+    - points: non-episodic Points in tenant graph (the Point-level
+      ``is_episodic`` flag is the quota discriminator — #947, epic #909
+      §4.4; legacy Points without the flag count as non-episodic,
+      fail-closed, until graph-scripts/backfill_is_episodic.py backfills
+      them, R-18)
     - api_keys: active (non-revoked) APIKey nodes in registry
-    - sessions: total nodes in tenant graph (same counter as points)
+    - sessions: Session nodes in tenant graph (MATCH (s:Session) — NOT the
+      all-nodes count; #947 P0)
     - users: active Membership nodes in registry
     - graphs: Graph nodes in registry
     """
@@ -268,11 +286,26 @@ def _count_resource(team_id: str, resource: str, sdk=None) -> int:
                 ).result_set
             return int(rows[0][0])
 
-        # ── Tenant-graph-scoped counts (points, sessions) ──
+        # ── Tenant-graph-scoped counts (sessions, points) ──
         if sdk is None:
             sdk = _make_sdk(namespace=team_id)
+        if resource == "sessions":
+            # #947 (epic #909 §4.4, W-4): the P0 — count Session nodes, NOT
+            # all nodes. Pre-fix this fell through to MATCH (n) (~25 nodes
+            # per captured session) → false 402 after ~40 captures.
+            rows = sdk._get_proj().g.query(
+                "MATCH (s:Session) RETURN count(s)",
+            ).result_set
+            return int(rows[0][0])
+        # points: non-episodic Points only — the Point-level is_episodic flag
+        # is the discriminator. A MISSING flag counts as non-episodic
+        # (fail-closed, R-18): legacy regex-path captures lack it and must be
+        # backfilled episodic by graph-scripts/backfill_is_episodic.py, else
+        # false 402s persist for existing capture users.
         rows = sdk._get_proj().g.query(
-            "MATCH (n) RETURN count(n)",
+            "MATCH (n:Point) "
+            "WHERE n.is_episodic IS NULL OR n.is_episodic = false "
+            "RETURN count(n)",
         ).result_set
         return int(rows[0][0])
     except QuotaCheckError:
