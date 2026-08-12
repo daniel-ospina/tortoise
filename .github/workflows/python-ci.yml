@@ -89,13 +89,13 @@ on:
     branches: [main]
   pull_request:
 
-# #1008 queue health: the heavy jobs below are path-filtered so docs/config-only
-# PRs skip the ~46-min matrix entirely. The required check is `python-ci-gate`
-# (branch protection) which aggregates them — code PRs are still fully gated,
-# docs PRs report green via the gate. Job id `python-ci-gate` is load-bearing:
-# do NOT rename it or add a `name:` field (the check name must match branch
-# protection exactly). welcome-e2e (#801 live-signup monitor) stays in ci.yml
-# as a running monitor but is no longer a required check (shared email bucket).
+# #1008 queue health: a `changes` job detects python-relevant edits; the heavy
+# matrix jobs run only when it's true, so docs/config-only PRs skip them. The
+# REQUIRED check is `python-ci-gate` (branch protection), which aggregates the
+# matrix — code PRs are fully gated, docs PRs report green via the gate. Job id
+# `python-ci-gate` is load-bearing: do NOT rename it or add a `name:` field.
+# welcome-e2e (#801 live-signup monitor) stays in ci.yml as a running monitor
+# but is no longer a required check (shared email bucket).
 
 concurrency:
   # Per-PR cancel only: on `pull_request` github.ref is refs/pull/N/merge so
@@ -145,6 +145,37 @@ env:
     tests/test_agent_signup.py
 
 jobs:
+  changes:
+    # #1008: detect python-relevant changes (tortoise/, tests/, python deps,
+    # shared actions, this workflow, supabase schema, graph-scripts/config used
+    # by tests). Docs/config-only PRs → false → the heavy jobs below skip and
+    # the gate reports green. push to main always runs.
+    runs-on: ubuntu-latest
+    outputs:
+      python: ${{ steps.filter.outputs.python }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Detect python-relevant changes
+        id: filter
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "python=true" >> "$GITHUB_OUTPUT"
+            echo "push to main — always run the matrix"
+            exit 0
+          fi
+          BASE="${{ github.event.pull_request.base.sha }}"
+          [ -n "$BASE" ] || BASE="origin/main"
+          CHANGED=$(git diff --name-only "$BASE...HEAD" 2>/dev/null || git diff --name-only "$BASE" HEAD)
+          echo "changed files:"
+          echo "$CHANGED"
+          MATCH="false"
+          for p in tortoise/ tests/ graph-scripts/ config/ validation/ packs/ supabase/ .github/actions/ .github/workflows/python-ci.yml pyproject.toml requirements; do
+            if echo "$CHANGED" | grep -qE "^${p}"; then MATCH="true"; break; fi
+          done
+          echo "python=$MATCH" >> "$GITHUB_OUTPUT"
+
   test:
     # #880: split into two parallel halves (matrix). The fast suite's pytest
     # session is ~28 min but the atexit teardown of ~200 leaked embedded
@@ -153,19 +184,9 @@ jobs:
     # (32/36/40/46m all hit exactly at the boundary). Two parallel jobs
     # halve per-job server count (atexit ~8 min) and overlap collection —
     # wall time drops to ~max(half) ≈ 22-25 min. Watchdog back to 30m.
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
     runs-on: ubuntu-latest
-    # #1008: docs/config-only PRs skip the heavy matrix (gate job aggregates).
-    paths:
-      - 'tortoise/**'
-      - 'tests/**'
-      - 'graph-scripts/**'
-      - 'config/**'
-      - 'validation/**'
-      - 'packs/**'
-      - 'pyproject.toml'
-      - 'requirements.txt'
-      - '.github/actions/**'
-      - '.github/workflows/python-ci.yml'
     strategy:
       fail-fast: false
       matrix:
@@ -299,19 +320,9 @@ jobs:
           TRANSFORMERS_OFFLINE: "1"
 
   test-slow:
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
     runs-on: ubuntu-latest
-    # #1008: same paths filter as the test matrix (docs PRs skip).
-    paths:
-      - 'tortoise/**'
-      - 'tests/**'
-      - 'graph-scripts/**'
-      - 'config/**'
-      - 'validation/**'
-      - 'packs/**'
-      - 'pyproject.toml'
-      - 'requirements.txt'
-      - '.github/actions/**'
-      - '.github/workflows/python-ci.yml'
     # Slow files run serially here; generous caps so the summary is
     # guaranteed to print (a runner kill would lose it — the #798 mode).
     # Watchdog (75m) + SIGINT grace + tail print; ~17 min for the original
@@ -415,18 +426,8 @@ jobs:
     # BOTH pytest 8.x output formats (-v progress: "nodeid SKIPPED (reason)";
     # -rs summary: "SKIPPED [N] tests/file.py:line").
     runs-on: ubuntu-latest
-    # #1008: same paths filter as the test matrix (docs PRs skip).
-    paths:
-      - 'tortoise/**'
-      - 'tests/**'
-      - 'graph-scripts/**'
-      - 'config/**'
-      - 'validation/**'
-      - 'packs/**'
-      - 'pyproject.toml'
-      - 'requirements.txt'
-      - '.github/actions/**'
-      - '.github/workflows/python-ci.yml'
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
     timeout-minutes: 15
     env:
       TORTOISE_DB_URI: "docker://:falkordb@localhost:6379/tortoise"
@@ -539,19 +540,9 @@ jobs:
   # with zero validation errors — a broken manifest must fail CI at PR time,
   # not the shared registry at runtime. Runs on every PR (cheap: seconds).
   packs-compile:
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
     runs-on: ubuntu-latest
-    # #1008: same paths filter as the test matrix (docs PRs skip).
-    paths:
-      - 'tortoise/**'
-      - 'tests/**'
-      - 'graph-scripts/**'
-      - 'config/**'
-      - 'validation/**'
-      - 'packs/**'
-      - 'pyproject.toml'
-      - 'requirements.txt'
-      - '.github/actions/**'
-      - '.github/workflows/python-ci.yml'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -586,7 +577,7 @@ jobs:
   # `name:` field.
   python-ci-gate:
     if: always()
-    needs: [test, test-slow, test-concurrency-falkor, packs-compile]
+    needs: [changes, test, test-slow, test-concurrency-falkor, packs-compile]
     runs-on: ubuntu-latest
     steps:
       - name: Aggregate matrix result
