@@ -64,8 +64,24 @@ def test_kappa_single_category_convention():
     assert kp.kappa(a, b) == 1.0
 
 
+def test_compare_incomplete_labeling_blocks_green():
+    """A judge that labels a subset of EDUs with perfect agreement must NOT
+    produce GREEN (review P2, PR #975 — incomplete labeling is gating)."""
+    a = {"window_type": "operational", "incomplete": False, "labels": [
+        {"edu_index": 0, "class": "event"}, {"edu_index": 1, "class": "event"}]}
+    b = {"window_type": "operational", "incomplete": True, "labels": [
+        {"edu_index": 0, "class": "event"}]}
+    r = kp.compare(a, b)
+    assert r["gate"]["verdict"] == "NOT_GREEN"
+    assert "incomplete" in r["gate"]["reason"]
+
+
 def test_kappa_single_category_disagreeing_branch():
-    """pe == 1.0 with po < 1.0 → κ = 0.0 (the NaN-guard branch)."""
+    """Agreement exactly at chance with asymmetric margins → κ = 0.0.
+
+    (Review P2, PR #975: the pe == 1.0 NaN-guard branch is mathematically
+    unreachable — pe == 1.0 forces po == 1.0 — the guard in kappa() is
+    defensive.)"""
     a = [L(0, "none"), L(1, "none")]
     b = [L(0, "none"), L(1, "claim")]
     k = kp.kappa(a, b)

@@ -112,6 +112,9 @@ def kappa(a_labels: list[Label], b_labels: list[Label]) -> float | None:
     pe = sum((a_counts[c] / n) * (b_counts[c] / n) for c in set(a_counts) | set(b_counts))
     if pe == 1.0:
         # Single-category raters: identical verdicts are perfect agreement.
+        # pe == 1.0 implies both judges use one identical category over the
+        # intersection, which forces po == 1.0 — the else branch is a
+        # defensive guard, not a reachable path (review P2, PR #975).
         return 1.0 if po == 1.0 else 0.0
     return (po - pe) / (1 - pe)
 
@@ -196,6 +199,16 @@ def gate_decision(
             f"kappa {kappa_value:.3f} >= {KAPPA_GREEN} but the minimum-signal "
             "assertion failed on an operational window — NOT green "
             "(DE2E-1 neg (b))",
+        )
+    if min_signal_passed is None:
+        # Fail closed (review P2, PR #975): GREEN is never emitted when the
+        # degenerate-empty guard was not evaluated. compare()'s post-hoc
+        # override is defense-in-depth; direct callers get the same contract.
+        return GateDecision(
+            "NOT_GREEN",
+            f"kappa {kappa_value:.3f} >= {KAPPA_GREEN} but the minimum-signal "
+            "assertion was NOT evaluated (no window type) — NOT green "
+            "(fail-closed, DE2E-1 neg (b))",
         )
     return GateDecision(
         "GREEN",
@@ -351,6 +364,24 @@ def compare(
             "minimum-signal assertion was not evaluated (no window_type on "
             "the windows, none passed) — NOT green (DE2E-1 neg (b))",
         )
+
+    # Fail closed on incomplete labeling (review P2, PR #975): a judge that
+    # labels a subset of EDUs with perfect agreement must not produce GREEN —
+    # the rubric instructs judges to never omit an EDU.
+    if decision.verdict == "GREEN":
+        incomplete = []
+        for name, w in (("a", window_a), ("b", window_b)):
+            flag = w.get("incomplete") if isinstance(w, dict) else w.incomplete
+            if flag:
+                incomplete.append(name)
+        if incomplete:
+            decision = GateDecision(
+                "NOT_GREEN",
+                f"kappa and nothing-verdict agreement are green but labeling "
+                f"is incomplete (judge{'s' if len(incomplete) > 1 else ''} "
+                f"{', '.join(incomplete)} omitted EDUs) — NOT green "
+                "(DE2E-1, incomplete labeling)",
+            )
 
     report = {
         "window_a": _window_meta(window_a),
