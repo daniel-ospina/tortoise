@@ -89,6 +89,14 @@ on:
     branches: [main]
   pull_request:
 
+# #1008 queue health: the heavy jobs below are path-filtered so docs/config-only
+# PRs skip the ~46-min matrix entirely. The required check is `python-ci-gate`
+# (branch protection) which aggregates them — code PRs are still fully gated,
+# docs PRs report green via the gate. Job id `python-ci-gate` is load-bearing:
+# do NOT rename it or add a `name:` field (the check name must match branch
+# protection exactly). welcome-e2e (#801 live-signup monitor) stays in ci.yml
+# as a running monitor but is no longer a required check (shared email bucket).
+
 concurrency:
   # Per-PR cancel only: on `pull_request` github.ref is refs/pull/N/merge so
   # a new commit cancels that PR's stale run (desired). On `push` to main the
@@ -146,6 +154,18 @@ jobs:
     # halve per-job server count (atexit ~8 min) and overlap collection —
     # wall time drops to ~max(half) ≈ 22-25 min. Watchdog back to 30m.
     runs-on: ubuntu-latest
+    # #1008: docs/config-only PRs skip the heavy matrix (gate job aggregates).
+    paths:
+      - 'tortoise/**'
+      - 'tests/**'
+      - 'graph-scripts/**'
+      - 'config/**'
+      - 'validation/**'
+      - 'packs/**'
+      - 'pyproject.toml'
+      - 'requirements.txt'
+      - '.github/actions/**'
+      - '.github/workflows/python-ci.yml'
     strategy:
       fail-fast: false
       matrix:
@@ -280,6 +300,18 @@ jobs:
 
   test-slow:
     runs-on: ubuntu-latest
+    # #1008: same paths filter as the test matrix (docs PRs skip).
+    paths:
+      - 'tortoise/**'
+      - 'tests/**'
+      - 'graph-scripts/**'
+      - 'config/**'
+      - 'validation/**'
+      - 'packs/**'
+      - 'pyproject.toml'
+      - 'requirements.txt'
+      - '.github/actions/**'
+      - '.github/workflows/python-ci.yml'
     # Slow files run serially here; generous caps so the summary is
     # guaranteed to print (a runner kill would lose it — the #798 mode).
     # Watchdog (75m) + SIGINT grace + tail print; ~17 min for the original
@@ -383,6 +415,18 @@ jobs:
     # BOTH pytest 8.x output formats (-v progress: "nodeid SKIPPED (reason)";
     # -rs summary: "SKIPPED [N] tests/file.py:line").
     runs-on: ubuntu-latest
+    # #1008: same paths filter as the test matrix (docs PRs skip).
+    paths:
+      - 'tortoise/**'
+      - 'tests/**'
+      - 'graph-scripts/**'
+      - 'config/**'
+      - 'validation/**'
+      - 'packs/**'
+      - 'pyproject.toml'
+      - 'requirements.txt'
+      - '.github/actions/**'
+      - '.github/workflows/python-ci.yml'
     timeout-minutes: 15
     env:
       TORTOISE_DB_URI: "docker://:falkordb@localhost:6379/tortoise"
@@ -496,6 +540,18 @@ jobs:
   # not the shared registry at runtime. Runs on every PR (cheap: seconds).
   packs-compile:
     runs-on: ubuntu-latest
+    # #1008: same paths filter as the test matrix (docs PRs skip).
+    paths:
+      - 'tortoise/**'
+      - 'tests/**'
+      - 'graph-scripts/**'
+      - 'config/**'
+      - 'validation/**'
+      - 'packs/**'
+      - 'pyproject.toml'
+      - 'requirements.txt'
+      - '.github/actions/**'
+      - '.github/workflows/python-ci.yml'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -520,3 +576,25 @@ jobs:
               )
           print(f"packs-compile OK: {loaded} packs loaded, 0 validation errors")
           EOF
+
+  # #1008 queue health: REQUIRED check (branch protection). Aggregates the
+  # path-filtered matrix so docs-only PRs (all legs skipped) still report a
+  # green check, while code PRs are fully gated. Fails iff any leg failed OR
+  # was cancelled (a runner-killed suite — e.g. test-slow hitting its 90m cap —
+  # must never pass silently). Job id is load-bearing: branch protection
+  # requires the exact check name `python-ci-gate` — do NOT rename or add a
+  # `name:` field.
+  python-ci-gate:
+    if: always()
+    needs: [test, test-slow, test-concurrency-falkor, packs-compile]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Aggregate matrix result
+        run: |
+          RESULTS="${{ join(needs.*.result, ' ') }}"
+          echo "matrix results: $RESULTS"
+          if echo "$RESULTS" | grep -qE 'failure|cancelled'; then
+            echo "❌ matrix leg failed or was cancelled — merge blocked"
+            exit 1
+          fi
+          echo "✅ matrix green or skipped (docs-only PR)"
