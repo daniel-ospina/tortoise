@@ -130,7 +130,7 @@ def audit_context(context):
         print(f"  ✅ impl_instead_of_nand: clean")
     
     # ── CHECK 4: missing_sourceKind (MEDIUM) on evidence points ──
-    r = q(f"MATCH (n:Point) WHERE {id_filter} AND (n.is_operator IS NULL OR n.is_operator <> 'True') AND n.sourceKind IS NULL AND n.pointKind IS NOT NULL RETURN n.id, n.pointKind, n.content LIMIT 20")
+    r = q(f"MATCH (n:Point) WHERE {id_filter} AND n.is_operator = false AND n.sourceKind IS NULL AND n.pointKind IS NOT NULL RETURN n.id, n.pointKind, n.content LIMIT 20")
     missing_sk = list(r)
     if missing_sk:
         print(f"\n  🟡 MEDIUM: missing_sourceKind — {len(missing_sk)} evidence points without credibility tier")

@@ -598,7 +598,7 @@ class TortoiseEP:
     def get_contested_claims(self, variance_threshold: float = 0.04) -> list[dict]:
         rows = self.g.query(
             "MATCH (n:Point) "
-            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "WHERE n.is_operator = false "
             "WITH n, coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS a, "
             "     coalesce(n.posterior_beta, n.ep_beta, 1.0) AS b "
             "WITH n, a, b, (a*b)/((a+b)*(a+b)*(a+b+1)) AS v "

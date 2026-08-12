@@ -691,7 +691,7 @@ class TortoiseSDK:
             # P1 #49: dedup by content_hash + pointKind (NOT context, which is no longer written)
             existing = proj.g.query(
                 "MATCH (n:Point {content_hash:$ch}) "
-                "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+                "WHERE n.is_operator = false "
                 "AND n.pointKind = $kind "
                 "RETURN n.id",
                 params={"ch": ch, "kind": kind},
@@ -1562,7 +1562,7 @@ class TortoiseSDK:
         query via proj.g.query() to inspect retracted tombstones.
         """
         proj = self._get_proj()
-        clauses = ["(n.is_operator IS NULL OR n.is_operator = false)"]
+        clauses = ["n.is_operator = false"]
         params: dict[str, Any] = {}
         # #432 Task 2: retracted exclusion — skipped when the caller explicitly
         # filters by status (their filter controls visibility).
@@ -1605,7 +1605,7 @@ class TortoiseSDK:
         to surface tombstones.
         """
         proj = self._get_proj()
-        clauses = ["(n.is_operator IS NULL OR n.is_operator = false)"]
+        clauses = ["n.is_operator = false"]
         params: dict[str, Any] = {}
         # #432 Task 2: retracted exclusion — skipped when the caller explicitly
         # filters by status (their filter controls visibility).
@@ -1776,7 +1776,7 @@ class TortoiseSDK:
         # Orphaned draft points — created but never wired (#131)
         for row in proj.g.query(
             "MATCH (n:Point {status:'draft'}) "
-            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "WHERE n.is_operator = false "
             "AND NOT (n)--() "
             "RETURN n.id, n.content, n.pointKind, n.createdAt "
             "ORDER BY n.createdAt"
@@ -1813,7 +1813,7 @@ class TortoiseSDK:
         for key, kind in gates:
             result[key] = proj.g.query(
                 "MATCH (n:Point {pointKind:$k}) "
-                "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+                "WHERE n.is_operator = false "
                 "RETURN count(n)",
                 params={"k": kind},
             ).result_set[0][0]
@@ -1832,7 +1832,7 @@ class TortoiseSDK:
         proj = self._get_proj()
         rows = proj.g.query(
             "MATCH (n:Point) "
-            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "WHERE n.is_operator = false "
             "AND n.pointKind IS NOT NULL "
             "RETURN n.pointKind, count(n) ORDER BY count(n) DESC"
         ).result_set
@@ -2057,7 +2057,7 @@ class TortoiseSDK:
             raise ValueError("Cannot file human approval: at least one claim Point required")
         r = proj.g.query(
             "MATCH (n:Point) WHERE n.id IN $ids "
-            "AND (n.is_operator IS NULL OR n.is_operator = false) RETURN n.id",
+            "AND n.is_operator = false RETURN n.id",
             params={"ids": point_ids},
         ).result_set
         existing = {row[0] for row in r}
@@ -2237,7 +2237,7 @@ class TortoiseSDK:
         # Ontology v2.1: use per-type about* edges instead of property
         rows = proj.g.query(
             "MATCH (n:Point) "
-            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "WHERE n.is_operator = false "
             "RETURN n.id, n.content"
         ).result_set
 
@@ -2373,7 +2373,7 @@ class TortoiseSDK:
         proj = self._get_proj()
         rows = proj.g.query(
             "MATCH (n:Point) "
-            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "WHERE n.is_operator = false "
             "  AND (n.status IS NULL OR n.status IN ['draft', 'live']) "
             "  AND (n.outdated IS NULL OR n.outdated = false) "
             "RETURN n.id, n.content, n.status, n.updatedAt",
@@ -2537,8 +2537,8 @@ class TortoiseSDK:
                                       "relation": rel, "via": op_id})
         rows = proj.g.query(
             "MATCH (a:Point)-[r:IMPL|NAND]->(b:Point) "
-            "WHERE (a.is_operator IS NULL OR a.is_operator = false) "
-            "  AND (b.is_operator IS NULL OR b.is_operator = false) "
+            "WHERE a.is_operator = false "
+            "  AND b.is_operator = false "
             "RETURN a.id, type(r), b.id",
         ).result_set
         for a, rel, b in rows:
@@ -2589,7 +2589,7 @@ class TortoiseSDK:
         contested: dict[str, dict] = {}
         rows = proj.g.query(
             "MATCH (n:Point) "
-            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "WHERE n.is_operator = false "
             "  AND (n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL) "
             "  AND (n.posterior_beta IS NOT NULL OR n.ep_beta IS NOT NULL) "
             "WITH n, coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS a, "
@@ -2606,7 +2606,7 @@ class TortoiseSDK:
         # handled by stale/draft semantics and must not double-flag.
         rows = proj.g.query(
             "MATCH (op:Point {is_operator:true})-[r:NAND]->(n:Point) "
-            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "WHERE n.is_operator = false "
             "  AND (n.status IS NULL OR n.status = 'live') "
             "RETURN DISTINCT n.id",
         ).result_set
@@ -3014,7 +3014,7 @@ class TortoiseSDK:
         #   (baseline_source IS NULL AND baseline_set IS NOT true)  → always eligible
         #   (baseline_source = 'inherited')                          → gated by inherited_at
         where = (
-            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "WHERE n.is_operator = false "
             "AND (n.pointKind IS NULL OR n.pointKind <> 'assessment') "
             "AND ("
             "  (n.baseline_source IS NULL AND (n.baseline_set IS NULL OR n.baseline_set = false)) "
@@ -3139,7 +3139,7 @@ class TortoiseSDK:
         points, traverses extractedFrom→Source to check for inherited credibilityTier.
         """
         proj = self._get_proj()
-        where = "WHERE (n.is_operator IS NULL OR n.is_operator = false)"
+        where = "WHERE n.is_operator = false"
         params = {}
         
         from tortoise.source_credibility import resolve_tier
@@ -3214,7 +3214,7 @@ class TortoiseSDK:
         proj = self._get_proj()
         rows = proj.g.query(
             "MATCH (n:Point {content_hash:$ch}) "
-            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "WHERE n.is_operator = false "
             "RETURN n.id",
             params={"ch": ch},
         ).result_set
@@ -3305,7 +3305,7 @@ class TortoiseSDK:
         proj = self._get_proj()
         rows = proj.g.query(
             "MATCH (n:Point {pointKind:'checkpoint-item'}) "
-            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "WHERE n.is_operator = false "
             "RETURN n.content"
         ).result_set
         existing = [r[0] for r in rows if r[0]]
@@ -3353,14 +3353,14 @@ class TortoiseSDK:
         if wing:
             rows = proj.g.query(
                 "MATCH (n:Point {pointKind:'diary', authoredBy:$agent, wing:$wing}) "
-                "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+                "WHERE n.is_operator = false "
                 "RETURN properties(n) ORDER BY n.createdAt DESC LIMIT $lim",
                 params={"agent": agent_name, "wing": wing, "lim": last_n},
             ).result_set
         else:
             rows = proj.g.query(
                 "MATCH (n:Point {pointKind:'diary', authoredBy:$agent}) "
-                "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+                "WHERE n.is_operator = false "
                 "RETURN properties(n) ORDER BY n.createdAt DESC LIMIT $lim",
                 params={"agent": agent_name, "lim": last_n},
             ).result_set
@@ -3805,7 +3805,7 @@ class TortoiseSDK:
             return []
 
         proj = self._get_proj()
-        clauses = ["(n.is_operator IS NULL OR n.is_operator = false)",
+        clauses = ["n.is_operator = false",
                    "toLower(n.content) CONTAINS toLower($q)"]
         params = {"q": q}
         if kind_filter:
@@ -3889,12 +3889,12 @@ class TortoiseSDK:
         proj = self._get_proj()
         diary_entries = [r[0] for r in proj.g.query(
             "MATCH (n:Point {pointKind:'diary'}) "
-            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "WHERE n.is_operator = false "
             "RETURN properties(n) ORDER BY n.createdAt DESC LIMIT 10"
         ).result_set]
         recent_points = [r[0] for r in proj.g.query(
             "MATCH (n:Point) "
-            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "WHERE n.is_operator = false "
             "RETURN properties(n) ORDER BY n.createdAt DESC LIMIT 20"
         ).result_set]
         recent_events = [r[0] for r in proj.g.query(
@@ -3905,7 +3905,7 @@ class TortoiseSDK:
              "confidence": r[3], "updatedAt": r[4]}
             for r in proj.g.query(
                 "MATCH (n:Point) WHERE n.confidence IS NOT NULL "
-                "AND (n.is_operator IS NULL OR n.is_operator = false) "
+                "AND n.is_operator = false "
                 "RETURN n.id, n.content, n.pointKind, n.confidence, n.updatedAt "
                 "ORDER BY n.updatedAt DESC LIMIT 20"
             ).result_set
@@ -5965,7 +5965,7 @@ class TortoiseSDK:
         impl_rows = proj.g.query(
             "MATCH (s:Subject)-[:performs]->(e:Event) "
             "MATCH (e)-[:IMPL]->(p:Point) "
-            "WHERE (p.is_operator IS NULL OR p.is_operator = false) "
+            "WHERE p.is_operator = false "
             "AND (p.outdated IS NULL OR p.outdated = false) "
             "AND e.eventKind <> 'humanApproval' "  # #531: no reputation from own approvals
             f"AND {match_clause} "
@@ -5975,7 +5975,7 @@ class TortoiseSDK:
         nand_rows = proj.g.query(
             "MATCH (s:Subject)-[:performs]->(e:Event) "
             "MATCH (e)-[:NAND]->(p:Point) "
-            "WHERE (p.is_operator IS NULL OR p.is_operator = false) "
+            "WHERE p.is_operator = false "
             "AND (p.outdated IS NULL OR p.outdated = false) "
             "AND e.eventKind <> 'humanApproval' "  # #531: no reputation from own approvals
             f"AND {match_clause} "

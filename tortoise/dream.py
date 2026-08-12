@@ -115,7 +115,7 @@ class Dreamer:
         """
         proj = self._sdk._get_proj()
         rows = proj.g.query(
-            "MATCH (n:Point) WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "MATCH (n:Point) WHERE n.is_operator = false "
             "RETURN n.id"
         ).result_set
         anchors = [r[0] for r in rows]

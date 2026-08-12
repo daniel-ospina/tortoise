@@ -84,7 +84,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
     r = proj.g.query(
         f"MATCH (op:Point {{is_operator: true}})-[:IMPL|NAND]->(ev:Point)\n"
         f"WHERE {_op_in_kinds('op', 'ev')}\n"
-        "AND ev.sourceKind IS NULL AND (ev.is_operator IS NULL OR ev.is_operator = false)\n"
+        "AND ev.sourceKind IS NULL AND ev.is_operator = false\n"
         "RETURN DISTINCT op.id, ev.id, ev.content LIMIT 50",
         params={"kinds": kinds},
     )
@@ -162,7 +162,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         r = proj.g.query(
             f"MATCH (src:Point)-[e:IMPL]->(tgt:Point)\n"
             f"WHERE {_op_in_kinds('src', 'tgt')}\n"
-            f"AND toLower(tgt.content) CONTAINS '{kw}' AND tgt.is_operator IS NULL\n"
+            f"AND toLower(tgt.content) CONTAINS '{kw}' AND tgt.is_operator = false\n"
             "RETURN src.id, tgt.id, tgt.content LIMIT 20",
             params={"kinds": kinds},
         )

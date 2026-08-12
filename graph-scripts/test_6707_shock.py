@@ -17,7 +17,7 @@ print('✅ Reset: all confidence set to 0.5')
 # 2. Find epicenter: a non-operator Point with IMPL edges
 rows = proj.g.query(
     "MATCH (n:Point)-[:IMPL]-(:Point) "
-    "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+    "WHERE n.is_operator = false "
     "RETURN n.id LIMIT 1"
 ).result_set
 assert rows, 'No Point with IMPL edges found'

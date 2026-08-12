@@ -22,8 +22,8 @@ TEMPLATES: dict[str, dict] = {
         "cypher": """
             MATCH (a:Point)<-[:NAND]-(op:Point {op_type:\"NAND\"})-[:NAND]->(b:Point)
             WHERE a.id <> b.id
-              AND (a.is_operator IS NULL OR a.is_operator = false)
-              AND (b.is_operator IS NULL OR b.is_operator = false)
+              AND a.is_operator = false
+              AND b.is_operator = false
               AND coalesce(a.confidence, 0.5) > 0.45
               AND coalesce(b.confidence, 0.5) > 0.45
             RETURN a.id, a.content, coalesce(a.confidence,0.5) as a_conf,
@@ -54,7 +54,7 @@ TEMPLATES: dict[str, dict] = {
             MATCH (target:Point)<-[:NAND]-(op:Point {op_type:\"NAND\"})-[:NAND]->(opponent:Point)
             WHERE target.id <> opponent.id
               AND target.content CONTAINS $entity
-              AND (opponent.is_operator IS NULL OR opponent.is_operator = false)
+              AND opponent.is_operator = false
             RETURN opponent.id, opponent.content, coalesce(opponent.confidence,0.5) as conf
             ORDER BY conf DESC LIMIT $limit
         """,
@@ -66,7 +66,7 @@ TEMPLATES: dict[str, dict] = {
         "subgraph_vars": ["c"],
         "cypher": """
             MATCH (c:Point)
-            WHERE (c.is_operator IS NULL OR c.is_operator = false)
+            WHERE c.is_operator = false
               AND coalesce(c.confidence, 0.5) > 0.6
               AND NOT (c)<-[:NAND]-(:Point {op_type:\"NAND\"})
             RETURN c.id, c.content, coalesce(c.confidence,0.5) as conf
@@ -80,7 +80,7 @@ TEMPLATES: dict[str, dict] = {
         "subgraph_vars": ["c"],
         "cypher": """
             MATCH (c:Point)
-            WHERE (c.is_operator IS NULL OR c.is_operator = false)
+            WHERE c.is_operator = false
               AND (c.posterior_alpha IS NOT NULL OR c.ep_alpha IS NOT NULL)
             WITH c, coalesce(c.posterior_alpha, c.ep_alpha, 1.0) AS a,
                  coalesce(c.posterior_beta, c.ep_beta, 1.0) AS b
@@ -99,7 +99,7 @@ TEMPLATES: dict[str, dict] = {
             MATCH (evidence:Point)<-[:IMPL]-(op:Point {op_type:\"IMPL\"})-[:IMPL]->(target:Point)
             WHERE target.id <> evidence.id
               AND target.content CONTAINS $entity
-              AND (evidence.is_operator IS NULL OR evidence.is_operator = false)
+              AND evidence.is_operator = false
             RETURN evidence.id, evidence.content, coalesce(evidence.confidence,0.5) as conf
             ORDER BY conf DESC LIMIT $limit
         """,
@@ -127,7 +127,7 @@ TEMPLATES: dict[str, dict] = {
         "subgraph_vars": ["c"],
         "cypher": """
             MATCH (c:Point)
-            WHERE (c.is_operator IS NULL OR c.is_operator = false)
+            WHERE c.is_operator = false
               AND c.grounding IS NOT NULL
             RETURN c.id, c.content, c.grounding
             ORDER BY c.grounding DESC LIMIT $limit

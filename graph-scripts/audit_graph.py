@@ -95,7 +95,7 @@ def audit_context(context):
         print(f"  ✅ impl_instead_of_nand: none")
 
     # ── 4. missing_sourceKind (MEDIUM) ──
-    r = q(f"MATCH (n:Point) WHERE {cf} AND n.is_operator IS NULL AND n.sourceKind IS NULL AND n.pointKind IS NOT NULL RETURN count(n)")
+    r = q(f"MATCH (n:Point) WHERE {cf} AND n.is_operator = false AND n.sourceKind IS NULL AND n.pointKind IS NOT NULL RETURN count(n)")
     missing_sk = r[0][0] if r else 0
     r2 = q(f"MATCH (n:Point) WHERE {cf} AND n.sourceKind IS NULL RETURN count(n)")
     total_missing_sk = r2[0][0] if r2 else 0
@@ -165,7 +165,7 @@ if __name__ == '__main__':
     # Global stats
     r = q("MATCH (n:Point {status:'superseded'}) WHERE NOT (n)-[:SUPERSEDES]->() RETURN count(n)")
     global_superseded_no_edge = r[0][0] if r else 0
-    r = q("MATCH (n:Point) WHERE n.sourceKind IS NULL AND n.is_operator IS NULL AND n.pointKind IS NOT NULL RETURN count(n)")
+    r = q("MATCH (n:Point) WHERE n.sourceKind IS NULL AND n.is_operator = false AND n.pointKind IS NOT NULL RETURN count(n)")
     global_missing_sk = r[0][0] if r else 0
     r = q("MATCH (n:Point) WHERE n.sourceKind IS NOT NULL AND n.sourceDate IS NULL RETURN count(n)")
     global_missing_sd = r[0][0] if r else 0

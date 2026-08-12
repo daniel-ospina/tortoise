@@ -66,7 +66,7 @@ print(f"\nTopology: {total} total points, {impl_count} IMPL edges, {nand_count} 
 grounding = proj.compute_grounding(lam=0.6)
 print("\n=== Grounding Scores (post-Cycle 3) ===")
 ad_points = proj.query(
-    "MATCH (p:Point) WHERE p.context = 'auto-discovery' AND (p.is_operator IS NULL OR p.is_operator = false) "
+    "MATCH (p:Point) WHERE p.context = 'auto-discovery' AND p.is_operator = false "
     "RETURN p.id, p.content ORDER BY p.content"
 ).result_set
 scores = [(g.get(pid, 0), pid, content[:80]) for pid, content in ad_points]
