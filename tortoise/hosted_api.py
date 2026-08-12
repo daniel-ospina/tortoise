@@ -2433,14 +2433,19 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
         r"(?i)(?:I think|I believe|my understanding is|the problem is|the key insight)\s+[^.!?]+[.!?]",
         r"(?i)(?:evidence suggests|data shows|we found that|this means)\s+[^.!?]+[.!?]",
     ]
-    est = 2
+    est = 0
     for turn in body.conversation:
-        # #329: estimate scans the SAME full content the extraction loop uses
-        # (must be an upper bound — a truncation mismatch would under-count).
+        # #329/#947 (review P2, PR #976): the points quota counts NON-episodic
+        # Points only, and turn Points are written with is_episodic=true — the
+        # estimate must count the EXTRACTED (non-episodic) points only. The
+        # Session/Event base and the per-turn +1 are episodic; including them
+        # caused false pre-write 402s for teams near the limit. Still an upper
+        # bound for the extracted set (same full content the loop scans — a
+        # truncation mismatch would under-count).
         content = turn.get("content", "")
         n_dec = sum(len(re.findall(p, content)) for p in decisions)
         n_clm = sum(len(re.findall(p, content)) for p in claims)
-        est += 1 + min(n_dec, MAX_EXTRACTIONS_PER_TURN) + min(n_clm, MAX_EXTRACTIONS_PER_TURN)
+        est += min(n_dec, MAX_EXTRACTIONS_PER_TURN) + min(n_clm, MAX_EXTRACTIONS_PER_TURN)
     from tortoise.quota import count_team_usage
     sdk_team = _make_sdk(namespace=team["team_id"])
     try:

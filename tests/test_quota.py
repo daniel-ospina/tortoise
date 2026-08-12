@@ -343,7 +343,9 @@ class TestIsEpisodicBackfill:
         tenant = self._make_tenant(reg_sdk, tmp_path)
         try:
             proj = tenant._get_proj()
-            # Pre-#947 regex-path capture nodes — written WITHOUT the flag
+            # Pre-#947 regex-path capture nodes — written WITHOUT the flag.
+            # Capture artifacts: Session + CONTAINS turn Points + the
+            # sessionCaptured Event + the session Source (extractedFrom).
             proj.g.query(
                 "CREATE (s:Session {id:'legacy_s1', created_at:'2026-08-01T00:00:00Z', turn_count:2})")
             proj.g.query(
@@ -356,24 +358,40 @@ class TestIsEpisodicBackfill:
             proj.g.query(
                 "CREATE (p2:Point {id:'legacy_p2', content:'[assistant] ok', "
                 "pointKind:'event', is_operator:false, status:'draft'})")
+            proj.g.query(
+                "MATCH (s:Session {id:'legacy_s1'}), (p:Point {id:'legacy_p1'}) "
+                "CREATE (s)-[:CONTAINS]->(p)")
+            proj.g.query(
+                "MATCH (s:Session {id:'legacy_s1'}), (p:Point {id:'legacy_p2'}) "
+                "CREATE (s)-[:CONTAINS]->(p)")
+            proj.g.query(
+                "MATCH (p:Point {id:'legacy_p1'}), (src:Source {id:'legacy_src1'}) "
+                "CREATE (p)-[:extractedFrom]->(src)")
+            # A NON-capture knowledge Point — must NEVER be stamped (review P1,
+            # PR #976: the scoped backfill exempts only capture artifacts; a
+            # label-wide stamp would permanently undercount the points quota).
+            proj.g.query(
+                "CREATE (k1:Point {id:'legacy_k1', content:'we decided X', "
+                "pointKind:'decision', is_operator:false, status:'live'})")
             # Pre-backfill: missing flag counts as NON-episodic (fail-closed,
-            # R-18) → the 2 legacy Points inflate the points quota → false 402.
-            assert count_team_usage(tid, "points", sdk=tenant) == 2
+            # R-18) → 3 legacy Points (p1, p2, k1) inflate the points quota.
+            assert count_team_usage(tid, "points", sdk=tenant) == 3
             with pytest.raises(QuotaExceededError, match="points limit reached"):
                 enforce_team_limit(
-                    {"team_id": tid, "max_points": 2}, "points", sdk=tenant)
-            # Dry-run reports without writing
+                    {"team_id": tid, "max_points": 3}, "points", sdk=tenant)
+            # Dry-run reports without writing (5 capture artifacts: s, e, src,
+            # p1, p2 — NOT k1)
             report = run_backfill(proj, dry_run=True)
             assert report == {"matched": 5, "updated": 0}
-            # One-query migration applies the flag to all 5 legacy nodes
+            # Scoped migration applies the flag to the 5 capture artifacts only
             report = run_backfill(proj)
             assert report == {"matched": 5, "updated": 5}
             # Idempotent — re-run is a no-op
             assert run_backfill(proj) == {"matched": 0, "updated": 0}
-            # Post-backfill: legacy points count as episodic → no false 402
-            assert count_team_usage(tid, "points", sdk=tenant) == 0
+            # k1 is untouched — still counted → quota is NOT undercounted
+            assert count_team_usage(tid, "points", sdk=tenant) == 1
             enforce_team_limit(
-                {"team_id": tid, "max_points": 2}, "points", sdk=tenant)
+                {"team_id": tid, "max_points": 3}, "points", sdk=tenant)
             # Sessions branch still counts the (now-flagged) Session
             assert count_team_usage(tid, "sessions", sdk=tenant) == 1
         finally:

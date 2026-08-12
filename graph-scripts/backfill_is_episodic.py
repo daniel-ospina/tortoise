@@ -1,13 +1,23 @@
 #!/usr/bin/env python3
-"""Backfill `is_episodic: true` on legacy regex-path capture nodes (#947, epic #909 §4.4, R-18).
+"""Backfill `is_episodic: true` on legacy regex-path CAPTURE nodes (#947, epic #909 §4.4, R-18).
 
 Pre-#947 regex-path captures (sdk.capture_session / hosted POST /v1/sessions)
 wrote Session/Event/Source/Point nodes WITHOUT the `is_episodic` flag. The
 post-fix points quota counts non-episodic Points only, and a MISSING flag
 counts as non-episodic (fail-closed) — so legacy captures over-count → false
-402s persist for the teams that already use capture (R-18). This one-query
-Cypher migration stamps `is_episodic: true` on every Session/Event/Source/
-Point node that lacks the flag.
+402s persist for the teams that already use capture (R-18).
+
+SCOPE (review P1, PR #976): capture artifacts ONLY — never knowledge Points,
+operators, or other non-capture nodes (stamping those would permanently
+exempt them from the points quota — a fail-open undercount). The migration
+stamps:
+  1. every :Session lacking the flag (Sessions are capture containers)
+  2. :Point nodes reachable via (s:Session)-[:CONTAINS]->(p:Point)
+     (capture turn + regex-extracted points)
+  3. :Event nodes with eventKind 'sessionCaptured'/'AgentSession'
+  4. :Source nodes referenced by a session-linked Point
+     ((s:Session)-[:CONTAINS]->(p:Point)-[:extractedFrom]->(src:Source))
+     — session sources; the capture paths do not write other Sources
 
 Idempotent — safe to re-run (only touches nodes with is_episodic IS NULL).
 
@@ -34,36 +44,63 @@ sys.path.insert(0, os.path.dirname(_HERE))
 
 DEFAULT_URI = "docker://:falkordb@localhost:16379/tortoise"
 
-# The one-query Cypher migration (R-18): stamp every capture-path node that
-# lacks the flag. Counters (Session/Event/Source) are episodic by definition
-# (§4.4 amendment #13); legacy regex-path Points are episodic too.
-BACKFILL_QUERY = (
-    "MATCH (n) "
-    "WHERE (n:Session OR n:Event OR n:Source OR n:Point) "
-    "  AND n.is_episodic IS NULL "
-    "SET n.is_episodic = true "
-    "RETURN count(n) AS updated"
-)
+# Scoped Cypher statements (review P1, PR #976): capture artifacts only —
+# see the module docstring for the scope rationale. Each statement is
+# idempotent (IS NULL guard) and returns the count it updated.
+BACKFILL_STATEMENTS = [
+    (
+        "MATCH (s:Session) WHERE s.is_episodic IS NULL "
+        "SET s.is_episodic = true RETURN count(s) AS updated"
+    ),
+    (
+        "MATCH (s:Session)-[:CONTAINS]->(p:Point) "
+        "WHERE p.is_episodic IS NULL "
+        "SET p.is_episodic = true RETURN count(p) AS updated"
+    ),
+    (
+        "MATCH (e:Event) "
+        "WHERE e.eventKind IN ['sessionCaptured', 'AgentSession'] "
+        "  AND e.is_episodic IS NULL "
+        "SET e.is_episodic = true RETURN count(e) AS updated"
+    ),
+    (
+        # Session-linked sources only (capture provenance): the match is
+        # anchored on the Session so it does not depend on stamp order.
+        "MATCH (s:Session)-[:CONTAINS]->(p:Point)-[:extractedFrom]->(src:Source) "
+        "WHERE src.is_episodic IS NULL "
+        "SET src.is_episodic = true RETURN count(src) AS updated"
+    ),
+]
 
 
 def run_backfill(proj, *, dry_run: bool = False) -> dict:
-    """Run the one-query is_episodic backfill on a FalkorProjection.
+    """Run the scoped is_episodic backfill on a FalkorProjection.
 
     Returns {"matched": int, "updated": int} (dry_run reports matched, writes
     nothing). Importable so unit tests can drive the migration directly on an
     embedded test graph (tests/test_quota.py legacy fixture, DE2E-7/R-18).
     """
     count_rows = proj.g.query(
-        "MATCH (n) "
-        "WHERE (n:Session OR n:Event OR n:Source OR n:Point) "
-        "  AND n.is_episodic IS NULL "
-        "RETURN count(n) AS cnt"
+        "MATCH (s:Session) WHERE s.is_episodic IS NULL RETURN count(s) AS c "
+        "UNION ALL "
+        "MATCH (s:Session)-[:CONTAINS]->(p:Point) WHERE p.is_episodic IS NULL "
+        "RETURN count(p) AS c "
+        "UNION ALL "
+        "MATCH (e:Event) WHERE e.eventKind IN ['sessionCaptured', 'AgentSession'] "
+        "  AND e.is_episodic IS NULL RETURN count(e) AS c "
+        "UNION ALL "
+        "MATCH (s:Session)-[:CONTAINS]->(p:Point)-[:extractedFrom]->(src:Source) "
+        "WHERE src.is_episodic IS NULL "
+        "RETURN count(src) AS c"
     ).result_set
-    matched = int(count_rows[0][0]) if count_rows and count_rows[0][0] else 0
+    matched = sum(int(r[0] or 0) for r in count_rows) if count_rows else 0
     if dry_run or matched == 0:
         return {"matched": matched, "updated": 0}
-    result = proj.g.query(BACKFILL_QUERY)
-    updated = int(result.result_set[0][0]) if result.result_set else 0
+    updated = 0
+    for statement in BACKFILL_STATEMENTS:
+        result = proj.g.query(statement)
+        if result.result_set:
+            updated += int(result.result_set[0][0] or 0)
     return {"matched": matched, "updated": updated}
 
 
@@ -76,8 +113,9 @@ def test_guard(graph_name: str, yes: bool = False) -> None:
         print(f"⚠️  Production graph ({graph_name}) — --yes flag set, proceeding")
         return
     print(f"\n⚠️  Target graph is '{graph_name}' — NOT a test graph.")
-    print("    This script stamps ALL Session/Event/Source/Point nodes without")
-    print("    is_episodic as is_episodic=true.")
+    print("    This script stamps CAPTURE-ARTIFACT nodes only (Sessions, their")
+    print("    CONTAINS Points, sessionCaptured/AgentSession Events, session")
+    print("    Sources) — never knowledge Points or operators (review P1 #976).")
     print("    Run with --yes to confirm, or use a test-prefixed graph.")
     sys.exit(1)
 
