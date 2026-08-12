@@ -24,7 +24,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tortoise.__main__ import _harness_mcp_config, _harness_stdio_config, _print_harness_instructions
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-ENDPOINT = "https://api.premiselabs.co/mcp"
+# #984 contract (merged to main): the hosted endpoint always carries the
+# trailing slash — pinned here so a regression to the unsuffixed URL fails.
+ENDPOINT = "https://api.premiselabs.co/mcp/"
 
 
 class TestHostedStreamableHttpShapes:
@@ -62,8 +64,11 @@ class TestHostedStreamableHttpShapes:
         assert "--bearer-token-env-var TORTOISE_API_KEY" in cmd
 
     def test_endpoint_trailing_slash_normalized(self):
-        cfg = _harness_mcp_config("claude", "tt_testkey", "https://api.premiselabs.co/")
-        assert cfg["mcpServers"]["tortoise"]["url"] == ENDPOINT
+        # #984: regardless of whether the input api_url has a trailing
+        # slash, the emitted endpoint keeps exactly one.
+        for api_url in ("https://api.premiselabs.co", "https://api.premiselabs.co/"):
+            cfg = _harness_mcp_config("claude", "tt_testkey", api_url)
+            assert cfg["mcpServers"]["tortoise"]["url"] == ENDPOINT
 
     def test_all_harness_keys_emitted(self):
         for harness in ("claude", "codex", "cursor", "pi"):
