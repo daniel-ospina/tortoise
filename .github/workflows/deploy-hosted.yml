@@ -162,6 +162,10 @@ jobs:
           # #528 server analytics (PostHog) — absent key → analytics module no-ops.
           [ -n "${{ secrets.POSTHOG_API_KEY }}" ] && ARGS="$ARGS POSTHOG_API_KEY=${{ secrets.POSTHOG_API_KEY }}"
           [ -n "${{ secrets.POSTHOG_HOST }}" ] && ARGS="$ARGS POSTHOG_HOST=${{ secrets.POSTHOG_HOST }}"
+          # #308 signup CAPTCHA (Cloudflare Turnstile) — absent secret → API
+          # fails open (signup works, warning logged), matching the optional
+          # env-gated feature pattern.
+          [ -n "${{ secrets.TURNSTILE_SECRET_KEY }}" ] && ARGS="$ARGS TURNSTILE_SECRET_KEY=${{ secrets.TURNSTILE_SECRET_KEY }}"
           flyctl secrets set --stage $ARGS --app tortoise-y4mjjq
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
