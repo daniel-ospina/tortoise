@@ -299,6 +299,22 @@ class GitHubConnector:
         if not self.webhook_port:
             return 0
 
+        # #331: double-start must be a no-op — a second HTTPServer on the
+        # same port raises Address already in use and orphans the first
+        # server + its thread (socket + thread leak).
+        # #331 (review r2): a DEAD serve_forever thread is not a running
+        # server — close its stale socket so the re-bind below succeeds
+        # (previously: silent no-op with nothing serving).
+        if self._server is not None:
+            if self._thread is not None and self._thread.is_alive():
+                return self.webhook_port
+            try:
+                self._server.server_close()
+            except OSError:
+                pass
+            self._server = None
+            self._thread = None
+
         secret = self.webhook_secret.encode() if self.webhook_secret else None
         connector = self  # capture for handler closure
 
@@ -322,12 +338,23 @@ class GitHubConnector:
                     return
 
                 event_type = self.headers.get("X-GitHub-Event", "")
-                ev = connector._webhook_to_event(event_type, payload)
-                if ev:
-                    if on_event:
-                        on_event(ev)
-                    if connector.api:
-                        connector.api.get_proj().apply(ev)
+                try:
+                    ev = connector._webhook_to_event(event_type, payload)
+                    if ev:
+                        if on_event:
+                            on_event(ev)
+                        if connector.api:
+                            connector.api.get_proj().apply(ev)
+                except Exception:
+                    # #331: processing failures must be visible and answered
+                    # with HTTP 500 — a silently dropped connection makes
+                    # GitHub retry blindly with no server-side trace.
+                    logger.exception(
+                        "GitHub webhook processing failed (event=%s)",
+                        event_type)
+                    self.send_response(500)
+                    self.end_headers()
+                    return
                 self.send_response(200)
                 self.end_headers()
 
@@ -341,9 +368,15 @@ class GitHubConnector:
 
     def stop_webhook(self) -> None:
         if self._server:
-            self._server.shutdown()
-            self._server = None
-            self._thread = None
+            try:
+                self._server.shutdown()
+            finally:
+                # #331: shutdown() stops serve_forever but does NOT release
+                # the listening socket — without server_close() the port
+                # stays bound and stop→restart fails with EADDRINUSE.
+                self._server.server_close()
+                self._server = None
+                self._thread = None
 
     # ── Event mapping ──────────────────────────────────────────────
 

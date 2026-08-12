@@ -29,13 +29,23 @@ class _EdgeHandlers:
     def _create_edges(self, p: dict) -> None:
         """Create typed edges for an operator Point. Auto-creates stub nodes
         for missing source Points referenced by short IDs (#6713)."""
-        op = p["operator"]
+        op = p.get("operator")
+        if not isinstance(op, dict):
+            # #331 (review r4): a truthy non-dict operator value must
+            # degrade to no edges, not AttributeError in op.get().
+            return
+        # #331 (review r3): .get() — a malformed operator dict without
+        # op_type/inputs must degrade to no typed edges, not KeyError.
         rel_type = {"NAND": "NAND", "IMPL": "IMPL",
                      "composedOf": "hasPart", "decomposesInto": "hasPart",
-                     "contains": "hasPart", "wraps": "hasPart"}.get(op["op_type"])
+                     "contains": "hasPart", "wraps": "hasPart"}.get(op.get("op_type"))
         import logging as _logging
         _log = _logging.getLogger(__name__)
-        for idx, src in enumerate(op["inputs"]):
+        for idx, src in enumerate(op.get("inputs") or []):
+            # #331 (review r4): non-string inputs members are malformed —
+            # skip (len()/Cypher param would raise).
+            if not isinstance(src, str):
+                continue
             # ponytail: auto-create stub if source Point doesn't exist.
             # Short numeric IDs are orphan refs from cross-file wiring scripts.
             if len(src) < 20:  # short IDs (non-ULID) are suspect

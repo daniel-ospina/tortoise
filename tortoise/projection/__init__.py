@@ -140,6 +140,11 @@ def _norm(ev: dict) -> dict:
     Only splices point fields when ``point`` is a dict — a non-dict ``point``
     (e.g. a legacy string ID) must not crash normalization (issue #325).
     """
+    if not isinstance(ev, dict):
+        # #331 (review r4): a non-dict event (raw JSON null/array line in
+        # the log) degrades to an empty event — callers skip it via the
+        # type guard instead of AttributeError in ev.get().
+        return {}
     if isinstance(ev.get("point"), dict):
         return {**ev, **ev["point"]}
     return ev
@@ -147,22 +152,37 @@ def _norm(ev: dict) -> dict:
 
 def _apply_one(points: dict[str, dict], ev: dict) -> None:
     ev = _norm(ev)
-    t = ev["type"]
+    t = ev.get("type")
+    if not isinstance(t, str):
+        # #331: events without a 'type' key (or with a non-string type)
+        # must be skipped, not crash the fold.
+        return
     if t in ("PointAdded", "OperatorAdded"):
-        p = ev["point"]
+        # #331 (review r3): ev.get — a valid type with NO 'point' key at all
+        # must be handled by the isinstance guard below, not KeyError here.
+        p = ev.get("point")
         if not isinstance(p, dict):
-            # Malformed event (non-dict point) — skip, don't crash (issue #325)
+            # Malformed event (non-dict/missing point) — skip, don't crash
+            # (issue #325)
+            return
+        # #331: no id → nothing to index by; skip rather than KeyError.
+        # #331 (review r4): str-only — a truthy non-string id (list/dict)
+        # raised TypeError (unhashable) in the index op below.
+        if not isinstance(p.get("id"), str):
             return
         # Phase 1 stop-writes: strip context from v2+ events (#49)
         if ev.get("projection_version", 0) >= 2:
             p.pop("context", None)
         points[p["id"]] = p
         # Flatten speaker from point's provenance into node data
+        # #331: non-dict provenance (null/string) must not crash flattening.
         prov = p.get("provenance", {})
-        if prov.get("speaker"):
+        if isinstance(prov, dict) and prov.get("speaker"):
             p["speaker"] = prov["speaker"]
     elif t == "PointRevised":
-        p = points.get(ev["id"])
+        # #331 (review r4): str-only lookup — dict.get(unhashable) raises.
+        rid = ev.get("id")
+        p = points.get(rid) if isinstance(rid, str) else None
         if p:
             if ev.get("new_content") is not None:
                 p["content"] = ev["new_content"]
@@ -175,12 +195,18 @@ def _apply_one(points: dict[str, dict], ev: dict) -> None:
         # this change is irreversible (already-hard-deleted points cannot
         # be reconstructed from the event log alone — the content existed
         # only in the projection, and the projection deleted it).
-        p = points.get(ev["id"])
+        # #331 (review r4): str-only lookup — dict.get(unhashable) raises.
+        rid = ev.get("id")
+        p = points.get(rid) if isinstance(rid, str) else None
         if p:
             p["status"] = "retracted"
     elif t == "PointsMerged":
-        for mid in ev.get("merge_ids", []):
-            points.pop(mid, None)
+        # #331 (review r2): `or []` also covers an explicit "merge_ids": null
+        # in the log — dict.get(key, []) only covers the missing key.
+        for mid in ev.get("merge_ids") or []:
+            # #331 (review r4): str-only — dict.pop(unhashable) raises.
+            if isinstance(mid, str):
+                points.pop(mid, None)
     # IngestStarted: no graph effect
 
 
@@ -500,6 +526,10 @@ class FalkorProjection(
 
     def _norm(self, ev: dict) -> dict:
         """Normalize event shape — tolerates API (flat) and script (nested point)."""
+        if not isinstance(ev, dict):
+            # #331 (review r4): non-dict event → empty event → skipped by
+            # the type guard below (no AttributeError in ev.get()).
+            return {}
         if isinstance(ev.get("point"), dict):
             # Script format: id lives inside point
             return {**ev, **ev["point"]}
@@ -507,11 +537,33 @@ class FalkorProjection(
 
     def apply(self, event: dict) -> None:
         ev = self._norm(event)
-        t = ev["type"]
+        t = ev.get("type")
+        if not isinstance(t, str):
+            # #331: malformed event (no/non-string 'type') — skip, don't crash.
+            # Visible at the I/O boundary: silent skips corrupt recovery
+            # accounting (recover_from_log counts "did apply raise", code-review r2).
+            logger.warning(
+                "FalkorProjection.apply: skipping malformed event with "
+                "missing/non-string 'type' (event_id=%s)", ev.get("event_id"))
+            return
         if t in ("PointAdded", "OperatorAdded"):
-            p = ev["point"]
+            # #331 (review r3): ev.get — missing 'point' key handled by the
+            # isinstance guard, not KeyError.
+            p = ev.get("point")
             if not isinstance(p, dict):
-                # Malformed event (non-dict point) — skip, don't crash (issue #325)
+                # Malformed event (non-dict/missing point) — skip, don't crash
+                # (issue #325)
+                logger.warning(
+                    "FalkorProjection.apply: skipping %s with non-dict point "
+                    "(event_id=%s)", t, ev.get("event_id"))
+                return
+            # #331 (review r2): parity with _apply_one — no id → nothing to
+            # index by; skip rather than KeyError in _upsert.
+            # #331 (review r4): str-only ids (non-str would break Cypher params).
+            if not isinstance(p.get("id"), str):
+                logger.warning(
+                    "FalkorProjection.apply: skipping %s with missing point "
+                    "id (event_id=%s)", t, ev.get("event_id"))
                 return
             # Phase 1 stop-writes: strip context from v2+ events (#49)
             if ev.get("projection_version", 0) >= 2:
@@ -523,10 +575,19 @@ class FalkorProjection(
                 ev.pop("new_context", None)
             self._revise_point(ev, set_updated_at=True)
         elif t == "PointRetracted":
-            self._retract(ev["id"])
+            rid = ev.get("id")
+            if isinstance(rid, str):
+                # #331: missing id must be skipped, not crash the handler.
+                # #331 (review r2): NO event_id fallback — an event id is not
+                # a point id, and the fallback diverged from _apply_one (the
+                # fold is the single source of truth, module contract).
+                self._retract(rid)
         elif t == "PointsMerged":
-            for mid in ev.get("merge_ids", []):
-                self._delete(mid)
+            # #331 (review r2): `or []` also covers "merge_ids": null.
+            for mid in ev.get("merge_ids") or []:
+                # #331 (review r4): str-only ids.
+                if isinstance(mid, str):
+                    self._delete(mid)
         elif t == "EventRecorded":
             self._upsert_event(ev)
         elif t == "SubjectAdded":
@@ -654,11 +715,22 @@ class FalkorProjection(
         # (skip edges), so cross-file PointRevised always has a node to revise (#21).
         for ev in events:
             ev = self._norm(ev)
-            t = ev["type"]
+            t = ev.get("type")
             if t in ("PointAdded", "OperatorAdded"):
-                p = ev["point"]
+                # #331 (review r3): ev.get — missing 'point' key handled by
+                # the isinstance guard, not KeyError.
+                p = ev.get("point")
                 if not isinstance(p, dict):
-                    # Malformed event (non-dict point) — skip (issue #325)
+                    # Malformed event (non-dict/missing point) — skip (#325)
+                    continue
+                # #331 (review r2): parity with apply()/_apply_one — no id →
+                # nothing to index by; skip rather than KeyError in
+                # _upsert_point_props.
+                # #331 (review r4): str-only ids.
+                if not isinstance(p.get("id"), str):
+                    logger.warning(
+                        "rebuild: skipping %s with missing point id "
+                        "(event_id=%s)", t, ev.get("event_id"))
                     continue
                 # Phase 1 stop-writes: strip context from v2+ events (#49)
                 # (identical to apply() — parity between rebuild and apply)
@@ -672,17 +744,23 @@ class FalkorProjection(
         # Pass 1b: apply revisions + other non-edge events AFTER all nodes exist
         for ev in events:
             ev = self._norm(ev)
-            t = ev["type"]
+            t = ev.get("type")
             if t in ("PointAdded", "OperatorAdded"):
                 continue  # already handled in pass 1a
             elif t == "PointRetracted":
-                # #689: tombstone instead of hard delete
-                rid = ev.get("id") or ev.get("event_id")
-                if rid is not None:
+                # #689: tombstone instead of hard delete.
+                # #331 (review r3): NO event_id fallback — parity with
+                # apply()/_apply_one (fold is the single source of truth).
+                # #331 (review r4): str-only ids.
+                rid = ev.get("id")
+                if isinstance(rid, str):
                     self._retract(rid)
             elif t == "PointsMerged":
-                for mid in ev.get("merge_ids", []):
-                    self._delete(mid)
+                # #331 (review r2): `or []` also covers "merge_ids": null.
+                for mid in ev.get("merge_ids") or []:
+                    # #331 (review r4): str-only ids.
+                    if isinstance(mid, str):
+                        self._delete(mid)
             elif t == "PointRevised":
                 # Phase 1: discard new_context for v2+ events (#49)
                 if ev.get("projection_version", 0) >= 2:
@@ -706,10 +784,21 @@ class FalkorProjection(
         # (shared _upsert_point_edges — single source of truth with apply, #330).
         for ev in events:
             ev = self._norm(ev)
-            if ev["type"] in ("PointAdded", "OperatorAdded"):
-                p = ev["point"]
+            if ev.get("type") in ("PointAdded", "OperatorAdded"):
+                # #331 (review r3): ev.get — missing 'point' key handled by
+                # the isinstance guard, not KeyError.
+                p = ev.get("point")
                 if not isinstance(p, dict):
-                    # Malformed event (non-dict point) — skip (issue #325)
+                    # Malformed event (non-dict/missing point) — skip (#325)
+                    continue
+                # #331 (review r3): parity with apply()/pass 1a — edge
+                # wiring indexes by p["id"]; skip rather than KeyError.
+                # #331 (review r4): str-only ids.
+                if not isinstance(p.get("id"), str):
+                    logger.warning(
+                        "rebuild: skipping edge wiring for event with "
+                        "missing point id (event_id=%s)",
+                        ev.get("event_id"))
                     continue
                 if ev.get("projection_version", 0) >= 2:
                     p.pop("context", None)
@@ -1020,8 +1109,11 @@ class FalkorProjection(
         """Apply PointRevised event — update content, context, and re-compute embedding."""
         new_content = ev.get("new_content")
         new_context = ev.get("new_context")
-        pid = ev.get("id") or ev.get("event_id")
-        if pid is None:
+        # #331 (review r3): NO event_id fallback — parity with _apply_one
+        # (fold is the single source of truth, module contract).
+        # #331 (review r4): str-only ids.
+        pid = ev.get("id")
+        if not isinstance(pid, str):
             # Malformed PointRevised — skip rather than crash (issue #325)
             return
         params: dict = {"id": pid, "c": new_content}

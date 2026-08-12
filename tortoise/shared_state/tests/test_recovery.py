@@ -11,7 +11,9 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# #331: parents[2] = repo root tortoise/ dir -- parents[1] is
+# tortoise/shared_state, where `shared_state` is not importable
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from shared_state.recovery import (
     dedup_events,
@@ -143,7 +145,7 @@ class TestFindLastCheckpoint:
     def test_single_gate_passed(self):
         d = Path(tempfile.mkdtemp())
         log = d / "log.jsonl"
-        log.write_text(json.dumps({"type": "gate_passed", "gate": "review"}))
+        log.write_text(json.dumps({"type": "gatePassed", "gate": "review"}))
         cp = find_last_checkpoint(log)
         assert cp is not None
         assert cp["gate"] == "review"
@@ -152,9 +154,9 @@ class TestFindLastCheckpoint:
         d = Path(tempfile.mkdtemp())
         log = d / "log.jsonl"
         log.write_text('\n'.join([
-            json.dumps({"type": "gate_passed", "gate": "first"}),
+            json.dumps({"type": "gatePassed", "gate": "first"}),
             json.dumps({"type": "card_started"}),
-            json.dumps({"type": "gate_passed", "gate": "last"}),
+            json.dumps({"type": "gatePassed", "gate": "last"}),
         ]))
         cp = find_last_checkpoint(log)
         assert cp["gate"] == "last"
@@ -164,7 +166,7 @@ class TestFindLastCheckpoint:
         log = d / "log.jsonl"
         log.write_text('\n'.join([
             "not json",
-            json.dumps({"type": "gate_passed", "gate": "valid"}),
+            json.dumps({"type": "gatePassed", "gate": "valid"}),
         ]))
         cp = find_last_checkpoint(log)
         assert cp["gate"] == "valid"
@@ -174,8 +176,24 @@ class TestFindLastCheckpoint:
         log = d / "log.jsonl"
         log.write_text('\n'.join([
             "",
-            json.dumps({"type": "gate_passed", "gate": "valid"}),
+            json.dumps({"type": "gatePassed", "gate": "valid"}),
             "",
         ]))
         cp = find_last_checkpoint(log)
         assert cp["gate"] == "valid"
+
+
+# ── #331: docstring-vs-behavior — scan_incomplete_cards is FIELD-based ──
+
+class TestScanIncompleteEventLogNotConsulted:
+    def test_completion_event_in_log_does_not_affect_scan(self):
+        """A card with a cardCompleted event in the log but no completed_at
+        field is STILL incomplete — recovery is field-based (the old
+        docstring claimed an event-log lookup that does not exist)."""
+        d = Path(tempfile.mkdtemp())
+        (d / "c1.card").write_text(json.dumps({"card_id": "c1"}))
+        (d / "events.jsonl").write_text(
+            json.dumps({"type": "cardCompleted", "card_id": "c1"}) + "\n"
+        )
+        incomplete = scan_incomplete_cards(d)
+        assert [c["card_id"] for c in incomplete] == ["c1"]

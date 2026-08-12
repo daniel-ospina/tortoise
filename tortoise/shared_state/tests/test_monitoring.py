@@ -6,7 +6,9 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# #331: parents[2] = repo root tortoise/ dir -- parents[1] is
+# tortoise/shared_state, where `shared_state` is not importable
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from shared_state.monitoring import GoldenSignals, collect_signals
 
