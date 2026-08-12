@@ -235,6 +235,45 @@ jobs:
           pkill workerd 2>/dev/null || true
           true
 
+  hosted-e2e:
+    # #303: the 12-case hosted-platform E2E suite (tests/e2e/hosted/). Boots
+    # the REAL deployment artifact (uvicorn tortoise.hosted_api:app) on
+    # embedded FalkorDBLite inside the test session — zero secrets, no
+    # Docker, no browser binaries (pytest-playwright APIRequestContext only,
+    # so NO `playwright install` step — the suite is HTTP-level; a browser
+    # leg would add ~4m of setup for zero current coverage).
+    # Hermetic seams: TORTOISE_BACKUP_STORAGE=memory (backups), fixture
+    # pricing via TORTOISE_PRICING_PATH, self-signed Stripe webhooks against
+    # a local secret (tier bump without Stripe network), local JWKS mock +
+    # minted RS256 JWTs (session-auth plane). Suite self-boots the server
+    # (fixture), so the job is one pytest invocation — legal-e2e pattern
+    # minus the external-server step. Measured locally: ~60-120s suite.
+    runs-on: ubuntu-latest
+    concurrency:
+      group: hosted-e2e
+      cancel-in-progress: true
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # Package + e2e extras (pytest-playwright, cryptography for the JWKS
+      # mint). No chromium: APIRequestContext needs no browser binaries.
+      - run: pip install -e '.[test]'
+      - name: Run hosted platform E2E suite (#303)
+        run: |
+          set -o pipefail
+          RUN_HOSTED_E2E=1 python -m pytest tests/e2e/hosted/ \
+            -q -rs -p no:cacheprovider --durations=10 2>&1 | tee /tmp/hosted-e2e.log
+          # Loud-warning monitor (output-parse — NOT the #801 env-check
+          # pattern, which is collect-only-safe; here we parse the run log):
+          # this job ALWAYS sets the gate, so zero passed tests means the
+          # suite skipped out or failed collection — surface it, don't certify.
+          if ! grep -qE "[1-9][0-9]* passed" /tmp/hosted-e2e.log; then
+            echo "::warning::hosted E2E certified NOTHING — no passed tests in the run"
+          fi
+
   flip-gate:
     # #669 pre-deploy cutover gate (plan Task 10.1, issue #771) — the gate
     # that MUST PASS before the single-deploy flip. Runs the local/CI

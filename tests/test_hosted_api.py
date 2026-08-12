@@ -2016,3 +2016,43 @@ class TestInviteEndpointsRegistry:
         session_user("user-2", "bob@example.com")
         r = tc.post("/v1/invites/accept", json={"token": token})
         assert r.status_code == 400
+
+
+class TestBackupStorageSeam:
+    """#303 — TORTOISE_BACKUP_STORAGE env seam in _backup_storage().
+
+    Default (unset) → R2Storage; 'memory' → process-wide MemoryStorage
+    singleton (hermetic E2E); unknown value → RuntimeError (fail-closed,
+    never a silent durability downgrade)."""
+
+    def test_default_returns_r2(self, monkeypatch):
+        from tortoise import hosted_api as _ha
+        from tortoise.hosted_backup import R2Storage
+
+        monkeypatch.delenv("TORTOISE_BACKUP_STORAGE", raising=False)
+        # R2Storage needs its env to construct — provide dummy config.
+        monkeypatch.setenv("R2_ACCOUNT_ID", "acct")
+        monkeypatch.setenv("R2_ACCESS_KEY_ID", "ak")
+        monkeypatch.setenv("R2_SECRET_ACCESS_KEY", "sk")
+        monkeypatch.setenv("R2_BUCKET", "bkt")
+        store = _ha._backup_storage()
+        assert isinstance(store, R2Storage)
+
+    def test_memory_mode_returns_shared_singleton(self, monkeypatch):
+        from tortoise import hosted_api as _ha
+        from tortoise.hosted_backup import MemoryStorage
+
+        monkeypatch.setenv("TORTOISE_BACKUP_STORAGE", "memory")
+        monkeypatch.setattr(_ha, "_MEMORY_BACKUP_STORE", None)
+        a = _ha._backup_storage()
+        b = _ha._backup_storage()
+        assert isinstance(a, MemoryStorage)
+        assert a is b, "memory store must be a singleton (per-request callers share state)"
+        monkeypatch.setattr(_ha, "_MEMORY_BACKUP_STORE", None)
+
+    def test_unknown_value_fails_closed(self, monkeypatch):
+        from tortoise import hosted_api as _ha
+
+        monkeypatch.setenv("TORTOISE_BACKUP_STORAGE", "s3-ish")
+        with pytest.raises(RuntimeError, match="unknown"):
+            _ha._backup_storage()
