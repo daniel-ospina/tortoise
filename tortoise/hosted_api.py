@@ -5159,6 +5159,19 @@ async def index_job_status(job_id: str, team: dict = Depends(get_current_team)):
 # store for an in-process MemoryStorage so the backup→restore journey can run
 # hermetic (no R2 creds). Precedent: RATE_LIMIT_DISABLED. Any other value
 # fails closed (loud) so a typo can never silently downgrade durability.
+# Durability guard (#101 incident class): on Fly (FLY_APP_NAME set) the seam
+# REFUSES — memory backups vanish on restart, the exact silent-data-loss mode
+# the #101 postmortem documents (mirrors the sdk.py embedded-on-Fly guard).
+if os.environ.get("TORTOISE_BACKUP_STORAGE", "").strip().lower() == "memory":
+    if os.environ.get("FLY_APP_NAME"):
+        raise RuntimeError(
+            "TORTOISE_BACKUP_STORAGE=memory is a test seam and refuses to run "
+            "on Fly (FLY_APP_NAME set) — memory backups are lost on restart"
+        )
+    _logger.warning(
+        "TORTOISE_BACKUP_STORAGE=memory active at startup — backups live in "
+        "process memory only and are LOST on restart (test seam, #303)"
+    )
 _MEMORY_BACKUP_STORE: MemoryStorage | None = None
 
 

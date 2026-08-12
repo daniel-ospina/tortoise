@@ -266,9 +266,10 @@ jobs:
           set -o pipefail
           RUN_HOSTED_E2E=1 python -m pytest tests/e2e/hosted/ \
             -q -rs -p no:cacheprovider --durations=10 2>&1 | tee /tmp/hosted-e2e.log
-          # Loud-warning monitor (welcome-e2e pattern, #801): this job ALWAYS
-          # sets the gate, so a run with zero passed tests means the suite
-          # skipped out or failed collection — surface it, don't certify.
+          # Loud-warning monitor (output-parse — NOT the #801 env-check
+          # pattern, which is collect-only-safe; here we parse the run log):
+          # this job ALWAYS sets the gate, so zero passed tests means the
+          # suite skipped out or failed collection — surface it, don't certify.
           if ! grep -qE "[1-9][0-9]* passed" /tmp/hosted-e2e.log; then
             echo "::warning::hosted E2E certified NOTHING — no passed tests in the run"
           fi

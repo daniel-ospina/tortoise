@@ -36,6 +36,8 @@ import hashlib
 import hmac as hmac_mod
 import json
 import os
+import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -66,17 +68,19 @@ SUITE_ID = uuid.uuid4().hex[:8]
 # ── Gating ───────────────────────────────────────────────────────────────────
 
 def _gate_reason() -> str | None:
-    """None = run; str = skip reason (clear message per #303 requirement)."""
+    """None = run; str = skip reason (clear message per #303 requirement).
+
+    RUN_HOSTED_E2E=1 is ALWAYS required (RUN_LEGAL_E2E opt-in discipline);
+    E2E_BASE_URL selects the target (default: fixture-booted local server)."""
+    if not os.environ.get("RUN_HOSTED_E2E"):
+        return ("hosted E2E suite: opt-in via RUN_HOSTED_E2E=1 (local hermetic "
+                "server, or with E2E_BASE_URL=<url> for remote mode; https also "
+                "needs ALLOW_PROD=1)")
     url = os.environ.get("E2E_BASE_URL", "").strip()
-    if url:
-        if url.startswith("https://") and os.environ.get("ALLOW_PROD") != "1":
-            return ("hosted E2E: E2E_BASE_URL is https — set ALLOW_PROD=1 to run "
-                    "against a live/staging deployment")
-        return None
-    if os.environ.get("RUN_HOSTED_E2E"):
-        return None
-    return ("hosted E2E suite: opt-in via RUN_HOSTED_E2E=1 (local hermetic server) "
-            "or E2E_BASE_URL=<url> (remote mode; https also needs ALLOW_PROD=1)")
+    if url and url.startswith("https://") and os.environ.get("ALLOW_PROD") != "1":
+        return ("hosted E2E: E2E_BASE_URL is https — set ALLOW_PROD=1 to run "
+                "against a live/staging deployment")
+    return None
 
 
 GATE_REASON = _gate_reason()
@@ -181,11 +185,21 @@ def _build_server_env(db_path: str, jwks_url: str, *, bare: bool) -> dict:
     (TORTOISE_DB_URI beats TORTOISE_DB_PATH in _make_sdk → a stale exported
     URI hangs the readiness poll; test_bridge_mcp documents the hazard)."""
     env = {**os.environ}
+    # Pop vars that flip server mode/durability; blank the external
+    # side-effect channels (audit sink, email, analytics, telegram, DR) —
+    # blank-not-pop because tortoise/mcp_server._load_dotenv refills only
+    # ABSENT keys from the repo .env in the fresh child interpreter, so an
+    # explicit "" keeps a populated dev .env out of the E2E server.
     for var in ("TORTOISE_DB_URI", "FALKORDB_CLOUD_URI",
                 "SUPABASE_SERVICE_KEY", "SUPABASE_SERVICE_ROLE_KEY",
                 "SUPABASE_ANON_KEY", "GITHUB_CLIENT_SECRET",
                 "STRIPE_SECRET_KEY", "TORTOISE_BACKUP_STORAGE"):
         env.pop(var, None)
+    for var in ("TORTOISE_AUDIT_DSN", "RESEND_API_KEY", "BILLING_NOTIFY_TO",
+                "POSTHOG_API_KEY", "POSTHOG_HOST", "TELEGRAM_BOT_TOKEN",
+                "TELEGRAM_CHAT_ID", "DR_ISSUES_PAT", "R2_ACCOUNT_ID",
+                "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET"):
+        env[var] = "" 
     env.update({
         "TORTOISE_DB_PATH": db_path,
         "TORTOISE_CONTROL_PLANE": "registry",
@@ -222,15 +236,19 @@ class _ServerProc:
         self.base_url = f"http://127.0.0.1:{self.port}"
         self._log_path = Path(db_path).parent / f"{name}-uvicorn.log"
         env = _build_server_env(db_path, jwks_url, bare=bare)
+        self._log_fh = open(self._log_path, "wb")
         self.proc = subprocess.Popen(
             [sys.executable, "-m", "uvicorn", app,
              "--host", "127.0.0.1", "--port", str(self.port),
              "--log-level", "warning"],
             env=env, cwd=str(REPO_ROOT),
-            stdout=open(self._log_path, "wb"), stderr=subprocess.STDOUT,
+            stdout=self._log_fh, stderr=subprocess.STDOUT,
+            # Own process group: the embedded redislite child dies with the
+            # uvicorn parent on group kill (#176 orphan class).
+            start_new_session=True,
         )
 
-    def wait_ready(self, timeout_s: float = 90.0) -> None:
+    def wait_ready(self, timeout_s: float = 60.0) -> None:
         import urllib.request
 
         deadline = time.time() + timeout_s
@@ -261,15 +279,25 @@ class _ServerProc:
 
     def stop(self) -> None:
         if self.proc.poll() is None:
-            self.proc.terminate()
+            try:
+                os.killpg(os.getpgid(self.proc.pid), signal.SIGTERM)
+            except (ProcessLookupError, PermissionError, OSError):
+                self.proc.terminate()
             try:
                 self.proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
-                self.proc.kill()
+                try:
+                    os.killpg(os.getpgid(self.proc.pid), signal.SIGKILL)
+                except (ProcessLookupError, PermissionError, OSError):
+                    self.proc.kill()
                 self.proc.wait(timeout=5)
+        try:
+            self._log_fh.close()
+        except Exception:  # noqa: BLE001
+            pass
 
 
-def _boot_with_retry(factory, attempts: int = 3):
+def _boot_with_retry(factory, attempts: int = 2):
     """Boot a server via factory() -> _ServerProc; retry on boot failure.
 
     Embedded FalkorDBLite version handshake is timing-sensitive under CPU
@@ -306,13 +334,20 @@ def hosted_env():
                "server": None, "jwks": None, "supabase_url": None}
         return
 
-    tmpdir = tempfile.mkdtemp(prefix="tortoise_hosted_e2e_")
+    tmpdirs: list[str] = []
     keys = _JWKSKeys()
     jwks_srv, jwks_url = _start_jwks_server(keys)
+
+    def _mk_hosted() -> "_ServerProc":
+        # Fresh DB dir PER ATTEMPT — a partial redislite init must not
+        # poison the retry (test_12 selfhost precedent, #176).
+        d = tempfile.mkdtemp(prefix="tortoise_hosted_e2e_")
+        tmpdirs.append(d)
+        return _ServerProc("hosted", "tortoise.hosted_api:app",
+                           os.path.join(d, "hosted.db"), jwks_url)
+
     try:
-        server = _boot_with_retry(lambda: _ServerProc(
-            "hosted", "tortoise.hosted_api:app",
-            os.path.join(tmpdir, "hosted.db"), jwks_url))
+        server = _boot_with_retry(_mk_hosted)
     except Exception:
         jwks_srv.shutdown()
         raise
@@ -320,6 +355,8 @@ def hosted_env():
            "jwks": keys, "supabase_url": jwks_url}
     server.stop()
     jwks_srv.shutdown()
+    for d in tmpdirs:
+        shutil.rmtree(d, ignore_errors=True)
 
 
 @pytest.fixture(scope="session")
@@ -329,19 +366,26 @@ def bare_hosted_server(hosted_env):
     Remote mode: skip (can't boot a bare prod variant)."""
     if hosted_env["remote"]:
         pytest.skip("bare server is local-only (hermetic negatives)")
-    tmpdir = tempfile.mkdtemp(prefix="tortoise_hosted_e2e_bare_")
+    tmpdirs: list[str] = []
     keys = _JWKSKeys()
     jwks_srv, jwks_url = _start_jwks_server(keys)
+
+    def _mk_bare() -> "_ServerProc":
+        d = tempfile.mkdtemp(prefix="tortoise_hosted_e2e_bare_")
+        tmpdirs.append(d)
+        return _ServerProc("bare", "tortoise.hosted_api:app",
+                           os.path.join(d, "bare.db"), jwks_url, bare=True)
+
     try:
-        server = _boot_with_retry(lambda: _ServerProc(
-            "bare", "tortoise.hosted_api:app",
-            os.path.join(tmpdir, "bare.db"), jwks_url, bare=True))
+        server = _boot_with_retry(_mk_bare)
     except Exception:
         jwks_srv.shutdown()
         raise
     yield server
     server.stop()
     jwks_srv.shutdown()
+    for d in tmpdirs:
+        shutil.rmtree(d, ignore_errors=True)
 
 
 @pytest.fixture(scope="session")
@@ -379,10 +423,15 @@ def tenant_factory(api, hosted_env):
     """
     created: list[dict] = []
     pool: list[dict] = []
+    pool_idx = {"i": 0}
 
     def _register(label: str) -> dict:
-        if hosted_env["remote"] and pool:
-            return pool[0]
+        # Remote mode: server-side register limit is 3/hr/IP — rotate a pool
+        # of 3 shared tenants (pairwise-isolation tests skip in remote mode).
+        if hosted_env["remote"] and len(pool) >= 3:
+            t = pool[pool_idx["i"] % 3]
+            pool_idx["i"] += 1
+            return t
         email = f"e2e-{SUITE_ID}-{label}-{uuid.uuid4().hex[:6]}@e2e.premise-labs.dev"
         r = api.post("/v1/register", data={"email": email, "password": "E2ePass-303-x"})
         assert r.status == 200, f"register failed: {r.status} {r.text()}"

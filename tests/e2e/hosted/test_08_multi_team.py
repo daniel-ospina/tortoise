@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import uuid
 
-from conftest import bump_team_tier, skip_unless_hosted_e2e
+import pytest
+
+from conftest import bump_team_tier, is_remote_mode, skip_unless_hosted_e2e
 
 skip_unless_hosted_e2e()
 
@@ -93,6 +95,7 @@ def test_duplicate_invite_409_and_bad_token_400(api, session_jwt):
     assert r.status == 400, f"bad invite token must 400, got {r.status}: {r.text()}"
 
 
+@pytest.mark.skipif(is_remote_mode(), reason="needs two distinct tenants (remote pool shares 3)")
 def test_cross_team_key_revoke_403(api, tenant_factory):
     """Team A's key cannot revoke team B's key ('Not your API key')."""
     a = tenant_factory("rbac-a")

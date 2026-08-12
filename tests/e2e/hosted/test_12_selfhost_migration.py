@@ -16,6 +16,8 @@ migration destination rejects duplicate emails → 409. Skips in remote mode
 from __future__ import annotations
 
 import os
+import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -62,7 +64,8 @@ def _boot_selfhost(tmpdir: str):
         [sys.executable, "-m", "uvicorn", "tortoise.selfhost:app",
          "--host", "127.0.0.1", "--port", str(port), "--log-level", "warning"],
         env=env, cwd=str(REPO_ROOT),
-        stdout=open(log_path, "wb"), stderr=subprocess.STDOUT)
+        stdout=open(log_path, "wb"), stderr=subprocess.STDOUT,
+        start_new_session=True)
     base = f"http://127.0.0.1:{port}"
     deadline = time.time() + 60
     try:
@@ -90,10 +93,12 @@ def selfhost_server():
     the FalkorDBLite handshake is timing-sensitive under CPU contention."""
     base = proc = None
     last_exc = None
+    tmpdirs = []
     for _attempt in range(3):
         # fresh DB dir per attempt — a partial redislite init must not
         # poison the retry
         tmpdir = tempfile.mkdtemp(prefix="tortoise_e2e_selfhost_")
+        tmpdirs.append(tmpdir)
         try:
             base, proc = _boot_selfhost(tmpdir)
             break
@@ -105,11 +110,16 @@ def selfhost_server():
         yield base
     finally:
         if proc.poll() is None:
-            proc.terminate()
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            except (ProcessLookupError, PermissionError, OSError):
+                proc.terminate()
             try:
                 proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 proc.kill()
+        for d in tmpdirs:
+            shutil.rmtree(d, ignore_errors=True)
 
 
 def test_migration_journey_selfhost_to_hosted(api, selfhost_server, tenant_factory):

@@ -8,11 +8,14 @@ Negatives: foreign point id → 404; revoked key → 401; garbage bearer → 401
 """
 from __future__ import annotations
 
-from conftest import skip_unless_hosted_e2e
+import pytest
+
+from conftest import is_remote_mode, skip_unless_hosted_e2e
 
 skip_unless_hosted_e2e()
 
 
+@pytest.mark.skipif(is_remote_mode(), reason="needs two distinct tenants (remote pool shares 3)")
 def test_cross_tenant_point_read_denied(api, tenant_factory):
     """Positive for A, negative across the boundary: B's key cannot read A's
     point by id and A's content never appears in B's list."""
