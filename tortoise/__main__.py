@@ -256,7 +256,7 @@ def _cmd_init(args):
                         "team_id": existing.get("team_id"),
                         "api_url": existing_api_url,
                         "mcp": {
-                            "endpoint": f"{existing_api_url}/mcp",
+                            "endpoint": f"{existing_api_url}/mcp/",
                             "auth_header": f"Bearer {args.api_key}",
                             "configs": {
                                 "claude": {"file": ".mcp.json", "config": _harness_mcp_config("claude", args.api_key, existing_api_url)},
@@ -404,7 +404,7 @@ def _cmd_init(args):
                 "team_id": team_id,
                 "api_url": base_url,
                 "mcp": {
-                    "endpoint": f"{base_url}/mcp",
+                    "endpoint": f"{base_url}/mcp/",
                     "auth_header": f"Bearer {args.api_key}",
                     "configs": {
                         "claude": {"file": ".mcp.json", "config": _harness_mcp_config("claude", args.api_key, base_url)},
@@ -775,7 +775,7 @@ def _harness_mcp_config(harness: str, api_key: str, api_url: str) -> dict:
     - cursor: same but WITHOUT `type` (Cursor's client doesn't use it)
     - codex: shell command — Codex manages its own config (no file to write)
     """
-    endpoint = api_url.rstrip("/") + "/mcp"
+    endpoint = api_url.rstrip("/") + "/mcp/"
     if harness == "codex":
         return {"command": f"codex mcp add tortoise --url {endpoint} --bearer-token-env-var TORTOISE_API_KEY"}
     server: dict = {
@@ -797,7 +797,7 @@ def _print_mcp_configs(api_key: str, api_url: str, harness: str | None) -> None:
     With --harness, print only that harness; without, print the selector UI.
     """
     import json as _json
-    endpoint = api_url.rstrip("/") + "/mcp"
+    endpoint = api_url.rstrip("/") + "/mcp/"
     if harness:
         print(f"── MCP Configuration (Streamable HTTP) — {_harness_label(harness)} ──")
         if harness == "codex":

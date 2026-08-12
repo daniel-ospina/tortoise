@@ -7,7 +7,7 @@
 ## How to use
 
 1. After adding the Tortoise MCP server (`export TORTOISE_API_KEY=<your key>`
-   then `codex mcp add tortoise --url https://api.premiselabs.co/mcp
+   then `codex mcp add tortoise --url https://api.premiselabs.co/mcp/
    --bearer-token-env-var TORTOISE_API_KEY`), paste this ENTIRE document into
    your Codex chat.
 2. Answer the yes/no questions one at a time — the agent runs the setup and
@@ -23,7 +23,7 @@ Prefer standing instructions over a one-time chat paste:
   before doing any work (global `~/.codex/AGENTS.md` works too).
 - MCP config file alternative: instead of the CLI one-liner, add a
   `config.toml` snippet to `~/.codex/config.toml`:
-  `[mcp_servers.tortoise]` with `url = "https://api.premiselabs.co/mcp"` and
+  `[mcp_servers.tortoise]` with `url = "https://api.premiselabs.co/mcp/"` and
   `bearer_token_env_var = "TORTOISE_API_KEY"` (the env-var NAME — never the
   secret). If Tortoise fails to connect, the usual cause is a skipped export —
   the fix is: export TORTOISE_API_KEY=tt_your_key in your shell profile.

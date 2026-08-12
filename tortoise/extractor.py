@@ -366,12 +366,27 @@ _DEFAULT_POINT_KIND_DESCRIPTIONS: list[tuple[str, str]] = [
 ]
 
 
-def _build_pointkind_prompt(point_kinds: list[str] | None = None) -> str:
+def _build_pointkind_prompt(point_kinds: list[str] | dict[str, str] | None = None) -> str:
     """Build the pointKind list for the LLM prompt.
 
-    If point_kinds is provided, use those values (bare names for domain kinds).
-    Otherwise use default descriptions.
+    - None → core defaults with descriptions.
+    - list[str] → bare names (legacy domain mode).
+    - dict[str, str] → kind semantics (#951): ``- kind: description`` lines;
+      kinds without a pack description fall back to the core defaults, then
+      to the bare name (pack kindDefs are the vocabulary source, the
+      defaults are the core fallback — research-r6 §5.4).
     """
+    if isinstance(point_kinds, dict) and point_kinds:
+        core_descs = dict(_DEFAULT_POINT_KIND_DESCRIPTIONS)
+        lines = []
+        for kind, desc in point_kinds.items():
+            if desc:
+                lines.append(f"- {kind}: {desc}")
+            elif kind in core_descs:
+                lines.append(f"- {kind}: {core_descs[kind]}")
+            else:
+                lines.append(f"- {kind}")
+        return "\n".join(lines)
     if point_kinds:
         lines = [f"- {k}" for k in point_kinds]
     else:
@@ -383,7 +398,9 @@ def _warn_unrecognized_kinds(extracted_kinds: set[str]) -> None:
     """Warn if any extracted pointKind values are not in the known registry.
 
     Prints warnings to stderr. Unknown kinds are accepted (open vocabulary) but
-    agents should know when the LLM invents a new kind.
+    agents should know when the LLM invents a new kind. Uses the bucket-scoped
+    ``kind_is_known(kind, "pointKind")`` (#951 — previously a silent TypeError,
+    research-r6 §1.2).
     """
     try:
         from tortoise.domain_loader import kind_is_known
@@ -393,7 +410,7 @@ def _warn_unrecognized_kinds(extracted_kinds: set[str]) -> None:
             print(
                 f"⚠ unrecognized pointKind values: {sorted(unknown)}. "
                 f"These will be stored but may not match any registered ontology. "
-                f"Register them via domain manifest if intentional.",
+                f"Register them via a pack manifest (or register_kind) if intentional.",
                 file=sys.stderr,
             )
     except Exception:
@@ -738,12 +755,21 @@ class LLMExtractor:
         if max_utterances:
             sections = sections[:max_utterances]
 
-        # Resolve domain pointKinds for the prompt
+        # Resolve domain pointKinds for the prompt. #951 (epic #909 slice 4c):
+        # previously called the nonexistent domain_kinds() — AttributeError
+        # swallowed by the ponytail, so the pack vocabulary never reached the
+        # prompt (research-r6 §1.2). Now the adapter returns pack kind
+        # SEMANTICS (kind → description from pack kindDefs; core defaults are
+        # the fallback in _build_pointkind_prompt).
         point_kinds = None
         if domain:
             try:
-                from tortoise.domain_loader import domain_kinds
-                point_kinds = domain_kinds(domain, "pointKind")
+                from tortoise.domain_loader import domain_kinds, domain_kind_semantics
+                semantics = domain_kind_semantics(domain, "pointKind")
+                if semantics:
+                    point_kinds = semantics  # pack kind semantics
+                else:
+                    point_kinds = domain_kinds(domain, "pointKind")
             except Exception:
                 pass  # ponytail: use defaults if loader fails
 
@@ -872,7 +898,9 @@ class LLMExtractor:
         if not is_doc:
             return {"subjects": 0, "objects": 0, "entities": []}
 
-        # Build kind vocabularies from domain loader
+        # Build kind vocabularies from the domain_loader adapter (#951):
+        # domain_kinds()/known_kinds(bucket) previously did not exist — the
+        # TypeError fell through to the defaults below.
         subject_kinds = None
         object_kinds = None
         try:

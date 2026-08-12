@@ -11,11 +11,17 @@
 #       ontology_doc: str — path to ontology markdown document
 #       active: bool — if false, loader skips this domain
 #       version: str — domain ontology version
+#       version: str — domain ontology version
 #       kind_values:
-#         pointKind: [str]   — additional point kind values
-#         subjectKind: [str] — additional subject kind values
-#         objectKind: [str]  — additional object kind values
-#         eventKind: [str]   — additional event kind values
+#         pointKind: [str]   — LEGACY (#951, epic #909 slice 4c): superseded by
+#                              pack manifests (packs/*/manifest.yaml — the pack
+#                              registry is the canonical kind source). Still
+#                              registered into domain_loader's legacy flat
+#                              registry for backward compat; do NOT add new
+#                              kinds here — declare them in the packs.
+#         subjectKind: [str] — additional subject kind values (legacy, see above)
+#         objectKind: [str]  — additional object kind values (legacy, see above)
+#         eventKind: [str]   — additional event kind values (legacy, see above)
 #       event_types: [str]   — JSONL event types this domain handles (write-side routing)
 #       query_patterns: [str] — NL query pattern keys this domain answers (read-side routing)
 #       cypher_template: str  — base Cypher query template for this domain
@@ -31,6 +37,12 @@ domains:
     ontology_doc: "docs/product-strategy-ontology.md"
     active: true
     version: "1.0"
+    # LEGACY (#951, epic #909 slice 4c): kind_values are superseded by the pack
+    # manifests (packs/*/manifest.yaml) — the pack registry is the canonical
+    # kind source (plan §5.2 boundary 4). load_manifest still registers these
+    # into domain_loader's legacy flat registry so existing document-domain
+    # routing and warnings don't change. Do NOT add new kinds here — declare
+    # them in the pack manifests (pack_registry validates them).
     kind_values:
       pointKind:
         - useCase

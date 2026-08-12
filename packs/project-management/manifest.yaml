@@ -4,7 +4,7 @@
 
 namespace: pm
 name: "Project Management"
-version: "0.1.0"
+version: "0.2.0"          # bumped: extractor-readable business logic (R6)
 tier: free
 description: "GitHub Issues, Linear, Asana integration for project tracking"
 
@@ -36,6 +36,19 @@ ontology:
   pointKinds:
     - estimate       # Story points / time estimate
     - retrospective  # Sprint retrospective observation
+
+  # ── NEW: per-kind extractor metadata (epic #909, research-r6 §6.2) ──────
+  kindDefs:
+    issue:
+      description: "A tracked work item (GitHub Issue, Linear issue, Asana task) — ≡ dev:issue"
+      synonyms: ["ticket", "task"]
+      nearMisses: [card]
+    sprint:
+      description: "A time-boxed work period in which cards are committed"
+      nearMisses: [milestone]
+    card:
+      description: "A generic work unit on a board (supertype of issue)"
+      nearMisses: [issue]
 
   relations:
     - { predicate: blocks, from: Object, to: Object, cardinality: many_to_many }
