@@ -1,14 +1,24 @@
 """Tests for tortoise.quota (#329, #683)."""
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
 import pytest
 
 from tortoise.quota import (
     QuotaCheckError,
     QuotaExceededError,
+    count_team_usage,
     enforce_team_limit,
     resolve_team_limits,
 )
+
+# graph-scripts/ is a hyphenated (namespace) dir — import the #947 backfill
+# one-shot via path insert (AGENTS.md sibling-import convention).
+_GRAPH_SCRIPTS = str(Path(__file__).resolve().parent.parent / "graph-scripts")
+if _GRAPH_SCRIPTS not in sys.path:
+    sys.path.insert(0, _GRAPH_SCRIPTS)
 
 
 @pytest.fixture(autouse=True)
@@ -241,3 +251,174 @@ class TestNonePreservation:
         assert limits["max_points"] == 10000
         assert limits["max_api_keys"] == 2
         assert limits["max_sessions"] == 1000
+
+
+# ── #947 (epic #909 slice 2): sessions branch + is_episodic + constants ──
+
+class TestSessionsQuota:
+    """#947 P0: the sessions branch counts Session nodes, NOT all nodes.
+
+    Pre-fix ``_count_resource("sessions")`` fell through to ``MATCH (n)`` —
+    ~25 nodes per captured session → false 402 after ~40 captures. The
+    fixture follows conftest.provision_test_user's convention (direct
+    max_sessions write on the Team node — no tier gives 40, DE2E-7).
+    """
+
+    def test_sessions_count_returns_session_nodes_and_41st_402(
+            self, reg_sdk, tmp_path):
+        from tortoise.sdk import TortoiseSDK
+        import os
+        db = os.path.join(tmp_path, "quota.db")
+        tid = _find_team_id(reg_sdk)
+        # Inject max_sessions=40 on the Team node (provision_test_user
+        # convention — direct write, DE2E-7 quota fixture).
+        reg_sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.max_sessions=40",
+            params={"id": tid},
+        )
+        tenant = TortoiseSDK(db, namespace=tid)
+        try:
+            # 40 minimal captures (tiny conversation — no regex extraction)
+            for i in range(40):
+                tenant.capture_session(
+                    [{"role": "user", "content": "ok"}],
+                    session_id=f"s{i:02d}",
+                )
+            # P0 regression: sessions count == 40, NOT the all-nodes count
+            # (pre-fix this branch returned the all-nodes count → fails
+            # pre-fix).
+            count = count_team_usage(tid, "sessions", sdk=tenant)
+            assert count == 40, (
+                f"sessions count should be 40, got {count} — the P0 "
+                "(MATCH (n) all-nodes fallthrough) is not fixed")
+            all_nodes = tenant._get_proj().g.query(
+                "MATCH (n) RETURN count(n)"
+            ).result_set[0][0]
+            assert all_nodes > 40, (
+                f"expected >40 total nodes ({all_nodes}) — the fixture must "
+                "distinguish sessions from the pre-fix all-nodes count")
+            # Resolver picks the injected limit up
+            limits = resolve_team_limits(tid)
+            assert limits["max_sessions"] == 40
+            # 41st session → 402-equivalent (DE2E-7)
+            with pytest.raises(QuotaExceededError, match="sessions limit reached"):
+                enforce_team_limit(limits, "sessions", sdk=tenant)
+        finally:
+            tenant.close()
+
+    def test_sessions_branch_ignores_non_session_nodes(self, reg_sdk, tmp_path):
+        """Only :Session nodes count — plain Points never inflate sessions."""
+        from tortoise.sdk import TortoiseSDK
+        import os
+        db = os.path.join(tmp_path, "quota.db")
+        tid = _find_team_id(reg_sdk)
+        tenant = TortoiseSDK(db, namespace=tid)
+        try:
+            tenant.capture_session(
+                [{"role": "user", "content": "ok"}], session_id="only_s1")
+            # ~10 non-Session nodes: turn Point + Event + extracted points
+            tenant.create_point("statement", "plain non-episodic point")
+            for i in range(8):
+                tenant.create_point("statement", f"filler point {i}")
+            assert count_team_usage(tid, "sessions", sdk=tenant) == 1
+            assert count_team_usage(tid, "points", sdk=tenant) == 9
+        finally:
+            tenant.close()
+
+
+class TestIsEpisodicBackfill:
+    """R-18 (DE2E-7 legacy fixture): legacy nodes lack is_episodic → the
+    one-query backfill (graph-scripts/backfill_is_episodic.py) stamps them →
+    the points branch counts them as episodic (no false 402)."""
+
+    def _make_tenant(self, reg_sdk, tmp_path):
+        from tortoise.sdk import TortoiseSDK
+        import os
+        return TortoiseSDK(
+            os.path.join(tmp_path, "quota.db"), namespace=_find_team_id(reg_sdk))
+
+    def test_legacy_nodes_backfilled_are_episodic(self, reg_sdk, tmp_path):
+        from backfill_is_episodic import run_backfill
+        tid = _find_team_id(reg_sdk)
+        tenant = self._make_tenant(reg_sdk, tmp_path)
+        try:
+            proj = tenant._get_proj()
+            # Pre-#947 regex-path capture nodes — written WITHOUT the flag
+            proj.g.query(
+                "CREATE (s:Session {id:'legacy_s1', created_at:'2026-08-01T00:00:00Z', turn_count:2})")
+            proj.g.query(
+                "CREATE (e:Event {id:'legacy_e1', eventKind:'sessionCaptured'})")
+            proj.g.query(
+                "CREATE (src:Source {id:'legacy_src1', url:'legacy://src1'})")
+            proj.g.query(
+                "CREATE (p1:Point {id:'legacy_p1', content:'[user] ok', "
+                "pointKind:'event', is_operator:false, status:'draft'})")
+            proj.g.query(
+                "CREATE (p2:Point {id:'legacy_p2', content:'[assistant] ok', "
+                "pointKind:'event', is_operator:false, status:'draft'})")
+            # Pre-backfill: missing flag counts as NON-episodic (fail-closed,
+            # R-18) → the 2 legacy Points inflate the points quota → false 402.
+            assert count_team_usage(tid, "points", sdk=tenant) == 2
+            with pytest.raises(QuotaExceededError, match="points limit reached"):
+                enforce_team_limit(
+                    {"team_id": tid, "max_points": 2}, "points", sdk=tenant)
+            # Dry-run reports without writing
+            report = run_backfill(proj, dry_run=True)
+            assert report == {"matched": 5, "updated": 0}
+            # One-query migration applies the flag to all 5 legacy nodes
+            report = run_backfill(proj)
+            assert report == {"matched": 5, "updated": 5}
+            # Idempotent — re-run is a no-op
+            assert run_backfill(proj) == {"matched": 0, "updated": 0}
+            # Post-backfill: legacy points count as episodic → no false 402
+            assert count_team_usage(tid, "points", sdk=tenant) == 0
+            enforce_team_limit(
+                {"team_id": tid, "max_points": 2}, "points", sdk=tenant)
+            # Sessions branch still counts the (now-flagged) Session
+            assert count_team_usage(tid, "sessions", sdk=tenant) == 1
+        finally:
+            tenant.close()
+
+    def test_new_capture_writes_carry_flag(self, reg_sdk, tmp_path):
+        """Seam note (MECE ISSUE 3): regex-fallback captures write is_episodic
+        on Session + turn Points going forward — unflagged new captures would
+        re-introduce the false-402 this fix eliminates."""
+        from backfill_is_episodic import run_backfill
+        tid = _find_team_id(reg_sdk)
+        tenant = self._make_tenant(reg_sdk, tmp_path)
+        try:
+            proj = tenant._get_proj()
+            tenant.capture_session(
+                [{"role": "user", "content": "ok"}], session_id="new_s1")
+            # Nothing to backfill — new capture nodes already carry the flag
+            assert run_backfill(proj) == {"matched": 0, "updated": 0}
+            # The turn Point is episodic → points quota sees no inflation
+            assert count_team_usage(tid, "points", sdk=tenant) == 0
+            # Session counted by the sessions branch
+            assert count_team_usage(tid, "sessions", sdk=tenant) == 1
+        finally:
+            tenant.close()
+
+
+class TestBudgetConstants:
+    """#947 indicator (b): budget + Layer-1 payload caps exported from
+    quota.py (epic #909 §4.4 — DE2E-7 Layer-1 51-point → 422 uses
+    MAX_PAYLOAD_POINTS)."""
+
+    def test_max_value_points_per_session(self):
+        from tortoise.quota import MAX_VALUE_POINTS_PER_SESSION
+        assert MAX_VALUE_POINTS_PER_SESSION == {"soft": 15, "hard": 25, "ceiling": 50}
+
+    def test_max_payload_points(self):
+        from tortoise.quota import (
+            MAX_ENTITIES, MAX_OPERATORS, MAX_PAYLOAD_POINTS,
+            MAX_VALUE_POINTS_PER_SESSION,
+        )
+        assert MAX_PAYLOAD_POINTS == 50
+        assert MAX_ENTITIES == 500
+        assert MAX_OPERATORS == 500
+        # R-decoupling: the Layer-1 raw cap is deliberately a SEPARATE named
+        # constant from the budget ceiling (same numeric value — the name
+        # prevents wiring the wrong 50, plan §4.4).
+        assert MAX_PAYLOAD_POINTS == MAX_VALUE_POINTS_PER_SESSION["ceiling"]
+        assert MAX_PAYLOAD_POINTS == 50  # explicit value, not derived

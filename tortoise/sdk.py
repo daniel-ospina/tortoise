@@ -865,7 +865,8 @@ class TortoiseSDK:
                 f"Session turn cap exceeded: {len(conversation)} > {max_turns}")
 
         proj.g.query(
-            "MERGE (s:Session {id:$sid}) SET s.created_at=$now, s.turn_count=$tc",
+            "MERGE (s:Session {id:$sid}) SET s.created_at=$now, s.turn_count=$tc, "
+            "    s.is_episodic=true",
             params={"sid": session_id, "now": now, "tc": len(conversation)},
         )
 
@@ -918,6 +919,7 @@ class TortoiseSDK:
                 "MERGE (t:Point {id:$id}) "
                 "SET t.content=$c, t.pointKind=$k, t.is_operator=false, "
                 "    t.speaker=$speaker, "
+                "    t.is_episodic=true, "
                 "    t.status=coalesce(t.status, $s), "
                 "    t.createdAt=coalesce(t.createdAt, $now), "
                 "    t.updatedAt=$now, t.content_hash=$ch",
@@ -977,6 +979,7 @@ class TortoiseSDK:
             event = self.create_event(
                 f"session_{session_id}", "sessionCaptured",
                 startedAt=now, endedAt=now, sessionId=session_id,
+                is_episodic=True,
             )
             event_id = event.get("id") or event.get("eventId")
             for p in extracted:

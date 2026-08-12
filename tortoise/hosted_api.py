@@ -2462,7 +2462,8 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
     now = datetime.now(timezone.utc).isoformat()
 
     proj.g.query(
-        "MERGE (s:Session {id:$sid}) SET s.created_at=$now, s.turn_count=$tc",
+        "MERGE (s:Session {id:$sid}) SET s.created_at=$now, s.turn_count=$tc, "
+        "    s.is_episodic=true",
         params={"sid": session_id, "now": now, "tc": len(body.conversation)},
     )
 
@@ -2493,6 +2494,7 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
         proj.g.query(
             "MERGE (t:Point {id:$id}) "
             "SET t.content=$c, t.pointKind=$k, t.is_operator=false, "
+            "    t.is_episodic=true, "
             "    t.status=coalesce(t.status, $s), "
             "    t.createdAt=coalesce(t.createdAt, $now), "
             "    t.updatedAt=$now, t.content_hash=$ch",
@@ -2553,6 +2555,7 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
             startedAt=now,
             endedAt=now,
             sessionId=session_id,
+            is_episodic=True,
         )
         event_id = event.get("id") or event.get("eventId")
         for p in extracted:
