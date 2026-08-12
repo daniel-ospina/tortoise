@@ -77,7 +77,7 @@ def audit_context(context):
 
     # ── 3. impl_instead_of_nand (HIGH) ──
     # Find NAND edges and check if endpoints have source_rationale suggesting contradiction
-    r = q(f"MATCH (n:Point)-[:IMPL]->(m:Point) WHERE ({cf.replace('n.', 'n.')}) OR ({cf.replace('n.', 'm.')}) AND n.is_operator = 'True' RETURN n.id, n.op_type, m.id, m.content, n.content LIMIT 50")
+    r = q(f"MATCH (n:Point)-[:IMPL]->(m:Point) WHERE ({cf.replace('n.', 'n.')}) OR ({cf.replace('n.', 'm.')}) AND n.is_operator = true RETURN n.id, n.op_type, m.id, m.content, n.content LIMIT 50")
     # Check if any IMPL connects to things that semantically should be NAND
     impl_issues = []
     for row in r:
@@ -120,7 +120,7 @@ def audit_context(context):
     r = q(f"MATCH (n:Point)-[:mitigates]->(m:Point) WHERE {cf.replace('n.', 'n.')} RETURN count(n)")
     has_mitigations = r[0][0] if r else 0
     # Count low-relevance operators without mitigations
-    r = q(f"MATCH (n:Point) WHERE {cf} AND (n.context CONTAINS 'low-relevance' OR n.context CONTAINS 'weak') AND n.is_operator = 'True' RETURN n.id, n.content, n.context LIMIT 10")
+    r = q(f"MATCH (n:Point) WHERE {cf} AND (n.context CONTAINS 'low-relevance' OR n.context CONTAINS 'weak') AND n.is_operator = true RETURN n.id, n.content, n.context LIMIT 10")
     low_rel = list(r)
     if low_rel:
         mitigated = 0
@@ -137,7 +137,7 @@ def audit_context(context):
             print(f"  ✅ mitigation_recommended: all mitigated")
     else:
         # Check across broader context — any operators with low confidence
-        r = q(f"MATCH (n:Point) WHERE {cf} AND n.is_operator = 'True' AND (n.confidence < '0.4' OR n.confidence IS NULL) AND n.op_type = 'IMPL' RETURN n.id, n.confidence, n.content LIMIT 10")
+        r = q(f"MATCH (n:Point) WHERE {cf} AND n.is_operator = true AND (n.confidence < '0.4' OR n.confidence IS NULL) AND n.op_type = 'IMPL' RETURN n.id, n.confidence, n.content LIMIT 10")
         low_conf = list(r)
         if low_conf:
             print(f"\n  💡 MEDIUM: mitigation_recommended — {len(low_conf)} low-confidence operators might benefit")
@@ -149,7 +149,7 @@ def audit_context(context):
     # ── Summary stats ──
     r = q(f"MATCH (n:Point) WHERE {cf} RETURN count(n)")
     total = r[0][0] if r else 0
-    r = q(f"MATCH (n:Point) WHERE {cf} AND n.is_operator = 'True' RETURN count(n)")
+    r = q(f"MATCH (n:Point) WHERE {cf} AND n.is_operator = true RETURN count(n)")
     ops = r[0][0] if r else 0
     print(f"\n  📊 Summary: {total} points ({ops} operators) in context")
 

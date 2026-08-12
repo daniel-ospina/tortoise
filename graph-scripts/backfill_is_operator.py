@@ -91,11 +91,29 @@ def main():
         return
 
     if total > 0:
+        # Legacy operators: points with op_type but no is_operator property are
+        # documented as operators (projection is_op rule: bool(is_operator or
+        # op_type)) — stamp them TRUE, not false, so the backfill never
+        # demotes them (#522 review P2). op_type is the reliable signal;
+        # edge-existence checks are redundant with it for IMPL/NAND ops.
+        legacy_ops = proj.g.query(
+            "MATCH (n:Point) WHERE n.is_operator IS NULL "
+            "AND n.op_type IS NOT NULL "
+            "RETURN count(n)"
+        ).result_set
+        n_legacy_ops = legacy_ops[0][0] if legacy_ops else 0
+        if n_legacy_ops:
+            proj.g.query(
+                "MATCH (n:Point) WHERE n.is_operator IS NULL "
+                "AND n.op_type IS NOT NULL "
+                "SET n.is_operator = true"
+            )
+            print(f"Stamped {n_legacy_ops} legacy operator Points as is_operator=true.")
         proj.g.query(
             "MATCH (n:Point) WHERE n.is_operator IS NULL "
             "SET n.is_operator = false"
         )
-        print(f"Backfilled {total} Points.")
+        print(f"Backfilled {total - n_legacy_ops} non-operator Points.")
 
     # Repair legacy composite index (best-effort — may not exist on
     # fresh DBs or on FalkorDB builds without composite-index support).
@@ -107,7 +125,13 @@ def main():
         if "no such index" in msg or "already" in msg or "does not exist" in msg:
             print("No legacy composite index to drop.")
         else:
-            print(f"⚠️  Could not drop legacy composite index: {e}")
+            # The rewrite's correctness depends on the drop succeeding — a
+            # silently-kept stale index makes every `= false` query return
+            # empty results. Fail loudly rather than report false success.
+            print(f"❌ Could not drop legacy composite index: {e}")
+            print("   `= false` queries will return wrong results until this is fixed.")
+            sdk.close()
+            sys.exit(1)
 
     # Recreate canonical per-property indexes (idempotent — errors on
     # already-indexed are expected and ignored).
@@ -117,16 +141,42 @@ def main():
         except Exception:
             pass  # already indexed — expected
 
-    # Verify
+    # Verify: no NULLs remain
     after = proj.g.query(
         "MATCH (n:Point) WHERE n.is_operator IS NULL RETURN count(n)"
     ).result_set
     remaining = after[0][0] if after else 0
     print(f"Remaining NULL: {remaining}")
-
     if remaining > 0:
         print("⚠️  Some Points still missing is_operator — investigate.")
+        sdk.close()
         sys.exit(1)
+
+    # Sanity: the whole point of #522 is that `= false` returns the full
+    # non-operator population. On docker FalkorDB (hosted production) the
+    # boolean comparison always works post-backfill. On embedded redislite,
+    # a legacy attribute type table can persist string-typed is_operator in
+    # the db file (verified: `= false` matches 0 while `<> true` matches all,
+    # even after index drop) — warn loudly with remediation instead of
+    # blocking, because the code rewrite remains correct on the hosted path.
+    false_count = proj.g.query(
+        "MATCH (n:Point) WHERE n.is_operator = false RETURN count(n)"
+    ).result_set[0][0]
+    not_true_count = proj.g.query(
+        "MATCH (n:Point) WHERE n.is_operator <> true RETURN count(n)"
+    ).result_set[0][0]
+    total_points = proj.g.query(
+        "MATCH (n:Point) RETURN count(n)"
+    ).result_set[0][0]
+    if false_count != not_true_count or (false_count == 0 and total_points > 0):
+        print(f"⚠️  Sanity divergence: `= false` matches {false_count}, "
+              f"`<> true` matches {not_true_count} (total {total_points}).")
+        print("    On embedded redislite this is the legacy string-typed attribute "
+              "table (see #522); docker FalkorDB is unaffected. Remediation: "
+              "export + rebuild the graph, or re-import via the JSONL event log.")
+    else:
+        print(f"✅ Sanity check passed: `= false` matches {false_count} non-operators "
+              f"({not_true_count} via `<> true`).")
 
     sdk.close()
 

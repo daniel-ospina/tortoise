@@ -2510,8 +2510,9 @@ def test_retract_tombstone_hosted_list_excludes_retracted():
                                "pointKind": "statement"}})
         proj.apply({"type": "PointRetracted", "id": "h_ret"})
         # Replicate the hosted API query (non-operator, no kind filter)
+        # (#522: `= false` — the IS NULL disjunction was rewritten)
         conditions = [
-            "(n.is_operator IS NULL OR n.is_operator = false)",
+            "n.is_operator = false",
             "(n.status IS NULL OR n.status <> 'retracted')",
         ]
         query = (
