@@ -1,0 +1,145 @@
+{
+  "$schema": "pricing-schema-v1",
+  "status": "current",
+  "owner_confirmed": "2026-08-07",
+  "billing": {
+    "model": "per-team",
+    "per_seat": false,
+    "multi_team": "user-level capability \u2014 any user may be a member of N teams (rate-limited creation for abuse); each team independently selects its plan. NOT a tier feature.",
+    "overage_unit": "write_ops",
+    "overage_price_per_10k": 5.0,
+    "overage_tiers": [
+      "pro",
+      "team"
+    ],
+    "reads_free": true,
+    "integrations": "unlimited at ALL tiers \u2014 more integrations = more usage = more value; abuse controlled by connection rate-limit, not tier caps",
+    "cost_basis": {
+      "falkordb_per_gb": 73.0,
+      "bytes_per_node": 1024,
+      "dedup": "content_hash"
+    }
+  },
+  "tiers": {
+    "free": {
+      "price_usd_monthly": 0,
+      "max_graphs_per_team": 1,
+      "max_users_per_team": 1,
+      "included_write_ops_per_month": 10000,
+      "max_graph_nodes": 10000,
+      "max_api_keys": 2,
+      "integrations": "unlimited",
+      "overage": false,
+      "support": "none",
+      "features": {
+        "per_graph_keys": false,
+        "daily_backups": false,
+        "usage_dashboard": false,
+        "webhooks": false,
+        "export": false,
+        "roles_rbac": "none",
+        "audit_log": false
+      }
+    },
+    "solo": {
+      "price_usd_monthly": 9,
+      "max_graphs_per_team": 2,
+      "max_users_per_team": 1,
+      "included_write_ops_per_month": 10000,
+      "max_graph_nodes": 25000,
+      "max_api_keys": 5,
+      "integrations": "unlimited",
+      "overage": false,
+      "support": "none",
+      "loss_leader": true,
+      "features": {
+        "per_graph_keys": false,
+        "daily_backups": false,
+        "usage_dashboard": "basic",
+        "webhooks": false,
+        "export": false,
+        "roles_rbac": "none",
+        "audit_log": false
+      }
+    },
+    "pro": {
+      "price_usd_monthly": 25,
+      "max_graphs_per_team": null,
+      "max_users_per_team": 2,
+      "included_write_ops_per_month": 50000,
+      "max_graph_nodes": 100000,
+      "max_api_keys": 10,
+      "integrations": "unlimited",
+      "overage": true,
+      "support": "standard",
+      "segments": [
+        "power_user",
+        "app_builder"
+      ],
+      "features": {
+        "per_graph_keys": "planned",
+        "daily_backups": true,
+        "usage_dashboard": "planned",
+        "webhooks": "planned",
+        "export": "planned",
+        "roles_rbac": "owner + 1 (minimal)",
+        "audit_log": false
+      }
+    },
+    "team": {
+      "price_usd_monthly": 149,
+      "max_graphs_per_team": null,
+      "max_users_per_team": null,
+      "included_write_ops_per_month": 200000,
+      "max_graph_nodes": 600000,
+      "max_api_keys": 20,
+      "integrations": "unlimited",
+      "overage": true,
+      "support": "priority",
+      "features": {
+        "invites": true,
+        "roles_rbac": "owner / admin / member",
+        "reBAC_per_graph": "future",
+        "per_graph_keys": "planned",
+        "daily_backups": true,
+        "usage_dashboard": "planned",
+        "webhooks": "planned",
+        "export": "planned",
+        "audit_log": "planned"
+      }
+    },
+    "e2e_small": {
+      "price_usd_monthly": 0,
+      "max_graphs_per_team": 1,
+      "max_users_per_team": 1,
+      "included_write_ops_per_month": 10000,
+      "max_graph_nodes": 8,
+      "max_api_keys": 2,
+      "integrations": "unlimited",
+      "overage": false,
+      "support": "none",
+      "features": {
+        "per_graph_keys": false,
+        "daily_backups": false,
+        "usage_dashboard": false,
+        "webhooks": false,
+        "export": false,
+        "roles_rbac": "none",
+        "audit_log": false
+      }
+    }
+  },
+  "display": {
+    "annual_discount_pct": 20,
+    "annual_default": true,
+    "license_self_hosted": "BSL 1.1 + $5M AUG (free <$5M trailing-12mo revenue); Mozilla Public License 2.0 (MPL-2.0) conversion after 4 years; hosted excluded from grant",
+    "segments": {
+      "use": "Use Tortoise \u2014 memory for you and your team: connect your agents, remember decisions, MCP integration",
+      "build": "Build with Tortoise \u2014 embedded memory via API for your product: REST/MCP, per-team keys, usage-based pricing"
+    },
+    "why_hosted": "No setup, no servers \u2014 your agents just work. Memory backed up and managed for you. Upgrade as you grow.",
+    "overage_line": "$5 per additional 10k write ops",
+    "integrations_line": "Unlimited integrations at every tier"
+  },
+  "$e2e_note": "E2E fixture (#303) \u2014 product/pricing.json copy with pro/team daily_backups=true and an e2e_small cap tier. Served via TORTOISE_PRICING_PATH to the E2E server only."
+}

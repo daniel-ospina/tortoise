@@ -39,6 +39,7 @@ import hmac
 from tortoise.sdk import TortoiseSDK, _content_hash
 from tortoise.mcp_server import create_http_app
 from tortoise.hosted_backup import (
+    MemoryStorage,
     RestoreVerificationError,
     R2Storage,
     create_backup,
@@ -5154,8 +5155,32 @@ async def index_job_status(job_id: str, team: dict = Depends(get_current_team)):
 # ── Backups: endpoints (#305) ────────────────────────────────────
 
 
-def _backup_storage() -> R2Storage:
-    """R2 storage from env (R2_ACCOUNT_ID / R2_ACCESS_KEY_ID / ...)."""
+# Test seam (#303 E2E): TORTOISE_BACKUP_STORAGE=memory swaps the R2 object
+# store for an in-process MemoryStorage so the backup→restore journey can run
+# hermetic (no R2 creds). Precedent: RATE_LIMIT_DISABLED. Any other value
+# fails closed (loud) so a typo can never silently downgrade durability.
+_MEMORY_BACKUP_STORE: MemoryStorage | None = None
+
+
+def _backup_storage() -> R2Storage | MemoryStorage:
+    """Backup object store. R2 from env (R2_ACCOUNT_ID / ...) by default.
+
+    TORTOISE_BACKUP_STORAGE=memory → process-wide MemoryStorage singleton
+    (E2E seam, #303). Unknown value → RuntimeError (fail-closed)."""
+    global _MEMORY_BACKUP_STORE
+    mode = os.environ.get("TORTOISE_BACKUP_STORAGE", "").strip().lower()
+    if mode == "memory":
+        if _MEMORY_BACKUP_STORE is None:
+            _logger.warning(
+                "TORTOISE_BACKUP_STORAGE=memory — backups live in process "
+                "memory only and are LOST on restart (test seam, #303)"
+            )
+            _MEMORY_BACKUP_STORE = MemoryStorage()
+        return _MEMORY_BACKUP_STORE
+    if mode:
+        raise RuntimeError(
+            f"TORTOISE_BACKUP_STORAGE={mode!r} unknown — use 'memory' or unset for R2"
+        )
     return R2Storage()
 
 
