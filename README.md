@@ -13,13 +13,17 @@ A graph engine for agent memory: claims are **Points**, relationships are **edge
 
 ## Core hypothesis: the graph is the memory, not the summaries
 
-The epistemic graph — its content **and its metadata** (lifecycle events,
-supersession chains, confidence trajectories, provenance) — is the **primary
-record of context**. The narrative lives in the graph; agents are the
+The graph stores **STATE, not decisions**. Competitors store decision objects
+("Decision X was made because of Reasons"); we do not. The record is: state
+(objects/options with queryable lifecycle events — promoted/deprecated/
+superseded — and confidence) + points (the logic: claims connected to the
+state, the arguments that move confidence) + events (what happened, including
+the decision moment as an Event node, so the decision dimension stays
+queryable as a timeline). The graph says "this state is based on these
+reasons" — never "this decision was made because of these reasons". The
+narrative lives in the graph's content **and** its metadata; agents are the
 computational layer that reads and maintains it; semantic summaries are
-derived projections, never the record. Decisions are found by **querying**
-decision nodes + lifecycle events (superseded/deprecated/promoted) — never by
-inferring them from stored summaries. Evidence stays authoritative: every
+derived projections, never the record. Evidence stays authoritative: every
 Point keeps its quoted source span, and the graph is an auditable index over
 unrewritten evidence.
 
