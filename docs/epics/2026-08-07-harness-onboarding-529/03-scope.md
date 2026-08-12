@@ -1,3 +1,14 @@
+---
+title: "Epic Scope — Epic #529: Harness-specific onboarding variants"
+type: decisions
+domain: capability
+doc_status: draft
+subjects.team: epistemic-team
+created: 2026-08-11
+aboutSubjects: tortoise
+aboutObjects: tortoise
+---
+
 # Epic Scope — Harness-specific onboarding variants (#529)
 
 **Date:** 2026-08-11

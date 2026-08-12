@@ -1,3 +1,14 @@
+---
+title: "Implementation Plan — Epic #529: Harness-specific onboarding variants"
+type: engineering
+domain: capability
+doc_status: draft
+subjects.team: epistemic-team
+created: 2026-08-11
+aboutSubjects: tortoise
+aboutObjects: tortoise
+---
+
 <!-- research-path: docs/epics/2026-08-07-harness-onboarding-529/02-research-brief.md -->
 
 # Harness-specific Onboarding Variants (#529) — Implementation Plan

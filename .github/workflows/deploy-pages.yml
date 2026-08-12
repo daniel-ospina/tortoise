@@ -7,6 +7,8 @@ on:
     paths:
       - 'website/**'
       - 'tortoise/onboarding/AGENT_ONBOARDING.md'
+      - 'tortoise/onboarding/variants/**'
+      - 'tortoise/onboarding/stage_variants.py'
   workflow_dispatch:
 
 concurrency:
@@ -18,13 +20,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Stage onboarding prompt (single source of truth → deployed copy)
+      - name: Stage onboarding prompt + harness variants (single source of truth → deployed copies)
         # tortoise/onboarding/AGENT_ONBOARDING.md is canonical (issues #496/#540).
-        # The welcome page fetches https://tortoise.premiselabs.co/onboarding-prompt.md
-        # at runtime; generate the deployed copy here so the two can't drift.
+        # The welcome page fetches https://premiselabs.co/onboarding-prompt.md
+        # (canonical) and /onboarding/<harness>.md (epic #529 variants) at runtime;
+        # stage_variants.py is the single concat point — headers wrap the canonical
+        # body, never fork it, so the copies can't drift.
         run: |
-          cp tortoise/onboarding/AGENT_ONBOARDING.md website/onboarding-prompt.md
+          python3 tortoise/onboarding/stage_variants.py --out website
           test -s website/onboarding-prompt.md
+          for h in claude-code codex cursor pi; do
+            test -s "website/onboarding/$h.md"
+          done
       - name: Sync DNS — tortoise.premiselabs.co → premise-labs Pages project (best-effort)
         # The subdomain previously CNAME'd to the legacy tortoise-landing-v2
         # Pages project (stale content: welcome v1, no onboarding-prompt.md),

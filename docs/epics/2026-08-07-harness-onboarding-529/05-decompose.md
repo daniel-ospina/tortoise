@@ -1,3 +1,14 @@
+---
+title: "Epic Decompose — Epic #529: Harness-specific onboarding variants"
+type: decisions
+domain: capability
+doc_status: draft
+subjects.team: epistemic-team
+created: 2026-08-11
+aboutSubjects: tortoise
+aboutObjects: tortoise
+---
+
 # Epic #529 Decomposition Record
 
 **Date:** 2026-08-11

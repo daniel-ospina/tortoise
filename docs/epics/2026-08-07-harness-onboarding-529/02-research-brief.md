@@ -1,3 +1,14 @@
+---
+title: "Epic Research Brief — Epic #529: Harness-specific onboarding variants"
+type: synthesis
+domain: capability
+doc_status: draft
+subjects.team: epistemic-team
+created: 2026-08-11
+aboutSubjects: tortoise
+aboutObjects: tortoise
+---
+
 <!-- research-path: docs/epics/2026-08-07-hosted-onboarding-235/01-research-brief.md -->
 
 # Epic Research Brief — Harness-specific onboarding variants (#529)
