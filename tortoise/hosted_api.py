@@ -2422,9 +2422,10 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
             detail=f"Session turn cap exceeded: {len(body.conversation)} > {MAX_SESSION_TURNS}.",
         )
 
-    # Extraction-aware estimate (pre-write, fail-closed count):
-    #   est = 1 Session + 1 Event + Σ_turns (1 turn Point
-    #         + min(decisions, cap) + min(claims, cap))
+    # Extraction-aware estimate (pre-write, fail-closed count) — review P2,
+    # PR #976: the points quota counts NON-episodic Points only, and turn
+    # Points/Session/Event are episodic — the estimate is the EXTRACTED set:
+    #   est = Σ_turns (min(decisions, cap) + min(claims, cap))
     decisions = [
         r"(?i)(?:let'?s|we will|we should|I will|I'm going to|decided|decision)\s+[^.!?]+[.!?]",
         r"(?i)(?:plan is|next steps?:|action item:)\s+[^.!?]+[.!?]",
