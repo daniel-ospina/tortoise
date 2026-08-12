@@ -7297,6 +7297,10 @@ class TortoiseSDK:
     # ── Gate B Calibration Milestone (epic-264 #779) ───────────────
 
     _CALIBRATION_MARKER_KEY = "calibration_milestone"
+    # Gate B criterion (epic-264 align): ≥70% human-reviewed precision.
+    # Enforced at write time — a below-target record would falsely open
+    # Gate B via calibration_passed().
+    _CALIBRATION_PRECISION_TARGET = 0.70
 
     def record_calibration(self, *, precision: float | None = None,
                            sample_size: int | None = None,
@@ -7315,9 +7319,14 @@ class TortoiseSDK:
         event is emitted when an event log is configured (#548 best-effort).
 
         Args:
-            precision: measured extraction precision in [0, 1] (≥0.70 target).
+            precision: measured extraction precision in [0, 1]. ENFORCED at
+                write time — must be ≥ 0.70 (Gate B criterion); a below-
+                target value raises ValueError and leaves no marker.
             sample_size: sessions in the human-reviewed sample (> 0).
-            mean_grounding_delta: measured pre/post drift (≤ 0.02 target).
+            mean_grounding_delta: measured pre/post drift. ENFORCED at
+                write time — must be ≤ 0.02 (``MAX_GROUNDING_DRIFT``, the
+                #785 seam); an above-ceiling value raises ValueError and
+                leaves no marker.
             notes: free-form ops documentation (e.g. reviewer count, corpus).
 
         Returns:
@@ -7325,8 +7334,31 @@ class TortoiseSDK:
         """
         if precision is not None and not 0.0 <= precision <= 1.0:
             raise ValueError(f"precision must be in [0, 1], got {precision}")
+        # Gate B criterion enforcement (review round 1): the docstring
+        # documents ≥0.70 precision / ≤0.02 drift as binding — enforce them
+        # BEFORE the MERGE so a below-target marker cannot open Gate B.
+        if (precision is not None
+                and precision < self._CALIBRATION_PRECISION_TARGET):
+            raise ValueError(
+                f"precision {precision} is below the Gate B target of "
+                f"{self._CALIBRATION_PRECISION_TARGET:.2f} (≥70% human-reviewed "
+                "precision) — refusing to record a calibration milestone that "
+                "does not pass the gate"
+            )
         if sample_size is not None and sample_size <= 0:
             raise ValueError(f"sample_size must be positive, got {sample_size}")
+        # Lazy import: sdk/analyze are mutually imported at call sites, never
+        # at module load (analyze.py contract). MAX_GROUNDING_DRIFT is the
+        # #785 seam constant, pinned at 0.02 by tests.
+        from tortoise.analyze import MAX_GROUNDING_DRIFT
+        if (mean_grounding_delta is not None
+                and mean_grounding_delta > MAX_GROUNDING_DRIFT):
+            raise ValueError(
+                f"mean_grounding_delta {mean_grounding_delta} exceeds the "
+                f"MAX_GROUNDING_DRIFT ceiling of {MAX_GROUNDING_DRIFT} (≤2% "
+                "mean absolute drift) — refusing to record a calibration "
+                "milestone that does not pass the gate"
+            )
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc).isoformat()
         proj = self._get_proj()

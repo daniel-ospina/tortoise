@@ -548,8 +548,16 @@ def mean_grounding(proj=None) -> float:
     ``_live_only`` filter — legacy NULL-status Points are LIVE
     (``coalesce($st, n.status, 'live')`` write default), ``status: draft``
     Points are excluded. Operator Points (``is_operator: true``) are
-    excluded; missing confidence defaults to 0.5 (repo-wide convention).
-    An empty live set returns 0.0.
+    excluded. An empty live set returns 0.0.
+
+    Missing-confidence extension (DELIBERATE, beyond the pinned DE2E-4
+    formula): a live Point with no ``confidence`` contributes 0.5 to the
+    mean (``coalesce(p.confidence, 0.5)`` — repo-wide NULL-confidence
+    convention). The DE2E-4 plan formula assumes every Point carries a
+    confidence; this implementation deliberately extends it so a
+    confidence-less Point degrades the mean toward neutral 0.5 instead of
+    erroring or being silently dropped (which would skew the mean upward).
+    Asserted in ``test_mean_grounding_null_confidence_imputed_zero_five``.
 
     Consumed by #785's EpSafeCommit seam (resolves
     ``tortoise.analyze.mean_grounding``) for the pre/post batch check.
@@ -601,19 +609,29 @@ def grounding_drift(pre: dict, post: dict, *,
     Ceilings: ≤2% mean absolute (matches EpSafeCommit's
     ``max_grounding_drift=0.02`` — the #785 seam) and ≤5% max single-point
     absolute delta (R12 — a mean-absolute check alone can mask per-point
-    flips). Per-point deltas are computed over the ID intersection only:
-    a Point created or deleted between snapshots is new/removed content,
-    not a regression, and must not fail the check.
+    flips). Both the per-point deltas AND the mean term are computed over
+    the ID intersection (``common``) only: a Point created or deleted
+    between snapshots is new/removed content, not a regression, and must
+    not fail the check — a set-size change must not shift the mean past
+    the ≤2% ceiling either. ``mean_abs_delta`` is the intersection-scoped
+    delta (ignores pre/post ``mean`` fields; recomputed from ``points``).
 
     Returns:
         {"passed": bool, "mean_abs_delta": float,
          "max_point_abs_delta": float, "mean_ceiling": float,
          "point_ceiling": float, "pre_count": int, "post_count": int}
     """
-    mean_abs_delta = abs(float(post["mean"]) - float(pre["mean"]))
     pre_points = pre.get("points", {})
     post_points = post.get("points", {})
+    # Means are recomputed over the ID intersection only — a set-size
+    # change (created/deleted Points) must not shift the mean past the
+    # ceiling (review P2: full-set means can drift on add/remove alone).
     common = set(pre_points) & set(post_points)
+    pre_mean = (sum(float(pre_points[pid]) for pid in common) / len(common)
+                if common else 0.0)
+    post_mean = (sum(float(post_points[pid]) for pid in common) / len(common)
+                 if common else 0.0)
+    mean_abs_delta = abs(post_mean - pre_mean)
     max_point_abs_delta = max(
         (abs(float(post_points[pid]) - float(pre_points[pid])) for pid in common),
         default=0.0,

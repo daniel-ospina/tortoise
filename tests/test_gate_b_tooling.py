@@ -82,6 +82,23 @@ def test_mean_grounding_snapshot_matches_mean(sdk):
     assert "sampled_at" in snap and snap["sampled_at"]
 
 
+def test_mean_grounding_null_confidence_imputed_zero_five(sdk):
+    """A live Point with no confidence contributes 0.5 to the mean — the
+    coalesce(0.5) imputation is a DELIBERATE extension of the DE2E-4 formula
+    (repo-wide NULL-confidence convention), not part of the pinned plan
+    formula. Asserted here per review round 1."""
+    proj = sdk._get_proj()
+    make_point(sdk, "no conf a")
+    make_point(sdk, "no conf b")
+    assert mean_grounding(proj) == pytest.approx(0.5)
+    snap = grounding_snapshot(proj)
+    assert snap["count"] == 2
+    assert set(snap["points"].values()) == {0.5}
+    # Mixed: one confident + two null → mean is (0.9 + 0.5 + 0.5) / 3.
+    make_point(sdk, "confident", confidence=0.9)
+    assert mean_grounding(proj) == pytest.approx((0.9 + 0.5 + 0.5) / 3)
+
+
 # ── grounding_drift: ≤2% mean / ≤5% max single-point ceilings ─────
 
 def test_grounding_drift_identical_snapshots_pass(sdk):
@@ -110,15 +127,20 @@ def test_grounding_drift_mean_ceiling_fails(sdk):
 
 
 def test_grounding_drift_point_ceiling_fails(sdk):
-    # Mean moves 0.01 (≤2%) but one point flips 0.5 → 0.6 (10% > 5%): the
-    # per-point ceiling (R12) must catch what the mean masks.
-    pre = {"count": 3, "mean": 0.50,
-           "points": {"p1": 0.50, "p2": 0.50, "p3": 0.50}}
-    post = {"count": 3, "mean": 0.51,
-            "points": {"p1": 0.60, "p2": 0.50, "p3": 0.50}}
+    # Mean moves 0.017 (≤2%) but one point flips 0.5 → 0.6 (10% > 5%): the
+    # per-point ceiling (R12) must catch what the mean masks. Means are
+    # recomputed over the ID intersection (review round 1) — with 6 points
+    # the single 0.1 flip dilutes to a 0.0167 mean delta, under the 2% mean
+    # ceiling, so only the per-point ceiling trips.
+    pre = {"count": 6, "mean": 0.50,
+           "points": {"p0": 0.50, "p1": 0.50, "p2": 0.50,
+                       "p3": 0.50, "p4": 0.50, "p5": 0.50}}
+    post = {"count": 6, "mean": 0.5167,
+            "points": {"p0": 0.60, "p1": 0.50, "p2": 0.50,
+                        "p3": 0.50, "p4": 0.50, "p5": 0.50}}
     drift = grounding_drift(pre, post)
     assert drift["passed"] is False
-    assert drift["mean_abs_delta"] == pytest.approx(0.01)
+    assert drift["mean_abs_delta"] == pytest.approx(1 / 60)  # 0.0167 ≤ 0.02
     assert drift["max_point_abs_delta"] == pytest.approx(0.10)
 
 
@@ -131,6 +153,24 @@ def test_grounding_drift_removed_points_not_regression(sdk):
     drift = grounding_drift(pre, post)
     assert drift["passed"] is True
     assert drift["max_point_abs_delta"] == 0.0
+
+
+def test_grounding_drift_removed_point_mean_term_intersection_scoped(sdk):
+    """The MEAN term is also computed over the ID intersection (review
+    round 1): removing a high-confidence point whose value ≠ set mean shifts
+    the full-set mean (0.90 → 0.50 here) but is not a regression — the
+    intersection-scoped mean must stay flat and the check must pass."""
+    pre = {"count": 2, "mean": 0.70,
+           "points": {"p1": 0.50, "gone": 0.90}}
+    post = {"count": 1, "mean": 0.50, "points": {"p1": 0.50}}
+    drift = grounding_drift(pre, post)
+    # Full-set means would read |0.50 - 0.70| = 0.20 > 0.02 ceiling;
+    # intersection-scoped means are both 0.50 → delta 0.0.
+    assert drift["passed"] is True
+    assert drift["mean_abs_delta"] == pytest.approx(0.0)
+    assert drift["max_point_abs_delta"] == pytest.approx(0.0)
+    assert drift["pre_count"] == 2
+    assert drift["post_count"] == 1
 
 
 def test_grounding_drift_ceiling_constants_pinned(sdk):
@@ -179,6 +219,25 @@ def test_record_calibration_validation(sdk):
     with pytest.raises(ValueError):
         sdk.record_calibration(sample_size=0)
     assert sdk.calibration_passed() is False  # failed writes leave no marker
+
+
+def test_record_calibration_enforces_gate_targets(sdk):
+    """Gate B criteria are enforced at write time (review round 1): a
+    0.50-precision marker or an over-ceiling drift must not open Gate B —
+    validation happens BEFORE the MERGE, so a refused write leaves no
+    marker. Boundary values (0.70 / 0.02) still pass."""
+    with pytest.raises(ValueError, match="0.70"):
+        sdk.record_calibration(precision=0.50, sample_size=50)
+    with pytest.raises(ValueError, match="0.02"):
+        sdk.record_calibration(precision=0.73, sample_size=50,
+                               mean_grounding_delta=0.05)
+    assert sdk.calibration_passed() is False  # refused writes leave no marker
+    # Boundary values exactly at target still record.
+    ok = sdk.record_calibration(precision=0.70, sample_size=50,
+                                mean_grounding_delta=0.02)
+    assert ok["precision"] == 0.70
+    assert ok["mean_grounding_delta"] == 0.02
+    assert sdk.calibration_passed() is True
 
 
 def test_record_calibration_is_idempotent(sdk):
