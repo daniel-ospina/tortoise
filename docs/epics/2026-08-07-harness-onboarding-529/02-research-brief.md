@@ -97,6 +97,10 @@ No new dependencies. Changes land in: `tortoise/onboarding/variants/` (new heade
 | R8 | Human-in-harness legs remain for: Cursor live chat, Claude/Codex chat-paste trigger behavior | HIGH | §4 | Documented in E2E verification doc as human-required |
 | R9 | **AL-7b carried forward:** chat-paste variants (Claude/Codex) trigger the flow only if the user pastes the prompt (behavioral); file-based variants (Cursor `.mdc` alwaysApply, Pi AGENTS.md) make the trigger structural | MEDIUM (file) / LOW (chat) | §3, AL-7b | Per-harness paste-trigger check in E2E doc (AL-6) + assert the fallback line ("If the agent doesn't start the flow, paste: 'Start Tortoise onboarding'") is present in every chat-paste variant artifact. Note: the fallback line is a #529 artifact — confirmed absent from `AGENT_ONBOARDING.md` today |
 
+## Research Review Gate Record
+
+Fresh-context reviewer, 2 cycles: cycle 1 found 2×P2 — (1) AL-7b (inherited #235 A1 trigger fragility) had no register row → R9 added; (2) §3 claims lacked retrievable citations → §7 Sources added. Cycle 2: NO ISSUES FOUND. Gate CLEARED.
+
 ## 7. Sources (harness docs, verified 2026-08-11)
 
 - Claude Code MCP (add command, `--transport http`, `--header`, scopes, `.mcp.json` shape + `${VAR}` expansion): https://code.claude.com/docs/en/mcp
