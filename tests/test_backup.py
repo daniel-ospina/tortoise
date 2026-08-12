@@ -129,3 +129,33 @@ def test_restore_jsonl_fallback_when_rdb_empty(monkeypatch):
         assert result["status"] == "ok"
         # Empty RDB → fell through to JSONL replay → no restored_via=rdb
         assert result.get("restored_via") is None
+
+
+# ── #331: legacy-manifest embedded.db fallback (NameError regression) ──
+
+def test_restore_legacy_manifest_embedded_db_fallback(tmp_path):
+    """#331 regression: restore with a legacy manifest (no 'db' key) must
+    fall back to embedded.db WITHOUT crashing.
+
+    Pre-fix this path raised NameError inside restore() (logger was used
+    before it was defined); the fallback must copy embedded.db to the target.
+    """
+    src = tmp_path / "backup"
+    src.mkdir()
+    (src / "events.jsonl").write_text(
+        '{"type": "PointAdded", "point": {"id": "p1", "content": "x"}}\n'
+    )
+    # Legacy manifest: no 'db' key → restore must fall back to embedded.db
+    (src / "manifest.json").write_text(
+        json.dumps({"backed_up_at": "20260101T000000Z"})
+    )
+    (src / "embedded.db").write_bytes(b"stub-embedded-db")
+
+    dst = tmp_path / "dst"
+    dst.mkdir()
+    result = restore(str(src), db_path=str(dst / "tortoise.db"),
+                     events_path=str(dst / "events.jsonl"))
+    assert result["status"] == "ok"
+    assert (dst / "tortoise.db").exists(), \
+        "embedded.db fallback must be copied to the target db path"
+    assert (dst / "tortoise.db").read_bytes() == b"stub-embedded-db"
