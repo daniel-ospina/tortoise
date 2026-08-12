@@ -13,7 +13,7 @@ Covered here:
 - Secret set + siteverify success=false → 400.
 - Secret set + siteverify success=true → signup proceeds; the siteverify
   call carries {secret, response, remoteip} form data.
-- siteverify transport error → 502 (fail-closed: a CAPTCHA outage must not
+- siteverify transport error → 400 (fail-closed: a CAPTCHA outage must not
   silently disable abuse protection).
 """
 from __future__ import annotations
@@ -58,10 +58,10 @@ def _clean_env(monkeypatch):
     monkeypatch.delenv("SUPABASE_SERVICE_KEY", raising=False)
     monkeypatch.setenv("RATE_LIMIT_DISABLED", "1")
     ha_mod._register_buckets.clear()
-    ha_mod._turnstile_failopen_warned = False
+    ha_mod._turnstile_open_logged = False
     yield
     ha_mod._register_buckets.clear()
-    ha_mod._turnstile_failopen_warned = False
+    ha_mod._turnstile_open_logged = False
 
 
 def _dispatch_post(captcha_result, gotrue_result):
@@ -96,7 +96,7 @@ class TestEmailSignupCaptcha:
         assert r.status_code == 503, r.text
         assert "tortoise signup" in r.json()["detail"]
         assert any(
-            "TURNSTILE_SECRET_KEY not set" in rec.message for rec in caplog.records
+            "TURNSTILE_SECRET_KEY unset" in rec.message for rec in caplog.records
         ), "fail-open must be visible in the logs"
 
     def test_fail_open_warning_logged_once(self, client, caplog):
@@ -104,7 +104,7 @@ class TestEmailSignupCaptcha:
         with caplog.at_level("WARNING", logger="tortoise.hosted_api"):
             client.post("/v1/signup/email", json={"email": "a@b.co", "password": "password123"})
             client.post("/v1/signup/email", json={"email": "a@b.co", "password": "password123"})
-        matches = [rec for rec in caplog.records if "TURNSTILE_SECRET_KEY not set" in rec.message]
+        matches = [rec for rec in caplog.records if "TURNSTILE_SECRET_KEY unset" in rec.message]
         assert len(matches) == 1
 
     def test_missing_token_rejected_when_secret_set(self, client, monkeypatch):
@@ -162,7 +162,7 @@ class TestEmailSignupCaptcha:
         }
         assert captured["gotrue"][0] == f"{_SUPABASE_URL}/auth/v1/admin/users"
 
-    def test_siteverify_transport_error_502(self, client, monkeypatch):
+    def test_siteverify_transport_error_fail_closed(self, client, monkeypatch):
         """Fail-closed: a Cloudflare outage must not disable the CAPTCHA."""
         monkeypatch.setenv("TURNSTILE_SECRET_KEY", "secret-123")
         fake, captured = _dispatch_post(
@@ -175,7 +175,7 @@ class TestEmailSignupCaptcha:
             "/v1/signup/email",
             json={"email": "a@b.co", "password": "password123", "cf-turnstile-response": "tok-ok"},
         )
-        assert r.status_code == 502, r.text
+        assert r.status_code == 400, r.text
         assert "gotrue" not in captured, "GoTrue must not be called when siteverify is unreachable"
 
 
