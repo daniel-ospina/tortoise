@@ -1236,9 +1236,9 @@ The 9 slices decompose into issues with these boundaries (each slice = 1-3 issue
 |---|---|---|---|---|
 | §1-3 (journeys/workflows/prototype) | ux-coverage, ux-consistency, ux-realism | 2 rounds (parallel + convergence) | ~21 | all fixed (P0×2: hold-queue promotion, MITIGATES payload gap) |
 | §4-6 (data model/architecture/interfaces) | schema-correctness, ontology-alignment, architectural-soundness, integration, contract-completeness | 2 rounds (3 parallel + convergence) | ~35 | all fixed (P0×2: CORRECTS direction, aboutEntity; P0: :CommitRecord storage) |
-| §7 (detailed E2E) | e2e-coverage, e2e-reproducibility, test-quality | 2 rounds (3 parallel + re-verified via §8 reviews) | ~30 | all fixed (P0: canonical MITIGATES probe missing → DE2E-11 added; Layer-2 N-source + fixtures hardened) |
-| §8 (coherence/risk) | cross-substep-drift, risk-completeness, improvement-opportunities | 2 rounds (3 parallel + verify-audit cross-check) | ~30 | all fixed (P1s: PL4 hold-billing, version-trigger, process-routing band; R-13..R-21 added) |
+| §7 (detailed E2E) | e2e-coverage, e2e-reproducibility, test-quality | 1 round (3 parallel) — fixes re-verified via the §8 reviews (not a separate round) | ~30 | all fixed (P0: canonical MITIGATES probe missing → DE2E-11 added; Layer-2 N-source + fixtures hardened) |
+| §8 (coherence/risk) | cross-substep-drift, risk-completeness, improvement-opportunities | 1 round (3 parallel) — fixes re-verified via the decompose MECE + verify audit (not a separate round) | ~30 | all fixed (P1s: PL4 hold-billing, version-trigger, process-routing band; R-13..R-21 added) |
 | Decompose | per-issue batches (×5) + MECE (×2) | 3 rounds (5 parallel + MECE ×2) | ~22 | all fixed → MECE CLEAN (05-decompose.md) |
 | Verify audit | verification reviewer + convergence reviewer | 2 rounds | 13×P2 | all fixed (this record, PL1-PL4 rename, table rebuild, cite corrections) |
 
-Final state: 0 open P0/P1 across all gates (P2s resolved in-line or recorded as v1.1 deferrals). Total: 14 reviewer rounds, ~151 findings.
+Final state: 0 open P0/P1 across all gates (P2s resolved in-line or recorded as v1.1 deferrals). Total: 13 reviewer rounds (plan 8 + decompose 3 + verify 2), ~151 findings (116 + 22 + 13).
