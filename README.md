@@ -11,6 +11,25 @@ updated: 2026-08-10
 
 A graph engine for agent memory: claims are **Points**, relationships are **edges**, and belief scores are computed by propagating evidence through the graph (EP — Evidence Propagation).
 
+## Core hypothesis: the graph is the memory, not the summaries
+
+The epistemic graph — its content **and its metadata** (lifecycle events,
+supersession chains, confidence trajectories, provenance) — is the **primary
+record of context**. The narrative lives in the graph; agents are the
+computational layer that reads and maintains it; semantic summaries are
+derived projections, never the record. Decisions are found by **querying**
+decision nodes + lifecycle events (superseded/deprecated/promoted) — never by
+inferring them from stored summaries. Evidence stays authoritative: every
+Point keeps its quoted source span, and the graph is an auditable index over
+unrewritten evidence.
+
+This is the product's core, falsifiable hypothesis (evidence: temporal-KG
+memory beats vector-summary memory — Graphiti arXiv:2501.13956; n26modi
+head-to-head: staleness error 87%→20%, historical-belief retrieval 60%→100%;
+event sourcing precedent). Full framing + the falsification experiments:
+`docs/drafts/2026-08-12-graph-as-memory-hypothesis.md`. Every epic takes it
+into account (filed 2026-08-12).
+
 Tortoise runs **as a service** — self-hosted or hosted — and your tools **connect** to it over MCP (Model Context Protocol). You don't import it into your application; you run it and point your agent at it, the way you'd run MongoDB and connect a driver.
 
 A product of [Premise Labs](https://premiselabs.co).
