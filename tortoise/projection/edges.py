@@ -189,11 +189,13 @@ class _EdgeHandlers:
                     created = True
         return created
 
-    def _link_source(self, point_id: str, source_ref: str, source_kind: str = "document") -> None:
-        """Link Point → Source via extractedFrom edge (Ontology v2.5).
+    def _link_source(self, point_id: str, source_ref: str, source_kind: str = "document", *, label: str = "Point") -> None:
+        """Link entity → Source via extractedFrom edge (Ontology v3.3).
 
         Creates stub Source if missing, keyed on url. sourceKind defaults to 'document'
         but connectors pass specific values (github_issue, slack_message, linear_card, etc.).
+        ``label`` selects the source-side entity label — Point (default) or Document
+        (create_document provenance, #394).
         """
         self.g.query(
             "MERGE (s:Source {url:$url}) "
@@ -202,7 +204,7 @@ class _EdgeHandlers:
             params={"url": source_ref, "sk": source_kind, "now": _now_iso()},
         )
         self.g.query(
-            "MATCH (n:Point {id:$pid}), (s:Source {url:$url}) "
+            f"MATCH (n:{label} {{id:$pid}}), (s:Source {{url:$url}}) "
             "MERGE (n)-[:extractedFrom]->(s)",
             params={"pid": point_id, "url": source_ref},
         )

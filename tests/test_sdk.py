@@ -810,6 +810,29 @@ class TestSanitizeProps:
         doc = sdk.create_document("Clean", "planDoc")
         assert "sourcePath" not in doc
 
+    def test_create_document_links_extracted_from_source(self, sdk):
+        """#394: create_document wires Document → Source via extractedFrom."""
+        doc = sdk.create_document(
+            "Sourced", "planDoc", extractedFrom="https://docs.example.com/spec"
+        )
+        proj = sdk._get_proj()
+        r = proj.g.query(
+            "MATCH (d:Document {id:$did})-[:extractedFrom]->(s:Source {url:$url}) "
+            "RETURN count(*) > 0",
+            params={"did": doc["id"], "url": "https://docs.example.com/spec"},
+        ).result_set
+        assert r[0][0] is True
+
+    def test_create_document_no_extracted_from_no_edge(self, sdk):
+        """#394: without extractedFrom, no Document→Source edge is created."""
+        doc = sdk.create_document("Unsourced", "planDoc")
+        proj = sdk._get_proj()
+        r = proj.g.query(
+            "MATCH (d:Document {id:$did})-[:extractedFrom]->(s) RETURN count(s)",
+            params={"did": doc["id"]},
+        ).result_set
+        assert r[0][0] == 0
+
     def test_update_entity_rejects_sourcepath_and_id(self, sdk):
         doc = sdk.create_document("Upd", "planDoc")
         did = doc["id"]
