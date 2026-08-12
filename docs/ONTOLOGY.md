@@ -24,11 +24,11 @@ doc_status: live
 > 6. §4.6/§5: `provenance_spans` Source property + `sourceKind: agentSession` value (credibility-tier inheritance keyed on sourceKind, #398).
 > 7. §3.9: `mitigated_by` predicate registered (existing `mitigate_operator` edge — currently unregistered).
 > 8. §3.4: `references` target extended — Source allowed (producer extension `link_source_to_entity`).
-> 9. §5: `pointKind: event` registered (episodic turn Points — sdk.py:924, hosted_api.py).
+> 9. §5: `pointKind: event` registered (episodic turn Points — regex capture path, sdk.py:924).
 > 10. §4.1: content-addressed Point ids (`pt_<sha>`) sanctioned as an id form (ULID preference retained).
 > 11. §4.1: `c_cal` (calibrated confidence) + stored `quote` (≤200 chars provenance quote) registered.
 > 12. §4.3: `passes_frequency_gate` registered on Object (S5 gate-result flag).
-> 13. §4.1/§4.3/§4.5/§4.6: `is_episodic` registered on Session/Event/Source/Point (quota exemption discriminator).
+> 13. §4.1/§4.3/§4.5/§4.6: `is_episodic` registered on Object/Event/Source/Point — plus the `:Session` capture node (§4.5 note) (quota exemption discriminator).
 >
 > **Changelog v3.5 (2026-08-11, epic #898 — reification rule):**
 > - §8: Reification rule added — an edge carries an operator only when it needs
@@ -56,7 +56,7 @@ doc_status: live
 >   (documented derivation cache — see §11) and `sourceDate` (evidence-age clock).
 > - §5: pointKind vocabulary gains `assessment` (agent source evaluations).
 > - §10: recency-modulation decision log (per-field/per-sourceType decay deferred).
-> **Convention:** camelCase throughout. `kind` = classification tag on an entity. `predicate` = named edge between entities.
+> **Convention:** camelCase throughout. `kind` = classification tag on an entity. `predicate` = named edge between entities. Capture-path/pipeline fields keep their code spelling (snake_case) — e.g. `doc_status`, `file_hash`, `is_episodic`, `c_cal`, `story_arc`, `passes_frequency_gate`, `provenance_spans` (v3.6, #909).
 
 ---
 
@@ -244,7 +244,7 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | `status` | string | — | `pav:status` | ✅ | Lifecycle: draft, live, retracted, superseded, outdated, archived (#432). **challenged is a derived condition** (presence of a NAND operator edge on a live point), not a stored status (§5). draft inert for computation; retracted/superseded/archived are terminal |
 | `confidence` | float 0..1 | — | — | ⚠️ | EP posterior mean, computed by propagation |
 | `c_cal` | float 0..1 | — | — | ❌ | Calibrated confidence — calibrated counterpart to the EP posterior `confidence` (registered #909 §4.3 #11; written by the calibrated pipeline, slice 5+) |
-| `quote` | string ≤200 | — | — | ⚠️ | Provenance quote — the source text this claim was drawn from; payload-level metadata today (hosted capture), stored Point property per #909 §4.3 #11 (secret-scanned) |
+| `quote` | string ≤200 | — | — | ⚠️ | Provenance quote — the source text this claim was drawn from; payload-level metadata today (SDK extraction path / EventAPI `provenance()` payloads — extractor.py, api.py), stored Point property per #909 §4.3 #11 (secret-scanned) |
 | `authoredBy` | SubjectID | — | `dc:creator` | ✅ | Who created the claim |
 | `validFrom` / `validTo` | ISO8601 | — | — | ✅ | Temporal validity window |
 | `createdAt` / `updatedAt` | ISO8601 | ✅ | `dc:created` / `dc:modified` | ✅ | Timestamps |
@@ -276,8 +276,8 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | `status` | string | — | `pav:status` | ❌ | Projected from event stream (in_progress, completed, failed) — **derived at query time, NOT stored** |
 | `createdAt` | ISO8601 | ✅ | `dc:created` | ✅ | Timestamp (set ON CREATE) |
 | `updatedAt` | ISO8601 | — | `dc:modified` | ❌ | **Not written by `_upsert_object`** — planned follow-up |
-| `passes_frequency_gate` | bool | — | — | ❌ | S5 frequency-gate result flag — false entities are still written, flagged (registered #909 §4.3 #12) |
-| `is_episodic` | bool | — | — | ❌ | Quota exemption discriminator (registered #909 §4.3 #13; written by the capture path) |
+| `passes_frequency_gate` | bool | — | — | ❌ | S5 frequency-gate result flag — false entities are still written, flagged (registered #909 §4.3 #12; planned for the capture path, slice 5+) |
+| `is_episodic` | bool | — | — | ❌ | Quota exemption discriminator (registered #909 §4.3 #13; planned for the capture path — backfill for legacy nodes ships with #947) |
 
 > **Responsibility fields (authoredBy / ownedBy / managedBy) are EDGES, not node properties** — see §3.5-3.6. `_upsert_object` does not store them as properties; they exist as graph edges to Subject nodes.
 
@@ -294,7 +294,7 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | `content` | string | — | `schema:text` | ✅ | Raw document text |
 | `topics` | list[str] | — | — | ✅ | Searchable topic labels (session/discussion index). FTS-indexed metadata — NOT Points, never EP-participating |
 | `summary` | string | — | — | ✅ | Story-arch summary (bullet "what was done" for captured sessions). Searchable via FTS |
-| `story_arc` | string | — | — | ❌ | Arc continuation of the captured session — `summary` = short ("what was done"), `story_arc` = the full arc continuation (registered #909 §4.3 #4; written by the capture path) |
+| `story_arc` | string | — | — | ❌ | Arc continuation of the captured session — `summary` = short ("what was done"), `story_arc` = the full arc continuation (registered #909 §4.3 #4; planned for the capture path, slice 5+) |
 | `doc_status` | string | — | `pav:status` | ✅ | Capture lifecycle: captured (metadata-only) / extracted (full analysis) / draft |
 | `sessionId` | string | — | — | ✅ | Source session identifier (for `documentKind: transcript` captures) |
 | `eventId` | string | — | — | ✅ | Link to the producing Event's log record — 1-hop audit to the mechanism snapshot |
@@ -313,7 +313,7 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | `subject` | SubjectID | — | `prov:wasAssociatedWith` (inverse) | ✅ | Who performed the event (mirrors `performs` edge) |
 | `object_name` / `object_type` | string | — | `prov:used` | ✅ | What was acted on / produced |
 | `file_hash` | string | — | — | ✅ | SHA-256 of the ingested file's raw bytes — ingest idempotency anchor (`ingest_corpus` skips byte-identical re-ingests; written by the DocumentCreated/AgentSession ingest paths, #330) |
-| `is_episodic` | bool | — | — | ❌ | Quota exemption discriminator — true on capture-path episodic Events (registered #909 §4.3 #13) |
+| `is_episodic` | bool | — | — | ❌ | Quota exemption discriminator — true on capture-path episodic Events (registered #909 §4.3 #13; planned for the capture path, slice 5+) |
 
 > **agentSession Event (#909 §4.3 #1):** the canonical eventKind for session-capture Events is **`AgentSession`** — EXACT code spelling (capital A; sdk.py `ingest_corpus`, session_indexer.py); `sessionCaptured` (the core kind still written by the regex capture path) is an **alias of the same concept** — both remain valid kinds, **no migration**. The capture graph's `:Session` node (session container, `CONTAINS` → turn Points) also carries `is_episodic: true` — the quota `sessions` branch counts `MATCH (s:Session)` (plan §4.4, slice 2).
 
@@ -330,8 +330,8 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | `updatedAt` | ISO8601 | — | `dc:modified` | ✅ | Last modified (set ON MATCH by `_upsert_source`) |
 | `externalId` | string | — | `dc:identifier` (external) | ⚠️ | System-of-record ID (Slack ts, GitHub issue #) |
 | `sourceDate` | ISO8601 | — | `dc:date` | ⚠️ | Evidence-age clock for recency decay (falls back to `ingestedAt` — the pipeline-arrival proxy, #398) |
-| `provenance_spans` | JSON | — | — | ❌ | Window spans derived from `provenance_refs` (registered #909 §4.3 #6; written by the capture path, slice 5+) |
-| `is_episodic` | bool | — | — | ❌ | Quota exemption discriminator — true on the session Source (registered #909 §4.3 #13; written by the capture path) |
+| `provenance_spans` | JSON | — | — | ❌ | Window spans derived from the capture path's `provenance_refs` (plan-defined, #909 §4.3 #6; written by the capture path, slice 5+) |
+| `is_episodic` | bool | — | — | ❌ | Quota exemption discriminator — true on the session Source (registered #909 §4.3 #13; planned for the capture path, slice 5+) |
 | `reliability` | float 0..1 | — | — | ⚠️ | DERIVED query-time projection (mean of the modulated Beta prior) — documented cache, never authoritative (v3.2, #398) |
 | `reliabilityComponents` | JSON | — | — | ⚠️ | Cache metadata: tier, decay, factor, assessment_count, derivation time (#398) |
 | `reliability_derived_at` | ISO8601 | — | — | ⚠️ | Cache freshness stamp (#398) |
@@ -352,8 +352,8 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | format | — | — | — | format | format | — |
 | aboutEdges | ✅ | — | ✅ | ✅ | ✅ | — |
 | temporal | validFrom/To | — | — | — | startedAt/endedAt | — |
-| is_episodic | ✅ | — | ✅ | ✅ (inherits Object) | ✅ | ✅ |
-| passes_frequency_gate | — | — | ✅ | ✅ (inherits Object) | — | — |
+| is_episodic | ❌ | — | ❌ | ❌ (inherits Object) | ❌ | ❌ |
+| passes_frequency_gate | — | — | ❌ | ❌ (inherits Object) | — | — |
 
 ---
 
@@ -364,7 +364,7 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 ```
 statement, decision, vision, strategy, plan, goal, target, observation, hypothesis,
 humanApproval   # #531: decision Point for a filed human approval
-event           # episodic turn Points from the regex capture path (sdk.py:924, hosted_api.py) — registered #909 §4.3 #9
+event           # episodic turn Points from the regex capture path (sdk.py:924) — registered #909 §4.3 #9
 ```
 
 ### Object Kind Vocabulary (core)
@@ -612,7 +612,9 @@ supersede_point / invalidate_point          (§3.1: mark old outdated:true,
 
 Direction-aware EP (§3.1, #86) is the prerequisite that makes reverse
 traversal well-defined: IMPL is unidirectional (source→target), NAND
-symmetric, hasPart bidirectional — `_affected_claims` follows these directions.
+symmetric by default (directed `unidirectional` NANDs traverse one-way
+per §3.1 — extraction-emitted NANDs default directed, #909), hasPart
+bidirectional — `_affected_claims` follows these directions.
 
 ---
 
