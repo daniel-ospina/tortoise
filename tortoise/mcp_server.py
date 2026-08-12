@@ -1263,9 +1263,6 @@ def main():
     mcp.run(transport="stdio")
 
 
-if __name__ == "__main__":
-    main()
-
 # ── P0 Group 3: Checkpoint, Diary, Status, Ingest ──────────────
 
 def tortoise_checkpoint(items: Any,
@@ -2253,3 +2250,14 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
         path="/",
         middleware=middleware,
     )
+
+
+# #993: the stdio entrypoint guard MUST run AFTER every @mcp.tool decorator
+# and the FastMCPAdapter.register_all() call above. Placing it earlier (was
+# line ~1211) made `python -m tortoise.mcp_server` enter mcp.run() with ZERO
+# tools registered — onboarding's Step 0 (tortoise_health) failed with
+# "Can't connect to Tortoise". Importing callers (tortoise serve via
+# __main__.py, deployment.py) are unaffected: they import the module first
+# (which executes register_all), then call main().
+if __name__ == "__main__":
+    main()

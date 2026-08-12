@@ -750,3 +750,84 @@ class TestEventsHttpSurface:
 
         assert "tortoise_events_poll" in HTTP_ALLOWED
         assert "tortoise_retract_point" in HTTP_ALLOWED
+
+
+class TestStdioEntrypointToolRegistration:
+    """#993 regression — `python -m tortoise.mcp_server` must serve the tool
+    registry. The __main__ guard previously sat ABOVE the @mcp.tool
+    decorators and FastMCPAdapter.register_all(), so the stdio loop entered
+    with ZERO tools registered (onboarding Step 0 = tortoise_health failed
+    with "Can't connect to Tortoise"). Spawns the real entrypoint as a
+    subprocess and asserts tools/list returns the full registry."""
+
+    def test_stdio_entrypoint_serves_full_registry(self):
+        import json
+        import os
+        import select
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        env = dict(os.environ)
+        for k in ("TORTOISE_DB_URI", "TORTOISE_DB_PATH", "TORTOISE_API_KEY"):
+            env.pop(k, None)
+        # #942 test-only escape hatch: tools/list needs no DB; avoid a
+        # hard error from main()'s missing-config guard.
+        env["TORTOISE_ALLOW_EMBEDDED"] = "1"
+        repo_root = Path(__file__).resolve().parents[1]
+
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "tortoise.mcp_server"],
+            cwd=str(repo_root),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,  # never drained — avoid pipe-buffer deadlock (reviewer, #993)
+            env=env,
+            text=True,
+            bufsize=1,
+        )
+        try:
+            def send(payload: dict) -> None:
+                proc.stdin.write(json.dumps(payload) + "\n")
+                proc.stdin.flush()
+
+            def read_line(timeout: float = 30) -> dict:
+                ready, _, _ = select.select([proc.stdout], [], [], timeout)
+                assert ready, f"no MCP response within {timeout}s"
+                return json.loads(proc.stdout.readline())
+
+            send({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "tortoise-regression-test", "version": "0.0.0"},
+            }})
+            init = read_line()
+            assert "result" in init and "serverInfo" in init["result"], init
+
+            send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+            send({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
+            resp = read_line()
+            tools = resp.get("result", {}).get("tools", [])
+            names = [t["name"] for t in tools]
+
+            # Issue #993 target (1): tools/list >= 70 on this entrypoint.
+            assert len(names) >= 70, f"expected >=70 tools, got {len(names)}"
+            # Onboarding-critical tools must be present (Step 0 + the set).
+            assert "tortoise_health" in names
+            onboarding = {
+                "tortoise_onboarding_demo_create",
+                "tortoise_onboarding_state",
+                "tortoise_onboarding_session_recording",
+                "tortoise_onboarding_github_connect",
+                "tortoise_onboarding_github_index",
+                "tortoise_onboarding_github_status",
+            }
+            missing = onboarding - set(names)
+            assert not missing, f"missing onboarding tools: {sorted(missing)}"
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
