@@ -126,7 +126,14 @@ def dispatch(
     import time
     deadline = time.monotonic() + timeout
 
-    with ThreadPoolExecutor(max_workers=len(ontologies)) as ex:
+    # #331: explicit executor (not `with`) — ThreadPoolExecutor.__exit__
+    # calls shutdown(wait=True), which BLOCKS until every in-flight query
+    # finishes. A hung ontology query would then defeat the per-future
+    # deadline entirely (timeout was fake). wait=False lets the deadline
+    # actually bound dispatch; the orphaned thread only burns until its
+    # query returns.
+    ex = ThreadPoolExecutor(max_workers=len(ontologies))
+    try:
         # Submit all futures in parallel, then wait per-future with timeout
         pending: dict[str, Future] = {}
         for ont in ontologies:
@@ -146,6 +153,8 @@ def dispatch(
                 errors[ont] = "timeout"
             except Exception as e:
                 errors[ont] = str(e)
+    finally:
+        ex.shutdown(wait=False)
 
     if not results and errors:
         raise OrchestratorError(errors)
@@ -173,6 +182,8 @@ def _parseNode(node: Any) -> dict:
 
     FalkorDB 1.6+ returns Node objects with .id, .labels, .properties.
     Also handles raw list form [id, [labels], [[k,v],...]] for testing.
+    Malformed node shapes (None, short lists, junk) degrade to a dict
+    with unknown id/type instead of crashing the dispatch (#331).
     """
     if hasattr(node, 'properties'):
         # FalkorDB Node object
@@ -181,9 +192,24 @@ def _parseNode(node: Any) -> dict:
         props["type"] = node.labels[0] if node.labels else "unknown"
         return props
     # Raw list form: [id, [labels], [[k, v], ...]]
-    props = {k: v for k, v in node[2]}
-    props["id"] = str(node[0])
-    props["type"] = node[1][0] if node[1] else "unknown"
+    props: dict[str, Any] = {}
+    if (isinstance(node, (list, tuple)) and len(node) >= 3
+            and isinstance(node[2], (list, tuple))):
+        for pair in node[2]:
+            # Only well-formed [k, v] pairs survive; anything else is
+            # malformed and skipped (e.g. ['bad','pair','extra'], 'junk').
+            if isinstance(pair, (list, tuple)) and len(pair) == 2:
+                props[pair[0]] = pair[1]
+    elif isinstance(node, dict):
+        props = dict(node)
+    node_id = (node[0] if isinstance(node, (list, tuple)) and len(node) >= 1
+               else None)
+    labels = (node[1] if isinstance(node, (list, tuple)) and len(node) >= 2
+              else None)
+    props["id"] = str(node_id) if node_id is not None else "unknown"
+    props["type"] = (labels[0]
+                     if isinstance(labels, (list, tuple)) and labels
+                     else "unknown")
     return props
 
 

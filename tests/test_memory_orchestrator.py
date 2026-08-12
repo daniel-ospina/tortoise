@@ -590,3 +590,61 @@ if __name__ == "__main__":
             print(f"✗ {t.__name__} FAILED: {e}")
             raise
     print(f"\n─── {passed}/{len(tests)} passed ───")
+
+
+# ── #331: fake dispatch timeout + _parseNode malformed-input crash ──
+
+def test_dispatch_enforces_deadline():
+    """#331: dispatch must return at ~timeout even when an ontology query
+    hangs. Pre-fix the executor context-manager exit blocked on
+    shutdown(wait=True) until the hung query finished (timeout was fake)."""
+    import time
+    from types import SimpleNamespace
+    from tortoise.memory_orchestrator import dispatch
+
+    class _SlowGraph:
+        def query(self, cypher, params=None):
+            time.sleep(2.0)
+            return SimpleNamespace(result_set=[[1]])
+
+    class _FastGraph:
+        def query(self, cypher, params=None):
+            return SimpleNamespace(result_set=[[1]])
+
+    db = MagicMock()
+    db.select_graph = lambda name: _SlowGraph() if name == "episodic" else _FastGraph()
+
+    # Fast ontology first: it completes instantly; the hanging one then burns
+    # the shared deadline. dispatch must return at ~timeout regardless.
+    start = time.monotonic()
+    results, errors = dispatch(["epistemic", "episodic"], db, timeout=0.2)
+    elapsed = time.monotonic() - start
+
+    assert "epistemic" in results
+    assert errors.get("episodic") == "timeout"
+    assert elapsed < 1.5, \
+        f"dispatch blocked {elapsed:.2f}s on a hung query — deadline not enforced"
+    print("✓ dispatch deadline enforced")
+
+
+def test_parse_node_malformed_inputs_no_crash():
+    """#331: malformed node shapes must not crash _parseNode/dispatch."""
+    from tortoise.memory_orchestrator import _parseNode
+    for bad in (None, [], [1], [1, []], [1, ["L"], "junk"], "junk", 42):
+        try:
+            result = _parseNode(bad)
+        except Exception as e:  # noqa: BLE001
+            assert False, f"_parseNode({bad!r}) raised {type(e).__name__}: {e}"
+        assert isinstance(result, dict), f"_parseNode({bad!r}) -> {result!r}"
+    print("✓ _parseNode malformed inputs")
+
+
+def test_parse_node_partial_properties_tolerated():
+    """#331: malformed [[k,v]] pairs are skipped, valid ones survive."""
+    from tortoise.memory_orchestrator import _parseNode
+    node = [7, ["Point"], [["content", "ok"], ["bad", "pair", "extra"], "nope"]]
+    result = _parseNode(node)
+    assert result["id"] == "7"
+    assert result["type"] == "Point"
+    assert result["content"] == "ok"
+    print("✓ _parseNode partial properties")
