@@ -151,6 +151,14 @@ class SlackConnector:
                     self.end_headers()
                     return
 
+                # #331 (review r4): non-dict JSON (array/string body) must
+                # get a 400 — a payload.get() below would AttributeError and
+                # drop the connection (blind Slack retries, no trace).
+                if not isinstance(payload, dict):
+                    self.send_response(400)
+                    self.end_headers()
+                    return
+
                 # Slack URL verification challenge
                 if payload.get("type") == "url_verification":
                     challenge = payload.get("challenge", "")

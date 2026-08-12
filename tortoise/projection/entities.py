@@ -101,7 +101,9 @@ class _EntityHandlers:
 
         # Compute embedding for non-operator Points (#7778)
         embedding = None
-        if not op:
+        # #331 (review r4): only embed real content — an empty string
+        # produced a junk vector in the HNSW index.
+        if not op and p.get("content"):
             try:
                 from tortoise.embeddings import compute_embedding
                 embedding = compute_embedding(p.get("content", ""))

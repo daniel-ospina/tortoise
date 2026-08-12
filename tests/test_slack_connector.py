@@ -228,3 +228,31 @@ def test_webhook_processing_error_returns_500():
             assert False, "handler must respond with 500, not drop the connection"
     finally:
         sc.stop_webhook()
+
+
+def test_webhook_non_dict_payload_returns_400():
+    """#331 (review r4): valid JSON that is not an object (array/string)
+    must get HTTP 400 — not an AttributeError-dropped connection."""
+    import urllib.error
+    import urllib.request
+
+    sc = SlackConnector(config={
+        "token": "xoxb-test",
+        "webhook_port": 18995,
+        "signing_secret": "",
+    })
+    port = sc.start_webhook()
+    try:
+        req = urllib.request.Request(
+            f"http://localhost:{port}/", data=b"[1, 2, 3]",
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            urllib.request.urlopen(req, timeout=5)
+            assert False, "expected HTTP 400"
+        except urllib.error.HTTPError as e:
+            assert e.code == 400
+        except urllib.error.URLError:
+            assert False, "handler must respond with 400, not drop the connection"
+    finally:
+        sc.stop_webhook()

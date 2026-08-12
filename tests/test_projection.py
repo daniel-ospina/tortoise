@@ -2597,6 +2597,8 @@ def test_falkor_apply_missing_keys_no_crash():
         proj.apply({"type": "PointsMerged", "keep_id": "p9",
                     "merge_ids": None})          # explicit null
         proj.apply({"type": "PointAdded"})        # no 'point' key at all
+        proj.apply(None)                          # r4: non-dict event
+        proj.apply([])                            # r4: non-dict event
         # r3: non-dict provenance must not AttributeError in the Falkor path
         proj.apply({"type": "PointAdded",
                     "point": {"id": "pn1", "content": "null prov",
@@ -2665,6 +2667,32 @@ def test_falkor_apply_merge_ids_explicit_null_no_crash():
         proj.close()
 
 
+def test_apply_one_non_dict_events_skipped():
+    """#331 (review r4): non-dict events (raw JSON null/array/string lines)
+    must be skipped by the fold, not AttributeError in _norm."""
+    points = {}
+    for bad in (None, [], "x", 42):
+        _apply_one(points, bad)
+    assert points == {}
+    # fold over a mixed log survives
+    result = fold([None, {"type": "PointAdded",
+                          "point": {"id": "p1", "content": "x"}}, [], "junk"])
+    assert set(result.keys()) == {"p1"}
+
+
+def test_apply_one_non_string_ids_skipped():
+    """#331 (review r4): truthy non-string ids (list/dict) must be skipped,
+    not raise TypeError (unhashable) in the fold's index ops."""
+    points = {}
+    _apply_one(points, {"type": "PointAdded", "point": {"id": ["x"], "content": "c"}})
+    _apply_one(points, {"type": "PointAdded", "point": {"id": {"a": 1}, "content": "c"}})
+    _apply_one(points, {"type": "PointRevised", "id": ["x"], "new_content": "n"})
+    _apply_one(points, {"type": "PointRetracted", "id": ["x"]})
+    _apply_one(points, {"type": "PointsMerged", "keep_id": "p",
+                        "merge_ids": [["x"], {"a": 1}, None]})
+    assert points == {}
+
+
 def test_apply_one_point_key_missing_entirely():
     """#331 (review r3): a valid type with NO 'point' key must be skipped
     by the isinstance guard, not KeyError at ev['point']."""
@@ -2693,6 +2721,8 @@ def test_rebuild_all_tolerates_malformed_events():
     d = tempfile.mkdtemp(prefix="tortoise_rebuild_331_")
     try:
         events = [
+            None,           # r4: raw JSON null line
+            [],             # r4: raw JSON array line
             {"type": "PointAdded",
              "point": {"id": "p1", "content": "valid", "provenance": {}}},
             {"type": "PointAdded", "point": {"content": "no id"}},
@@ -2706,6 +2736,8 @@ def test_rebuild_all_tolerates_malformed_events():
         with open(os.path.join(d, "events.jsonl"), "w") as f:
             for ev in events:
                 f.write(json.dumps(ev) + "\n")
+            f.write(json.dumps({"type": "PointAdded",
+                                "point": {"id": ["x"], "content": "bad id"}}) + "\n")
         proj = FalkorProjection(_tmp("g_rebuild_331.db"), graph_name="test")
         try:
             result = proj.rebuild_all(d)
