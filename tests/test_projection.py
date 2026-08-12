@@ -2528,3 +2528,74 @@ def test_retract_tombstone_hosted_list_excludes_retracted():
         assert "h_ret" not in ids, "retracted point must NOT appear in list"
     finally:
         proj.close()
+
+
+# ------------------------------------------------------------------ #331: missing event keys
+
+def test_apply_one_missing_type_skipped():
+    """#331: events without a 'type' key must not crash fold/apply."""
+    points = {}
+    _apply_one(points, {})
+    _apply_one(points, {"point": {"id": "p1", "content": "x"}})  # nested point, no type
+    _apply_one(points, {"type": None})
+    _apply_one(points, {"type": 42})
+    assert points == {}
+
+
+def test_apply_one_point_added_missing_id_skipped():
+    """#331: PointAdded without an id must not crash (no key to index by)."""
+    points = {}
+    _apply_one(points, {"type": "PointAdded", "point": {"content": "no id"}})
+    assert points == {}
+    _apply_one(points, {"type": "OperatorAdded", "point": {"operator": {"op_type": "IMPL"}}})
+    assert points == {}
+
+
+def test_apply_one_non_dict_provenance_no_crash():
+    """#331: null/non-dict provenance must not crash speaker flattening."""
+    points = {}
+    _apply_one(points, {"type": "PointAdded",
+                        "point": {"id": "p1", "content": "x", "provenance": None}})
+    assert points["p1"]["id"] == "p1"
+    _apply_one(points, {"type": "PointAdded",
+                        "point": {"id": "p2", "content": "y", "provenance": "junk"}})
+    assert points["p2"]["id"] == "p2"
+
+
+def test_fold_missing_type_events_skipped():
+    """#331: fold over a log containing malformed events must not raise."""
+    pts = fold([
+        {},
+        {"type": "PointAdded", "point": {"id": "a", "content": "x", "provenance": {}}},
+        {"type": "NopeUnknown"},
+    ])
+    assert set(pts) == {"a"}
+
+
+def test_inmemory_apply_missing_keys_no_crash():
+    """#331: InMemoryProjection.apply tolerates missing event keys."""
+    proj = InMemoryProjection()
+    proj.apply({})
+    proj.apply({"type": "PointRetracted"})  # no id
+    proj.apply({"type": "PointRevised"})    # no id
+    proj.apply({"type": "PointsMerged"})    # no merge_ids
+    assert proj.points == {}
+
+
+def test_falkor_apply_missing_keys_no_crash():
+    """#331: FalkorProjection.apply tolerates missing event keys (embedded)."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    proj = FalkorProjection(_tmp("tortoise.db"))
+    try:
+        proj.apply({})
+        proj.apply({"type": "PointRetracted"})  # no id — no crash
+        proj.apply({"type": "PointRevised"})    # no id — no crash
+        proj.apply({"type": "PointsMerged"})    # no merge_ids
+        # a valid event still lands
+        proj.apply({"type": "PointAdded",
+                    "point": {"id": "p1", "content": "x", "provenance": {}}})
+        rows = proj.g.query("MATCH (n:Point {id:'p1'}) RETURN count(n)").result_set
+        assert rows[0][0] == 1
+    finally:
+        proj.close()

@@ -147,22 +147,30 @@ def _norm(ev: dict) -> dict:
 
 def _apply_one(points: dict[str, dict], ev: dict) -> None:
     ev = _norm(ev)
-    t = ev["type"]
+    t = ev.get("type")
+    if not isinstance(t, str):
+        # #331: events without a 'type' key (or with a non-string type)
+        # must be skipped, not crash the fold.
+        return
     if t in ("PointAdded", "OperatorAdded"):
         p = ev["point"]
         if not isinstance(p, dict):
             # Malformed event (non-dict point) — skip, don't crash (issue #325)
+            return
+        # #331: no id → nothing to index by; skip rather than KeyError.
+        if not p.get("id"):
             return
         # Phase 1 stop-writes: strip context from v2+ events (#49)
         if ev.get("projection_version", 0) >= 2:
             p.pop("context", None)
         points[p["id"]] = p
         # Flatten speaker from point's provenance into node data
+        # #331: non-dict provenance (null/string) must not crash flattening.
         prov = p.get("provenance", {})
-        if prov.get("speaker"):
+        if isinstance(prov, dict) and prov.get("speaker"):
             p["speaker"] = prov["speaker"]
     elif t == "PointRevised":
-        p = points.get(ev["id"])
+        p = points.get(ev.get("id"))
         if p:
             if ev.get("new_content") is not None:
                 p["content"] = ev["new_content"]
@@ -175,7 +183,7 @@ def _apply_one(points: dict[str, dict], ev: dict) -> None:
         # this change is irreversible (already-hard-deleted points cannot
         # be reconstructed from the event log alone — the content existed
         # only in the projection, and the projection deleted it).
-        p = points.get(ev["id"])
+        p = points.get(ev.get("id"))
         if p:
             p["status"] = "retracted"
     elif t == "PointsMerged":
@@ -507,7 +515,10 @@ class FalkorProjection(
 
     def apply(self, event: dict) -> None:
         ev = self._norm(event)
-        t = ev["type"]
+        t = ev.get("type")
+        if not isinstance(t, str):
+            # #331: malformed event (no/non-string 'type') — skip, don't crash.
+            return
         if t in ("PointAdded", "OperatorAdded"):
             p = ev["point"]
             if not isinstance(p, dict):
@@ -523,7 +534,10 @@ class FalkorProjection(
                 ev.pop("new_context", None)
             self._revise_point(ev, set_updated_at=True)
         elif t == "PointRetracted":
-            self._retract(ev["id"])
+            rid = ev.get("id") or ev.get("event_id")
+            if rid is not None:
+                # #331: missing id must be skipped, not crash the handler.
+                self._retract(rid)
         elif t == "PointsMerged":
             for mid in ev.get("merge_ids", []):
                 self._delete(mid)
@@ -654,7 +668,7 @@ class FalkorProjection(
         # (skip edges), so cross-file PointRevised always has a node to revise (#21).
         for ev in events:
             ev = self._norm(ev)
-            t = ev["type"]
+            t = ev.get("type")
             if t in ("PointAdded", "OperatorAdded"):
                 p = ev["point"]
                 if not isinstance(p, dict):
@@ -672,7 +686,7 @@ class FalkorProjection(
         # Pass 1b: apply revisions + other non-edge events AFTER all nodes exist
         for ev in events:
             ev = self._norm(ev)
-            t = ev["type"]
+            t = ev.get("type")
             if t in ("PointAdded", "OperatorAdded"):
                 continue  # already handled in pass 1a
             elif t == "PointRetracted":
@@ -706,7 +720,7 @@ class FalkorProjection(
         # (shared _upsert_point_edges — single source of truth with apply, #330).
         for ev in events:
             ev = self._norm(ev)
-            if ev["type"] in ("PointAdded", "OperatorAdded"):
+            if ev.get("type") in ("PointAdded", "OperatorAdded"):
                 p = ev["point"]
                 if not isinstance(p, dict):
                     # Malformed event (non-dict point) — skip (issue #325)
