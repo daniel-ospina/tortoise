@@ -127,10 +127,31 @@ class EventAPI:
 
     def add_operator(self, op_type, inputs, provenance, *,
                      content=None, corrects=None) -> str:
-        assert op_type in ("NAND", "IMPL"), f"unknown gate {op_type!r}"
-        _inputs = [x["id"] if isinstance(x, dict) and "id" in x
-                   else x.id if hasattr(x, "id") else x
-                   for x in inputs]
+        # #331: explicit validation — a bare assert vanishes under python -O,
+        # and non-string inputs crashed the label join below.
+        if not isinstance(op_type, str) or op_type not in ("NAND", "IMPL"):
+            raise ValueError(f"unknown gate {op_type!r}")
+        if inputs is None:
+            raise TypeError("add_operator: inputs must be a list of point ids")
+        _inputs = []
+        for x in inputs:
+            if isinstance(x, dict):
+                if not isinstance(x.get("id"), str):
+                    raise TypeError(
+                        f"add_operator: input dict missing string 'id': {x!r}")
+                _inputs.append(x["id"])
+            elif hasattr(x, "id"):
+                if not isinstance(x.id, str):
+                    raise TypeError(
+                        f"add_operator: input {x!r} has non-string .id "
+                        f"{x.id!r}")
+                _inputs.append(x.id)
+            elif isinstance(x, str):
+                _inputs.append(x)
+            else:
+                raise TypeError(
+                    "add_operator: input must be a point id string, a dict "
+                    f"with 'id', or an object with .id — got {type(x).__name__}: {x!r}")
         label = content or f"{op_type}({', '.join(_inputs)})"
         p = self._point(label, provenance,
                         operator={"op_type": op_type, "inputs": _inputs})
@@ -189,6 +210,12 @@ class EventAPI:
         return ev["event_id"]
 
     def merge_points(self, keep_id, merge_ids, *, corrects=None) -> str:
+        # #331: None/empty merge input must not crash (list(None) raises
+        # TypeError); a bare string is a single id, never char-split.
+        if merge_ids is None:
+            merge_ids = []
+        elif isinstance(merge_ids, str):
+            merge_ids = [merge_ids]
         ev = self._emit("PointsMerged", keep_id=keep_id, merge_ids=list(merge_ids),
                         corrects=corrects)
         return ev["event_id"]
