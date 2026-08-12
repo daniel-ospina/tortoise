@@ -179,7 +179,7 @@ class RelationLabel:
     type: str                      # IMPL | NAND | MITIGATES
     source: int | None = None      # edu_index of the source EDU (null when n/a)
     target: str | int | None = None  # edu_index (IMPL/NAND) or edge id "[X→A]" (MITIGATES)
-    bias: float | None = None      # MITIGATES only; canonical range [0.10, 0.50]
+    bias: float | None = None      # MITIGATES only; canonical range [0.10, 0.50] (ENFORCED)
 
 
 @dataclass
@@ -250,8 +250,8 @@ def parse_labels(raw: str, edus: list[Edu]) -> list[Label]:
             raise LabelParseError(f"labels[{i}]: not an object")
         if "edu_index" not in item:
             raise LabelParseError(f"labels[{i}]: missing 'edu_index'")
-        if not isinstance(item["edu_index"], int):
-            raise LabelParseError(f"labels[{i}]: 'edu_index' must be an int")
+        if isinstance(item["edu_index"], bool) or not isinstance(item["edu_index"], int):
+            raise LabelParseError(f"labels[{i}]: 'edu_index' must be an int (bool is not an int here)")
         idx = item["edu_index"]
         if idx not in valid_indices:
             raise LabelParseError(
@@ -299,12 +299,14 @@ def parse_labels(raw: str, edus: list[Edu]) -> list[Label]:
                     f"{rtype!r} — must be one of {', '.join(RELATION_VOCAB)}"
                 )
             source = rel.get("source")
-            if source is not None and not isinstance(source, int):
+            if source is not None and (isinstance(source, bool) or not isinstance(source, int)):
                 raise LabelParseError(
-                    f"labels[{i}].relations[{j}]: 'source' must be an int or null"
+                    f"labels[{i}].relations[{j}]: 'source' must be an int or null (bool is not an int here)"
                 )
             target = rel.get("target")
-            if target is not None and not isinstance(target, (int, str)):
+            if target is not None and (
+                isinstance(target, bool) or not isinstance(target, (int, str))
+            ):
                 raise LabelParseError(
                     f"labels[{i}].relations[{j}]: 'target' must be an int, "
                     f"string, or null"
@@ -315,9 +317,10 @@ def parse_labels(raw: str, edus: list[Edu]) -> list[Label]:
                     raise LabelParseError(
                         f"labels[{i}].relations[{j}]: 'bias' must be a number or null"
                     )
-                if not 0.0 <= float(bias) <= 1.0:
+                if not 0.10 <= float(bias) <= 0.50:
                     raise LabelParseError(
-                        f"labels[{i}].relations[{j}]: 'bias' {bias} outside [0, 1]"
+                        f"labels[{i}].relations[{j}]: 'bias' {bias} outside the "
+                        f"canonical MITIGATES range [0.10, 0.50]"
                     )
             relations.append(
                 RelationLabel(type=rtype, source=source, target=target, bias=bias)
@@ -392,6 +395,18 @@ def _apply_tuning(model, max_tokens: int, temperature: float) -> None:
 
 
 def main(argv: list[str] | None = None, *, model_factory: Callable[[str], object] | None = None) -> int:
+    if argv is None:
+        argv = sys.argv[1:]
+    if "--list-models" in argv:
+        # Pre-scan: --list-models must work standalone (--transcript is required
+        # for a labeling run only).
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from tests.model_adapters import MODELS  # noqa: PLC0415
+
+        for name in sorted(MODELS):
+            print(name)
+        return 0
+
     parser = argparse.ArgumentParser(
         prog="judge_harness",
         description="Label an extraction window via the classification-model "
@@ -416,14 +431,6 @@ def main(argv: list[str] | None = None, *, model_factory: Callable[[str], object
     parser.add_argument("--list-models", action="store_true",
                         help="list available model names and exit")
     args = parser.parse_args(argv)
-
-    if args.list_models:
-        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-        from tests.model_adapters import MODELS  # noqa: PLC0415
-
-        for name in sorted(MODELS):
-            print(name)
-        return 0
 
     try:
         transcript = sys.stdin.read() if args.transcript == "-" else Path(args.transcript).read_text()
@@ -451,10 +458,14 @@ def main(argv: list[str] | None = None, *, model_factory: Callable[[str], object
         return 1
 
     payload = json.dumps(window.to_json(), indent=2)
-    if args.out:
-        Path(args.out).write_text(payload + "\n")
-    else:
-        print(payload)
+    try:
+        if args.out:
+            Path(args.out).write_text(payload + "\n")
+        else:
+            print(payload)
+    except OSError as exc:
+        print(f"judge_harness: error: {exc}", file=sys.stderr)
+        return 1
     if window.degenerate:
         print(
             "judge_harness: DEGENERATE LABELING: window is non-empty "

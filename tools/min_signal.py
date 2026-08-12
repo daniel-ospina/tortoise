@@ -25,8 +25,10 @@ Usage:
     python tools/min_signal.py --labels labels.json --window-type operational
     python tools/min_signal.py --labels labels.json --window-type operational --min-events 3
 
-Output (JSON): {"window_type", "required", "emitted", "passed"} — exit 0 when
-passed, 1 when the assertion fails.
+Output (JSON): {"window_type", "required", "emitted", "passed"}.
+Exit codes (uniform pipeline convention — judge_harness / kappa / min_signal):
+0 = assertion passed; 1 = operational error; 2 = assertion FAILED
+(degenerate-empty guard triggered).
 """
 from __future__ import annotations
 
@@ -112,7 +114,7 @@ def main(argv: list[str] | None = None) -> int:
         result = min_signal_check(labels, args.window_type, args.min_events)
     except (OSError, ValueError) as exc:
         print(f"min_signal: error: {exc}", file=sys.stderr)
-        return 2
+        return 1
 
     print(json.dumps(asdict(result)))
     if not result.passed:
@@ -122,7 +124,7 @@ def main(argv: list[str] | None = None) -> int:
             "degenerate-empty guard (DE2E-1 neg (b))",
             file=sys.stderr,
         )
-        return 1
+        return 2
     return 0
 
 

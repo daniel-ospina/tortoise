@@ -219,12 +219,40 @@ def test_parse_labels_bad_relation_type():
 
 def test_parse_labels_bad_bias_range():
     edus = parse_transcript(TRANSCRIPT)
-    with pytest.raises(LabelParseError, match="outside \\[0, 1\\]"):
-        parse_labels(
+    for bias in (0.05, 0.60, 1.5):
+        payload = (
             '{"labels": [{"edu_index": 0, "class": "claim", "relations": '
-            '[{"type": "MITIGATES", "bias": 1.5}]}]}',
-            edus,
+            '[{"type": "MITIGATES", "bias": ' + str(bias) + '}]}]}'
         )
+        with pytest.raises(LabelParseError, match="canonical MITIGATES range"):
+            parse_labels(payload, edus)
+
+
+def test_parse_labels_type_validation_branches():
+    """Every garbage-defense branch of parse_labels (uncontrolled LLM output)."""
+    edus = parse_transcript(TRANSCRIPT)
+    cases = [
+        ('{"labels": {}}', "'labels' is not an array"),
+        ('{"labels": ["x"]}', "not an object"),
+        ('{"labels": [{"edu_index": "1", "class": "claim"}]}', "must be an int"),
+        ('{"labels": [{"edu_index": true, "class": "claim"}]}', "must be an int"),
+        ('{"labels": [{"edu_index": 0, "class": "claim", "kind": 7}]}', "'kind' must be a string"),
+        ('{"labels": [{"edu_index": 0, "class": "claim", "atomicity": 1}]}', "'atomicity' must be a bool"),
+        ('{"labels": [{"edu_index": 0, "class": "claim", "source_ref": 9}]}', "'source_ref' must be a string"),
+        ('{"labels": [{"edu_index": 0, "class": "claim", "relations": {}}]}', "'relations' must be an array"),
+        ('{"labels": [{"edu_index": 0, "class": "claim", "relations": [{}]}]}', "missing 'type'"),
+        ('{"labels": [{"edu_index": 0, "class": "claim", "relations": '
+         '[{"type": "IMPL", "source": "0"}]}]}', "'source' must be an int"),
+        ('{"labels": [{"edu_index": 0, "class": "claim", "relations": '
+         '[{"type": "IMPL", "source": true}]}]}', "'source' must be an int"),
+        ('{"labels": [{"edu_index": 0, "class": "claim", "relations": '
+         '[{"type": "IMPL", "target": true}]}]}', "'target' must be an int"),
+        ('{"labels": [{"edu_index": 0, "class": "claim", "relations": '
+         '[{"type": "MITIGATES", "bias": true}]}]}', "'bias' must be a number"),
+    ]
+    for payload, message in cases:
+        with pytest.raises(LabelParseError, match=message):
+            parse_labels(payload, edus)
 
 
 # ── The labeling pipeline (deterministic, mocked judge) ─────────────────────
@@ -318,11 +346,31 @@ def test_main_cli_malformed_transcript_exit_1(tmp_path):
     assert code == 1
 
 
-def test_main_cli_list_models(tmp_path, capsys):
-    code = jh_main(["--transcript", str(tmp_path / "x"), "--window-id", "w1",
-                    "--list-models"])
+def test_empty_window_not_degenerate():
+    """An empty transcript is legitimate — never flagged degenerate (the
+    degenerate guard is n_edus > 0)."""
+    model = MockModel('{"labels": []}')
+    window = label_window([], model, window_id="w0")
+    assert window.n_edus == 0
+    assert window.labels == []
+    assert window.degenerate is False
+    assert window.incomplete is False
+
+
+def test_main_cli_list_models(capsys):
+    code = jh_main(["--list-models"])
     assert code == 0
     assert "deepseek-flash" in capsys.readouterr().out
+
+
+def test_main_cli_unwritable_out_exit_1(tmp_path):
+    transcript = tmp_path / "w1.txt"
+    transcript.write_text(TRANSCRIPT)
+    code = jh_main(["--transcript", str(transcript), "--window-id", "w1",
+                    "--out", str(tmp_path / "no-such-dir" / "w1.json")],
+                   model_factory=lambda name: MockModel(
+                       json.dumps({"labels": labels_for([0, 1, 2])})))
+    assert code == 1
 
 
 def test_apply_tuning_sets_adapter_knobs():

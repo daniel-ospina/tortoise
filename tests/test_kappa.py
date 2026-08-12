@@ -64,6 +64,15 @@ def test_kappa_single_category_convention():
     assert kp.kappa(a, b) == 1.0
 
 
+def test_kappa_single_category_disagreeing_branch():
+    """pe == 1.0 with po < 1.0 → κ = 0.0 (the NaN-guard branch)."""
+    a = [L(0, "none"), L(1, "none")]
+    b = [L(0, "none"), L(1, "claim")]
+    k = kp.kappa(a, b)
+    assert k == 0.0
+    assert k == k  # not NaN
+
+
 def test_kappa_no_overlap_is_none():
     assert kp.kappa([L(0, "claim"), L(1, "claim")], [L(2, "claim")]) is None
 
@@ -128,6 +137,14 @@ def test_nothing_agreement_disjoint():
 
 
 # ── Per-class agreement (recorded, no v1 threshold — DE2E-1) ────────────────
+
+def test_per_class_agreement_intersection_base():
+    """Totals are restricted to the SHARED EDU set (same basis as kappa)."""
+    a = [L(0, "event"), L(1, "event")]
+    b = [L(0, "event")]
+    result = kp.per_class_agreement(a, b)
+    assert result["event"] == 1.0  # perfect agreement on every shared EDU
+
 
 def test_per_class_agreement_specific_agreement():
     """idx0: d/d · idx1: e/d · idx2: n/n · idx3: d/e
@@ -234,7 +251,9 @@ def test_compare_report_shape():
     # po=0.5, pe=0.25 → κ = (0.5-0.25)/0.75 = 1/3
     assert report["kappa"] == pytest.approx(1 / 3)
     assert report["gate"]["verdict"] in ("GREEN", "NOT_GREEN", "REVISE")
-    assert report["min_signal"] is None  # no window type → no min-signal
+    # Window type is inferred from the windows (design, floor 0) → evaluated.
+    assert report["min_signal"]["a"]["passed"] is True
+    assert report["min_signal"]["b"]["passed"] is True
 
 
 def test_compare_operational_min_signal_fails_gate():
@@ -264,7 +283,52 @@ def test_compare_operational_with_events_is_green():
     assert report["gate"]["verdict"] == "GREEN"
 
 
-def test_compare_design_window_skips_min_signal_floor():
+def test_compare_operational_inferred_from_windows():
+    """window_type is read from the labeled windows when not passed."""
+    a = window([L(0, "event"), L(1, "decision")], window_type="operational", judge="owner")
+    b = window([L(0, "event"), L(1, "decision")], window_type="operational", judge="frontier")
+    report = kp.compare(a, b)  # no explicit window_type
+    assert report["min_signal"]["a"]["passed"] is True
+    assert report["gate"]["verdict"] == "GREEN"
+
+
+def test_compare_operational_one_judge_sees_events():
+    """DE2E-1 neg (b) fails only when BOTH judges agree on nothing — a
+    judge-specific miss surfaces through κ, not min-signal."""
+    a = window([L(0, "event"), L(1, "claim")], window_type="operational", judge="owner")
+    b = window([L(0, "none"), L(1, "claim")], window_type="operational", judge="frontier")
+    report = kp.compare(a, b, window_type="operational")
+    assert report["min_signal"]["a"]["passed"] is True
+    assert report["min_signal"]["b"]["passed"] is False
+    # Overall min-signal passes (the window DID emit events); κ = 1/3 < 0.50
+    # → REVISE on agreement, not on min-signal.
+    assert "minimum-signal" not in report["gate"]["reason"]
+    assert report["gate"]["verdict"] == "REVISE"
+
+
+def test_compare_fail_closed_without_window_type():
+    """GREEN is never emitted when the min-signal assertion was not evaluated."""
+    raw = {
+        "window_id": "w", "judge": "a", "n_edus": 2, "degenerate": False,
+        "incomplete": False,  # no window_type key
+        "labels": [{"edu_index": 0, "class": "decision"},
+                   {"edu_index": 1, "class": "decision"}],
+    }
+    report = kp.compare(raw, dict(raw))
+    assert report["kappa"] == 1.0
+    assert report["min_signal"] is None
+    assert report["gate"]["verdict"] == "NOT_GREEN"
+    assert "minimum-signal" in report["gate"]["reason"]
+
+
+def test_compare_window_type_conflict():
+    a = {"window_id": "a", "window_type": "design", "labels": []}
+    b = {"window_id": "b", "window_type": "operational", "labels": []}
+    with pytest.raises(kp.KappaError, match="disagree on window_type"):
+        kp.compare(a, b)
+
+
+def test_compare_design_window_no_event_floor():
     a = window([L(0, "claim")], window_type="design")
     b = window([L(0, "event")], window_type="design")
     report = kp.compare(a, b, window_type="design")
@@ -333,8 +397,39 @@ def test_kappa_cli_strict_exit_on_not_green(tmp_path, capsys):
                       "frontier")
     # Default: computation succeeds → exit 0 (verdict is a documented decision).
     assert kp.main(["--judge-a", str(a), "--judge-b", str(b)]) == 0
-    # --strict: NOT_GREEN/REVISE → exit 1 (CI enforcement).
-    assert kp.main(["--judge-a", str(a), "--judge-b", str(b), "--strict"]) == 1
+    # --strict: NOT_GREEN/REVISE → exit 2 (CI enforcement).
+    assert kp.main(["--judge-a", str(a), "--judge-b", str(b), "--strict"]) == 2
+
+
+def test_kappa_cli_malformed_labels_clean_error(tmp_path, capsys):
+    """Malformed label JSON → clean 'kappa: error' + exit 1 (no traceback)."""
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps({
+        "window_id": "w", "window_type": "design", "labels":
+        [{"edu_index": 0}],  # missing 'class'
+    }))
+    good = _write_window(tmp_path, "good.json", "design",
+                         [{"edu_index": 0, "class": "claim", "kind": None,
+                           "atomicity": True, "source_ref": None,
+                           "relations": []}], "owner")
+    code = kp.main(["--judge-a", str(bad), "--judge-b", str(good)])
+    assert code == 1
+    assert "kappa: error:" in capsys.readouterr().err
+
+
+def test_kappa_cli_duplicate_edu_rejected(tmp_path, capsys):
+    dup = tmp_path / "dup.json"
+    dup.write_text(json.dumps({
+        "window_id": "w", "window_type": "design", "labels": [
+            {"edu_index": 0, "class": "decision"},
+            {"edu_index": 0, "class": "event"},
+        ],
+    }))
+    good = _write_window(tmp_path, "good.json", "design",
+                         [{"edu_index": 0, "class": "claim", "kind": None,
+                           "atomicity": True, "source_ref": None,
+                           "relations": []}], "owner")
+    assert kp.main(["--judge-a", str(dup), "--judge-b", str(good)]) == 1
 
 
 def test_min_signal_cli(tmp_path, capsys):
@@ -342,7 +437,12 @@ def test_min_signal_cli(tmp_path, capsys):
                          [{"edu_index": 0, "class": "claim", "kind": None,
                            "atomicity": True, "source_ref": None,
                            "relations": []}], "owner")
+    # Operational window with zero events → assertion FAILED → exit 2.
     assert min_signal.main(["--labels", str(path), "--window-type",
-                            "operational"]) == 1
+                            "operational"]) == 2
     assert "passed" in capsys.readouterr().out
+    # Design windows have no floor → exit 0.
     assert min_signal.main(["--labels", str(path), "--window-type", "design"]) == 0
+    # Operational error (missing file) → exit 1.
+    assert min_signal.main(["--labels", str(tmp_path / "nope.json"),
+                            "--window-type", "operational"]) == 1
