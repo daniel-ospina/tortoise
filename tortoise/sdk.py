@@ -1460,21 +1460,30 @@ class TortoiseSDK:
         SDK #131 edge auto-promotion for extraction paths
         (`create_operator(promote_source=False)`, #780).
 
-        Semantics:
-          - already live → NO-OP (returns {promoted: False, reason: "already_live"},
-            no error — DE2E-N9)
+        Semantics (all responses include id + status + promoted + blocked):
+          - already live → NO-OP {promoted: False, blocked: False,
+            reason: "already_live"} — DE2E-N9
+          - operator node → blocked {blocked: True, reason: "is_operator"} —
+            operators only go live via the R16 endpoint gate (matching
+            retract_point's operator rejection)
           - terminal (retracted/superseded/outdated/archived) → blocked
             {blocked: True, reason: "not_draft"}
-          - Point belongs to a QUARANTINED batch → blocked with
+          - Point belongs to a QUARANTINED batch → blocked
             {blocked: True, reason: "batch_quarantined", batch_id} — quarantine
             is batch-level (plan §3): the batch's Points stay draft until the
             W-3 re-run passes (EpSafeCommit recovery loop)
           - otherwise → status draft→live, `reviewed: true` derived flag set,
             PointPromoted event emitted, and R16 zombie prevention:
-            incident DRAFT operator nodes (status 'draft' or unset — the
-            pre-#780 create_operator path writes no status) are promoted to
-            live ONCE ALL their endpoint Points are live, so a contradiction
-            never stays a dead draft operator after its claims go live.
+            incident DRAFT operator nodes (status 'draft' — the post-#780
+            extraction shape) are promoted to live ONCE ALL their endpoint
+            Points are live, so a contradiction never stays a dead draft
+            operator after its claims go live.
+
+        NOTE (review #944): the quarantine lock is a read-then-CAS — a
+        quarantine landing between the batch_status read and the CAS can race
+        a promotion through (window is milliseconds; the flow is
+        single-operator). Fully atomic batch+point locking is tracked with
+        the W-3 pipeline wiring (#785 follow-up).
 
         Raises ValueError if the Point does not exist.
         """
@@ -1488,10 +1497,16 @@ class TortoiseSDK:
         point = row[0][0]
         status = point.get("status")
 
+        # Operators go live ONLY via the R16 endpoint gate — promoting a
+        # draft operator directly would create the live-operator-with-draft-
+        # endpoints state R16 exists to prevent (review #944).
+        if point.get("is_operator") or point.get("op_type"):
+            return {"id": point_id, "status": status, "promoted": False,
+                    "blocked": True, "reason": "is_operator"}
         # DE2E-N9: already-live promote → no-op, no error.
         if status == "live":
             return {"id": point_id, "status": "live", "promoted": False,
-                    "reason": "already_live"}
+                    "blocked": False, "reason": "already_live"}
         # Terminal states cannot be promoted back to live.
         if status != "draft":
             return {"id": point_id, "status": status, "promoted": False,
@@ -1504,8 +1519,9 @@ class TortoiseSDK:
             from .mining import batch_status  # lazy: no module-level sdk↔mining cycle
             bs = batch_status(proj, batch_id)
             if bs is not None and bs["status"] == "quarantined":
-                return {"id": point_id, "promoted": False, "blocked": True,
-                        "reason": "batch_quarantined", "batch_id": batch_id}
+                return {"id": point_id, "status": status, "promoted": False,
+                        "blocked": True, "reason": "batch_quarantined",
+                        "batch_id": batch_id}
 
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc).isoformat()
@@ -1522,9 +1538,10 @@ class TortoiseSDK:
             re = self.get_point(point_id)
             if re.get("status") == "live":
                 return {"id": point_id, "status": "live", "promoted": False,
-                        "reason": "already_live"}
-            return {"id": point_id, "promoted": False, "blocked": True,
-                    "reason": "not_draft", "status": re.get("status")}
+                        "blocked": False, "reason": "already_live"}
+            return {"id": point_id, "status": re.get("status"),
+                    "promoted": False, "blocked": True,
+                    "reason": "not_draft"}
 
         # R16 zombie-operator prevention: promote incident draft operators
         # once ALL their endpoint Points are live.
@@ -1538,17 +1555,17 @@ class TortoiseSDK:
     def _promote_incident_operators(self, proj, point_id: str, now: str) -> list[str]:
         """R16: promote draft operator nodes incident to a freshly-live Point.
 
-        An operator is "draft" when its raw node status is 'draft' (post-#780
-        `create_operator(promote_source=False)`) or unset (the pre-#780
-        create_operator path writes no status property; the event path writes
-        'live' via projection coalesce, so an unset raw status is never the
-        event path). It is promoted only when EVERY endpoint Point is live —
-        otherwise the draft endpoints would inherit a live edge (the exact
-        pollution the draft lifecycle prevents).
+        An operator is promoted only when it carries EXPLICIT status 'draft'
+        (the post-#780 `create_operator(promote_source=False)` shape) AND
+        every endpoint Point is live — otherwise the draft endpoints would
+        inherit a live edge (the exact pollution the draft lifecycle
+        prevents). Unset-status operators are LIVE under the canonical read
+        model (projection coalesce default; #944 review) and are skipped —
+        never re-promoted into the event stream.
         """
         rows = proj.g.query(
             "MATCH (o:Point {is_operator:true})-[r]->(n:Point {id:$id}) "
-            "WHERE (o.status IS NULL OR o.status = 'draft') RETURN DISTINCT o.id",
+            "WHERE o.status = 'draft' RETURN DISTINCT o.id",
             params={"id": point_id},
         ).result_set
         promoted = []
@@ -1563,14 +1580,31 @@ class TortoiseSDK:
             all_live = all((st or "live") == "live" for _, st in eps)
             if not all_live:
                 continue  # keep draft until every endpoint is live
-            proj.g.query(
-                "MATCH (o:Point {id:$oid}) SET o.status = 'live', "
-                "o.promotedAt = $now, o.updatedAt = $now",
+            # CAS-guarded SET: only an explicitly-draft operator may flip,
+            # and only once (concurrent endpoint promotions can't double-emit).
+            r = proj.g.query(
+                "MATCH (o:Point {id:$oid}) WHERE o.status = 'draft' "
+                "SET o.status = 'live', o.promotedAt = $now, o.updatedAt = $now "
+                "RETURN o.id",
                 params={"oid": oid, "now": now},
             )
-            self._emit_event("OperatorPromoted", id=oid)
+            if not r.result_set:
+                continue  # lost a race — another promote already flipped it
+            # Full snapshot for JSONL rebuild parity (#548, review #944).
+            self._emit_event("OperatorPromoted", id=oid,
+                             point=self.get_point(oid))
             promoted.append(oid)
         return promoted
+
+    def quarantine_batch(self, batch_id: str, *, reason: str) -> dict:
+        """Quarantine a batch (W-3 fail path) — blocks promote_point on its
+        Points until a re-run passes (plan §6.1 pinned SDK signature).
+
+        Thin delegate to tortoise.mining.quarantine_batch — batch lifecycle
+        state lives on :Batch marker nodes (operational metadata).
+        """
+        from .mining import quarantine_batch as _qb
+        return _qb(self._get_proj(), batch_id, reason=reason)
 
     def list_drafts(self, *, limit: int = 50) -> list[dict]:
         """Draft queue for promotion review (J-5 companion, plan §6.1).

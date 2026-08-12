@@ -927,8 +927,8 @@ class TestPromotePoint:
         # DE2E-N9: already-live promote → no-op, no error.
         p = _make_point(sdk, status="live")
         res = sdk.promote_point(p["id"])
-        assert res == {"id": p["id"], "status": "live",
-                       "promoted": False, "reason": "already_live"}
+        assert res == {"id": p["id"], "status": "live", "promoted": False,
+                       "blocked": False, "reason": "already_live"}
 
     def test_promote_terminal_point_is_blocked(self, sdk):
         p = _make_point(sdk, status="draft")
@@ -947,8 +947,9 @@ class TestPromotePoint:
         p = _make_point(sdk, status="draft", batch_id="qb1")
         quarantine_batch(sdk._get_proj(), "qb1", reason="EP drift (W-3)")
         res = sdk.promote_point(p["id"])
-        assert res == {"id": p["id"], "promoted": False, "blocked": True,
-                       "reason": "batch_quarantined", "batch_id": "qb1"}
+        assert res == {"id": p["id"], "status": "draft", "promoted": False,
+                       "blocked": True, "reason": "batch_quarantined",
+                       "batch_id": "qb1"}
         assert sdk.get_point(p["id"])["status"] == "draft"  # stays draft
 
     def test_promote_not_blocked_by_unregistered_batch(self, sdk):
@@ -1084,4 +1085,76 @@ def test_de2e8_contradiction_propagates_after_promotion(sdk):
         assert mean < 0.80, (
             f"NAND contradiction must suppress the promoted claim's "
             f"posterior (mean {mean:.3f} vs prior 0.889)"
+        )
+
+
+def test_promote_operator_node_is_blocked(sdk):
+    """promote_point on an operator node must be blocked — operators only go
+    live via the R16 endpoint gate (review #944)."""
+    a = _make_point(sdk, status="draft", content="a")
+    b = _make_point(sdk, status="draft", content="b")
+    op = _make_draft_operator(sdk, "NAND", [a["id"], b["id"]])
+    res = sdk.promote_point(op["id"])
+    assert res["blocked"] is True
+    assert res["reason"] == "is_operator"
+    assert sdk.get_point(op["id"])["status"] == "draft"
+
+
+def test_r16_skips_unset_status_operator(sdk):
+    """Unset-status (legacy, pre-#780) operator nodes are LIVE under the
+    canonical read model — R16 must NOT promote them or emit spurious
+    OperatorPromoted events (review #944)."""
+    import tempfile
+    import json
+    tmp = tempfile.mkdtemp()
+    sdk2 = TortoiseSDK(db_path=os.path.join(tmp, "t.db"),
+                       event_log_path=os.path.join(tmp, "events.jsonl"))
+    a = _make_point(sdk2, status="draft", content="a")
+    b = _make_point(sdk2, status="draft", content="b")
+    # Legacy shape: operator node with NO status property (create_operator
+    # default path on main before #780 wrote no status).
+    op = _make_draft_operator(sdk2, "NAND", [a["id"], b["id"]])
+    sdk2._get_proj().g.query(
+        "MATCH (o:Point {id:$id}) REMOVE o.status", params={"id": op["id"]})
+    assert sdk2.get_point(op["id"]).get("status") is None
+    res = sdk2.promote_point(a["id"])
+    assert res["operator_nodes_promoted"] == [], (
+        "unset-status operator must NOT be re-promoted"
+    )
+    res2 = sdk2.promote_point(b["id"])
+    assert res2["operator_nodes_promoted"] == []
+    assert sdk2.get_point(op["id"]).get("status") is None
+    lines = open(os.path.join(tmp, "events.jsonl")).read().splitlines()
+    types = [json.loads(l).get("type") for l in lines]
+    assert "OperatorPromoted" not in types, (
+        "no spurious OperatorPromoted for a live-by-projection operator"
+    )
+    sdk2.close()
+
+
+def test_promotion_survives_rebuild(sdk, tmp_path):
+    """Rebuild parity (#548, review #944): promoted Points and R16-promoted
+    operators must still be live after wipe+rebuild_all from the JSONL log."""
+    import json
+    event_log = tmp_path / "events.jsonl"
+    sdk2 = TortoiseSDK(db_path=str(tmp_path / "t.db"),
+                       event_log_path=str(event_log))
+    a = _make_point(sdk2, status="draft", content="a")
+    b = _make_point(sdk2, status="draft", content="b")
+    op = _make_draft_operator(sdk2, "NAND", [a["id"], b["id"]])
+    sdk2.promote_point(a["id"])
+    sdk2.promote_point(b["id"])
+    assert sdk2.get_point(op["id"])["status"] == "live"
+    sdk2.close()
+
+    proj = sdk._get_proj()
+    rebuilt = proj.rebuild_all(str(tmp_path))
+    assert rebuilt["events"] > 0
+    for pid in (a["id"], b["id"], op["id"]):
+        rows = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.status",
+            params={"id": pid},
+        ).result_set
+        assert rows and rows[0][0] == "live", (
+            f"rebuild must preserve promotion for {pid}, got {rows}"
         )

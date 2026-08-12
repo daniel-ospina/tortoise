@@ -405,3 +405,79 @@ if __name__ == "__main__":
     test_mine_derives_friction()
     test_mine_sparse_transcript()
     test_mine_preserves_point_content()
+
+
+class TestEpSafeCommitReviewFixes:
+    """#944 code-review regression tests."""
+
+    def test_null_status_operator_node_is_live_leak(self, mining_sdk):
+        """The REAL pre-#780 leak shape: operator node with NO status property
+        (create_operator writes none; projection coalesce defaults to live).
+        W-3 must flag operator_node_live — a raw 'live' SET never occurs."""
+        sdk = mining_sdk
+        proj = sdk._get_proj()
+        p1 = sdk.create_point("decision", "a", status="draft", batch_id="w2")
+        p2 = sdk.create_point("decision", "b", status="draft", batch_id="w2")
+        op = sdk.create_operator("NAND", p1["id"], [p2["id"]])
+        _set_status(sdk, p1["id"], "draft")
+        _set_status(sdk, p2["id"], "draft")
+        # NOTE: no _set_status(op) — raw status stays NULL (the leak shape)
+        assert sdk.get_point(op["id"]).get("status") is None
+        res = EpSafeCommit(proj, "w2").run([p1["id"], p2["id"]])
+        assert res["ok"] is False
+        assert res["checks"]["auto_wired"][0]["reason"] == "operator_node_live"
+
+    def test_empty_batch_fails_closed(self, mining_sdk):
+        """An all-fail extraction produces zero Points — the gate must
+        quarantine, not vacuously commit (plan J-1)."""
+        sdk = mining_sdk
+        proj = sdk._get_proj()
+        res = EpSafeCommit(proj, "empty-batch").run([])
+        assert res["ok"] is False
+        assert res["quarantined"] is True
+        assert "empty_batch" in res["reason"]
+
+    def test_committed_at_written_and_quarantined_at_cleared_on_recovery(self, mining_sdk):
+        sdk = mining_sdk
+        proj = sdk._get_proj()
+        from tortoise.mining import batch_status, quarantine_batch
+        p1 = sdk.create_point("decision", "a", status="draft", batch_id="rec1")
+        quarantine_batch(proj, "rec1", reason="EP drift (W-3)")
+        q = batch_status(proj, "rec1")
+        assert q["status"] == "quarantined"
+        assert q["quarantinedAt"] is not None
+        res = EpSafeCommit(proj, "rec1").run([p1["id"]])
+        assert res["ok"] is True and res["recovered"] is True
+        committed = batch_status(proj, "rec1")
+        assert committed["status"] == "committed"
+        assert committed["committedAt"] is not None, (
+            "committedAt must be written on commit (review #944)"
+        )
+        assert committed["quarantinedAt"] is None, (
+            "quarantinedAt is episode state — must clear on recovery"
+        )
+
+    def test_grounding_error_fails_closed(self, mining_sdk):
+        sdk = mining_sdk
+        proj = sdk._get_proj()
+        p1 = sdk.create_point("decision", "a", status="draft", batch_id="g1")
+
+        def boom():
+            raise RuntimeError("graph query failed")
+
+        res = EpSafeCommit(proj, "g1", grounding_fn=boom).run(
+            [p1["id"]], grounding_before=0.5)
+        assert res["ok"] is False
+        assert res["checks"]["grounding"]["status"] == "fail"
+
+    def test_grounding_before_required_when_fn_available(self, mining_sdk):
+        sdk = mining_sdk
+        proj = sdk._get_proj()
+        p1 = sdk.create_point("decision", "a", status="draft", batch_id="g2")
+
+        def identity():
+            return 0.5
+
+        res = EpSafeCommit(proj, "g2", grounding_fn=identity).run([p1["id"]])
+        assert res["ok"] is False
+        assert res["checks"]["grounding"]["status"] == "fail"

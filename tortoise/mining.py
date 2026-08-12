@@ -43,6 +43,12 @@ logger = logging.getLogger(__name__)
 # a quarantined batch's Points stay `draft` until re-review. State lives in a
 # `:Batch` marker node (operational metadata, like :GraphEvent — not ONTOLOGY
 # content; no new Point statuses, POINT_STATUS_VALUES unchanged).
+#
+# NOTE (review #944): :Batch state is NOT JSONL-rebuilt — rebuild_all wipes
+# marker nodes (they are not :Point nodes and no batch-state events exist),
+# so after a rebuild quarantined batches become unregistered and their Points
+# are promotable again. Tracked with the W-3 pipeline wiring follow-up; until
+# then, quarantine is an in-session safety lock, not a durable one.
 BATCH_STATUS_ACTIVE = "active"
 BATCH_STATUS_QUARANTINED = "quarantined"
 BATCH_STATUS_COMMITTED = "committed"
@@ -116,8 +122,14 @@ def _upsert_batch(proj, batch_id: str, *, status: str,
     if status == BATCH_STATUS_QUARANTINED:
         # preserve the original quarantine timestamp on re-quarantine
         sets.append("b.quarantinedAt=coalesce(b.quarantinedAt, $now)")
-    if status == BATCH_STATUS_COMMITTED and reason is None:
-        sets.append("b.reason=null")  # cleared on recovery
+    if status == BATCH_STATUS_COMMITTED:
+        sets.append("b.committedAt=$now")  # review #944: declared field was never written
+        if reason is None:
+            sets.append("b.reason=null")  # cleared on recovery
+            # quarantinedAt is EPISODE state — clear it when the batch
+            # recovers so a later re-quarantine records the NEW episode
+            # (#944 review).
+            sets.append("b.quarantinedAt=null")
     if point_count is not None:
         sets.append("b.pointCount=$pointCount")
         params["pointCount"] = point_count
@@ -1022,7 +1034,11 @@ class EpSafeCommit:
                 violations.append({"id": oid, "reason": "operator_not_found"})
                 continue
             op_status = op_rows[0][0]
-            if op_status == "live":
+            # Canonical read model (tortoise/live.py): a missing raw status is
+            # LIVE (projection coalesce default) — the pre-#780 create_operator
+            # path writes no status, so the R7 leak manifests as raw NULL
+            # (#944 review). Explicit 'draft' is the ONLY clean state.
+            if (op_status or "live") == "live":
                 violations.append({"id": oid, "reason": "operator_node_live",
                                    "status": op_status})
             # endpoints: every operator edge target must be draft
@@ -1051,15 +1067,26 @@ class EpSafeCommit:
                 "drift": None, "max_drift": self.max_grounding_drift,
             }
         if grounding_before is None:
+            # Fail closed once the Gate B helper exists: a caller that skips
+            # the pre-snapshot gets a hard gate, not a silent skip (#944
+            # review). Pre-#779 the fn is None and this branch is unreachable.
             return {
-                "status": "skipped",
-                "note": "grounding_before not provided — drift undefined",
+                "status": "fail",
+                "note": "grounding_before required when mean_grounding is available",
                 "before": None, "after": grounding_after,
                 "drift": None, "max_drift": self.max_grounding_drift,
             }
-        after = grounding_after if grounding_after is not None \
-            else self._grounding_fn()
-        drift = abs(after - grounding_before)
+        try:
+            after = grounding_after if grounding_after is not None \
+                else self._grounding_fn()
+            drift = abs(after - grounding_before)
+        except Exception as exc:  # noqa: BLE001 — fail closed on runtime error
+            return {
+                "status": "fail",
+                "note": f"grounding computation error: {exc}",
+                "before": grounding_before, "after": grounding_after,
+                "drift": None, "max_drift": self.max_grounding_drift,
+            }
         ok = drift <= self.max_grounding_drift
         return {
             "status": "pass" if ok else "fail",
@@ -1088,8 +1115,14 @@ class EpSafeCommit:
             "no_auto_wire": not auto_wired,
             "auto_wired": auto_wired,
             "grounding": grounding,
+            "non_empty": len(point_ids) > 0,
         }
         failures = []
+        if not point_ids:
+            # Fail closed: an all-fail extraction produces zero Points and
+            # must quarantine (plan J-1) — a vacuous pass would mark a
+            # nonexistent batch committed (#944 review).
+            failures.append("empty_batch")
         if non_draft:
             failures.append("points_not_draft")
         if auto_wired:
