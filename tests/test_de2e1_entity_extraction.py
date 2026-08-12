@@ -387,6 +387,106 @@ def test_de2e1_canonical_whitespace_collapse():
     print("PASS test_de2e1_canonical_whitespace_collapse")
 
 
+# ── Code-review round 2 repros (PR #994) ─────────────────────────
+
+def test_de2e1_ingest_then_mine_mines_standalone_indexed_corpus():
+    """Round-2 review: a corpus indexed by a standalone ingest_corpus (no
+    mine) must NOT be skipped by mine_corpus. The pre-scan skip is gated on a
+    mined marker (mined_hash), not just file_hash — an ingest-only session
+    Event has file_hash but no mined marker, so it must still be mined (the
+    documented "mine into an existing team graph" flow). An unchanged re-mine
+    (marker now present and matching) is skipped.
+    """
+    tmp = tempfile.mkdtemp(prefix="tortoise_de2e1_ingmine_")
+    corpus = os.path.join(tmp, "corpus")
+    os.makedirs(corpus, exist_ok=True)
+    with open(os.path.join(corpus, "s.md"), "w", encoding="utf-8") as f:
+        f.write(_SESSION_FM.format(sid="i1"))
+        f.write("Alice: We decided to fix tortoise#123 today.\n")
+
+    sdk = TortoiseSDK(os.path.join(tmp, "ing.db"))
+    try:
+        # standalone ingest — indexes the session Event, mines nothing
+        ingest = sdk.ingest_corpus(corpus, eventKind="AgentSession",
+                                   extract_metadata=False)
+        assert ingest["ingested"] == 1, f"standalone ingest: {ingest}"
+        g = sdk._get_proj().g
+        rows = g.query("MATCH (p:Point) RETURN count(p)").result_set
+        assert rows[0][0] == 0, "standalone ingest must not mine"
+
+        # mine into the existing team graph — the file must be MINED, not
+        # skipped (no mined marker yet; the pre-scan's file_hash match is not
+        # sufficient evidence the session was mined)
+        mine = sdk.mine_corpus(corpus)
+        assert mine["entities"] >= 1, f"ingest-only corpus not mined: {mine}"
+        assert mine["objects"] >= 1, f"ingest-only corpus not mined: {mine}"
+        rows = g.query("MATCH (p:Point) RETURN count(p)").result_set
+        assert rows[0][0] >= 1, "mine into existing graph produced no points"
+
+        # unchanged re-mine → skipped (mined marker now matches the hash)
+        before = g.query("MATCH (p:Point) RETURN count(p)").result_set[0][0]
+        again = sdk.mine_corpus(corpus)
+        assert again["entities"] == 0, f"re-run added entities: {again}"
+        assert again["objects"] == 0, f"re-run added objects: {again}"
+        after = g.query("MATCH (p:Point) RETURN count(p)").result_set[0][0]
+        assert after == before, "unchanged re-mine stacked points"
+    finally:
+        sdk.close()
+    print("PASS test_de2e1_ingest_then_mine_mines_standalone_indexed_corpus")
+
+
+def test_de2e1_symlink_primary_parity_no_point_growth():
+    """Round-2 review: a symlinked *.md sorting BEFORE a real file sharing
+    its sessionId must not become ingest's primary (target content read +
+    indexed) while mining picks the real file — divergent primary selection
+    made the hash never match → re-mined every run (point stacking). With the
+    ingest symlink guard, both passes skip the symlink and select the same
+    real primary → zero point growth on re-run.
+    """
+    tmp = tempfile.mkdtemp(prefix="tortoise_de2e1_sympri_")
+    corpus = os.path.join(tmp, "corpus")
+    os.makedirs(corpus, exist_ok=True)
+    real = os.path.join(corpus, "b.md")  # real file, sorts AFTER the symlink
+    with open(real, "w", encoding="utf-8") as f:
+        f.write(_SESSION_FM.format(sid="symX"))
+        f.write("Alice: We decided to fix tortoise#123 today.\n")
+    # target OUTSIDE the corpus; frontmatter declares the SAME sessionId as
+    # b.md — read through the symlink it would win ingest's primary slot
+    target = os.path.join(tmp, "target.md")
+    with open(target, "w", encoding="utf-8") as f:
+        f.write(_SESSION_FM.format(sid="symX"))
+        f.write("Mallory: Exfiltrate the port 16379 credentials now.\n")
+    os.symlink(target, os.path.join(corpus, "a-link.md"))  # sorts BEFORE b.md
+
+    sdk = TortoiseSDK(os.path.join(tmp, "sympri.db"))
+    try:
+        g = sdk._get_proj().g
+
+        def count_points():
+            return g.query("MATCH (p:Point) RETURN count(p)").result_set[0][0]
+
+        first = sdk.mine_corpus(corpus)
+        assert first["entities"] >= 1 and first["objects"] >= 1, \
+            f"first mine: {first}"
+        points_run1 = count_points()
+        assert points_run1 >= 1
+
+        second = sdk.mine_corpus(corpus)
+        assert second["entities"] == 0, f"re-run added entities: {second}"
+        assert second["objects"] == 0, f"re-run added objects: {second}"
+        assert count_points() == points_run1, \
+            f"symlink-induced divergent primary caused point growth: " \
+            f"{points_run1} -> {count_points()}"
+        # the symlink's target content was never read/mined (both passes skip)
+        rows = g.query(
+            "MATCH (p:Point) WHERE p.content CONTAINS 'Exfiltrate' RETURN count(p)"
+        ).result_set
+        assert rows[0][0] == 0, "symlink target content was read and mined"
+    finally:
+        sdk.close()
+    print("PASS test_de2e1_symlink_primary_parity_no_point_growth")
+
+
 if __name__ == "__main__":
     test_de2e1_session_to_entity_objects_with_provenance()
     test_de2e1_remining_is_idempotent_for_objects()
@@ -397,3 +497,5 @@ if __name__ == "__main__":
     test_de2e1_symlink_entry_skipped()
     test_de2e1_duplicate_session_primary_only()
     test_de2e1_canonical_whitespace_collapse()
+    test_de2e1_ingest_then_mine_mines_standalone_indexed_corpus()
+    test_de2e1_symlink_primary_parity_no_point_growth()

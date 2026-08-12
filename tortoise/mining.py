@@ -584,7 +584,11 @@ def mine_corpus_with_sdk(
     COMPOSES the SDK's ingest_corpus (security, resume, file_hash — R17): the
     directory is validated and files ingested (AgentSession event index) by
     the shared machinery; this pass then mines every file whose content hash
-    does not already match its indexed Event (file_hash skip — DE2E-N8).
+    does not already match its indexed Event AND whose session Event carries
+    a mined marker for that exact hash (mined_hash skip — DE2E-N8, round-2
+    review: file_hash alone conflates "indexed by ingest" with "already
+    mined", so a corpus indexed by a standalone ingest_corpus was never
+    mined).
 
     R17 / review hardening (in addition to ingest's own gate):
     - the directory security validation (ingest_dir_is_safe) runs BEFORE any
@@ -626,11 +630,18 @@ def mine_corpus_with_sdk(
             f"TORTOISE_INGEST_BASE_DIR when set ({ingest_base or '<unset>'})."
         )
 
-    # ── Pre-ingest scan: capture which files are ALREADY indexed with the
-    # CURRENT content hash (unchanged re-run / duplicate session file,
-    # DE2E-N8). Must run BEFORE ingest_corpus so first-run files are not
-    # mistaken for already-indexed. Symlinks are skipped (R17); duplicate
-    # sessionIds are deduped to one primary per sessionId (#280 parity). ──
+    # ── Pre-ingest scan: capture which files are ALREADY indexed AND mined
+    # with the CURRENT content hash (unchanged re-run / duplicate session
+    # file, DE2E-N8). Must run BEFORE ingest_corpus so first-run files are
+    # not mistaken for already-indexed. The skip requires BOTH the session
+    # Event's file_hash AND its mined_hash (stamped after a successful mine
+    # below) to equal the current content hash — ingest_corpus always
+    # creates/updates the session Event (file_hash set) INCLUDING on the
+    # first mine, so a file_hash-only match would silently skip a corpus
+    # that a standalone ingest_corpus indexed but never mined (the
+    # documented "mine into an existing team graph" flow no-ops; round-2
+    # review). Symlinks are skipped (R17); duplicate sessionIds are deduped
+    # to one primary per sessionId (#280 parity). ──
     from .session_indexer import _FM_RE
     proj = sdk._get_proj()
     errors: list[dict] = []
@@ -683,10 +694,15 @@ def mine_corpus_with_sdk(
         _primary_sessions.setdefault(session_id, rel)
         file_hash = _hashlib.sha256(text.encode()).hexdigest()
         rows = proj.g.query(
-            "MATCH (e:Event {eventId:$eid}) RETURN e.file_hash",
+            "MATCH (e:Event {eventId:$eid}) RETURN e.file_hash, e.mined_hash",
             params={"eid": f"session_{session_id}"},
         ).result_set
-        if rows and rows[0] and rows[0][0] == file_hash:
+        # Round-2 review: skip only when the session was BOTH indexed at this
+        # content hash AND actually mined at this content hash. A session
+        # Event created by a standalone ingest_corpus has file_hash but no
+        # mined_hash — it must still be mined (missing marker -> re-mine).
+        if (rows and rows[0] and rows[0][0] == file_hash
+                and rows[0][1] == file_hash):
             pre_indexed.add(rel)
         files.append(fp)
 
@@ -746,6 +762,20 @@ def mine_corpus_with_sdk(
             drafts += res["drafts"]
         except Exception as e:
             errors.append({"file": rel, "error": str(e), "retryable": True})
+            continue
+        # Round-2 review: stamp a mined marker on the session Event (content
+        # hash actually mined) so the next run's pre-scan can skip an
+        # unchanged re-mine while still mining ingest-only sessions. The
+        # marker is only stamped on SUCCESS — a failed/retried file keeps its
+        # stale-or-absent marker and is re-mined next run. `MATCH` is a no-op
+        # if ingest never created the session Event (e.g. lock-held skip).
+        proj.g.query(
+            "MATCH (e:Event {eventId:$eid}) SET e.mined_hash = $h, "
+            "e.mined_at = $t",
+            params={"eid": f"session_{session_id}",
+                    "h": _hashlib.sha256(text.encode()).hexdigest(),
+                    "t": _now()},
+        )
 
     # failed = union of per-file failures across both passes (a file that
     # fails ingest AND mining is counted once)

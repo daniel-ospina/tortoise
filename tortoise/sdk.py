@@ -3964,6 +3964,22 @@ class TortoiseSDK:
                 skipped += 1
                 continue
 
+            if eventKind == "AgentSession" and filepath.is_symlink():
+                # R17 parity with mining.py's pre-scan: a symlinked *.md is
+                # never read (host-file read + LLM exfiltration when
+                # extract_metadata/llm_model is set) and never participates in
+                # primary-session selection — otherwise a symlink sorting
+                # before a real file sharing its sessionId becomes ingest's
+                # primary (target content read+indexed) while mining picks the
+                # real file → hash never matches → re-mined every run (point
+                # stacking; round-2 review).
+                skipped += 1
+                errors.append({"file": rel_path,
+                               "error": "symlinked file skipped (R17: the corpus "
+                                         "walk must not follow symlinks)",
+                               "retryable": False})
+                continue
+
             try:
                 text = filepath.read_text(encoding="utf-8")
             except Exception as e:
