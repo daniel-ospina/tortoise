@@ -434,3 +434,34 @@ jobs:
             exit 1
           fi
           echo "docs-consistency guard OK"
+
+  # Whole-registry compile gate for pack manifests (epic #909, R-16).
+  # Every pack PR must load the ENTIRE registry (all packs/*/manifest.yaml)
+  # with zero validation errors — a broken manifest must fail CI at PR time,
+  # not the shared registry at runtime. Runs on every PR (cheap: seconds).
+  packs-compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'   # pyproject requires-python >= 3.12
+      - name: Install package
+        run: pip install -e .
+      - name: Whole-registry compile (all packs, zero validation errors)
+        run: |
+          python - <<'EOF'
+          from pathlib import Path
+          from tortoise.pack_registry import PackRegistry
+
+          registry = PackRegistry(Path("packs"))
+          loaded = registry.load_all()
+          if registry.errors:
+              for ns, errs in sorted(registry.errors.items()):
+                  for err in errs:
+                      print(f"ERROR [{ns}]: {err}")
+              raise SystemExit(
+                  f"packs-compile FAILED: {len(registry.errors)} pack(s) with validation errors"
+              )
+          print(f"packs-compile OK: {loaded} packs loaded, 0 validation errors")
+          EOF
