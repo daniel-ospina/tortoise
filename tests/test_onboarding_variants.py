@@ -196,8 +196,11 @@ def test_welcome_harness_configs_are_optimal():
     # .mcp.json alternative pins type:http (whitespace-tolerant)
     assert re.search(r'"type"\s*:\s*"http"', html), \
         "claude .mcp.json alternative must pin type:http"
-    # Codex: CLI + env export (URL composed via the MCP_URL constant)
-    assert 'const MCP_URL = "https://api.premiselabs.co/mcp"' in html
+    # Codex: CLI + env export (URL composed via the MCP_URL constant).
+    # Trailing slash is load-bearing: POST /mcp 307-redirects with a
+    # scheme-downgraded Location; some stacks convert the follow-up
+    # http→https 301 POST→GET and miss the JSON-RPC endpoint (epic #529 E2E).
+    assert 'const MCP_URL = "https://api.premiselabs.co/mcp/"' in html
     for frag in ("codex mcp add tortoise --url",
                  "--bearer-token-env-var TORTOISE_API_KEY",
                  "export TORTOISE_API_KEY="):
@@ -215,12 +218,12 @@ def test_welcome_harness_configs_are_optimal():
     # Cursor canonical JSON: shape + env expansion
     cursor_cfg = _extract_marker_json(html, "cursor")
     tortoise = cursor_cfg["mcpServers"]["tortoise"]
-    assert tortoise["url"] == "https://api.premiselabs.co/mcp"
+    assert tortoise["url"] == "https://api.premiselabs.co/mcp/"  # trailing slash load-bearing
     assert tortoise["headers"]["Authorization"] == "Bearer ${env:TORTOISE_API_KEY}"
     # Pi canonical JSON: shape + env expansion
     pi_cfg = _extract_marker_json(html, "pi")
     tortoise = pi_cfg["mcpServers"]["tortoise"]
-    assert tortoise["url"] == "https://api.premiselabs.co/mcp"
+    assert tortoise["url"] == "https://api.premiselabs.co/mcp/"  # trailing slash load-bearing
     assert tortoise["headers"]["Authorization"] == "Bearer ${TORTOISE_API_KEY}"
     # paste-session-only labeling on the literal-key alternatives
     assert html.count("paste-session only") >= 2, (

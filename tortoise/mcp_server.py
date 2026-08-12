@@ -456,7 +456,7 @@ def _safe(fn, *args, **kwargs):
                     "Options: (1) self-hosted authenticated MCP — run "
                     "'tortoise serve --http' (tenant mode; bootstrap a key with "
                     "'tortoise key create'); (2) hosted — point your MCP client "
-                    "at https://api.premiselabs.co/mcp with 'Authorization: "
+                    "at https://api.premiselabs.co/mcp/ with 'Authorization: "
                     "Bearer <tt_key>'; (3) local stdio dev mode — unset "
                     "TORTOISE_API_KEY."
                 )

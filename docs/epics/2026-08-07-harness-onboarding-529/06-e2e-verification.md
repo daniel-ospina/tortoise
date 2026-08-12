@@ -24,9 +24,9 @@ aboutObjects: tortoise
 | `tortoise_health` | **PASS** | tools/call → structured result (status field reports `degraded/no_sdk_registered` — health-surface reporting artifact in HTTP mode; call itself succeeded) |
 | `tortoise_create_point` → **first memory** | **PASS** | tools/call → `{"id":"19ff459d2a0-32b82f250cd2","content":"E2E first memory — epic #529 automated server-side leg (Pi variant tenant)","pointKind":"decision",…}` |
 | Read-back by ID (persistence) | **PASS** | `tortoise_get(type="point", id="19ff459d2a0-32b82f250cd2")` returned the same point — UUID-shaped ID grep PASS |
-| pi client end-to-end connect (`mcp__tortoise__*` tools in a pi session) | **BLOCKED → FIXED, awaits deploy** | mcp-client v1.29.0 failed: its GET listener (Accept: text/event-stream) received the `/mcp` JSON self-test body and aborted on JSON-RPC parse (`unrecognized_keys: status/protocol/transport/endpoint`). Root cause: server GET answered 200 JSON to SSE-accepting GETs. Fix in this PR: GET returns **405** when Accept includes `text/event-stream` (MCP Streamable HTTP spec answer for no-SSE servers; SDKs continue without notifications); plain GETs keep the JSON self-test. Regression test: `tests/test_mcp_http.py::TestGetMetadata::test_get_sse_accept_returns_405_not_json`. **Re-run this leg after PR #977 merges + deploy-hosted runs.** |
+| pi client end-to-end connect (`mcp__tortoise__*` tools in a pi session) | **PASS (post-deploy, two fixes)** | Attempt 1 (post-#977 deploy) still failed — instrumented SDK probe exposed a second chain: POST /mcp → 307 with scheme-downgraded Location (http://) → Fly http→https 301 → fetch-spec POST→GET conversion → GET /mcp/ → 405. Fixed by trailing-slash URLs everywhere (PR #984). Attempt 2 with slash URL: `[mcp-client] Resolved .mcp.json: /private/tmp/e2e-529-pi/.mcp.json` → `Connected to 'tortoise' (1329ms)` → `Connected to 1/1 servers`; HEALTH ok; CREATE → point `19ff4c3589e-3b269a98833c`; READBACK by id returned identical content/kind; `EVIDENCE: 19ff4c3589e-3b269a98833c` grep PASS. Variant artifacts used verbatim: Block A `.mcp.json` (env indirection, no literal key) + staged `onboarding/pi.md` as AGENTS.md |
 
-**Verdict:** variant artifacts + server-side first-memory legs PASS; the final pi-session connect leg is pending deploy of the GET-405 fix (discovered BY this test — exactly the failure mode the "tested paste path" indicator exists to catch).
+**Verdict:** ALL T8 legs PASS (after two server-side compatibility fixes discovered BY this test — exactly the failure mode the "tested paste path" indicator exists to catch). E2E-5 (Pi variant, scope): landing artifact → `.mcp.json` + AGENTS.md drop-in → automated pi session → first memory + read-back. No human required.
 
 ## T9 — Claude Code / Codex CLI config legs (scope E2E-2/E2E-3)
 
@@ -62,9 +62,10 @@ aboutObjects: tortoise
 
 Pending: `https://premiselabs.co/onboarding/{claude-code,codex,cursor,pi}.md` + `/onboarding-prompt.md` → expect 200 ×5, each variant body ends with the canonical body; fallback negative leg (404 a variant URL in devtools → Block B renders canonical prompt).
 
-Also post-deploy: (a) re-run the T8 pi-session connect leg (needs the GET-405 fix live); (b) tighten tests/e2e/test_welcome_page.py's four dual-shape assertions to new-shape-only (transition comments mark them).
+Also post-deploy: (a) ~~re-run the T8 pi-session connect leg~~ DONE — see T8 row (PASS after GET-405 + trailing-slash fixes); (b) tighten tests/e2e/test_welcome_page.py's four dual-shape assertions to new-shape-only (transition comments mark them).
 
 ## Environment notes (for reproducibility)
 
 - `hosted_api` TestClient suites hang on this machine (pre-existing: unchanged `tests/test_onboarding_endpoints.py` reproduces; congested redislite environment from the parallel swarm). CI is the venue for T5–T7.
 - Claude/Codex CLIs: cmux shims only — real binaries not installed.
+- MCP URL trailing slash is load-bearing: POST /mcp 307-redirects with a scheme-downgraded Location (http://) behind the proxy; some HTTP stacks (Node fetch observed) convert the follow-up http→https 301 POST→GET and land on the GET metadata route instead of JSON-RPC. All Block A URLs ship with the trailing slash (follow-up fix PR); server-side proxy-headers/redirect hardening filed separately.
