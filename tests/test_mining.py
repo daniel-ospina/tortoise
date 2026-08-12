@@ -250,7 +250,10 @@ class TestQuarantineBatch:
         p = sdk.create_point("decision", "a", status="draft", batch_id="qb1")
         ok = sdk.create_point("decision", "b", status="draft", batch_id="ok1")
         quarantine_batch(proj, "qb1", reason="drift")
-        EpSafeCommit(proj, "ok1").run([ok["id"]])  # clean batch commits
+        # #779 integration: supply an unchanged grounding snapshot.
+        EpSafeCommit(proj, "ok1").run([ok["id"]],
+                                      grounding_before=0.5,
+                                      grounding_after=0.5)
         assert sdk.get_point(p["id"])["status"] == "draft"
         assert [b["batch_id"] for b in list_quarantined(proj)] == ["qb1"]
 
@@ -341,9 +344,13 @@ class TestEpSafeCommit:
         _set_status(sdk, p1["id"], "draft")
         _set_status(sdk, p2["id"], "draft")
         _set_status(sdk, op["id"], "draft")
-        res = EpSafeCommit(proj, "c2").run([p1["id"], p2["id"]])
+        # #779 landed: mean_grounding is live — supply an unchanged snapshot.
+        res = EpSafeCommit(proj, "c2").run([p1["id"], p2["id"]],
+                                           grounding_before=0.5,
+                                           grounding_after=0.5)
         assert res["ok"] is True
         assert res["checks"]["no_auto_wire"] is True
+        assert res["checks"]["grounding"]["status"] == "pass"
 
     def test_grounding_drift_over_2pct_quarantines(self, mining_sdk):
         sdk = mining_sdk
@@ -357,16 +364,33 @@ class TestEpSafeCommit:
         assert res["checks"]["grounding"]["drift"] == pytest.approx(0.05)
         assert res["reason"].startswith("W-3 failed: grounding_drift")
 
-    def test_grounding_gate_skipped_when_unavailable(self, mining_sdk):
-        # Pre-#779 seam: mean_grounding() not yet in tortoise.analyze — the
-        # gate is recorded as skipped (structural checks stay hard gates).
+    def test_grounding_gate_skip_branch_unit(self, mining_sdk):
+        """#779 landed: the DEFAULT grounding_fn resolves mean_grounding, so
+        the skip branch is reachable only via a directly-constructed
+        EpSafeCommit with an explicitly-None fn (unit-level check)."""
         sdk = mining_sdk
         proj = sdk._get_proj()
-        p = sdk.create_point("decision", "a", status="draft", batch_id="s1")
-        res = EpSafeCommit(proj, "s1").run([p["id"]])
-        assert res["ok"] is True
-        assert res["checks"]["grounding"]["status"] == "skipped"
-        assert "#779" in res["checks"]["grounding"]["note"]
+        gate = EpSafeCommit(proj, "s1")
+        gate._grounding_fn = None  # pre-#779 era seam, unit-level
+        check = gate._grounding_check(None, None)
+        assert check["status"] == "skipped"
+        assert "#779" in check["note"]
+
+    def test_grounding_gate_active_with_default_fn_requires_snapshot(self, mining_sdk):
+        """#779 landed: the DEFAULT grounding_fn resolves mean_grounding —
+        the gate is active and fails closed without a pre-snapshot."""
+        sdk = mining_sdk
+        proj = sdk._get_proj()
+        p = sdk.create_point("decision", "a", status="draft", batch_id="s2")
+        res = EpSafeCommit(proj, "s2").run([p["id"]])
+        assert res["ok"] is False
+        assert res["checks"]["grounding"]["status"] == "fail"
+        assert "grounding_before" in res["checks"]["grounding"]["note"]
+        # With an unchanged snapshot the batch commits.
+        res2 = EpSafeCommit(proj, "s2").run([p["id"]],
+                                            grounding_before=0.5,
+                                            grounding_after=0.5)
+        assert res2["ok"] is True
 
     def test_recovery_rerun_pass_unquarantines(self, mining_sdk):
         sdk = mining_sdk
@@ -446,7 +470,9 @@ class TestEpSafeCommitReviewFixes:
         q = batch_status(proj, "rec1")
         assert q["status"] == "quarantined"
         assert q["quarantinedAt"] is not None
-        res = EpSafeCommit(proj, "rec1").run([p1["id"]])
+        res = EpSafeCommit(proj, "rec1").run([p1["id"]],
+                                           grounding_before=0.5,
+                                           grounding_after=0.5)
         assert res["ok"] is True and res["recovered"] is True
         committed = batch_status(proj, "rec1")
         assert committed["status"] == "committed"
