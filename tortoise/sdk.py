@@ -7293,3 +7293,70 @@ class TortoiseSDK:
         report["point_count"] = r.result_set[0][0]
 
         return report
+
+    # ── Gate B Calibration Milestone (epic-264 #779) ───────────────
+
+    _CALIBRATION_MARKER_KEY = "calibration_milestone"
+
+    def record_calibration(self, *, precision: float | None = None,
+                           sample_size: int | None = None,
+                           mean_grounding_delta: float | None = None,
+                           notes: str | None = None) -> dict:
+        """Record the Gate B calibration milestone as a persisted :Meta marker.
+
+        Persists a ``:Meta {key: 'calibration_milestone'}`` node in the graph
+        DB (the ``event_fts_v2`` marker pattern, projection/__init__.py) so the
+        marker survives restarts and is visible to any SDK instance on the
+        same DB. ``calibration_passed()`` reads it.
+
+        The 50-session calibration RUN with ≥70% human-reviewed precision is
+        an ops follow-up (issue #779) — this writer exists so the milestone
+        can be recorded when that run completes. A ``CalibrationRecorded``
+        event is emitted when an event log is configured (#548 best-effort).
+
+        Args:
+            precision: measured extraction precision in [0, 1] (≥0.70 target).
+            sample_size: sessions in the human-reviewed sample (> 0).
+            mean_grounding_delta: measured pre/post drift (≤ 0.02 target).
+            notes: free-form ops documentation (e.g. reviewer count, corpus).
+
+        Returns:
+            The stored marker properties (key + recordedAt + given fields).
+        """
+        if precision is not None and not 0.0 <= precision <= 1.0:
+            raise ValueError(f"precision must be in [0, 1], got {precision}")
+        if sample_size is not None and sample_size <= 0:
+            raise ValueError(f"sample_size must be positive, got {sample_size}")
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        proj = self._get_proj()
+        props: dict[str, Any] = {"recordedAt": now}
+        if precision is not None:
+            props["precision"] = precision
+        if sample_size is not None:
+            props["sample_size"] = sample_size
+        if mean_grounding_delta is not None:
+            props["mean_grounding_delta"] = mean_grounding_delta
+        if notes is not None:
+            props["notes"] = notes
+        proj.g.query(
+            "MERGE (m:Meta {key:$key}) SET m += $props RETURN m",
+            params={"key": self._CALIBRATION_MARKER_KEY, "props": props},
+        )
+        self._emit_event("CalibrationRecorded",
+                         id=self._CALIBRATION_MARKER_KEY, **props)
+        return {"key": self._CALIBRATION_MARKER_KEY, **props}
+
+    def calibration_passed(self) -> bool:
+        """True once the Gate B calibration milestone marker is stored.
+
+        Local SDK contract (DE2E-7, epic-264 §6.3): no GitHub dependency —
+        the workflow-layer ``check_gates`` helper composes this with #320's
+        state. #787 re-uses this reader; it does NOT re-implement it.
+        """
+        proj = self._get_proj()
+        rows = proj.g.query(
+            "MATCH (m:Meta {key:$key}) RETURN m.recordedAt",
+            params={"key": self._CALIBRATION_MARKER_KEY},
+        ).result_set
+        return bool(rows)
