@@ -787,6 +787,27 @@ def _harness_mcp_config(harness: str, api_key: str, api_url: str) -> dict:
     return {"mcpServers": {"tortoise": server}}
 
 
+def _harness_stdio_config(harness: str) -> dict:
+    """Stdio MCP config for one harness (self-hosted) — mirrors website/self-hosted.html (#529).
+
+    Shapes:
+    - claude / pi: {"command", "args", "env"} — neither client requires `type`
+    - cursor: same but WITH `type: "stdio"` — Cursor docs mark `type` required
+      for stdio servers (remote url-based servers must NOT have it)
+    - codex: shell command — Codex manages its own config (no file to write)
+    """
+    if harness == "codex":
+        return {"command": "codex mcp add tortoise -- python3 -m tortoise.mcp_server"}
+    server: dict = {
+        "command": "python3",
+        "args": ["-m", "tortoise.mcp_server"],
+        "env": {"TORTOISE_DB_URI": "docker://localhost:6379"},
+    }
+    if harness == "cursor":
+        server = {"type": "stdio", **server}
+    return {"mcpServers": {"tortoise": server}}
+
+
 def _harness_label(harness: str) -> str:
     return {"claude": "Claude Code", "codex": "Codex", "cursor": "Cursor", "pi": "Pi"}.get(harness, harness)
 
@@ -1998,34 +2019,41 @@ def _cmd_setup(args) -> int:
 
 
 def _print_harness_instructions(harness: str) -> None:
-    """Print harness-specific setup instructions."""
+    """Print harness-specific setup instructions (self-hosted stdio, #529).
+
+    Uses the canonical _harness_stdio_config() shapes — cursor includes
+    `type: "stdio"` (Cursor docs require it), codex uses `codex mcp add`.
+    """
+    import json as _json
+
     if harness == "pi" or harness == "multiple":
         print()
         print("Pi:")
         print("  ✅ tortoise-context extension auto-injects context when you mention issues.")
         print("  Run /reload in Pi to activate.")
         print("  Or call tortoise_help() anytime.")
+        print("  Add tortoise MCP to your .mcp.json:")
+        print("    " + _json.dumps(_harness_stdio_config("pi"), indent=4).replace("\n", "\n    "))
     if harness == "claude" or harness == "multiple":
         print()
         print("Claude Code:")
         print("  Add tortoise MCP to your .mcp.json:")
-        print('    {"tortoise": {"command": "python3", "args": ["-m", "tortoise.mcp_server"]}}')
+        print("    " + _json.dumps(_harness_stdio_config("claude"), indent=4).replace("\n", "\n    "))
         print("  Claude Code will auto-discover MCP tools on restart.")
         print("  Optional: add .claude/hooks/session-start.sh for auto-injection.")
         print("    cp tortoise/claude-hooks/session-start.sh .claude/hooks/session-start.sh")
     if harness == "codex" or harness == "multiple":
         print()
         print("Codex:")
-        print("  Add tortoise MCP to ~/.codex/config.toml:")
-        print("    [mcp_servers.tortoise]")
-        print('    command = "python3"')
-        print('    args = ["-m", "tortoise.mcp_server"]')
+        print("  Add tortoise MCP (Codex manages its own config):")
+        print("    " + _harness_stdio_config("codex")["command"])
         print("  AGENTS.md is auto-loaded by Codex — Tortoise instructions are already there.")
         print("  autoRecall will pick up Tortoise Points automatically.")
     if harness == "cursor" or harness == "multiple":
         print()
         print("Cursor:")
-        print("  Add tortoise MCP to your .mcp.json (same format as Pi/Claude Code).")
+        print("  Add tortoise MCP to your .mcp.json (type: stdio is required):")
+        print("    " + _json.dumps(_harness_stdio_config("cursor"), indent=4).replace("\n", "\n    "))
         print("  Create .cursor/rules/tortoise.mdc with agent instructions:")
         print("    When working on issues, call mcp__tortoise__tortoise_suggest_entry_points()")
         print("    to find related context. File decisions with tortoise_create_point().")
