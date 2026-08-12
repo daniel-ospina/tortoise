@@ -664,6 +664,16 @@ you up to 6 yes/no questions and set up your Tortoise memory.
       }
       const session = await waitForSession(SESSION_WAIT_MS);
 
+      // #863 (review P2): re-check recoveryMode AFTER the await — the
+      // PASSWORD_RECOVERY event fires asynchronously during supabase-js
+      // init, i.e. while this poll is suspended. Without this second check
+      // the event-driven fallback path would still run revealKeyOnce /
+      // provisionViaEdgeFunction mid-password-reset.
+      if (recoveryMode) {
+        showResetPanel();
+        return;
+      }
+
       if (!session) {
         showError("No active session. Please sign up first — or if you just clicked a confirmation link, refresh this page in a few seconds.");
         return;
@@ -702,6 +712,7 @@ you up to 6 yes/no questions and set up your Tortoise memory.
         }
 
         if (data && data.status === "active" && data.team_id) {
+          if (recoveryMode) { showResetPanel(); return; }
           await revealKeyOnce(userId, data);
           return;
         }
@@ -714,6 +725,7 @@ you up to 6 yes/no questions and set up your Tortoise memory.
       // the membership query came back empty, so a team is never minted
       // twice for the same user (the function would mint a NEW team per
       // call — the page must not re-provision once a team exists).
+      if (recoveryMode) { showResetPanel(); return; }
       await provisionViaEdgeFunction(session, userId, activeMembershipQuery);
     }
 
@@ -1008,6 +1020,12 @@ tortoise create-point "Hello world" --kind statement`;
         document.getElementById("reset-error").classList.add("hidden");
         document.getElementById("reset-success-text").textContent = "Password updated — sign in with your new password.";
         document.getElementById("reset-success").classList.remove("hidden");
+      } catch (err) {
+        // #863 (review P2): network failures throw out of updateUser — the
+        // {error} contract only covers API responses. Never leave the user
+        // with a silently re-enabled button and no feedback.
+        console.error("resetPassword:", err);
+        resetShowError("Something went wrong. Please try again — or request a new reset link.");
       } finally {
         resetInFlight = false;
       }

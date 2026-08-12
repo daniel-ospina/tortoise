@@ -780,8 +780,12 @@
         setLoading(false);
         applyRateLimitLockout();   // re-apply the lockout state (#863)
         // P4: signInWithProvider's clearError() wiped the lockout explanation
-        // — restore it when a lockout is still active.
-        if (rateLimitRemainingMs() > 0) showError(rateLimitMessage());
+        // — restore it when a lockout is still active. But never overwrite an
+        // error this attempt already surfaced (validation, auth, network —
+        // #863 review P2: the lockout copy must not mask a real message).
+        const errEl = document.getElementById("error");
+        const errVisible = errEl && errEl.classList.contains("visible");
+        if (rateLimitRemainingMs() > 0 && !errVisible) showError(rateLimitMessage());
       }
     }
 
@@ -827,7 +831,12 @@
       } finally {
         setLoading(false);
         applyRateLimitLockout();   // re-apply tier gating AFTER setLoading re-enables buttons
-        if (rateLimitRemainingMs() > 0) showError(rateLimitMessage());
+        // #863 review P2: only restore the lockout copy when this attempt
+        // surfaced no error of its own (validation / auth / network) — the
+        // lockout message must not mask the real message.
+        const errEl = document.getElementById("error");
+        const errVisible = errEl && errEl.classList.contains("visible");
+        if (rateLimitRemainingMs() > 0 && !errVisible) showError(rateLimitMessage());
       }
     }
   </script>
