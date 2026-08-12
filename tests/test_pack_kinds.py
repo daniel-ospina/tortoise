@@ -1007,3 +1007,59 @@ class TestWorkedExampleV3Fixture:
         assert not ps.is_active_for("github_issue")
         # equivalence resolved: requirement ≡ dev:requirement
         assert "dev:requirement" in registry.expand_kind("product-strategy:requirement")
+
+
+# ── Review fixes (PR #978): load_all idempotence + dangling-ref fixpoint ──
+
+def test_load_all_reentry_is_idempotent(tmp_path):
+    """A second load_all() on the same registry must not wipe healthy packs
+    (review P1: the isolation drop loop used to accumulate stale errors)."""
+    from tortoise import pack_registry as pr
+    reg = pr.PackRegistry(tmp_path)
+    # Two healthy packs + one broken pack.
+    for ns in ("alpha", "beta"):
+        d = tmp_path / ns
+        d.mkdir()
+        (d / "manifest.yaml").write_text(
+            f"namespace: {ns}\nname: {ns}\nversion: 0.1.0\ntier: free\n"
+            "ontology:\n  extends: core\n  objectKinds: [thing]\n")
+    broken = tmp_path / "broken"
+    broken.mkdir()
+    (broken / "manifest.yaml").write_text(
+        "namespace: broken\nname: broken\nversion: 0.1.0\ntier: free\n"
+        "ontology:\n  extends: core\n  objectKinds: [thing]\n  kindDefs:\n"
+        "    thing:\n      storeAs: bogus\n")
+    n1 = reg.load_all()
+    assert n1 == 2, f"first load: expected 2 healthy, got {n1}"
+    assert "alpha" in reg.packs and "beta" in reg.packs
+    assert "broken" not in reg.packs and "broken" in reg.errors
+    n2 = reg.load_all()
+    assert n2 == 2, f"re-entry: expected 2 healthy again, got {n2} (registry wiped?)"
+    assert "alpha" in reg.packs and "beta" in reg.packs
+
+
+def test_dangling_cross_pack_ref_after_drop(tmp_path):
+    """A pack referencing a dropped pack must also be excluded (fixpoint,
+    review P2)."""
+    from tortoise import pack_registry as pr
+    reg = pr.PackRegistry(tmp_path)
+    bad = tmp_path / "badpack"
+    bad.mkdir()
+    (bad / "manifest.yaml").write_text(
+        "namespace: badpack\nname: badpack\nversion: 0.1.0\ntier: free\n"
+        "ontology:\n  extends: core\n  objectKinds: [gadget]\n  relations:\n"
+        "    - predicate: contains\n      mechanism: IMPL\n      fromKind: badpack:gadget\n"
+        "      toKind: ghost:thing\n")
+    dependent = tmp_path / "dependent"
+    dependent.mkdir()
+    (dependent / "manifest.yaml").write_text(
+        "namespace: dependent\nname: dependent\nversion: 0.1.0\ntier: free\n"
+        "ontology:\n  extends: core\n  objectKinds: [widget]\n  relations:\n"
+        "    - predicate: contains\n      mechanism: IMPL\n      fromKind: dependent:widget\n"
+        "      toKind: badpack:gadget\n")
+    n = reg.load_all()
+    # badpack fails (ghost:thing unresolvable) and is dropped; dependent's
+    # reference to badpack:gadget is then dangling -> also excluded.
+    assert n == 0, f"expected no healthy packs (badpack dropped, dependent dangling), got {n}"
+    assert "dependent" not in reg.packs
+    assert "dependent" in reg.errors

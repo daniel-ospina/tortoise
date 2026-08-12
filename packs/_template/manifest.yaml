@@ -62,8 +62,10 @@ ontology:
   #   - extractable:  bool, default true — false = registered but never minted
   #                   by extraction
   #   - storeAs:      claim|decision|entity|tag|event — default inferred from
-  #                   list placement (pointKinds → claim, objectKinds/
-  #                   documentKinds → entity, eventKinds → event)
+  #                   list placement (pointKinds → claim, with
+  #                   decision/vision/strategy/plan/goal/target/humanApproval
+  #                   → decision; objectKinds/subjectKinds/documentKinds →
+  #                   entity; eventKinds → event) — review P2, PR #978
   #   - enforcement:  warn|retry|block — overrides the pack-wide default
   # Example:
   #   kindDefs:

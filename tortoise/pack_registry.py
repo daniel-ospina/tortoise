@@ -80,9 +80,8 @@ CANONICAL_KINDS = {
 # Action. Valid subclassOf parents AND expansion roots (R6 §6.2a: named
 # Document/Source/Subject/Point/Event; Object/Action included so every parent
 # the validator accepts also expands).
-CORE_ENTITY_TYPES = frozenset({
-    "Subject", "Object", "Action", "Event", "Point", "Document", "Source",
-})
+# Alias of VALID_ENTITY_TYPES (review P2, PR #978) — one source of truth.
+CORE_ENTITY_TYPES = VALID_ENTITY_TYPES
 
 # Everything a bare kind reference may resolve to without a namespace.
 CORE_KINDS = (
@@ -295,6 +294,12 @@ class PackRegistry:
         """
         if not self.packs_dir.exists():
             return 0
+        # Reset state up front (review P1, PR #978): a re-entry previously
+        # accumulated stale errors and the isolation drop loop wiped every
+        # pack that had ANY recorded error — including errors from an earlier
+        # call. Reload must be idempotent.
+        self.packs = {}
+        self.errors = {}
         count = 0
         for manifest_path in sorted(self.packs_dir.glob("*/manifest.yaml")):
             ns = manifest_path.parent.name
@@ -315,6 +320,15 @@ class PackRegistry:
         for ns in [ns for ns, pack in self.packs.items() if ns in self.errors]:
             del self.packs[ns]
             count -= 1
+        # Fixpoint (review P2, PR #978): a pack whose cross-pack references
+        # pointed at a now-dropped pack must also be excluded — re-validate
+        # against the surviving set so the compiled vocabulary never carries
+        # dangling references.
+        if self.errors:
+            self._validate_cross_pack_refs()
+            for ns in [ns for ns, pack in self.packs.items() if ns in self.errors]:
+                del self.packs[ns]
+                count -= 1
         self._build_kind_expansions()
         return count
 
@@ -541,6 +555,11 @@ class PackRegistry:
                                 f"kindDefs '{kind}': unknown key '{key}' (allowed: "
                                 f"{', '.join(sorted(VALID_KINDDEF_KEYS))})"
                             )
+                    if "description" in spec and not isinstance(spec["description"], str):
+                        errors.append(
+                            f"kindDefs '{kind}': 'description' must be a string "
+                            f"(it is prompt material for the extractor, R6 §3.1)"
+                        )
                     for list_field in ("synonyms", "examples", "nearMisses"):
                         if list_field in spec:
                             val = spec[list_field]
