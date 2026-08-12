@@ -250,3 +250,82 @@ def test_webhook_server_lifecycle():
             assert r.status == 200
     finally:
         gh.stop_webhook()
+
+
+# ── #331: webhook double-start resource leak + swallowed exceptions ──
+
+def test_webhook_start_is_idempotent():
+    """#331: starting an already-running webhook must be a no-op — the
+    second call must NOT bind a new socket (pre-fix: Address already in
+    use / orphaned first server + thread leak)."""
+    import urllib.request
+    gh = GitHubConnector(config={
+        "repo": "test/r",
+        "webhook_port": 18996,
+        "webhook_secret": "",
+    })
+    port1 = gh.start_webhook()
+    server1 = gh._server
+    port2 = gh.start_webhook()  # double-start — must be idempotent
+    assert port1 == port2
+    assert gh._server is server1, "second start must not replace the server"
+
+    # Original socket must still be serving
+    payload = json.dumps({
+        "action": "opened",
+        "issue": {"number": 2, "title": "t",
+                  "created_at": "2026-07-19T00:00:00Z",
+                  "closed_at": None, "html_url": ""},
+    }).encode()
+    req = urllib.request.Request(
+        f"http://localhost:{port1}/", data=payload,
+        headers={"Content-Type": "application/json", "X-GitHub-Event": "issues"},
+    )
+    with urllib.request.urlopen(req, timeout=5) as r:
+        assert r.status == 200
+    gh.stop_webhook()
+
+    # stop + restart must work (socket fully released)
+    port3 = gh.start_webhook()
+    assert port3 == port1
+    gh.stop_webhook()
+
+
+def test_webhook_processing_error_returns_500():
+    """#331: an exception while processing a webhook must be LOGGED and
+    answered with HTTP 500 — not silently dropped (client sees a closed
+    connection and retries blindly)."""
+    import urllib.error
+    import urllib.request
+
+    class _BoomAPI:
+        def get_proj(self):
+            raise RuntimeError("graph down")
+
+    gh = GitHubConnector(config={
+        "repo": "test/r",
+        "webhook_port": 18997,
+        "webhook_secret": "",
+    })
+    gh.api = _BoomAPI()
+    port = gh.start_webhook()
+    try:
+        payload = json.dumps({
+            "action": "opened",
+            "issue": {"number": 1, "title": "t",
+                      "created_at": "2026-07-19T00:00:00Z",
+                      "closed_at": None, "html_url": ""},
+        }).encode()
+        req = urllib.request.Request(
+            f"http://localhost:{port}/", data=payload,
+            headers={"Content-Type": "application/json", "X-GitHub-Event": "issues"},
+        )
+        try:
+            urllib.request.urlopen(req, timeout=5)
+            assert False, "expected HTTP 500"
+        except urllib.error.HTTPError as e:
+            assert e.code == 500
+        except urllib.error.URLError:
+            assert False, "handler must respond with 500, not drop the connection"
+    finally:
+        gh.stop_webhook()
