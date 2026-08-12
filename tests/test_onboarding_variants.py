@@ -128,6 +128,22 @@ def test_stage_variants_embeds_canonical_verbatim(tmp_path):
         assert separator in content, f"{harness} staged artifact missing the separator"
 
 
+def test_staged_cursor_variant_is_valid_mdc(tmp_path):
+    """T10: the staged Cursor artifact must be a valid .mdc — YAML
+    frontmatter with alwaysApply: true (structural trigger)."""
+    import subprocess as _sp
+    result = _sp.run(
+        [sys.executable, str(STAGE_SCRIPT), "--out", str(tmp_path)],
+        cwd=REPO_ROOT, capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0
+    content = (tmp_path / "onboarding" / "cursor.md").read_text(encoding="utf-8")
+    assert content.startswith("---\n"), "cursor variant must open with YAML frontmatter"
+    end = content.index("\n---\n", 4)
+    frontmatter = content[4:end]
+    assert "alwaysApply: true" in frontmatter, "frontmatter must set alwaysApply: true"
+
+
 def test_stage_variants_fails_on_missing_header(tmp_path, monkeypatch):
     """W1 failure mode: a missing/empty header must block staging (non-zero exit)."""
     missing = VARIANTS_DIR / "pi-header.md"
