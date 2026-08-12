@@ -133,6 +133,10 @@ class EventAPI:
             raise ValueError(f"unknown gate {op_type!r}")
         if inputs is None:
             raise TypeError("add_operator: inputs must be a list of point ids")
+        if isinstance(inputs, str):
+            # #331 (review r2): a bare string is a single id, never char-split
+            # (parity with merge_points).
+            inputs = [inputs]
         _inputs = []
         for x in inputs:
             if isinstance(x, dict):

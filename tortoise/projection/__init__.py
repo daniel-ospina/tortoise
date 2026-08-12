@@ -187,7 +187,9 @@ def _apply_one(points: dict[str, dict], ev: dict) -> None:
         if p:
             p["status"] = "retracted"
     elif t == "PointsMerged":
-        for mid in ev.get("merge_ids", []):
+        # #331 (review r2): `or []` also covers an explicit "merge_ids": null
+        # in the log — dict.get(key, []) only covers the missing key.
+        for mid in ev.get("merge_ids") or []:
             points.pop(mid, None)
     # IngestStarted: no graph effect
 
@@ -518,11 +520,26 @@ class FalkorProjection(
         t = ev.get("type")
         if not isinstance(t, str):
             # #331: malformed event (no/non-string 'type') — skip, don't crash.
+            # Visible at the I/O boundary: silent skips corrupt recovery
+            # accounting (recover_from_log counts "did apply raise", code-review r2).
+            logger.warning(
+                "FalkorProjection.apply: skipping malformed event with "
+                "missing/non-string 'type' (event_id=%s)", ev.get("event_id"))
             return
         if t in ("PointAdded", "OperatorAdded"):
             p = ev["point"]
             if not isinstance(p, dict):
                 # Malformed event (non-dict point) — skip, don't crash (issue #325)
+                logger.warning(
+                    "FalkorProjection.apply: skipping %s with non-dict point "
+                    "(event_id=%s)", t, ev.get("event_id"))
+                return
+            # #331 (review r2): parity with _apply_one — no id → nothing to
+            # index by; skip rather than KeyError in _upsert.
+            if not p.get("id"):
+                logger.warning(
+                    "FalkorProjection.apply: skipping %s with missing point "
+                    "id (event_id=%s)", t, ev.get("event_id"))
                 return
             # Phase 1 stop-writes: strip context from v2+ events (#49)
             if ev.get("projection_version", 0) >= 2:
@@ -534,12 +551,16 @@ class FalkorProjection(
                 ev.pop("new_context", None)
             self._revise_point(ev, set_updated_at=True)
         elif t == "PointRetracted":
-            rid = ev.get("id") or ev.get("event_id")
+            rid = ev.get("id")
             if rid is not None:
                 # #331: missing id must be skipped, not crash the handler.
+                # #331 (review r2): NO event_id fallback — an event id is not
+                # a point id, and the fallback diverged from _apply_one (the
+                # fold is the single source of truth, module contract).
                 self._retract(rid)
         elif t == "PointsMerged":
-            for mid in ev.get("merge_ids", []):
+            # #331 (review r2): `or []` also covers "merge_ids": null.
+            for mid in ev.get("merge_ids") or []:
                 self._delete(mid)
         elif t == "EventRecorded":
             self._upsert_event(ev)
@@ -674,6 +695,14 @@ class FalkorProjection(
                 if not isinstance(p, dict):
                     # Malformed event (non-dict point) — skip (issue #325)
                     continue
+                # #331 (review r2): parity with apply()/_apply_one — no id →
+                # nothing to index by; skip rather than KeyError in
+                # _upsert_point_props.
+                if not p.get("id"):
+                    logger.warning(
+                        "rebuild: skipping %s with missing point id "
+                        "(event_id=%s)", t, ev.get("event_id"))
+                    continue
                 # Phase 1 stop-writes: strip context from v2+ events (#49)
                 # (identical to apply() — parity between rebuild and apply)
                 if ev.get("projection_version", 0) >= 2:
@@ -695,7 +724,8 @@ class FalkorProjection(
                 if rid is not None:
                     self._retract(rid)
             elif t == "PointsMerged":
-                for mid in ev.get("merge_ids", []):
+                # #331 (review r2): `or []` also covers "merge_ids": null.
+                for mid in ev.get("merge_ids") or []:
                     self._delete(mid)
             elif t == "PointRevised":
                 # Phase 1: discard new_context for v2+ events (#49)

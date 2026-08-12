@@ -2530,7 +2530,7 @@ def test_retract_tombstone_hosted_list_excludes_retracted():
         proj.close()
 
 
-# ------------------------------------------------------------------ #331: missing event keys
+# ── #331: missing event keys ──
 
 def test_apply_one_missing_type_skipped():
     """#331: events without a 'type' key must not crash fold/apply."""
@@ -2599,3 +2599,53 @@ def test_falkor_apply_missing_keys_no_crash():
         assert rows[0][0] == 1
     finally:
         proj.close()
+
+
+# ── #331 (review r2): backend-parity regression tests ──
+
+def test_apply_one_merge_ids_explicit_null_no_crash():
+    """#331 (review r2): an explicit "merge_ids": null in the log must not
+    raise TypeError in the fold (dict.get(key, []) only covers missing)."""
+    points = {"p1": {"id": "p1"}}
+    _apply_one(points, {"type": "PointsMerged", "keep_id": "p9",
+                        "merge_ids": None})
+    assert points == {"p1": {"id": "p1"}}
+
+
+def test_falkor_apply_point_added_missing_id_no_crash():
+    """#331 (review r2): FalkorProjection.apply with a PointAdded whose
+    point dict has no id must skip, not KeyError in _upsert."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    proj = FalkorProjection(_tmp("tortoise.db"))
+    try:
+        proj.apply({"type": "PointAdded", "point": {"content": "no id"}})
+        proj.apply({"type": "OperatorAdded", "point": {"content": "no id"}})
+        # nothing landed
+        rows = proj.g.query("MATCH (n:Point) RETURN count(n)").result_set
+        assert rows[0][0] == 0
+        # and a valid event still lands after the skips
+        proj.apply({"type": "PointAdded",
+                    "point": {"id": "p2", "content": "y", "provenance": {}}})
+        rows = proj.g.query("MATCH (n:Point {id:'p2'}) RETURN count(n)").result_set
+        assert rows[0][0] == 1
+    finally:
+        proj.close()
+
+
+def test_falkor_apply_merge_ids_explicit_null_no_crash():
+    """#331 (review r2): explicit "merge_ids": null must not crash the
+    Falkor handler either."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    proj = FalkorProjection(_tmp("tortoise.db"))
+    try:
+        proj.apply({"type": "PointAdded",
+                    "point": {"id": "p1", "content": "x", "provenance": {}}})
+        proj.apply({"type": "PointsMerged", "keep_id": "p9",
+                    "merge_ids": None})
+        rows = proj.g.query("MATCH (n:Point {id:'p1'}) RETURN count(n)").result_set
+        assert rows[0][0] == 1  # untouched, no crash
+    finally:
+        proj.close()
+

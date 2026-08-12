@@ -130,8 +130,14 @@ def dispatch(
     # calls shutdown(wait=True), which BLOCKS until every in-flight query
     # finishes. A hung ontology query would then defeat the per-future
     # deadline entirely (timeout was fake). wait=False lets the deadline
-    # actually bound dispatch; the orphaned thread only burns until its
-    # query returns.
+    # actually bound dispatch.
+    #
+    # Known trade-off (code-review r2): a timed-out query's worker thread
+    # keeps running until the query returns — ThreadPoolExecutor workers
+    # are non-daemon and concurrent.futures' atexit hook joins them, so a
+    # query that NEVER returns delays interpreter shutdown. cancel_futures
+    # drops queued-but-unstarted work; the FalkorDB client's socket timeout
+    # (docker mode) is what bounds the running ones.
     ex = ThreadPoolExecutor(max_workers=len(ontologies))
     try:
         # Submit all futures in parallel, then wait per-future with timeout
@@ -154,7 +160,7 @@ def dispatch(
             except Exception as e:
                 errors[ont] = str(e)
     finally:
-        ex.shutdown(wait=False)
+        ex.shutdown(wait=False, cancel_futures=True)
 
     if not results and errors:
         raise OrchestratorError(errors)
@@ -191,17 +197,26 @@ def _parseNode(node: Any) -> dict:
         props["id"] = str(node.id)
         props["type"] = node.labels[0] if node.labels else "unknown"
         return props
+    # Dict-shaped node: preserve any existing keys — only fill id/type
+    # when absent (code-review r2: unconditional overwrite corrupted
+    # valid dict nodes into id='unknown').
+    if isinstance(node, dict):
+        props = dict(node)
+        props.setdefault("id", "unknown")
+        props.setdefault("type", "unknown")
+        return props
     # Raw list form: [id, [labels], [[k, v], ...]]
     props: dict[str, Any] = {}
     if (isinstance(node, (list, tuple)) and len(node) >= 3
             and isinstance(node[2], (list, tuple))):
         for pair in node[2]:
-            # Only well-formed [k, v] pairs survive; anything else is
-            # malformed and skipped (e.g. ['bad','pair','extra'], 'junk').
-            if isinstance(pair, (list, tuple)) and len(pair) == 2:
+            # Only well-formed [k, v] pairs with a hashable key survive;
+            # anything else is malformed and skipped (e.g.
+            # ['bad','pair','extra'], 'junk', [[...], v] — code-review r2:
+            # an unhashable key raised TypeError mid-dispatch).
+            if (isinstance(pair, (list, tuple)) and len(pair) == 2
+                    and isinstance(pair[0], (str, int, float, bool))):
                 props[pair[0]] = pair[1]
-    elif isinstance(node, dict):
-        props = dict(node)
     node_id = (node[0] if isinstance(node, (list, tuple)) and len(node) >= 1
                else None)
     labels = (node[1] if isinstance(node, (list, tuple)) and len(node) >= 2

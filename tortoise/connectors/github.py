@@ -302,8 +302,18 @@ class GitHubConnector:
         # #331: double-start must be a no-op — a second HTTPServer on the
         # same port raises Address already in use and orphans the first
         # server + its thread (socket + thread leak).
+        # #331 (review r2): a DEAD serve_forever thread is not a running
+        # server — close its stale socket so the re-bind below succeeds
+        # (previously: silent no-op with nothing serving).
         if self._server is not None:
-            return self.webhook_port
+            if self._thread is not None and self._thread.is_alive():
+                return self.webhook_port
+            try:
+                self._server.server_close()
+            except OSError:
+                pass
+            self._server = None
+            self._thread = None
 
         secret = self.webhook_secret.encode() if self.webhook_secret else None
         connector = self  # capture for handler closure

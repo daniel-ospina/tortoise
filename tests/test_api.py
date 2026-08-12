@@ -514,3 +514,18 @@ def test_add_operator_rejects_non_string_op_type():
         except ValueError as e:
             assert "gate" in str(e)
     print("PASS test_add_operator_rejects_non_string_op_type")
+
+def test_add_operator_single_string_input_not_char_split():
+    """#331 (review r2): a bare string inputs arg is ONE point id, never
+    char-split (parity with merge_points)."""
+    api, log = _api()
+    prov = provenance("doc.txt", [0, 1], "x", extracted_by="test@0")
+    a = api.add_point("point a", prov)
+    b = api.add_point("point b", prov)
+    api.add_operator("IMPL", a, prov)  # bare string, not [a]
+    events = [e for e in log.read_all() if e["type"] == "OperatorAdded"]
+    assert len(events) == 1
+    op = events[0]["point"]["operator"]
+    assert op["inputs"] == [a], f"bare string was char-split: {op['inputs']!r}"
+    print("PASS test_add_operator_single_string_input_not_char_split")
+

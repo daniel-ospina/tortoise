@@ -648,3 +648,31 @@ def test_parse_node_partial_properties_tolerated():
     assert result["type"] == "Point"
     assert result["content"] == "ok"
     print("✓ _parseNode partial properties")
+
+def test_parse_node_unhashable_property_key_no_crash():
+    """#331 (review r2): a property pair with an unhashable key (e.g.
+    [["k"], "v"]) must be skipped, not raise TypeError mid-dispatch."""
+    from tortoise.memory_orchestrator import _parseNode
+    node = [9, ["Point"], [[["k"], "v"], ["content", "ok"]]]
+    result = _parseNode(node)
+    assert result["id"] == "9"
+    assert result["type"] == "Point"
+    assert result["content"] == "ok"
+    assert len(result) == 3  # id, type, content — junk pair dropped
+    print("✓ _parseNode unhashable property key")
+
+
+def test_parse_node_dict_preserves_existing_id_type():
+    """#331 (review r2): a dict-shaped node keeps its own id/type —
+    the unknown fallback only fills MISSING keys."""
+    from tortoise.memory_orchestrator import _parseNode
+    result = _parseNode({"id": "p1", "type": "Person", "name": "Ada"})
+    assert result["id"] == "p1"
+    assert result["type"] == "Person"
+    assert result["name"] == "Ada"
+    # and a dict without id/type still degrades instead of crashing
+    result2 = _parseNode({"name": "x"})
+    assert result2["id"] == "unknown"
+    assert result2["type"] == "unknown"
+    print("✓ _parseNode dict preserves id/type")
+
