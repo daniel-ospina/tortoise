@@ -27,7 +27,9 @@ FROM_ADDRESS = "billing@premiselabs.co"
 
 # Kinds mirror the audit/analytics event names (billing_upgrade, billing_downgrade,
 # billing_payment_failed, billing_cancel).
-KINDS = {"billing_upgrade", "billing_downgrade", "billing_payment_failed", "billing_cancel"}
+KINDS = {"billing_upgrade", "billing_downgrade", "billing_payment_failed", "billing_cancel",
+         # #308: abuse prevention notifications
+         "abuse_flag", "abuse_suspended", "abuse_new_ip", "abuse_read_velocity"}
 
 _skip_logged: set[str] = set()
 
@@ -112,6 +114,84 @@ def notify_billing_event(kind: str, team: dict, details: dict | None = None) -> 
             telegram_send(bot_token, chat_id, _telegram_text(kind, team, details))
         except Exception as e:  # noqa: BLE001 — best-effort, never raise
             logger.warning("billing notify: telegram failed (%s)", redact_safe(e))
+
+
+def _abuse_email_text(kind: str, team: dict, details: dict) -> str:
+    lines = [
+        f"Tortoise Security — {kind}",
+        "",
+        f"Team id: {team.get('team_id', '?')}",
+    ]
+    if details.get("rule"):
+        lines.append(f"Rule: {details['rule']}")
+    if details.get("count") is not None:
+        lines.append(f"Count: {details['count']} (threshold {details.get('threshold')}"
+                     f" per {details.get('window_s')}s)")
+    if details.get("country"):
+        lines.append(f"Country: {details['country']}")
+    if details.get("scope"):
+        lines.append(f"Scope: {details['scope']} ({details.get('id')})")
+    if details.get("appeal_url"):
+        lines.append(f"Appeal: {details['appeal_url']}")
+    return "\n".join(lines)
+
+
+def notify_abuse(kind: str, team: dict, details: dict | None = None) -> None:
+    """Abuse notification over both channels (#308). NEVER raises.
+
+    Recipient: ``team.get('email')`` — missing OR NULL both fall back to the
+    BILLING_NOTIFY_TO ops inbox (anon agent-signup teams have no team email;
+    the registry team dict has no 'email' key at all, so .get is mandatory).
+    Callers in async contexts invoke via asyncio.to_thread (#310 pattern).
+    """
+    if kind not in KINDS or not kind.startswith("abuse_"):
+        logger.warning("abuse notify: unknown kind %r ignored", kind)
+        return
+    details = details or {}
+
+    api_key = _env("RESEND_API_KEY")
+    to = team.get("email") or _env("BILLING_NOTIFY_TO")
+    if not _skip_channel("resend", api_key) and not _skip_channel("resend-recipient", to):
+        try:
+            subject = f"Tortoise Security — {kind}"
+            body = _abuse_email_text(kind, team, details).replace("\n", "<br>")
+            _send_resend(api_key, to, subject, f"<pre>{body}</pre>")
+        except Exception as e:  # noqa: BLE001 — best-effort, never raise
+            logger.warning("abuse notify: resend failed (%s)", redact_safe(e))
+
+    bot_token = _env("TELEGRAM_BOT_TOKEN")
+    chat_id = _env("TELEGRAM_CHAT_ID")
+    if not _skip_channel("telegram", bot_token) and not _skip_channel("telegram-chat", chat_id):
+        try:
+            parts = [f"🚨 Tortoise Security: {kind}",
+                     f"Team: {team.get('team_id', '?')}"]
+            if details.get("rule"):
+                parts.append(f"Rule: {details['rule']}")
+            if details.get("count") is not None:
+                parts.append(f"Count: {details['count']}")
+            if details.get("country"):
+                parts.append(f"Country: {details['country']}")
+            telegram_send(bot_token, chat_id, "\n".join(parts))
+        except Exception as e:  # noqa: BLE001 — best-effort, never raise
+            logger.warning("abuse notify: telegram failed (%s)", redact_safe(e))
+
+    if kind == "abuse_suspended":
+        # Ops incident alert (GH issue + Telegram) — best-effort: absence of
+        # backup config or any failure degrades to Resend+Telegram above.
+        # Function-level import: notify must never import hosted_api at
+        # module level (hosted_api imports notify).
+        try:
+            from tortoise import hosted_api as _ha
+            cfg = _ha._backup_config_safe()
+            if cfg is not None:
+                store = _ha._alert_store_from(cfg)
+                store.open_incident(
+                    "abuse_suspended", team.get("team_id") or "_",
+                    {"detail": (f"Auto-suspended: {details.get('rule', '?')} "
+                                f"count={details.get('count', '?')}")})
+        except Exception as e:  # noqa: BLE001 — best-effort, never raise
+            logger.warning("abuse notify: alert_store incident failed (%s)",
+                           redact_safe(e))
 
 
 def redact_safe(e: BaseException) -> str:

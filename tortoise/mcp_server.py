@@ -20,8 +20,9 @@ from tortoise.auth import is_dev_mode as _is_dev_mode
 from tortoise.config import is_db_uri as _is_db_uri
 from tortoise.sdk import TortoiseSDK
 from tortoise import monitoring
-from tortoise.mcp_auth import (_current_team_id, _transport_mode, _get_team_sdk,
-                               HTTP_ALLOWED, ERR_EXCLUDED)
+from tortoise.mcp_auth import (_current_team_id, _current_team_limits,
+                               _transport_mode, _get_team_sdk,
+                               HTTP_ALLOWED, ERR_EXCLUDED, SELFHOST_TEAM_ID)
 
 _log = logging.getLogger(__name__)
 
@@ -212,6 +213,7 @@ async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None,
         return await _original_call_tool(name, arguments, version=version,
                                          run_middleware=False, task_meta=task_meta)
     team_id = _current_team_id.get() or ""
+    maybe_record_mcp_read(name, team_id, _current_team_limits.get())
     status, error_kind = "ok", None
     t0 = _time.perf_counter()
     try:
@@ -346,6 +348,19 @@ _QUOTA_GATED: frozenset[str] = frozenset({
 })
 
 
+# #308 (R3, scoping delta 11): the explicit WRITE set for read-velocity
+# classification — tools/call for a tool NOT in this set counts as a read.
+# NOT derived as the complement of _QUOTA_GATED: tortoise_ingest is
+# _quota_gated-wrapped but absent from that frozenset, and the demo-create
+# tool writes Points via _enforce_quota without the wrapper. Membership is
+# asserted by an introspective test (plan Task 11) so a new write tool cannot
+# silently be counted as a read.
+WRITE_TOOL_NAMES: frozenset[str] = _QUOTA_GATED | frozenset({
+    "tortoise_ingest",               # bulk write (wrapped, not in _QUOTA_GATED)
+    "tortoise_onboarding_demo_create",  # seeds the 4-layer demo graph
+})
+
+
 # #329: per-team per-minute LLM-call budget for tortoise_analyze (operator LLM
 # keys back outbound calls; the rate limiter alone is not the bound).
 _ANALYZE_LLM_BUDGET: dict[str, list[float]] = {}
@@ -398,7 +413,7 @@ def _enforce_quota(resource: str = "points") -> None:
     enforce_team_limit(limits, resource, sdk=_get_team_sdk())
 
 
-def _quota_gated(fn, resource: str = "points"):
+def _quota_gated(fn, resource: str = "points", abuse_weight=None):
     """Wrap a bound SDK method with a pre-write quota check + metering.
 
     Preserves the bound-callable style (_safe(_get_team_sdk().name, ...)):
@@ -408,6 +423,12 @@ def _quota_gated(fn, resource: str = "points"):
     #681: after a successful write (fn returns without raising), records a
     write op for overage metering. Best-effort — metering failures are
     swallowed and never block the tool.
+
+    #308 (R1, scoping delta 8): ``abuse_weight`` records a WEIGHTED
+    point_create event after a successful Point-creating write — int for a
+    fixed weight, or callable(result, args, kwargs) -> int for bulk ops
+    (ingest/checkpoint/file_decision). Tools that do not create Points pass
+    None and record nothing (an edit/update burst must never trip R1).
     """
     def _gated(*args, **kwargs):
         _enforce_quota(resource)
@@ -420,10 +441,43 @@ def _quota_gated(fn, resource: str = "points"):
                 limits = _current_team_limits.get() or {}
                 from tortoise.metering import record_write_ops
                 record_write_ops(team_id, tier=limits.get("tier"))
+                # #308 (R1): weighted point_create recording + evaluation.
+                # The engine piggybacks R2 evaluation on the same call.
+                if abuse_weight is not None and not _abuse_off():
+                    n = (int(abuse_weight(result, args, kwargs) or 0)
+                         if callable(abuse_weight) else int(abuse_weight))
+                    if n > 0:
+                        from tortoise import abuse as _abuse
+                        _abuse.get_engine().record_point_create(team_id, n)
         except Exception:
             pass  # best-effort — never block the tool
         return result
     return _gated
+
+
+def _abuse_off() -> bool:
+    try:
+        from tortoise.abuse import abuse_disabled
+        return abuse_disabled()
+    except Exception:
+        return True
+
+
+def maybe_record_mcp_read(name: str, team_id: str, limits: dict | None) -> None:
+    """#308 (R3, scoping delta 11): read-velocity counting for non-write
+    tools/call. Explicit write set (WRITE_TOOL_NAMES) — writes never count
+    as reads. key_id rides the limits ContextVar (Supabase resolutions carry
+    it; registry resolutions may not → per-team counting only there).
+    Best-effort: telemetry never breaks the tool call."""
+    try:
+        if not team_id or team_id == SELFHOST_TEAM_ID or _abuse_off():
+            return
+        if name in WRITE_TOOL_NAMES:
+            return
+        from tortoise import abuse as _abuse
+        _abuse.record_read((limits or {}).get("key_id"), team_id)
+    except Exception:
+        pass
 
 
 def _safe(fn, *args, **kwargs):
@@ -552,7 +606,7 @@ def tortoise_create_point(kind: str, content: str,
             if not isinstance(t, str) or not t.strip() or len(t) > 200:
                 return {"error": f"invalid tag value: {t!r} (must be a non-empty string ≤ 200 chars)"}
     merged["dedup"] = dedup
-    return _safe(_quota_gated(_get_team_sdk().create_point, "points"), kind, content, **merged)
+    return _safe(_quota_gated(_get_team_sdk().create_point, "points", abuse_weight=1), kind, content, **merged)
 
 
 def tortoise_query(kind: str | None = None,
@@ -992,7 +1046,7 @@ def tortoise_create_operator(op_type: str, source_id: str, target_ids: Any,
     if isinstance(target_ids, list) and len(target_ids) > MAX_OPERATOR_TARGETS:
         return {"error": f"create_operator target_ids exceed the cap ({MAX_OPERATOR_TARGETS})",
                 "code": ERR_QUOTA}
-    return _safe(_quota_gated(_get_team_sdk().create_operator, "points"), op_type, source_id, target_ids,
+    return _safe(_quota_gated(_get_team_sdk().create_operator, "points", abuse_weight=1), op_type, source_id, target_ids,
                  direction=direction)
 
 
@@ -1025,7 +1079,7 @@ def tortoise_mitigate_operator(id: str, reason: str, strength: float = 0.5) -> d
     strength: 0-1 — 0=fully neutralized, 1=fully intact (default 0.5).
     Idempotent — second call updates existing mitigation.
     """
-    return _safe(_quota_gated(_get_team_sdk().mitigate_operator, "points"), id, reason, strength)
+    return _safe(_quota_gated(_get_team_sdk().mitigate_operator, "points", abuse_weight=1), id, reason, strength)
 
 
 def tortoise_file_decision(options: Any, evidence: Any,
@@ -1052,7 +1106,8 @@ def tortoise_file_decision(options: Any, evidence: Any,
     if isinstance(evidence, list) and len(evidence) > MAX_FILE_DECISION_EVIDENCE:
         return {"error": f"file_decision evidence exceeds the cap ({MAX_FILE_DECISION_EVIDENCE})",
                 "code": ERR_QUOTA}
-    return _safe(_quota_gated(_get_team_sdk().file_decision, "points"), options, evidence, choice)
+    return _safe(_quota_gated(_get_team_sdk().file_decision, "points",
+                          abuse_weight=lambda r, a, k: 1 + len(a[0] or []) + len(a[1] or [])), options, evidence, choice)
 
 
 def tortoise_file_human_approval(approver_id: str, artifact_id: str,
@@ -1075,7 +1130,7 @@ def tortoise_file_human_approval(approver_id: str, artifact_id: str,
     Returns {event_id, decision_point_id, impl_operator_ids, confidence_delta}.
     """
     point_ids = _parse(point_ids)
-    return _safe(_quota_gated(_get_team_sdk().file_human_approval, "points"),
+    return _safe(_quota_gated(_get_team_sdk().file_human_approval, "points", abuse_weight=1),
                  approver_id, artifact_id, point_ids, decision_content)
 
 
@@ -1230,7 +1285,8 @@ def tortoise_checkpoint(items: Any,
     if isinstance(items, list) and len(items) > MAX_CHECKPOINT_ITEMS:
         return {"error": f"checkpoint items exceed the batch cap ({MAX_CHECKPOINT_ITEMS})",
                 "code": ERR_QUOTA}
-    return _safe(_quota_gated(_get_team_sdk().checkpoint, "points"), items,
+    return _safe(_quota_gated(_get_team_sdk().checkpoint, "points",
+                          abuse_weight=lambda r, a, k: int((r or {}).get("filed") or 0)), items,
                  agent_name=agent_name, threshold=threshold)
 
 
@@ -1240,7 +1296,7 @@ def tortoise_diary_write(agent_name: str, entry: str,
     """Write an agent diary entry (AAAK format suggested).
     Creates a Point with pointKind=diary, authoredBy=agent.
     """
-    return _safe(_quota_gated(_get_team_sdk().diary_write, "points"), agent_name, entry, topic=topic, wing=wing)
+    return _safe(_quota_gated(_get_team_sdk().diary_write, "points", abuse_weight=1), agent_name, entry, topic=topic, wing=wing)
 
 
 def tortoise_diary_read(agent_name: str, last_n: int = 10,
@@ -1501,7 +1557,7 @@ def tortoise_operator_action(action: str, id: str, reason: str | None = None,
     if action == "mitigate":
         if not reason:
             return {"error": "operator_action(action='mitigate') requires 'reason'"}
-        return _safe(_quota_gated(_get_team_sdk().mitigate_operator, "points"),
+        return _safe(_quota_gated(_get_team_sdk().mitigate_operator, "points", abuse_weight=1),
                      id, reason, strength)
     if action == "annotate":
         dims = (bias, precision, consistency, directness)
@@ -1682,7 +1738,8 @@ def tortoise_ingest(bundle: Any = None, granularity: str = "bulk") -> dict:
     if granularity not in ("bulk", "granular"):
         return {"error": f"granularity must be 'bulk' or 'granular', got "
                           f"{granularity!r}", "code": ERR_INVALID}
-    return _safe(_quota_gated(_get_team_sdk().ingest, "points"),
+    return _safe(_quota_gated(_get_team_sdk().ingest, "points",
+                          abuse_weight=lambda r, a, k: int(((r or {}).get("created") or {}).get("points") or 0)),
                  bundle, granularity=granularity)
 
 def tortoise_get_governance(subject_id: str) -> list:

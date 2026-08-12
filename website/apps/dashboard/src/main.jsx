@@ -94,6 +94,16 @@ function App() {
 
   const headers = apiKey ? { Authorization: `Bearer ${apiKey}` } : {}
 
+  // #308 (R5/R7): suspension surfaces from the 403 detail (dict with
+  // code === 'SUSPENDED' + appeal_url) — the banner renders it; the alert
+  // list comes from the session-authed /v1/team/alerts.
+  const [suspended, setSuspended] = React.useState(null)
+  const [alerts, setAlerts] = React.useState([])
+
+  function suspendedFromDetail(detail) {
+    return detail && typeof detail === 'object' && detail.code === 'SUSPENDED' ? detail : null
+  }
+
   async function api(path, opts = {}) {
     const res = await fetch(`${API_BASE}${path}`, {
       ...opts,
@@ -104,8 +114,11 @@ function App() {
       // Round-11: attach the HTTP status — hosted_api.py returns detail strings
       // ('Invalid API key', 'Unauthorized', …), never '401', so status-based
       // checks (switchTeam re-mint) must read e.status, not message content.
-      const err = new Error(body.detail || `HTTP ${res.status}`)
+      // #308: suspended teams get a dict detail — surface the appeal link.
+      const sus = suspendedFromDetail(body.detail)
+      const err = new Error(sus ? (sus.message || 'Team suspended') : (typeof body.detail === 'string' ? body.detail : `HTTP ${res.status}`))
       err.status = res.status
+      if (sus) err.suspended = sus
       throw err
     }
     return res.json()
@@ -236,7 +249,12 @@ function App() {
     }
     if (!res.ok) {
       const b = await res.json().catch(() => ({}))
-      throw new Error(b.detail || `HTTP ${res.status}`)
+      // #308: a suspended team's mint 403s with a dict detail — carry it so
+      // the load path renders the suspension banner (primary load path).
+      const sus = suspendedFromDetail(b.detail)
+      const err = new Error(sus ? (sus.message || 'Team suspended') : (typeof b.detail === 'string' ? b.detail : `HTTP ${res.status}`))
+      if (sus) err.suspended = sus
+      throw err
     }
     const data = await res.json()
     if (!data.key) throw new Error('Session mint returned no key')
@@ -308,7 +326,10 @@ function App() {
             const minted = await mintSessionKey('bootstrap', firstTeamId)
             key = minted.key
             if (minted.teamId) teamKeysRef.current[minted.teamId] = key
-          } catch {
+          } catch (e) {
+            // #308: a suspended team's mint 403s — show the appeal banner
+            // instead of silently degrading to the API-key screen.
+            if (e && e.suspended) setSuspended(e.suspended)
             // No usable session key — fall back to the API-key screen
             setChecking(false)
             return
@@ -349,14 +370,32 @@ function App() {
     return t
   }
 
+  async function loadAlerts(tid) {
+    // #308 (R7): session-authed alert history — reachable even while the
+    // team is suspended (API-key routes 403 by design).
+    const tok = sessionTokenRef.current
+    if (!tok || !tid) return
+    try {
+      const res = await fetch(`${API_BASE}/v1/team/alerts?team_id=${encodeURIComponent(tid)}`, {
+        headers: { Authorization: `Bearer ${tok}` },
+      })
+      if (res.ok) {
+        const d = await res.json()
+        setAlerts(d.alerts || [])
+      }
+    } catch { /* best-effort — alert history never blocks the dashboard */ }
+  }
+
   async function completeLogin(key) {
     setError('')
     try {
       const t = await api('/v1/team', key ? { headers: { Authorization: `Bearer ${key}` } } : {})
       setTeam(t)
       setAuthed(true)
+      loadAlerts(t?.team_id)  // fire-and-forget (#308 R7)
       await Promise.all([loadAll(key), loadTeams(), loadBackups(key)])
     } catch (e) {
+      if (e && e.suspended) setSuspended(e.suspended)  // #308
       setError(e.message === 'Invalid API key' ? 'Invalid API key — check your key and try again.' : e.message)
       setAuthed(false)
     } finally {
@@ -1061,6 +1100,9 @@ function App() {
             {team.tier || 'free'} tier · Upgrade
           </a>
         )}
+        {team && team.status === 'flagged' && (
+          <span className="tier-badge" title="Suspicious activity detected — see security alerts">⚠ flagged</span>
+        )}
         {team && team.tier === 'team' && (
           <span className="tier-badge tier-team">Team tier</span>
         )}
@@ -1068,6 +1110,16 @@ function App() {
       </header>
 
       <main>
+        {suspended && (
+          <div className="error banner" role="alert">
+            ⚠️ {suspended.message || 'This team has been suspended due to unusual activity.'}
+            {suspended.appeal_url && (
+              <span>
+                {' '}— <a href={suspended.appeal_url} target="_blank" rel="noreferrer">Appeal suspension</a>
+              </span>
+            )}
+          </div>
+        )}
         {error && (
           <div className="error banner">
             {error}
@@ -1079,6 +1131,20 @@ function App() {
           </div>
         )}
 
+        {tab === 'overview' && alerts.length > 0 && (
+          <section className="overview" aria-label="Security alerts">
+            <h2>Security alerts</h2>
+            <p className="dim small">Suspicious activity detected on this team. Revoke any key you don't recognize.</p>
+            <ul>
+              {alerts.map((a, i) => (
+                <li key={i}>
+                  <strong>{a.type}</strong> — {a.message}{' '}
+                  <span className="dim small">{a.at ? new Date(a.at).toLocaleString() : ''}</span>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
         {tab === 'overview' && team && (team.point_count ?? 0) === 0 && (
           <section className="overview empty-state">
             <h2>Welcome to your Tortoise graph</h2>

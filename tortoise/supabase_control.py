@@ -68,6 +68,9 @@ _SERVICE_KEY_ENV = ("SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_SERVICE_KEY")
 _QUOTA_SELECT = [
     "id", "name", "tier", "max_users", "max_graphs", "graph_size_cap",
     "ops_allowance",
+    # #308: suspension/staging state + owner email ride the same resolution
+    # round-trip (additive keys — consumers read known keys only).
+    "suspended_at", "flagged_at", "email",
 ]
 
 
@@ -280,6 +283,48 @@ def get_control_plane() -> SupabaseControlPlane:
     return _control_plane
 
 
+# ── Abuse store seam (#308) ─────────────────────────────────────────────────
+
+_abuse_store = None
+
+
+_REGISTRY_ABUSE_FIELDS = {"suspended_at", "flagged_at"}
+
+
+def _registry_abuse_write(team_id: str, field: str, value) -> None:
+    """Durable selfhost enforcement (scoping delta 4, code-review P1 fix):
+    write ONE suspension/staging field onto the registry Team node so the
+    auth seams' prop reads actually reject. Field-scoped (never both props
+    at once) so concurrent flag/suspend writes cannot clobber each other
+    (code-review P2). Lazy hosted_api import — the hosted_api→
+    supabase_control import direction forbids module-level use."""
+    if field not in _REGISTRY_ABUSE_FIELDS:
+        raise ValueError(f"not an abuse state field: {field!r}")
+    from tortoise import hosted_api as _ha
+    sdk = _ha._make_sdk(namespace="registry")
+    sdk._get_registry().query(
+        f"MATCH (t:Team {{id: $id}}) SET t.{field} = $value",
+        params={"id": team_id, "value": value},
+    )
+
+
+def get_abuse_store():
+    """Lazy abuse-event store (tests monkeypatch this, mirroring
+    get_control_plane). Supabase mode → durable SupabaseAbuseStore; registry
+    mode → MemoryAbuseStore with a registry-write callback so enforcement is
+    durable in selfhost too (R2 session-mint under-counting remains the
+    documented registry degradation)."""
+    global _abuse_store
+    if _abuse_store is None:
+        from tortoise.abuse import MemoryAbuseStore, SupabaseAbuseStore
+        if is_supabase_enabled():
+            _abuse_store = SupabaseAbuseStore(get_control_plane())
+        else:
+            _abuse_store = MemoryAbuseStore(
+                registry_write=_registry_abuse_write)
+    return _abuse_store
+
+
 # ── Shared resolution logic (REST + MCP single source of truth) ────────────
 
 def _parse_ts(value) -> datetime | None:
@@ -387,6 +432,10 @@ def resolve_api_key(cp, token: str) -> dict | None:
         "key_prefix": key_prefix,
         "created_via": created_via,
         "created_by": created_by,
+        # #308: enforcement (403 SUSPENDED) + owner notification
+        "suspended_at": team_row.get("suspended_at"),
+        "flagged_at": team_row.get("flagged_at"),
+        "email": team_row.get("email"),
     }
 
 
@@ -442,7 +491,8 @@ def team_by_id(cp, team_id: str) -> dict | None:
         select=["id", "name", "tier", "email", "graph_name", "max_users",
                 "max_teams", "max_graphs", "ops_allowance", "graph_size_cap",
                 "backup_enabled", "backup_latest_at", "backup_restored_at",
-                "created_at", "deleted_at", "grace_hours"],
+                "created_at", "deleted_at", "grace_hours",
+                "suspended_at", "flagged_at"],
         filters=[("id", "eq", team_id)],
     )
     return rows[0] if rows else None
