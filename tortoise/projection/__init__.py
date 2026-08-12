@@ -153,9 +153,12 @@ def _apply_one(points: dict[str, dict], ev: dict) -> None:
         # must be skipped, not crash the fold.
         return
     if t in ("PointAdded", "OperatorAdded"):
-        p = ev["point"]
+        # #331 (review r3): ev.get — a valid type with NO 'point' key at all
+        # must be handled by the isinstance guard below, not KeyError here.
+        p = ev.get("point")
         if not isinstance(p, dict):
-            # Malformed event (non-dict point) — skip, don't crash (issue #325)
+            # Malformed event (non-dict/missing point) — skip, don't crash
+            # (issue #325)
             return
         # #331: no id → nothing to index by; skip rather than KeyError.
         if not p.get("id"):
@@ -527,9 +530,12 @@ class FalkorProjection(
                 "missing/non-string 'type' (event_id=%s)", ev.get("event_id"))
             return
         if t in ("PointAdded", "OperatorAdded"):
-            p = ev["point"]
+            # #331 (review r3): ev.get — missing 'point' key handled by the
+            # isinstance guard, not KeyError.
+            p = ev.get("point")
             if not isinstance(p, dict):
-                # Malformed event (non-dict point) — skip, don't crash (issue #325)
+                # Malformed event (non-dict/missing point) — skip, don't crash
+                # (issue #325)
                 logger.warning(
                     "FalkorProjection.apply: skipping %s with non-dict point "
                     "(event_id=%s)", t, ev.get("event_id"))
@@ -691,9 +697,11 @@ class FalkorProjection(
             ev = self._norm(ev)
             t = ev.get("type")
             if t in ("PointAdded", "OperatorAdded"):
-                p = ev["point"]
+                # #331 (review r3): ev.get — missing 'point' key handled by
+                # the isinstance guard, not KeyError.
+                p = ev.get("point")
                 if not isinstance(p, dict):
-                    # Malformed event (non-dict point) — skip (issue #325)
+                    # Malformed event (non-dict/missing point) — skip (#325)
                     continue
                 # #331 (review r2): parity with apply()/_apply_one — no id →
                 # nothing to index by; skip rather than KeyError in
@@ -719,8 +727,10 @@ class FalkorProjection(
             if t in ("PointAdded", "OperatorAdded"):
                 continue  # already handled in pass 1a
             elif t == "PointRetracted":
-                # #689: tombstone instead of hard delete
-                rid = ev.get("id") or ev.get("event_id")
+                # #689: tombstone instead of hard delete.
+                # #331 (review r3): NO event_id fallback — parity with
+                # apply()/_apply_one (fold is the single source of truth).
+                rid = ev.get("id")
                 if rid is not None:
                     self._retract(rid)
             elif t == "PointsMerged":
@@ -751,9 +761,19 @@ class FalkorProjection(
         for ev in events:
             ev = self._norm(ev)
             if ev.get("type") in ("PointAdded", "OperatorAdded"):
-                p = ev["point"]
+                # #331 (review r3): ev.get — missing 'point' key handled by
+                # the isinstance guard, not KeyError.
+                p = ev.get("point")
                 if not isinstance(p, dict):
-                    # Malformed event (non-dict point) — skip (issue #325)
+                    # Malformed event (non-dict/missing point) — skip (#325)
+                    continue
+                # #331 (review r3): parity with apply()/pass 1a — edge
+                # wiring indexes by p["id"]; skip rather than KeyError.
+                if not p.get("id"):
+                    logger.warning(
+                        "rebuild: skipping edge wiring for event with "
+                        "missing point id (event_id=%s)",
+                        ev.get("event_id"))
                     continue
                 if ev.get("projection_version", 0) >= 2:
                     p.pop("context", None)
@@ -1064,7 +1084,9 @@ class FalkorProjection(
         """Apply PointRevised event — update content, context, and re-compute embedding."""
         new_content = ev.get("new_content")
         new_context = ev.get("new_context")
-        pid = ev.get("id") or ev.get("event_id")
+        # #331 (review r3): NO event_id fallback — parity with _apply_one
+        # (fold is the single source of truth, module contract).
+        pid = ev.get("id")
         if pid is None:
             # Malformed PointRevised — skip rather than crash (issue #325)
             return

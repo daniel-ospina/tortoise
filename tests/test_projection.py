@@ -7,7 +7,9 @@ Runnable without pytest:  .venv/bin/python tests/test_projection.py
 """
 from __future__ import annotations
 
+import json
 import os
+import shutil
 import sys
 import tempfile
 
@@ -2592,11 +2594,24 @@ def test_falkor_apply_missing_keys_no_crash():
         proj.apply({"type": "PointRetracted"})  # no id — no crash
         proj.apply({"type": "PointRevised"})    # no id — no crash
         proj.apply({"type": "PointsMerged"})    # no merge_ids
+        proj.apply({"type": "PointsMerged", "keep_id": "p9",
+                    "merge_ids": None})          # explicit null
+        proj.apply({"type": "PointAdded"})        # no 'point' key at all
+        # r3: non-dict provenance must not AttributeError in the Falkor path
+        proj.apply({"type": "PointAdded",
+                    "point": {"id": "pn1", "content": "null prov",
+                              "provenance": None}})
+        proj.apply({"type": "PointAdded",
+                    "point": {"id": "pn2", "content": "string prov",
+                              "provenance": "junk"}})
         # a valid event still lands
         proj.apply({"type": "PointAdded",
                     "point": {"id": "p1", "content": "x", "provenance": {}}})
         rows = proj.g.query("MATCH (n:Point {id:'p1'}) RETURN count(n)").result_set
         assert rows[0][0] == 1
+        rows = proj.g.query("MATCH (n:Point) WHERE n.id IN ['pn1','pn2'] "
+                            "RETURN count(n)").result_set
+        assert rows[0][0] == 2, "non-dict-provenance points must land"
     finally:
         proj.close()
 
@@ -2648,4 +2663,61 @@ def test_falkor_apply_merge_ids_explicit_null_no_crash():
         assert rows[0][0] == 1  # untouched, no crash
     finally:
         proj.close()
+
+
+def test_apply_one_point_key_missing_entirely():
+    """#331 (review r3): a valid type with NO 'point' key must be skipped
+    by the isinstance guard, not KeyError at ev['point']."""
+    points = {}
+    _apply_one(points, {"type": "PointAdded"})
+    _apply_one(points, {"type": "OperatorAdded"})
+    assert points == {}
+
+
+def test_retract_without_id_skipped_everywhere():
+    """#331 (review r3): a PointRetracted carrying only event_id must NOT
+    retract anything — fold parity (an event id is not a point id)."""
+    points = {"p1": {"id": "p1", "status": "live"}}
+    _apply_one(points, {"type": "PointRetracted", "event_id": "ev-999"})
+    assert points["p1"]["status"] == "live"
+
+
+def test_rebuild_all_tolerates_malformed_events():
+    """#331 (review r3): rebuild_all must skip, not crash, on:
+    - PointAdded/OperatorAdded with missing point id (incl. operator-carrying)
+    - explicit null merge_ids
+    - PointRetracted carrying only event_id (must NOT retract p1)
+    """
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    d = tempfile.mkdtemp(prefix="tortoise_rebuild_331_")
+    try:
+        events = [
+            {"type": "PointAdded",
+             "point": {"id": "p1", "content": "valid", "provenance": {}}},
+            {"type": "PointAdded", "point": {"content": "no id"}},
+            {"type": "OperatorAdded",
+             "point": {"content": "no id",
+                       "operator": {"op_type": "IMPL", "inputs": ["p1"]}}},
+            {"type": "PointAdded"},  # no point key at all
+            {"type": "PointsMerged", "keep_id": "p1", "merge_ids": None},
+            {"type": "PointRetracted", "event_id": "ev-999"},
+        ]
+        with open(os.path.join(d, "events.jsonl"), "w") as f:
+            for ev in events:
+                f.write(json.dumps(ev) + "\n")
+        proj = FalkorProjection(_tmp("g_rebuild_331.db"), graph_name="test")
+        try:
+            result = proj.rebuild_all(d)
+            assert result["nodes"] >= 1
+            rows = proj.g.query(
+                "MATCH (n:Point {id:'p1'}) RETURN n.status").result_set
+            # p1 landed and was NOT retracted by the event_id-only event
+            assert rows and rows[0][0] != "retracted"
+            rows = proj.g.query("MATCH (n:Point) RETURN count(n)").result_set
+            assert rows[0][0] == 1, "malformed points must not land"
+        finally:
+            proj.close()
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
 
