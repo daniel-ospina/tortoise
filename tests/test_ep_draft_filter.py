@@ -307,3 +307,120 @@ def test_create_operator_draft_status_survives_event_payload(sdk, tmp_path):
     assert log["point"].get("status") == "draft", (
         "OperatorAdded event must carry status:'draft' for replay parity"
     )
+
+
+# ── Review-fix regressions (#943 code review) ─────────────────────────
+
+def test_draft_seed_runs_nothing(sdk):
+    """A draft claim used as a plain-point seed must run nothing: affected
+    set empty, run() early-returns (0, True)."""
+    s = sdk.create_point("statement", "s", status="live")
+    d = sdk.create_point("statement", "draft seed")
+    op = sdk.create_operator("IMPL", s["id"], [d["id"]])
+    ep = sdk._get_ep()
+    affected = ep._affected_claims([d["id"]], include_draft=False)
+    assert affected == set(), (
+        f"draft seed must contribute nothing, got affected={affected}"
+    )
+    iters, converged = ep.run([d["id"]])
+    assert (iters, converged) == (0, True)
+    # include_draft=True restores the seed's reachability.
+    affected2 = ep._affected_claims([d["id"]], include_draft=True)
+    assert s["id"] in affected2 or op["id"] in affected2
+
+
+def test_live_seed_does_not_cross_draft_operator_bridge(sdk):
+    """Live claim s --live op O1--> live l1, plus s --DRAFT op D--> live l2
+    with a live operator O3 on l2 (l2's own chain): seeding s must NOT reach
+    l2 through D, so neither l2 nor O3's factor enters the affected set."""
+    s = sdk.create_point("statement", "s", status="live")
+    l1 = sdk.create_point("statement", "l1", status="live")
+    l2 = sdk.create_point("statement", "l2", status="live")
+    c3 = sdk.create_point("statement", "c3", status="live")
+    o1 = sdk.create_operator("IMPL", s["id"], [l1["id"]])
+    d = sdk.create_operator("IMPL", s["id"], [l2["id"]], promote_source=False)
+    o3 = sdk.create_operator("IMPL", l2["id"], [c3["id"]])
+    ep = sdk._get_ep()
+    affected = ep._affected_claims([s["id"]], include_draft=False)
+    assert l1["id"] in affected
+    assert l2["id"] not in affected, (
+        "live claim reached only through a DRAFT operator bridge must be excluded"
+    )
+    assert c3["id"] not in affected
+    factors = ep._affected_factors(affected, include_draft=False)
+    factor_ops = {f[0] for f in factors}
+    assert o1["id"] in factor_ops
+    assert d["id"] not in factor_ops
+    assert o3["id"] not in factor_ops
+    # include_draft=True crosses the bridge (legacy semantics).
+    affected2 = ep._affected_claims([s["id"]], include_draft=True)
+    assert l2["id"] in affected2
+
+
+def test_directional_factor_skipped_when_draft_source_stripped(sdk):
+    """Non-bidirectional operator whose idx-0 SOURCE is draft: skipping beats
+    renumbering a live target into the source slot (direction inversion)."""
+    draft_src = sdk.create_point("statement", "draft source")
+    t1 = sdk.create_point("statement", "t1", status="live")
+    t2 = sdk.create_point("statement", "t2", status="live")
+    # promote_source=False keeps the source draft; the operator node starts
+    # draft too — simulate the #785 promote flow making the OPERATOR live
+    # while its source stays draft (reachable via update_point/manual write).
+    op = sdk.create_operator("IMPL", draft_src["id"], [t1["id"], t2["id"]],
+                             direction="unidirectional", promote_source=False)
+    sdk._get_proj().g.query(
+        "MATCH (o:Point {id:$id}) SET o.status = 'live'",
+        params={"id": op["id"]},
+    )
+    ep = sdk._get_ep()
+    # Seed the live targets so the operator is discovered via Batch 1.
+    affected = {t1["id"], t2["id"]}
+    factors = ep._affected_factors(affected, include_draft=False)
+    assert all(f[0] != op["id"] for f in factors), (
+        "draft-source unidirectional factor must be skipped, not renumbered"
+    )
+    # include_draft=True keeps it (legacy).
+    factors2 = ep._affected_factors({draft_src["id"], t1["id"], t2["id"]},
+                                    include_draft=True)
+    assert any(f[0] == op["id"] for f in factors2)
+
+
+def test_unary_operator_factor_kept_when_not_draft_caused(sdk):
+    """A genuinely unary operator (created with empty target_ids) keeps its
+    factor when the <2-input state is NOT draft-caused — matches pre-PR
+    behavior (_update_factor no-ops it) and keeps include_draft parity."""
+    a = sdk.create_point("statement", "a", status="live")
+    op = sdk.create_operator("IMPL", a["id"], [])
+    ep = sdk._get_ep()
+    factors = ep._affected_factors({a["id"]}, include_draft=False)
+    assert any(f[0] == op["id"] for f in factors), (
+        "unary (non-draft-caused) factor must be kept for legacy parity"
+    )
+
+
+def test_compute_confidence_live_invariant_with_draft_subgraph(sdk, tmp_path):
+    """Write-back surface: compute_confidence must leave live confidences
+    unchanged when a draft subgraph is present. Two identical live graphs,
+    one with the leak operator (live op wired to a draft Point): l's
+    confidence must be identical — the leak must not change it."""
+    def build(with_leak: bool, db: str) -> tuple[dict, dict]:
+        s = TortoiseSDK(db_path=db)
+        ids = make_leak_graph(s)
+        if not with_leak:
+            # remove the leak operator's edges (keep the draft point)
+            s._get_proj().g.query(
+                "MATCH (o:Point {id:$oid})-[r]->() DELETE r",
+                params={"oid": ids["o2"]},
+            )
+        return s, ids
+
+    leak_sdk, leak_ids = build(True, str(tmp_path / "leak.db"))
+    ctrl_sdk, ctrl_ids = build(False, str(tmp_path / "ctrl.db"))
+    leak_res = leak_sdk.compute_confidence(factors=[leak_ids["o1"], leak_ids["o2"]])
+    ctrl_res = ctrl_sdk.compute_confidence(factors=[ctrl_ids["o1"]])
+    l_leak = leak_res["confidences"][leak_ids["l"]]["mean"]
+    l_ctrl = ctrl_res["confidences"][ctrl_ids["l"]]["mean"]
+    assert l_leak == pytest.approx(l_ctrl, abs=1e-9), (
+        "the draft-connected leak operator must not change the live posterior "
+        "through compute_confidence"
+    )

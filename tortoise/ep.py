@@ -584,9 +584,12 @@ class TortoiseEP:
         affected: set[str] = set()
         for seed_id in operator_ids:
             is_op = self.g.query(
-                "MATCH (n:Point {id:$id}) RETURN (n.is_operator = true)",
+                "MATCH (n:Point {id:$id}) RETURN (n.is_operator = true), n.status",
                 params={"id": seed_id},
             ).result_set
+            seed_is_draft = bool(
+                is_op and is_op[0][1] == "draft" and not include_draft
+            )
             if is_op and is_op[0][0]:
                 # Operator seed — legacy behavior: follow outgoing edges to
                 # the operator's inputs (the operator's factor). Draft
@@ -624,8 +627,9 @@ class TortoiseEP:
                     "RETURN DISTINCT b.id",
                     params={"id": seed_id},
                 ).result_set
-                for nid in self.proj._neighbors(seed_id):
-                    affected.add(nid)
+                if not seed_is_draft:
+                    for nid in self._live_neighbors(seed_id, include_draft):
+                        affected.add(nid)
             affected.update(r[0] for r in rows)
 
         if max_hops > 0 and affected:
@@ -642,7 +646,7 @@ class TortoiseEP:
                             break
                 new_frontier: list[str] = []
                 for claim_id in frontier:
-                    for nid in self.proj._neighbors(claim_id):
+                    for nid in self._live_neighbors(claim_id, include_draft):
                         if nid not in affected:
                             affected.add(nid)
                             new_frontier.append(nid)
@@ -688,6 +692,26 @@ class TortoiseEP:
             params={"ids": list(ids)},
         ).result_set
         return {r[0] for r in rows}
+
+    def _live_neighbors(self, node_id: str, include_draft: bool) -> list[str]:
+        """Operator-mediated neighborhood hop that never crosses drafts (#780).
+
+        Mirrors proj._neighbors (propagation.py) but excludes hops THROUGH
+        draft operator nodes and TO draft endpoints — a draft-connected
+        operator must change NO live claim's posterior, so the affected-set
+        expansion must not reach live claims via a draft bridge.
+        """
+        if include_draft:
+            return self.proj._neighbors(node_id)
+        rows = self.g.query(
+            "MATCH (n:Point {id:$id})-[r]-(op:Point {is_operator:true})-[r2]-(m:Point) "
+            "WHERE m.id <> $id "
+            "AND (op.status IS NULL OR op.status <> 'draft') "
+            "AND (m.status IS NULL OR m.status <> 'draft') "
+            "RETURN DISTINCT m.id",
+            params={"id": node_id},
+        ).result_set
+        return [r[0] for r in rows]
 
     def _affected_factors(self, affected_claims: set[str],
                           include_draft: bool = False
@@ -781,18 +805,26 @@ class TortoiseEP:
         # ORDER BY r.idx ensures source (idx=0) comes first — required
         # for directional IMPL: id_a = source, id_b = target so that
         # back-messages are correctly skipped. Draft inputs are stripped
-        # (#780): a draft claim contributes NO belief to a live factor.
+        # IN PYTHON (#780): a draft claim contributes NO belief to a live
+        # factor, but the unfiltered list is needed to (a) detect when the
+        # idx-0 SOURCE was a draft — renumbering a live target into the
+        # source slot would invert directional semantics — and (b)
+        # distinguish draft-caused degradation from genuinely unary
+        # operators (pre-existing behavior: _update_factor no-ops <2 inputs).
         op_inputs: dict[str, list[str]] = {op_id: [] for op_id in op_info}
-        where_b2 = "o.id IN $ids" + (f" AND {live_c}" if live_c else "")
+        op_input_live: dict[str, list[bool]] = {op_id: [] for op_id in op_info}
         rows = self.g.query(
             "MATCH (o:Point)-[r:IMPL|NAND]->(c:Point) "
-            f"WHERE {where_b2} "
-            "RETURN o.id, c.id, coalesce(r.idx, 0) "
+            "WHERE o.id IN $ids "
+            "RETURN o.id, c.id, coalesce(r.idx, 0), c.status "
             "ORDER BY coalesce(r.idx, 0)",
             params={"ids": list(op_info.keys())},
         ).result_set
-        for op_id, claim_id, _idx in rows:
+        for op_id, claim_id, _idx, status in rows:
             op_inputs[op_id].append(claim_id)
+            op_input_live[op_id].append(
+                include_draft or status is None or status != "draft"
+            )
 
         # Assemble factors (single compute_operator_weight per operator).
         for op_id, (op_type, label, direction) in op_info.items():
@@ -804,11 +836,38 @@ class TortoiseEP:
                     "Run graph-scripts/migrate_direction.py to backfill.",
                     op_id,
                 )
-            input_ids = op_inputs.get(op_id, [])
-            if not include_draft and len(input_ids) < 2:
-                # Degenerate after draft stripping — a draft-connected
-                # operator must change NO live posterior (#780).
-                continue
+            full_inputs = op_inputs.get(op_id, [])
+            if not include_draft:
+                input_ids = [
+                    cid for cid, live in zip(full_inputs, op_input_live[op_id])
+                    if live
+                ]
+                stripped = len(full_inputs) - len(input_ids)
+                if stripped:
+                    if (direction != "bidirectional"
+                            and full_inputs
+                            and not op_input_live[op_id][0]):
+                        # The idx-0 SOURCE was a draft — keeping this factor
+                        # would renumber a live target into the source slot
+                        # and invert directional semantics (#780 review-fix).
+                        logger.warning(
+                            "Operator %s: draft source stripped — factor skipped "
+                            "(non-bidirectional with draft source, #780)",
+                            op_id,
+                        )
+                        continue
+                    if len(input_ids) < 2 <= len(full_inputs):
+                        # Draft-caused degradation below 2 live inputs — a
+                        # draft-connected operator must change NO live
+                        # posterior (#780); matches the SVBP-path convention.
+                        logger.warning(
+                            "Operator %s: %d/%d inputs draft — factor skipped "
+                            "(degenerate, #780)",
+                            op_id, stripped, len(full_inputs),
+                        )
+                        continue
+            else:
+                input_ids = full_inputs
             weight = compute_operator_weight(self.proj, op_id)
             factors.append((op_id, op_type, input_ids, weight, label, direction))
         return factors
@@ -946,6 +1005,13 @@ class TortoiseEP:
         affected = self._affected_claims(operator_ids, max_hops,
                                          include_draft=include_draft)
         if not affected:
+            if not include_draft and operator_ids:
+                logger.warning(
+                    "EP run seeded with %d id(s) produced no affected claims — "
+                    "draft Points/operators are excluded by default (#780); "
+                    "pass include_draft=True to include them.",
+                    len(operator_ids),
+                )
             return 0, True
 
         factors = self._affected_factors(affected, include_draft=include_draft)

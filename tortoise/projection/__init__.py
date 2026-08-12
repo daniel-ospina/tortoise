@@ -81,6 +81,7 @@ class _GuardedGraph:
         return getattr(self._g, name)
 
 from tortoise.config import RELATIVE_PATH_ERROR, SUPPORTED_URI_SCHEMES
+from tortoise.live import _live_only
 
 # Backward-compat alias: the canonical scheme set lives in tortoise.config
 # (SUPPORTED_URI_SCHEMES) so URI-routing and connection-layer validation share
@@ -1073,8 +1074,10 @@ class FalkorProjection(
         # Query 1: all operator IDs and types (single query, O(1) round-trip).
         # #689: retracted operators never feed EP factors.
         # #780: draft operators never feed EP factors (unless opted in).
-        draft_o = "" if include_draft else "AND (o.status IS NULL OR o.status <> 'draft')"
-        draft_c = "" if include_draft else "AND (c.status IS NULL OR c.status <> 'draft')"
+        # Shared predicate from tortoise/live.py — one definition of the
+        # live-only rule across all four factor-extraction call sites.
+        draft_o = f"AND {_live_only('o.status', include_draft)}" if not include_draft else ""
+        draft_c = f"AND {_live_only('c.status', include_draft)}" if not include_draft else ""
         op_rows = self.g.query(
             "MATCH (o:Point) WHERE o.is_operator = true "
             "AND (o.status IS NULL OR o.status <> 'retracted') "

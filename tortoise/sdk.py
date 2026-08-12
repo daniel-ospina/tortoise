@@ -3283,6 +3283,11 @@ class TortoiseSDK:
                            recency_decay: float | None = None) -> dict:
         """Compute confidence via EP belief propagation. Returns {iterations, converged, confidences}.
 
+        #780: draft Points/operators are EXCLUDED by default (EP only runs
+        over live claims); there is no include_draft escape hatch on this
+        surface — call TortoiseEP.run(include_draft=True) directly for
+        legacy behavior.
+
         Args:
             factors: operator IDs (list[str]) or factor tuples. If None, auto-extracts.
             evidence: optional {claim_id: (alpha, beta)} priors.

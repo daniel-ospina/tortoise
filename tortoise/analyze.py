@@ -9,6 +9,8 @@ from __future__ import annotations
 import json, os, re
 from typing import Any
 
+from .live import _live_only
+
 
 # ═══════════════════════════════════════════════════════════════════
 # Template Registry
@@ -349,9 +351,9 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int = 1,
     visited: set[str] = set(anchors)
     rel_types = set(rel_filter.split("|"))
 
-    live_op = "" if include_draft else "AND (op.status IS NULL OR op.status <> 'draft')"
-    live_t = "" if include_draft else "AND (target.status IS NULL OR target.status <> 'draft')"
-    live_p = "" if include_draft else "AND (p.status IS NULL OR p.status <> 'draft')"
+    live_op = f"AND {_live_only('op.status', include_draft)}" if not include_draft else ""
+    live_t = f"AND {_live_only('target.status', include_draft)}" if not include_draft else ""
+    live_p = f"AND {_live_only('p.status', include_draft)}" if not include_draft else ""
 
     if not include_draft and frontier:
         rows = proj.g.query(
