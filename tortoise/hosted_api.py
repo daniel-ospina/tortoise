@@ -395,13 +395,30 @@ class AnalyticsMiddleware(BaseHTTPMiddleware):
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
-    """In-memory token bucket rate limiter. 100 Points/min per API key."""
+    """In-memory token bucket rate limiter. 100 Points/min per API key.
+
+    R-13 (epic #909, slice 5): the commit endpoint (POST /v1/sessions/commit)
+    is EXEMPT from the general 100/min key bucket via a dedicated 300/min/key
+    bucket — catch-up commits after offline capture and hold re-submissions
+    can exceed the general rate (plan §6.1, R-13: "dedicated higher bucket
+    300 req/min/key, decided + tested in slice 5"). The commit path gets its
+    OWN bucket key (``<key>@/v1/sessions/commit``) so commit requests neither
+    consume nor are consumed by the general per-key budget.
+    """
 
     SKIP = {"/health", "/health/ready", "/docs", "/openapi.json", "/v1/register", "/v1/signup/email"}
+    # R-13: path → dedicated per-key limit. The commit endpoint's bucket is
+    # keyed on ``<key>@<path>`` (see _bucket_key) — fully separate from the
+    # general 100/min bucket.
+    PATH_LIMITS = {"/v1/sessions/commit": 300}
 
-    def __init__(self, app, max_per_minute=100):
+    def __init__(self, app, max_per_minute=100, path_limits: dict | None = None):
         super().__init__(app)
         self.max_per_minute = max_per_minute
+        self.path_limits = dict(self.PATH_LIMITS)
+        if path_limits:
+            # test seam: override the per-path limits (R-13 bucket testing)
+            self.path_limits.update(path_limits)
         self._buckets: dict[str, list[float]] = defaultdict(list)
         self._last_cleanup = time.time()
         self._lock = asyncio.Lock()
@@ -410,6 +427,26 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         # tripping 429 in full-suite runs. Production keeps the limit.
         self._disabled = os.environ.get("RATE_LIMIT_DISABLED") == "1"
 
+    def _limit_for(self, path: str) -> int:
+        """Per-path rate limit (dedicated 300/min bucket for the commit
+        endpoint, R-13; everything else keeps the general 100/min)."""
+        return self.path_limits.get(path, self.max_per_minute)
+
+    def _bucket_key(self, path: str, auth: str, client_host: str | None) -> str | None:
+        """Deterministic bucket-key selection (mirrored by the rate-limit
+        tests). Valid-format tt_ keys bucket per key; the commit endpoint
+        gets a DEDICATED per-key bucket (``<key>@<path>``) so it is exempt
+        from the general 100/min key budget (R-13). Invalid/missing keys
+        fall to a per-IP bucket; no client host → no bucket (blocked)."""
+        if auth.startswith("Bearer ") and auth[7:].startswith("tt_"):
+            key = auth[7:]
+            if path in self.path_limits:
+                return f"{key}@{path}"
+            return key
+        if client_host:
+            return f"ip:{client_host}"
+        return None
+
     async def dispatch(self, request: Request, call_next):
         if self._disabled:
             return await call_next(request)
@@ -417,15 +454,12 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         auth = request.headers.get("Authorization", "")
-        if not auth.startswith("Bearer ") or not auth[7:].startswith("tt_"):
-            # IP-based fallback for unauthenticated requests
-            if request.client and request.client.host:
-                key_id = f"ip:{request.client.host}"
-            else:
-                return await call_next(request)
-        else:
-            # Use API key as bucket key (per-key limits, avoids hashing in hot path)
-            key_id = auth[7:]
+        path = request.url.path
+        key_id = self._bucket_key(path, auth,
+                                  request.client.host if request.client else None)
+        if key_id is None:
+            return await call_next(request)
+        limit = self._limit_for(path)
         now = time.time()
 
         async with self._lock:
@@ -443,10 +477,19 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             bucket = self._buckets[key_id]
             bucket[:] = [t for t in bucket if now - t < 60]
 
-            if len(bucket) >= self.max_per_minute:
-                raise HTTPException(
+            if len(bucket) >= limit:
+                # Return the 429 response directly: an HTTPException raised in
+                # a BaseHTTPMiddleware.dispatch is NOT converted by
+                # ExceptionMiddleware (it sits inside this middleware) — in
+                # this Starlette generation it bubbles to
+                # ServerErrorMiddleware and mis-renders as 500. Returning a
+                # JSONResponse is the canonical BaseHTTPMiddleware pattern and
+                # keeps the §6.1 429 contract ({detail}, Retry-After).
+                return JSONResponse(
                     status_code=429,
-                    detail="Rate limit exceeded. 100 points/minute per API key.",
+                    content={"detail": (
+                        f"Rate limit exceeded. {limit} points/minute per "
+                        "API key.")},
                     headers={"Retry-After": "60"},
                 )
 
@@ -1025,15 +1068,21 @@ def _check_team_limit(team: dict, resource: str) -> None:
         raise HTTPException(status_code=500, detail=f"Quota check failed: {e}")
 
 
-def _record_write_op(team: dict) -> None:
+def _record_write_op(team: dict, nodes_written: int = 0) -> None:
     """Best-effort write-op metering for overage billing (#681).
 
     Call AFTER a successful write. Non-fatal — metering failures are logged
     and swallowed; they never block the caller.
+
+    nodes_written: net-new non-episodic nodes written by this call (the
+    value-first commit cost driver, epic #909 §4.4/W-4/PL4 — the commit
+    endpoint passes the reconciled net-new delta; hold commits bill 0 and
+    skip this entirely).
     """
     try:
         from tortoise.metering import record_write_ops
-        record_write_ops(team.get("team_id", ""), tier=team.get("tier"))
+        record_write_ops(team.get("team_id", ""), tier=team.get("tier"),
+                         nodes_written=nodes_written)
     except Exception:
         pass  # best-effort — never block the write path
 
@@ -2629,6 +2678,511 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
     return {"session_id": session_id, "turns": len(body.conversation),
             "extracted": len(extracted), "points": extracted,
             "extraction_mode": effective_mode}
+
+
+# ── POST /v1/sessions/commit — epic #909 slice 5b (plan §6.1, W-3, W-7) ────
+# The derived-commit receiver: Layer-1 via commit_schema.py (the SHARED
+# module — same models the local extractor mirrors, §5.2 boundary 4), L1/L2
+# idempotency via :CommitRecord (commit_idempotency.py), the four-node write
+# chain (Session counters → Event AgentSession → Document transcript → Source
+# bridge → extractedFrom Points + entities + operators), budget adjudication
+# (adjudicate_budget on the RECONCILED net-new delta), metering (write_ops +1
+# per non-duplicate; nodes_written += net-new; hold commits bill 0 — PL4) and
+# content-free telemetry (W-7: no conversation content, no graph-side counts,
+# judge_summary dropped from v1).
+
+# Privacy helpers (W-7 / §6.1): provenance paths are BASENAME only — the full
+# local path never leaves the machine; the session Source url derives from the
+# basename (+ contentHash), never the full path.
+
+
+def _session_source_basename(payload: "CommitPayload") -> str:
+    """The session Source identity = the FIRST provenance basename (privacy,
+    W-7). Empty when the payload has no provenance_refs (valid empty commit)."""
+    if not payload.provenance_refs:
+        return ""
+    return os.path.basename(payload.provenance_refs[0].path.rstrip("/"))
+
+
+def _commit_response(
+    payload: "CommitPayload",
+    *,
+    duplicate: bool,
+    nodes_created: int = 0,
+    nodes_merged: int = 0,
+    held: list[str] | None = None,
+    warn: bool = False,
+) -> dict:
+    """§6.1 200 response body — commit_id = client_commit_id (stable per
+    logical commit); duplicate:true ⇒ zero writes, zero write-ops billed
+    (PL4); held non-empty ⇒ overflow (PL3), client-side, re-commit checks
+    the 50-ceiling only."""
+    return {
+        "session_id": payload.session_id,
+        "commit_id": payload.client_commit_id,
+        "nodes_created": nodes_created,
+        "nodes_merged": nodes_merged,
+        "held": held or [],
+        "duplicate": duplicate,
+        "warn": warn,
+    }
+
+
+def _load_commit_graph_state(sdk: TortoiseSDK, payload: "CommitPayload"):
+    """L2 read surface (W-3 [3]) — same-session/global MERGE state the
+    reconciliation needs, computed IN MEMORY (nothing written here).
+
+    - Session counters + is_episodic (budget numerator + quota discriminator);
+    - Points by pt_<sha> (content-addressed — global dedup, matching
+      create_point's content-hash dedup across sessions);
+    - Entities by (name, kind); operators by the (src, dst, op_type) MERGE key
+      (PL1 — no op_<sha> ids);
+    - MITIGATES: key (src, dst, MITIGATES) when the target IMPL edge already
+      carries a mitigation (the existing mitigate_operator mechanism).
+    """
+    from tortoise.commit_schema import GraphState
+
+    proj = sdk._get_proj()
+    state = GraphState()
+    rows = proj.g.query(
+        "MATCH (s:Session {id:$sid}) RETURN s.is_episodic, "
+        "coalesce(s.value_nodes_created, 0), coalesce(s.value_nodes_held, 0)",
+        params={"sid": payload.session_id},
+    ).result_set
+    if rows:
+        state.is_episodic = bool(rows[0][0])
+        state.value_nodes_created = int(rows[0][1] or 0)
+        state.value_nodes_held = int(rows[0][2] or 0)
+    point_ids = [p.id for p in payload.points]
+    if point_ids:
+        rows = proj.g.query(
+            "MATCH (p:Point) WHERE p.id IN $ids RETURN p.id, p.content",
+            params={"ids": point_ids},
+        ).result_set
+        state.points = {r[0]: r[1] for r in rows}
+    rows = proj.g.query(
+        "MATCH (o:Object) RETURN o.name, o.objectKind",
+    ).result_set
+    state.entities = {(r[0], r[1] or "") for r in rows}
+    rows = proj.g.query(
+        "MATCH (o:Point {is_operator:true})-[r]->(t:Point) "
+        "WHERE type(r) IN ['IMPL','NAND'] "
+        "RETURN o.id, o.op_type, r.idx, t.id ORDER BY o.id, r.idx",
+    ).result_set
+    ops: dict[str, dict] = {}
+    for oid, op_type, idx, tid in rows:
+        ops.setdefault(oid, {"op_type": op_type, "inputs": {}})
+        ops[oid]["inputs"][idx] = tid
+    for op in ops.values():
+        inputs = op["inputs"]
+        if 0 in inputs and 1 in inputs:
+            state.operators.add((inputs[0], inputs[1], op["op_type"]))
+    # MITIGATES — the payload key (src, dst, MITIGATES) exists when the target
+    # IMPL edge (target triple) already has a mitigation attached.
+    for op in payload.operators:
+        if op.op_type != "MITIGATES" or op.target is None:
+            continue
+        t = op.target
+        mit_rows = proj.g.query(
+            "MATCH (o:Point {is_operator:true, op_type:'IMPL'}) "
+            "MATCH (o)-[:IMPL {idx:0}]->(s:Point {id:$src}) "
+            "MATCH (o)-[:IMPL {idx:1}]->(d:Point {id:$dst}) "
+            "MATCH (o)-[:mitigated_by]->(m) RETURN count(m)",
+            params={"src": t.src, "dst": t.dst},
+        ).result_set
+        if mit_rows and mit_rows[0][0]:
+            state.operators.add((op.src, op.dst, "MITIGATES"))
+    return state
+
+
+def _store_commit_telemetry(proj, client_commit_id: str, payload: "CommitPayload",
+                            *, warn: bool = False) -> None:
+    """Content-free telemetry store (W-7): the payload telemetry block is
+    stored on the :CommitRecord — the schema has NO text-bearing fields (#963
+    guards it) and NO graph-side counts (the server derives
+    merge/supersede/held/draft/live from the Session counters — no second
+    source of truth). judge_summary is DROPPED from v1. ``budget_warn`` is a
+    server-side annotation (soft-15 WARN), not part of the client schema."""
+    telemetry = payload.telemetry.model_dump()
+    proj.g.query(
+        "MATCH (r:CommitRecord {client_commit_id:$cid}) "
+        "SET r.telemetry=$t, r.budget_warn=$warn",
+        params={"cid": client_commit_id, "t": _json.dumps(telemetry),
+                "warn": warn},
+    )
+
+
+def _point_content_by_id(payload: "CommitPayload", pid: str) -> str:
+    for pt in payload.points:
+        if pt.id == pid:
+            return pt.content
+    return ""
+
+
+def _execute_commit_writes(sdk: TortoiseSDK, payload: "CommitPayload", plan):
+    """W-3 [5] — the graph write phase for an adjudicated (budget=ok) commit.
+
+    Order matters: chain nodes first (Session counters → Event AgentSession →
+    Document transcript → Sources), then Points (new/merge/supersede), then
+    entities + aboutObject edges, then operators — IMPL/NAND BEFORE MITIGATES
+    (v1 targets must be same-commit emitted operators, Layer-1 enforced).
+
+    Runs inside the handler's fail-closed guard — any graph error surfaces as
+    a redacted 500 and the client retries with the same client_commit_id
+    (safe by L1; the record stays partial until the write completes).
+    """
+    from tortoise.ids import content_hash
+
+    proj = sdk._get_proj()
+    now = datetime.now(timezone.utc).isoformat()
+    session_id = payload.session_id
+    reconcile = plan.reconcile
+    event_id = content_hash(f"{session_id}:{payload.captured_at}")
+    doc_id = f"doc_{content_hash(f'{session_id}:{payload.captured_at}')}"
+    session_basename = _session_source_basename(payload)
+
+    # ── 1. Session node + budget counters (is_episodic: true — MECE ISSUE 2;
+    # the value-chain container is episodic; the VALUE Points below are the
+    # non-episodic quota/budget discriminator). ──
+    drafts = sum(1 for pr in reconcile.points
+                 if pr.action in ("new", "supersede")
+                 and pr.point.status == "draft")
+    proj.g.query(
+        "MERGE (s:Session {id:$sid}) "
+        "SET s.is_episodic=true, s.created_at=coalesce(s.created_at, $now), "
+        "    s.value_nodes_created = coalesce(s.value_nodes_created, 0) + $created, "
+        "    s.draft_count = coalesce(s.draft_count, 0) + $drafts, "
+        "    s.commit_count = coalesce(s.commit_count, 0) + 1, "
+        "    s.updated_at=$now",
+        params={"sid": session_id, "now": now, "created": reconcile.net_new,
+                "drafts": drafts},
+    )
+
+    # ── 2. Document transcript (deterministic id — replay-safe MERGE). NO
+    # content on the derived path (§4.1: summary/story_arc/sessionId only). ──
+    proj.g.query(
+        "MERGE (d:Document {id:$did}) "
+        "SET d.documentKind='transcript', d.title=$title, d.summary=$summary, "
+        "    d.story_arc=$arc, d.sessionId=$sid, d.eventId=$eid, "
+        "    d.sourcePath=$srcpath, d.doc_status='extracted', d.is_episodic=true, "
+        "    d.updatedAt=$now",
+        params={"did": doc_id, "title": payload.summary or session_id,
+                "summary": payload.summary, "arc": payload.story_arc,
+                "sid": session_id, "eid": event_id,
+                "srcpath": session_basename, "now": now},
+    )
+
+    # ── 3. Event AgentSession (content-addressed eventId — MERGE anchor,
+    # amendment §4.3 #3) — produces the Document. Written via raw Cypher:
+    # create_entity generates its own ULID and the projection prefers the
+    # generated id over a passed eventId, so the deterministic anchor would
+    # never land (review fix, PR #953). The Event is REQUIRED — a write
+    # failure fails the commit closed (no non-fatal wrapper). ──
+    proj.g.query(
+        "MERGE (e:Event {eventId:$eid}) "
+        "SET e.id=$eid, e.eventKind='AgentSession', e.name=$name, "
+        "    e.capturedAt=$cap, e.startedAt=$cap, e.endedAt=$cap, "
+        "    e.sessionId=$sid, e.summary=$sum, e.story_arc=$arc, "
+        "    e.is_episodic=true, e.keywords=$kw, e.eventStatus='scheduled', "
+        "    e.updatedAt=$now",
+        params={"eid": event_id, "name": payload.summary or session_id,
+                "cap": payload.captured_at, "sid": session_id,
+                "sum": payload.summary, "arc": payload.story_arc,
+                "kw": [session_id], "now": now},
+    )
+    proj.g.query(
+        "MATCH (e:Event {eventId:$eid}), (d:Document {id:$did}) "
+        "MERGE (e)-[:produces]->(d)",
+        params={"eid": event_id, "did": doc_id},
+    )
+
+    # ── 4. Source bridge: the session Source (basename url — privacy, W-7)
+    # + external artifacts from sources[]; the session Source references the
+    # Document AND the external artifacts (DE2E-5 chain). ──
+    session_urls: list[str] = []
+    for ref in payload.provenance_refs:
+        url = os.path.basename(ref.path.rstrip("/"))
+        if url not in session_urls:
+            session_urls.append(url)
+        sdk.create_source(
+            url, "agentSession",
+            contentHash=content_hash(url) if url else "",
+            provenance_spans=list(ref.spans), is_episodic=True,
+            sourceDate=payload.captured_at,
+        )
+    external_urls: list[str] = []
+    for src in payload.sources:
+        external_urls.append(src.url)
+        sdk.create_source(
+            src.url, src.sourceKind, tier=src.credibilityTier,
+            contentHash=src.contentHash or "", is_episodic=True,
+        )
+    for url in session_urls:
+        sdk.link_source_to_entity(url, doc_id, "Document")
+    for session_url in session_urls:
+        for external_url in external_urls:
+            proj.g.query(
+                "MATCH (a:Source {url:$u1}), (b:Source {url:$u2}) "
+                "MERGE (a)-[:references]->(b)",
+                params={"u1": session_url, "u2": external_url},
+            )
+
+    # ── 5. Points — deterministic pt_<sha> ids; content-hash dedup (global,
+    # matching create_point); supersede candidates (changed content) get a NEW
+    # content-addressed id + supersede_point (CORRECTS + outdated + edge
+    # transfer, PL2). Non-episodic (the quota discriminator). ──
+    for pr in reconcile.points:
+        pid = pr.point.id
+        if pr.action == "merge":
+            # MERGE bump (zero budget, PL3): updatedAt touch ONLY — never
+            # re-write status (update_point refuses non-promoting transitions;
+            # a live re-capture would 500 — review fix, PR #953).
+            proj.g.query(
+                "MATCH (p:Point {id:$pid}) SET p.updatedAt=$now",
+                params={"pid": pid, "now": now},
+            )
+        elif pr.action == "supersede":
+            pid = pr.supersede_id
+            sdk.create_point(
+                pr.point.pointKind, pr.point.content, dedup=True, id=pid,
+                status=pr.point.status, confidence=pr.point.confidence,
+                c_cal=pr.point.c_cal, quote=pr.point.quote,
+                source_ref=pr.point.source_ref,
+                extractedFrom=pr.point.source_ref, is_episodic=False,
+            )
+            sdk.supersede_point(pr.existing_id, pid)
+        else:
+            sdk.create_point(
+                pr.point.pointKind, pr.point.content, dedup=True, id=pid,
+                status=pr.point.status, confidence=pr.point.confidence,
+                c_cal=pr.point.c_cal, quote=pr.point.quote,
+                source_ref=pr.point.source_ref,
+                extractedFrom=pr.point.source_ref, is_episodic=False,
+            )
+        proj.g.query(
+            "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
+            "MERGE (s)-[:CONTAINS]->(p)",
+            params={"sid": session_id, "pid": pid},
+        )
+
+    # ── 6. Entities — :Object nodes MERGE by name (#452); objectKind + the
+    # S5 gate-result flag (passes_frequency_gate written WITH flag, amendment
+    # §4.3 #12); aboutObject edges (the canonical predicate — aboutEntity does
+    # NOT exist, §4.2). ──
+    for er in reconcile.entities:
+        sdk.create_entity(
+            "object", er.entity.name,
+            objectKind=er.entity.kind,
+            passes_frequency_gate=er.entity.passes_frequency_gate,
+            is_episodic=False,
+        )
+    for pr in reconcile.points:
+        pid = pr.point.id if pr.action != "supersede" else pr.supersede_id
+        for name in pr.point.about_entities:
+            proj.g.query(
+                "MATCH (p:Point {id:$pid}), (o:Object {name:$name}) "
+                "MERGE (p)-[:aboutObject]->(o)",
+                params={"pid": pid, "name": name},
+            )
+
+    # ── 7. Operators — (src,dst,op_type) MERGE key (PL1, no op_<sha> ids).
+    # IMPL/NAND first (draft extraction operators, promote_source=False — #780
+    # convention); MITIGATES second (targets a same-commit IMPL edge — the
+    # existing mitigate_operator mechanism: mitigation Point + (m)-[:IMPL]->(op)
+    # + (op)-[:mitigated_by]->(m), §4.2). ──
+    target_op_ids: dict[tuple, str] = {}
+    for op_rec in reconcile.operators:
+        op = op_rec.operator
+        if op_rec.action != "new" or op.op_type == "MITIGATES":
+            continue
+        try:
+            result = sdk.create_operator(
+                op.op_type, op.src, [op.dst],
+                direction=op.direction or "unidirectional",
+                promote_source=False,
+            )
+        except ValueError as e:
+            _logger.warning(
+                "commit: operator write skipped (inputs missing?): %s", e)
+            continue
+        target_op_ids[(op.src, op.dst, op.op_type)] = result["id"]
+    for op_rec in reconcile.operators:
+        op = op_rec.operator
+        if op_rec.action != "new" or op.op_type != "MITIGATES":
+            continue
+        t = op.target
+        op_id = target_op_ids.get((t.src, t.dst, t.op_type))
+        if op_id is None:
+            rows = proj.g.query(
+                "MATCH (o:Point {is_operator:true, op_type:'IMPL'}) "
+                "MATCH (o)-[:IMPL {idx:0}]->(s:Point {id:$src}) "
+                "MATCH (o)-[:IMPL {idx:1}]->(d:Point {id:$dst}) "
+                "RETURN o.id LIMIT 1",
+                params={"src": t.src, "dst": t.dst},
+            ).result_set
+            op_id = rows[0][0] if rows else None
+        if op_id is None:
+            # Deep-miss (DE2E-11 negative): the target IMPL edge is absent —
+            # the mitigation must NOT attach (support-edge-first convention).
+            _logger.warning(
+                "commit: MITIGATES target edge (%s,%s,IMPL) not found — "
+                "mitigation dropped", t.src, t.dst)
+            continue
+        reason = _point_content_by_id(payload, op.src) or f"[MITIGATION] {op.src}"
+        sdk.mitigate_operator(op_id, reason=reason, strength=op.strength or 0.5)
+
+
+@app.post("/v1/sessions/commit")
+async def commit_session(request: Request, team: dict = Depends(get_current_team)):
+    """Derived-commit receiver (epic #909 slice 5b — plan §6.1 + W-3).
+
+    Flow: [1] Layer-1 via commit_schema (400 missing_required_fields /
+    422 field reasons incl. commit_id_mismatch + calibration_mismatch;
+    retry-once semantics documented) → [2] L1 replay via :CommitRecord
+    (fully_written → 200 duplicate:true, zero writes, zero write-ops) →
+    [3] L2 reconciliation IN MEMORY → [4] sessions quota (402) + budget
+    adjudication on the reconciled net-new delta (soft 15 → WARN telemetry;
+    >25 first-adjudication → held[], NOT written; >50 → 402) → [5] the
+    four-node chain + entities + operators + supersede_point + Session
+    counters → [6] metering (write_ops +1 non-duplicate; nodes_written
+    += net-new; held bills 0 → write_ops_billed:0) + content-free telemetry.
+
+    Response contract (§6.1): 200 {session_id, commit_id, nodes_created,
+    nodes_merged, held[], duplicate} · 400 missing required fields ·
+    401 bad/missing key (get_current_team) · 402 budget ceiling or sessions
+    quota · 422 Layer-1 (retry once; code calibration_mismatch /
+    commit_id_mismatch) · 429 dedicated 300/min/key bucket (R-13) ·
+    500 fail-closed, redacted.
+    """
+    from tortoise.commit_schema import (
+        validate_payload_dict, plan_commit,
+    )
+    from tortoise.commit_idempotency import CommitRecordStore
+
+    # [1] Layer-1 (400 class = missing required fields; 422 class = shape +
+    # semantic violations with field reasons). The derived payload has NO
+    # turns — the legacy turn cap (POST /v1/sessions) does not apply.
+    try:
+        raw = await request.json()
+    except Exception:
+        raise HTTPException(
+            status_code=400, detail="Request body must be a JSON object")
+    result, payload = validate_payload_dict(raw)
+    if result.code == "missing_required_fields":
+        raise HTTPException(
+            status_code=400,
+            detail="; ".join(reasons for reasons in result.errors.get("required", [])))
+    if not result.ok or payload is None:
+        detail: dict = {k: list(v) for k, v in result.errors.items()}
+        if result.code:
+            detail["code"] = result.code
+        raise HTTPException(status_code=422, detail=detail)
+
+    sdk = _make_sdk(namespace=team["team_id"])
+    proj = sdk._get_proj()
+    store = CommitRecordStore(sdk)
+
+    # [2] L1 replay — a fully_written :CommitRecord is the idempotency proof:
+    # 200 {duplicate:true}, zero writes, zero write-ops billed (PL4). A
+    # record with status held|partial is NOT fully written (PL3).
+    record = store.get(payload.client_commit_id)
+    if record is not None and record.status == "fully_written":
+        return _commit_response(payload, duplicate=True)
+
+    # [3] L2 reconciliation IN MEMORY (W-3 [3]) + budget adjudication on the
+    # reconciled net-new delta — computed BEFORE any write (the ceiling check
+    # must count net-new, which only the reconciliation knows).
+    state = _load_commit_graph_state(sdk, payload)
+    plan = plan_commit(payload, state, record)
+
+    # :CommitRecord MERGE = the atomic concurrency serialization point (W-3
+    # [2], DE2E-7 neg a): the loser of the MERGE sees the winner's record →
+    # duplicate (if fully_written) or completes the remainder (held|partial).
+    rec, created = store.acquire(
+        payload.client_commit_id, session_id=payload.session_id,
+        status="partial", write_ops_billed=0)
+    if not created:
+        rec = store.get(payload.client_commit_id) or rec
+        if rec.status == "fully_written":
+            return _commit_response(payload, duplicate=True)
+        plan = plan_commit(payload, state, rec)  # PL3: ceiling-only
+    if plan.duplicate:
+        return _commit_response(payload, duplicate=True)
+
+    # [4a] Sessions quota (post-fix count — 402). Replays already returned
+    # above: quota never gates a duplicate (zero writes).
+    _check_team_limit(team, "sessions")
+
+    # [4b] Budget — the authoritative §6.1 semantics live in adjudicate_budget.
+    if plan.budget.outcome == "fail":
+        # Ceiling exceeded (>50): nothing written; the record stays partial
+        # (re-submission 402s deterministically — DE2E-7 Session B/C).
+        raise HTTPException(status_code=402, detail=plan.budget.reason)
+
+    now = datetime.now(timezone.utc).isoformat()
+    if plan.budget.outcome == "held":
+        # >25 (first adjudication only, PL3): items NOT written — the held
+        # count lives on the Session counter (value_nodes_held, §4.1 — NOT on
+        # the record); re-submission checks the 50-ceiling only. Bills zero
+        # write-ops (write_ops_billed: 0 on the record, PL4).
+        proj.g.query(
+            "MERGE (s:Session {id:$sid}) "
+            "SET s.is_episodic=true, s.created_at=coalesce(s.created_at, $now), "
+            "    s.value_nodes_held = coalesce(s.value_nodes_held, 0) + $n, "
+            "    s.updated_at=$now",
+            params={"sid": payload.session_id, "n": len(plan.budget.held_point_ids),
+                    "now": now},
+        )
+        store.update(payload.client_commit_id, status="held")
+        _store_commit_telemetry(proj, payload.client_commit_id, payload,
+                                warn=plan.budget.warn)
+        return _commit_response(
+            payload, duplicate=False, held=list(plan.budget.held_point_ids),
+            warn=plan.budget.warn)
+
+    # [5] Graph writes — fail-closed: any write error → redacted 500 (the
+    # client retries with the same client_commit_id — safe by L1; the record
+    # stays partial).
+    try:
+        _execute_commit_writes(sdk, payload, plan)
+    except HTTPException:
+        raise
+    except Exception as e:
+        _logger.exception(
+            "commit write failed (fail-closed 500): team=%s session=%s",
+            team["team_id"], payload.session_id)
+        raise HTTPException(
+            status_code=500,
+            detail="Commit write failed — the commit is replay-safe (retry "
+                   "with the same client_commit_id; L1 idempotency). Details "
+                   "logged server-side (fail-closed, redacted).")
+
+    # :CommitRecord → fully_written + billing (the single +1 for this logical
+    # payload — PL4) + content-free telemetry (W-7).
+    store.update(payload.client_commit_id, status="fully_written")
+    proj.g.query(
+        "MATCH (r:CommitRecord {client_commit_id:$cid}) "
+        "SET r.write_ops_billed=1",
+        params={"cid": payload.client_commit_id},
+    )
+    _store_commit_telemetry(proj, payload.client_commit_id, payload,
+                            warn=plan.budget.warn)
+
+    # [6] Metering — write_ops +1 per NON-duplicate commit call; nodes_written
+    # += net-new non-episodic (cost driver; supersede-only deltas exempt, R-14).
+    _record_write_op(team, nodes_written=plan.reconcile.net_new)
+
+    merged = (
+        sum(1 for pr in plan.reconcile.points if pr.action == "merge")
+        + sum(1 for er in plan.reconcile.entities if er.action == "merge")
+        + sum(1 for op in plan.reconcile.operators if op.action == "merge")
+    )
+    return _commit_response(
+        payload, duplicate=False,
+        nodes_created=plan.reconcile.net_new,
+        nodes_merged=merged,
+        warn=plan.budget.warn,
+    )
 
 
 @app.get("/v1/sessions")

@@ -1289,13 +1289,18 @@ def metering_get(cp, team_id: str, period: str) -> int:
     return int(rows[0]["write_ops"]) if rows else 0
 
 
-def metering_increment(cp, team_id: str, period: str, n: int = 1) -> int:
+def metering_increment(cp, team_id: str, period: str, n: int = 1,
+                      nodes_written: int = 0) -> int:
     """Increment the team's write-op counter for the period; returns the new
     count. ATOMIC (review P2, PR #911): delegates to the metering_increment
-    SQL RPC (0014) — write_ops = write_ops + n under Postgres row locking —
+    SQL RPC (0014/0015) — write_ops = write_ops + n under Postgres row locking —
     so concurrent increments can never undercount (a GET-then-PATCH would
     lose updates). Best-effort by contract (metering failures never block a
     write): the caller swallows exceptions.
+
+    nodes_written: net-new non-episodic nodes for the period (the value-first
+    commit cost driver, epic #909 §4.4/W-4 — 0 on hold commits). The 0015
+    RPC increments both columns atomically under the same row lock.
 
     #925: the read-back is the only best-effort step. The RPC call itself
     still raises when it fails — though if the response is lost the write
@@ -1309,7 +1314,8 @@ def metering_increment(cp, team_id: str, period: str, n: int = 1) -> int:
     """
     cp.rpc(
         "metering_increment",
-        {"p_team_id": team_id, "p_period": period, "p_n": n},
+        {"p_team_id": team_id, "p_period": period, "p_n": n,
+         "p_nodes_written": nodes_written},
     )
     # PostgREST does not echo SECURITY DEFINER RPC results with
     # return=minimal — read back the atomic new value. The RPC above already
