@@ -1,4 +1,4 @@
-"""xtractor — transcript segment(s) → events, via the shared EventAPI.
+"""Extractor — transcript segment(s) → events, via the shared EventAPI.
 
 M0 ships a deterministic, offline `MockExtractor` so the spine runs with no API
 key: one utterance-level point each (Option A), plus asserted-only {NAND, IMPL}
@@ -334,11 +334,28 @@ def _normalize_object_kind(kind: str) -> str:
     return k if k in _OBJECT_KIND_VOCAB else "other"
 
 
+def _intersect_object_kinds(kinds: list[str] | None) -> list[str]:
+    """DE2E-review (objectKind vocab): the LLM prompt vocab must not be wider
+    than the validator vocab — kinds that cannot survive _normalize_object_kind
+    (DE2E-N7) silently collapse to 'other' and mislead the model ("Prefer
+    specific kinds" while 26 of 38 prompt kinds are dropped). Intersect the
+    resolved vocab (domain_loader known_kinds/domain_kinds) with
+    _OBJECT_KIND_VOCAB so the model only sees kinds that survive."""
+    if not kinds:
+        return sorted(_OBJECT_KIND_VOCAB)
+    merged: list[str] = []
+    for k in kinds:
+        ks = str(k).strip().lower()
+        if ks in _OBJECT_KIND_VOCAB and ks not in merged:
+            merged.append(ks)
+    return merged or sorted(_OBJECT_KIND_VOCAB)
+
+
 def _canonical_name(name: str) -> str:
-    """Plan §4.1: normalized entity name — lowercase, whitespace-collapsed,
-    punctuation-stripped for matching; the display `title` preserves the
-    original mention."""
-    return _PUNC.sub("", name.lower().strip())
+    """Plan §4.1: normalized entity name — lowercase, whitespace-collapsed
+    ("port  16379" == "port 16379"), punctuation-stripped for matching; the
+    display `title` preserves the original mention."""
+    return _PUNC.sub("", re.sub(r"\s+", " ", name.lower().strip()))
 
 
 def _normalize_entity(e) -> dict | None:
@@ -416,13 +433,19 @@ class EntityStageMock:
                 if span is None:
                     start = transcript.find(name)
                     span = [start, start + len(name)] if start >= 0 else None
-                ent = _normalize_entity({
-                    "name": name,
-                    "objectKind": e.get("objectKind", "other"),
-                    "canonical_candidates": e.get("canonical_candidates") or [name],
-                    "span": span,
-                    "confidence": e.get("confidence", 1.0),
-                })
+                try:
+                    ent = _normalize_entity({
+                        "name": name,
+                        "objectKind": e.get("objectKind", "other"),
+                        "canonical_candidates": e.get("canonical_candidates") or [name],
+                        "span": span,
+                        "confidence": e.get("confidence", 1.0),
+                    })
+                except Exception:
+                    # per-entity brittleness: skip only the bad entity
+                    logger.debug("skipping malformed fixture entity %r", e,
+                                 exc_info=True)
+                    continue
                 if ent:
                     out.append(ent)
         return out
@@ -857,10 +880,12 @@ class EntityStage(_SemanticStage):
     """
 
     def __init__(self, model, *, object_kinds: list[str] | None = None):
-        super().__init__(model, object_kinds=object_kinds or [
-            "project", "workitem", "document", "tag", "user", "skill",
-            "tool", "agent", "workflow", "agreement", "standard", "other",
-        ])
+        super().__init__(model, object_kinds=_intersect_object_kinds(
+            object_kinds or [
+                "project", "workitem", "document", "tag", "user", "skill",
+                "tool", "agent", "workflow", "agreement", "standard", "other",
+            ],
+        ))
         self._system = _ENTITY_CONV_SYS
 
     def run(self, transcript: str, source_id: str) -> list[dict]:
@@ -875,12 +900,25 @@ class EntityStage(_SemanticStage):
             }),
         )
         raw = _json(out).get("entities", [])
+        if not isinstance(raw, list):
+            # DE2E-review (parse brittleness): a non-list entities payload is a
+            # parse failure — raise so the caller's rule fallback runs instead
+            # of silently returning [] (which drops valid entities AND skips
+            # the fallback).
+            raise ValueError(
+                f"entities must be a JSON list, got {type(raw).__name__}: "
+                f"{str(raw)[:120]!r}"
+            )
         entities: list[dict] = []
-        if isinstance(raw, list):
-            for e in raw:
+        for e in raw:
+            try:
                 ent = _normalize_entity(e)
-                if ent:
-                    entities.append(ent)
+            except Exception:
+                # per-entity brittleness: skip only the bad entity, keep the rest
+                logger.debug("skipping malformed entity %r", e, exc_info=True)
+                continue
+            if ent:
+                entities.append(ent)
         return entities
 
 
@@ -1185,7 +1223,12 @@ class LLMExtractor:
             raw = _rule_fallback_entities(transcript)
         out: list[dict] = []
         for e in raw or []:
-            ent = _normalize_entity(e)
+            try:
+                ent = _normalize_entity(e)
+            except Exception:
+                # per-entity brittleness: skip only the bad entity
+                logger.debug("skipping malformed entity %r", e, exc_info=True)
+                continue
             if ent:
                 out.append(ent)
         return out
@@ -1263,4 +1306,14 @@ def extract_conversation_entities(
             raw = _rule_fallback_entities(transcript)
     else:
         raw = _rule_fallback_entities(transcript)
-    return [e for e in (_normalize_entity(e) for e in (raw or [])) if e]
+    out: list[dict] = []
+    for e in raw or []:
+        try:
+            ent = _normalize_entity(e)
+        except Exception:
+            # per-entity brittleness: skip only the bad entity
+            logger.debug("skipping malformed entity %r", e, exc_info=True)
+            continue
+        if ent:
+            out.append(ent)
+    return out

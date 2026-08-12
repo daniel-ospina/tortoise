@@ -167,6 +167,60 @@ def test_entity_stage_llm_path_with_mock_model_no_crash():
     print("PASS test_entity_stage_llm_path_with_mock_model_no_crash")
 
 
+# ── Code-review round 1 (PR #994): per-entity parse brittleness ───
+
+def test_de2e1_non_numeric_confidence_entity_skipped():
+    """A single entity with a non-numeric LLM confidence is SKIPPED (logged),
+    not the whole extraction — valid entities survive instead of the entire
+    extraction falling back to rules and discarding them.
+    """
+    from tortoise.mining import mine_conversation
+    api, log = _api()
+    transcript = "Alice: FalkorDB is the store and tortoise#123 tracks it.\n"
+    # FalkorDB (good confidence, NOT a rule-fallback pattern) + tortoise#123
+    # (bad confidence, IS a rule-fallback pattern). Without the per-entity
+    # guard, the mock stage raises on the bad entity → rule fallback drops
+    # FalkorDB and keeps only tortoise#123. With the guard: only the bad
+    # entity is skipped, FalkorDB survives.
+    stage = EntityStageMock({
+        "FalkorDB": [{"name": "FalkorDB", "objectKind": "tool",
+                       "confidence": 0.9}],
+        "tortoise#123": [{"name": "tortoise#123", "objectKind": "workitem",
+                           "confidence": "high"}],
+    })
+    res = mine_conversation(transcript, "sConf", api, entity_stage=stage)
+    objects = [e for e in log.read_all() if e["type"] == "ObjectRegistered"]
+    names = {o["name"] for o in objects}
+    assert res["entities"] == 1, f"expected only the good entity: {res}"
+    assert "FalkorDB" in names, f"valid entity dropped: {names}"
+    assert "tortoise#123" not in names, f"bad entity not skipped: {names}"
+    print("PASS test_de2e1_non_numeric_confidence_entity_skipped")
+
+
+def test_entity_stage_objectkind_vocab_intersected_with_validator():
+    """DE2E-review (objectKind vocab): a wide prompt vocab (e.g. domain_loader
+    known_kinds — 38 kinds) must be intersected with the DE2E-N7 validator
+    vocab so the LLM only sees kinds that survive normalization — no silent
+    'other' collapse, no misleading 'Prefer specific kinds'.
+    """
+    from tortoise.extractor import _OBJECT_KIND_VOCAB
+    wide = ["database", "api", "code", "software", "infrastructure",
+            "product", "customer", "competitor", "epic", "indicator",
+            "tool", "other"]
+    stage = EntityStage(MockModel("cheap"), object_kinds=wide)
+    assert set(stage.object_kinds) <= set(_OBJECT_KIND_VOCAB), stage.object_kinds
+    for excluded in ("database", "api", "code", "software", "product",
+                     "customer", "competitor", "epic"):
+        assert excluded not in stage.object_kinds, \
+            f"{excluded} survived the vocab intersect"
+    assert "tool" in stage.object_kinds and "other" in stage.object_kinds
+    # the prompt itself only lists surviving kinds (parse the kinds line)
+    prompt = stage._system.format(object_kinds=", ".join(stage.object_kinds))
+    kinds_line = prompt.split("Object kinds:")[1].split("Return JSON")[0]
+    assert "database" not in kinds_line and "product" not in kinds_line
+    print("PASS test_entity_stage_objectkind_vocab_intersected_with_validator")
+
+
 if __name__ == "__main__":
     test_entity_stage_mock_deterministic_fixture()
     test_entity_stage_mock_empty_transcript()
@@ -177,3 +231,5 @@ if __name__ == "__main__":
     test_de2e_n7_unknown_object_kind_normalized_to_other()
     test_de2e_n12_conversation_and_s7_extract_entities_coexist()
     test_entity_stage_llm_path_with_mock_model_no_crash()
+    test_de2e1_non_numeric_confidence_entity_skipped()
+    test_entity_stage_objectkind_vocab_intersected_with_validator()

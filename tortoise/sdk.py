@@ -4287,13 +4287,17 @@ class TortoiseSDK:
                 "failed": failed, "errors": errors}
 
     def mine_corpus(self, directory: str, *, extract_entities: bool = True,
-                    progress_file: str | None = None, model=None) -> dict:
+                    progress_file: str | None = None, model=None,
+                    event_log_path: str | None = None) -> dict:
         """Batch-mine a session corpus (J-1, plan §6.1) into this graph.
 
         COMPOSES :meth:`ingest_corpus` (security, resume, file_hash — R17):
         each file is first indexed as an AgentSession Event by the shared
         machinery, then mined via ConversationMiner (Points/Operators/Events +
         Phase-2 entity Objects with aboutObject/aboutEvent wiring, DE2E-1).
+        ``event_log_path`` routes mining events to the given JSONL log
+        (default: this SDK's configured event log, else a fallback next to
+        the DB path).
 
         Returns: {sessions, ingested, updated, skipped, failed, entities,
         objects, dedup_hits, drafts, errors:[{file, error, retryable}]}.
@@ -4304,6 +4308,7 @@ class TortoiseSDK:
         return mine_corpus_with_sdk(
             self, directory, extract_entities=extract_entities,
             progress_file=progress_file, model=model,
+            event_log_path=event_log_path,
         )
 
     # ── Entity Resolution (GAP-01 #6987) ──────────────────────

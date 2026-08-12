@@ -103,7 +103,7 @@ class ConversationMiner:
         extractor.run(transcript, source_id, api)
 
         # 2. Collect what was just produced by reading back from the log
-        points, operators = self._collect_recent(api)
+        points, operators = self._collect_recent(api, source_id)
 
         # 3. Derive session-level EventRecorded events
         events = self._derive_events(
@@ -152,9 +152,12 @@ class ConversationMiner:
     @staticmethod
     def _object_id(name: str) -> str:
         """Deterministic canonical Object id (plan §4.1/§4.4): ``obj_`` +
-        sha256 of the domain-separated canonical name, truncated to 12 hex
-        chars — via the existing ids.content_hash helper (no third sha256)."""
-        return "obj_" + content_hash(f"obj:{_canonical_name(name)}")[:12]
+        sha256 of the domain-separated canonical name, truncated to 16 hex
+        chars (64 bits — collision-resistant vs the old 48-bit [:12], which
+        collided once punctuation-stripping canonicalization was added,
+        "Foo.Bar" == "FooBar") — via the existing ids.content_hash helper
+        (no third sha256)."""
+        return "obj_" + content_hash(f"obj:{_canonical_name(name)}")[:16]
 
     def _reify_entities(
         self,
@@ -185,16 +188,22 @@ class ConversationMiner:
         if proj is None:
             # Log-only mode: emit ObjectRegistered events for the audit trail;
             # graph wiring is projection-bound.
+            wired = 0
             for ent in entities:
                 name = ent["name"]
+                if not self._reifiable_name(name, transcript):
+                    continue
                 api.add_object(name, ent["objectKind"], id=self._object_id(name),
                                canonical_name=_canonical_name(name), title=name)
-            return len(entities)
+                wired += 1
+            return wired
 
         meeting_event = f"meeting-{source_id}"
         wired = 0
         for ent in entities:
             name = ent["name"]
+            if not self._reifiable_name(name, transcript):
+                continue
             canonical = _canonical_name(name)
             api.add_object(name, ent["objectKind"], id=self._object_id(name),
                            canonical_name=canonical, title=name)
@@ -227,29 +236,50 @@ class ConversationMiner:
 
     # ── Internal helpers ───────────────────────────────────────────
 
+    @staticmethod
+    def _reifiable_name(name: str, transcript: str) -> bool:
+        """DE2E-review (substring wiring): a name must be ≥3 chars and appear
+        verbatim in the transcript before it is reified/wired — otherwise
+        short or absent names over-wire via substring matches ("port 16379"
+        vs "port 1637")."""
+        name = (name or "").strip()
+        return len(name) >= 3 and name.lower() in transcript.lower()
+
     def _make_extractor(self):
         if self.model is not None:
             return LLMExtractor(self.model, self.model)
         return MockExtractor()
 
-    def _collect_recent(self, api: EventAPI) -> tuple[list[dict], list[dict]]:
-        """Collect PointAdded and OperatorAdded events from the current run."""
+    def _collect_recent(self, api: EventAPI,
+                        source_id: str | None = None) -> tuple[list[dict], list[dict]]:
+        """Collect PointAdded and OperatorAdded events from the current run.
+
+        Run boundary (DE2E-review): filters by ``api.current_run`` when set AND
+        by provenance source_id when given. A corpus loop reusing ONE EventAPI
+        across files must never inherit a prior file's points — otherwise
+        cross-session aboutObject/aboutEvent wiring, wrong per-session event
+        content, duplicate derived events, and re-mine stacking occur.
+        """
         run_id = getattr(api, "current_run", None)
         points: list[dict] = []
         operators: list[dict] = []
         for ev in api.log.read_all():
             if ev.get("type") == "PointAdded":
                 p = ev.get("point", {})
-                if run_id and p.get("provenance", {}).get("run_id") == run_id:
-                    points.append(p)
-                elif not run_id:
-                    points.append(p)
+                prov = p.get("provenance", {})
+                if run_id and prov.get("run_id") != run_id:
+                    continue
+                if source_id is not None and prov.get("source_id") != source_id:
+                    continue
+                points.append(p)
             elif ev.get("type") == "OperatorAdded":
                 op = ev.get("point", {})
-                if run_id and op.get("provenance", {}).get("run_id") == run_id:
-                    operators.append(op)
-                elif not run_id:
-                    operators.append(op)
+                prov = op.get("provenance", {})
+                if run_id and prov.get("run_id") != run_id:
+                    continue
+                if source_id is not None and prov.get("source_id") != source_id:
+                    continue
+                operators.append(op)
         return points, operators
 
     def _derive_events(
@@ -491,8 +521,11 @@ def mine_conversation(
     operators, event_ids} plus Phase-2 {entities, objects, dedup_hits, drafts}.
     ``content_dedup``/``dedup_threshold`` are accepted for the pinned API
     surface but the dedup stage itself is a later issue — dedup_hits is
-    always 0 from this entry point.
+    always 0 from this entry point (DE2E-3).
     """
+    if content_dedup:
+        logger.info("content dedup stage not yet implemented — "
+                    "dedup_hits always 0 (DE2E-3)")
     miner = ConversationMiner(model)
     return miner.mine(transcript, source_id, api,
                       participants=participants,
@@ -506,12 +539,15 @@ def mine_corpus(
     extract_entities: bool = True,
     progress_file: str | None = None,
     model: Any | None = None,
+    event_log_path: str | None = None,
 ) -> dict:
     """Batch-mine a session corpus (J-1, plan §6.1) into a fresh embedded DB.
 
     Convenience wrapper over :func:`mine_corpus_with_sdk` — creates an
     isolated embedded graph next to the corpus directory. Callers that want
     to mine into an existing team graph use ``TortoiseSDK.mine_corpus``.
+    ``event_log_path`` routes mining events to the given JSONL log (default:
+    the SDK's configured event log, or a fallback next to the DB path).
     """
     import os as _os
     import hashlib as _hashlib
@@ -521,13 +557,14 @@ def mine_corpus(
         _os.path.dirname(_os.path.abspath(directory)) or ".",
         f".mine-{_hashlib.md5(directory.encode()).hexdigest()[:8]}.db",
     )
-    sdk = TortoiseSDK(db_path)
+    sdk = TortoiseSDK(db_path, event_log_path=event_log_path)
     try:
         return mine_corpus_with_sdk(
             sdk, directory,
             extract_entities=extract_entities,
             progress_file=progress_file,
             model=model,
+            event_log_path=event_log_path,
         )
     finally:
         sdk.close()
@@ -540,6 +577,7 @@ def mine_corpus_with_sdk(
     extract_entities: bool = True,
     progress_file: str | None = None,
     model: Any | None = None,
+    event_log_path: str | None = None,
 ) -> dict:
     """Batch-mine a session corpus (J-1, plan §6.1) through an existing SDK.
 
@@ -547,6 +585,20 @@ def mine_corpus_with_sdk(
     directory is validated and files ingested (AgentSession event index) by
     the shared machinery; this pass then mines every file whose content hash
     does not already match its indexed Event (file_hash skip — DE2E-N8).
+
+    R17 / review hardening (in addition to ingest's own gate):
+    - the directory security validation (ingest_dir_is_safe) runs BEFORE any
+      file I/O — the pre-index scan never reads an unsafe directory;
+    - symlinked *.md entries are never read (host-file read + LLM
+      exfiltration when model= is set) — surfaced as non-retryable errors;
+    - duplicate-sessionId files are deduped to ONE primary per sessionId
+      (first in sorted order, mirroring ingest) — non-primary copies are
+      skipped and surfaced as non-retryable errors;
+    - a fresh run boundary (api.current_run) is set per file so each
+      session's mine sees only its own points (no cross-session wiring).
+
+    ``event_log_path`` routes mining events to the given JSONL log; default:
+    the SDK's configured event log, else a fallback next to the DB path.
 
     Returns {sessions, ingested, updated, skipped, failed, entities, objects,
     dedup_hits, drafts, errors:[{file, error, retryable}]}.
@@ -557,21 +609,51 @@ def mine_corpus_with_sdk(
 
     from tortoise.api import EventAPI
     from tortoise.log import EventLog
+    from .security import ingest_dir_is_safe
+
+    # ── R17: directory security validation BEFORE any file I/O. The pre-index
+    # scan reads host files — an unsafe directory (relative, `..`, or outside
+    # TORTOISE_INGEST_BASE_DIR) must never be walked here, matching
+    # ingest_corpus's own gate (which runs later, after this scan). ──
+    ingest_base = None
+    raw_base = _os.environ.get("TORTOISE_INGEST_BASE_DIR")
+    if raw_base:
+        ingest_base = _os.path.realpath(_os.path.expanduser(raw_base))
+    if not ingest_dir_is_safe(directory, ingest_base):
+        raise ValueError(
+            f"Unsafe ingest directory: {directory!r}. Directory must be "
+            f"absolute, contain no '..' components, and resolve under "
+            f"TORTOISE_INGEST_BASE_DIR when set ({ingest_base or '<unset>'})."
+        )
 
     # ── Pre-ingest scan: capture which files are ALREADY indexed with the
     # CURRENT content hash (unchanged re-run / duplicate session file,
     # DE2E-N8). Must run BEFORE ingest_corpus so first-run files are not
-    # mistaken for already-indexed. ──
+    # mistaken for already-indexed. Symlinks are skipped (R17); duplicate
+    # sessionIds are deduped to one primary per sessionId (#280 parity). ──
     from .session_indexer import _FM_RE
-    files = sorted(Path(directory).rglob("*.md"))
     proj = sdk._get_proj()
+    errors: list[dict] = []
+    files: list[Path] = []
+    scanned: list[str] = []  # every *.md found by the walk (sessions count)
     pre_indexed: set[str] = set()
     _frontmatter_of: dict[str, dict] = {}
-    for fp in files:
+    _primary_sessions: dict[str, str] = {}
+    for fp in sorted(Path(directory).rglob("*.md")):
         rel = str(fp)
+        scanned.append(rel)
+        if fp.is_symlink():
+            errors.append({"file": rel,
+                           "error": "symlinked file skipped (R17: the corpus "
+                                     "walk must not follow symlinks)",
+                           "retryable": False})
+            continue
         try:
             text = fp.read_text(encoding="utf-8")
-        except Exception:
+        except Exception as e:
+            # unreadable file — surface it (non-retryable) and skip; ingest
+            # counts it as failed but the mining-pass errors list must too
+            errors.append({"file": rel, "error": str(e), "retryable": False})
             continue
         m = _FM_RE.match(text)
         frontmatter: dict = {}
@@ -586,6 +668,19 @@ def mine_corpus_with_sdk(
         _frontmatter_of[rel] = frontmatter
         session_id = frontmatter.get("sessionId") or frontmatter.get("session_id") \
             or f"file_{fp.stem}"
+        # #280 parity: duplicate sessionId → first-in-sorted-order file wins;
+        # non-primary copies are skipped (deterministic, non-retryable —
+        # re-running changes nothing) instead of being re-mined every run
+        # (event flapping, LLM spend, non-convergence).
+        _primary = _primary_sessions.get(session_id)
+        if _primary is not None and _primary != rel:
+            errors.append({"file": rel,
+                           "error": f"duplicate sessionId '{session_id}' "
+                                    f"(primary file: {_primary}) — non-primary "
+                                    f"copy skipped",
+                           "retryable": False})
+            continue
+        _primary_sessions.setdefault(session_id, rel)
         file_hash = _hashlib.sha256(text.encode()).hexdigest()
         rows = proj.g.query(
             "MATCH (e:Event {eventId:$eid}) RETURN e.file_hash",
@@ -593,16 +688,28 @@ def mine_corpus_with_sdk(
         ).result_set
         if rows and rows[0] and rows[0][0] == file_hash:
             pre_indexed.add(rel)
+        files.append(fp)
 
     ingest = sdk.ingest_corpus(
         directory, eventKind="AgentSession", extract_metadata=False,
         progress_file=progress_file,
     )
 
-    log = sdk._get_event_log()
-    if log is None:
+    # ── Event-log routing (DE2E-review): mine through the SDK's own event
+    # log when one exists (events stay on the canonical store path); an
+    # explicit event_log_path overrides; the fallback lives NEXT TO THE DB
+    # PATH (not next to the corpus dir). ──
+    log = None
+    if event_log_path is not None:
+        log = EventLog(event_log_path)
+    elif sdk._get_event_log() is not None:
+        log = sdk._get_event_log()
+    else:
+        db_path = getattr(sdk, "_db_path", None)
+        anchor = (_os.path.dirname(_os.path.abspath(db_path)) if db_path
+                  else _os.path.dirname(_os.path.abspath(directory)) or ".")
         log = EventLog(_os.path.join(
-            _os.path.dirname(_os.path.abspath(directory)) or ".",
+            anchor,
             f".mine-events-{_hashlib.md5(directory.encode()).hexdigest()[:8]}.jsonl",
         ))
     api = EventAPI(log, initiated_by="extractor", agent_id="mining-pilot",
@@ -611,7 +718,6 @@ def mine_corpus_with_sdk(
 
     miner = ConversationMiner(model)
     entities = objects = dedup_hits = drafts = 0
-    errors: list[dict] = []
     for fp in files:
         rel = str(fp)
         if rel in pre_indexed:
@@ -624,6 +730,12 @@ def mine_corpus_with_sdk(
         frontmatter = _frontmatter_of.get(rel, {})
         session_id = frontmatter.get("sessionId") or frontmatter.get("session_id") \
             or f"file_{fp.stem}"
+        if _primary_sessions.get(session_id, rel) != rel:
+            continue  # non-primary copy of a duplicate sessionId (already errored)
+        # Run boundary: one fresh run per file, so _collect_recent never
+        # inherits a prior file's points (cross-session aboutObject/aboutEvent
+        # wiring, wrong per-session event content, re-mine stacking).
+        api.current_run = ulid()
         try:
             res = miner.mine(text, f"session_{session_id}", api,
                              extract_entities=extract_entities,
@@ -641,7 +753,7 @@ def mine_corpus_with_sdk(
         {e.get("file") for e in errors}
 
     return {
-        "sessions": len(files),
+        "sessions": len(scanned),
         "ingested": ingest.get("ingested", 0),
         "updated": ingest.get("updated", 0),
         "skipped": ingest.get("skipped", 0),
