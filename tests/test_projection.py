@@ -2564,6 +2564,26 @@ def test_apply_one_non_dict_provenance_no_crash():
     assert points["p2"]["id"] == "p2"
 
 
+def test_falkor_apply_non_dict_operator_no_crash():
+    """#331 (review r5): a truthy non-dict operator (bare string) must
+    degrade to no-operator in _upsert_point_props — parity with the r4
+    guard in _create_edges — not AttributeError in op.get('op_type')."""
+    if _skip_if_no_falkor():
+        return
+    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    try:
+        proj.apply({"type": "PointAdded",
+                    "point": {"id": "p-op-str", "content": "x", "operator": "IMPL"}})
+        # Point written, flagged as non-operator
+        row = proj.g.query(
+            "MATCH (n:Point {id:'p-op-str'}) RETURN n.is_operator"
+        ).result_set
+        assert row and row[0][0] is False, \
+            "non-dict operator must degrade to is_operator=false"
+    finally:
+        proj.close()
+
+
 def test_fold_missing_type_events_skipped():
     """#331: fold over a log containing malformed events must not raise."""
     pts = fold([

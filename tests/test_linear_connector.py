@@ -175,9 +175,11 @@ def test_query_without_api_key_returns_empty():
 
 # ── #331: undeclared GraphQL variable + swallowed HTTP errors ──────
 
-def test_cycles_query_declares_team_id_variable():
-    """#331: the Cycles query must DECLARE $teamId before passing it as a
-    variable — an undeclared variable is a GraphQL validation error."""
+def test_cycles_query_uses_schema_valid_team_filter():
+    """#331 (review r5): Query.cycles has no teamId argument in the Linear
+    schema — team filtering must go through filter: CycleFilter (same
+    pattern as _poll_issues). A direct teamId argument is a GraphQL
+    validation error in every configuration."""
     lc = LinearConnector(config={"api_key": "lin_api_test", "team_id": "team-1"})
     captured: dict = {}
 
@@ -188,11 +190,51 @@ def test_cycles_query_declares_team_id_variable():
 
     lc._query = fake_query
     assert lc._poll_cycles() == []
-    assert captured["variables"].get("teamId") == "team-1"
-    assert "$teamId: String" in captured["query"], \
-        "query must declare $teamId: String"
-    assert "teamId: $teamId" in captured["query"], \
-        "query must pass teamId: $teamId to cycles()"
+    assert captured["variables"].get("filter") == {"team": {"id": {"eq": "team-1"}}}
+    assert "$filter: CycleFilter" in captured["query"], \
+        "query must declare $filter: CycleFilter"
+    assert "filter: $filter" in captured["query"], \
+        "query must pass filter: $filter to cycles()"
+    assert "teamId" not in captured["query"], \
+        "teamId is not a valid Query.cycles argument in the Linear schema"
+
+
+def test_cycles_query_no_filter_without_team_id():
+    """#331 (review r5): without a configured team_id the Cycles query must
+    not send a filter variable (all cycles, schema-valid)."""
+    lc = LinearConnector(config={"api_key": "lin_api_test"})
+    captured: dict = {}
+
+    def fake_query(query, variables=None):
+        captured["query"] = query
+        captured["variables"] = variables
+        return {"data": {"cycles": {"nodes": []}}}
+
+    lc._query = fake_query
+    assert lc._poll_cycles() == []
+    assert "filter" not in captured["variables"]
+
+
+def test_query_tolerates_malformed_errors_payload(caplog):
+    """#331 (review r5): a malformed GraphQL errors payload (null, string,
+    non-dict entries) must be surfaced without crashing the connector —
+    the error-reporting path itself must not become a crash vector."""
+    import json as _json
+    import urllib.request
+    import unittest.mock as mock
+
+    lc = LinearConnector(config={"api_key": "lin_api_test"})
+    for bad_errors in (None, "oops", [{"message": "fine"}, "garbage", 42]):
+        resp = mock.MagicMock()
+        body = _json.dumps({"errors": bad_errors}).encode()
+        resp.read.return_value = body
+        cm = resp.__enter__.return_value
+        cm.read.return_value = body
+        with mock.patch("urllib.request.urlopen", return_value=resp):
+            with caplog.at_level("WARNING", logger="tortoise.connectors.linear"):
+                assert lc._query("query X { x }") == {}
+    assert any("GraphQL" in r.message for r in caplog.records), \
+        "malformed GraphQL errors must still be logged"
 
 
 def test_query_logs_http_errors(caplog):

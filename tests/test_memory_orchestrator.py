@@ -275,6 +275,39 @@ def test_dispatch_all_fail():
     print("✓ dispatch all fail → OrchestratorError")
 
 
+def test_dispatch_harvests_completed_results_after_deadline():
+    """#331 (review r5): when the FIRST ontology in iteration order burns
+    the shared deadline, later ontologies whose futures ALREADY completed
+    must still contribute their results — not be misreported as timeouts
+    (order-sensitive silent data loss)."""
+    import time as _time
+
+    db = MagicMock()
+
+    def _select_graph(name):
+        g = MagicMock()
+        if name == "epistemic":  # slow: burns the whole deadline
+            def _slow_query(cypher):
+                _time.sleep(1.0)
+                result = MagicMock()
+                result.result_set = []
+                return result
+            g.query = _slow_query
+        else:  # fast: completes immediately
+            data = [[[1, ["Event"], [["content", "evt1"]]]]]
+            g.query = lambda cypher: MagicMock(result_set=data)
+        return g
+
+    db.select_graph = _select_graph
+    # Slow ontology FIRST: waiting for it consumes the deadline before the
+    # fast one is harvested.
+    results, errors = dispatch(["epistemic", "episodic"], db, timeout=0.3)
+    assert "episodic" in results, \
+        "completed fast result must be harvested even after the deadline"
+    assert errors.get("epistemic") == "timeout"
+    print("✓ dispatch harvests completed results after deadline")
+
+
 def test_dispatch_no_cypher_template():
     db = MagicMock()
     try:

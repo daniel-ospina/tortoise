@@ -149,10 +149,12 @@ def dispatch(
             pending[ont] = ex.submit(_queryOntology, db, ont, cypherMap[ont], cypherParams)
 
         for ont, f in pending.items():
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                errors[ont] = "timeout"
-                continue
+            # #331 (review r5): clamp remaining to >= 0 instead of
+            # shortcutting — f.result(timeout=0) returns an
+            # already-completed future immediately, so a fast ontology
+            # listed after a slow one keeps its result instead of being
+            # misreported as a timeout (order-sensitive data loss).
+            remaining = max(deadline - time.monotonic(), 0.0)
             try:
                 results[ont] = f.result(timeout=remaining)
             except TimeoutError:

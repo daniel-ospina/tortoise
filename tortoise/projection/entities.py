@@ -93,6 +93,11 @@ class _EntityHandlers:
         never drift from the incrementally-applied graph on node properties.
         """
         op = p.get("operator")
+        if not isinstance(op, dict):
+            # #331 (review r5): parity with _create_edges' r4 guard — a
+            # truthy non-dict operator (e.g. a bare string) must degrade
+            # to no-operator, not AttributeError in op.get("op_type").
+            op = None
         prov = p.get("provenance")
         if not isinstance(prov, dict):
             # #331 (review r3): explicit null / string provenance must not
