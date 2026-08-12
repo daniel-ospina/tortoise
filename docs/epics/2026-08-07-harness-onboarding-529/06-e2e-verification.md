@@ -62,6 +62,8 @@ aboutObjects: tortoise
 
 Pending: `https://premiselabs.co/onboarding/{claude-code,codex,cursor,pi}.md` + `/onboarding-prompt.md` → expect 200 ×5, each variant body ends with the canonical body; fallback negative leg (404 a variant URL in devtools → Block B renders canonical prompt).
 
+Also post-deploy: (a) re-run the T8 pi-session connect leg (needs the GET-405 fix live); (b) tighten tests/e2e/test_welcome_page.py's four dual-shape assertions to new-shape-only (transition comments mark them).
+
 ## Environment notes (for reproducibility)
 
 - `hosted_api` TestClient suites hang on this machine (pre-existing: unchanged `tests/test_onboarding_endpoints.py` reproduces; congested redislite environment from the parallel swarm). CI is the venue for T5–T7.
