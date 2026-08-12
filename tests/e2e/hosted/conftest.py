@@ -11,8 +11,10 @@ Run modes (RUN_LEGAL_E2E precedent, tests/e2e/test_signup_form_safety_e2e.py):
 
   E2E_BASE_URL=https://staging.example.co ALLOW_PROD=1 RUN_HOSTED_E2E=1 ...
       Remote mode: no server boot; cases whose local-only seams don't apply
-      (backup memory storage, selfhost daemon) skip per-test. https targets
-      require ALLOW_PROD=1 (signup-safety precedent).
+      (backup memory storage, selfhost daemon, register-budget and
+      webhook-secret legs) skip per-test. ANY non-loopback target requires
+      ALLOW_PROD=1 regardless of scheme — an http:// tunnel fronting prod
+      is still prod (signup-safety precedent).
 
 Every test module MUST call `skip_unless_hosted_e2e()` at import time so an
 unconfigured environment skips gracefully with a clear message.

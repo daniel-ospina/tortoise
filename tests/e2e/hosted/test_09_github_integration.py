@@ -15,12 +15,18 @@ import urllib.error
 import urllib.request
 import uuid
 
-from conftest import skip_unless_hosted_e2e
+import pytest
+
+from conftest import is_remote_mode, skip_unless_hosted_e2e
 
 skip_unless_hosted_e2e()
 
 
 def test_connect_returns_auth_url_and_state(api, tenant_factory):
+    if is_remote_mode():
+        pytest.skip("auth_url asserts the fixture GITHUB_CLIENT_ID "
+                    "(e2e_client_id_303) — a remote target returns its own "
+                    "client id or 503s unconfigured (E2E-9-D local seam)")
     t = tenant_factory("gh-connect")
     h = {"Authorization": f"Bearer {t['api_key']}"}
     r = api.post("/v1/onboarding/github/connect", headers=h)
@@ -64,6 +70,10 @@ def test_callback_bad_state_404(api):
 
 
 def test_index_github_without_connection_400(api, tenant_factory):
+    if is_remote_mode():
+        pytest.skip("400 body asserts the unconfigured-connect error text — "
+                    "a remote target with GitHub configured returns a "
+                    "different error (E2E-9-D local seam)")
     t = tenant_factory("gh-index")
     h = {"Authorization": f"Bearer {t['api_key']}"}
     r = api.post("/v1/index/github", headers=h, data={"org": "some-org"})
