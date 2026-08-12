@@ -368,6 +368,46 @@
     // API (CORS allows premiselabs.co; same hardcode as welcome.html).
     const SIGNUP_API_URL = "https://api.premiselabs.co";
 
+    // #308 (R6): Turnstile CAPTCHA — mirrors the waitlist widget pattern in
+    // index.html. Empty until a site key is provisioned (human step); when
+    // set, the widget is injected into the signup form and a single-use
+    // token rides each /v1/signup/email submit as cf-turnstile-response.
+    // Server-side siteverify (TURNSTILE_SECRET_KEY, Fly secret) fails OPEN
+    // only while the secret is unset — matching this hidden-widget state.
+    const TURNSTILE_SITE_KEY = '';
+    let turnstileToken = null;
+
+    (function initTurnstile() {
+      if (!TURNSTILE_SITE_KEY) return;
+      const form = document.getElementById('email-form');
+      if (!form) return;
+      const widget = document.createElement('div');
+      widget.className = 'cf-turnstile';
+      widget.setAttribute('data-sitekey', TURNSTILE_SITE_KEY);
+      widget.setAttribute('data-callback', 'onSignupTurnstileToken');
+      widget.setAttribute('data-expired-callback', 'onSignupTurnstileExpired');
+      widget.setAttribute('data-error-callback', 'onSignupTurnstileError');
+      // Insert the challenge just above the submit button.
+      const button = form.querySelector('button[type="submit"]');
+      form.insertBefore(widget, button);
+      window.onSignupTurnstileToken = function (token) { turnstileToken = token; };
+      window.onSignupTurnstileExpired = function () { turnstileToken = null; };
+      window.onSignupTurnstileError = function () { turnstileToken = null; };
+      const script = document.createElement('script');
+      script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js';
+      script.async = true;
+      script.defer = true;
+      document.head.appendChild(script);
+    })();
+
+    function resetTurnstile() {
+      // Tokens are single-use — clear + re-render after any submit attempt.
+      turnstileToken = null;
+      if (TURNSTILE_SITE_KEY && window.turnstile) {
+        try { window.turnstile.reset(); } catch (e) { /* widget not ready */ }
+      }
+    }
+
     // In dev/local, fall back to local Supabase
     const isLocal = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
     const supabaseUrl = isLocal
@@ -696,15 +736,23 @@
 
     async function serverSignup(email, password) {
       try {
+        const body = { email: email, password: password };
+        if (TURNSTILE_SITE_KEY) body["cf-turnstile-response"] = turnstileToken || "";
         const resp = await fetch(SIGNUP_API_URL + "/v1/signup/email", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ email: email, password: password }),
+          body: JSON.stringify(body),
         });
         if (resp.status === 404 || resp.status === 503) return "unavailable";
         if (resp.ok) return "created";
         let payload = {};
         try { payload = await resp.json(); } catch (e) { /* non-JSON error body */ }
+        if (resp.status === 400) {
+          // #308: CAPTCHA challenge failed/missing (server siteverify).
+          const detail = (payload && payload.detail) || "";
+          showError(typeof detail === "string" && detail ? detail : "Please complete the security check and try again.");
+          return "handled";
+        }
         if (resp.status === 409) return "already";
         if (resp.status === 429) return "ratelimited";
         if (resp.status === 422) {
@@ -791,6 +839,13 @@
           return;
         }
 
+        // #308 (R6): require the Turnstile challenge before submitting
+        // (only when a site key is provisioned).
+        if (TURNSTILE_SITE_KEY && !turnstileToken) {
+          showError("Please complete the verification check first.");
+          return;
+        }
+
         // #801: server-first signup (bypasses the SMTP rate-limit bucket).
         // Only for the hosted API — local/dev runs the legacy client-side
         // flow against local Supabase (api.premiselabs.co is not reachable
@@ -868,6 +923,7 @@
         signupInFlight = false;
         setLoading(false);
         applyRateLimitLockout();
+        resetTurnstile();  // #308: single-use token — re-arm the challenge
       }
     }
 

@@ -328,7 +328,13 @@ def _cmd_init(args):
                             body = e.read().decode()
                         except Exception:
                             pass
-                        fail = ("key_rejected", f"API rejected the key ({e.code}): {body.strip() or e.reason}", e.code)
+                        # #308: suspended teams get a structured 403 — surface
+                        # the appeal link instead of the generic rejection.
+                        sus = _suspended_info(body)
+                        if sus is not None:
+                            fail = ("team_suspended", f"Team suspended — {sus[0]}", e.code)
+                        else:
+                            fail = ("key_rejected", f"API rejected the key ({e.code}): {body.strip() or e.reason}", e.code)
                         if not json_mode:
                             print(f"❌ {fail[1]}", file=sys.stderr)
                             print(f"   Config NOT saved. Double-check the key or run:", file=sys.stderr)
@@ -744,6 +750,23 @@ def _cmd_fail(json_mode: bool, error: str, message: str, **extra: object) -> int
     return 1
 
 
+def _suspended_info(body: str) -> tuple[str, str | None] | None:
+    """#308 (R5): parse a 403 body for the SUSPENDED detail code.
+
+    Returns (message, appeal_url) when the team is suspended, else None —
+    unparseable/other bodies keep each caller's pre-#308 behavior."""
+    try:
+        import json as _j
+        detail = (_j.loads(body) or {}).get("detail")
+    except Exception:
+        return None
+    if not isinstance(detail, dict) or detail.get("code") != "SUSPENDED":
+        return None
+    msg = detail.get("message") or "This team has been suspended due to unusual activity."
+    url = detail.get("appeal_url")
+    return (f"{msg} Appeal: {url}" if url else msg, url)
+
+
 def _harness_mcp_config(harness: str, api_key: str, api_url: str) -> dict:
     """MCP config for one harness — mirrors website/welcome.html (#497).
 
@@ -871,6 +894,11 @@ def _cmd_team_keys_list(args) -> int:
     except HTTPError as e:
         body = e.read().decode() if e.fp else ""
         if e.code in (401, 403):
+            sus = _suspended_info(body)  # #308
+            if sus is not None:
+                return _cmd_fail(json_mode, "team_suspended",
+                                 f"Team suspended — {sus[0]}", http_code=e.code,
+                                 appeal_url=sus[1])
             return _cmd_fail(json_mode, "key_rejected",
                              "API key rejected — re-run tortoise init --api-key", http_code=e.code)
         return _cmd_fail(json_mode, "api_error", f"API error ({e.code}): {body}", http_code=e.code)
@@ -932,6 +960,11 @@ def _cmd_team_keys_create(args) -> int:
             return _cmd_fail(json_mode, "rate_limited",
                              "Too many keys created recently — try again in 60s.", http_code=429)
         if e.code in (401, 403):
+            sus = _suspended_info(body)  # #308
+            if sus is not None:
+                return _cmd_fail(json_mode, "team_suspended",
+                                 f"Team suspended — {sus[0]}", http_code=e.code,
+                                 appeal_url=sus[1])
             return _cmd_fail(json_mode, "key_rejected",
                              "API key rejected — re-run tortoise init --api-key", http_code=e.code)
         return _cmd_fail(json_mode, "api_error", f"API error ({e.code}): {body}", http_code=e.code)
@@ -997,6 +1030,13 @@ def _cmd_team_keys_revoke(args) -> int:
         if e.code == 404:
             return _cmd_fail(json_mode, "not_found", "API key not found", http_code=404)
         if e.code == 403:
+            # #308: a suspended team's revoke also 403s — the SUSPENDED
+            # detail (with appeal link) must not masquerade as cross-team.
+            sus = _suspended_info(body)
+            if sus is not None:
+                return _cmd_fail(json_mode, "team_suspended",
+                                 f"Team suspended — {sus[0]}", http_code=403,
+                                 appeal_url=sus[1])
             return _cmd_fail(json_mode, "cross_team",
                              "Cannot revoke — this key belongs to a different team", http_code=403)
         if e.code == 401:

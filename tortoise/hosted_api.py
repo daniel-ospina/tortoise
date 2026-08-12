@@ -914,29 +914,41 @@ async def get_current_team(request: Request) -> dict:
         team = sdk._get_registry().query(
             # #329: quota fields read with tier in one round-trip. max_teams is
             # NOT read — multi-team is a user capability, not a tier field (D1).
+            # #308: suspended_at/flagged_at/email ride the same round-trip.
             "MATCH (t:Team {id: $id}) RETURN t.tier, t.max_users, t.max_graphs, "
-            "t.max_points, t.max_api_keys, t.max_sessions",
+            "t.max_points, t.max_api_keys, t.max_sessions, t.suspended_at, "
+            "t.flagged_at, t.email",
             params={"id": team_id},
         )
         row = team.result_set[0] if team.result_set else None
         if row:
-            tier, mu, mg, mp, mak, ms = row
+            tier, mu, mg, mp, mak, ms, t_suspended, t_flagged, t_email = row
         else:
             tier, mu, mg, mp, mak, ms = ("free", None, None, None, None, None)
+            t_suspended = t_flagged = t_email = None
+        # #308 (R5): durable suspension check (registry mode — MemoryAbuseStore
+        # writes the prop through its registry_write callback).
+        if t_suspended is not None:
+            raise HTTPException(status_code=403, detail=_suspended_detail())
         from tortoise.pricing import tier_limits
         request.state.team_id = team_id
         request.state.tier = tier or "free"
         lim = tier_limits(tier or "free")
         # max_teams removed: multi-team is a USER capability, not a tier field
         # (per-team billing; tier limits come from pricing.json)
-        return {"team_id": team_id, "key_id": key_id, "tier": tier or "free",
+        team_dict = {"team_id": team_id, "key_id": key_id, "tier": tier or "free",
                 # max_users: preserve None from pricing (Team tier = unlimited)
                 "max_users": mu if mu is not None else lim["max_users_per_team"],
                 "max_graphs": mg if mg is not None else lim["max_graphs_per_team"],
                 # points counter counts graph nodes → max_graph_nodes (#310 GAP-B)
                 "max_points": int(mp) if mp is not None else lim["max_graph_nodes"],
                 "max_api_keys": int(mak) if mak is not None else lim["max_api_keys"],
-                "max_sessions": int(ms) if ms is not None else DEFAULT_MAX_SESSIONS}
+                "max_sessions": int(ms) if ms is not None else DEFAULT_MAX_SESSIONS,
+                # #308 additive: enforcement state + owner email
+                "suspended_at": t_suspended, "flagged_at": t_flagged,
+                "email": t_email}
+        await _abuse_post_auth(request, team_dict)
+        return team_dict
     except HTTPException:
         raise
     except Exception:
@@ -961,6 +973,16 @@ async def _get_current_team_supabase(request: Request, token: str) -> dict:
             await _audit_auth_failure(request, "invalid_key")
             raise HTTPException(status_code=401, detail="Invalid API key")
         team_id = team["team_id"]
+        # #308 (R5): durable suspension check — the ONLY rejection authority
+        # (the in-process signal set merely forces fresh resolution, scoping
+        # delta 14; REST resolves fresh every request anyway).
+        from tortoise.abuse import clear_suspended, is_suspended_signal
+        if team.get("suspended_at") is not None:
+            raise HTTPException(status_code=403, detail=_suspended_detail())
+        if is_suspended_signal(team_id):
+            # Un-suspended: the fresh resolution returned NULL → self-heal
+            # the signal entry (AC8 next-request restore).
+            clear_suspended(team_id)
         # #685: last_used_at write-through on api_keys.id — best-effort
         # (telemetry must never gate auth). Membership-only resolutions have
         # no api_keys row (key_id=None) → no write.
@@ -977,6 +999,9 @@ async def _get_current_team_supabase(request: Request, token: str) -> dict:
             )
         request.state.team_id = team_id
         request.state.tier = team["tier"]
+        # #308: R3 read velocity + R4 geo (best-effort, off the critical
+        # path via to_thread).
+        await _abuse_post_auth(request, team)
         return team
     except HTTPException:
         raise
@@ -1038,6 +1063,115 @@ def _record_write_op(team: dict) -> None:
         pass  # best-effort — never block the write path
 
 
+def _suspended_detail() -> dict:
+    """#308 (R5): 403 detail for suspended teams — code + appeal link."""
+    from tortoise.abuse import appeal_url, suspended_message
+    return {"code": "SUSPENDED", "message": suspended_message(),
+            "appeal_url": appeal_url()}
+
+
+def _abuse_post_auth_sync(method: str, headers: dict, team: dict) -> None:
+    """#308 post-auth hooks (run via asyncio.to_thread): R3 read velocity
+    (GET only — writes never count as reads, scoping delta 11) + R4 geo
+    (every request). Best-effort; TORTOISE_ABUSE_DISABLED kills both."""
+    from tortoise import abuse as _abuse
+    if _abuse.abuse_disabled():
+        return
+    team_id = team.get("team_id")
+    if not team_id:
+        return
+    if method == "GET":
+        _abuse.record_read(team.get("key_id"), team_id)
+    country = _abuse.resolve_country(headers)
+    if country:
+        _abuse.check_new_country(team_id, country, _abuse.get_engine().store)
+
+
+async def _abuse_post_auth(request: Request, team: dict) -> None:
+    """Async wrapper — never raises into the auth path."""
+    try:
+        headers = dict(request.headers)
+        await asyncio.to_thread(_abuse_post_auth_sync, request.method, headers, team)
+    except Exception:
+        pass  # best-effort — abuse telemetry never breaks auth
+
+
+def _abuse_record_points_sync(team: dict, n: int) -> None:
+    """#308 R1 recording + evaluation (delta 8 weights; delta 13 staging).
+    The engine piggybacks R2 evaluation (signup-path key creates evaluate on
+    the team's next hooked request)."""
+    from tortoise import abuse as _abuse
+    _abuse.get_engine().record_point_create(team.get("team_id", ""), n)
+
+
+async def _abuse_record_points(request: Request, team: dict, n: int) -> None:
+    try:
+        await asyncio.to_thread(_abuse_record_points_sync, team, n)
+    except Exception:
+        pass  # best-effort — never block the write path
+
+
+def _abuse_evaluate_keys_sync(team_id: str) -> None:
+    """#308 R2 evaluation after a key mint (the trigger recorded the event)."""
+    from tortoise import abuse as _abuse
+    _abuse.get_engine().evaluate_key_creates(team_id)
+
+
+async def _abuse_evaluate_keys(team_id: str) -> None:
+    try:
+        await asyncio.to_thread(_abuse_evaluate_keys_sync, team_id)
+    except Exception:
+        pass
+
+
+# ── Turnstile CAPTCHA (#308 R6) ─────────────────────────────────
+_TURNSTILE_VERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
+_turnstile_open_logged = False
+
+
+async def _verify_turnstile(token: str | None, ip: str | None) -> bool:
+    """Server-side Turnstile siteverify (waitlist pattern). Fail-open ONLY
+    when TURNSTILE_SECRET_KEY is unset (the widget is hidden too); set secret
+    + missing/invalid token or unreachable siteverify → fail-closed."""
+    global _turnstile_open_logged
+    secret = os.environ.get("TURNSTILE_SECRET_KEY", "").strip()
+    if not secret:
+        if not _turnstile_open_logged:
+            _turnstile_open_logged = True
+            _logger.warning(
+                "turnstile: TURNSTILE_SECRET_KEY unset — CAPTCHA verification "
+                "disabled (fail-open)")
+        return True
+    if not token:
+        return False
+    import httpx as _httpx
+
+    def _post() -> dict:
+        resp = _httpx.post(
+            _TURNSTILE_VERIFY_URL,
+            data={"secret": secret, "response": token,
+                  **({"remoteip": ip} if ip else {})},
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    try:
+        body = await asyncio.to_thread(_post)
+    except Exception:
+        return False  # fail-closed when the check cannot run
+    return bool(body.get("success"))
+
+
+async def _check_turnstile(request: Request, body: dict) -> None:
+    """400 when the secret is configured and the challenge fails."""
+    token = body.get("cf-turnstile-response") or body.get("turnstile_token")
+    ip = request.client.host if request.client else None
+    if not await _verify_turnstile(token, ip):
+        raise HTTPException(
+            status_code=400,
+            detail="Please complete the security check (CAPTCHA) and try again.")
+
 
 # ── Pydantic Models ───────────────────────────────────────────────
 
@@ -1082,6 +1216,10 @@ class TeamInfoResponse(BaseModel):
     max_users: int
     max_graphs: int | None
     max_teams: int | None
+    # #308 (R7): "active" | "flagged" over HTTP — a suspended team never
+    # reaches this handler (403 SUSPENDED fires in get_current_team first);
+    # suspension renders from the 403 detail (scoping delta 12).
+    status: str = "active"
     point_count: int = 0
     write_ops_used: int = 0
     write_ops_limit: int = 0
@@ -1313,7 +1451,8 @@ async def create_point(body: CreatePointRequest, request: Request, team: dict = 
     )
     # Metering (#681): best-effort write-op count for overage billing.
     _record_write_op(team)
-
+    # #308 (R1, delta 8): one Point created → one point_create event.
+    await _abuse_record_points(request, team, 1)
 
     return {
         "id": result["id"],
@@ -1559,6 +1698,9 @@ async def team_info(team: dict = Depends(get_current_team)):
         tier=team["tier"],
         max_users=team["max_users"],
         max_graphs=team["max_graphs"],
+        # #308 (R7): flagged status rides /v1/team (suspended never reaches
+        # here — the auth dependency 403s first; scoping delta 12).
+        status="flagged" if team.get("flagged_at") is not None else "active",
         # max_teams removed (D1): multi-team is a user capability, not a tier field.
         # TeamInfoResponse.max_teams is optional — omit rather than KeyError (pre-existing
         # 500 on every /v1/team call, exposed by the zero-email signup verification).
@@ -1570,6 +1712,24 @@ async def team_info(team: dict = Depends(get_current_team)):
         overage_eligible=usage["overage_eligible"],
         overage_cost_usd=usage["overage_cost_usd"],
     )
+
+
+@app.get("/v1/team/alerts")
+async def team_alerts(team_id: str, user: dict = Depends(get_current_user)):
+    """#308 (R7) — suspicious-activity alert history for the dashboard.
+
+    Session-authed (NOT API-key authed) by design: it must stay reachable
+    while the team is suspended so the owner can see what happened and find
+    the appeal path (scoping delta 12)."""
+    membership = await _membership_team(user["user_id"], team_id)
+    if membership is None:
+        raise HTTPException(status_code=403, detail="No membership in team")
+    try:
+        from tortoise.supabase_control import get_abuse_store
+        alerts = get_abuse_store().recent_alerts(team_id, limit=20)
+    except Exception:
+        alerts = []  # best-effort — an alert-history failure is not a 500
+    return {"team_id": team_id, "alerts": alerts}
 
 
 # ── Onboarding: Self-Service Registration (#498) ──────────────────
@@ -1592,6 +1752,8 @@ async def register_user(request: Request, response: Response):
     await _check_register_rate_limit(request)
 
     body = await request.json()
+    # #308 (R6): Turnstile siteverify — fail-open only when secret unset.
+    await _check_turnstile(request, body if isinstance(body, dict) else {})
     try:
         reg = RegisterRequest.model_validate(body)
     except Exception as e:
@@ -1770,6 +1932,8 @@ async def register_user(request: Request, response: Response):
 
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
 
+    # #308 (R2): the trigger recorded the provision key create — evaluate.
+    await _abuse_evaluate_keys(team_id)
     return {"api_key": api_key, "team_id": team_id, "graph_name": graph_name}
 
 
@@ -1849,6 +2013,15 @@ async def email_signup(request: Request):
 
     try:
         body = await request.json()
+    except Exception:
+        raise HTTPException(
+            status_code=422,
+            detail="Invalid email or password. Check the email format and that the password is at least 6 characters.",
+        )
+    # #308 (R6): Turnstile siteverify — fail-open only when secret unset.
+    # OUTSIDE the 422 try-block: its 400 must not be remapped.
+    await _check_turnstile(request, body if isinstance(body, dict) else {})
+    try:
         req = EmailSignupRequest.model_validate(body)
     except Exception:
         # #801 review P1: never echo str(ValidationError) — Pydantic v2 embeds
@@ -2569,6 +2742,9 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
     )
     # Metering (#681): best-effort write-op count for overage billing.
     _record_write_op(team)
+    # #308 (R1, delta 8): capture_session creates one Point per turn plus the
+    # extracted decision/statement Points — weight by the actual count.
+    await _abuse_record_points(request, team, len(body.conversation) + len(extracted))
 
     # #722: report the EFFECTIVE method actually used, not the configured
     # policy. The extraction loop above is the deterministic regex path — the
@@ -4094,9 +4270,12 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
         raise HTTPException(status_code=403, detail="No membership in team")
 
     team_row = reg.query(
-        "MATCH (t:Team {id:$id}) RETURN t.tier", params={"id": tid},
+        "MATCH (t:Team {id:$id}) RETURN t.tier, t.suspended_at", params={"id": tid},
     ).result_set
     tier = team_row[0][0] if team_row else "free"
+    # #308 (R5): a suspended team cannot re-mint keys (scoping delta 12).
+    if team_row and team_row[0][1] is not None:
+        raise HTTPException(status_code=403, detail=_suspended_detail())
 
     api_key = f"tt_{_uuid.uuid4().hex}"
     key_hash = _hash(api_key)
@@ -4152,6 +4331,9 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
                 "cb": user_id, "now": now, "exp": expires_at, "cv": created_via},
     )
     await _async_audit(request, tid, "api_key_mint", resource_type="api_key", resource_id=kid)
+    # #308 (R2): evaluate key-create velocity after a successful mint
+    # (bootstrap mints are trigger-excluded but evaluation is harmless).
+    await _abuse_evaluate_keys(tid)
 
     return {"key": api_key, "key_prefix": api_key[:10], "expires_at": expires_at,
             "team_id": tid, "purpose": purpose}
@@ -4200,6 +4382,9 @@ async def _session_key_supabase(body: dict, request: Request, user: dict) -> dic
 
     team_row = team_by_id(cp, tid)
     tier = (team_row or {}).get("tier") or "free"
+    # #308 (R5): a suspended team cannot re-mint keys (scoping delta 12).
+    if (team_row or {}).get("suspended_at") is not None:
+        raise HTTPException(status_code=403, detail=_suspended_detail())
 
     api_key = f"tt_{_uuid.uuid4().hex}"
     kid = _short_id()
@@ -4243,6 +4428,8 @@ async def _session_key_supabase(body: dict, request: Request, user: dict) -> dic
         "expires_at": expires_at,
     })
     await _async_audit(request, tid, "api_key_mint", resource_type="api_key", resource_id=kid)
+    # #308 (R2): evaluate key-create velocity after a successful mint.
+    await _abuse_evaluate_keys(tid)
 
     return {"key": api_key, "key_prefix": api_key[:10], "expires_at": expires_at,
             "team_id": tid, "purpose": purpose}

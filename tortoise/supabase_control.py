@@ -68,6 +68,9 @@ _SERVICE_KEY_ENV = ("SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_SERVICE_KEY")
 _QUOTA_SELECT = [
     "id", "name", "tier", "max_users", "max_graphs", "graph_size_cap",
     "ops_allowance",
+    # #308: suspension/staging state + owner email ride the same resolution
+    # round-trip (additive keys — consumers read known keys only).
+    "suspended_at", "flagged_at", "email",
 ]
 
 
@@ -280,6 +283,25 @@ def get_control_plane() -> SupabaseControlPlane:
     return _control_plane
 
 
+# ── Abuse store seam (#308) ─────────────────────────────────────────────────
+
+_abuse_store = None
+
+
+def get_abuse_store():
+    """Lazy abuse-event store (tests monkeypatch this, mirroring
+    get_control_plane). Supabase mode → durable SupabaseAbuseStore; registry
+    mode → MemoryAbuseStore (selfhost degradation documented in abuse.py)."""
+    global _abuse_store
+    if _abuse_store is None:
+        from tortoise.abuse import MemoryAbuseStore, SupabaseAbuseStore
+        if is_supabase_enabled():
+            _abuse_store = SupabaseAbuseStore(get_control_plane())
+        else:
+            _abuse_store = MemoryAbuseStore()
+    return _abuse_store
+
+
 # ── Shared resolution logic (REST + MCP single source of truth) ────────────
 
 def _parse_ts(value) -> datetime | None:
@@ -387,6 +409,10 @@ def resolve_api_key(cp, token: str) -> dict | None:
         "key_prefix": key_prefix,
         "created_via": created_via,
         "created_by": created_by,
+        # #308: enforcement (403 SUSPENDED) + owner notification
+        "suspended_at": team_row.get("suspended_at"),
+        "flagged_at": team_row.get("flagged_at"),
+        "email": team_row.get("email"),
     }
 
 
@@ -442,7 +468,8 @@ def team_by_id(cp, team_id: str) -> dict | None:
         select=["id", "name", "tier", "email", "graph_name", "max_users",
                 "max_teams", "max_graphs", "ops_allowance", "graph_size_cap",
                 "backup_enabled", "backup_latest_at", "backup_restored_at",
-                "created_at", "deleted_at", "grace_hours"],
+                "created_at", "deleted_at", "grace_hours",
+                "suspended_at", "flagged_at"],
         filters=[("id", "eq", team_id)],
     )
     return rows[0] if rows else None
