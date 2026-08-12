@@ -1,0 +1,86 @@
+# Extraction-quality gate table — value-first extractor (v1)
+# Sources of truth (ONE reconciled set — plan §6.3 slice 8; no second file):
+#   docs/drafts/2026-08-09-extraction-quality-evaluation.md (Appendix B) — A-rows A1-A22
+#   docs/epics/2026-08-11-epic909-value-first-mining/research-r8-eval-thresholds-commit-endpoint.md
+#     — the R8 threshold table + N math (band gates, not point gates)
+#   docs/epics/2026-08-11-epic909-value-first-mining/04-plan.md §6.3 — slice-8 reconciliation
+# Hard-fail rows block CI merge; alert rows are telemetry-only (see section 6).
+gold_version: v1
+extractor_version: value@0.1.0
+
+# ── Band semantics (watch-gates, not powered tests — research-r8 N math) ──
+# pass:  rate >= target on N >= 30 windows (accept band — system healthy)
+# fail:  rate <  block  on N >= 12 windows (block band — catastrophic collapse
+#        only; at 12 <= N < 30 the bump is a NON-DESTRUCTIVE warn + re-measure,
+#        never a hard fail — research-r8: a healthy 0.90 trips the <0.80 block
+#        band 11% of the time at N=12)
+# watch: between target and block, or N < 12 (per-class N rule — a window
+#        contributes to a class's N iff it contains >= 1 gold item of that
+#        class; a class with N < 12 is SKIPPED and flagged, plan §6.3)
+# EXCEPT live floor: rolling N = 20 (research-r8) — the post-launch power
+#        source (v1 drift monitor consumes only the deterministic/ops floors;
+#        the Layer-2 live-floor watch arrives post-v1 with the live judge, §5.1)
+# N ≈ 109 needed for true separation — out of gold-set scope (research-r8).
+# Layer-1 deterministic rows (provenance_coverage, R8 L1) are CI blockers, not
+# evals (n = 1). The 30-window gold set validates directionally and feeds the
+# live-judge calibration loop (rolling N=20) — the real statistical power source.
+band_semantics: "watch-gates: pass = rate >= target on N>=30 | fail = rate < block on N>=12 (warn+re-measure below N=30) | between or N<12 = watch (skip+flag) | live floor: rolling N=20 | deterministic rows: n=1 CI blocker"
+standards:
+  # --- Core extraction (section 2.2) ---
+  point_precision_raw:   {target: 0.65, block: 0.55}   # A1
+  point_recall_raw:      {target: 0.70, block: 0.60}   # A2
+  point_f1_raw:          {target: 0.68, block: 0.58}   # A3
+  point_precision_live:  {target: 0.80, block: 0.70}   # A4 (post draft-gate)
+  per_kind_f1:           {target: 0.60, report_block: 0.45}  # A10 (top-4 kinds)
+  nand_precision:        {target: 0.70, block: 0.50}   # A11
+  entity_precision:      {target: 0.80, block: 0.65}   # A12 — IS the R8 entity-P row (same numbers; reconciled, NOT duplicated)
+  entity_recall:         {target: 0.65, block: 0.50}   # A12 — IS the R8 entity-R row (same numbers; reconciled, NOT duplicated)
+
+  # --- Extract-nothing (section 2.3) ---
+  fn_rate_hv:            {target: 0.10, block: 0.15}   # A5 (high-value, gold)
+  fn_rate_live_judge:    {target: 0.15, alert: 0.20}   # A6 (1-in-N judge)
+  empty_rate:            {lo: 0.20, hi: 0.40, alert_lo: 0.15, alert_hi: 0.50}  # A7 — IS the R8 empty-rate row (not duplicated; see reconciliation note)
+  empty_rate_hv:         {target: 0.15, block: 0.25}   # A8 (value-heavy windows)
+  fp_session_rate:       {target: 0.00, block: 0.20}   # A9 (gold-nothing windows)
+
+  # --- Calibration (section 3) ---
+  ece:                   {target: 0.10, block: 0.15}   # A13 (test split, c_cal)
+  live_floor_compliance: {target: 0.95, block: 0.90}   # A14 (% live points >= 0.6 c_cal)
+
+  # --- Budget / degradation (section 2.4) ---
+  amplification:         {target: 0.15, alert: 0.30}   # A15 (non-episodic nodes / turn; regex=1.6)
+  amplification_vs_regex: {target: 0.15, regex_baseline: 1.6, block_ratio: 5.0}  # A22 (>=10x cut vs the 1.6 regex baseline; block = amplification/regex ratio > 5x)
+  nodes_per_session:     {median: 15, p95: 25, hard_ceiling: 50}  # A16
+  keep_ratio:            {lo: 0.05, hi: 0.25, failclose_ratio: 0.40, failclose_windows: 3}  # A17 (see reconciliation note)
+  cost_per_session:      {target: 0.06, alert: 0.15}   # A18 (USD)
+  frontier_calls:        {target: 3, alert: 5}         # A19
+
+  # --- Integrity / agreement ---
+  provenance_coverage:   {target: 1.00, block: 0.98}   # A20 (span+quote+extracted_by)
+  judge_agreement_kappa: {target: 0.60, rubric_gate: 0.50}  # A21
+
+  # --- CI regression guard (section 4.3) ---
+  regression_delta_f1:   -0.05   # dev point F1 must not drop >5pp vs previous merged run
+
+  # --- R8 layer-level semantic gates (research-r8 table; same band semantics) ---
+  layer_correct:         {target: 0.90, block: 0.80, n_accept: 30, n_block: 12}   # R1 headline semantic gate
+  atomicity:             {target: 0.85, block: 0.70, n_accept: 30, n_block: 12}   # R2 gold matching, not self-report
+  kind_correctness:      {target: 0.90, block: 0.80, n_accept: 30, n_block: 12}   # R6 out-of-vocab kind = auto FP
+  citation_correctness:  {target: 0.90, block: 0.80, n_accept: 30, n_block: 12}   # R4 quote/span backs the claim
+  mitigation_recall:     {target: 0.75, block: 0.60, n_accept: 30, n_block: 12, block_provisional: true}  # R9 — block value PROVISIONAL (from the R9 audit's fail-closed posture; confirm at gold-set calibration)
+  process_routing:       {target: 0.95, block: 0.80, n_accept: 30, n_block: 12, warn_only_until: 20}  # R3 — warn-only until n>=20 (block is a WATCH, monitor-only by class rarity)
+  r1r3_decisions_fp:     {target: 0.05, n_accept: 30, direction: max}  # R1∧R3 conjunction — decisions-FP <= 5% on the meta-mixed fixture set (DE2E-3 Layer-2 band)
+
+# ── Reconciliation notes (slice 8 — ONE authoritative file, plan §6.3) ──
+# A7/A17: the canonical doc's fail edges are aggregates — A7 <15%/>50% over
+#   4 weeks, A17 >40% keep-ratio ×3 windows fail-closed. The per-session
+#   interpretation (empty 20-40% band and keep-ratio per window, DE2E-8) is
+#   the plan's — reconciled INTO ONE file here: the rows above are the
+#   acceptance semantics for BOTH the per-session eval and the rolling
+#   aggregates; CI evaluates the same rows.
+# R6 entity P/R: A12 (entity_precision/entity_recall, 0.80/0.65 & 0.65/0.50)
+#   IS the R8 entity P/R row — same numbers, NOT duplicated (research-r8
+#   reconciliation: existing rows remain the acceptance source of truth).
+# R1 empty-rate: A7 (empty_rate 20-40%) IS the R8 empty-rate row — not
+#   duplicated (research-r8; A8 high-value-session empty <15% and A9
+#   FP-session 0% remain separate).
