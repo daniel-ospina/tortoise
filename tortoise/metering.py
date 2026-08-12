@@ -35,8 +35,15 @@ Storage
         team_id:   "team_abc123",
         period:    "2026-08",
         write_ops: 42,
+        nodes_written: 12,
         updated_at: "2026-08-09T14:31:00.123Z"
     })
+
+``nodes_written`` is the value-first commit cost driver (epic #909 §4.4/
+W-4/PL4): +net-new non-episodic nodes per commit call (0 on hold commits;
+supersede-only deltas exempt — R-14). It prevents the 25x per-node arbitrage
+vs ``create_point`` while the billed unit stays ``write_ops`` (a commit call
+is billed exactly once — PL4).
 
 Atomic increment via FalkorDB Cypher::
 
@@ -131,7 +138,8 @@ def _reg_sdk():
 
 # ── Core increment ──────────────────────────────────────────────────────────
 
-def record_write_ops(team_id: str, tier: str | None = None, n: int = 1) -> dict | None:
+def record_write_ops(team_id: str, tier: str | None = None, n: int = 1,
+                     nodes_written: int = 0) -> dict | None:
     """Increment the write-op counter for *team_id* in the current billing period.
 
     Args:
@@ -140,11 +148,15 @@ def record_write_ops(team_id: str, tier: str | None = None, n: int = 1) -> dict 
             for threshold events. If None, threshold checks are skipped (e.g.
             when called from a context where tier isn't readily available).
         n: Number of write ops to record (default 1).
+        nodes_written: Net-new non-episodic nodes written by this call (the
+            value-first commit cost driver, epic #909 §4.4/W-4/PL4 — 0 on
+            hold commits; supersede-only deltas exempt, R-14). Stored on the
+            MeteringRecord as ``nodes_written``.
 
     Returns:
-        ``{write_ops, period, ops_allowance, overage_eligible}`` for threshold
-        checking, or None if the registry is unreachable (non-fatal — metering
-        failures never block the write).
+        ``{write_ops, nodes_written, period, ops_allowance, overage_eligible}``
+        for threshold checking, or None if the registry is unreachable
+        (non-fatal — metering failures never block the write).
 
     Raises:
         Nothing — metering is best-effort. Failures are logged and swallowed.
@@ -159,9 +171,11 @@ def record_write_ops(team_id: str, tier: str | None = None, n: int = 1) -> dict 
                 get_control_plane, metering_increment,
             )
             write_ops = metering_increment(
-                get_control_plane(), team_id, period, n)
+                get_control_plane(), team_id, period, n,
+                nodes_written=nodes_written)
             result = {
                 "write_ops": write_ops,
+                "nodes_written": nodes_written,
                 "period": period,
                 "ops_allowance": _ops_allowance(tier) if tier else 0,
                 "overage_eligible": _overage_eligible(tier) if tier else False,
@@ -173,15 +187,18 @@ def record_write_ops(team_id: str, tier: str | None = None, n: int = 1) -> dict 
         reg.query(
             "MERGE (m:MeteringRecord {team_id: $tid, period: $period}) "
             "SET m.write_ops = coalesce(m.write_ops, 0) + $n, "
+            "    m.nodes_written = coalesce(m.nodes_written, 0) + $nw, "
             "    m.updated_at = $now",
-            params={"tid": team_id, "period": period, "n": n, "now": now_iso},
+            params={"tid": team_id, "period": period, "n": n,
+                    "nw": nodes_written, "now": now_iso},
         )
         rows = reg.query(
             "MATCH (m:MeteringRecord {team_id: $tid, period: $period}) "
-            "RETURN m.write_ops",
+            "RETURN m.write_ops, m.nodes_written",
             params={"tid": team_id, "period": period},
         ).result_set
         write_ops = int(rows[0][0]) if rows else n
+        nodes_written_total = int(rows[0][1]) if rows else nodes_written
     except Exception as e:
         _logger.warning(
             "metering increment failed (non-fatal): team=%s period=%s error=%s",
@@ -191,6 +208,7 @@ def record_write_ops(team_id: str, tier: str | None = None, n: int = 1) -> dict 
 
     result = {
         "write_ops": write_ops,
+        "nodes_written": nodes_written_total,
         "period": period,
         "ops_allowance": _ops_allowance(tier) if tier else 0,
         "overage_eligible": _overage_eligible(tier) if tier else False,

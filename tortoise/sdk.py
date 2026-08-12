@@ -684,6 +684,12 @@ class TortoiseSDK:
         # existing-point lookup, not hash persistence (fix #80).
         ch = _content_hash(content)
         props["content_hash"] = ch
+        # Explicit id must be popped BEFORE the dedup branch: the dedup-hit
+        # path calls update_point(pid, **props) and a residual 'id' in props
+        # crashed with "multiple values for argument 'id'" (review fix, PR
+        # #953 — the commit endpoint writes deterministic pt_<sha> ids with
+        # dedup=True).
+        explicit_id = props.pop("id", None)
         # Idempotency guard: dedup by content hash when requested
         dedup = props.pop("dedup", False)
         if dedup:
@@ -716,7 +722,6 @@ class TortoiseSDK:
                 return self.get_point(pid)
 
         # Issue #52 — warn when caller passes an explicit non-ULID id
-        explicit_id = props.pop("id", None)
         if explicit_id is not None:
             if not _is_ulid(explicit_id):
                 _logger.warning(

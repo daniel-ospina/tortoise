@@ -712,12 +712,16 @@ class TestBudgetDE2E7:
         assert plan.budget.outcome == "ok"
         assert plan.budget.cumulative_after == 49
 
-    def test_episodic_session_exempt(self):
+    def test_episodic_session_flag_is_not_a_budget_exemption(self):
+        """The Session's is_episodic flag is the QUOTA discriminator — NOT a
+        budget exemption (review fix, PR #953: the previous exemption let a
+        held re-submission bypass the ceiling — Session C, DE2E-7). Value
+        points from the commit endpoint are non-episodic and always count."""
         state = GraphState(is_episodic=True, value_nodes_created=45)
         payload = _payload_with(_ten_new_points())
         plan = plan_commit(payload, state, record=None)
-        assert plan.budget.outcome == "ok"
-        assert "episodic" in (plan.budget.reason or "")
+        assert plan.budget.outcome == "fail"  # 45 + 10 = 55 > 50 ceiling
+        assert "ceiling" in (plan.budget.reason or "")
 
     def test_held_payload_reported_point_ids(self):
         state = GraphState(value_nodes_created=20)
