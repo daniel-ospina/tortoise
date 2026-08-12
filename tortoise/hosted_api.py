@@ -2461,9 +2461,10 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
             detail=f"Session turn cap exceeded: {len(body.conversation)} > {MAX_SESSION_TURNS}.",
         )
 
-    # Extraction-aware estimate (pre-write, fail-closed count):
-    #   est = 1 Session + 1 Event + Σ_turns (1 turn Point
-    #         + min(decisions, cap) + min(claims, cap))
+    # Extraction-aware estimate (pre-write, fail-closed count) — review P2,
+    # PR #976: the points quota counts NON-episodic Points only, and turn
+    # Points/Session/Event are episodic — the estimate is the EXTRACTED set:
+    #   est = Σ_turns (min(decisions, cap) + min(claims, cap))
     decisions = [
         r"(?i)(?:let'?s|we will|we should|I will|I'm going to|decided|decision)\s+[^.!?]+[.!?]",
         r"(?i)(?:plan is|next steps?:|action item:)\s+[^.!?]+[.!?]",
@@ -2472,14 +2473,19 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
         r"(?i)(?:I think|I believe|my understanding is|the problem is|the key insight)\s+[^.!?]+[.!?]",
         r"(?i)(?:evidence suggests|data shows|we found that|this means)\s+[^.!?]+[.!?]",
     ]
-    est = 2
+    est = 0
     for turn in body.conversation:
-        # #329: estimate scans the SAME full content the extraction loop uses
-        # (must be an upper bound — a truncation mismatch would under-count).
+        # #329/#947 (review P2, PR #976): the points quota counts NON-episodic
+        # Points only, and turn Points are written with is_episodic=true — the
+        # estimate must count the EXTRACTED (non-episodic) points only. The
+        # Session/Event base and the per-turn +1 are episodic; including them
+        # caused false pre-write 402s for teams near the limit. Still an upper
+        # bound for the extracted set (same full content the loop scans — a
+        # truncation mismatch would under-count).
         content = turn.get("content", "")
         n_dec = sum(len(re.findall(p, content)) for p in decisions)
         n_clm = sum(len(re.findall(p, content)) for p in claims)
-        est += 1 + min(n_dec, MAX_EXTRACTIONS_PER_TURN) + min(n_clm, MAX_EXTRACTIONS_PER_TURN)
+        est += min(n_dec, MAX_EXTRACTIONS_PER_TURN) + min(n_clm, MAX_EXTRACTIONS_PER_TURN)
     from tortoise.quota import count_team_usage
     sdk_team = _make_sdk(namespace=team["team_id"])
     try:
@@ -2501,7 +2507,8 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
     now = datetime.now(timezone.utc).isoformat()
 
     proj.g.query(
-        "MERGE (s:Session {id:$sid}) SET s.created_at=$now, s.turn_count=$tc",
+        "MERGE (s:Session {id:$sid}) SET s.created_at=$now, s.turn_count=$tc, "
+        "    s.is_episodic=true",
         params={"sid": session_id, "now": now, "tc": len(body.conversation)},
     )
 
@@ -2532,6 +2539,7 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
         proj.g.query(
             "MERGE (t:Point {id:$id}) "
             "SET t.content=$c, t.pointKind=$k, t.is_operator=false, "
+            "    t.is_episodic=true, "
             "    t.status=coalesce(t.status, $s), "
             "    t.createdAt=coalesce(t.createdAt, $now), "
             "    t.updatedAt=$now, t.content_hash=$ch",
@@ -2592,6 +2600,7 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
             startedAt=now,
             endedAt=now,
             sessionId=session_id,
+            is_episodic=True,
         )
         event_id = event.get("id") or event.get("eventId")
         for p in extracted:
