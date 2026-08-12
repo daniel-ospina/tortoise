@@ -69,6 +69,8 @@ _GRAPH_EVENT_TYPES = frozenset({
     "PointRetracted",
     "PointSuperseded",
     "OperatorAnnotated",
+    "PointPromoted",   # #785: reviewer-gated draft→live promotion
+    "OperatorPromoted",  # #785: R16 zombie-operator prevention
 })
 
 
@@ -1448,6 +1450,167 @@ class TortoiseSDK:
             raise ValueError(
                 f"Point {id!r} is already terminal — retraction is terminal")
         return r.result_set[0][0]  # updated node props (no trailing get_point round trip)
+
+    # ── Promotion (Phase-4 EP-safe lifecycle, #785) ────────────────
+
+    def promote_point(self, point_id: str) -> dict:
+        """Reviewer-gated draft→live promotion (plan §6.1, J-5, DE2E-8).
+
+        The ONLY path a draft extraction Point may go live — never via the
+        SDK #131 edge auto-promotion for extraction paths
+        (`create_operator(promote_source=False)`, #780).
+
+        Semantics:
+          - already live → NO-OP (returns {promoted: False, reason: "already_live"},
+            no error — DE2E-N9)
+          - terminal (retracted/superseded/outdated/archived) → blocked
+            {blocked: True, reason: "not_draft"}
+          - Point belongs to a QUARANTINED batch → blocked with
+            {blocked: True, reason: "batch_quarantined", batch_id} — quarantine
+            is batch-level (plan §3): the batch's Points stay draft until the
+            W-3 re-run passes (EpSafeCommit recovery loop)
+          - otherwise → status draft→live, `reviewed: true` derived flag set,
+            PointPromoted event emitted, and R16 zombie prevention:
+            incident DRAFT operator nodes (status 'draft' or unset — the
+            pre-#780 create_operator path writes no status) are promoted to
+            live ONCE ALL their endpoint Points are live, so a contradiction
+            never stays a dead draft operator after its claims go live.
+
+        Raises ValueError if the Point does not exist.
+        """
+        proj = self._get_proj()
+        row = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN properties(n)",
+            params={"id": point_id},
+        ).result_set
+        if not row:
+            raise ValueError(f"No point {point_id!r}")
+        point = row[0][0]
+        status = point.get("status")
+
+        # DE2E-N9: already-live promote → no-op, no error.
+        if status == "live":
+            return {"id": point_id, "status": "live", "promoted": False,
+                    "reason": "already_live"}
+        # Terminal states cannot be promoted back to live.
+        if status != "draft":
+            return {"id": point_id, "status": status, "promoted": False,
+                    "blocked": True, "reason": "not_draft"}
+
+        # Quarantine lock (batch-level): a quarantined batch's Points stay
+        # draft until re-review (W-3 recovery).
+        batch_id = point.get("batch_id")
+        if batch_id:
+            from .mining import batch_status  # lazy: no module-level sdk↔mining cycle
+            bs = batch_status(proj, batch_id)
+            if bs is not None and bs["status"] == "quarantined":
+                return {"id": point_id, "promoted": False, "blocked": True,
+                        "reason": "batch_quarantined", "batch_id": batch_id}
+
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        # CAS-guarded SET (concurrent promote can't double-fire); reviewed is
+        # the DERIVED reviewer flag (plan §3 — no new stored status).
+        r = proj.g.query(
+            "MATCH (n:Point {id:$id}) WHERE n.status = 'draft' "
+            "SET n.status = 'live', n.reviewed = true, n.promotedAt = $now, "
+            "n.updatedAt = $now RETURN n.id",
+            params={"id": point_id, "now": now},
+        )
+        if not r.result_set:
+            # Raced with a concurrent promote — re-read and report the outcome.
+            re = self.get_point(point_id)
+            if re.get("status") == "live":
+                return {"id": point_id, "status": "live", "promoted": False,
+                        "reason": "already_live"}
+            return {"id": point_id, "promoted": False, "blocked": True,
+                    "reason": "not_draft", "status": re.get("status")}
+
+        # R16 zombie-operator prevention: promote incident draft operators
+        # once ALL their endpoint Points are live.
+        promoted_ops = self._promote_incident_operators(proj, point_id, now)
+
+        self._emit_event("PointPromoted", point=self.get_point(point_id))
+        return {"id": point_id, "status": "live", "promoted": True,
+                "reviewed": True,
+                "operator_nodes_promoted": promoted_ops}
+
+    def _promote_incident_operators(self, proj, point_id: str, now: str) -> list[str]:
+        """R16: promote draft operator nodes incident to a freshly-live Point.
+
+        An operator is "draft" when its raw node status is 'draft' (post-#780
+        `create_operator(promote_source=False)`) or unset (the pre-#780
+        create_operator path writes no status property; the event path writes
+        'live' via projection coalesce, so an unset raw status is never the
+        event path). It is promoted only when EVERY endpoint Point is live —
+        otherwise the draft endpoints would inherit a live edge (the exact
+        pollution the draft lifecycle prevents).
+        """
+        rows = proj.g.query(
+            "MATCH (o:Point {is_operator:true})-[r]->(n:Point {id:$id}) "
+            "WHERE (o.status IS NULL OR o.status = 'draft') RETURN DISTINCT o.id",
+            params={"id": point_id},
+        ).result_set
+        promoted = []
+        for (oid,) in rows:
+            eps = proj.g.query(
+                "MATCH (o:Point {id:$oid})-[r]->(s:Point) "
+                "RETURN s.id, s.status",
+                params={"oid": oid},
+            ).result_set
+            if not eps:
+                continue  # no endpoints — nothing to gate on
+            all_live = all((st or "live") == "live" for _, st in eps)
+            if not all_live:
+                continue  # keep draft until every endpoint is live
+            proj.g.query(
+                "MATCH (o:Point {id:$oid}) SET o.status = 'live', "
+                "o.promotedAt = $now, o.updatedAt = $now",
+                params={"oid": oid, "now": now},
+            )
+            self._emit_event("OperatorPromoted", id=oid)
+            promoted.append(oid)
+        return promoted
+
+    def list_drafts(self, *, limit: int = 50) -> list[dict]:
+        """Draft queue for promotion review (J-5 companion, plan §6.1).
+
+        Returns up to `limit` non-operator Points with status 'draft' (newest
+        first), each shaped as {id, content, pointKind, provenance,
+        dedup_context, batch_id}. `provenance` is the node's extractedFrom/
+        provenance property when present; `dedup_context` is assembled from the
+        #782 dedup candidate properties when the Point is a dedup candidate.
+        """
+        if limit < 1:
+            raise ValueError(f"limit must be >= 1, got {limit}")
+        proj = self._get_proj()
+        # Plain points carry NO is_operator property (only operators set it),
+        # so match on absence-or-false, not the literal property value.
+        rows = proj.g.query(
+            "MATCH (n:Point) "
+            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "AND n.status = 'draft' "
+            "RETURN properties(n) ORDER BY n.createdAt DESC LIMIT $limit",
+            params={"limit": limit},
+        ).result_set
+        out = []
+        for (props,) in rows:
+            dedup_context = None
+            if props.get("dedup_candidate"):
+                dedup_context = {
+                    k: props.get(k) for k in (
+                        "dedup_method", "dedup_similarity", "dedup_target_id")
+                }
+            out.append({
+                "id": props.get("id"),
+                "content": props.get("content"),
+                "pointKind": props.get("pointKind"),
+                "provenance": props.get("provenance")
+                or props.get("extractedFrom"),
+                "dedup_context": dedup_context,
+                "batch_id": props.get("batch_id"),
+            })
+        return out
 
     # ── Operators ─────────────────────────────────────────────────
 

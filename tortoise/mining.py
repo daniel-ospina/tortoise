@@ -35,6 +35,140 @@ from .ids import ulid, now_iso, content_hash
 logger = logging.getLogger(__name__)
 
 
+# ── Phase-4 EP-safe batch commit (#785, epic 2026-08-09-insight-mining-p2p4) ──
+# W-3 state machine: a batch is ACTIVE while being written, QUARANTINED when
+# W-3 verification fails (EP drift / batch failure), COMMITTED when W-3 passes
+# (drafts enter the review queue; quarantine recovery = re-run pass → committed).
+# Quarantine is BATCH-level (plan §3 state machine) — NOT a Point status:
+# a quarantined batch's Points stay `draft` until re-review. State lives in a
+# `:Batch` marker node (operational metadata, like :GraphEvent — not ONTOLOGY
+# content; no new Point statuses, POINT_STATUS_VALUES unchanged).
+BATCH_STATUS_ACTIVE = "active"
+BATCH_STATUS_QUARANTINED = "quarantined"
+BATCH_STATUS_COMMITTED = "committed"
+BATCH_STATUS_VALUES = frozenset({
+    BATCH_STATUS_ACTIVE, BATCH_STATUS_QUARANTINED, BATCH_STATUS_COMMITTED,
+})
+
+
+# Grounding drift ceiling (W-3 / Gate B): snapshot mean grounding of live
+# non-operator Points pre/post batch must not move more than 2% mean absolute.
+def _default_grounding_fn():
+    """Resolve the Gate B `mean_grounding()` helper (plan §7 DE2E-4).
+
+    TODO(#779): mean_grounding() lands with the Gate B tooling issue. Until
+    then the grounding gate is RECORDED as unavailable/skipped (never crashes
+    the commit), while the structural W-3 checks (draft-only + no auto-wire)
+    stay hard gates. The interface is pinned: ``mean_grounding() -> float``
+    (mean over `confidence` of live non-operator Points, full live Point set).
+    """
+    try:
+        from tortoise.analyze import mean_grounding  # type: ignore[attr-defined]
+        return mean_grounding
+    except Exception:  # noqa: BLE001 — #779 not merged yet
+        return None
+
+
+def _batch_node(proj, batch_id: str) -> dict | None:
+    """Raw :Batch node properties, or None when the batch has no state node."""
+    rows = proj.g.query(
+        "MATCH (b:Batch {id:$id}) RETURN properties(b)",
+        params={"id": batch_id},
+    ).result_set
+    return rows[0][0] if rows else None
+
+
+def batch_status(proj, batch_id: str) -> dict | None:
+    """Read a batch's lifecycle state: {batch_id, status, reason, ...} | None.
+
+    None = no :Batch node (batch not registered — nothing quarantined). Used by
+    promote_point (sdk.py) for the quarantine lock.
+    """
+    node = _batch_node(proj, batch_id)
+    if node is None:
+        return None
+    return {
+        "batch_id": batch_id,
+        "status": node.get("status", BATCH_STATUS_ACTIVE),
+        "reason": node.get("reason"),
+        "quarantinedAt": node.get("quarantinedAt"),
+        "committedAt": node.get("committedAt"),
+        "pointCount": node.get("pointCount"),
+    }
+
+
+def _upsert_batch(proj, batch_id: str, *, status: str,
+                  reason: str | None = None,
+                  point_count: int | None = None) -> dict:
+    """Create-or-update the :Batch state node (idempotent)."""
+    if not batch_id or not isinstance(batch_id, str):
+        raise ValueError(f"batch_id must be a non-empty string, got {batch_id!r}")
+    if status not in BATCH_STATUS_VALUES:
+        raise ValueError(
+            f"Invalid batch status {status!r}. Must be one of: "
+            f", ".join(sorted(BATCH_STATUS_VALUES)))
+    now = _now()
+    sets = ["b.status=$status", "b.updatedAt=$now"]
+    params = {"id": batch_id, "status": status, "now": now}
+    if reason is not None:
+        sets.append("b.reason=$reason")
+        params["reason"] = reason
+    if status == BATCH_STATUS_QUARANTINED:
+        # preserve the original quarantine timestamp on re-quarantine
+        sets.append("b.quarantinedAt=coalesce(b.quarantinedAt, $now)")
+    if status == BATCH_STATUS_COMMITTED and reason is None:
+        sets.append("b.reason=null")  # cleared on recovery
+    if point_count is not None:
+        sets.append("b.pointCount=$pointCount")
+        params["pointCount"] = point_count
+    proj.g.query(
+        "MERGE (b:Batch {id:$id}) SET " + ", ".join(sets),
+        params=params,
+    )
+    return batch_status(proj, batch_id)
+
+
+def quarantine_batch(proj, batch_id: str, *, reason: str) -> dict:
+    """Mark a batch quarantined — blocks promote_point on its Points (W-3).
+
+    Test/ops primitive (plan §6.1): quarantine is the drift-fail path of
+    EpSafeCommit; callers that force it directly (tests, ops) must pass the
+    documented W-3 failure reason. Idempotent — re-quarantine updates the
+    reason and keeps the original quarantine timestamp.
+    """
+    if not reason or not isinstance(reason, str):
+        raise ValueError("quarantine_batch requires a non-empty reason")
+    _upsert_batch(proj, batch_id, status=BATCH_STATUS_QUARANTINED, reason=reason)
+    return {
+        "batch_id": batch_id,
+        "blocked": True,
+        "reason": reason,
+        "status": BATCH_STATUS_QUARANTINED,
+    }
+
+
+def list_quarantined(proj) -> list[dict]:
+    """List all quarantined batches: [{batch_id, reason, quarantinedAt, ...}] (newest first)."""
+    rows = proj.g.query(
+        "MATCH (b:Batch {status:$st}) RETURN properties(b) "
+        "ORDER BY b.updatedAt DESC",
+        params={"st": BATCH_STATUS_QUARANTINED},
+    ).result_set
+    out = []
+    for (props,) in rows:
+        bid = props.get("id")
+        if bid is None:
+            continue
+        out.append({
+            "batch_id": bid,
+            "status": BATCH_STATUS_QUARANTINED,
+            "reason": props.get("reason"),
+            "quarantinedAt": props.get("quarantinedAt"),
+            "pointCount": props.get("pointCount"),
+        })
+    return out
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -794,3 +928,199 @@ def mine_corpus_with_sdk(
         "drafts": drafts,
         "errors": errors,
     }
+
+# ── Phase-4 EP-safe batch commit gate (#785) ──────────────────────────
+
+class EpSafeCommit:
+    """W-3 EP-safe batch commit gate (plan §2 W-3, §4.5, §7 DE2E-8).
+
+    Verifies an extraction batch BEFORE it enters the review queue:
+      1. every extraction Point is `status: draft` (no SDK #131 edge
+         auto-promotion leak for extraction paths)
+      2. no operator auto-wire — batch operator nodes are not live AND every
+         incident operator edge connects only draft endpoints (W-2/W-4
+         draft-to-draft-only rule; live prior → review queue, never a draft→live
+         edge)
+      3. mean-grounding snapshot drift pre/post batch ≤ max_grounding_drift
+         (Gate B tooling; #779 `mean_grounding`)
+
+    Pass → batch COMMITTED (drafts enter the review queue; a previously
+    quarantined batch is un-quarantined by the re-run pass — recovery loop,
+    J-5). Fail → batch QUARANTINED (promote_point blocks on its Points until
+    the cause is fixed and the batch re-runs clean).
+
+    `proj` is a FalkorProjection (or anything exposing ``.g.query``) — the
+    mining pipeline passes ``api.projection``; SDK callers pass
+    ``sdk._get_proj()``. `grounding_fn` is the injectable mean-grounding seam:
+    ``Callable[[], float]``; None resolves `tortoise.analyze.mean_grounding`
+    (#779) and records the gate as unavailable/skipped until it lands.
+    """
+
+    def __init__(self, proj, batch_id: str, *,
+                 max_grounding_drift: float = 0.02,
+                 grounding_fn=None):
+        self.proj = proj
+        self.batch_id = batch_id
+        self.max_grounding_drift = max_grounding_drift
+        self._grounding_fn = grounding_fn if grounding_fn is not None \
+            else _default_grounding_fn()
+
+    # ── W-3 check 1: all extraction Points draft ───────────────────
+    def verify_draft_only(self, point_ids: list[str]) -> list[dict]:
+        """Return violations: batch Points that are not (explicitly) draft.
+
+        Missing/unknown Points and any non-draft status (live/retracted/…) are
+        violations — the batch must be 100% draft or it fails closed.
+        """
+        point_ids = list(point_ids)
+        if not point_ids:
+            return []
+        rows = self.proj.g.query(
+            "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, n.status",
+            params={"ids": point_ids},
+        ).result_set
+        by_id = {row[0]: row[1] for row in rows}
+        violations = []
+        for pid in point_ids:
+            status = by_id.get(pid)
+            if pid not in by_id:
+                violations.append({"id": pid, "reason": "not_found"})
+            elif status != "draft":
+                violations.append({"id": pid, "reason": "status_not_draft",
+                                   "status": status})
+        return violations
+
+    # ── W-3 check 2: no operator auto-wire ─────────────────────────
+    def verify_no_auto_wire(self, point_ids: list[str], *,
+                            operator_ids: list[str] | None = None) -> list[dict]:
+        """Return auto-wire violations for the batch's operator subgraph.
+
+        Checks every incident operator node (given explicitly or discovered
+        from the batch Points' edges): the operator node itself must not be
+        live (extraction creates draft operator nodes — #780
+        `create_operator(promote_source=False)`; on main the event path
+        defaults operator nodes to live, which IS the R7 leak this catches),
+        and every edge endpoint must be draft (draft-to-draft only).
+        """
+        point_ids = list(point_ids)
+        if operator_ids is None:
+            if not point_ids:
+                return []
+            rows = self.proj.g.query(
+                "MATCH (o:Point {is_operator:true})-[r]->(n:Point) "
+                "WHERE n.id IN $ids RETURN DISTINCT o.id",
+                params={"ids": point_ids},
+            ).result_set
+            operator_ids = [row[0] for row in rows]
+        violations = []
+        for oid in operator_ids:
+            op_rows = self.proj.g.query(
+                "MATCH (o:Point {id:$id}) RETURN o.status",
+                params={"id": oid},
+            ).result_set
+            if not op_rows:
+                violations.append({"id": oid, "reason": "operator_not_found"})
+                continue
+            op_status = op_rows[0][0]
+            if op_status == "live":
+                violations.append({"id": oid, "reason": "operator_node_live",
+                                   "status": op_status})
+            # endpoints: every operator edge target must be draft
+            eps = self.proj.g.query(
+                "MATCH (o:Point {id:$oid})-[r]->(s:Point) "
+                "RETURN s.id, s.status",
+                params={"oid": oid},
+            ).result_set
+            for sid, st in eps:
+                # missing status = implicit live (projection coalesce default)
+                if (st or "live") != "draft":
+                    violations.append({
+                        "id": oid, "reason": "endpoint_live",
+                        "endpoint_id": sid, "status": st,
+                    })
+        return violations
+
+    # ── W-3 check 3: grounding snapshot drift ──────────────────────
+    def _grounding_check(self, grounding_before: float | None,
+                         grounding_after: float | None) -> dict:
+        if self._grounding_fn is None:
+            return {
+                "status": "skipped",
+                "note": "mean_grounding unavailable until #779 — gate skipped",
+                "before": grounding_before, "after": grounding_after,
+                "drift": None, "max_drift": self.max_grounding_drift,
+            }
+        if grounding_before is None:
+            return {
+                "status": "skipped",
+                "note": "grounding_before not provided — drift undefined",
+                "before": None, "after": grounding_after,
+                "drift": None, "max_drift": self.max_grounding_drift,
+            }
+        after = grounding_after if grounding_after is not None \
+            else self._grounding_fn()
+        drift = abs(after - grounding_before)
+        ok = drift <= self.max_grounding_drift
+        return {
+            "status": "pass" if ok else "fail",
+            "before": grounding_before, "after": after, "drift": drift,
+            "max_drift": self.max_grounding_drift,
+        }
+
+    # ── W-3 gate ───────────────────────────────────────────────────
+    def run(self, point_ids: list[str], *,
+            operator_ids: list[str] | None = None,
+            grounding_before: float | None = None,
+            grounding_after: float | None = None) -> dict:
+        """Run the full W-3 gate over a completed extraction batch.
+
+        Returns {batch_id, ok, committed, quarantined, checks, reason}.
+        Pass → :Batch status committed (un-quarantines on recovery re-run).
+        Fail → quarantine_batch() with the first failing check's reason.
+        """
+        non_draft = self.verify_draft_only(point_ids)
+        auto_wired = self.verify_no_auto_wire(point_ids, operator_ids=operator_ids)
+        grounding = self._grounding_check(grounding_before, grounding_after)
+
+        checks = {
+            "all_points_draft": not non_draft,
+            "non_draft_points": non_draft,
+            "no_auto_wire": not auto_wired,
+            "auto_wired": auto_wired,
+            "grounding": grounding,
+        }
+        failures = []
+        if non_draft:
+            failures.append("points_not_draft")
+        if auto_wired:
+            failures.append("operator_auto_wire")
+        if grounding.get("status") == "fail":
+            failures.append("grounding_drift")
+
+        prev = _batch_node(self.proj, self.batch_id)
+        if failures:
+            reason = (
+                f"W-3 failed: {', '.join(failures)} "
+                f"({len(point_ids)} points, batch {self.batch_id})"
+            )
+            quarantine_batch(self.proj, self.batch_id, reason=reason)
+            return {
+                "batch_id": self.batch_id,
+                "ok": False,
+                "committed": False,
+                "quarantined": True,
+                "reason": reason,
+                "checks": checks,
+            }
+
+        recovered = (prev or {}).get("status") == BATCH_STATUS_QUARANTINED
+        _upsert_batch(self.proj, self.batch_id, status=BATCH_STATUS_COMMITTED,
+                      point_count=len(point_ids))
+        return {
+            "batch_id": self.batch_id,
+            "ok": True,
+            "committed": True,
+            "quarantined": False,
+            "recovered": recovered,
+            "checks": checks,
+        }
