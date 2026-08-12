@@ -9,7 +9,8 @@ back from selfhost would be an import cycle.
 EMBEDDED_EVAL_BANNER = (
     "⚠️  EMBEDDED FalkorDBLite — SINGLE-WRITER, EVAL ONLY. "
     "Concurrent writers (multiple agents) LOSE DATA on this engine. "
-    "Durable multi-writer: `docker compose up -d` (repo root) or set "
-    "TORTOISE_DB_URI (managed Cloud). --auth tenant on embedded is "
+    "Durable multi-writer: `docker compose up -d` (repo root) or point "
+    "TORTOISE_DB_URI at a FalkorDB sidecar or managed Cloud. --auth tenant "
+    "on embedded is "
     "single-agent eval only — NOT a supported team deployment."
 )
