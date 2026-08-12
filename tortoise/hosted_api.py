@@ -4279,6 +4279,12 @@ _ONBOARDING_DEFAULT_STATE = {
 
 _ALLOWED_STATE_KEYS = set(_ONBOARDING_DEFAULT_STATE.keys())
 
+# Epic #529: copy-attribution enums (#235 artifact_copied schema, verbatim).
+# Not state keys — the PATCH handler pops harness/section and emits an
+# analytics event instead of persisting them.
+_HARNESS_ANALYTICS_VALUES = {"claude", "codex", "cursor", "pi"}
+_SECTION_ANALYTICS_VALUES = {"config", "prompt", "both"}
+
 
 def _get_onboarding_state(team_id: str) -> dict:
     """Read onboarding_state — Supabase ``teams.onboarding_state`` (jsonb,
@@ -4366,6 +4372,11 @@ class OnboardingStatePatchRequest(BaseModel):
     # E2E-5 (plan Task 6): email read-patch from the control plane (teams
     # row in Supabase mode, Team node in registry mode). #764 review P2.
     email: str | None = None
+    # Epic #529 copy-attribution beacon (analytics-only, NEVER persisted):
+    # welcome.html fires this on copy with the displayed key. Enums match
+    # #235's artifact_copied schema verbatim (align cycle-3 conformance).
+    harness: str | None = None   # "claude"|"codex"|"cursor"|"pi"
+    section: str | None = None   # "config"|"prompt"|"both"
 
 
 @app.get("/v1/onboarding/state", response_model=OnboardingStateResponse)
@@ -4383,6 +4394,15 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
     """Merge provided onboarding fields into the team's state."""
     updates = {k: v for k, v in body.model_dump().items() if v is not None}
     email = updates.pop("email", None)  # state keys only — email is a teams column
+    # Epic #529 copy-attribution beacon: analytics-only fields — pop before
+    # the state merge (email pattern) and emit artifact_copied for enum-valid
+    # pairs; invalid values are ignored (no event, no error) so a stale or
+    # malformed beacon can never break the copy UX or pollute state.
+    harness = updates.pop("harness", None)
+    section = updates.pop("section", None)
+    if harness in _HARNESS_ANALYTICS_VALUES and section in _SECTION_ANALYTICS_VALUES:
+        _track_analytics_event(team["team_id"], "artifact_copied",
+                               {"harness": harness, "section": section})
     state = _update_onboarding_state(team["team_id"], **updates)
     if email is not None:
         _write_team_email(team["team_id"], email)
