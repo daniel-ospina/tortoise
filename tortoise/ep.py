@@ -676,8 +676,10 @@ class TortoiseEP:
                 frontier = new_frontier
                 if not frontier:
                     break
-        # Final strip: draft ids collected at seed time or on the last hop
-        # must not participate in factor extraction (#780).
+        # Final strip: FAIL-SAFE only — every admission point into `affected`
+        # already excludes drafts (seed predicates, _live_neighbors, direct-edge
+        # filters); the strip guards the nuclear-risk invariant against future
+        # admission-point regressions (#943 review).
         if not include_draft and affected:
             affected -= self._filter_draft_ids(affected)
         return affected
@@ -703,9 +705,15 @@ class TortoiseEP:
         """
         if include_draft:
             return self.proj._neighbors(node_id)
+        # Operator detection matches Batch 1 (_affected_factors): a Point is
+        # an operator when is_operator=true OR op_type is set (legacy nodes —
+        # projection/__init__.py treats bool(is_operator or op_type) as
+        # operator). Matching only {is_operator:true} would leave legacy
+        # operator bridges invisible to the draft exclusion (#943 review).
         rows = self.g.query(
-            "MATCH (n:Point {id:$id})-[r]-(op:Point {is_operator:true})-[r2]-(m:Point) "
+            "MATCH (n:Point {id:$id})-[r]-(op:Point)-[r2]-(m:Point) "
             "WHERE m.id <> $id "
+            "AND (op.is_operator = true OR op.op_type IS NOT NULL) "
             "AND (op.status IS NULL OR op.status <> 'draft') "
             "AND (m.status IS NULL OR m.status <> 'draft') "
             "RETURN DISTINCT m.id",
@@ -813,21 +821,26 @@ class TortoiseEP:
         # operators (pre-existing behavior: _update_factor no-ops <2 inputs).
         op_inputs: dict[str, list[str]] = {op_id: [] for op_id in op_info}
         op_input_live: dict[str, list[bool]] = {op_id: [] for op_id in op_info}
+        # idx_known flags operators whose EVERY input edge carries an idx —
+        # create_operator always writes idx (source=0 first). Legacy/migrated
+        # operators may have idx-less edges (all coalesce to 0): position 0
+        # is then NOT provably the source, so the directional source-slot
+        # guard must not fire (it could check the wrong slot — #943 review).
+        op_idx_known: dict[str, bool] = {op_id: True for op_id in op_info}
         rows = self.g.query(
             "MATCH (o:Point)-[r:IMPL|NAND]->(c:Point) "
             "WHERE o.id IN $ids "
-            "RETURN o.id, c.id, coalesce(r.idx, 0), c.status "
-            # Deterministic tie-break: legacy/migrated operators may carry
-            # idx-less edges (all coalesce to 0) — the source-slot guard
-            # below depends on position 0 being the true source (#943 review).
+            "RETURN o.id, c.id, r.idx, c.status "
             "ORDER BY coalesce(r.idx, 0), c.id",
             params={"ids": list(op_info.keys())},
         ).result_set
-        for op_id, claim_id, _idx, status in rows:
+        for op_id, claim_id, idx, status in rows:
             op_inputs[op_id].append(claim_id)
             op_input_live[op_id].append(
                 include_draft or status is None or status != "draft"
             )
+            if idx is None:
+                op_idx_known[op_id] = False
 
         # Assemble factors (single compute_operator_weight per operator).
         for op_id, (op_type, label, direction) in op_info.items():
@@ -848,6 +861,7 @@ class TortoiseEP:
                 stripped = len(full_inputs) - len(input_ids)
                 if stripped:
                     if (direction != "bidirectional"
+                            and op_idx_known[op_id]
                             and full_inputs
                             and not op_input_live[op_id][0]):
                         # The idx-0 SOURCE was a draft — keeping this factor

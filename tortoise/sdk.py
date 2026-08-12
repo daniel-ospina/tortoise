@@ -1461,9 +1461,12 @@ class TortoiseSDK:
             (source point goes live when its first edge is created). Pass
             False for extraction paths (#780): the operator node itself is
             created with status:'draft' AND the source is NOT auto-promoted —
-            a draft must never wire an operator to a live Point and promotion
-            is reviewer-gated (promote_point, #785). The emitted OperatorAdded
-            event carries the draft status so JSONL replay preserves it
+            a draft must never wire an operator to a live Point. NOTE: there is
+            currently NO public promote API for draft operators — they stay
+            draft until the reviewer-gated promotion path lands (#785
+            promote_point); run(include_draft=True) is the only sanctioned
+            escape hatch today. The emitted OperatorAdded event carries the
+            draft status so JSONL replay preserves it
             (projection/entities.py coalesce default is 'live').
         """
         if op_type not in ("IMPL", "NAND", "composedOf", "decomposesInto", "contains", "wraps"):
