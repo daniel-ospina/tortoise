@@ -13,6 +13,7 @@ import math
 import random
 
 from .quadrature import tilted_moments, moments_to_beta, phi_nand, phi_impl
+from .live import _live_only
 
 logger = logging.getLogger(__name__)
 
@@ -561,7 +562,8 @@ class TortoiseEP:
     # ── Affected subgraph extraction ──────────────────────────────
 
     def _affected_claims(self, operator_ids: list[str],
-                         max_hops: int = 2) -> set[str]:
+                         max_hops: int = 2,
+                         include_draft: bool = False) -> set[str]:
         """Affected claims for a run, seeded from operator and/or point ids.
 
         Seeds may be operator ids (legacy) or plain point ids (#888 W5): a
@@ -569,7 +571,16 @@ class TortoiseEP:
         directions (an operator-less edge is a factor shared by BOTH of its
         endpoints) AND its operator-mediated neighborhood, so seeding a claim
         runs every factor it participates in.
+
+        With include_draft=False (default, #780): draft target claims are
+        excluded, draft operator nodes are skipped as sources, and the BFS
+        expansion never hops through draft claims — a draft-connected
+        operator must change NO live claim's posterior.
         """
+        live_c = _live_only("c.status", include_draft)
+        live_o = _live_only("o.status", include_draft)
+        live_a = _live_only("a.status", include_draft)
+        live_b = _live_only("b.status", include_draft)
         affected: set[str] = set()
         for seed_id in operator_ids:
             is_op = self.g.query(
@@ -578,9 +589,17 @@ class TortoiseEP:
             ).result_set
             if is_op and is_op[0][0]:
                 # Operator seed — legacy behavior: follow outgoing edges to
-                # the operator's inputs (the operator's factor).
+                # the operator's inputs (the operator's factor). Draft
+                # operators and draft target claims are excluded (#780).
+                conds = []
+                if live_c:
+                    conds.append(live_c)
+                if live_o:
+                    conds.append(live_o)
+                where = (" WHERE " + " AND ".join(conds)) if conds else ""
                 rows = self.g.query(
                     "MATCH (o:Point {id:$oid})-[r:IMPL|NAND]->(c:Point) "
+                    f"{where} "
                     "RETURN DISTINCT c.id",
                     params={"oid": seed_id},
                 ).result_set
@@ -589,10 +608,17 @@ class TortoiseEP:
                 # (an operator-less edge is a factor shared by its endpoints),
                 # plus the seed's operator-mediated neighborhood via
                 # _neighbors so a seed whose only connections are
-                # operator-mediated still runs its incident factors.
+                # operator-mediated still runs its incident factors. Draft
+                # endpoints are excluded (#780) — a draft seed runs nothing.
+                conds = ["b.id <> $id"]
+                if live_b:
+                    conds.append(live_b)
+                if live_a:
+                    conds.append(live_a)
+                where = " WHERE " + " AND ".join(conds)
                 rows = self.g.query(
                     "MATCH (a:Point {id:$id})-[r:IMPL|NAND]-(b:Point) "
-                    "WHERE b.id <> $id "
+                    f"{where} "
                     "AND (b.is_operator IS NULL OR b.is_operator = false) "
                     "AND b.op_type IS NULL "
                     "RETURN DISTINCT b.id",
@@ -605,6 +631,15 @@ class TortoiseEP:
         if max_hops > 0 and affected:
             frontier = list(affected)
             for _ in range(max_hops):
+                # Strip drafts from the frontier BEFORE expanding: a draft
+                # claim must never propagate to live claims (#780).
+                if not include_draft:
+                    draft_ids = self._filter_draft_ids(set(frontier))
+                    if draft_ids:
+                        affected -= draft_ids
+                        frontier = [n for n in frontier if n not in draft_ids]
+                        if not frontier:
+                            break
                 new_frontier: list[str] = []
                 for claim_id in frontier:
                     for nid in self.proj._neighbors(claim_id):
@@ -613,9 +648,16 @@ class TortoiseEP:
                             new_frontier.append(nid)
                     # Operator-less hops (#888 W5): direct IMPL/NAND edges
                     # between plain Points (operator-mediated hops above).
+                    # Draft endpoints never propagate (#780).
+                    conds = ["b.id <> $id"]
+                    if live_a:
+                        conds.append(live_a)
+                    if live_b:
+                        conds.append(live_b)
+                    where = " WHERE " + " AND ".join(conds)
                     dir_rows = self.g.query(
                         "MATCH (a:Point {id:$id})-[r:IMPL|NAND]-(b:Point) "
-                        "WHERE b.id <> $id "
+                        f"{where} "
                         "AND (a.is_operator IS NULL OR a.is_operator = false) "
                         "AND a.op_type IS NULL "
                         "AND (b.is_operator IS NULL OR b.is_operator = false) "
@@ -630,9 +672,25 @@ class TortoiseEP:
                 frontier = new_frontier
                 if not frontier:
                     break
+        # Final strip: draft ids collected at seed time or on the last hop
+        # must not participate in factor extraction (#780).
+        if not include_draft and affected:
+            affected -= self._filter_draft_ids(affected)
         return affected
 
-    def _affected_factors(self, affected_claims: set[str]
+    def _filter_draft_ids(self, ids: set[str]) -> set[str]:
+        """Return the subset of ids whose nodes have status == 'draft' (#780)."""
+        if not ids:
+            return set()
+        rows = self.g.query(
+            "MATCH (n:Point) WHERE n.id IN $ids AND n.status = 'draft' "
+            "RETURN n.id",
+            params={"ids": list(ids)},
+        ).result_set
+        return {r[0] for r in rows}
+
+    def _affected_factors(self, affected_claims: set[str],
+                          include_draft: bool = False
                           ) -> list[tuple[str, str, list[str], float, str | None, str]]:
         """Extract EP factors from the affected claims subgraph.
 
@@ -644,7 +702,16 @@ class TortoiseEP:
 
         Semantics are preserved: same affected set, same factor list, same
         ordering guarantees (source idx=0 first for directional IMPL).
+
+        With include_draft=False (default, #780): draft operators never feed
+        factors, draft ids are stripped from input_ids, and draft endpoints
+        never form direct-edge factors. An operator whose live inputs drop
+        below 2 becomes degenerate and is skipped — the SVBP-path convention.
         """
+        live_o = _live_only("o.status", include_draft)
+        live_c = _live_only("c.status", include_draft)
+        live_a = _live_only("a.status", include_draft)
+        live_b = _live_only("b.status", include_draft)
         factors: list[tuple[str, str, list[str], float, str | None, str]] = []
         if not affected_claims:
             return factors
@@ -658,11 +725,15 @@ class TortoiseEP:
         # operator-less direct edges (#888 W5) handled by Batch 3 below.
         # (Pre-#910 graphs are unaffected: plain points had no outgoing
         # IMPL/NAND edges, so the exclusion is behavior-neutral there.)
+        # Draft operators are excluded (#780).
         op_info: dict[str, tuple[str, str | None, str | None]] = {}
+        where_b1 = " AND ".join(
+            ["(o.is_operator = true OR o.op_type IS NOT NULL)",
+             "c.id IN $ids"] + ([live_o] if live_o else []) + ([live_c] if live_c else [])
+        )
         rows = self.g.query(
             "MATCH (o:Point)-[r:IMPL|NAND]->(c:Point) "
-            "WHERE (o.is_operator = true OR o.op_type IS NOT NULL) "
-            "AND c.id IN $ids "
+            f"WHERE {where_b1} "
             "RETURN DISTINCT o.id, o.op_type, o.label, o.direction",
             params={"ids": list(affected_claims)},
         ).result_set
@@ -692,6 +763,7 @@ class TortoiseEP:
             "AND (b.is_operator IS NULL OR b.is_operator = false) "
             "AND b.op_type IS NULL "
             "AND (a.id IN $ids OR b.id IN $ids) "
+            f"{('AND ' + live_a + ' AND ' + live_b + ' ') if live_a else ''}"
             "RETURN a.id, b.id, type(r), coalesce(r.direction, 'bidirectional'), "
             "       r.weight",
             params={"ids": list(affected_claims)},
@@ -708,11 +780,13 @@ class TortoiseEP:
         # Batch 2: all inputs for all discovered operators, ordered by idx.
         # ORDER BY r.idx ensures source (idx=0) comes first — required
         # for directional IMPL: id_a = source, id_b = target so that
-        # back-messages are correctly skipped.
+        # back-messages are correctly skipped. Draft inputs are stripped
+        # (#780): a draft claim contributes NO belief to a live factor.
         op_inputs: dict[str, list[str]] = {op_id: [] for op_id in op_info}
+        where_b2 = "o.id IN $ids" + (f" AND {live_c}" if live_c else "")
         rows = self.g.query(
             "MATCH (o:Point)-[r:IMPL|NAND]->(c:Point) "
-            "WHERE o.id IN $ids "
+            f"WHERE {where_b2} "
             "RETURN o.id, c.id, coalesce(r.idx, 0) "
             "ORDER BY coalesce(r.idx, 0)",
             params={"ids": list(op_info.keys())},
@@ -731,6 +805,10 @@ class TortoiseEP:
                     op_id,
                 )
             input_ids = op_inputs.get(op_id, [])
+            if not include_draft and len(input_ids) < 2:
+                # Degenerate after draft stripping — a draft-connected
+                # operator must change NO live posterior (#780).
+                continue
             weight = compute_operator_weight(self.proj, op_id)
             factors.append((op_id, op_type, input_ids, weight, label, direction))
         return factors
@@ -798,8 +876,8 @@ class TortoiseEP:
                  "beta": r[3], "variance": r[4]} for r in rows]
 
     def run(self, operator_ids: list[str], max_hops: int = 2,
-            evidence: dict[str, tuple[float, float]] | None = None
-            ) -> tuple[int, bool]:
+            evidence: dict[str, tuple[float, float]] | None = None,
+            include_draft: bool = False) -> tuple[int, bool]:
         """Run EP to convergence. Batch I/O avoids SQLite crashes (#6761).
 
         Args:
@@ -811,6 +889,10 @@ class TortoiseEP:
             evidence: optional {claim_id: (alpha, beta)} priors —
                 merged with any evidence set at construction time.
                 Evidence set at run() overrides per-claim.
+            include_draft: when True, draft Points/operators participate in
+                EP identically to live ones (#780 escape hatch — legacy
+                behavior). Default False: drafts are excluded at ALL four
+                factor-extraction call sites.
         """
         # Run-level evidence is CALL-SCOPED (#330): merge into a local dict so
         # self._evidence is never mutated by run() — otherwise a later run()
@@ -861,11 +943,12 @@ class TortoiseEP:
                 params={"params": params_list},
             )
 
-        affected = self._affected_claims(operator_ids, max_hops)
+        affected = self._affected_claims(operator_ids, max_hops,
+                                         include_draft=include_draft)
         if not affected:
             return 0, True
 
-        factors = self._affected_factors(affected)
+        factors = self._affected_factors(affected, include_draft=include_draft)
         if not factors:
             return 0, True
 

@@ -329,13 +329,18 @@ def _inject_subgraph_filter(cypher: str, vars: list[str],
 
 def _bfs_select_operators(proj, anchors: list[str], max_hops: int = 1,
                           rel_filter: str = "IMPL|NAND",
-                          direction: str = "both") -> set[str]:
+                          direction: str = "both",
+                          include_draft: bool = False) -> set[str]:
     """BFS subgraph selection from anchor Points — returns set of operator Point IDs.
 
     Shared helper for both compute_confidence and tortoise_analyze.
     Expands from anchor Points along operator edges (IMPL|NAND) for max_hops hops.
     IMPL edges respect direction; NAND always traversed bidirectionally.
     Capped at 200 operator IDs.
+
+    With include_draft=False (default, #780): draft anchors, draft operators
+    and draft frontier points are excluded — the shared live-only filter at
+    the analyze-path call site of the four-factor-extraction set.
     """
     import logging
     _log = logging.getLogger(__name__)
@@ -343,6 +348,20 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int = 1,
     frontier: set[str] = set(anchors)
     visited: set[str] = set(anchors)
     rel_types = set(rel_filter.split("|"))
+
+    live_op = "" if include_draft else "AND (op.status IS NULL OR op.status <> 'draft')"
+    live_t = "" if include_draft else "AND (target.status IS NULL OR target.status <> 'draft')"
+    live_p = "" if include_draft else "AND (p.status IS NULL OR p.status <> 'draft')"
+
+    if not include_draft and frontier:
+        rows = proj.g.query(
+            "MATCH (n:Point) WHERE n.id IN $ids AND n.status = 'draft' RETURN n.id",
+            params={"ids": list(frontier)},
+        ).result_set
+        draft_anchors = {r[0] for r in rows}
+        if draft_anchors:
+            frontier -= draft_anchors
+            visited -= draft_anchors
 
     for hop in range(max_hops):
         if not frontier:
@@ -367,7 +386,7 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int = 1,
                 if d == "incoming":
                     rows = proj.g.query(
                         f"MATCH (op:Point {{is_operator:true}})-[:{rel}]->(p:Point) "
-                        "WHERE p.id IN $frontier "
+                        f"WHERE p.id IN $frontier {live_op} "
                         "RETURN DISTINCT op.id",
                         params={"frontier": frontier_list},
                     ).result_set
@@ -377,7 +396,7 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int = 1,
                 else:  # outgoing
                     rows = proj.g.query(
                         f"MATCH (op:Point {{is_operator:true}})-[:{rel}]->(target:Point) "
-                        "WHERE op.id IN $frontier "
+                        f"WHERE op.id IN $frontier {live_op} {live_t} "
                         "RETURN DISTINCT target.id",
                         params={"frontier": frontier_list},
                     ).result_set
@@ -401,7 +420,7 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int = 1,
             ops_list = list(new_ops)
             rows = proj.g.query(
                 "MATCH (op:Point {is_operator:true})-[r:IMPL|NAND]->(p:Point) "
-                "WHERE op.id IN $ops "
+                f"WHERE op.id IN $ops {live_p} "
                 "RETURN DISTINCT p.id",
                 params={"ops": ops_list},
             ).result_set
