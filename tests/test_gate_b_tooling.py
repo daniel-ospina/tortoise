@@ -173,6 +173,39 @@ def test_grounding_drift_removed_point_mean_term_intersection_scoped(sdk):
     assert drift["post_count"] == 1
 
 
+def test_grounding_drift_zero_overlap_fails_closed(sdk):
+    """Total replacement (zero shared Point ids) must FAIL CLOSED (review
+    round 2): with an empty intersection both recomputed means are 0.0, so
+    the ceilings previously passed vacuously — pre 0.90 → post 0.30
+    reported passed True. An empty comparison is vacuous, not evidence:
+    fail with an explicit ``no_common_points`` reason and ``overlap: 0``."""
+    pre = {"count": 2, "mean": 0.90,
+           "points": {"old_a": 0.90, "old_b": 0.90}}
+    post = {"count": 2, "mean": 0.30,
+            "points": {"new_a": 0.30, "new_b": 0.30}}
+    drift = grounding_drift(pre, post)
+    assert drift["passed"] is False
+    assert drift["reason"] == "no_common_points"
+    assert drift["overlap"] == 0
+    assert drift["mean_abs_delta"] == 0.0
+    assert drift["max_point_abs_delta"] == 0.0
+    assert drift["pre_count"] == 2
+    assert drift["post_count"] == 2
+
+
+def test_grounding_drift_nonempty_overlap_reported(sdk):
+    """The ID-intersection size is surfaced on the result for all paths —
+    an empty intersection is the fail-closed signal (overlap == 0), so a
+    non-empty intersection reports its overlap alongside a normal pass."""
+    pre = {"count": 3, "mean": 0.50,
+           "points": {"p1": 0.50, "p2": 0.50, "gone": 0.50}}
+    post = {"count": 2, "mean": 0.50, "points": {"p1": 0.50, "p2": 0.50}}
+    drift = grounding_drift(pre, post)
+    assert drift["passed"] is True
+    assert drift["overlap"] == 2
+    assert "reason" not in drift
+
+
 def test_grounding_drift_ceiling_constants_pinned(sdk):
     # The 0.02 constant is the EpSafeCommit max_grounding_drift seam (#785) —
     # pin it so the contract cannot silently drift.
@@ -201,7 +234,8 @@ def test_calibration_marker_persists_across_restart(tmp_path):
     sdk1 = TortoiseSDK(db_path=db_path)
     try:
         assert sdk1.calibration_passed() is False
-        sdk1.record_calibration(precision=0.70, sample_size=50)
+        sdk1.record_calibration(precision=0.70, sample_size=50,
+                                mean_grounding_delta=0.02)
     finally:
         sdk1.close()
     sdk2 = TortoiseSDK(db_path=db_path)  # fresh instance, same DB file
@@ -212,12 +246,16 @@ def test_calibration_marker_persists_across_restart(tmp_path):
 
 
 def test_record_calibration_validation(sdk):
-    with pytest.raises(ValueError):
-        sdk.record_calibration(precision=1.5)
-    with pytest.raises(ValueError):
-        sdk.record_calibration(precision=-0.1)
-    with pytest.raises(ValueError):
-        sdk.record_calibration(sample_size=0)
+    # Metrics are required (review round 2) — provide them so these cases
+    # still exercise the range / sample-size checks, not the missing-metrics
+    # refusal.
+    with pytest.raises(ValueError, match="precision must be in"):
+        sdk.record_calibration(precision=1.5, mean_grounding_delta=0.01)
+    with pytest.raises(ValueError, match="precision must be in"):
+        sdk.record_calibration(precision=-0.1, mean_grounding_delta=0.01)
+    with pytest.raises(ValueError, match="sample_size must be positive"):
+        sdk.record_calibration(precision=0.8, sample_size=0,
+                               mean_grounding_delta=0.01)
     assert sdk.calibration_passed() is False  # failed writes leave no marker
 
 
@@ -225,13 +263,25 @@ def test_record_calibration_enforces_gate_targets(sdk):
     """Gate B criteria are enforced at write time (review round 1): a
     0.50-precision marker or an over-ceiling drift must not open Gate B —
     validation happens BEFORE the MERGE, so a refused write leaves no
-    marker. Boundary values (0.70 / 0.02) still pass."""
+    marker. Measured metrics are REQUIRED (review round 2): a call with no
+    precision/mean_grounding_delta (e.g. notes only) is refused too.
+    Boundary values (0.70 / 0.02) still pass."""
     with pytest.raises(ValueError, match="0.70"):
-        sdk.record_calibration(precision=0.50, sample_size=50)
+        sdk.record_calibration(precision=0.50, sample_size=50,
+                               mean_grounding_delta=0.01)
     with pytest.raises(ValueError, match="0.02"):
         sdk.record_calibration(precision=0.73, sample_size=50,
                                mean_grounding_delta=0.05)
     assert sdk.calibration_passed() is False  # refused writes leave no marker
+    # No measured metrics → bypass attempt refused, still no marker.
+    with pytest.raises(ValueError, match="requires measured metrics"):
+        sdk.record_calibration(notes="run done")
+    with pytest.raises(ValueError, match="requires measured metrics"):
+        sdk.record_calibration(precision=0.73, sample_size=50)  # no drift
+    with pytest.raises(ValueError, match="requires measured metrics"):
+        sdk.record_calibration(sample_size=50,
+                               mean_grounding_delta=0.01)  # no precision
+    assert sdk.calibration_passed() is False
     # Boundary values exactly at target still record.
     ok = sdk.record_calibration(precision=0.70, sample_size=50,
                                 mean_grounding_delta=0.02)
@@ -241,8 +291,10 @@ def test_record_calibration_enforces_gate_targets(sdk):
 
 
 def test_record_calibration_is_idempotent(sdk):
-    sdk.record_calibration(precision=0.71, sample_size=50)
+    sdk.record_calibration(precision=0.71, sample_size=50,
+                           mean_grounding_delta=0.01)
     second = sdk.record_calibration(precision=0.74, sample_size=50,
+                                    mean_grounding_delta=0.01,
                                     notes="re-measured")
     assert sdk.calibration_passed() is True
     # MERGE semantics: one marker node, latest write wins.

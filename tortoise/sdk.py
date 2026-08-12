@@ -7319,26 +7319,36 @@ class TortoiseSDK:
         event is emitted when an event log is configured (#548 best-effort).
 
         Args:
-            precision: measured extraction precision in [0, 1]. ENFORCED at
-                write time — must be ≥ 0.70 (Gate B criterion); a below-
-                target value raises ValueError and leaves no marker.
+            precision: measured extraction precision in [0, 1]. REQUIRED
+                (review round 2) and ENFORCED at write time — must be ≥ 0.70
+                (Gate B criterion); a missing value or a below-target value
+                raises ValueError and leaves no marker.
             sample_size: sessions in the human-reviewed sample (> 0).
-            mean_grounding_delta: measured pre/post drift. ENFORCED at
-                write time — must be ≤ 0.02 (``MAX_GROUNDING_DRIFT``, the
-                #785 seam); an above-ceiling value raises ValueError and
-                leaves no marker.
+            mean_grounding_delta: measured pre/post drift. REQUIRED (review
+                round 2) and ENFORCED at write time — must be ≤ 0.02
+                (``MAX_GROUNDING_DRIFT``, the #785 seam); a missing value or
+                an above-ceiling value raises ValueError and leaves no marker.
             notes: free-form ops documentation (e.g. reviewer count, corpus).
 
         Returns:
             The stored marker properties (key + recordedAt + given fields).
         """
-        if precision is not None and not 0.0 <= precision <= 1.0:
+        # Measured metrics are REQUIRED (review round 2): a marker written
+        # with no precision/mean_grounding_delta (e.g. notes only) would
+        # skip every gate check and flip calibration_passed() True with zero
+        # measured evidence — refuse BEFORE any gate check can be bypassed.
+        if precision is None or mean_grounding_delta is None:
+            raise ValueError(
+                "record_calibration requires measured metrics: precision and "
+                "mean_grounding_delta are both required (Gate B must not "
+                "open without measured evidence)"
+            )
+        if not 0.0 <= precision <= 1.0:
             raise ValueError(f"precision must be in [0, 1], got {precision}")
         # Gate B criterion enforcement (review round 1): the docstring
         # documents ≥0.70 precision / ≤0.02 drift as binding — enforce them
         # BEFORE the MERGE so a below-target marker cannot open Gate B.
-        if (precision is not None
-                and precision < self._CALIBRATION_PRECISION_TARGET):
+        if precision < self._CALIBRATION_PRECISION_TARGET:
             raise ValueError(
                 f"precision {precision} is below the Gate B target of "
                 f"{self._CALIBRATION_PRECISION_TARGET:.2f} (≥70% human-reviewed "
@@ -7351,8 +7361,7 @@ class TortoiseSDK:
         # at module load (analyze.py contract). MAX_GROUNDING_DRIFT is the
         # #785 seam constant, pinned at 0.02 by tests.
         from tortoise.analyze import MAX_GROUNDING_DRIFT
-        if (mean_grounding_delta is not None
-                and mean_grounding_delta > MAX_GROUNDING_DRIFT):
+        if mean_grounding_delta > MAX_GROUNDING_DRIFT:
             raise ValueError(
                 f"mean_grounding_delta {mean_grounding_delta} exceeds the "
                 f"MAX_GROUNDING_DRIFT ceiling of {MAX_GROUNDING_DRIFT} (≤2% "
@@ -7363,12 +7372,11 @@ class TortoiseSDK:
         now = datetime.now(timezone.utc).isoformat()
         proj = self._get_proj()
         props: dict[str, Any] = {"recordedAt": now}
-        if precision is not None:
-            props["precision"] = precision
+        # precision / mean_grounding_delta are guaranteed non-None above.
+        props["precision"] = precision
         if sample_size is not None:
             props["sample_size"] = sample_size
-        if mean_grounding_delta is not None:
-            props["mean_grounding_delta"] = mean_grounding_delta
+        props["mean_grounding_delta"] = mean_grounding_delta
         if notes is not None:
             props["notes"] = notes
         proj.g.query(

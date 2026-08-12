@@ -619,7 +619,10 @@ def grounding_drift(pre: dict, post: dict, *,
     Returns:
         {"passed": bool, "mean_abs_delta": float,
          "max_point_abs_delta": float, "mean_ceiling": float,
-         "point_ceiling": float, "pre_count": int, "post_count": int}
+         "point_ceiling": float, "pre_count": int, "post_count": int,
+         "overlap": int} — plus "reason": "no_common_points" when the ID
+        intersection is empty (review round 2: a total replacement must
+        FAIL CLOSED, never vacuously pass).
     """
     pre_points = pre.get("points", {})
     post_points = post.get("points", {})
@@ -627,10 +630,24 @@ def grounding_drift(pre: dict, post: dict, *,
     # change (created/deleted Points) must not shift the mean past the
     # ceiling (review P2: full-set means can drift on add/remove alone).
     common = set(pre_points) & set(post_points)
-    pre_mean = (sum(float(pre_points[pid]) for pid in common) / len(common)
-                if common else 0.0)
-    post_mean = (sum(float(post_points[pid]) for pid in common) / len(common)
-                 if common else 0.0)
+    if not common:
+        # Zero shared Point ids (total replacement): both recomputed means
+        # are 0.0, so the ceilings would trivially pass — a vacuous pass
+        # (pre 0.90 → post 0.30 reported True before this fix). Fail closed
+        # with an explicit signal instead of a silent 0.0-delta pass.
+        return {
+            "passed": False,
+            "reason": "no_common_points",
+            "overlap": 0,
+            "mean_abs_delta": 0.0,
+            "max_point_abs_delta": 0.0,
+            "mean_ceiling": max_mean_drift,
+            "point_ceiling": max_point_drift,
+            "pre_count": pre.get("count", 0),
+            "post_count": post.get("count", 0),
+        }
+    pre_mean = sum(float(pre_points[pid]) for pid in common) / len(common)
+    post_mean = sum(float(post_points[pid]) for pid in common) / len(common)
     mean_abs_delta = abs(post_mean - pre_mean)
     max_point_abs_delta = max(
         (abs(float(post_points[pid]) - float(pre_points[pid])) for pid in common),
@@ -648,4 +665,5 @@ def grounding_drift(pre: dict, post: dict, *,
         "point_ceiling": max_point_drift,
         "pre_count": pre.get("count", 0),
         "post_count": post.get("count", 0),
+        "overlap": len(common),
     }
