@@ -57,7 +57,7 @@ High-level E2E (scope) → Detailed E2E (plan §7) → Issue references (decompo
 | E2E-8 extract-nothing | DE2E-8 | 955, 961, 962 |
 | E2E-9 pack enforcement | DE2E-9 | 949, 950, 951, 954, 956 |
 | E2E-10 privacy | DE2E-10 | 953, 959, 963 |
-| (spec §6 probe) | DE2E-11 MITIGATES | 955 (probe); 953 covers the MITIGATES write mechanism via its DE2E-2 four-node row |
+| (spec §6 probe) | DE2E-11 MITIGATES | 955 (probe); 953 (write mechanism via its DE2E-2 four-node row); 961/962 (Layer-2 recall band — E2E fields declare DE2E-11 legs) |
 
 Wiring annotations: #956's E9 stream-shape assertions exercise DE2E-3/4 through #955's run-loop wiring (per #956's body — its E2E field is DE2E-9). Layer-2 legs (961/962) read the gold set per the per-class N rule.
 
@@ -70,9 +70,9 @@ Every high-level E2E → detailed counterpart ✅ · every DE2E referenced by �
 | epic-align | Strategy review | ✅ | align-decision.md (adversarial test, Eisenhower, profit alignment, 5 conditions) |
 | epic-research | Research brief review | ✅ | handoff: verifier-corrected (addendum absorbed Research-Needed #4) |
 | epic-scope | Scope review (human gate) | ✅ | 3 of 4 owner decisions resolved + 1 carried (window-#2 schedule → #946, owner availability); window-1 validation converged (0→29→100%) |
-| epic-plan §1-8 | Per-substep reviews (×8) | ✅ | 6 review cycles, ~60 issues fixed to convergence, 0 open P0/P1 (04-plan.md) |
-| epic-decompose | Per-issue review | ✅ | 5 batches, ~15 findings fixed (05-decompose.md) |
-| epic-decompose | MECE verification | ✅ | 2 cycles (4 findings + 3 residuals) → MECE CLEAN |
+| epic-plan §1-8 | Per-substep reviews (×8) | ✅ | 10 reviewer rounds, ~116 findings fixed to convergence, 0 open P0/P1 (review record in 04-plan.md) |
+| epic-decompose | Per-issue review | ✅ | 5 parallel batches, ~15 findings fixed (05-decompose.md) |
+| epic-decompose | MECE verification | ✅ | 2 rounds (4 findings + 3 residuals) → MECE CLEAN |
 
 ## Step 5 — Final Decision
 
