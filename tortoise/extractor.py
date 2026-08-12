@@ -310,6 +310,158 @@ class MockExtractor:
 
 
 # ---------------------------------------------------------------------------
+# Phase-2 entity stage (epic #264 plan W-1 / §5.1 / §7 — issue #782 DE2E-1).
+# ---------------------------------------------------------------------------
+
+# W-1 rules pre-filter: reuse the EXISTING issues/prs metadata regex
+# (session_indexer.py:204 — repo#NNN pattern). Deliberately NOT
+# _graph_entity_keywords: that is a name-substring matcher against existing
+# graph entities, valid only as the known-Object pre-filter for R4 cost control.
+_ISSUE_REF_RE = re.compile(r"([a-zA-Z0-9_-]+)#(\d+)")
+
+# objectKind vocab reuse (issue #782 complexity table + plan §4.1):
+# Project, WorkItem, document, tag, user, skill, tool, agent, workflow,
+# agreement, standard, other.
+_OBJECT_KIND_VOCAB = frozenset({
+    "project", "workitem", "document", "tag", "user", "skill", "tool",
+    "agent", "workflow", "agreement", "standard", "other",
+})
+
+
+def _normalize_object_kind(kind: str) -> str:
+    """DE2E-N7: unknown objectKind values fall back to 'other'."""
+    k = str(kind or "other").strip().lower()
+    return k if k in _OBJECT_KIND_VOCAB else "other"
+
+
+def _intersect_object_kinds(kinds: list[str] | None) -> list[str]:
+    """DE2E-review (objectKind vocab): the LLM prompt vocab must not be wider
+    than the validator vocab — kinds that cannot survive _normalize_object_kind
+    (DE2E-N7) silently collapse to 'other' and mislead the model ("Prefer
+    specific kinds" while 26 of 38 prompt kinds are dropped). Intersect the
+    resolved vocab (domain_loader known_kinds/domain_kinds) with
+    _OBJECT_KIND_VOCAB so the model only sees kinds that survive."""
+    if not kinds:
+        return sorted(_OBJECT_KIND_VOCAB)
+    merged: list[str] = []
+    for k in kinds:
+        ks = str(k).strip().lower()
+        if ks in _OBJECT_KIND_VOCAB and ks not in merged:
+            merged.append(ks)
+    return merged or sorted(_OBJECT_KIND_VOCAB)
+
+
+def _canonical_name(name: str) -> str:
+    """Plan §4.1: normalized entity name — lowercase, whitespace-collapsed
+    ("port  16379" == "port 16379"), punctuation-stripped for matching; the
+    display `title` preserves the original mention."""
+    return _PUNC.sub("", re.sub(r"\s+", " ", name.lower().strip()))
+
+
+def _normalize_entity(e) -> dict | None:
+    """Normalize one raw entity dict into the Phase-2 contract shape
+    {name, objectKind, canonical_candidates, span, confidence}."""
+    if not isinstance(e, dict) or not e.get("name"):
+        return None
+    name = str(e["name"]).strip()
+    if not name:
+        return None
+    span = e.get("span")
+    if not (isinstance(span, list) and len(span) == 2
+            and all(isinstance(x, int) for x in span) and span[0] <= span[1]):
+        span = None
+    return {
+        "name": name,
+        "objectKind": _normalize_object_kind(e.get("objectKind")),
+        "canonical_candidates": [str(c) for c in (e.get("canonical_candidates") or [])],
+        "span": span,
+        "confidence": float(e.get("confidence", 0.5)),
+    }
+
+
+def _rule_fallback_entities(transcript: str) -> list[dict]:
+    """DE2E-N2 rule/keyword fallback: extract KNOWN reference entities
+    (issue/PR refs repo#NNN → objectKind workitem) with deterministic spans.
+    Returns [] when no known refs are present — never raises."""
+    out: list[dict] = []
+    seen: set[tuple[int, int]] = set()
+    for m in _ISSUE_REF_RE.finditer(transcript):
+        span = (m.start(), m.end())
+        if span in seen:
+            continue
+        seen.add(span)
+        ent = _normalize_entity({
+            "name": m.group(0),
+            "objectKind": "workitem",
+            "canonical_candidates": [m.group(0)],
+            "span": list(span),
+            "confidence": 1.0,
+        })
+        if ent:
+            out.append(ent)
+    return out
+
+
+class EntityStageMock:
+    """Deterministic Phase-2 entity-stage fixture (plan §7 preamble).
+
+    Same pattern as MockExtractor: offline, no LLM, no network. Maps seed
+    transcript fragments (substring keys) to fixed entity sets; char spans are
+    located deterministically via str.find. Optional failure injection for
+    DE2E-N2 (LLM failure → rule/keyword fallback).
+    """
+
+    version = "entity-mock@0"
+
+    def __init__(self, entities_by_key: dict[str, list[dict]] | None = None,
+                 *, fail_first_call: bool = False):
+        self.entities_by_key = dict(entities_by_key or {})
+        self.fail_first_call = fail_first_call
+        self.calls = 0
+
+    def run(self, transcript: str, source_id: str) -> list[dict]:
+        self.calls += 1
+        if self.fail_first_call and self.calls == 1:
+            raise RuntimeError("entity stage failure (fixture: fail_first_call)")
+        out: list[dict] = []
+        for key, ents in self.entities_by_key.items():
+            if key not in transcript:
+                continue
+            for e in ents:
+                name = str(e.get("name") or key)
+                span = e.get("span")
+                if span is None:
+                    start = transcript.find(name)
+                    span = [start, start + len(name)] if start >= 0 else None
+                try:
+                    ent = _normalize_entity({
+                        "name": name,
+                        "objectKind": e.get("objectKind", "other"),
+                        "canonical_candidates": e.get("canonical_candidates") or [name],
+                        "span": span,
+                        "confidence": e.get("confidence", 1.0),
+                    })
+                except Exception:
+                    # per-entity brittleness: skip only the bad entity
+                    logger.debug("skipping malformed fixture entity %r", e,
+                                 exc_info=True)
+                    continue
+                if ent:
+                    out.append(ent)
+        return out
+
+
+def entity_stage_fixture(entities_by_key: dict[str, list[dict]] | None = None) -> EntityStageMock:
+    """Default DE2E-1 fixture: port 16379 → other, FalkorDB → tool,
+    tortoise#123 → workitem."""
+    return EntityStageMock(entities_by_key or {
+        "port 16379": [{"name": "port 16379", "objectKind": "other"}],
+        "FalkorDB": [{"name": "FalkorDB", "objectKind": "tool"}],
+        "tortoise#123": [{"name": "tortoise#123", "objectKind": "workitem"}],
+    })
+
+
+# ---------------------------------------------------------------------------
 # M2: two-stage LLM extractor (cheap point model + reasoning relation model).
 # ---------------------------------------------------------------------------
 
@@ -696,6 +848,80 @@ class _SemanticStage:
         }
 
 
+_ENTITY_CONV_SYS = (
+    "TASK: extract_conversation_entities\n"
+    "Extract named OBJECT entities from the conversation transcript: tools, "
+    "products, documents, projects, work items (issues/PRs), skills, agents, "
+    "workflows, agreements, standards, tags, users, etc. Do NOT extract "
+    "speakers/subjects as entities — only the things they act on or reference. "
+    "Object kinds: {object_kinds}\n\n"
+    'Return JSON: {{"entities": [{{"name": "...", "objectKind": "...", '
+    '"canonical_candidates": ["canonical variant", ...], '
+    '"span": [start_char, end_char], "confidence": 0.9]}}}}\n\n'
+    "Rules:\n"
+    "- Only extract entities that appear verbatim in the transcript.\n"
+    "- `name` = the exact mention (display form).\n"
+    "- `canonical_candidates` = normalized/alias variants of the name (lowercase, "
+    "abbreviations, issue refs without repo prefix) used for cross-session dedup.\n"
+    "- `span` = zero-based character offsets of the name in the transcript.\n"
+    "- Prefer specific kinds over 'other'.\n"
+    '- If no entities are found, return {{"entities": []}}.\n'
+)
+
+
+class EntityStage(_SemanticStage):
+    """Phase-2 conversation entity stage — extends _SemanticStage with span +
+    canonical_candidates prompt params (plan W-1 / §5.1 / §6.1).
+
+    Object-only output: [{name, objectKind, canonical_candidates, span,
+    confidence}] — one dict per extracted entity mention. The S7
+    `extract_entities` document surface (Subjects+Objects) is untouched
+    (DE2E-N12: `extract_conversation_entities` is the renamed Phase-2 API).
+    """
+
+    def __init__(self, model, *, object_kinds: list[str] | None = None):
+        super().__init__(model, object_kinds=_intersect_object_kinds(
+            object_kinds or [
+                "project", "workitem", "document", "tag", "user", "skill",
+                "tool", "agent", "workflow", "agreement", "standard", "other",
+            ],
+        ))
+        self._system = _ENTITY_CONV_SYS
+
+    def run(self, transcript: str, source_id: str) -> list[dict]:
+        """LLM call for conversation entity extraction. Raises on parse failure
+        — the caller (extract_conversation_entities) applies the rule fallback."""
+        system = self._system.format(object_kinds=", ".join(self.object_kinds))
+        out = self.model.complete(
+            system=system,
+            user=json.dumps({
+                "context": f"conversation:{source_id}",
+                "transcript": transcript,
+            }),
+        )
+        raw = _json(out).get("entities", [])
+        if not isinstance(raw, list):
+            # DE2E-review (parse brittleness): a non-list entities payload is a
+            # parse failure — raise so the caller's rule fallback runs instead
+            # of silently returning [] (which drops valid entities AND skips
+            # the fallback).
+            raise ValueError(
+                f"entities must be a JSON list, got {type(raw).__name__}: "
+                f"{str(raw)[:120]!r}"
+            )
+        entities: list[dict] = []
+        for e in raw:
+            try:
+                ent = _normalize_entity(e)
+            except Exception:
+                # per-entity brittleness: skip only the bad entity, keep the rest
+                logger.debug("skipping malformed entity %r", e, exc_info=True)
+                continue
+            if ent:
+                entities.append(ent)
+        return entities
+
+
 class LLMExtractor:
     """Cheap point model + large relation model, same Extractor interface as the
     mock. Spans/quotes come from the deterministic segmenter, so provenance
@@ -963,6 +1189,50 @@ class LLMExtractor:
             "entities": sorted(all_entity_names),
         }
 
+    def extract_conversation_entities(self, transcript: str, source_id: str, api: EventAPI, *,
+                                      model=None, domain: str | None = None,
+                                      entity_stage=None) -> list[dict]:
+        """Phase-2: conversation entity extraction → Object-only entity dicts
+        [{name, canonical_candidates, objectKind, span, confidence}].
+
+        RENAMED API vs the S7 `extract_entities` (document Subjects+Objects) so
+        the two extraction tasks never collide (DE2E-N12). `entity_stage` is an
+        injectable deterministic mock (EntityStageMock) for tests; None → LLM
+        EntityStage with domain-aware objectKind vocab via domain_loader.
+        LLM failure → rule/keyword fallback extracting known refs (DE2E-N2).
+        """
+        if entity_stage is None:
+            object_kinds = None
+            try:
+                from tortoise.domain_loader import domain_kinds, known_kinds
+                if domain:
+                    object_kinds = domain_kinds(domain, "objectKind")
+                else:
+                    object_kinds = list(known_kinds("objectKind"))
+            except Exception:
+                pass  # ponytail: use the default conversation vocab
+            entity_stage = EntityStage(model or self.points.model,
+                                       object_kinds=object_kinds)
+        try:
+            raw = entity_stage.run(transcript, source_id)
+        except Exception:
+            logger.warning(
+                "extract_conversation_entities: entity stage failed for %s — "
+                "rule/keyword fallback (DE2E-N2)", source_id, exc_info=True,
+            )
+            raw = _rule_fallback_entities(transcript)
+        out: list[dict] = []
+        for e in raw or []:
+            try:
+                ent = _normalize_entity(e)
+            except Exception:
+                # per-entity brittleness: skip only the bad entity
+                logger.debug("skipping malformed entity %r", e, exc_info=True)
+                continue
+            if ent:
+                out.append(ent)
+        return out
+
 
 # -- Module-level convenience API ------------------------------------------------
 
@@ -1001,3 +1271,49 @@ def extract_from_document(
         "points": 0, "operators": 0, "sections": 0,
         "point_ids": [], "failed_sections": [],
     })
+
+
+def extract_conversation_entities(
+    transcript: str,
+    source_id: str,
+    api: EventAPI,
+    *,
+    model=None,
+    entity_stage=None,
+    domain: str | None = None,
+) -> list[dict]:
+    """Phase-2 convenience: conversation entity extraction → Object-only list
+    [{name, canonical_candidates, objectKind, span, confidence}].
+
+    ``model=None`` + ``entity_stage=None`` → rule/keyword fallback only
+    (deterministic, no LLM — the safe default for MockExtractor pipelines).
+    ``entity_stage`` injects a deterministic mock (EntityStageMock).
+    """
+    if model is not None:
+        extractor = LLMExtractor(model, model)
+        return extractor.extract_conversation_entities(
+            transcript, source_id, api, model=model, domain=domain,
+            entity_stage=entity_stage,
+        )
+    if entity_stage is not None:
+        try:
+            raw = entity_stage.run(transcript, source_id)
+        except Exception:
+            logger.warning(
+                "extract_conversation_entities: injected stage failed — "
+                "rule/keyword fallback (DE2E-N2)", exc_info=True,
+            )
+            raw = _rule_fallback_entities(transcript)
+    else:
+        raw = _rule_fallback_entities(transcript)
+    out: list[dict] = []
+    for e in raw or []:
+        try:
+            ent = _normalize_entity(e)
+        except Exception:
+            # per-entity brittleness: skip only the bad entity
+            logger.debug("skipping malformed entity %r", e, exc_info=True)
+            continue
+        if ent:
+            out.append(ent)
+    return out

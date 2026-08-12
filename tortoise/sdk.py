@@ -3964,6 +3964,22 @@ class TortoiseSDK:
                 skipped += 1
                 continue
 
+            if eventKind == "AgentSession" and filepath.is_symlink():
+                # R17 parity with mining.py's pre-scan: a symlinked *.md is
+                # never read (host-file read + LLM exfiltration when
+                # extract_metadata/llm_model is set) and never participates in
+                # primary-session selection — otherwise a symlink sorting
+                # before a real file sharing its sessionId becomes ingest's
+                # primary (target content read+indexed) while mining picks the
+                # real file → hash never matches → re-mined every run (point
+                # stacking; round-2 review).
+                skipped += 1
+                errors.append({"file": rel_path,
+                               "error": "symlinked file skipped (R17: the corpus "
+                                         "walk must not follow symlinks)",
+                               "retryable": False})
+                continue
+
             try:
                 text = filepath.read_text(encoding="utf-8")
             except Exception as e:
@@ -4285,6 +4301,31 @@ class TortoiseSDK:
 
         return {"ingested": ingested, "updated": updated, "skipped": skipped,
                 "failed": failed, "errors": errors}
+
+    def mine_corpus(self, directory: str, *, extract_entities: bool = True,
+                    progress_file: str | None = None, model=None,
+                    event_log_path: str | None = None) -> dict:
+        """Batch-mine a session corpus (J-1, plan §6.1) into this graph.
+
+        COMPOSES :meth:`ingest_corpus` (security, resume, file_hash — R17):
+        each file is first indexed as an AgentSession Event by the shared
+        machinery, then mined via ConversationMiner (Points/Operators/Events +
+        Phase-2 entity Objects with aboutObject/aboutEvent wiring, DE2E-1).
+        ``event_log_path`` routes mining events to the given JSONL log
+        (default: this SDK's configured event log, else a fallback next to
+        the DB path).
+
+        Returns: {sessions, ingested, updated, skipped, failed, entities,
+        objects, dedup_hits, drafts, errors:[{file, error, retryable}]}.
+        Unchanged re-runs report ``skipped`` via file_hash and add no new
+        entities/objects (DE2E-N8).
+        """
+        from tortoise.mining import mine_corpus_with_sdk
+        return mine_corpus_with_sdk(
+            self, directory, extract_entities=extract_entities,
+            progress_file=progress_file, model=model,
+            event_log_path=event_log_path,
+        )
 
     # ── Entity Resolution (GAP-01 #6987) ──────────────────────
 

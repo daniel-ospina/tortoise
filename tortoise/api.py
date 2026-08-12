@@ -232,12 +232,20 @@ class EventAPI:
                    createdAt=now_iso())
         return sid
 
-    def add_object(self, name: str, object_kind: str = "other") -> str:
-        """Emit ObjectRegistered event. Returns the object's id."""
-        oid = ulid()
+    def add_object(self, name: str, object_kind: str = "other", *,
+                   id: str | None = None, **props) -> str:
+        """Emit ObjectRegistered event. Returns the object's id.
+
+        ``id``: deterministic canonical id override (epic #264 plan §4.1 —
+        obj_sha256 scheme); default ulid() unchanged (back-compat). Extra props
+        (e.g. canonical_name, title) are persisted by the projection's
+        extra-props handler. The projection MERGEs Object by name — a re-run
+        with the same name never creates a duplicate node (idempotent
+        reification, DE2E-1/DE2E-8).
+        """
+        oid = id or ulid()
         self._emit("ObjectRegistered", id=oid, name=name,
-                   object_kind=object_kind,
-                   createdAt=now_iso())
+                   object_kind=object_kind, createdAt=now_iso(), **props)
         return oid
 
     def add_document(self, doc_id: str, title: str, *,
