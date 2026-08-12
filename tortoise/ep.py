@@ -817,7 +817,10 @@ class TortoiseEP:
             "MATCH (o:Point)-[r:IMPL|NAND]->(c:Point) "
             "WHERE o.id IN $ids "
             "RETURN o.id, c.id, coalesce(r.idx, 0), c.status "
-            "ORDER BY coalesce(r.idx, 0)",
+            # Deterministic tie-break: legacy/migrated operators may carry
+            # idx-less edges (all coalesce to 0) — the source-slot guard
+            # below depends on position 0 being the true source (#943 review).
+            "ORDER BY coalesce(r.idx, 0), c.id",
             params={"ids": list(op_info.keys())},
         ).result_set
         for op_id, claim_id, _idx, status in rows:
