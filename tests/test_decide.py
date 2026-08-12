@@ -143,12 +143,12 @@ class TestDecideWiring:
     def test_compute_confidence_with_anchors(self, sdk):
         """EP computes confidence for points via anchors-based selection."""
         # Create two options
-        opt_a = sdk.create_point("option", "Option A")
-        opt_b = sdk.create_point("option", "Option B")
+        opt_a = sdk.create_point("option", "Option A", status="live")
+        opt_b = sdk.create_point("option", "Option B", status="live")
 
         # Evidence strongly supports A, opposes B
-        ev1 = sdk.create_point("evidence", "A is better")
-        ev2 = sdk.create_point("evidence", "B has problems")
+        ev1 = sdk.create_point("evidence", "A is better", status="live")
+        ev2 = sdk.create_point("evidence", "B has problems", status="live")
 
         sdk.create_operator("IMPL", ev1["id"], [opt_a["id"]])
         sdk.create_operator("NAND", ev2["id"], [opt_b["id"]])
@@ -209,17 +209,17 @@ class TestDecideWiring:
     def test_full_wiring_produces_ranked_output(self, sdk):
         """End-to-end: create options + criteria + findings, wire edges, compute confidence."""
         # Options
-        opt_a = sdk.create_point("option", "Option A")
-        opt_b = sdk.create_point("option", "Option B")
+        opt_a = sdk.create_point("option", "Option A", status="live")
+        opt_b = sdk.create_point("option", "Option B", status="live")
 
         # Criteria
-        crit_1 = sdk.create_point("criterion", "Security")
-        crit_2 = sdk.create_point("criterion", "Adoption")
+        crit_1 = sdk.create_point("criterion", "Security", status="live")
+        crit_2 = sdk.create_point("criterion", "Adoption", status="live")
 
         # Findings
-        f1 = sdk.create_point("evidence", "A is secure")
-        f2 = sdk.create_point("evidence", "A has wide adoption")
-        f3 = sdk.create_point("evidence", "B has security issues")
+        f1 = sdk.create_point("evidence", "A is secure", status="live")
+        f2 = sdk.create_point("evidence", "A has wide adoption", status="live")
+        f3 = sdk.create_point("evidence", "B has security issues", status="live")
 
         # Wire: criteria → options
         sdk.create_operator("IMPL", crit_1["id"], [opt_a["id"]])
@@ -254,12 +254,12 @@ class TestDecideContextFree:
         """Wire 2 options + findings, run compute_confidence(factors=...),
         and assert a ranked table is produced with numeric confidences."""
         # Options
-        opt_a = sdk.create_point("option", "Option A")
-        opt_b = sdk.create_point("option", "Option B")
+        opt_a = sdk.create_point("option", "Option A", status="live")
+        opt_b = sdk.create_point("option", "Option B", status="live")
 
         # Findings
-        f1 = sdk.create_point("evidence", "A is strongly supported")
-        f2 = sdk.create_point("evidence", "B has major issues")
+        f1 = sdk.create_point("evidence", "A is strongly supported", status="live")
+        f2 = sdk.create_point("evidence", "B has major issues", status="live")
 
         # Collect operator IDs as the CLI would for --context-free mode
         operator_ids: list[str] = []
@@ -276,7 +276,7 @@ class TestDecideContextFree:
         operator_ids.append(op3["id"])
 
         # Extra IMPL for A to create clear separation
-        f3 = sdk.create_point("evidence", "A is also cost-effective")
+        f3 = sdk.create_point("evidence", "A is also cost-effective", status="live")
         op4 = sdk.create_operator("IMPL", f3["id"], [opt_a["id"]])
         operator_ids.append(op4["id"])
 
@@ -372,9 +372,9 @@ class TestIssue400EPFixes:
 
     def test_batch_factor_extraction_has_both_inputs(self, sdk):
         """Batch extract_svbp_factors returns operators with all inputs (not N+1 drops)."""
-        opt_a = sdk.create_point("option", "Option A")
-        opt_b = sdk.create_point("option", "Option B")
-        ev = sdk.create_point("evidence", "Both good")
+        opt_a = sdk.create_point("option", "Option A", status="live")
+        opt_b = sdk.create_point("option", "Option B", status="live")
+        ev = sdk.create_point("evidence", "Both good", status="live")
 
         # Create operator with source + 2 targets (3 inputs total)
         op = sdk.create_operator("IMPL", ev["id"], [opt_a["id"], opt_b["id"]])
@@ -425,9 +425,9 @@ class TestIssue400EPFixes:
 
     def test_nand_operator_gets_weight_3(self, sdk):
         """NAND operators get weight 3.0 in factor extraction (batch query preserves this)."""
-        opt_a = sdk.create_point("option", "Option A")
-        opt_b = sdk.create_point("option", "Option B")
-        ev = sdk.create_point("evidence", "A opposes B")
+        opt_a = sdk.create_point("option", "Option A", status="live")
+        opt_b = sdk.create_point("option", "Option B", status="live")
+        ev = sdk.create_point("evidence", "A opposes B", status="live")
 
         op = sdk.create_operator("NAND", ev["id"], [opt_a["id"], opt_b["id"]])
 
