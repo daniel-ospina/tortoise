@@ -433,10 +433,25 @@
     // error_code first (stable), then by message substring (legacy), with a
     // friendly catch-all. Known codes:
     // https://supabase.com/docs/guides/auth/error-codes
+    //
+    // #863 mechanism-accurate 429 copy: the email-send limit is PROJECT-WIDE
+    // (custom SMTP 30/hr for ALL users) — over_email_send_rate_limit is NOT a
+    // per-network problem. These constants must stay ABOVE the AUTH_ERROR_MAP
+    // literal (TDZ: the map evaluates at script load; a `const` referenced
+    // before its declaration kills the whole inline script — the #527 class).
+    const EMAIL_BUCKET_RATE_LIMIT_COPY = "Signup emails are temporarily exhausted (too many signups right now). Try again in about an hour.";
+    const NETWORK_RATE_LIMIT_COPY = "Too many attempts from this network. Please wait about an hour and try again.";
     const AUTH_ERROR_MAP = [
       {
-        codes: ["over_email_send_rate_limit", "over_request_rate_limit", "over_request_rate_limit_ip", "rate_limit"],
-        message: "Too many attempts from this network. Please wait about an hour — or get an instant zero-email key with: tortoise signup",
+        // Email-bucket entry FIRST with the "email_rate_limit" pseudo-code so
+        // the substring pass matches an "email rate limit exceeded" message
+        // BEFORE the network entry's bare "rate limit" (dead-code trap, #863).
+        codes: ["over_email_send_rate_limit", "email_rate_limit"],
+        message: EMAIL_BUCKET_RATE_LIMIT_COPY,
+      },
+      {
+        codes: ["over_request_rate_limit", "over_request_rate_limit_ip", "rate_limit"],
+        message: NETWORK_RATE_LIMIT_COPY,
       },
       {
         codes: ["email_address_invalid"],
@@ -477,8 +492,11 @@
       if (msg.includes("already registered") || msg.includes("already exists") || msg.includes("already been registered")) {
         return "An account with this email already exists. Please sign in instead.";
       }
-      if (msg.includes("email rate limit") || msg.includes("rate limit")) {
-        return "Too many attempts from this network. Please wait about an hour — or get an instant zero-email key with: tortoise signup";
+      if (msg.includes("email rate limit")) {
+        return EMAIL_BUCKET_RATE_LIMIT_COPY;
+      }
+      if (msg.includes("rate limit")) {
+        return NETWORK_RATE_LIMIT_COPY;
       }
       if (msg.includes("provider is not enabled") || msg.includes("provider disabled") || msg.includes("unsupported provider")) {
         return "This sign-in option is temporarily unavailable. Try email instead.";
@@ -561,16 +579,17 @@
       applyRateLimitLockout();
     }
 
-    // Tier-aware lockout copy: the email bucket maps to the #527 pinned
-    // "about an hour" literal; the short per-IP tier must not contradict the
-    // live countdown it shows. Tier is read from storage (set at lockout
-    // time) — deriving it from remaining time would decay the copy mid-lockout.
+    // Tier-aware lockout copy: the email bucket maps to the #863
+    // mechanism-accurate "temporarily exhausted" literal; the short per-IP
+    // tier must not contradict the live countdown it shows. Tier is read
+    // from storage (set at lockout time) — deriving it from remaining time
+    // would decay the copy mid-lockout.
     function rateLimitMessage() {
       if (rateLimitRemainingMs() <= 0) return "";
       let tier = rateLimitTier;
       try { tier = sessionStorage.getItem(RATE_LIMIT_TIER_KEY) || tier; } catch (e) {}
       if (tier === "email") {
-        return "Too many attempts from this network. Please wait about an hour and try again.";
+        return EMAIL_BUCKET_RATE_LIMIT_COPY;
       }
       return "Too many attempts from this network. Please try again in a minute.";
     }
@@ -694,7 +713,16 @@
     // SMTP rate-limit bucket). Falls back to client-side auth.signUp when
     // the API doesn't offer the endpoint (selfhost / dev).
 
+    // ── Server-first signup (#801) ────────────────────────────────────────
+    // #863: the API's 429 responses carry the mechanism in
+    // detail.error_code (email bucket vs per-IP); stale deployments send a
+    // bare string detail — stashed here so the caller can resolve the tier.
+    let lastServer429Code = "";
+    let lastServer429Message = "";
+
     async function serverSignup(email, password) {
+      lastServer429Code = "";
+      lastServer429Message = "";
       try {
         const resp = await fetch(SIGNUP_API_URL + "/v1/signup/email", {
           method: "POST",
@@ -706,7 +734,16 @@
         let payload = {};
         try { payload = await resp.json(); } catch (e) { /* non-JSON error body */ }
         if (resp.status === 409) return "already";
-        if (resp.status === 429) return "ratelimited";
+        if (resp.status === 429) {
+          const detail = payload && payload.detail;
+          if (typeof detail === "object" && detail !== null) {
+            lastServer429Code = detail.error_code || "";
+            lastServer429Message = detail.message || "";
+          } else if (typeof detail === "string") {
+            lastServer429Message = detail;
+          }
+          return "ratelimited";
+        }
         if (resp.status === 422) {
           const detail = (payload && payload.detail) || "Please check your email and password and try again.";
           showError(typeof detail === "string" ? detail : "Please check your email and password and try again.");
@@ -717,6 +754,21 @@
         console.warn("server signup unreachable:", err);
         return "unavailable";
       }
+    }
+
+    // #863: resolve which mechanism a server 429 came from. error_code wins;
+    // a code-less STRING detail is hint-scanned ("registration" → per-IP
+    // register bucket; "email"/"rate limit exceeded" → email bucket); the
+    // fail-safe default is the email tier — errs toward protecting the
+    // shared project-wide bucket (only reachable on stale deployments, since
+    // the API always sends a code after #863).
+    function resolveServer429Code() {
+      const known = ["over_email_send_rate_limit", "over_request_rate_limit", "over_request_rate_limit_ip"];
+      if (known.includes(lastServer429Code)) return lastServer429Code;
+      const m = (lastServer429Message || "").toLowerCase();
+      if (m.includes("registration")) return "over_request_rate_limit_ip";
+      if (m.includes("email") || m.includes("rate limit exceeded")) return "over_email_send_rate_limit";
+      return "over_email_send_rate_limit";
     }
 
     async function signInAndGo(email, password) {
@@ -808,7 +860,13 @@
           return;
         }
         if (outcome === "ratelimited") {
-          showError("Too many attempts from this network. Please wait about an hour — or get an instant zero-email key with: tortoise signup");
+          // #863: tier-aware — email bucket → 1h lockout + exhausted copy;
+          // per-IP server limits → 60s short tier + network copy. Also sets
+          // the lockout now (the #801-era path showed copy but no lockout,
+          // leaving the shared bucket exposed to retry loops).
+          const err = { code: resolveServer429Code() };
+          setRateLimitLockout(err);
+          showError(isEmailBucketError(err) ? EMAIL_BUCKET_RATE_LIMIT_COPY : rateLimitMessage());
           return;
         }
         if (outcome !== "unavailable") {
