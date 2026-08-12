@@ -116,6 +116,11 @@ BEGIN
      WHERE id = p_team_id;
     INSERT INTO public.abuse_events (team_id, event_type)
     VALUES (p_team_id, 'unsuspend');
+    -- End every flag episode: without this, the first post-recovery burst
+    -- would auto-suspend on the stale flag row (delta-13 regression).
+    INSERT INTO public.abuse_events (team_id, event_type, rule)
+    VALUES (p_team_id, 'flag_clear', 'point_create'),
+           (p_team_id, 'flag_clear', 'key_create');
 END;
 $$;
 

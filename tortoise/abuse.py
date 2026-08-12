@@ -11,13 +11,15 @@ Rules (env-overridable thresholds):
 - R4  geo:          first unseen CF-IPCountry per team -> notify Owner
 
 Two-stage staging with EPISODE semantics (scoping delta 13 + code-review
-fix): flags are PER-RULE (flag event rows carry the rule). Stage 2 suspends
-only when (a) the rule's flag is a full window old, AND (b) the rule has at
-least one event between the flag and the current window's start — evidence
-the breach actually persisted across the boundary. A burst after a quiet
-period is a NEW episode: it re-flags and can never suspend on its first
-evaluation. Rules are independent: an R1 flag never escalates a first R2
-breach.
+fixes): flags are PER-RULE (flag event rows carry the rule). Stage 2
+suspends only when (a) the rule's flag is a full window old, AND (b) the
+rule has at least one event between the flag and the current window's start
+— evidence the breach actually persisted across the boundary. Episodes END
+on a clean evaluation (window back under threshold → flag_clear event) or on
+un-suspend (the RPC clears all episodes) — so a burst after a quiet period
+or after recovery is a NEW episode: it re-flags and can never suspend on its
+first evaluation. Rules are independent: an R1 flag never escalates a first
+R2 breach.
 
 Suspension signal set (scoping delta 14): the process-wide set is a
 CACHE-INVALIDATION SIGNAL, never a rejection authority — membership forces a
@@ -44,6 +46,7 @@ EVENT_POINT_CREATE = "point_create"
 EVENT_KEY_CREATE = "key_create"
 EVENT_AUTH_IP = "auth_ip"
 EVENT_FLAG = "flag"
+EVENT_FLAG_CLEAR = "flag_clear"  # episode end (clean eval or un-suspend)
 EVENT_SUSPEND = "suspend"
 EVENT_UNSUSPEND = "unsuspend"
 EVENT_READ_VELOCITY = "read_velocity"
@@ -181,13 +184,38 @@ class MemoryAbuseStore:
             )
 
     def latest_flag_at(self, team_id: str, rule: str) -> datetime | None:
-        """Per-rule flag-episode anchor (flag event rows carry the rule)."""
+        """ACTIVE per-rule flag-episode anchor: the newest flag row, or None
+        when a flag_clear (clean evaluation or un-suspend) ended the
+        episode after it."""
         with self._lock:
-            stamps = [r["created_at"] for r in self.rows
+            flags = [r["created_at"] for r in self.rows
+                     if r["team_id"] == team_id
+                     and r["event_type"] == EVENT_FLAG
+                     and r.get("rule") == rule]
+            clears = [r["created_at"] for r in self.rows
                       if r["team_id"] == team_id
-                      and r["event_type"] == EVENT_FLAG
+                      and r["event_type"] == EVENT_FLAG_CLEAR
                       and r.get("rule") == rule]
-        return max(stamps) if stamps else None
+        if not flags:
+            return None
+        newest_flag = max(flags)
+        if clears and max(clears) >= newest_flag:
+            return None  # episode ended
+        return newest_flag
+
+    def flag_clear(self, team_id: str, rule: str,
+                   now: datetime | None = None) -> None:
+        """End a flag episode (clean evaluation or recovery)."""
+        now = _ensure_aware(_utcnow(now))
+        self._append(team_id, EVENT_FLAG_CLEAR, rule=rule, created_at=now)
+        # teams.flagged_at is the team-level chip: clear only when NO rule
+        # still has an active episode.
+        other_active = any(
+            self.latest_flag_at(team_id, r) is not None
+            for r in (EVENT_POINT_CREATE, EVENT_KEY_CREATE) if r != rule)
+        if not other_active:
+            self.flags.pop(team_id, None)
+            self._durable(team_id, "flagged_at", None)
 
     def rule_event_between(self, team_id: str, rule: str, after: datetime,
                           before: datetime) -> bool:
@@ -208,27 +236,30 @@ class MemoryAbuseStore:
         self.flags[team_id] = now
         self._append(team_id, EVENT_FLAG, rule=rule, details={
             **(details or {}), "rule": rule}, created_at=now)
-        self._durable(team_id)
+        self._durable(team_id, "flagged_at", now.isoformat())
 
-    def clear_flag(self, team_id: str) -> None:
-        self.flags.pop(team_id, None)
-        self._durable(team_id)
+
 
     def suspend_team(self, team_id: str, details: dict | None = None,
                      now: datetime | None = None) -> None:
         now = _ensure_aware(_utcnow(now))
         self.suspended[team_id] = now
-        self.flags.pop(team_id, None)
         self._append(team_id, EVENT_SUSPEND,
                      rule=(details or {}).get("rule"),
                      details=details or {}, created_at=now)
-        self._durable(team_id)
+        self._durable(team_id, "suspended_at", now.isoformat())
 
     def unsuspend_team(self, team_id: str, now: datetime | None = None) -> None:
+        now = _ensure_aware(_utcnow(now))
         self.suspended.pop(team_id, None)
         self.flags.pop(team_id, None)
         self._append(team_id, EVENT_UNSUSPEND, created_at=now)
-        self._durable(team_id)
+        # end every flag episode — a recovered team starts clean, so its
+        # first post-recovery burst re-flags instead of auto-suspending
+        for rule in (EVENT_POINT_CREATE, EVENT_KEY_CREATE):
+            self._append(team_id, EVENT_FLAG_CLEAR, rule=rule, created_at=now)
+        self._durable(team_id, "suspended_at", None)
+        self._durable(team_id, "flagged_at", None)
 
     def team_suspended(self, team_id: str) -> bool:
         return team_id in self.suspended
@@ -250,19 +281,15 @@ class MemoryAbuseStore:
         rows.sort(key=lambda r: r["created_at"], reverse=True)
         return [_alert_dict(r) for r in rows[:limit]]
 
-    def _durable(self, team_id: str) -> None:
-        """Write-through to the registry Team node when a callback is wired
-        (selfhost durability, scoping delta 4). Best-effort."""
+    def _durable(self, team_id: str, field: str, value) -> None:
+        """Field-scoped write-through to the registry Team node when a
+        callback is wired (selfhost durability, scoping delta 4). Writing
+        ONLY the changed field means a concurrent flag/suspend can never
+        clobber the other prop (code-review P2). Best-effort."""
         if self._registry_write is None:
             return
         try:
-            sus = self.suspended.get(team_id)
-            self._registry_write(
-                team_id,
-                sus.isoformat() if sus else None,
-                self.flags.get(team_id).isoformat()
-                if team_id in self.flags else None,
-            )
+            self._registry_write(team_id, field, value)
         except Exception:
             logger.debug("abuse registry write-through failed for %s", team_id)
 
@@ -302,6 +329,8 @@ class SupabaseAbuseStore:
         return sum(int(r.get("weight") or 1) for r in rows)
 
     def latest_flag_at(self, team_id: str, rule: str) -> datetime | None:
+        """ACTIVE per-rule flag-episode anchor (None when a flag_clear ended
+        the episode after the newest flag)."""
         rows = self._cp.query(
             "abuse_events", select=["created_at"],
             filters=[("team_id", "eq", team_id),
@@ -309,7 +338,33 @@ class SupabaseAbuseStore:
                      ("rule", "eq", rule)],
             order="-created_at", limit=1,
         )
-        return _parse_ts(rows[0].get("created_at")) if rows else None
+        if not rows:
+            return None
+        newest_flag = _parse_ts(rows[0].get("created_at"))
+        clears = self._cp.query(
+            "abuse_events", select=["created_at"],
+            filters=[("team_id", "eq", team_id),
+                     ("event_type", "eq", EVENT_FLAG_CLEAR),
+                     ("rule", "eq", rule)],
+            order="-created_at", limit=1,
+        )
+        if clears:
+            newest_clear = _parse_ts(clears[0].get("created_at"))
+            if newest_clear is not None and newest_flag is not None \
+                    and newest_clear >= newest_flag:
+                return None  # episode ended
+        return newest_flag
+
+    def flag_clear(self, team_id: str, rule: str,
+                   now: datetime | None = None) -> None:
+        """End a flag episode; clear the team-level chip only when no other
+        rule keeps an active episode."""
+        self.record_event(team_id, EVENT_FLAG_CLEAR, rule=rule)
+        other_active = any(
+            self.latest_flag_at(team_id, r) is not None
+            for r in (EVENT_POINT_CREATE, EVENT_KEY_CREATE) if r != rule)
+        if not other_active:
+            self.clear_flag(team_id)
 
     def rule_event_between(self, team_id: str, rule: str, after: datetime,
                           before: datetime) -> bool:
@@ -455,6 +510,13 @@ class AbuseEngine:
             logger.debug("abuse window_sum failed for %s/%s", team_id, rule)
             return None
         if total <= threshold:
+            # Clean window → end any active flag episode for this rule, so a
+            # later burst starts fresh (re-flag, never a stale-flag suspend).
+            try:
+                if self.store.latest_flag_at(team_id, rule) is not None:
+                    self.store.flag_clear(team_id, rule, now=now)
+            except Exception:
+                logger.debug("abuse flag_clear failed for %s/%s", team_id, rule)
             return None
         details = {"rule": rule, "count": total,
                    "threshold": threshold, "window_s": window_s}
@@ -660,18 +722,19 @@ def check_new_country(team_id: str, country: str | None, store,
         if len(stamps) >= _GEO_NOTIFY_MAX_PER_DAY:
             seen.add(country)  # still track it; just don't notify/event
             return False
-    recorded = True
     try:
         store.record_event(team_id, EVENT_AUTH_IP, country=country)
     except Exception:
-        recorded = False  # keep trying on subsequent requests
+        # Unrecorded → not marked seen → retried on a later request (and
+        # NOT notified: a notify without a durable event would re-fire on
+        # every request until the store recovers — code-review P3).
         logger.debug("geo event record failed for %s", team_id)
-    if recorded:
-        with _GEO_LOCK:
-            cached2 = _GEO_CACHE.get(team_id)
-            if cached2 is not None:
-                cached2[1].add(country)
-            _GEO_NOTIFIED[team_id].append(now)
+        return False
+    with _GEO_LOCK:
+        cached2 = _GEO_CACHE.get(team_id)
+        if cached2 is not None:
+            cached2[1].add(country)
+        _GEO_NOTIFIED[team_id].append(now)
     try:
         from tortoise.notify import notify_abuse
         notify_abuse("abuse_new_ip",

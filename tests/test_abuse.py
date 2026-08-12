@@ -104,13 +104,14 @@ class TestStaging:
         store = MemoryAbuseStore()
         eng = AbuseEngine(store)
         eng.record_point_create("t1", 501, now=T0)                      # flag
-        # mid-window activity (continuity evidence for the boundary crossing)
-        eng.record_point_create("t1", 10, now=T0 + timedelta(minutes=30))
-        # still breaching a full window later: window (T0+3601..T0+7201]
-        # contains the 501 fresh events; continuity band (T0..T0+3601]
-        # contains the +30m events.
-        eng.record_point_create("t1", 10, now=T0 + timedelta(seconds=3601))
-        r = eng.record_point_create("t1", 501, now=T0 + timedelta(seconds=7201))
+        # sustained breach: every evaluation stays over threshold (a dip
+        # under threshold would clean-evaluate and end the episode)
+        assert eng.record_point_create(
+            "t1", 501, now=T0 + timedelta(minutes=30)) == "breach"
+        # at +90m the flag is a full window old; continuity band
+        # (T0, T0+1800] holds the +30m events AND the current window
+        # (T0+1800, T0+5400] still breaches via the fresh 501.
+        r = eng.record_point_create("t1", 501, now=T0 + timedelta(minutes=90))
         assert r == "suspend"
         assert store.team_suspended("t1") is True
         assert is_suspended_signal("t1") is True
@@ -140,9 +141,10 @@ class TestStaging:
                                        now=burst + timedelta(minutes=10)) == "breach"
         assert store.team_suspended("t1") is False
         # the re-flagged episode stages normally from its own anchor
-        eng.record_point_create("t1", 10, now=burst + timedelta(minutes=30))
-        eng.record_point_create("t1", 10, now=burst + timedelta(seconds=3601))
-        r = eng.record_point_create("t1", 501, now=burst + timedelta(seconds=7201))
+        # (sustained breach throughout — no clean evaluation)
+        assert eng.record_point_create(
+            "t1", 501, now=burst + timedelta(minutes=30)) == "breach"
+        r = eng.record_point_create("t1", 501, now=burst + timedelta(minutes=90))
         assert r == "suspend"
 
     def test_cross_rule_staging_independent(self, notified):
@@ -217,6 +219,92 @@ class TestKeyRule:
         assert result == "flag"
         flag_rows = [r for r in store.rows if r["event_type"] == "flag"]
         assert flag_rows[0]["details"]["rule"] == "key_create"
+
+
+class TestEpisodeLifecycle:
+    def test_recovery_clears_episodes_no_stale_suspend(self, notified):
+        """Confirmation-review P1 regression test: flag → suspend →
+        un-suspend → fresh single-window burst must RE-FLAG, never suspend
+        (the un-suspend ends every flag episode)."""
+        store = MemoryAbuseStore()
+        eng = AbuseEngine(store)
+        eng.record_point_create("t1", 501, now=T0)
+        eng.record_point_create("t1", 501, now=T0 + timedelta(minutes=30))
+        assert eng.record_point_create(
+            "t1", 501, now=T0 + timedelta(minutes=90)) == "suspend"
+        store.unsuspend_team("t1")
+        assert store.latest_flag_at("t1", "point_create") is None
+        # fresh burst long after recovery: stage 1 again, never stage 2
+        burst = T0 + timedelta(days=30)
+        assert eng.record_point_create("t1", 501, now=burst) == "flag"
+        assert eng.record_point_create(
+            "t1", 100, now=burst + timedelta(minutes=10)) == "breach"
+        assert store.team_suspended("t1") is False
+
+    def test_clean_evaluation_ends_episode(self, notified):
+        """Confirmation-review P2: a window back under threshold ends the
+        episode — ongoing sub-threshold activity can never feed continuity
+        for a stale-flag suspension."""
+        store = MemoryAbuseStore()
+        eng = AbuseEngine(store)
+        assert eng.record_point_create("t1", 501, now=T0) == "flag"
+        # in-window breach stays an open episode
+        assert eng.record_point_create(
+            "t1", 10, now=T0 + timedelta(minutes=30)) == "breach"
+        assert store.latest_flag_at("t1", "point_create") is not None
+        # window goes clean → episode ends
+        assert eng.record_point_create(
+            "t1", 1, now=T0 + timedelta(hours=3)) is None
+        assert store.latest_flag_at("t1", "point_create") is None
+        # much later burst: re-flag, never a stale-flag suspend
+        burst = T0 + timedelta(days=10)
+        assert eng.record_point_create("t1", 501, now=burst) == "flag"
+        assert store.team_suspended("t1") is False
+
+    def test_unsuspend_clears_all_rules(self, notified):
+        store = MemoryAbuseStore()
+        eng = AbuseEngine(store)
+        eng.record_point_create("t1", 501, now=T0)           # R1 flag
+        later = T0 + timedelta(hours=2)  # (fictional time kept in the past)
+        for i in range(11):
+            store.record_event("t1", "key_create", key_id=f"k{i}",
+                               created_at=later)
+        eng.evaluate_key_creates("t1", now=later)              # R2 flag
+        assert store.latest_flag_at("t1", "point_create") is not None
+        assert store.latest_flag_at("t1", "key_create") is not None
+        store.unsuspend_team("t1")
+        assert store.latest_flag_at("t1", "point_create") is None
+        assert store.latest_flag_at("t1", "key_create") is None
+
+    def test_registry_write_field_scoped(self):
+        """Selfhost durability: the registry callback gets FIELD-SCOPED
+        writes — a flag write can never clobber suspended_at (review P2)."""
+        writes: list[tuple[str, str, object]] = []
+        store = MemoryAbuseStore(
+            registry_write=lambda tid, field, value:
+            writes.append((tid, field, value)))
+        eng = AbuseEngine(store)
+        eng.record_point_create("t1", 501, now=T0)
+        assert ("t1", "flagged_at", (T0.isoformat())) in writes
+        eng.record_point_create("t1", 501, now=T0 + timedelta(minutes=30))
+        eng.record_point_create("t1", 501, now=T0 + timedelta(minutes=90))
+        assert any(w[1] == "suspended_at" and w[2] is not None for w in writes)
+        store.unsuspend_team("t1")
+        assert ("t1", "suspended_at", None) in writes
+        assert ("t1", "flagged_at", None) in writes
+        # every write names exactly one field (no combined prop clobber)
+        assert all(w[1] in ("suspended_at", "flagged_at") for w in writes)
+
+    def test_geo_notify_flood_cap(self, monkeypatch, notified):
+        """CF-IPCountry is spoofable — geo notifications are capped at
+        10/team/24h (security review)."""
+        store = MemoryAbuseStore()
+        for i in range(25):
+            check_new_country("t1", f"C{i:02d}", store)
+        geo = [c for c in notified if c[0] == "abuse_new_ip"]
+        assert len(geo) == 10  # capped
+        ip_events = [r for r in store.rows if r["event_type"] == "auth_ip"]
+        assert len(ip_events) == 10  # cap-before-record
 
 
 class TestSwitches:

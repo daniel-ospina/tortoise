@@ -288,16 +288,23 @@ def get_control_plane() -> SupabaseControlPlane:
 _abuse_store = None
 
 
-def _registry_abuse_write(team_id: str, suspended_at, flagged_at) -> None:
+_REGISTRY_ABUSE_FIELDS = {"suspended_at", "flagged_at"}
+
+
+def _registry_abuse_write(team_id: str, field: str, value) -> None:
     """Durable selfhost enforcement (scoping delta 4, code-review P1 fix):
-    write the suspension/staging state onto the registry Team node so the
-    auth seams' prop reads actually reject. Lazy hosted_api import — the
-    hosted_api→supabase_control import direction forbids module-level use."""
+    write ONE suspension/staging field onto the registry Team node so the
+    auth seams' prop reads actually reject. Field-scoped (never both props
+    at once) so concurrent flag/suspend writes cannot clobber each other
+    (code-review P2). Lazy hosted_api import — the hosted_api→
+    supabase_control import direction forbids module-level use."""
+    if field not in _REGISTRY_ABUSE_FIELDS:
+        raise ValueError(f"not an abuse state field: {field!r}")
     from tortoise import hosted_api as _ha
     sdk = _ha._make_sdk(namespace="registry")
     sdk._get_registry().query(
-        "MATCH (t:Team {id: $id}) SET t.suspended_at = $sus, t.flagged_at = $fl",
-        params={"id": team_id, "sus": suspended_at, "fl": flagged_at},
+        f"MATCH (t:Team {{id: $id}}) SET t.{field} = $value",
+        params={"id": team_id, "value": value},
     )
 
 

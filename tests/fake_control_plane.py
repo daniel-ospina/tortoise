@@ -68,9 +68,15 @@ class FakeControlPlane:
                     t["suspended_at"] = None
                     t["flagged_at"] = None
             from datetime import datetime, timezone
-            self.tables.setdefault("abuse_events", []).append(
-                {"team_id": tid, "event_type": "unsuspend", "weight": 1,
-                 "created_at": datetime.now(timezone.utc).isoformat()})
+            now_iso = datetime.now(timezone.utc).isoformat()
+            events = self.tables.setdefault("abuse_events", [])
+            events.append({"team_id": tid, "event_type": "unsuspend",
+                           "weight": 1, "created_at": now_iso})
+            # end every flag episode (mirrors the SQL)
+            for rule in ("point_create", "key_create"):
+                events.append({"team_id": tid, "event_type": "flag_clear",
+                               "rule": rule, "weight": 1,
+                               "created_at": now_iso})
             return None
         if fn == "metering_increment":
             # Emulate migration 0014's SQL function: atomic upsert + increment.
