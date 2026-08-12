@@ -20,7 +20,7 @@ from tortoise.ep import TortoiseEP
 
 
 def make_point(sdk, content, kind="statement"):
-    return sdk.create_point(kind, content)
+    return sdk.create_point(kind, content, status="live")  # #780 default excludes drafts
 
 
 def make_operator(sdk, source_id, target_id, op_type="IMPL", direction=None):

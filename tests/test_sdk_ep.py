@@ -24,7 +24,7 @@ def sdk():
 
 
 def _make_claim(sdk: TortoiseSDK, content: str):
-    return sdk.create_point("statement", content)
+    return sdk.create_point("statement", content, status="live")  # #780 default excludes drafts
 
 
 # ── set_prior / get_confidence ────────────────────────────────────

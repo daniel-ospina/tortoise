@@ -1445,7 +1445,8 @@ class TortoiseSDK:
 
     def create_operator(self, op_type: str, source_id: str, target_ids: list[str],
                         label: str | None = None,
-                        direction: str = "bidirectional") -> dict:
+                        direction: str = "bidirectional",
+                        promote_source: bool = True) -> dict:
         """Create an operator Point with optional semantic label.
 
         Semantic-epistemic edge model (#7801):
@@ -1456,6 +1457,17 @@ class TortoiseSDK:
             Default bidirectional (mutual) for all op types; pass
             "unidirectional" for a directed attack (no back-pressure).
           - Operator carries the label and direction; IMPL/NAND edges carry confidence via EP.
+          - promote_source: default True preserves the #131 draft→live lifecycle
+            (source point goes live when its first edge is created). Pass
+            False for extraction paths (#780): the operator node itself is
+            created with status:'draft' AND the source is NOT auto-promoted —
+            a draft must never wire an operator to a live Point. NOTE: there is
+            currently NO public promote API for draft operators — they stay
+            draft until the reviewer-gated promotion path lands (#785
+            promote_point); run(include_draft=True) is the only sanctioned
+            escape hatch today. The emitted OperatorAdded event carries the
+            draft status so JSONL replay preserves it
+            (projection/entities.py coalesce default is 'live').
         """
         if op_type not in ("IMPL", "NAND", "composedOf", "decomposesInto", "contains", "wraps"):
             raise ValueError(
@@ -1488,12 +1500,18 @@ class TortoiseSDK:
         if missing:
             raise ValueError(f"Cannot create operator: Points {missing} do not exist")
 
-        # Build operator node with direction + optional label (context is NOT written — P1 #49)
+        # Build operator node with direction + optional label (context is NOT written — P1 #49).
+        # #780: extraction operators (promote_source=False) carry status:'draft' so
+        # the EP draft filter excludes them; the event path default ('live',
+        # projection/entities.py coalesce) is overridden by the explicit status.
         extra_props = []
         params = {"id": pid, "op": op_type, "direction": direction}
         if label:
             extra_props.append("label:$label")
             params["label"] = label
+        if not promote_source:
+            extra_props.append("status:$st")
+            params["st"] = "draft"
         props_clause = ", " + ", ".join(extra_props) if extra_props else ""
         proj.g.query(
             f"CREATE (o:Point {{id:$id, is_operator:true, op_type:$op, direction:$direction{props_clause}}})",
@@ -1507,16 +1525,19 @@ class TortoiseSDK:
                 f"CREATE (o)-[:{edge_type} {{idx:$i}}]->(s)",
                 params={"oid": pid, "sid": inp_id, "i": i},
             )
-        # Draft → live lifecycle (#131): source point goes live when first edge created
+        # Draft → live lifecycle (#131): source point goes live when first edge created.
         # P1 (code-review): draft → live promote ONLY for draft/null sources —
         # an unconditional promote resurrected retracted (terminal) sources,
         # violating the terminal-state contract with no event in the stream.
-        proj.g.query(
-            "MATCH (s:Point {id:$sid}) "
-            "WHERE (s.status IS NULL OR s.status = 'draft') "
-            "SET s.status = 'live'",
-            params={"sid": source_id},
-        )
+        # #780: extraction paths (promote_source=False) skip this entirely —
+        # the source stays draft and the draft operator node carries the status.
+        if promote_source:
+            proj.g.query(
+                "MATCH (s:Point {id:$sid}) "
+                "WHERE (s.status IS NULL OR s.status = 'draft') "
+                "SET s.status = 'live'",
+                params={"sid": source_id},
+            )
         # Dreaming (#85): new edges change propagation — mark all inputs dirty.
         self._mark_dirty(inputs)
         result = self.get_point(pid)
@@ -3241,15 +3262,19 @@ class TortoiseSDK:
 
     def _select_subgraph(self, anchors: list[str], max_hops: int = 1,
                          rel_filter: str = "IMPL|NAND",
-                         direction: str = "both") -> list[str]:
+                         direction: str = "both",
+                         include_draft: bool = False) -> list[str]:
         """BFS subgraph selection from anchor Points to collect operator IDs.
 
         Delegates to the shared _bfs_select_operators in tortoise.analyze.
+        With include_draft=False (default, #780) draft anchors, operators and
+        frontier points are excluded.
         """
         from .analyze import _bfs_select_operators
         proj = self._get_proj()
         result = _bfs_select_operators(proj, anchors, max_hops=max_hops,
-                                        rel_filter=rel_filter, direction=direction)
+                                        rel_filter=rel_filter, direction=direction,
+                                        include_draft=include_draft)
         return list(result)
 
     def compute_confidence(self, factors=None, evidence=None,
@@ -3260,6 +3285,11 @@ class TortoiseSDK:
                            require_calibration: bool = False,
                            recency_decay: float | None = None) -> dict:
         """Compute confidence via EP belief propagation. Returns {iterations, converged, confidences}.
+
+        #780: draft Points/operators are EXCLUDED by default (EP only runs
+        over live claims); there is no include_draft escape hatch on this
+        surface — call TortoiseEP.run(include_draft=True) directly for
+        legacy behavior.
 
         Args:
             factors: operator IDs (list[str]) or factor tuples. If None, auto-extracts.

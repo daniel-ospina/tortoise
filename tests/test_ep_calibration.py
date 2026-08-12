@@ -95,8 +95,8 @@ class TestNANDCalibrationAtRealWeights:
         """
         sdk = sdk_factory(namespace="ep_calib")
         # Create two claim points (regular points, not operators).
-        claim_a = sdk.create_point("evidence", "Claim A: high-confidence finding")
-        claim_b = sdk.create_point("evidence", "Claim B: contradictory finding")
+        claim_a = sdk.create_point("evidence", "Claim A: high-confidence finding", status="live")
+        claim_b = sdk.create_point("evidence", "Claim B: contradictory finding", status="live")
 
         # Set T0 baselines directly on the graph (persistent evidence).
         proj = sdk._get_proj()

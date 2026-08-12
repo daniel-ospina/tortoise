@@ -81,6 +81,7 @@ class _GuardedGraph:
         return getattr(self._g, name)
 
 from tortoise.config import RELATIVE_PATH_ERROR, SUPPORTED_URI_SCHEMES
+from tortoise.live import _live_only
 
 # Backward-compat alias: the canonical scheme set lives in tortoise.config
 # (SUPPORTED_URI_SCHEMES) so URI-routing and connection-layer validation share
@@ -1055,7 +1056,7 @@ class FalkorProjection(
 
     # ── SVBP integration (Gate 4) ─────────────────────────────────
 
-    def extract_svbp_factors(self):
+    def extract_svbp_factors(self, include_draft: bool = False):
         """Extract factor list for TortoiseSVBP from the graph.
 
         Returns (factors, evidence) where:
@@ -1065,12 +1066,22 @@ class FalkorProjection(
         Uses batch I/O (2 queries regardless of operator count) to avoid
         the N+1 query pattern that timed out on graphs with 1,800+ operators
         (#400). Operators with <2 inputs are excluded with a warning.
+
+        With include_draft=False (default, #780): draft operators and draft
+        claim inputs are excluded — the shared live-only filter applied at
+        ALL four factor-extraction call sites.
         """
         # Query 1: all operator IDs and types (single query, O(1) round-trip).
         # #689: retracted operators never feed EP factors.
+        # #780: draft operators never feed EP factors (unless opted in).
+        # Shared predicate from tortoise/live.py — one definition of the
+        # live-only rule across all four factor-extraction call sites.
+        draft_o = f"AND {_live_only('o.status', include_draft)}" if not include_draft else ""
+        draft_c = f"AND {_live_only('c.status', include_draft)}" if not include_draft else ""
         op_rows = self.g.query(
             "MATCH (o:Point) WHERE o.is_operator = true "
             "AND (o.status IS NULL OR o.status <> 'retracted') "
+            f"{draft_o} "
             "RETURN o.id, o.op_type"
         ).result_set
 
@@ -1078,10 +1089,13 @@ class FalkorProjection(
         # Avoids the N+1 pattern: previously this was a per-operator loop.
         # #689: retracted claims never appear as operator inputs (an operator
         # whose inputs all retract becomes degenerate and is excluded below).
+        # #780: draft claims never appear as inputs; draft operators' edges
+        # are excluded too.
         input_rows = self.g.query(
             "MATCH (o:Point)-[r:IMPL|NAND]->(c:Point) "
             "WHERE o.is_operator = true "
             "AND (c.status IS NULL OR c.status <> 'retracted') "
+            f"{draft_c} {draft_o} "
             "RETURN o.id, c.id "
             "ORDER BY o.id, c.id"
         ).result_set
