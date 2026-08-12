@@ -1241,4 +1241,4 @@ The 9 slices decompose into issues with these boundaries (each slice = 1-3 issue
 | Decompose | per-issue batches (×5) + MECE (×2) | 3 rounds (5 parallel + MECE ×2) | ~22 | all fixed → MECE CLEAN (05-decompose.md) |
 | Verify audit | verification reviewer + convergence reviewer | 2 rounds | 13×P2 | all fixed (this record, PL1-PL4 rename, table rebuild, cite corrections) |
 
-Final state: 0 open P0/P1 across all gates (P2s resolved in-line or recorded as v1.1 deferrals). Total: 13 reviewer rounds (plan 8 + decompose 3 + verify 2), ~151 findings (116 + 22 + 13).
+Final state: 0 open P0/P1 across all gates (P2s resolved in-line or recorded as v1.1 deferrals). Total: 11 reviewer rounds (plan 6 + decompose 3 + verify 2) + 1 mechanical arithmetic fix, ~151 findings (116 + 22 + 13).

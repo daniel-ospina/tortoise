@@ -70,7 +70,7 @@ Every high-level E2E → detailed counterpart ✅ · every DE2E referenced by �
 | epic-align | Strategy review | ✅ | align-decision.md (adversarial test, Eisenhower, profit alignment, 5 conditions) |
 | epic-research | Research brief review | ✅ | handoff: verifier-corrected (addendum absorbed Research-Needed #4) |
 | epic-scope | Scope review (human gate) | ✅ | 3 of 4 owner decisions resolved + 1 carried (window-#2 schedule → #946, owner availability); window-1 validation converged (0→29→100%) |
-| epic-plan §1-8 | Per-substep reviews (×8) | ✅ | 8 reviewer rounds, ~116 findings fixed to convergence, 0 open P0/P1 (review record in 04-plan.md) |
+| epic-plan §1-8 | Per-substep reviews (×8) | ✅ | 6 reviewer rounds, ~116 findings fixed to convergence, 0 open P0/P1 (review record in 04-plan.md) |
 | epic-decompose | Per-issue review | ✅ | 5 parallel batches, ~15 findings fixed (05-decompose.md) |
 | epic-decompose | MECE verification | ✅ | 2 rounds (4 findings + 3 residuals) → MECE CLEAN |
 
