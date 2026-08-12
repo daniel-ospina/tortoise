@@ -52,7 +52,7 @@ Point your agent at Tortoise over MCP:
 
 ```bash
 # Hosted
-claude mcp add tortoise https://api.premiselabs.co/mcp
+claude mcp add tortoise https://api.premiselabs.co/mcp/
 # or self-hosted
 claude mcp add tortoise http://localhost:8000/mcp
 ```
