@@ -17,14 +17,25 @@ from __future__ import annotations
 import json
 import uuid
 
+import pytest
+
 from conftest import (
     WEBHOOK_SECRET,
     bump_team_tier,
+    is_remote_mode,
     sign_stripe_event,
     skip_unless_hosted_e2e,
 )
 
 skip_unless_hosted_e2e()
+
+# #303 (review r2): every leg here signs Stripe webhooks with the fixture
+# STRIPE_WEBHOOK_SECRET against the fixture STRIPE_PRICE_IDS catalog — a
+# remote target does not share that contract (signature 400 / unknown price).
+pytestmark = pytest.mark.skipif(
+    is_remote_mode(),
+    reason=("needs the fixture webhook secret + price catalog on the target "
+            "(local hermetic seam)"))
 
 
 def test_hermetic_upgrade_to_pro(api, tenant_factory):

@@ -52,8 +52,11 @@ def _free_port() -> int:
 def _boot_selfhost(tmpdir: str):
     port = _free_port()
     env = {**os.environ}
+    # #303 (review r2): blank-not-pop — mcp_server._load_dotenv refills only
+    # ABSENT keys from the repo .env in the fresh child, so a popped URI
+    # would be re-populated and silently beat TORTOISE_DB_PATH.
     for var in ("TORTOISE_DB_URI", "FALKORDB_CLOUD_URI"):
-        env.pop(var, None)
+        env[var] = ""
     env.update({
         "TORTOISE_DB_PATH": os.path.join(tmpdir, "selfhost.db"),
         "TORTOISE_API_KEY": SELFHOST_KEY,

@@ -12,9 +12,21 @@ from __future__ import annotations
 import json
 import uuid
 
-from conftest import PRICE_IDS, PRICING_FIXTURE, bump_team_tier, skip_unless_hosted_e2e
+import pytest
+
+from conftest import (PRICE_IDS, PRICING_FIXTURE, bump_team_tier,
+                      is_remote_mode, skip_unless_hosted_e2e)
 
 skip_unless_hosted_e2e()
+
+# #303 (review r2): local-only seams — the tier bump drives the real webhook
+# path signed with the fixture STRIPE_WEBHOOK_SECRET and resolves prices via
+# the fixture STRIPE_PRICE_IDS catalog; the caps asserted here come from the
+# fixture pricing file. A remote target shares none of that contract.
+pytestmark = pytest.mark.skipif(
+    is_remote_mode(),
+    reason=("needs the fixture webhook secret + price catalog + pricing caps "
+            "on the target (local hermetic seam)"))
 
 
 def test_free_tier_limits_visible_in_team_info(api, tenant_factory):

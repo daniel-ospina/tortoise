@@ -74,12 +74,19 @@ def _gate_reason() -> str | None:
     E2E_BASE_URL selects the target (default: fixture-booted local server)."""
     if not os.environ.get("RUN_HOSTED_E2E"):
         return ("hosted E2E suite: opt-in via RUN_HOSTED_E2E=1 (local hermetic "
-                "server, or with E2E_BASE_URL=<url> for remote mode; https also "
-                "needs ALLOW_PROD=1)")
+                "server, or with E2E_BASE_URL=<url> for remote mode; "
+                "non-loopback targets also need ALLOW_PROD=1)")
     url = os.environ.get("E2E_BASE_URL", "").strip()
-    if url and url.startswith("https://") and os.environ.get("ALLOW_PROD") != "1":
-        return ("hosted E2E: E2E_BASE_URL is https — set ALLOW_PROD=1 to run "
-                "against a live/staging deployment")
+    if url:
+        # #303 (review r2): require ALLOW_PROD for ANY non-loopback target
+        # regardless of scheme/case — an http:// (or HTTPS://) live
+        # deployment or tunnel fronting prod must not slip past the gate.
+        from urllib.parse import urlparse
+        host = (urlparse(url).hostname or "").lower()
+        if host not in ("localhost", "127.0.0.1", "::1") \
+                and os.environ.get("ALLOW_PROD") != "1":
+            return ("hosted E2E: E2E_BASE_URL is non-loopback — set "
+                    "ALLOW_PROD=1 to run against a live/staging deployment")
     return None
 
 
@@ -185,20 +192,38 @@ def _build_server_env(db_path: str, jwks_url: str, *, bare: bool) -> dict:
     (TORTOISE_DB_URI beats TORTOISE_DB_PATH in _make_sdk → a stale exported
     URI hangs the readiness poll; test_bridge_mcp documents the hazard)."""
     env = {**os.environ}
-    # Pop vars that flip server mode/durability; blank the external
-    # side-effect channels (audit sink, email, analytics, telegram, DR) —
-    # blank-not-pop because tortoise/mcp_server._load_dotenv refills only
-    # ABSENT keys from the repo .env in the fresh child interpreter, so an
-    # explicit "" keeps a populated dev .env out of the E2E server.
+    # Blank (never pop) the vars that flip server mode/durability, AND the
+    # bare-server unconfigured-contract vars: tortoise/mcp_server
+    # ._load_dotenv runs in the fresh child interpreter (hosted_api imports
+    # it at module scope) and refills only ABSENT keys from the repo .env —
+    # a POPPED var is silently re-populated from a dev .env (TORTOISE_DB_URI
+    # beats TORTOISE_DB_PATH in _make_sdk → the "hermetic" server targets
+    # the dev DB), while an explicit "" blocks the refill (#303 review r2).
+    # Non-bare servers re-set the Stripe/GitHub vars below; the bare server
+    # keeps them blank for its unconfigured negatives (checkout/github 503).
     for var in ("TORTOISE_DB_URI", "FALKORDB_CLOUD_URI",
                 "SUPABASE_SERVICE_KEY", "SUPABASE_SERVICE_ROLE_KEY",
                 "SUPABASE_ANON_KEY", "GITHUB_CLIENT_SECRET",
-                "STRIPE_SECRET_KEY", "TORTOISE_BACKUP_STORAGE"):
-        env.pop(var, None)
+                "STRIPE_SECRET_KEY", "TORTOISE_BACKUP_STORAGE",
+                "STRIPE_WEBHOOK_SECRET", "STRIPE_PRICE_IDS",
+                "GITHUB_CLIENT_ID"):
+        env[var] = ""
     for var in ("TORTOISE_AUDIT_DSN", "RESEND_API_KEY", "BILLING_NOTIFY_TO",
                 "POSTHOG_API_KEY", "POSTHOG_HOST", "TELEGRAM_BOT_TOKEN",
                 "TELEGRAM_CHAT_ID", "DR_ISSUES_PAT", "R2_ACCOUNT_ID",
-                "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET"):
+                "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET",
+                # #303 (review r2): denylist scrub — parent-env secrets not
+                # part of the server contract must not reach the child (it
+                # runs the full production app code; inherited LLM keys flip
+                # provider detection on). A full allowlist would be more
+                # hermetic but risks dropping boot-required vars; blanking
+                # the known secret families covers the realistic leak classes.
+                "GH_TOKEN", "GITHUB_TOKEN", "OPENAI_API_KEY",
+                "ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY", "GEMINI_API_KEY",
+                "OPENROUTER_API_KEY", "EXA_API_KEY", "PERPLEXITY_API_KEY",
+                "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
+                "TURNSTILE_SECRET_KEY", "REGISTRY_STREAM_KEY",
+                "CLOUDFLARE_API_TOKEN"):
         env[var] = "" 
     env.update({
         "TORTOISE_DB_PATH": db_path,

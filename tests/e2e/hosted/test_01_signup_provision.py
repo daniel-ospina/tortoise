@@ -11,9 +11,21 @@ from __future__ import annotations
 
 import uuid
 
-from conftest import skip_unless_hosted_e2e
+import pytest
+
+from conftest import is_remote_mode, skip_unless_hosted_e2e
 
 skip_unless_hosted_e2e()
+
+# #303 (review r2): direct /v1/register calls consume a token from the
+# server-side 3/hr/IP register budget BEFORE validation (even 422s count),
+# which starves the shared remote tenant pool. The register surface is fully
+# covered in local hermetic mode (RATE_LIMIT_DISABLED=1); remote mode runs
+# the journey via the pooled tenant_factory instead.
+pytestmark = pytest.mark.skipif(
+    is_remote_mode(),
+    reason=("direct /v1/register calls burn the 3/hr/IP register budget the "
+            "shared tenant pool needs; register surface covered in local mode"))
 
 
 def test_register_provisions_team_key_and_first_point(api, tenant_factory):

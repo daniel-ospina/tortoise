@@ -22,13 +22,32 @@ surviving user-journeys E2E designs. Full reconstruction record:
 RUN_HOSTED_E2E=1 python -m pytest tests/e2e/hosted/ -q -rs
 
 # Remote mode against a staging deployment (no server boot):
-E2E_BASE_URL=https://staging.example.co RUN_HOSTED_E2E=1 \
+E2E_BASE_URL=https://staging.example.co RUN_HOSTED_E2E=1 ALLOW_PROD=1 \
   python -m pytest tests/e2e/hosted/ -q -rs
-# https targets additionally require ALLOW_PROD=1 (signup-safety precedent).
+# ALLOW_PROD=1 is required for ANY non-loopback target, regardless of scheme
+# (signup-safety precedent — an http:// tunnel fronting prod is still prod).
 ```
 
 Without `RUN_HOSTED_E2E` / `E2E_BASE_URL` the suite skips gracefully with a
 clear message (RUN_LEGAL_E2E pattern).
+
+### Remote mode is a subset
+
+Remote targets run real rate limiting and do not share the local seams, so
+the suite skips the cases that cannot pass against an arbitrary deployment:
+
+- **E2E-1-D direct register tests** — the server-side register limiter
+  counts every `/v1/register` POST (3/hr/IP, consumed before validation);
+  the shared tenant pool needs the whole budget.
+- **E2E-2-D / E2E-3-D** — webhook legs are signed with the fixture
+  `STRIPE_WEBHOOK_SECRET` and resolve prices via the fixture
+  `STRIPE_PRICE_IDS` catalog; caps are asserted against the fixture pricing
+  file.
+- **E2E-5-D / E2E-12-D / bare-server legs** — local-only seams.
+
+Remaining request volume is modest, but the target's global request limiter
+(100/min by default) still applies — point remote mode at a deployment with
+headroom (or `RATE_LIMIT_DISABLED=1`).
 
 ## The 12 cases
 
