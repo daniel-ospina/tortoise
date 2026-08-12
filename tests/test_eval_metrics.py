@@ -45,15 +45,16 @@ from tools import kappa as tools_kappa  # noqa: E402
 
 # ── Fixture helpers ─────────────────────────────────────────────────────────
 
-# Distinctive per-class phrases: cross-class / cross-index edu texts share
-# few words, so the fuzzy pass-2 matcher only fires on true matches.
-_PHRASES = {
-    "decision": "we decided to ship",
-    "event": "we fixed the bug",
-    "claim": "the cost is five dollars",
-    "process": "we will handle both tasks now",
-    "none": "small talk filler",
-}
+# Distinctive per-INDEX content phrases: the EDU text is the same regardless of
+# who labels it (gold/pred), so a misclassification at the same index still
+# matches (same text), while a shifted index resolves by text in pass 2.
+_CONTENT = [
+    "we decided to ship alpha",
+    "we fixed the beta bug",
+    "the gamma costs five dollars",
+    "we will handle delta now",
+    "epsilon is small talk filler",
+]
 
 
 def _label(
@@ -80,33 +81,34 @@ def _window(
     pred_spec: list[tuple] | None = None,
     *,
     session_id: str = "s1",
+    texts: dict[int, str] | None = None,
 ) -> tuple[Window, Window]:
     """Build a (gold, pred) Window pair sharing one transcript.
 
-    Spec entries: (edu_index, class_, **label_kwargs). Edu texts are
-    generated per (class, index) from distinctive phrases so fuzzy matching
-    is unambiguous.
+    Spec entries: (edu_index, class_, **label_kwargs). Edu texts are per-INDEX
+    (identical for gold and pred at the same EDU); pass `texts` to override
+    (used by the shifted-index tests).
     """
 
-    def build(spec: list[tuple]) -> tuple[list[Label], dict[int, str]]:
+    def build(spec: list[tuple] | None) -> list[Label] | None:
         if spec is None:
-            return None, {}
+            return None
         labels = []
-        texts: dict[int, str] = {}
         for item in spec:
             idx, cls = item[0], item[1]
             kwargs = item[2] if len(item) > 2 else {}
             labels.append(Label(idx, cls, **kwargs))
-            texts[idx] = f"{_PHRASES[cls]} item {idx}"
-        return labels, texts
+        return labels
 
-    gold_labels, gold_t = build(gold_spec)
-    pred_labels, pred_t = build(pred_spec)
-    all_idx = sorted(set(gold_t) | set(pred_t))
-    edus = [
-        gold_t.get(i, pred_t.get(i, f"{window_id} edu {i}"))
-        for i in range(max(all_idx, default=-1) + 1)
-    ]
+    gold_labels = build(gold_spec)
+    pred_labels = build(pred_spec)
+    if texts is None:
+        all_idx = sorted(
+            {l.edu_index for l in (gold_labels or [])}
+            | {l.edu_index for l in (pred_labels or [])}
+        )
+        texts = {i: f"{_CONTENT[i % len(_CONTENT)]} in {window_id}" for i in all_idx}
+    edus = [texts[i] for i in range(max(texts, default=-1) + 1)]
     return (
         Window(session_id, window_id, edus, gold_labels),
         Window(session_id, window_id, edus, pred_labels),
@@ -543,22 +545,82 @@ def test_r1r3_zero_decisions_watch():
 # ── Fuzzy matching (Pass 2 — shifted indices) ───────────────────────────────
 
 def test_fuzzy_matching_on_shifted_indices():
-    """Pass-2 fuzzy fallback: pred indices shifted +1 still match by edu text."""
-    # Same class, shifted index → fuzzy text match succeeds (entity P/R 1.0).
+    """Pass-2 fuzzy fallback: a +1-shifted pred (same text, new index) still matches."""
+    # Same content at a shifted index → pass-2 fuzzy match succeeds (entity 1.0).
     g_shift, p_shift = _window(
-        "fs1", [(0, "decision")], [(1, "decision")]
+        "fs1",
+        [(0, "decision")],
+        [(1, "decision")],
+        texts={0: "the decision about shipping", 1: "the decision about shipping"},
     )
     report = compute_metrics([g_shift], [p_shift])
     assert report.entity_p_r == (pytest.approx(1.0), pytest.approx(1.0))
     assert report.layer_correct == pytest.approx(1.0)
 
-    # Different class, shifted index → no fuzzy match (distinctive phrases).
+    # Genuinely different content → no fuzzy match (distinctive texts).
     g_no, p_no = _window(
-        "fs2", [(0, "decision")], [(1, "event")]
+        "fs2",
+        [(0, "decision")],
+        [(1, "event")],
+        texts={0: "the decision about shipping", 1: "the event about bugfixing"},
     )
     report_no = compute_metrics([g_no], [p_no])
     assert report_no.entity_p_r == (pytest.approx(0.0), pytest.approx(0.0))
     assert report_no.layer_correct == pytest.approx(0.0)
+
+
+def test_shifted_multi_label_window():
+    """Pass-1 is text-verified: a shared-index shift never mispairs (bug-deep P1)."""
+    # Pred transcript has a preamble + shifted: pred@0 is new content, pred@1 is
+    # gold@0's text, pred@2 is gold@1's text. Pass-1 defers text-mismatched
+    # index pairs; pass-2 re-pairs the true correspondence by text.
+    texts = {
+        0: "preamble filler",
+        1: "we decided to ship alpha",
+        2: "we fixed the beta bug",
+    }
+    gold, pred = _window(
+        "sh1",
+        [(1, "decision"), (2, "event")],
+        [(0, "none"), (1, "decision"), (2, "event")],
+        texts=texts,
+    )
+    report = compute_metrics([gold], [pred])
+    # gold decision@0 ↔ pred decision@1 and gold event@1 ↔ pred event@2 by text.
+    assert report.entity_p_r == (pytest.approx(1.0), pytest.approx(1.0))
+    assert report.layer_correct == pytest.approx(1.0)
+
+    # The same shift must not flip r1r3 to 100% FP: the shifted decision is the
+    # gold decision (matched pair), not a false decision.
+    golds, preds = [], []
+    for i in range(30):
+        g, p = _window(
+            f"sh2-{i}",
+            [(0, "decision")],
+            [(1, "decision")],
+            texts={0: "we decided to ship alpha", 1: "we decided to ship alpha"},
+        )
+        golds.append(g)
+        preds.append(p)
+    conj = compute_metrics(golds, preds).r1r3_conjunction
+    assert conj["n_windows"] == 30
+    assert conj["decisions_fp"] == pytest.approx(0.0)
+    assert conj["band"] == "pass"  # consistent with entity/layer scoring the shift as perfect
+
+
+def test_unmatched_none_labels_do_not_crash():
+    """Unmatched 'none' labels carry no per-class signal — no KeyError (P0 fix)."""
+    # gold labels a "none" EDU the pred omitted; pred labels a "none" EDU the
+    # gold did not label — both land in gold_fn/pred_fp with class "none".
+    gold, pred = _window(
+        "nz1",
+        [(0, "claim"), (1, "none")],
+        [(0, "claim"), (2, "none")],
+    )
+    report = compute_metrics([gold], [pred])
+    assert report.entity_p_r == (pytest.approx(1.0), pytest.approx(1.0))
+    assert report.layer_correct == pytest.approx(1.0)
+    assert report.empty_rate == pytest.approx(0.0)
 
 
 def test_r1r3_unlabeled_edu_decision_is_fp():
@@ -686,7 +748,9 @@ def test_thresholds_yaml_r8_rows_and_band_semantics():
         assert s[row]["block"] == block
         assert s[row]["n_accept"] == 30 and s[row]["n_block"] == 12
     assert s["r1r3_decisions_fp"]["target"] == 0.05  # ≤5% band
+    assert s["r1r3_decisions_fp"]["block"] == 0.05  # one-sided max-direction row
     assert s["r1r3_decisions_fp"]["n_accept"] == 30
+    assert s["r1r3_decisions_fp"]["n_block"] == 30  # the band needs N≥30 (DE2E-3)
     assert s["r1r3_decisions_fp"]["direction"] == "max"
 
     # Band semantics: pass ≥ target N≥30 / fail < block N≥12 / watch between;
@@ -748,7 +812,8 @@ def test_band_semantics_applied_to_report():
     assert verdict(0.45, s["entity_recall"], 30) == "fail"
 
     # One-sided (max-direction, lower-is-better) rows: ECE ≤0.10 / >0.15 and
-    # r1r3 decisions-FP ≤5% — the pass boundary is INCLUSIVE (≤ target).
+    # r1r3 decisions-FP ≤5% — the pass boundary is INCLUSIVE (≤ target); the
+    # r1r3 fail band also needs N ≥ 30 (n_block: 30 — DE2E-3 Layer-2 band).
     def verdict_max(rate, row, n):
         warn_until = row.get("warn_only_until")
         if warn_until is not None and n < warn_until:
@@ -765,9 +830,10 @@ def test_band_semantics_applied_to_report():
     assert verdict_max(0.05, s["r1r3_decisions_fp"], 30) == "pass"  # exactly ≤ 5%
     assert verdict_max(0.0501, s["r1r3_decisions_fp"], 30) == "fail"
     assert verdict_max(0.05, s["r1r3_decisions_fp"], 29) == "watch"
+    assert verdict_max(0.50, s["r1r3_decisions_fp"], 20) == "watch"  # N<30 → no fail
 
     # A real report coupled to the yaml: an atomicity 0.5 report at N=1 window
-    # → watch (the N rule gates the band, per-class N < 12 → skip + flag).
+    # → watch (the N rule gates the band — rate_n carries the true support).
     gold, pred = _window(
         "bd1",
         [(0, "decision", {"atomicity": True}), (1, "decision", {"atomicity": True})],
@@ -775,7 +841,7 @@ def test_band_semantics_applied_to_report():
     )
     report = compute_metrics([gold], [pred])
     assert report.atomicity == pytest.approx(0.5)
-    assert verdict(report.atomicity, s["atomicity"], report.per_class_n["decision"]) == "watch"
+    assert verdict(report.atomicity, s["atomicity"], report.rate_n["atomicity"]) == "watch"
 
     # Real mitigation report at N=12 with recall 0.583 (< 0.60 block) → FAIL
     # (block band fires at N≥12 — the DE2E-11 per-class N rule is satisfied).
@@ -801,7 +867,10 @@ def test_r1r3_constants_match_thresholds_yaml():
     """The in-code R1∧R3 band cannot drift from the reconciled yaml row."""
     row = yaml.safe_load(THRESHOLDS_PATH.read_text())["standards"]["r1r3_decisions_fp"]
     assert DECISIONS_FP_BAND == row["target"]
+    assert DECISIONS_FP_BAND == row["block"]
     assert BAND_N_ACCEPT == row["n_accept"]
+    assert BAND_N_ACCEPT == row["n_block"]
+    assert row["direction"] == "max"
 
 
 # ── Real gold seeds (plan W-6: 0323_excerpt, gold_standard, eval_results_v2) ─
@@ -943,6 +1012,12 @@ def test_compute_metrics_validation():
     # Unknown window_type in the window_types kwarg.
     with pytest.raises(ValueError):
         compute_metrics([g0], [p0], window_types={"v0": "bogus"})
+    # window_types referencing an unknown window id.
+    with pytest.raises(ValueError):
+        compute_metrics([g0], [p0], window_types={"v0": "operational", "nope": "design"})
+    # min_events keys that are not window types.
+    with pytest.raises(ValueError):
+        compute_metrics([g0], [p0], min_events={"bogus": 3})
     # Empty eval sets.
     with pytest.raises(ValueError):
         compute_metrics([], [p0])
@@ -961,9 +1036,18 @@ def test_pred_unlabeled_window_is_empty():
     assert report.min_signal == {"operational": False}  # degenerate-empty fires
 
 
-def test_first_label_wins_on_duplicate_edu_index():
-    """One label per EDU (documented): a duplicate edu_index keeps the first."""
+def test_duplicate_edu_index_rejected():
+    """Duplicate labels at one edu_index are malformed — one verdict per EDU.
+
+    Mirrors tools/judge_harness.py (hard error on duplicate indices): the
+    extractor/rubric labels each EDU exactly once, so duplicates are rejected
+    in validation rather than silently order-dependent.
+    """
     gold, pred = _window("du1", [(0, "claim")], [(0, "claim")])
-    pred.gold_labels.append(_label(0, "decision"))  # duplicate index — ignored
-    report = compute_metrics([gold], [pred])
-    assert report.entity_p_r == (pytest.approx(1.0), pytest.approx(1.0))
+    pred.gold_labels.append(_label(0, "decision"))  # duplicate index
+    with pytest.raises(ValueError):
+        compute_metrics([gold], [pred])
+    bad_rel = _window("du2", [(0, "claim")], [(0, "claim")])
+    bad_rel[1].gold_labels[0].relations.append(RelationLabel("BOGUS", 0, 1))
+    with pytest.raises(ValueError):
+        compute_metrics([bad_rel[0]], [bad_rel[1]])

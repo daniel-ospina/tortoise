@@ -56,10 +56,13 @@ Metric semantics (all documented; matching plan §6.3, spec §6, research-r8):
   default to operational (fail-closed). min_signal = {window_type: passed}.
 - r1r3_conjunction (spec §6 — THE decision-class test): on the eval's window
   set (callers pass the meta-discussion-mixed fixture set, N ≥ 30),
-  decisions_fp = pred decisions whose gold label at the same EDU is not a
-  decision (meta-discussion / recommendation / misroute); decisions_fp_rate
-  = fp / pred decisions; band: pass ≤ 5% on N ≥ 30, fail > 5% on N ≥ 30,
-  watch N < 30 (thresholds.yaml R8 r1r3_decisions_fp row, DE2E-3).
+  decisions_fp = pred decisions whose MATCHED gold label is not a decision
+  (meta-discussion / recommendation / misroute) plus pred decisions that
+  matched NO gold label (spurious — derived from the same matched pairs as
+  the rest of the report, so shifted indices stay consistent);
+  decisions_fp_rate = fp / pred decisions; band: pass ≤ 5% on N ≥ 30, fail
+  > 5% on N ≥ 30, watch N < 30 or zero decisions predicted (thresholds.yaml
+  R8 r1r3_decisions_fp row, DE2E-3).
 
 kappa() re-exports tools/kappa.py (merged slice-1 tooling, #945) as a module
 level alias — NOT duplicated here. The plan §6.3 declares `kappa() -> float`;
@@ -69,7 +72,6 @@ None as NOT_GREEN (documented in tools/kappa.py; consumers must handle None).
 """
 from __future__ import annotations
 
-import math
 import re
 import sys
 from pathlib import Path
@@ -80,6 +82,8 @@ if _REPO_ROOT not in sys.path:
 
 from tests.eval.types import (  # noqa: E402
     CLASS_VOCAB,
+    RELATION_VOCAB,
+    WINDOW_TYPES,
     Label,
     MetricsReport,
     RelationLabel,
@@ -89,10 +93,9 @@ from tools import kappa as _tools_kappa  # noqa: E402
 from tools.min_signal import min_signal_check  # noqa: E402
 
 # ── Band constants (research-r8 / plan §6.3 — watch-gates, not powered tests) ──
-CLASS_N_MIN = 12  # per-class gold window-N below this → skip + flag (plan §6.3)
+CLASS_N_MIN = 12  # per-class gold window-N below this → skip + flag (plan §7)
 BAND_N_ACCEPT = 30  # the pass band requires N ≥ 30 windows (research-r8)
 DECISIONS_FP_BAND = 0.05  # R1∧R3 conjunction: decisions-FP ≤ 5% on N ≥ 30 (DE2E-3)
-PROCESS_ROUTING_WARN_N = 20  # R3 band is warn-only until n ≥ 20 (research-r8)
 
 POINT_CLASSES = ("decision", "event", "claim")  # classes that hit the graph as points
 EVAL_CLASSES = ("decision", "event", "claim", "process")  # per-class eval set
@@ -136,10 +139,13 @@ def _match_items(
     gold_texts: dict[int, str],
     pred_texts: dict[int, str],
 ) -> tuple[list[tuple[Label, Label]], list[Label], list[Label]]:
-    """Match gold→pred labels within one window (one label per EDU, first wins).
+    """Match gold→pred labels within one window (one label per EDU).
 
-    Pass 1 anchors on edu_index (aligned labeling — the common case). Pass 2
-    greedily fuzzy-matches the remainder by edu text (shifted labeling).
+    Pass 1 anchors on edu_index (aligned labeling — the common case) and
+    COMMITS the pair only when the edu texts also fuzzy-match (a rephrased
+    EDU still matches its own index; a shifted index does not mispair).
+    Pass 2 fuzzy-matches the remainder by edu text, assigning in descending
+    best-score order so near-identical texts resolve consistently.
 
     Returns (pairs, gold_fn, pred_fp): pairs = matched (gold, pred); gold_fn =
     gold items with no pred match; pred_fp = pred items matched to no gold.
@@ -152,32 +158,50 @@ def _match_items(
         pred_by_idx.setdefault(p.edu_index, p)
 
     pairs: list[tuple[Label, Label]] = []
-    used_pred: set[int] = set()
     for gidx, g in gold_by_idx.items():
         p = pred_by_idx.get(gidx)
-        if p is not None:
-            pairs.append((g, p))
-            used_pred.add(gidx)
+        if p is None:
+            continue
+        score = _fuzzy_score(
+            gold_texts.get(gidx, ""), pred_texts.get(gidx, "")
+        )
+        if score >= _FUZZY_MIN:
+            pairs.append((g, p))  # aligned + text-consistent
 
     matched_gold_idx = {g.edu_index for g, _ in pairs}
-    matched_pred_idx = set(used_pred)
+    matched_pred_idx = {p.edu_index for _, p in pairs}
     remaining_gold = [g for idx, g in gold_by_idx.items() if idx not in matched_gold_idx]
     remaining_pred = [
         p for idx, p in pred_by_idx.items() if idx not in matched_pred_idx
     ]
 
+    # Pass 2: assign the strongest text matches first (score-descending order
+    # makes the greedy assignment insensitive to label-list order).
+    candidates = []
     for g in remaining_gold:
         g_text = gold_texts.get(g.edu_index, "")
         best: Label | None = None
         best_score = 0.0
         for p in remaining_pred:
-            p_text = pred_texts.get(p.edu_index, "")
-            score = _fuzzy_score(g_text, p_text)
+            score = _fuzzy_score(g_text, pred_texts.get(p.edu_index, ""))
+            if score > best_score:
+                best, best_score = p, score
+        if best is not None and best_score >= _FUZZY_MIN:
+            candidates.append((-best_score, g.edu_index, g, best))
+    for _neg_score, _idx, g, _best in sorted(candidates):
+        if g not in remaining_gold:
+            continue
+        g_text = gold_texts.get(g.edu_index, "")
+        best: Label | None = None
+        best_score = 0.0
+        for p in remaining_pred:
+            score = _fuzzy_score(g_text, pred_texts.get(p.edu_index, ""))
             if score > best_score:
                 best, best_score = p, score
         if best is not None and best_score >= _FUZZY_MIN:
             pairs.append((g, best))
             remaining_pred.remove(best)
+            remaining_gold.remove(g)
 
     matched_gold = {g.edu_index for g, _ in pairs}
     matched_pred = {p.edu_index for _, p in pairs}
@@ -204,19 +228,32 @@ def _validate(gold: list[Window], pred: list[Window]) -> None:
     for w in gold:
         if w.gold_labels is None:
             raise ValueError(f"compute_metrics: gold window {w.window_id!r} has no labels")
-        for label in w.gold_labels:
-            if label.class_ not in CLASS_VOCAB:
-                raise ValueError(
-                    f"compute_metrics: gold label {label.edu_index} in "
-                    f"{w.window_id!r} has unknown class {label.class_!r}"
-                )
+        _validate_labels(w.window_id, w.gold_labels, "gold")
     for w in pred:
-        for label in w.gold_labels or []:
-            if label.class_ not in CLASS_VOCAB:
+        _validate_labels(w.window_id, w.gold_labels or [], "pred")
+
+
+def _validate_labels(window_id: str, labels: list[Label], side: str) -> None:
+    """One label per EDU (rubric convention — mirrors tools/judge_harness.py)."""
+    seen: set[int] = set()
+    for label in labels:
+        if label.class_ not in CLASS_VOCAB:
+            raise ValueError(
+                f"compute_metrics: {side} label {label.edu_index} in "
+                f"{window_id!r} has unknown class {label.class_!r}"
+            )
+        for rel in label.relations:
+            if rel.type not in RELATION_VOCAB:
                 raise ValueError(
-                    f"compute_metrics: pred label {label.edu_index} in "
-                    f"{w.window_id!r} has unknown class {label.class_!r}"
+                    f"compute_metrics: {side} label {label.edu_index} in "
+                    f"{window_id!r} has unknown relation type {rel.type!r}"
                 )
+        if label.edu_index in seen:
+            raise ValueError(
+                f"compute_metrics: {side} window {window_id!r} has duplicate "
+                f"labels at edu_index {label.edu_index} — one verdict per EDU"
+            )
+        seen.add(label.edu_index)
 
 
 # ── Public API ──────────────────────────────────────────────────────────────
@@ -257,8 +294,8 @@ def compute_metrics(
     _validate(gold, pred)
     gold_by_id = {w.window_id: w for w in gold}
     pred_by_id = {w.window_id: w for w in pred}
-    # One label per EDU (documented convention): dedup first-wins ONCE, so every
-    # metric (per-class, entity, mitigation, ECE, min-signal) sees the same set.
+    # One label per EDU (strict — validated above; _dedup is defense-in-depth
+    # against malformed callers bypassing _validate).
     gold_labels = {wid: _dedup(w.gold_labels or []) for wid, w in gold_by_id.items()}
     pred_labels = {wid: _dedup(w.gold_labels or []) for wid, w in pred_by_id.items()}
 
@@ -302,10 +339,12 @@ def compute_metrics(
                 stats[pc]["fp"] += 1  # pred claimed a point where gold said none
     for gfn in gold_fn_by_window.values():
         for g in gfn:
-            stats[g.class_]["fn"] += 1
+            if g.class_ in EVAL_CLASSES:
+                stats[g.class_]["fn"] += 1
     for pfp in pred_fp_by_window.values():
         for p in pfp:
-            stats[p.class_]["fp"] += 1
+            if p.class_ in EVAL_CLASSES:
+                stats[p.class_]["fp"] += 1
 
     per_class: dict[str, dict[str, float]] = {}
     per_class_n: dict[str, int] = {}
@@ -316,7 +355,9 @@ def compute_metrics(
             per_class[c] = {"p": float("nan"), "r": float("nan"), "f1": float("nan")}
             continue
         tp, fp, fn = stats[c]["tp"], stats[c]["fp"], stats[c]["fn"]
-        p = tp / (tp + fp) if (tp + fp) else float("nan")
+        # Precision floored to 0.0 when no true positives (NaN strictly means
+        # "skipped by the N rule" — a measured class always yields a number).
+        p = tp / (tp + fp) if (tp + fp) else 0.0
         r = tp / (tp + fn) if (tp + fn) else float("nan")
         f1 = 2 * p * r / (p + r) if tp else 0.0  # no recall → F1 floored to 0
         per_class[c] = {"p": p, "r": r, "f1": f1}
@@ -410,17 +451,30 @@ def compute_metrics(
     empty_rate = _rate(empty_windows, len(pred_by_id))
 
     # 7. ECE (A13) — 0.1 bins over comparable confident EDUs.
-    ece = _expected_calibration_error(gold_labels, pred_labels, confidences or {})
+    ece, ece_n = _expected_calibration_error(gold_labels, pred_labels, confidences or {})
 
     # 8. Minimum-signal (spec §5.8/§6) — per window type, ALL windows pass.
     wt_of = window_types or {}
+    unknown_wt_ids = set(wt_of) - set(pred_by_id)
+    if unknown_wt_ids:
+        raise ValueError(
+            f"compute_metrics: window_types references unknown window ids: "
+            f"{sorted(unknown_wt_ids)}"
+        )
+    me = min_events or {}
+    unknown_me = set(me) - set(WINDOW_TYPES)
+    if unknown_me:
+        raise ValueError(
+            f"compute_metrics: min_events keys must be window types, got: "
+            f"{sorted(unknown_me)}"
+        )
     min_signal: dict[str, dict] = {}
     for wid, pw in pred_by_id.items():
         wt = wt_of.get(wid, "operational")
-        if wt not in ("design", "operational"):
+        if wt not in WINDOW_TYPES:
             raise ValueError(
                 f"compute_metrics: unknown window_type {wt!r} for {wid!r} "
-                f"— must be 'design' or 'operational'"
+                f"— must be one of {WINDOW_TYPES}"
             )
         entry = min_signal.setdefault(wt, {"passed": True, "n_windows": 0})
         entry["n_windows"] += 1
@@ -446,8 +500,22 @@ def compute_metrics(
                 process_ok += 1
     process_routing = _rate(process_ok, process_denom)
 
-    # 10. R1∧R3 conjunction (spec §6 — THE decision-class test).
-    r1r3_conjunction = _r1r3_conjunction(gold_labels, pred_labels)
+    # 10. R1∧R3 conjunction (spec §6 — THE decision-class test), derived from
+    # the SAME matched pairs as the rest of the report (shift-consistent).
+    r1r3_conjunction = _r1r3_conjunction(pairs_by_window, pred_fp_by_window)
+
+    # Per-rate sample N (true support for the thresholds band rows — #962).
+    rate_n = {
+        "layer_correct": layer_denom,
+        "atomicity": atomicity_denom,
+        "citation_correctness": citation_denom,
+        "kind_correctness": kind_denom,
+        "entity": ent_gold,
+        "empty_rate": len(pred_by_id),
+        "ece": ece_n,
+        "mitigation": per_class_n["mitigation"],
+        "process_routing": process_denom,
+    }
 
     return MetricsReport(
         per_class=per_class,
@@ -463,13 +531,14 @@ def compute_metrics(
         min_signal=min_signal_report,
         r1r3_conjunction=r1r3_conjunction,
         process_routing=process_routing,
+        rate_n=rate_n,
     )
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
 
 def _dedup(labels: list[Label]) -> list[Label]:
-    """One label per EDU (documented convention): first label at an index wins."""
+    """First label at an index wins (defense-in-depth; _validate rejects dups)."""
     by_idx: dict[int, Label] = {}
     for label in labels:
         by_idx.setdefault(label.edu_index, label)
@@ -531,15 +600,16 @@ def _expected_calibration_error(
     gold_labels: dict[str, list[Label]],
     pred_labels: dict[str, list[Label]],
     confidences: dict[tuple[str, int], float],
-) -> float:
+) -> tuple[float, int]:
     """ECE over comparable confident EDUs (gold + pred label at the same EDU).
 
     10 bins of width 0.1 (the telemetry confidence_histogram shape, §6.1).
-    Correctness = pred class == gold class. NaN when no comparable EDUs carry
-    a confidence. Out-of-range confidences are clamped to [0, 1].
+    Correctness = pred class == gold class. Returns (ece, n_total) — NaN when
+    no comparable EDUs carry a confidence. Out-of-range confidences are
+    clamped to [0, 1].
     """
     if not confidences:
-        return float("nan")
+        return float("nan"), 0
     n_bin = [0] * 10
     acc_bin = [0] * 10
     conf_bin = [0.0] * 10
@@ -560,7 +630,7 @@ def _expected_calibration_error(
         conf_bin[b] += conf
         n_total += 1
     if n_total == 0:
-        return float("nan")
+        return float("nan"), 0
     ece = 0.0
     for b in range(10):
         if n_bin[b] == 0:
@@ -568,33 +638,38 @@ def _expected_calibration_error(
         acc = acc_bin[b] / n_bin[b]
         conf = conf_bin[b] / n_bin[b]
         ece += (n_bin[b] / n_total) * abs(acc - conf)
-    return ece
+    return ece, n_total
 
 
 def _r1r3_conjunction(
-    gold_labels: dict[str, list[Label]],
-    pred_labels: dict[str, list[Label]],
+    pairs_by_window: dict[str, list[tuple[Label, Label]]],
+    pred_fp_by_window: dict[str, list[Label]],
 ) -> dict[str, float | str]:
     """R1∧R3 conjunction stats — THE decision-class test (spec §6).
 
-    decisions_fp: pred decisions whose gold label at the same EDU is not a
+    Derived from the SAME matched pairs as the rest of the report (shift-
+    consistent): a pred decision is an FP when its matched gold label is not a
     decision (meta-discussion "we decided the extractor should support X",
-    recommendations, misroutes — FM2; an EDU with NO gold label also counts
-    as FP). Band: pass ≤ 5% on N ≥ 30; fail > 5% on N ≥ 30; watch N < 30
-    or when no decisions were predicted (thresholds.yaml R8 row, DE2E-3).
+    recommendations, misroutes — FM2), or when it matched NO gold label at
+    all (spurious decision on an unlabeled EDU). Band: pass ≤ 5% on N ≥ 30;
+    fail > 5% on N ≥ 30; watch N < 30 or when no decisions were predicted
+    (thresholds.yaml R8 row, DE2E-3).
     """
     pred_decisions = 0
     decisions_fp = 0
-    for wid, pred_wlabels in pred_labels.items():
-        gold_by_idx = {label.edu_index: label for label in gold_labels[wid]}
-        for p in pred_wlabels:
+    for pairs in pairs_by_window.values():
+        for g, p in pairs:
             if p.class_ != "decision":
                 continue
             pred_decisions += 1
-            g = gold_by_idx.get(p.edu_index)
-            if g is None or g.class_ != "decision":
+            if g.class_ != "decision":
                 decisions_fp += 1
-    n_windows = len(pred_labels)
+    for pfp in pred_fp_by_window.values():
+        for p in pfp:
+            if p.class_ == "decision":
+                pred_decisions += 1
+                decisions_fp += 1  # matched no gold → spurious decision
+    n_windows = len(pairs_by_window)
     rate = decisions_fp / pred_decisions if pred_decisions else float("nan")
     if pred_decisions == 0:
         # No decision-class signal to evaluate: the conjunction test cannot

@@ -1,6 +1,9 @@
 # Extraction-quality gate table — value-first extractor (v1)
 # Sources of truth (ONE reconciled set — plan §6.3 slice 8; no second file):
-#   docs/drafts/2026-08-09-extraction-quality-evaluation.md (Appendix B) — A-rows A1-A22
+#   docs/drafts/2026-08-09-extraction-quality-evaluation.md (Appendix B + §4.3
+#     table) — A-rows A1-A22 (Appendix B's yaml template covers A1-A9, A11-A21;
+#     A10 per-kind F1 and A22 amplification-vs-regex come from the §4.3 table
+#     and plan §6.3)
 #   docs/epics/2026-08-11-epic909-value-first-mining/research-r8-eval-thresholds-commit-endpoint.md
 #     — the R8 threshold table + N math (band gates, not point gates)
 #   docs/epics/2026-08-11-epic909-value-first-mining/04-plan.md §6.3 — slice-8 reconciliation
@@ -16,15 +19,19 @@ extractor_version: value@0.1.0
 #        band 11% of the time at N=12)
 # watch: between target and block, or N < 12 (per-class N rule — a window
 #        contributes to a class's N iff it contains >= 1 gold item of that
-#        class; a class with N < 12 is SKIPPED and flagged, plan §6.3)
+#        class; a class with N < 12 is SKIPPED and flagged, plan §7
+#        test-surface conventions)
+# MAX-direction rows (ece, r1r3_decisions_fp — lower is better): pass rate
+#        <= target on N>=30; fail rate > block on N>=n_block (r1r3 needs
+#        N>=30 — the DE2E-3 Layer-2 band); between = watch
 # EXCEPT live floor: rolling N = 20 (research-r8) — the post-launch power
 #        source (v1 drift monitor consumes only the deterministic/ops floors;
 #        the Layer-2 live-floor watch arrives post-v1 with the live judge, §5.1)
 # N ≈ 109 needed for true separation — out of gold-set scope (research-r8).
-# Layer-1 deterministic rows (provenance_coverage, R8 L1) are CI blockers, not
-# evals (n = 1). The 30-window gold set validates directionally and feeds the
+# Layer-1 deterministic rows (R8 L1 schema checks) are CI blockers, not evals
+# (n = 1). The 30-window gold set validates directionally and feeds the
 # live-judge calibration loop (rolling N=20) — the real statistical power source.
-band_semantics: "watch-gates: pass = rate >= target on N>=30 | fail = rate < block on N>=12 (warn+re-measure below N=30) | between or N<12 = watch (skip+flag) | live floor: rolling N=20 | deterministic rows: n=1 CI blocker"
+band_semantics: "watch-gates: pass = rate >= target on N>=30 | fail = rate < block on N>=12 (warn+re-measure below N=30) | between or N<12 = watch (skip+flag, plan §7) | max-direction rows (ece, r1r3): pass <= target on N>=30, fail > block on N>=n_block | live floor: rolling N=20 | deterministic rows (R8 L1): n=1 CI blocker"
 standards:
   # --- Core extraction (section 2.2) ---
   point_precision_raw:   {target: 0.65, block: 0.55}   # A1
@@ -69,7 +76,7 @@ standards:
   citation_correctness:  {target: 0.90, block: 0.80, n_accept: 30, n_block: 12}   # R4 quote/span backs the claim
   mitigation_recall:     {target: 0.75, block: 0.60, n_accept: 30, n_block: 12, block_provisional: true}  # R9 — block value PROVISIONAL (from the R9 audit's fail-closed posture; confirm at gold-set calibration)
   process_routing:       {target: 0.95, block: 0.80, n_accept: 30, n_block: 12, warn_only_until: 20}  # R3 — warn-only until n>=20 (block is a WATCH, monitor-only by class rarity)
-  r1r3_decisions_fp:     {target: 0.05, n_accept: 30, direction: max}  # R1∧R3 conjunction — decisions-FP <= 5% on the meta-mixed fixture set (DE2E-3 Layer-2 band)
+  r1r3_decisions_fp:     {target: 0.05, block: 0.05, n_accept: 30, n_block: 30, direction: max}  # R1∧R3 conjunction — decisions-FP <= 5% on the meta-mixed fixture set; MAX-direction row: pass <= target on N>=30, fail > block on N>=30 (the DE2E-3 Layer-2 band needs N>=30, not the 12-window floor)
 
 # ── Reconciliation notes (slice 8 — ONE authoritative file, plan §6.3) ──
 # A7/A17: the canonical doc's fail edges are aggregates — A7 <15%/>50% over
@@ -84,3 +91,6 @@ standards:
 # R1 empty-rate: A7 (empty_rate 20-40%) IS the R8 empty-rate row — not
 #   duplicated (research-r8; A8 high-value-session empty <15% and A9
 #   FP-session 0% remain separate).
+# Key-name note: `frontier_calls` (A19) matches the pre-slice-8 file; the
+#   doc template's `frontier_calls_per_session` name is a deliberate rename
+#   (values unchanged: 3/5) — the yaml key here is canonical for consumers.

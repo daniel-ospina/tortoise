@@ -115,3 +115,7 @@ class MetricsReport:
     min_signal: dict[str, bool]  # {window_type: passed} — degenerate-empty defense
     r1r3_conjunction: dict[str, float | str]  # THE decision-class test stats (spec §6)
     process_routing: float
+    rate_n: dict[str, int]  # per-rate sample N (true support for the band rows) —
+    # {layer_correct, atomicity, citation_correctness, kind_correctness,
+    #  entity (gold items), empty_rate (windows), ece (comparable EDUs),
+    #  mitigation (gold windows), process_routing (gold items)}
