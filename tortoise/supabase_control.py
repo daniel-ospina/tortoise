@@ -288,17 +288,33 @@ def get_control_plane() -> SupabaseControlPlane:
 _abuse_store = None
 
 
+def _registry_abuse_write(team_id: str, suspended_at, flagged_at) -> None:
+    """Durable selfhost enforcement (scoping delta 4, code-review P1 fix):
+    write the suspension/staging state onto the registry Team node so the
+    auth seams' prop reads actually reject. Lazy hosted_api import — the
+    hosted_api→supabase_control import direction forbids module-level use."""
+    from tortoise import hosted_api as _ha
+    sdk = _ha._make_sdk(namespace="registry")
+    sdk._get_registry().query(
+        "MATCH (t:Team {id: $id}) SET t.suspended_at = $sus, t.flagged_at = $fl",
+        params={"id": team_id, "sus": suspended_at, "fl": flagged_at},
+    )
+
+
 def get_abuse_store():
     """Lazy abuse-event store (tests monkeypatch this, mirroring
     get_control_plane). Supabase mode → durable SupabaseAbuseStore; registry
-    mode → MemoryAbuseStore (selfhost degradation documented in abuse.py)."""
+    mode → MemoryAbuseStore with a registry-write callback so enforcement is
+    durable in selfhost too (R2 session-mint under-counting remains the
+    documented registry degradation)."""
     global _abuse_store
     if _abuse_store is None:
         from tortoise.abuse import MemoryAbuseStore, SupabaseAbuseStore
         if is_supabase_enabled():
             _abuse_store = SupabaseAbuseStore(get_control_plane())
         else:
-            _abuse_store = MemoryAbuseStore()
+            _abuse_store = MemoryAbuseStore(
+                registry_write=_registry_abuse_write)
     return _abuse_store
 
 

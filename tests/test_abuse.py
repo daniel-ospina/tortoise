@@ -99,14 +99,18 @@ class TestStaging:
         assert not is_suspended_signal("t1")
 
     def test_boundary_crossing_suspends(self, notified):
+        """Continuity evidence: events exist on BOTH sides of the window
+        boundary — the breach genuinely persisted across it."""
         store = MemoryAbuseStore()
         eng = AbuseEngine(store)
         eng.record_point_create("t1", 501, now=T0)                      # flag
+        # mid-window activity (continuity evidence for the boundary crossing)
         eng.record_point_create("t1", 10, now=T0 + timedelta(minutes=30))
-        # persist the breach into the next window: age the burst out of the
-        # window is NOT required — new events keep the sum over threshold
-        # while flagged_at falls a full window behind.
-        r = eng.record_point_create("t1", 501, now=T0 + timedelta(seconds=3601))
+        # still breaching a full window later: window (T0+3601..T0+7201]
+        # contains the 501 fresh events; continuity band (T0..T0+3601]
+        # contains the +30m events.
+        eng.record_point_create("t1", 10, now=T0 + timedelta(seconds=3601))
+        r = eng.record_point_create("t1", 501, now=T0 + timedelta(seconds=7201))
         assert r == "suspend"
         assert store.team_suspended("t1") is True
         assert is_suspended_signal("t1") is True
@@ -118,6 +122,42 @@ class TestStaging:
         eng = AbuseEngine(store)
         eng.record_point_create("t1", 501, now=T0)
         # no further evaluations (team went quiet) — even far past the window
+        assert store.team_suspended("t1") is False
+
+    def test_new_burst_after_quiet_is_new_episode(self, notified):
+        """Code-review P1 fix: a stale flag must not auto-suspend a fresh
+        single-window burst. Flag → quiet → burst 2 windows later: the first
+        evaluation of the new burst RE-FLAGS (new episode), never suspends;
+        and a continued in-window breach of the new episode stays 'breach'."""
+        store = MemoryAbuseStore()
+        eng = AbuseEngine(store)
+        assert eng.record_point_create("t1", 501, now=T0) == "flag"
+        # quiet for 2 full windows, then a new single-window burst
+        burst = T0 + timedelta(seconds=7200)
+        assert eng.record_point_create("t1", 501, now=burst) == "flag"
+        assert store.team_suspended("t1") is False
+        assert eng.record_point_create("t1", 100,
+                                       now=burst + timedelta(minutes=10)) == "breach"
+        assert store.team_suspended("t1") is False
+        # the re-flagged episode stages normally from its own anchor
+        eng.record_point_create("t1", 10, now=burst + timedelta(minutes=30))
+        eng.record_point_create("t1", 10, now=burst + timedelta(seconds=3601))
+        r = eng.record_point_create("t1", 501, now=burst + timedelta(seconds=7201))
+        assert r == "suspend"
+
+    def test_cross_rule_staging_independent(self, notified):
+        """Code-review P1 fix: an old R1 flag must not escalate a FIRST R2
+        breach — flags are per rule."""
+        store = MemoryAbuseStore()
+        eng = AbuseEngine(store)
+        eng.record_point_create("t1", 501, now=T0)  # R1 flag
+        # first-ever R2 breach 25h later (> R1 flag age, but R2 has no flag)
+        later = T0 + timedelta(hours=25)
+        for i in range(11):
+            store.record_event("t1", "key_create", key_id=f"k{i}",
+                               created_at=later)
+        r = eng.evaluate_key_creates("t1", now=later)
+        assert r == "flag"  # stage 1 for R2, NOT suspension
         assert store.team_suspended("t1") is False
 
     def test_weighted_rows_sum(self, notified):
@@ -149,9 +189,22 @@ class TestKeyRule:
         eng = AbuseEngine(store)
         self._seed_keys(store, "t1", 11, T0)
         assert eng.evaluate_key_creates("t1", now=T0) == "flag"
-        # 24h window: breach persists past flagged_at + 24h
+        # continuity evidence inside (flag, flag+window], then a breach that
+        # persists past flagged_at + 24h
+        self._seed_keys(store, "t1", 1, T0 + timedelta(hours=1))
         self._seed_keys(store, "t1", 11, T0 + timedelta(hours=25))
         assert eng.evaluate_key_creates("t1", now=T0 + timedelta(hours=25)) == "suspend"
+
+    def test_r2_isolated_bursts_re_flag_not_suspend(self, notified):
+        """Two separated key-mint bursts are two episodes — the second
+        re-flags, it does not inherit the stale first flag."""
+        store = MemoryAbuseStore()
+        eng = AbuseEngine(store)
+        self._seed_keys(store, "t1", 11, T0)
+        assert eng.evaluate_key_creates("t1", now=T0) == "flag"
+        self._seed_keys(store, "t1", 11, T0 + timedelta(hours=25))
+        assert eng.evaluate_key_creates("t1", now=T0 + timedelta(hours=25)) == "flag"
+        assert store.team_suspended("t1") is False
 
     def test_piggyback_on_point_create(self, notified):
         """Trigger-recorded key events (signup RPC path) evaluate on the
@@ -200,6 +253,8 @@ class TestReadVelocity:
         breach = tr.record_read("key1", "t1", now=now + 2)
         assert breach == ("key", "key1")
         assert [c[0] for c in notified] == ["abuse_read_velocity"]
+        # key-scope breach still notifies the TEAM owner (team_id carried)
+        assert notified[0][1]["team_id"] == "t1"
         # dedup: same window → no repeat notification, no repeat breach return
         assert tr.record_read("key1", "t1", now=now + 3) is None
         assert len(notified) == 1

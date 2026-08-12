@@ -187,7 +187,20 @@ class TeamResolutionMiddleware(BaseHTTPMiddleware):
             # resolution says the team is NOT suspended (AC8 self-heal).
             from tortoise.abuse import (appeal_url, clear_suspended,
                                         is_suspended_signal, suspended_message)
-            if team.get("suspended_at") is not None:
+            suspended_at = team.get("suspended_at")
+            if suspended_at is None and not is_supabase_enabled():
+                # Registry mode: apikey_verify returns no suspension state —
+                # read the durable Team prop the abuse store writes (delta 4).
+                try:
+                    sdk = await self._get_registry_sdk()
+                    rows = sdk._get_registry().query(
+                        "MATCH (t:Team {id: $id}) RETURN t.suspended_at",
+                        params={"id": team.get("team_id")},
+                    ).result_set
+                    suspended_at = rows[0][0] if rows else None
+                except Exception:
+                    suspended_at = None  # best-effort selfhost enforcement
+            if suspended_at is not None:
                 self._cache.pop(token, None)
                 return _jsonrpc_error(
                     ERR_SUSPENDED, suspended_message(),

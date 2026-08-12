@@ -10,12 +10,14 @@ Rules (env-overridable thresholds):
 - R3  reads:        > 100 / 5min per-key OR per-team -> notify Owner only
 - R4  geo:          first unseen CF-IPCountry per team -> notify Owner
 
-Two-stage staging (scoping delta 13 — the false-positive guarantee):
-evaluation is event-triggered. Stage 1 flags when the window sum exceeds the
-threshold (durable ``teams.flagged_at``). Stage 2 suspends ONLY when an
-evaluation occurs at/after ``flagged_at + window`` AND the window still
-breaches — a single burst contained in one window can flag but can NEVER
-auto-suspend; a team that flags and goes quiet is never suspended.
+Two-stage staging with EPISODE semantics (scoping delta 13 + code-review
+fix): flags are PER-RULE (flag event rows carry the rule). Stage 2 suspends
+only when (a) the rule's flag is a full window old, AND (b) the rule has at
+least one event between the flag and the current window's start — evidence
+the breach actually persisted across the boundary. A burst after a quiet
+period is a NEW episode: it re-flags and can never suspend on its first
+evaluation. Rules are independent: an R1 flag never escalates a first R2
+breach.
 
 Suspension signal set (scoping delta 14): the process-wide set is a
 CACHE-INVALIDATION SIGNAL, never a rejection authority — membership forces a
@@ -32,6 +34,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
@@ -43,8 +46,9 @@ EVENT_AUTH_IP = "auth_ip"
 EVENT_FLAG = "flag"
 EVENT_SUSPEND = "suspend"
 EVENT_UNSUSPEND = "unsuspend"
+EVENT_READ_VELOCITY = "read_velocity"
 
-ALERT_TYPES = (EVENT_FLAG, EVENT_SUSPEND, EVENT_AUTH_IP, "read_velocity")
+ALERT_TYPES = (EVENT_FLAG, EVENT_SUSPEND, EVENT_AUTH_IP, EVENT_READ_VELOCITY)
 
 
 def _int_env(name: str, default: int) -> int:
@@ -74,9 +78,6 @@ def suspended_message() -> str:
 
 
 # ── Suspended signal set (delta 14) ─────────────────────────────────────────
-# Cache-invalidation signal ONLY — never a rejection authority. Membership
-# forces a fresh resolution; durable suspended_at decides; entries clear when
-# a fresh resolution returns suspended_at=NULL.
 _SUSPENDED_SIGNAL: set[str] = set()
 _SIGNAL_LOCK = threading.Lock()
 
@@ -121,6 +122,14 @@ def _parse_ts(value) -> datetime | None:
     return _ensure_aware(parsed)
 
 
+def _team_email(store, team_id: str) -> str | None:
+    """Best-effort owner email so R3/R4 notify the OWNER, not just ops."""
+    try:
+        return store.team_email(team_id) if team_id else None
+    except Exception:
+        return None
+
+
 # ── Stores ──────────────────────────────────────────────────────────────────
 
 class MemoryAbuseStore:
@@ -142,22 +151,23 @@ class MemoryAbuseStore:
 
     def _append(self, team_id: str, event_type: str, *, weight: int = 1,
                 key_id: str | None = None, country: str | None = None,
-                details: dict | None = None,
+                rule: str | None = None, details: dict | None = None,
                 created_at: datetime | None = None) -> None:
         with self._lock:
             self.rows.append({
                 "team_id": team_id, "event_type": event_type,
                 "weight": int(weight), "key_id": key_id, "country": country,
-                "details": details or {},
+                "rule": rule, "details": details or {},
                 "created_at": _ensure_aware(_utcnow(created_at)),
             })
 
     def record_event(self, team_id: str, event_type: str, *, weight: int = 1,
                      key_id: str | None = None, country: str | None = None,
-                     details: dict | None = None,
+                     rule: str | None = None, details: dict | None = None,
                      created_at: datetime | None = None) -> None:
         self._append(team_id, event_type, weight=weight, key_id=key_id,
-                     country=country, details=details, created_at=created_at)
+                     country=country, rule=rule, details=details,
+                     created_at=created_at)
 
     def window_sum(self, team_id: str, event_type: str, window_s: int,
                    now: datetime | None = None) -> int:
@@ -170,16 +180,34 @@ class MemoryAbuseStore:
                 and r["created_at"] > cutoff
             )
 
+    def latest_flag_at(self, team_id: str, rule: str) -> datetime | None:
+        """Per-rule flag-episode anchor (flag event rows carry the rule)."""
+        with self._lock:
+            stamps = [r["created_at"] for r in self.rows
+                      if r["team_id"] == team_id
+                      and r["event_type"] == EVENT_FLAG
+                      and r.get("rule") == rule]
+        return max(stamps) if stamps else None
+
+    def rule_event_between(self, team_id: str, rule: str, after: datetime,
+                          before: datetime) -> bool:
+        """Continuity evidence: any rule event in (after, before]."""
+        after, before = _ensure_aware(after), _ensure_aware(before)
+        with self._lock:
+            return any(r["team_id"] == team_id and r["event_type"] == rule
+                       and after < r["created_at"] <= before
+                       for r in self.rows)
+
     def team_flagged_at(self, team_id: str) -> datetime | None:
         return self.flags.get(team_id)
 
-    def flag_team(self, team_id: str, event_type: str,
+    def flag_team(self, team_id: str, rule: str,
                   details: dict | None = None,
                   now: datetime | None = None) -> None:
         now = _ensure_aware(_utcnow(now))
         self.flags[team_id] = now
-        self._append(team_id, EVENT_FLAG, details={
-            **(details or {}), "rule": event_type}, created_at=now)
+        self._append(team_id, EVENT_FLAG, rule=rule, details={
+            **(details or {}), "rule": rule}, created_at=now)
         self._durable(team_id)
 
     def clear_flag(self, team_id: str) -> None:
@@ -191,8 +219,9 @@ class MemoryAbuseStore:
         now = _ensure_aware(_utcnow(now))
         self.suspended[team_id] = now
         self.flags.pop(team_id, None)
-        self._append(team_id, EVENT_SUSPEND, details=details or {},
-                     created_at=now)
+        self._append(team_id, EVENT_SUSPEND,
+                     rule=(details or {}).get("rule"),
+                     details=details or {}, created_at=now)
         self._durable(team_id)
 
     def unsuspend_team(self, team_id: str, now: datetime | None = None) -> None:
@@ -246,13 +275,16 @@ class SupabaseAbuseStore:
 
     def record_event(self, team_id: str, event_type: str, *, weight: int = 1,
                      key_id: str | None = None, country: str | None = None,
-                     details: dict | None = None) -> None:
+                     rule: str | None = None, details: dict | None = None,
+                     created_at: datetime | None = None) -> None:
         body = {"team_id": team_id, "event_type": event_type,
                 "weight": int(weight)}
         if key_id is not None:
             body["key_id"] = key_id
         if country is not None:
             body["country"] = country
+        if rule is not None:
+            body["rule"] = rule
         if details:
             body["details"] = details
         self._cp.query("abuse_events", method="POST", json_body=body)
@@ -269,6 +301,28 @@ class SupabaseAbuseStore:
         )
         return sum(int(r.get("weight") or 1) for r in rows)
 
+    def latest_flag_at(self, team_id: str, rule: str) -> datetime | None:
+        rows = self._cp.query(
+            "abuse_events", select=["created_at"],
+            filters=[("team_id", "eq", team_id),
+                     ("event_type", "eq", EVENT_FLAG),
+                     ("rule", "eq", rule)],
+            order="-created_at", limit=1,
+        )
+        return _parse_ts(rows[0].get("created_at")) if rows else None
+
+    def rule_event_between(self, team_id: str, rule: str, after: datetime,
+                          before: datetime) -> bool:
+        rows = self._cp.query(
+            "abuse_events", select=["created_at"],
+            filters=[("team_id", "eq", team_id),
+                     ("event_type", "eq", rule),
+                     ("created_at", "gt", _ensure_aware(after).isoformat()),
+                     ("created_at", "lte", _ensure_aware(before).isoformat())],
+            limit=1,
+        )
+        return bool(rows)
+
     def _team_field(self, team_id: str, field: str):
         rows = self._cp.query("teams", select=[field],
                               filters=[("id", "eq", team_id)])
@@ -277,15 +331,15 @@ class SupabaseAbuseStore:
     def team_flagged_at(self, team_id: str) -> datetime | None:
         return _parse_ts(self._team_field(team_id, "flagged_at"))
 
-    def flag_team(self, team_id: str, event_type: str,
+    def flag_team(self, team_id: str, rule: str,
                   details: dict | None = None,
                   now: datetime | None = None) -> None:
         self._cp.query(
             "teams", method="PATCH", filters=[("id", "eq", team_id)],
             json_body={"flagged_at": _ensure_aware(_utcnow(now)).isoformat()},
         )
-        self.record_event(team_id, EVENT_FLAG,
-                          details={**(details or {}), "rule": event_type})
+        self.record_event(team_id, EVENT_FLAG, rule=rule,
+                          details={**(details or {}), "rule": rule})
 
     def clear_flag(self, team_id: str) -> None:
         self._cp.query("teams", method="PATCH",
@@ -298,7 +352,7 @@ class SupabaseAbuseStore:
         # event atomically; ``now`` accepted for store-protocol parity.
         self._cp.rpc("abuse_suspend", {"p_team_id": team_id})
 
-    def unsuspend_team(self, team_id: str) -> None:
+    def unsuspend_team(self, team_id: str, now: datetime | None = None) -> None:
         self._cp.rpc("abuse_unsuspend", {"p_team_id": team_id})
 
     def team_suspended(self, team_id: str) -> bool:
@@ -335,7 +389,7 @@ def _alert_dict(row: dict) -> dict:
         EVENT_FLAG: f"Suspicious activity flagged ({details.get('rule', 'rule')})",
         EVENT_SUSPEND: "Team auto-suspended due to unusual activity",
         EVENT_AUTH_IP: f"Access from new location: {row.get('country') or 'unknown'}",
-        "read_velocity": "Unusual read velocity detected on an API key",
+        EVENT_READ_VELOCITY: "Unusual read velocity detected on an API key",
     }
     at = row.get("created_at")
     return {
@@ -348,12 +402,11 @@ def _alert_dict(row: dict) -> dict:
 # ── Engine ──────────────────────────────────────────────────────────────────
 
 class AbuseEngine:
-    """Two-stage rule engine over an AbuseStore (scoping deltas 8/13)."""
+    """Two-stage rule engine with per-rule flag episodes (delta 13)."""
 
     def __init__(self, store):
         self.store = store
 
-    # thresholds read at call time so env overrides apply per-process
     def point_threshold(self) -> int:
         return _int_env("TORTOISE_ABUSE_POINT_THRESHOLD", 500)
 
@@ -373,15 +426,16 @@ class AbuseEngine:
         they evaluate on the team's next hooked request)."""
         if abuse_disabled() or not team_id or n <= 0:
             return None
+        now = _ensure_aware(_utcnow(now))
         try:
-            self.store.record_event(team_id, EVENT_POINT_CREATE, weight=n)
+            self.store.record_event(team_id, EVENT_POINT_CREATE, weight=n,
+                                    created_at=now)
         except Exception:
             logger.debug("abuse record_point_create failed for %s", team_id)
         r1 = self._evaluate(team_id, EVENT_POINT_CREATE,
                             self.point_threshold(), self.point_window_s(), now)
         r2 = self._evaluate(team_id, EVENT_KEY_CREATE,
                             self.key_threshold(), self.key_window_s(), now)
-        # suspension outranks flag for the caller's view
         return "suspend" if "suspend" in (r1, r2) else (r1 or r2)
 
     def evaluate_key_creates(self, team_id: str,
@@ -390,53 +444,66 @@ class AbuseEngine:
         if abuse_disabled() or not team_id:
             return None
         return self._evaluate(team_id, EVENT_KEY_CREATE,
-                              self.key_threshold(), self.key_window_s(), now)
+                              self.key_threshold(), self.key_window_s(),
+                              _ensure_aware(_utcnow(now)))
 
-    def _evaluate(self, team_id: str, event_type: str, threshold: int,
-                  window_s: int, now: datetime | None = None) -> str | None:
-        now = _ensure_aware(_utcnow(now))
+    def _evaluate(self, team_id: str, rule: str, threshold: int,
+                  window_s: int, now: datetime) -> str | None:
         try:
-            total = self.store.window_sum(team_id, event_type, window_s, now)
+            total = self.store.window_sum(team_id, rule, window_s, now)
         except Exception:
-            logger.debug("abuse window_sum failed for %s/%s", team_id, event_type)
+            logger.debug("abuse window_sum failed for %s/%s", team_id, rule)
             return None
         if total <= threshold:
             return None
+        details = {"rule": rule, "count": total,
+                   "threshold": threshold, "window_s": window_s}
         try:
-            flagged_at = self.store.team_flagged_at(team_id)
+            flagged_at = self.store.latest_flag_at(team_id, rule)
         except Exception:
             flagged_at = None
-        details = {"rule": event_type, "count": total,
-                   "threshold": threshold, "window_s": window_s}
         if flagged_at is None:
-            # Stage 1 — flag. Durable flagged_at anchors the staging window.
-            try:
-                self.store.flag_team(team_id, event_type, details, now=now)
-            except Exception:
-                logger.debug("abuse flag_team failed for %s", team_id)
-            self._notify("abuse_flag", team_id, details)
-            return "flag"
-        if (now - _ensure_aware(flagged_at)).total_seconds() >= window_s:
-            # Stage 2 — the breach persisted across a full window boundary.
-            try:
-                self.store.suspend_team(team_id, details, now=now)
-            except Exception:
-                logger.debug("abuse suspend_team failed for %s", team_id)
-                return "breach"
-            mark_suspended(team_id)
-            self._notify("abuse_suspended", team_id, details)
-            return "suspend"
-        return "breach"
+            return self._flag(team_id, rule, details, now)
+        flagged_at = _ensure_aware(flagged_at)
+        age_s = (now - flagged_at).total_seconds()
+        if age_s < window_s:
+            return "breach"  # still inside the staging window
+        # The flag is a full window old. Stage 2 requires CONTINUITY — at
+        # least one rule event between the flag and the current window's
+        # start. Without it the breach is a NEW episode after a quiet period:
+        # re-flag, never suspend (code-review fix; delta-13 guarantee).
+        try:
+            continuity = self.store.rule_event_between(
+                team_id, rule, flagged_at,
+                now - timedelta(seconds=window_s))
+        except Exception:
+            continuity = True  # fail-safe toward the conservative path
+        if not continuity:
+            return self._flag(team_id, rule, details, now)
+        try:
+            self.store.suspend_team(team_id, details, now=now)
+        except Exception:
+            logger.debug("abuse suspend_team failed for %s", team_id)
+            return "breach"
+        mark_suspended(team_id)
+        self._notify("abuse_suspended", team_id, details)
+        return "suspend"
+
+    def _flag(self, team_id: str, rule: str, details: dict,
+              now: datetime) -> str:
+        try:
+            self.store.flag_team(team_id, rule, details, now=now)
+        except Exception:
+            logger.debug("abuse flag_team failed for %s", team_id)
+        self._notify("abuse_flag", team_id, details)
+        return "flag"
 
     def _notify(self, kind: str, team_id: str, details: dict) -> None:
         try:
             from tortoise.notify import notify_abuse
-            email = None
-            try:
-                email = self.store.team_email(team_id)
-            except Exception:
-                pass
-            notify_abuse(kind, {"team_id": team_id, "email": email},
+            notify_abuse(kind,
+                         {"team_id": team_id,
+                          "email": _team_email(self.store, team_id)},
                          {**details, "appeal_url": appeal_url()})
         except Exception:
             logger.debug("abuse notify failed (%s, %s)", kind, team_id)
@@ -445,10 +512,13 @@ class AbuseEngine:
 # ── R3: read-velocity tracker (in-memory, notify-only) ─────────────────────
 
 class ReadVelocityTracker:
-    """>100 reads / 5min per-key OR per-team → notify Owner once per window.
+    """>100 reads / 5min per-key OR per-team → notify once per window.
 
     In-memory by design (the 5-min window bounds deploy-reset damage);
-    notify-only per the issue — R3 never suspends.
+    notify-only per the issue — R3 never suspends. The notification goes to
+    the team OWNER (email resolved via the engine store) with the ops inbox
+    as fallback; a best-effort read_velocity event row surfaces the alert in
+    the dashboard list.
     """
 
     def __init__(self, threshold: int | None = None, window_s: int | None = None):
@@ -467,8 +537,7 @@ class ReadVelocityTracker:
         once per window per (scope, id)."""
         if abuse_disabled():
             return None
-        import time as _time
-        now = now if now is not None else _time.time()
+        now = now if now is not None else time.time()
         cutoff = now - self.window_s
         breach: tuple[str, str] | None = None
         with self._lock:
@@ -491,21 +560,35 @@ class ReadVelocityTracker:
             if len(self._by_team) > 10_000:
                 self._by_team = {k: v for k, v in self._by_team.items()
                                  if any(t > cutoff for t in v)}
+            # prune the notify-dedup map too (code-review P3)
+            self._notified = {k: t for k, t in self._notified.items()
+                              if now - t < self.window_s}
             if breach is not None:
                 last = self._notified.get(breach)
                 if last is not None and now - last < self.window_s:
                     return None  # already notified this window
                 self._notified[breach] = now
         if breach is not None:
-            self._notify(breach)
+            self._notify(breach, team_id)
         return breach
 
-    def _notify(self, breach: tuple[str, str]) -> None:
+    def _notify(self, breach: tuple[str, str], team_id: str | None) -> None:
         scope, ident = breach
+        # Dashboard alert row (best-effort; same dedup gate as the notify)
+        store = None
+        try:
+            from tortoise.supabase_control import get_abuse_store
+            store = get_abuse_store()
+            if team_id:
+                store.record_event(team_id, EVENT_READ_VELOCITY,
+                                   details={"scope": scope, "id": ident})
+        except Exception:
+            logger.debug("read-velocity event record failed (%s)", breach)
         try:
             from tortoise.notify import notify_abuse
             notify_abuse("abuse_read_velocity",
-                         {"team_id": ident if scope == "team" else None},
+                         {"team_id": team_id,
+                          "email": _team_email(store, team_id)},
                          {"scope": scope, "id": ident,
                           "threshold": self.threshold,
                           "window_s": self.window_s,
@@ -528,6 +611,10 @@ def record_read(key_id: str | None, team_id: str | None,
 _GEO_CACHE: dict[str, tuple[float, set[str]]] = {}
 _GEO_TTL_S = 86400
 _GEO_LOCK = threading.Lock()
+# per-team geo-notify flood cap (CF-IPCountry is spoofable on Fly-direct —
+# security review): at most N new-country notifications per team per 24h.
+_GEO_NOTIFY_MAX_PER_DAY = 10
+_GEO_NOTIFIED: dict[str, list[float]] = defaultdict(list)
 
 
 def resolve_country(headers) -> str | None:
@@ -543,12 +630,12 @@ def resolve_country(headers) -> str | None:
 
 def check_new_country(team_id: str, country: str | None, store,
                       now: float | None = None) -> bool:
-    """True when the country is new for the team (records auth_ip + notifies).
-    Seen-set cached in-process (24h TTL); durable lookup on cache miss."""
+    """True when the country is new for the team (records auth_ip + notifies
+    the OWNER, flood-capped). Seen-set cached in-process (24h TTL); durable
+    lookup on cache miss."""
     if abuse_disabled() or not team_id or not country:
         return False
-    import time as _time
-    now = now if now is not None else _time.time()
+    now = now if now is not None else time.time()
     with _GEO_LOCK:
         cached = _GEO_CACHE.get(team_id)
         if cached is None or now - cached[0] > _GEO_TTL_S:
@@ -558,17 +645,38 @@ def check_new_country(team_id: str, country: str | None, store,
                 return False  # fail-open: unseen-set unavailable → inactive
             cached = (now, seen)
             _GEO_CACHE[team_id] = cached
+            # evict other expired entries (bounded memory)
+            expired = [t for t, (ts, _) in _GEO_CACHE.items()
+                       if now - ts > _GEO_TTL_S]
+            for t in expired:
+                _GEO_CACHE.pop(t, None)
+                _GEO_NOTIFIED.pop(t, None)
         seen = cached[1]
         if country in seen:
             return False
-        seen.add(country)
+        # flood cap before recording anything
+        stamps = [t for t in _GEO_NOTIFIED[team_id] if now - t < _GEO_TTL_S]
+        _GEO_NOTIFIED[team_id] = stamps
+        if len(stamps) >= _GEO_NOTIFY_MAX_PER_DAY:
+            seen.add(country)  # still track it; just don't notify/event
+            return False
+    recorded = True
     try:
         store.record_event(team_id, EVENT_AUTH_IP, country=country)
     except Exception:
+        recorded = False  # keep trying on subsequent requests
         logger.debug("geo event record failed for %s", team_id)
+    if recorded:
+        with _GEO_LOCK:
+            cached2 = _GEO_CACHE.get(team_id)
+            if cached2 is not None:
+                cached2[1].add(country)
+            _GEO_NOTIFIED[team_id].append(now)
     try:
         from tortoise.notify import notify_abuse
-        notify_abuse("abuse_new_ip", {"team_id": team_id},
+        notify_abuse("abuse_new_ip",
+                     {"team_id": team_id,
+                      "email": _team_email(store, team_id)},
                      {"country": country, "appeal_url": appeal_url()})
     except Exception:
         logger.debug("geo notify failed for %s", team_id)
@@ -578,6 +686,7 @@ def check_new_country(team_id: str, country: str | None, store,
 def reset_geo_cache() -> None:
     with _GEO_LOCK:
         _GEO_CACHE.clear()
+        _GEO_NOTIFIED.clear()
 
 
 # ── Engine singleton seam ───────────────────────────────────────────────────
@@ -587,7 +696,7 @@ _engine_lock = threading.Lock()
 
 
 def get_engine() -> AbuseEngine:
-    """Lazy process-wide engine (tests monkeypatch or reset_engine())."""
+    """Lazy process-wide engine (tests monkeypatch or set_engine())."""
     global _engine
     if _engine is None:
         with _engine_lock:

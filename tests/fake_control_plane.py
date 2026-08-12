@@ -49,11 +49,13 @@ class FakeControlPlane:
         """
         self.rpc_calls.append((fn, dict(body or {})))
         if fn == "abuse_suspend":
+            # Mirrors the SQL: set suspended_at only when NULL; flagged_at is
+            # NOT touched (the engine's flag-episode state is event-derived).
             tid = (body or {}).get("p_team_id")
             for t in self.tables.get("teams", []):
-                if t.get("id") == tid:
-                    t["suspended_at"] = t.get("suspended_at") or "now"
-                    t["flagged_at"] = None
+                if t.get("id") == tid and t.get("suspended_at") is None:
+                    from datetime import datetime, timezone
+                    t["suspended_at"] = datetime.now(timezone.utc).isoformat()
             from datetime import datetime, timezone
             self.tables.setdefault("abuse_events", []).append(
                 {"team_id": tid, "event_type": "suspend", "weight": 1,

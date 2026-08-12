@@ -24,12 +24,17 @@ CREATE TABLE IF NOT EXISTS public.abuse_events (
     weight      integer NOT NULL DEFAULT 1,
     key_id      text,
     country     text,
+    -- rule this row belongs to (point_create/key_create staging rows set it;
+    -- per-rule flag episodes need it indexed — see abuse.py _evaluate)
+    rule        text,
     details     jsonb NOT NULL DEFAULT '{}'::jsonb,
     created_at  timestamptz NOT NULL DEFAULT now()
 );
 
 CREATE INDEX IF NOT EXISTS idx_abuse_events_team_type_time
     ON public.abuse_events (team_id, event_type, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_abuse_events_team_rule_time
+    ON public.abuse_events (team_id, rule, created_at DESC);
 
 -- RLS: service_role manages all; no browser surface reads abuse telemetry.
 ALTER TABLE public.abuse_events ENABLE ROW LEVEL SECURITY;

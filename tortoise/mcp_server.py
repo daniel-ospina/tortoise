@@ -21,7 +21,7 @@ from tortoise.sdk import TortoiseSDK
 from tortoise import monitoring
 from tortoise.mcp_auth import (_current_team_id, _current_team_limits,
                                _transport_mode, _get_team_sdk,
-                               HTTP_ALLOWED, ERR_EXCLUDED)
+                               HTTP_ALLOWED, ERR_EXCLUDED, SELFHOST_TEAM_ID)
 
 _log = logging.getLogger(__name__)
 
@@ -212,16 +212,7 @@ async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None,
         return await _original_call_tool(name, arguments, version=version,
                                          run_middleware=False, task_meta=task_meta)
     team_id = _current_team_id.get() or ""
-    # #308 (R3, scoping delta 11): read-velocity counting for non-write tools.
-    # Explicit write set (WRITE_TOOL_NAMES) — writes never count as reads.
-    # key_id rides the limits ContextVar (Supabase resolutions carry it).
-    try:
-        if team_id and name not in WRITE_TOOL_NAMES:
-            from tortoise import abuse as _abuse
-            limits = _current_team_limits.get() or {}
-            _abuse.record_read(limits.get("key_id"), team_id)
-    except Exception:
-        pass  # best-effort — telemetry never breaks the tool call
+    maybe_record_mcp_read(name, team_id, _current_team_limits.get())
     status, error_kind = "ok", None
     t0 = _time.perf_counter()
     try:
@@ -469,6 +460,23 @@ def _abuse_off() -> bool:
         return abuse_disabled()
     except Exception:
         return True
+
+
+def maybe_record_mcp_read(name: str, team_id: str, limits: dict | None) -> None:
+    """#308 (R3, scoping delta 11): read-velocity counting for non-write
+    tools/call. Explicit write set (WRITE_TOOL_NAMES) — writes never count
+    as reads. key_id rides the limits ContextVar (Supabase resolutions carry
+    it; registry resolutions may not → per-team counting only there).
+    Best-effort: telemetry never breaks the tool call."""
+    try:
+        if not team_id or team_id == SELFHOST_TEAM_ID or _abuse_off():
+            return
+        if name in WRITE_TOOL_NAMES:
+            return
+        from tortoise import abuse as _abuse
+        _abuse.record_read((limits or {}).get("key_id"), team_id)
+    except Exception:
+        pass
 
 
 def _safe(fn, *args, **kwargs):

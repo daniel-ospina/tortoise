@@ -926,8 +926,9 @@ async def get_current_team(request: Request) -> dict:
         else:
             tier, mu, mg, mp, mak, ms = ("free", None, None, None, None, None)
             t_suspended = t_flagged = t_email = None
-        # #308 (R5): durable suspension check (registry mode — MemoryAbuseStore
-        # writes the prop through its registry_write callback).
+        # #308 (R5): durable suspension check (registry mode — the
+        # MemoryAbuseStore registry_write callback wired in
+        # supabase_control.get_abuse_store writes these props).
         if t_suspended is not None:
             raise HTTPException(status_code=403, detail=_suspended_detail())
         from tortoise.pricing import tier_limits
@@ -2368,6 +2369,10 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
         request, team["team_id"], "api_key_create",
         resource_type="api_key", resource_id=kid,
     )
+    # #308 (R2): evaluate key-create velocity after a successful mint —
+    # the trigger recorded the event; a key-rotation attacker who only mints
+    # (no point creates) must still be evaluated (code-review P2).
+    await _abuse_evaluate_keys(team["team_id"])
 
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
 
@@ -2744,6 +2749,8 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
     _record_write_op(team)
     # #308 (R1, delta 8): capture_session creates one Point per turn plus the
     # extracted decision/statement Points — weight by the actual count.
+    # Conservative over-count when turns dedupe is accepted (the dedup check
+    # runs inside the SDK write; recounting here would cost a second query).
     await _abuse_record_points(request, team, len(body.conversation) + len(extracted))
 
     # #722: report the EFFECTIVE method actually used, not the configured
@@ -4084,6 +4091,14 @@ async def agent_signup(request: Request):
     team_memberships + api_keys land in one transaction and the minted key
     resolves via api_keys.lookup_hash. No registry write, no half-team.
     The registry path stays for selfhost."""
+    # #308 (R6 security-review fix): the per-identity limit below is dead by
+    # design (#741: identity is server-side and fresh per request), so the
+    # shared per-IP register bucket (3/hour) is the compensating control for
+    # this mint seam. CAPTCHA itself is intentionally NOT applied here —
+    # headless agents cannot solve a challenge; the IP bucket bounds the
+    # automated team+key minting vector instead.
+    await _check_register_rate_limit(request)
+
     # #741(a): identity is ALWAYS server-side — client-supplied identity and
     # x-device-id are ignored (a client-chosen identity trivially bypasses the
     # per-identity rate limit). The CLI generates its own identity server-side.

@@ -190,7 +190,17 @@ class TestPointBurst:
                 self._post_point(tc, i)
             assert fake.tables["teams"][0]["suspended_at"] is None
             assert tc.get("/v1/team/keys", headers=_auth()).status_code == 200
-        assert [c[0] for c in env["notified"]].count("abuse_flag") >= 1
+            # quiet → burst AFTER the window: a new episode re-flags, never
+            # suspends on its first evaluation (stale-flag protection)
+            past = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+            for e in fake.tables["abuse_events"]:
+                if e["event_type"] in ("flag", "point_create"):
+                    e["created_at"] = past
+            self._post_point(tc, 50)
+            for i in range(5):
+                self._post_point(tc, 51 + i)
+            assert fake.tables["teams"][0]["suspended_at"] is None
+        assert [c[0] for c in env["notified"]].count("abuse_flag") >= 2
 
     def test_boundary_crossing_suspends_and_403(self, env):
         """A breach persisting past flagged_at + window suspends (delta 13).
@@ -201,10 +211,19 @@ class TestPointBurst:
             for i in range(6):
                 self._post_point(tc, i)
             assert fake.tables["teams"][0]["flagged_at"] is not None
-            # age the flag a full window into the past (events stay fresh →
-            # the window sum still breaches)
+            # Age the flag EPISODE anchor (the flag event row — staging is
+            # event-derived) a full window into the past, and move ONE point
+            # event into the continuity band (flag, now-window] so the breach
+            # genuinely spans the boundary. The rest stay fresh → the window
+            # sum still breaches.
             past = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
-            fake.tables["teams"][0]["flagged_at"] = past
+            band = (datetime.now(timezone.utc) - timedelta(minutes=90)).isoformat()
+            flag_rows = [e for e in fake.tables["abuse_events"]
+                         if e["event_type"] == "flag"]
+            flag_rows[0]["created_at"] = past
+            point_rows = [e for e in fake.tables["abuse_events"]
+                          if e["event_type"] == "point_create"]
+            point_rows[0]["created_at"] = band  # continuity evidence
             self._post_point(tc, 99)  # evaluation now crosses the boundary
             assert fake.tables["teams"][0]["suspended_at"] is not None
             # next authed request 403s with the SUSPENDED contract
@@ -296,6 +315,11 @@ class TestExfiltration:
                     if c[0] == "abuse_read_velocity"]
         assert len(velocity) == 1
         assert velocity[0][2]["scope"] == "key"
+        # key-scope breach notifies the team OWNER (email resolved), not ops
+        assert velocity[0][1]["email"] == "owner@abuse.test"
+        # the breach also lands in the dashboard alert history
+        alerts = SupabaseAbuseStore(env["fake"]).recent_alerts(TEAM)
+        assert any(a["type"] == "read_velocity" for a in alerts)
 
     def test_fanout_team_velocity(self, env):
         """Two keys under the per-key limit, 101 together → team notify."""
@@ -338,6 +362,9 @@ class TestGeo:
         ip_events = [e for e in fake.tables["abuse_events"]
                      if e["event_type"] == "auth_ip"]
         assert {e["country"] for e in ip_events} == {"US", "DE"}
+        # R4 notifies the OWNER (email resolved from the team row)
+        geo = [c for c in env["notified"] if c[0] == "abuse_new_ip"]
+        assert geo and all(c[1]["email"] == "owner@abuse.test" for c in geo)
 
     def test_no_header_fail_open(self, env):
         with TestClient(env["app"]) as tc:
@@ -449,6 +476,26 @@ class TestMintGateAndAlerts:
         finally:
             env["app"].dependency_overrides.clear()
 
+    def test_alerts_reachable_while_suspended(self, env):
+        """Delta 12: the alert history must stay visible during suspension
+        (session auth — the API-key routes 403 by design)."""
+        from tortoise.hosted_api import get_current_user
+        fake = env["fake"]
+        fake.seed("team_memberships", [{
+            "user_id": "user-1", "team_id": TEAM, "role": "owner",
+            "status": "active", "team_name": "abuse-team"}])
+        SupabaseAbuseStore(fake).flag_team(TEAM, "point_create", {"count": 6})
+        fake.rpc("abuse_suspend", {"p_team_id": TEAM})
+        env["app"].dependency_overrides[get_current_user] = \
+            lambda: {"user_id": "user-1"}
+        try:
+            with TestClient(env["app"]) as tc:
+                r = tc.get(f"/v1/team/alerts?team_id={TEAM}")
+            assert r.status_code == 200
+            assert any(a["type"] == "flag" for a in r.json()["alerts"])
+        finally:
+            env["app"].dependency_overrides.clear()
+
     def test_alerts_require_membership(self, env):
         from tortoise.hosted_api import get_current_user
         env["app"].dependency_overrides[get_current_user] = \
@@ -551,21 +598,100 @@ class TestIntrospection:
                 f"{method} must NOT record point_create"
 
     def test_no_write_tool_counted_as_read(self):
-        """The R3 read surface is the complement of an explicit write set —
-        assert the set contains every wrapped write tool (incl. ingest)."""
+        """Drift guard (code-review fix — the old version was a tautology):
+        extract the ACTUAL _quota_gated wrap sites from source and assert
+        every one is classified as a write in WRITE_TOOL_NAMES via the pinned
+        method→tool map. A new wrapped write tool with no map entry fails
+        here; a mapped tool missing from WRITE_TOOL_NAMES fails here too."""
+        import re
         import tortoise.mcp_server as ms
-        wrapped = set(re_find_wrapped(ms))
-        assert wrapped <= ms.WRITE_TOOL_NAMES
+        src = Path(ms.__file__).read_text()
+        wrapped_methods = set(re.findall(
+            r"_quota_gated\(_get_team_sdk\(\)\.(\w+)", src))
+        # pinned method→tool map (the write surface as designed)
+        method_to_tool = {
+            "create_point": "tortoise_create_point",
+            "update_point": "tortoise_update_point",
+            "create_operator": "tortoise_create_operator",
+            "mitigate_operator": "tortoise_mitigate_operator",
+            "file_decision": "tortoise_file_decision",
+            "file_human_approval": "tortoise_file_human_approval",
+            "invalidate_point": "tortoise_invalidate",
+            "supersede": "tortoise_supersede",
+            "retract_point": "tortoise_retract_point",
+            "checkpoint": "tortoise_checkpoint",
+            "diary_write": "tortoise_diary_write",
+            "create_entity": "tortoise_create_entity",
+            "update": "tortoise_update",
+            "annotate_operator": "tortoise_operator_action",
+            "create_subject": "tortoise_create_subject",
+            "create_object": "tortoise_create_object",
+            "create_event": "tortoise_create_event",
+            "create_document": "tortoise_create_document",
+            "create_source": "tortoise_create_source",
+            "assess_source": "tortoise_assess_source",
+            "update_entity": "tortoise_update_entity",
+            "create_edge": "tortoise_create_edge",
+            "ingest": "tortoise_ingest",
+        }
+        # every wrap site must be a known write method (new wrap → fail here)
+        unknown = wrapped_methods - set(method_to_tool)
+        assert not unknown, f"unmapped _quota_gated wrap sites: {unknown}"
+        # every wrap site's tool must be classified as a WRITE (never a read)
+        missing = {method_to_tool[m] for m in wrapped_methods} - ms.WRITE_TOOL_NAMES
+        assert not missing, f"write tools missing from WRITE_TOOL_NAMES: {missing}"
 
+    def test_mcp_read_hook_classification(self, monkeypatch):
+        """maybe_record_mcp_read: writes skipped, reads counted, selfhost and
+        no-team skipped, kill-switch respected."""
+        import tortoise.mcp_server as ms
+        import tortoise.abuse as abuse_mod
+        calls = []
+        monkeypatch.setattr(abuse_mod, "record_read",
+                            lambda key_id, team_id, now=None:
+                            calls.append((key_id, team_id)))
+        ms.maybe_record_mcp_read("tortoise_search", "team-x",
+                                 {"key_id": "k1"})
+        assert calls == [("k1", "team-x")]
+        ms.maybe_record_mcp_read("tortoise_create_point", "team-x",
+                                 {"key_id": "k1"})
+        ms.maybe_record_mcp_read("tortoise_ingest", "team-x", {"key_id": "k1"})
+        assert len(calls) == 1  # write tools never count as reads
+        ms.maybe_record_mcp_read("tortoise_search", "", {})
+        ms.maybe_record_mcp_read("tortoise_search", "selfhost", {})
+        assert len(calls) == 1  # no-team + selfhost skipped
+        monkeypatch.setenv("TORTOISE_ABUSE_DISABLED", "1")
+        ms.maybe_record_mcp_read("tortoise_search", "team-x", {})
+        assert len(calls) == 1  # kill-switch respected
 
-def re_find_wrapped(ms):
-    import re
-    src = Path(ms.__file__).read_text()
-    # every `_quota_gated(_get_team_sdk().X` wrap site + the two additions
-    for m in re.finditer(r"_quota_gated\(_get_team_sdk\(\)\.\w+,\s*\"points\"", src):
-        pass  # names extracted below via tool registry correlation
-    from tortoise.tool_registry import get_http_allowed
-    # The HTTP surface is the registered tool set; write-ness is asserted by
-    # WRITE_TOOL_NAMES ⊇ _QUOTA_GATED + explicit additions in the other test.
-    return list(ms._QUOTA_GATED) + ["tortoise_ingest",
-                                    "tortoise_onboarding_demo_create"]
+    def test_weight_arithmetic_pins(self):
+        """The bulk-weight arithmetic AC1 depends on, pinned against the
+        SDK result shapes (a shape drift → weight 0 → R1 bypass on the
+        largest bulk surface; code-review P2)."""
+        ingest_result = {"granularity": "bulk",
+                         "created": {"points": 613, "entities": 2,
+                                     "sources": 1, "connections": 4}}
+        w_ingest = int(((ingest_result or {}).get("created") or {}).get("points") or 0)
+        assert w_ingest == 613
+        checkpoint_result = {"filed": 42, "duplicates": 3}
+        w_checkpoint = int((checkpoint_result or {}).get("filed") or 0)
+        assert w_checkpoint == 42
+        options, evidence = ["a", "b"], [{"u": 1}]
+        w_decision = 1 + len(options or []) + len(evidence or [])
+        assert w_decision == 4
+        # degenerate shapes must degrade to 0, never raise
+        assert int(((None or {}).get("created") or {}).get("points") or 0) == 0
+        assert int(({}).get("filed") or 0) == 0
+        # and the REAL call sites still read those exact shape keys (drift
+        # tripwire: a renamed SDK return key fails here, not in production)
+        import tortoise.mcp_server as ms
+        src = Path(ms.__file__).read_text()
+        i_ingest = src.find("_get_team_sdk().ingest,")
+        assert i_ingest != -1 and '.get("points")' in src[i_ingest:i_ingest + 400]
+        i_ckpt = src.find("_get_team_sdk().checkpoint,")
+        assert i_ckpt != -1 and '.get("filed")' in src[i_ckpt:i_ckpt + 400]
+        # capture_session weight lives in hosted_api (REST seam)
+        import tortoise.hosted_api as ha
+        ha_src = Path(ha.__file__).read_text()
+        i_cap = ha_src.find("len(body.conversation) + len(extracted)")
+        assert i_cap != -1  # capture_session weights actual created Points
