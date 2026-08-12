@@ -161,6 +161,58 @@ def test_seq_is_monotonic_under_concurrency(sdk_factory, tmp_path):
         assert sorted(seqs) == seqs and len(set(seqs)) == len(seqs),             f"non-monotonic or duplicate seqs: {seqs}"
 
 
+def test_seq_is_monotonic_under_concurrency_live_falkor():
+    """TRUE cross-worker atomicity on ONE shared live graph (#942).
+
+    The embedded sibling test documents that real cross-worker atomicity
+    needs a live FalkorDB — this is that path, run by CI's
+    test-concurrency-falkor job (TORTOISE_DB_URI=docker://...). Skips
+    visibly everywhere else. Deliberately does NOT use sdk_factory (it mints
+    isolated embedded files — the vacuous pattern this test replaces).
+    """
+    import os
+    import threading
+
+    from _live_utils import _skip_unless_live_uri
+    from tortoise.projection import FalkorProjection
+    from tortoise.sdk import TortoiseSDK
+
+    _skip_unless_live_uri()
+    uri = os.environ["TORTOISE_DB_URI"]
+
+    # Reset the shared graph (test-prefixed name passes _assert_test_graph).
+    proj = FalkorProjection.from_uri(uri, graph_name="test_live_seq_tortoise")
+    proj.g.query("MATCH (n) DETACH DELETE n")
+    proj.close()
+
+    # Warm-up: install the event schema + seq counter deterministically
+    # before the threads race (next_seq is a server-side atomic MERGE).
+    warm = TortoiseSDK(namespace="test_live_seq")
+    assert warm._db_uri, "live test must resolve the URI backend (not embedded)"
+    warm.create_point("statement", "warmup")
+    warm.close()
+
+    errors, per_worker = [], []
+
+    def worker(i):
+        try:
+            s = TortoiseSDK(namespace="test_live_seq")
+            s.create_point("statement", f"live-c{i}")
+            per_worker.append([e["seq"] for e in _events(s._get_proj())])
+            s.close()
+        except Exception as e:  # pragma: no cover
+            errors.append(e)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    assert not errors, errors
+    union = sorted({seq for seqs in per_worker for seq in seqs})
+    assert union == list(range(1, len(union) + 1)), (
+        f"global seqs not contiguous 1..N — lost or duplicate seqs: {union}")
+    assert len(union) >= 8, f"expected >= 8 events (warmup + 8 workers), got {len(union)}"
+
+
 def test_purge_expired_removes_old_events(sdk_factory, tmp_path):
     """Task 7: events older than retention_days are purged (ts cutoff)."""
     from datetime import datetime, timedelta, timezone

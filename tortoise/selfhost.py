@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -63,15 +64,16 @@ if _auth_mode() == "none" and HOST not in _LOOPBACK_HOSTS:
     )
 
 
-# ⚠️ Embedded-mode durability warning (2026-08-05 incident #101: AOF-off,
-# no automated backups, empty-state RDB re-save failed → 5,748 points lost).
-# Embedded FalkorDBLite is for EVAL/DEV only — back up or use TORTOISE_DB_URI.
+# ⚠️ Embedded-mode single-writer warning (#942; historical: 2026-08-05 incident
+# #101 — AOF-off, no automated backups, empty-state RDB re-save failed → 5,748
+# points lost). Since #915 embedded is AOF-durable for ONE process; the residual
+# boundary is CONCURRENT WRITERS — embedded FalkorDBLite is single-writer,
+# eval-only. Back up or use TORTOISE_DB_URI / docker compose for anything else.
 if not os.environ.get("TORTOISE_DB_URI"):
-    _logger.warning(
-        "tortoise selfhost: EMBEDDED MODE (no TORTOISE_DB_URI) — NOT durable. "
-        "For production use TORTOISE_DB_URI (FalkorDB with AOF) or the "
-        "docker-compose reference. See docs/license-notes.md / infra-runbook."
-    )
+    from tortoise._embedded import EMBEDDED_EVAL_BANNER
+
+    print(f"tortoise selfhost: {EMBEDDED_EVAL_BANNER}", file=sys.stderr)
+    _logger.warning(EMBEDDED_EVAL_BANNER)
 
 _ALLOWED_HOSTS = [o.split("//")[1].split("/")[0] for o in ALLOWED_ORIGINS if "//" in o]
 

@@ -303,11 +303,52 @@ def test_serve_http_namespace_note_all_modes_tilde_expansion(monkeypatch, capsys
         db_file.unlink(missing_ok=True)
 
 
+def test_serve_http_embedded_banner_stderr(monkeypatch, tmp_path, capsys):
+    """#942: embedded (no TORTOISE_DB_URI) + default auth tenant → rc==0 and
+    the loud SINGLE-WRITER / EVAL-ONLY banner on stderr (auth-independent)."""
+    from tortoise.__main__ import main
+
+    _patch_serve_runtime(monkeypatch, tmp_path)
+    rc = main(["serve", "--http"])
+    err = capsys.readouterr().err
+    assert rc == 0
+    assert "SINGLE-WRITER" in err and "EVAL ONLY" in err
+    assert "reachable on your network" not in err
+
+
+def test_serve_http_uri_branch_no_banner(monkeypatch, tmp_path, capsys):
+    """#942 negative pin: the embedded banner must NOT fire when
+    TORTOISE_DB_URI is a supported URI. Order matters: _patch_serve_runtime
+    DELENVS TORTOISE_DB_URI, so patch FIRST, then set the URI (monkeypatch
+    restores both at teardown)."""
+    from tortoise.__main__ import main
+
+    _patch_serve_runtime(monkeypatch, tmp_path)
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:falkordb@localhost:6379/tortoise")
+    rc = main(["serve", "--http"])
+    assert rc == 0
+    assert "SINGLE-WRITER" not in capsys.readouterr().err
+
+
+def test_key_create_embedded_warns(monkeypatch, tmp_path, capsys):
+    """#942: minting a team key on an embedded DB warns on stderr (the
+    key-mint moment is the team-mode enforcement point) — rc stays 0 and the
+    key still prints to stdout. Never touches the real ~/.tortoise db."""
+    from tortoise.__main__ import main
+
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "t.db"))
+    rc = main(["key", "create", "--name", "t"])
+    captured = capsys.readouterr()
+    assert "SINGLE-WRITER" in captured.err and "EVAL ONLY" in captured.err
+    assert rc == 0
+    assert "tt_" in captured.out, "key must still print to stdout"
+
+
 def test_serve_http_allowed_hosts_flag(monkeypatch, tmp_path):
     """--allowed-hosts feeds the Host guard verbatim (arbitrary hostnames /
     DNS names clients use that aren't the bind address)."""
     from tortoise.__main__ import main
-
     calls = _patch_serve_runtime(monkeypatch, tmp_path)
     rc = main(["serve", "--http", "--auth", "none",
                "--allowed-hosts", "mybox.local,10.0.0.7"])

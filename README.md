@@ -22,11 +22,24 @@ A product of [Premise Labs](https://premiselabs.co).
 New to Tortoise? Choose a path:
 
 - **Hosted (managed)** — no install, just connect your agent: [docs/quickstart-cloud.md](docs/quickstart-cloud.md)
-- **Self-hosted (run it yourself)** — requires **Python ≥ 3.12**:
+- **Self-hosted — durable (recommended): Docker compose.** Runs the daemon
+  plus a FalkorDB sidecar (AOF, named volume, healthcheck) from the repo root:
+
+  ```bash
+  git clone https://github.com/daniel-ospina/tortoise.git && cd tortoise
+  docker compose up -d          # daemon on http://localhost:8000 (MCP at /mcp)
+  ```
+
+  Durable multi-writer: the compose sidecar is the supported team/production
+  path. For a single-agent eval without Docker, use the pip path below —
+  embedded FalkorDBLite is SINGLE-WRITER / EVAL-ONLY (concurrent writers lose data).
+
+- **Self-hosted — single-agent eval (no Docker):** requires **Python ≥ 3.12**:
 
   ```bash
   git clone https://github.com/daniel-ospina/tortoise.git && cd tortoise
   pip install -e .                         # or: pip install -e '.[embeddings]' for vector search
+  python -m tortoise.selfhost              # embedded FalkorDBLite — SINGLE-WRITER, eval only
   # or straight from GitHub (no clone):
   pip install git+https://github.com/daniel-ospina/tortoise.git
   ```
@@ -80,8 +93,8 @@ python -m tortoise.selfhost # run the daemon locally (see env table below)
 
 | Env var | Default | Purpose |
 |---|---|---|
-| `TORTOISE_DB_URI` | — | Durable FalkorDB connection string (recommended) |
-| `TORTOISE_DB_PATH` | `/data/tortoise.db` | Embedded FalkorDBLite eval path (AOF-durable to ≤1s since #915; delete the db + `<db>-appendonlydir` to reset) |
+| `TORTOISE_DB_URI` | — | Durable FalkorDB connection string — the recommended path (docker compose sidecar or managed Cloud); multi-writer safe |
+| `TORTOISE_DB_PATH` | `~/.tortoise/tortoise.db` | Embedded FalkorDBLite eval path — SINGLE-WRITER, eval only (concurrent writers lose data); AOF-durable to ≤1s for ONE process since #915; delete the db + `<db>-appendonlydir` to reset |
 | `TORTOISE_API_KEY` | unset | Set → `auth_mode=static` (Bearer key); unset → `auth_mode=none` — ⚠️ a non-localhost bind with no key exposes an unauthenticated engine |
 | `TORTOISE_HOST` / `TORTOISE_PORT` | `127.0.0.1` / `8000` | Daemon bind |
 | `TORTOISE_RATE_LIMIT` | `100` | Requests per minute per IP (MCP SSE bursts ≈ 5–10 req/call) |
@@ -116,7 +129,7 @@ Tortoise is **Business Source License 1.1** — see [LICENSE](LICENSE) and the [
 
 **`daniel-ospina/tortoise` (this repo)** is the **full product** — graph runtime, SDK, MCP server, self-host daemon + docker compose, Fly.io deployment config (`fly.toml`), Dockerfile.selfhost, embedded reaper, Supabase edge functions (`supabase/functions/tenant-provision/`), backup pipeline, and the hosted dashboard (`website/` dir → Cloudflare Pages). This is the canonical source of truth. If you want to deploy Tortoise (self-host or hosted), this is the only repo you need.
 
-**`daniel-ospina/premise-labs`** is a **partial copy** of the tortoise tree used as an **SDK-import surface** by dependent repos (notably `daniel-ospina/swarm`, which sets `PYTHONPATH` to import `tortoise/projection.py`, `tortoise/ids.py`, `tortoise/pipeline_cli.py`, and `config/` from it). It is **not** the full product — it lacks `docker-compose.yml`, `Dockerfile.selfhost`, `tortoise/embedded_reaper.py`, `tortoise/selfhost.py`, `fly.toml`, and `supabase/functions/tenant-provision/`. It also carries an outdated `.env.example` (port `:6379` in the URI example vs `FALKORDB_PORT=16379`; this repo uses `:16379` consistently).
+**`daniel-ospina/premise-labs`** is a **partial copy** of the tortoise tree used as an **SDK-import surface** by dependent repos (notably `daniel-ospina/swarm`, which sets `PYTHONPATH` to import `tortoise/projection.py`, `tortoise/ids.py`, `tortoise/pipeline_cli.py`, and `config/` from it). It is **not** the full product — it lacks `docker-compose.yml`, `Dockerfile.selfhost`, `tortoise/embedded_reaper.py`, `tortoise/selfhost.py`, `fly.toml`, and `supabase/functions/tenant-provision/`. It also carries an outdated `.env.example` (a passwordless `:6379` URI example vs this repo's canonical `docker://:falkordb@localhost:6379/tortoise` — compose publishes 127.0.0.1:6379).
 
 **Guidance:** if you clone `premise-labs` for swarm imports, also clone `tortoise` for deployment infrastructure. `premise-labs` is SDK-only — it cannot run a Tortoise server. (#761)
 

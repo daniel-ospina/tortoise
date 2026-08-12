@@ -17,6 +17,7 @@ from fastmcp.exceptions import (AuthorizationError, FastMCPError, ToolError,
 from mcp.types import ToolAnnotations
 from pydantic import ValidationError as PydanticValidationError
 from tortoise.auth import is_dev_mode as _is_dev_mode
+from tortoise.config import is_db_uri as _is_db_uri
 from tortoise.sdk import TortoiseSDK
 from tortoise import monitoring
 from tortoise.mcp_auth import (_current_team_id, _transport_mode, _get_team_sdk,
@@ -1194,6 +1195,16 @@ def main():
                 "Override with TORTOISE_ALLOW_EMBEDDED=1 (test only)."
             )
             sys.exit(1)
+    # #942: embedded FalkorDBLite is SINGLE-WRITER / EVAL-ONLY. `not uri` is
+    # NOT the predicate — _get_sdk treats a bare-path TORTOISE_DB_URI as
+    # embedded (backward compat), and that path must warn too. Placed AFTER
+    # the config-error guard above so a missing-config exit stays clean.
+    # Single-fire: `tortoise serve` stdio and the tortoise-serve console
+    # script both funnel here; no other entrypoint prints it for stdio.
+    if not _is_db_uri(uri):
+        from tortoise._embedded import EMBEDDED_EVAL_BANNER
+
+        print(EMBEDDED_EVAL_BANNER, file=sys.stderr)
     mcp.run(transport="stdio")
 
 

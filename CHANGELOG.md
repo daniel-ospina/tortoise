@@ -4,6 +4,34 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Self-hosted trust (#942)
+
+The durable multi-writer path is now the documented default; embedded
+FalkorDBLite is honestly bounded to single-writer eval.
+
+- **Docs flip**: README quickstart, docs/quickstart-selfhosted.md,
+  website/self-hosted.html, and infra-runbook §4.5 lead with
+  `docker compose up -d` (daemon + FalkorDB sidecar: AOF, named volume,
+  healthcheck, loopback-published sidecar port). Embedded is labeled
+  single-agent eval only everywhere; the self-hosted.html comparison table
+  is now a decision table; `.env.example`/canonical host URI unified on
+  `docker://:falkordb@localhost:6379/tortoise`.
+- **CI proof**: new pre-merge job `test-concurrency-falkor` runs the TRUE
+  cross-worker concurrency tests against a real `falkordb/falkordb-server`
+  service container (`test_seq_is_monotonic_under_concurrency_live_falkor`
+  — 8 workers, one shared graph, contiguous global seqs; and
+  `test_concurrent_writers_live_falkor_no_lost_writes` — 5 processes, no
+  lost writes). Both skip visibly when `TORTOISE_DB_URI` is unset; the job
+  fails if they skip (anti-vacuity guard) and enforces the docs flip with a
+  consistency grep.
+- **Honest guard**: embedded mode now emits a loud SINGLE-WRITER / EVAL-ONLY
+  banner at every runtime entrypoint — `serve --http` (any auth mode), the
+  daemon, the stdio MCP entrypoint (`tortoise serve` /
+  `python -m tortoise.mcp_server`), `tortoise key create` (the team-mode
+  minting moment), and `tortoise init`. `--auth tenant` on embedded is
+  marked single-agent eval only (decision: WARN, not refuse — documented in
+  #942).
+
 ### Added — service model (#338)
 
 Tortoise is repositioned from a pip library to a **service** (MongoDB-style):
