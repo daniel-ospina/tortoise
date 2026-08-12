@@ -1053,7 +1053,9 @@ class CreatePointRequest(BaseModel):
     @classmethod
     def valid_kind(cls, v: str) -> str:
         from tortoise.domain_loader import known_kinds
-        allowed = known_kinds()
+        # #951: consume the same compiled vocabulary as the SDK — the adapter's
+        # pointKind bucket (pack_registry canonical). Block posture unchanged.
+        allowed = known_kinds("pointKind")
         if v not in allowed:
             raise ValueError(f"kind must be one of {sorted(allowed)}")
         return v

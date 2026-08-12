@@ -6043,11 +6043,13 @@ class TortoiseSDK:
     def _validate_kind(kind: str) -> None:
         # ponytail: open-ended kind vocabularies — any string accepted.
         # Warning for unrecognized values; domain_loader.register_kind() can suppress.
-        if kind not in known_kinds():
+        # #951: vocabulary source is the domain_loader adapter — the compiled
+        # pack pointKind bucket (pack_registry canonical, plan §5.2 boundary 4).
+        if kind not in known_kinds("pointKind"):
             _logger.warning(
                 "Unrecognized pointKind %r. Known values: %s. "
                 "Use tortoise.domain_loader.register_kind(%r) to register it.",
-                kind, sorted(known_kinds()), kind,
+                kind, sorted(known_kinds("pointKind")), kind,
             )
 
 

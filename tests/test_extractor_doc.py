@@ -402,23 +402,22 @@ def test_domain_pointkind_injection():
 
 
 def test_domain_unrecognized_kind_warning():
-    """_warn_unrecognized_kinds is best-effort — it calls kind_is_known(k, 'pointKind')
-    which only takes 1 arg, so the TypeError is caught and no warning prints.
-
-    This is a known ponytail: validation gate, not a blocker.
-    """
+    """_warn_unrecognized_kinds uses the 2-arg kind_is_known(kind, 'pointKind')
+    (#951 — previously a silent TypeError, research-r6 §1.2): known kinds stay
+    silent, unknown kinds print a warning (best-effort, never blocks)."""
     import sys, io
     from tortoise.extractor import _warn_unrecognized_kinds
 
-    # All calls are no-ops (TypeError → except pass)
+    # Known kinds → no warning
     sys.stderr = io.StringIO()
     _warn_unrecognized_kinds({"statement", "decision"})
     assert sys.stderr.getvalue() == ""
 
-    # Unrecognized kinds also produce no warning
+    # Unrecognized kinds → warning names them (fix: no longer swallowed)
     sys.stderr = io.StringIO()
     _warn_unrecognized_kinds({"statement", "bogusValue"})
-    assert sys.stderr.getvalue() == ""
+    out = sys.stderr.getvalue()
+    assert "bogusValue" in out
 
     print("PASS test_domain_unrecognized_kind_warning")
 
