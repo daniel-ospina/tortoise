@@ -28,7 +28,7 @@ doc_status: live
 > 10. §4.1: content-addressed Point ids (`pt_<sha>`) sanctioned as an id form (ULID preference retained).
 > 11. §4.1: `c_cal` (calibrated confidence) + stored `quote` (≤200 chars provenance quote) registered.
 > 12. §4.3: `passes_frequency_gate` registered on Object (S5 gate-result flag).
-> 13. §4.1/§4.3/§4.5/§4.6: `is_episodic` registered on Object/Event/Source/Point — plus the `:Session` capture node (§4.5 note) (quota exemption discriminator).
+> 13. §4.1/§4.5/§4.6: `is_episodic` registered on Point/Event/Source — plus the `:Session` capture node (§4.5 note) (quota exemption discriminator; NOT on Object/Document — plan §4.3 #13 entity set, review P2 PR #973).
 >
 > **Changelog v3.5 (2026-08-11, epic #898 — reification rule):**
 > - §8: Reification rule added — an edge carries an operator only when it needs
@@ -277,8 +277,6 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | `createdAt` | ISO8601 | ✅ | `dc:created` | ✅ | Timestamp (set ON CREATE) |
 | `updatedAt` | ISO8601 | — | `dc:modified` | ❌ | **Not written by `_upsert_object`** — planned follow-up |
 | `passes_frequency_gate` | bool | — | — | ❌ | S5 frequency-gate result flag — false entities are still written, flagged (registered #909 §4.3 #12; planned for the capture path, slice 5+) |
-| `is_episodic` | bool | — | — | ❌ | Quota exemption discriminator (registered #909 §4.3 #13; planned for the capture path — backfill for legacy nodes ships with #947) |
-
 > **Responsibility fields (authoredBy / ownedBy / managedBy) are EDGES, not node properties** — see §3.5-3.6. `_upsert_object` does not store them as properties; they exist as graph edges to Subject nodes.
 
 ### §4.4 Document (subclass of Object)
@@ -352,7 +350,7 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | format | — | — | — | format | format | — |
 | aboutEdges | ✅ | — | ✅ | ✅ | ✅ | — |
 | temporal | validFrom/To | — | — | — | startedAt/endedAt | — |
-| is_episodic | ❌ | — | ❌ | ❌ (inherits Object) | ❌ | ❌ |
+| is_episodic | ✅ | — | ❌ | — | ✅ | ✅ |
 | passes_frequency_gate | — | — | ❌ | ❌ (inherits Object) | — | — |
 
 ---
