@@ -5062,6 +5062,11 @@ async def claim_status(request: Request, api_key: str | None = None):
     mint (RLS hides NULL-user_id rows from authenticated, so the welcome
     page cannot see the anon owner row directly).
 
+    #1082 review P1-2: the key travels via the ``X-Claim-Key`` header — a
+    query-string api_key would land in access logs (the key is the graph
+    read/write credential). The query param is retained as a DEPRECATED
+    fallback for legacy callers.
+
     Returns:
         {"claimable": true, "team_id": ...}  — key resolves to an unclaimed
             anon team; the user should claim it (dashboard claim card)
@@ -5072,6 +5077,9 @@ async def claim_status(request: Request, api_key: str | None = None):
         {"claimable": false, "need_key": true}  — no key presented
     """
     session = await verify_session_jwt(request)  # 401 on invalid
+    # P1-2: header is the primary carrier (key must not ride the query
+    # string into access logs); the query param is a DEPRECATED fallback.
+    api_key = request.headers.get("X-Claim-Key") or api_key
     if not api_key or not api_key.startswith("tt_"):
         return {"claimable": False, "need_key": True}
     from tortoise.supabase_control import (

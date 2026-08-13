@@ -212,12 +212,17 @@ BEGIN
          WHERE id = v_existing_row_id;
     ELSE
         -- ── Step 5: plain claim — link the verified user to the owner row
-        -- and clear the anon identity anchor.
+        -- and clear the anon identity anchor. The `user_id IS NULL` conjunct
+        -- is the race guard (#1082 review P1-1): under READ COMMITTED a
+        -- concurrent claim's UPDATE re-evaluates EPQ against the new row
+        -- version — with only `id` it would match again and silently
+        -- overwrite (last-writer-wins defeats first-claim-wins). With the
+        -- conjunct, the loser's UPDATE affects 0 rows → already_claimed.
         UPDATE public.team_memberships
            SET user_id   = p_user_id,
                identity  = NULL,
                updated_at = now()
-         WHERE id = v_owner_row_id;
+         WHERE id = v_owner_row_id AND user_id IS NULL;
 
         IF NOT FOUND THEN
             -- Lost the row to a concurrent claim — first-claim-wins.

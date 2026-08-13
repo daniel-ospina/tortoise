@@ -358,15 +358,15 @@
     const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InliZXR3aWNodXJhamJmc3dmZXFhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODUyNzgzNDYsImV4cCI6MjEwMDg1NDM0Nn0.YHysJAebPualDNDQTU5bnGBUHg5guLe8eBadm0LiEiY";
     const WELCOME_URL = "/welcome.html";
     // #1082 (PR1): claim-intent routing — when a claimable tt_ key is stored
-    // (parent-domain cookie written by the dashboard claim card), OAuth must
+    // (sessionStorage written by the dashboard claim card), OAuth must
     // land on the dashboard CLAIM ROUTE (?claim=1), NEVER welcome.html (its
     // Phase-2 mint would orphan the claimable anon team). Password-recovery
     // links keep WELCOME_URL (unchanged).
     const DASHBOARD_URL = "https://app.premiselabs.co";
     function claimRedirectTarget() {
       try {
-        const m = document.cookie.match(/(?:^|; )tt_claim_key=([^;]*)/);
-        if (m && decodeURIComponent(m[1]).startsWith("tt_")) {
+        const k = sessionStorage.getItem("tt_claim_key");
+        if (k && k.startsWith("tt_")) {
           return DASHBOARD_URL + "/?claim=1";
         }
       } catch (e) { /* fall through to welcome */ }

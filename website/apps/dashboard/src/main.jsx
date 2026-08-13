@@ -7,33 +7,13 @@ const KEY_STORAGE = 'tortoise_api_key'
 // #1082 (PR1): the pasted claim key must survive the OAuth redirect (same-tab
 // PKCE round-trip). sessionStorage is origin-scoped and same-tab — NEVER put
 // the key in `redirectTo` (GoTrue embeds it in the OAuth state URL → leak).
+// #1082 review P1-2: sessionStorage ONLY — a parent-domain cookie would
+// expose the raw tt_ credential to every .premiselabs.co subdomain for its
+// TTL (any XSS on any subdomain reads document.cookie).
 const CLAIM_KEY_STORAGE = 'tt_claim_key'
-// Parent-domain claim-key cookie (Domain=.premiselabs.co, same pattern as the
-// sb-tortoise-auth-token session cookie): lets the WELCOME page and the
-// signup/signin pages (tortoise.premiselabs.co) see the claim intent from the
-// dashboard (app.premiselabs.co) — the welcome Phase-2 mint guard + the
-// ?claim=1 routing depend on it. Secure + SameSite=Lax; 7-day expiry.
-const CLAIM_COOKIE = 'tt_claim_key'
-const CLAIM_COOKIE_DOMAIN = '.premiselabs.co'
 
-function setClaimKeyCookie(key) {
-  try {
-    const expires = new Date(Date.now() + 7 * 24 * 3600 * 1000).toUTCString()
-    document.cookie = `${CLAIM_COOKIE}=${encodeURIComponent(key)}; Domain=${CLAIM_COOKIE_DOMAIN}; Path=/; SameSite=Lax; Secure; Expires=${expires}`
-  } catch { /* best-effort */ }
-}
-
-function clearClaimKeyCookie() {
-  try {
-    document.cookie = `${CLAIM_COOKIE}=; Domain=${CLAIM_COOKIE_DOMAIN}; Path=/; SameSite=Lax; Secure; Max-Age=0`
-  } catch { /* best-effort */ }
-}
-
-function readClaimKeyCookie() {
-  try {
-    const m = document.cookie.match(new RegExp('(?:^|; )' + CLAIM_COOKIE + '=([^;]*)'))
-    return m ? decodeURIComponent(m[1]) : ''
-  } catch { return '' }
+function readClaimKeyStorage() {
+  try { return sessionStorage.getItem(CLAIM_KEY_STORAGE) || '' } catch { return '' }
 }
 const SUPABASE_URL = 'https://ybetwichurajbfswfeqa.supabase.co'
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InliZXR3aWNodXJhamJmc3dmZXFhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODUyNzgzNDYsImV4cCI6MjEwMDg1NDM0Nn0.YHysJAebPualDNDQTU5bnGBUHg5guLe8eBadm0LiEiY'
@@ -332,15 +312,13 @@ function App() {
         if (claimParam === '1') {
           let claimKeyStored = ''
           try { claimKeyStored = sessionStorage.getItem(CLAIM_KEY_STORAGE) || '' } catch { /* best-effort */ }
-          // Cross-origin entry fallback: the parent-domain cookie carries the
-          // key when the OAuth flow started on tortoise.premiselabs.co.
-          if (!claimKeyStored.startsWith('tt_')) claimKeyStored = readClaimKeyCookie()
+          // sessionStorage is same-tab/same-origin — the OAuth redirect
+          // returns to this dashboard origin, so the key is always here.
           if (claimKeyStored.startsWith('tt_') && session.access_token) {
             try {
               const claimRes = await performClaim(session.access_token, claimKeyStored)
               if (claimRes.ok) {
                 try { sessionStorage.removeItem(CLAIM_KEY_STORAGE) } catch { /* best-effort */ }
-                clearClaimKeyCookie()
                 setClaimKey('')
                 // Strip ?claim=1 so a reload doesn't re-claim.
                 window.history.replaceState({}, '', window.location.pathname)
@@ -517,11 +495,9 @@ function App() {
     }
     // Key survives the OAuth redirect via sessionStorage (same-tab PKCE
     // round-trip). NEVER in redirectTo — GoTrue puts it in the OAuth state
-    // URL → leak. The parent-domain cookie bridges the welcome page guard
-    // and signup/signin ?claim=1 routing (cross-origin storage is not
-    // shared).
+    // URL → leak. sessionStorage only (P1-2): the raw tt_ credential must
+    // not ride a parent-domain cookie.
     try { sessionStorage.setItem(CLAIM_KEY_STORAGE, k) } catch { /* best-effort */ }
-    setClaimKeyCookie(k)
     setClaimBusy(true)
     try {
       const redirectTo = `${window.location.origin}${window.location.pathname}?claim=1`
@@ -576,7 +552,6 @@ function App() {
     setClaimKey('')
     setClaimError('')
     try { sessionStorage.removeItem(CLAIM_KEY_STORAGE) } catch { /* best-effort */ }
-    clearClaimKeyCookie()
     setGraphs([])
     setGraphsLoaded(false) // Round-27: symmetry with switchTeam
     setMembers(null)

@@ -742,20 +742,24 @@ you up to 6 yes/no questions and set up your Tortoise memory.
     }
 
     // #1082 (PR1): welcome Phase-2 mint guard — if the browser holds a
-    // claimable tt_ key (parent-domain cookie written by the dashboard
-    // claim card), GET /v1/claim/status and route to the dashboard claim
-    // card (NEVER welcome.html provisioning — the mint would orphan the
-    // claimable team). Returns true when the guard routed away.
+    // claimable tt_ key (sessionStorage written by the dashboard claim card),
+    // GET /v1/claim/status (key via X-Claim-Key header, never query string —
+    // P1-2) and route to the dashboard claim card (NEVER welcome.html
+    // provisioning — the mint would orphan the claimable team). Returns true
+    // when the guard routed away. FAIL-CLOSED on error: a claimable key in
+    // hand means we must not mint a stray team on a blip (review P3-1).
     async function claimStatusGuard(session) {
-      const key = readClaimKeyCookie();
+      const key = readClaimKeyStorage();
       if (!key || !key.startsWith("tt_")) return false;
       try {
         const resp = await fetch(
-          "https://api.premiselabs.co/v1/claim/status?api_key=" + encodeURIComponent(key),
-          { headers: { "Authorization": "Bearer " + session.access_token } }
+          "https://api.premiselabs.co/v1/claim/status",
+          { headers: {
+              "Authorization": "Bearer " + session.access_token,
+              "X-Claim-Key": key,
+          } }
         );
-        if (!resp.ok) return false; // fail-closed → do NOT mint on a blip; the
-                                    // claim card remains reachable later
+        if (!resp.ok) return true; // fail-closed → route away, do NOT mint
         const body = await resp.json();
         if (!body || body.claimable !== true) return false;
         const dashUrl = "https://app.premiselabs.co/?claim=1";
@@ -775,14 +779,13 @@ you up to 6 yes/no questions and set up your Tortoise memory.
         }
         return true;
       } catch (e) {
-        return false;
+        return true; // fail-closed → route away, do NOT mint on a blip
       }
     }
 
-    function readClaimKeyCookie() {
+    function readClaimKeyStorage() {
       try {
-        const m = document.cookie.match(/(?:^|; )tt_claim_key=([^;]*)/);
-        return m ? decodeURIComponent(m[1]) : "";
+        return sessionStorage.getItem("tt_claim_key") || "";
       } catch (e) {
         return "";
       }

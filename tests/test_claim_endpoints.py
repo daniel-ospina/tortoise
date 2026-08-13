@@ -423,14 +423,34 @@ class TestClaimStatusEndpoint:
         key, team_id = _provision_anon(client, fake)
         _patch_verify(monkeypatch, _jwt("user-a", email="a@example.com",
                                         providers=["github"]))
+        # P1-2: key travels via X-Claim-Key header (never query string —
+        # access-log leak of the graph credential).
         r = client.get(
-            "/v1/claim/status?api_key=" + key,
-            headers={"Authorization": "Bearer abc.def.ghi"},
+            "/v1/claim/status",
+            headers={"Authorization": "Bearer abc.def.ghi",
+                     "X-Claim-Key": key},
         )
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["claimable"] is True
         assert body["team_id"] == team_id
+
+    def test_claim_status_header_preferred_over_query(self, client, fake,
+                                                     monkeypatch):
+        """P1-2: when both a query api_key and X-Claim-Key are present, the
+        header wins (the query form is deprecated)."""
+        key, team_id = _provision_anon(client, fake)
+        other = "tt_" + "0" * 30
+        _patch_verify(monkeypatch, _jwt("user-a", email="a@example.com",
+                                        providers=["github"]))
+        r = client.get(
+            "/v1/claim/status?api_key=" + other,
+            headers={"Authorization": "Bearer abc.def.ghi",
+                     "X-Claim-Key": key},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["claimable"] is True
+        assert r.json()["team_id"] == team_id
 
     def test_claimed_key_reports_claimed_by_me(self, client, fake,
                                                monkeypatch):

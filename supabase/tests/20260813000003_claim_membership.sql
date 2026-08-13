@@ -509,6 +509,58 @@ DO $$ BEGIN
     'claim: leftover placeholder row dropped');
 END $$;
 
+
+-- ============================================================================
+-- SECTION 12.5 — concurrent-claim race guard (#1082 review P1-1)
+-- ----------------------------------------------------------------------------
+-- Two claims for the SAME team/key by different users: the second must raise
+-- already_claimed, never silently overwrite (the RPC's Step-5 UPDATE carries
+-- `AND user_id IS NULL`, so under READ COMMITTED the loser's EPQ re-check
+-- finds 0 rows). Simulated sequentially here; the user_id IS NULL conjunct is
+-- what makes the interleaving safe.
+DO $$
+DECLARE v_team text := 'team-race-1082';
+        v_owner uuid;
+BEGIN
+  -- provision an anon team via the real provision_team RPC (identity path)
+  PERFORM public.provision_team(
+    p_user_id => NULL, p_identity => 'anon-race-1082',
+    p_team_id => v_team, p_team_name => 'race-1082',
+    p_api_key => 'tt_race_1082_key', p_key_hash => 'race-hash-1082',
+    p_lookup_hash => 'lkp-race-1082', p_graph_name => 'team_race_1082',
+    p_tier => 'free', p_key_prefix => 'tt_race_108',
+    p_max_users => 1, p_max_graphs => 1,
+    p_ops_allowance => 10000, p_graph_size_cap => 10000);
+
+  -- claim #1 by user-a (wins)
+  PERFORM public.claim_membership(
+    p_lookup_hash => 'lkp-race-1082',
+    p_user_id => 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'::uuid,
+    p_email => 'race-a-1082test@example.com');
+
+  -- claim #2 by user-b (must FAIL — user_id IS NULL conjunct gone)
+  BEGIN
+    PERFORM public.claim_membership(
+      p_lookup_hash => 'lkp-race-1082',
+      p_user_id => 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbb03'::uuid,
+      p_email => 'race-b-1082test@example.com');
+    RAISE EXCEPTION 'ASSERTION FAILED: concurrent second claim must raise already_claimed';
+  EXCEPTION WHEN others THEN
+    IF SQLERRM NOT LIKE '%already_claimed%' THEN
+      RAISE EXCEPTION 'ASSERTION FAILED: expected already_claimed, got: %', SQLERRM;
+    END IF;
+  END;
+
+  PERFORM tests.assert(
+    (SELECT user_id FROM public.team_memberships
+      WHERE team_id=v_team AND role='owner' AND status='active') =
+      'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'::uuid,
+    'race: first-claim-wins — owner stays user-a');
+  PERFORM tests.assert(
+    (SELECT email FROM public.teams WHERE id=v_team) = 'race-a-1082test@example.com',
+    'race: teams.email stays the winning claimer');
+END $$;
+
 -- ============================================================================
 -- SECTION 13 — cleanup (audit rows exempt; append-only)
 -- ============================================================================
