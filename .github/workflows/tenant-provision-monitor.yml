@@ -43,7 +43,7 @@ jobs:
           set -euo pipefail
           start="$(date -u -d '-3 hours' +%Y-%m-%dT%H:%M:%SZ)"
           end="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          sql="select timestamp, event_message from logs where source_name = 'edge_logs' and event_message like '%tenant-provision%' order by timestamp desc limit 500"
+          sql="select timestamp, event_message from logs where source = 'function_logs' and event_message like '%tenant-provision%' order by timestamp desc limit 500"
           out="$(curl -sS -G "https://api.supabase.com/v1/projects/$SUPABASE_PROJECT_REF/analytics/endpoints/logs" \
             -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
             --data-urlencode "sql=$sql" \
@@ -68,9 +68,12 @@ jobs:
             | sort -u | head -20 || true)"
           if [ -n "$hits" ]; then
             title="[monitor] incident-class errors in tenant-provision logs ($SUPABASE_PROJECT_REF)"
-            existing="$(gh api "search/issues" \
-              -f q="repo:$GITHUB_REPOSITORY is:issue is:open in:title \"$title\"" \
-              --jq '.total_count' 2>/dev/null || echo 0)"
+            # Dedup: search must go in the URL path (-f q= 404s on this
+            # endpoint); coerce the count to a number so a failed call can
+            # never break the integer comparison.
+            q="repo:${GITHUB_REPOSITORY} is:issue is:open in:title monitor tenant-provision"
+            enc="$(printf '%s' "$q" | jq -sRr @uri)"
+            existing="$(gh api "search/issues?q=$enc" --jq '.total_count' 2>/dev/null | grep -E '^[0-9]+$' || echo 0)"
             if [ "$existing" -eq 0 ]; then
               body="Automatic alert from the hourly tenant-provision log monitor (workflow: $GITHUB_WORKFLOW, run: $GITHUB_RUN_ID).
 
