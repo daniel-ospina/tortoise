@@ -639,6 +639,17 @@ def _cmd_signup(args) -> int:
             data = json.loads(resp.read())
     except HTTPError as e:
         body = e.read().decode() if e.fp else ""
+        if e.code == 429:
+            # #1081 P3: friendly retry window + support pointer instead of the
+            # raw JSON body. Retry-After is the RFC 7231 contract; tolerate
+            # both seconds and (hypothetically) HTTP-date via isdigit guard.
+            retry = (e.headers.get("Retry-After")
+                     if e.headers and e.headers.get("Retry-After") else None)
+            when = f"{int(retry)}s" if (retry and retry.isdigit()) else "later"
+            print(f"Signup rate limit reached — try again in {when}. "
+                  "Need more keys? Contact support@premiselabs.co.",
+                  file=sys.stderr)
+            return 1
         print(f"Signup failed ({e.code}): {body}", file=sys.stderr)
         return 1
     except (URLError, ValueError, json.JSONDecodeError) as e:
@@ -3317,7 +3328,7 @@ def main(argv: list[str] | None = None) -> int:
     team_keys_revoke_p.add_argument("--json", action="store_true", help="Machine-readable JSON output")
     team_keys_revoke_p.add_argument("--force", "-f", action="store_true", help="Skip the confirmation prompt")
     # tortoise signup — zero-email free-team mint (issue #663)
-    signup_p = sp.add_parser("signup", help="Mint a free hosted team + API key — no email or dashboard")
+    signup_p = sp.add_parser("signup", help="Mint a free hosted team + API key — no email or dashboard (2 free teams/IP/24h)")
     signup_p.add_argument(
         "--claim", action="store_true",
         help="After minting, print the dashboard claim instructions: sign in "

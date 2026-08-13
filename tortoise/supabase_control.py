@@ -1446,13 +1446,13 @@ def metering_increment(cp, team_id: str, period: str, n: int = 1,
                       nodes_written: int = 0) -> int:
     """Increment the team's write-op counter for the period; returns the new
     count. ATOMIC (review P2, PR #911): delegates to the metering_increment
-    SQL RPC (0014/0015) — write_ops = write_ops + n under Postgres row locking —
+    SQL RPC (0014/0017) — write_ops = write_ops + n under Postgres row locking —
     so concurrent increments can never undercount (a GET-then-PATCH would
     lose updates). Best-effort by contract (metering failures never block a
     write): the caller swallows exceptions.
 
     nodes_written: net-new non-episodic nodes for the period (the value-first
-    commit cost driver, epic #909 §4.4/W-4 — 0 on hold commits). The 0015
+    commit cost driver, epic #909 §4.4/W-4 — 0 on hold commits). The 0017
     RPC increments both columns atomically under the same row lock.
 
     #925: the read-back is the only best-effort step. The RPC call itself

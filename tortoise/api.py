@@ -267,7 +267,11 @@ class EventAPI:
                      session_id: str | None = None,
                      event_id: str | None = None,
                      source_path: str | None = None,
-                     needs_extraction: bool = False) -> str:
+                     needs_extraction: bool = False,
+                     # epic #900 T3 (§4.1 route pin):
+                     source_url: str | None = None,
+                     domain: str | None = None,
+                     suppress_embedding: bool = False) -> str:
         """Emit DocumentCreated event. Returns the document id (same as input).
 
         JSONL fields are snake_case per plan §4.3 convention.
@@ -275,6 +279,13 @@ class EventAPI:
         #125: topics/summary/session_id/event_id capture metadata.
         #167: source_path → d.sourcePath for file resolution.
         #133: needs_extraction → d.needs_extraction for --upgrade-all discovery.
+        Epic #900 T3: ``source_url`` overrides the #205 auto-wire target (the
+        indexer passes the real ``corpus://`` Source url so no phantom Source
+        is merged — the override rides the JOURNALED event, so replay honors
+        it); ``domain`` is persisted as ``d.domain`` via ``_persist_extra_props``
+        (intentionally NOT in ``_DOCUMENT_HANDLED`` — the persistence IS the
+        intent); ``suppress_embedding`` skips the unconditional embedding call
+        (new-path docs; the legacy branch computes as today — SC4).
         """
         self._emit("DocumentCreated",
                    corrects=corrects,
@@ -297,7 +308,10 @@ class EventAPI:
                    session_id=session_id,
                    event_id=event_id,
                    source_path=source_path,
-                   needs_extraction=needs_extraction)
+                   needs_extraction=needs_extraction,
+                   source_url=source_url,
+                   domain=domain,
+                   suppress_embedding=suppress_embedding)
         return doc_id
 
     def add_event(self, event_id: str, event_kind: str, *,

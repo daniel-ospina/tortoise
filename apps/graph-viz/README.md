@@ -54,9 +54,12 @@ FALKORDB_HOST=localhost FALKORDB_PORT=16379 python3 server/main.py
 
 # Test instance
 FALKORDB_HOST=127.0.0.1 FALKORDB_PORT=6379 FALKORDB_PASSWORD=falkordb python3 server/main.py
+
+# FalkorDB Cloud / ACL-auth instance (#1079) — username + optional TLS
+FALKORDB_HOST=<cloud-host> FALKORDB_PORT=<port> FALKORDB_USERNAME=tortoise FALKORDB_PASSWORD=<secret> FALKORDB_SSL=1 python3 server/main.py
 ```
 
-See `.env.example` for all options.
+See `.env.example` for all options (`FALKORDB_USERNAME`, `FALKORDB_SSL`, `FALKORDB_GRAPH`).
 
 ## API
 

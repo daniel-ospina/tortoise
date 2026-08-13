@@ -208,6 +208,26 @@ def _redislite_hygiene():
         """
         import subprocess as _sp
         my_pid = os.getpid()
+        # Ancestors of THIS suite's invocation (runner shell → bash -c step →
+        # timeout → stdbuf → python) carry "pytest" in their cmdline (the step
+        # script text) but are NOT foreign suites. Without the ancestry skip,
+        # the CI step wrapper false-positives and the end-sweep defers forever
+        # — every suite leaks its servers (observed as 13 orphans on test (b),
+        # issue #1005). Genuine concurrent suites (different process tree) are
+        # not ancestors and are still detected below.
+        ancestors: set[int] = set()
+        pid = my_pid
+        for _ in range(64):  # bounded walk to init
+            try:
+                ppid = int(_sp.run(["ps", "-o", "ppid=", "-p", str(pid)],
+                                   capture_output=True, text=True, timeout=5
+                                   ).stdout.strip())
+            except (_sp.TimeoutExpired, OSError, ValueError):
+                break
+            if ppid <= 0 or ppid == pid:
+                break
+            ancestors.add(ppid)
+            pid = ppid
         try:
             out = _sp.run(["pgrep", "-f", "pytest"], capture_output=True,
                           text=True, timeout=10)
@@ -215,7 +235,7 @@ def _redislite_hygiene():
             return True  # unknown -> fail closed (defer full sweep)
         for line in out.stdout.splitlines():
             pid = line.strip()
-            if not pid.isdigit() or int(pid) == my_pid:
+            if not pid.isdigit() or int(pid) == my_pid or int(pid) in ancestors:
                 continue
             try:
                 ppid = int(_sp.run(["ps", "-o", "ppid=", "-p", pid],
@@ -245,15 +265,29 @@ def _redislite_hygiene():
 
 
 @pytest.fixture(autouse=True)
-def _reset_register_rate_limit():
-    """/v1/register rate limiter is in-memory per process (3/hour/IP, #498).
-
-    pytest runs all test files in ONE process, so onboarding/register tests
-    in earlier files consume the budget of later files (429s in
-    test_onboarding_integration, #493). Reset per test — the limiter's
-    cross-test persistence has no value here (each test uses a fresh IP-less
-    TestClient context).
-    """
+def _reset_ip_rate_limits():
+    """#498 register + #1081 signup IP limiters are in-memory per process and
+    share one TestClient host across a module — reset both per test."""
+    # P3-FIX-6: getattr-guard so the red phase (before _SIGNUP_BUCKETS exists)
+    # does not ImportError the whole suite; also reset the R8 tracker
+    # (order-dependent dedup flake guard — module-scoped testclient host).
+    import tortoise.hosted_api as ha_mod
     from tortoise.hosted_api import _register_buckets
     _register_buckets.clear()
+    signup_buckets = getattr(ha_mod, "_SIGNUP_BUCKETS", None)
+    if signup_buckets is not None:
+        signup_buckets.clear()
+    try:
+        from tortoise.abuse import SIGNUP_TRACKER
+        SIGNUP_TRACKER.reset()
+    except (ImportError, AttributeError):
+        pass
     yield
+    _register_buckets.clear()
+    if signup_buckets is not None:
+        signup_buckets.clear()
+    try:
+        from tortoise.abuse import SIGNUP_TRACKER
+        SIGNUP_TRACKER.reset()
+    except (ImportError, AttributeError):
+        pass
