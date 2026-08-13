@@ -5512,7 +5512,9 @@ _ALLOWED_STATE_KEYS = set(_ONBOARDING_DEFAULT_STATE.keys())
 # Not state keys — the PATCH handler pops harness/section and emits an
 # analytics event instead of persisting them.
 _HARNESS_ANALYTICS_VALUES = {"claude", "codex", "cursor", "pi"}
-_SECTION_ANALYTICS_VALUES = {"config", "prompt", "both"}
+# "setup" (welcome page one-click setup prompt) added alongside the #529
+# "config"/"prompt" copy-attribution sections — see welcome.html copySetupPrompt.
+_SECTION_ANALYTICS_VALUES = {"config", "prompt", "both", "setup"}
 
 
 def _get_onboarding_state(team_id: str) -> dict:

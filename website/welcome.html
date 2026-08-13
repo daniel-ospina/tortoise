@@ -372,6 +372,11 @@
       font-weight: 600;
       text-decoration: none;
     }
+    /* The claim CTA lives inside .error-state, whose `a` rule (0,1,1) would
+       otherwise beat .btn (0,1,0) and render cyan-on-cyan (invisible). */
+    .error-state a.btn {
+      color: var(--bg);
+    }
     .btn-ghost:hover {
       color: var(--accent);
       border-color: var(--accent);
@@ -1576,10 +1581,14 @@ ${JSON.stringify(PI_MCP_CONFIG_ENV, null, 2)}`,
       if (path !== "mcp") {
         const manual = document.getElementById("manual-setup");
         if (manual) manual.classList.add("hidden");
+        manualMode = false;
       }
       // Re-derive both flows from the key state on entry, so a previous
       // manual-toggle can't leak an empty MCP card across Back → re-enter.
-      if (path === "mcp") renderSetupPrompt();
+      if (path === "mcp") {
+        renderSetupPrompt();
+        renderMcpConfig();
+      }
       // Focus management: move focus into the shown surface so keyboard/SR
       // users aren't dropped to <body> when the focused element is hidden.
       if (path === "mcp") {
