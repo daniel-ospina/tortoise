@@ -191,8 +191,8 @@ class TestInitApiKeyEnhancements:
         assert set(out["mcp"]["configs"]) == {"claude", "codex", "cursor", "pi"}
         claude = out["mcp"]["configs"]["claude"]
         assert claude["file"] == ".mcp.json"
-        assert claude["config"]["mcpServers"]["tortoise"]["type"] == "streamable-http"
-        assert claude["config"]["mcpServers"]["tortoise"]["headers"]["Authorization"] == "Bearer tt_testkey"
+        assert claude["config"]["mcpServers"]["tortoise"]["type"] == "http"
+        assert claude["config"]["mcpServers"]["tortoise"]["headers"]["Authorization"] == "Bearer ${TORTOISE_API_KEY}"
         # cursor shape has no `type` field; codex is a command
         assert "type" not in out["mcp"]["configs"]["cursor"]["config"]["mcpServers"]["tortoise"]
         assert out["mcp"]["configs"]["codex"]["command"].startswith("codex mcp add tortoise")
@@ -255,7 +255,8 @@ class TestInitApiKeyEnhancements:
         assert rc == 0
         out = capsys.readouterr().out
         assert "Claude Code" in out
-        assert '"type": "streamable-http"' in out
+        assert '"type": "http"' in out
+        assert "claude mcp add --transport http tortoise" in out
         assert "codex mcp add" not in out  # only the claude config
         assert "Cursor" not in out
         assert "[2] Codex" not in out
@@ -269,14 +270,15 @@ class TestInitApiKeyEnhancements:
         assert rc == 0
         mcp = json.loads((tmp_path / ".mcp.json").read_text())
         tortoise = mcp["mcpServers"]["tortoise"]
-        assert tortoise["type"] == "streamable-http"
+        assert tortoise["type"] == "http"
         assert tortoise["url"] == "https://api.premiselabs.co/mcp/"
-        assert tortoise["headers"]["Authorization"] == "Bearer tt_testkey"
+        assert tortoise["headers"]["Authorization"] == "Bearer ${TORTOISE_API_KEY}"
         captured = capsys.readouterr()
         assert "Wrote MCP config" in captured.out
-        # plaintext key → 0600 perms + do-not-commit warning, like .tortoise (#875 P2)
+        # env-form config → 0600 perms + env-var guidance (#529 shapes, #981)
         assert (tmp_path / ".mcp.json").stat().st_mode & 0o777 == 0o600
-        assert ".mcp.json contains a plaintext API key — do NOT commit this file." in captured.out
+        assert "No literal key in the file" in captured.out
+        assert "export TORTOISE_API_KEY=" in captured.out
 
     def test_write_mcp_config_merges_existing(self, monkeypatch, tmp_path, capsys):
         (tmp_path / ".mcp.json").write_text(
@@ -288,7 +290,8 @@ class TestInitApiKeyEnhancements:
         mcp = json.loads((tmp_path / ".mcp.json").read_text())
         assert mcp["extra"] == 1  # other top-level keys preserved
         assert "other" in mcp["mcpServers"]  # other servers preserved
-        assert mcp["mcpServers"]["tortoise"]["type"] == "streamable-http"
+        assert mcp["mcpServers"]["tortoise"]["headers"]["Authorization"] == "Bearer ${TORTOISE_API_KEY}"
+        assert "type" not in mcp["mcpServers"]["tortoise"]  # pi env form has no type
         # perms tightened to 0600 even on the merge path (#875 P2)
         assert (tmp_path / ".mcp.json").stat().st_mode & 0o777 == 0o600
 
@@ -353,8 +356,8 @@ class TestInitApiKeyEnhancements:
         assert not urlopen.called  # still no API call
         # MCP config WAS written despite the short-circuit
         mcp = json.loads((tmp_path / ".mcp.json").read_text())
-        assert mcp["mcpServers"]["tortoise"]["type"] == "streamable-http"
-        assert mcp["mcpServers"]["tortoise"]["headers"]["Authorization"] == "Bearer tt_same"
+        assert mcp["mcpServers"]["tortoise"]["type"] == "http"
+        assert mcp["mcpServers"]["tortoise"]["headers"]["Authorization"] == "Bearer ${TORTOISE_API_KEY}"
         # stdout stays pure JSON with the FULL shape (not the partial one)
         out = json.loads(capsys.readouterr().out)
         assert out["status"] == "connected"

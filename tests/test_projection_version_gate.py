@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import os
 import sys
-import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -18,35 +17,8 @@ from tortoise.projection import _apply_one, FalkorProjection  # noqa: E402
 # ── helpers ────────────────────────────────────────────────────────────────
 
 
-def _tmp(name: str) -> str:
-    return os.path.join(tempfile.mkdtemp(prefix="tortoise_test_"), name)
-
-
-_HAS_FALKOR: bool | None = None
-
-
-def _has_falkor() -> bool:
-    global _HAS_FALKOR
-    if _HAS_FALKOR is None:
-        try:
-            from redislite.falkordb_client import FalkorDB  # noqa: F401
-            # Runtime probe: embedded mode is broken on some machines (#82 —
-            # redislite interprets the file path as a hostname → idna
-            # UnicodeEncodeError). Only treat FalkorDB as available if a
-            # projection can actually be constructed.
-            import tempfile
-            from tortoise.projection import FalkorProjection
-            db_path = os.path.join(tempfile.mkdtemp(prefix="tortoise_probe_"), "probe.db")
-            proj = FalkorProjection(db_path, graph_name="test")
-            proj.close()
-            _HAS_FALKOR = True
-        except (ImportError, Exception):
-            _HAS_FALKOR = False
-    return _HAS_FALKOR
-
-
-def _skip_if_no_falkor() -> bool:
-    return not _has_falkor()
+from tests._embedded import skip_if_no_falkor as _skip_if_no_falkor  # noqa: E402
+from tests._embedded import wipe  # noqa: E402
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -155,11 +127,12 @@ def test_apply_one_always_fields_preserved_v2():
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-def test_falkor_old_event_no_context_written():
+def test_falkor_old_event_no_context_written(shared_proj):
     """P2 #49: context field removed — even old-format events don't write it."""
     if _skip_if_no_falkor():
         return
-    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    proj = shared_proj
+    wipe(proj)
     try:
         proj.apply({
             "type": "PointAdded",
@@ -172,14 +145,15 @@ def test_falkor_old_event_no_context_written():
         # Context is not persisted — the field no longer exists in projections
         assert r[0][1] is None
     finally:
-        proj.close()
+        pass  # shared session projection — fixture owns close
 
 
-def test_falkor_v2_event_discards_context():
+def test_falkor_v2_event_discards_context(shared_proj):
     """Event WITH projection_version=2 → context NOT written to graph node."""
     if _skip_if_no_falkor():
         return
-    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    proj = shared_proj
+    wipe(proj)
     try:
         proj.apply({
             "type": "PointAdded",
@@ -193,14 +167,15 @@ def test_falkor_v2_event_discards_context():
         # Context should be nil/None — not written
         assert r[0][1] is None, f"expected context=None, got {r[0][1]!r}"
     finally:
-        proj.close()
+        pass  # shared session projection — fixture owns close
 
 
-def test_falkor_v2_pointrevised_does_not_mutate_context():
+def test_falkor_v2_pointrevised_does_not_mutate_context(shared_proj):
     """PointRevised v2 → content updated, context untouched in graph."""
     if _skip_if_no_falkor():
         return
-    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    proj = shared_proj
+    wipe(proj)
     try:
         # First add with old event (has context)
         proj.apply({
@@ -222,14 +197,15 @@ def test_falkor_v2_pointrevised_does_not_mutate_context():
         # P2 #49: context never written — no context property on the node
         assert r[0][1] is None
     finally:
-        proj.close()
+        pass  # shared session projection — fixture owns close
 
 
-def test_falkor_v2_always_fields_still_written():
+def test_falkor_v2_always_fields_still_written(shared_proj):
     """content/pointKind still written to graph regardless of version."""
     if _skip_if_no_falkor():
         return
-    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    proj = shared_proj
+    wipe(proj)
     try:
         proj.apply({
             "type": "PointAdded",
@@ -248,14 +224,15 @@ def test_falkor_v2_always_fields_still_written():
         assert r[0][1] == "claim"
         assert r[0][2] is None, f"expected context=None, got {r[0][2]!r}"
     finally:
-        proj.close()
+        pass  # shared session projection — fixture owns close
 
 
-def test_falkor_v2_operator_no_context():
+def test_falkor_v2_operator_no_context(shared_proj):
     """OperatorAdded v2 → no context on operator node."""
     if _skip_if_no_falkor():
         return
-    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    proj = shared_proj
+    wipe(proj)
     try:
         # Add inputs first (old events for simplicity)
         proj.apply({
@@ -284,7 +261,7 @@ def test_falkor_v2_operator_no_context():
         assert r[0][2] is True  # is_operator flag preserved
         assert r[0][1] is None, f"expected context=None, got {r[0][1]!r}"
     finally:
-        proj.close()
+        pass  # shared session projection — fixture owns close
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -292,11 +269,12 @@ def test_falkor_v2_operator_no_context():
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-def test_falkor_mixed_old_and_v2_events():
+def test_falkor_mixed_old_and_v2_events(shared_proj):
     """Old events keep context, v2 events don't — coexisting in same graph."""
     if _skip_if_no_falkor():
         return
-    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    proj = shared_proj
+    wipe(proj)
     try:
         # Old event (no version) — context written
         proj.apply({
@@ -322,4 +300,4 @@ def test_falkor_mixed_old_and_v2_events():
         ).result_set
         assert r[0][0] is None, f"expected context=None, got {r[0][0]!r}"
     finally:
-        proj.close()
+        pass  # shared session projection — fixture owns close

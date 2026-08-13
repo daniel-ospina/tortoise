@@ -267,6 +267,34 @@ def _pid_alive(pid: int) -> bool:
         return False
 
 
+def _is_detached(pid: int) -> bool:
+    """True when the process's direct parent is init (pid 0/1) — its whole
+    spawning tree has exited and it was reparented, so NO live process holds
+    it. Such a server is a dead-end: safe to reap even while OTHER suites run
+    (issue #1115 option A — bounds orphan accumulation under concurrent
+    suites without the global 'last suite standing' wait).
+
+    Fail-closed: any uncertainty (ps timeout/error, pid vanished, unparseable
+    ppid) returns False so the server is protected, never risked. A server
+    whose parent is still alive (in-process fixture server, live test
+    subprocess) is also protected — only fully reparented servers qualify.
+    """
+    import subprocess as _sp
+    try:
+        r = _sp.run(["ps", "-o", "ppid=", "-p", str(pid)],
+                    capture_output=True, text=True, timeout=5)
+    except (_sp.TimeoutExpired, OSError):
+        return False
+    raw = r.stdout.strip()
+    if not raw:
+        return False  # pid vanished mid-check -> reap() skips dead pids anyway
+    try:
+        ppid = int(raw)
+    except ValueError:
+        return False
+    return ppid in (0, 1)
+
+
 def _derive_real_pid(socket_path: str, pidfile_pid: int | None = None) -> int | None:
     """Derive the real redis-server PID for a live socket.
 
@@ -877,9 +905,12 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
 
     only_safe=True (issue #1005 concurrency guard): restrict to dir-gone
     (dir_missing) candidates — the owning suite's tmp tree was cleaned, so
-    the server cannot belong to a running suite. Live ephemeral servers
-    with 0 clients are skipped so a concurrent suite's between-tests idle
-    server is never killed.
+    the server cannot belong to a running suite — plus DETACHED candidates
+    (issue #1115): a live ephemeral server whose direct parent is init was
+    reparented after its whole spawning tree exited, so no live process
+    holds it; reaping it cannot disturb a running suite. Live ephemeral
+    servers with 0 clients still owned by a live process are skipped so a
+    concurrent suite's between-tests idle server is never killed.
     """
     acted = []
     killed = 0
@@ -894,7 +925,8 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
                     record.get("socket_path"))
             continue
         if only_safe and not (record.get("dir_missing")
-                              or classification == "stale_socket"):
+                              or classification == "stale_socket"
+                              or _is_detached(record.get("pid") or 0)):
             logger.info(
                 "concurrent-suite guard: skipping live ephemeral candidate %s",
                 record.get("socket_path"))

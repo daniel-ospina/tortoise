@@ -272,6 +272,37 @@ def compute_dispositions(files: list[tuple[Path, os.stat_result | None]],
             for p in paths:
                 disp.by_path[p] = DISP_UNRECONCILED
         # else: count == nlink → all aliases in-walk → url-keyed (process all).
+
+    # ── Combo-link inode check (W4 hardlink row, E2E-7(t), cycle-5 P1 pin):
+    # the inode check applies to a symlink's RESOLVED target too. A symlink
+    # whose resolved target is an UNRECONCILED inode group (in-walk count <
+    # st_nlink — an out-of-walk alias exists) must ALSO be dispositioned
+    # unreconciled: reading through it would stat/read the outside-root file
+    # via the in-root hardlink entry (the #329 file-read-oracle bypass the
+    # stat-only rejection exists to close). Realpath escape cannot catch it
+    # (both entries resolve in-root). The symlink itself is NOT inode-counted
+    # (lstat pin — it never joined by_inode); this pass marks it from its
+    # RESOLVED target's group instead.
+    for spath, st in files:
+        sp = str(spath)
+        if st is None or not stat.S_ISLNK(st.st_mode):
+            continue
+        if disp.by_path.get(sp) is not None:
+            continue  # already dispositioned (escape/structural/dup)
+        try:
+            target = os.path.realpath(sp)
+        except OSError:
+            continue
+        # realpath-vs-realpath comparison (macOS /var → /private/var: the
+        # walked path and the resolved target can differ lexically — map via
+        # the realpath form, not raw string equality).
+        for opath, ost in files:
+            if ost is None or stat.S_ISLNK(ost.st_mode):
+                continue
+            if (disp.by_path.get(str(opath)) == DISP_UNRECONCILED
+                    and os.path.realpath(str(opath)) == target):
+                disp.by_path[sp] = DISP_UNRECONCILED
+                break
     return disp
 
 

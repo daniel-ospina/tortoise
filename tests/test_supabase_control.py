@@ -1338,7 +1338,7 @@ class TestResolveTeamLimitsSupabase:
         assert limits["max_points"] == 500000
 
 
-# ── Claim seam (#1082, PR1 — 20260813000003) ────────────────────────────────
+# ── Claim seam (#1082, PR1 — 20260813000004) ────────────────────────────────
 # TestClaimSeam exercises the Python claim_membership wrapper + is_anon_team
 # over the FakeControlPlane emulation (which mirrors the SQL RPC semantics).
 

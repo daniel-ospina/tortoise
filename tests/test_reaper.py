@@ -941,6 +941,51 @@ def test_reap_only_safe_skips_live_ephemeral_without_killing(monkeypatch):
     assert killed == []  # nothing was killed
 
 
+def test_reap_only_safe_reaps_detached_orphan(monkeypatch):
+    """only_safe=True must reap a DETACHED candidate (direct parent is init
+    — its spawning tree fully exited), even though it is a live ephemeral
+    server. This bounds orphan accumulation under concurrent suites
+    (issue #1115 option A): a server with no live holder is a dead-end, so
+    a suite's start/end sweep can clean it without waiting for the global
+    'last suite standing'.
+    """
+    from tortoise.embedded_reaper import discover, reap
+    monkeypatch.setenv("TORTOISE_REAPER_MIN_UPTIME", "0")
+    sock = _spawn_orphan()
+    found = discover()
+    match = [s for s in found if s["socket_path"] == sock][0]
+    assert match["classification"] == "candidate"
+    pid = match["pid"]
+    # The orphan's spawning subprocess was SIGKILLed, so it is reparented
+    # (ppid 1) — the new detached criterion must admit it in only_safe mode.
+    reap([match], dry_run=False, only_safe=True)
+    time.sleep(1)
+    assert not _pid_alive_for(pid), "detached orphan was not reaped in only_safe"
+
+
+def test_reap_only_safe_protects_live_parented_server(monkeypatch):
+    """only_safe=True must NOT reap a candidate whose direct parent is a
+    LIVE process (e.g. a concurrent suite's in-process fixture server at
+    0-client between tests) — the detached criterion is parent-exact.
+    """
+    from tortoise.embedded_reaper import reap
+    import os as _os
+    live_parent = _os.getpid()  # this pytest process is alive
+    kept = []
+
+    def fake_kill(pid, timeout):
+        kept.append(pid)
+
+    monkeypatch.setattr("tortoise.embedded_reaper._kill", fake_kill)
+    rec = {"classification": "candidate", "dir_missing": False,
+           "socket_path": "/tmp/s-live-parent", "pid": live_parent}
+    # The record's pid is this live pytest process, whose own parent is a live
+    # process — NOT detached — so only_safe must skip it before any probe.
+    acted = reap([rec], dry_run=False, only_safe=True)
+    assert acted == []
+    assert kept == []  # live-parented server never killed in only_safe
+
+
 def test_active_suite_tokens_lists_markers(monkeypatch, tmp_path):
     """active_suite_tokens() returns non-hidden marker filenames only, and
     skips stale markers whose pid is dead (#1005 review P2)."""

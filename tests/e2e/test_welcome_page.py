@@ -278,15 +278,40 @@ def test_prompt_copy_uses_fetched_markdown(page: Page) -> None:
     assert "### Q1" in clip, "prompt missing Q1"
 
 
-def test_returning_visitor_shows_dashboard_hub(page: Page) -> None:
+def _require_returning_redirect(page: Page) -> None:
+    """Skip when the deployed welcome page predates the #1147 returning-
+    visitor dashboard redirect. The CI welcome-e2e job tests the LIVE prod
+    page, which only gains the redirect once this PR deploys — pre-deploy
+    runs skip (green-with-annotation, the repo's TORTISE_HOST_CHECK pattern)
+    and post-deploy runs exercise the routing on every subsequent run."""
+    has = page.evaluate(
+        "typeof window.showAlreadyProvisioned !== 'undefined' && "
+        "window.showAlreadyProvisioned.toString().includes('app.premiselabs.co')"
+    )
+    if not has:
+        pytest.skip(
+            "deployed welcome page predates #1147 returning-visit redirect — "
+            "runs post-deploy"
+        )
+
+
+def test_returning_visitor_routes_to_dashboard(page: Page) -> None:
     """A returning visitor (key already consumed — reveal returns 'pending')
-    sees the dashboard-hub state instead of a re-revealed key."""
+    is ROUTED to the dashboard (app.premiselabs.co) instead of dead-ending on
+    a 'can't be shown again' card (#1147): the key is shown exactly once on
+    first visit; subsequent visits go to the dashboard hub where keys live.
+    """
+    # Route the dashboard target so the redirect navigation is deterministic.
+    page.route("**//app.premiselabs.co/**", lambda route: route.fulfill(
+        status=200, content_type="text/html", body="<html><body>dashboard</body></html>"
+    ))
     _mock_supabase_success(page, reveal_result="pending")
     page.goto(WELCOME_URL, wait_until="domcontentloaded", timeout=30_000)
+    _require_returning_redirect(page)
+    # The hold card paints before the (1.2s-delayed) redirect navigates away.
     expect(page.locator("#returning-block")).not_to_be_hidden(timeout=15_000)
-    # Returning visitors also get the dashboard CTA (showAlreadyProvisioned path)
-    expect(page.locator("#btn-dashboard")).to_be_visible(timeout=15_000)
-    # And must NOT see a re-revealed key
+    page.wait_for_url("**://app.premiselabs.co/**", timeout=15_000)
+    # A returning visitor must NOT see a re-revealed key.
     expect(page.locator("#reveal-block")).to_be_hidden(timeout=5_000)
 
 
@@ -329,9 +354,16 @@ def test_reveal_shows_key_once_then_returning_state(page: Page) -> None:
     expect(page.locator("#success")).not_to_be_hidden(timeout=15_000)
     expect(page.locator("#api-key")).to_contain_text("tt_", timeout=15_000)
 
-    # Second visit: the key was nulled server-side → returning state, no key.
+    # Second visit: the key was nulled server-side → route to the dashboard
+    # (no re-reveal, no 'can't be shown again' dead-end, #1147).
+    page.route("**//app.premiselabs.co/**", lambda route: route.fulfill(
+        status=200, content_type="text/html", body="<html><body>dashboard</body></html>"
+    ))
     page.reload(wait_until="domcontentloaded")
+    _require_returning_redirect(page)
+    # Hold card paints, then the redirect routes to the dashboard.
     expect(page.locator("#returning-block")).not_to_be_hidden(timeout=15_000)
+    page.wait_for_url("**://app.premiselabs.co/**", timeout=15_000)
     expect(page.locator("#reveal-block")).to_be_hidden(timeout=5_000)
     assert reveal_calls["n"] == 2, (
         f"expected exactly 2 reveal RPCs (one per visit), got {reveal_calls['n']}"
