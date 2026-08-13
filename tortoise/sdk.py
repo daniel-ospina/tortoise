@@ -43,6 +43,33 @@ STALE_TERMINAL_STATUSES = frozenset(
 INGEST_GRANULARITIES = ("bulk", "granular")
 INGEST_PROMOTION_POLICIES = ("gated", "auto")
 
+
+def _first_non_draft_status(points: list) -> tuple[int, object] | None:
+    """Row-9 guard helper (PR #1073): return (index, effective_status) of the
+    first point item whose EFFECTIVE status is not exactly 'draft'.
+
+    The effective status is the top-level ``status`` key, or the nested
+    ``props={"status": ...}`` value when top-level is absent (create_point
+    flattens nested props via _coerce_props — top-level wins on conflict,
+    mirrored here). Only the exact canonical string "draft" is storable under
+    promotion_policy='gated': case/whitespace variants ("Draft", "draft "),
+    terminal statuses, and non-str values are all rejected (EP _live_only
+    excludes only exact 'draft', so every other value would be EP-live).
+
+    Shared by TortoiseSDK.ingest and tortoise_ingest so the two layers
+    cannot drift. Returns None when every item is draft/absent.
+    """
+    for i, item in enumerate(points or []):
+        if not isinstance(item, dict):
+            continue
+        st = item.get("status")
+        nested = item.get("props")
+        if st is None and isinstance(nested, dict):
+            st = nested.get("status")
+        if st is not None and str(st) != "draft":
+            return i, st
+    return None
+
 # #913: whole-graph mode=add cap — pairwise scoring is O(n²) in time AND
 # memory (dense cosine matrix + pair dict); a read-only MCP call must not
 # OOM a hosted server (#329/#579 bounding precedent). The unscoped candidate
@@ -2882,39 +2909,21 @@ class TortoiseSDK:
                 f"connections sections, got {type(bundle).__name__}"
             )
         # Row 9 of INGEST_CONTRACT.md: under gated, points must stay draft —
-        # ANY effective status other than 'draft' on a point item is a
-        # violation (no bypass of the gated contract; sanctioned routes:
-        # promotion_policy='auto' or update_point(status='live') after ingest).
-        # The effective status is checked (top-level OR the nested props={...}
-        # convention flattened by _coerce_props), case-insensitive — 'Live',
-        # props:{"status":"live"}, AND canonical terminal statuses
-        # (retracted/superseded/outdated/archived) cannot slip past: _live_only
-        # excludes only exact 'draft', so every other value is EP-live
-        # (PR #1073 re-review P0s + P1). create_point's vocabulary validation
-        # is the fail-closed backstop for non-str values.
+        # ANY effective status other than the exact canonical "draft" on a
+        # point item is a violation (no bypass of the gated contract; the
+        # sanctioned routes are promotion_policy='auto' or
+        # update_point(status='live') after ingest). Shared helper keeps the
+        # SDK and MCP layers identical (PR #1073).
         if promotion_policy == "gated":
-            for i, item in enumerate(bundle.get("points") or []):
-                if not isinstance(item, dict):
-                    continue
-                st = item.get("status")
-                nested = item.get("props")
-                if st is None and isinstance(nested, dict):
-                    st = nested.get("status")
-                # Only the exact canonical "draft" string is storable under
-                # gated: case/whitespace variants ("Draft", "draft ") and
-                # every other value get the uniform row-9 message (they would
-                # otherwise fall to create_point's vocabulary backstop with a
-                # different error class).
-                if st is not None:
-                    s = str(st)
-                    if s.strip().lower() != "draft" or s != "draft":
-                        raise ValueError(
-                            f"ingest: points[{i}] status:{st!r} is not allowed "
-                            f"under promotion_policy 'gated' — under gated "
-                            f"points stay draft; pass promotion_policy='auto' "
-                            f"for explicit live, or keep draft and promote via "
-                            f"update_point(status='live')"
-                        )
+            bad = _first_non_draft_status(bundle.get("points"))
+            if bad is not None:
+                i, st = bad
+                raise ValueError(
+                    f"ingest: points[{i}] status:{st!r} is not allowed under "
+                    f"promotion_policy 'gated' — under gated points stay "
+                    f"draft; pass promotion_policy='auto' for explicit live, "
+                    f"or keep draft and promote via update_point(status='live')"
+                )
         from .projection.edges import _VALID_EDGE_PREDICATES
 
         proj = self._get_proj()

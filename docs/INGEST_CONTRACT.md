@@ -451,6 +451,14 @@ Additional posture rules:
 
 ## 11. Promotion & EP
 
+**Known non-gated promotion surfaces (A0 is ingest-scoped; tracked as follow-up):**
+The Q2 gated default applies to the `ingest` surface (SDK + MCP `tortoise_ingest`).
+Direct primitives remain explicit promotion routes and are NOT gated: `tortoise_create_point(
+props={"status":"live"})`, `tortoise_create_operator` (calls `create_operator` with the
+`promote_source=True` default — a silent-promotion surface outside ingest), and the
+decision-commit helpers. Flipping `create_operator`'s default / exposing `promote_source` on
+the MCP tool is tracked as a follow-up so the system-wide default matches the ingest contract.
+
 **Promotion-EP conditional line (operative — GATE-2 Q6 approved):**
 
 > **Promoted points are live; direct-edge knowledge enters EP computation

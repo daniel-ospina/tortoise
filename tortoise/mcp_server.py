@@ -18,7 +18,8 @@ from mcp.types import ToolAnnotations
 from pydantic import ValidationError as PydanticValidationError
 from tortoise.auth import is_dev_mode as _is_dev_mode
 from tortoise.config import is_db_uri as _is_db_uri
-from tortoise.sdk import TortoiseSDK, INGEST_GRANULARITIES, INGEST_PROMOTION_POLICIES
+from tortoise.sdk import (TortoiseSDK, INGEST_GRANULARITIES,
+                          INGEST_PROMOTION_POLICIES, _first_non_draft_status)
 from tortoise import monitoring
 from tortoise.mcp_auth import (_current_team_id, _current_team_limits,
                                _transport_mode, _get_team_sdk,
@@ -1760,31 +1761,20 @@ def tortoise_ingest(bundle: Any = None, granularity: str = "bulk",
     if promotion_policy not in INGEST_PROMOTION_POLICIES:
         return {"error": f"promotion_policy must be 'gated' or 'auto', got "
                           f"{promotion_policy!r}", "code": ERR_INVALID}
-    # Row-9 guard (SDK-side, mirrors ingest()): under gated, points must stay
-    # draft — ANY effective status other than 'draft' (top-level OR nested
-    # props={...}, case-insensitive) is a violation. Rejects 'Live',
-    # props:{"status":"live"}, AND canonical terminal statuses that EP would
-    # treat as live (PR #1073 re-review P0s + P1).
+    # Row-9 guard (shared helper — identical to the SDK's): under gated,
+    # points must stay draft — ANY effective status other than the exact
+    # canonical "draft" (top-level or nested props={...}) is a violation.
     if promotion_policy == "gated":
-        for i, item in enumerate(bundle.get("points") or []):
-            if not isinstance(item, dict):
-                continue
-            st = item.get("status")
-            nested = item.get("props")
-            if st is None and isinstance(nested, dict):
-                st = nested.get("status")
-            # Only the exact canonical "draft" string passes — case/whitespace
-            # variants and every other value get the uniform row-9 message.
-            if st is not None:
-                s = str(st)
-                if s.strip().lower() != "draft" or s != "draft":
-                    return {"error": f"points[{i}] status:{st!r} is not allowed "
-                                      f"under promotion_policy 'gated' — under "
-                                      f"gated points stay draft; pass "
-                                      f"promotion_policy='auto' for explicit live, "
-                                      f"or keep draft and promote via "
-                                      f"update_point(status='live')",
-                            "code": ERR_INVALID}
+        bad = _first_non_draft_status(bundle.get("points"))
+        if bad is not None:
+            i, st = bad
+            return {"error": f"points[{i}] status:{st!r} is not allowed "
+                              f"under promotion_policy 'gated' — under "
+                              f"gated points stay draft; pass "
+                              f"promotion_policy='auto' for explicit live, "
+                              f"or keep draft and promote via "
+                              f"update_point(status='live')",
+                    "code": ERR_INVALID}
     return _safe(_quota_gated(_get_team_sdk().ingest, "points",
                           abuse_weight=lambda r, a, k: int(((r or {}).get("created") or {}).get("points") or 0)),
                  bundle, granularity=granularity, promotion_policy=promotion_policy)
