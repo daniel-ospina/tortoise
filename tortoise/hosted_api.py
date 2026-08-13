@@ -501,6 +501,30 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 app.add_middleware(RateLimitMiddleware, max_per_minute=100)
 
 
+class ClientIPMiddleware(BaseHTTPMiddleware):
+    """Resolve the real client IP into ``request.state.client_ip`` (#1081).
+
+    Fly Proxy sets ``Fly-Client-IP`` from the connection peer and overwrites
+    any client-supplied value (X-Forwarded-For is documented "treat with
+    caution" — uvicorn only trusts it from 127.0.0.1, so behind the proxy
+    ``request.client.host`` is the PROXY's IP). All per-IP limiters
+    (#498 register 3/hr, #302 sensitive-op, #1081 signup 2/24h) key on
+    ``request.state.client_ip`` (fallback: ``request.client.host``) —
+    without this resolution every per-IP limiter collapses to a GLOBAL
+    cap behind the proxy.
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        request.state.client_ip = (
+            request.headers.get("Fly-Client-IP")
+            or (request.client.host if request.client else None)
+        )
+        return await call_next(request)
+
+
+app.add_middleware(ClientIPMiddleware)
+
+
 class HSTSMiddleware(BaseHTTPMiddleware):
     """Add Strict-Transport-Security header to every response."""
 
