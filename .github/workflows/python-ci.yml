@@ -278,6 +278,20 @@ jobs:
           HF_HUB_OFFLINE: "1"
           TRANSFORMERS_OFFLINE: "1"
 
+      - name: Assert no redislite orphans (issue #1005)
+        # Runs even when pytest failed — the orphan check is independent of
+        # test outcomes. The conftest session-finalizer sweep runs on every
+        # suite; on a fresh runner the count must be ~0. Tolerance 5 for
+        # parallel test-slow job teardown still settling on shared infra.
+        if: always()
+        run: |
+          COUNT=$(pgrep -f "redislite/bin/redis-server" | wc -l | tr -d ' ')
+          echo "orphaned redislite servers after suite: $COUNT"
+          if [ "$COUNT" -gt 5 ]; then
+            echo "::error::redislite server leak: $COUNT orphans after suite (issue #1005)"
+            exit 1
+          fi
+
   test-slow:
     runs-on: ubuntu-latest
     # Slow files run serially here; generous caps so the summary is

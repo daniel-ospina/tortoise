@@ -319,10 +319,12 @@ class FalkorProjection(
                 # unexpanded it is relative-like -> reject with hint
                 raise ValueError(RELATIVE_PATH_ERROR.format(path=path))
 
-            # Embedded mode (opt-in via path=). Use redislite's FalkorDB client —
-            # the plain falkordb.FalkorDB treats a positional path arg as a HOST
-            # (IDNA crash: redis tries to resolve the file path as a hostname, #82).
-            from redislite.falkordb_client import FalkorDB  # lazy: keep import optional
+            # Embedded mode (opt-in via path=). Use tortoise's guarded
+            # FalkorDB subclass (issue #1005): the plain redislite class
+            # bypasses the relative-path guard and has no lifecycle (atexit /
+            # context manager) — every embedded projection client leaked its
+            # server on exit. The subclass passes path/host through unchanged.
+            from tortoise import FalkorDB  # lazy: keep import optional
             # #915 — embedded durability: enable AOF (appendonly) so a kill -9 of
             # the redis-server daemon loses at most the last ~1s of writes instead
             # of the whole graph since the last RDB save (RDB snapshots never fire
@@ -389,15 +391,17 @@ class FalkorProjection(
                 "Could not determine FalkorDB version. FTS and vector indexes may fail.")
         self._ensure_indexes()
 
-        # Lifecycle hardening (plan Task 4):
+        # Lifecycle hardening (plan Task 4 + issue #1005):
         # - _closed flag for idempotent close()
-        # - weakref.finalize so GC cleans up without explicit close
-        # - atexit so normal process exit never orphans the server
+        # - atexit so a NORMAL process exit never orphans the server (the
+        #   dominant #1005 leak path). No weakref.finalize: the atexit bound
+        #   method keeps the projection alive until exit, so a GC finalizer
+        #   could never fire — mid-session close is via __enter__/__exit__
+        #   or explicit close(); hard-killed processes' strays are reaped by
+        #   the conftest hygiene sweeps (tortoise.embedded_reaper).
         # - NO per-instance signal handlers (atexit suffices; avoids leaks)
         import atexit as _atexit
-        import weakref as _weakref
         self._closed = False
-        self._finalizer = _weakref.finalize(self, self.close)
         _atexit.register(self.close)
 
     # ── Ops safety (#428): health check + transparent recovery ────────────
