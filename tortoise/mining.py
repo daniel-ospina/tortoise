@@ -8,7 +8,7 @@ entities as Object nodes (deterministic obj_sha256 canonical id via
 ObjectRegistered), wires aboutObject Point+Event side, aboutEvent provenance
 anchors, and the extractedFrom → Source → references → Event chain. No
 Subject stubs (legacy auto-detect bypassed). Dedup is a later stage — the
-dedup_hits key is counted only.
+dedup_hits reflects the two-tier W-2 content dedup (#784).
 
 Architecture (from plan WF4):
   Conversation transcript → extractor (Points + Operators) →
@@ -286,7 +286,7 @@ class ConversationMiner:
         # 5. Phase-2 entity extraction + Object reification (W-1, DE2E-1)
         entities: list[dict] = []
         objects_wired = 0
-        dedup_hits = 0  # dedup stage is a later issue (#784-ish) — key counted only
+        dedup_hits = 0  # #784: real count comes from dedup_report below
         drafts = sum(1 for p in points if p.get("status", "draft") == "draft")
         if extract_entities:
             try:
@@ -372,7 +372,7 @@ class ConversationMiner:
             "event_ids": event_ids,
             "entities": len(entities),
             "objects": objects_wired,
-            "dedup_hits": dedup_hits,
+            
             "drafts": drafts,
             "batch_id": batch_id,
             "batch_status": batch_status,

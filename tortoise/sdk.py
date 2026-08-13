@@ -1749,7 +1749,7 @@ class TortoiseSDK:
                 similarity = pairs[0]["similarity"]
             if prior == pid:
                 # Belt-and-braces: never self-target.
-                logger.warning("dedup: candidate %s matched itself — skipped", pid)
+                _logger.warning("dedup: candidate %s matched itself — skipped", pid)
                 continue
             # Mark the candidate (review-queue state on the Point).
             proj.g.query(
