@@ -153,6 +153,8 @@ class TestIngestFullBundle:
         assert "ref" not in source
 
     def test_points_default_to_draft_unless_specified(self, sdk):
+        # Per-item status:'live' is only allowed under promotion_policy='auto'
+        # (INGEST_CONTRACT row 9: under gated it is a violation).
         bundle = {
             "points": [
                 {"kind": "claim", "content": "draft point, no connections"},
@@ -160,26 +162,210 @@ class TestIngestFullBundle:
             ],
             "connections": [],
         }
-        res = sdk.ingest(bundle)
+        res = sdk.ingest(bundle, promotion_policy="auto")
         pid_draft, pid_live = res["ids"]["points"]
         assert sdk.get_point(pid_draft)["status"] == "draft"
         assert sdk.get_point(pid_live)["status"] == "live"
 
-    def test_source_of_impl_promoted_draft_to_live(self, sdk):
-        # #131 lifecycle: source point goes live when its first edge is created
+# ── promotion_policy (epic #902 W4 A0) ─────────────────────────────
+
+class TestPromotionPolicy:
+    """E2E-8: promotion policy is an explicit param with both behaviors.
+
+    gated (default) → source stays draft; auto → source promotes on wire
+    (#131 parity). Param is keyword-only on the SDK surface.
+    """
+
+    def test_signature_default_is_gated(self):
+        import inspect
+        sig = inspect.signature(TortoiseSDK.ingest)
+        # Q2-lock contract pin: the signature default IS the guarantee (no
+        # silent auto-promotion). The KEYWORD_ONLY half is behaviorally
+        # covered by test_keyword_only_enforced — not re-asserted here.
+        assert sig.parameters["promotion_policy"].default == "gated"
+
+    def test_default_omit_gated_keeps_source_draft(self, sdk):
+        # E2E-8 assertion 2: omitting the param defaults to gated — the
+        # source stays draft (no silent mode exists; #131 behavior is the
+        # opt-in, not the default).
         bundle = {
             "points": [
                 {"ref": "pA", "kind": "claim", "content": "A implies B"},
                 {"ref": "pB", "kind": "claim", "content": "B"},
             ],
-            "connections": [
-                {"from": "pA", "to": "pB", "operator": "IMPL"},
-            ],
+            "connections": [{"from": "pA", "to": "pB", "operator": "IMPL"}],
         }
         res = sdk.ingest(bundle)
         pA, pB = res["ids"]["points"]
-        assert sdk.get_point(pA)["status"] == "live"   # promoted by edge creation
+        assert sdk.get_point(pA)["status"] == "draft"  # not auto-promoted
+        assert sdk.get_point(pB)["status"] == "draft"
+        # operator node itself is written draft (#780 promote_source=False)
+        op_id = res["ids"]["connections"][0]
+        assert sdk.get_point(op_id)["status"] == "draft"
+
+    def test_explicit_gated_keeps_source_draft(self, sdk):
+        bundle = {
+            "points": [
+                {"ref": "pA", "kind": "claim", "content": "A implies B"},
+                {"ref": "pB", "kind": "claim", "content": "B"},
+            ],
+            "connections": [{"from": "pA", "to": "pB", "operator": "IMPL"}],
+        }
+        res = sdk.ingest(bundle, promotion_policy="gated")
+        pA, pB = res["ids"]["points"]
+        assert sdk.get_point(pA)["status"] == "draft"
+
+        # CYCLE-26 REVIEW FIX (P2): assert the OPERATOR node and the TARGET
+        # also stay draft under explicit gated (not just the source) — closes
+        # the gap that a gated-explicit operator-write regression would ship
+        # green.
+        op_id = next(
+            i for i in res["ids"]["connections"]
+            if isinstance(i, str)
+        )
+        assert sdk.get_point(op_id)["status"] == "draft"
+        assert sdk.get_point(pB)["status"] == "draft"
+
+    def test_invalid_promotion_policy_raises_naming_valid_values(self, sdk):
+        # every invalid value raises ValueError naming the param AND the valid
+        # values (cycle-21 message-content pin)
+        for bad in ("atomic", "nope"):
+            with pytest.raises(ValueError) as exc:
+                sdk.ingest({"points": []}, promotion_policy=bad)
+            msg = str(exc.value)
+            assert "promotion_policy" in msg
+            assert "gated" in msg and "auto" in msg
+
+    def test_gated_granular_parity(self, sdk):
+        # Policy is ORTHOGONAL to granularity (E2E-5): gated holds in both
+        # modes — no silent promotion window in granular mode.
+        bundle = {
+            "points": [
+                {"ref": "pA", "kind": "claim", "content": "A implies B"},
+                {"ref": "pB", "kind": "claim", "content": "B"},
+            ],
+            "connections": [{"from": "pA", "to": "pB", "operator": "IMPL"}],
+        }
+        res = sdk.ingest(bundle, granularity="granular", promotion_policy="gated")
+        pA, pB = res["ids"]["points"]
+        op_id = res["ids"]["connections"][0]
+        # Full status set mirrors the bulk counterpart — E2E-5's "identical
+        # final graph" claim checked per-node, not just the source.
+        assert sdk.get_point(pA)["status"] == "draft"
+        assert sdk.get_point(pB)["status"] == "draft"
+        assert sdk.get_point(op_id)["status"] == "draft"
+
+    def test_auto_promotes_source_live(self, sdk):
+        # E2E-8 assertion 1 (SDK surface): auto → source promotes live on
+        # first IMPL edge; target stays draft; operator is NOT draft (the
+        # live-side of the #780 promote_source asymmetry — gated writes an
+        # explicit draft, auto writes no status → projection coalesces live).
+        bundle = {
+            "points": [
+                {"ref": "pA", "kind": "claim", "content": "A implies B"},
+                {"ref": "pB", "kind": "claim", "content": "B"},
+            ],
+            "connections": [{"from": "pA", "to": "pB", "operator": "IMPL"}],
+        }
+        res = sdk.ingest(bundle, promotion_policy="auto")
+        pA, pB = res["ids"]["points"]
+        op_id = res["ids"]["connections"][0]
+        assert sdk.get_point(pA)["status"] == "live"   # source promoted
         assert sdk.get_point(pB)["status"] == "draft"  # target stays draft
+        # #780 asymmetry: gated writes explicit draft on the operator; auto
+        # writes NO status prop (EP treats null-status as live). Assert the
+        # honest discriminator — key absence, not == "live" (which would
+        # fail on the raw-properties read surface) and not != "draft"
+        # (which false-passes on garbage statuses like "retracted").
+        assert "status" not in sdk.get_point(op_id)
+
+    def test_auto_nand_promotes_source_live(self, sdk):
+        # Promotion is op-type-agnostic: NAND wires the same #131 path
+        # (guards against a future op-type-conditional promotion).
+        bundle = {
+            "points": [
+                {"ref": "pA", "kind": "claim", "content": "A contradicts B"},
+                {"ref": "pB", "kind": "claim", "content": "B"},
+            ],
+            "connections": [{"from": "pA", "to": "pB", "operator": "NAND"}],
+        }
+        res = sdk.ingest(bundle, promotion_policy="auto")
+        pA, _ = res["ids"]["points"]
+        assert sdk.get_point(pA)["status"] == "live"
+
+    def test_auto_granular_parity(self, sdk):
+        # E2E-5 discriminating cell: auto holds in granular mode — the
+        # promote flag must not be dropped on the granular code path.
+        bundle = {
+            "points": [
+                {"ref": "pA", "kind": "claim", "content": "A implies B"},
+                {"ref": "pB", "kind": "claim", "content": "B"},
+            ],
+            "connections": [{"from": "pA", "to": "pB", "operator": "IMPL"}],
+        }
+        res = sdk.ingest(bundle, granularity="granular", promotion_policy="auto")
+        pA, pB = res["ids"]["points"]
+        op_id = res["ids"]["connections"][0]
+        assert sdk.get_point(pA)["status"] == "live"
+        assert sdk.get_point(pB)["status"] == "draft"
+        assert "status" not in sdk.get_point(op_id)  # #780 live-side
+
+    def test_keyword_only_enforced(self, sdk):
+        # Q2-lock: positional auto-promotion must NOT silently opt in — a
+        # third positional arg raises TypeError (agents opt in explicitly).
+        with pytest.raises(TypeError):
+            sdk.ingest({"points": []}, "bulk", "auto")
+
+    def test_gated_rejects_explicit_live_item(self, sdk):
+        # INGEST_CONTRACT row 9: under gated, an explicit status:'live' on a
+        # point item is a violation — the Q2 lock is not bypassable via the
+        # bundle's own status field.
+        bundle = {
+            "points": [
+                {"ref": "pA", "kind": "claim", "content": "A",
+                 "status": "live"},
+            ],
+            "connections": [],
+        }
+        with pytest.raises(ValueError) as exc:
+            sdk.ingest(bundle)
+        msg = str(exc.value)
+        assert "status:'live' is not allowed under promotion_policy 'gated'" in msg
+        assert "promotion_policy='auto'" in msg and "update_point" in msg
+
+    def test_auto_allows_explicit_live_item(self, sdk):
+        # Same item is sanctioned under auto (the row-9 route).
+        bundle = {
+            "points": [
+                {"ref": "pA", "kind": "claim", "content": "A",
+                 "status": "live"},
+            ],
+            "connections": [],
+        }
+        res = sdk.ingest(bundle, promotion_policy="auto")
+        pA = res["ids"]["points"][0]
+        assert sdk.get_point(pA)["status"] == "live"
+
+    def test_auto_not_retroactive_on_dedup(self, sdk):
+        # "Promotes when its FIRST edge is created": a re-ingest under auto
+        # of an already-deduped operator does NOT retro-promote the source.
+        bundle = {
+            "points": [
+                {"ref": "pA", "kind": "claim", "content": "A implies B"},
+                {"ref": "pB", "kind": "claim", "content": "B"},
+            ],
+            "connections": [{"from": "pA", "to": "pB", "operator": "IMPL"}],
+        }
+        first = sdk.ingest(bundle)  # gated default
+        pA, _ = first["ids"]["points"]
+        assert sdk.get_point(pA)["status"] == "draft"
+        second = sdk.ingest(bundle, promotion_policy="auto")  # dedup path
+        pA2, _ = second["ids"]["points"]
+        assert pA2 == pA
+        # Directly prove the dedup branch ran: operator deduped, not re-created
+        assert second["deduped"]["connections"] == 1
+        assert second["ids"]["connections"][0] == first["ids"]["connections"][0]
+        assert sdk.get_point(pA)["status"] == "draft"  # not retro-promoted
 
 
 # ── granularity ─────────────────────────────────────────────────────
@@ -209,8 +395,11 @@ class TestGranularity:
         assert "results" not in res
 
     def test_invalid_granularity_raises(self, sdk):
-        with pytest.raises(ValueError, match="granularity"):
+        with pytest.raises(ValueError, match="granularity") as exc:
             sdk.ingest({"points": []}, granularity="atomic")
+        # message-content half of the contract: valid values named (mirror of
+        # the promotion_policy pin)
+        assert "bulk" in str(exc.value) and "granular" in str(exc.value)
 
 
 # ── idempotency ─────────────────────────────────────────────────────

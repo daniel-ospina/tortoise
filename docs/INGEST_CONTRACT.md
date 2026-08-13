@@ -191,14 +191,11 @@ policy):
 
 | Policy | Points | Connections |
 |---|---|---|
-| `"gated"` (default, planned default flip) | stay `draft` | never promote. Direct edges: no promotion. Operator path: `promote_source=False` → operator created `draft`, source **not** auto-promoted. |
-| `"auto"` | source points promote on write (#131 parity) | source of an operator-requiring connection is auto-promoted to `live` |
+| `"gated"` (default — shipped since A0, epic #902) | stay `draft`; an explicit `status:"live"` item is a violation (row 9) | never promote. Direct edges: no promotion. Operator path: `promote_source=False` → operator created `draft`, source **not** auto-promoted. |
+| `"auto"` (opt-in parity mode) | source points promote on write (#131 parity) | source of an operator-requiring connection is auto-promoted to `live` (draft/null-status sources only; terminal sources never resurrected). Operator node written without a status property (live by projection, the #780 asymmetry). |
 
-**planned:** the parameter is this release's addition; today ingest always
-behaves like `"auto"` (source points of operator connections promote, #131).
-When the default flips to `"gated"`, pass `promotion_policy="auto"` to
-preserve today's behavior; the resulting graph is identical (E2E-8 proves
-parity).
+`promotion_policy` is orthogonal to granularity — the same bundle via
+`bulk` vs `granular` honors the same policy (E2E-5 proves graph parity).
 
 ---
 
