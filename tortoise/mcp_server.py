@@ -357,7 +357,9 @@ _QUOTA_GATED: frozenset[str] = frozenset({
 # silently be counted as a read.
 WRITE_TOOL_NAMES: frozenset[str] = _QUOTA_GATED | frozenset({
     "tortoise_ingest",               # bulk write (wrapped, not in _QUOTA_GATED)
-    "tortoise_onboarding_demo_create",  # seeds the 4-layer demo graph
+    "tortoise_onboarding_demo_create",  # seeds the 4-layer demo graph,
+    "tortoise_mine_conversations", "tortoise_approve_merge",
+    "tortoise_promote_point",
 })
 
 
@@ -1952,6 +1954,11 @@ def tortoise_mine_conversations(transcript: str | None = None,
     mined-marker resume, R17 security validation). Returns the mine result
     incl. batch_id/batch_status (W-3 gate), dedup_* and temporal_* keys.
     """
+    # Filesystem-walk vector (same as ingest_corpus/index_sessions): the
+    # corpus path is caller-controlled and rglobs the HOST filesystem —
+    # excluded from tenant HTTP; stdio/CLI only (#1090 review).
+    if _transport_mode.get() == "http":
+        return _http_excluded_error()
     sdk = _get_team_sdk()
     if corpus_dir is not None:
         return _safe(sdk.mine_corpus, corpus_dir,
@@ -1959,20 +1966,24 @@ def tortoise_mine_conversations(transcript: str | None = None,
     if not transcript or not source_id:
         return {"error": "transcript= and source_id= are required "
                          "(or corpus_dir= for a batch)"}
-    from tortoise.api import EventAPI
-    from tortoise.log import EventLog
-    from tortoise.mining import mine_conversation
-    import tempfile, os
-    log = sdk._get_event_log()
-    if log is None:
-        log = EventLog(os.path.join(
-            tempfile.mkdtemp(prefix="tortoise_mcp_mine_"), "events.jsonl"))
-    api = EventAPI(log, initiated_by="extractor", agent_id="mcp",
-                   projection=sdk._get_proj())
+    try:
+        from tortoise.api import EventAPI
+        from tortoise.log import EventLog
+        from tortoise.mining import mine_conversation
+        import tempfile, os
+        log = sdk._get_event_log()
+        if log is None:
+            log = EventLog(os.path.join(
+                tempfile.mkdtemp(prefix="tortoise_mcp_mine_"), "events.jsonl"))
+        api = EventAPI(log, initiated_by="extractor", agent_id="mcp",
+                       projection=sdk._get_proj())
+    except Exception as exc:
+        return {"error": f"mine setup failed: {exc}"}
     return _safe(mine_conversation, transcript, source_id, api,
                  extract_entities=extract_entities,
                  content_dedup=content_dedup,
                  session_date=session_date,
+                 participants=participants,
                  sdk=sdk)
 
 

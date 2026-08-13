@@ -99,23 +99,44 @@ class TestDe2e7:
         assert by_name["tortoise_belief_timeline"].sdk_method == "belief_timeline"
 
     def test_mcp_handler_error_contract(self, monkeypatch):
-        """J-6: handlers return {error: message} on failure (the _safe
-        convention) — verified via the underlying SDK raise path."""
+        """J-6: handlers return {error: message} on failure — the REAL SDK
+        raise path is exercised (stdio dev mode, then a raising method)."""
         import tortoise.mcp_server as mcp
         from tortoise.sdk import TortoiseSDK
+        monkeypatch.setenv("TORTOISE_API_KEY", "")
+        mcp._transport_mode.set("stdio")
         sdk = TortoiseSDK(db_path=os.path.join(tempfile.mkdtemp(), "t.db"))
         monkeypatch.setattr(mcp, "_get_team_sdk", lambda: sdk)
+        # Real SDK raise path: nonexistent ids → ValueError → {error: ...}.
         res = mcp.tortoise_promote_point("no-such-point-123")
         assert isinstance(res, dict) and "error" in res, res
         res2 = mcp.tortoise_approve_merge("no-such-candidate", action="merge")
         assert isinstance(res2, dict) and "error" in res2, res2
         res3 = mcp.tortoise_mine_conversations()
         assert isinstance(res3, dict) and "error" in res3, res3
-        # Without an initialized transport the auth gate rejects (fail-closed)
-        # — the contract shape is what matters here: every handler routes
-        # through _safe and returns {error: message} on failure. The happy
-        # paths are covered by the SDK-level suites.
+        # Raising SDK method → {error: message} (sanitized, no crash).
+        def boom(*a, **k):
+            raise RuntimeError("synthetic sdk failure")
+        monkeypatch.setattr(sdk, "belief_timeline", boom)
         res4 = mcp.tortoise_belief_timeline("port 16379")
         assert isinstance(res4, dict) and "error" in res4, res4
-        res5 = mcp.tortoise_list_dedup_candidates()
-        assert isinstance(res5, dict) and "error" in res5, res5
+        assert "synthetic" in res4["error"]
+
+    def test_check_gates_open_unknown_dependency_blocks(self):
+        """An open dependency NOT in the known in-epic set blocks."""
+        res = check_gates(787,
+                          issue_body="Depends on: #320, #9999",
+                          dependency_states={320: "closed", 9999: "open"},
+                          calibration_passed=True)
+        assert res["blocked"] is True
+        assert any("9999" in r for r in res["reasons"])
+        assert res["open_dependencies"] == [9999]
+
+    def test_check_gates_in_epic_deps_do_not_block(self):
+        """Documented in-epic sequencing refs (#779/#780/#782/...) do not
+        block — they carry their own gates."""
+        res = check_gates(784,
+                          issue_body="Depends on: #320, #779, #782, #780",
+                          dependency_states={320: "closed"},
+                          calibration_passed=True)
+        assert res["blocked"] is False, res

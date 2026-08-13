@@ -44,8 +44,8 @@ def check_gates(child_issue: str | int,
 
     Args:
         child_issue: the child issue number (for the report).
-        issue_body: the child issue body (parsed for 'Depends on:'); when
-            None the CLI path fetches it via gh (gh_runner).
+        issue_body: the child issue body — parsed for '#N' dependency refs
+            ('Depends on: ...'); when None the CLI path fetches it via gh.
         dependency_states: {issue_number: 'open'|'closed'|...} — when None,
             the CLI path resolves each dependency via gh.
         calibration_passed: the local Gate B marker (SDK
@@ -53,19 +53,30 @@ def check_gates(child_issue: str | int,
         gh_runner: injectable ``gh api <path>`` runner for tests; default
             subprocess ``gh``.
 
+    Gate semantics (plan §6.3): Gate A = #320 must be CLOSED; Gate B = the
+    calibration milestone must be recorded. Other 'Depends on:' refs are
+    BLOCKING while open, except the documented in-epic sequencing refs
+    (_KNOWN_NON_GATES — they carry their own gates).
+
     Returns {"child_issue": N, "blocked": bool, "reasons": [...],
              "gates": {"gate_a": "open"|"closed"|"unknown",
-                       "gate_b": "passed"|"open"}}.
+                       "gate_b": "passed"|"open"},
+             "open_dependencies": [...]}.
     """
     reasons: list[str] = []
     body = issue_body
     if body is None and gh_runner is not None:
         body = _gh_issue_body(child_issue, gh_runner)
 
-    # Gate A: #320 must be closed.
+    # Dependency refs from the issue body.
+    deps = sorted({int(n) for n in _DEPENDS_ON_RE.findall(body or "")})
     states = dict(dependency_states or {})
-    if 320 not in states and gh_runner is not None:
-        states[320] = _gh_issue_state(320, gh_runner)
+    for dep in deps:
+        if dep in states or gh_runner is None:
+            continue
+        states[dep] = _gh_issue_state(dep, gh_runner)
+
+    # Gate A: #320 must be closed.
     gate_a = states.get(320)
     if gate_a is None:
         gate_a_state = "unknown"
@@ -75,6 +86,15 @@ def check_gates(child_issue: str | int,
     else:
         gate_a_state = "open"
         reasons.append("gate A (#320 index-sessions epic) is open")
+
+    # Other open dependencies block (except documented in-epic refs).
+    open_deps: list[int] = []
+    for dep in deps:
+        if dep == 320 or dep in _KNOWN_NON_GATES:
+            continue
+        if states.get(dep) != "closed":
+            open_deps.append(dep)
+            reasons.append(f"dependency #{dep} is open")
 
     # Gate B: the local calibration marker.
     gate_b_state = "passed" if calibration_passed else "open"
@@ -91,6 +111,7 @@ def check_gates(child_issue: str | int,
             "gate_a": gate_a_state,
             "gate_b": gate_b_state,
         },
+        "open_dependencies": open_deps,
     }
 
 
