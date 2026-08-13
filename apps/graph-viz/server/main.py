@@ -11,7 +11,7 @@ To switch graphs, set env vars:
 """
 from __future__ import annotations
 
-import random, math
+import random, math, zlib
 from collections import Counter
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -322,6 +322,9 @@ _CANONICAL_KINDS = [
     ("feature",         "Feature",          "#ff9e64", "A feature (product-strategy pack)", "puzzle-piece", "product-strategy"),
     ("userJourney",     "User Journey",     "#7dcfff", "A user journey (product-strategy pack)", "map", "product-strategy"),
     ("requirement",     "Requirement",      "#f7768e", "A requirement (product-strategy pack)", "clipboard-check", "product-strategy"),
+    # #531 canonical approval pattern + legacy event kind (ONTOLOGY §5)
+    ("humanApproval",   "Human Approval",   "#9ece6a", "Human approval event/decision (#531 pattern)", "thumbs-up", "core"),
+    ("event",           "Event",            "#7dcfff", "Legacy event pointKind", "zap", "core"),
 ]
 
 # Deterministic palette for kinds discovered in the graph but absent from
@@ -329,21 +332,25 @@ _CANONICAL_KINDS = [
 _EXTRA_PALETTE = ["#7aa2f7", "#9ece6a", "#bb9af7", "#e0af68", "#ff9e64",
                   "#7dcfff", "#c0caf5", "#f7768e", "#2ac3de", "#db4b4b"]
 
-# Expansion-pack contexts advertised by the endpoint (ONTOLOGY §9 packs;
-# the graph may contain pack kinds beyond core — they are discovered live).
-_PACK_CONTEXTS = ["product-strategy", "development", "marketing"]
+# Expansion-pack contexts advertised by the endpoint. Only contexts that
+# can actually return data are advertised: core + product-strategy (canonical
+# table) and tenant (discovered). development/marketing packs exist in the
+# repo but have no canonical entries here yet — advertising them would ship
+# dead filter tabs (#362 review P2).
+_PACK_CONTEXTS = ["product-strategy"]
 
 
 def _discover_graph_kinds() -> list[str]:
     """Return every kind value actually present in the live graph.
 
-    Union across the five kind-bearing properties (ONTOLOGY §4.7). This is
-    what makes tenant-custom ontologies work: any objectKind/pointKind/etc.
-    written via the SDK or CLI shows up here automatically.
+    Union across the six kind-bearing properties (ONTOLOGY §4.7: pointKind,
+    subjectKind, objectKind, documentKind, eventKind, sourceKind). This is
+    what makes tenant-custom ontologies work: any kind written via the SDK
+    or CLI shows up here automatically.
     """
     kinds: set[str] = set()
     for prop in ("pointKind", "objectKind", "subjectKind",
-                 "eventKind", "documentKind"):
+                 "eventKind", "documentKind", "sourceKind"):
         try:
             rows = _g.query(
                 f"MATCH (n) WHERE n.{prop} IS NOT NULL "
@@ -375,12 +382,12 @@ def get_ontology_types(context: str = "all"):
 
     discovered = _discover_graph_kinds()
     types = list(canonical.values())
-    extra_idx = 0
     for kind in discovered:
         if kind in canonical:
             continue
-        color = _EXTRA_PALETTE[extra_idx % len(_EXTRA_PALETTE)]
-        extra_idx += 1
+        # Kind-stable color: hash the kind name so inserting a new kind in
+        # the graph never recolors existing kinds (#362 review P3).
+        color = _EXTRA_PALETTE[zlib.crc32(kind.encode()) % len(_EXTRA_PALETTE)]
         types.append({
             "objectKind": kind, "label": kind.replace("_", " ").title(),
             "color": color, "description": "Discovered from graph data",
