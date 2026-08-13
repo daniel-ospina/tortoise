@@ -2193,7 +2193,11 @@ def tortoise_onboarding_github_connect(org: str | None = None) -> dict:
     import os as _os
     client_id = _os.environ.get("GITHUB_CLIENT_ID")
     if not client_id:
-        return {"error": "GitHub OAuth not configured"}
+        # Prompt-canonical text (#496/#540): GitHub OAuth is hosted-mode only.
+        # In self-host HTTP the env never exists — match the prompt's documented
+        # recovery anchor instead of the misleading "OAuth not configured".
+        # (hosted_api.py REST endpoints keep the 503 ops signal.)
+        return {"error": "No team context (HTTP mode required)"}
     state = secrets.token_urlsafe(24)
     # Store CSRF state so the callback can validate it (P2 review fix) —
     # must be visible to the REST callback handler in the same process.
