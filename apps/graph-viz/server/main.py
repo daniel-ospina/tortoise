@@ -7,11 +7,12 @@ Available graphs (in Docker / OrbStack):
   - falkordb (127.0.0.1:6379) password=falkordb → graph "tortoise" (test/dev, 481 claims)
 
 To switch graphs, set env vars:
-  FALKORDB_HOST, FALKORDB_PORT, FALKORDB_PASSWORD, FALKORDB_GRAPH
+  FALKORDB_HOST, FALKORDB_PORT, FALKORDB_USERNAME, FALKORDB_PASSWORD,
+  FALKORDB_SSL (1 for rediss-style TLS), FALKORDB_GRAPH
 """
 from __future__ import annotations
 
-import random, math
+import random, math, zlib, sys
 from collections import Counter
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,14 +21,22 @@ from pydantic import BaseModel
 from falkordb import FalkorDB
 import os
 
+# connection.py lives beside main.py; make the import work both as a script
+# (python3 server/main.py) and as a module (uvicorn main:app).
+if __package__ in (None, ""):
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from connection import build_connection_kwargs, graph_name
+
 app = FastAPI(title="Tortoise Graph Viz")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 # ── FalkorDB connection (defaults work on any new machine via docker-compose) ──
-DB_HOST = os.environ.get("FALKORDB_HOST", "localhost")
-DB_PORT = int(os.environ.get("FALKORDB_PORT", "16379"))
-DB_PASSWORD = os.environ.get("FALKORDB_PASSWORD", None)
-DB_GRAPH = os.environ.get("FALKORDB_GRAPH", "tortoise")
+# Env contract (see server/connection.py + .env.example):
+#   FALKORDB_HOST / FALKORDB_PORT — connection endpoint
+#   FALKORDB_USERNAME / FALKORDB_PASSWORD — FalkorDB Cloud + ACL-auth instances (#1079)
+#   FALKORDB_SSL=1 — TLS (rediss-style endpoints) (#1079)
+#   FALKORDB_GRAPH — graph to select
+DB_GRAPH = graph_name()
 CONTEXT_DEFAULT = "product-strategy"
 
 # ── Agent discovery protocol ──
@@ -35,8 +44,9 @@ CONTEXT_DEFAULT = "product-strategy"
 # Override with: export TORTOISE_HOST=http://host:port
 # The /api/health endpoint returns which graph is active and all available graphs.
 
-kwargs = {"host": DB_HOST, "port": DB_PORT}
-if DB_PASSWORD: kwargs["password"] = DB_PASSWORD
+kwargs = build_connection_kwargs()
+DB_HOST = kwargs["host"]
+DB_PORT = kwargs["port"]
 import time
 for attempt in range(1, 31):  # retry for ~30s
     try:
@@ -279,6 +289,130 @@ def get_sources():
     except:
         raw = []
     return {"sources": [{"name": (r[0] or "")[:80], "count": r[1], "enabled": True} for r in raw]}
+
+
+# ── Dynamic ontology types (#362) ─────────────────────────────────────
+# Canonical kind vocabulary per ONTOLOGY v3.4 (docs/ONTOLOGY.md §4):
+#   pointKind: statement, decision, vision, strategy, plan, goal, target,
+#              observation, hypothesis, assessment (+ pack pointKinds)
+#   objectKind: Project, WorkItem, document, tag, user, skill, tool, agent,
+#               workflow, agreement, standard, other (+ pack objectKinds)
+# Colors follow the app palette (constants.js C / FALLBACK_TYPES in
+# useOntologyTypes.ts) so the graph stays visually consistent.
+_CANONICAL_KINDS = [
+    # pointKind (claims/decisions)
+    ("statement",   "Statement",   "#c0caf5", "Claim or assertion in the belief graph", "file-text",  "core"),
+    ("decision",    "Decision",    "#7aa2f7", "A recorded decision", "check-square", "core"),
+    ("vision",      "Vision",      "#bb9af7", "Aspirational end-state description", "eye", "core"),
+    ("strategy",    "Strategy",    "#9ece6a", "Strategic direction or approach", "compass", "core"),
+    ("plan",        "Plan",        "#7dcfff", "Planned course of action", "calendar", "core"),
+    ("goal",        "Goal",        "#e0af68", "A desired outcome", "target", "core"),
+    ("target",      "Target",      "#ff9e64", "Quantified or dated objective", "crosshair", "core"),
+    ("observation", "Observation", "#f7768e", "Empirical observation", "search", "core"),
+    ("hypothesis",  "Hypothesis",  "#2ac3de", "Testable proposition", "flask", "core"),
+    ("assessment",  "Assessment",  "#e0af68", "Agent source evaluation (ONTOLOGY v3.2 §5)", "scale", "core"),
+    # objectKind (persistent things)
+    ("Project",     "Project",     "#7aa2f7", "A project entity", "folder", "core"),
+    ("WorkItem",    "Work Item",   "#9ece6a", "A unit of work", "list", "core"),
+    ("document",    "Document",    "#c0caf5", "A document", "file-text", "core"),
+    ("tag",         "Tag",         "#565f89", "Free-form label (TAGGED edge target)", "tag", "core"),
+    ("user",        "User",        "#7dcfff", "A user", "user", "core"),
+    ("skill",       "Skill",       "#bb9af7", "A skill (mechanism provenance)", "award", "core"),
+    ("tool",        "Tool",        "#ff9e64", "A tool (mechanism provenance)", "wrench", "core"),
+    ("agent",       "Agent",       "#f7768e", "An agent (mechanism provenance)", "bot", "core"),
+    ("workflow",    "Workflow",    "#2ac3de", "A workflow (mechanism provenance)", "git-branch", "core"),
+    ("agreement",   "Agreement",   "#e0af68", "A formal agreement", "handshake", "core"),
+    ("standard",    "Standard",    "#c0caf5", "A standard or norm", "book-open", "core"),
+    ("other",       "Other",       "#565f89", "Fallback object kind", "circle", "core"),
+    # product-strategy expansion pack (ONTOLOGY §9 pack; default app context)
+    ("customerSegment", "Customer Segment", "#7aa2f7", "A customer segment (product-strategy pack)", "users", "product-strategy"),
+    ("jobToBeDone",     "Job to Be Done",   "#9ece6a", "A job to be done (product-strategy pack)", "briefcase", "product-strategy"),
+    ("valueProposition","Value Proposition","#bb9af7", "A value proposition (product-strategy pack)", "gem", "product-strategy"),
+    ("useCase",         "Use Case",         "#e0af68", "A use case (product-strategy pack)", "play-circle", "product-strategy"),
+    ("feature",         "Feature",          "#ff9e64", "A feature (product-strategy pack)", "puzzle-piece", "product-strategy"),
+    ("userJourney",     "User Journey",     "#7dcfff", "A user journey (product-strategy pack)", "map", "product-strategy"),
+    ("requirement",     "Requirement",      "#f7768e", "A requirement (product-strategy pack)", "clipboard-check", "product-strategy"),
+    # #531 canonical approval pattern + legacy event kind (ONTOLOGY §5)
+    ("humanApproval",   "Human Approval",   "#9ece6a", "Human approval event/decision (#531 pattern)", "thumbs-up", "core"),
+    ("event",           "Event",            "#7dcfff", "Legacy event pointKind", "zap", "core"),
+]
+
+# Deterministic palette for kinds discovered in the graph but absent from
+# the canonical table (tenant-custom / expansion-pack kinds).
+_EXTRA_PALETTE = ["#7aa2f7", "#9ece6a", "#bb9af7", "#e0af68", "#ff9e64",
+                  "#7dcfff", "#c0caf5", "#f7768e", "#2ac3de", "#db4b4b"]
+
+# Expansion-pack contexts advertised by the endpoint. Only contexts that
+# can actually return data are advertised: core + product-strategy (canonical
+# table) and tenant (discovered). development/marketing packs exist in the
+# repo but have no canonical entries here yet — advertising them would ship
+# dead filter tabs (#362 review P2).
+_PACK_CONTEXTS = ["product-strategy"]
+
+
+def _discover_graph_kinds() -> list[str]:
+    """Return every kind value actually present in the live graph.
+
+    Union across the six kind-bearing properties (ONTOLOGY §4.7: pointKind,
+    subjectKind, objectKind, documentKind, eventKind, sourceKind). This is
+    what makes tenant-custom ontologies work: any kind written via the SDK
+    or CLI shows up here automatically.
+    """
+    kinds: set[str] = set()
+    for prop in ("pointKind", "objectKind", "subjectKind",
+                 "eventKind", "documentKind", "sourceKind"):
+        try:
+            rows = _g.query(
+                f"MATCH (n) WHERE n.{prop} IS NOT NULL "
+                f"RETURN DISTINCT n.{prop} LIMIT 500"
+            ).result_set
+            for row in rows:
+                if row[0]:
+                    kinds.add(str(row[0]))
+        except Exception:
+            continue
+    return sorted(kinds)
+
+
+@app.get("/api/ontology-types")
+def get_ontology_types(context: str = "all"):
+    """Return available kind values with labels, colors and metadata (#362).
+
+    - Canonical core kinds come from ONTOLOGY v3.4 (static table above).
+    - Kinds present in the live graph but not canonical are discovered
+      dynamically (tenant/expansion-pack kinds) and assigned a stable
+      color from the extra palette.
+    - ``context`` filters to a pack ("core" / "product-strategy" / ...);
+      "all" returns everything.
+    """
+    canonical = {k[0]: {
+        "objectKind": k[0], "label": k[1], "color": k[2],
+        "description": k[3], "icon": k[4], "context": k[5],
+    } for k in _CANONICAL_KINDS}
+
+    discovered = _discover_graph_kinds()
+    types = list(canonical.values())
+    for kind in discovered:
+        if kind in canonical:
+            continue
+        # Kind-stable color: hash the kind name so inserting a new kind in
+        # the graph never recolors existing kinds (#362 review P3).
+        color = _EXTRA_PALETTE[zlib.crc32(kind.encode()) % len(_EXTRA_PALETTE)]
+        types.append({
+            "objectKind": kind, "label": kind.replace("_", " ").title(),
+            "color": color, "description": "Discovered from graph data",
+            "icon": None, "context": "tenant",
+        })
+
+    if context != "all":
+        types = [t for t in types if t["context"] == context]
+
+    return {
+        "context": context,
+        "contexts": ["core"] + _PACK_CONTEXTS + ["tenant"],
+        "types": types,
+        "total": len(types),
+    }
 
 
 @app.get("/api/health")

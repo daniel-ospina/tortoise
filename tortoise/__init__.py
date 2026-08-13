@@ -46,14 +46,47 @@ if _OriginalFalkorDB is not None:
         Raises RuntimeError when `path` is relative (never permitted — relative
         paths create per-CWD servers, the Category-3 leak). Absolute paths and
         no-arg construction pass through to the original.
+
+        Issue #1005 (lifecycle): context-manager support + idempotent close +
+        atexit registration so normal process exit never orphans the server.
+        NOTE: no GC-time weakref.finalize here — the object IS the redislite
+        client, and finalizer callbacks cannot dereference their own referent
+        (it is already dead), so a finalizer could never reach close().
+        Deterministic close is via `with`/explicit close; strays are covered
+        by the reaper + conftest hygiene sweeps.
         """
 
         def __init__(self, *args, **kwargs):
             if args and args[0] is not None and isinstance(args[0], str):
                 path = args[0]
-                if not os.path.isabs(path) and not path.startswith("~"):
+                if path == ":memory:":
+                    # redislite in-memory server — not a file path, exempt
+                    # (mirrors config.py; #1005 lifecycle applies to
+                    # file-backed servers only)
+                    pass
+                elif not os.path.isabs(path) and not path.startswith("~"):
                     raise RuntimeError(RELATIVE_PATH_ERROR.format(path=path))
             super().__init__(*args, **kwargs)
+            import atexit as _atexit
+            self._t_closed = False
+            _atexit.register(self._t_close)
+
+        def _t_close(self) -> None:
+            """Idempotent close; safe from atexit or __exit__."""
+            if getattr(self, "_t_closed", False):
+                return
+            self._t_closed = True
+            try:
+                self.close()
+            except Exception:
+                pass  # teardown context: never raise
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self._t_close()
+            return False
 
 else:
 

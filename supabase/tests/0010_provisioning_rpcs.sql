@@ -351,21 +351,33 @@ DO $$ BEGIN
     'identity rotation: api_keys accumulates the rotated key row');
 END $$;
 
--- two DIFFERENT identities may both join the same team (M:N agent members)
-SELECT public.provision_team(
-  p_user_id     => NULL,
-  p_identity    => 'agent:anon-770-2',
-  p_team_id     => 'team-c-770',
-  p_team_name   => 'Agent C 770',
-  p_api_key     => 'tt_plaintext_c2_770',
-  p_key_hash    => 'salt:hash-c2-770',
-  p_lookup_hash => 'lkp-c2-770',
-  p_graph_name  => 'team_team-c-770'
-);
+-- the owner ≤1 invariant (20260813000004 uq_member_owner — P3-FIX-P): a
+-- SECOND identity attempting owner co-provision on an already-owned team is
+-- REJECTED (anon teams are single-owner — the claim path needs exactly one
+-- NULL-user owner row to attach a verified identifier to). M:N membership
+-- for distinct identities remains valid via invitations/member role, but
+-- co-OWNERSHIP is now structurally impossible (the old "two identities may
+-- co-provision one team" scenario predates the invariant and is invalid).
 DO $$ BEGIN
+  BEGIN
+    PERFORM public.provision_team(
+      p_user_id     => NULL,
+      p_identity    => 'agent:anon-770-2',
+      p_team_id     => 'team-c-770',
+      p_team_name   => 'Agent C 770',
+      p_api_key     => 'tt_plaintext_c2_770',
+      p_key_hash    => 'salt:hash-c2-770',
+      p_lookup_hash => 'lkp-c2-770',
+      p_graph_name  => 'team_team-c-770'
+    );
+    RAISE EXCEPTION 'FAIL: second owner co-provision must be rejected (uq_member_owner)';
+  EXCEPTION WHEN unique_violation THEN NULL; END;
   PERFORM tests.assert(
-    (SELECT count(*) FROM public.team_memberships WHERE team_id='team-c-770') = 2,
-    'identity path: distinct identities may co-provision one team');
+    (SELECT count(*) FROM public.team_memberships WHERE team_id='team-c-770') = 1,
+    'owner≤1: second owner co-provision rejected — exactly one membership row');
+  PERFORM tests.assert(
+    (SELECT count(*) FROM public.api_keys WHERE team_id='team-c-770') = 2,
+    'owner≤1: rejected co-provision leaves the api_keys rows untouched');
 END $$;
 
 -- guard: exactly one of p_user_id / p_identity is required

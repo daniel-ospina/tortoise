@@ -17,29 +17,6 @@ from tortoise.sdk import TortoiseSDK
 from tortoise.pricing import tier_limits
 
 
-@pytest.fixture(scope="session")
-def shared_embedded_db():
-    """One shared embedded FalkorDBLite DB for the whole session (#221 R5).
-
-    R5 mitigation for the redislite process leak (#176): tests that need an
-    embedded (redislite) DB create ONE server per session instead of one per
-    test. Each test wipes the graph on its own (or uses a per-test graph
-    name), so state never leaks across tests while the subprocess count stays
-    at 1.
-
-    Restored 2026-08-08 (#647): the D11 conftest rewrite (#578) dropped this
-    fixture but five test files (test_ep_selector, test_ranking,
-    test_sdk_legacy_coverage, test_search_sessions_temporal,
-    test_session_semantic_search) still depend on it.
-
-    # TODO(#176): stopgap — remove when the redislite root-cause fix lands.
-    """
-    db_path = os.path.join(
-        tempfile.mkdtemp(prefix="tortoise_shared_embedded_"), "shared.db"
-    )
-    yield db_path
-
-
 @pytest.fixture
 def provision_test_user():
     created = []
@@ -136,24 +113,232 @@ def shared_embedded_db():
     fixture at that point; the #647 restoration landed on main afterward).
 
     # TODO(#176): stopgap — remove when the redislite root-cause fix lands.
+    # Issue #1005: superseded by lifecycle finalize (tortoise.FalkorDB /
+    # TortoiseSDK close on GC) + the _redislite_hygiene session sweeps below;
+    # kept because the fixture's shared path is still the cheap way for the
+    # five dependent files to share one server.
     """
     import tempfile as _tf
     db_path = os.path.join(_tf.mkdtemp(prefix="tortoise_shared_embedded_"), "shared.db")
     yield db_path
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _redislite_hygiene():
+    """Bound redislite orphan accumulation (#1005).
+
+    Session start: register this suite in the active-suite registry and run
+    a CONCURRENCY-SAFE sweep (dir-gone/stale records only — never a live
+    server of a concurrently running suite, which may sit at 0 clients
+    between tests). Session end: run a full sweep, but only when no other
+    suite is still active — otherwise defer to the last suite standing.
+
+    Sweeps acquire the reaper singleton lock and are batch-capped so a
+    dirty machine cannot stall suite startup.
+    """
+    import uuid
+
+    from tortoise.embedded_reaper import (
+        ACTIVE_SUITES_DIR,
+        _ReaperLock,
+        _run_sweep,
+        active_suite_tokens,
+    )
+
+    marker_dir = ACTIVE_SUITES_DIR
+    token = f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    marker_path = None
+    try:
+        os.makedirs(marker_dir, exist_ok=True)
+        marker_path = os.path.join(marker_dir, token)
+        with open(marker_path, "w") as fh:
+            fh.write(f"pid={os.getpid()}\n")
+    except OSError:
+        # never fail the suite over hygiene; remove any partial marker so a
+        # poison file cannot degrade every future suite's sweep to only-safe
+        # (the foreign-pytest guard still covers the markerless case)
+        if marker_path:
+            try:
+                os.remove(marker_path)
+            except OSError:
+                pass
+        marker_path = None
+
+    def _sweep(only_safe: bool) -> dict:
+        try:
+            lock = _ReaperLock()
+            if not lock.acquire():
+                return {"skipped": "reaper-lock-held"}
+            try:
+                # Full end-sweep: disable the boot cooldown — at session end
+                # no new client can appear, so servers younger than the 30s
+                # cooldown are still safe to reap (otherwise the last minute
+                # of the suite's servers leak until the next suite; observed
+                # as 13 orphans on CI, issue #1005 follow-up).
+                prev = os.environ.get("TORTOISE_REAPER_MIN_UPTIME")
+                if not only_safe:
+                    os.environ["TORTOISE_REAPER_MIN_UPTIME"] = "0"
+                try:
+                    acted = _run_sweep(
+                        dry_run=False, batch_size=50, only_safe=only_safe,
+                        jobs=8, kill_pacing=0.4)
+                    return {"reaped": len(acted)}
+                finally:
+                    if prev is None:
+                        os.environ.pop("TORTOISE_REAPER_MIN_UPTIME", None)
+                    else:
+                        os.environ["TORTOISE_REAPER_MIN_UPTIME"] = prev
+            finally:
+                lock.release()
+        except Exception as exc:  # never fail the suite over hygiene
+            return {"error": str(exc)}
+
+    # Session start: only dir-gone/stale records are safe while other suites
+    # may be mid-run (their per-test servers are 0-client between tests).
+    start_result = _sweep(only_safe=True)
+    print(f"[redislite-hygiene] start sweep: {start_result}")
+
+    yield
+
+    def _cmdline_of(pid: str) -> str:
+        """Short cmdline for a pid, for the hygiene log (issue #1103).
+        Linux /proc first (CI), macOS ps fallback. Best-effort — "?" on
+        failure (the pid may have just exited).
+        """
+        import subprocess as _sp
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as fh:
+                raw = fh.read()
+            if raw:
+                return raw.replace(b"\x00", b" ").decode(
+                    errors="replace")[:120]
+        except OSError:
+            pass
+        try:
+            return (_sp.run(["ps", "-o", "args=", "-p", pid],
+                            capture_output=True, text=True, timeout=5)
+                    .stdout.strip()[:120])
+        except Exception:
+            return "?"
+
+    def _foreign_suites_active() -> tuple[bool, list[dict]]:
+        """(foreign, matches) — True when pytest processes outside this suite's
+        process tree are running, plus the matched pids (pid + cmdline) so the
+        decision is diagnosable (issue #1103). Catches suites running the
+        pre-#1005 conftest, which do not write active-suite markers — without
+        this, our full end-sweep could kill another suite's between-tests idle
+        server (issue #1005 P1).
+        """
+        import subprocess as _sp
+        my_pid = os.getpid()
+        # Ancestors of THIS suite's invocation (runner shell → bash -c step →
+        # timeout → stdbuf → python) carry "pytest" in their cmdline (the step
+        # script text) but are NOT foreign suites. Without the ancestry skip,
+        # the CI step wrapper false-positives and the end-sweep defers forever
+        # — every suite leaks its servers (observed as 13 orphans on test (b),
+        # issue #1005). Genuine concurrent suites (different process tree) are
+        # not ancestors and are still detected below.
+        ancestors: set[int] = set()
+        pid = my_pid
+        for _ in range(64):  # bounded walk to init
+            try:
+                ppid = int(_sp.run(["ps", "-o", "ppid=", "-p", str(pid)],
+                                   capture_output=True, text=True, timeout=5
+                                   ).stdout.strip())
+            except (_sp.TimeoutExpired, OSError, ValueError):
+                break
+            if ppid <= 0 or ppid == pid:
+                break
+            ancestors.add(ppid)
+            pid = ppid
+        try:
+            out = _sp.run(["pgrep", "-f", "pytest"], capture_output=True,
+                          text=True, timeout=10)
+        except (_sp.TimeoutExpired, OSError):
+            return True, []  # unknown -> fail closed (defer full sweep)
+        for line in out.stdout.splitlines():
+            pid = line.strip()
+            if not pid.isdigit() or int(pid) == my_pid or int(pid) in ancestors:
+                continue
+            try:
+                r = _sp.run(["ps", "-o", "ppid=", "-p", pid],
+                            capture_output=True, text=True, timeout=5)
+            except (_sp.TimeoutExpired, OSError):
+                return True, []  # unknown liveness -> fail closed
+            raw = r.stdout.strip()
+            if not raw:
+                # pgrep/ps race — the pid exited between the two calls. A dead
+                # process cannot be a live foreign suite, so it must NOT defer
+                # the sweep (issue #1103: the race makes the full end-sweep
+                # skip, leaking this suite's own 0-client servers as the CI
+                # orphan count).
+                continue
+            try:
+                ppid = int(raw)
+            except ValueError:
+                return True, []  # unparseable -> fail closed
+            if ppid != my_pid:
+                return True, [{"pid": pid, "cmdline": _cmdline_of(pid)}]
+        return False, []
+
+    # Session end: remove our marker first, then check for other active
+    # suites (markers) AND foreign pytest processes (old-conftest suites).
+    # Full sweep only when we are the last suite standing.
+    if marker_path:
+        try:
+            os.remove(marker_path)
+        except OSError:
+            pass
+    others = [t for t in active_suite_tokens() if t != token]
+    foreign, foreign_matches = _foreign_suites_active()
+    end_result = _sweep(only_safe=bool(others) or foreign)
+    print(f"[redislite-hygiene] end sweep (other-suites={len(others)}, "
+          f"foreign-pytest={foreign}): {end_result}")
+    # Issue #1103: pytest capture swallows the print above, so the sweep
+    # decision is invisible in CI logs. Mirror it to a file the CI orphan
+    # check can dump. Best-effort — never fail the suite over hygiene logging.
+    try:
+        import json as _json
+        log_dir = os.environ.get("RUNNER_TEMP") or tempfile.gettempdir()
+        log_path = os.path.join(log_dir, "redislite-hygiene-end.json")
+        with open(log_path, "w") as fh:
+            _json.dump({
+                "token": token,
+                "other_suites": others,
+                "foreign_pytest": foreign,
+                "foreign_pids": foreign_matches,
+                "sweep": end_result,
+            }, fh, indent=2)
+    except Exception:
+        pass
+
+
 
 
 @pytest.fixture(autouse=True)
-def _reset_register_rate_limit():
-    """/v1/register rate limiter is in-memory per process (3/hour/IP, #498).
-
-    pytest runs all test files in ONE process, so onboarding/register tests
-    in earlier files consume the budget of later files (429s in
-    test_onboarding_integration, #493). Reset per test — the limiter's
-    cross-test persistence has no value here (each test uses a fresh IP-less
-    TestClient context).
-    """
+def _reset_ip_rate_limits():
+    """#498 register + #1081 signup IP limiters are in-memory per process and
+    share one TestClient host across a module — reset both per test."""
+    # P3-FIX-6: getattr-guard so the red phase (before _SIGNUP_BUCKETS exists)
+    # does not ImportError the whole suite; also reset the R8 tracker
+    # (order-dependent dedup flake guard — module-scoped testclient host).
+    import tortoise.hosted_api as ha_mod
     from tortoise.hosted_api import _register_buckets
     _register_buckets.clear()
+    signup_buckets = getattr(ha_mod, "_SIGNUP_BUCKETS", None)
+    if signup_buckets is not None:
+        signup_buckets.clear()
+    try:
+        from tortoise.abuse import SIGNUP_TRACKER
+        SIGNUP_TRACKER.reset()
+    except (ImportError, AttributeError):
+        pass
     yield
+    _register_buckets.clear()
+    if signup_buckets is not None:
+        signup_buckets.clear()
+    try:
+        from tortoise.abuse import SIGNUP_TRACKER
+        SIGNUP_TRACKER.reset()
+    except (ImportError, AttributeError):
+        pass

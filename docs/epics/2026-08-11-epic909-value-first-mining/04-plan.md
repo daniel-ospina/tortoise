@@ -1262,3 +1262,20 @@ The 9 slices decompose into issues with these boundaries (each slice = 1-3 issue
 | Verify audit | verification reviewer + convergence reviewer | 2 rounds | 13×P2 | all fixed (this record, PL1-PL4 rename, table rebuild, cite corrections) |
 
 Final state: 0 open P0/P1 across all gates (P2s resolved in-line or recorded as v1.1 deferrals). Total: 11 reviewer rounds (plan 6 + decompose 3 + verify 2) + 1 mechanical arithmetic fix, ~151 findings (116 + 22 + 13).
+
+
+## 9. State-centric alignment (2026-08-12 — post-verify deltas, supersede the earlier write mappings)
+
+> Filed as critical across all related issues (32 comments). Sources: ONTOLOGY v3.7 (#1017),
+> README (#1016), hypothesis doc, issue #1013. These deltas amend §4/§6/W-3 of this plan.
+
+| Delta | Old (this plan) | New (state-centric) |
+|---|---|---|
+| D-A | event-class items → points[] with `pointKind: event` (§4.1, §6.1, W-3 [5]) | **events[] in the payload** — Event nodes (eventKind `occurrence`/`turn`/fitting vocab); pointKind `event` removed (#1013) |
+| D-B | decision Points with kinds (decision/vision/strategy/plan/goal/target) | **NO decision Points** — decision class → Event node (eventKind `decision`, aboutObject → options) + lifecycle writes on state objects; criteria = statement Points IMPL-ing (the confidence engine) |
+| D-C | pointKind vocabulary for extraction (§4.5 constraints, commit_schema vocab) | extraction point kinds = {statement, observation, hypothesis}; others LEGACY write kinds (never extraction-emitted) |
+| D-D | object kinds (unchanged) | commitment-state family added (strategy/plan/goal/target); pack option kinds (JTBD/useCase/userJourney) → objectKinds (pack-mapping item) |
+| D-E | state confidence n/a | state (object) confidence is DERIVED at read time from attached points' EP confidence — never stored per-object (read-path computation, D3) |
+| D-F | lifecycle | supersede/deprecate/promote are queryable lifecycle events (the Episodic layer is the truth; status is a projection) — point-in-time + is-current queries (D1/D6, #786) |
+
+Implementation deltas: commit_schema.py (events[] model, pointKind vocab), hosted_api.py write path (Event-node writes), quota (is_episodic simplifies — Event nodes episodic by label), criteria v1 (state-centric), gold-set labels (#961), tests (DE2E-2/3/8).

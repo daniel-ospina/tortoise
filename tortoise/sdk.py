@@ -9,13 +9,16 @@ import hashlib
 import json as _json
 import logging
 import re
+import stat
 from typing import Any
 
 from .domain_loader import known_kinds, register_kind
 from .ids import ulid
 from . import monitoring
+from . import file_indexer  # noqa: F401 — import-time sourceKind registration (§4.4)
 from .projection import FalkorProjection
 from .quota import MAX_EXTRACTIONS_PER_TURN, MAX_SESSION_TURNS
+from .canonical import derive_batch_id
 import threading
 
 # P0 Group 3: register custom kinds for diary + checkpoint
@@ -36,6 +39,46 @@ POINT_STATUS_VALUES = frozenset({'draft', 'live', 'retracted', 'superseded', 'ou
 # only statuses a connection to is NOT stale.
 STALE_TERMINAL_STATUSES = frozenset(
     {'retracted', 'superseded', 'outdated', 'archived'})
+
+# Epic #902 W4 A0 — single-source valid-value sets for ingest() (consumed by
+# the SDK validation AND the MCP pre-validation so the two layers cannot
+# drift; INGEST_CONTRACT.md §2/§5 pins the exact values + error shapes).
+INGEST_GRANULARITIES = ("bulk", "granular")
+INGEST_PROMOTION_POLICIES = ("gated", "auto")
+
+
+def _first_non_draft_status(points: list) -> tuple[int, object] | None:
+    """Row-9 guard helper (PR #1073): return (index, effective_status) of the
+    first point item whose EFFECTIVE status is not exactly 'draft'.
+
+    The effective status is the top-level ``status`` key, or the nested
+    ``props={"status": ...}`` value when top-level is absent (create_point
+    flattens nested props via _coerce_props — top-level wins on conflict,
+    mirrored here). Only the exact canonical string "draft" is storable under
+    promotion_policy='gated': case/whitespace variants ("Draft", "draft "),
+    terminal statuses, and non-str values are all rejected (EP _live_only
+    excludes only exact 'draft', so every other value would be EP-live).
+
+    Shared by TortoiseSDK.ingest and tortoise_ingest so the two layers
+    cannot drift. Returns None when every item is draft/absent.
+    """
+    for i, item in enumerate(points or []):
+        if not isinstance(item, dict):
+            continue
+        st = item.get("status")
+        nested = item.get("props")
+        has_status = "status" in item
+        if not has_status and isinstance(nested, dict):
+            st = nested.get("status")
+            has_status = "status" in nested
+        # An explicit status key present with value None is a violation too
+        # (None would otherwise be stored as NULL, which _live_only treats as
+        # LIVE) — uniform row-9 message, not the vocabulary error.
+        if has_status and st is None:
+            return i, None
+        if st is not None and str(st) != "draft":
+            return i, st
+    return None
 
 # #913: whole-graph mode=add cap — pairwise scoring is O(n²) in time AND
 # memory (dense cosine matrix + pair dict); a read-only MCP call must not
@@ -69,7 +112,18 @@ _GRAPH_EVENT_TYPES = frozenset({
     "PointRetracted",
     "PointSuperseded",
     "OperatorAnnotated",
+    "PointPromoted",   # #785: reviewer-gated draft→live promotion
+    "OperatorPromoted",  # #785: R16 zombie-operator prevention
+    "DedupeRecorded",  # #784: content-dedup candidate recorded/merged
+    "DedupeRejected",  # #784: content-dedup candidate rejected
 })
+
+# Epic #902 A4 (§4.2): JSONL-ONLY batch_id record type — deliberately NOT in
+# _GRAPH_EVENT_TYPES, so _stamp_batch_id writes the prop SET + this record and
+# NO GraphEvent-store event (Q4 stays deferred). A10's rebuild pass-2b replays
+# these records to restore batch_id (+ content_hash / mitigates_operator_id /
+# mitigation_strength) after a rebuild.
+_BATCH_ID_RECORD_TYPE = "BatchIdStamped"
 
 
 def _raise_update_point_status_error(proj, id: str) -> None:
@@ -211,7 +265,111 @@ def _save_progress(progress_file: str, directory: str, total: int, processed: in
         pass  # progress file is best-effort
 
 
-# Module-level cached registry for kind expansion
+# ── Index workflow (epic #900 T3) module helpers ──────────────────────────
+# Connection-level retry budget for the bounded-abort disposition (E2E-19 /
+# §6.4): DB write failures are per-file failed{retryable:true} while the
+# connection can recover, up to this many consecutive failures — then the run
+# aborts with a partial report (aborted/aborted_reason).
+_INDEX_DB_RETRY_BUDGET = 3
+
+# In-process per-url locks serializing the Source conditional MERGE + outcome
+# detection (E2E-9 threads leg): the embedded FalkorDBLite executes concurrent
+# same-key MERGEs in a parallel executor that reports "Nodes created: 1" for
+# BOTH writers (and even re-fires both ON CREATE branches — commit order
+# nondeterministic), so the counter-authority outcome needs the writers
+# serialized. The threads leg is single-process (one daemon, per-thread SDK
+# instances) — an in-process lock suffices; the bolt:// subprocess leg's stats
+# are honest (and the __runId marker backstops cross-process ambiguity).
+_source_merge_lock_guard = threading.Lock()
+_source_merge_locks: dict[str, threading.Lock] = {}
+
+# Embedded db paths this PROCESS has opened (the §5.3 busy probe passes
+# same-process daemon reuse — the registry records the DAEMON pid, which is
+# never our own python pid).
+_embedded_busy_known: set[str] = set()
+_embedded_busy_guard = threading.Lock()
+
+
+# Per-corpus in-process run locks: the embedded FalkorDBLite's cross-connection
+# MERGE semantics are broken under concurrency (observed: the ON CREATE branch
+# re-fires against an existing key created by ANOTHER connection — the
+# counter-authority outcome then lies). The threads leg (E2E-9) runs in ONE
+# process, so serializing whole index_directory runs per corpus makes the
+# second run's gate see the first's completed units → honest fast-path skips
+# (the plan's "later completions report skipped/updated honestly"). The bolt://
+# subprocess leg is cross-process (no shared lock) but server-mode stats/MERGE
+# are honest there. This is an ORCHESTRATION-side serialization — the
+# write-path machinery (conditional MERGE, repair carve-out) is unchanged.
+_index_run_lock_guard = threading.Lock()
+_index_run_locks: dict[str, threading.Lock] = {}
+
+
+def _index_run_lock_for(key: str) -> threading.Lock:
+    with _index_run_lock_guard:
+        lock = _index_run_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _index_run_locks[key] = lock
+        return lock
+
+
+def _mark_embedded_opened(db_path: str) -> None:
+    with _embedded_busy_guard:
+        _embedded_busy_known.add(str(db_path))
+
+
+def _now_iso() -> str:
+    """UTC now in ISO format (module-level — shared by write paths)."""
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _source_merge_lock_for(url: str) -> threading.Lock:
+    with _source_merge_lock_guard:
+        lock = _source_merge_locks.get(url)
+        if lock is None:
+            lock = threading.Lock()
+            _source_merge_locks[url] = lock
+        return lock
+
+
+def _resolve_under_base_realpath(candidate: str, base: str) -> str | None:
+    """Realpath-resolved containment check (the index_file path argument gets
+    the same resolved-target discipline as progress_file/directory — §6.4
+    cycle-7 pin: an in-base symlink whose target resolves OUTSIDE the base
+    raises; a lexical check alone would pass the #329 argument-path test)."""
+    import os as _os
+    try:
+        real = _os.path.realpath(candidate)
+        from pathlib import Path
+        Path(real).relative_to(Path(_os.path.realpath(base)))
+        return real
+    except (ValueError, OSError):
+        return None
+
+
+def _classify_db_failure(e: BaseException) -> str | None:
+    """Map an exception to the §6.4 DB-failure cause-class (E2E-19 naming):
+    ``db`` when the write path hit the graph engine (ResponseError /
+    ConnectionError / TimeoutError / ENOSPC-family); None otherwise (the
+    per-file handler re-buckets it as structural)."""
+    import os as _os
+    try:
+        import redis.exceptions as _re
+        if isinstance(e, (_re.ResponseError, _re.ConnectionError,
+                          _re.TimeoutError, _re.BusyLoadingError,
+                          _re.InvalidResponse)):
+            return "db"
+    except Exception:  # noqa: BLE001
+        pass
+    if isinstance(e, OSError) and getattr(e, "errno", None) in (
+            getattr(_os, "ENOSPC", None), getattr(_os, "EIO", None),
+            getattr(_os, "EROFS", None)):
+        return "db"
+    return None
+
+
+# ── Module-level cached registry for kind expansion
 _registry_cache: "PackRegistry | None" = None
 _registry_lock = threading.Lock()
 
@@ -283,15 +441,75 @@ class TortoiseSDK:
         self._namespace = namespace
         self._event_log_path = event_log_path
         self._event_log = None  # lazy-init EventLog (#548)
+        # Epic #900 §5.3 (cycle-21): cross-process embedded overlap probe —
+        # fail-fast when another PROCESS holds this embedded store (redislite
+        # pid-registry + liveness probe). Same-process threads reuse the daemon
+        # by construction — the process-local opened-set passes them (the
+        # registry records the DAEMON pid, which is never our own python pid).
+        if self._db_uri is None and self._db_path:
+            self._probe_embedded_busy(self._db_path)
+            _mark_embedded_opened(self._db_path)
         self._proj: FalkorProjection | None = None
         self._ep = None  # lazy-init TortoiseEP
         self._evidence: dict[str, tuple[float, float]] = {}
         self._registry_g = None
         self._audit_logger = None
+        # Issue #1005 (lifecycle): idempotent close + context-manager support
+        # + atexit registration so a NORMAL process exit never orphans the
+        # embedded server (the dominant leak path — sessions ending without
+        # closing). No weakref.finalize: the atexit bound method keeps the
+        # SDK alive until exit, so a GC finalizer could never fire.
+        self._t_closed = False
+        import atexit as _atexit
+        _atexit.register(self._t_close)
         # Dreaming (#85): dirty claim roots awaiting EP stabilization. Write
         # paths mark affected claims dirty; dream()/lazy-read consume them.
         self._dirty_roots: set[str] = set()
         self._dreamer = None  # lazy-init Dreamer
+
+    def _probe_embedded_busy(self, db_path: str) -> None:
+        """Epic #900 §5.3: fail-fast on cross-process embedded overlap.
+
+        Reads the redislite daemon registry (``<db_path>.settings`` → the
+        recorded ``pidfile``) and liveness-probes the recorded pid: a LIVE
+        holder that is NOT this process raises ``EmbeddedStoreBusyError``
+        (naming db_path + holder pid) — never a silent second daemon
+        (two in-memory copies = split-brain on the default embedded topology).
+        Same-process opens (paths in ``_embedded_busy_known`` — threads reuse
+        the daemon by construction) and dead-pid leftovers (crash residue)
+        pass.
+        """
+        import os as _os
+        import json as _json
+        from pathlib import Path as _Path
+        if not db_path or str(db_path) == ":memory:":
+            return
+        if str(db_path) in _embedded_busy_known:
+            return  # this process already owns/holds the daemon — threads reuse
+        registry = _Path(db_path).with_name(_Path(db_path).name + ".settings")
+        if not registry.is_file():
+            return
+        try:
+            settings = _json.loads(registry.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001 — registry unreadable ⇒ no probe
+            return
+        pidfile = settings.get("pidfile")
+        if not pidfile or not _os.path.isfile(str(pidfile)):
+            return
+        try:
+            pid = int(_Path(pidfile).read_text().strip())
+        except Exception:  # noqa: BLE001
+            return
+        if pid <= 0:
+            return
+        try:
+            _os.kill(pid, 0)  # liveness probe
+        except ProcessLookupError:
+            return  # dead daemon (crash residue) — safe to open
+        except PermissionError:
+            pass  # exists but not ours to signal — still a live holder
+        from tortoise.exceptions import EmbeddedStoreBusyError
+        raise EmbeddedStoreBusyError(db_path, pid)
 
     def _get_proj(self) -> FalkorProjection:
         if self._proj is None:
@@ -697,7 +915,7 @@ class TortoiseSDK:
             # P1 #49: dedup by content_hash + pointKind (NOT context, which is no longer written)
             existing = proj.g.query(
                 "MATCH (n:Point {content_hash:$ch}) "
-                "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+                "WHERE n.is_operator = false "
                 "AND n.pointKind = $kind "
                 "RETURN n.id",
                 params={"ch": ch, "kind": kind},
@@ -735,6 +953,17 @@ class TortoiseSDK:
             pid = ulid()
         # Points enter as draft, go live when first edge is created (#131)
         status = props.pop("status", "draft")
+        # Fail-closed vocabulary validation (mirrors update_point): a
+        # non-canonical status (case variant, junk, non-str, typo) would
+        # otherwise be stored verbatim and treated as EP-LIVE by _live_only
+        # (which excludes only exact 'draft') — a silent-promotion hole
+        # (PR #1073 review P0/P1). isinstance guard keeps the error a
+        # ValueError for unhashable values (list/dict) too.
+        if not isinstance(status, str) or status not in POINT_STATUS_VALUES:
+            raise ValueError(
+                f"Invalid status {status!r}. Valid statuses: "
+                f"{sorted(POINT_STATUS_VALUES)}"
+            )
 
         # Compute embedding (Phase 1A, #7698) — stored as Point property
         embedding = None
@@ -1070,7 +1299,8 @@ class TortoiseSDK:
             )
 
         # Validate status if present
-        if 'status' in props and props['status'] not in POINT_STATUS_VALUES:
+        if 'status' in props and (not isinstance(props['status'], str)
+                                  or props['status'] not in POINT_STATUS_VALUES):
             raise ValueError(
                 f"Invalid status {props['status']!r}. "
                 f"Must be one of: {', '.join(sorted(POINT_STATUS_VALUES))}"
@@ -1319,7 +1549,7 @@ class TortoiseSDK:
         #    a failure leaves the graph untouched.
         edges_result = proj.g.query(
             "MATCH (op:Point {is_operator:true})-[r]->(old:Point {id:$old_id}) "
-            "RETURN op.id, type(r), r.idx",
+            "RETURN op.id, type(r), r.idx, op.label",
             params={"old_id": old_id},
         )
         from .security import validate_rel_type
@@ -1331,25 +1561,31 @@ class TortoiseSDK:
         # before validation produced phantoms on corrupt-edge data).
         self._emit_event("PointSuperseded", {"id": old_id, "new_id": new_id}, id=old_id)
 
-        # 1. Mark old superseded + outdated + create CORRECTS edge (same as invalidate)
-        # #432: status='superseded' alongside the legacy outdated=true flag
-        # (back-compat for consumers reading the flag; #690 will consolidate).
-        proj.g.query(
-            "MATCH (n:Point {id:$id}) SET n.status = 'superseded', "
-            "n.outdated = true, n.updatedAt = $now",
-            params={"id": old_id, "now": now},
-        )
-        proj.g.query(
-            "MATCH (a:Point {id:$new_id}), (b:Point {id:$old_id}) "
-            "MERGE (a)-[:CORRECTS]->(b)",
-            params={"new_id": new_id, "old_id": old_id},
-        )
+        # CYCLE-26 REVIEW-FIX P1 (cycle-7 pin): the superseded-status write +
+        # CORRECTS edge MOVE AFTER the transfers (2a / 2a-DIRECT / 2b). The
+        # transfers read old's edges directly and don't depend on the status;
+        # under the pinned order a crash mid-transfer leaves old NOT yet
+        # terminal, and a RE-RUN converges (the terminal guard never fires
+        # on the retry). The old order (status first) left a terminal point
+        # with EP-active incident direct edges and no remediation short of
+        # rebuild_all.
 
         # 2a. Transfer operator edges (IMPL, NAND, hasPart) — preserve provenance
 
         transferred = 0
         for row in edges_result.result_set:
             op_id, edge_type, idx = row[0], row[1], row[2]
+            op_label = row[3] if len(row) > 3 else None
+            if op_label == "alreadyDecided":
+                # #1080 review: dedup context edges must NOT be re-pointed at
+                # the replacement — an alreadyDecided IMPL on the superseded
+                # prior declares the OLD decision a duplicate, not the new one.
+                _logger.info(
+                    "supersede_point: keeping alreadyDecided operator %s "
+                    "attached to the superseded point %s (dedup context edge)",
+                    op_id, old_id,
+                )
+                continue
             # Create new edge: operator → new point (same idx preserves source/target position)
             proj.g.query(
                 f"MATCH (op:Point {{id:$op_id}}), (new:Point {{id:$new_id}}) "
@@ -1363,6 +1599,126 @@ class TortoiseSDK:
                 params={"op_id": op_id, "idx": idx, "old_id": old_id},
             )
             transferred += 1
+
+        # 2a-DIRECT (epic #902 §8 / plan §5.3 review fix): transfer
+        # OPERATOR-LESS direct IMPL/NAND edges incident to the superseded
+        # point, BOTH directions:
+        #   (old)-[:IMPL|NAND]->(x)  and  (x)-[:IMPL|NAND]->(old)
+        # Repointed to new_id preserving type/direction/confidence/weight/
+        # label/batch_id (E2E-11.6: zero direct edges remain incident to a
+        # superseded point, live AND post-rebuild). The REPOINT descriptor is
+        # emitted BEFORE the transfer (EMIT-BEFORE-TRANSFER, §4.4) so a
+        # transfer×emission crash cannot leave the stale descriptor in the
+        # JSONL while the live edge moves.
+        for direction in ("out", "in"):
+            if direction == "out":
+                dq = ("MATCH (old:Point {id:$old_id})-[r:IMPL|NAND]->(t) "
+                      "RETURN type(r), r, t.id, ID(r)")
+            else:
+                dq = ("MATCH (t)-[r:IMPL|NAND]->(old:Point {id:$old_id}) "
+                      "RETURN type(r), r, t.id, ID(r)")
+            rows = proj.g.query(dq, params={"old_id": old_id}).result_set
+            # Filter: exclude edges whose OTHER endpoint is an operator Point
+            # (REVIEW-FIX P2 — a mitigation-style (m)-[:IMPL]->(op) edge has
+            # an operator target; 2a owns op->input edges and runs first;
+            # repointing an operator target would create a topology
+            # create_direct_edge itself rejects). Operators carry
+            # is_operator=true.
+            plain = []
+            if rows:
+                other_ids = [row[2] for row in rows]
+                op_rows = proj.g.query(
+                    "MATCH (p:Point) WHERE p.id IN $ids AND "
+                    "coalesce(p.is_operator, false) = true RETURN p.id",
+                    params={"ids": other_ids},
+                ).result_set
+                op_set = {r[0] for r in op_rows}
+                plain = [row for row in rows if row[2] not in op_set]
+            rows = plain
+            for row in rows:
+                rtype, r, tid, rid = row[0], row[1], row[2], row[3]
+                # FalkorDB returns an Edge object — read its properties.
+                rdict = dict(r.properties) if hasattr(r, "properties") else {}
+                if tid == new_id:
+                    # REVIEW-FIX P1 (cycle-26): the edge already terminates at
+                    # the successor — repointing would CREATE A PHANTOM
+                    # SELF-EDGE (new)->(new) (the MERGE runs before the old
+                    # delete, and no existing (new)->(new) edge collapses it).
+                    # The old edge is DELETED and NO repoint descriptor is
+                    # emitted (pass-2b must not recreate the self-edge
+                    # post-rebuild). E2E-11.6: zero direct edges incident to
+                    # a superseded point, live AND post-rebuild.
+                    proj.g.query(
+                        f"MATCH (a)-[r:{rtype}]->(b) WHERE ID(r) = $rid DELETE r",
+                        params={"rid": rid},
+                    )
+                    transferred += 1
+                    continue
+                _attrs = {k: v for k, v in rdict.items()
+                          if k in ("direction", "confidence", "weight",
+                                   "label", "batch_id")}
+                # EMIT-BEFORE-TRANSFER: the REPOINT descriptor (plan §4.4 —
+                # A10's pass-2b repoint apply consumes it post-rebuild).
+                # Flat descriptor shape (REVIEW-FIX P2: match
+                # DirectEdgeCreated's §4.4 canonical flat shape — A10's
+                # pass-2b reads the same fields from both record types).
+                self._emit_event(
+                    "DirectEdgeRepoint",
+                    id=f"{old_id}->{new_id}:{rtype}",
+                    src=(tid if direction == "in" else new_id),
+                    tgt=(new_id if direction == "in" else tid),
+                    edge_type=rtype,
+                    **{k: v for k, v in _attrs.items()},
+                )
+                # MERGE-collapse (count()==1 twin guard): the MERGE matches
+                # the bare pattern; if the target edge already exists it
+                # converges instead of duplicating. rtype is validated
+                # IMPL/NAND (from the query) — interpolated into the MERGE
+                # pattern (FalkorDB requires ONE relationship type per
+                # MERGE pattern).
+                # MERGE (bare) then SET separately — MERGE+SET in ONE
+                # statement matches the full pattern (attrs included) and
+                # creates a PARALLEL edge on attribute change; the two-
+                # statement form collapses to one edge and last-writer-wins
+                # on attrs (the plan's no-parallel-direct-edges contract).
+                # Two-step MERGE (FalkorDB quirk — same as create_direct_edge):
+                # MATCH the existing nodes, then MERGE the edge between them
+                # (never creates duplicate nodes; collapses to one edge).
+                if direction == "out":
+                    mq = (f"MATCH (new:Point {{id:$new_id}}), "
+                          f"(t:Point {{id:$tid}}) "
+                          f"MERGE (new)-[nr:{rtype}]->(t)")
+                else:
+                    mq = (f"MATCH (t:Point {{id:$tid}}), "
+                          f"(new:Point {{id:$new_id}}) "
+                          f"MERGE (t)-[nr:{rtype}]->(new)")
+                proj.g.query(mq, params={"new_id": new_id, "tid": tid})
+                _keep = {k: v for k, v in rdict.items()
+                         if k in ("direction", "confidence", "weight",
+                                  "label", "batch_id")}
+                proj.g.query(
+                    f"MATCH (a:Point {{id:$a}})-[r:{rtype}]->"
+                    f"(b:Point {{id:$b}}) SET r += $attrs",
+                    params={"a": (tid if direction == "in" else new_id),
+                            "b": (new_id if direction == "in" else tid),
+                            "attrs": _keep},
+                )
+                # Delete the OLD edge by its internal id (precision),
+                # constrained to the old point's incident edges (REVIEW-FIX
+                # P2: never graph-wide — internal ids may be reused).
+                if direction == "out":
+                    proj.g.query(
+                        f"MATCH (old:Point {{id:$old_id}})-[r:{rtype}]->() "
+                        f"WHERE ID(r) = $rid DELETE r",
+                        params={"rid": rid, "old_id": old_id},
+                    )
+                else:
+                    proj.g.query(
+                        f"MATCH ()-[r:{rtype}]->(old:Point {{id:$old_id}}) "
+                        f"WHERE ID(r) = $rid DELETE r",
+                        params={"rid": rid, "old_id": old_id},
+                    )
+                transferred += 1
 
         # 2b. Transfer plain structural edges (#122) — about*, extractedFrom, wasDerivedFrom, etc.
         # These edges connect the Point to entities (Subject, Object, Source, etc.)
@@ -1391,6 +1747,23 @@ class TortoiseSDK:
                     params={"old_id": old_id, "tid": target_graph_id},
                 )
                 transferred += 1
+
+        # 1. Mark old superseded + outdated + create CORRECTS edge — AFTER the
+        # transfers (CYCLE-26 REVIEW-FIX P1 / plan §5.3 cycle-7 pin: the crash
+        # window between the status write and the transfers is closed by
+        # re-run convergence; this block is the last mutation before dreaming).
+        # #432: status='superseded' alongside the legacy outdated=true flag
+        # (back-compat for consumers reading the flag; #690 will consolidate).
+        proj.g.query(
+            "MATCH (n:Point {id:$id}) SET n.status = 'superseded', "
+            "n.outdated = true, n.updatedAt = $now",
+            params={"id": old_id, "now": now},
+        )
+        proj.g.query(
+            "MATCH (a:Point {id:$new_id}), (b:Point {id:$old_id}) "
+            "MERGE (a)-[:CORRECTS]->(b)",
+            params={"new_id": new_id, "old_id": old_id},
+        )
 
         # Dreaming (#85): supersede changes the propagation graph around both.
         self._mark_dirty([old_id, new_id])
@@ -1448,6 +1821,691 @@ class TortoiseSDK:
             raise ValueError(
                 f"Point {id!r} is already terminal — retraction is terminal")
         return r.result_set[0][0]  # updated node props (no trailing get_point round trip)
+
+    # ── Promotion (Phase-4 EP-safe lifecycle, #785) ────────────────
+
+    def promote_point(self, point_id: str) -> dict:
+        """Reviewer-gated draft→live promotion (plan §6.1, J-5, DE2E-8).
+
+        The ONLY path a draft extraction Point may go live — never via the
+        SDK #131 edge auto-promotion for extraction paths
+        (`create_operator(promote_source=False)`, #780).
+
+        Semantics (all responses include id + status + promoted + blocked):
+          - already live → NO-OP {promoted: False, blocked: False,
+            reason: "already_live"} — DE2E-N9
+          - operator node → blocked {blocked: True, reason: "is_operator"} —
+            operators only go live via the R16 endpoint gate (matching
+            retract_point's operator rejection)
+          - terminal (retracted/superseded/outdated/archived) → blocked
+            {blocked: True, reason: "not_draft"}
+          - Point belongs to a QUARANTINED batch → blocked
+            {blocked: True, reason: "batch_quarantined", batch_id} — quarantine
+            is batch-level (plan §3): the batch's Points stay draft until the
+            W-3 re-run passes (EpSafeCommit recovery loop)
+          - otherwise → status draft→live, `reviewed: true` derived flag set,
+            PointPromoted event emitted, and R16 zombie prevention:
+            incident DRAFT operator nodes (status 'draft' — the post-#780
+            extraction shape) are promoted to live ONCE ALL their endpoint
+            Points are live, so a contradiction never stays a dead draft
+            operator after its claims go live.
+
+        NOTE (review #944/#990): the quarantine lock is a read-then-CAS —
+        FalkorDBLite has no EXISTS subqueries, so the batch check cannot fold
+        into the CAS. #990 added a post-CAS re-check that SURFACES a lost
+        race instead of hiding it: when a quarantine lands between the read
+        and the CAS, the promotion completes but the response carries
+        ``race_detected: true`` + ``race_warning`` (the point is live while
+        its batch is quarantined — an operator action is required).
+
+        Raises ValueError if the Point does not exist.
+        """
+        proj = self._get_proj()
+        row = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN properties(n)",
+            params={"id": point_id},
+        ).result_set
+        if not row:
+            raise ValueError(f"No point {point_id!r}")
+        point = row[0][0]
+        status = point.get("status")
+
+        # Operators go live ONLY via the R16 endpoint gate — promoting a
+        # draft operator directly would create the live-operator-with-draft-
+        # endpoints state R16 exists to prevent (review #944).
+        if point.get("is_operator") or point.get("op_type"):
+            return {"id": point_id, "status": status, "promoted": False,
+                    "blocked": True, "reason": "is_operator"}
+        # DE2E-N9: already-live promote → no-op, no error.
+        if status == "live":
+            return {"id": point_id, "status": "live", "promoted": False,
+                    "blocked": False, "reason": "already_live"}
+        # Terminal states cannot be promoted back to live.
+        if status != "draft":
+            return {"id": point_id, "status": status, "promoted": False,
+                    "blocked": True, "reason": "not_draft"}
+
+        # Quarantine lock (batch-level): a quarantined batch's Points stay
+        # draft until re-review (W-3 recovery).
+        batch_id = point.get("batch_id")
+        if batch_id:
+            from .mining import batch_status  # lazy: no module-level sdk↔mining cycle
+            bs = batch_status(proj, batch_id)
+            if bs is not None and bs["status"] == "quarantined":
+                return {"id": point_id, "status": status, "promoted": False,
+                        "blocked": True, "reason": "batch_quarantined",
+                        "batch_id": batch_id}
+
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        # CAS-guarded SET (concurrent promote can't double-fire); reviewed is
+        # the DERIVED reviewer flag (plan §3 — no new stored status).
+        r = proj.g.query(
+            "MATCH (n:Point {id:$id}) WHERE n.status = 'draft' "
+            "SET n.status = 'live', n.reviewed = true, n.promotedAt = $now, "
+            "n.updatedAt = $now RETURN n.id",
+            params={"id": point_id, "now": now},
+        )
+        if not r.result_set:
+            # Raced with a concurrent promote — re-read and report the outcome.
+            re = self.get_point(point_id)
+            if re.get("status") == "live":
+                return {"id": point_id, "status": "live", "promoted": False,
+                        "blocked": False, "reason": "already_live"}
+            return {"id": point_id, "status": re.get("status"),
+                    "promoted": False, "blocked": True,
+                    "reason": "not_draft"}
+
+        # Post-CAS race re-check (#990): the quarantine lock is a
+        # read-then-CAS (two statements — FalkorDBLite has no EXISTS
+        # subqueries), so a quarantine landing between the batch_status read
+        # and the CAS can race a promotion through. Surface the race instead
+        # of hiding it: the point is live, but the batch is quarantined.
+        race_detected = False
+        if batch_id:
+            from .mining import batch_status
+            bs = batch_status(proj, batch_id)
+            if bs is not None and bs["status"] == "quarantined":
+                race_detected = True
+                _logger.warning(
+                    "promote_point: batch %s quarantined concurrently with "
+                    "promotion of %s (TOCTOU race, #990) — point is live but "
+                    "batch is quarantined",
+                    batch_id, point_id,
+                )
+
+        # Variant C (#784): a MERGED content-dedup candidate whose prior was
+        # LIVE at approve time is wired NOW — the candidate is live, so the
+        # "already decided" IMPL becomes a live→live link (exactly one).
+        # The exists-guard is OPERATOR-MEDIATED (create_operator writes
+        # (op)-[:IMPL]->(endpoint) edges — direct-edge counts are always 0,
+        # #784 review) and the prior is validated BEFORE the CAS so a stale
+        # dedup_target_id cannot produce a live point with no event.
+        dedup_wired = False
+        dedup_target_valid = True
+        prior = point.get("dedup_target_id")
+        if point.get("dedup_reviewed") == "merge" and prior:
+            prow = proj.g.query(
+                "MATCH (n:Point {id:$id}) RETURN n.id",
+                params={"id": prior},
+            ).result_set
+            if not prow:
+                dedup_target_valid = False
+                _logger.warning(
+                    "promote_point: dedup target %s for %s no longer exists — "
+                    "skipping the alreadyDecided wire", prior, point_id)
+        if point.get("dedup_reviewed") == "merge" and prior and dedup_target_valid:
+            exists = proj.g.query(
+                "MATCH (op:Point {label:'alreadyDecided'})-[:IMPL]->"
+                "(:Point {id:$cand}), "
+                "(op)-[:IMPL]->(:Point {id:$prior}) RETURN count(op)",
+                params={"cand": point_id, "prior": prior},
+            ).result_set
+            if not exists or exists[0][0] == 0:
+                self.create_operator(
+                    "IMPL", point_id, [prior], label="alreadyDecided",
+                    direction="unidirectional")
+                dedup_wired = True
+
+        # Temporal wiring at promotion (W-4, #786): a MERGED temporal
+        # candidate whose prior was LIVE at extraction gets its NAND now
+        # (live→live), or — for an explicit replacement — the prior is
+        # superseded (CORRECTS + outdated:true). Targets are validated
+        # BEFORE the CAS (mirroring the dedup block) so a stale/terminal
+        # target can never produce a live point with no event (#1080 review).
+        temporal_wired = False
+        superseded = False
+        temporal_targets = point.get("temporal_target_ids") or []
+        if point.get("temporal_target_id") and point.get("temporal_target_id") not in temporal_targets:
+            temporal_targets.append(point["temporal_target_id"])
+        live_targets: list[str] = []
+        if (point.get("temporal_candidate")
+                and point.get("temporal_reviewed") == "merge"):
+            for tgt in temporal_targets:
+                trow = proj.g.query(
+                    "MATCH (n:Point {id:$id}) RETURN n.status",
+                    params={"id": tgt},
+                ).result_set
+                if not trow:
+                    # MISSING node (stale target) — distinct from an unset
+                    # status node, which is live by the canonical read model
+                    # (#1080 round-2 review: missing targets crashed the
+                    # NAND create AFTER the CAS).
+                    _logger.warning(
+                        "promote_point: temporal target %s for %s no longer "
+                        "exists — skipping the wire", tgt, point_id)
+                    continue
+                tstatus = trow[0][0] or "live"
+                if tstatus == "live":
+                    live_targets.append(tgt)
+                else:
+                    _logger.warning(
+                        "promote_point: temporal target %s for %s is %s — "
+                        "skipping the wire", tgt, point_id, tstatus)
+        if live_targets and point.get("temporal_replacement"):
+            for tgt in live_targets:
+                try:
+                    self.supersede_point(tgt, point_id)
+                    superseded = True
+                except ValueError as exc:
+                    _logger.warning(
+                        "promote_point: supersede of %s failed for %s: %s",
+                        tgt, point_id, exc)
+        elif live_targets:
+            for tgt in live_targets:
+                exists = proj.g.query(
+                    "MATCH (op:Point {is_operator:true})-[:NAND]->"
+                    "(:Point {id:$cand}), "
+                    "(op)-[:NAND]->(:Point {id:$prior}) RETURN count(op)",
+                    params={"cand": point_id, "prior": tgt},
+                ).result_set
+                if exists and exists[0][0] > 0:
+                    continue
+                # Cross-guard: never NAND a pair already linked by an
+                # alreadyDecided IMPL (dedup+temporal conflict, #1080).
+                dup = proj.g.query(
+                    "MATCH (op:Point {label:'alreadyDecided'})-[:IMPL]->"
+                    "(:Point {id:$cand}), "
+                    "(op)-[:IMPL]->(:Point {id:$prior}) RETURN count(op)",
+                    params={"cand": point_id, "prior": tgt},
+                ).result_set
+                if dup and dup[0][0] > 0:
+                    _logger.warning(
+                        "promote_point: %s already linked to %s by an "
+                        "alreadyDecided IMPL — skipping temporal NAND",
+                        point_id, tgt)
+                    continue
+                try:
+                    self.create_operator("NAND", point_id, [tgt])
+                    temporal_wired = True
+                except ValueError as exc:
+                    # A racing delete between validation and create must
+                    # never leave a live point without its event (#1080).
+                    _logger.warning(
+                        "promote_point: NAND wiring to %s failed for %s: %s",
+                        tgt, point_id, exc)
+
+        # R16 zombie-operator prevention: promote incident draft operators
+        # once ALL their endpoint Points are live.
+        promoted_ops = self._promote_incident_operators(proj, point_id, now)
+
+        self._emit_event("PointPromoted", point=self.get_point(point_id))
+        result = {"id": point_id, "status": "live", "promoted": True,
+                  "reviewed": True,
+                  "operator_nodes_promoted": promoted_ops}
+        if dedup_wired:
+            result["dedup_wired"] = True
+        if temporal_wired:
+            result["temporal_wired"] = True
+        if superseded:
+            result["superseded"] = True
+        if race_detected:
+            result["race_detected"] = True
+            result["race_warning"] = (
+                "batch quarantined concurrently with promotion — point is live")
+        return result
+
+    def _promote_incident_operators(self, proj, point_id: str, now: str) -> list[str]:
+        """R16: promote draft operator nodes incident to a freshly-live Point.
+
+        An operator is promoted only when it carries EXPLICIT status 'draft'
+        (the post-#780 `create_operator(promote_source=False)` shape) AND
+        every endpoint Point is live — otherwise the draft endpoints would
+        inherit a live edge (the exact pollution the draft lifecycle
+        prevents). Unset-status operators are LIVE under the canonical read
+        model (projection coalesce default; #944 review) and are skipped —
+        never re-promoted into the event stream.
+        """
+        rows = proj.g.query(
+            "MATCH (o:Point {is_operator:true})-[r]->(n:Point {id:$id}) "
+            "WHERE o.status = 'draft' RETURN DISTINCT o.id",
+            params={"id": point_id},
+        ).result_set
+        promoted = []
+        for (oid,) in rows:
+            eps = proj.g.query(
+                "MATCH (o:Point {id:$oid})-[r]->(s:Point) "
+                "RETURN s.id, s.status",
+                params={"oid": oid},
+            ).result_set
+            if not eps:
+                continue  # no endpoints — nothing to gate on
+            all_live = all((st or "live") == "live" for _, st in eps)
+            if not all_live:
+                continue  # keep draft until every endpoint is live
+            # CAS-guarded SET: only an explicitly-draft operator may flip,
+            # and only once (concurrent endpoint promotions can't double-emit).
+            r = proj.g.query(
+                "MATCH (o:Point {id:$oid}) WHERE o.status = 'draft' "
+                "SET o.status = 'live', o.promotedAt = $now, o.updatedAt = $now "
+                "RETURN o.id",
+                params={"oid": oid, "now": now},
+            )
+            if not r.result_set:
+                continue  # lost a race — another promote already flipped it
+            # Full snapshot for JSONL rebuild parity (#548, review #944).
+            self._emit_event("OperatorPromoted", id=oid,
+                             point=self.get_point(oid))
+            promoted.append(oid)
+        return promoted
+
+    def quarantine_batch(self, batch_id: str, *, reason: str) -> dict:
+        """Quarantine a batch (W-3 fail path) — blocks promote_point on its
+        Points until a re-run passes (plan §6.1 pinned SDK signature).
+
+        Thin delegate to tortoise.mining.quarantine_batch — batch lifecycle
+        state lives on :Batch marker nodes (operational metadata).
+        """
+        from .mining import quarantine_batch as _qb
+        return _qb(self._get_proj(), batch_id, reason=reason)
+
+    # ── Temporal belief timeline (W-4, #786, DE2E-6) ───────────────
+
+    def belief_timeline(self, topic: str, limit: int = 50) -> list[dict]:
+        """Dated, ordered belief chain for a topic (plan §6.1, J-4, DE2E-6).
+
+        Returns decision Points aboutObject-connected to the topic entity,
+        ordered by validFrom ascending, each shaped as
+        {content, pointKind, validFrom, status, linked_by, related} where
+        linked_by is the temporal edge (NAND via an operator, or CORRECTS via
+        supersede_point) to the NEXT point in the chain, and related holds
+        the linked point ids.
+        """
+        if limit < 1:
+            raise ValueError(f"limit must be >= 1, got {limit}")
+        proj = self._get_proj()
+        rows = proj.g.query(
+            "MATCH (p:Point {pointKind:'decision'})-[:aboutObject]->"
+            "(o:Object) "
+            "WHERE (p.is_operator IS NULL OR p.is_operator = false) "
+            "AND (o.name = $topic OR o.canonical_name = $topic) "
+            "RETURN p.id, p.content, p.validFrom, p.status, p.outdated "
+            "ORDER BY p.validFrom LIMIT $limit",
+            params={"topic": topic, "limit": limit},
+        ).result_set
+        entries = [list(r) for r in rows]
+        # Superseded priors dropped out of the topic query (supersede_point
+        # transferred their aboutObject edges) — re-attach them via the
+        # CORRECTS chain so the timeline keeps the outdated belief (#1080).
+        if entries:
+            topic_ids = [r[0] for r in entries]
+            old_rows = proj.g.query(
+                "MATCH (cur:Point)-[:CORRECTS]->(old:Point {pointKind:'decision'}) "
+                "WHERE cur.id IN $ids "
+                "RETURN old.id, old.content, old.validFrom, old.status, "
+                "       old.outdated ORDER BY old.validFrom",
+                params={"ids": topic_ids},
+            ).result_set
+            known = {r[0] for r in entries}
+            for r in old_rows:
+                if r[0] not in known:
+                    entries.append(list(r))
+            # Globally ordered by validFrom (superseded priors appended).
+            entries.sort(key=lambda e: (e[2] is None, e[2] or ""))
+        out = []
+        ids = [e[0] for e in entries]
+        for pid, content, vf, status, outdated in entries[-limit:]:
+            # Temporal link to the NEXT point in the chain.
+            linked_by = None
+            related = []
+            for other_id in ids:
+                if other_id == pid:
+                    continue
+                nand = proj.g.query(
+                    "MATCH (op:Point {is_operator:true})-[:NAND]->"
+                    "(:Point {id:$a}), "
+                    "(op)-[:NAND]->(:Point {id:$b}) RETURN count(op)",
+                    params={"a": pid, "b": other_id},
+                ).result_set
+                if nand and nand[0][0] > 0:
+                    linked_by = "NAND"
+                    related.append(other_id)
+                    break
+                corr = proj.g.query(
+                    "MATCH (:Point {id:$a})-[:CORRECTS]->(:Point {id:$b}) "
+                    "RETURN count(*)",
+                    params={"a": pid, "b": other_id},
+                ).result_set
+                if corr and corr[0][0] > 0:
+                    linked_by = "CORRECTS"
+                    related.append(other_id)
+                    break
+            entry = {
+                "content": content,
+                "pointKind": "decision",
+                "validFrom": vf,
+                "status": status,
+                "linked_by": linked_by,
+                "related": related,
+            }
+            if outdated:
+                entry["outdated"] = True
+            out.append(entry)
+        return out
+
+    # ── Content dedup queue (W-2, #784) ─────────────────────────────
+    # Content candidates are DRAFT decision Points flagged by the two-tier
+    # dedup (hash + embedding) against existing decision Points. The
+    # candidate state lives in Point properties (dedup_candidate /
+    # dedup_method / dedup_similarity / dedup_target_id / dedup_reviewed) —
+    # review-queue operational state, JSONL-rebuild non-durable (tracked).
+
+    # Pinned review band (plan §7 preamble): calibration keeps production
+    # values within the band; tests assert against the pinned constants.
+    DEDUP_REVIEW_THRESHOLD = 0.60
+    DEDUP_AUTO_MERGE_THRESHOLD = 0.92
+
+    def _dedup_content_candidates(self, point_ids: list[str],
+                                  threshold: float = DEDUP_REVIEW_THRESHOLD,
+                                  sdk_for_wiring=None) -> dict:
+        """Two-tier content dedup over freshly-extracted Points (#784, W-2).
+
+        For each new non-operator Point whose pointKind is 'decision':
+        Tier 1 — content-hash vs existing decision Points; Tier 2 — embedding
+        cosine vs existing decision Points. On a hit:
+          - existing prior is DRAFT → wire the "already decided" IMPL now
+            (draft-to-draft, create_operator(promote_source=False)) and flag
+            the candidate (DedupeRecorded event).
+          - existing prior is LIVE → flag the candidate WITHOUT wiring
+            (W-2 live-prior rule: a draft must never wire an operator to a
+            live Point) — the link is scheduled for D2's promotion time
+            (Variant C, wired by promote_point).
+        Idempotent: points already carrying dedup_candidate=true are skipped
+        (re-run → no duplicate IMPL, no new DedupeRecorded — DE2E-3).
+
+        Returns {"hits": n, "wired_draft_to_draft": n, "deferred_live_prior": n}.
+        """
+        threshold = self.DEDUP_REVIEW_THRESHOLD if threshold is None else threshold
+        proj = self._get_proj()
+        rows = proj.g.query(
+            "MATCH (n:Point) WHERE n.id IN $ids "
+            "AND (n.is_operator IS NULL OR n.is_operator = false) "
+            "RETURN n.id, n.content, n.pointKind, n.status, "
+            "       coalesce(n.dedup_candidate, false)",
+            params={"ids": list(point_ids)},
+        ).result_set
+        hits = wired = deferred = 0
+        for pid, content, kind, status, already in rows:
+            if already or status != "draft" or kind != "decision":
+                continue
+            if not content:
+                continue
+            # Tier 1: hash vs existing decisions (pointKind-scoped, N11).
+            # The candidate itself is excluded — never its own prior (#784
+            # review self-match fix).
+            prior = self._content_exists(content, pointKind="decision",
+                                         exclude_id=pid)
+            method = "hash"
+            similarity = 1.0
+            if prior is None:
+                # Tier 2: embedding similarity vs existing decisions,
+                # excluding the candidate itself (self-cosine 1.0 would
+                # otherwise always win the argmax and garbage-flag every
+                # novel decision — #784 review P1).
+                pairs = self._semantic_dedup(
+                    [({"id": pid, "content": content}, "")],
+                    threshold=threshold,
+                    pointKind="decision",
+                    return_pairs=True,
+                    exclude_ids={pid},
+                )
+                if not pairs:
+                    continue
+                prior = pairs[0]["existing"]
+                method = "embedding"
+                similarity = pairs[0]["similarity"]
+            if prior == pid:
+                # Belt-and-braces: never self-target.
+                _logger.warning("dedup: candidate %s matched itself — skipped", pid)
+                continue
+            # Mark the candidate (review-queue state on the Point).
+            proj.g.query(
+                "MATCH (n:Point {id:$id}) SET n.dedup_candidate = true, "
+                "n.dedup_method = $m, n.dedup_similarity = $s, "
+                "n.dedup_target_id = $t",
+                params={"id": pid, "m": method, "s": similarity, "t": prior},
+            )
+            hits += 1
+            # Prior status decides wiring vs deferral.
+            prow = proj.g.query(
+                "MATCH (n:Point {id:$id}) RETURN n.status",
+                params={"id": prior},
+            ).result_set
+            prior_status = (prow[0][0] if prow else None) or "live"
+            if prior_status == "draft":
+                # Variant A: draft-to-draft "already decided" IMPL.
+                if sdk_for_wiring is not None:
+                    sdk_for_wiring.create_operator(
+                        "IMPL", pid, [prior], label="alreadyDecided",
+                        direction="unidirectional", promote_source=False)
+                    wired += 1
+            else:
+                # Live prior: defer to promotion (Variant C).
+                deferred += 1
+            self._emit_event("DedupeRecorded", point=self.get_point(pid))
+        return {"hits": hits, "wired_draft_to_draft": wired,
+                "deferred_live_prior": deferred}
+
+    def list_dedup_candidates(self, candidate_type: str = "content",
+                              limit: int = 50) -> list[dict]:
+        """Review queue for dedup candidates (plan §6.1, DE2E-3/DE2E-2).
+
+        candidate_type='content': pending (unreviewed) content candidates —
+        draft decision Points flagged by the two-tier dedup, shaped as
+        {id, content, pointKind, method, similarity, target_id, batch_id}.
+        candidate_type='entity': entity ambiguity pairs — the entity
+        resolver surface (#783) is not yet implemented; returns [] (the MCP
+        tool contract still holds).
+        """
+        if limit < 1:
+            raise ValueError(f"limit must be >= 1, got {limit}")
+        proj = self._get_proj()
+        if candidate_type == "entity":
+            return []  # #783 partial — entity queue tracked for epic completion
+        if candidate_type not in ("content", "temporal"):
+            raise ValueError(
+                f"candidate_type must be 'content', 'temporal' or 'entity', "
+                f"got {candidate_type!r}")
+        if candidate_type == "content":
+            rows = proj.g.query(
+                "MATCH (n:Point) "
+                "WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL "
+                "AND n.status = 'draft' "
+                "AND (n.is_operator IS NULL OR n.is_operator = false) "
+                "RETURN properties(n) ORDER BY n.createdAt DESC LIMIT $limit",
+                params={"limit": limit},
+            ).result_set
+            out = []
+            for (props,) in rows:
+                out.append({
+                    "id": props.get("id"),
+                    "content": props.get("content"),
+                    "pointKind": props.get("pointKind"),
+                    "method": props.get("dedup_method"),
+                    "similarity": props.get("dedup_similarity"),
+                    "target_id": props.get("dedup_target_id"),
+                    "existing_id": props.get("dedup_target_id"),  # §6.1 alias
+                    "candidate_type": "content",
+                    "status": props.get("dedup_reviewed") or "pending",
+                    "batch_id": props.get("batch_id"),
+                })
+            return out
+        # Temporal candidates (W-4, #786): contradictory/replacement decision
+        # Points whose prior was LIVE at extraction — wire at promotion.
+        rows = proj.g.query(
+            "MATCH (n:Point) "
+            "WHERE n.temporal_candidate = true AND n.temporal_reviewed IS NULL "
+            "AND n.status = 'draft' "
+            "AND (n.is_operator IS NULL OR n.is_operator = false) "
+            "RETURN properties(n) ORDER BY n.createdAt DESC LIMIT $limit",
+            params={"limit": limit},
+        ).result_set
+        out = []
+        for (props,) in rows:
+            out.append({
+                "id": props.get("id"),
+                "content": props.get("content"),
+                "pointKind": props.get("pointKind"),
+                "target_id": props.get("temporal_target_id"),
+                "existing_id": props.get("temporal_target_id"),
+                "replacement": bool(props.get("temporal_replacement")),
+                "candidate_type": "temporal",
+                "status": props.get("temporal_reviewed") or "pending",
+                "batch_id": props.get("batch_id"),
+            })
+        return out
+
+    def approve_merge(self, candidate_id: str, action: str = "merge") -> dict:
+        """Review a content dedup candidate (plan §6.1, DE2E-3 Variants B/C).
+
+        action='reject' → the candidate stays separate (dedup_reviewed=
+        'reject', reviewed=true, DedupeRejected event) and is no longer
+        surfaced by list_dedup_candidates.
+        action='merge' → the "already decided" IMPL is wired now when the
+        prior is DRAFT; when the prior is LIVE it is DEFERRED and wired at
+        the candidate's promotion time (Variant C — promote_point wires the
+        live→live link). Returns {candidate_id, action, wired,
+        deferred_to_promotion, target_id}.
+        """
+        if action not in ("merge", "reject"):
+            raise ValueError(f"action must be 'merge' or 'reject', got {action!r}")
+        proj = self._get_proj()
+        rows = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN properties(n)",
+            params={"id": candidate_id},
+        ).result_set
+        if not rows:
+            raise ValueError(f"No point {candidate_id!r}")
+        props = rows[0][0]
+        is_temporal = bool(props.get("temporal_candidate"))
+        if not (props.get("dedup_candidate") or is_temporal):
+            raise ValueError(
+                f"Point {candidate_id!r} is not a dedup/temporal candidate")
+        if is_temporal:
+            # Temporal candidates: mark reviewed; the wire/supersede happens
+            # at promotion (live-prior rule — never draft→live wiring).
+            # Idempotent: re-approving with the SAME action is a no-op (no
+            # duplicate event — #1080 review).
+            if props.get("temporal_reviewed") == action:
+                return {"candidate_id": candidate_id, "action": action,
+                        "candidate_type": "temporal",
+                        "wired": False,
+                        "deferred_to_promotion": action == "merge",
+                        "target_id": props.get("temporal_target_id"),
+                        "already_reviewed": True}
+            proj.g.query(
+                "MATCH (n:Point {id:$id}) SET n.temporal_reviewed = $a, "
+                "n.reviewed = true",
+                params={"id": candidate_id, "a": action},
+            )
+            if action == "reject":
+                self._emit_event("DedupeRejected",
+                                 point=self.get_point(candidate_id))
+            else:
+                self._emit_event("DedupeRecorded",
+                                 point=self.get_point(candidate_id))
+            return {"candidate_id": candidate_id, "action": action,
+                    "candidate_type": "temporal",
+                    "wired": False,
+                    "deferred_to_promotion": action == "merge",
+                    "target_id": props.get("temporal_target_id")}
+        target_id = props.get("dedup_target_id")
+        proj.g.query(
+            "MATCH (n:Point {id:$id}) SET n.dedup_reviewed = $a, n.reviewed = true",
+            params={"id": candidate_id, "a": action},
+        )
+        wired = False
+        deferred = False
+        if action == "merge" and target_id:
+            trow = proj.g.query(
+                "MATCH (n:Point {id:$id}) RETURN n.status",
+                params={"id": target_id},
+            ).result_set
+            target_status = (trow[0][0] if trow else None) or "live"
+            if target_status == "draft":
+                exists = proj.g.query(
+                    "MATCH (op:Point {label:'alreadyDecided'})-[:IMPL]->"
+                    "(:Point {id:$cand}), "
+                    "(op)-[:IMPL]->(:Point {id:$prior}) RETURN count(op)",
+                    params={"cand": candidate_id, "prior": target_id},
+                ).result_set
+                if not exists or exists[0][0] == 0:
+                    self.create_operator(
+                        "IMPL", candidate_id, [target_id],
+                        label="alreadyDecided",
+                        direction="unidirectional", promote_source=False)
+                    wired = True
+                else:
+                    wired = True  # already linked — idempotent approve
+            else:
+                deferred = True  # wired at promotion (Variant C)
+        if action == "reject":
+            self._emit_event("DedupeRejected", point=self.get_point(candidate_id))
+        else:
+            self._emit_event("DedupeRecorded", point=self.get_point(candidate_id))
+        return {"candidate_id": candidate_id, "action": action,
+                "wired": wired, "deferred_to_promotion": deferred,
+                "target_id": target_id}
+
+    def list_drafts(self, *, limit: int = 50) -> list[dict]:
+        """Draft queue for promotion review (J-5 companion, plan §6.1).
+
+        Returns up to `limit` non-operator Points with status 'draft' (newest
+        first), each shaped as {id, content, pointKind, provenance,
+        dedup_context, batch_id}. `provenance` is the node's extractedFrom/
+        provenance property when present; `dedup_context` is assembled from the
+        #782 dedup candidate properties when the Point is a dedup candidate.
+        """
+        if limit < 1:
+            raise ValueError(f"limit must be >= 1, got {limit}")
+        proj = self._get_proj()
+        # Plain points carry NO is_operator property (only operators set it),
+        # so match on absence-or-false, not the literal property value.
+        rows = proj.g.query(
+            "MATCH (n:Point) "
+            "WHERE n.is_operator = false "
+            "AND n.status = 'draft' "
+            "RETURN properties(n) ORDER BY n.createdAt DESC LIMIT $limit",
+            params={"limit": limit},
+        ).result_set
+        out = []
+        for (props,) in rows:
+            dedup_context = None
+            if props.get("dedup_candidate"):
+                dedup_context = {
+                    k: props.get(k) for k in (
+                        "dedup_method", "dedup_similarity", "dedup_target_id")
+                }
+            out.append({
+                "id": props.get("id"),
+                "content": props.get("content"),
+                "pointKind": props.get("pointKind"),
+                "provenance": props.get("provenance")
+                or props.get("extractedFrom"),
+                "dedup_context": dedup_context,
+                "batch_id": props.get("batch_id"),
+            })
+        return out
 
     # ── Operators ─────────────────────────────────────────────────
 
@@ -1691,7 +2749,7 @@ class TortoiseSDK:
         query via proj.g.query() to inspect retracted tombstones.
         """
         proj = self._get_proj()
-        clauses = ["(n.is_operator IS NULL OR n.is_operator = false)"]
+        clauses = ["n.is_operator = false"]
         params: dict[str, Any] = {}
         # #432 Task 2: retracted exclusion — skipped when the caller explicitly
         # filters by status (their filter controls visibility).
@@ -1734,7 +2792,7 @@ class TortoiseSDK:
         to surface tombstones.
         """
         proj = self._get_proj()
-        clauses = ["(n.is_operator IS NULL OR n.is_operator = false)"]
+        clauses = ["n.is_operator = false"]
         params: dict[str, Any] = {}
         # #432 Task 2: retracted exclusion — skipped when the caller explicitly
         # filters by status (their filter controls visibility).
@@ -1905,7 +2963,7 @@ class TortoiseSDK:
         # Orphaned draft points — created but never wired (#131)
         for row in proj.g.query(
             "MATCH (n:Point {status:'draft'}) "
-            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "WHERE n.is_operator = false "
             "AND NOT (n)--() "
             "RETURN n.id, n.content, n.pointKind, n.createdAt "
             "ORDER BY n.createdAt"
@@ -1942,7 +3000,7 @@ class TortoiseSDK:
         for key, kind in gates:
             result[key] = proj.g.query(
                 "MATCH (n:Point {pointKind:$k}) "
-                "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+                "WHERE n.is_operator = false "
                 "RETURN count(n)",
                 params={"k": kind},
             ).result_set[0][0]
@@ -1961,7 +3019,7 @@ class TortoiseSDK:
         proj = self._get_proj()
         rows = proj.g.query(
             "MATCH (n:Point) "
-            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "WHERE n.is_operator = false "
             "AND n.pointKind IS NOT NULL "
             "RETURN n.pointKind, count(n) ORDER BY count(n) DESC"
         ).result_set
@@ -2080,7 +3138,711 @@ class TortoiseSDK:
         ("IMPL", "NAND", "composedOf", "decomposesInto", "contains", "wraps")
     )
 
-    def ingest(self, bundle: dict, granularity: str = "bulk") -> dict:
+    # ── Shared pre-validation check helpers (epic #902 W4 A1) ────────────
+    #
+    # Checks 1-8 from plan §5.2, extracted from the checks originally raised
+    # mid-write inside ingest(). Consumed by BOTH `_validate_bundle` (Phase 1
+    # — collects ALL violations, zero mutation) and ingest()'s write path
+    # (Phase 2 — defense-in-depth raises). The SAME helper emits the SAME
+    # message in both phases, so Phase-1/2 parity holds by construction
+    # (asserted by the parity unit test).
+    #
+    # CYCLE-25 (ontology v3.8): pointKind `statement` is THE write kind;
+    # legacy kinds are write-compat-only; `event` is REJECTED (episodic
+    # records are entity items type:'event' with eventKind); a point item
+    # WITHOUT kind DEFAULTS to `statement`. `quote` (≤200 chars) is a
+    # permitted point-item field; `c_cal` is calibrated-pipeline-write-only
+    # (a bundle carrying it is a violation).
+    #
+    # CYCLE-26 (GATE-2 Q3): check 5's fail-closed policy-feasibility
+    # rejection is REMOVED — gated operator-requiring connections are
+    # ACCEPTED (the operator's EP activity is derived: ≥2 connected points
+    # live — A9 #1059). The RETAINED piece: gated + explicit status:"live"
+    # on a point item is a violation (no bypass of the gated contract).
+
+    _INGEST_TERMINAL_STATUSES = frozenset(("superseded", "retracted"))
+    _INGEST_DIRECTION_VALUES = frozenset(("bidirectional", "unidirectional"))
+    _INGEST_LEGACY_WRITE_KINDS = frozenset((
+        "decision", "vision", "strategy", "plan", "goal", "target",
+        "humanApproval", "observation", "hypothesis",
+    ))
+
+    def _check_item_shape(self, section: str, index: int, item: Any,
+                          violations: list[dict]) -> None:
+        """Check 1 — section item shape (dict-ness + required fields, incl.
+        the CYCLE-25 quote/c_cal rules) and check 8 — the ingest-scoped
+        batch_id guard (a bundle item carrying `batch_id` is a violation;
+        the server computes and stamps it, §4.2)."""
+        if not isinstance(item, dict):
+            violations.append({
+                "section": section, "index": index,
+                "message": f"ingest: {section}[{index}] must be a dict",
+            })
+            return
+        if "batch_id" in item:
+            violations.append({
+                "section": section, "index": index,
+                "message": f"ingest: {section}[{index}] batch_id is "
+                           f"server-managed and cannot be set on bundle items",
+            })
+        if section == "points":
+            # kind is OPTIONAL (CYCLE-25: kind-absent defaults to
+            # 'statement'); content is required.
+            if item.get("content") is None or not isinstance(item.get("content"), str):
+                # REVIEW-FIX P1 (cycle-26): non-string content is a Phase-1
+                # violation (Phase 2 would AttributeError at _content_hash
+                # mid-write after earlier sections commit).
+                violations.append({
+                    "section": section, "index": index,
+                    "message": f"ingest: points[{index}] requires 'content'",
+                })
+            quote = item.get("quote")
+            if quote is not None and (not isinstance(quote, str) or len(quote) > 200):
+                violations.append({
+                    "section": section, "index": index,
+                    "message": f"ingest: points[{index}] quote exceeds 200 "
+                               f"characters (provenance quote cap, v3.6 #11)",
+                })
+            if "c_cal" in item:
+                violations.append({
+                    "section": section, "index": index,
+                    "message": f"ingest: points[{index}] c_cal is "
+                               f"calibrated-pipeline-write-only — ingest never "
+                               f"writes calibrated confidence",
+                })
+        elif section == "sources":
+            url = item.get("url")
+            if not url or not isinstance(url, str):
+                violations.append({
+                    "section": section, "index": index,
+                    "message": f"ingest: sources[{index}] requires a "
+                               f"non-empty 'url'",
+                })
+            if not item.get("sourceKind"):
+                violations.append({
+                    "section": section, "index": index,
+                    "message": f"ingest: sources[{index}] requires 'sourceKind'",
+                })
+        elif section == "entities":
+            _etype_v = item.get("type")
+            etype = (_etype_v if isinstance(_etype_v, str) else "").strip().lower()
+            if not etype:
+                violations.append({
+                    "section": section, "index": index,
+                    "message": f"ingest: entities[{index}] requires 'type' "
+                               f"(subject|object|event|document)",
+                })
+            elif etype not in ("subject", "object", "event", "document"):
+                violations.append({
+                    "section": section, "index": index,
+                    "message": f"ingest: entities[{index}] type must be "
+                               f"subject|object|event|document, got {etype!r}",
+                })
+            if not item.get("name"):
+                violations.append({
+                    "section": section, "index": index,
+                    "message": f"ingest: entities[{index}] requires 'name'",
+                })
+            if etype == "event" and not item.get("eventKind"):
+                violations.append({
+                    "section": section, "index": index,
+                    "message": f"ingest: entities[{index}] type='event' "
+                               f"requires 'eventKind'",
+                })
+            if etype == "document" and not item.get("documentKind"):
+                violations.append({
+                    "section": section, "index": index,
+                    "message": f"ingest: entities[{index}] type='document' "
+                               f"requires 'documentKind'",
+                })
+        # connections: only dict-ness + the batch_id guard here — the
+        # connection contract is check 4's job.
+
+    def _check_kind(self, kind: Any, index: int, violations: list[dict]) -> None:
+        """Check 2 — CYCLE-25 point-kind vocabulary (ontology v3.8).
+
+        Accepts `statement` (THE extraction write kind — canonical) plus the
+        legacy write-compat kinds (decision/vision/strategy/plan/goal/target/
+        humanApproval/observation/hypothesis) for back-compat — and any other
+        kind, since the kind registry is descriptive (warnings), not
+        restrictive. REJECTS pointKind `event` (REMOVED, #1013 — episodic
+        records are entity items type:'event' with eventKind). A point item
+        WITHOUT kind is LEGAL and defaults to `statement` — the default is
+        applied by the write path, not flagged here.
+        """
+        if kind is None:
+            return
+        if not isinstance(kind, str):
+            # REVIEW-FIX P2 (cycle-26): a non-string kind must not silently
+            # write pointKind:<int> into the graph — Phase-1 violation.
+            violations.append({
+                "section": "points", "index": index,
+                "message": f"pointKind must be a string, got "
+                           f"{type(kind).__name__}",
+            })
+            return
+        if kind == "event":
+            violations.append({
+                "section": "points", "index": index,
+                "message": "pointKind 'event' is not a write kind — use an "
+                           "entity item with type:'event' and eventKind "
+                           "('occurrence'/'turn') for episodic records",
+            })
+
+    def _check_refs(self, bundle: dict, violations: list[dict]) -> None:
+        """Check 3 (ref-table half) — duplicate refs across the whole bundle
+        and ULID-shadowing rejection (a ref shaped like a real ULID would
+        make refs.get(x, x) silently address an existing node)."""
+        seen: dict[str, str] = {}
+        for section in ("sources", "points", "entities"):
+            for i, item in enumerate(bundle.get(section) or []):
+                if not isinstance(item, dict):
+                    continue  # shape violation already reported (check 1)
+                ref = item.get("ref")
+                if not ref:
+                    continue
+                if _is_ulid(str(ref)):
+                    violations.append({
+                        "section": section, "index": i,
+                        "message": f"ingest: {section}[{i}] ref {ref!r} is "
+                                   f"shaped like a real ULID — refs are "
+                                   f"bundle-local labels, not node ids (a ULID-"
+                                   f"shaped ref would silently shadow an "
+                                   f"existing node)",
+                    })
+                    continue
+                if ref in seen:
+                    violations.append({
+                        "section": section, "index": i,
+                        "message": f"ingest: duplicate bundle ref {ref!r} "
+                                   f"({section}) — refs must be unique across "
+                                   f"the bundle",
+                    })
+                else:
+                    seen[ref] = section
+
+    def _connection_route(self, conn: dict) -> str:
+        """Route classification for a connection item: 'direct' for plain
+        IMPL/NAND (operator-less per §8 — the terminal-status guard is
+        direct-edge-scoped), 'operator' for mitigation/reify:true/part-whole,
+        'relation' otherwise."""
+        if "operator" not in conn:
+            return "relation"
+        if conn["operator"] in ("IMPL", "NAND") and not conn.get("mitigation") \
+                and not conn.get("reify"):
+            return "direct"
+        return "operator"
+
+    @staticmethod
+    def _canonical_direction(op_type: str, direction: str | None) -> str | None:
+        """CYCLE-25 per-op_type absent↔default canonicalization (ontology v3.6
+        #5): direction-ABSENT canonicalizes per op_type — IMPL → "bidirectional",
+        NAND → "unidirectional" (the extraction default); other operator types
+        keep create_operator's bidirectional default. Absent is NOT a distinct
+        value in the §5.2.7 comparison."""
+        if direction is not None:
+            return direction
+        return "unidirectional" if op_type == "NAND" else "bidirectional"
+
+    def _check_connection(self, index: int, conn: Any,
+                          violations: list[dict]) -> None:
+        """Check 4 — the connection contract (pure; no graph access).
+
+        exactly one of relation/operator; from/to presence; to shape/emptiness
+        (zero-target rows c8(i-iv)); operator/relation vocabulary; self-edge
+        rejection on IMPL/NAND; multi-target rejection on plain IMPL/NAND
+        (cycle-7); §8 field validity (direction/confidence/weight/mitigation)
+        + route-scoped attribute rejection (cycle-13: relation carries
+        direction/confidence/weight; operator route carries confidence/weight).
+        """
+        if not isinstance(conn, dict):
+            return  # dict-ness already reported by check 1
+        if "from" not in conn or "to" not in conn:
+            violations.append({
+                "section": "connections", "index": index,
+                "message": f"ingest: connections[{index}] requires 'from' "
+                           f"and 'to'",
+            })
+            return
+        tos = conn["to"]
+        if not isinstance(tos, (list, str)):
+            violations.append({
+                "section": "connections", "index": index,
+                "message": f"ingest: connections[{index}] 'to' must be a "
+                           f"list or string, got {type(tos).__name__}",
+            })
+        frm = conn.get("from")
+        if not isinstance(frm, str):
+            # REVIEW-FIX P1 (cycle-26): non-string from is a Phase-1 violation
+            # (Phase 2 would raise 'Points [5] do not exist' AFTER points are
+            # committed — partial mutation, J2/E2E-1 zero-mutation violation).
+            violations.append({
+                "section": "connections", "index": index,
+                "message": f"ingest: connections[{index}] 'from' must be a "
+                           f"string ref, got {type(frm).__name__}",
+            })
+        if isinstance(tos, list) and not tos:
+            violations.append({
+                "section": "connections", "index": index,
+                "message": f"ingest: connections[{index}] 'to' cannot be "
+                           f"empty — at least one target is required",
+            })
+        elif isinstance(tos, list):
+            for t in tos:
+                if not isinstance(t, str):
+                    violations.append({
+                        "section": "connections", "index": index,
+                        "message": f"ingest: connections[{index}] 'to' items "
+                                   f"must be string refs, got "
+                                   f"{type(t).__name__}",
+                    })
+                    break
+        has_rel = "relation" in conn
+        has_op = "operator" in conn
+        if has_rel == has_op:
+            violations.append({
+                "section": "connections", "index": index,
+                "message": f"ingest: connections[{index}] must carry exactly "
+                           f"one of 'relation' (structural edge) or 'operator' "
+                           f"(IMPL/NAND reification)",
+            })
+            return
+        if has_op:
+            op_type = conn["operator"]
+            if op_type not in self._INGEST_OPERATOR_TYPES:
+                violations.append({
+                    "section": "connections", "index": index,
+                    "message": f"ingest: connections[{index}] operator must "
+                               f"be one of {sorted(self._INGEST_OPERATOR_TYPES)}, "
+                               f"got {op_type!r}",
+                })
+            frm = conn.get("from")
+            to_list = tos if isinstance(tos, list) else [tos]
+            if op_type in ("IMPL", "NAND") and (frm == tos or frm in to_list):
+                violations.append({
+                    "section": "connections", "index": index,
+                    "message": f"ingest: connections[{index}] self-edges are "
+                               f"not allowed on IMPL/NAND — from and to "
+                               f"address the same endpoint (EP cavity risk)",
+                })
+            route = self._connection_route(conn)
+            if route == "direct" and isinstance(tos, list) and len(tos) > 1:
+                violations.append({
+                    "section": "connections", "index": index,
+                    "message": f"ingest: connections[{index}] multi-item 'to' "
+                               f"on a plain IMPL/NAND connection is not "
+                               f"supported — split into singular connections, "
+                               f"or use the operator route (reify:true or "
+                               f"mitigation) for multi-input fan-out",
+                })
+            direction = conn.get("direction")
+            if direction is not None and direction not in self._INGEST_DIRECTION_VALUES:
+                violations.append({
+                    "section": "connections", "index": index,
+                    "message": f"ingest: connections[{index}] direction must "
+                               f"be 'bidirectional' or 'unidirectional', got "
+                               f"{direction!r}",
+                })
+            if route == "operator":
+                # cycle-13 route scoping: create_operator accepts no
+                # confidence/weight (they are plain direct-edge attributes).
+                for key in ("confidence", "weight"):
+                    if key in conn:
+                        violations.append({
+                            "section": "connections", "index": index,
+                            "message": f"ingest: connections[{index}] {key} is "
+                                       f"not allowed on the operator route "
+                                       f"(reify:true/mitigation) — it belongs "
+                                       f"on plain IMPL/NAND direct edges",
+                        })
+            else:
+                for key in ("confidence", "weight"):
+                    val = conn.get(key)
+                    if val is not None and not (isinstance(val, (int, float))
+                                                and not isinstance(val, bool)
+                                                and 0 <= val <= 1):
+                        violations.append({
+                            "section": "connections", "index": index,
+                            "message": f"ingest: connections[{index}] {key} must "
+                                       f"be a number in [0, 1], got {val!r}",
+                        })
+            mitigation = conn.get("mitigation")
+            if mitigation is not None:
+                if not isinstance(mitigation, dict):
+                    violations.append({
+                        "section": "connections", "index": index,
+                        "message": f"ingest: connections[{index}] mitigation must "
+                                   f"be a dict {{reason, strength}}",
+                    })
+                else:
+                    reason = mitigation.get("reason")
+                    if not reason or not isinstance(reason, str):
+                        violations.append({
+                            "section": "connections", "index": index,
+                            "message": f"ingest: connections[{index}] "
+                                       f"mitigation.reason must be a non-empty "
+                                       f"string",
+                        })
+                    strength = mitigation.get("strength")
+                    if strength is None or not (isinstance(strength, (int, float))
+                                                and not isinstance(strength, bool)
+                                                and 0 <= strength <= 1):
+                        violations.append({
+                            "section": "connections", "index": index,
+                            "message": f"ingest: connections[{index}] "
+                                       f"mitigation.strength must be a number "
+                                       f"in [0, 1], got {strength!r}",
+                        })
+        else:
+            rel = conn["relation"]
+            from .projection.edges import _VALID_EDGE_PREDICATES
+            if rel != "extractedFrom" and rel not in _VALID_EDGE_PREDICATES:
+                violations.append({
+                    "section": "connections", "index": index,
+                    "message": f"ingest: connections[{index}] unknown relation "
+                               f"{rel!r} — must be a structural predicate or "
+                               f"'extractedFrom'",
+                })
+            # cycle-13 route scoping: relation connections carry none of the
+            # §8 edge attributes (direction/confidence/weight).
+            for key in ("direction", "confidence", "weight"):
+                if key in conn:
+                    violations.append({
+                        "section": "connections", "index": index,
+                        "message": f"ingest: connections[{index}] {key} is not "
+                                   f"allowed on relation connections (structural "
+                                   f"edges) — it belongs on plain IMPL/NAND "
+                                   f"direct edges",
+                    })
+
+    def _fetch_endpoint_info(self, values: set[str]) -> dict[str, dict]:
+        """ONE batched query resolving external endpoint existence, label
+        (node type) and status for a set of raw ids/urls (review fix: existence
+        alone cannot distinguish, since extractedFrom legitimately targets
+        Sources)."""
+        if not values:
+            return {}
+        proj = self._get_proj()
+        rows = proj.g.query(
+            "MATCH (n) WHERE n.id IN $vals OR n.url IN $vals "
+            "OR n.eventId IN $vals "
+            "RETURN coalesce(n.id, n.url, n.eventId) AS key, "
+            "head(labels(n)) AS label, n.is_operator, n.status",
+            params={"vals": sorted(values)},
+        ).result_set
+        out: dict[str, dict] = {}
+        for key, label, is_op, status in rows:
+            out[key] = {"label": label, "is_operator": bool(is_op),
+                        "status": status}
+        return out
+
+    def _find_terminal_dedup_hit(self, content: str, kind: str) -> str | None:
+        """Read-only NFC-keyed dedup MATCH (mirrors create_point's dedup key)
+        restricted to TERMINAL hits — the Phase-1 mechanism behind the
+        bundle-local-refs-resolving-to-terminal-points guard (cycle-17/18)."""
+        proj = self._get_proj()
+        rows = proj.g.query(
+            "MATCH (n:Point {content_hash:$ch}) WHERE n.is_operator = false "
+            "AND n.pointKind = $kind AND n.status IN $terminal RETURN n.id LIMIT 1",
+            params={"ch": _content_hash(content), "kind": kind,
+                    "terminal": sorted(self._INGEST_TERMINAL_STATUSES)},
+        ).result_set
+        return rows[0][0] if rows else None
+
+    def _check_endpoints(self, bundle: dict, violations: list[dict]) -> None:
+        """Check 3 (endpoint half) — typed endpoints (external + bundle-local,
+        cycle-2) and the direct-edge terminal-status guard (cycle-3, refined
+        cycle-17/18). Operator/direct-edge connections require plain-Point
+        endpoints; direct-edge connections (plain IMPL/NAND) additionally
+        reject terminal (superseded/retracted) endpoints. Bundle-local refs
+        resolving to EXISTING (dedup-hit) terminal points are Phase-1
+        violations (never a Phase-2 raise)."""
+        local: dict[str, tuple[str, dict]] = {}
+        for section in ("sources", "points", "entities"):
+            for item in bundle.get(section) or []:
+                if isinstance(item, dict) and item.get("ref"):
+                    local[item["ref"]] = (section, item)
+        external: set[str] = set()
+        conns: list[tuple[int, dict, str, list]] = []
+        for i, conn in enumerate(bundle.get("connections") or []):
+            if not isinstance(conn, dict) or "operator" not in conn:
+                continue
+            frm = conn.get("from")
+            tos = conn.get("to")
+            to_list = tos if isinstance(tos, list) else [tos]
+            route = self._connection_route(conn)
+            for v in [frm] + to_list:
+                if isinstance(v, str) and v not in local:
+                    external.add(v)
+            conns.append((i, conn, route, [frm] + to_list))
+        node_info = self._fetch_endpoint_info(external)
+        entity_labels = {"subject": "Subject", "object": "Object",
+                         "event": "Event", "document": "Document"}
+        for i, conn, route, vals in conns:
+            for v in vals:
+                if not isinstance(v, str):
+                    continue
+                if v in local:
+                    section, item = local[v]
+                    if section != "points" or item.get("is_operator"):
+                        if section == "sources":
+                            label = "Source"
+                        elif section == "entities":
+                            label = entity_labels.get(
+                                str(item.get("type") or "").strip().lower(),
+                                "entity")
+                        else:
+                            label = "operator-shaped point item"
+                        violations.append({
+                            "section": "connections", "index": i,
+                            "message": f"ingest: connections[{i}] bundle-local "
+                                       f"endpoint {v!r} must be a plain Point — "
+                                       f"got a {label} item",
+                        })
+                else:
+                    info = node_info.get(v)
+                    if info is None:
+                        violations.append({
+                            "section": "connections", "index": i,
+                            "message": f"ingest: connections[{i}] external "
+                                       f"endpoint {v!r} does not exist",
+                        })
+                    elif info["label"] != "Point" or info["is_operator"]:
+                        got = ("operator Point" if info["is_operator"]
+                               else info["label"] or "unknown node type")
+                        violations.append({
+                            "section": "connections", "index": i,
+                            "message": f"ingest: connections[{i}] endpoint "
+                                       f"{v!r} must be a plain Point — got a "
+                                       f"{got} endpoint",
+                        })
+                    elif route == "direct" and info["status"] in self._INGEST_TERMINAL_STATUSES:
+                        violations.append({
+                            "section": "connections", "index": i,
+                            "message": f"ingest: connections[{i}] endpoint "
+                                       f"{v!r} is {info['status']} — new direct "
+                                       f"edges to terminal points are rejected",
+                        })
+        # Bundle-local dedup-hit terminal guard (cycle-17/18) — Phase-1 ONLY.
+        for i, conn, route, vals in conns:
+            if route != "direct":
+                continue
+            for v in vals:
+                if not isinstance(v, str) or v not in local:
+                    continue
+                section, item = local[v]
+                if section != "points":
+                    continue
+                content = item.get("content")
+                if content is None or not isinstance(content, str):
+                    # REVIEW-FIX P1 (cycle-26): non-string content would crash
+                    # _find_terminal_dedup_hit -> _content_hash (AttributeError
+                    # 'int' object has no attribute 'encode') — shape violation
+                    # already reported (check 1), skip the dedup-hit scan.
+                    continue
+                kind = item.get("kind") or "statement"
+                hit = self._find_terminal_dedup_hit(content, kind)
+                if hit:
+                    violations.append({
+                        "section": "connections", "index": i,
+                        "message": f"ingest: connections[{i}] bundle-local "
+                                   f"endpoint {v!r} resolves to terminal point "
+                                   f"{hit!r} (dedup hit) — new direct edges to "
+                                   f"terminal points are rejected",
+                    })
+
+    def _check_endpoint_race(self, index: int, conn: dict,
+                             refs: dict[str, str], violations: list[dict]) -> None:
+        """Phase-2 defense-in-depth (check 3): re-verify endpoints right
+        before the connection write — a node deleted/superseded between
+        Phase-1 validation and this write is the race class this exists for.
+        Reuses the SAME message shapes as Phase 1 (Phase-1/2 parity)."""
+        if not isinstance(conn, dict) or "operator" not in conn:
+            return
+        route = self._connection_route(conn)
+        frm = conn.get("from")
+        tos = conn.get("to")
+        vals = []
+        for v in ([frm] + (tos if isinstance(tos, list) else [tos])):
+            vals.append(refs.get(v, v) if isinstance(v, str) else v)
+        external = {v for v in vals if isinstance(v, str)}
+        info = self._fetch_endpoint_info(external)
+        for v in vals:
+            if not isinstance(v, str):
+                continue
+            info_i = info.get(v)
+            if info_i is None:
+                violations.append({
+                    "section": "connections", "index": index,
+                    "message": f"ingest: connections[{index}] external "
+                               f"endpoint {v!r} does not exist",
+                })
+            elif info_i["label"] != "Point" or info_i["is_operator"]:
+                got = ("operator Point" if info_i["is_operator"]
+                       else info_i["label"] or "unknown node type")
+                violations.append({
+                    "section": "connections", "index": index,
+                    "message": f"ingest: connections[{index}] endpoint "
+                               f"{v!r} must be a plain Point — got a {got} "
+                               f"endpoint",
+                })
+            elif route == "direct" and info_i["status"] in self._INGEST_TERMINAL_STATUSES:
+                violations.append({
+                    "section": "connections", "index": index,
+                    "message": f"ingest: connections[{index}] endpoint "
+                               f"{v!r} is {info_i['status']} — new direct edges "
+                               f"to terminal points are rejected",
+                })
+
+    def _connections_conflict(self, ca: dict, cb: dict) -> bool:
+        """§5.2.7 conflict predicate for a same from/to/operator pair.
+
+        Conflicts: differing canonical direction (per op_type), differing
+        confidence/weight/mitigation.strength; label-absent as a DISTINCT
+        value (absent-vs-present → conflict); label-differing on the
+        direct-edge path (label joins the predicate there); mitigation-reason
+        conflict on same-label pairs. Identical pairs are clean dedup.
+        """
+        op = ca["operator"]
+        if self._canonical_direction(op, ca.get("direction")) != \
+                self._canonical_direction(op, cb.get("direction")):
+            return True
+        if ca.get("confidence") != cb.get("confidence"):
+            return True
+        if ca.get("weight") != cb.get("weight"):
+            return True
+        ma, mb = ca.get("mitigation"), cb.get("mitigation")
+        sa = ma.get("strength") if isinstance(ma, dict) else None
+        sb = mb.get("strength") if isinstance(mb, dict) else None
+        if sa != sb:
+            return True
+        la, lb = ca.get("label"), cb.get("label")
+        if la != lb:
+            if la is None or lb is None:
+                return True  # label-absent is a DISTINCT value (cycle-14)
+            if self._connection_route(ca) == "direct" \
+                    or self._connection_route(cb) == "direct":
+                return True  # label joins the direct-edge predicate (cycle-8)
+            # both operator-routed with differing labels → LEGAL (two
+            # operators; _find_operator's key includes label).
+        elif isinstance(ma, dict) and isinstance(mb, dict) and sa == sb \
+                and ma.get("reason") != mb.get("reason"):
+            return True  # mitigation-reason conflict, same-label pairs
+        return False
+
+    def _check_duplicates(self, bundle: dict, violations: list[dict]) -> None:
+        """Check 7 — intra-bundle duplicate connections (§5.2.7).
+
+        Identical duplicates (same from/to/operator with identical direction
+        (canonicalized per op_type), confidence, weight, mitigation.strength,
+        label) are clean dedup — NO violation. Conflicting duplicates are
+        violations (fail-closed — _find_operator's key lacks strength, so
+        acceptance would be order-dependent). Reversed-pair bidirectional
+        contradictions (a→b AND b→a, IMPL/NAND) are violations.
+        """
+        ops = [(i, c) for i, c in enumerate(bundle.get("connections") or [])
+               if isinstance(c, dict) and "operator" in c]
+        for a in range(len(ops)):
+            for b in range(a + 1, len(ops)):
+                ia, ca = ops[a]
+                ib, cb = ops[b]
+                if (ca.get("from") != cb.get("from")
+                        or ca.get("to") != cb.get("to")
+                        or ca["operator"] != cb["operator"]):
+                    continue
+                if self._connections_conflict(ca, cb):
+                    violations.append({
+                        "section": "connections", "index": ib,
+                        "message": f"ingest: connections[{ia}] and "
+                                   f"connections[{ib}] are conflicting "
+                                   f"duplicates — same from/to/operator with "
+                                   f"differing direction/confidence/weight/"
+                                   f"mitigation/label is ambiguous (identical "
+                                   f"duplicates dedup cleanly)",
+                    })
+        for a in range(len(ops)):
+            for b in range(a + 1, len(ops)):
+                ia, ca = ops[a]
+                ib, cb = ops[b]
+                if ca["operator"] not in ("IMPL", "NAND") \
+                        or cb["operator"] not in ("IMPL", "NAND"):
+                    continue
+                if ca.get("from") == cb.get("to") and ca.get("to") == cb.get("from"):
+                    da = self._canonical_direction(ca["operator"], ca.get("direction"))
+                    db = self._canonical_direction(cb["operator"], cb.get("direction"))
+                    if da == "bidirectional" or db == "bidirectional":
+                        violations.append({
+                            "section": "connections", "index": ib,
+                            "message": f"ingest: connections[{ia}] and "
+                                       f"connections[{ib}] are reversed-pair "
+                                       f"contradictions — a bidirectional edge "
+                                       f"already covers both directions",
+                        })
+
+    def _check_gated_status(self, bundle: dict, promotion_policy: str,
+                            violations: list[dict]) -> None:
+        """Check 5 (RETAINED piece, CYCLE-26) — under gated, an explicit
+        status:'live' on a point item is a violation (no bypass of the gated
+        contract; the sanctioned routes are promotion_policy='auto' or
+        update_point(status='live') after ingest)."""
+        if promotion_policy != "gated":
+            return
+        # CYCLE-26 merge resolution: match the SHIPPED A0 semantics (PR #1073
+        # _first_non_draft_status) — ANY status other than the exact canonical
+        # "draft" on a point item is a violation (no bypass; status:'draft'
+        # accepted as a no-op). Phase-1/2 parity via the shared helper.
+        for i, item in enumerate(bundle.get("points") or []):
+            if not isinstance(item, dict):
+                continue
+            # top-level status wins on conflict; nested props flattened by
+            # _coerce_props — mirror _first_non_draft_status (PR #1073).
+            st = item.get("status")
+            has_status = "status" in item
+            if not has_status and isinstance(item.get("props"), dict):
+                st = item["props"].get("status")
+                has_status = "status" in item["props"]
+            # An explicit status key with value None is a violation too
+            # (None stores NULL, which _live_only treats as LIVE) — the
+            # explicit-None and non-draft cases both violate row 9.
+            if has_status and (st is None or st != "draft"):
+                violations.append({
+                    "section": "points", "index": i,
+                    "message": f"ingest: points[{i}] status:{st!r} "
+                               f"is not allowed under promotion_policy 'gated' "
+                               f"— under gated points stay draft; pass "
+                               f"promotion_policy='auto' for explicit live, or "
+                               f"keep draft and promote via "
+                               f"update_point(status='live')",
+                })
+
+    def _validate_bundle(self, bundle: dict, *,
+                         promotion_policy: str = "gated") -> list[dict]:
+        """Phase-1 validation (epic #902 A1 — plan §5.2 checks 1-8).
+
+        Pure and zero-mutation: walks ALL sections and returns EVERY violation
+        as {section, index, message} (aggregated, never fail-fast).
+        Mode-invariant — runs identically for granularity='bulk' and
+        'granular'. Consumes the same shared check helpers as ingest()'s
+        Phase-2 defense-in-depth raises, so Phase 1 catches every violation
+        class Phase 2 can raise (asserted by the parity unit test).
+        """
+        violations: list[dict] = []
+        for section in ("sources", "points", "entities"):
+            for i, item in enumerate(bundle.get(section) or []):
+                self._check_item_shape(section, i, item, violations)
+                if section == "points" and isinstance(item, dict):
+                    self._check_kind(item.get("kind"), i, violations)
+        for i, conn in enumerate(bundle.get("connections") or []):
+            self._check_item_shape("connections", i, conn, violations)
+            self._check_connection(i, conn, violations)
+        self._check_refs(bundle, violations)
+        self._check_endpoints(bundle, violations)
+        self._check_duplicates(bundle, violations)
+        self._check_gated_status(bundle, promotion_policy, violations)
+        return violations
+
+    def ingest(self, bundle: dict, granularity: str = "bulk", *,
+               promotion_policy: str = "gated") -> dict:
         """Heterogeneous bulk write (epic #888 W4, design ref PR #912).
 
         One call writes points + entities + sources + connections coherently:
@@ -2109,31 +3871,80 @@ class TortoiseSDK:
           returns aggregated {created, ids, nudges}. granularity='granular':
           additionally returns per-item ``results`` for agent step-by-step
           control (each item's primitive result + deduped flag).
+        - promotion_policy: "gated" (DEFAULT, Q2) — points stay draft;
+          connections never promote (operator path: promote_source=False via
+          #780 — the operator node is created draft and the source is NOT
+          auto-promoted). "auto" — #131 parity preserved: a source point
+          promotes on wire when its FIRST operator edge is created
+          (CYCLE-26 REVIEW FIX P2: NOT retroactive — re-ingest dedup of an
+          existing operator does not retro-promote a previously-gated
+          source). ORTHOGONAL to granularity: both modes honor the same
+          policy.
         - Idempotent-ish: points dedup by (content_hash, pointKind) via
           create_point(dedup=True); sources merge by url; Subject/Object
           merge by name; operator connections dedup by (op_type, input set);
           structural edges MERGE. Document/Event entities are append-only
           occurrence records — re-ingest duplicates them by design.
         - EP-safe: created points default to status='draft' (#131 draft→live
-          lifecycle) unless the item carries status=... — pass status='live'
-          explicitly to opt into EP propagation.
+          lifecycle). Under promotion_policy='gated' ANY effective status other
+          than 'draft' on a point item is rejected (INGEST CONTRACT row 9 —
+          no bypass of the gated contract; the sanctioned routes are
+          promotion_policy='auto' or update_point(status='live') after ingest;
+          case variants, nested props={...}, and canonical terminal statuses
+          are rejected too — EP _live_only excludes only exact 'draft').
+          Connection-driven promotion (source → live on first edge) only
+          happens under promotion_policy='auto', and only for draft/null-status sources
+          (retracted/deprecated terminal sources are never resurrected).
+          Under auto the operator node is written WITHOUT a status property
+          (live by projection — the #780 asymmetry: gated writes explicit
+          draft on the operator, auto writes none).
 
         Returns {granularity, created: {points, entities, sources, connections},
         deduped: {...}, ids: {points, entities, sources, connections, refs},
         nudges: [...]} (+ results for granularity='granular').
         """
-        if granularity not in ("bulk", "granular"):
+        if granularity not in INGEST_GRANULARITIES:
             raise ValueError(
                 f"ingest: granularity must be 'bulk' or 'granular', got {granularity!r}"
+            )
+        if promotion_policy not in INGEST_PROMOTION_POLICIES:
+            raise ValueError(
+                f"ingest: promotion_policy must be 'gated' or 'auto', got {promotion_policy!r}"
             )
         if not isinstance(bundle, dict):
             raise ValueError(
                 f"ingest: bundle must be a dict with points/entities/sources/"
                 f"connections sections, got {type(bundle).__name__}"
             )
-        from .projection.edges import _VALID_EDGE_PREDICATES
+        # Row 9 of INGEST_CONTRACT.md: under gated, an explicit status:'live'
+        # on a point item is a violation — the Q2-lock must not be bypassable
+        # via the bundle's own status field (the sanctioned routes are
+        # promotion_policy='auto' or update_point(status='live') after ingest).
+        # This is check 5's RETAINED piece (CYCLE-26) — enforced by the shared
+        # _check_gated_status helper below (see _validate_bundle).
+
+        # ── Phase 1 — shared check helpers (plan §5.2 checks 1-8): collect
+        # ALL violations with ZERO mutation before any write. Fail-fast raise
+        # carries the first violation's message (the shipped message contract);
+        # the A2 failure contract upgrades this to BundleValidationError with
+        # ALL violations (.violations, .as_dict()).
+        violations = self._validate_bundle(bundle, promotion_policy=promotion_policy)
+        if violations:
+            # A2 failure contract: BundleValidationError carries ALL
+            # violations (str() = first message for back-compat parity);
+            # _safe maps it to {error, code: ERR_BUNDLE_INVALID, violations}.
+            from .exceptions import BundleValidationError
+            raise BundleValidationError(violations)
 
         proj = self._get_proj()
+        # §4.2 (A4): deterministic content-derived batch_id over the canonical
+        # serialization of the RESOLVED bundle (refs expanded, NFC-normalized,
+        # int/float-collapsed, item/connection order normalized) — computed ONCE
+        # here, stamped on every NEW point the commit creates and applied
+        # stamp-when-absent on dedup hits. Clock-independent by construction
+        # (no time component — CYCLE-21 pin).
+        from .exceptions import Phase2Error
+        batch_id = derive_batch_id(bundle)
         refs: dict[str, str] = {}          # ref → canonical id (or url for sources)
         source_refs: set[str] = set()      # refs that address Source nodes (url-keyed)
         ids = {"points": [], "entities": [], "sources": [],
@@ -2144,9 +3955,15 @@ class TortoiseSDK:
 
         def _register_ref(ref: str, cid: str, section: str) -> None:
             if ref in refs:
-                raise ValueError(
+                # REVIEW-FIX P2 (cycle-26): the Phase2Error must carry the
+                # computed batch_id (plan §6.4 — the agent audits the partial
+                # commit) AND the message must interpolate it (the literal
+                # "batch_id=batch_id" text was a bug).
+                raise Phase2Error(
                     f"ingest: duplicate bundle ref {ref!r} "
-                    f"({section}) — refs must be unique across the bundle"
+                    f"({section}, batch_id={batch_id}) — refs must be unique "
+                    f"across the bundle",
+                    batch_id=batch_id,
                 )
             refs[ref] = cid
             ids["refs"][ref] = cid
@@ -2158,25 +3975,27 @@ class TortoiseSDK:
             ref = item.get("ref") if isinstance(item, dict) else None
             if ref:
                 if ref in refs:
-                    raise ValueError(
-                        f"ingest: duplicate bundle ref {ref!r} (sources)"
+                    raise Phase2Error(
+                        f"ingest: duplicate bundle ref {ref!r} "
+                        f"(sources, batch_id={batch_id})",
+                        batch_id=batch_id,
                     )
                 refs[ref] = item.get("url", "")
                 ids["refs"][ref] = item.get("url", "")
                 source_refs.add(ref)
 
         # ── 1. Sources (first: points may reference them via extractedFrom) ──
+        # Phase-2 defense-in-depth: the shared shape helper re-checks the raw
+        # item right before the write (the same helper Phase 1 ran — parity).
         for i, item in enumerate(bundle.get("sources") or []):
-            if not isinstance(item, dict):
-                raise ValueError(f"ingest: sources[{i}] must be a dict")
+            viols: list[dict] = []
+            self._check_item_shape("sources", i, item, viols)
+            if viols:
+                raise Phase2Error(viols[0]["message"], batch_id=batch_id)
             item = dict(item)
             ref = item.pop("ref", None)
             url = item.pop("url", None)
             source_kind = item.pop("sourceKind", None)
-            if not url or not isinstance(url, str):
-                raise ValueError(f"ingest: sources[{i}] requires a non-empty 'url'")
-            if not source_kind:
-                raise ValueError(f"ingest: sources[{i}] requires 'sourceKind'")
             existed = proj.g.query(
                 "MATCH (s:Source {url:$url}) RETURN count(s)",
                 params={"url": url},
@@ -2201,23 +4020,27 @@ class TortoiseSDK:
 
         # ── 2. Points (default status='draft', #131) ────────────────────
         for i, item in enumerate(bundle.get("points") or []):
-            if not isinstance(item, dict):
-                raise ValueError(f"ingest: points[{i}] must be a dict")
+            viols = []
+            self._check_item_shape("points", i, item, viols)
+            if viols:
+                raise Phase2Error(viols[0]["message"], batch_id=batch_id)
             item = dict(item)
             ref = item.pop("ref", None)
-            kind = item.pop("kind", None)
+            # CYCLE-25: kind-absent DEFAULTS to 'statement' (v3.8 canonical —
+            # the extraction write kind). Legacy kinds are write-compat; the
+            # event kind is rejected by the shared _check_kind helper (check 2).
+            kind = item.pop("kind", None) or "statement"
+            self._check_kind(kind, i, viols)
+            if viols:
+                raise Phase2Error(viols[0]["message"], batch_id=batch_id)
             content = item.pop("content", None)
-            if not kind:
-                raise ValueError(f"ingest: points[{i}] requires 'kind'")
-            if content is None:
-                raise ValueError(f"ingest: points[{i}] requires 'content'")
             # extractedFrom may address a bundle source by its local ref
             if isinstance(item.get("extractedFrom"), str) \
                     and item["extractedFrom"] in source_refs:
                 item["extractedFrom"] = refs[item["extractedFrom"]]
             existed = proj.g.query(
                 "MATCH (n:Point {content_hash:$ch}) "
-                "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+                "WHERE n.is_operator = false "
                 "AND n.pointKind = $kind RETURN n.id",
                 params={"ch": _content_hash(content), "kind": kind},
             ).result_set
@@ -2226,6 +4049,15 @@ class TortoiseSDK:
             if ref:
                 _register_ref(ref, pid, "points")
             ids["points"].append(pid)
+            # §4.2 (A4): stamp the bundle's batch_id on EVERY point — created
+            # points get the full stamp; dedup hits get stamp-when-absent
+            # (a batch-less pre-existing point ACQUIRES the bundle's batch_id on
+            # its first dedup-hit — E2E-10 row 14 — and a crash between
+            # create_point and the stamp, position (f), is completed on retry).
+            # _stamp_batch_id itself decides: full stamp vs (h) record-repair
+            # vs no-op (a point already stamped with a DIFFERENT batch_id keeps
+            # it — dedup never rewrites provenance).
+            self._stamp_batch_id(pid, batch_id, content_hash=_content_hash(content))
             if existed:
                 deduped["points"] += 1
             else:
@@ -2237,17 +4069,14 @@ class TortoiseSDK:
 
         # ── 3. Entities (subject/object merge by name; event/document append) ─
         for i, item in enumerate(bundle.get("entities") or []):
-            if not isinstance(item, dict):
-                raise ValueError(f"ingest: entities[{i}] must be a dict")
+            viols = []
+            self._check_item_shape("entities", i, item, viols)
+            if viols:
+                raise Phase2Error(viols[0]["message"], batch_id=batch_id)
             item = dict(item)
             ref = item.pop("ref", None)
             etype = (item.pop("type", None) or "").strip().lower()
             name = item.pop("name", None)
-            if not etype:
-                raise ValueError(f"ingest: entities[{i}] requires 'type' "
-                                 f"(subject|object|event|document)")
-            if not name:
-                raise ValueError(f"ingest: entities[{i}] requires 'name'")
             # Entity props that wire edges may address earlier bundle items
             # by local ref (points + entities are registered by now).
             for key in ("authoredBy", "ownedBy", "managedBy",
@@ -2271,25 +4100,19 @@ class TortoiseSDK:
                 canonical = node.get("id") or name
             elif etype == "event":
                 event_kind = item.pop("eventKind", None)
-                if not event_kind:
-                    raise ValueError(f"ingest: entities[{i}] type='event' "
-                                     f"requires 'eventKind'")
                 node = self.create_event(name, event_kind, **item)
                 canonical = node.get("eventId") or node.get("id") or name
                 existed = []  # Event records are append-only — never deduped
             elif etype == "document":
                 doc_kind = item.pop("documentKind", None)
-                if not doc_kind:
-                    raise ValueError(f"ingest: entities[{i}] type='document' "
-                                     f"requires 'documentKind'")
                 node = self.create_document(name, doc_kind, **item)
                 canonical = node.get("id") or name
                 existed = []  # Document records are append-only — never deduped
             else:
-                raise ValueError(
+                raise Phase2Error(
                     f"ingest: entities[{i}] type must be subject|object|event|"
                     f"document, got {etype!r}"
-                )
+                , batch_id=batch_id)
             if ref:
                 _register_ref(ref, canonical, "entities")
             ids["entities"].append(canonical)
@@ -2303,28 +4126,22 @@ class TortoiseSDK:
                                 "deduped": bool(existed)})
 
         # ── 4. Connections (nodes exist — resolve refs, apply reification) ──
+        # Phase-2 defense-in-depth: the shared contract helper + a live
+        # endpoint re-verify run right before each write — a node deleted/
+        # superseded between Phase-1 validation and this write is the race
+        # class the re-check exists for (same helpers, same messages — parity).
         for i, conn in enumerate(bundle.get("connections") or []):
-            if not isinstance(conn, dict):
-                raise ValueError(f"ingest: connections[{i}] must be a dict")
-            if "from" not in conn or "to" not in conn:
-                raise ValueError(f"ingest: connections[{i}] requires 'from' and 'to'")
-            has_rel, has_op = "relation" in conn, "operator" in conn
-            if has_rel == has_op:
-                raise ValueError(
-                    f"ingest: connections[{i}] must carry exactly one of "
-                    f"'relation' (structural edge) or 'operator' "
-                    f"(IMPL/NAND reification)"
-                )
+            viols = []
+            self._check_item_shape("connections", i, conn, viols)
+            self._check_connection(i, conn, viols)
+            self._check_endpoint_race(i, conn, refs, viols)
+            if viols:
+                raise Phase2Error(viols[0]["message"], batch_id=batch_id)
             src = refs.get(conn["from"], conn["from"])
             to_list = conn["to"] if isinstance(conn["to"], list) else [conn["to"]]
             dsts = [refs.get(x, x) for x in to_list]
-            if has_op:
+            if "operator" in conn:
                 op_type = conn["operator"]
-                if op_type not in self._INGEST_OPERATOR_TYPES:
-                    raise ValueError(
-                        f"ingest: connections[{i}] operator must be one of "
-                        f"{sorted(self._INGEST_OPERATOR_TYPES)}, got {op_type!r}"
-                    )
                 label = conn.get("label")
                 direction = conn.get("direction")
                 existing = self._find_operator(op_type, [src] + dsts,
@@ -2335,10 +4152,17 @@ class TortoiseSDK:
                     conn_result = {"operator_id": oid, "deduped": True}
                 else:
                     op = self.create_operator(op_type, src, dsts,
-                                              label=label, direction=direction)
+                                              label=label, direction=direction,
+                                              promote_source=(promotion_policy == "auto"))
                     oid = op["id"]
                     created["connections"] += 1
                     conn_result = {"operator_id": oid, "deduped": False}
+                # §4.2 (A4): operator Points are stamped POST-WRITE keyed on the
+                # returned id (create_operator accepts no props). Stamp-when-
+                # absent covers the operator-path crash boundary too (position
+                # (g)): a retry's _find_operator dedup hit on a batch-less
+                # operator Point acquires the bundle's batch_id.
+                self._stamp_batch_id(oid, batch_id)
                 ids["connections"].append(oid)
             else:
                 rel = conn["relation"]
@@ -2358,11 +4182,6 @@ class TortoiseSDK:
                     conn_result = {"relation": rel, "from": src, "to": dsts[0],
                                    "deduped": bool(existed and existed[0][0])}
                 else:
-                    if rel not in _VALID_EDGE_PREDICATES:
-                        raise ValueError(
-                            f"ingest: connections[{i}] unknown relation {rel!r} — "
-                            f"must be a structural predicate or 'extractedFrom'"
-                        )
                     existed = proj.g.query(
                         f"MATCH (a)-[r:{rel}]->(b) "
                         "WHERE (a.id = $f OR a.eventId = $f OR a.url = $f) "
@@ -2372,10 +4191,10 @@ class TortoiseSDK:
                     ).result_set
                     ok = proj.create_edge(src, dsts[0], rel)
                     if not ok:
-                        raise ValueError(
+                        raise Phase2Error(
                             f"ingest: connections[{i}] could not create "
                             f"{rel!r} edge — endpoints not found"
-                        )
+                        , batch_id=batch_id)
                     if existed and existed[0][0]:
                         deduped["connections"] += 1
                     else:
@@ -2402,6 +4221,7 @@ class TortoiseSDK:
 
         out = {
             "granularity": granularity,
+            "batch_id": batch_id,
             "created": created,
             "deduped": deduped,
             "ids": ids,
@@ -2410,6 +4230,270 @@ class TortoiseSDK:
         if results is not None:
             out["results"] = results
         return out
+
+    # ── batch_id stamping (epic #902 A4, §4.2) ────────────────────────
+
+    def _stamp_batch_id(self, point_id: str, batch_id: str, *,
+                        content_hash: str | None = None,
+                        mitigates_operator_id: str | None = None,
+                        mitigation_strength: float | None = None) -> bool:
+        """Stamp ``batch_id`` onto a Point — single SET + JSONL-only record.
+
+        §4.2 (A4): ``batch_id`` is SERVER-MANAGED. The stamp is two writes:
+        (1) one prop SET (no GraphEvent — ``BatchIdStamped`` is NOT a
+        ``_GRAPH_EVENT_TYPES`` member), (2) a JSONL-only batch_id record
+        ``{id, batch_id, content_hash?, mitigates_operator_id?,
+        mitigation_strength?}`` for rebuild durability — the PointAdded
+        snapshot predates the stamp, so without the record a rebuild loses
+        every bundle-created point's batch_id (A10 pass-2b replays it).
+
+        Stamp-when-absent (cycle-2/3/4 pins):
+        - prop MISSING → full stamp (SET + record) — completes an interrupted
+          create→stamp write (crash positions (f)/(g)) and lets a batch-less
+          pre-existing dedup hit ACQUIRE the bundle's batch_id on its first
+          dedup-hit (E2E-10 row 14 — there is no implementable discriminator
+          between a crash sibling and a pre-#902 point);
+        - prop PRESENT and equal → the JSONL record is checked; a missing
+          record is re-emitted ONLY (crash sub-position (h): the SET landed
+          but the record did not — completing the interrupted record, NOT
+          rewriting provenance);
+        - prop PRESENT and different → no-op (dedup never rewrites
+          provenance — a re-ingest must not reparent an existing point).
+
+        Returns True when the stamp changed state (SET or record emitted),
+        False when it was a no-op.
+        """
+        proj = self._get_proj()
+        rows = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.batch_id",
+            params={"id": point_id},
+        ).result_set
+        if not rows:
+            return False  # point does not exist — nothing to stamp
+        existing = rows[0][0]
+        if existing is not None and existing != batch_id:
+            return False  # dedup hit keeps its original batch_id
+        if existing is None:
+            proj.g.query(
+                "MATCH (n:Point {id:$id}) SET n.batch_id = $bid",
+                params={"id": point_id, "bid": batch_id},
+            )
+            self._emit_batch_id_record(
+                point_id, batch_id,
+                content_hash=content_hash,
+                mitigates_operator_id=mitigates_operator_id,
+                mitigation_strength=mitigation_strength,
+            )
+            return True
+        # prop present and equal — (h) record-repair: re-emit ONLY the record
+        # when it is missing (the SET survived a crash the record did not).
+        if self._batch_id_record_missing(point_id, batch_id):
+            self._emit_batch_id_record(
+                point_id, batch_id,
+                content_hash=content_hash,
+                mitigates_operator_id=mitigates_operator_id,
+                mitigation_strength=mitigation_strength,
+            )
+            return True
+        return False
+
+    def _emit_batch_id_record(self, point_id: str, batch_id: str, *,
+                              content_hash: str | None = None,
+                              mitigates_operator_id: str | None = None,
+                              mitigation_strength: float | None = None) -> None:
+        """Emit the JSONL-only batch_id record via ``_emit_event``'s JSONL branch.
+
+        The record type is NOT in ``_GRAPH_EVENT_TYPES`` — no GraphEvent-store
+        write (Q4 stays deferred). Optional fields are omitted when None so
+        A10's pass-2b can distinguish absent from explicit-null.
+        """
+        extra: dict = {"batch_id": batch_id}
+        if content_hash is not None:
+            extra["content_hash"] = content_hash
+        if mitigates_operator_id is not None:
+            extra["mitigates_operator_id"] = mitigates_operator_id
+        if mitigation_strength is not None:
+            extra["mitigation_strength"] = mitigation_strength
+        self._emit_event(_BATCH_ID_RECORD_TYPE, id=point_id, **extra)
+
+    def _batch_id_record_missing(self, point_id: str, batch_id: str) -> bool:
+        """True when no ``BatchIdStamped`` JSONL record exists for the pair.
+
+        Best-effort — a log-read failure is logged and treated as "not
+        missing" (the graph mutation already succeeded; a log glitch must not
+        crash the stamp or spin the repair).
+        """
+        log = self._get_event_log()
+        if log is None:
+            return False  # no log configured — no record was or will be written
+        try:
+            for event in log.read_all():
+                if (event.get("type") == _BATCH_ID_RECORD_TYPE
+                        and event.get("id") == point_id
+                        and event.get("batch_id") == batch_id):
+                    return False
+        except Exception:  # noqa: BLE001 — best-effort
+            _logger.warning(
+                "batch_id record check failed for %s — treating as present",
+                point_id, exc_info=True,
+            )
+            return False
+        return True
+
+    def create_direct_edge(self, op_type: str, source_id: str, target_id: str, *,
+                           direction: str | None = None,
+                           confidence: float | None = None,
+                           weight: float | None = None,
+                           label: str | None = None,
+                           batch_id: str | None = None,
+                           promote_source: bool = True) -> dict:
+        """Create an OPERATOR-LESS direct IMPL/NAND Point→Point edge (plan §5.3).
+
+        Ontology v3.5 §8 / v3.8: plain IMPL/NAND connections are direct edges
+        (edge-carried direction/confidence/weight/label/batch_id; NO operator
+        node). The edge is a BARE-pattern MERGE + attribute SET — exactly one
+        edge per (src,tgt,type), last-writer-wins on attribute change
+        (MERGE-with-attributes would create a parallel edge on attribute
+        change, violating EP's no-parallel-direct-edges contract).
+
+        Guards (shared with #901, E2E-11.7):
+          - endpoints exist AND are plain Points (a Source/Subject/event/
+            operator endpoint is a typed error);
+          - terminal-endpoint guard: `status NOT IN {superseded, retracted}`
+            (a direct edge incident to a terminal point would recreate the
+            terminal-point propagation hazard).
+        op_type ∈ {IMPL, NAND}.
+
+        Promotion (CYCLE-24 promotion-on-created-only pin): `promote_source`
+        fires ONLY when the MERGE CREATED the edge (`created==True`) — a
+        bare-MERGE dedup hit applies NO promotion (dedup never rewrites).
+        CYCLE-25: direction-absent NAND defaults to "unidirectional" on the
+        edge (extraction default — new-claim-attacks-existing); direction-
+        absent IMPL stays "bidirectional".
+
+        Emits the dedicated JSONL edge descriptor for rebuild durability
+        (plan §4.4 — A10's pass-2b consumer) on created==True.
+
+        Returns {"direct_edge": op_type, "from": source_id, "to": target_id,
+                 "created": bool, "deduped": bool}.
+        """
+        if op_type not in ("IMPL", "NAND"):
+            raise ValueError(
+                f"create_direct_edge: op_type must be IMPL or NAND, got {op_type!r}"
+            )
+        if source_id == target_id:
+            raise ValueError("create_direct_edge: source_id and target_id must differ")
+        if confidence is not None and not (0.0 <= float(confidence) <= 1.0):
+            raise ValueError(
+                f"create_direct_edge: confidence must be in [0,1], got {confidence!r}"
+            )
+        # CYCLE-25: NAND extraction default — direction-absent NAND is
+        # "unidirectional" (new-claim-attacks-existing); IMPL stays
+        # bidirectional. An explicit value is preserved verbatim.
+        if direction is None:
+            direction = "unidirectional" if op_type == "NAND" else "bidirectional"
+        if direction not in ("bidirectional", "unidirectional"):
+            raise ValueError(
+                f"create_direct_edge: direction must be 'bidirectional' or "
+                f"'unidirectional', got {direction!r}"
+            )
+
+        proj = self._get_proj()
+        # Endpoint validation: exist, plain Points, non-terminal.
+        rows = proj.g.query(
+            "MATCH (p:Point) WHERE p.id IN $ids "
+            "RETURN p.id, coalesce(p.is_operator, false), p.status",
+            params={"ids": [source_id, target_id]},
+        ).result_set
+        found = {r[0]: (bool(r[1]), r[2]) for r in rows}
+        for pid in (source_id, target_id):
+            if pid not in found:
+                raise ValueError(
+                    f"create_direct_edge: endpoint {pid!r} does not exist or "
+                    f"is not a Point"
+                )
+            is_op, status = found[pid]
+            if is_op:
+                raise ValueError(
+                    f"create_direct_edge: endpoint {pid!r} is an operator — "
+                    f"direct edges connect plain Points only"
+                )
+            if status in ("superseded", "retracted"):
+                raise ValueError(
+                    f"create_direct_edge: endpoint {pid!r} is terminal "
+                    f"({status!r}) — a direct edge incident to a terminal "
+                    f"point is rejected (terminal-point propagation hazard)"
+                )
+
+        # BARE-pattern MERGE + attribute SET (last-writer-wins; exactly one
+        # edge per (src,tgt,type)). `created` is detected by a pre-count
+        # BEFORE the MERGE (the MERGE's stats aren't reliably surfaced, and a
+        # post-MERGE count always sees 1).
+        rel_type = op_type  # IMPL / NAND
+        pre = proj.g.query(
+            f"MATCH (a:Point {{id:$src}})-[r:{rel_type}]->(b:Point {{id:$tgt}}) "
+            f"RETURN count(r)",
+            params={"src": source_id, "tgt": target_id},
+        ).result_set
+        created = (pre[0][0] == 0)
+        # Two-step MERGE (FalkorDB quirk fixed, cycle-26): a MERGE whose node
+        # patterns carry property filters can CREATE DUPLICATE NODES when the
+        # relationship is absent (the node match is ambiguous). MATCH the
+        # existing nodes first, then MERGE the edge BETWEEN them — exactly one
+        # edge per (src,tgt,type), no duplicate nodes.
+        proj.g.query(
+            f"MATCH (a:Point {{id:$src}}), (b:Point {{id:$tgt}}) "
+            f"MERGE (a)-[r:{rel_type}]->(b)",
+            params={"src": source_id, "tgt": target_id},
+        )
+        attrs = {"direction": direction}
+        if confidence is not None:
+            attrs["confidence"] = float(confidence)
+        if weight is not None:
+            attrs["weight"] = float(weight)
+        if label is not None:
+            attrs["label"] = label
+        if batch_id is not None:
+            attrs["batch_id"] = batch_id
+        # SET r += $attrs (additive — never clobbers EP-managed msg_* fields)
+        proj.g.query(
+            f"MATCH (a:Point {{id:$src}})-[r:{rel_type}]->(b:Point {{id:$tgt}}) "
+            f"SET r += $attrs",
+            params={"src": source_id, "tgt": target_id, "attrs": attrs},
+        )
+
+        # Promotion-on-created-only (CYCLE-24 pin): the guarded #131-style SET
+        # fires ONLY when the MERGE created the edge.
+        if created and promote_source:
+            proj.g.query(
+                "MATCH (s:Point {id:$id}) "
+                "WHERE s.status IS NULL OR s.status = 'draft' "
+                "SET s.status = 'live', s.updatedAt = $now",
+                params={"id": source_id,
+                        "now": _now_iso()},
+            )
+
+        # JSONL edge descriptor (plan §4.4) — emitted on EVERY write (the
+        # MERGE-keyed replay is idempotent, so dedup-hit emissions are
+        # harmless, and the crash window closes: a crash between the MERGE
+        # and the emission on attempt 1 is recovered by attempt 2's emission —
+        # a created-only gate would lose the edge from the log forever on
+        # crash-retry). REVIEW-FIX P1 (cycle-26): last-writer-wins attr
+        # updates must replay the FINAL attrs post-rebuild.
+        self._emit_event(
+            "DirectEdgeCreated",
+            id=f"{source_id}->{target_id}:{op_type}",
+            src=source_id, tgt=target_id, edge_type=op_type,
+            direction=direction,
+            **({"confidence": float(confidence)} if confidence is not None else {}),
+            **({"weight": float(weight)} if weight is not None else {}),
+            **({"label": label} if label is not None else {}),
+            **({"batch_id": batch_id} if batch_id is not None else {}),
+        )
+
+        self._mark_dirty([source_id, target_id])
+        return {"direct_edge": op_type, "from": source_id, "to": target_id,
+                "created": created, "deduped": not created}
 
     def _find_operator(self, op_type: str, inputs: list[str],
                        label: str | None = None,
@@ -2555,7 +4639,7 @@ class TortoiseSDK:
             raise ValueError("Cannot file human approval: at least one claim Point required")
         r = proj.g.query(
             "MATCH (n:Point) WHERE n.id IN $ids "
-            "AND (n.is_operator IS NULL OR n.is_operator = false) RETURN n.id",
+            "AND n.is_operator = false RETURN n.id",
             params={"ids": point_ids},
         ).result_set
         existing = {row[0] for row in r}
@@ -2654,8 +4738,31 @@ class TortoiseSDK:
         """
         return _get_kind_expander().list_relations()
 
+    def _t_close(self) -> None:
+        """Idempotent close; safe from atexit or __exit__ (#1005).
+
+        Does NOT set _t_closed itself — close() owns the flag (setting it
+        here would make close() short-circuit and never run its body).
+        """
+        if getattr(self, "_t_closed", False):
+            return
+        try:
+            self.close()
+        except Exception:
+            self._t_closed = True  # never retry a failing close
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self._t_close()
+        return False
+
     def close(self) -> None:
         """Close the underlying database connection and audit logger."""
+        if getattr(self, "_t_closed", False):
+            return
+        self._t_closed = True
         if self._audit_logger is not None:
             self._audit_logger.close()
             self._audit_logger = None
@@ -2735,7 +4842,7 @@ class TortoiseSDK:
         # Ontology v2.1: use per-type about* edges instead of property
         rows = proj.g.query(
             "MATCH (n:Point) "
-            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "WHERE n.is_operator = false "
             "RETURN n.id, n.content"
         ).result_set
 
@@ -2871,7 +4978,7 @@ class TortoiseSDK:
         proj = self._get_proj()
         rows = proj.g.query(
             "MATCH (n:Point) "
-            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "WHERE n.is_operator = false "
             "  AND (n.status IS NULL OR n.status IN ['draft', 'live']) "
             "  AND (n.outdated IS NULL OR n.outdated = false) "
             "RETURN n.id, n.content, n.status, n.updatedAt",
@@ -3035,8 +5142,8 @@ class TortoiseSDK:
                                       "relation": rel, "via": op_id})
         rows = proj.g.query(
             "MATCH (a:Point)-[r:IMPL|NAND]->(b:Point) "
-            "WHERE (a.is_operator IS NULL OR a.is_operator = false) "
-            "  AND (b.is_operator IS NULL OR b.is_operator = false) "
+            "WHERE a.is_operator = false "
+            "  AND b.is_operator = false "
             "RETURN a.id, type(r), b.id",
         ).result_set
         for a, rel, b in rows:
@@ -3087,7 +5194,7 @@ class TortoiseSDK:
         contested: dict[str, dict] = {}
         rows = proj.g.query(
             "MATCH (n:Point) "
-            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "WHERE n.is_operator = false "
             "  AND (n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL) "
             "  AND (n.posterior_beta IS NOT NULL OR n.ep_beta IS NOT NULL) "
             "WITH n, coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS a, "
@@ -3104,7 +5211,7 @@ class TortoiseSDK:
         # handled by stale/draft semantics and must not double-flag.
         rows = proj.g.query(
             "MATCH (op:Point {is_operator:true})-[r:NAND]->(n:Point) "
-            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "WHERE n.is_operator = false "
             "  AND (n.status IS NULL OR n.status = 'live') "
             "RETURN DISTINCT n.id",
         ).result_set
@@ -3521,7 +5628,7 @@ class TortoiseSDK:
         #   (baseline_source IS NULL AND baseline_set IS NOT true)  → always eligible
         #   (baseline_source = 'inherited')                          → gated by inherited_at
         where = (
-            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "WHERE n.is_operator = false "
             "AND (n.pointKind IS NULL OR n.pointKind <> 'assessment') "
             "AND ("
             "  (n.baseline_source IS NULL AND (n.baseline_set IS NULL OR n.baseline_set = false)) "
@@ -3646,7 +5753,7 @@ class TortoiseSDK:
         points, traverses extractedFrom→Source to check for inherited credibilityTier.
         """
         proj = self._get_proj()
-        where = "WHERE (n.is_operator IS NULL OR n.is_operator = false)"
+        where = "WHERE n.is_operator = false"
         params = {}
         
         from tortoise.source_credibility import resolve_tier
@@ -3715,15 +5822,31 @@ class TortoiseSDK:
 
     # ── P0 Group 3: Checkpoint, Diary, Status, Analyze, Ingest ────
 
-    def _content_exists(self, content: str) -> str | None:
-        """Return point ID if a point with this content hash exists, else None."""
+    def _content_exists(self, content: str,
+                        pointKind: str | None = None,
+                        exclude_id: str | None = None) -> str | None:
+        """Return point ID if a point with this content hash exists, else None.
+
+        #784: optional pointKind scoping — a duplicate observation must never
+        suppress a decision (DE2E-N11); ``exclude_id`` excludes a specific
+        point (the dedup candidate itself — self-match guard, #784 review).
+        Default None preserves the legacy any-kind behavior.
+        """
         ch = _content_hash(content)
         proj = self._get_proj()
+        kind_clause = " AND n.pointKind = $kind" if pointKind else ""
+        exclude_clause = " AND n.id <> $exclude" if exclude_id else ""
+        params: dict = {"ch": ch}
+        if pointKind:
+            params["kind"] = pointKind
+        if exclude_id:
+            params["exclude"] = exclude_id
         rows = proj.g.query(
-            "MATCH (n:Point {content_hash:$ch}) "
+            f"MATCH (n:Point {{content_hash:$ch}}) "
             "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            f"{kind_clause} {exclude_clause} "
             "RETURN n.id",
-            params={"ch": ch},
+            params=params,
         ).result_set
         return rows[0][0] if rows else None
 
@@ -3759,7 +5882,8 @@ class TortoiseSDK:
         to_file = to_check
         if threshold < 1.0:
             try:
-                to_file = self._semantic_dedup(to_check, threshold)
+                to_file = self._semantic_dedup(
+                    to_check, threshold, pointKind="checkpoint-item")
             except ImportError:
                 # Expected in zero-dependency environments — hash-only fallback.
                 # #330: previously a bare `except Exception: pass` swallowed
@@ -3806,18 +5930,38 @@ class TortoiseSDK:
         return {"filed": filed, "duplicates": duplicates}
 
     def _semantic_dedup(self, candidates: list[tuple[dict, str]],
-                        threshold: float) -> list[tuple[dict, str]]:
-        """Filter candidates by embedding similarity against existing checkpoint items."""
+                        threshold: float,
+                        pointKind: str = "checkpoint-item",
+                        return_pairs: bool = False,
+                        similarity_out: bool = False,
+                        exclude_ids: set[str] | None = None
+                        ) -> list[tuple[dict, str]] | list[dict]:
+        """Filter candidates by embedding similarity against existing points.
+
+        #784 generalization: ``pointKind`` scopes the existing-point universe
+        (default 'checkpoint-item' preserves the legacy checkpoint() behavior
+        — R14); ``return_pairs=True`` returns above-threshold HITS as
+        {candidate, existing, similarity} dicts (the review-queue mode);
+        ``similarity_out`` appends the max similarity to each surviving
+        (item, ch) tuple when filtering.
+        """
         import numpy as np
         proj = self._get_proj()
+        exclude = exclude_ids or set()
+        excl_clause = " AND NOT n.id IN $exclude" if exclude else ""
+        params: dict = {"kind": pointKind}
+        if exclude:
+            params["exclude"] = list(exclude)
         rows = proj.g.query(
-            "MATCH (n:Point {pointKind:'checkpoint-item'}) "
+            "MATCH (n:Point {pointKind:$kind}) "
             "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
-            "RETURN n.content"
+            f"{excl_clause} "
+            "RETURN n.id, n.content",
+            params=params,
         ).result_set
-        existing = [r[0] for r in rows if r[0]]
+        existing = [(r[0], r[1]) for r in rows if r[1]]
         if not existing:
-            return candidates
+            return [] if return_pairs else candidates
 
         new_texts = [item["content"] for item, _ch in candidates]
         # Single degrade chain (embeddings._encode): real model → TF-IDF → zeros.
@@ -3828,7 +5972,7 @@ class TortoiseSDK:
         # EmbeddingModel singleton + degrade chain so any load/encode failure
         # degrades to deterministic TF-IDF instead of hash-only.
         from .embeddings import _encode
-        all_vecs, _degraded = _encode(existing + new_texts)
+        all_vecs, _degraded = _encode([c for _i, c in existing] + new_texts)
 
         e_vecs, n_vecs = all_vecs[:len(existing)], all_vecs[len(existing):]
 
@@ -3837,7 +5981,28 @@ class TortoiseSDK:
             n[n == 0] = 1
             return v / n
 
-        max_sims = (_norm(n_vecs) @ _norm(e_vecs).T).max(axis=1)
+        sims = (_norm(n_vecs) @ _norm(e_vecs).T)
+        max_sims = sims.max(axis=1)
+        argmax = sims.argmax(axis=1)
+
+        if return_pairs:
+            pairs = []
+            for i, ((item, _ch), sim) in enumerate(zip(candidates, max_sims)):
+                if sim >= threshold:
+                    eid, econtent = existing[argmax[i]]
+                    pairs.append({
+                        "candidate": item,
+                        "candidate_id": item.get("id"),
+                        "existing": eid,
+                        "existing_content": econtent,
+                        "similarity": round(float(sim), 4),
+                    })
+            return pairs
+
+        if similarity_out:
+            return [(item, ch, round(float(max_sims[i]), 4))
+                    for i, (item, ch) in enumerate(candidates)
+                    if max_sims[i] < threshold]
         return [(item, ch) for i, (item, ch) in enumerate(candidates)
                 if max_sims[i] < threshold]
 
@@ -3860,14 +6025,14 @@ class TortoiseSDK:
         if wing:
             rows = proj.g.query(
                 "MATCH (n:Point {pointKind:'diary', authoredBy:$agent, wing:$wing}) "
-                "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+                "WHERE n.is_operator = false "
                 "RETURN properties(n) ORDER BY n.createdAt DESC LIMIT $lim",
                 params={"agent": agent_name, "wing": wing, "lim": last_n},
             ).result_set
         else:
             rows = proj.g.query(
                 "MATCH (n:Point {pointKind:'diary', authoredBy:$agent}) "
-                "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+                "WHERE n.is_operator = false "
                 "RETURN properties(n) ORDER BY n.createdAt DESC LIMIT $lim",
                 params={"agent": agent_name, "lim": last_n},
             ).result_set
@@ -3932,10 +6097,10 @@ class TortoiseSDK:
                     f"progress_file {progress_file!r} not under TORTOISE_INGEST_BASE_DIR."
                 )
 
-        # Canonical boundary regex lives in session_indexer (#280 review round 6):
+        # Canonical boundary regex lives in file_indexer (#280 review round 6):
         # hoisted so extract/health/ingest can never drift apart again (the round-5
         # bug was exactly two copies diverging → permanent sweep non-convergence).
-        from .session_indexer import _FM_RE
+        from .file_indexer import _FM_RE
         ingested, updated, skipped, failed = 0, 0, 0, 0
         errors: list[dict] = []
         now = datetime.now(timezone.utc).isoformat()
@@ -4353,7 +6518,7 @@ class TortoiseSDK:
             return []
 
         proj = self._get_proj()
-        clauses = ["(n.is_operator IS NULL OR n.is_operator = false)",
+        clauses = ["n.is_operator = false",
                    "toLower(n.content) CONTAINS toLower($q)"]
         params = {"q": q}
         if kind_filter:
@@ -4437,12 +6602,12 @@ class TortoiseSDK:
         proj = self._get_proj()
         diary_entries = [r[0] for r in proj.g.query(
             "MATCH (n:Point {pointKind:'diary'}) "
-            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "WHERE n.is_operator = false "
             "RETURN properties(n) ORDER BY n.createdAt DESC LIMIT 10"
         ).result_set]
         recent_points = [r[0] for r in proj.g.query(
             "MATCH (n:Point) "
-            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "WHERE n.is_operator = false "
             "RETURN properties(n) ORDER BY n.createdAt DESC LIMIT 20"
         ).result_set]
         recent_events = [r[0] for r in proj.g.query(
@@ -4453,7 +6618,7 @@ class TortoiseSDK:
              "confidence": r[3], "updatedAt": r[4]}
             for r in proj.g.query(
                 "MATCH (n:Point) WHERE n.confidence IS NOT NULL "
-                "AND (n.is_operator IS NULL OR n.is_operator = false) "
+                "AND n.is_operator = false "
                 "RETURN n.id, n.content, n.pointKind, n.confidence, n.updatedAt "
                 "ORDER BY n.updatedAt DESC LIMIT 20"
             ).result_set
@@ -6101,10 +8266,21 @@ class TortoiseSDK:
 
     # ── Entity CRUD (ONTOLOGY v2.5 §3, all 7 types) ──────────────────
 
-    def _create_entity(self, label: str, id_val: str, props: dict, event_type: str) -> dict:
-        """Generic entity creation. Applies to graph via projection (event log + FalkorDB)."""
+    def _create_entity(self, label: str, id_val: str, props: dict, event_type: str,
+                       *, _skip_sanitize: bool = False) -> dict:
+        """Generic entity creation. Applies to graph via projection (event log + FalkorDB).
+
+        ``_skip_sanitize=True`` (epic #900 T3, create_source's sanctioned
+        source_path route): the caller has already extracted the server-
+        managed ``source_path``/``source_path`` keys into an explicit kwarg and
+        sanitized the remainder — bypassing ``_sanitize_props`` would otherwise
+        fail-closed on the sanctioned key (the sanitizer's own docstring carves
+        out ``api.add_document(source_path=)``; create_source(source_path=) is
+        the mirror route).
+        """
         # #329: id + sourcePath/source_path are server-managed — reject
-        props = _sanitize_props(props, reject_id=True)
+        if not _skip_sanitize:
+            props = _sanitize_props(props, reject_id=True)
         proj = self._get_proj()
         # Build event dict
         event = {"type": event_type, "id": id_val, **props}
@@ -6122,7 +8298,12 @@ class TortoiseSDK:
         if label == "Source":
             event["url"] = id_val
         # Apply through projection (writes to JSONL + FalkorDB)
-        proj.apply(event)
+        apply_result = proj.apply(event)
+        if label == "Source":
+            # epic #900 T3: thread the conditional-MERGE QueryResult so
+            # create_source can attribute the counter-authority outcome
+            # (nodes_created) from the single statement (pin b).
+            proj._source_merge_result = apply_result
         # #452: Subject/Object MERGE by name (content-hash dedup).
         # When the name already exists, the fresh id_val never lands on the
         # node (ON CREATE never fires).  Re-fetch the canonical id from the
@@ -6531,6 +8712,1328 @@ class TortoiseSDK:
         ).result_set
         return rows[0][0] if rows else None
 
+    def index_file(self, path: str,
+                   file_type: str | None = None,   # "agent_session"|"meeting"|"doc"|None(auto)
+                   *, corpus_root: str | None = None,
+                   corpus_name: str | None = None,
+                   extract_metadata: bool = True,
+                   llm_model: str | None = "gpt-5-mini",
+                   embedding_repair_backoff: float | None = None,
+                   ) -> dict:
+        """One idempotent unit operation (epic #900 T3; A8). Returns:
+        {"status": "indexed"|"updated"|"skipped"|"failed",
+         "url": str, "eventId"|"documentId": str, "sourceKind": str,
+         "reason"?: str,              # skipped/failed explanation. SKIPPED reasons
+                                       # (PINNED): "unchanged" | "lock-held"
+                                       # (retryable:true) | "duplicate-sessionId" |
+                                       # "symlink-duplicate" | "inode-duplicate" |
+                                       # "embedding-unavailable"
+         "retryable"?: bool}
+        `updated` is TWO-ARMED: (a) hash-diff MERGE — in-place update + version
+        bump; (b) repair work with UNCHANGED hash (unit completion / embedding
+        heal) — NO version bump.
+        Raises: ValueError — unsafe path (#329), file outside corpus_root,
+        unknown file_type value, unresolved corpus_root (§6.1 I6 default
+        resolution: nearest ancestor equal to TORTOISE_INGEST_BASE_DIR, else
+        explicit corpus_root demanded).
+        """
+        import os as _os
+        from pathlib import Path
+        # #329: single-file path validation — absolute, no `..`, and under
+        # TORTOISE_INGEST_BASE_DIR when set (same family as ingest_corpus).
+        if not isinstance(path, str) or not path:
+            raise ValueError("index_file: path must be a non-empty string")
+        raw_base = _os.environ.get("TORTOISE_INGEST_BASE_DIR")
+        ingest_base = _os.path.realpath(_os.path.expanduser(raw_base)) if raw_base else None
+        if not _os.path.isabs(path) or ".." in Path(path).parts:
+            raise ValueError(
+                f"Unsafe path {path!r} — must be absolute with no '..' components."
+            )
+        if ingest_base is not None and _resolve_under_base_realpath(path, ingest_base) is None:
+            raise ValueError(
+                f"Unsafe path {path!r} — resolves outside "
+                f"TORTOISE_INGEST_BASE_DIR ({ingest_base})."
+            )
+        if not _os.path.exists(path):
+            return {"status": "failed", "reason": "file not found",
+                    "retryable": False}
+        # corpus_root default resolution (§6.1 I6 pin).
+        root, name = self._index_resolve_corpus_root(path, corpus_root, corpus_name)
+        # REVIEW-FIX P1 (cycle-26): TORTOISE_INDEX_NO_NETWORK honored at the
+        # NEW-PATH call boundary REGARDLESS of extract_metadata (cycle-10/12
+        # pin; index_file is a new-path boundary — S14 precedence unit test
+        # "var set + flag True → resolved False" covers this path too).
+        if self._index_no_network():
+            extract_metadata = False
+        # REVIEW-FIX P1 (cycle-26): index_file OUTSIDE-ROOT mount-source class
+        # (§6.4 cycle-7 — the (s2) class: realpath resolves in-root, st_nlink
+        # == 1, "the mount-source check is the ONLY catch"). index_file is the
+        # THIRD mount_source_for seam consumer — check the resolved file's
+        # parent-dir chain before any read; fail closed on outside-root source.
+        from .index_walk import mount_source_for_file
+        ms = mount_source_for_file(_os.path.realpath(path), str(root), ingest_base)
+        # REVIEW-FIX P1 (cycle-26): mount_source_for_file returns list[dict] —
+        # any() over the entries (the earlier fix called .get on the list and
+        # AttributeError'd on BOTH the warn and fail cells).
+        if ms and any(n.get("fail") for n in ms):
+            return {"status": "failed", "reason": "escape",
+                    "retryable": False}
+        result = self._index_process_unit(
+            Path(path), corpus_root=root, corpus_name=name,
+            file_type_declared=file_type, extract_metadata=extract_metadata,
+            llm_model=llm_model, repair_backoff=self._index_repair_backoff(
+                embedding_repair_backoff),
+            fast_skip_key=None, disposition=None,
+            election_owner=None, single_file=True,
+        )
+        return {k: v for k, v in result.items() if k in (
+            "status", "url", "eventId", "documentId", "sourceKind",
+            "reason", "retryable")}
+
+    def index_directory(self, directory: str,
+                        *, file_type: str = "auto",
+                        corpus_name: str | None = None,
+                        extract_metadata: bool = True,
+                        llm_model: str | None = "gpt-5-mini",
+                        embedding_repair_backoff: float | None = None,
+                        progress_file: str | None = None,
+                        ) -> dict:
+        """Batch walk (custom bounded walker, W1 cycle-4 pin). Returns:
+        {"directory", "corpus_name", "file_count", "indexed", "updated",
+         "skipped", "failed", "aborted", "ignored", "errors": [...],
+         "by_kind": {kind: count}, "aborted_reason"?}
+        Invariant: indexed + updated + skipped + failed + aborted == file_count.
+        file_count counts `*.md` files ONLY (non-md walk entries land in
+        `ignored`, never in file_count or the four buckets); aborted = files
+        never reached because the run aborted (bounded-abort disposition,
+        E2E-19); aborted_reason names the DB-failure class when aborted > 0.
+        errors[] entries carry the cause-class token (decode/size/escape/
+        structural/filename/db/lock) + the rel-path + limit values where
+        applicable (§6.4 cycle-21).
+        Raises: ValueError — #329 boundary violations (directory +
+        progress_file, realpath-resolved; symlink roots resolving outside the
+        base, E2E-7(v1)); TORTOISE_MAX_FILE_MB garbage/<=0.
+        """
+        import os as _os
+        from pathlib import Path
+        from .security import resolve_under_base as _rub
+        from .index_walk import (walk_markdown, compute_dispositions,
+                                 DISP_ESCAPE, DISP_UNRECONCILED,
+                                 DISP_STRUCTURAL)
+        raw_base = _os.environ.get("TORTOISE_INGEST_BASE_DIR")
+        ingest_base = _os.path.realpath(_os.path.expanduser(raw_base)) if raw_base else None
+
+        # ── directory-argument resolution (cycle-7): the DIRECTORY argument
+        # gets the SAME realpath-resolved treatment as progress_file — an
+        # in-base symlink root whose target resolves OUTSIDE the base raises
+        # ValueError BEFORE any walk (E2E-7(v1)); inside → indexes normally
+        # with realpath-derived urls (E2E-7(v2)).
+        if not isinstance(directory, str) or not directory:
+            raise ValueError("index_directory: directory must be a non-empty string")
+        if not _os.path.isabs(directory) or ".." in Path(directory).parts:
+            raise ValueError(
+                f"Unsafe directory {directory!r} — must be absolute with no "
+                f"'..' components (#329)."
+            )
+        dir_path = Path(directory)
+        if not dir_path.is_dir():
+            # cycle-12 disposition: nonexistent walk root = zero-count no-op
+            # (legacy session_index_health is_dir() parity — the backgrounded
+            # hook must never see an unhandled FileNotFoundError traceback).
+            return {"directory": str(dir_path), "corpus_name": corpus_name or "",
+                    "file_count": 0, "indexed": 0, "updated": 0,
+                    "skipped": 0, "failed": 0, "aborted": 0, "ignored": 0,
+                    "errors": [], "by_kind": {}}
+        resolved_dir = _os.path.realpath(str(dir_path))
+        if ingest_base is not None and _rub(resolved_dir, ingest_base) is None:
+            raise ValueError(
+                f"Unsafe directory {directory!r} — its resolved target "
+                f"{resolved_dir!r} is outside TORTOISE_INGEST_BASE_DIR "
+                f"({ingest_base})."
+            )
+
+        # ── progress_file bounds (cycle-6): REALPATH-RESOLVED through
+        # resolve_under_base BEFORE any walk/write; nothing may materialize at
+        # a resolved target outside the base (E2E-10(g3)).
+        if progress_file is not None:
+            if not isinstance(progress_file, str) or not progress_file:
+                raise ValueError("progress_file must be a non-empty string.")
+            if not _os.path.isabs(progress_file):
+                raise ValueError(f"progress_file must be absolute: {progress_file!r}")
+            if ".." in Path(progress_file).parts:
+                raise ValueError(f"progress_file contains '..': {progress_file!r}")
+            if ingest_base is not None and _rub(progress_file, ingest_base) is None:
+                raise ValueError(
+                    f"progress_file {progress_file!r} not under "
+                    f"TORTOISE_INGEST_BASE_DIR (resolved-target discipline, "
+                    f"§6.4/E2E-10(g3))."
+                )
+
+        corpus_root = Path(resolved_dir)
+        corpus_name = corpus_name or corpus_root.name
+        max_bytes = self._index_max_bytes()
+        repair_backoff = self._index_repair_backoff(embedding_repair_backoff)
+        # TORTOISE_INDEX_NO_NETWORK (test-only, cycle-10): FORCES
+        # extract_metadata=False-equivalent omission at the NEW-PATH call
+        # boundary regardless of the flag (NEVER inside the shared
+        # `_session_embedding` — the legacy path must still embed; SC4).
+        if self._index_no_network():
+            extract_metadata = False
+
+        result = {
+            "directory": str(corpus_root),
+            "corpus_name": corpus_name,
+            "file_count": 0, "indexed": 0, "updated": 0, "skipped": 0,
+            "failed": 0, "aborted": 0, "ignored": 0,
+            "errors": [], "by_kind": {}, "aborted_reason": None,
+        }
+
+        # ── bounded walk + pre-write dispositions ─────────────────────
+        # Per-corpus run lock: serializes concurrent index_directory runs on
+        # the SAME corpus in this process (the threads leg; the embedded
+        # engine's cross-connection MERGE semantics cannot provide a race-safe
+        # counter outcome otherwise). Different corpora parallelize.
+        with _index_run_lock_for("dir:" + resolved_dir):
+            return self._index_directory_locked(
+                corpus_root, corpus_name, file_type, extract_metadata,
+                llm_model, repair_backoff, progress_file, ingest_base, result,
+                keys={} if progress_file is None else self._index_load_progress(
+                    progress_file, str(corpus_root)))
+
+    def _index_directory_locked(self, corpus_root, corpus_name, file_type,
+                                extract_metadata, llm_model, repair_backoff,
+                                progress_file, ingest_base, result,
+                                keys) -> dict:
+        """The locked body of index_directory (see the caller)."""
+        import os as _os
+        from pathlib import Path
+        from .index_walk import (walk_markdown, compute_dispositions,
+                                 DISP_ESCAPE, DISP_UNRECONCILED, DISP_STRUCTURAL)
+        # REVIEW-FIX P2: file_type validated PRE-WALK (never mid-walk after
+        # partial writes — the plan pins "validation, not a bucket").
+        if file_type not in ("auto", "agent_session", "meeting", "doc"):
+            raise ValueError(
+                f"index_directory: unknown file_type {file_type!r} — "
+                f"expected auto|agent_session|meeting|doc"
+            )
+        walked = walk_markdown(corpus_root, base=ingest_base)
+        result["file_count"] = len(walked.files)
+        result["ignored"] = walked.ignored
+        for derr in walked.dir_errors:
+            result["errors"].append({**derr, "cause": "structural"})
+        for m in walked.mount_warnings:
+            result["errors"].append(
+                {"file": f"(mount) {m}", "error": m, "retryable": False,
+                 "cause": "structural"})  # REVIEW-FIX P2: warn-not-fail mount
+        # entries are NOT escapes — "escape" is reserved for real rejections
+        disp = compute_dispositions(walked.files, corpus_root,
+                                    banned_prefixes=walked.banned_prefixes)
+
+        # ── resume checkpoint (fast-skip keys; §5.3) — the caller already
+        # loaded them (keys param); stale/corrupt → empty → full re-run.
+        checkpoint_counter = 0
+
+        proj = self._get_proj()
+        # Primary-election map (W4 duplicate-sessionId row; derived-id
+        # collisions included): FIRST sorted rel-path owns the Event.
+        session_owners: dict[str, str] = {}
+        # Connection-level DB retry budget (E2E-19 recover-vs-abort pin).
+        db_streak = 0
+        aborted_reason: str | None = None
+        processed = 0
+
+        try:
+            for path, _st in walked.files:
+                rel = _os.path.relpath(str(path), str(corpus_root))
+                key = keys.get(rel)
+                # flag-conditional fast-skip (cycle-7): True-recorded keys are
+                # fast-skippable by either flag; False-recorded keys are
+                # RE-EXAMINED by a True run (the completeness gate must run).
+                if key is not None and extract_metadata and not key.get("metadata", False):
+                    key = None
+                sid_claim = key.get("sid") if key is not None else None
+                if sid_claim is not None:
+                    session_owners.setdefault(sid_claim, rel)
+                disposition = disp.by_path.get(str(path))
+                if disposition in (DISP_ESCAPE, DISP_UNRECONCILED, DISP_STRUCTURAL):
+                    session_owners.setdefault(sid_claim or "", "")
+                per_file = self._index_process_unit(
+                    path, corpus_root=corpus_root, corpus_name=corpus_name,
+                    file_type_declared=(None if file_type == "auto" else file_type),
+                    extract_metadata=extract_metadata, llm_model=llm_model,
+                    repair_backoff=repair_backoff, fast_skip_key=key,
+                    disposition=disposition, election_owner=session_owners,
+                    single_file=False,
+                )
+                processed += 1
+                status = per_file["status"]
+                if per_file.get("skipped_reason") == "duplicate-sessionId":
+                    result["skipped"] += 1
+                elif status == "indexed":
+                    result["indexed"] += 1
+                elif status == "updated":
+                    result["updated"] += 1
+                elif status == "skipped":
+                    result["skipped"] += 1
+                else:
+                    result["failed"] += 1
+                kind = per_file.get("sourceKind")
+                if kind:
+                    result["by_kind"][kind] = result["by_kind"].get(kind, 0) + 1
+                err = per_file.get("error")
+                if err:
+                    result["errors"].append(err)
+                # fast-skip key recording discipline (§5.3): completed-under-
+                # pin-(a) units only — failed/lock-held/embedding-unavailable/
+                # embedding-NULL-under-True units are NEVER keyed (re-attempted
+                # honestly on resume, E2E-10(e3)/(e5)).
+                if progress_file is not None and per_file.get("keyed") and key is None:
+                    keys[rel] = per_file.get("fast_skip_key")
+                elif per_file.get("keyed") and key is not None:
+                    keys[rel] = per_file.get("fast_skip_key") or key
+                checkpoint_counter += 1
+                if progress_file is not None and checkpoint_counter % 100 == 0:
+                    self._index_save_progress(
+                        progress_file, str(corpus_root), corpus_name,
+                        extract_metadata, result, keys)
+                # DB-failure bounded abort (E2E-19/§6.4): recoverable failures
+                # are per-file failed{retryable:true} up to the connection
+                # retry budget; then the run aborts with honest `aborted`.
+                if per_file.get("db_failure"):
+                    db_streak += 1
+                    if db_streak >= _INDEX_DB_RETRY_BUDGET or not proj._probe_ok():
+                        aborted_reason = per_file.get("db_reason", "db")
+                        break
+                else:
+                    db_streak = 0
+        finally:
+            if progress_file is not None:
+                self._index_save_progress(
+                    progress_file, str(corpus_root), corpus_name,
+                    extract_metadata, result, keys)
+        if aborted_reason is not None:
+            remaining = len(walked.files) - processed
+            result["aborted"] = max(remaining, 0)
+            result["aborted_reason"] = aborted_reason
+        return result
+
+    # ── T3 internal helpers ────────────────────────────────────────────
+
+    def _index_resolve_corpus_root(self, file_path: str, corpus_root: str | None,
+                                   corpus_name: str | None) -> tuple:
+        """§6.1 I6 pin: index_file's corpus_root default resolution.
+
+        Explicit param → realpath-resolved. Else the nearest ancestor of the
+        file that equals TORTOISE_INGEST_BASE_DIR; else ValueError demanding
+        an explicit corpus_root (never an implicit walk-root guess). Guarantees
+        single-file + directory-sweep entry points derive the SAME corpus://
+        url for the same file (E2E-4 cross-entry-point variant).
+        """
+        import os as _os
+        from pathlib import Path
+        if corpus_root is not None:
+            root = Path(_os.path.realpath(str(corpus_root)))
+            # the file must resolve under the declared root (escape policy)
+            from .file_indexer import _resolve_rel_path
+            _resolve_rel_path(file_path, root)  # raises ValueError on escape
+            return root, (corpus_name or root.name)
+        base = _os.environ.get("TORTOISE_INGEST_BASE_DIR")
+        if base:
+            base_real = _os.path.realpath(_os.path.expanduser(base))
+            p = Path(_os.path.realpath(str(file_path)))
+            while True:
+                if str(p) == base_real:
+                    return p, (corpus_name or p.name)
+                parent = p.parent
+                if parent == p:
+                    break
+                p = parent
+            raise ValueError(
+                f"index_file: file {file_path!r} is not under "
+                f"TORTOISE_INGEST_BASE_DIR ({base_real}) and no corpus_root "
+                f"was given — pass corpus_root explicitly (§6.1 I6)."
+            )
+        raise ValueError(
+            f"index_file: corpus_root required — TORTOISE_INGEST_BASE_DIR is "
+            f"unset and no corpus_root was given (§6.1 I6)."
+        )
+
+    def _index_max_bytes(self) -> int:
+        """Two-layer size-guard threshold (§6.4): env TORTOISE_MAX_FILE_MB as
+        float MB (default 50); invalid/garbage → pre-walk ValueError; <= 0 →
+        fail-closed ValueError (cycle-11 pin, E2E-7(p))."""
+        import os as _os
+        raw = _os.environ.get("TORTOISE_MAX_FILE_MB", "50")
+        try:
+            mb = float(raw)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"TORTOISE_MAX_FILE_MB must be a float number of MiB, got "
+                f"{raw!r}") from None
+        if mb <= 0:
+            raise ValueError(
+                f"TORTOISE_MAX_FILE_MB must be > 0 (got {raw!r}) — a "
+                f"0/negative limit silently fails every non-empty file."
+            )
+        return int(mb * 1024 * 1024)
+
+    def _index_repair_backoff(self, explicit: float | None) -> float:
+        """Embedding-repair backoff (hours) precedence (cycle-7/8): explicit
+        kwarg > env TORTOISE_EMBEDDING_REPAIR_BACKOFF_HOURS > 24h default."""
+        import os as _os
+        if explicit is not None:
+            return float(explicit)
+        raw = _os.environ.get("TORTOISE_EMBEDDING_REPAIR_BACKOFF_HOURS")
+        if raw is not None and str(raw).strip():
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                pass
+        return 24.0
+
+    def _index_no_network(self) -> bool:
+        import os as _os
+        return _os.environ.get("TORTOISE_INDEX_NO_NETWORK", "").strip().lower() in (
+            "1", "true", "yes")
+
+    def _index_read_file(self, path, max_bytes: int):
+        """Layer-2 BOUNDED BINARY read (§6.4 cycle-4 pin).
+
+        The cap counts BYTES (a text-mode read(n) caps CHARACTERS — a
+        TOCTOU-grown multibyte file could allocate ~4× the cap); the bounded
+        buffer is incrementally UTF-8-decoded with universal-newline
+        translation and hashed as TEXT. Returns (text, error_reason|None):
+        over-limit → (None, 'size'); truncation mid-multibyte-sequence →
+        decode failure → (None, 'decode') — never a truncated-buffer hash
+        reaching hash_text. This is the SINGLE read (pin c): the returned
+        buffer is BOTH hashed and parsed.
+        """
+        with open(path, "rb") as f:
+            buf = f.read(max_bytes + 1)
+        if len(buf) > max_bytes:
+            return None, "size"
+        try:
+            text = buf.decode("utf-8")
+        except UnicodeDecodeError:
+            return None, "decode"
+        # universal-newline translation (matches compute_file_hash's text-mode
+        # read — the canonical hash is CRLF-immune, §4.5).
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        return text, None
+
+    def _index_gate_read(self, url: str, event_id: str | None,
+                         doc_id: str | None) -> dict:
+        """Fast-path ROUTER read (NEVER the counter authority, §5.1 pin b).
+
+        Returns source existence/hash/version + unit completeness (Source AND
+        Event/Document AND references edge — the CURRENT derived identity,
+        §5.1 pin (a)) + embedding/marker state for the embedding clause.
+        """
+        proj = self._get_proj()
+        g = {"source": False, "hash": None, "version": None,
+             "entity": False, "edge": False, "embedding": None,
+             "marker": None, "stored_source_file": None}
+        rows = proj.g.query(
+            "MATCH (s:Source {url:$url}) RETURN s.contentHash, s.version",
+            params={"url": url},
+        ).result_set
+        if rows:
+            g["source"] = True
+            g["hash"] = rows[0][0]
+            g["version"] = rows[0][1]
+        if event_id:
+            rows = proj.g.query(
+                "MATCH (e:Event {eventId:$eid}) RETURN e.embedding, "
+                "e.embeddingRepairFailedAt, e.source_file",
+                params={"eid": event_id},
+            ).result_set
+            if rows:
+                g["entity"] = True
+                g["embedding"] = rows[0][0]
+                g["marker"] = rows[0][1]
+                g["stored_source_file"] = rows[0][2]
+        elif doc_id:
+            rows = proj.g.query(
+                "MATCH (d:Document {id:$did}) RETURN 1",
+                params={"did": doc_id},
+            ).result_set
+            g["entity"] = bool(rows)
+        rows = proj.g.query(
+            "MATCH (s:Source {url:$url})-[:references]->(n) RETURN count(n)",
+            params={"url": url},
+        ).result_set
+        g["edge"] = bool(rows and rows[0][0])
+        return g
+
+    def _index_process_unit(self, path, *, corpus_root, corpus_name,
+                            file_type_declared, extract_metadata, llm_model,
+                            repair_backoff, fast_skip_key, disposition,
+                            election_owner, single_file: bool) -> dict:
+        """The per-file unit op — the whole W1 pipeline for ONE file.
+
+        Returns a per-file result dict consumed by index_file/index_directory:
+        {status, reason?, retryable?, url?, eventId?, documentId?, sourceKind?,
+         skipped_reason?, error? (errors[] entry), keyed? (fast-skip
+         eligibility), fast_skip_key? (dict), db_failure?, db_reason?}
+        """
+        import os as _os
+        import time as _time
+        from pathlib import Path
+        from .file_indexer import (
+            hash_text, parse_frontmatter, classify_file, derive_source_url,
+            derive_session_id, derive_meeting_event_id, derive_document_id,
+            source_kind_for_classifier, normalize_source_date,
+        )
+        out = {"status": "failed", "keyed": False, "db_failure": False}
+        proj = self._get_proj()
+        rel = _os.path.relpath(str(path), str(corpus_root))
+        abs_path = str(path)
+        # realpath-relativized stored form (§4.2 cycle-16 form pin — the
+        # meeting guard's canonical source_file and the session #320 rel-path
+        # convention family).
+        try:
+            sf_rel = _os.path.relpath(_os.path.realpath(abs_path),
+                                      _os.path.realpath(str(corpus_root)))
+        except ValueError:
+            sf_rel = rel
+        url = None
+
+        def _fail(error: str, *, retryable: bool, cause: str) -> dict:
+            out["error"] = {"file": rel, "error": error,
+                             "retryable": retryable, "cause": cause}
+            out["reason"] = error
+            out["retryable"] = retryable
+            return out
+
+        def _skip(reason: str, *, retryable: bool = False,
+                  detail: str = "") -> dict:
+            out["status"] = "skipped"
+            out["skipped_reason"] = reason
+            out["reason"] = reason if not detail else f"{reason} ({detail})"
+            out["retryable"] = retryable
+            if retryable:
+                out["error"] = {"file": rel, "error": out["reason"],
+                                 "retryable": True, "cause": "lock"}
+            return out
+
+        # ── pre-write dispositions (computed on the sorted walk list) ──
+        if disposition is not None:
+            if disposition == "symlink-duplicate":
+                return _skip("symlink-duplicate")
+            if disposition == "inode-duplicate":
+                out["error"] = {"file": rel,
+                                 "error": "inode-duplicate: mount/firmlink "
+                                           "alias of an indexed path — "
+                                           "deduped to ONE Source per "
+                                           "physical file (W4 mount row)",
+                                 "retryable": False, "cause": "structural"}
+                return _skip("inode-duplicate")
+            if disposition == "escape":
+                return _fail("escape rejected: path/mount resolves outside "
+                             "the corpus root — never read",
+                             retryable=False, cause="escape")
+            if disposition == "unreconciled":
+                return _fail("hardlink alias cannot be proven root-local "
+                             "(st_nlink > in-walk count) — stat-only "
+                             "rejection, never read (W4 hardlink row)",
+                             retryable=False, cause="escape")
+            if disposition == "structural":
+                return _fail("non-regular file (FIFO/socket/dir-named-.md) "
+                             "— S_ISREG check failed before any open "
+                             "(E2E-7(w))", retryable=False, cause="structural")
+
+        # ── resume fast-skip (cycle-4): stat (size, mtime) match → skipped
+        # WITHOUT open/read/hash — the checkpoint avoids a full-corpus re-hash.
+        if fast_skip_key is not None:
+            try:
+                st = _os.lstat(abs_path)
+                if (st.st_size == fast_skip_key.get("size")
+                        and st.st_mtime == fast_skip_key.get("mtime")):
+                    out["status"] = "skipped"
+                    out["skipped_reason"] = "unchanged"
+                    out["reason"] = "unchanged"
+                    out["keyed"] = True
+                    out["fast_skip_key"] = fast_skip_key
+                    return out
+            except OSError:
+                pass  # vanished since the checkpoint → full fast path
+
+        # ── pre-read stat: S_ISREG + layer-1 size guard (before any open) ──
+        # os.stat (FOLLOWS symlinks): a symlink entry's lstat shows the link
+        # itself (S_IFLNK) — the type/size guard must see the RESOLVED target
+        # (symlink disposition/escape already handled pre-write). Broken/loop
+        # symlinks raise OSError here → failed structural.
+        try:
+            st = _os.stat(abs_path)
+        except OSError as e:
+            if isinstance(e, PermissionError):
+                return _fail(f"permission denied: {e}", retryable=True,
+                             cause="structural")
+            return _fail(f"stat failed: {e}", retryable=False,
+                         cause="structural")
+        if not stat.S_ISREG(st.st_mode):
+            return _fail("non-regular file — S_ISREG check before any open "
+                         "(E2E-7(w))".strip(), retryable=False,
+                         cause="structural")
+        max_bytes = self._index_max_bytes()
+        if st.st_size > max_bytes:
+            return _fail(
+                f"file exceeds size guard ({max_bytes} bytes, "
+                f"TORTOISE_MAX_FILE_MB) — rejected before any read (layer-1 "
+                f"stat, §6.4)", retryable=False, cause="size")
+
+        # ── single read (pin c): bounded binary read → decode → hash+parse ──
+        try:
+            text, read_err = self._index_read_file(abs_path, max_bytes)
+        except IsADirectoryError:
+            return _fail("IsADirectoryError: entry named *.md is a directory",
+                         retryable=False, cause="structural")
+        except PermissionError as e:
+            return _fail(f"permission denied: {e}", retryable=True,
+                         cause="structural")
+        except OSError as e:
+            return _fail(f"open failed: {e}", retryable=False,
+                         cause="structural")
+        if read_err == "size":
+            return _fail(
+                f"file grew past the size guard between stat and read "
+                f"(layer-2 bounded read, {max_bytes} bytes) — failed closed",
+                retryable=False, cause="size")
+        if read_err == "decode":
+            return _fail("non-UTF-8 content (decode failure) — never hashed",
+                         retryable=False, cause="decode")
+        content_hash = hash_text(text)
+        frontmatter = parse_frontmatter(text)
+
+        # ── classify + identity (T1 OWNS derivation; T3 consumes) ──
+        try:
+            classifier = classify_file(frontmatter, path, file_type_declared)
+            url = derive_source_url(path, corpus_root, corpus_name)
+        except (UnicodeEncodeError, ValueError) as e:
+            # undecodable-filename guard (cycle-12): derive_source_url's
+            # quote() raises UnicodeEncodeError on surrogate filenames — a
+            # per-file catch at the ENTRY point, never inside the pure
+            # function; the run completes (E2E-7(x)). ValueError from the
+            # escape rejection → cause-class `escape` (§6.4 cycle-21).
+            if isinstance(e, UnicodeEncodeError):
+                return _fail(f"identity derivation failed: {e}",
+                             retryable=False, cause="filename")
+            if "escape" in str(e):
+                return _fail(f"identity derivation failed: {e}",
+                             retryable=False, cause="escape")
+            raise
+        kind = source_kind_for_classifier(classifier)
+        out["sourceKind"] = kind
+        out["url"] = url
+        source_date = None
+        # §4.1 per-path sourceDate consumption: session/meeting paths consume
+        # startedAt/date/created; the DOC path consumes created/updated ONLY
+        # (date/startedAt whitelisted-but-DROPPED — E2E-7(u2)).
+        if classifier == "doc":
+            source_date = normalize_source_date(
+                frontmatter.get("created") or frontmatter.get("updated"))
+        else:
+            source_date = normalize_source_date(
+                frontmatter.get("startedAt") or frontmatter.get("date")
+                or frontmatter.get("created"))
+        title = str(frontmatter.get("title") or Path(path).stem)
+
+        event_id = None
+        doc_id = None
+        session_id = None
+        if classifier == "agent_session":
+            session_id = derive_session_id(frontmatter, Path(path).stem)
+            event_id = f"session_{session_id}"
+            out["eventId"] = event_id
+        elif classifier == "meeting":
+            def _sf_lookup(candidate: str) -> str | None:
+                rows = proj.g.query(
+                    "MATCH (e:Event {eventId:$eid}) RETURN e.source_file",
+                    params={"eid": candidate},
+                ).result_set
+                return rows[0][0] if rows else None
+            event_id = derive_meeting_event_id(
+                frontmatter, path, _sf_lookup, source_file=sf_rel)
+            out["eventId"] = event_id
+        else:
+            doc_id = derive_document_id(path, corpus_root)
+            out["documentId"] = doc_id
+
+        # ── primary election (directory mode) + single-file duplicate rule ──
+        # FIRST sorted rel-path owns the Event (W4 row; derived-id collisions
+        # included): the walk is sorted and units process in order, so the
+        # first unit per session_id claims the Event here — the loop's
+        # fast-skip sid_claim (keyed files) uses setdefault, so this claim is
+        # idempotent across resume.
+        non_primary = False
+        if not single_file and session_id is not None and election_owner is not None:
+            election_owner.setdefault(session_id, rel)
+            owner = election_owner[session_id]
+            if owner != rel:
+                non_primary = True
+
+        # ── session lock (sessions only; §5.3 acquisition-point pin) ──
+        lock = None
+        if classifier == "agent_session" and not non_primary:
+            from .index_lock import SessionIndexLock
+            lock = SessionIndexLock(session_id)
+            try:
+                status = lock.acquire()
+            except (OSError, AttributeError, ImportError) as e:
+                lock = None
+                return _skip("lock-held", retryable=True,
+                             detail=f"lock unavailable: {e}")
+            if status == "held":
+                lock_detail = str(getattr(lock, "detail", ""))
+                lock.release()
+                lock = None
+                return _skip("lock-held", retryable=True, detail=lock_detail)
+
+        try:
+            # ── GATE (fast-path router; completeness per §5.1 pin (a)) ──
+            gate = self._index_gate_read(url, event_id, doc_id)
+            if non_primary:
+                complete = gate["source"]  # election-suppressed: Source-existence ONLY
+                base_complete = complete
+                hash_unchanged = (gate["hash"] == content_hash)
+                embedding_incomplete = False
+            else:
+                base_complete = bool(gate["source"] and gate["entity"] and gate["edge"])
+                hash_unchanged = (gate["hash"] == content_hash)
+                # embedding completeness clause (pin (a), cycle-5): for
+                # agent_session units under extract_metadata=True, completeness
+                # ADDITIONALLY requires e.embedding IS NOT NULL — a session
+                # indexed during an outage would otherwise stay None forever
+                # (every later run reports skipped and the embedding never
+                # heals). Election-suppressed (non-primary) units are
+                # Source-existence-only — no Event exists to hold e.embedding.
+                embedding_incomplete = bool(
+                    classifier == "agent_session" and extract_metadata
+                    and gate["entity"] and gate["embedding"] is None)
+                complete = base_complete and not embedding_incomplete
+            # single-file duplicate-sessionId rule (W4 row; no election context)
+            single_dup = False
+            if (single_file and classifier == "agent_session"
+                    and gate["entity"]
+                    and gate["stored_source_file"] is not None
+                    and gate["stored_source_file"] != sf_rel):
+                single_dup = True
+
+            if (not non_primary and not single_dup and complete
+                    and hash_unchanged):
+                # ── fast path: conditional MERGE only (skipped expected) ──
+                merge_outcome = self._index_source_merge(
+                    url, kind, source_date, content_hash, title, abs_path,
+                    gate_v=gate["version"])
+                if merge_outcome == "updated":
+                    out["status"] = "updated"
+                    out["reason"] = "updated"
+                else:
+                    out["status"] = "skipped"
+                    out["skipped_reason"] = "unchanged"
+                    out["reason"] = "unchanged"
+                out["keyed"] = True
+                out["fast_skip_key"] = {
+                    "size": st.st_size, "mtime": st.st_mtime,
+                    "metadata": extract_metadata,
+                    "sid": session_id if (session_id and not non_primary) else None,
+                }
+                return out
+
+            # ── write path: Source (conditional MERGE) → Event/Document → edge ──
+            merge_outcome = self._index_source_merge(
+                url, kind, source_date, content_hash, title, abs_path,
+                gate_v=gate["version"])
+            repair_work = False
+            embedding_only_incomplete = bool(
+                embedding_incomplete and base_complete and hash_unchanged)
+            if not non_primary and not single_dup and (not complete or not hash_unchanged):
+                if embedding_only_incomplete:
+                    # unit otherwise complete — only the embedding clause is
+                    # unmet (pin (a)): repair-only path (heal/suppress/marker),
+                    # NEVER a metadata re-write.
+                    attempt, _ts = self._embedding_repair_attempt(
+                        event_id, frontmatter, text, title, repair_backoff,
+                        gate["marker"])
+                    if attempt == "healed":
+                        repair_work = True
+                    else:
+                        # failed OR suppressed → skipped embedding-unavailable
+                        # (a failed repair performs NO unit-completion write →
+                        # never updated; marker already recorded inside).
+                        out["status"] = "skipped"
+                        out["skipped_reason"] = "embedding-unavailable"
+                        out["reason"] = "embedding-unavailable"
+                        out["retryable"] = True
+                        out["error"] = {"file": rel,
+                                         "error": "embedding repair failed and is "
+                                                   "within the repair-backoff window "
+                                                   "— suppressed (zero embedding calls)",
+                                         "retryable": True, "cause": "db"}
+                        return out
+                else:
+                    # unit-completion work (repair carve-out, pin (b))
+                    if classifier == "agent_session":
+                        embed_val = self._session_event_write(
+                            frontmatter, text, path, event_id, session_id,
+                            content_hash, title, extract_metadata, llm_model,
+                            sf_rel, rel)
+                        # failed embedding on an EXISTING Event → record the
+                        # repair marker (mixed precedence pin: unit work still
+                        # reports updated; the marker bounds the NEXT run).
+                        if (embed_val is None and extract_metadata
+                                and gate["entity"]):
+                            self._record_embedding_marker(event_id)
+                        repair_work = not base_complete or merge_outcome == "updated"
+                    elif classifier == "meeting":
+                        resolved_eid, rejected = self._meeting_event_write(
+                            frontmatter, path, event_id, content_hash, sf_rel,
+                            source_date)
+                        event_id = resolved_eid
+                        out["eventId"] = event_id
+                        if rejected:
+                            # REVIEW-FIX P2/P1 (cycle-26): ALL suffix widths
+                            # (8/12/16) taken by other-source meetings — never
+                            # a silent clobber: no EventRecorded emission, no
+                            # edge wiring, an errors[] entry, and the unit is
+                            # bucketed failed (the §4.2 mechanism's "never a
+                            # silent clobber" guarantee; the journaled
+                            # candidate would otherwise replay props onto the
+                            # colliding meeting's Event). The caller appends
+                            # out["error"] to the run's errors[] (REVIEW-FIX
+                            # P1: this unit has NO access to the run result
+                            # dict — the earlier fix referenced a phantom
+                            # `result` and NameError'd).
+                            out["error"] = {
+                                "file": str(path),
+                                "error": f"meeting eventId {event_id} "
+                                         f"collides at all suffix widths "
+                                         f"(sha256 [:8]/[:12]/[:16]) — "
+                                         f"refusing to clobber; re-name the "
+                                         f"file or split the meeting",
+                                "retryable": False,
+                                "cause": "structural"}
+                            out["status"] = "failed"
+                            out["reason"] = "meeting-id-collision"
+                            out["retryable"] = False
+                            return {k: v for k, v in out.items() if k in (
+                                "status", "url", "eventId", "documentId",
+                                "sourceKind", "reason", "retryable",
+                                "skipped_reason", "error")}
+                        repair_work = not base_complete or merge_outcome == "updated"
+                    else:
+                        self._doc_write(frontmatter, doc_id, title, abs_path, url)
+                        repair_work = not base_complete or merge_outcome == "updated"
+                    # wire (Source)-[:references]->(Event|Document) — plain edge
+                    target = event_id if classifier != "doc" else doc_id
+                    label = "Event" if classifier != "doc" else "Document"
+                    proj.link_source_to_entity(url, target, label)
+
+            # ── embedding repair (sessions; extract_metadata=True) — runs only
+            # when the FULL write path just executed but the embedding attempt
+            # inside it failed AND the Event pre-existed (the repair-only
+            # branch above is NOT re-entered; its failed case already returned).
+            embed_skip = False
+            if (classifier == "agent_session" and not non_primary
+                    and not single_dup and extract_metadata
+                    and gate["embedding"] is None and gate["entity"]
+                    and not embedding_only_incomplete
+                    and not repair_work and merge_outcome in ("skipped", "updated")):
+                attempt, _ts = self._embedding_repair_attempt(
+                    event_id, frontmatter, text, title, repair_backoff,
+                    gate["marker"])
+                if attempt == "healed":
+                    repair_work = True
+                elif attempt == "suppressed":
+                    embed_skip = True
+
+            # ── counter attribution ──
+            if non_primary:
+                out["status"] = "indexed" if merge_outcome == "indexed" else \
+                    ("updated" if merge_outcome == "updated" else "skipped")
+                if out["status"] == "skipped":
+                    out["skipped_reason"] = "unchanged"
+                out["keyed"] = True
+            elif single_dup:
+                # Source update visible via fields/counters; status stays
+                # skipped (E2E-14 single-file variant)
+                out["status"] = "skipped"
+                out["skipped_reason"] = "duplicate-sessionId"
+                out["reason"] = ("duplicate sessionId (primary="
+                                  f"{gate['stored_source_file']})")
+                out["keyed"] = True
+            elif embed_skip:
+                out["status"] = "skipped"
+                out["skipped_reason"] = "embedding-unavailable"
+                out["reason"] = "embedding-unavailable"
+                out["retryable"] = True
+                out["error"] = {"file": rel,
+                                 "error": "embedding repair failed and is "
+                                           "within the repair-backoff window "
+                                           "— suppressed (zero embedding calls)",
+                                 "retryable": True, "cause": "db"}
+            elif repair_work and merge_outcome == "skipped":
+                out["status"] = "updated"
+                out["reason"] = "updated (repair work with unchanged hash)"
+                out["keyed"] = True
+            elif merge_outcome == "indexed":
+                out["status"] = "indexed"
+                out["reason"] = "indexed"
+                # initial index during an embedding outage: warning, NEVER
+                # silent (E2E-11(c)); NO marker (the first repair attempt
+                # happens on the next extract_metadata=True run — E2E-11(d)).
+                if (classifier == "agent_session" and extract_metadata
+                        and not gate["entity"]):
+                    ev_state = proj.g.query(
+                        "MATCH (e:Event {eventId:$eid}) RETURN e.embedding",
+                        params={"eid": event_id},
+                    ).result_set
+                    if not ev_state or ev_state[0][0] is None:
+                        out["error"] = {"file": rel,
+                                         "error": "indexed with embedding=None "
+                                                   "(model unavailable) — will be "
+                                                   "repaired on a later "
+                                                   "extract_metadata=True run",
+                                         "retryable": False, "cause": "db"}
+                out["keyed"] = True
+            elif merge_outcome == "updated":
+                out["status"] = "updated"
+                out["reason"] = "updated"
+                out["keyed"] = True
+            else:
+                out["status"] = "skipped"
+                out["skipped_reason"] = "unchanged"
+                out["reason"] = "unchanged"
+                out["keyed"] = True
+            # keyed discipline (pin (a)): embedding-NULL under extract_metadata
+            # = True is NEVER keyed (resume re-attempts through the gate).
+            if (out["status"] in ("indexed", "updated")
+                    and classifier == "agent_session" and extract_metadata
+                    and event_id is not None):
+                ev_state = proj.g.query(
+                    "MATCH (e:Event {eventId:$eid}) RETURN e.embedding",
+                    params={"eid": event_id},
+                ).result_set
+                if not ev_state or ev_state[0][0] is None:
+                    out["keyed"] = False  # incomplete under pin (a) — never keyed
+            if out["keyed"]:
+                out["fast_skip_key"] = {
+                    "size": st.st_size, "mtime": st.st_mtime,
+                    "metadata": extract_metadata,
+                    "sid": session_id if (session_id and not non_primary) else None,
+                }
+            return out
+        except Exception as e:  # noqa: BLE001 — per-file isolation (never abort)
+            db_class = _classify_db_failure(e)
+            if db_class:
+                out["db_failure"] = True
+                out["db_reason"] = db_class
+                out["status"] = "failed"
+                out["retryable"] = True
+                out["error"] = {"file": rel,
+                                 "error": f"db write failure ({db_class}): {e}",
+                                 "retryable": True, "cause": "db"}
+            else:
+                out["status"] = "failed"
+                out["retryable"] = False
+                out["error"] = {"file": rel, "error": str(e),
+                                 "retryable": False, "cause": "structural"}
+            return out
+        finally:
+            if lock is not None:
+                lock.release()
+
+    def _index_source_merge(self, url, kind, source_date, content_hash, title,
+                            abs_path, *, gate_v) -> str:
+        """The conditional single-statement Source MERGE (via create_source) —
+        outcome = COUNTER AUTHORITY (pin b): ON CREATE → 'indexed'; ON MATCH
+        hash-diff → 'updated'; ON MATCH hash-equal → 'skipped'. Never from the
+        pre-gate read (concurrent runs cannot double-count a file they all
+        pre-read as absent).
+
+        CREATED DETECTION: the embedded FalkorDBLite reports ``Nodes created:
+        1`` for BOTH of two concurrent same-key MERGEs (server-side
+        parallel-executor quirk) — ``nodes_created`` is NOT a race-safe
+        discriminator there. The ON CREATE branch therefore records the
+        caller's per-run token (``s.__runId``); re-reading it after the merge
+        tells us whether THIS run's CREATE fired (token matches ⇒ we created ⇒
+        the token is then removed — a crash-stray vanishes on rebuild). On
+        bolt:// (server mode) the same mechanism holds (the MERGE is atomic).
+        Matched outcomes use the version delta bracketing the merge (bumped ⇒
+        the conditional SET fired).
+        """
+        from .ids import ulid as _ulid
+        rid = _ulid()
+        lock = _source_merge_lock_for(url)
+        with lock:
+            # Serialized per-url: the embedded parallel executor cannot give a
+            # race-safe creator signal for concurrent same-key MERGEs; the
+            # lock makes the single-statement MERGE + detection atomic w.r.t.
+            # other index writers (threads leg). bolt:// stats stay honest.
+            self.create_source(
+                url, kind, sourceDate=source_date, source_path=abs_path,
+                contentHash=content_hash, title=title, _searchText=title,
+                format="markdown", _merge_run_id=rid)
+            proj = self._get_proj()
+            rows = proj.g.query(
+                "MATCH (s:Source {url:$url}) RETURN s.__runId, s.version",
+                params={"url": url},
+            ).result_set
+            run_id = rows[0][0] if rows else None
+            v = int(rows[0][1]) if rows and rows[0][1] is not None else 0
+            if run_id == rid:
+                # OUR ON CREATE fired — this run created the Source.
+                try:
+                    proj.g.query(
+                        "MATCH (s:Source {url:$url}) REMOVE s.__runId",
+                        params={"url": url},
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+                return "indexed"
+            if gate_v is None:
+                # concurrent create between gate and merge — our ON MATCH either
+                # bumped (hash-diff) or not
+                return "updated" if v >= 2 else "skipped"
+            return "updated" if v > gate_v else "skipped"
+
+    def _session_event_write(self, frontmatter, text, path, event_id, session_id,
+                             content_hash, title, extract_metadata, llm_model,
+                             sf_rel, rel) -> list | None:
+        """Session Event write — raw-MERGE wrapper mirroring legacy #320
+        semantics (E2E-10(a) cycle-18 target pin: NOT _upsert_event): locking,
+        metadata tiers, embeddings, _connect_issue_objects, INSTANTIATES edges.
+        CYCLE-25: sourceKind value agentSession (v3.6 #6); capturedAt = ingest
+        time; no is_episodic/story_arc on the index path. Journals EventRecorded
+        (contract (a), emit-on-every-write) with the live embedding as the
+        replay carrier. Returns the computed embedding (None = unavailable —
+        the caller records the repair marker when the Event pre-existed)."""
+        import json as _json
+        from datetime import datetime, timezone
+        from .session_indexer import (
+            extract_keywords_from_frontmatter as _kw_fallback,
+            extract_metadata as _extract,
+        )
+        proj = self._get_proj()
+        now = datetime.now(timezone.utc).isoformat()
+        if extract_metadata:
+            try:
+                metadata = _extract(text, llm_model)
+            except Exception:  # noqa: BLE001 — tiered fallback
+                metadata = _kw_fallback(text)
+        else:
+            metadata = _kw_fallback(text)
+        name = str(frontmatter.get("title") or Path(path).stem)
+        props = {
+            "id": event_id,  # ensure Event node has id for edge matching (#122)
+            "name": metadata.get("summary", name),
+            "eventKind": "AgentSession",
+            "session_id": session_id,
+            "agent": str(frontmatter.get("agent", "pi")),
+            "source_file": sf_rel,
+            "file_hash": content_hash,
+            "keywords": metadata.get("keywords", []),
+            "topics": metadata.get("topics", []),
+            "message_count": int(frontmatter.get("message_count", 0) or 0),
+            # REVIEW-FIX P2 (cycle-26): startedAt/capturedAt are ONLY set on
+            # CREATE — the MERGE's ON MATCH arm preserves the recorded
+            # timestamps (a repair re-run of a hash-unchanged unit must not
+            # drift capturedAt, pinned = ingest time). The conditional MERGE
+            # below branches ON CREATE SET full / ON MATCH SET additive
+            # (without startedAt/capturedAt).
+            "startedAt": now,
+            "capturedAt": now,   # cycle-25(b): capture/ingest transaction time
+            "content_metadata": _json.dumps({
+                "schema_version": 1,
+                "summary": metadata.get("summary", ""),
+                "narrative_arc": metadata.get("narrative_arc", []),
+                "issues": metadata.get("issues", []),
+                "prs": metadata.get("prs", []),
+                "critical_decisions": metadata.get("critical_decisions", []),
+            }),
+            "eventStatus": "completed",
+            "classificationLevel": "internal",
+            "format": "markdown",
+        }
+        # embedding — short-circuited to None under extract_metadata=False
+        # (I15 pin) or NO_NETWORK; CASE-guarded $embedding is the ONLY node-
+        # write surface (never rides $props).
+        embedding = None
+        if extract_metadata:
+            try:
+                embedding = self._session_embedding(
+                    props["name"], metadata.get("summary", ""),
+                    props["keywords"], props["topics"])
+            except Exception:  # noqa: BLE001 — degrade, never abort
+                embedding = None
+        # REVIEW-FIX P2 (cycle-26): timestamps preserved on MATCH — the MERGE
+        # splits ON CREATE (full props incl. startedAt/capturedAt) vs ON MATCH
+        # (additive props WITHOUT the timestamps), so a repair re-run of a
+        # hash-unchanged unit never drifts capturedAt (pinned = ingest time).
+        # The CASE-guarded embedding clause stays the ONLY embedding write.
+        create_props = {k: v for k, v in props.items()
+                        if k not in ("startedAt", "capturedAt")}
+        proj.g.query(
+            "MERGE (e:Event {eventId:$eid}) "
+            "ON CREATE SET e += $props "
+            "ON MATCH SET e += $match_props, "
+            "e.embedding = CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) "
+            "ELSE e.embedding END",
+            params={"eid": event_id, "props": props,
+                    "match_props": create_props, "embedding": embedding},
+        )
+        self._connect_issue_objects(event_id, metadata)
+        # JOURNALING CONTRACT (a): emit-on-every-write; embedding rides the
+        # journaled payload (the sanctioned replay carrier, cycle-18/19).
+        payload = {k: v for k, v in props.items() if k != "id"}
+        self._emit_event("EventRecorded", id=event_id, **{
+            **payload, "embedding": embedding, "eventId": event_id,
+            "eventKind": "AgentSession"})
+        return embedding
+
+    def _record_embedding_marker(self, event_id: str) -> None:
+        """Targeted marker SET (pin (a) cycle-7): e.embeddingRepairFailedAt =
+        $ts touching NO other Event key (NOT a partial-prop re-write — the
+        E2E-11(d) prop-snapshot guard asserts preservation)."""
+        from datetime import datetime, timezone
+        try:
+            proj = self._get_proj()
+            proj.g.query(
+                "MATCH (e:Event {eventId:$eid}) "
+                "SET e.embeddingRepairFailedAt = $ts",
+                params={"eid": event_id,
+                        "ts": datetime.now(timezone.utc).isoformat()},
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _meeting_event_write(self, frontmatter, path, candidate, content_hash,
+                             sf_rel, source_date) -> tuple:
+        """Meeting Event write — the meeting-scoped source_file-aware GUARD
+        (§4.2 cycle-12/13/17/18): returns (resolved_event_id, guard_rejected).
+        The guard-rejected step emits NO EventRecorded; the suffix follow-up
+        journals exactly once with the suffixed id (cycle-14/18)."""
+        import json as _json
+        proj = self._get_proj()
+        participants = frontmatter.get("participants") or []
+        if isinstance(participants, str):
+            participants = [participants]
+        participants = [str(p) for p in participants]
+        topics = frontmatter.get("topics") or []
+        if not isinstance(topics, list):
+            topics = [topics]
+        topics = [str(t) for t in topics]
+        # content_metadata: decisions + absorbed whitelisted non-contract
+        # extras (cycle-8 per-path consumption pin — never node props).
+        absorbed = {}
+        for k in ("sessionId", "session_id", "agent", "created", "updated",
+                  "domain"):
+            if k in frontmatter and frontmatter[k] is not None:
+                absorbed[k] = frontmatter[k]
+        content_metadata = {"schema_version": 1,
+                            "decisions": frontmatter.get("decisions") or []}
+        content_metadata.update(absorbed)
+        inner = {
+            "id": candidate,
+            "eventId": candidate,
+            "eventKind": "meeting",
+            "title": str(frontmatter.get("title") or Path(path).stem),
+            "startedAt": source_date or "",
+            "topics": topics,
+            "participants": participants,
+            "content_metadata": _json.dumps(content_metadata, default=str),
+            "file_hash": content_hash,
+            "source_file": sf_rel,
+            "format": "markdown",
+            "classificationLevel": "internal",
+            "eventStatus": "completed",
+        }
+        resolved, rejected = proj._upsert_event(
+            inner, guard=True, guard_source_file=sf_rel)
+        # journal: emit-on-every-write with the RESOLVED id (candidate on hit,
+        # suffixed on reject — the suffixed Event is the one that exists live).
+        # REVIEW-FIX P2 (cycle-26): when the guard exhausts ALL suffix widths
+        # and returns the BARE candidate with rejected=True (the all-widths-
+        # taken cell — `resolved == candidate` is the OTHER meeting's id),
+        # NO emission: the journal would otherwise replay this file's payload
+        # onto the colliding meeting's Event via the plain-replay ON MATCH SET.
+        if not (rejected and resolved == candidate):
+            payload = {k: v for k, v in {**inner, "eventId": resolved}.items()
+                       if k != "id"}
+            self._emit_event("EventRecorded", id=resolved, **payload)
+        return resolved, rejected
+
+    def _doc_write(self, frontmatter, doc_id, title, abs_path, source_url) -> None:
+        """Document path — via the journaled DocumentCreated event (route pin):
+        proj.apply honors the source_url override (#205 auto-wire onto the REAL
+        Source — no phantom) and the embedding-suppression flag (cycle-19); the
+        event rides the JSONL so replay reproduces the edge. Frontmatter→ev-dict
+        WHITELIST (cycle-7/8): doc handled set only — title/documentKind/domain/
+        doc_status/topics; everything else DROPPED (authoredBy never persisted;
+        date/startedAt whitelisted-but-dropped → sourceDate falls to ingestedAt)."""
+        proj = self._get_proj()
+        doc_kind = (str(frontmatter.get("type") or frontmatter.get("documentKind")
+                        or frontmatter.get("document_kind") or ""))
+        topics = frontmatter.get("topics") or []
+        if not isinstance(topics, list):
+            topics = [topics]
+        topics = [str(t) for t in topics]
+        ev = {
+            "type": "DocumentCreated",
+            "id": doc_id,
+            "title": title,
+            "document_kind": doc_kind or "brief",  # §8.3 flag 1 fallback
+            "doc_status": str(frontmatter.get("doc_status") or "draft"),
+            "format": "markdown",
+            "source_path": str(abs_path),
+            "source_url": source_url,
+            "suppress_embedding": True,
+            "topics": topics,
+        }
+        if frontmatter.get("domain") is not None:
+            ev["domain"] = str(frontmatter["domain"])
+        proj.apply(ev)
+        payload = {k: v for k, v in ev.items() if k not in ("type", "id")}
+        self._emit_event("DocumentCreated", id=doc_id, **payload)
+
+    def _embedding_repair_attempt(self, event_id, frontmatter, text, title,
+                                  repair_backoff, marker) -> tuple:
+        """Embedding repair (sessions; §5.1 pin (a) cycle-6/7/8). Returns
+        (attempt, marker_ts): 'healed' | 'suppressed' | 'failed'.
+
+        Backoff: a FAILED repair attempt records e.embeddingRepairFailedAt
+        (targeted SET touching no other key) and reports skipped
+        'embedding-unavailable' — a failed attempt performs NO unit-completion
+        write, so it is NEVER updated. Subsequent runs suppress the network
+        retry while elapsed <= the backoff window (ZERO embedding calls). On
+        success the embedding heals (carve-out updated, no version bump) via a
+        JOURNALED EventRecorded emission (survives rebuild) + marker clear.
+        """
+        import time as _time
+        from datetime import datetime, timezone
+        from .session_indexer import extract_keywords_from_frontmatter as _kw_fallback
+        if marker is not None:
+            try:
+                elapsed_h = (datetime.now(timezone.utc)
+                             - datetime.fromisoformat(marker).replace(tzinfo=timezone.utc))
+                if elapsed_h.total_seconds() / 3600.0 <= repair_backoff:
+                    return ("suppressed", None)
+            except (TypeError, ValueError):
+                pass  # unparseable marker → re-attempt
+        proj = self._get_proj()
+        try:
+            metadata = _kw_fallback(text)
+            embedding = self._session_embedding(
+                str(frontmatter.get("title") or title), metadata.get("summary", ""),
+                metadata.get("keywords", []), metadata.get("topics", []))
+        except Exception:  # noqa: BLE001 — outage (429/timeout/500)
+            embedding = None
+        if embedding is None:
+            # failed attempt → targeted marker write (BOOKKEEPING, not unit
+            # work) — the unit is NEVER updated by this run.
+            ts = datetime.now(timezone.utc).isoformat()
+            try:
+                proj.g.query(
+                    "MATCH (e:Event {eventId:$eid}) "
+                    "SET e.embeddingRepairFailedAt = $ts",
+                    params={"eid": event_id, "ts": ts},
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            return ("failed", ts)
+        # heal — the CASE-guarded $embedding is the ONLY embedding node-write
+        # surface (never $props); the marker clear is a targeted REMOVE.
+        proj.g.query(
+            "MATCH (e:Event {eventId:$eid}) SET "
+            "e.embedding = CASE WHEN $embedding IS NOT NULL THEN "
+            "vecf32($embedding) ELSE e.embedding END, "
+            "e.embeddingRepairFailedAt = null",
+            params={"eid": event_id, "embedding": embedding},
+        )
+        # journaled EventRecorded emission = the heal write surface (cycle-8):
+        # a healed embedding SURVIVES rebuild; only the marker resets.
+        rows = proj.g.query(
+            "MATCH (e:Event {eventId:$eid}) RETURN properties(e)",
+            params={"eid": event_id},
+        ).result_set
+        if rows:
+            props = {k: v for k, v in rows[0][0].items()
+                     if k not in ("embedding", "embeddingRepairFailedAt",
+                                  "_searchText", "id")}
+            self._emit_event("EventRecorded", id=event_id, **{
+                **props, "embedding": embedding, "eventId": event_id})
+        return ("healed", None)
+
+    def _index_save_progress(self, progress_file: str, directory: str,
+                             corpus_name: str, extract_metadata: bool,
+                             result: dict, keys: dict) -> None:
+        """Atomic checkpoint write (temp+rename — torn-checkpoint guard,
+        E2E-10(h)); a write failure degrades to no-checkpoint semantics, never
+        crashes (E2E-19(c))."""
+        import os as _os
+        import tempfile
+        from datetime import datetime, timezone
+        try:
+            payload = {
+                "started": datetime.now(timezone.utc).isoformat(),
+                "directory": directory,
+                "corpus_name": corpus_name,
+                "extract_metadata": extract_metadata,
+                "counters": {k: result.get(k, 0) for k in (
+                    "file_count", "indexed", "updated", "skipped", "failed",
+                    "aborted", "ignored")},
+                "keys": keys,
+            }
+            fd, tmp = tempfile.mkstemp(
+                dir=_os.path.dirname(_os.path.abspath(progress_file)) or ".",
+                prefix=".idx-", suffix=".tmp")
+            try:
+                with _os.fdopen(fd, "w", encoding="utf-8") as f:
+                    _json.dump(payload, f)
+                _os.replace(tmp, progress_file)
+            except Exception:  # noqa: BLE001
+                try:
+                    _os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
+        except Exception:  # noqa: BLE001 — progress file is best-effort
+            _logger.warning("index progress checkpoint write failed — "
+                            "degrading to no-checkpoint (E2E-19(c))")
+
+    def _index_load_progress(self, progress_file: str,
+                             directory: str) -> dict:
+        """Load fast-skip keys — stale/corrupt checkpoints (g1/g2) and
+        directory mismatches → no-checkpoint (full honest re-run)."""
+        try:
+            with open(progress_file, encoding="utf-8") as f:
+                data = _json.load(f)
+            if data.get("directory") != directory:
+                return {}
+            keys = data.get("keys") or {}
+            return {k: v for k, v in keys.items() if isinstance(v, dict)}
+        except Exception:  # noqa: BLE001
+            return {}
+
+    def _journal_line_state(self, event_id: str) -> dict | None:
+        """Latest journaled EventRecorded payload for event_id (repair-detection
+        mechanism, cycle-17/18: re-emit iff NO line OR the recorded state
+        differs from the live write)."""
+        log = self._get_event_log()
+        if log is None:
+            return None
+        try:
+            lines = log.read_all()
+        except Exception:  # noqa: BLE001
+            return None
+        state = None
+        for ev in lines:
+            if (ev.get("type") == "EventRecorded"
+                    and (ev.get("id") == event_id
+                         or ev.get("eventId") == event_id)):
+                state = ev
+        return state
+
     def index_sessions(self, directory: str, extract_metadata: bool = True,
                        llm_model: str | None = "gpt-5-mini",
                        progress_file: str | None = None) -> dict:
@@ -6563,8 +10066,9 @@ class TortoiseSDK:
         ingest_corpus, never silently re-indexed (#280 review P2).
         """
         from pathlib import Path
+        from .file_indexer import compute_file_hash
         from .session_indexer import (
-            compute_file_hash, extract_session_id, session_corpus_dir,
+            extract_session_id, session_corpus_dir,
         )
 
         dir_path = Path(directory or session_corpus_dir())
@@ -6720,6 +10224,8 @@ class TortoiseSDK:
 
     def create_source(self, url: str, sourceKind: str, *,
                       tier: str | None = None, sourceDate: str | None = None,
+                      source_path: str | None = None,
+                      _merge_run_id: str | None = None,
                       **props) -> dict:
         """Create (or merge) a Source node (issue #398 Task 6).
 
@@ -6733,6 +10239,28 @@ class TortoiseSDK:
         ``sourceDate`` is the evidence-age clock for decay (falls back to
         ``ingestedAt`` — the documented pipeline-arrival proxy). Invalid tier
         values raise ValueError.
+
+        Epic #900 T3 extensions (plan §4.1/§5.1 pins b/d):
+          - ``source_path=`` — the SANCTIONED route for the ``sourcePath``
+            secondary prop (mirrors the ``api.add_document(source_path=)``
+            precedent the sanitizer's docstring carves out): the path is
+            pre-validated under the corpus root / TORTOISE_INGEST_BASE_DIR by
+            the indexer, and props-passthrough of ``sourcePath``/``source_path``
+            stays rejected by ``_sanitize_props`` (fail-closed, #329). The
+            write path emits the ev key ``source_path`` → ``s.sourcePath`` on
+            the node (camelCase; ``_SOURCE_HANDLED`` membership keeps the
+            snake_case key from persisting verbatim).
+          - the Source MERGE is CONDITIONAL (single statement, pin b): the ON
+            MATCH version/updatedAt/contentHash/title/``_searchText`` bump
+            fires ONLY when the stored contentHash differs (a stub Source with
+            NULL contentHash is completed). The MERGE outcome (via
+            ``proj._source_merge_result`` nodes_created) is the counter
+            authority for the index path.
+          - JOURNALING CONTRACT (a) (cycle-18): the write path emits a
+            SourceCreated JSONL line on EVERY write (emit-on-every-write — a
+            create-only cadence would revert updated Sources to create-time
+            state post-rebuild); replay re-MERGEs by url and the hash-diff-gated
+            bump lands at the live converged value.
         """
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
         if not url or not url.strip():
@@ -6748,6 +10276,18 @@ class TortoiseSDK:
                 )
         if sourceKind in TIER_PRIORS and tier is None:
             tier = sourceKind  # tier-form sourceKind mirrors to credibilityTier
+        # #329: props passthrough of the server-managed sourcePath keys stays
+        # fail-closed — ONLY the sanctioned source_path= keyword route carries
+        # it (the sanitizer's docstring carve-out; §4.1). ``id`` overrides are
+        # equally server-managed (node identity) — rejected here because
+        # ``_create_entity``'s reject_id is bypassed for the sanctioned route.
+        for _k in ("sourcePath", "source_path", "id"):
+            if _k in props:
+                raise ValueError(
+                    f"{_k!r} is a server-managed field and cannot be set via "
+                    f"props — use the sanctioned create_source(source_path=) "
+                    f"keyword (epic #900 §4.1)."
+                )
         ev = {
             "url": url,
             "sourceKind": sourceKind,
@@ -6755,11 +10295,32 @@ class TortoiseSDK:
                 __import__('datetime').timezone.utc).isoformat(),
             **props,
         }
+        if source_path is not None:
+            ev["source_path"] = str(source_path)
         if tier is not None:
             ev["credibilityTier"] = tier
         if sourceDate is not None:
             ev["sourceDate"] = sourceDate
-        result = self._create_entity("Source", url, ev, "SourceCreated")
+        if _merge_run_id is not None:
+            # internal run token: the race-safe CREATE discriminator for the
+            # conditional-MERGE outcome (the embedded backend's nodes_created
+            # stats are unreliable under concurrent same-key MERGEs). Rides
+            # the ev dict to _upsert_source (popped by apply) and is stripped
+            # from the journaled payload below.
+            ev["_merge_run_id"] = _merge_run_id
+        proj = self._get_proj()
+        proj._source_merge_result = None
+        result = self._create_entity("Source", url, ev, "SourceCreated",
+                                     _skip_sanitize=True)
+        # Journaling contract (a): emit-on-every-write SourceCreated. Best-
+        # effort (no-op when no event_log_path configured) — never crashes the
+        # write (mirrors _emit_event's discipline). The internal run token
+        # never rides the journaled payload.
+        try:
+            payload = {k: v for k, v in ev.items() if k != "_merge_run_id"}
+            self._emit_event("SourceCreated", id=url, **payload)
+        except Exception:  # noqa: BLE001 — journaling must not break the write
+            _logger.warning("SourceCreated journal emission failed for %s — continuing", url)
         # Write events invalidate the inheritance gate + reliability cache
         self._invalidate_inheritance_gate_for_source(url)
         self._clear_reliability_cache(url)
@@ -7125,7 +10686,7 @@ class TortoiseSDK:
         impl_rows = proj.g.query(
             "MATCH (s:Subject)-[:performs]->(e:Event) "
             "MATCH (e)-[:IMPL]->(p:Point) "
-            "WHERE (p.is_operator IS NULL OR p.is_operator = false) "
+            "WHERE p.is_operator = false "
             "AND (p.outdated IS NULL OR p.outdated = false) "
             "AND e.eventKind <> 'humanApproval' "  # #531: no reputation from own approvals
             f"AND {match_clause} "
@@ -7135,7 +10696,7 @@ class TortoiseSDK:
         nand_rows = proj.g.query(
             "MATCH (s:Subject)-[:performs]->(e:Event) "
             "MATCH (e)-[:NAND]->(p:Point) "
-            "WHERE (p.is_operator IS NULL OR p.is_operator = false) "
+            "WHERE p.is_operator = false "
             "AND (p.outdated IS NULL OR p.outdated = false) "
             "AND e.eventKind <> 'humanApproval' "  # #531: no reputation from own approvals
             f"AND {match_clause} "

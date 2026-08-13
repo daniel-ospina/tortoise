@@ -178,7 +178,12 @@ Introspection tests (dual membership): (a) every name in the R1 weight map IS a 
 
 ## Runtime prerequisites (PR note)
 
-- Migration 0015 auto-applies via the existing Supabase migration flow.
+- Migration 0015 does NOT auto-apply — the Supabase migration flow is
+  MANUAL dispatch since #771 (flip gating): a push to `main` touching
+  `supabase/**` records but never deploys. The operator must run
+  `gh workflow run supabase-deploy.yml --ref main` to apply migrations
+  (#1001: the false auto-apply assumption left 0015 unapplied on prod and
+  took down all tt_ key auth).
 - Fly secrets to set: `TURNSTILE_SECRET_KEY` (new), optionally `ABUSE_APPEAL_EMAIL`. Turnstile site key = hand-edited literal in signup.html/index.html (static site).
 - No `TORTOISE_AUDIT_DSN` dependency.
 - Deploy note: merge auto-deploys via `.github/workflows/deploy-hosted.yml` (tortoise/** changes in this PR are covered by the paths filter).
