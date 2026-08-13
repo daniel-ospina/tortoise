@@ -1612,6 +1612,30 @@ class TortoiseSDK:
                     direction="unidirectional")
                 dedup_wired = True
 
+        # Temporal wiring at promotion (W-4, #786): a MERGED temporal
+        # candidate whose prior was LIVE at extraction gets its NAND now
+        # (live→live), or — for an explicit replacement — the prior is
+        # superseded (CORRECTS + outdated:true).
+        temporal_wired = False
+        superseded = False
+        temporal_target = point.get("temporal_target_id")
+        if (point.get("temporal_candidate")
+                and point.get("temporal_reviewed") == "merge"
+                and temporal_target):
+            if point.get("temporal_replacement"):
+                self.supersede_point(temporal_target, point_id)
+                superseded = True
+            else:
+                exists = proj.g.query(
+                    "MATCH (op:Point {is_operator:true})-[:NAND]->"
+                    "(:Point {id:$cand}), "
+                    "(op)-[:NAND]->(:Point {id:$prior}) RETURN count(op)",
+                    params={"cand": point_id, "prior": temporal_target},
+                ).result_set
+                if not exists or exists[0][0] == 0:
+                    self.create_operator("NAND", point_id, [temporal_target])
+                    temporal_wired = True
+
         # R16 zombie-operator prevention: promote incident draft operators
         # once ALL their endpoint Points are live.
         promoted_ops = self._promote_incident_operators(proj, point_id, now)
@@ -1622,6 +1646,10 @@ class TortoiseSDK:
                   "operator_nodes_promoted": promoted_ops}
         if dedup_wired:
             result["dedup_wired"] = True
+        if temporal_wired:
+            result["temporal_wired"] = True
+        if superseded:
+            result["superseded"] = True
         if race_detected:
             result["race_detected"] = True
             result["race_warning"] = (
@@ -1681,6 +1709,71 @@ class TortoiseSDK:
         """
         from .mining import quarantine_batch as _qb
         return _qb(self._get_proj(), batch_id, reason=reason)
+
+    # ── Temporal belief timeline (W-4, #786, DE2E-6) ───────────────
+
+    def belief_timeline(self, topic: str, limit: int = 50) -> list[dict]:
+        """Dated, ordered belief chain for a topic (plan §6.1, J-4, DE2E-6).
+
+        Returns decision Points aboutObject-connected to the topic entity,
+        ordered by validFrom ascending, each shaped as
+        {content, pointKind, validFrom, status, linked_by, related} where
+        linked_by is the temporal edge (NAND via an operator, or CORRECTS via
+        supersede_point) to the NEXT point in the chain, and related holds
+        the linked point ids.
+        """
+        if limit < 1:
+            raise ValueError(f"limit must be >= 1, got {limit}")
+        proj = self._get_proj()
+        rows = proj.g.query(
+            "MATCH (p:Point {pointKind:'decision'})-[:aboutObject]->"
+            "(o:Object) "
+            "WHERE (p.is_operator IS NULL OR p.is_operator = false) "
+            "AND (o.name = $topic OR o.canonical_name = $topic) "
+            "RETURN p.id, p.content, p.validFrom, p.status, p.outdated "
+            "ORDER BY p.validFrom",
+            params={"topic": topic, "lim": limit},
+        ).result_set
+        out = []
+        ids = [r[0] for r in rows[:limit]]
+        for pid, content, vf, status, outdated in rows[:limit]:
+            # Temporal link to the NEXT point in the chain.
+            linked_by = None
+            related = []
+            for other_id in ids:
+                if other_id == pid:
+                    continue
+                nand = proj.g.query(
+                    "MATCH (op:Point {is_operator:true})-[:NAND]->"
+                    "(:Point {id:$a}), "
+                    "(op)-[:NAND]->(:Point {id:$b}) RETURN count(op)",
+                    params={"a": pid, "b": other_id},
+                ).result_set
+                if nand and nand[0][0] > 0:
+                    linked_by = "NAND"
+                    related.append(other_id)
+                    break
+                corr = proj.g.query(
+                    "MATCH (:Point {id:$a})-[:CORRECTS]->(:Point {id:$b}) "
+                    "RETURN count(*)",
+                    params={"a": pid, "b": other_id},
+                ).result_set
+                if corr and corr[0][0] > 0:
+                    linked_by = "CORRECTS"
+                    related.append(other_id)
+                    break
+            entry = {
+                "content": content,
+                "pointKind": "decision",
+                "validFrom": vf,
+                "status": status,
+                "linked_by": linked_by,
+                "related": related,
+            }
+            if outdated:
+                entry["outdated"] = True
+            out.append(entry)
+        return out
 
     # ── Content dedup queue (W-2, #784) ─────────────────────────────
     # Content candidates are DRAFT decision Points flagged by the two-tier
@@ -1801,12 +1894,39 @@ class TortoiseSDK:
         proj = self._get_proj()
         if candidate_type == "entity":
             return []  # #783 partial — entity queue tracked for epic completion
-        if candidate_type != "content":
+        if candidate_type not in ("content", "temporal"):
             raise ValueError(
-                f"candidate_type must be 'content' or 'entity', got {candidate_type!r}")
+                f"candidate_type must be 'content', 'temporal' or 'entity', "
+                f"got {candidate_type!r}")
+        if candidate_type == "content":
+            rows = proj.g.query(
+                "MATCH (n:Point) "
+                "WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL "
+                "AND n.status = 'draft' "
+                "AND (n.is_operator IS NULL OR n.is_operator = false) "
+                "RETURN properties(n) ORDER BY n.createdAt DESC LIMIT $limit",
+                params={"limit": limit},
+            ).result_set
+            out = []
+            for (props,) in rows:
+                out.append({
+                    "id": props.get("id"),
+                    "content": props.get("content"),
+                    "pointKind": props.get("pointKind"),
+                    "method": props.get("dedup_method"),
+                    "similarity": props.get("dedup_similarity"),
+                    "target_id": props.get("dedup_target_id"),
+                    "existing_id": props.get("dedup_target_id"),  # §6.1 alias
+                    "candidate_type": "content",
+                    "status": props.get("dedup_reviewed") or "pending",
+                    "batch_id": props.get("batch_id"),
+                })
+            return out
+        # Temporal candidates (W-4, #786): contradictory/replacement decision
+        # Points whose prior was LIVE at extraction — wire at promotion.
         rows = proj.g.query(
             "MATCH (n:Point) "
-            "WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL "
+            "WHERE n.temporal_candidate = true AND n.temporal_reviewed IS NULL "
             "AND n.status = 'draft' "
             "AND (n.is_operator IS NULL OR n.is_operator = false) "
             "RETURN properties(n) ORDER BY n.createdAt DESC LIMIT $limit",
@@ -1818,12 +1938,11 @@ class TortoiseSDK:
                 "id": props.get("id"),
                 "content": props.get("content"),
                 "pointKind": props.get("pointKind"),
-                "method": props.get("dedup_method"),
-                "similarity": props.get("dedup_similarity"),
-                "target_id": props.get("dedup_target_id"),
-                "existing_id": props.get("dedup_target_id"),  # §6.1 alias
-                "candidate_type": "content",
-                "status": props.get("dedup_reviewed") or "pending",
+                "target_id": props.get("temporal_target_id"),
+                "existing_id": props.get("temporal_target_id"),
+                "replacement": bool(props.get("temporal_replacement")),
+                "candidate_type": "temporal",
+                "status": props.get("temporal_reviewed") or "pending",
                 "batch_id": props.get("batch_id"),
             })
         return out
@@ -1850,8 +1969,29 @@ class TortoiseSDK:
         if not rows:
             raise ValueError(f"No point {candidate_id!r}")
         props = rows[0][0]
-        if not props.get("dedup_candidate"):
-            raise ValueError(f"Point {candidate_id!r} is not a dedup candidate")
+        is_temporal = bool(props.get("temporal_candidate"))
+        if not (props.get("dedup_candidate") or is_temporal):
+            raise ValueError(
+                f"Point {candidate_id!r} is not a dedup/temporal candidate")
+        if is_temporal:
+            # Temporal candidates: mark reviewed; the wire/supersede happens
+            # at promotion (live-prior rule — never draft→live wiring).
+            proj.g.query(
+                "MATCH (n:Point {id:$id}) SET n.temporal_reviewed = $a, "
+                "n.reviewed = true",
+                params={"id": candidate_id, "a": action},
+            )
+            if action == "reject":
+                self._emit_event("DedupeRejected",
+                                 point=self.get_point(candidate_id))
+            else:
+                self._emit_event("DedupeRecorded",
+                                 point=self.get_point(candidate_id))
+            return {"candidate_id": candidate_id, "action": action,
+                    "candidate_type": "temporal",
+                    "wired": False,
+                    "deferred_to_promotion": action == "merge",
+                    "target_id": props.get("temporal_target_id")}
         target_id = props.get("dedup_target_id")
         proj.g.query(
             "MATCH (n:Point {id:$id}) SET n.dedup_reviewed = $a, n.reviewed = true",
