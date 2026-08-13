@@ -85,7 +85,7 @@ def get_context_anchors(g, context: str) -> list[str]:
     """Get all non-operator Point IDs with this context value (anchors for BFS)."""
     rows = g.query(
         "MATCH (n:Point {context:$ctx}) "
-        "WHERE n.is_operator IS NULL OR n.is_operator = false "
+        "WHERE n.is_operator = false "
         "RETURN n.id",
         params={"ctx": context},
     ).result_set

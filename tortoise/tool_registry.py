@@ -426,7 +426,11 @@ TOOL_REGISTRY: list[ToolDefinition] = [
                     "operator Points per the reification rule (v3.5 §8); connections "
                     "carrying 'relation' stay plain structural edges. Local refs address "
                     "bundle items. granularity='bulk' (default) returns aggregated counts; "
-                    "granularity='granular' returns per-item results. Idempotent-ish: "
+                    "granularity='granular' returns per-item results. promotion_policy='gated' "
+                    "(default) keeps points draft and never promotes connections (operator "
+                    "path: promote_source=False via #780); promotion_policy='auto' preserves "
+                    "the #131 promote-on-wire lifecycle (source points go live on first edge). "
+                    "Idempotent-ish: "
                     "points dedup by content hash + kind, sources by url, operators by "
                     "input set.",
         annotations=_idem(),
