@@ -116,6 +116,26 @@ class TestAgentSignup:
             f"membership anchor {rows[0][0]!r} != signup identity {data['identity']!r}"
         )
 
+    def test_anon_team_bound_by_free_tier_caps(self, client):
+        """#1081 (indicator 3): the minted Team node must carry the free-tier
+        caps EXACTLY — a pricing-drift regression must never silently un-cap
+        anon teams. (Reduced anon ceiling is deliberately deferred to #1082.)"""
+        from tortoise.pricing import tier_limits
+        r = client.post("/v1/agent/signup", json={})
+        assert r.status_code == 200, r.text
+        lim = tier_limits("free")
+        sdk = ha_mod._make_sdk(namespace="registry")
+        row = sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) RETURN t.max_users, t.max_graphs, "
+            "t.max_api_keys, t.ops_allowance, t.graph_size_cap",
+            params={"id": r.json()["team_id"]},
+        ).result_set[0]
+        assert row[0] == lim["max_users_per_team"]
+        assert row[1] == lim["max_graphs_per_team"]
+        assert row[2] == lim["max_api_keys"]
+        assert row[3] == lim["included_write_ops_per_month"]
+        assert row[4] == lim["max_graph_nodes"]
+
 
 class TestSignupIpRateLimit:
     """#1081: agent-signup per-IP limiter (2/24h, env-tunable, OWN store).

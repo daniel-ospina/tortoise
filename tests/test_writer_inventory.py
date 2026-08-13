@@ -357,6 +357,22 @@ class TestAgentSignup:
         r = tc.post("/v1/agent/signup", json={"identity": "anon-client-chosen"})
         assert r.status_code == 429, r.text
 
+    def test_signup_caps_match_free_tier(self, client):
+        """#1081 (indicator 3): provision_team's p_* params must mirror
+        tier_limits("free") exactly — a pricing-drift regression must never
+        silently un-cap anon teams in Supabase mode."""
+        from tortoise.pricing import tier_limits
+        tc, fake, _ = client
+        r = tc.post("/v1/agent/signup", json={})
+        assert r.status_code == 200, r.text
+        fn, p = next(c for c in fake.rpc_calls if c[0] == "provision_team")
+        lim = tier_limits("free")
+        assert p["p_max_users"] == lim["max_users_per_team"]
+        assert p["p_max_graphs"] == lim["max_graphs_per_team"]
+        assert p["p_ops_allowance"] == lim["included_write_ops_per_month"]
+        assert p["p_graph_size_cap"] == lim["max_graph_nodes"]
+        assert p["p_tier"] == "free"
+
 
 # ── POST /v1/register (email provision via provision_team RPC) ─────────────
 
