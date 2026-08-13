@@ -582,6 +582,25 @@ class FalkorProjection(
                 # a point id, and the fallback diverged from _apply_one (the
                 # fold is the single source of truth, module contract).
                 self._retract(rid)
+        elif t == "PointPromoted":
+            # #785: re-apply the full promoted snapshot (status live +
+            # reviewed + promotedAt) — rebuild parity for reviewer-gated
+            # promotions (PointRetracted-style lifecycle event).
+            p = ev.get("point")
+            if isinstance(p, dict) and p.get("id"):
+                self._upsert(p)
+        elif t == "OperatorPromoted":
+            # #785/R16: restore the operator's live status on replay.
+            p = ev.get("point")
+            if isinstance(p, dict) and p.get("id"):
+                self._upsert(p)
+            else:
+                oid = ev.get("id") or ev.get("event_id")
+                if oid is not None:
+                    self.g.query(
+                        "MATCH (n:Point {id:$id}) SET n.status = 'live'",
+                        params={"id": oid},
+                    )
         elif t == "PointsMerged":
             # #331 (review r2): `or []` also covers "merge_ids": null.
             for mid in ev.get("merge_ids") or []:
@@ -755,6 +774,27 @@ class FalkorProjection(
                 rid = ev.get("id")
                 if isinstance(rid, str):
                     self._retract(rid)
+            elif t == "PointPromoted":
+                # #785: rebuild parity — re-apply the promoted snapshot.
+                p = ev.get("point")
+                if isinstance(p, dict) and p.get("id"):
+                    if ev.get("projection_version", 0) >= 2:
+                        p.pop("context", None)
+                    self._upsert_point_props(p)
+            elif t == "OperatorPromoted":
+                # #785/R16: restore the operator's live status on replay.
+                p = ev.get("point")
+                if isinstance(p, dict) and p.get("id"):
+                    if ev.get("projection_version", 0) >= 2:
+                        p.pop("context", None)
+                    self._upsert_point_props(p)
+                else:
+                    oid = ev.get("id") or ev.get("event_id")
+                    if oid is not None:
+                        self.g.query(
+                            "MATCH (n:Point {id:$id}) SET n.status = 'live'",
+                            params={"id": oid},
+                        )
             elif t == "PointsMerged":
                 # #331 (review r2): `or []` also covers "merge_ids": null.
                 for mid in ev.get("merge_ids") or []:
