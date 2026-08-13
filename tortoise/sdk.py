@@ -3955,9 +3955,15 @@ class TortoiseSDK:
 
         def _register_ref(ref: str, cid: str, section: str) -> None:
             if ref in refs:
+                # REVIEW-FIX P2 (cycle-26): the Phase2Error must carry the
+                # computed batch_id (plan §6.4 — the agent audits the partial
+                # commit) AND the message must interpolate it (the literal
+                # "batch_id=batch_id" text was a bug).
                 raise Phase2Error(
                     f"ingest: duplicate bundle ref {ref!r} "
-                    f"({section}, batch_id=batch_id) — refs must be unique across the bundle"
+                    f"({section}, batch_id={batch_id}) — refs must be unique "
+                    f"across the bundle",
+                    batch_id=batch_id,
                 )
             refs[ref] = cid
             ids["refs"][ref] = cid
@@ -3970,7 +3976,9 @@ class TortoiseSDK:
             if ref:
                 if ref in refs:
                     raise Phase2Error(
-                        f"ingest: duplicate bundle ref {ref!r} (sources, batch_id=batch_id)"
+                        f"ingest: duplicate bundle ref {ref!r} "
+                        f"(sources, batch_id={batch_id})",
+                        batch_id=batch_id,
                     )
                 refs[ref] = item.get("url", "")
                 ids["refs"][ref] = item.get("url", "")

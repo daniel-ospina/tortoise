@@ -483,6 +483,14 @@ def maybe_record_mcp_read(name: str, team_id: str, limits: dict | None) -> None:
         pass
 
 
+def _scrub_error(msg: str) -> str:
+    """#43 sanitize: strip hostnames, ports, passwords from error messages."""
+    import re
+    msg = re.sub(r'://[^@]*@', '://***@', msg)  # password in URI
+    msg = re.sub(r'(host=|at |to )[\w.-]+(:\d+)?', r'\1***', msg)  # host:port
+    return msg
+
+
 def _safe(fn, *args, **kwargs):
     """Call fn; return error dict on exception instead of raising.
 
@@ -532,8 +540,14 @@ def _safe(fn, *args, **kwargs):
             # A2: dedicated branch BEFORE the generic — violations survive
             # the MCP boundary INTACT (E2E-12.1/E2E-15(c)); the wire shape is
             # {error: <first message>, code: ERR_BUNDLE_INVALID, violations}.
-            return {"error": str(e), "code": ERR_BUNDLE_INVALID,
-                    "violations": e.violations}
+            # REVIEW-FIX P2: message content scrubbed (#43) — violation
+            # messages echo client-controlled refs/endpoints that could carry
+            # URIs with credentials; structure (section/index/message keys)
+            # survives intact.
+            scrubbed = [{**v, "message": _scrub_error(v["message"])}
+                        for v in e.violations]
+            return {"error": _scrub_error(str(e)), "code": ERR_BUNDLE_INVALID,
+                    "violations": scrubbed}
         if isinstance(e, QuotaExceededError):
             return {"error": str(e), "code": ERR_QUOTA}
         if isinstance(e, QuotaCheckError):
@@ -543,13 +557,10 @@ def _safe(fn, *args, **kwargs):
             # A2: Phase-2 failure — {error, batch_id} with NO code (distinct
             # from Phase-1's ERR_BUNDLE_INVALID); the batch_id lets the agent
             # audit the partial commit before re-sending (cycle-23/24 pin).
-            return {"error": str(e), **({"batch_id": e.batch_id}
-                                        if e.batch_id else {})}
-        msg = str(e)
-        # Sanitize: strip hostnames, ports, passwords from error messages (#43)
-        import re
-        msg = re.sub(r'://[^@]*@', '://***@', msg)  # password in URI
-        msg = re.sub(r'(host=|at |to )[\w.-]+(:\d+)?', r'\1***', msg)  # host:port
+            # REVIEW-FIX P2: message scrubbed (#43).
+            return {"error": _scrub_error(str(e)),
+                    **({"batch_id": e.batch_id} if e.batch_id else {})}
+        msg = _scrub_error(str(e))
         return {"error": msg}
 
 
