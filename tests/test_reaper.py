@@ -879,6 +879,20 @@ def test_is_ephemeral_dir_recognizes_test_prefixes():
     assert not _is_ephemeral_dir("/Users/u/tortoise-test-home-1", tmp)
 
 
+def test_is_ephemeral_dir_linux_tmp_root_never_matches():
+    """Regression (#1005 review P1): on Linux the tempdir root IS /tmp —
+    the root's own 'tmp' component must never classify everything beneath
+    it as ephemeral, and /tmp2 siblings must not match via string prefix."""
+    from tortoise.embedded_reaper import _is_ephemeral_dir
+    assert not _is_ephemeral_dir("/tmp/unknown-prefix-x", "/tmp")
+    assert not _is_ephemeral_dir("/tmp/myapp", "/tmp")
+    assert not _is_ephemeral_dir("/tmp2/something", "/tmp")
+    assert not _is_ephemeral_dir("/tmp", "/tmp")  # the root itself
+    assert _is_ephemeral_dir("/tmp/pytest-of-user/pytest-1/test_x", "/tmp")
+    assert _is_ephemeral_dir("/tmp/tortoise_test_abc", "/tmp")
+    assert _is_ephemeral_dir("/tmp/tt_own_1", "/tmp")
+
+
 def test_classify_path_server_under_ephemeral_tree_is_candidate(monkeypatch):
     """Path-based server whose dir is an ephemeral test tree -> candidate
     (previously 'protected' — the #1005 dominant leak source)."""
@@ -928,11 +942,13 @@ def test_reap_only_safe_skips_live_ephemeral_without_killing(monkeypatch):
 
 
 def test_active_suite_tokens_lists_markers(monkeypatch, tmp_path):
-    """active_suite_tokens() returns non-hidden marker filenames only."""
+    """active_suite_tokens() returns non-hidden marker filenames only, and
+    skips stale markers whose pid is dead (#1005 review P2)."""
     from tortoise.embedded_reaper import ACTIVE_SUITES_DIR, active_suite_tokens
     marker_dir = tmp_path / "active_suites"
     marker_dir.mkdir(parents=True)
-    (marker_dir / "1234-abc").write_text("pid=1234")
+    (marker_dir / "1234-abc").write_text(f"pid={os.getpid()}\n")
+    (marker_dir / "999999-dead").write_text("pid=999999\n")  # dead pid
     (marker_dir / ".hidden").write_text("x")
     monkeypatch.setattr("tortoise.embedded_reaper.ACTIVE_SUITES_DIR",
                         str(marker_dir))

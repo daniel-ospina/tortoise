@@ -133,10 +133,9 @@ def _redislite_hygiene():
     between tests). Session end: run a full sweep, but only when no other
     suite is still active — otherwise defer to the last suite standing.
 
-    Sweeps acquire the reaper singleton lock and are time-boxed + batch-
-    capped so a dirty machine cannot stall suite startup.
+    Sweeps acquire the reaper singleton lock and are batch-capped so a
+    dirty machine cannot stall suite startup.
     """
-    import gc
     import uuid
 
     from tortoise.embedded_reaper import (
@@ -148,12 +147,15 @@ def _redislite_hygiene():
 
     marker_dir = ACTIVE_SUITES_DIR
     token = f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
-    os.makedirs(marker_dir, exist_ok=True)
-    marker_path = os.path.join(marker_dir, token)
+    marker_path = None
     try:
+        os.makedirs(marker_dir, exist_ok=True)
+        marker_path = os.path.join(marker_dir, token)
         with open(marker_path, "w") as fh:
             fh.write(f"pid={os.getpid()}\n")
     except OSError:
+        # never fail the suite over hygiene; the foreign-pytest guard still
+        # covers the markerless case (defense in depth)
         marker_path = None
 
     def _sweep(only_safe: bool) -> dict:
@@ -215,7 +217,6 @@ def _redislite_hygiene():
             pass
     others = [t for t in active_suite_tokens() if t != token]
     foreign = _foreign_suites_active()
-    gc.collect()  # fire finalizers so SDK/projection close() runs first
     end_result = _sweep(only_safe=bool(others) or foreign)
     print(f"[redislite-hygiene] end sweep (other-suites={len(others)}, "
           f"foreign-pytest={foreign}): {end_result}")

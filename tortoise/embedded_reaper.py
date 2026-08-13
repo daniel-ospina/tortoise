@@ -69,31 +69,50 @@ DEFAULT_BATCH_SIZE = 50
 
 def _is_ephemeral_dir(dbdir_real: str, tmpdir_real: str) -> bool:
     """True when dbdir sits under the system tempdir AND any path component
-    starts with a known ephemeral test prefix (issue #1005).
+    BELOW the tempdir root starts with a known ephemeral test prefix
+    (issue #1005).
 
-    Checks all components, not just the basename: pytest tmp trees nest
-    servers as pytest-of-<user>/pytest-N/<test_name>/… where the dbdir
-    basename is the test name. The tempdir-containment check is the safety
-    boundary: user-home test dirs (tortoise-test-home-*, tortoise-
-    lifecycle-*) never match.
+    Uses strict relative_to containment (not string startswith — /tmp2 must
+    not match a /tmp tempdir) and excludes the tempdir root itself: on Linux
+    the tempdir IS /tmp, so the root's own 'tmp' component must never
+    classify everything beneath it as ephemeral. Checks all components, not
+    just the basename: pytest tmp trees nest servers as
+    pytest-of-<user>/pytest-N/<test_name>/… where the dbdir basename is the
+    test name. The containment check is the safety boundary: user-home test
+    dirs (tortoise-test-home-*, tortoise-lifecycle-*) never match.
     """
-    if not dbdir_real.startswith(tmpdir_real):
+    try:
+        rel = Path(dbdir_real).relative_to(Path(tmpdir_real))
+    except ValueError:
         return False
-    return any(part.startswith(EPHEMERAL_PREFIXES)
-               for part in Path(dbdir_real).parts)
+    return any(part.startswith(EPHEMERAL_PREFIXES) for part in rel.parts)
 
 
 def active_suite_tokens() -> list[str]:
     """List active pytest-suite marker tokens (filenames in ACTIVE_SUITES_DIR).
 
     Each marker is created by a suite's conftest at session start and removed
-    at session end. Empty when no other suite is mid-run.
+    at session end. Stale markers (pid dead — suite SIGKILLed) are treated as
+    absent so one crash cannot permanently degrade later suites' sweeps to
+    only-safe (issue #1005 review P2). Empty when no other suite is mid-run.
     """
     try:
         entries = os.listdir(ACTIVE_SUITES_DIR)
     except OSError:
         return []
-    return [e for e in entries if not e.startswith(".")]
+    tokens = []
+    for e in entries:
+        if e.startswith("."):
+            continue
+        try:
+            text = Path(ACTIVE_SUITES_DIR, e).read_text()
+        except OSError:
+            continue
+        m = re.search(r"pid=(\d+)", text)
+        if m and not _pid_alive(int(m.group(1))):
+            continue  # stale marker from a killed suite
+        tokens.append(e)
+    return tokens
 
 
 def _dir_missing_on_disk(dbdir: str | None) -> bool:
@@ -847,9 +866,9 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
     active clients (double-checked). Path-based / protected / stale_socket /
     undetermined records are NEVER killed here.
 
-    only_safe=True (issue #1005 concurrency guard): restrict to records that
-    are safe under concurrent suites — dir_missing (the owning suite's tmp
-    tree was cleaned) or stale sockets (pid dead). Live ephemeral servers
+    only_safe=True (issue #1005 concurrency guard): restrict to dir-gone
+    (dir_missing) candidates — the owning suite's tmp tree was cleaned, so
+    the server cannot belong to a running suite. Live ephemeral servers
     with 0 clients are skipped so a concurrent suite's between-tests idle
     server is never killed.
     """
@@ -908,12 +927,6 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
 
         _kill(record["pid"], sigterm_timeout)
         _cleanup_tempdir(record.get("dbdir"))
-        # Also remove the redislite socket dir (autogen under tempdir) so
-        # killed servers don't accumulate tens of thousands of stale dirs
-        # (issue #1005 tempdir pollution).
-        sock_dir = os.path.dirname(record.get("socket_path", "") or "")
-        if sock_dir and sock_dir != record.get("dbdir"):
-            _cleanup_tempdir(sock_dir)
         logger.warning("killed orphan PID %s (%s)",
                        record["pid"], record["socket_path"])
         acted.append(record)

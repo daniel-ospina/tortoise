@@ -77,9 +77,11 @@ RAW_EMBEDDED_ALLOWLIST = {
 def test_falkordb_context_manager_closes_once(monkeypatch, tmp_path):
     """__exit__ closes; a second __exit__/close is a no-op."""
     calls = []
+    orig_close = FalkorDB.close
 
     def recorder(self):
         calls.append("close")
+        return orig_close(self)
 
     monkeypatch.setattr(FalkorDB, "close", recorder)
     db = FalkorDB(str(tmp_path / "a.db"))
