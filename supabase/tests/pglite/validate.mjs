@@ -46,7 +46,7 @@ await db.exec(`
     $$ SELECT coalesce(nullif(current_setting('request.jwt.claims', true), ''), '{}')::jsonb $$;
 `);
 
-// ── Apply migrations 0001-20260813000004 in order ──
+// ── Apply migrations 0001-20260813000005 in order ──
 // NOTE (harness-local): 0014 ships metering_increment(text, text, integer);
 // 20260813000002 replaces it with a 4-arg variant WITH defaults. CREATE
 // OR REPLACE cannot match across different arg lists → an overload is
@@ -65,7 +65,8 @@ const files = ['0001_user_teams.sql','0002_audit_events.sql','0003_team_membersh
                '20260813000001_teams_deleted_at.sql',
                '20260813000002_metering_nodes_written.sql',
                '20260813000003_audit_ip_time_index.sql',
-               '20260813000004_claim_membership.sql'];
+               '20260813000004_claim_membership.sql',
+               '20260813000005_dashboard_login.sql'];
 for (const f of files) {
   const sql = readFileSync(`${MIG_DIR}/${f}`, 'utf8');
   try {

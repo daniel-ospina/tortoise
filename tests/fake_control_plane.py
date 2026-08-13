@@ -204,7 +204,9 @@ class FakeControlPlane:
                     "max_users": p.get("p_max_users", 1),
                     "max_graphs": p.get("p_max_graphs", 1),
                     "ops_allowance": p.get("p_ops_allowance", 10000),
-                    "graph_size_cap": p.get("p_graph_size_cap", 10000)}
+                    "graph_size_cap": p.get("p_graph_size_cap", 10000),
+                    # #1148: dashboard key-login acceptance (migration default true)
+                    "dashboard_key_login": True}
             if p.get("p_email"):
                 team["email"] = p["p_email"]
             team_rows.append(team)

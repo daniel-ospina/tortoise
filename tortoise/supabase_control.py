@@ -71,6 +71,9 @@ _QUOTA_SELECT = [
     # #308: suspension/staging state + owner email ride the same resolution
     # round-trip (additive keys — consumers read known keys only).
     "suspended_at", "flagged_at", "email",
+    # #1148: whether API-key login is accepted for the dashboard (management
+    # surface). Default true; claimed owners toggle it (session-authed).
+    "dashboard_key_login",
 ]
 
 
@@ -374,13 +377,18 @@ def resolve_api_key(cp, token: str) -> dict | None:
     rows = cp.query(
         "api_keys",
         select=["id", "team_id", "key_prefix", "created_via", "created_by",
-                "expires_at", "revoked_at"],
+                "expires_at", "revoked_at", "enabled"],
         filters=[("lookup_hash", "eq", h)],
     )
     if rows:
         row = rows[0]
         if row.get("revoked_at") is not None:
             # P1-2: api_keys.revoked_at is the revocation source of truth.
+            return None
+        if row.get("enabled") is False:
+            # #1148: a disabled key stops authenticating (per-key toggle;
+            # re-enable anytime). Hashes-only stored — same reject path as
+            # revoked, distinct reason for the 401 detail.
             return None
         expires_at = _parse_ts(row.get("expires_at"))
         if expires_at is not None and expires_at <= now:
@@ -445,6 +453,10 @@ def resolve_api_key(cp, token: str) -> dict | None:
         "key_prefix": key_prefix,
         "created_via": created_via,
         "created_by": created_by,
+        # #1148: dashboard key-login acceptance (rides the team row)
+        "dashboard_key_login": team_row.get("dashboard_key_login", True),
+        # #1148: per-key enabled state (dashboard toggle)
+        "enabled": row.get("enabled", True) if rows else True,
         # #308: enforcement (403 SUSPENDED) + owner notification
         "suspended_at": team_row.get("suspended_at"),
         "flagged_at": team_row.get("flagged_at"),
@@ -553,6 +565,32 @@ def revoke_api_key(cp, key_id: str, now: str | None = None) -> None:
         method="PATCH",
         filters=[("id", "eq", key_id)],
         json_body={"revoked_at": now or datetime.now(timezone.utc).isoformat()},
+    )
+
+def set_api_key_enabled(cp, key_id: str, enabled: bool) -> None:
+    """#1148: enable/disable an API key (per-key toggle). Disabled keys stop
+    authenticating (resolve_api_key rejects enabled=false) but stay listed —
+    re-enable anytime. The dashboard toggle (PATCH /v1/team/keys/{id}) calls
+    this. Session-authed + owner-only enforced at the endpoint."""
+    cp.query(
+        "api_keys",
+        method="PATCH",
+        filters=[("id", "eq", key_id)],
+        json_body={"enabled": bool(enabled)},
+    )
+
+
+def set_dashboard_key_login(cp, team_id: str, enabled: bool) -> None:
+    """#1148: set whether API-key login is accepted for the dashboard
+    (management surface). Claimed owners toggle this (session-authed,
+    PATCH /v1/team/dashboard-login). When false, key-auth management calls
+    return 403 dashboard_login_disabled; graph endpoints keep accepting the
+    key. Anon teams always keep it true (the Protect screen IS the bootstrap)."""
+    cp.query(
+        "teams",
+        method="PATCH",
+        filters=[("id", "eq", team_id)],
+        json_body={"dashboard_key_login": bool(enabled)},
     )
 
 
@@ -1200,7 +1238,7 @@ def team_api_keys(cp, team_id: str) -> list[dict]:
     rows = cp.query(
         "api_keys",
         select=["id", "key_prefix", "created_at", "last_used_at",
-                "revoked_at"],
+                "revoked_at", "enabled"],
         filters=[("team_id", "eq", team_id)],
     )
     rows.sort(key=lambda r: r.get("created_at") or "", reverse=True)
@@ -1211,7 +1249,7 @@ def api_key_by_id(cp, key_id: str) -> dict | None:
     """One api_keys row by id (revoke lookup — team-scoping + already-revoked)."""
     rows = cp.query(
         "api_keys",
-        select=["team_id", "revoked_at"],
+        select=["team_id", "revoked_at", "created_via", "enabled"],
         filters=[("id", "eq", key_id)],
     )
     return rows[0] if rows else None
