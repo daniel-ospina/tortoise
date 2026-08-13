@@ -398,6 +398,20 @@ class TestToolFunctions:
         assert callable(tortoise_diary_write)
         assert callable(tortoise_diary_read)
 
+    def test_github_connect_oauth_unset_returns_canonical_text(self, monkeypatch):
+        """#1009: GITHUB_CLIENT_ID unset (self-host HTTP — OAuth is hosted-mode
+        only) → the prompt-canonical text, not the misleading
+        'GitHub OAuth not configured' (AGENT_ONBOARDING.md lines 51/209)."""
+        from tortoise.mcp_auth import _current_team_id
+        from tortoise.mcp_server import tortoise_onboarding_github_connect
+        monkeypatch.delenv("GITHUB_CLIENT_ID", raising=False)
+        token = _current_team_id.set("team-github-oauth")
+        try:
+            result = tortoise_onboarding_github_connect("acme")
+        finally:
+            _current_team_id.reset(token)
+        assert result == {"error": "No team context (HTTP mode required)"}
+
 
 @pytest.mark.skipif(not FALKORDB_AVAILABLE, reason="FalkorDB not available")
 class TestToolIntegration:
