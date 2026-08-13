@@ -16,11 +16,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pytest
 from tortoise.projection import FalkorProjection
 
-EXPECTED_RANGE = {
-    # is_operator is intentionally absent on embedded: falkordblite degrades
-    # the bool type table across close/reopen, so the indexed `= false` form
-    # silently returns 0 after restart (label scans coerce correctly). The
-    # index is created on docker FalkorDB only — see _ensure_indexes.
+EXPECTED_RANGE_EMBEDDED = {
+    # Embedded-only expectation: is_operator is intentionally absent on
+    # embedded — falkordblite degrades the bool type table across close/
+    # reopen, so the indexed `= false` form silently returns 0 after restart
+    # (label scans coerce correctly). The index is created on non-embedded
+    # FalkorDB (docker/server) only — see _ensure_indexes.
     "Point": ["id", "pointKind", "content_hash"],
     "Document": ["id", "documentKind"],
     "Subject": ["id", "name"],
@@ -52,16 +53,60 @@ def _range_indexes(proj):
     out = {}
     for row in rows:
         label, fields, types = row[0], row[1], row[2]
-        types = dict(types)
+        # Defensive: 4.x returns a dict keyed by field, but 3.x servers
+        # return a flat per-field list — normalize both to {field: [types]}.
+        types = (dict(types) if isinstance(types, dict)
+                 else {f: list(types) for f in fields})
         out[label] = {f: types.get(f, []) for f in fields}
     return out
+
+
+# ── Non-embedded (docker/server) gate (#522) ─────────────────────────────
+# Mirrors tests/test_search_engine_gaps.py: probe candidate URIs once at
+# import; the docker-gated test below skips when no non-embedded FalkorDB is
+# reachable (CI runs embedded-only via FalkorDBLite).
+FALKORDB_AVAILABLE = False
+_WORKING_URI: str | None = None
+
+
+def _probe_falkordb(candidates: list[str | None]) -> tuple[bool, str | None]:
+    """Probe candidate URIs for a live non-embedded FalkorDB."""
+    _env_uri = os.environ.get("TORTOISE_DB_URI")
+    for _uri in candidates:
+        if not _uri:
+            continue
+        _proj = None
+        try:
+            from tortoise.projection import FalkorProjection
+            _proj = FalkorProjection.from_uri(_uri)
+            _proj.g.query("RETURN 1")
+            return True, _uri
+        except Exception:
+            if _uri == _env_uri and _uri:
+                break  # env-specified DB unreachable — don't fall through (#196)
+            continue
+        finally:
+            if _proj is not None:
+                try:
+                    _proj.close()
+                except Exception:
+                    pass
+    return False, None
+
+
+_uri_candidates = [
+    os.environ.get("TORTOISE_DB_URI"),
+    "docker://:falkordb@localhost:6379/tortoise_test_idx522",
+    "docker://:@localhost:16379/tortoise_test_idx522",
+]
+FALKORDB_AVAILABLE, _WORKING_URI = _probe_falkordb(_uri_candidates)
 
 
 # ── Task 1: index existence + idempotency ────────────────────────────────
 
 def test_entity_key_indexes_exist(proj):
     idx = _range_indexes(proj)
-    for label, fields in EXPECTED_RANGE.items():
+    for label, fields in EXPECTED_RANGE_EMBEDDED.items():
         assert label in idx, f"no indexes for {label}: {idx}"
         for f in fields:
             assert "RANGE" in idx[label].get(f, []), \
@@ -319,36 +364,82 @@ def test_resolve_entity_queries_use_index_scans(proj):
 # falkordblite/redislite degrades the persisted bool type table across
 # close/reopen: indexed `= false` lookups silently return 0 after restart,
 # while label scans coerce correctly (TRUE lookups survive, FALSE do not).
-# The is_operator index is therefore docker-only — see _ensure_indexes.
+# The is_operator index is therefore non-embedded (docker/server)-only —
+# embedded drops any stale persisted copy on open — see _ensure_indexes.
 
 def test_embedded_reopen_false_equality_correct():
-    """After close/reopen, non-operator lookups must not silently empty."""
+    """After close/reopen, non-operator lookups must not silently empty.
+
+    Session 1 seeds the PRE-FIX stale state (a pre-#522 build persisted the
+    is_operator RANGE index), so session 2 exercises the actual migration
+    path: _ensure_indexes must DROP the stale embedded index on open and the
+    `= false` sweep must return the full non-operator set.
+    """
     from tortoise.sdk import TortoiseSDK
     db_path = f"{tempfile.mkdtemp(prefix='tt_boolidx_')}/t.db"
-    sdk = TortoiseSDK(db_path)
-    a = sdk.create_point("statement", "bool-a")
-    b = sdk.create_point("statement", "bool-b")
-    sdk.create_operator("IMPL", a["id"], [b["id"]], label="op1")
-    sdk.close()
-
-    sdk2 = TortoiseSDK(db_path)
-    proj = sdk2._get_proj()
-    g = proj.g
+    sdk = None
+    sdk2 = None
     try:
-        # No is_operator index on embedded — dropped on open (best-effort).
+        sdk = TortoiseSDK(db_path)
+        a = sdk.create_point("statement", "bool-a")
+        b = sdk.create_point("statement", "bool-b")
+        sdk.create_operator("IMPL", a["id"], [b["id"]], label="op1")
+        # Simulate the pre-fix state: a prior embedded build persisted the
+        # is_operator RANGE index. It must be dropped by _ensure_indexes on
+        # the next open, or `= false` silently returns 0 after reopen.
+        proj1 = sdk._get_proj()
+        proj1.g.query("CREATE INDEX FOR (n:Point) ON (n.is_operator)")
+        sdk.close()
+        sdk = None
+
+        sdk2 = TortoiseSDK(db_path)
+        proj = sdk2._get_proj()
+        g = proj.g
+        # (a) The stale index was dropped on open — the healing mechanism ran.
         idx = _range_indexes(proj)
         assert "RANGE" not in idx.get("Point", {}).get("is_operator", []), \
-            f"embedded must not serve indexed is_operator lookups: {idx}"
-        # The #522 load-bearing form returns the full non-operator set.
+            f"embedded must drop stale is_operator index on open: {idx}"
+        # (b) The #522 load-bearing form returns the full non-operator set.
         assert g.query("MATCH (n:Point) WHERE n.is_operator = false "
                        "RETURN count(n)").result_set[0][0] == 2
+        # (c) The IS NULL disjunction is also unaffected.
         assert g.query("MATCH (n:Point) WHERE (n.is_operator IS NULL "
                        "OR n.is_operator = false) "
                        "RETURN count(n)").result_set[0][0] == 2
-        # Operator lookups unaffected.
+        # (d) Operator lookups unaffected.
         assert g.query("MATCH (n:Point {is_operator:true}) "
                        "RETURN count(n)").result_set[0][0] == 1
         assert g.query("MATCH (n:Point) WHERE n.is_operator = true "
                        "RETURN count(n)").result_set[0][0] == 1
     finally:
-        sdk2.close()
+        if sdk is not None:
+            sdk.close()
+        if sdk2 is not None:
+            sdk2.close()
+
+
+@pytest.mark.skipif(not FALKORDB_AVAILABLE,
+                    reason="FalkorDB not available")
+def test_non_embedded_is_operator_index_created():
+    """#522: non-embedded FalkorDB (docker/server) keeps is_operator indexed."""
+    from tortoise.projection import FalkorProjection
+    proj = FalkorProjection.from_uri(
+        _WORKING_URI or "docker://:falkordb@localhost:6379/tortoise_test_idx522")
+    try:
+        proj.g.query("MATCH (n) DETACH DELETE n")
+        proj._ensure_indexes()
+        # Non-embedded keeps the RANGE index — bools persist correctly here.
+        idx = _range_indexes(proj)
+        assert "RANGE" in idx.get("Point", {}).get("is_operator", []), \
+            f"non-embedded must serve indexed is_operator lookups: {idx}"
+        proj.g.query("CREATE (a:Point {id:'pa', content:'a', "
+                     "pointKind:'statement', is_operator:false})")
+        proj.g.query("CREATE (b:Point {id:'pb', content:'b', "
+                     "pointKind:'statement', is_operator:false})")
+        proj.g.query("CREATE (c:Point {id:'pc', content:'c', "
+                     "pointKind:'statement', is_operator:true})")
+        # The #522 load-bearing form returns the full non-operator set.
+        assert proj.g.query("MATCH (n:Point) WHERE n.is_operator = false "
+                            "RETURN count(n)").result_set[0][0] == 2
+    finally:
+        proj.close()

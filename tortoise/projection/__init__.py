@@ -101,6 +101,20 @@ from tortoise.projection.propagation import _PropagationMixin
 
 # ── Module-level helpers ──────────────────────────────────────────────────
 
+#: Range-indexed Point properties on non-embedded FalkorDB (docker/server).
+#: is_operator is NOT in this list — rule: no RANGE index on bool properties
+#: on embedded (falkordblite/redislite degrades the persisted bool type table
+#: across close/reopen, so an indexed `= false` lookup silently returns 0
+#: after restart; see #522/#1015). Non-embedded backends persist bools
+#: correctly, so the is_operator index is created only in the non-embedded
+#: branch below.
+_POINT_RANGE_PROPS = ("id", "pointKind", "content_hash")
+
+#: Bool properties NEVER range-indexed on embedded: falkordblite degrades the
+#: persisted bool type table across close/reopen — indexed `= false` returns
+#: 0; see #522/#1015.
+_EMBEDDED_BOOL_EXCLUDED = frozenset({"is_operator"})
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -1048,19 +1062,17 @@ class FalkorProjection(
         FTS and vector indexes are gated on FalkorDB >= 4.x.
         """
         # ── Range indexes (always safe, pre-4.x compatible) ──
-        # is_operator is deliberately NOT indexed on embedded (falkordblite /
-        # redislite): the persisted bool type table degrades across close/
-        # reopen, so indexed `= false` lookups silently return 0 after a
-        # restart while label scans coerce correctly (verified: unindexed bool
-        # equality, `<> true`, and the IS NULL disjunction all return the full
-        # set; indexed `= false` returns 0 even after a fresh index rebuild).
-        # TRUE lookups survive reopen, FALSE do not — and #522 is precisely
-        # the non-operator (`= false`) sweep, so this is the load-bearing
-        # form. Docker FalkorDB persists bools correctly, so the index (and
-        # the #522 perf win) applies there; embedded graphs are small, so the
-        # label scan is free. See the PR #1015 crash-recovery regression for
-        # the original repro.
-        for prop in ("id", "pointKind", "content_hash"):
+        # Rule: no RANGE index on bool properties on embedded (falkordblite /
+        # redislite degrades the persisted bool type table across close/
+        # reopen, so an indexed `= false` lookup silently returns 0 after a
+        # restart while label scans coerce correctly; see #522/#1015). TRUE
+        # lookups survive reopen, FALSE do not — and #522 is precisely the
+        # non-operator (`= false`) sweep, so this is the load-bearing form.
+        # Non-embedded FalkorDB (docker/server) persists bools correctly, so
+        # the index (and the #522 perf win) applies there; embedded graphs
+        # are small, so the label scan is free. See the PR #1015
+        # crash-recovery regression for the original repro.
+        for prop in _POINT_RANGE_PROPS:
             try:
                 self.g.query(f"CREATE INDEX FOR (n:Point) ON (n.{prop})")
             except Exception as e:
@@ -1072,20 +1084,35 @@ class FalkorProjection(
                     logging.getLogger(__name__).error(
                         "Failed to create index on n.%s: %s", prop, e)
         if self._is_embedded:
-            # Drop a stale is_operator index persisted by a prior embedded
-            # session — it is unusable for bool equality after reopen (see
-            # above). Best-effort: the absent index is the expected state.
-            try:
-                self.g.query("DROP INDEX ON :Point(is_operator)")
-            except Exception as e:
-                msg = str(e).lower()
-                if ("no such index" not in msg
-                        and "does not exist" not in msg
-                        and "not found" not in msg):
-                    import logging
-                    logging.getLogger(__name__).warning(
-                        "Failed to drop stale embedded is_operator index: %s", e)
+            # Drop stale bool-property RANGE indexes persisted by a prior
+            # embedded session — unusable for bool equality after reopen (see
+            # the rule above). First check db.indexes() and DROP only what
+            # exists, so repeat _ensure_indexes() calls stay warning-free
+            # (hosted_api restore rebuild calls it twice per session); the
+            # try/except remains as a safety net with a loud error on real
+            # failures (absent index is the expected embedded state).
+            for prop in _EMBEDDED_BOOL_EXCLUDED:
+                try:
+                    rows = self.g.query("CALL db.indexes()").result_set
+                    if not any(row[0] == "Point" and prop in row[1]
+                               for row in rows):
+                        continue
+                    self.g.query(f"DROP INDEX ON :Point({prop})")
+                except Exception as e:
+                    msg = str(e).lower()
+                    if ("no such index" in msg or "does not exist" in msg
+                            or "not found" in msg or "responseerror" in msg
+                            or "already" in msg):
+                        pass  # absent — expected embedded state
+                    else:
+                        import logging
+                        logging.getLogger(__name__).error(
+                            "Failed to drop stale embedded %s index: %s",
+                            prop, e)
         else:
+            # Non-embedded FalkorDB (docker/server) only: range-index
+            # is_operator here — these backends persist bools correctly
+            # across reopen, so the #522 perf win is safe.
             try:
                 self.g.query("CREATE INDEX FOR (n:Point) ON (n.is_operator)")
             except Exception as e:
