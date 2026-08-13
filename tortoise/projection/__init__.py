@@ -612,7 +612,7 @@ class FalkorProjection(
                 if isinstance(mid, str):
                     self._delete(mid)
         elif t == "EventRecorded":
-            self._upsert_event(ev)
+            return self._upsert_event(ev)
         elif t == "SubjectAdded":
             self._upsert_subject(ev)
         elif t == "ObjectRegistered":
@@ -620,7 +620,14 @@ class FalkorProjection(
         elif t == "DocumentCreated":
             self._upsert_document(ev)
         elif t == "SourceCreated":
-            self._upsert_source(ev)
+            # epic #900 T3: return the MERGE QueryResult so the SDK's
+            # create_source write path can attribute the counter-authority
+            # outcome (nodes_created) from the single statement (pin b). The
+            # internal ``_merge_run_id`` key (the creator's run token — the
+            # race-safe CREATE discriminator on the embedded backend) is
+            # popped here so it never reaches _persist_extra_props.
+            return self._upsert_source(
+                ev, merge_run_id=ev.pop("_merge_run_id", None))
 
     def rebuild(self, log) -> None:
         self.g.query("MATCH (n) DETACH DELETE n")
@@ -752,14 +759,22 @@ class FalkorProjection(
             pass  # graph may be corrupt — best-effort, like the #548 snapshot
 
         # ── Wipe + rebuild ──────────────────────────────────────────
-        self.g.query("MATCH (n) DETACH DELETE n")
-
+        # WIPE-AFTER-PARSE (epic #900 T12/T3, cycle-21 ordering pin): parse
+        # ALL .jsonl into memory (line-tolerant — a torn TRAILING line from a
+        # SIGKILL mid-append is skipped with a warning + count via
+        # EventLog.read_all, never raised — S15) BEFORE the wipe. A
+        # wipe-then-parse order would turn one torn line into TOTAL LOSS
+        # (wipe lands, then the parse raises, then the #548 snapshot phase
+        # swallows the same error silently).
+        #
         # Collect all events from all files (synthetic first so their nodes
         # exist before JSONL events that may reference them)
         events = list(synthetic_events)
         for fname in sorted(os.listdir(log_dir)):
             if fname.endswith('.jsonl'):
                 events.extend(EventLog(os.path.join(log_dir, fname)).read_all())
+
+        self.g.query("MATCH (n) DETACH DELETE n")
 
         # Pass 1: create all Point/Operator nodes (skip edges) + non-edge events
         # Pass 1a: create all Point/Operator nodes first
