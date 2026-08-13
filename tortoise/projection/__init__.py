@@ -101,13 +101,12 @@ from tortoise.projection.propagation import _PropagationMixin
 
 # ── Module-level helpers ──────────────────────────────────────────────────
 
-#: Range-indexed Point properties on non-embedded FalkorDB (docker/server).
+#: Point properties range-indexed on ALL backends (embedded and non-embedded).
 #: is_operator is NOT in this list — rule: no RANGE index on bool properties
 #: on embedded (falkordblite/redislite degrades the persisted bool type table
 #: across close/reopen, so an indexed `= false` lookup silently returns 0
-#: after restart; see #522/#1015). Non-embedded backends persist bools
-#: correctly, so the is_operator index is created only in the non-embedded
-#: branch below.
+#: after restart; see #522/#1015); the embedded/non-embedded split applies
+#: only to is_operator (see _EMBEDDED_BOOL_EXCLUDED).
 _POINT_RANGE_PROPS = ("id", "pointKind", "content_hash")
 
 #: Bool properties NEVER range-indexed on embedded: falkordblite degrades the
@@ -1110,19 +1109,23 @@ class FalkorProjection(
                             "Failed to drop stale embedded %s index: %s",
                             prop, e)
         else:
-            # Non-embedded FalkorDB (docker/server) only: range-index
-            # is_operator here — these backends persist bools correctly
-            # across reopen, so the #522 perf win is safe.
-            try:
-                self.g.query("CREATE INDEX FOR (n:Point) ON (n.is_operator)")
-            except Exception as e:
-                msg = str(e).lower()
-                if "already indexed" in msg or "already exists" in msg:
-                    pass  # expected — index exists from prior startup
-                else:
-                    import logging
-                    logging.getLogger(__name__).error(
-                        "Failed to create index on n.is_operator: %s", e)
+            # Non-embedded FalkorDB (docker/server) only: range-index the
+            # embedded-excluded bool props (currently just is_operator) here
+            # — these backends persist bools correctly across reopen, so the
+            # #522 perf win is safe. Driven from _EMBEDDED_BOOL_EXCLUDED so
+            # future additions stay in sync with the embedded drop loop above.
+            for prop in _EMBEDDED_BOOL_EXCLUDED:
+                try:
+                    self.g.query(
+                        f"CREATE INDEX FOR (n:Point) ON (n.{prop})")
+                except Exception as e:
+                    msg = str(e).lower()
+                    if "already indexed" in msg or "already exists" in msg:
+                        pass  # expected — index exists from prior startup
+                    else:
+                        import logging
+                        logging.getLogger(__name__).error(
+                            "Failed to create index on n.%s: %s", prop, e)
 
         # ── Document range indexes (#125 — structural queries filter by kind) ──
         for prop in ("id", "documentKind"):

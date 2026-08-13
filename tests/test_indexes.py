@@ -54,10 +54,15 @@ def _range_indexes(proj):
     for row in rows:
         label, fields, types = row[0], row[1], row[2]
         # Defensive: 4.x returns a dict keyed by field, but 3.x servers
-        # return a flat per-field list — normalize both to {field: [types]}.
+        # return a flat per-field list (one row per field) — normalize both
+        # to {field: [types]}, pairing fields with types positionally.
         types = (dict(types) if isinstance(types, dict)
-                 else {f: list(types) for f in fields})
-        out[label] = {f: types.get(f, []) for f in fields}
+                 else ({f: [t] for f, t in zip(fields, types)}
+                       if isinstance(types, (list, tuple))
+                       else {f: [types] for f in fields}))
+        # Merge per label (3.x emits one row per field) so the result is
+        # label-complete regardless of row order.
+        out.setdefault(label, {}).update({f: types.get(f, []) for f in fields})
     return out
 
 
@@ -418,13 +423,30 @@ def test_embedded_reopen_false_equality_correct():
             sdk2.close()
 
 
+def _current_uri() -> str:
+    """Resolve the non-embedded URI at CALL time (mirrors test_search_engine_gaps).
+
+    Prefers a live TORTOISE_DB_URI so a dev machine with a running server
+    exercises it; falls back to the module-probe _WORKING_URI.
+    """
+    return os.environ.get("TORTOISE_DB_URI") or (
+        _WORKING_URI or "docker://:falkordb@localhost:6379/tortoise_test_idx522")
+
+
 @pytest.mark.skipif(not FALKORDB_AVAILABLE,
                     reason="FalkorDB not available")
 def test_non_embedded_is_operator_index_created():
     """#522: non-embedded FalkorDB (docker/server) keeps is_operator indexed."""
     from tortoise.projection import FalkorProjection
-    proj = FalkorProjection.from_uri(
-        _WORKING_URI or "docker://:falkordb@localhost:6379/tortoise_test_idx522")
+    uri = _current_uri()
+    # Round-2 guard: the URI was probed at import time and may resolve to a
+    # LIVE non-test graph (dev machine with a real DB). The DETACH DELETE
+    # below would trip _assert_test_graph and hard-fail the suite — skip
+    # instead (same "no test server" semantics as FALKORDB_AVAILABLE).
+    if not uri.rsplit("/", 1)[-1].startswith(("test_", "tortoise_test")):
+        pytest.skip(f"resolved URI {uri!r} is not a test graph "
+                    "(graph name must start with 'test_'/'tortoise_test_')")
+    proj = FalkorProjection.from_uri(uri)
     try:
         proj.g.query("MATCH (n) DETACH DELETE n")
         proj._ensure_indexes()
