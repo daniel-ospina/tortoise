@@ -278,6 +278,20 @@ jobs:
           HF_HUB_OFFLINE: "1"
           TRANSFORMERS_OFFLINE: "1"
 
+      - name: Dump redislite-hygiene end-sweep decision (issue #1103)
+        # pytest capture swallows the conftest print; the orphan check below
+        # needs the sweep decision (other-suites / foreign-pytest flags) to
+        # distinguish "real leak" from "deferred sweep false positive".
+        if: always()
+        run: |
+          LOG="${RUNNER_TEMP:-/tmp}/redislite-hygiene-end.json"
+          if [ -f "$LOG" ]; then
+            echo "=== redislite-hygiene end-sweep decision (issue #1103) ==="
+            cat "$LOG"
+          else
+            echo "no hygiene log at $LOG (end-sweep logger did not write)"
+          fi
+
       - name: Assert no redislite orphans (issue #1005)
         # Runs even when pytest failed — the orphan check is independent of
         # test outcomes. The conftest session-finalizer sweep runs on every
