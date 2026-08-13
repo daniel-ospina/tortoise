@@ -1123,6 +1123,14 @@ async def _session_user_team(request: Request, user: dict) -> dict:
     if not memberships:
         raise HTTPException(status_code=403, detail="No team membership")
     team_id = request.query_params.get("team_id") or memberships[0]["team_id"]
+    # #1148 review P1 (gate-closing): the session user must actually be a
+    # member of the requested team — otherwise ?team_id= lets any session
+    # user mint keys for / restore backups into / open billing for ANY team
+    # id they can guess (cross-team key minting, bypassing the
+    # dashboard_key_login flag by design). Same invariant as list_graphs/
+    # create_graph (_membership_team).
+    if team_id not in {m["team_id"] for m in memberships}:
+        raise HTTPException(status_code=403, detail="No membership in team")
     from tortoise.supabase_control import _QUOTA_SELECT
     rows = cp.query("teams", select=_QUOTA_SELECT, filters=[("id", "eq", team_id)])
     if not rows:

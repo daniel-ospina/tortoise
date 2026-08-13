@@ -237,3 +237,50 @@ class TestClaimEmail:
             "api_key": key, "email": "x@example.com", "password": "123",
         })
         assert r.status_code == 400, r.text
+
+
+class TestCrossTeamMintProtection:
+    """#1148 gate-closing P1: a session user must NOT mint keys / restore
+    backups / open billing for a team they don't belong to via ?team_id=.
+    (get_current_team_session → _session_user_team membership check.)"""
+
+    def test_session_cannot_mint_key_for_other_team(self, client, fake, monkeypatch):
+        # two anon teams
+        keyA, teamA = _provision_anon(client, fake)
+        keyB, teamB = _provision_anon(client, fake)
+        user_id = f"user-{uuid.uuid4().hex[:8]}"
+        _patch_session_user(monkeypatch, user_id)
+        # user owns ONLY team A (claim links the real anon owner row)
+        from tortoise.auth import lookup_hash
+        sc.claim_membership(fake, lookup_hash=lookup_hash(keyA),
+                            user_id=user_id, email="ownerA@example.com")
+        # mint for team B (not a member) → 403
+        r = client.post(
+            f"/v1/team/keys?team_id={teamB}",
+            headers={"Authorization": "Bearer eyJ.sess"}, json={},
+        )
+        assert r.status_code == 403, r.text
+        assert "No membership in team" in str(r.json())
+        # mint for own team A → works
+        r2 = client.post(
+            f"/v1/team/keys?team_id={teamA}",
+            headers={"Authorization": "Bearer eyJ.sess"}, json={},
+        )
+        assert r2.status_code == 200, r2.text
+
+    def test_session_cannot_toggle_dashboard_login_for_other_team(self, client, fake, monkeypatch):
+        keyA, teamA = _provision_anon(client, fake)
+        _, teamB = _provision_anon(client, fake)
+        user_id = f"user-{uuid.uuid4().hex[:8]}"
+        _patch_session_user(monkeypatch, user_id)
+        from tortoise.auth import lookup_hash
+        sc.claim_membership(fake, lookup_hash=lookup_hash(keyA),
+                            user_id=user_id, email="ownerA@example.com")
+        # toggle dashboard-login for team B → 403 (the endpoint's own
+        # _require_owner_admin would 403 anyway; this pins the membership gate)
+        r = client.patch(
+            f"/v1/team/dashboard-login?team_id={teamB}",
+            headers={"Authorization": "Bearer eyJ.sess"},
+            json={"enabled": False},
+        )
+        assert r.status_code == 403, r.text
