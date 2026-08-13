@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json as _json
 import logging
+import math
 import os
 import threading
 import time
@@ -514,13 +515,25 @@ class ClientIPMiddleware(BaseHTTPMiddleware):
     ``request.state.client_ip`` (fallback: ``request.client.host``) —
     without this resolution every per-IP limiter collapses to a GLOBAL
     cap behind the proxy.
+
+    #1081 review P2-2: the header is trusted ONLY when
+    ``TORTOISE_TRUST_FLY_CLIENT_IP=1`` (set in the hosted Fly image).
+    Fail-closed otherwise — an app reachable without the proxy (local dev,
+    selfhost, staging, direct port exposure, misconfigured org) must never
+    let a client set its own ``Fly-Client-IP`` (that would reset every
+    per-IP limiter key and the R8 tracker).
     """
 
     async def dispatch(self, request: Request, call_next):
-        request.state.client_ip = (
-            request.headers.get("Fly-Client-IP")
-            or (request.client.host if request.client else None)
-        )
+        if os.environ.get("TORTOISE_TRUST_FLY_CLIENT_IP") == "1":
+            request.state.client_ip = (
+                request.headers.get("Fly-Client-IP")
+                or (request.client.host if request.client else None)
+            )
+        else:
+            request.state.client_ip = (
+                request.client.host if request.client else None
+            )
         return await call_next(request)
 
 
@@ -586,7 +599,10 @@ async def _async_audit(
     (owner export/delete, #302) — key-plane paths leave it None (the key
     creator is not the caller).
     """
-    ip = request.client.host if request.client else None
+    # #1081 review P2-1: the durable sweeper queries audit_events by
+    # ip_address — record the REAL client IP (state.client_ip set by
+    # ClientIPMiddleware), never the Fly proxy IP (request.client.host).
+    ip = getattr(request.state, "client_ip", None) or (request.client.host if request.client else None)
     ua = request.headers.get("user-agent")
     await asyncio.to_thread(
         _audit_logger.append,
@@ -871,7 +887,7 @@ async def _audit_auth_failure(request: Request, reason: str) -> None:
 
     Offloaded to a thread to avoid blocking the 401 response.
     """
-    ip = request.client.host if request.client else None
+    ip = getattr(request.state, "client_ip", None) or (request.client.host if request.client else None)
     try:
         await asyncio.to_thread(
             _audit_logger.append,
@@ -1243,7 +1259,7 @@ async def _verify_turnstile(token: str | None, ip: str | None) -> bool:
 async def _check_turnstile(request: Request, body: dict) -> None:
     """400 when the secret is configured and the challenge fails."""
     token = body.get("cf-turnstile-response") or body.get("turnstile_token")
-    ip = request.client.host if request.client else None
+    ip = getattr(request.state, "client_ip", None) or (request.client.host if request.client else None)
     if not await _verify_turnstile(token, ip):
         raise HTTPException(
             status_code=400,
@@ -1447,8 +1463,17 @@ _SENSITIVE_LOCK = asyncio.Lock()
 # 2 signups / 24h per IP — "3rd signup in rolling 24h → 429" (issue decision).
 _SIGNUP_BUCKETS: dict[str, list[float]] = defaultdict(list)
 _SIGNUP_LOCK = asyncio.Lock()
-# P2-1: retained R8 feed tasks (create_task must hold a reference — asyncio GC)
+# P2-1: retained R8 feed tasks (create_task must hold a reference — asyncio GC).
+# #1081 review P3: dict is pruned via done-callback — every distinct IP
+# leaving a completed task would otherwise grow unbounded under the
+# rotating-IP farm this control defends against.
 _SIGNUP_FEED_TASKS: dict[str, asyncio.Task] = {}
+
+
+def _retain_feed_task(key: str, task: asyncio.Task) -> None:
+    """Retain an R8 feed task with done-callback cleanup (#1081 review P3)."""
+    _SIGNUP_FEED_TASKS[key] = task
+    task.add_done_callback(lambda _t: _SIGNUP_FEED_TASKS.pop(key, None))
 
 
 async def _check_ip_bucket_rate_limit(
@@ -1476,16 +1501,25 @@ async def _check_ip_bucket_rate_limit(
     if not request.client or not request.client.host:
         return
     ip = key if key is not None else request.client.host
-    # P2-2 (coherence): normalize IPv4-mapped IPv6 (::ffff:1.2.3.4 == 1.2.3.4)
-    # so a dual-stack client cannot present two keys for the same address.
-    if isinstance(ip, str) and ip.startswith("::ffff:") and "." in ip:
-        ip = ip[7:]
+    # P2-2 (coherence): normalize IPv4-mapped IPv6 so a dual-stack client
+    # cannot present two keys for one address. Handles both dotted-quad
+    # (::ffff:1.2.3.4) and hex (::ffff:7f00:1) forms via ipaddress.
+    if isinstance(ip, str) and ip.startswith("::ffff:") and len(ip) > 7:
+        try:
+            import ipaddress as _ipa
+            mapped = _ipa.ip_address(ip).ipv4_mapped
+            ip = str(mapped)
+        except ValueError:
+            pass
     now = time.time()
     async with lock:
         bucket = buckets[ip]
         bucket[:] = [t for t in bucket if now - t < window_s]
         if len(bucket) >= limit:
-            remaining = (int(bucket[0] + window_s - now)
+            # #1081 review P4: ceil — int() floors and can understate (and
+            # yield 0 for near-expiry windows); a client retrying exactly at
+            # the advertised value must not get a surprise 429.
+            remaining = (math.ceil(bucket[0] + window_s - now)
                          if retry_after_s is None else retry_after_s)
             raise HTTPException(
                 status_code=429,
@@ -4800,11 +4834,11 @@ async def agent_signup(request: Request):
             # the 429 response must NOT absorb ops email latency (up to ~15s
             # Resend). Retained in _SIGNUP_FEED_TASKS (P2-1: create_task must
             # hold a reference — asyncio GC).
-            _SIGNUP_FEED_TASKS["block-" + (getattr(request.state, "client_ip", None)
-                or (request.client.host if request.client else None))] = asyncio.create_task(
-                    asyncio.to_thread(_abuse.record_signup_block,
-                        getattr(request.state, "client_ip", None)
-                        or (request.client.host if request.client else None)))
+            _retain_feed_task("block-" + (getattr(request.state, "client_ip", None)
+                or (request.client.host if request.client else None)),
+                asyncio.create_task(asyncio.to_thread(_abuse.record_signup_block,
+                    getattr(request.state, "client_ip", None)
+                    or (request.client.host if request.client else None))))
         raise
 
     # #741(a): identity is ALWAYS server-side — client-supplied identity and
@@ -4878,11 +4912,11 @@ async def agent_signup(request: Request):
         await _async_audit(request, team_id, "agent_signup", resource_type="team", resource_id=team_id)
         # P3-D/P3-6: notify_abuse is sync httpx — fire-and-forget so ops email
         # latency never delays the cold-start mint (best-effort telemetry; #310)
-        _SIGNUP_FEED_TASKS["signup-" + (getattr(request.state, "client_ip", None)
-            or (request.client.host if request.client else None))] = asyncio.create_task(
-                asyncio.to_thread(_abuse.record_signup,
-                    getattr(request.state, "client_ip", None)
-                    or (request.client.host if request.client else None), team_id))
+        _retain_feed_task("signup-" + (getattr(request.state, "client_ip", None)
+            or (request.client.host if request.client else None)),
+            asyncio.create_task(asyncio.to_thread(_abuse.record_signup,
+                getattr(request.state, "client_ip", None)
+                or (request.client.host if request.client else None), team_id)))
         return {"key": api_key, "team_id": team_id, "team_name": team_name, "graph_name": graph_name,
                 "identity": identity, "tier": "free"}
 
@@ -4913,11 +4947,11 @@ async def agent_signup(request: Request):
         await _async_audit(request, team_id, "agent_signup", resource_type="team", resource_id=team_id)
         # P3-D/P3-6: fire-and-forget success-path feed (ops email latency
         # must never delay the mint response)
-        _SIGNUP_FEED_TASKS["signup-" + (getattr(request.state, "client_ip", None)
-            or (request.client.host if request.client else None))] = asyncio.create_task(
-                asyncio.to_thread(_abuse.record_signup,
-                    getattr(request.state, "client_ip", None)
-                    or (request.client.host if request.client else None), team_id))
+        _retain_feed_task("signup-" + (getattr(request.state, "client_ip", None)
+            or (request.client.host if request.client else None)),
+            asyncio.create_task(asyncio.to_thread(_abuse.record_signup,
+                getattr(request.state, "client_ip", None)
+                or (request.client.host if request.client else None), team_id)))
     except HTTPException:
         raise
     except Exception:

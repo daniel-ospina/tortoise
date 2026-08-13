@@ -35,7 +35,11 @@ def _middleware():
 
 
 @pytest.mark.asyncio
-async def test_fly_client_ip_header_populates_state():
+async def test_fly_client_ip_header_populates_state(monkeypatch):
+    # #1081 review P2-2: the header is trusted ONLY when
+    # TORTOISE_TRUST_FLY_CLIENT_IP=1 (hosted Fly image) — fail-closed
+    # otherwise so a non-proxy ingress can never set its own IP.
+    monkeypatch.setenv("TORTOISE_TRUST_FLY_CLIENT_IP", "1")
     req = _FakeRequest(headers={"Fly-Client-IP": "203.0.113.7"})
 
     async def call_next(request):
@@ -43,6 +47,23 @@ async def test_fly_client_ip_header_populates_state():
 
     await _middleware().dispatch(req, call_next)
     assert req.state.client_ip == "203.0.113.7"
+
+
+@pytest.mark.asyncio
+async def test_fly_client_ip_header_ignored_without_trust_flag(monkeypatch):
+    # Fail-closed: without the trust flag, a client-supplied Fly-Client-IP
+    # must NOT override the TCP peer (limiters key on client.host) —
+    # otherwise local dev / selfhost / non-proxy ingress could reset every
+    # per-IP limiter key (review P2-2).
+    monkeypatch.delenv("TORTOISE_TRUST_FLY_CLIENT_IP", raising=False)
+    req = _FakeRequest(headers={"Fly-Client-IP": "203.0.113.7"},
+                       client_host="198.51.100.9")
+
+    async def call_next(request):
+        return request
+
+    await _middleware().dispatch(req, call_next)
+    assert req.state.client_ip == "198.51.100.9"  # peer, not header
 
 
 @pytest.mark.asyncio
@@ -57,10 +78,12 @@ async def test_falls_back_to_client_host_when_header_absent():
 
 
 @pytest.mark.asyncio
-async def test_forged_x_forwarded_for_ignored():
+async def test_forged_x_forwarded_for_ignored(monkeypatch):
     """A client-forged XFF must NOT change the resolved IP (non-spoofable:
     the middleware only reads Fly-Client-IP, which the proxy sets/overwrites;
-    XFF is never consulted)."""
+    XFF is never consulted).
+    """
+    monkeypatch.setenv("TORTOISE_TRUST_FLY_CLIENT_IP", "1")
     req = _FakeRequest(headers={"Fly-Client-IP": "203.0.113.7",
                                 "X-Forwarded-For": "6.6.6.6"})
 
