@@ -584,7 +584,9 @@ class TestDeriveMeetingEventId:
         fm = {"date": "2026-08-05", "title": "Same Title"}
         lookup = lambda candidate: None  # noqa: E731 — eventId is free
         assert (
-            derive_meeting_event_id(fm, f, existing_source_file_lookup=lookup)
+            derive_meeting_event_id(
+                fm, f, existing_source_file_lookup=lookup, source_file="m.md"
+            )
             == "meeting_2026-08-05-same-title"
         )
 
@@ -603,9 +605,11 @@ class TestDeriveMeetingEventId:
         assert first == second  # deterministic, idempotent
 
     def test_symlink_alias_derives_same_suffix(self, tmp_path):
-        # Suffix hash input defaults to realpath(file) — alias and real path
-        # for ONE physical file converge on the same suffixed id WITHOUT an
-        # explicit source_file (the realpath-dedup default branch).
+        # CYCLE-26 REVIEW FIX (P2): the suffix-hash input is the caller-passed
+        # realpath-RELATIVIZED source_file (plan §4.2 cycle-15/16/17/18) — alias
+        # and real path for ONE physical file converge on the same suffixed id;
+        # omitting source_file under a collision lookup now RAISES (the
+        # absolute-realpath default is retired).
         root = tmp_path / "corpus"
         root.mkdir()
         real = self._rel(root, "m.md")
@@ -613,10 +617,16 @@ class TestDeriveMeetingEventId:
         alias.symlink_to(real)
         fm = {"date": "2026-08-05", "title": "Same Title"}
         lookup = lambda candidate: "/other.md"  # noqa: E731
-        a = derive_meeting_event_id(fm, alias, existing_source_file_lookup=lookup)
-        b = derive_meeting_event_id(fm, real, existing_source_file_lookup=lookup)
+        a = derive_meeting_event_id(
+            fm, alias, existing_source_file_lookup=lookup, source_file="m.md"
+        )
+        b = derive_meeting_event_id(
+            fm, real, existing_source_file_lookup=lookup, source_file="m.md"
+        )
         assert a == b
         assert a.startswith("meeting_2026-08-05-same-title-")
+        with pytest.raises(ValueError):
+            derive_meeting_event_id(fm, real, existing_source_file_lookup=lookup)
 
 
 class TestDeriveDocumentId:
@@ -796,3 +806,12 @@ class TestImportFlipAliases:
         import tortoise.sdk
 
         assert tortoise.sdk.file_indexer is tortoise.file_indexer
+
+
+def test_hash_text_does_not_normalize_boundary():
+    """P2-2 review fix: pin that hash_text hashes the buffer AS GIVEN — the
+    CRLF-immunity guarantee belongs to compute_file_hash's text-mode read."""
+    from tortoise.file_indexer import hash_text
+    assert hash_text("a\r\nb") != hash_text("a\nb"), (
+        "hash_text must NOT normalize line endings (caller precondition)"
+    )

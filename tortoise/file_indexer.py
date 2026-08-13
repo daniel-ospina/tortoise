@@ -71,10 +71,14 @@ _FM_RE = re.compile(r"^---\s*\n(.*?)\n---", re.DOTALL)
 def hash_text(text: str) -> str:
     """SHA-256 of the normalized text buffer (universal-newlines text mode).
 
-    CRLF-immune by construction: a text-mode read normalizes line endings
-    BEFORE the hash, so LF and CRLF copies of the same content hash equal
-    (the #330 non-convergence class). The index path hashes the SAME buffer
-    it parses (single-read / TOCTOU pin, §5.1 pin (c)).
+    CRLF-immune via CALLER PRECONDITION (CYCLE-26 REVIEW FIX P2): hash_text
+    hashes the buffer AS GIVEN — it does NOT normalize line endings
+    (hash_text("a\r\nb") != hash_text("a\nb")). The CRLF-immunity guarantee
+    lives on compute_file_hash, which owns the text-mode read (universal
+    newlines normalize BEFORE the hash). Any other caller (e.g. T3's bounded-
+    binary-read path, §6.4 layer-2 decode pin) MUST apply its own universal-
+    newline translation before calling hash_text — a raw CRLF buffer would
+    derive a divergent hash (the #330 non-convergence class).
     """
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -276,7 +280,10 @@ def derive_meeting_event_id(
     keyword) is this file's canonical stored form — the REALPATH-RELATIVIZED
     path when a corpus root is known (the form T3 stores on the meeting
     Event; a symlink-alias writer and a real-path writer for ONE physical
-    file derive the SAME suffixed id); default = ``realpath(file)``.
+    file derive the SAME suffixed id); the CALLER must pass ``source_file`` = the
+    realpath-RELATIVIZED path (plan §4.2 cycle-15/16/17/18 — the same canonical home as
+    the stored ``e.source_file``; an absolute default would spurious-suffix-fork on every
+    re-run and break whole-corpus relocation invariance — CYCLE-26 REVIEW FIX P2).
     """
     title = _coerce_str(frontmatter.get("title"))
     date_val = frontmatter.get("date")
@@ -299,11 +306,17 @@ def derive_meeting_event_id(
         candidate = f"meeting_{slugify(stem)}"
 
     if existing_source_file_lookup is not None:
-        own = (
-            source_file
-            if source_file is not None
-            else os.path.realpath(str(file_path))
-        )
+        if source_file is None:
+            # CYCLE-26 REVIEW FIX (P2): the suffix-hash input must be the pinned
+            # realpath-RELATIVIZED form (plan §4.2 cycle-15/16/17/18) — demand it;
+            # an absolute realpath default would spurious-suffix-fork on every
+            # re-run that omits source_file and break whole-corpus relocation
+            # invariance (T3 passes the relativized form).
+            raise ValueError(
+                "derive_meeting_event_id: source_file (realpath-relativized) is "
+                "required for collision-suffix derivation (plan §4.2)"
+            )
+        own = source_file
         stored = existing_source_file_lookup(candidate)
         if stored is not None and stored != own:
             suffix = hashlib.sha256(own.encode("utf-8")).hexdigest()[:8]
