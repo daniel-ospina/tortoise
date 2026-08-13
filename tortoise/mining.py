@@ -227,6 +227,7 @@ class ConversationMiner:
         session_started_at: str | None = None,
         extract_entities: bool = True,
         entity_stage=None,
+        batch_id: str | None = None,
     ) -> dict:
         """Run extraction pipeline on a conversation transcript.
 
@@ -238,11 +239,24 @@ class ConversationMiner:
           - dedup_hits: 0 — the dedup stage is a later issue; key counted only
           - drafts:  number of extraction Points created with status 'draft'
 
+        Phase-4 (W-3, #990): every extraction Point is stamped with a
+        ``batch_id`` (auto-generated per call when not given, plan §4.4) and
+        the batch runs the EpSafeCommit W-3 gate (draft-only, no auto-wire,
+        grounding drift ≤2% via mean_grounding — #779). Additive result keys:
+          - batch_id: the batch this call produced
+          - batch_status: "committed" (W-3 pass — drafts enter the review
+            queue), "quarantined" (W-3 fail — promote_point is blocked on
+            the batch's Points until a re-run passes, J-5), or "not_gated"
+            (standalone log mode — no projection, gate skipped)
+          - batch_reason: the W-3 failure reason when quarantined, or the
+            skip explanation when not_gated
+
         ``entity_stage`` injects a deterministic mock (EntityStageMock, plan
         §7 preamble) for tests; None → LLM stage (or rule fallback when no
         model is configured).
         """
         started_at = session_started_at or _now()
+        batch_id = batch_id or ulid()
 
         # 1. Run extractor: Points + IMPL/NAND operators
         extractor = self._make_extractor()
@@ -282,6 +296,53 @@ class ConversationMiner:
                 transcript, source_id, api, entities, points, events,
             )
 
+        # Phase-4 (W-3, #990): stamp the batch on every extraction Point
+        # (post-hoc bulk write — the extractor is untouched), then run the
+        # EpSafeCommit gate over the batch. Pass → committed (drafts enter
+        # the review queue); fail → batch quarantined (promote_point blocks).
+        point_ids = [p.get("id") for p in points if p.get("id")]
+        if point_ids and api.projection is not None:
+            api.projection.g.query(
+                "MATCH (n:Point) WHERE n.id IN $ids SET n.batch_id = $bid",
+                params={"ids": point_ids, "bid": batch_id},
+            )
+        batch_status = "not_gated"
+        batch_reason = "no projection — W-3 gate skipped (standalone log mode)"
+        if api.projection is not None:
+            from tortoise.analyze import grounding_snapshot
+            # EpSafeCommit/quarantine_batch are module-level (defined below);
+            # reference via module for clarity at the call site.
+            from . import mining as _mining
+            try:
+                # Grounding drift protects the LIVE graph against batch
+                # side-effects. Actual ordering: extraction has already
+                # completed here, and extraction writes only drafts (excluded
+                # from the live-only mean), so pre and post normally agree
+                # (~0 drift) — the check guards against concurrent live
+                # changes landing between the two reads (e.g. a parallel
+                # promote_point on the same graph), which would trip the
+                # ≤2% mean ceiling and quarantine the batch.
+                pre = grounding_snapshot(api.projection)["mean"]
+                gate = _mining.EpSafeCommit(api.projection, batch_id)
+                res = gate.run(point_ids, grounding_before=pre,
+                               grounding_after=grounding_snapshot(
+                                   api.projection)["mean"])
+                if res["ok"]:
+                    batch_status = "committed"
+                    batch_reason = None
+                else:
+                    batch_status = "quarantined"
+                    batch_reason = res.get("reason")
+            except Exception:
+                logger.exception("W-3 gate failed for batch %s — quarantining", batch_id)
+                try:
+                    _mining.quarantine_batch(api.projection, batch_id,
+                                             reason="W-3 gate error (pipeline wiring)")
+                except Exception:
+                    logger.exception("quarantine_batch failed for %s", batch_id)
+                batch_status = "quarantined"
+                batch_reason = "W-3 gate error (pipeline wiring)"
+
         return {
             "events": len(events),
             "points": len(points),
@@ -291,6 +352,9 @@ class ConversationMiner:
             "objects": objects_wired,
             "dedup_hits": dedup_hits,
             "drafts": drafts,
+            "batch_id": batch_id,
+            "batch_status": batch_status,
+            "batch_reason": batch_reason,
         }
 
     # ── Phase-2 entity reification (W-1 write phase, DE2E-1) ──────
@@ -664,7 +728,10 @@ def mine_conversation(
     """Convenience: mine a conversation transcript → Events + Points + Objects.
 
     Returns (plan §6.1, back-compatible): Phase-1 keys {events, points,
-    operators, event_ids} plus Phase-2 {entities, objects, dedup_hits, drafts}.
+    operators, event_ids} plus Phase-2 {entities, objects, dedup_hits, drafts}
+    plus Phase-4 {batch_id, batch_status, batch_reason} (W-3 wiring, #990 —
+    see ConversationMiner.mine for the exact semantics, incl. the
+    "not_gated" standalone-log state).
     ``content_dedup``/``dedup_threshold`` are accepted for the pinned API
     surface but the dedup stage itself is a later issue — dedup_hits is
     always 0 from this entry point (DE2E-3).
@@ -676,7 +743,8 @@ def mine_conversation(
     return miner.mine(transcript, source_id, api,
                       participants=participants,
                       extract_entities=extract_entities,
-                      entity_stage=entity_stage)
+                      entity_stage=entity_stage,
+                      batch_id=None)  # auto-generated per call (#990)
 
 
 def mine_corpus(

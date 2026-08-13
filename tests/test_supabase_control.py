@@ -1208,8 +1208,8 @@ class TestMeteringSeam:
         spy = _Spy()
         assert metering_increment(spy, "team-1", "2026-08", 2) == 2
         assert metering_increment(spy, "team-1", "2026-08", 4) == 6
-        # p_nodes_written is the net-new node cost driver (#1006); default 0
-        # when the caller doesn't pass it.
+        # #953: the RPC body carries p_nodes_written (epic #909 W-4 commit
+        # cost driver; default 0 on plain increments).
         assert spy.rpc_calls == [
             ("metering_increment", {"p_team_id": "team-1",
                                     "p_period": "2026-08", "p_n": 2,
@@ -1217,6 +1217,28 @@ class TestMeteringSeam:
             ("metering_increment", {"p_team_id": "team-1",
                                     "p_period": "2026-08", "p_n": 4,
                                     "p_nodes_written": 0}),
+        ]
+
+    def test_metering_increment_passes_nodes_written(self):
+        """#953: a non-zero nodes_written flows through to the RPC body."""
+        from tortoise.supabase_control import metering_increment
+        from tests.fake_control_plane import FakeControlPlane
+
+        class _Spy(FakeControlPlane):
+            def __init__(self):
+                super().__init__({"metering_records": []})
+                self.rpc_calls = []
+
+            def rpc(self, fn, body):
+                self.rpc_calls.append((fn, body))
+                return None
+
+        spy = _Spy()
+        metering_increment(spy, "team-1", "2026-08", 3, nodes_written=5)
+        assert spy.rpc_calls == [
+            ("metering_increment", {"p_team_id": "team-1",
+                                    "p_period": "2026-08", "p_n": 3,
+                                    "p_nodes_written": 5}),
         ]
 
     def test_metering_increment_readback_failure_returns_delta(self):

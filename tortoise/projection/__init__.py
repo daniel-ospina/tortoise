@@ -723,6 +723,34 @@ class FalkorProjection(
         except Exception:
             pass  # Graph may be corrupt — skip snapshot; JSONL replay is best-effort
 
+        # ── :Batch marker snapshot (#990) ───────────────────────────
+        # Batch lifecycle state (quarantine/commit) lives on :Batch marker
+        # nodes, which are NOT :Point nodes — the #548 snapshot below only
+        # covers Points. Snapshot them here so a rebuild does not silently
+        # evaporate quarantine locks (a quarantined batch must stay
+        # quarantined after rebuild — review #944/#990).
+        batch_snapshot: list[dict] = []
+        batch_point_links: list[tuple[str, str]] = []
+        try:
+            rows = self.g.query(
+                "MATCH (b:Batch) RETURN properties(b)"
+            ).result_set
+            batch_snapshot = [r[0] for r in rows] if rows else []
+            # The ENFORCEMENT link (Point.batch_id) is a raw graph write on
+            # the mining path — it never rides the JSONL event stream, so the
+            # #548 Point snapshot (which skips log-covered points) cannot
+            # restore it. Snapshot the links too: without them, a rebuild
+            # leaves the :Batch marker quarantined while promote_point no
+            # longer sees the batch_id — the lock silently bypasses (#1025
+            # review P1).
+            link_rows = self.g.query(
+                "MATCH (p:Point) WHERE p.batch_id IS NOT NULL "
+                "RETURN p.id, p.batch_id"
+            ).result_set
+            batch_point_links = [(r[0], r[1]) for r in link_rows] if link_rows else []
+        except Exception:
+            pass  # graph may be corrupt — best-effort, like the #548 snapshot
+
         # ── Wipe + rebuild ──────────────────────────────────────────
         self.g.query("MATCH (n) DETACH DELETE n")
 
@@ -823,6 +851,24 @@ class FalkorProjection(
                 # #330 parity with apply(): SourceCreated was dropped by rebuild.
                 self._upsert_source(ev)
             # ConfidenceChanged: no graph effect (audit-only event)
+
+        # Pass 1b tail: restore :Batch marker nodes AND the Point.batch_id
+        # enforcement links from the pre-wipe snapshot (#990) — quarantine
+        # locks survive rebuilds, and promote_point still sees them.
+        for props in batch_snapshot:
+            bid = props.get("id")
+            if not bid:
+                continue
+            clean = {k: v for k, v in props.items() if k != "id"}
+            self.g.query(
+                "MERGE (b:Batch {id:$id}) SET b += $props",
+                params={"id": bid, "props": clean},
+            )
+        for pid, bid in batch_point_links:
+            self.g.query(
+                "MATCH (p:Point {id:$pid}) SET p.batch_id = $bid",
+                params={"pid": pid, "bid": bid},
+            )
 
         # Pass 2: create edges for all operators + provenance/entity wiring
         # (shared _upsert_point_edges — single source of truth with apply, #330).
