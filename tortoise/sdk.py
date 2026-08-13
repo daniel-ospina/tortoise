@@ -354,6 +354,7 @@ def _classify_db_failure(e: BaseException) -> str | None:
     ConnectionError / TimeoutError / ENOSPC-family); None otherwise (the
     per-file handler re-buckets it as structural)."""
     import os as _os
+    import errno
     try:
         import redis.exceptions as _re
         if isinstance(e, (_re.ResponseError, _re.ConnectionError,
@@ -363,8 +364,8 @@ def _classify_db_failure(e: BaseException) -> str | None:
     except Exception:  # noqa: BLE001
         pass
     if isinstance(e, OSError) and getattr(e, "errno", None) in (
-            getattr(_os, "ENOSPC", None), getattr(_os, "EIO", None),
-            getattr(_os, "EROFS", None)):
+            getattr(errno, "ENOSPC", None), getattr(errno, "EIO", None),
+            getattr(errno, "EROFS", None)):
         return "db"
     return None
 
@@ -9710,6 +9711,7 @@ class TortoiseSDK:
         the caller records the repair marker when the Event pre-existed)."""
         import json as _json
         from datetime import datetime, timezone
+        from pathlib import Path
         from .session_indexer import (
             extract_keywords_from_frontmatter as _kw_fallback,
             extract_metadata as _extract,
@@ -9775,7 +9777,9 @@ class TortoiseSDK:
                         if k not in ("startedAt", "capturedAt")}
         proj.g.query(
             "MERGE (e:Event {eventId:$eid}) "
-            "ON CREATE SET e += $props "
+            "ON CREATE SET e += $props, "
+            "e.embedding = CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) "
+            "ELSE e.embedding END "
             "ON MATCH SET e += $match_props, "
             "e.embedding = CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) "
             "ELSE e.embedding END",

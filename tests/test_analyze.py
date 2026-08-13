@@ -6,6 +6,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 from tortoise.analyze import classify, analyze, TEMPLATES, _format_chain
 
+from tests._embedded import wipe  # noqa: E402
 
 def test_classify_disagreement():
     result = classify("where is the disagreement?")
@@ -76,14 +77,13 @@ def test_no_llm_no_proj():
     assert result["raw"] == []
 
 
-def test_with_projection():
+def test_with_projection(shared_proj):
     """With a real FalkorProjection, executes queries."""
-    from tortoise.projection import FalkorProjection
-    import tempfile, shutil
-    tmpdir = tempfile.mkdtemp()
-    db_path = os.path.join(tmpdir, "test.db")
+    proj = shared_proj
+    if proj is None:
+        return
+    wipe(proj)
     try:
-        proj = FalkorProjection(db_path)
         # Add test data: the disagreement template matches the operator-node
         # pattern (a)<-[:NAND]-(op {op_type:"NAND"})-[:NAND]->(b), NOT a direct
         # (a)-[:NAND]->(b) edge — the old fixture returned zero rows (#325).
@@ -97,8 +97,7 @@ def test_with_projection():
         assert len(result["raw"]) > 0, "disagreement query returned no rows"
         assert result["query"] is not None
     finally:
-        proj.close()
-        shutil.rmtree(tmpdir, ignore_errors=True)
+        pass  # shared session projection — fixture owns close
 
 
 def test_format_chain_three_column_rows():
@@ -136,14 +135,13 @@ def test_format_ranked_non_numeric_confidence():
     assert "claim" in out
 
 
-def test_evidence_chain_end_to_end():
+def test_evidence_chain_end_to_end(shared_proj):
     """Regression #325: an IMPL chain answer must not raise IndexError."""
-    from tortoise.projection import FalkorProjection
-    import tempfile, shutil
-    tmpdir = tempfile.mkdtemp()
-    db_path = os.path.join(tmpdir, "test.db")
+    proj = shared_proj
+    if proj is None:
+        return
+    wipe(proj)
     try:
-        proj = FalkorProjection(db_path)
         # evidence <-IMPL- op(IMPL) -IMPL-> target (target content must contain
         # the entity extracted from the question)
         proj.g.query("CREATE (:Point {id:'e1', content:'sales data shows growth', confidence:0.8, is_operator:false})")
@@ -157,8 +155,7 @@ def test_evidence_chain_end_to_end():
         assert result["pattern"] == "evidence_chain"
         assert result["answer"] != ""  # must not raise IndexError
     finally:
-        proj.close()
-        shutil.rmtree(tmpdir, ignore_errors=True)
+        pass  # shared session projection — fixture owns close
 
 
 def test_analyze_rejects_legacy_context_kwarg():
@@ -269,15 +266,14 @@ def test_llm_classify_provider_down_returns_none(monkeypatch):
 
 # ── #329: error/cypher redaction ──
 
-def test_analyze_error_redacted(monkeypatch):
+def test_analyze_error_redacted(monkeypatch, shared_proj):
     """Force a Cypher error → no raw exception internals, query is None."""
     from tortoise.analyze import analyze
-    from tortoise.projection import FalkorProjection
-    import tempfile, shutil
-    tmpdir = tempfile.mkdtemp()
-    db_path = os.path.join(tmpdir, "test.db")
+    proj = shared_proj
+    if proj is None:
+        return
+    wipe(proj)
     try:
-        proj = FalkorProjection(db_path)
         proj.g.query("CREATE (:Point {id:'c1', content:'AI strategy is working', confidence:0.85})")
         proj.g.query("CREATE (:Point {id:'c2', content:'AI strategy needs revision', confidence:0.65})")
         # NAND is operator-mediated (#7801): op {op_type:'NAND', is_operator:true}
@@ -299,8 +295,7 @@ def test_analyze_error_redacted(monkeypatch):
         finally:
             _a.TEMPLATES["disagreement"]["cypher"] = orig
     finally:
-        proj.close()
-        shutil.rmtree(tmpdir, ignore_errors=True)
+        pass  # shared session projection — fixture owns close
 
 
 def test_analyze_unknown_pattern_not_echoed():
