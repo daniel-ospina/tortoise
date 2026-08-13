@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+# check-migration-drift — fail-closed deploy gate for Supabase schema drift (#1095)
+#
+# Compares repo migration version prefixes (supabase/migrations/*.sql) against
+# the linked project's applied set (supabase_migrations.schema_migrations via
+# the Supabase Management API). Blocks deploys when the repo has pending
+# table/column/function/unique-index migrations that prod lacks — the #1001
+# failure class (code shipped reading columns whose migration never applied).
+#
+# Usage:
+#   bash .github/scripts/check-migration-drift
+#
+# Env:
+#   SUPABASE_ACCESS_TOKEN  (required) — repo secret; Bearer token for the
+#                          Management API (the same token-based path
+#                          supabase-deploy uses since #883)
+#   DRIFT_API_URL          (optional) — default https://api.supabase.com
+#   DRIFT_PROJECT_REF      (optional) — default ybetwichurajbfswfeqa
+#   DRIFT_CURL             (optional) — curl command override (test seam)
+#   DRIFT_MIGRATIONS_DIR   (optional) — migrations dir (test seam; default
+#                          <repo>/supabase/migrations)
+#   DRIFT_BASE_SHA         (optional) — not used by this script (see
+#                          check-migration-append-only)
+#
+# Exit codes (mirrors verify-cutover convention):
+#   0 — clean, or only warn-class drift (index-only) / remote-ahead
+#   1 — repo-ahead BLOCKING drift (table/column/function/unique-index)
+#   2 — could not determine state (missing token, API error, parse failure)
+#
+# Fail-closed by contract: any error exits 2 with an actionable message. A
+# missing secret must fail the deploy, not silently skip the gate.
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+API_URL="${DRIFT_API_URL:-https://api.supabase.com}"
+PROJECT_REF="${DRIFT_PROJECT_REF:-ybetwichurajbfswfeqa}"
+MIGRATIONS_DIR="${DRIFT_MIGRATIONS_DIR:-$REPO_ROOT/supabase/migrations}"
+CURL="${DRIFT_CURL:-curl}"
+
+# ── 1. Preconditions (fail-closed) ────────────────────────────────────────
+if [ -z "${SUPABASE_ACCESS_TOKEN:-}" ] && [ -z "${DRIFT_TOKEN:-}" ]; then
+  echo "check-migration-drift: SUPABASE_ACCESS_TOKEN not set — cannot verify migration state (exit 2)" >&2
+  exit 2
+fi
+TOKEN="${DRIFT_TOKEN:-$SUPABASE_ACCESS_TOKEN}"
+
+if [ ! -d "$MIGRATIONS_DIR" ]; then
+  echo "check-migration-drift: migrations dir not found: $MIGRATIONS_DIR (exit 2)" >&2
+  exit 2
+fi
+
+# ── 2. Local version set (CLI key rule: everything before first _) ────────
+# Matches the Supabase CLI's migrateFilePattern ^([0-9]+)_(.*)\.sql$.
+# -n + p drops non-conforming files (the CLI skips them too); they are
+# reported separately below since they'd be applied by NOBODY.
+LOCAL_VERSIONS="$(
+  ls "$MIGRATIONS_DIR"/*.sql 2>/dev/null \
+    | sed -nE 's#.*/([0-9]+)_.*#\1#p' \
+    | sort -u
+)"
+NON_CONFORMING="$(
+  ls "$MIGRATIONS_DIR"/*.sql 2>/dev/null \
+    | sed -nE 's#.*/([^0-9][^/]*\.sql|[0-9]+[^_/]*\.sql)$#\1#p' \
+    | sort -u
+)"
+
+# ── 3. Remote version set (Management API, fail-closed) ───────────────────
+QUERY='{"query":"SELECT version FROM supabase_migrations.schema_migrations ORDER BY version"}'
+API_RESPONSE="$("$CURL" -s -w '\n%{http_code}' -X POST \
+  "$API_URL/v1/projects/$PROJECT_REF/database/query" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "$QUERY" 2>&1 || true)"
+HTTP_CODE="$(printf '%s' "$API_RESPONSE" | tail -n1)"
+API_BODY="$(printf '%s' "$API_RESPONSE" | sed '$d')"
+
+if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "201" ]; then
+  echo "check-migration-drift: Management API returned HTTP $HTTP_CODE — cannot determine migration state (exit 2)" >&2
+  printf '%s\n' "$API_BODY" | head -c 400 >&2
+  echo "" >&2
+  exit 2
+fi
+
+REMOTE_VERSIONS="$(
+  printf '%s' "$API_BODY" \
+    | jq -e 'type == "array"' >/dev/null 2>&1 \
+    && printf '%s' "$API_BODY" | jq -r '.[].version' 2>/dev/null | sort -u \
+    || { echo "check-migration-drift: API response was not a JSON array — cannot determine migration state (exit 2)" >&2; exit 2; }
+)"
+# jq exit propagation: if the type-assert or extraction failed, we must exit 2.
+# BUT an empty remote set (fresh project / zero applied migrations) is a
+# legitimate state — every repo migration is repo-ahead (exit 1, not 2).
+if [ -z "$REMOTE_VERSIONS" ] && ! printf '%s' "$API_BODY" | jq -e 'type == "array"' >/dev/null 2>&1; then
+  echo "check-migration-drift: could not extract remote migration versions (exit 2)" >&2
+  exit 2
+fi
+
+# ── 4. Diff ───────────────────────────────────────────────────────────────
+REPO_AHEAD="$(comm -23 <(printf '%s\n' "$LOCAL_VERSIONS") <(printf '%s\n' "$REMOTE_VERSIONS"))"
+REMOTE_AHEAD="$(comm -13 <(printf '%s\n' "$LOCAL_VERSIONS") <(printf '%s\n' "$REMOTE_VERSIONS"))"
+
+# ── 5. DDL classification (block-first precedence) ────────────────────────
+# For each repo-ahead migration, classify by content:
+#   block-class — table/column/function/trigger/unique-index/primary-key/
+#                 exclude/DO-block/unparseable → BLOCK the deploy
+#   warn-class  — plain non-unique CREATE INDEX only → warn (app can't read
+#                 an index; a pending index is not a correctness dependency)
+# Comment-stripped + case-insensitive (SQL keywords are case-insensitive).
+BLOCKING=""
+WARN_ONLY=""
+for v in $REPO_AHEAD; do
+  f="$(ls "$MIGRATIONS_DIR"/${v}_*.sql 2>/dev/null | head -n1)"
+  [ -z "$f" ] && continue
+  # strip -- and /* */ comments (line-scoped; multi-line /* */ is a known
+  # limitation — over-blocks fail-closed, never under-blocks), then test block
+  # patterns first
+  if grep -iE "create unique index|primary key|add constraint .*unique|exclude using|create table|alter table|create or replace function|create trigger|do \$\$|create policy|create type|create view" "$f" \
+      | sed -E 's/--.*$//; s!/\*.*\*/!!g' \
+      | grep -qiE "create unique index|primary key|add constraint .*unique|exclude using|create table|alter table|create or replace function|create trigger|do \$\$|create policy|create type|create view"; then
+    BLOCKING="$BLOCKING $v"
+  elif grep -iE "create index" "$f" | sed -E 's/--.*$//' | grep -qiE "create index"; then
+    WARN_ONLY="$WARN_ONLY $v"
+  else
+    BLOCKING="$BLOCKING $v"
+  fi
+done
+
+# ── 6. Report + exit ──────────────────────────────────────────────────────
+echo "check-migration-drift: repo migrations vs prod (project $PROJECT_REF)"
+if [ -n "$REMOTE_AHEAD" ]; then
+  echo "  remote-ahead (WARN, safe direction — repo code can't depend on objects the repo doesn't know): $REMOTE_AHEAD"
+fi
+if [ -n "$NON_CONFORMING" ]; then
+  echo "  non-conforming migration filenames (applied by NOBODY — rename to ^[0-9]+_ pattern): $NON_CONFORMING" >&2
+fi
+
+if [ -n "$BLOCKING" ]; then
+  echo "  BLOCKING repo-ahead migrations (pending in repo, NOT applied to prod):"
+  for v in $BLOCKING; do echo "    - $v"; done
+  echo "  Remediation: apply migrations first —"
+  echo "    gh workflow run supabase-deploy.yml --ref main"
+  echo "    # or manually: supabase db push --linked --include-all"
+  echo "    # rename-repair case: supabase migration repair --linked --status applied <version>"
+  exit 1
+fi
+if [ -n "$WARN_ONLY" ]; then
+  echo "  warn-only repo-ahead migrations (index-only, no correctness dependency): $WARN_ONLY"
+fi
+echo "check-migration-drift: OK (no blocking drift)"
+exit 0
