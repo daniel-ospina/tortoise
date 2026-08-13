@@ -22,7 +22,10 @@ from tortoise.sdk import TortoiseSDK
 
 
 @pytest.fixture()
-def sdk(tmp_path):
+def sdk(tmp_path, monkeypatch):
+    # Pin the session-index lock dir so sandboxed CI (unwritable home) can't
+    # turn a lock skip into a hard failure (#1068 review).
+    monkeypatch.setenv("TORTOISE_INDEX_LOCK_DIR", str(tmp_path / "locks"))
     return TortoiseSDK(db_path=str(tmp_path / "t.db"))
 
 
@@ -76,9 +79,31 @@ class TestDe2e5:
         assert "issue" in kinds, f"expected an issue-kind Object, got {kinds}"
         assert _no_instantiates(sdk), "INSTANTIATES must not exist on the ingest path"
 
+    def test_session_event_uses_artifact_object(self, sdk):
+        """DE2E-5 spec: the session Event `uses` the artifact Object — the
+        canonical writer is file_human_approval (create_edge(event, artifact,
+        'uses'), design #421)."""
+        claim = sdk.create_point("statement", "claim under approval", status="live")
+        sdk.create_subject("alice")
+        artifact = sdk.create_entity("document", "doc-1",
+                                     documentKind="plan", objectKind="document")
+        sdk.file_human_approval(approver_id="alice",
+                                artifact_id=artifact["node"]["id"],
+                                point_ids=[claim["id"]])
+        rows = sdk._get_proj().g.query(
+            "MATCH (e:Event)-[:uses]->(o) RETURN e.eventId, o.id"
+        ).result_set
+        assert rows, "approval Event must use the artifact"
+        assert rows[0][1] == artifact["node"]["id"], (
+            "the uses edge must point at the approved artifact"
+        )
+
     def test_decision_produces_point(self, sdk):
         """The humanApproval flow wires the Event → decision Point via
-        produces (design #421) — the canonical produces writer."""
+        produces (file_human_approval, design #421) — the canonical writer.
+        NOTE: the ranking read path queries uppercase PRODUCES (pre-existing
+        #25 case mismatch — the confidence term is currently dead for
+        production events; tracked, not introduced by this PR)."""
         proj = sdk._get_proj()
         claim = sdk.create_point("statement", "claim under approval", status="live")
         sdk.create_subject("alice")
@@ -159,6 +184,27 @@ class TestDe2e5:
         assert boost == expected, (
             f"Point-origin aboutObject must NOT inflate the session boost "
             f"(got {boost}, expected {expected})"
+        )
+
+    def test_mining_path_no_instantiates(self, sdk):
+        """DE2E-5 'both paths': mining (mine_conversation) writes zero
+        INSTANTIATES edges."""
+        import os as _os
+        import tempfile as _tf
+        from tortoise.api import EventAPI
+        from tortoise.log import EventLog
+        from tortoise.mining import mine_conversation
+        tmp = _tf.mkdtemp()
+        api = EventAPI(EventLog(_os.path.join(tmp, "e.jsonl")),
+                       initiated_by="extractor", agent_id="t",
+                       projection=sdk._get_proj())
+        mine_conversation(
+            "Alice: We decided to move the FalkorDB default port to 16379.\n"
+            "Bob: I disagree because changing port 16379 breaks the redis config.\n"
+            "Alice: But tortoise#123 tracks the migration work.\n",
+            "session_sm", api)
+        assert _no_instantiates(sdk), (
+            "mining path must not write INSTANTIATES edges"
         )
 
     def test_security_whitelist_has_no_instantiates(self):
