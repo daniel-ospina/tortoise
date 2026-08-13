@@ -165,6 +165,8 @@ CLAIM_EVENT_TYPES = (
     "PointRetracted",
     "PointSuperseded",
     "OperatorAnnotated",
+    "PointPromoted",      # #785: reviewer-gated draft→live promotion
+    "OperatorPromoted",   # #785: R16 zombie-operator prevention
 )
 
 

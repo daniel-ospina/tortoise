@@ -69,6 +69,8 @@ _GRAPH_EVENT_TYPES = frozenset({
     "PointRetracted",
     "PointSuperseded",
     "OperatorAnnotated",
+    "PointPromoted",   # #785: reviewer-gated draft→live promotion
+    "OperatorPromoted",  # #785: R16 zombie-operator prevention
 })
 
 
@@ -288,6 +290,14 @@ class TortoiseSDK:
         self._evidence: dict[str, tuple[float, float]] = {}
         self._registry_g = None
         self._audit_logger = None
+        # Issue #1005 (lifecycle): idempotent close + context-manager support
+        # + atexit registration so a NORMAL process exit never orphans the
+        # embedded server (the dominant leak path — sessions ending without
+        # closing). No weakref.finalize: the atexit bound method keeps the
+        # SDK alive until exit, so a GC finalizer could never fire.
+        self._t_closed = False
+        import atexit as _atexit
+        _atexit.register(self._t_close)
         # Dreaming (#85): dirty claim roots awaiting EP stabilization. Write
         # paths mark affected claims dirty; dream()/lazy-read consume them.
         self._dirty_roots: set[str] = set()
@@ -1448,6 +1458,226 @@ class TortoiseSDK:
             raise ValueError(
                 f"Point {id!r} is already terminal — retraction is terminal")
         return r.result_set[0][0]  # updated node props (no trailing get_point round trip)
+
+    # ── Promotion (Phase-4 EP-safe lifecycle, #785) ────────────────
+
+    def promote_point(self, point_id: str) -> dict:
+        """Reviewer-gated draft→live promotion (plan §6.1, J-5, DE2E-8).
+
+        The ONLY path a draft extraction Point may go live — never via the
+        SDK #131 edge auto-promotion for extraction paths
+        (`create_operator(promote_source=False)`, #780).
+
+        Semantics (all responses include id + status + promoted + blocked):
+          - already live → NO-OP {promoted: False, blocked: False,
+            reason: "already_live"} — DE2E-N9
+          - operator node → blocked {blocked: True, reason: "is_operator"} —
+            operators only go live via the R16 endpoint gate (matching
+            retract_point's operator rejection)
+          - terminal (retracted/superseded/outdated/archived) → blocked
+            {blocked: True, reason: "not_draft"}
+          - Point belongs to a QUARANTINED batch → blocked
+            {blocked: True, reason: "batch_quarantined", batch_id} — quarantine
+            is batch-level (plan §3): the batch's Points stay draft until the
+            W-3 re-run passes (EpSafeCommit recovery loop)
+          - otherwise → status draft→live, `reviewed: true` derived flag set,
+            PointPromoted event emitted, and R16 zombie prevention:
+            incident DRAFT operator nodes (status 'draft' — the post-#780
+            extraction shape) are promoted to live ONCE ALL their endpoint
+            Points are live, so a contradiction never stays a dead draft
+            operator after its claims go live.
+
+        NOTE (review #944/#990): the quarantine lock is a read-then-CAS —
+        FalkorDBLite has no EXISTS subqueries, so the batch check cannot fold
+        into the CAS. #990 added a post-CAS re-check that SURFACES a lost
+        race instead of hiding it: when a quarantine lands between the read
+        and the CAS, the promotion completes but the response carries
+        ``race_detected: true`` + ``race_warning`` (the point is live while
+        its batch is quarantined — an operator action is required).
+
+        Raises ValueError if the Point does not exist.
+        """
+        proj = self._get_proj()
+        row = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN properties(n)",
+            params={"id": point_id},
+        ).result_set
+        if not row:
+            raise ValueError(f"No point {point_id!r}")
+        point = row[0][0]
+        status = point.get("status")
+
+        # Operators go live ONLY via the R16 endpoint gate — promoting a
+        # draft operator directly would create the live-operator-with-draft-
+        # endpoints state R16 exists to prevent (review #944).
+        if point.get("is_operator") or point.get("op_type"):
+            return {"id": point_id, "status": status, "promoted": False,
+                    "blocked": True, "reason": "is_operator"}
+        # DE2E-N9: already-live promote → no-op, no error.
+        if status == "live":
+            return {"id": point_id, "status": "live", "promoted": False,
+                    "blocked": False, "reason": "already_live"}
+        # Terminal states cannot be promoted back to live.
+        if status != "draft":
+            return {"id": point_id, "status": status, "promoted": False,
+                    "blocked": True, "reason": "not_draft"}
+
+        # Quarantine lock (batch-level): a quarantined batch's Points stay
+        # draft until re-review (W-3 recovery).
+        batch_id = point.get("batch_id")
+        if batch_id:
+            from .mining import batch_status  # lazy: no module-level sdk↔mining cycle
+            bs = batch_status(proj, batch_id)
+            if bs is not None and bs["status"] == "quarantined":
+                return {"id": point_id, "status": status, "promoted": False,
+                        "blocked": True, "reason": "batch_quarantined",
+                        "batch_id": batch_id}
+
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        # CAS-guarded SET (concurrent promote can't double-fire); reviewed is
+        # the DERIVED reviewer flag (plan §3 — no new stored status).
+        r = proj.g.query(
+            "MATCH (n:Point {id:$id}) WHERE n.status = 'draft' "
+            "SET n.status = 'live', n.reviewed = true, n.promotedAt = $now, "
+            "n.updatedAt = $now RETURN n.id",
+            params={"id": point_id, "now": now},
+        )
+        if not r.result_set:
+            # Raced with a concurrent promote — re-read and report the outcome.
+            re = self.get_point(point_id)
+            if re.get("status") == "live":
+                return {"id": point_id, "status": "live", "promoted": False,
+                        "blocked": False, "reason": "already_live"}
+            return {"id": point_id, "status": re.get("status"),
+                    "promoted": False, "blocked": True,
+                    "reason": "not_draft"}
+
+        # Post-CAS race re-check (#990): the quarantine lock is a
+        # read-then-CAS (two statements — FalkorDBLite has no EXISTS
+        # subqueries), so a quarantine landing between the batch_status read
+        # and the CAS can race a promotion through. Surface the race instead
+        # of hiding it: the point is live, but the batch is quarantined.
+        race_detected = False
+        if batch_id:
+            from .mining import batch_status
+            bs = batch_status(proj, batch_id)
+            if bs is not None and bs["status"] == "quarantined":
+                race_detected = True
+                _logger.warning(
+                    "promote_point: batch %s quarantined concurrently with "
+                    "promotion of %s (TOCTOU race, #990) — point is live but "
+                    "batch is quarantined",
+                    batch_id, point_id,
+                )
+
+        # R16 zombie-operator prevention: promote incident draft operators
+        # once ALL their endpoint Points are live.
+        promoted_ops = self._promote_incident_operators(proj, point_id, now)
+
+        self._emit_event("PointPromoted", point=self.get_point(point_id))
+        result = {"id": point_id, "status": "live", "promoted": True,
+                  "reviewed": True,
+                  "operator_nodes_promoted": promoted_ops}
+        if race_detected:
+            result["race_detected"] = True
+            result["race_warning"] = (
+                "batch quarantined concurrently with promotion — point is live")
+        return result
+
+    def _promote_incident_operators(self, proj, point_id: str, now: str) -> list[str]:
+        """R16: promote draft operator nodes incident to a freshly-live Point.
+
+        An operator is promoted only when it carries EXPLICIT status 'draft'
+        (the post-#780 `create_operator(promote_source=False)` shape) AND
+        every endpoint Point is live — otherwise the draft endpoints would
+        inherit a live edge (the exact pollution the draft lifecycle
+        prevents). Unset-status operators are LIVE under the canonical read
+        model (projection coalesce default; #944 review) and are skipped —
+        never re-promoted into the event stream.
+        """
+        rows = proj.g.query(
+            "MATCH (o:Point {is_operator:true})-[r]->(n:Point {id:$id}) "
+            "WHERE o.status = 'draft' RETURN DISTINCT o.id",
+            params={"id": point_id},
+        ).result_set
+        promoted = []
+        for (oid,) in rows:
+            eps = proj.g.query(
+                "MATCH (o:Point {id:$oid})-[r]->(s:Point) "
+                "RETURN s.id, s.status",
+                params={"oid": oid},
+            ).result_set
+            if not eps:
+                continue  # no endpoints — nothing to gate on
+            all_live = all((st or "live") == "live" for _, st in eps)
+            if not all_live:
+                continue  # keep draft until every endpoint is live
+            # CAS-guarded SET: only an explicitly-draft operator may flip,
+            # and only once (concurrent endpoint promotions can't double-emit).
+            r = proj.g.query(
+                "MATCH (o:Point {id:$oid}) WHERE o.status = 'draft' "
+                "SET o.status = 'live', o.promotedAt = $now, o.updatedAt = $now "
+                "RETURN o.id",
+                params={"oid": oid, "now": now},
+            )
+            if not r.result_set:
+                continue  # lost a race — another promote already flipped it
+            # Full snapshot for JSONL rebuild parity (#548, review #944).
+            self._emit_event("OperatorPromoted", id=oid,
+                             point=self.get_point(oid))
+            promoted.append(oid)
+        return promoted
+
+    def quarantine_batch(self, batch_id: str, *, reason: str) -> dict:
+        """Quarantine a batch (W-3 fail path) — blocks promote_point on its
+        Points until a re-run passes (plan §6.1 pinned SDK signature).
+
+        Thin delegate to tortoise.mining.quarantine_batch — batch lifecycle
+        state lives on :Batch marker nodes (operational metadata).
+        """
+        from .mining import quarantine_batch as _qb
+        return _qb(self._get_proj(), batch_id, reason=reason)
+
+    def list_drafts(self, *, limit: int = 50) -> list[dict]:
+        """Draft queue for promotion review (J-5 companion, plan §6.1).
+
+        Returns up to `limit` non-operator Points with status 'draft' (newest
+        first), each shaped as {id, content, pointKind, provenance,
+        dedup_context, batch_id}. `provenance` is the node's extractedFrom/
+        provenance property when present; `dedup_context` is assembled from the
+        #782 dedup candidate properties when the Point is a dedup candidate.
+        """
+        if limit < 1:
+            raise ValueError(f"limit must be >= 1, got {limit}")
+        proj = self._get_proj()
+        # Plain points carry NO is_operator property (only operators set it),
+        # so match on absence-or-false, not the literal property value.
+        rows = proj.g.query(
+            "MATCH (n:Point) "
+            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "AND n.status = 'draft' "
+            "RETURN properties(n) ORDER BY n.createdAt DESC LIMIT $limit",
+            params={"limit": limit},
+        ).result_set
+        out = []
+        for (props,) in rows:
+            dedup_context = None
+            if props.get("dedup_candidate"):
+                dedup_context = {
+                    k: props.get(k) for k in (
+                        "dedup_method", "dedup_similarity", "dedup_target_id")
+                }
+            out.append({
+                "id": props.get("id"),
+                "content": props.get("content"),
+                "pointKind": props.get("pointKind"),
+                "provenance": props.get("provenance")
+                or props.get("extractedFrom"),
+                "dedup_context": dedup_context,
+                "batch_id": props.get("batch_id"),
+            })
+        return out
 
     # ── Operators ─────────────────────────────────────────────────
 
@@ -2654,8 +2884,31 @@ class TortoiseSDK:
         """
         return _get_kind_expander().list_relations()
 
+    def _t_close(self) -> None:
+        """Idempotent close; safe from atexit or __exit__ (#1005).
+
+        Does NOT set _t_closed itself — close() owns the flag (setting it
+        here would make close() short-circuit and never run its body).
+        """
+        if getattr(self, "_t_closed", False):
+            return
+        try:
+            self.close()
+        except Exception:
+            self._t_closed = True  # never retry a failing close
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self._t_close()
+        return False
+
     def close(self) -> None:
         """Close the underlying database connection and audit logger."""
+        if getattr(self, "_t_closed", False):
+            return
+        self._t_closed = True
         if self._audit_logger is not None:
             self._audit_logger.close()
             self._audit_logger = None
