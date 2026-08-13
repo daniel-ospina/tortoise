@@ -101,9 +101,23 @@ jobs:
         # skipping the deploy.
         run: |
           LIST=$(curl -s --max-time 20 "https://api.cloudflare.com/client/v4/accounts/367c7ecf27e1b1b092d04fe9915a1e56/pages/projects?per_page=100"             -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}")
-          if ! echo "$LIST" | grep -q '"tortoise-dashboard"'; then
-            echo "::error::CLOUDFLARE_API_TOKEN cannot list the tortoise-dashboard Pages project — check token scope (Cloudflare Pages:Edit for tortoise-dashboard)."
-            echo "projects visible: $(echo "$LIST" | grep -oE '"name":"[^"]+"' | head -20 || true)"
+          # Diagnostic: surface the API status + a snippet so a failing
+          # pre-flight is debuggable (not just 'cannot list').
+          STATUS=$(echo "$LIST" | jq -r '.success // empty' 2>/dev/null || echo 'parse-error')
+          if [ "$STATUS" != "true" ]; then
+            echo "::error::Cloudflare API did not return success — API response (first 300 chars):"
+            echo "$(echo "$LIST" | head -c 300)"
+            echo "::error::CLOUDFLARE_API_TOKEN cannot list Pages projects — check the token is Account > Cloudflare Pages > Edit and was saved to the repo secret."
+            exit 1
+          fi
+          # jq is available on ubuntu runners (the DNS-sync step uses it) and
+          # is whitespace-robust vs grep on raw JSON.
+          # P1 (review): jq -e on a multi-element array exits on the LAST
+          # output — order-dependent false-fail. any() collapses to one
+          # boolean: exit 0 iff SOME project matches.
+          if ! echo "$LIST" | jq -e 'any(.result[]?; .name == "tortoise-dashboard")' >/dev/null 2>&1; then
+            echo "::error::tortoise-dashboard project not in the token's visible Pages projects."
+            echo "projects visible: $(echo "$LIST" | jq -r '.result[]?.name' | tr '\n' ' ' || true)"
             exit 1
           fi
           echo "tortoise-dashboard project visible — deploying"
