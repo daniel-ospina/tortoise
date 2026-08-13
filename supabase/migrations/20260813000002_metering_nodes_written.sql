@@ -1,4 +1,4 @@
--- Migration 0015: metering_records.nodes_written — value-first commit cost driver
+-- Migration 20260813000002: metering_records.nodes_written — value-first commit cost driver
 -- Epic: #909 value-first mining · Issue: #953 (slice 5b — POST /v1/sessions/commit)
 --
 -- The MeteringRecord gains `nodes_written` (net-new non-episodic nodes per

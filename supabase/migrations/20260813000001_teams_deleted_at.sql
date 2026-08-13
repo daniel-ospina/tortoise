@@ -1,4 +1,4 @@
--- Migration 0016: team soft-delete columns (issue #302 E2E-6-D)
+-- Migration 20260813000001: team soft-delete columns (issue #302 E2E-6-D)
 --
 -- RENAME (issue #1001, 2026-08-13): the original 0012_teams_deleted_at
 -- collided with 0012_teams_billing_columns (Supabase CLI keys migrations by
