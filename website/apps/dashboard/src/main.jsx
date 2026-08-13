@@ -4,6 +4,38 @@ import './index.css'
 
 const API_BASE = 'https://api.premiselabs.co'
 const KEY_STORAGE = 'tortoise_api_key'
+// #1082 (PR1): the pasted claim key must survive the OAuth redirect (same-tab
+// PKCE round-trip). sessionStorage is origin-scoped and same-tab — NEVER put
+// the key in `redirectTo` (GoTrue embeds it in the OAuth state URL → leak).
+// #1082 review P1-2: the raw key lives ONLY in app-origin sessionStorage —
+// never a cookie. Cross-origin claim INTENT (welcome/signin/signup on the
+// tortoise origin must know a claim is in flight so they don't mint a stray
+// team) travels as a NON-SECRET marker cookie (tt_claim_pending=1) — it
+// carries no credential, only a routing signal.
+const CLAIM_KEY_STORAGE = 'tt_claim_key'
+const CLAIM_PENDING_COOKIE = 'tt_claim_pending'
+
+function readClaimKeyStorage() {
+  try { return sessionStorage.getItem(CLAIM_KEY_STORAGE) || '' } catch { return '' }
+}
+
+// Non-secret claim-intent marker (parent domain): lets the welcome page's
+// Phase-2 mint guard and the signin/signup claim-intent routing on
+// tortoise.premiselabs.co know a claim is in flight from the dashboard
+// (app.premiselabs.co) — without exposing the raw tt_ key (P1-2).
+// Short TTL (1h — the OAuth round-trip is minutes); Secure + SameSite=Lax.
+function setClaimPendingMarker() {
+  try {
+    const expires = new Date(Date.now() + 60 * 60 * 1000).toUTCString()
+    document.cookie = `${CLAIM_PENDING_COOKIE}=1; Domain=.premiselabs.co; Path=/; SameSite=Lax; Secure; Expires=${expires}`
+  } catch { /* best-effort */ }
+}
+
+function clearClaimPendingMarker() {
+  try {
+    document.cookie = `${CLAIM_PENDING_COOKIE}=; Domain=.premiselabs.co; Path=/; SameSite=Lax; Secure; Max-Age=0`
+  } catch { /* best-effort */ }
+}
 const SUPABASE_URL = 'https://ybetwichurajbfswfeqa.supabase.co'
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InliZXR3aWNodXJhamJmc3dmZXFhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODUyNzgzNDYsImV4cCI6MjEwMDg1NDM0Nn0.YHysJAebPualDNDQTU5bnGBUHg5guLe8eBadm0LiEiY'
 
@@ -57,6 +89,12 @@ function App() {
   const [error, setError] = React.useState('')
   const [busy, setBusy] = React.useState(false)
   const [newKey, setNewKey] = React.useState(null)
+  // #1082 (PR1): claim-card state — paste tt_ key → OAuth → POST /v1/claim.
+  const [claimKey, setClaimKey] = React.useState(() => {
+    try { return sessionStorage.getItem(CLAIM_KEY_STORAGE) || '' } catch { return '' }
+  })
+  const [claimBusy, setClaimBusy] = React.useState(false)
+  const [claimError, setClaimError] = React.useState('')
   const [tab, setTab] = React.useState('overview')
   const [authMode, setAuthMode] = React.useState('session') // 'session' | 'apikey'
   const [checking, setChecking] = React.useState(true)
@@ -285,6 +323,43 @@ function App() {
         })
         authSubRef.current = authSub?.subscription || null
 
+        // #1082 (PR1): ?claim=1 claim-intent routing — the OAuth redirect
+        // lands here with the pasted key in sessionStorage (same-tab PKCE).
+        // POST /v1/claim BEFORE any provisioning: the welcome page's
+        // Phase-2 mint is never reached (redirectTo targets the dashboard
+        // claim route, NOT welcome.html), so the claimable anon team is
+        // never orphaned by a stray mint.
+        const claimParam = new URLSearchParams(window.location.search).get('claim')
+        if (claimParam === '1') {
+          let claimKeyStored = ''
+          try { claimKeyStored = sessionStorage.getItem(CLAIM_KEY_STORAGE) || '' } catch { /* best-effort */ }
+          // sessionStorage is same-tab/same-origin — the OAuth redirect
+          // returns to this dashboard origin, so the key is always here.
+          if (claimKeyStored.startsWith('tt_') && session.access_token) {
+            try {
+              const claimRes = await performClaim(session.access_token, claimKeyStored)
+              if (claimRes.ok) {
+                try { sessionStorage.removeItem(CLAIM_KEY_STORAGE) } catch { /* best-effort */ }
+                clearClaimPendingMarker()
+                setClaimKey('')
+                // Strip ?claim=1 so a reload doesn't re-claim.
+                window.history.replaceState({}, '', window.location.pathname)
+              } else {
+                let claimMsg = `Claim failed (HTTP ${claimRes.status}).`
+                try {
+                  const b = await claimRes.json()
+                  if (b && b.detail) claimMsg = typeof b.detail === 'string' ? b.detail : JSON.stringify(b.detail)
+                } catch { /* non-JSON body */ }
+                setClaimError(claimMsg)
+              }
+            } catch (e) {
+              setClaimError((e && e.message) || 'Claim failed — try again.')
+            }
+          } else {
+            setClaimError('Claim interrupted — paste your tt_ key again to continue.')
+          }
+        }
+
         // List memberships up front so the mint targets a concrete team
         // (P1: multi-membership users cannot mint without team_id).
         let teamsList = []
@@ -427,6 +502,65 @@ function App() {
     }
   }
 
+  // #1082 (PR1): claim-card handlers — attach a provider-verified identity
+  // to an anon team (same key, same graph, memories intact).
+  async function claimSignIn(provider) {
+    setClaimError('')
+    const k = (claimKey || '').trim()
+    if (!k.startsWith('tt_')) {
+      setClaimError('Enter a valid tt_ key — the one printed when the team was minted.')
+      return
+    }
+    if (!supabaseClient) {
+      setClaimError('Auth is not configured on this deployment.')
+      return
+    }
+    // Key survives the OAuth redirect via sessionStorage (same-tab PKCE
+    // round-trip). NEVER in redirectTo — GoTrue puts it in the OAuth state
+    // URL → leak. Raw key = sessionStorage only (P1-2). The non-secret
+    // tt_claim_pending marker (cross-origin intent for welcome/signin/
+    // signup routing) is set alongside — it carries NO credential.
+    try { sessionStorage.setItem(CLAIM_KEY_STORAGE, k) } catch { /* best-effort */ }
+    setClaimPendingMarker()
+    setClaimBusy(true)
+    try {
+      const redirectTo = `${window.location.origin}${window.location.pathname}?claim=1`
+      const { data, error } = await supabaseClient.auth.signInWithOAuth({
+        provider: provider, // github | google — provider-verified email invariant
+        options: { redirectTo },
+      })
+      if (error) {
+        setClaimError(error.message || 'Sign-in failed — try again.')
+        setClaimBusy(false)
+        return
+      }
+      if (data?.url) {
+        // Same-tab redirect (sessionStorage survives); the popup flow would
+        // lose the key — pinned in e2e.
+        window.location.href = data.url
+        return
+      }
+      setClaimBusy(false)
+    } catch (err) {
+      setClaimError((err && err.message) || 'Sign-in failed — try again.')
+      setClaimBusy(false)
+    }
+  }
+
+  async function performClaim(sessionToken, key) {
+    // POST /v1/claim — both credentials in ONE request: session JWT
+    // (Authorization) + pasted tt_ key (body).
+    const res = await fetch(`${API_BASE}/v1/claim`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${sessionToken}`,
+      },
+      body: JSON.stringify({ api_key: key }),
+    })
+    return res
+  }
+
   async function logout() {
     localStorage.removeItem(KEY_STORAGE)
     setApiKey('')
@@ -437,6 +571,12 @@ function App() {
     setKeys([])
     setSessions([])
     setNewKey(null)
+    // #1082: clear the claim intent on logout (a stale pasted key must not
+    // auto-claim the next user's session).
+    setClaimKey('')
+    setClaimError('')
+    try { sessionStorage.removeItem(CLAIM_KEY_STORAGE) } catch { /* best-effort */ }
+    clearClaimPendingMarker()
     setGraphs([])
     setGraphsLoaded(false) // Round-27: symmetry with switchTeam
     setMembers(null)
@@ -464,8 +604,7 @@ function App() {
   async function loadAll(key) {
     const _teamAtCall = teamIdRef.current // Round-10: staleness guard — a rapid
                                           // A→B→C switch must not land B's data
-                                          // under team C's header
-    // P2 (code-review): /v1/team/keys + /v1/sessions resolve the team from the
+                                          // under team C's header    // P2 (code-review): /v1/team/keys + /v1/sessions resolve the team from the
     // API key — fetch them with the SELECTED team's key so the overview cards
     // track the team switcher, not the bootstrap team.
     const h = key ? { headers: { Authorization: `Bearer ${key}` } } : {}
@@ -1197,6 +1336,61 @@ function App() {
 
         {tab === 'keys' && (
           <section>
+            {/* #1082 (PR1): claim card — renders when the resolved team is
+                anon (apikey-mode entry — a pre-claim anon owner has NO
+                session by definition). Paste the tt_ key → fresh OAuth
+                (GitHub/Google) → POST /v1/claim. redirectTo is the dashboard
+                claim route (?claim=1), NEVER welcome.html (its Phase-2 mint
+                would orphan the claimable team). */}
+            {team && team.anon && (
+              <div className="claim-card">
+                <h3>Claim this anonymous team</h3>
+                <p className="dim">
+                  This team was minted without a verified identity (zero-email).
+                  Attach your GitHub or Google account to unlock dashboard
+                  session access — same key, same graph, memories intact.
+                </p>
+                {!claimKey ? (
+                  <div className="inline-form">
+                    <input
+                      placeholder="Paste your tt_ key"
+                      aria-label="Paste your tt_ key"
+                      value={claimKey}
+                      onChange={(e) => setClaimKey(e.target.value)}
+                      autoComplete="one-time-code"
+                    />
+                    <button onClick={() => claimSignIn('github')} disabled={claimBusy}>
+                      {claimBusy ? 'Redirecting…' : 'Save key & sign in with GitHub'}
+                    </button>
+                    <button className="ghost" onClick={() => claimSignIn('google')} disabled={claimBusy}>
+                      with Google
+                    </button>
+                  </div>
+                ) : (
+                  <div className="inline-form">
+                    <code className="key-value">{claimKey.slice(0, 12)}…</code>
+                    <button onClick={() => claimSignIn('github')} disabled={claimBusy}>
+                      {claimBusy ? 'Redirecting…' : 'Sign in with GitHub'}
+                    </button>
+                    <button className="ghost" onClick={() => claimSignIn('google')} disabled={claimBusy}>
+                      Sign in with Google
+                    </button>
+                    <button
+                      className="ghost small"
+                      onClick={() => { setClaimKey(''); setClaimError('') }}
+                      disabled={claimBusy}
+                    >
+                      Change key
+                    </button>
+                  </div>
+                )}
+                {claimError && <div className="error">{claimError}</div>}
+                <p className="dim small">
+                  You'll sign in with GitHub or Google (a fresh provider-verified
+                  identity), then come back here with the team unlocked.
+                </p>
+              </div>
+            )}
             <div className="row">
               <h2>API Keys</h2>
               <button onClick={createKey} disabled={busy}>+ New key</button>
