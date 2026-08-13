@@ -38,14 +38,14 @@ def list_topics(proj, entity_id: str) -> dict:
     neighbors_impl = proj.g.query(
         "MATCH (n:Point {id:$id})<-[r1:IMPL]-(op:Point {is_operator:true})"
         "-[r2:IMPL]->(m:Point) "
-        "WHERE m.id <> n.id AND (m.is_operator IS NULL OR m.is_operator = false) "
+        "WHERE m.id <> n.id AND m.is_operator = false "
         "RETURN m.pointKind",
         params={"id": entity_id},
     ).result_set
     neighbors_nand = proj.g.query(
         "MATCH (n:Point {id:$id})<-[r1:NAND]-(op:Point {is_operator:true})"
         "-[r2:NAND]->(m:Point) "
-        "WHERE m.id <> n.id AND (m.is_operator IS NULL OR m.is_operator = false) "
+        "WHERE m.id <> n.id AND m.is_operator = false "
         "RETURN m.pointKind",
         params={"id": entity_id},
     ).result_set

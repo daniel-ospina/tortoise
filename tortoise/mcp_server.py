@@ -18,7 +18,8 @@ from mcp.types import ToolAnnotations
 from pydantic import ValidationError as PydanticValidationError
 from tortoise.auth import is_dev_mode as _is_dev_mode
 from tortoise.config import is_db_uri as _is_db_uri
-from tortoise.sdk import TortoiseSDK
+from tortoise.sdk import (TortoiseSDK, INGEST_GRANULARITIES,
+                          INGEST_PROMOTION_POLICIES, _first_non_draft_status)
 from tortoise import monitoring
 from tortoise.mcp_auth import (_current_team_id, _current_team_limits,
                                _transport_mode, _get_team_sdk,
@@ -357,7 +358,9 @@ _QUOTA_GATED: frozenset[str] = frozenset({
 # silently be counted as a read.
 WRITE_TOOL_NAMES: frozenset[str] = _QUOTA_GATED | frozenset({
     "tortoise_ingest",               # bulk write (wrapped, not in _QUOTA_GATED)
-    "tortoise_onboarding_demo_create",  # seeds the 4-layer demo graph
+    "tortoise_onboarding_demo_create",  # seeds the 4-layer demo graph,
+    "tortoise_mine_conversations", "tortoise_approve_merge",
+    "tortoise_promote_point",
 })
 
 
@@ -480,6 +483,14 @@ def maybe_record_mcp_read(name: str, team_id: str, limits: dict | None) -> None:
         pass
 
 
+def _scrub_error(msg: str) -> str:
+    """#43 sanitize: strip hostnames, ports, passwords from error messages."""
+    import re
+    msg = re.sub(r'://[^@]*@', '://***@', msg)  # password in URI
+    msg = re.sub(r'(host=|at |to )[\w.-]+(:\d+)?', r'\1***', msg)  # host:port
+    return msg
+
+
 def _safe(fn, *args, **kwargs):
     """Call fn; return error dict on exception instead of raising.
 
@@ -523,16 +534,33 @@ def _safe(fn, *args, **kwargs):
         return result
     except Exception as e:
         monitoring.record_error()
+        from tortoise.exceptions import BundleValidationError
         from tortoise.quota import QuotaCheckError, QuotaExceededError
+        if isinstance(e, BundleValidationError):
+            # A2: dedicated branch BEFORE the generic — violations survive
+            # the MCP boundary INTACT (E2E-12.1/E2E-15(c)); the wire shape is
+            # {error: <first message>, code: ERR_BUNDLE_INVALID, violations}.
+            # REVIEW-FIX P2: message content scrubbed (#43) — violation
+            # messages echo client-controlled refs/endpoints that could carry
+            # URIs with credentials; structure (section/index/message keys)
+            # survives intact.
+            scrubbed = [{**v, "message": _scrub_error(v["message"])}
+                        for v in e.violations]
+            return {"error": _scrub_error(str(e)), "code": ERR_BUNDLE_INVALID,
+                    "violations": scrubbed}
         if isinstance(e, QuotaExceededError):
             return {"error": str(e), "code": ERR_QUOTA}
         if isinstance(e, QuotaCheckError):
             return {"error": str(e), "code": ERR_QUOTA_SERVER}
-        msg = str(e)
-        # Sanitize: strip hostnames, ports, passwords from error messages (#43)
-        import re
-        msg = re.sub(r'://[^@]*@', '://***@', msg)  # password in URI
-        msg = re.sub(r'(host=|at |to )[\w.-]+(:\d+)?', r'\1***', msg)  # host:port
+        from tortoise.exceptions import Phase2Error
+        if isinstance(e, Phase2Error):
+            # A2: Phase-2 failure — {error, batch_id} with NO code (distinct
+            # from Phase-1's ERR_BUNDLE_INVALID); the batch_id lets the agent
+            # audit the partial commit before re-sending (cycle-23/24 pin).
+            # REVIEW-FIX P2: message scrubbed (#43).
+            return {"error": _scrub_error(str(e)),
+                    **({"batch_id": e.batch_id} if e.batch_id else {})}
+        msg = _scrub_error(str(e))
         return {"error": msg}
 
 
@@ -548,9 +576,20 @@ def _scrub_analyze_answer(answer: str) -> str:
     return answer[:2000]
 
 
-# #329: quota error codes (registered alongside the other ERR_* in mcp_auth).
+# #329: quota error codes. NOTE: the ERR_* namespace is split — the
+# auth-side codes (ERR_UNAUTHORIZED/-32001, ERR_RATE_LIMIT/-32002,
+# ERR_EXCLUDED/-32004, ERR_REGISTRY/-32005, ERR_SUSPENDED/-32006) live in
+# mcp_auth.py; the quota + tool-validation codes live HERE in mcp_server.py.
+# Pre-existing collision: ERR_QUOTA=-32006 (here) vs ERR_SUSPENDED=-32006
+# (mcp_auth) — tracked as a follow-up (client cannot distinguish the two).
 ERR_QUOTA = -32006
 ERR_QUOTA_SERVER = -32007
+# A2: Phase-1 bundle validation failure (carries .violations).
+ERR_BUNDLE_INVALID = -32008
+# Application-defined pre-SDK param errors (tool-level validation that never
+# reaches the SDK): invalid granularity / promotion_policy on tortoise_ingest
+# return {error, code: ERR_INVALID} naming the valid values (E2E-8.3 pin).
+ERR_INVALID = -32003
 
 
 def _http_excluded_error() -> dict:
@@ -1714,7 +1753,8 @@ def tortoise_create_edge(source_id: str, target_id: str, predicate: str) -> dict
                  predicate, source_id, target_id)
 
 
-def tortoise_ingest(bundle: Any = None, granularity: str = "bulk") -> dict:
+def tortoise_ingest(bundle: Any = None, granularity: str = "bulk",
+                    promotion_policy: str = "gated") -> dict:
     """Heterogeneous bulk write (epic #888 W4) — one call writes points +
     entities + sources + connections coherently. Nodes are written first, then
     the connections between them; connections carrying 'operator' (IMPL/NAND)
@@ -1723,6 +1763,18 @@ def tortoise_ingest(bundle: Any = None, granularity: str = "bulk") -> dict:
 
     granularity='bulk' (default): aggregated {created, ids, nudges}.
     granularity='granular': per-item results for agent step-by-step control.
+    promotion_policy='gated' (DEFAULT, Q2): points stay draft, connections
+    never promote (operator path: promote_source=False via #780). ANY
+    effective status other than 'draft' on a point item is REJECTED under
+    gated (INGEST_CONTRACT row 9 — no bypass of the gated contract; case
+    variants, nested props={...}, and terminal statuses included; use
+    promotion_policy='auto' or promote after ingest via the SDK's
+    update_point(status='live')).
+    promotion_policy='auto': #131 parity — source points promote on wire
+    (only draft/null-status sources; retracted/deprecated are never
+    resurrected); the operator node is written without a status property
+    (live by projection — the #780 asymmetry). Deduped connections never
+    retro-promote (promotion fires on FIRST edge creation only).
     Idempotent-ish: points dedup by content hash + kind, sources by url,
     operators by input set.
     """
@@ -1732,12 +1784,29 @@ def tortoise_ingest(bundle: Any = None, granularity: str = "bulk") -> dict:
     if not isinstance(bundle, dict):
         return {"error": "bundle must be a dict with points/entities/sources/"
                           "connections sections", "code": ERR_INVALID}
-    if granularity not in ("bulk", "granular"):
+    if granularity not in INGEST_GRANULARITIES:
         return {"error": f"granularity must be 'bulk' or 'granular', got "
                           f"{granularity!r}", "code": ERR_INVALID}
+    if promotion_policy not in INGEST_PROMOTION_POLICIES:
+        return {"error": f"promotion_policy must be 'gated' or 'auto', got "
+                          f"{promotion_policy!r}", "code": ERR_INVALID}
+    # Row-9 guard (shared helper — identical to the SDK's): under gated,
+    # points must stay draft — ANY effective status other than the exact
+    # canonical "draft" (top-level or nested props={...}) is a violation.
+    if promotion_policy == "gated":
+        bad = _first_non_draft_status(bundle.get("points"))
+        if bad is not None:
+            i, st = bad
+            return {"error": f"points[{i}] status:{st!r} is not allowed "
+                              f"under promotion_policy 'gated' — under "
+                              f"gated points stay draft; pass "
+                              f"promotion_policy='auto' for explicit live, "
+                              f"or keep draft and promote via "
+                              f"update_point(status='live')",
+                    "code": ERR_INVALID}
     return _safe(_quota_gated(_get_team_sdk().ingest, "points",
                           abuse_weight=lambda r, a, k: int(((r or {}).get("created") or {}).get("points") or 0)),
-                 bundle, granularity=granularity)
+                 bundle, granularity=granularity, promotion_policy=promotion_policy)
 
 def tortoise_get_governance(subject_id: str) -> list:
     """Get all entities owned by a Subject.
@@ -1898,6 +1967,106 @@ def tortoise_backfill_v25(dry_run: bool = True) -> dict:
     return _safe(_get_team_sdk().backfill_v25, dry_run=dry_run)
 
 
+# ── Phase-4 mining/promotion/dedup/timeline surface (#787, DE2E-7) ──
+# J-6 error contract: every tool returns the SDK result on success or
+# {"error": message} on failure (via _safe — the repo-wide convention).
+
+
+def tortoise_mine_conversations(transcript: str | None = None,
+                                corpus_dir: str | None = None,
+                                source_id: str | None = None,
+                                extract_entities: bool = True,
+                                content_dedup: bool = True,
+                                session_date: str | None = None,
+                                participants: Any = None) -> dict:
+    """Mine agent conversations into the graph (W-1..W-4, #787).
+
+    Single transcript (transcript= + source_id=) or a batch corpus
+    (corpus_dir= — per-file failures reported non-fatally in 'errors',
+    mined-marker resume, R17 security validation). Returns the mine result
+    incl. batch_id/batch_status (W-3 gate), dedup_* and temporal_* keys.
+    """
+    # Filesystem-walk vector (same as ingest_corpus/index_sessions): the
+    # corpus path is caller-controlled and rglobs the HOST filesystem —
+    # excluded from tenant HTTP; stdio/CLI only (#1090 review).
+    if _transport_mode.get() == "http":
+        return _http_excluded_error()
+    sdk = _get_team_sdk()
+    if corpus_dir is not None:
+        return _safe(sdk.mine_corpus, corpus_dir,
+                     extract_entities=extract_entities)
+    if not transcript or not source_id:
+        return {"error": "transcript= and source_id= are required "
+                         "(or corpus_dir= for a batch)"}
+    try:
+        from tortoise.api import EventAPI
+        from tortoise.log import EventLog
+        from tortoise.mining import mine_conversation
+        import tempfile, os
+        log = sdk._get_event_log()
+        if log is None:
+            log = EventLog(os.path.join(
+                tempfile.mkdtemp(prefix="tortoise_mcp_mine_"), "events.jsonl"))
+        api = EventAPI(log, initiated_by="extractor", agent_id="mcp",
+                       projection=sdk._get_proj())
+    except Exception as exc:
+        return {"error": f"mine setup failed: {exc}"}
+    return _safe(mine_conversation, transcript, source_id, api,
+                 extract_entities=extract_entities,
+                 content_dedup=content_dedup,
+                 session_date=session_date,
+                 participants=participants,
+                 sdk=sdk)
+
+
+def tortoise_list_dedup_candidates(candidate_type: str = "content",
+                                   limit: int = 50) -> dict:
+    """Review queue for dedup/temporal candidates (W-2/W-4, #787).
+
+    candidate_type='content' → content-dedup candidates; 'temporal' →
+    contradictory/replacement decision Points pending promotion wiring;
+    'entity' → [] (entity queue tracked separately). Each entry carries
+    {id, content, pointKind, method/similarity (content) or replacement
+    (temporal), target_id, candidate_type, status}.
+    """
+    return _safe(_get_team_sdk().list_dedup_candidates,
+                 candidate_type=candidate_type, limit=limit)
+
+
+def tortoise_approve_merge(candidate_id: str,
+                           action: str = "merge") -> dict:
+    """Review a dedup/temporal candidate (W-2/W-4, #787).
+
+    action='merge' → content: wire the alreadyDecided IMPL (draft prior) or
+    defer to promotion (live prior); temporal: defer the NAND/supersede to
+    promotion. action='reject' → the candidate stays separate and is no
+    longer surfaced. Idempotent for repeated identical reviews.
+    """
+    return _safe(_get_team_sdk().approve_merge, candidate_id, action=action)
+
+
+def tortoise_promote_point(point_id: str) -> dict:
+    """Reviewer-gated draft→live promotion (Phase-4, #785/#787).
+
+    The ONLY path a draft extraction Point may go live: blocks on
+    quarantined batches {blocked, reason, batch_id}, rejects operator
+    nodes, no-ops on already-live (DE2E-N9), promotes incident draft
+    operators once all endpoints are live (R16), and wires deferred
+    dedup/temporal links (Variant C / W-4).
+    """
+    return _safe(_get_team_sdk().promote_point, point_id)
+
+
+def tortoise_belief_timeline(topic: str, limit: int = 50) -> dict:
+    """Dated, ordered belief chain for a topic (J-4, #786/#787).
+
+    Decision Points aboutObject-connected to the topic entity, validFrom-
+    ordered (superseded priors kept visible via the CORRECTS chain), each
+    with {content, pointKind, validFrom, status, linked_by, related}.
+    """
+    return _safe(_get_team_sdk().belief_timeline, topic, limit=limit)
+
+
 # ── Tool Registry Adapter (#454) ────────────────────────────────
 # Replaces @mcp.tool() decorators with programmatic registration.
 # Function bodies remain module-level callables; the adapter wraps each
@@ -2024,7 +2193,11 @@ def tortoise_onboarding_github_connect(org: str | None = None) -> dict:
     import os as _os
     client_id = _os.environ.get("GITHUB_CLIENT_ID")
     if not client_id:
-        return {"error": "GitHub OAuth not configured"}
+        # Prompt-canonical text (#496/#540): GitHub OAuth is hosted-mode only.
+        # In self-host HTTP the env never exists — match the prompt's documented
+        # recovery anchor instead of the misleading "OAuth not configured".
+        # (hosted_api.py REST endpoints keep the 503 ops signal.)
+        return {"error": "No team context (HTTP mode required)"}
     state = secrets.token_urlsafe(24)
     # Store CSRF state so the callback can validate it (P2 review fix) —
     # must be visible to the REST callback handler in the same process.

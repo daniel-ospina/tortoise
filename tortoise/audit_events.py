@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS audit_events (
     resource_id TEXT,
     ip_address TEXT,
     user_agent TEXT,
+    detail JSONB,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 """
@@ -93,8 +94,13 @@ class AuditLogger:
         resource_id: str | None = None,
         ip_address: str | None = None,
         user_agent: str | None = None,
+        detail: dict | None = None,
     ) -> None:
         """Append an audit event.
+
+        ``detail`` is a free-form JSONB payload (20260813000004 added the
+        column; team_claim stores provider/email/user_id — 0002 has no
+        provider/email columns).
 
         Tries Postgres first. On failure, writes to JSONL fallback.
         On any successful Postgres write, replays accumulated fallback entries.
@@ -110,6 +116,7 @@ class AuditLogger:
             "resource_id": resource_id,
             "ip_address": ip_address,
             "user_agent": user_agent,
+            "detail": json.dumps(detail) if detail is not None else None,
             "created_at": _now_iso(),
         }
 
@@ -185,11 +192,11 @@ class AuditLogger:
                     """INSERT INTO audit_events
                        (id, team_id, actor_user_id, operation,
                         resource_type, resource_id, ip_address,
-                        user_agent, created_at)
+                        user_agent, detail, created_at)
                        VALUES (%(id)s, %(team_id)s, %(actor_user_id)s,
                                %(operation)s, %(resource_type)s,
                                %(resource_id)s, %(ip_address)s,
-                               %(user_agent)s, %(created_at)s)
+                               %(user_agent)s, %(detail)s::jsonb, %(created_at)s)
                        ON CONFLICT (id) DO NOTHING""",
                     event,
                 )

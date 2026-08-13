@@ -757,8 +757,13 @@ def test_key_create_wildcard_bind_prints_lan_note(local_db, bind, port):
     the printed wildcard URL is unusable for clients, and the note used to
     fire only on full defaults (suppressed exactly when needed most).
     Wildcard + non-default port must also show it."""
-    db, key, env, _cli_sdk = local_db
+    db, key, env, cli_sdk = local_db
     env["TORTOISE_DB_PATH"] = str(db)
+    # #1102: the subprocess opens the SAME embedded DB — close the fixture's
+    # live handle first or the #942 single-writer probe (EmbeddedStoreBusy)
+    # makes the subprocess exit 1 (redislite shuts the server down on the
+    # last connection close, so the subprocess reloads the RDB fresh).
+    cli_sdk.close()
     proc = subprocess.run(
         [sys.executable, "-m", "tortoise", "key", "create", "--name", "test",
          "--bind", bind, "--port", str(port)],
@@ -773,8 +778,11 @@ def test_key_create_wildcard_bind_prints_lan_note(local_db, bind, port):
 def test_key_create_default_bind_still_prints_mirror_hint(local_db):
     """The defaults case keeps the mirror hint (pass --bind/--port to match
     a custom serve setup) — regression guard for the elif branch."""
-    db, key, env, _cli_sdk = local_db
+    db, key, env, cli_sdk = local_db
     env["TORTOISE_DB_PATH"] = str(db)
+    # #1102: same single-writer constraint as the wildcard-bind test — close
+    # the fixture's live handle before the subprocess.
+    cli_sdk.close()
     proc = subprocess.run(
         [sys.executable, "-m", "tortoise", "key", "create", "--name", "test"],
         capture_output=True, text=True, env=env, timeout=120,

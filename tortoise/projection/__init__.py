@@ -612,7 +612,7 @@ class FalkorProjection(
                 if isinstance(mid, str):
                     self._delete(mid)
         elif t == "EventRecorded":
-            self._upsert_event(ev)
+            return self._upsert_event(ev)
         elif t == "SubjectAdded":
             self._upsert_subject(ev)
         elif t == "ObjectRegistered":
@@ -620,7 +620,14 @@ class FalkorProjection(
         elif t == "DocumentCreated":
             self._upsert_document(ev)
         elif t == "SourceCreated":
-            self._upsert_source(ev)
+            # epic #900 T3: return the MERGE QueryResult so the SDK's
+            # create_source write path can attribute the counter-authority
+            # outcome (nodes_created) from the single statement (pin b). The
+            # internal ``_merge_run_id`` key (the creator's run token — the
+            # race-safe CREATE discriminator on the embedded backend) is
+            # popped here so it never reaches _persist_extra_props.
+            return self._upsert_source(
+                ev, merge_run_id=ev.pop("_merge_run_id", None))
 
     def rebuild(self, log) -> None:
         self.g.query("MATCH (n) DETACH DELETE n")
@@ -752,14 +759,22 @@ class FalkorProjection(
             pass  # graph may be corrupt — best-effort, like the #548 snapshot
 
         # ── Wipe + rebuild ──────────────────────────────────────────
-        self.g.query("MATCH (n) DETACH DELETE n")
-
+        # WIPE-AFTER-PARSE (epic #900 T12/T3, cycle-21 ordering pin): parse
+        # ALL .jsonl into memory (line-tolerant — a torn TRAILING line from a
+        # SIGKILL mid-append is skipped with a warning + count via
+        # EventLog.read_all, never raised — S15) BEFORE the wipe. A
+        # wipe-then-parse order would turn one torn line into TOTAL LOSS
+        # (wipe lands, then the parse raises, then the #548 snapshot phase
+        # swallows the same error silently).
+        #
         # Collect all events from all files (synthetic first so their nodes
         # exist before JSONL events that may reference them)
         events = list(synthetic_events)
         for fname in sorted(os.listdir(log_dir)):
             if fname.endswith('.jsonl'):
                 events.extend(EventLog(os.path.join(log_dir, fname)).read_all())
+
+        self.g.query("MATCH (n) DETACH DELETE n")
 
         # Pass 1: create all Point/Operator nodes (skip edges) + non-edge events
         # Pass 1a: create all Point/Operator nodes first
@@ -1046,9 +1061,23 @@ class FalkorProjection(
         (O(1) check), so there is no startup penalty on large graphs.
 
         FTS and vector indexes are gated on FalkorDB >= 4.x.
+
+        Embedded (redislite) note (#522): the is_operator RANGE index is
+        intentionally NOT created on embedded DBs. redislite merges
+        per-property indexes into a composite whose is_operator entries are
+        written with the FIRST process's type encoding; a later process
+        reopening the same DB file inherits a stale composite and
+        `n.is_operator = false` (which the query planner routes through the
+        index) silently matches ZERO rows — verified on the crash-recovery
+        reopen path (test_crash_recovery). The full label scan for
+        `= false` is correct on embedded; docker/server FalkorDB keeps the
+        index for the Node By Index Scan perf win.
         """
         # ── Range indexes (always safe, pre-4.x compatible) ──
-        for prop in ("id", "pointKind", "content_hash", "is_operator"):
+        point_props = ("id", "pointKind", "content_hash")
+        if not getattr(self, "_is_embedded", False):
+            point_props = (*point_props, "is_operator")
+        for prop in point_props:
             try:
                 self.g.query(f"CREATE INDEX FOR (n:Point) ON (n.{prop})")
             except Exception as e:
@@ -1059,6 +1088,44 @@ class FalkorProjection(
                     import logging
                     logging.getLogger(__name__).error(
                         "Failed to create index on n.%s: %s", prop, e)
+
+        # ── Embedded repair: drop stale composite Point indexes (#522) ──
+        # A composite index containing is_operator (created by an older
+        # _ensure_indexes or the pre-#522 build) has entries typed by the
+        # writing process; a later process reopening the same embedded DB
+        # routes `= false` through it and gets ZERO matches (verified on the
+        # crash-recovery path). Drop every Point index that includes
+        # is_operator. redislite's DROP INDEX matches on the CREATE-time
+        # field order and the build creates multiple overlapping composites
+        # (verified: two distinct Point composites on the same DB), so all
+        # permutations containing is_operator are swept. The canonical
+        # per-property indexes are recreated below / on next boot; the
+        # fulltext content index is created later in this function.
+        if getattr(self, "_is_embedded", False):
+            try:
+                _rows = self.g.query("CALL db.indexes()").result_set
+                _needs_repair = any(
+                    _row and _row[0] == "Point"
+                    and "is_operator" in str(_row[1])
+                    for _row in _rows
+                )
+                if _needs_repair:
+                    import itertools as _it
+                    _fields = ("id", "pointKind", "content_hash",
+                               "is_operator", "content")
+                    for _n in range(2, 6):
+                        for _perm in _it.permutations(_fields, _n):
+                            if "is_operator" not in _perm:
+                                continue
+                            try:
+                                self.g.query(
+                                    "DROP INDEX ON :Point("
+                                    + ", ".join(_perm) + ")"
+                                )
+                            except Exception:
+                                pass
+            except Exception:
+                pass
 
         # ── Document range indexes (#125 — structural queries filter by kind) ──
         for prop in ("id", "documentKind"):

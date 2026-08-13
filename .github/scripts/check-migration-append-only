@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+# check-migration-append-only — PR CI invariant checks for Supabase migrations (#1095)
+#
+# Two modes (first arg):
+#   prefix — reject duplicate migration version prefixes AND non-conforming
+#            filenames (files not matching the Supabase CLI's ^[0-9]+_ pattern
+#            are applied by NOBODY — the CLI skips them).
+#   diff   — reject edits/renames/deletions of migration files present in the
+#            PR's base tree (migrations are append-only: a change to an
+#            applied migration must be a NEW timestamp file). Same-PR-added
+#            files (status A against the base) are allowed — the author can
+#            fix their own new migration before merge.
+#
+# The check logic lives in this SHARED script (not inline YAML) so the
+# hermetic pytest suite exercises the shipped logic, not a Python copy.
+#
+# Usage:
+#   bash .github/scripts/check-migration-append-only prefix
+#   bash .github/scripts/check-migration-append-only diff   # needs DRIFT_BASE_SHA
+#
+# Env:
+#   DRIFT_REPO      (optional) — repo root (default: this script's repo)
+#   DRIFT_BASE_SHA  (diff mode, required) — base commit to diff against
+#
+# Exit codes:
+#   0 — invariants hold
+#   1 — violation found (print the offending file(s))
+#   2 — usage/environment error
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+REPO="${DRIFT_REPO:-$REPO_ROOT}"
+MIG_DIR="$REPO/supabase/migrations"
+MODE="${1:-}"
+
+case "$MODE" in
+  prefix)
+    ;;
+  diff)
+    if [ -z "${DRIFT_BASE_SHA:-}" ]; then
+      echo "check-migration-append-only: DRIFT_BASE_SHA required in diff mode (exit 2)" >&2
+      exit 2
+    fi
+    ;;
+  *)
+    echo "check-migration-append-only: usage: $0 <prefix|diff> (exit 2)" >&2
+    exit 2
+    ;;
+esac
+
+if [ ! -d "$MIG_DIR" ]; then
+  echo "check-migration-append-only: migrations dir not found: $MIG_DIR (exit 2)" >&2
+  exit 2
+fi
+
+if [ "$MODE" = "prefix" ]; then
+  # 1. Non-conforming filenames — the CLI's migrateFilePattern is ^([0-9]+)_(.*)\.sql$.
+  #    Anything else is silently skipped by `db push` = applied by NOBODY.
+  NON_CONFORMING="$(
+    ls "$MIG_DIR"/*.sql 2>/dev/null \
+      | sed -nE 's#.*/([^0-9][^/]*\.sql)$#\1#p; s#.*/([0-9]+[^_/]*\.sql)$#\1#p' \
+      | sort -u
+  )"
+  if [ -n "$NON_CONFORMING" ]; then
+    echo "::error::Non-conforming migration filenames (CLI skips these — applied by NOBODY; rename to <N>_name.sql):"
+    printf '%s\n' "$NON_CONFORMING" | sed 's/^/  /'
+    exit 1
+  fi
+
+  # 2. Duplicate version prefixes (the 0012x2/0015x2 bug that aborted db push).
+  DUPES="$(
+    ls "$MIG_DIR"/*.sql 2>/dev/null \
+      | sed -nE 's#.*/([0-9]+)_.*#\1#p' \
+      | sort \
+      | uniq -d
+  )"
+  if [ -n "$DUPES" ]; then
+    echo "::error::Duplicate migration version prefixes (Supabase CLI keys by prefix — duplicate prefixes abort db push):"
+    printf '%s\n' "$DUPES" | sed 's/^/  /'
+    exit 1
+  fi
+
+  echo "check-migration-append-only: prefix invariants OK"
+  exit 0
+fi
+
+# diff mode — append-only enforcement
+# Read --name-status output line-by-line (tabs preserved) so filenames survive.
+# Format: "M\tpath" / "R100\told\tnew" / "D\tpath" / "A\tpath"
+STATUS_OUTPUT="$(
+  git -C "$REPO" diff --find-renames=20% "$DRIFT_BASE_SHA"...HEAD \
+    --name-status -- supabase/migrations/ 2>&1
+)" || {
+  echo "check-migration-append-only: git diff failed (bad DRIFT_BASE_SHA?) (exit 2)" >&2
+  exit 2
+}
+VIOLATIONS=""
+while IFS= read -r line; do
+  [ -z "$line" ] && continue
+  status="${line%%$'\t'*}"
+  case "$status" in
+    M|D|R*|T)
+      VIOLATIONS="$VIOLATIONS
+$line"
+      ;;
+  esac
+done <<EOF
+$STATUS_OUTPUT
+EOF
+
+if [ -n "$VIOLATIONS" ]; then
+  echo "::error::Migrations are append-only (#1095): a change to an already-merged migration must be a NEW timestamp file (do not edit/rename/delete an applied migration):"
+  printf '%s\n' "$VIOLATIONS" | sed '/^$/d' | sed 's/^/  /'
+  echo "::error::Historical violations of this rule caused the #1001 P0 (applied-migration edits diverged repo from prod). Use: supabase migration repair --linked --status applied <version> for repair."
+  exit 1
+fi
+
+echo "check-migration-append-only: append-only invariants OK"
+exit 0

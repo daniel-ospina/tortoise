@@ -38,13 +38,43 @@ on:
       - 'supabase/**'
   workflow_dispatch:
 
-concurrency:
-  group: supabase-deploy
-  cancel-in-progress: false
-
 jobs:
+  # Drift visibility on push (#1095): warn-only gate so a pure supabase/**
+  # push (no app code) still reports pending migrations. The BLOCK lives in
+  # deploy-hosted.yml where it gates actual app deploys. Repo-ahead on a
+  # supabase/** push is the expected state (apply is dispatch-only #771), so
+  # this is a warning + remediation banner, not a failure. Exit 2 (missing
+  # token / API error) DOES fail red — that's a config problem, not drift.
+  # Runs in its own job (no concurrency group) so it can't stall an
+  # operator's dispatch apply.
+  check-drift:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check migration drift (warn-only on push)
+        run: |
+          set +e
+          bash .github/scripts/check-migration-drift
+          rc=$?
+          set -e
+          if [ "$rc" -eq 1 ]; then
+            echo "::warning::Migrations pending — dispatch Deploy Supabase (migrations + functions) to apply before the next app deploy."
+            exit 0
+          fi
+          exit "$rc"
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+
   deploy:
     runs-on: ubuntu-latest
+    # Dispatch-only (#771 flip gating): a push records but never deploys. At
+    # JOB level so a push-triggered run doesn't hold the shared concurrency
+    # group and stall an operator's dispatch apply (#1095).
+    if: github.event_name == 'workflow_dispatch'
+    concurrency:
+      group: supabase-deploy
+      cancel-in-progress: false
     env:
       SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
       SUPABASE_PROJECT_REF: ybetwichurajbfswfeqa
@@ -60,6 +90,42 @@ jobs:
       # flip (auth-blackout window). See the flip sequence above.
       - name: Link project
         run: supabase link --project-ref "$SUPABASE_PROJECT_REF"
+      - name: Verify required edge-function secrets (#1121)
+        # Fail fast BEFORE deploy: if any secret the tenant-provision success
+        # path reads is missing, every signup 500s/502s at runtime with no
+        # deploy-time signal (post-#1110 hardening — CORS was masking
+        # missing-secret failures). AUTH_HOOK_SECRET is deliberately NOT
+        # required (hook path inert since #832); SUPABASE_SERVICE_ROLE_KEY is
+        # a platform-reserved secret auto-injected into edge functions, so it
+        # is WARN-only here (secrets list may omit reserved names).
+        # NOTE: current CLI (v2.x) prints `secrets list --output json` as a
+        # JSON array — parse with jq, never grep for `NAME<TAB>` (old format).
+        if: github.event_name == 'workflow_dispatch' && env.SUPABASE_ACCESS_TOKEN != ''
+        run: |
+          set -euo pipefail
+          required=(FASTAPI_URL FASTAPI_INTERNAL_KEY TORTOISE_SECRET_PEPPER)
+          out="$(supabase secrets list --output json --project-ref "$SUPABASE_PROJECT_REF")" \
+            || { echo "::error::supabase secrets list failed — cannot verify tenant-provision secrets"; exit 1; }
+          # Recursive: handles BOTH the JSON array ([{name,value}]) and the
+          # object wrapper ({"secrets":[...]}) output shapes.
+          present() { printf '%s' "$out" | jq -e --arg n "$1" \
+            '[.. | objects | select(has("name")) | .name] | any(. == $n)' >/dev/null; }
+          missing=()
+          for name in "${required[@]}"; do
+            if ! present "$name"; then missing+=("$name"); fi
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::MISSING Supabase secrets required by tenant-provision:"
+            for name in "${missing[@]}"; do echo "::error::  $name"; done
+            echo "::error::Set them with: supabase secrets set --project-ref $SUPABASE_PROJECT_REF <NAME>='...'"
+            exit 1
+          fi
+          if present SUPABASE_SERVICE_ROLE_KEY; then
+            echo "✅ Required secrets present: ${required[*]} SUPABASE_SERVICE_ROLE_KEY"
+          else
+            echo "::warning::SUPABASE_SERVICE_ROLE_KEY not listed by secrets list (platform-reserved, auto-injected) — assuming present"
+            echo "✅ Required secrets present: ${required[*]}"
+          fi
       - name: Apply migrations
         # Token-based push (login role) — no DB password secret needed.
         # Proven 2026-08-10 against the premise-labs project.
@@ -79,9 +145,3 @@ jobs:
         run: |
           supabase functions deploy tenant-provision \
             --project-ref "$SUPABASE_PROJECT_REF" --no-verify-jwt
-      - name: Note when push runs no-op (flip gating)
-        if: github.event_name == 'push'
-        run: |
-          echo "::notice::supabase/** push recorded — deploy steps are "
-          echo "::notice::workflow_dispatch-only (#771 flip gating). Run the "
-          echo "::notice::flip sequence to deploy migrations + Edge Functions."

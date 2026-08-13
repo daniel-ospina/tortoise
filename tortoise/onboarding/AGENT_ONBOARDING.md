@@ -116,15 +116,18 @@ directory of markdown files, I can index them into your memory."
 
 **If yes:**
 1. Ask: "What directory contains your markdown files? Provide an absolute path."
-2. Call `tortoise_ingest_corpus(directory=<path>)`. Returns
+2. Set expectations BEFORE calling: "Indexing can take a few minutes for large
+   corpora (a few hundred files ≈ minutes on embedded; it runs in the
+   background — do NOT report it as stuck)."
+3. Call `tortoise_ingest_corpus(directory=<path>)`. Returns
    `{ingested, updated, skipped}`.
-3. Show: "✅ Ingested [N] documents into memory."
-4. If the tool returns an HTTP-excluded error (hosted users): "Document
+4. Show: "✅ Ingested [N] documents into memory."
+5. If the tool returns an HTTP-excluded error (hosted users): "Document
    ingestion from a directory isn't available in hosted mode. Run
    `tortoise serve` locally and connect your agent to it (stdio) to use
    `tortoise_ingest_corpus`, or run `tortoise onboard` for the self-hosted
    setup. I'll skip ahead."
-5. (HTTP-transport ingest of a directory is not supported — see error recovery)
+6. (HTTP-transport ingest of a directory is not supported — see error recovery)
 
 **If no:** "Skipping document ingestion. You can ingest docs later."
 

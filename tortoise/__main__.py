@@ -619,7 +619,7 @@ def _cmd_signup(args) -> int:
     of Mem0's 4-command key mint and Hindsight's npx self-install. Saves
     the config to .tortoise so `tortoise create-point` etc. work immediately.
     """
-    import json, sys, uuid
+    import json, os, sys, uuid
     from pathlib import Path
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
@@ -639,6 +639,17 @@ def _cmd_signup(args) -> int:
             data = json.loads(resp.read())
     except HTTPError as e:
         body = e.read().decode() if e.fp else ""
+        if e.code == 429:
+            # #1081 P3: friendly retry window + support pointer instead of the
+            # raw JSON body. Retry-After is the RFC 7231 contract; tolerate
+            # both seconds and (hypothetically) HTTP-date via isdigit guard.
+            retry = (e.headers.get("Retry-After")
+                     if e.headers and e.headers.get("Retry-After") else None)
+            when = f"{int(retry)}s" if (retry and retry.isdigit()) else "later"
+            print(f"Signup rate limit reached — try again in {when}. "
+                  "Need more keys? Contact support@premiselabs.co.",
+                  file=sys.stderr)
+            return 1
         print(f"Signup failed ({e.code}): {body}", file=sys.stderr)
         return 1
     except (URLError, ValueError, json.JSONDecodeError) as e:
@@ -659,6 +670,19 @@ def _cmd_signup(args) -> int:
     print(f"✅ Free team created: {data['team_name']}")
     print(f"   API key: {data['key']}")
     print(f"   Config saved to {config_path} (shown once — store it)")
+    if getattr(args, "claim", False):
+        # #1082: the anonymous team can attach a verified identity (same key,
+        # same team, memories intact) — one-time human act, no device flow.
+        dashboard = os.environ.get(
+            "TORTOISE_DASHBOARD_URL", "https://app.premiselabs.co")
+        print()
+        print("🔐 Claim your team (optional but recommended):")
+        print(f"   1. Open {dashboard}")
+        print(f"   2. Sign in with GitHub or Google")
+        print(f"   3. Paste this key when prompted:")
+        print(f"      {data['key']}")
+        print("   Your verified identity attaches to THIS team — same key,"
+              " same graph, memories intact.")
     print(f"   Next: tortoise create-point \"hello world\" --kind statement")
     return 0
 
@@ -768,22 +792,29 @@ def _suspended_info(body: str) -> tuple[str, str | None] | None:
 
 
 def _harness_mcp_config(harness: str, api_key: str, api_url: str) -> dict:
-    """MCP config for one harness — mirrors website/welcome.html (#497).
+    """MCP config for one harness — mirrors website/welcome.html (#497/#529).
 
-    Hosted (Streamable HTTP) shapes:
-    - claude / pi: {"mcpServers": {"tortoise": {"type": "streamable-http", ...}}}
-    - cursor: same but WITHOUT `type` (Cursor's client doesn't use it)
-    - codex: shell command — Codex manages its own config (no file to write)
+    Hosted (HTTP) shapes — pinned by tests/test_onboarding_variants.py T3:
+    - claude: {"mcpServers": {"tortoise": {"type": "http", ...}}} — a url
+      entry WITHOUT "type" is skipped by Claude Code; the page's .mcp.json
+      alternative pins type:http.
+    - cursor / pi: same but WITHOUT `type` (Cursor/Pi remote servers take
+      url+headers; the page's canonical blocks carry no type for these).
+    - codex: shell command — Codex manages its own config (no file to write).
+
+    Headers use env expansion (${TORTOISE_API_KEY} / ${env:TORTOISE_API_KEY})
+    exactly like the page's canonical blocks — no literal key on disk.
     """
     endpoint = api_url.rstrip("/") + "/mcp/"
     if harness == "codex":
         return {"command": f"codex mcp add tortoise --url {endpoint} --bearer-token-env-var TORTOISE_API_KEY"}
+    header = "${env:TORTOISE_API_KEY}" if harness == "cursor" else "${TORTOISE_API_KEY}"
     server: dict = {
         "url": endpoint,
-        "headers": {"Authorization": f"Bearer {api_key}"},
+        "headers": {"Authorization": f"Bearer {header}"},
     }
-    if harness in ("claude", "pi"):
-        server = {"type": "streamable-http", **server}
+    if harness == "claude":
+        server = {"type": "http", **server}
     return {"mcpServers": {"tortoise": server}}
 
 
@@ -813,27 +844,38 @@ def _harness_label(harness: str) -> str:
 
 
 def _print_mcp_configs(api_key: str, api_url: str, harness: str | None) -> None:
-    """Print per-harness MCP config (hosted Streamable HTTP shape, #304).
+    """Print per-harness MCP config (hosted HTTP shape, #304/#981).
 
     With --harness, print only that harness; without, print the selector UI.
+    Shapes mirror website/welcome.html Block A (T3-pinned): claude's CLI
+    one-liner + type:http .mcp.json alternative, env-expansion forms for
+    cursor/pi, codex mcp add command.
     """
     import json as _json
     endpoint = api_url.rstrip("/") + "/mcp/"
     if harness:
-        print(f"── MCP Configuration (Streamable HTTP) — {_harness_label(harness)} ──")
+        print(f"── MCP Configuration (HTTP) — {_harness_label(harness)} ──")
         if harness == "codex":
             print("Codex manages its own config — run:")
             print(f"  export TORTOISE_API_KEY={api_key}")
             cfg = _harness_mcp_config("codex", api_key, api_url)
             print(f"  {cfg['command']}")
-        else:
-            print("Add this to .mcp.json:")
+        elif harness == "claude":
+            print("Run this ONE command in your terminal:")
+            print(f'  claude mcp add --transport http tortoise {endpoint} --header "Authorization: Bearer {api_key}"')
+            print()
+            print("File alternative (.mcp.json) — env expansion, no literal key on disk:")
+            print(f"  export TORTOISE_API_KEY={api_key}")
+            print(_json.dumps(_harness_mcp_config(harness, api_key, api_url), indent=2))
+        else:  # cursor / pi
+            print("Add this to your project's MCP config (env expansion — no literal key on disk):")
+            print(f"  export TORTOISE_API_KEY={api_key}")
             print(_json.dumps(_harness_mcp_config(harness, api_key, api_url), indent=2))
         print()
         print(f"→ MCP endpoint: {endpoint}")
-        print("→ Auth: Bearer <your-key>")
+        print("→ Auth: Bearer <key> (or $TORTOISE_API_KEY)")
         return
-    print("── MCP Configuration (Streamable HTTP) ──")
+    print("── MCP Configuration (HTTP) ──")
     print("Connect your agent to Tortoise Cloud. Pick your harness:")
     print()
     print("[1] Claude Code")
@@ -842,7 +884,7 @@ def _print_mcp_configs(api_key: str, api_url: str, harness: str | None) -> None:
     print("[4] Pi")
     print()
     print(f"→ MCP endpoint: {endpoint}")
-    print("→ Auth: Bearer <your-key>")
+    print("→ Auth: Bearer <key> (or $TORTOISE_API_KEY)")
 
 
 def _write_mcp_config_file(api_key: str, api_url: str, harness: str, force: bool,
@@ -853,9 +895,10 @@ def _write_mcp_config_file(api_key: str, api_url: str, harness: str, force: bool
     Merge strategy: preserve existing mcpServers entries, overwrite only the
     tortoise entry (refused if it exists unless --force).
 
-    The file holds a plaintext API key → chmod 0o600 + do-not-commit warning,
-    matching the .tortoise pattern (#875 P2). status_to_stderr keeps stdout
-    pure JSON for --json callers.
+    The written entry uses env expansion (${TORTOISE_API_KEY} — page #529
+    shape, no literal key on disk); the CLI prints the export line so the
+    var is set in the user's shell. status_to_stderr keeps stdout pure JSON
+    for --json callers.
     """
     import json as _json
     import os
@@ -886,11 +929,15 @@ def _write_mcp_config_file(api_key: str, api_url: str, harness: str, force: bool
         servers["tortoise"] = entry
     else:
         data = {"mcpServers": {"tortoise": entry}}
-    target.write_text(_json.dumps(data, indent=2) + "\n")
-    os.chmod(target, 0o600)  # plaintext API key — no group/other read (#875 P2)
     status = sys.stderr if status_to_stderr else sys.stdout
+    # The written config references $TORTOISE_API_KEY (page #529 env form) —
+    # make sure the var is set in the shell that will launch the agent.
+    print(f"ℹ️  This config reads $TORTOISE_API_KEY — export it first:", file=status)
+    print(f"   export TORTOISE_API_KEY={api_key}", file=status)
+    target.write_text(_json.dumps(data, indent=2) + "\n")
+    os.chmod(target, 0o600)
     print(f"✅ Wrote MCP config to {target}", file=status)
-    print("⚠️  .mcp.json contains a plaintext API key — do NOT commit this file.", file=status)
+    print("ℹ️  No literal key in the file — keep $TORTOISE_API_KEY exported in your shell.", file=status)
     return 0
 
 
@@ -3304,7 +3351,13 @@ def main(argv: list[str] | None = None) -> int:
     team_keys_revoke_p.add_argument("--json", action="store_true", help="Machine-readable JSON output")
     team_keys_revoke_p.add_argument("--force", "-f", action="store_true", help="Skip the confirmation prompt")
     # tortoise signup — zero-email free-team mint (issue #663)
-    sp.add_parser("signup", help="Mint a free hosted team + API key — no email or dashboard")
+    signup_p = sp.add_parser("signup", help="Mint a free hosted team + API key — no email or dashboard (2 free teams/IP/24h)")
+    signup_p.add_argument(
+        "--claim", action="store_true",
+        help="After minting, print the dashboard claim instructions: sign in "
+             "with GitHub/Google on the dashboard and paste this key to attach "
+             "a verified identity to the anonymous team (#1082)",
+    )
     # tortoise index github <url>
     idx = sp.add_parser("index", help="Index content into the graph")
     idx_sp = idx.add_subparsers(dest="index_cmd")

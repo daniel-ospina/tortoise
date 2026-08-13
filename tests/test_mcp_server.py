@@ -398,6 +398,20 @@ class TestToolFunctions:
         assert callable(tortoise_diary_write)
         assert callable(tortoise_diary_read)
 
+    def test_github_connect_oauth_unset_returns_canonical_text(self, monkeypatch):
+        """#1009: GITHUB_CLIENT_ID unset (self-host HTTP — OAuth is hosted-mode
+        only) → the prompt-canonical text, not the misleading
+        'GitHub OAuth not configured' (AGENT_ONBOARDING.md lines 51/209)."""
+        from tortoise.mcp_auth import _current_team_id
+        from tortoise.mcp_server import tortoise_onboarding_github_connect
+        monkeypatch.delenv("GITHUB_CLIENT_ID", raising=False)
+        token = _current_team_id.set("team-github-oauth")
+        try:
+            result = tortoise_onboarding_github_connect("acme")
+        finally:
+            _current_team_id.reset(token)
+        assert result == {"error": "No team context (HTTP mode required)"}
+
 
 @pytest.mark.skipif(not FALKORDB_AVAILABLE, reason="FalkorDB not available")
 class TestToolIntegration:
@@ -750,6 +764,135 @@ class TestEventsHttpSurface:
 
         assert "tortoise_events_poll" in HTTP_ALLOWED
         assert "tortoise_retract_point" in HTTP_ALLOWED
+
+
+class TestIngestPromotionPolicy:
+    """Epic #902 W4 A0 — promotion_policy param on the MCP tortoise_ingest
+    tool (E2E-8.3 parity: exposed identically on SDK + MCP; invalid value →
+    ERR_INVALID naming valid values). Also pins the ERR_INVALID constant that
+    the granularity rejection always referenced but never defined (latent
+    NameError on the pre-SDK param path)."""
+
+    def test_mcp_tool_schema_exposes_promotion_policy(self):
+        # E2E-8.3: the registered tool's JSON schema carries the param with
+        # the same default as the SDK signature (schema derives from the
+        # handler function — parity by construction, pinned here).
+        import asyncio
+        tools = asyncio.run(mcp_mod.mcp.list_tools())
+        t = next(
+            x for x in tools
+            if (getattr(x, "name", None) or (x.get("name") if isinstance(x, dict) else None))
+            == "tortoise_ingest"
+        )
+        params = getattr(t, "parameters", None)
+        if params is None:
+            params = t.get("inputSchema") if isinstance(t, dict) else None
+        schema = params.model_json_schema() if hasattr(params, "model_json_schema") else params
+        props = (schema or {}).get("properties", {})
+        assert "promotion_policy" in props
+        assert props["promotion_policy"].get("default") == "gated"
+        assert "granularity" in props
+
+    def test_mcp_invalid_promotion_policy_err_invalid(self):
+        res = mcp_mod.tortoise_ingest(bundle={}, promotion_policy="atomic")
+        assert res["code"] == mcp_mod.ERR_INVALID == -32003
+        assert "gated" in res["error"] and "auto" in res["error"]
+
+    def test_mcp_invalid_granularity_err_invalid(self):
+        # Regression pin: the granularity rejection previously referenced an
+        # undefined ERR_INVALID → NameError instead of the contract shape.
+        res = mcp_mod.tortoise_ingest(bundle={}, granularity="atomic")
+        assert res["code"] == mcp_mod.ERR_INVALID == -32003
+        assert "bulk" in res["error"] and "granular" in res["error"]
+
+    def test_mcp_gated_rejects_explicit_live_item(self):
+        # INGEST_CONTRACT row 9 at the MCP layer: explicit status:'live' under
+        # gated returns the structured ERR_INVALID shape naming the routes.
+        res = mcp_mod.tortoise_ingest(
+            bundle={"points": [{"kind": "claim", "content": "A",
+                                 "status": "live"}]})
+        assert res["code"] == mcp_mod.ERR_INVALID == -32003
+        assert "not allowed under promotion_policy 'gated'" in res["error"]
+        assert "promotion_policy='auto'" in res["error"]
+
+    def test_mcp_gated_rejects_nested_props_and_case_variant(self):
+        # PR #1073 re-review P0s/P1 at the MCP layer: nested props={status:live},
+        # case variants, and canonical terminal statuses must all return
+        # ERR_INVALID under gated.
+        for item in ({"kind": "claim", "content": "A",
+                      "props": {"status": "live"}},
+                     {"kind": "claim", "content": "A", "status": "Live"},
+                     {"kind": "claim", "content": "A", "status": "retracted"},
+                     {"kind": "claim", "content": "A",
+                      "props": {"status": "archived"}}):
+            res = mcp_mod.tortoise_ingest(
+                bundle={"points": [item]})
+            assert res["code"] == mcp_mod.ERR_INVALID == -32003
+            assert "not allowed under promotion_policy 'gated'" in res["error"]
+
+    def _sdk_backed_ingest(self, request, monkeypatch, tmp_path, **kw):
+        import os
+        from tortoise.sdk import TortoiseSDK
+        sdk = TortoiseSDK(os.path.join(str(tmp_path), "ing.db"))
+        request.addfinalizer(sdk.close)  # match repo teardown convention
+        monkeypatch.setattr("tortoise.mcp_server._get_team_sdk", lambda: sdk)
+        bundle = {
+            "points": [
+                {"ref": "pA", "kind": "claim", "content": "A implies B"},
+                {"ref": "pB", "kind": "claim", "content": "B"},
+            ],
+            "connections": [{"from": "pA", "to": "pB", "operator": "IMPL"}],
+        }
+        res = mcp_mod.tortoise_ingest(bundle=bundle, **kw)
+        return res
+
+    def test_mcp_gated_default_keeps_source_draft(self, request, monkeypatch, tmp_path):
+        # Agent journey: ingest via tortoise_ingest → read status back via
+        # tortoise_get_point (the read surface the agent actually calls).
+        res = self._sdk_backed_ingest(request, monkeypatch, tmp_path)
+        assert "error" not in res, res
+        pA, _ = res["ids"]["points"]
+        op_id = res["ids"]["connections"][0]
+        assert mcp_mod.tortoise_get_point(pA)["status"] == "draft"
+        assert mcp_mod.tortoise_get_point(op_id)["status"] == "draft"
+
+    def test_mcp_auto_promotes_source_live(self, request, monkeypatch, tmp_path):
+        res = self._sdk_backed_ingest(
+            request, monkeypatch, tmp_path, promotion_policy="auto")
+        assert "error" not in res, res
+        pA, pB = res["ids"]["points"]
+        op_id = res["ids"]["connections"][0]
+        assert mcp_mod.tortoise_get_point(pA)["status"] == "live"
+        assert mcp_mod.tortoise_get_point(pB)["status"] == "draft"  # source-only
+        op = mcp_mod.tortoise_get_point(op_id)
+        assert "error" not in op, op
+        # #780 live-side: auto writes NO status on the operator (EP treats
+        # null-status as live) — assert key absence, not == "live".
+        assert "status" not in op
+
+    def test_mcp_granular_auto_parity(self, request, monkeypatch, tmp_path):
+        # E2E-5 at the MCP layer: granularity is forwarded verbatim and the
+        # auto×granular combination holds through the agent-facing tool.
+        res = self._sdk_backed_ingest(
+            request, monkeypatch, tmp_path,
+            granularity="granular", promotion_policy="auto")
+        assert "error" not in res, res
+        assert res["granularity"] == "granular"
+        assert isinstance(res.get("results"), list) and res["results"]
+        pA, _ = res["ids"]["points"]
+        assert mcp_mod.tortoise_get_point(pA)["status"] == "live"
+
+    def test_mcp_gated_granular_parity(self, request, monkeypatch, tmp_path):
+        # E2E-5 second cell at the MCP layer: gated default holds in granular
+        # mode (no forced-auto window on the granular code path).
+        res = self._sdk_backed_ingest(
+            request, monkeypatch, tmp_path, granularity="granular")
+        assert "error" not in res, res
+        assert res["granularity"] == "granular"
+        pA, _ = res["ids"]["points"]
+        op_id = res["ids"]["connections"][0]
+        assert mcp_mod.tortoise_get_point(pA)["status"] == "draft"
+        assert mcp_mod.tortoise_get_point(op_id)["status"] == "draft"
 
 
 class TestStdioEntrypointToolRegistration:

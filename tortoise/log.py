@@ -45,13 +45,41 @@ class EventLog:
             f.write(json.dumps(event, ensure_ascii=False) + "\n")
 
     def read_all(self) -> list[dict]:
+        """Read all events in the log.
+
+        LINE-TOLERANCE (epic #900 S15/T12, cycle-21): a malformed TRAILING
+        line (a torn tail from a SIGKILL mid-append — ``append`` is a bare
+        ``f.write`` with no fsync) is skipped with a warning + count
+        (``self.torn_trailing_count``), never raised — a raised parse would
+        kill the very recovery tool (``rebuild_all`` / ``_auto_health_recover``).
+        A malformed MID-FILE line is a separate corruption class (not a torn
+        append) and raises an actionable error naming the file and line.
+        """
+        import logging
         if not self.path.exists():
             return []
+        self.torn_trailing_count = 0
         out = []
-        for line in self.path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if line:
+        lines = self.path.read_text(encoding="utf-8").splitlines()
+        for idx, raw in enumerate(lines):
+            line = raw.strip()
+            if not line:
+                continue
+            try:
                 out.append(json.loads(line))
+            except ValueError:
+                if idx == len(lines) - 1:
+                    self.torn_trailing_count += 1
+                    logging.getLogger(__name__).warning(
+                        "EventLog %s: skipping torn trailing line %d "
+                        "(SIGKILL mid-append tolerance, S15) — %d line(s) skipped",
+                        self.path, idx + 1, self.torn_trailing_count)
+                else:
+                    raise ValueError(
+                        f"EventLog {self.path}: malformed line {idx + 1} — "
+                        "mid-file corruption is not a torn append; refusing to "
+                        "skip (line-tolerance covers the trailing line only)"
+                    ) from None
         return out
 
     # ── streaming tail (M1 / M4) ──────────────────────────────────────

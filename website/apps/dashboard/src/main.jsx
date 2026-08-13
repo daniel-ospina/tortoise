@@ -4,6 +4,38 @@ import './index.css'
 
 const API_BASE = 'https://api.premiselabs.co'
 const KEY_STORAGE = 'tortoise_api_key'
+// #1082 (PR1): the pasted claim key must survive the OAuth redirect (same-tab
+// PKCE round-trip). sessionStorage is origin-scoped and same-tab — NEVER put
+// the key in `redirectTo` (GoTrue embeds it in the OAuth state URL → leak).
+// #1082 review P1-2: the raw key lives ONLY in app-origin sessionStorage —
+// never a cookie. Cross-origin claim INTENT (welcome/signin/signup on the
+// tortoise origin must know a claim is in flight so they don't mint a stray
+// team) travels as a NON-SECRET marker cookie (tt_claim_pending=1) — it
+// carries no credential, only a routing signal.
+const CLAIM_KEY_STORAGE = 'tt_claim_key'
+const CLAIM_PENDING_COOKIE = 'tt_claim_pending'
+
+function readClaimKeyStorage() {
+  try { return sessionStorage.getItem(CLAIM_KEY_STORAGE) || '' } catch { return '' }
+}
+
+// Non-secret claim-intent marker (parent domain): lets the welcome page's
+// Phase-2 mint guard and the signin/signup claim-intent routing on
+// tortoise.premiselabs.co know a claim is in flight from the dashboard
+// (app.premiselabs.co) — without exposing the raw tt_ key (P1-2).
+// Short TTL (1h — the OAuth round-trip is minutes); Secure + SameSite=Lax.
+function setClaimPendingMarker() {
+  try {
+    const expires = new Date(Date.now() + 60 * 60 * 1000).toUTCString()
+    document.cookie = `${CLAIM_PENDING_COOKIE}=1; Domain=.premiselabs.co; Path=/; SameSite=Lax; Secure; Expires=${expires}`
+  } catch { /* best-effort */ }
+}
+
+function clearClaimPendingMarker() {
+  try {
+    document.cookie = `${CLAIM_PENDING_COOKIE}=; Domain=.premiselabs.co; Path=/; SameSite=Lax; Secure; Max-Age=0`
+  } catch { /* best-effort */ }
+}
 const SUPABASE_URL = 'https://ybetwichurajbfswfeqa.supabase.co'
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InliZXR3aWNodXJhamJmc3dmZXFhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODUyNzgzNDYsImV4cCI6MjEwMDg1NDM0Nn0.YHysJAebPualDNDQTU5bnGBUHg5guLe8eBadm0LiEiY'
 
@@ -57,6 +89,33 @@ function App() {
   const [error, setError] = React.useState('')
   const [busy, setBusy] = React.useState(false)
   const [newKey, setNewKey] = React.useState(null)
+  const [capNotice, setCapNotice] = React.useState('') // #1147: tier-cap upgrade prompt (keys tab)
+
+  // #1147: build the tier-cap notice. The server's 402 detail carries the
+  // real limit ('Team api_keys limit reached (N). Upgrade your plan to
+  // increase it.') — /v1/team does NOT return max_api_keys, so parse it
+  // instead of trusting a client-side hardcode.
+  function upgradeNoticeFrom(message, team_) {
+    const m = String(message || '').match(/limit reached \((\d+)\)/)
+    const limit = m ? m[1] : (team_?.max_api_keys ?? '2')
+    return `You've reached your plan's limit of ${limit} API keys. Upgrade to add more — or regenerate an existing key instead.`
+  }
+
+  // #1147: shared mint — POST /v1/team/keys and return the plaintext key.
+  async function mintKey(activeKey) {
+    const k = await api('/v1/team/keys', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(activeKey ? { Authorization: `Bearer ${activeKey}` } : {}) },
+      body: '{}',
+    })
+    return k.api_key || k.key || k
+  }
+  // #1082 (PR1): claim-card state — paste tt_ key → OAuth → POST /v1/claim.
+  const [claimKey, setClaimKey] = React.useState(() => {
+    try { return sessionStorage.getItem(CLAIM_KEY_STORAGE) || '' } catch { return '' }
+  })
+  const [claimBusy, setClaimBusy] = React.useState(false)
+  const [claimError, setClaimError] = React.useState('')
   const [tab, setTab] = React.useState('overview')
   const [authMode, setAuthMode] = React.useState('session') // 'session' | 'apikey'
   const [checking, setChecking] = React.useState(true)
@@ -285,6 +344,43 @@ function App() {
         })
         authSubRef.current = authSub?.subscription || null
 
+        // #1082 (PR1): ?claim=1 claim-intent routing — the OAuth redirect
+        // lands here with the pasted key in sessionStorage (same-tab PKCE).
+        // POST /v1/claim BEFORE any provisioning: the welcome page's
+        // Phase-2 mint is never reached (redirectTo targets the dashboard
+        // claim route, NOT welcome.html), so the claimable anon team is
+        // never orphaned by a stray mint.
+        const claimParam = new URLSearchParams(window.location.search).get('claim')
+        if (claimParam === '1') {
+          let claimKeyStored = ''
+          try { claimKeyStored = sessionStorage.getItem(CLAIM_KEY_STORAGE) || '' } catch { /* best-effort */ }
+          // sessionStorage is same-tab/same-origin — the OAuth redirect
+          // returns to this dashboard origin, so the key is always here.
+          if (claimKeyStored.startsWith('tt_') && session.access_token) {
+            try {
+              const claimRes = await performClaim(session.access_token, claimKeyStored)
+              if (claimRes.ok) {
+                try { sessionStorage.removeItem(CLAIM_KEY_STORAGE) } catch { /* best-effort */ }
+                clearClaimPendingMarker()
+                setClaimKey('')
+                // Strip ?claim=1 so a reload doesn't re-claim.
+                window.history.replaceState({}, '', window.location.pathname)
+              } else {
+                let claimMsg = `Claim failed (HTTP ${claimRes.status}).`
+                try {
+                  const b = await claimRes.json()
+                  if (b && b.detail) claimMsg = typeof b.detail === 'string' ? b.detail : JSON.stringify(b.detail)
+                } catch { /* non-JSON body */ }
+                setClaimError(claimMsg)
+              }
+            } catch (e) {
+              setClaimError((e && e.message) || 'Claim failed — try again.')
+            }
+          } else {
+            setClaimError('Claim interrupted — paste your tt_ key again to continue.')
+          }
+        }
+
         // List memberships up front so the mint targets a concrete team
         // (P1: multi-membership users cannot mint without team_id).
         let teamsList = []
@@ -427,6 +523,65 @@ function App() {
     }
   }
 
+  // #1082 (PR1): claim-card handlers — attach a provider-verified identity
+  // to an anon team (same key, same graph, memories intact).
+  async function claimSignIn(provider) {
+    setClaimError('')
+    const k = (claimKey || '').trim()
+    if (!k.startsWith('tt_')) {
+      setClaimError('Enter a valid tt_ key — the one printed when the team was minted.')
+      return
+    }
+    if (!supabaseClient) {
+      setClaimError('Auth is not configured on this deployment.')
+      return
+    }
+    // Key survives the OAuth redirect via sessionStorage (same-tab PKCE
+    // round-trip). NEVER in redirectTo — GoTrue puts it in the OAuth state
+    // URL → leak. Raw key = sessionStorage only (P1-2). The non-secret
+    // tt_claim_pending marker (cross-origin intent for welcome/signin/
+    // signup routing) is set alongside — it carries NO credential.
+    try { sessionStorage.setItem(CLAIM_KEY_STORAGE, k) } catch { /* best-effort */ }
+    setClaimPendingMarker()
+    setClaimBusy(true)
+    try {
+      const redirectTo = `${window.location.origin}${window.location.pathname}?claim=1`
+      const { data, error } = await supabaseClient.auth.signInWithOAuth({
+        provider: provider, // github | google — provider-verified email invariant
+        options: { redirectTo },
+      })
+      if (error) {
+        setClaimError(error.message || 'Sign-in failed — try again.')
+        setClaimBusy(false)
+        return
+      }
+      if (data?.url) {
+        // Same-tab redirect (sessionStorage survives); the popup flow would
+        // lose the key — pinned in e2e.
+        window.location.href = data.url
+        return
+      }
+      setClaimBusy(false)
+    } catch (err) {
+      setClaimError((err && err.message) || 'Sign-in failed — try again.')
+      setClaimBusy(false)
+    }
+  }
+
+  async function performClaim(sessionToken, key) {
+    // POST /v1/claim — both credentials in ONE request: session JWT
+    // (Authorization) + pasted tt_ key (body).
+    const res = await fetch(`${API_BASE}/v1/claim`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${sessionToken}`,
+      },
+      body: JSON.stringify({ api_key: key }),
+    })
+    return res
+  }
+
   async function logout() {
     localStorage.removeItem(KEY_STORAGE)
     setApiKey('')
@@ -437,6 +592,12 @@ function App() {
     setKeys([])
     setSessions([])
     setNewKey(null)
+    // #1082: clear the claim intent on logout (a stale pasted key must not
+    // auto-claim the next user's session).
+    setClaimKey('')
+    setClaimError('')
+    try { sessionStorage.removeItem(CLAIM_KEY_STORAGE) } catch { /* best-effort */ }
+    clearClaimPendingMarker()
     setGraphs([])
     setGraphsLoaded(false) // Round-27: symmetry with switchTeam
     setMembers(null)
@@ -464,8 +625,7 @@ function App() {
   async function loadAll(key) {
     const _teamAtCall = teamIdRef.current // Round-10: staleness guard — a rapid
                                           // A→B→C switch must not land B's data
-                                          // under team C's header
-    // P2 (code-review): /v1/team/keys + /v1/sessions resolve the team from the
+                                          // under team C's header    // P2 (code-review): /v1/team/keys + /v1/sessions resolve the team from the
     // API key — fetch them with the SELECTED team's key so the overview cards
     // track the team switcher, not the bootstrap team.
     const h = key ? { headers: { Authorization: `Bearer ${key}` } } : {}
@@ -509,6 +669,7 @@ function App() {
     // P3 (code-review): reset stale team-scoped state at the top so a rapid
     // switch never flashes the previous team's members/graphs, and record the
     // requested team as current for staleness guards.
+    setCapNotice('') // #1147: a cap banner from the previous team must not stick
     const prevTeamId = currentTeamId
     const prevKey = apiKey
     const tok = sessionTokenRef.current
@@ -811,6 +972,7 @@ function App() {
     // against the ref after the await (the round-16 mutation pattern).
     const _teamAtCall = currentTeamId
     if (busy) return // Round-27: in-function double-click guard (disabled attr is click-path only)
+    setCapNotice('')
     setError('')
     setBusy(true)
     try {
@@ -819,11 +981,7 @@ function App() {
       // a key created with it lands on the wrong team.
       const _apiKeyAtCall = apiKey
       const activeKey = _teamAtCall ? (teamKeysRef.current[_teamAtCall] || _apiKeyAtCall) : _apiKeyAtCall
-      const k = await api('/v1/team/keys', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...(activeKey ? { Authorization: `Bearer ${activeKey}` } : {}) },
-        body: '{}',
-      })
+      const newKeyVal = await mintKey(activeKey)
       // Identity guard BEFORE any UI write: a team switch during the POST must
       // not render this team's plaintext key card or key table under the new
       // team's header (switchTeam's setNewKey(null) already ran for the new team).
@@ -840,22 +998,71 @@ function App() {
       // mid-switch window (cache[B] empty, apiKey already moved to A's key
       // from a prior switch).
       if (cachedForTeam ? activeKey !== cachedForTeam : activeKey !== apiKeyRef.current) return
-      setNewKey(k.api_key || k.key || k)
+      setNewKey(newKeyVal)
       await loadAll(activeKey)
     } catch (e) {
       // Round-18: a stale request's error must not land under the new team
-      if (teamIdRef.current === _teamAtCall) setError(e.message)
+      if (teamIdRef.current === _teamAtCall) {
+        // #1147: a tier-cap 402 (hosted_api._check_team_limit) is a LIMIT,
+        // not an error — surface the upgrade prompt with the real cap.
+        if (e.status === 402) {
+          setCapNotice(upgradeNoticeFrom(e.message, team))
+          setError('')
+        } else {
+          setError(e.message)
+        }
+      }
     } finally {
       setBusy(false)
     }
   }
 
-  async function revokeKey(keyId) {
+  async function regenerateKey(keyId) {
+    // #1147: rotate = mint the REPLACEMENT first (the old key still
+    // authorizes the request), then revoke the old — a single mint (no
+    // bootstrap-pool growth), works in both auth modes, and the replacement
+    // becomes the active key (shown once). Available on every tier:
+    // regenerating does not grow the key count.
+    if (busy) return
+    if (!confirm('Regenerate this API key? A new key is created and the current one is revoked (shown once). Applications using the old key will stop working.')) return
+    setCapNotice('')
+    setError('')
+    setBusy(true)
+    try {
+      const _teamAtCall = currentTeamId
+      const activeKey = _teamAtCall ? (teamKeysRef.current[_teamAtCall] || apiKey) : apiKey
+      const newKeyVal = await mintKey(activeKey)
+      // Revoke the old key — skip its bootstrap re-mint (we already hold the
+      // replacement; the re-mint exists only for revoke-without-replacement).
+      await revokeKey(keyId, { skipConfirm: true, skipBootstrap: true })
+      if (teamIdRef.current !== _teamAtCall) return
+      // Install the replacement as the team's active data-plane key.
+      setNewKey(newKeyVal)
+      if (_teamAtCall) teamKeysRef.current[_teamAtCall] = newKeyVal
+      if (localStorage.getItem(KEY_STORAGE) === apiKey) localStorage.setItem(KEY_STORAGE, newKeyVal)
+      apiKeyRef.current = newKeyVal
+      await loadAll(newKeyVal)
+    } catch (e) {
+      if (teamIdRef.current === currentTeamId) {
+        if (e.status === 402) {
+          setCapNotice(upgradeNoticeFrom(e.message, team))
+          setError('')
+        } else {
+          setError(e.message)
+        }
+      }
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function revokeKey(keyId, opts = {}) {
     // Round-20 (P2): capture team at call — a mid-flight switch must not let
     // this revoke's re-mint clobber the new team's active key/localStorage or
     // land the old team's key table under the new header.
     const _teamAtCall = currentTeamId
-    if (!confirm('Revoke this API key? Applications using it will stop working.')) return
+    if (!opts.skipConfirm && !confirm('Revoke this API key? Applications using it will stop working.')) return
+    setCapNotice('')
     setError('')
     try {
       await api(`/v1/team/keys/${keyId}`, { method: 'DELETE' })
@@ -866,7 +1073,7 @@ function App() {
       // per-team cache + localStorage now hold a dead key — re-mint so the
       // app doesn't 401 on the next switch/reload.
       const cached = _teamAtCall ? teamKeysRef.current[_teamAtCall] : null
-      if (cached && keyId === keyIdFromValue(cached)) {
+      if (cached && keyId === keyIdFromValue(cached) && !opts.skipBootstrap) {
         delete teamKeysRef.current[currentTeamId]
         if (localStorage.getItem(KEY_STORAGE) === cached) localStorage.removeItem(KEY_STORAGE)
         const tok = sessionTokenRef.current
@@ -1056,7 +1263,7 @@ function App() {
             </button>
           </form>
           {error && <div className="error">{error}</div>}
-          <p className="dim small">No key? <a href="https://tortoise.premiselabs.co/signup" target="_blank" rel="noreferrer">Sign up</a> — you'll get one on the welcome page.</p>
+          <p className="dim small">No key? <a href="https://tortoise.premiselabs.co/signup" target="_blank" rel="noreferrer">Create a free account</a> (GitHub, Google, or email) — you'll get one on the welcome page. Prefer zero-email? Run <code>tortoise signup</code> in your terminal.</p>
         </div>
       </div>
     )
@@ -1197,11 +1404,78 @@ function App() {
 
         {tab === 'keys' && (
           <section>
+            {/* #1082 (PR1): claim card — renders when the resolved team is
+                anon (apikey-mode entry — a pre-claim anon owner has NO
+                session by definition). Paste the tt_ key → fresh OAuth
+                (GitHub/Google) → POST /v1/claim. redirectTo is the dashboard
+                claim route (?claim=1), NEVER welcome.html (its Phase-2 mint
+                would orphan the claimable team). */}
+            {team && team.anon && (
+              <div className="claim-card">
+                <h3>Claim this anonymous team</h3>
+                <p className="dim">
+                  This team was minted without a verified identity (zero-email).
+                  Attach your GitHub or Google account to unlock dashboard
+                  session access — same key, same graph, memories intact.
+                </p>
+                {!claimKey ? (
+                  <div className="inline-form">
+                    <input
+                      placeholder="Paste your tt_ key"
+                      aria-label="Paste your tt_ key"
+                      value={claimKey}
+                      onChange={(e) => setClaimKey(e.target.value)}
+                      autoComplete="one-time-code"
+                    />
+                    <button onClick={() => claimSignIn('github')} disabled={claimBusy}>
+                      {claimBusy ? 'Redirecting…' : 'Save key & sign in with GitHub'}
+                    </button>
+                    <button className="ghost" onClick={() => claimSignIn('google')} disabled={claimBusy}>
+                      with Google
+                    </button>
+                  </div>
+                ) : (
+                  <div className="inline-form">
+                    <code className="key-value">{claimKey.slice(0, 12)}…</code>
+                    <button onClick={() => claimSignIn('github')} disabled={claimBusy}>
+                      {claimBusy ? 'Redirecting…' : 'Sign in with GitHub'}
+                    </button>
+                    <button className="ghost" onClick={() => claimSignIn('google')} disabled={claimBusy}>
+                      Sign in with Google
+                    </button>
+                    <button
+                      className="ghost small"
+                      onClick={() => { setClaimKey(''); setClaimError('') }}
+                      disabled={claimBusy}
+                    >
+                      Change key
+                    </button>
+                  </div>
+                )}
+                {claimError && <div className="error">{claimError}</div>}
+                <p className="dim small">
+                  You'll sign in with GitHub or Google (a fresh provider-verified
+                  identity), then come back here with the team unlocked.
+                </p>
+              </div>
+            )}
             <div className="row">
               <h2>API Keys</h2>
               <button onClick={createKey} disabled={busy}>+ New key</button>
             </div>
             <p className="dim small">Lost your key? <button className="link" onClick={recoverKey} disabled={busy}>Generate a new one</button> — works without an existing key (session-authenticated).</p>
+            {capNotice && (
+              <div className="cap-notice" style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', margin: '0.5rem 0 1rem', padding: '0.6rem 0.85rem', border: '1px solid var(--border, #d0d7de)', borderRadius: 8, background: 'var(--bg-soft, #f6f8fa)' }}>
+                <span className="dim small">{capNotice}</span>
+                {team?.checkout_price_id ? (
+                  <button className="ghost small" onClick={upgrade} disabled={checkoutPending}>
+                    {checkoutPending ? 'Opening checkout…' : 'Upgrade'}
+                  </button>
+                ) : (
+                  <a className="ghost small" href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">See pricing</a>
+                )}
+              </div>
+            )}
             {newKey && (
               <div className="new-key">
                 <strong>Your new key (shown once):</strong>
@@ -1218,7 +1492,12 @@ function App() {
                     <td><code>{k.key_prefix || k.id?.slice(0, 12)}</code></td>
                     <td>{fmtTime(k.created_at || k.createdAt)}</td>
                     <td>{k.revoked_at ? <span className="revoked">revoked</span> : isSessionKey(k) ? <span className="live">ephemeral · session</span> : <span className="live">active</span>}</td>
-                    <td>{!k.revoked_at && !isSessionKey(k) && <button className="ghost small" onClick={() => revokeKey(k.id)}>Revoke</button>}</td>
+                    <td>{!k.revoked_at && !isSessionKey(k) && (
+                      <span style={{ display: 'inline-flex', gap: '0.35rem' }}>
+                        <button className="ghost small" onClick={() => regenerateKey(k.id)}>Regenerate</button>
+                        <button className="ghost small" onClick={() => revokeKey(k.id)}>Revoke</button>
+                      </span>
+                    )}</td>
                   </tr>
                 ))}
               </tbody>

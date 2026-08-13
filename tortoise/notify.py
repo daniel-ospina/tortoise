@@ -29,7 +29,9 @@ FROM_ADDRESS = "billing@premiselabs.co"
 # billing_payment_failed, billing_cancel).
 KINDS = {"billing_upgrade", "billing_downgrade", "billing_payment_failed", "billing_cancel",
          # #308: abuse prevention notifications
-         "abuse_flag", "abuse_suspended", "abuse_new_ip", "abuse_read_velocity"}
+         "abuse_flag", "abuse_suspended", "abuse_new_ip", "abuse_read_velocity",
+         # #1081: R8 signup-velocity (anon signups per IP per window)
+         "abuse_signup_velocity"}
 
 _skip_logged: set[str] = set()
 
@@ -129,6 +131,8 @@ def _abuse_email_text(kind: str, team: dict, details: dict) -> str:
                      f" per {details.get('window_s')}s)")
     if details.get("country"):
         lines.append(f"Country: {details['country']}")
+    if details.get("ip"):
+        lines.append(f"IP: {details['ip']}")
     if details.get("scope"):
         lines.append(f"Scope: {details['scope']} ({details.get('id')})")
     if details.get("appeal_url"):
@@ -171,6 +175,8 @@ def notify_abuse(kind: str, team: dict, details: dict | None = None) -> None:
                 parts.append(f"Count: {details['count']}")
             if details.get("country"):
                 parts.append(f"Country: {details['country']}")
+            if details.get("ip"):
+                parts.append(f"IP: {details['ip']}")
             telegram_send(bot_token, chat_id, "\n".join(parts))
         except Exception as e:  # noqa: BLE001 — best-effort, never raise
             logger.warning("abuse notify: telegram failed (%s)", redact_safe(e))

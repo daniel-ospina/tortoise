@@ -8,6 +8,32 @@ on:
   pull_request:
 
 jobs:
+  # Migration invariants (#1095) — secret-free, fork-safe:
+  #   migration-unique-prefix  — duplicate version prefixes / non-conforming
+  #                              filenames (the 0012x2/0015x2 class that aborted
+  #                              `db push` entirely, #1001 root cause)
+  #   migration-append-only    — edits/renames/deletions of already-merged
+  #                              migrations are rejected (a change to an applied
+  #                              migration must be a NEW timestamp file)
+  # Both drive the shared .github/scripts/check-migration-append-only script so
+  # tests exercise the shipped logic. fetch-depth: 0 is required for the base
+  # SHA to be available to `git diff` (default checkout is depth 1).
+  migration-unique-prefix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check migration prefix invariants
+        run: bash .github/scripts/check-migration-append-only prefix
+  migration-append-only:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check migrations are append-only
+        run: bash .github/scripts/check-migration-append-only diff
+        env:
+          DRIFT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
   pricing-artifact:
     # #682: canonical pricing must exist on main and stay in sync with the
     # tier_limits() table — a missing/renamed product/pricing.json fails CI.
@@ -109,6 +135,64 @@ jobs:
           fi
           echo "service-first gate OK"
 
+<<<<<<< HEAD
+=======
+  welcome-e2e:
+    runs-on: ubuntu-latest
+    # Serialize live smoke runs: each run consumes 1 email-send from the
+    # shared 30/hr project-wide prod bucket — parallel PRs would exhaust it
+    # and red CI on unrelated PRs (#801 code-review). Latest run wins.
+    concurrency:
+      group: welcome-e2e
+      cancel-in-progress: true
+    # Playwright browser tests for the onboarding welcome page (#541).
+    # Runs against the live prod page; Supabase-backed tests need
+    # SUPABASE_URL/SUPABASE_SERVICE_KEY secrets (skipped without them).
+    #
+    # #826: explicit timeout + scoped suite. The job used to run the whole
+    # tests/e2e/ dir — duplicating legal-e2e (its own job, #747) and
+    # dragging runs to GitHub's ~30m cancel boundary; a cancelled required
+    # check blocks the merge queue. Scoped to the welcome file only;
+    # test_billing_upgrade.py skips without STRIPE_TEST_* keys and
+    # test_signup_form_safety_e2e.py is RUN_LEGAL_E2E-gated, so no
+    # coverage is lost. Suite measured 2026-08-16: 25 passed / 1 skipped
+    # in ~30s (welcome 14 tests + waitlist 12); the budget is dominated
+    # by setup (pip install + playwright chromium, ~4m) → 15m cap leaves
+    # headroom for runner/prod slowness while staying well under 30m.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'   # --experimental-strip-types needs >= 22.6 (#373 harness)
+      # Install the package (pulls falkordblite/redislite needed by tortoise/__init__)
+      # + the e2e test extras.
+      - run: pip install -e '.[test]'
+      - run: python -m playwright install --with-deps chromium
+      - name: Run welcome page E2E + waitlist static tests (#373)
+        run: python -m pytest tests/e2e/test_welcome_page.py tests/test_waitlist_form.py -q -rs -p no:cacheprovider
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+      - name: Warn if live signup smoke is skipping (no-429 monitor off)
+        if: always()
+        run: |
+          # ⛔ env-var check, NOT pytest output parsing: `--collect-only` never
+          # prints "skipped" (verified empirically) — grep on it can never match.
+          if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_SERVICE_KEY" ]; then
+            echo "::warning::live signup smoke is SKIPPED — SUPABASE_URL/SUPABASE_SERVICE_KEY secrets missing; the #801 no-429 monitor is OFF"
+          else
+            echo "secrets present — live signup smoke will run"
+          fi
+      - name: Run waitlist edge-function behavioral harness (#373)
+        run: node --experimental-strip-types tests/test_waitlist_subscribe.mjs
+      - name: Run tenant-provision CORS runtime harness (#1110)
+        run: node --experimental-strip-types tests/test_tenant_provision_cors.mjs
+
+>>>>>>> origin/main
   legal-e2e:
     runs-on: ubuntu-latest
     # Full legal-page suite (#657) — ~1000 assertions across 10 plan checks
