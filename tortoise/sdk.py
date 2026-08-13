@@ -1642,8 +1642,17 @@ class TortoiseSDK:
                     "MATCH (n:Point {id:$id}) RETURN n.status",
                     params={"id": tgt},
                 ).result_set
-                tstatus = (trow[0][0] if trow else None) or "live"
-                if tstatus in ("live", None):
+                if not trow:
+                    # MISSING node (stale target) — distinct from an unset
+                    # status node, which is live by the canonical read model
+                    # (#1080 round-2 review: missing targets crashed the
+                    # NAND create AFTER the CAS).
+                    _logger.warning(
+                        "promote_point: temporal target %s for %s no longer "
+                        "exists — skipping the wire", tgt, point_id)
+                    continue
+                tstatus = trow[0][0] or "live"
+                if tstatus == "live":
                     live_targets.append(tgt)
                 else:
                     _logger.warning(
@@ -1682,8 +1691,15 @@ class TortoiseSDK:
                         "alreadyDecided IMPL — skipping temporal NAND",
                         point_id, tgt)
                     continue
-                self.create_operator("NAND", point_id, [tgt])
-                temporal_wired = True
+                try:
+                    self.create_operator("NAND", point_id, [tgt])
+                    temporal_wired = True
+                except ValueError as exc:
+                    # A racing delete between validation and create must
+                    # never leave a live point without its event (#1080).
+                    _logger.warning(
+                        "promote_point: NAND wiring to %s failed for %s: %s",
+                        tgt, point_id, exc)
 
         # R16 zombie-operator prevention: promote incident draft operators
         # once ALL their endpoint Points are live.
@@ -1804,7 +1820,7 @@ class TortoiseSDK:
             entries.sort(key=lambda e: (e[2] is None, e[2] or ""))
         out = []
         ids = [e[0] for e in entries]
-        for pid, content, vf, status, outdated in entries[:limit]:
+        for pid, content, vf, status, outdated in entries[-limit:]:
             # Temporal link to the NEXT point in the chain.
             linked_by = None
             related = []
