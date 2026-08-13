@@ -200,11 +200,34 @@ def _redislite_hygiene():
 
     yield
 
-    def _foreign_suites_active() -> bool:
-        """True when pytest processes outside this suite's process tree are
-        running. Catches suites running the pre-#1005 conftest, which do not
-        write active-suite markers — without this, our full end-sweep could
-        kill another suite's between-tests idle server (issue #1005 P1).
+    def _cmdline_of(pid: str) -> str:
+        """Short cmdline for a pid, for the hygiene log (issue #1103).
+        Linux /proc first (CI), macOS ps fallback. Best-effort — "?" on
+        failure (the pid may have just exited).
+        """
+        import subprocess as _sp
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as fh:
+                raw = fh.read()
+            if raw:
+                return raw.replace(b"\x00", b" ").decode(
+                    errors="replace")[:120]
+        except OSError:
+            pass
+        try:
+            return (_sp.run(["ps", "-o", "args=", "-p", pid],
+                            capture_output=True, text=True, timeout=5)
+                    .stdout.strip()[:120])
+        except Exception:
+            return "?"
+
+    def _foreign_suites_active() -> tuple[bool, list[dict]]:
+        """(foreign, matches) — True when pytest processes outside this suite's
+        process tree are running, plus the matched pids (pid + cmdline) so the
+        decision is diagnosable (issue #1103). Catches suites running the
+        pre-#1005 conftest, which do not write active-suite markers — without
+        this, our full end-sweep could kill another suite's between-tests idle
+        server (issue #1005 P1).
         """
         import subprocess as _sp
         my_pid = os.getpid()
@@ -232,20 +255,31 @@ def _redislite_hygiene():
             out = _sp.run(["pgrep", "-f", "pytest"], capture_output=True,
                           text=True, timeout=10)
         except (_sp.TimeoutExpired, OSError):
-            return True  # unknown -> fail closed (defer full sweep)
+            return True, []  # unknown -> fail closed (defer full sweep)
         for line in out.stdout.splitlines():
             pid = line.strip()
             if not pid.isdigit() or int(pid) == my_pid or int(pid) in ancestors:
                 continue
             try:
-                ppid = int(_sp.run(["ps", "-o", "ppid=", "-p", pid],
-                                   capture_output=True, text=True, timeout=5
-                                   ).stdout.strip())
-            except (_sp.TimeoutExpired, OSError, ValueError):
-                return True
+                r = _sp.run(["ps", "-o", "ppid=", "-p", pid],
+                            capture_output=True, text=True, timeout=5)
+            except (_sp.TimeoutExpired, OSError):
+                return True, []  # unknown liveness -> fail closed
+            raw = r.stdout.strip()
+            if not raw:
+                # pgrep/ps race — the pid exited between the two calls. A dead
+                # process cannot be a live foreign suite, so it must NOT defer
+                # the sweep (issue #1103: the race makes the full end-sweep
+                # skip, leaking this suite's own 0-client servers as the CI
+                # orphan count).
+                continue
+            try:
+                ppid = int(raw)
+            except ValueError:
+                return True, []  # unparseable -> fail closed
             if ppid != my_pid:
-                return True
-        return False
+                return True, [{"pid": pid, "cmdline": _cmdline_of(pid)}]
+        return False, []
 
     # Session end: remove our marker first, then check for other active
     # suites (markers) AND foreign pytest processes (old-conftest suites).
@@ -256,10 +290,27 @@ def _redislite_hygiene():
         except OSError:
             pass
     others = [t for t in active_suite_tokens() if t != token]
-    foreign = _foreign_suites_active()
+    foreign, foreign_matches = _foreign_suites_active()
     end_result = _sweep(only_safe=bool(others) or foreign)
     print(f"[redislite-hygiene] end sweep (other-suites={len(others)}, "
           f"foreign-pytest={foreign}): {end_result}")
+    # Issue #1103: pytest capture swallows the print above, so the sweep
+    # decision is invisible in CI logs. Mirror it to a file the CI orphan
+    # check can dump. Best-effort — never fail the suite over hygiene logging.
+    try:
+        import json as _json
+        log_dir = os.environ.get("RUNNER_TEMP") or tempfile.gettempdir()
+        log_path = os.path.join(log_dir, "redislite-hygiene-end.json")
+        with open(log_path, "w") as fh:
+            _json.dump({
+                "token": token,
+                "other_suites": others,
+                "foreign_pytest": foreign,
+                "foreign_pids": foreign_matches,
+                "sweep": end_result,
+            }, fh, indent=2)
+    except Exception:
+        pass
 
 
 
