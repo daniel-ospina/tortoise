@@ -3315,7 +3315,7 @@ def main(argv: list[str] | None = None) -> int:
     team_keys_revoke_p.add_argument("--json", action="store_true", help="Machine-readable JSON output")
     team_keys_revoke_p.add_argument("--force", "-f", action="store_true", help="Skip the confirmation prompt")
     # tortoise signup — zero-email free-team mint (issue #663)
-    sp.add_parser("signup", help="Mint a free hosted team + API key — no email or dashboard")
+    sp.add_parser("signup", help="Mint a free hosted team + API key — no email or dashboard (2 free teams/IP/24h)")
     # tortoise index github <url>
     idx = sp.add_parser("index", help="Index content into the graph")
     idx_sp = idx.add_subparsers(dest="index_cmd")
