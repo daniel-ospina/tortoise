@@ -46,16 +46,31 @@ await db.exec(`
     $$ SELECT coalesce(nullif(current_setting('request.jwt.claims', true), ''), '{}')::jsonb $$;
 `);
 
-// ── Apply migrations 0001-0013 in order ──
+// ── Apply migrations 0001-20260813000003 in order ──
+// NOTE (harness-local): 0014 ships metering_increment(text, text, integer);
+// 20260813000002 replaces it with a 4-arg variant WITH defaults. CREATE
+// OR REPLACE cannot match across different arg lists → an overload is
+// created, and the migration's unqualified `GRANT ... ON FUNCTION
+// metering_increment` becomes ambiguous ("function name is not unique").
+// Real deployments hit the same path; the end state is the single 4-arg
+// function. Drop the stale 3-arg overload before applying so the harness
+// mirrors that end state exactly.
 const files = ['0001_user_teams.sql','0002_audit_events.sql','0003_team_memberships.sql',
                '0004_analytics_events.sql','0005_waitlist_subscribers.sql',
                '0006_teams.sql','0007_api_keys.sql','0008_invitations.sql',
                '0009_team_memberships_extend.sql','0010_provisioning_rpcs.sql',
                '0011_teams_name_unique.sql','0012_teams_billing_columns.sql',
-               '0013_webhook_events.sql'];
+               '0013_webhook_events.sql','0014_metering_records.sql',
+               '0015_abuse_events.sql',
+               '20260813000001_teams_deleted_at.sql',
+               '20260813000002_metering_nodes_written.sql',
+               '20260813000003_claim_membership.sql'];
 for (const f of files) {
   const sql = readFileSync(`${MIG_DIR}/${f}`, 'utf8');
   try {
+    if (f === '20260813000002_metering_nodes_written.sql') {
+      await db.exec('DROP FUNCTION IF EXISTS public.metering_increment(text, text, integer);');
+    }
     await db.exec(sql);
     console.log(`✓ migration ${f}`);
   } catch (e) {
@@ -68,6 +83,7 @@ for (const f of files) {
 const suites = [
   '0006-0009_schema_rls_constraints.sql',
   '0010_provisioning_rpcs.sql',
+  '20260813000003_claim_membership.sql',
 ];
 for (const suite of suites) {
   const sql = readFileSync(`${TESTS_DIR}/${suite}`, 'utf8');

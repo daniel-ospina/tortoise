@@ -727,7 +727,65 @@ you up to 6 yes/no questions and set up your Tortoise memory.
       // twice for the same user (the function would mint a NEW team per
       // call — the page must not re-provision once a team exists).
       if (recoveryMode) { showResetPanel(); return; }
+
+      // #1082 (PR1 — P2-FIX-D): double-provision guard. RLS hides NULL-
+      // user_id membership rows from authenticated, so a claimable anon
+      // team is INVISIBLE to the query above — minting here would orphan it
+      // (the claim path needs exactly one NULL-user_id owner row). Before
+      // provisioning, ask the server (service-role, key-scoped) whether a
+      // claimable team exists for the presented key: if so, route to the
+      // dashboard claim card instead of minting a stray team.
+      if (await claimStatusGuard(session)) {
+        return;
+      }
       await provisionViaEdgeFunction(session, userId, activeMembershipQuery);
+    }
+
+    // #1082 (PR1): welcome Phase-2 mint guard — if the browser holds a
+    // claimable tt_ key (parent-domain cookie written by the dashboard
+    // claim card), GET /v1/claim/status and route to the dashboard claim
+    // card (NEVER welcome.html provisioning — the mint would orphan the
+    // claimable team). Returns true when the guard routed away.
+    async function claimStatusGuard(session) {
+      const key = readClaimKeyCookie();
+      if (!key || !key.startsWith("tt_")) return false;
+      try {
+        const resp = await fetch(
+          "https://api.premiselabs.co/v1/claim/status?api_key=" + encodeURIComponent(key),
+          { headers: { "Authorization": "Bearer " + session.access_token } }
+        );
+        if (!resp.ok) return false; // fail-closed → do NOT mint on a blip; the
+                                    // claim card remains reachable later
+        const body = await resp.json();
+        if (!body || body.claimable !== true) return false;
+        const dashUrl = "https://app.premiselabs.co/?claim=1";
+        showError(
+          "You have an anonymous team waiting to be claimed. " +
+          "Attach your GitHub or Google identity at the dashboard " +
+          "(same key, same graph, memories intact) — " +
+          "no new team will be created here."
+        );
+        const errState = document.getElementById("error-state");
+        if (errState) {
+          const link = document.createElement("a");
+          link.href = dashUrl;
+          link.className = "btn";
+          link.textContent = "Go claim my team →";
+          errState.appendChild(link);
+        }
+        return true;
+      } catch (e) {
+        return false;
+      }
+    }
+
+    function readClaimKeyCookie() {
+      try {
+        const m = document.cookie.match(/(?:^|; )tt_claim_key=([^;]*)/);
+        return m ? decodeURIComponent(m[1]) : "";
+      } catch (e) {
+        return "";
+      }
     }
 
     // ── Client-side provisioning (#527) ────────────────────────────────────

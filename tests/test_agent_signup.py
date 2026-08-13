@@ -161,3 +161,111 @@ class TestProvisionMembershipStatus:
                 app.dependency_overrides.pop(get_current_user, None)
         finally:
             os.environ["FASTAPI_INTERNAL_KEY"] = old_key
+
+
+class TestAgentSignupClaim:
+    """#1082 PR1 — claim path on agent-signup teams (Supabase mode).
+
+    Indicators 1 + 3: the SAME key authenticates pre/post claim and memories
+    (data-plane graph) are intact — the claim touches only the control-plane
+    membership/email rows, never the team_id or the graph namespace.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _supabase_claim_env(self, monkeypatch):
+        from tests.fake_control_plane import FakeControlPlane
+        import tortoise.supabase_control as sc
+        import tortoise.hosted_api as ha_mod
+
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "supabase")
+        monkeypatch.setenv("SUPABASE_URL", "https://agentclaim.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc-agent-claim")
+        monkeypatch.setenv("RATE_LIMIT_DISABLED", "1")
+        fake = FakeControlPlane()
+        monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
+
+        async def _confirmed(request):
+            return True
+
+        monkeypatch.setattr(ha_mod, "_gotrue_email_confirmed", _confirmed)
+        return fake
+
+    def _patch_jwt(self, monkeypatch, user_id, email, providers):
+        import tortoise.hosted_api as ha_mod
+
+        async def _verify(request):
+            return {"user_id": user_id, "email": email,
+                    "app_metadata": {"providers": providers}}
+
+        monkeypatch.setattr(ha_mod, "verify_session_jwt", _verify)
+
+    def test_claim_same_key_authenticates_pre_post_and_memories_intact(
+            self, client, monkeypatch):
+        """Indicator 1 + 3: mint → point → claim → same key reads the SAME
+        graph (team_id unchanged) — memories preserved."""
+        r = client.post("/v1/agent/signup", json={})
+        assert r.status_code == 200, r.text
+        key = r.json()["key"]
+        team_id = r.json()["team_id"]
+
+        # pre-claim: write a memory with the key
+        r = client.post(
+            "/v1/points",
+            headers={"Authorization": f"Bearer {key}"},
+            json={"content": "pre-claim memory", "kind": "statement"},
+        )
+        assert r.status_code == 200, r.text
+
+        self._patch_jwt(monkeypatch, "user-claim-a", "verified@example.com",
+                        ["github"])
+        r = client.post(
+            "/v1/claim",
+            headers={"Authorization": "Bearer abc.def.ghi"},
+            json={"api_key": key},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["team_id"] == team_id
+
+        # post-claim: the same key reads the SAME graph (memories intact)
+        r = client.get(
+            "/v1/points",
+            headers={"Authorization": f"Bearer {key}"},
+        )
+        assert r.status_code == 200, r.text
+        contents = [p.get("content") for p in r.json().get("points", r.json())]
+        assert "pre-claim memory" in contents, (
+            f"pre-claim memory lost after claim: {contents}")
+
+    def test_claim_email_overwrite_on_reg_team(self, client, monkeypatch):
+        """reg- identity teams (email set at mint) get the email overwritten
+        with the verified OAuth email on claim (P1-FIX-B, unconditional)."""
+        r = client.post("/v1/agent/signup", json={})
+        key = r.json()["key"]
+        import tortoise.supabase_control as sc
+        fake = sc.get_control_plane()
+        # simulate a reg- mint: provision a SECOND team with email set
+        import uuid as _uuid
+        from tortoise.auth import lookup_hash as _lh, hash_api_key as _hash
+        team_id = f"team-reg-{_uuid.uuid4().hex[:10]}"
+        api_key = f"tt_{_uuid.uuid4().hex}"
+        sc.provision_team(fake, **{
+            "p_user_id": None, "p_identity": f"reg-{_uuid.uuid4().hex[:12]}",
+            "p_team_id": team_id, "p_team_name": f"Reg {team_id}",
+            "p_api_key": api_key, "p_key_hash": _hash(api_key),
+            "p_lookup_hash": _lh(api_key), "p_graph_name": f"team_{team_id}",
+            "p_email": "stale-reg@example.com",
+            "p_key_prefix": api_key[:10], "p_tier": "free",
+            "p_max_users": 1, "p_max_graphs": 1, "p_ops_allowance": 10000,
+            "p_graph_size_cap": 10000,
+        })
+        self._patch_jwt(monkeypatch, "user-claim-a", "fresh-verified@example.com",
+                        ["google"])
+        r = client.post(
+            "/v1/claim",
+            headers={"Authorization": "Bearer abc.def.ghi"},
+            json={"api_key": api_key},
+        )
+        assert r.status_code == 200, r.text
+        team_row = next(t for t in fake.tables["teams"] if t["id"] == team_id)
+        assert team_row["email"] == "fresh-verified@example.com", (
+            f"reg- email must be overwritten A→B, got {team_row['email']}")

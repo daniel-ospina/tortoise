@@ -26,7 +26,7 @@ from contextlib import asynccontextmanager
 from tortoise.audit_events import AuditLogger
 from tortoise.auth import hash_api_key
 from tortoise.security import redact_error  # billing webhook + checkout error logging
-from tortoise.session_auth import get_current_user
+from tortoise.session_auth import get_current_user, verify_session_jwt
 from tortoise.quota import DEFAULT_MAX_SESSIONS  # used by get_current_team (#754 P0: missing import → 500 on every agent_signup auth)
 from tortoise.analytics import (  # #528 server analytics (fail-safe, no-op without key)
     api_key_created,
@@ -553,12 +553,15 @@ async def _async_audit(
     resource_type: str | None = None,
     resource_id: str | None = None,
     actor_user_id: str | None = None,
+    detail: dict | None = None,
 ) -> None:
     """Async-safe audit event writer. Offloads sync psycopg2 to thread pool.
 
     actor_user_id records the JWT-session user for session-plane operations
-    (owner export/delete, #302) — key-plane paths leave it None (the key
-    creator is not the caller).
+    (owner export/delete, #302; team_claim #1082) — key-plane paths leave it
+    None (the key creator is not the caller). ``detail`` is a free-form JSONB
+    payload (audit_events.detail, 20260813000003) — team_claim stores
+    provider/email/user_id.
     """
     ip = request.client.host if request.client else None
     ua = request.headers.get("user-agent")
@@ -571,6 +574,7 @@ async def _async_audit(
         resource_id=resource_id,
         ip_address=ip,
         user_agent=ua,
+        detail=detail,
     )
 
 
@@ -1279,6 +1283,10 @@ class TeamInfoResponse(BaseModel):
     write_ops_period: str = ""
     overage_eligible: bool = False
     overage_cost_usd: float | None = None
+    # #1082 (PR1): anon teams (NULL-user_id active owner — Supabase mode)
+    # render the dashboard claim card. Registry mode: always False (no
+    # claim path in selfhost v1).
+    anon: bool = False
 
 
 # ── Billing: Checkout + Portal request/response models (#310, Task 5) ───────
@@ -1473,6 +1481,46 @@ async def _check_sensitive_op_rate_limit(request: Request, op: str) -> None:
                      if not any(now - t < 3600 for t in b)]
             for k in stale:
                 del _SENSITIVE_BUCKETS[k]
+
+
+# ── Claim limiter (#1082, PR1 — P3-FIX-H restated) ────────────────────────
+# POST /v1/claim is an identity-LINKING endpoint (ATO-adjacent): a brute-
+# forced key × JWT pairing must be bounded. Explicit 24h-window bucket
+# (2/24h per IP) — NOT the hourly register bucket shape: a legitimate claim
+# is a ONE-TIME human act, so a 2/24h budget never trips a real user while
+# capping an automated farm. Mirrors the register/sensitive-op limiter
+# posture (#1081's per-IP pattern; RATE_LIMIT_DISABLED=1 opts out in tests).
+_CLAIM_MAX_PER_24H = 2
+_CLAIM_WINDOW = 24 * 3600
+_CLAIM_BUCKETS: dict[str, list[float]] = defaultdict(list)
+_CLAIM_LOCK = asyncio.Lock()
+
+
+async def _check_claim_rate_limit(request: Request) -> None:
+    """IP-based rate limit: 2 claim attempts per rolling 24h per IP."""
+    if os.environ.get("RATE_LIMIT_DISABLED") == "1":
+        return
+    if not request.client or not request.client.host:
+        return
+    ip = request.client.host
+    now = time.time()
+    async with _CLAIM_LOCK:
+        bucket = _CLAIM_BUCKETS[ip]
+        bucket[:] = [t for t in bucket if now - t < _CLAIM_WINDOW]
+        if len(bucket) >= _CLAIM_MAX_PER_24H:
+            raise HTTPException(
+                status_code=429,
+                detail=("Too many claim attempts (max 2 per 24h). "
+                        "Please try again later."),
+                headers={"Retry-After": "86400"},
+            )
+        bucket.append(now)
+        # Bound memory growth: drop dead buckets beyond 10k entries.
+        if len(_CLAIM_BUCKETS) > 10_000:
+            stale = [ip for ip, b in _CLAIM_BUCKETS.items()
+                     if not any(now - t < _CLAIM_WINDOW for t in b)]
+            for ip in stale:
+                del _CLAIM_BUCKETS[ip]
 
 
 # ── Endpoints ─────────────────────────────────────────────────────
@@ -1764,7 +1812,30 @@ async def team_info(team: dict = Depends(get_current_team)):
         write_ops_period=usage["period"],
         overage_eligible=usage["overage_eligible"],
         overage_cost_usd=usage["overage_cost_usd"],
+        # #1082 (PR1): anon flag drives the dashboard claim card — the shared
+        # is_anon_team predicate (Supabase mode only; registry = False).
+        anon=_team_is_anon(team["team_id"]),
     )
+
+
+def _team_is_anon(team_id: str) -> bool:
+    """True when the team is an unclaimed anon team (Supabase mode only).
+
+    The shared is_anon_team predicate (active owner membership with user_id
+    NULL) — the same predicate the claim RPC and the PR2 anon ceiling use.
+    Registry mode (selfhost): False — no claim path in v1.
+    """
+    from tortoise.supabase_control import (
+        get_control_plane, is_anon_team, is_supabase_enabled,
+    )
+    if not is_supabase_enabled():
+        return False
+    try:
+        return is_anon_team(get_control_plane(), team_id)
+    except Exception:
+        # Fail-closed on control-plane errors: never render the claim card
+        # on a resolution failure (the card is an affordance, not auth).
+        return False
 
 
 @app.get("/v1/team/alerts")
@@ -4835,6 +4906,197 @@ async def agent_signup(request: Request):
 
     return {"key": api_key, "team_id": team_id, "team_name": team_name, "graph_name": graph_name,
             "identity": identity, "tier": "free"}
+
+
+# ── Claim path (#1082, PR1 — indicators 1,2,3,5) ───────────────────────────
+#
+# POST /v1/claim attaches a provider-verified Supabase identity to an
+# anonymous (zero-email) team. GoTrue-native transport (ZERO new server-side
+# OAuth): the platform already ships client OAuth (signup.html:713,
+# signin.html:755, dashboard PKCE). Claim = ONE endpoint requiring BOTH
+# credentials in one request:
+#   · Authorization: Bearer <fresh Supabase session JWT> — verified
+#     server-side via JWKS (session_auth.verify_session_jwt)
+#   · body.api_key: the pasted tt_ key — the key-possession anchor
+#     (structurally the ONLY anchor: anon rows are identity-anchored and
+#     teams.email is NULL, so no logged-in identity can match an unclaimed
+#     team; the key gate also blocks the E1 session-rotation ATO ladder)
+#
+# Provider-verified-email invariant (P2-FIX-J, cycle-2/3 refined):
+# app_metadata.providers ∩ {github, google} ≠ ∅ (app_metadata is user-level,
+# always present, survives token refresh — unlike `amr` which is optional and
+# refresh-mutated to `token_refresh`). Secondary confirmatory conjunct:
+# GoTrue /auth/v1/user email_confirmed_at (AND, never OR). Fail-closed on
+# null email AND on email+password-only sessions (a confirmed password
+# session must NOT claim + overwrite teams.email). NOTE: a password login on
+# a github-LINKED account legitimately passes the invariant (providers
+# accumulates on linking) — intended semantics, documented.
+#
+# The claim_membership RPC resolves the team from api_keys.lookup_hash ONLY
+# (authoritative key→team binding) — client team_id/identity are
+# structurally rejected (the RPC signature has no such args; solution-verify
+# P1). Rate-limited 2/24h per IP (24h-window bucket, P3-FIX-H restated).
+#
+# CLAIM_CALLBACK/redirectTo NEVER routes to welcome.html (welcome Phase-2
+# mints a NEW team when the membership query is empty — RLS hides NULL-
+# user_id rows — which would orphan the claimable anon team).
+
+
+async def _gotrue_email_confirmed(request: Request) -> bool:
+    """GoTrue /auth/v1/user ``email_confirmed_at`` conjunct (AND, never OR).
+
+    The provider-invariant (app_metadata.providers ∩ {github,google} ≠ ∅) is
+    the primary assertion; email_confirmed_at is the confirmatory conjunct.
+    Fail-closed: an unreachable/non-2xx GoTrue rejects the claim (the
+    conjunct cannot be verified) — mirror of the invariant's AND semantics.
+    """
+    auth = request.headers.get("Authorization", "")
+    url = (os.environ.get("SUPABASE_URL", "").rstrip("/")
+           + "/auth/v1/user")
+    if not url.startswith("http"):
+        return False
+    import httpx as _httpx
+    try:
+        async with _httpx.AsyncClient(timeout=5) as client:
+            resp = await client.get(
+                url,
+                headers={"Authorization": auth,
+                         "apikey": os.environ.get("SUPABASE_ANON_KEY", "")},
+            )
+        if resp.status_code != 200:
+            return False
+        user = resp.json()
+        return bool(user.get("email_confirmed_at"))
+    except Exception:
+        return False
+
+
+@app.post("/v1/claim")
+async def claim_team(request: Request):
+    """Attach a provider-verified identity to an anonymous team (#1082)."""
+    await _check_claim_rate_limit(request)
+
+    # 1. session JWT (401 on missing/invalid/expired).
+    session = await verify_session_jwt(request)
+    user_id = session["user_id"]
+    email = session.get("email")
+
+    # 2. provider-verified-email invariant (before key work — cheap).
+    app_meta = session.get("app_metadata") or {}
+    providers = app_meta.get("providers") or []
+    if not (set(providers) & {"github", "google"}):
+        raise HTTPException(
+            status_code=403,
+            detail=("Claim requires a GitHub or Google sign-in (provider-"
+                    "verified email). Sign in with GitHub or Google, then "
+                    "try again."),
+        )
+    if not email:
+        raise HTTPException(
+            status_code=400,
+            detail="No verified email on this account — cannot claim.",
+        )
+    # email_confirmed_at conjunct (AND, never OR) — fail-closed.
+    if not await _gotrue_email_confirmed(request):
+        raise HTTPException(
+            status_code=403,
+            detail=("Your email is not confirmed — cannot claim an "
+                    "anonymous team. Confirm your email and try again."),
+        )
+
+    # 3. pasted key — the key-possession anchor.
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    api_key = (body or {}).get("api_key") or ""
+    if not isinstance(api_key, str) or not api_key.startswith("tt_"):
+        raise HTTPException(status_code=400,
+                            detail="api_key (tt_...) is required")
+
+    # 4. resolve the pasted key through the SAME auth path (revocation,
+    #    expiry, suspension, abuse hooks) — 401 on invalid/revoked keys.
+    team = await _get_current_team_supabase(request, api_key)
+    team_id = team["team_id"]
+
+    # 5. fail-closed: the resolved team must still be anon (an unclaimed
+    #    owner row). First-claim-wins; a claimed team is a 409 even when the
+    #    key still resolves (the idempotent re-claim below is scoped to the
+    #    SAME user — the RPC returns idempotent success then).
+    from tortoise.supabase_control import (
+        ClaimError, claim_membership, get_control_plane, is_anon_team,
+    )
+    cp = get_control_plane()
+    if not is_anon_team(cp, team_id):
+        raise HTTPException(status_code=409,
+                            detail="Team has already been claimed")
+
+    # 6. claim_membership service-role RPC (same key, same team, memories
+    #    intact).
+    from tortoise.auth import lookup_hash as _lookup_hash
+    try:
+        claim_membership(cp, lookup_hash=_lookup_hash(api_key),
+                         user_id=user_id, email=email)
+    except ClaimError as e:
+        raise HTTPException(status_code=e.status, detail=e.message)
+
+    # 7. audit team_claim — provider/email/user_id in detail (0002 has no
+    #    provider/email columns; 20260813000003 added detail JSONB).
+    await _async_audit(
+        request, team_id, "team_claim",
+        resource_type="team", resource_id=team_id,
+        actor_user_id=user_id,
+        detail={"provider": sorted(set(providers)), "email": email,
+                "user_id": user_id},
+    )
+    return {"team_id": team_id, "status": "claimed", "tier": team["tier"]}
+
+
+@app.get("/v1/claim/status")
+async def claim_status(request: Request, api_key: str | None = None):
+    """Claimability probe for the welcome double-provision guard (P2-FIX-D).
+
+    Identity-scoped (session JWT required) + key-scoped (service-role
+    lookup): welcome.html's Phase-2 mint calls this BEFORE provisioning a
+    new team so an existing claimable anon team is never orphaned by a stray
+    mint (RLS hides NULL-user_id rows from authenticated, so the welcome
+    page cannot see the anon owner row directly).
+
+    Returns:
+        {"claimable": true, "team_id": ...}  — key resolves to an unclaimed
+            anon team; the user should claim it (dashboard claim card)
+        {"claimable": false, "claimed": true}  — already claimed by this
+            user (idempotent re-claim is safe)
+        {"claimable": false}  — key unknown / team claimed by another /
+            registry mode (no claim path in selfhost v1)
+        {"claimable": false, "need_key": true}  — no key presented
+    """
+    session = await verify_session_jwt(request)  # 401 on invalid
+    if not api_key or not api_key.startswith("tt_"):
+        return {"claimable": False, "need_key": True}
+    from tortoise.supabase_control import (
+        get_control_plane, is_anon_team, is_supabase_enabled, resolve_api_key,
+    )
+    if not is_supabase_enabled():
+        # Selfhost (registry mode): no claim path in v1 (requires Supabase
+        # JWKS + RPC) — the welcome guard is a no-op.
+        return {"claimable": False, "unsupported": True}
+    try:
+        team = resolve_api_key(get_control_plane(), api_key)
+    except Exception:
+        # Fail-closed on control-plane errors: never report claimable.
+        return {"claimable": False}
+    if team is None:
+        return {"claimable": False}
+    team_id = team["team_id"]
+    if not is_anon_team(get_control_plane(), team_id):
+        # Already claimed — distinguish this-user idempotency for the UI.
+        from tortoise.supabase_control import membership_for_user_team
+        if membership_for_user_team(get_control_plane(), session["user_id"],
+                                    team_id) is not None:
+            return {"claimable": False, "claimed": True, "team_id": team_id}
+        return {"claimable": False}
+    return {"claimable": True, "team_id": team_id}
 
 
 @app.post("/v1/session/key")
