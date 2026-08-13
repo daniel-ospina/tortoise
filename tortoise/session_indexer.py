@@ -19,36 +19,33 @@ import json
 import os
 import re
 import sys
-import hashlib
 from pathlib import Path
 from typing import Any
 
-# ── YAML frontmatter parsing ──────────────────────────────────────
+from .file_indexer import (
+    _FM_RE,              # canonical home — back-compat alias (was defined here)
+    compute_file_hash,   # canonical home — back-compat alias (was defined here)
+    derive_session_id,
+    parse_frontmatter,
+)
 
-_FM_RE = re.compile(r'^---\s*\n(.*?)\n---', re.DOTALL)
+# ── YAML frontmatter parsing ──────────────────────────────────────
+# Canonical home: tortoise.file_indexer (_FM_RE + parse_frontmatter). The
+# module-level names stay as back-compat aliases so existing importers
+# (sdk.py, mining.py, health/doctor paths) keep working unchanged.
 
 
 def _parse_frontmatter(content: str) -> dict:
-    """Extract YAML frontmatter from markdown content.
+    """Extract YAML frontmatter from markdown content — back-compat alias.
 
-    Uses the canonical boundary regex (this module's ``_FM_RE``), imported by
-    ``ingest_corpus`` so both sides
-    agree on what constitutes frontmatter (review round 5 P2): a file starting
-    ``---sessionId: foo\n---`` must parse as NO frontmatter here, exactly as
-    ingest sees it — otherwise health derives a different event_id and the
-    sweep never converges. Non-dict roots (list/scalar YAML) return {} —
-    a malformed corpus file must degrade to the file-stem fallback, never
-    crash the health check / doctor / sweep (review round 5 P2).
+    Canonical implementation: ``file_indexer.parse_frontmatter`` (tolerant,
+    degraded={}). The boundary regex is the canonical ``_FM_RE`` (shared with
+    ingest/sdk), so health derives the SAME event_id as ingest_corpus and the
+    sweep converges (review round 5 P2). Non-dict roots (list/scalar YAML)
+    return {} — a malformed corpus file must degrade to the file-stem
+    fallback, never crash the health check / doctor / sweep.
     """
-    m = _FM_RE.match(content)
-    if not m:
-        return {}
-    try:
-        import yaml
-        parsed = yaml.safe_load(m.group(1))
-        return parsed if isinstance(parsed, dict) else {}
-    except Exception:
-        return {}
+    return parse_frontmatter(content)
 
 # ── Keyword extraction (TF-IDF + graph entities, no LLM) ──────────
 
@@ -488,56 +485,27 @@ def session_corpus_dir() -> Path:
     return Path.home() / ".tortoise" / "docs" / "conversations"
 
 
-def compute_file_hash(file_path: str) -> str | None:
-    """SHA256 of file contents — text-mode (universal newlines) normalized.
 
-    MUST match ``ingest_corpus``'s file_hash derivation exactly (both hash
-    ``read_text(encoding="utf-8").encode()``): a raw-bytes read would diverge
-    on CRLF files, permanently classifying them as hash-stale in the health
-    check / reconciliation sweep (non-convergent). Returns None on error.
-    """
-    try:
-        with open(file_path, encoding="utf-8") as f:
-            return hashlib.sha256(f.read().encode()).hexdigest()
-    except Exception:
-        return None
 
 
 def extract_session_id(file_path: str) -> str | None:
-    """Extract session ID from frontmatter or filename."""
+    """Extract session ID from frontmatter or filename.
+
+    Identity derivation lives in ``file_indexer.derive_session_id`` (§4.2 —
+    the str-coerced or-collapse mirror of ingest); this function adds the
+    file read. Round-10: explicit utf-8 — ingest (sdk.py) and compute_file_hash
+    both use it; under a non-UTF-8 locale (LC_ALL=C in cron/systemd) the
+    default encoding would throw UnicodeDecodeError → None → a different
+    event_id than ingest → permanent sweep non-convergence.
+    """
     try:
-        # Round-10: explicit utf-8 — ingest (sdk.py) and compute_file_hash both
-        # use it; under a non-UTF-8 locale (LC_ALL=C in cron/systemd) the
-        # default encoding would throw UnicodeDecodeError → None → a different
-        # event_id than ingest → permanent sweep non-convergence.
         with open(file_path, encoding="utf-8") as f:
             content = f.read()
     except Exception:
         return None
-    
-    fm = _parse_frontmatter(content)
-    # Check each key INDEPENDENTLY: `or` would collapse falsy-but-coercible
-    # scalars (0, 0.0, false). Coerce to str to match ingest (sdk.py coerces
-    # sessionId before use) so health derives the SAME event_id as
-    # ingest_corpus — otherwise the sweep never converges (review round 2 P2).
-    def _coerce(v):
-        return str(v) if v is not None else None
 
-    # Mirror ingest's str-coerced `or`-collapse EXACTLY (review round 4 P2):
-    # sessionId or session_id or file_<stem> — an empty-string sessionId is
-    # falsy and must fall through to the alternate key, not straight to the
-    # file stem. Otherwise health derives a DIFFERENT event_id than ingest
-    # and the sweep never converges.
-    sid = _coerce(fm.get("sessionId"))
-    if not sid:
-        sid = _coerce(fm.get("session_id"))
-    if sid:
-        return sid
-    # empty-string/None both keys → file fallback (matches ingest's or-collapse)
-    
-    # Fallback: derive from filename
-    stem = Path(file_path).stem
-    return f"file_{stem}"
+    fm = _parse_frontmatter(content)
+    return derive_session_id(fm, Path(file_path).stem)
 
 
 # ── CLI ────────────────────────────────────────────────────────────
