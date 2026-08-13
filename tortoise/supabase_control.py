@@ -409,9 +409,17 @@ def resolve_api_key(cp, token: str) -> dict | None:
         return None
     team_row = team_rows[0]
 
-    tier = team_row.get("tier") or "free"
+    # #1082 PR2: anon-ceiling derivation at the auth boundary — an
+    # unclaimed zero-email team resolves to the reduced ``anon`` tier until
+    # claimed (owner user_id linked). Fail-open to stored tier on error.
+    from tortoise.quota import derived_tier
+    tier = derived_tier({**team_row, "id": team_id})
     from tortoise.pricing import tier_limits
     lim = tier_limits(tier)
+    anon_override = tier == "anon"  # #1082 PR2: stored caps were minted at
+    # free values (agent_signup provisions tier='free' columns); when the
+    # unclaimed-owner predicate derives anon, override read-time with the
+    # reduced anon tier values — never leave free caps on an anon team.
     max_users = team_row.get("max_users")
     max_graphs = team_row.get("max_graphs")
     graph_size_cap = team_row.get("graph_size_cap")
@@ -421,10 +429,15 @@ def resolve_api_key(cp, token: str) -> dict | None:
         "tier": tier,
         # max_users/max_graphs: preserve None (unlimited, Team tier) and fall
         # back to pricing when the column is missing (mirrors registry path).
-        "max_users": max_users if max_users is not None else lim["max_users_per_team"],
-        "max_graphs": max_graphs if max_graphs is not None else lim["max_graphs_per_team"],
-        # points counter counts graph nodes → graph_size_cap (#310 GAP-B)
-        "max_points": int(graph_size_cap) if graph_size_cap is not None else lim["max_graph_nodes"],
+        # anon tier overrides BOTH stored and pricing (reduced caps bind).
+        "max_users": (lim["max_users_per_team"] if anon_override
+                      else (max_users if max_users is not None else lim["max_users_per_team"])),
+        "max_graphs": (lim["max_graphs_per_team"] if anon_override
+                       else (max_graphs if max_graphs is not None else lim["max_graphs_per_team"])),
+        # points counter counts graph nodes → graph_size_cap (#310 GAP-B);
+        # anon tier forces the reduced node cap.
+        "max_points": (int(lim["max_graph_nodes"]) if anon_override
+                       else (int(graph_size_cap) if graph_size_cap is not None else lim["max_graph_nodes"])),
         # 0006 teams has no max_api_keys/max_sessions columns — pricing/defaults
         "max_api_keys": lim["max_api_keys"],
         "max_sessions": DEFAULT_MAX_SESSIONS,
@@ -1083,6 +1096,92 @@ def provision_team(cp, **params: object) -> None:
     cp.rpc("provision_team", params)
 
 
+# ── Claim path (#1082, PR1 — 20260813000003) ────────────────────────────────
+#
+# claim_membership attaches a provider-verified Supabase user to the team
+# resolved from an api_keys.lookup_hash (authoritative key→team binding,
+# unique index 0007, revocation-aware). The RPC NEVER accepts team_id or
+# identity from the caller (solution-verify P1): a client-supplied
+# team_id/identity would let any key + any session JWT claim ANY team.
+
+
+class ClaimError(Exception):
+    """Semantic claim rejection (already_claimed / email_in_use / invalid key).
+
+    Carries an HTTP status so hosted_api can translate directly (409 for
+    already_claimed/email_in_use, 404/403 for key problems). Deliberately
+    NOT a RuntimeError: these are expected client outcomes, not control-
+    plane failures — the fail-closed contract (RPC errors → RuntimeError
+    → 500) is untouched.
+    """
+
+    def __init__(self, message: str, status: int = 409, code: str = ""):
+        super().__init__(message)
+        self.status = status
+        self.code = code
+
+
+# RPC RAISE messages → (HTTP status, user-facing detail). The RPC codes are
+# stable (SQL test suite 20260813000003 asserts them); PostgREST wraps them
+# in a 400 with the message embedded.
+_CLAIM_ERROR_CODES = {
+    "key_required": (400, "api_key is required to claim a team"),
+    "user_required": (400, "Claim requires a verified user"),
+    "key_not_found": (404, "Invalid API key — no team resolves from this key"),
+    "key_not_claimable": (403, "This is a session key and cannot claim a team"),
+    "key_expired": (403, "This key has expired"),
+    "already_claimed": (409, "Team has already been claimed by another user"),
+    "email_in_use": (409, "This email is already in use by another team"),
+}
+
+
+def claim_membership(cp, *, lookup_hash: str, user_id: str, email: str) -> dict:
+    """Call the claim_membership SECURITY DEFINER RPC (20260813000003).
+
+    Attaches the verified Supabase user (user_id) + verified email to the
+    team resolved from ``lookup_hash``'s api_keys row (authoritative
+    key→team binding). Same key, same team, memories intact. Idempotent:
+    an owner row already linked to ``user_id`` is a noop success.
+
+    The caller (hosted_api) MUST have already verified the session JWT + the
+    provider-verified-email invariant — the RPC is service-role and holds
+    no auth.uid() (P2-FIX-J). Raises ClaimError on semantic rejections;
+    RuntimeError (fail-closed) on control-plane failures.
+    """
+    try:
+        cp.rpc("claim_membership", {
+            "p_lookup_hash": lookup_hash,
+            "p_user_id": user_id,
+            "p_email": email,
+        })
+    except RuntimeError as e:
+        msg = str(e)
+        for code, (status, detail) in _CLAIM_ERROR_CODES.items():
+            if code in msg:
+                raise ClaimError(detail, status=status, code=code) from e
+        raise
+    # PostgREST return=minimal drops the jsonb body — success is 2xx.
+    return {"status": "claimed"}
+
+
+def is_anon_team(cp, team_id: str) -> bool:
+    """True when *team_id* has an ACTIVE OWNER membership with user_id NULL.
+
+    The shared anon predicate for the claim path (#1082 PR1: only an
+    unclaimed team may be claimed) AND the derived-tier ceiling (#1082 PR2:
+    unclaimed teams run the reduced ``anon`` tier). Deliberately NOT the
+    ``teams.email IS NULL`` proxy (reg- teams set email at mint; legacy
+    real-user teams may have NULL email — both would misclassify).
+    """
+    rows = cp.query(
+        "team_memberships",
+        select=["id"],
+        filters=[("team_id", "eq", team_id), ("role", "eq", "owner"),
+                 ("status", "eq", "active"), ("user_id", "is", None)],
+    )
+    return bool(rows)
+
+
 def team_by_email(cp, email: str) -> dict | None:
     """Team row for an email (register idempotency — 409 already_registered)."""
     rows = cp.query("teams", select=["id"], filters=[("email", "eq", email)])
@@ -1316,9 +1415,13 @@ def webhook_event_marker(cp, event_id: str, etype: str) -> bool:
 
 def team_tier(cp, team_id: str) -> str | None:
     """Current tier from the teams row (webhook analytics twin of the
-    registry tier read)."""
+    registry tier read). #1082 PR2: derives the anon ceiling — an
+    unclaimed zero-email team resolves to ``anon`` until claimed."""
     rows = cp.query("teams", select=["tier"], filters=[("id", "eq", team_id)])
-    return rows[0].get("tier") if rows else None
+    if not rows:
+        return None
+    from tortoise.quota import derived_tier
+    return derived_tier({"tier": rows[0].get("tier"), "id": team_id})
 
 
 # ── Write-op metering (post-#669 flip fix — #669) ───────────────────────────

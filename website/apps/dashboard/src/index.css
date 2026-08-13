@@ -123,3 +123,17 @@ tbody tr:last-child td { border-bottom: none; }
 .kind-decision { background: rgba(248,113,113,0.12); color: var(--red); }
 .kind-statement { background: rgba(196,167,60,0.12); color: #facc15; }
 .extracted-content { font-size: 14px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
+
+/* #1082 (PR1): claim card — anonymous team attaches a verified identity */
+.claim-card {
+  background: linear-gradient(135deg, rgba(6,182,212,0.08), rgba(167,139,250,0.08));
+  border: 1px solid rgba(6,182,212,0.25);
+  border-radius: 12px;
+  padding: 16px;
+  margin-bottom: 18px;
+}
+.claim-card h3 { font-size: 15px; margin-bottom: 6px; color: var(--accent); }
+.claim-card .inline-form { flex-wrap: wrap; margin: 10px 0; }
+.claim-card input { min-width: 260px; }
+.claim-card .key-value { display: inline-block; padding: 6px 10px; background: rgba(0,0,0,0.25); border-radius: 6px; }
+.claim-card .error { margin-top: 8px; }
