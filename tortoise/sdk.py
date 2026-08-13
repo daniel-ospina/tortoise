@@ -10061,10 +10061,14 @@ class TortoiseSDK:
                            "created": int, "linked": int, "skipped": int,
                            "degraded_no_file": int, "errors": [...]}
         `skipped` DEFINED (cycle-4): a legacy Event whose Source ALREADY exists AND
-        whose `references` edge ALREADY exists — created/linked/skipped are mutually
-        exclusive per Event per run (index_file enumerates skip reasons; backfill's
-        skipped bucket had no definition until this pin — E2E-8's second run asserts
-        it).
+        whose `references` edge ALREADY exists — `skipped` is exclusive per Event
+        per run (a FRESH Event counts in BOTH `created` and `linked`; `skipped`
+        counts only Events already fully linked — index_file enumerates skip
+        reasons; backfill's skipped bucket had no definition until this pin —
+        E2E-8's second run asserts it).
+        Counters are HONEST in the `db` failure class: a Source-write failure
+        NEVER increments `linked` (an edge that was not written is never counted),
+        and a re-run REPAIRS the missing edge (`linked`) instead of skipping.
         errors[] entries cover: null-file_hash-with-missing-file (no Source created),
         non-relativizable paths (counted identically in both modes),
         hash-mismatch-since-capture notes, hardlink aliases with NO walk context
@@ -10081,7 +10085,7 @@ class TortoiseSDK:
         """
         import os as _os
         from pathlib import Path
-        from .file_indexer import compute_file_hash, derive_source_url
+        from .file_indexer import compute_file_hash, derive_source_url, hash_text
 
         if directory is None:
             from .session_indexer import session_corpus_dir
@@ -10131,6 +10135,19 @@ class TortoiseSDK:
                               "cause": "structural"}
                 units.append(u)
                 continue
+            kind_name = _BACKFILL_SOURCE_KIND.get(ekind)
+            if kind_name is None:
+                # unmapped eventKind (custom event_kinds tuple) — NEVER a silent
+                # wrong-sourceKind write (§6.2 mapping-table pin): the unknown
+                # kind is reported and skipped, never fatal, never a Source.
+                u["error"] = {
+                    "event": eid, "eventKind": ekind,
+                    "error": f"eventKind {ekind!r} has no Source sourceKind "
+                             f"mapping — no Source created",
+                    "cause": "structural"}
+                units.append(u)
+                continue
+            u["source_kind"] = kind_name
             if ekind == "AgentSession":
                 raw = source_file
                 if raw is None or str(raw) == "":
@@ -10158,7 +10175,7 @@ class TortoiseSDK:
                     "event": eid, "eventKind": ekind,
                     "error": f"source_file {str(raw)!r} is not decodable — "
                              f"no Source created",
-                    "cause": "filename"}
+                    "cause": "filename", "path": str(raw)}
                 units.append(u)
                 continue
             except (ValueError, OSError) as exc:
@@ -10168,7 +10185,7 @@ class TortoiseSDK:
                     "event": eid, "eventKind": ekind,
                     "error": f"source_file {str(raw)!r} not relativizable under "
                              f"corpus root {directory!r} — {exc}",
-                    "cause": "escape"}
+                    "cause": "escape", "path": str(raw)}
                 units.append(u)
                 continue
             units.append(u)
@@ -10242,14 +10259,14 @@ class TortoiseSDK:
                                          f"stored file_hash at the OLD url "
                                          f"(degraded; accept-and-document "
                                          f"divergence, W2 moved-file row)",
-                                "cause": "moved"}
+                                "cause": "moved", "path": u["abs_path"]}
                         else:
                             u["note"] = {
                                 "event": eid, "eventKind": ekind,
                                 "error": "source file deleted since capture — "
                                          "Source built from stored file_hash "
                                          "(degraded)",
-                                "cause": "missing"}
+                                "cause": "missing", "path": u["abs_path"]}
                     continue
                 st = cand.stat()
                 if st.st_nlink > 1:
@@ -10262,7 +10279,7 @@ class TortoiseSDK:
                             "error": "source file hardlinked (st_nlink>1) and "
                                      "file_hash null — no REQUIRED-compliant "
                                      "Source possible",
-                            "cause": "inode"}
+                            "cause": "inode", "path": u["abs_path"]}
                     else:
                         u["degrade"] = True
                         u["content_hash"] = hash_s
@@ -10271,7 +10288,7 @@ class TortoiseSDK:
                             "error": "source file hardlinked (st_nlink>1) — "
                                      "never read without walk context; Source "
                                      "built from stored file_hash (degraded)",
-                            "cause": "inode"}
+                            "cause": "inode", "path": u["abs_path"]}
                     continue
                 if st.st_size > max_bytes:
                     # two-layer size-guard inheritance (§6.4/W2) — never read
@@ -10281,7 +10298,7 @@ class TortoiseSDK:
                             "error": "source file over max_file_mb size guard and "
                                      "file_hash null — no REQUIRED-compliant "
                                      "Source possible",
-                            "cause": "size"}
+                            "cause": "size", "path": u["abs_path"]}
                     else:
                         u["degrade"] = True
                         u["content_hash"] = hash_s
@@ -10290,16 +10307,39 @@ class TortoiseSDK:
                             "error": "source file over max_file_mb size guard — "
                                      "never read; Source built from stored "
                                      "file_hash (degraded)",
-                            "cause": "size"}
+                            "cause": "size", "path": u["abs_path"]}
                     continue
-                current = compute_file_hash(u["abs_path"])
-                if current is None:
+                # layer-2 bounded read (T6 inherits the §6.4 two-layer guard: a
+                # file that GREW past max_bytes between the stat and the read is
+                # never read unbounded — it degrades to the stored hash, keeping
+                # the OOM class closed at 4,190-file scale; hash_text on the
+                # universal-newline-normalized buffer == compute_file_hash)
+                text, read_err = self._index_read_file(u["abs_path"], max_bytes)
+                if read_err == "size":
+                    if hash_s is None:
+                        u["error"] = {
+                            "event": eid, "eventKind": ekind,
+                            "error": "source file grew past max_file_mb between "
+                                     "stat and read (layer-2) and file_hash null "
+                                     "— no REQUIRED-compliant Source possible",
+                            "cause": "size", "path": u["abs_path"]}
+                    else:
+                        u["degrade"] = True
+                        u["content_hash"] = hash_s
+                        u["note"] = {
+                            "event": eid, "eventKind": ekind,
+                            "error": "source file grew past max_file_mb between "
+                                     "stat and read (layer-2) — Source built "
+                                     "from stored file_hash (degraded)",
+                            "cause": "size", "path": u["abs_path"]}
+                    continue
+                if read_err == "decode":
                     if hash_s is None:
                         u["error"] = {
                             "event": eid, "eventKind": ekind,
                             "error": "source file unreadable and file_hash null — "
                                      "no REQUIRED-compliant Source possible",
-                            "cause": "decode"}
+                            "cause": "decode", "path": u["abs_path"]}
                     else:
                         u["degrade"] = True
                         u["content_hash"] = hash_s
@@ -10307,11 +10347,11 @@ class TortoiseSDK:
                             "event": eid, "eventKind": ekind,
                             "error": "source file unreadable — Source built from "
                                      "stored file_hash (degraded)",
-                            "cause": "decode"}
+                            "cause": "decode", "path": u["abs_path"]}
                     continue
-                u["content_hash"] = current
+                u["content_hash"] = hash_text(text)
                 u["inode"] = (st.st_dev, st.st_ino)
-                if hash_s is not None and current != hash_s:
+                if hash_s is not None and u["content_hash"] != hash_s:
                     # W2 "file edited since capture": Source gets the CURRENT
                     # hash, the legacy Event KEEPS its stored file_hash
                     # (additive-only, SC4) — the mismatch is a report artifact
@@ -10320,12 +10360,12 @@ class TortoiseSDK:
                         "error": "file edited since capture — Source has CURRENT "
                                  "file hash, Event keeps stored file_hash "
                                  "(additive-only)",
-                        "cause": "hash-mismatch"}
+                        "cause": "hash-mismatch", "path": u["abs_path"]}
             except OSError as exc:
                 u["error"] = {
                     "event": eid, "eventKind": ekind,
                     "error": f"cannot stat source file {u['abs_path']!r}: {exc}",
-                    "cause": "structural"}
+                    "cause": "structural", "path": u["abs_path"]}
 
         # ── sibling-Event same-inode convergence (cycle-6): the scan applies ONLY
         # to nlink==1 aliases (the mount-alias class); nlink>1 hardlink pairs are
@@ -10374,35 +10414,58 @@ class TortoiseSDK:
             winner = units[winner_i]
             url = winner["url"]
             eid = u["eid"]
-            source_exists, edge_exists = self._backfill_probe(url, eid)
+            try:
+                source_exists, edge_exists = self._backfill_probe(url, eid)
+            except Exception as exc:  # noqa: BLE001 — per-Event isolation
+                errors.append({"event": eid, "eventKind": u["kind"],
+                               "error": f"probe failed: {exc}", "cause": "db"})
+                continue
             if source_exists and edge_exists:
                 if not dry_run:
                     report["skipped"] += 1
                 continue
+            created_here = False
             if not source_exists and not group_created.get(winner_i, False):
                 if dry_run:
                     report["would_create"] += 1
+                    group_created[winner_i] = True
                 else:
                     try:
                         outcome = self._index_source_merge(
-                            url, _BACKFILL_SOURCE_KIND.get(u["kind"], "document"),
+                            url, u["source_kind"],
                             None, winner["content_hash"],
                             str(u["title"] or Path(winner["abs_path"] or eid).stem),
                             winner["abs_path"], gate_v=None)
                         if outcome == "indexed":
                             report["created"] += 1
+                        group_created[winner_i] = True
+                        created_here = True
                     except Exception as exc:  # noqa: BLE001 — per-Event isolation
                         errors.append({"event": eid, "eventKind": u["kind"],
                                        "error": f"Source write failed: {exc}",
                                        "cause": "db"})
-                group_created[winner_i] = True
+                        # outcome UNKNOWN (a journal-append failure can raise
+                        # AFTER the graph write committed): do NOT set
+                        # group_created — an alias member may retry the create;
+                        # the link below is gated on ACTUAL Source existence so
+                        # a failed create NEVER counts a phantom link (honest
+                        # counters in the db failure class).
             if not edge_exists:
                 if dry_run:
                     report["would_link"] += 1
                 else:
                     try:
-                        self._backfill_link(url, eid)
-                        report["linked"] += 1
+                        # gate the link on ACTUAL Source existence: the normal
+                        # path knows it (source_exists or created_here); the
+                        # unknown-outcome path (a journal-append failure can
+                        # raise AFTER the graph write committed) re-probes
+                        # before linking; a create that left NO Source is
+                        # covered by the "Source write failed" error already —
+                        # never a phantom link count (honest counters).
+                        if (source_exists or created_here
+                                or self._backfill_probe(url, eid)[0]):
+                            self._backfill_link(url, eid)
+                            report["linked"] += 1
                     except Exception as exc:  # noqa: BLE001 — crash-repair seam
                         errors.append({"event": eid, "eventKind": u["kind"],
                                        "error": f"references-link step failed: {exc}",

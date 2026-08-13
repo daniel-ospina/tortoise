@@ -838,6 +838,55 @@ def test_e2e8_kill_between_crash_repair(tmp_path, monkeypatch):
 # execution is a TEST FAILURE)
 # ═══════════════════════════════════════════════════════════════════════
 
+def test_e2e8_source_write_failure_honest_counters(tmp_path, monkeypatch):
+    """Review-gate regression (P1 — honest counters in the `db` failure
+    class): a Source-write failure must NEVER increment `linked` (an edge
+    that was not written is never counted) — run 1 reports created==0 /
+    linked==0 / skipped==0 with ONE errors[] cause "db" entry and a clean
+    graph; a re-run REPAIRS both the Source and the edge (created==1 /
+    linked==1 / errors==[]); the third run converges (skipped==1)."""
+    import tortoise.sdk as sdkmod
+    c = tmp_path / "corpus"; c.mkdir()
+    (c / "s1.md").write_text(SESSION_FIXTURE.format(sid="legacy1", n=1))
+    sdk = _sdk()
+    orig = sdkmod.TortoiseSDK._index_source_merge
+    try:
+        g = sdk._get_proj().g
+        _create_legacy_event(g, event_id="session_legacy1",
+                             kind="AgentSession", rel_path="s1.md",
+                             file_hash=compute_file_hash(str(c / "s1.md")),
+                             title="S1")
+
+        def _boom(self, *a, **k):  # noqa: ANN001, ANN002, ANN003
+            raise RuntimeError("simulated Source-write failure (db class)")
+        monkeypatch.setattr(sdkmod.TortoiseSDK, "_index_source_merge", _boom)
+        r1 = sdk.backfill_sources(str(c))
+        assert r1["created"] == 0 and r1["linked"] == 0 and r1["skipped"] == 0
+        assert len(r1["errors"]) == 1
+        assert r1["errors"][0]["cause"] == "db"
+        assert "Source write failed" in r1["errors"][0]["error"]
+        # clean graph — no phantom Source, no edge
+        assert g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0] == 0
+        assert g.query("MATCH ()-[r:references]->() RETURN count(r)"
+                       ).result_set[0][0] == 0
+        assert _required_sweep(g) == 0
+
+        # re-run repairs both the Source and the edge
+        monkeypatch.setattr(sdkmod.TortoiseSDK, "_index_source_merge", orig)
+        r2 = sdk.backfill_sources(str(c))
+        assert r2["created"] == 1 and r2["linked"] == 1 and r2["skipped"] == 0
+        assert r2["errors"] == []
+        assert g.query("MATCH ()-[r:references]->() RETURN count(r)"
+                       ).result_set[0][0] == 1
+
+        # third run: convergence
+        r3 = sdk.backfill_sources(str(c))
+        assert r3["created"] == 0 and r3["linked"] == 0 and r3["skipped"] == 1
+        assert _required_sweep(g) == 0
+    finally:
+        sdk.close()
+
+
 def test_e2e8_concurrent_backfill_and_index(tmp_path):
     """E2E-8 concurrent backfill+index leg: legacy AgentSession Event
     (session_legacy1, source_file=conv.md) + fixture conv.md whose frontmatter
