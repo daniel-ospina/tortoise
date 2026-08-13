@@ -2310,7 +2310,8 @@ class TortoiseSDK:
         ("IMPL", "NAND", "composedOf", "decomposesInto", "contains", "wraps")
     )
 
-    def ingest(self, bundle: dict, granularity: str = "bulk") -> dict:
+    def ingest(self, bundle: dict, granularity: str = "bulk", *,
+               promotion_policy: str = "gated") -> dict:
         """Heterogeneous bulk write (epic #888 W4, design ref PR #912).
 
         One call writes points + entities + sources + connections coherently:
@@ -2339,6 +2340,12 @@ class TortoiseSDK:
           returns aggregated {created, ids, nudges}. granularity='granular':
           additionally returns per-item ``results`` for agent step-by-step
           control (each item's primitive result + deduped flag).
+        - promotion_policy: "gated" (DEFAULT, Q2) — points stay draft;
+          connections never promote (operator path: promote_source=False via
+          #780 — the operator node is created draft and the source is NOT
+          auto-promoted). "auto" — #131 parity preserved: source points
+          promote on wire (today's behavior). ORTHOGONAL to granularity:
+          both modes honor the same policy.
         - Idempotent-ish: points dedup by (content_hash, pointKind) via
           create_point(dedup=True); sources merge by url; Subject/Object
           merge by name; operator connections dedup by (op_type, input set);
@@ -2346,7 +2353,9 @@ class TortoiseSDK:
           occurrence records — re-ingest duplicates them by design.
         - EP-safe: created points default to status='draft' (#131 draft→live
           lifecycle) unless the item carries status=... — pass status='live'
-          explicitly to opt into EP propagation.
+          explicitly to opt into EP propagation. Connection-driven promotion
+          (source → live on first edge) only happens under
+          promotion_policy="auto".
 
         Returns {granularity, created: {points, entities, sources, connections},
         deduped: {...}, ids: {points, entities, sources, connections, refs},
@@ -2355,6 +2364,10 @@ class TortoiseSDK:
         if granularity not in ("bulk", "granular"):
             raise ValueError(
                 f"ingest: granularity must be 'bulk' or 'granular', got {granularity!r}"
+            )
+        if promotion_policy not in ("gated", "auto"):
+            raise ValueError(
+                f"ingest: promotion_policy must be 'gated' or 'auto', got {promotion_policy!r}"
             )
         if not isinstance(bundle, dict):
             raise ValueError(
@@ -2565,7 +2578,8 @@ class TortoiseSDK:
                     conn_result = {"operator_id": oid, "deduped": True}
                 else:
                     op = self.create_operator(op_type, src, dsts,
-                                              label=label, direction=direction)
+                                              label=label, direction=direction,
+                                              promote_source=(promotion_policy == "auto"))
                     oid = op["id"]
                     created["connections"] += 1
                     conn_result = {"operator_id": oid, "deduped": False}

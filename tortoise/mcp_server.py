@@ -551,6 +551,10 @@ def _scrub_analyze_answer(answer: str) -> str:
 # #329: quota error codes (registered alongside the other ERR_* in mcp_auth).
 ERR_QUOTA = -32006
 ERR_QUOTA_SERVER = -32007
+# Application-defined pre-SDK param errors (tool-level validation that never
+# reaches the SDK): invalid granularity / promotion_policy on tortoise_ingest
+# return {error, code: ERR_INVALID} naming the valid values (E2E-8.3 pin).
+ERR_INVALID = -32003
 
 
 def _http_excluded_error() -> dict:
@@ -1714,7 +1718,8 @@ def tortoise_create_edge(source_id: str, target_id: str, predicate: str) -> dict
                  predicate, source_id, target_id)
 
 
-def tortoise_ingest(bundle: Any = None, granularity: str = "bulk") -> dict:
+def tortoise_ingest(bundle: Any = None, granularity: str = "bulk",
+                    promotion_policy: str = "gated") -> dict:
     """Heterogeneous bulk write (epic #888 W4) — one call writes points +
     entities + sources + connections coherently. Nodes are written first, then
     the connections between them; connections carrying 'operator' (IMPL/NAND)
@@ -1723,6 +1728,9 @@ def tortoise_ingest(bundle: Any = None, granularity: str = "bulk") -> dict:
 
     granularity='bulk' (default): aggregated {created, ids, nudges}.
     granularity='granular': per-item results for agent step-by-step control.
+    promotion_policy='gated' (DEFAULT, Q2): points stay draft, connections
+    never promote (operator path: promote_source=False via #780).
+    promotion_policy='auto': #131 parity — source points promote on wire.
     Idempotent-ish: points dedup by content hash + kind, sources by url,
     operators by input set.
     """
@@ -1735,9 +1743,12 @@ def tortoise_ingest(bundle: Any = None, granularity: str = "bulk") -> dict:
     if granularity not in ("bulk", "granular"):
         return {"error": f"granularity must be 'bulk' or 'granular', got "
                           f"{granularity!r}", "code": ERR_INVALID}
+    if promotion_policy not in ("gated", "auto"):
+        return {"error": f"promotion_policy must be 'gated' or 'auto', got "
+                          f"{promotion_policy!r}", "code": ERR_INVALID}
     return _safe(_quota_gated(_get_team_sdk().ingest, "points",
                           abuse_weight=lambda r, a, k: int(((r or {}).get("created") or {}).get("points") or 0)),
-                 bundle, granularity=granularity)
+                 bundle, granularity=granularity, promotion_policy=promotion_policy)
 
 def tortoise_get_governance(subject_id: str) -> list:
     """Get all entities owned by a Subject.
