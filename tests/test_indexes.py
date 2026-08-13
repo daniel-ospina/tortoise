@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+from urllib.parse import urlparse
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -443,7 +444,7 @@ def test_non_embedded_is_operator_index_created():
     # LIVE non-test graph (dev machine with a real DB). The DETACH DELETE
     # below would trip _assert_test_graph and hard-fail the suite — skip
     # instead (same "no test server" semantics as FALKORDB_AVAILABLE).
-    if not uri.rsplit("/", 1)[-1].startswith(("test_", "tortoise_test")):
+    if not urlparse(uri).path.lstrip("/").startswith(("test_", "tortoise_test")):
         pytest.skip(f"resolved URI {uri!r} is not a test graph "
                     "(graph name must start with 'test_'/'tortoise_test_')")
     proj = FalkorProjection.from_uri(uri)
