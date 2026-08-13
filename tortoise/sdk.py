@@ -71,6 +71,8 @@ _GRAPH_EVENT_TYPES = frozenset({
     "OperatorAnnotated",
     "PointPromoted",   # #785: reviewer-gated draft→live promotion
     "OperatorPromoted",  # #785: R16 zombie-operator prevention
+    "DedupeRecorded",  # #784: content-dedup candidate recorded/merged
+    "DedupeRejected",  # #784: content-dedup candidate rejected
 })
 
 
@@ -707,7 +709,7 @@ class TortoiseSDK:
             # P1 #49: dedup by content_hash + pointKind (NOT context, which is no longer written)
             existing = proj.g.query(
                 "MATCH (n:Point {content_hash:$ch}) "
-                "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+                "WHERE n.is_operator = false "
                 "AND n.pointKind = $kind "
                 "RETURN n.id",
                 params={"ch": ch, "kind": kind},
@@ -1571,6 +1573,39 @@ class TortoiseSDK:
                     batch_id, point_id,
                 )
 
+        # Variant C (#784): a MERGED content-dedup candidate whose prior was
+        # LIVE at approve time is wired NOW — the candidate is live, so the
+        # "already decided" IMPL becomes a live→live link (exactly one).
+        # The exists-guard is OPERATOR-MEDIATED (create_operator writes
+        # (op)-[:IMPL]->(endpoint) edges — direct-edge counts are always 0,
+        # #784 review) and the prior is validated BEFORE the CAS so a stale
+        # dedup_target_id cannot produce a live point with no event.
+        dedup_wired = False
+        dedup_target_valid = True
+        prior = point.get("dedup_target_id")
+        if point.get("dedup_reviewed") == "merge" and prior:
+            prow = proj.g.query(
+                "MATCH (n:Point {id:$id}) RETURN n.id",
+                params={"id": prior},
+            ).result_set
+            if not prow:
+                dedup_target_valid = False
+                _logger.warning(
+                    "promote_point: dedup target %s for %s no longer exists — "
+                    "skipping the alreadyDecided wire", prior, point_id)
+        if point.get("dedup_reviewed") == "merge" and prior and dedup_target_valid:
+            exists = proj.g.query(
+                "MATCH (op:Point {label:'alreadyDecided'})-[:IMPL]->"
+                "(:Point {id:$cand}), "
+                "(op)-[:IMPL]->(:Point {id:$prior}) RETURN count(op)",
+                params={"cand": point_id, "prior": prior},
+            ).result_set
+            if not exists or exists[0][0] == 0:
+                self.create_operator(
+                    "IMPL", point_id, [prior], label="alreadyDecided",
+                    direction="unidirectional")
+                dedup_wired = True
+
         # R16 zombie-operator prevention: promote incident draft operators
         # once ALL their endpoint Points are live.
         promoted_ops = self._promote_incident_operators(proj, point_id, now)
@@ -1579,6 +1614,8 @@ class TortoiseSDK:
         result = {"id": point_id, "status": "live", "promoted": True,
                   "reviewed": True,
                   "operator_nodes_promoted": promoted_ops}
+        if dedup_wired:
+            result["dedup_wired"] = True
         if race_detected:
             result["race_detected"] = True
             result["race_warning"] = (
@@ -1639,6 +1676,214 @@ class TortoiseSDK:
         from .mining import quarantine_batch as _qb
         return _qb(self._get_proj(), batch_id, reason=reason)
 
+    # ── Content dedup queue (W-2, #784) ─────────────────────────────
+    # Content candidates are DRAFT decision Points flagged by the two-tier
+    # dedup (hash + embedding) against existing decision Points. The
+    # candidate state lives in Point properties (dedup_candidate /
+    # dedup_method / dedup_similarity / dedup_target_id / dedup_reviewed) —
+    # review-queue operational state, JSONL-rebuild non-durable (tracked).
+
+    # Pinned review band (plan §7 preamble): calibration keeps production
+    # values within the band; tests assert against the pinned constants.
+    DEDUP_REVIEW_THRESHOLD = 0.60
+    DEDUP_AUTO_MERGE_THRESHOLD = 0.92
+
+    def _dedup_content_candidates(self, point_ids: list[str],
+                                  threshold: float = DEDUP_REVIEW_THRESHOLD,
+                                  sdk_for_wiring=None) -> dict:
+        """Two-tier content dedup over freshly-extracted Points (#784, W-2).
+
+        For each new non-operator Point whose pointKind is 'decision':
+        Tier 1 — content-hash vs existing decision Points; Tier 2 — embedding
+        cosine vs existing decision Points. On a hit:
+          - existing prior is DRAFT → wire the "already decided" IMPL now
+            (draft-to-draft, create_operator(promote_source=False)) and flag
+            the candidate (DedupeRecorded event).
+          - existing prior is LIVE → flag the candidate WITHOUT wiring
+            (W-2 live-prior rule: a draft must never wire an operator to a
+            live Point) — the link is scheduled for D2's promotion time
+            (Variant C, wired by promote_point).
+        Idempotent: points already carrying dedup_candidate=true are skipped
+        (re-run → no duplicate IMPL, no new DedupeRecorded — DE2E-3).
+
+        Returns {"hits": n, "wired_draft_to_draft": n, "deferred_live_prior": n}.
+        """
+        threshold = self.DEDUP_REVIEW_THRESHOLD if threshold is None else threshold
+        proj = self._get_proj()
+        rows = proj.g.query(
+            "MATCH (n:Point) WHERE n.id IN $ids "
+            "AND (n.is_operator IS NULL OR n.is_operator = false) "
+            "RETURN n.id, n.content, n.pointKind, n.status, "
+            "       coalesce(n.dedup_candidate, false)",
+            params={"ids": list(point_ids)},
+        ).result_set
+        hits = wired = deferred = 0
+        for pid, content, kind, status, already in rows:
+            if already or status != "draft" or kind != "decision":
+                continue
+            if not content:
+                continue
+            # Tier 1: hash vs existing decisions (pointKind-scoped, N11).
+            # The candidate itself is excluded — never its own prior (#784
+            # review self-match fix).
+            prior = self._content_exists(content, pointKind="decision",
+                                         exclude_id=pid)
+            method = "hash"
+            similarity = 1.0
+            if prior is None:
+                # Tier 2: embedding similarity vs existing decisions,
+                # excluding the candidate itself (self-cosine 1.0 would
+                # otherwise always win the argmax and garbage-flag every
+                # novel decision — #784 review P1).
+                pairs = self._semantic_dedup(
+                    [({"id": pid, "content": content}, "")],
+                    threshold=threshold,
+                    pointKind="decision",
+                    return_pairs=True,
+                    exclude_ids={pid},
+                )
+                if not pairs:
+                    continue
+                prior = pairs[0]["existing"]
+                method = "embedding"
+                similarity = pairs[0]["similarity"]
+            if prior == pid:
+                # Belt-and-braces: never self-target.
+                _logger.warning("dedup: candidate %s matched itself — skipped", pid)
+                continue
+            # Mark the candidate (review-queue state on the Point).
+            proj.g.query(
+                "MATCH (n:Point {id:$id}) SET n.dedup_candidate = true, "
+                "n.dedup_method = $m, n.dedup_similarity = $s, "
+                "n.dedup_target_id = $t",
+                params={"id": pid, "m": method, "s": similarity, "t": prior},
+            )
+            hits += 1
+            # Prior status decides wiring vs deferral.
+            prow = proj.g.query(
+                "MATCH (n:Point {id:$id}) RETURN n.status",
+                params={"id": prior},
+            ).result_set
+            prior_status = (prow[0][0] if prow else None) or "live"
+            if prior_status == "draft":
+                # Variant A: draft-to-draft "already decided" IMPL.
+                if sdk_for_wiring is not None:
+                    sdk_for_wiring.create_operator(
+                        "IMPL", pid, [prior], label="alreadyDecided",
+                        direction="unidirectional", promote_source=False)
+                    wired += 1
+            else:
+                # Live prior: defer to promotion (Variant C).
+                deferred += 1
+            self._emit_event("DedupeRecorded", point=self.get_point(pid))
+        return {"hits": hits, "wired_draft_to_draft": wired,
+                "deferred_live_prior": deferred}
+
+    def list_dedup_candidates(self, candidate_type: str = "content",
+                              limit: int = 50) -> list[dict]:
+        """Review queue for dedup candidates (plan §6.1, DE2E-3/DE2E-2).
+
+        candidate_type='content': pending (unreviewed) content candidates —
+        draft decision Points flagged by the two-tier dedup, shaped as
+        {id, content, pointKind, method, similarity, target_id, batch_id}.
+        candidate_type='entity': entity ambiguity pairs — the entity
+        resolver surface (#783) is not yet implemented; returns [] (the MCP
+        tool contract still holds).
+        """
+        if limit < 1:
+            raise ValueError(f"limit must be >= 1, got {limit}")
+        proj = self._get_proj()
+        if candidate_type == "entity":
+            return []  # #783 partial — entity queue tracked for epic completion
+        if candidate_type != "content":
+            raise ValueError(
+                f"candidate_type must be 'content' or 'entity', got {candidate_type!r}")
+        rows = proj.g.query(
+            "MATCH (n:Point) "
+            "WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL "
+            "AND n.status = 'draft' "
+            "AND (n.is_operator IS NULL OR n.is_operator = false) "
+            "RETURN properties(n) ORDER BY n.createdAt DESC LIMIT $limit",
+            params={"limit": limit},
+        ).result_set
+        out = []
+        for (props,) in rows:
+            out.append({
+                "id": props.get("id"),
+                "content": props.get("content"),
+                "pointKind": props.get("pointKind"),
+                "method": props.get("dedup_method"),
+                "similarity": props.get("dedup_similarity"),
+                "target_id": props.get("dedup_target_id"),
+                "existing_id": props.get("dedup_target_id"),  # §6.1 alias
+                "candidate_type": "content",
+                "status": props.get("dedup_reviewed") or "pending",
+                "batch_id": props.get("batch_id"),
+            })
+        return out
+
+    def approve_merge(self, candidate_id: str, action: str = "merge") -> dict:
+        """Review a content dedup candidate (plan §6.1, DE2E-3 Variants B/C).
+
+        action='reject' → the candidate stays separate (dedup_reviewed=
+        'reject', reviewed=true, DedupeRejected event) and is no longer
+        surfaced by list_dedup_candidates.
+        action='merge' → the "already decided" IMPL is wired now when the
+        prior is DRAFT; when the prior is LIVE it is DEFERRED and wired at
+        the candidate's promotion time (Variant C — promote_point wires the
+        live→live link). Returns {candidate_id, action, wired,
+        deferred_to_promotion, target_id}.
+        """
+        if action not in ("merge", "reject"):
+            raise ValueError(f"action must be 'merge' or 'reject', got {action!r}")
+        proj = self._get_proj()
+        rows = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN properties(n)",
+            params={"id": candidate_id},
+        ).result_set
+        if not rows:
+            raise ValueError(f"No point {candidate_id!r}")
+        props = rows[0][0]
+        if not props.get("dedup_candidate"):
+            raise ValueError(f"Point {candidate_id!r} is not a dedup candidate")
+        target_id = props.get("dedup_target_id")
+        proj.g.query(
+            "MATCH (n:Point {id:$id}) SET n.dedup_reviewed = $a, n.reviewed = true",
+            params={"id": candidate_id, "a": action},
+        )
+        wired = False
+        deferred = False
+        if action == "merge" and target_id:
+            trow = proj.g.query(
+                "MATCH (n:Point {id:$id}) RETURN n.status",
+                params={"id": target_id},
+            ).result_set
+            target_status = (trow[0][0] if trow else None) or "live"
+            if target_status == "draft":
+                exists = proj.g.query(
+                    "MATCH (op:Point {label:'alreadyDecided'})-[:IMPL]->"
+                    "(:Point {id:$cand}), "
+                    "(op)-[:IMPL]->(:Point {id:$prior}) RETURN count(op)",
+                    params={"cand": candidate_id, "prior": target_id},
+                ).result_set
+                if not exists or exists[0][0] == 0:
+                    self.create_operator(
+                        "IMPL", candidate_id, [target_id],
+                        label="alreadyDecided",
+                        direction="unidirectional", promote_source=False)
+                    wired = True
+                else:
+                    wired = True  # already linked — idempotent approve
+            else:
+                deferred = True  # wired at promotion (Variant C)
+        if action == "reject":
+            self._emit_event("DedupeRejected", point=self.get_point(candidate_id))
+        else:
+            self._emit_event("DedupeRecorded", point=self.get_point(candidate_id))
+        return {"candidate_id": candidate_id, "action": action,
+                "wired": wired, "deferred_to_promotion": deferred,
+                "target_id": target_id}
+
     def list_drafts(self, *, limit: int = 50) -> list[dict]:
         """Draft queue for promotion review (J-5 companion, plan §6.1).
 
@@ -1655,7 +1900,7 @@ class TortoiseSDK:
         # so match on absence-or-false, not the literal property value.
         rows = proj.g.query(
             "MATCH (n:Point) "
-            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "WHERE n.is_operator = false "
             "AND n.status = 'draft' "
             "RETURN properties(n) ORDER BY n.createdAt DESC LIMIT $limit",
             params={"limit": limit},
@@ -1921,7 +2166,7 @@ class TortoiseSDK:
         query via proj.g.query() to inspect retracted tombstones.
         """
         proj = self._get_proj()
-        clauses = ["(n.is_operator IS NULL OR n.is_operator = false)"]
+        clauses = ["n.is_operator = false"]
         params: dict[str, Any] = {}
         # #432 Task 2: retracted exclusion — skipped when the caller explicitly
         # filters by status (their filter controls visibility).
@@ -1964,7 +2209,7 @@ class TortoiseSDK:
         to surface tombstones.
         """
         proj = self._get_proj()
-        clauses = ["(n.is_operator IS NULL OR n.is_operator = false)"]
+        clauses = ["n.is_operator = false"]
         params: dict[str, Any] = {}
         # #432 Task 2: retracted exclusion — skipped when the caller explicitly
         # filters by status (their filter controls visibility).
@@ -2135,7 +2380,7 @@ class TortoiseSDK:
         # Orphaned draft points — created but never wired (#131)
         for row in proj.g.query(
             "MATCH (n:Point {status:'draft'}) "
-            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "WHERE n.is_operator = false "
             "AND NOT (n)--() "
             "RETURN n.id, n.content, n.pointKind, n.createdAt "
             "ORDER BY n.createdAt"
@@ -2172,7 +2417,7 @@ class TortoiseSDK:
         for key, kind in gates:
             result[key] = proj.g.query(
                 "MATCH (n:Point {pointKind:$k}) "
-                "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+                "WHERE n.is_operator = false "
                 "RETURN count(n)",
                 params={"k": kind},
             ).result_set[0][0]
@@ -2191,7 +2436,7 @@ class TortoiseSDK:
         proj = self._get_proj()
         rows = proj.g.query(
             "MATCH (n:Point) "
-            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "WHERE n.is_operator = false "
             "AND n.pointKind IS NOT NULL "
             "RETURN n.pointKind, count(n) ORDER BY count(n) DESC"
         ).result_set
@@ -2447,7 +2692,7 @@ class TortoiseSDK:
                 item["extractedFrom"] = refs[item["extractedFrom"]]
             existed = proj.g.query(
                 "MATCH (n:Point {content_hash:$ch}) "
-                "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+                "WHERE n.is_operator = false "
                 "AND n.pointKind = $kind RETURN n.id",
                 params={"ch": _content_hash(content), "kind": kind},
             ).result_set
@@ -2785,7 +3030,7 @@ class TortoiseSDK:
             raise ValueError("Cannot file human approval: at least one claim Point required")
         r = proj.g.query(
             "MATCH (n:Point) WHERE n.id IN $ids "
-            "AND (n.is_operator IS NULL OR n.is_operator = false) RETURN n.id",
+            "AND n.is_operator = false RETURN n.id",
             params={"ids": point_ids},
         ).result_set
         existing = {row[0] for row in r}
@@ -2988,7 +3233,7 @@ class TortoiseSDK:
         # Ontology v2.1: use per-type about* edges instead of property
         rows = proj.g.query(
             "MATCH (n:Point) "
-            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "WHERE n.is_operator = false "
             "RETURN n.id, n.content"
         ).result_set
 
@@ -3124,7 +3369,7 @@ class TortoiseSDK:
         proj = self._get_proj()
         rows = proj.g.query(
             "MATCH (n:Point) "
-            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "WHERE n.is_operator = false "
             "  AND (n.status IS NULL OR n.status IN ['draft', 'live']) "
             "  AND (n.outdated IS NULL OR n.outdated = false) "
             "RETURN n.id, n.content, n.status, n.updatedAt",
@@ -3288,8 +3533,8 @@ class TortoiseSDK:
                                       "relation": rel, "via": op_id})
         rows = proj.g.query(
             "MATCH (a:Point)-[r:IMPL|NAND]->(b:Point) "
-            "WHERE (a.is_operator IS NULL OR a.is_operator = false) "
-            "  AND (b.is_operator IS NULL OR b.is_operator = false) "
+            "WHERE a.is_operator = false "
+            "  AND b.is_operator = false "
             "RETURN a.id, type(r), b.id",
         ).result_set
         for a, rel, b in rows:
@@ -3340,7 +3585,7 @@ class TortoiseSDK:
         contested: dict[str, dict] = {}
         rows = proj.g.query(
             "MATCH (n:Point) "
-            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "WHERE n.is_operator = false "
             "  AND (n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL) "
             "  AND (n.posterior_beta IS NOT NULL OR n.ep_beta IS NOT NULL) "
             "WITH n, coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS a, "
@@ -3357,7 +3602,7 @@ class TortoiseSDK:
         # handled by stale/draft semantics and must not double-flag.
         rows = proj.g.query(
             "MATCH (op:Point {is_operator:true})-[r:NAND]->(n:Point) "
-            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "WHERE n.is_operator = false "
             "  AND (n.status IS NULL OR n.status = 'live') "
             "RETURN DISTINCT n.id",
         ).result_set
@@ -3774,7 +4019,7 @@ class TortoiseSDK:
         #   (baseline_source IS NULL AND baseline_set IS NOT true)  → always eligible
         #   (baseline_source = 'inherited')                          → gated by inherited_at
         where = (
-            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "WHERE n.is_operator = false "
             "AND (n.pointKind IS NULL OR n.pointKind <> 'assessment') "
             "AND ("
             "  (n.baseline_source IS NULL AND (n.baseline_set IS NULL OR n.baseline_set = false)) "
@@ -3899,7 +4144,7 @@ class TortoiseSDK:
         points, traverses extractedFrom→Source to check for inherited credibilityTier.
         """
         proj = self._get_proj()
-        where = "WHERE (n.is_operator IS NULL OR n.is_operator = false)"
+        where = "WHERE n.is_operator = false"
         params = {}
         
         from tortoise.source_credibility import resolve_tier
@@ -3968,15 +4213,31 @@ class TortoiseSDK:
 
     # ── P0 Group 3: Checkpoint, Diary, Status, Analyze, Ingest ────
 
-    def _content_exists(self, content: str) -> str | None:
-        """Return point ID if a point with this content hash exists, else None."""
+    def _content_exists(self, content: str,
+                        pointKind: str | None = None,
+                        exclude_id: str | None = None) -> str | None:
+        """Return point ID if a point with this content hash exists, else None.
+
+        #784: optional pointKind scoping — a duplicate observation must never
+        suppress a decision (DE2E-N11); ``exclude_id`` excludes a specific
+        point (the dedup candidate itself — self-match guard, #784 review).
+        Default None preserves the legacy any-kind behavior.
+        """
         ch = _content_hash(content)
         proj = self._get_proj()
+        kind_clause = " AND n.pointKind = $kind" if pointKind else ""
+        exclude_clause = " AND n.id <> $exclude" if exclude_id else ""
+        params: dict = {"ch": ch}
+        if pointKind:
+            params["kind"] = pointKind
+        if exclude_id:
+            params["exclude"] = exclude_id
         rows = proj.g.query(
-            "MATCH (n:Point {content_hash:$ch}) "
+            f"MATCH (n:Point {{content_hash:$ch}}) "
             "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            f"{kind_clause} {exclude_clause} "
             "RETURN n.id",
-            params={"ch": ch},
+            params=params,
         ).result_set
         return rows[0][0] if rows else None
 
@@ -4012,7 +4273,8 @@ class TortoiseSDK:
         to_file = to_check
         if threshold < 1.0:
             try:
-                to_file = self._semantic_dedup(to_check, threshold)
+                to_file = self._semantic_dedup(
+                    to_check, threshold, pointKind="checkpoint-item")
             except ImportError:
                 # Expected in zero-dependency environments — hash-only fallback.
                 # #330: previously a bare `except Exception: pass` swallowed
@@ -4059,18 +4321,38 @@ class TortoiseSDK:
         return {"filed": filed, "duplicates": duplicates}
 
     def _semantic_dedup(self, candidates: list[tuple[dict, str]],
-                        threshold: float) -> list[tuple[dict, str]]:
-        """Filter candidates by embedding similarity against existing checkpoint items."""
+                        threshold: float,
+                        pointKind: str = "checkpoint-item",
+                        return_pairs: bool = False,
+                        similarity_out: bool = False,
+                        exclude_ids: set[str] | None = None
+                        ) -> list[tuple[dict, str]] | list[dict]:
+        """Filter candidates by embedding similarity against existing points.
+
+        #784 generalization: ``pointKind`` scopes the existing-point universe
+        (default 'checkpoint-item' preserves the legacy checkpoint() behavior
+        — R14); ``return_pairs=True`` returns above-threshold HITS as
+        {candidate, existing, similarity} dicts (the review-queue mode);
+        ``similarity_out`` appends the max similarity to each surviving
+        (item, ch) tuple when filtering.
+        """
         import numpy as np
         proj = self._get_proj()
+        exclude = exclude_ids or set()
+        excl_clause = " AND NOT n.id IN $exclude" if exclude else ""
+        params: dict = {"kind": pointKind}
+        if exclude:
+            params["exclude"] = list(exclude)
         rows = proj.g.query(
-            "MATCH (n:Point {pointKind:'checkpoint-item'}) "
+            "MATCH (n:Point {pointKind:$kind}) "
             "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
-            "RETURN n.content"
+            f"{excl_clause} "
+            "RETURN n.id, n.content",
+            params=params,
         ).result_set
-        existing = [r[0] for r in rows if r[0]]
+        existing = [(r[0], r[1]) for r in rows if r[1]]
         if not existing:
-            return candidates
+            return [] if return_pairs else candidates
 
         new_texts = [item["content"] for item, _ch in candidates]
         # Single degrade chain (embeddings._encode): real model → TF-IDF → zeros.
@@ -4081,7 +4363,7 @@ class TortoiseSDK:
         # EmbeddingModel singleton + degrade chain so any load/encode failure
         # degrades to deterministic TF-IDF instead of hash-only.
         from .embeddings import _encode
-        all_vecs, _degraded = _encode(existing + new_texts)
+        all_vecs, _degraded = _encode([c for _i, c in existing] + new_texts)
 
         e_vecs, n_vecs = all_vecs[:len(existing)], all_vecs[len(existing):]
 
@@ -4090,7 +4372,28 @@ class TortoiseSDK:
             n[n == 0] = 1
             return v / n
 
-        max_sims = (_norm(n_vecs) @ _norm(e_vecs).T).max(axis=1)
+        sims = (_norm(n_vecs) @ _norm(e_vecs).T)
+        max_sims = sims.max(axis=1)
+        argmax = sims.argmax(axis=1)
+
+        if return_pairs:
+            pairs = []
+            for i, ((item, _ch), sim) in enumerate(zip(candidates, max_sims)):
+                if sim >= threshold:
+                    eid, econtent = existing[argmax[i]]
+                    pairs.append({
+                        "candidate": item,
+                        "candidate_id": item.get("id"),
+                        "existing": eid,
+                        "existing_content": econtent,
+                        "similarity": round(float(sim), 4),
+                    })
+            return pairs
+
+        if similarity_out:
+            return [(item, ch, round(float(max_sims[i]), 4))
+                    for i, (item, ch) in enumerate(candidates)
+                    if max_sims[i] < threshold]
         return [(item, ch) for i, (item, ch) in enumerate(candidates)
                 if max_sims[i] < threshold]
 
@@ -4113,14 +4416,14 @@ class TortoiseSDK:
         if wing:
             rows = proj.g.query(
                 "MATCH (n:Point {pointKind:'diary', authoredBy:$agent, wing:$wing}) "
-                "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+                "WHERE n.is_operator = false "
                 "RETURN properties(n) ORDER BY n.createdAt DESC LIMIT $lim",
                 params={"agent": agent_name, "wing": wing, "lim": last_n},
             ).result_set
         else:
             rows = proj.g.query(
                 "MATCH (n:Point {pointKind:'diary', authoredBy:$agent}) "
-                "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+                "WHERE n.is_operator = false "
                 "RETURN properties(n) ORDER BY n.createdAt DESC LIMIT $lim",
                 params={"agent": agent_name, "lim": last_n},
             ).result_set
@@ -4606,7 +4909,7 @@ class TortoiseSDK:
             return []
 
         proj = self._get_proj()
-        clauses = ["(n.is_operator IS NULL OR n.is_operator = false)",
+        clauses = ["n.is_operator = false",
                    "toLower(n.content) CONTAINS toLower($q)"]
         params = {"q": q}
         if kind_filter:
@@ -4690,12 +4993,12 @@ class TortoiseSDK:
         proj = self._get_proj()
         diary_entries = [r[0] for r in proj.g.query(
             "MATCH (n:Point {pointKind:'diary'}) "
-            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "WHERE n.is_operator = false "
             "RETURN properties(n) ORDER BY n.createdAt DESC LIMIT 10"
         ).result_set]
         recent_points = [r[0] for r in proj.g.query(
             "MATCH (n:Point) "
-            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "WHERE n.is_operator = false "
             "RETURN properties(n) ORDER BY n.createdAt DESC LIMIT 20"
         ).result_set]
         recent_events = [r[0] for r in proj.g.query(
@@ -4706,7 +5009,7 @@ class TortoiseSDK:
              "confidence": r[3], "updatedAt": r[4]}
             for r in proj.g.query(
                 "MATCH (n:Point) WHERE n.confidence IS NOT NULL "
-                "AND (n.is_operator IS NULL OR n.is_operator = false) "
+                "AND n.is_operator = false "
                 "RETURN n.id, n.content, n.pointKind, n.confidence, n.updatedAt "
                 "ORDER BY n.updatedAt DESC LIMIT 20"
             ).result_set
@@ -7378,7 +7681,7 @@ class TortoiseSDK:
         impl_rows = proj.g.query(
             "MATCH (s:Subject)-[:performs]->(e:Event) "
             "MATCH (e)-[:IMPL]->(p:Point) "
-            "WHERE (p.is_operator IS NULL OR p.is_operator = false) "
+            "WHERE p.is_operator = false "
             "AND (p.outdated IS NULL OR p.outdated = false) "
             "AND e.eventKind <> 'humanApproval' "  # #531: no reputation from own approvals
             f"AND {match_clause} "
@@ -7388,7 +7691,7 @@ class TortoiseSDK:
         nand_rows = proj.g.query(
             "MATCH (s:Subject)-[:performs]->(e:Event) "
             "MATCH (e)-[:NAND]->(p:Point) "
-            "WHERE (p.is_operator IS NULL OR p.is_operator = false) "
+            "WHERE p.is_operator = false "
             "AND (p.outdated IS NULL OR p.outdated = false) "
             "AND e.eventKind <> 'humanApproval' "  # #531: no reputation from own approvals
             f"AND {match_clause} "

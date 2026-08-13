@@ -28,7 +28,7 @@ for row in nand_points:
 
 # 2. Find points with NO incoming IMPL or NAND edges (low grounding)
 orphans = proj.query(
-    "MATCH (p:Point) WHERE p.is_operator IS NULL OR p.is_operator = false "
+    "MATCH (p:Point) WHERE p.is_operator = false "
     "OPTIONAL MATCH (p)<-[:IMPL]-(impl) "
     "OPTIONAL MATCH (p)<-[:NAND]-(nand) "
     "WITH p, count(DISTINCT impl) AS impl_count, count(DISTINCT nand) AS nand_count "
@@ -41,7 +41,7 @@ for row in orphans:
 
 # 3. Find points with only NAND edges (seen only as contradictions, not supported)
 only_nand = proj.query(
-    "MATCH (p:Point) WHERE (p.is_operator IS NULL OR p.is_operator = false) "
+    "MATCH (p:Point) WHERE p.is_operator = false "
     "OPTIONAL MATCH (p)<-[:IMPL]-(impl) "
     "OPTIONAL MATCH (p)<-[:NAND]-(nand) "
     "WITH p, count(DISTINCT impl) AS impl_count, count(DISTINCT nand) AS nand_count "

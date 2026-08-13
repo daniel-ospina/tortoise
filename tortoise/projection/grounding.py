@@ -59,7 +59,7 @@ class _GroundingMixin:
         #    EWMA decay (alpha=0.3) when resolution events carry timestamps.
         res = self.g.query(
             "MATCH (n:Point) WHERE n.pointKind IN ['resolution-event','resolution-vector','humanApproval'] "
-            "AND (n.is_operator IS NULL OR n.is_operator = false) RETURN n.id"
+            "AND n.is_operator = false RETURN n.id"
         ).result_set
         a = np.zeros(n)
         for (pid,) in res:
@@ -84,7 +84,7 @@ class _GroundingMixin:
         cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
         rows = self.g.query(
             "MATCH (n:Point) "
-            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "WHERE n.is_operator = false "
             "  AND coalesce(n.updatedAt, n.createdAt, '') < $cutoff "
             "RETURN n.id, n.content, n.pointKind, "
             "  coalesce(n.updatedAt, n.createdAt) as lastUpdate "
