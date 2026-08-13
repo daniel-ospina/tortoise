@@ -8,7 +8,7 @@ entities as Object nodes (deterministic obj_sha256 canonical id via
 ObjectRegistered), wires aboutObject Point+Event side, aboutEvent provenance
 anchors, and the extractedFrom → Source → references → Event chain. No
 Subject stubs (legacy auto-detect bypassed). Dedup is a later stage — the
-dedup_hits key is counted only.
+dedup_hits reflects the two-tier W-2 content dedup (#784).
 
 Architecture (from plan WF4):
   Conversation transcript → extractor (Points + Operators) →
@@ -227,6 +227,11 @@ class ConversationMiner:
         session_started_at: str | None = None,
         extract_entities: bool = True,
         entity_stage=None,
+        batch_id: str | None = None,
+        content_dedup: bool = True,
+        dedup_threshold: float = 0.60,
+        session_date: str | None = None,
+        sdk=None,
     ) -> dict:
         """Run extraction pipeline on a conversation transcript.
 
@@ -235,14 +240,29 @@ class ConversationMiner:
         {entities, objects, dedup_hits, drafts}:
           - entities: number of extracted entity mentions
           - objects:  number of Object nodes reified/wired for those entities
-          - dedup_hits: 0 — the dedup stage is a later issue; key counted only
+          - dedup_hits: number of duplicate decision Points flagged by the
+            two-tier content dedup (W-2, #784); dedup_wired/dedup_deferred
+            break down draft-prior (wired) vs live-prior (deferred) hits
           - drafts:  number of extraction Points created with status 'draft'
+
+        Phase-4 (W-3, #990): every extraction Point is stamped with a
+        ``batch_id`` (auto-generated per call when not given, plan §4.4) and
+        the batch runs the EpSafeCommit W-3 gate (draft-only, no auto-wire,
+        grounding drift ≤2% via mean_grounding — #779). Additive result keys:
+          - batch_id: the batch this call produced
+          - batch_status: "committed" (W-3 pass — drafts enter the review
+            queue), "quarantined" (W-3 fail — promote_point is blocked on
+            the batch's Points until a re-run passes, J-5), or "not_gated"
+            (standalone log mode — no projection, gate skipped)
+          - batch_reason: the W-3 failure reason when quarantined, or the
+            skip explanation when not_gated
 
         ``entity_stage`` injects a deterministic mock (EntityStageMock, plan
         §7 preamble) for tests; None → LLM stage (or rule fallback when no
         model is configured).
         """
         started_at = session_started_at or _now()
+        batch_id = batch_id or ulid()
 
         # 1. Run extractor: Points + IMPL/NAND operators
         extractor = self._make_extractor()
@@ -267,7 +287,7 @@ class ConversationMiner:
         # 5. Phase-2 entity extraction + Object reification (W-1, DE2E-1)
         entities: list[dict] = []
         objects_wired = 0
-        dedup_hits = 0  # dedup stage is a later issue (#784-ish) — key counted only
+        dedup_hits = 0  # #784: real count comes from dedup_report below
         drafts = sum(1 for p in points if p.get("status", "draft") == "draft")
         if extract_entities:
             try:
@@ -282,6 +302,81 @@ class ConversationMiner:
                 transcript, source_id, api, entities, points, events,
             )
 
+        # Phase-4 (W-3, #990): stamp the batch on every extraction Point
+        # (post-hoc bulk write — the extractor is untouched), then run the
+        # EpSafeCommit gate over the batch. Pass → committed (drafts enter
+        # the review queue); fail → batch quarantined (promote_point blocks).
+        point_ids = [p.get("id") for p in points if p.get("id")]
+        if point_ids and api.projection is not None:
+            api.projection.g.query(
+                "MATCH (n:Point) WHERE n.id IN $ids SET n.batch_id = $bid",
+                params={"ids": point_ids, "bid": batch_id},
+            )
+        # W-2 content dedup (#784): flag duplicate decision Points against
+        # existing decisions (hash + embedding tiers); draft priors get the
+        # "already decided" IMPL wired immediately, live priors defer to
+        # promotion (Variant C). Requires the SDK for operator creation —
+        # flag-only when sdk is None.
+        dedup_report = None
+        dedup_error = None
+        if content_dedup and point_ids and sdk is not None:
+            try:
+                dedup_report = sdk._dedup_content_candidates(
+                    point_ids, threshold=dedup_threshold, sdk_for_wiring=sdk)
+            except Exception as exc:
+                # Surface, don't swallow: a silent no-op made the feature look
+                # like 'no duplicates found' (#784 review).
+                logger.exception("content dedup failed for batch %s", batch_id)
+                dedup_error = f"content dedup failed: {exc}"
+
+        # Phase-4 temporal wiring (W-4, #786): validFrom + NAND/CORRECTS
+        # candidates for contradictory decision Points.
+        temporal_report = None
+        if api.projection is not None and point_ids:
+            try:
+                temporal_report = self._temporal_wire(
+                    transcript, source_id, api, point_ids,
+                    session_date=session_date, sdk=sdk)
+            except Exception:
+                logger.exception("temporal wiring failed for batch %s", batch_id)
+
+        batch_status = "not_gated"
+        batch_reason = "no projection — W-3 gate skipped (standalone log mode)"
+        if api.projection is not None:
+            from tortoise.analyze import grounding_snapshot
+            # EpSafeCommit/quarantine_batch are module-level (defined below);
+            # reference via module for clarity at the call site.
+            from . import mining as _mining
+            try:
+                # Grounding drift protects the LIVE graph against batch
+                # side-effects. Actual ordering: extraction has already
+                # completed here, and extraction writes only drafts (excluded
+                # from the live-only mean), so pre and post normally agree
+                # (~0 drift) — the check guards against concurrent live
+                # changes landing between the two reads (e.g. a parallel
+                # promote_point on the same graph), which would trip the
+                # ≤2% mean ceiling and quarantine the batch.
+                pre = grounding_snapshot(api.projection)["mean"]
+                gate = _mining.EpSafeCommit(api.projection, batch_id)
+                res = gate.run(point_ids, grounding_before=pre,
+                               grounding_after=grounding_snapshot(
+                                   api.projection)["mean"])
+                if res["ok"]:
+                    batch_status = "committed"
+                    batch_reason = None
+                else:
+                    batch_status = "quarantined"
+                    batch_reason = res.get("reason")
+            except Exception:
+                logger.exception("W-3 gate failed for batch %s — quarantining", batch_id)
+                try:
+                    _mining.quarantine_batch(api.projection, batch_id,
+                                             reason="W-3 gate error (pipeline wiring)")
+                except Exception:
+                    logger.exception("quarantine_batch failed for %s", batch_id)
+                batch_status = "quarantined"
+                batch_reason = "W-3 gate error (pipeline wiring)"
+
         return {
             "events": len(events),
             "points": len(points),
@@ -289,9 +384,145 @@ class ConversationMiner:
             "event_ids": event_ids,
             "entities": len(entities),
             "objects": objects_wired,
-            "dedup_hits": dedup_hits,
+            
             "drafts": drafts,
+            "batch_id": batch_id,
+            "batch_status": batch_status,
+            "batch_reason": batch_reason,
+            "dedup_hits": (dedup_report or {}).get("hits", dedup_hits),
+            "dedup_wired": (dedup_report or {}).get("wired_draft_to_draft", 0),
+            "dedup_deferred": (dedup_report or {}).get("deferred_live_prior", 0),
+            "dedup_error": dedup_error,
+            "temporal_wired": (temporal_report or {}).get("wired_nand", 0),
+            "temporal_candidates": (temporal_report or {}).get("candidates", 0),
+            "temporal_replacements": (temporal_report or {}).get(
+                "replacement_candidates", 0),
         }
+
+    # ── Phase-4 temporal belief wiring (W-4, #786, DE2E-6) ────────
+    # #438 boundary carve-out: TemporalWire runs ONLY inside the mining
+    # post-pass (this method, called from mine()) with explicit
+    # source_session provenance — it never discovers connections between
+    # EXISTING points without a conversation trigger.
+
+    # Refute cues → contradictory (NAND); supersede cues → explicit
+    # replacement (CORRECTS via supersede_point after review).
+    _TEMPORAL_REFUTE_CUES = (
+        "wrong", "revert", "disagree", "incorrect", "no longer",
+        "not correct", "mistake", "changed our mind", "supersede",
+        "replacement", "replace",
+    )
+    _TEMPORAL_REPLACE_CUES = ("supersede", "changed our mind", "replacement",
+                             "replace")
+
+    def _temporal_wire(self, transcript: str, source_id: str, api,
+                       point_ids: list[str],
+                       session_date: str | None = None,
+                       sdk=None) -> dict:
+        """W-4 post-pass: stamp validFrom and wire temporal NAND/CORRECTS
+        edges between conversation-extracted decision Points (#786).
+
+        For each new DRAFT decision Point sharing an aboutObject Object with
+        a prior decision Point:
+          - prior DRAFT → NAND draft-to-draft (create_operator
+            promote_source=False — operator node is draft too)
+          - prior LIVE → NO wire at extraction; the point is surfaced as a
+            temporal candidate (live-prior rule, R11) and the NAND is wired
+            at promotion (live→live, promote_point)
+          - explicit-replacement cues → replacement candidate; after review
+            + promotion the prior is superseded (CORRECTS + outdated:true)
+
+        validFrom = session frontmatter date (R5 — NOT ingest time); fallback
+        ingestedAt (documented).
+
+        Returns {"wired_nand": n, "candidates": n, "replacement_candidates": n}.
+        """
+        proj = getattr(api, "projection", None)
+        if proj is None or not point_ids:
+            return {"wired_nand": 0, "candidates": 0, "replacement_candidates": 0}
+        # Normalize the session date to an ISO-8601 string: YAML frontmatter
+        # can yield datetime.date objects ('date: 2026-07-01') which crash the
+        # SET, and non-ISO strings corrupt ORDER BY chronology (#1080 review).
+        if session_date is None:
+            vf = _now()
+        elif hasattr(session_date, "isoformat"):
+            # YAML frontmatter dates arrive as datetime.date/datetime objects
+            # ('date: 2026-07-01') — normalize to ISO-8601 (#1080 review).
+            vf = session_date.isoformat()
+        else:
+            vf = str(session_date)
+        report = {"wired_nand": 0, "candidates": 0, "replacement_candidates": 0}
+        wired_pairs: set[tuple[str, str]] = set()  # (newer, older) — one NAND per pair
+        for pid in point_ids:
+            rows = proj.g.query(
+                "MATCH (n:Point {id:$id}) RETURN n.content, n.pointKind, n.status",
+                params={"id": pid},
+            ).result_set
+            if not rows:
+                continue
+            content, kind, status = rows[0]
+            if kind != "decision" or status != "draft" or not content:
+                continue
+            # validFrom: real session date, not ingest time (R5).
+            proj.g.query(
+                "MATCH (n:Point {id:$id}) SET n.validFrom = $vf",
+                params={"id": pid, "vf": vf},
+            )
+            low = content.lower()
+            if not any(c in low for c in self._TEMPORAL_REFUTE_CUES):
+                continue
+            replace = any(c in low for c in self._TEMPORAL_REPLACE_CUES)
+            # Prior decisions on the same topic (shared aboutObject Object).
+            priors = proj.g.query(
+                "MATCH (p:Point {id:$pid})-[:aboutObject]->(o:Object)"
+                "<-[:aboutObject]-(prior:Point) "
+                "WHERE prior.id <> $pid "
+                "AND prior.pointKind = 'decision' "
+                "AND (prior.status = 'draft' OR prior.status = 'live') "
+                "RETURN prior.id, prior.status",
+                params={"pid": pid},
+            ).result_set
+            if not priors:
+                continue
+            for prior_id, prior_status in priors:
+                if prior_status == "draft":
+                    # Draft-to-draft NAND (operator node draft too) — exactly
+                    # one per pair even when both sides carry refute cues
+                    # (#1080 review: the loop would otherwise wire D2→D1 AND
+                    # D1→D2, doubling the EP penalty).
+                    pair = tuple(sorted((pid, prior_id)))
+                    if pair in wired_pairs:
+                        continue
+                    wired_pairs.add(pair)
+                    if sdk is not None:
+                        sdk.create_operator("NAND", pid, [prior_id],
+                                            promote_source=False)
+                        report["wired_nand"] += 1
+                else:
+                    # Live prior → review-queue candidate, wire at promotion.
+                    # Target list (a single slot would silently drop earlier
+                    # live priors — #1080 review).
+                    current = proj.g.query(
+                        "MATCH (n:Point {id:$id}) RETURN n.temporal_target_ids",
+                        params={"id": pid},
+                    ).result_set
+                    ids = list(current[0][0] or []) if current and current[0][0] else []
+                    if prior_id not in ids:
+                        ids.append(prior_id)
+                    proj.g.query(
+                        "MATCH (n:Point {id:$id}) "
+                        "SET n.temporal_candidate = true, "
+                        "n.temporal_target_ids = $ts, "
+                        "n.temporal_target_id = $t, "
+                        "n.temporal_replacement = $r, "
+                        "n.source_session = $ss",
+                        params={"id": pid, "ts": ids, "t": prior_id,
+                                "r": replace, "ss": source_id},
+                    )
+                    report["candidates"] += 1
+                    if replace:
+                        report["replacement_candidates"] += 1
+        return report
 
     # ── Phase-2 entity reification (W-1 write phase, DE2E-1) ──────
 
@@ -660,23 +891,36 @@ def mine_conversation(
     entity_stage=None,
     content_dedup: bool = True,
     dedup_threshold: float | None = None,
+    session_date: str | None = None,
+    sdk=None,
 ) -> dict:
     """Convenience: mine a conversation transcript → Events + Points + Objects.
 
     Returns (plan §6.1, back-compatible): Phase-1 keys {events, points,
-    operators, event_ids} plus Phase-2 {entities, objects, dedup_hits, drafts}.
-    ``content_dedup``/``dedup_threshold`` are accepted for the pinned API
-    surface but the dedup stage itself is a later issue — dedup_hits is
-    always 0 from this entry point (DE2E-3).
+    operators, event_ids} plus Phase-2 {entities, objects, dedup_hits, drafts}
+    plus Phase-4 {batch_id, batch_status, batch_reason} (W-3 wiring, #990 —
+    see ConversationMiner.mine for the exact semantics, incl. the
+    "not_gated" standalone-log state).
+    ``content_dedup`` (default True) enables the two-tier content dedup for
+    decision Points (W-2, #784); ``dedup_threshold`` defaults to the pinned
+    review band 0.60 (θ from the calibration milestone). Pass ``sdk=`` to
+    enable operator wiring (draft-prior alreadyDecided links); without it
+    dedup is skipped entirely (a warning is logged).
     """
-    if content_dedup:
-        logger.info("content dedup stage not yet implemented — "
-                    "dedup_hits always 0 (DE2E-3)")
+    if content_dedup and sdk is None:
+        logger.warning(
+            "content dedup enabled but no sdk passed to mine_conversation — "
+            "dedup is skipped entirely (pass sdk= to enable; #784)")
     miner = ConversationMiner(model)
     return miner.mine(transcript, source_id, api,
                       participants=participants,
                       extract_entities=extract_entities,
-                      entity_stage=entity_stage)
+                      entity_stage=entity_stage,
+                      batch_id=None,  # auto-generated per call (#990)
+                      content_dedup=content_dedup,
+                      dedup_threshold=dedup_threshold,
+                      session_date=session_date,
+                      sdk=sdk)
 
 
 def mine_corpus(
@@ -724,6 +968,8 @@ def mine_corpus_with_sdk(
     progress_file: str | None = None,
     model: Any | None = None,
     event_log_path: str | None = None,
+    content_dedup: bool = True,
+    dedup_threshold: float = 0.60,
 ) -> dict:
     """Batch-mine a session corpus (J-1, plan §6.1) through an existing SDK.
 
@@ -899,9 +1145,22 @@ def mine_corpus_with_sdk(
         # wiring, wrong per-session event content, re-mine stacking).
         api.current_run = ulid()
         try:
+            # #786: session frontmatter date becomes validFrom (R5 — real
+            # session date, not ingest time); fallback ingestedAt.
+            session_date = None
+            try:
+                from .session_indexer import _parse_frontmatter
+                fm = _parse_frontmatter(text)
+                session_date = fm.get("date") or fm.get("startedAt")
+            except Exception:
+                session_date = None
             res = miner.mine(text, f"session_{session_id}", api,
                              extract_entities=extract_entities,
-                             participants=ConversationMiner._extract_participants(text))
+                             participants=ConversationMiner._extract_participants(text),
+                             content_dedup=content_dedup,
+                             dedup_threshold=dedup_threshold,
+                             session_date=session_date,
+                             sdk=sdk)
             entities += res["entities"]
             objects += res["objects"]
             dedup_hits += res["dedup_hits"]

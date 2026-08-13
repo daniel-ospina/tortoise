@@ -161,6 +161,8 @@ jobs:
           fi
       - name: Run waitlist edge-function behavioral harness (#373)
         run: node --experimental-strip-types tests/test_waitlist_subscribe.mjs
+      - name: Run tenant-provision CORS runtime harness (#1110)
+        run: node --experimental-strip-types tests/test_tenant_provision_cors.mjs
 
   legal-e2e:
     runs-on: ubuntu-latest

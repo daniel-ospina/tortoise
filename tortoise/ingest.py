@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import re
 from pathlib import Path
 
 from .api import EventAPI, provenance
@@ -40,7 +39,12 @@ _PROVIDERS = {
 
 
 # -- Frontmatter parsing for S8 Document Indexer (#6890) ------------------------
-_FM_RE = re.compile(r'^---\s*\n(.*?)\n---', re.DOTALL)
+# Canonical boundary regex lives in tortoise.file_indexer (canonical home —
+# this module keeps the module-level ``_FM_RE`` name as a back-compat alias).
+# NOTE: this module's ``_parse_frontmatter`` is the deliberate line-by-line
+# parser (no PyYAML dependency) — a DIFFERENT function from
+# file_indexer.parse_frontmatter; only the boundary regex is shared.
+from .file_indexer import _FM_RE
 
 
 def _parse_frontmatter(text: str) -> dict:
@@ -92,7 +96,7 @@ def _run_ep_propagation(proj):
         from tortoise.ep import TortoiseEP
         claim_rows = proj.g.query(
             "MATCH (n:Point) "
-            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "WHERE n.is_operator = false "
             "RETURN n.id, coalesce(n.confidence, 0.5)"
         ).result_set
         evidence = {}
@@ -555,7 +559,7 @@ def main(argv=None):
                         # Build evidence priors from extractor confidence values
                         claim_rows = proj.g.query(
                             "MATCH (n:Point) "
-                            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+                            "WHERE n.is_operator = false "
                             "RETURN n.id, coalesce(n.confidence, 0.5)"
                         ).result_set
                         evidence = {}

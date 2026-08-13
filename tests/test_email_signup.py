@@ -272,3 +272,75 @@ class TestEmailSignup:
         # client uses the short tier + network copy (not the email-bucket copy).
         assert r.json()["detail"]["error_code"] == "over_request_rate_limit_ip"
         assert r.json()["detail"]["message"] == "Too many registration attempts. Please try again later."
+
+
+class TestEmailSignupClaim:
+    """#1082 PR1 — reg- identity teams: claim overwrites teams.email A→B.
+
+    A reg- team (registered with email at mint, identity anchor
+    reg-<sha256(email)[:12]>, user_id NULL) is claimable exactly like an
+    anon team; the verified OAuth email overwrites the stored one
+    (P1-FIX-B — unconditional). Same key, same team.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _supabase_claim_env(self, monkeypatch):
+        from tests.fake_control_plane import FakeControlPlane
+        import tortoise.supabase_control as sc
+        import tortoise.hosted_api as ha_mod
+
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "supabase")
+        monkeypatch.setenv("SUPABASE_URL", "https://regclaim.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc-reg-claim")
+        monkeypatch.setenv("RATE_LIMIT_DISABLED", "1")
+        fake = FakeControlPlane()
+        monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
+
+        async def _confirmed(request):
+            return True
+
+        monkeypatch.setattr(ha_mod, "_gotrue_email_confirmed", _confirmed)
+        return fake
+
+    def test_reg_claim_email_overwrite_a_to_b(self, client, monkeypatch):
+        """reg- claim email overwrite A→B: stored reg email replaced by the
+        verified OAuth email inside the claim txn."""
+        import uuid as _uuid
+        from tortoise.auth import lookup_hash as _lh, hash_api_key as _hash
+        import tortoise.supabase_control as sc
+        fake = sc.get_control_plane()
+
+        # a reg- mint: identity = reg-<sha256(email)[:12]>, email set at mint
+        reg_email = "reg-a@example.com"
+        import hashlib
+        identity = "reg-" + hashlib.sha256(reg_email.encode()).hexdigest()[:12]
+        team_id = f"team-reg-{_uuid.uuid4().hex[:10]}"
+        api_key = f"tt_{_uuid.uuid4().hex}"
+        sc.provision_team(fake, **{
+            "p_user_id": None, "p_identity": identity,
+            "p_team_id": team_id, "p_team_name": f"Reg {team_id}",
+            "p_api_key": api_key, "p_key_hash": _hash(api_key),
+            "p_lookup_hash": _lh(api_key), "p_graph_name": f"team_{team_id}",
+            "p_email": reg_email, "p_key_prefix": api_key[:10], "p_tier": "free",
+            "p_max_users": 1, "p_max_graphs": 1, "p_ops_allowance": 10000,
+            "p_graph_size_cap": 10000,
+        })
+
+        async def _verify(request):
+            return {"user_id": "user-reg-claim", "email": "verified-b@example.com",
+                    "app_metadata": {"providers": ["github"]}}
+
+        monkeypatch.setattr(ha_mod, "verify_session_jwt", _verify)
+        r = client.post(
+            "/v1/claim",
+            headers={"Authorization": "Bearer abc.def.ghi"},
+            json={"api_key": api_key},
+        )
+        assert r.status_code == 200, r.text
+        team_row = next(t for t in fake.tables["teams"] if t["id"] == team_id)
+        assert team_row["email"] == "verified-b@example.com", (
+            f"reg- email must be overwritten A→B, got {team_row['email']}")
+        mem = next(m for m in fake.tables["team_memberships"]
+                   if m["team_id"] == team_id)
+        assert mem["user_id"] == "user-reg-claim"
+        assert mem["identity"] is None

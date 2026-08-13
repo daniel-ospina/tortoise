@@ -33,7 +33,7 @@ def sdk():
 
 class TestPricingLoader:
     def test_loads_canonical_tiers(self):
-        assert pricing.all_tiers() == ["free", "solo", "pro", "team"]
+        assert pricing.all_tiers() == ["free", "solo", "pro", "team", "anon"]
 
     def test_tier_limits_match_pricing_json(self):
         free = pricing.tier_limits("free")

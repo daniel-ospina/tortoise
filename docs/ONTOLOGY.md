@@ -345,7 +345,7 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | `capturedAt` | ISO8601 | — | — | ❌ | Transaction time of the capture — bi-temporal complement to `startedAt`/`endedAt` (valid time). Registered #909 §4.3 #2; written by the agentSession capture path (endpoint payload field, slice 5) |
 | `subject` | SubjectID | — | `prov:wasAssociatedWith` (inverse) | ✅ | Who performed the event (mirrors `performs` edge) |
 | `object_name` / `object_type` | string | — | `prov:used` | ✅ | What was acted on / produced |
-| `file_hash` | string | — | — | ✅ | SHA-256 of the ingested file's raw bytes — ingest idempotency anchor (`ingest_corpus` skips byte-identical re-ingests; written by the DocumentCreated/AgentSession ingest paths, #330) |
+| `file_hash` | string | — | — | ✅ | SHA-256 of the file's UTF-8 text content (text-mode, universal newlines — CRLF-immune; #330/#900) |
 | `is_episodic` | bool | — | — | ❌ | Quota exemption discriminator — true on capture-path episodic Events (registered #909 §4.3 #13; planned for the capture path, slice 5+) |
 
 > **agentSession Event (#909 §4.3 #1):** the canonical eventKind for session-capture Events is **`AgentSession`** — EXACT code spelling (capital A; sdk.py `ingest_corpus`, session_indexer.py); `sessionCaptured` (the core kind still written by the regex capture path) is an **alias of the same concept** — both remain valid kinds, **no migration**. The capture graph's `:Session` node (session container, `CONTAINS` → turn Points) also carries `is_episodic: true` — the quota `sessions` branch counts `MATCH (s:Session)` (plan §4.4, slice 2).

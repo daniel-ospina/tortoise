@@ -619,7 +619,7 @@ def _cmd_signup(args) -> int:
     of Mem0's 4-command key mint and Hindsight's npx self-install. Saves
     the config to .tortoise so `tortoise create-point` etc. work immediately.
     """
-    import json, sys, uuid
+    import json, os, sys, uuid
     from pathlib import Path
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
@@ -639,6 +639,17 @@ def _cmd_signup(args) -> int:
             data = json.loads(resp.read())
     except HTTPError as e:
         body = e.read().decode() if e.fp else ""
+        if e.code == 429:
+            # #1081 P3: friendly retry window + support pointer instead of the
+            # raw JSON body. Retry-After is the RFC 7231 contract; tolerate
+            # both seconds and (hypothetically) HTTP-date via isdigit guard.
+            retry = (e.headers.get("Retry-After")
+                     if e.headers and e.headers.get("Retry-After") else None)
+            when = f"{int(retry)}s" if (retry and retry.isdigit()) else "later"
+            print(f"Signup rate limit reached — try again in {when}. "
+                  "Need more keys? Contact support@premiselabs.co.",
+                  file=sys.stderr)
+            return 1
         print(f"Signup failed ({e.code}): {body}", file=sys.stderr)
         return 1
     except (URLError, ValueError, json.JSONDecodeError) as e:
@@ -659,6 +670,19 @@ def _cmd_signup(args) -> int:
     print(f"✅ Free team created: {data['team_name']}")
     print(f"   API key: {data['key']}")
     print(f"   Config saved to {config_path} (shown once — store it)")
+    if getattr(args, "claim", False):
+        # #1082: the anonymous team can attach a verified identity (same key,
+        # same team, memories intact) — one-time human act, no device flow.
+        dashboard = os.environ.get(
+            "TORTOISE_DASHBOARD_URL", "https://app.premiselabs.co")
+        print()
+        print("🔐 Claim your team (optional but recommended):")
+        print(f"   1. Open {dashboard}")
+        print(f"   2. Sign in with GitHub or Google")
+        print(f"   3. Paste this key when prompted:")
+        print(f"      {data['key']}")
+        print("   Your verified identity attaches to THIS team — same key,"
+              " same graph, memories intact.")
     print(f"   Next: tortoise create-point \"hello world\" --kind statement")
     return 0
 
@@ -3304,7 +3328,13 @@ def main(argv: list[str] | None = None) -> int:
     team_keys_revoke_p.add_argument("--json", action="store_true", help="Machine-readable JSON output")
     team_keys_revoke_p.add_argument("--force", "-f", action="store_true", help="Skip the confirmation prompt")
     # tortoise signup — zero-email free-team mint (issue #663)
-    sp.add_parser("signup", help="Mint a free hosted team + API key — no email or dashboard")
+    signup_p = sp.add_parser("signup", help="Mint a free hosted team + API key — no email or dashboard (2 free teams/IP/24h)")
+    signup_p.add_argument(
+        "--claim", action="store_true",
+        help="After minting, print the dashboard claim instructions: sign in "
+             "with GitHub/Google on the dashboard and paste this key to attach "
+             "a verified identity to the anonymous team (#1082)",
+    )
     # tortoise index github <url>
     idx = sp.add_parser("index", help="Index content into the graph")
     idx_sp = idx.add_subparsers(dest="index_cmd")

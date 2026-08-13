@@ -23,6 +23,27 @@ _REFUTE_SINGLE_RE = re.compile(r'\b(but|however|although)\b', re.IGNORECASE)
 _REFUTE_PHRASES = ("not relevant", "doesn't follow", "on the contrary", "except that")
 _PUNC = re.compile(r'[,.!?;:\'\"()\[\]{}]')  # strip before phrase-matching (#8)
 
+def _classify_point_kind(text: str) -> str:
+    """Keyword-based pointKind classifier (#784 — the rule extractor must
+    carry kinds so content dedup (pointKind-scoped, DE2E-N11) and the
+    temporal post-pass can operate on decision points). Mirrors the
+    document-mode classifier; order matters — decision wins."""
+    kind = "statement"
+    low = text.lower()
+    if any(w in low for w in ("decided", "chosen", "chose", "select", "will adopt")):
+        kind = "decision"
+    elif any(w in low for w in ("vision", "future state", "aspir")):
+        kind = "vision"
+    elif any(w in low for w in ("plan", "step", "implement", "build")):
+        kind = "plan"
+    elif any(w in low for w in ("goal", "outcome", "achieve")):
+        kind = "goal"
+    elif any(w in low for w in ("found", "observe", "measure", "data shows")):
+        kind = "observation"
+    elif any(w in low for w in ("hypothes", "might", "could be", "possibly")):
+        kind = "hypothesis"
+    return kind
+
 logger = logging.getLogger(__name__)
 
 def _has_cue(text: str, single_re: re.Pattern, phrases: tuple[str, ...]) -> bool:
@@ -226,7 +247,8 @@ class MockExtractor:
                                   extracted_by=self.version)
                 # #49 Phase 2: context is deprecated — use extractedFrom for provenance
                 pid = api.add_point(content=text, provenance=prov,
-                                    extractedFrom=source_id)
+                                    extractedFrom=source_id,
+                                    pointKind=_classify_point_kind(text))
                 pids.append((pid, text.lower(), prov))
 
             # Use embedding pre-filter if available
@@ -296,7 +318,8 @@ class MockExtractor:
                                   extracted_by=self.version)
                 # #49 Phase 2: context is deprecated — use extractedFrom for provenance
                 pid = api.add_point(content=text, provenance=prov,
-                                    extractedFrom=source_id)
+                                    extractedFrom=source_id,
+                                    pointKind=_classify_point_kind(text))
                 low = _PUNC.sub('', f" {text.lower()} ")
                 gate = None
                 if _has_cue(low, _SUPPORT_SINGLE_RE, _SUPPORT_PHRASES):
@@ -623,20 +646,7 @@ class MockModel:
                 text = sent.group(0).strip()
                 if len(text) < 20:
                     continue
-                kind = "statement"
-                low = text.lower()
-                if any(w in low for w in ("decided", "chosen", "chose", "select", "will adopt")):
-                    kind = "decision"
-                elif any(w in low for w in ("vision", "future state", "aspir")):
-                    kind = "vision"
-                elif any(w in low for w in ("plan", "step", "implement", "build")):
-                    kind = "plan"
-                elif any(w in low for w in ("goal", "outcome", "achieve")):
-                    kind = "goal"
-                elif any(w in low for w in ("found", "observe", "measure", "data shows")):
-                    kind = "observation"
-                elif any(w in low for w in ("hypothes", "might", "could be", "possibly")):
-                    kind = "hypothesis"
+                kind = _classify_point_kind(text)
                 pts.append({
                     "content": text,
                     "pointKind": kind,

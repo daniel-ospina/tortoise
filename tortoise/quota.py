@@ -134,6 +134,50 @@ class QuotaCheckError(Exception):
     """Quota counting/config failed — fail closed (500/503), never pass."""
 
 
+def derived_tier(team_row: dict) -> str:
+    """Effective tier for a team row — the #1082 anon-ceiling derivation.
+
+    A zero-email (anonymous) team whose owner membership has NO linked
+    user_id runs the reduced ``anon`` tier until it is claimed (#1082 PR1
+    links the verified OAuth identity to the owner row; claim raises the
+    team to ``free``). The predicate is membership-based
+    (``is_anon_team``) — NEVER the ``teams.email IS NULL`` proxy, which
+    misclassifies reg- teams (email set at mint, owner user_id still NULL)
+    and legacy real-user rows.
+
+    Registry mode: NO-OP (raw tier) — the anon ceiling is Supabase-mode
+    only in v1 (selfhost is operator-controlled, not a farm surface).
+
+    NOTE: distinct from billing.effective_tier(team, now) (grace-period
+    logic, billing.py:382) — do not merge.
+
+    Args:
+        team_row: the teams row / Team dict (must carry ``tier`` and,
+            for Supabase mode, ``id``).
+    Returns:
+        The effective tier string.
+    """
+    tier = team_row.get("tier") or "free"
+    team_id = team_row.get("id") or team_row.get("team_id")
+    if not team_id:
+        return tier
+    try:
+        from tortoise.supabase_control import (
+            get_control_plane, is_anon_team, is_supabase_enabled,
+        )
+        if not is_supabase_enabled():
+            return tier  # registry mode: no-op
+        cp = get_control_plane()
+        if tier == "free" and is_anon_team(cp, team_id):
+            return "anon"
+        return tier
+    except Exception:
+        # Fail-open to the stored tier on control-plane read errors — the
+        # anon ceiling is a protection posture, never a reason to 500 the
+        # auth path.
+        return tier
+
+
 def resolve_team_limits(team_id: str) -> dict:
     """Resolve a team's limits from the control plane.
 
@@ -161,9 +205,20 @@ def resolve_team_limits(team_id: str) -> dict:
         if not rows:
             raise QuotaCheckError(f"Team {team_id!r} not found in control plane")
         row = rows[0]
+        # #1082 PR2: the anon ceiling is tier-DERIVED at resolution — an
+        # unclaimed zero-email team (owner user_id NULL) resolves to the
+        # reduced ``anon`` tier until claimed, then lifts to free. The row
+        # needs its ``id`` for the is_anon_team predicate (already have
+        # team_id).
+        row = {**row, "id": team_id, "tier": derived_tier({**row, "id": team_id})}
         tier = row.get("tier") or "free"
         from tortoise.pricing import tier_limits
         lim = tier_limits(tier)
+        # #1082 PR2: when the derived tier is anon, the STORED quota columns
+        # (minted at free values by agent_signup/register) are overridden
+        # read-time with the reduced anon caps — an unclaimed zero-email
+        # team must never bind at free limits (indicator 4).
+        anon_override = tier == "anon"
         # Mirror the registry shape EXACTLY (review P2, PR #911): NULL
         # max_users/max_graphs = UNLIMITED (Team tier) — preserve None,
         # never substitute pricing defaults (enforce_team_limit treats an
@@ -175,9 +230,12 @@ def resolve_team_limits(team_id: str) -> dict:
         mp = row.get("graph_size_cap")
         return {
             "team_id": team_id, "tier": tier,
-            "max_users": int(mu) if mu is not None else None,
-            "max_graphs": int(mg) if mg is not None else None,
-            "max_points": int(mp) if mp is not None else lim["max_graph_nodes"],
+            "max_users": (lim["max_users_per_team"] if anon_override
+                           else (int(mu) if mu is not None else None)),
+            "max_graphs": (lim["max_graphs_per_team"] if anon_override
+                            else (int(mg) if mg is not None else None)),
+            "max_points": (int(lim["max_graph_nodes"]) if anon_override
+                            else (int(mp) if mp is not None else lim["max_graph_nodes"])),
             "max_api_keys": lim["max_api_keys"],
             "max_sessions": DEFAULT_MAX_SESSIONS,
         }
