@@ -1,10 +1,30 @@
-// Test stub for https://esm.sh/standardwebhooks@1.0.0. Path 2 (auth-hook
-// signature) only constructs Webhook when AUTH_HOOK_SECRET is set; the CORS
-// harness leaves it unset so the function fails CLOSED (401) before reaching
-// this stub. Throwing proves that.
+// Test stub for https://esm.sh/standardwebhooks@1.0.0 — implements REAL
+// Standard-Webhooks signature verification (HMAC-SHA256 over
+// `${webhook-id}.${webhook-timestamp}.${rawBody}`, base64, `v1,` prefix) so
+// the runtime harness can exercise the authenticated hook path (Path 2) and
+// reach the 400/500/502/201 responses. Only constructible when the harness
+// sets AUTH_HOOK_SECRET; the no-secret 401 path never reaches this stub.
+import { createHmac, timingSafeEqual } from "node:crypto";
+
 export class Webhook {
-  constructor(_secret: string) {}
-  verify(): never {
-    throw new Error("Webhook.verify called — unexpected on CORS-test paths");
+  private secret: string;
+  constructor(secret: string) {
+    this.secret = secret;
+  }
+  verify(rawBody: string, headers: Record<string, string>): unknown {
+    const id = headers["webhook-id"];
+    const ts = headers["webhook-timestamp"];
+    const sig = headers["webhook-signature"];
+    if (!id || !ts || !sig || !sig.startsWith("v1,")) {
+      throw new Error("missing webhook headers");
+    }
+    const expected = createHmac("sha256", this.secret)
+      .update(`${id}.${ts}.${rawBody}`)
+      .digest();
+    const provided = Buffer.from(sig.slice(3), "base64");
+    if (provided.length !== expected.length || !timingSafeEqual(provided, expected)) {
+      throw new Error("signature mismatch");
+    }
+    return JSON.parse(rawBody);
   }
 }

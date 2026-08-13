@@ -25,6 +25,10 @@
 //
 // Anything else → 401. Missing/unverifiable signature fails CLOSED
 // (mirrors the FASTAPI_URL / TORTOISE_SECRET_PEPPER fail-closed pattern).
+// NOTE: the CORS origin gate (see below) runs BEFORE this auth block:
+// browser requests from non-allowlisted origins are rejected 403 "Origin not
+// allowed" without reaching auth; server-side callers with no Origin (auth
+// hook, curl) skip the gate and hit exactly the 401/403 rules written here.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { Webhook } from "https://esm.sh/standardwebhooks@1.0.0";
@@ -71,21 +75,34 @@ const AUTH_HOOK_SECRET_ENV = "AUTH_HOOK_SECRET";
 // A non-simple Content-Type forces a CORS preflight (OPTIONS), so without
 // CORS headers the browser blocks EVERY signup with "No
 // 'Access-Control-Allow-Origin' header" (production incident 2026-08-13).
-// Same allowlist as waitlist-subscribe: the welcome page is served on every
-// host of the Cloudflare Pages project (static asset pass-through), so the
-// company host and *.pages.dev previews are covered too. Auth-hook calls
-// (server-side, no Origin) are unaffected — they are not CORS-bound.
+//
+// ALLOWED_ORIGINS + ORIGIN_SUFFIXES are kept identical to waitlist-subscribe
+// (parity test: tests/test_provisioning_edge_function.py — change both
+// together). LOCAL_ORIGINS handling deliberately DIVERGES: tenant-provision
+// accepts ANY localhost/127.0.0.1 port because welcome.html's `isLocal`
+// treats every local port as local (wrangler --port, python http.server...),
+// while waitlist keeps a fixed 8788. Accepting any local port is safe: minting
+// still requires the caller's OWN valid JWT + identity match (#802), and a
+// local attacker page cannot read another local origin's storage to obtain it.
+//
+// The after_user_created auth-hook path (Path 2) is currently INERT in
+// production: #832 (2026-08-10) removed AUTH_HOOK_SECRET from Supabase
+// secrets, so Path 2 fails CLOSED (401) — the JWT path is the only live
+// consumer. The CORS gate treats a MISSING Origin as allowed (server-side
+// callers: auth hook, curl, tests), and the literal Origin: "null" sent by
+// sandboxed iframes is NOT allowlisted → 403 fail-closed.
 const ALLOWED_ORIGINS = [
   "https://premiselabs.co",
   "https://tortoise.premiselabs.co",
   "https://premise-labs.pages.dev",
 ];
 const ORIGIN_SUFFIXES = [".premise-labs.pages.dev"];
-const LOCAL_ORIGINS = ["http://localhost:8788", "http://127.0.0.1:8788"];
+// Any-port localhost/127.0.0.1 (see divergence note above).
+const LOCAL_ORIGIN_RE = /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/;
 
 function originAllowed(origin: string | null): string | null {
   if (!origin) return null; // no Origin (auth hook, curl, server-side) → treated as allowed
-  if (ALLOWED_ORIGINS.includes(origin) || LOCAL_ORIGINS.includes(origin)) return origin;
+  if (ALLOWED_ORIGINS.includes(origin) || LOCAL_ORIGIN_RE.test(origin)) return origin;
   for (const suffix of ORIGIN_SUFFIXES) {
     if (origin.endsWith(suffix)) return origin;
   }
@@ -93,9 +110,12 @@ function originAllowed(origin: string | null): string | null {
 }
 
 // Single response helper — ACAO + Vary: Origin on EVERY path so the browser
-// can always read error bodies (400/401/403/405/500/502). Never echo an
+// can read success AND error bodies from allowlisted origins. Never echo an
 // un-allowlisted request origin back (would grant CORS to arbitrary sites);
-// server-side callers with no Origin get the first allowlisted origin.
+// server-side callers with no Origin get the first allowlisted origin. Note:
+// a 403 to a NON-allowlisted origin is intentionally NOT browser-readable
+// (ACAO is the static fallback) — the browser surfaces it as a CORS error,
+// and the deny branches log the origin server-side for diagnosis.
 function json(body: unknown, status: number, corsOrigin: string | null): Response {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   headers["Access-Control-Allow-Origin"] = corsOrigin ?? ALLOWED_ORIGINS[0];
@@ -177,6 +197,7 @@ Deno.serve(async (req: Request) => {
   // OPTIONS probe succeeds (a 405 on preflight blocks the POST too).
   if (req.method === "OPTIONS") {
     if (requestOrigin && !originAllowed(requestOrigin)) {
+      console.error("tenant-provision: rejected origin not in allowlist:", requestOrigin);
       return json({ error: "Origin not allowed" }, 403, corsOrigin);
     }
     return new Response(null, {
@@ -197,6 +218,7 @@ Deno.serve(async (req: Request) => {
 
   // Origin gate (browser requests carry Origin; auth hooks/curl omit it)
   if (requestOrigin && !originAllowed(requestOrigin)) {
+    console.error("tenant-provision: rejected origin not in allowlist:", requestOrigin);
     return json({ error: "Origin not allowed" }, 403, corsOrigin);
   }
 
@@ -225,6 +247,30 @@ Deno.serve(async (req: Request) => {
     } catch {
       return json({ error: "invalid JSON body" }, 400, corsOrigin);
     }
+
+    // Post-parse type guard (code-review P2, PR #1111 — ports waitlist's
+    // #723 fix): JSON.parse("null") → null and type-confused fields
+    // ({user_id: 123}) must answer a clean 400 with CORS, never throw into
+    // the outer catch (500). The caller is already authenticated at this
+    // point, so this is robustness, not security.
+    const isObject = (v: unknown): v is Record<string, unknown> =>
+      typeof v === "object" && v !== null;
+    const isStr = (v: unknown): v is string => typeof v === "string";
+    const parsed = JSON.parse(rawBody) as unknown;
+    const parsedObj = isObject(parsed) ? parsed : null;
+    const userField = parsedObj ? parsedObj.user : undefined;
+    const bodyOk =
+      parsedObj !== null &&
+      (userField === undefined || isObject(userField)) &&
+      (userField === undefined || userField.id === undefined || isStr(userField.id)) &&
+      (userField === undefined || userField.email === undefined || isStr(userField.email)) &&
+      (parsedObj.user_id === undefined || isStr(parsedObj.user_id)) &&
+      (parsedObj.email === undefined || isStr(parsedObj.email)) &&
+      (parsedObj.display_name === undefined || isStr(parsedObj.display_name));
+    if (!bodyOk) {
+      return json({ error: "invalid JSON body" }, 400, corsOrigin);
+    }
+    body = parsed as HookPayload;
 
     // The provisioning target must BE the authenticated caller. A signed
     // hook payload only ever names the user GoTrue just created, and a JWT

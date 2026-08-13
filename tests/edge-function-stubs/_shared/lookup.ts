@@ -1,6 +1,6 @@
 // Test stub for supabase/functions/_shared/lookup.ts — pure TS with no Deno
-// deps (the real file). Only reachable on the deep success path (201), which
-// the CORS harness does not exercise; throwing proves no tested path reaches it.
+// deps (like the real file). Returns a fixed value so the success (201) path
+// can complete; the harness asserts the response shape, not the hash content.
 export async function lookupHash(_key: string, _pepper: string): Promise<string> {
-  throw new Error("lookupHash called — unexpected on CORS-test paths");
+  return "lookup-stub";
 }
