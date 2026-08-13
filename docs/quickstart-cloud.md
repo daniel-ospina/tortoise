@@ -19,6 +19,19 @@ Want to run it yourself instead? See [quickstart-selfhosted.md](quickstart-selfh
 1. Go to **https://tortoise.premiselabs.co/signup** (Supabase sign-up — email or social login).
 2. After signup, the welcome page shows your API key (starts with `tt_`) — copy it right away. It's shown **once** (like `POST /v1/team/keys`), so store it somewhere safe; if you lose it, create a new one via `POST /v1/team/keys`.
 
+### Zero-email signup (CLI)
+
+No email or dashboard? `tortoise signup` mints a free hosted team + key in one command and saves it to `.tortoise` in the current directory:
+
+```bash
+tortoise signup
+# ✅ Free team created: agent-abc123
+#    API key: tt_...
+#    Config saved to .tortoise (shown once — store it)
+```
+
+2 free anonymous teams per IP per 24h (3rd → 429 with a retry window); on a shared network or need more? Contact support@premiselabs.co.
+
 ## 2. Connect your agent (MCP, streamable-http)
 
 The hosted endpoint is `https://api.premiselabs.co/mcp/`, and it only speaks **streamable-http** — that's the only correct hosted pattern. Auth is a Bearer header with your API key.

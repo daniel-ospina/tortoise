@@ -103,3 +103,36 @@ def test_failed_notify_log_redacts_secret(monkeypatch, caplog):
 def test_unknown_kind_ignored(monkeypatch):
     monkeypatch.setattr(notify.httpx, "post", lambda url, **kw: (_ for _ in ()).throw(AssertionError("should not call")))
     notify.notify_billing_event("not_a_real_kind", TEAM)  # no-op, no crash
+
+
+def test_abuse_signup_velocity_kind_allowed_with_ip(monkeypatch):
+    """#1081: abuse_signup_velocity ∈ KINDS — notify_abuse must NOT hit the
+    unknown-kind early return, and the IP (the most actionable field of an
+    IP-scoped ops alert) renders in BOTH channels. Anon team (no email key)
+    → BILLING_NOTIFY_TO ops inbox fallback (notify.py:153)."""
+    calls = []
+
+    def fake_post(url, **kwargs):
+        calls.append((url, kwargs))
+
+        class _R:
+            def raise_for_status(self):
+                pass
+        return _R()
+
+    monkeypatch.setattr(notify.httpx, "post", fake_post)
+    sent = {}
+
+    def fake_telegram_send(bot_token, chat_id, text, timeout=15.0):
+        sent.update(chat_id=chat_id, text=text)
+
+    monkeypatch.setattr("tortoise.notify.telegram_send", fake_telegram_send)
+    notify.notify_abuse("abuse_signup_velocity", {"team_id": "team_123"},
+                        {"ip": "203.0.113.7", "count": 3,
+                         "threshold": 2, "window_s": 86400})
+    assert calls, "resend should be called for a known kind"
+    body = calls[0][1]["json"]
+    assert body["to"] == ["ops@premiselabs.co"]  # BILLING_NOTIFY_TO fallback
+    assert "abuse_signup_velocity" in body["subject"]
+    assert "203.0.113.7" in body["html"]  # IP renders in the email
+    assert sent and "203.0.113.7" in sent["text"]  # IP renders in Telegram
