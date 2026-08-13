@@ -13,6 +13,9 @@ import pytest
 
 from tortoise.sdk import TortoiseSDK
 
+REVIEW_THRESHOLD = 0.60   # pinned band (plan §7 preamble)
+AUTO_MERGE_THRESHOLD = 0.92  # pinned band (calibration keeps prod in band)
+
 DECISION_TEXT = "We decided to move the FalkorDB default port to 16379."
 
 TRANSCRIPT = (
@@ -23,18 +26,22 @@ TRANSCRIPT = (
 
 @pytest.fixture()
 def sdk(tmp_path):
-    return TortoiseSDK(db_path=str(tmp_path / "t.db"))
+    return TortoiseSDK(db_path=str(tmp_path / "t.db"),
+                       event_log_path=str(tmp_path / "events.jsonl"))
 
 
 def _decision(sdk, content=DECISION_TEXT, status="draft"):
     return sdk.create_point("decision", content, status=status)
 
 
-def _impls_between(sdk, a_id, b_id):
+def _already_decided_links(sdk, cand_id, prior_id):
+    """Operator-mediated alreadyDecided link count (create_operator writes
+    (op)-[:IMPL]->(endpoint) edges — direct-edge queries are vacuous)."""
     rows = sdk._get_proj().g.query(
-        "MATCH (a:Point {id:$a})-[r:IMPL]->(b:Point {id:$b}) "
-        "RETURN count(r)",
-        params={"a": a_id, "b": b_id},
+        "MATCH (op:Point {label:'alreadyDecided'})-[:IMPL]->"
+        "(:Point {id:$cand}), "
+        "(op)-[:IMPL]->(:Point {id:$prior}) RETURN count(op)",
+        params={"cand": cand_id, "prior": prior_id},
     ).result_set
     return rows[0][0]
 
@@ -67,13 +74,9 @@ class TestDe2e3:
         assert c["method"] == "hash"
         assert c["target_id"] == d1["id"]
         assert c["pointKind"] == "decision"
-        # No IMPL from the candidate to the live prior.
-        rows = sdk._get_proj().g.query(
-            "MATCH (n:Point {id:$id})-[r:IMPL]->(m:Point {id:$tid}) "
-            "RETURN count(r)",
-            params={"id": c["id"], "tid": d1["id"]},
-        ).result_set
-        assert rows[0][0] == 0, "no IMPL may be wired to a live prior"
+        # No IMPL from the candidate to the live prior (operator-mediated).
+        assert _already_decided_links(sdk, c["id"], d1["id"]) == 0, (
+            "no IMPL may be wired to a live prior")
 
     def test_variant_a_draft_prior_wires_draft_to_draft(self, sdk, tmp_path):
         """D1 still draft → the 'already decided' IMPL is wired immediately
@@ -122,26 +125,17 @@ class TestDe2e3:
         res = sdk.approve_merge(cand["id"], action="merge")
         assert res["wired"] is False
         assert res["deferred_to_promotion"] is True
-        assert _impls_between(sdk, cand["id"], d1["id"]) == 0
+        assert _already_decided_links(sdk, cand["id"], d1["id"]) == 0
         promoted = sdk.promote_point(cand["id"])
         assert promoted["dedup_wired"] is True, promoted
         # Operator-mediated "alreadyDecided" link, exactly one.
-        rows = sdk._get_proj().g.query(
-            "MATCH (op:Point {label:'alreadyDecided'})-[:IMPL]->(:Point {id:$tid}) "
-            "RETURN op.id",
-            params={"tid": d1["id"]},
-        ).result_set
-        assert len(rows) == 1, f"exactly one IMPL wired at promotion, got {rows}"
+        assert _already_decided_links(sdk, cand["id"], d1["id"]) == 1, (
+            "exactly one IMPL wired at promotion")
         assert sdk.get_point(cand["id"])["status"] == "live"
         assert sdk.get_point(d1["id"])["status"] == "live"
         # Re-promote: no duplicate wire.
         sdk.promote_point(cand["id"])
-        rows2 = sdk._get_proj().g.query(
-            "MATCH (op:Point {label:'alreadyDecided'})-[:IMPL]->(:Point {id:$tid}) "
-            "RETURN op.id",
-            params={"tid": d1["id"]},
-        ).result_set
-        assert len(rows2) == 1
+        assert _already_decided_links(sdk, cand["id"], d1["id"]) == 1
 
     def test_corpus_rerun_idempotent(self, sdk, tmp_path):
         """Re-running the corpus adds no new candidates and no new
@@ -191,3 +185,87 @@ class TestDe2e3:
         assert r1["filed"] == 1 and r1["duplicates"] == 0
         r2 = sdk.checkpoint([{"wing": "w", "room": "r", "content": "hello dedup"}])
         assert r2["filed"] == 0 and r2["duplicates"] == 1
+
+
+class TestDe2e3ReviewFixes:
+    """#1071 code-review regressions."""
+
+    def test_novel_decision_never_self_matches(self, sdk, tmp_path):
+        """P1: a novel decision (no prior) must NOT be flagged as its own
+        duplicate — no candidate, no alreadyDecided self-loop."""
+        res = _mine(sdk, tmp=str(tmp_path))
+        assert res["dedup_hits"] == 0, res
+        assert sdk.list_dedup_candidates(candidate_type="content") == []
+        rows = sdk._get_proj().g.query(
+            "MATCH (op:Point {label:'alreadyDecided'}) RETURN count(op)"
+        ).result_set
+        assert rows[0][0] == 0, "no alreadyDecided operator may exist"
+
+    def test_default_threshold_no_crash(self, sdk, tmp_path):
+        """P1: mine_conversation defaults (dedup_threshold=None) must run
+        the embedding tier without a TypeError and report no error."""
+        res = _mine(sdk, tmp=str(tmp_path))
+        assert res["dedup_error"] is None, res
+        assert res["dedup_hits"] == 0  # novel decision, no prior
+
+    def test_embedding_tier_in_band_surfaces_candidate(self, sdk, tmp_path, monkeypatch):
+        """P2: embedding-tier hit in the review band (0.60–0.92) surfaces a
+        candidate with method=embedding and the reported similarity."""
+        # Prior content DIFFERS from the mined decision (so the hash tier
+        # misses and the embedding tier runs); the pair selector is pinned
+        # to an in-band similarity (deterministic fixture per §7 preamble).
+        d1 = _decision(sdk, content="We decided to switch the database port to 16379.",
+                       status="live")
+        orig = sdk._semantic_dedup
+        def fake_sd(candidates, threshold, pointKind="checkpoint-item",
+                    return_pairs=False, similarity_out=False, exclude_ids=None):
+            if return_pairs:
+                return [{"candidate": candidates[0][0],
+                         "existing": d1["id"],
+                         "similarity": 0.88}]
+            return orig(candidates, threshold, pointKind=pointKind,
+                        return_pairs=return_pairs,
+                        similarity_out=similarity_out, exclude_ids=exclude_ids)
+        monkeypatch.setattr(sdk, "_semantic_dedup", fake_sd)
+        res = _mine(sdk, tmp=str(tmp_path))
+        assert res["dedup_hits"] >= 1, res
+        cands = sdk.list_dedup_candidates(candidate_type="content")
+        assert cands and cands[0]["method"] == "embedding"
+        assert cands[0]["similarity"] == 0.88
+        assert cands[0]["candidate_type"] == "content"
+        assert cands[0]["status"] == "pending"
+
+    def test_approve_merge_draft_prior_single_wire(self, sdk, tmp_path):
+        """P1: approving a draft-prior candidate that was ALREADY auto-wired
+        at extraction must not wire a second operator (idempotent approve)."""
+        d1 = _decision(sdk, status="draft")
+        res = _mine(sdk, tmp=str(tmp_path))
+        assert res["dedup_wired"] >= 1, res
+        cand = sdk.list_dedup_candidates(candidate_type="content")[0]
+        assert _already_decided_links(sdk, cand["id"], d1["id"]) == 1
+        approved = sdk.approve_merge(cand["id"], action="merge")
+        assert approved["wired"] is True
+        assert _already_decided_links(sdk, cand["id"], d1["id"]) == 1, (
+            "approve must not duplicate the extraction-time wire"
+        )
+
+    def test_corpus_rerun_no_new_dedupe_events(self, sdk, tmp_path):
+        """P2: re-run adds no new DedupeRecorded events and no duplicate
+        alreadyDecided operator."""
+        _decision(sdk, status="live")
+        corpus = tmp_path / "corpus2"
+        corpus.mkdir()
+        (corpus / "s.md").write_text(
+            "---\nsessionId: s-idem2\n---\n\n" + TRANSCRIPT)
+        sdk.mine_corpus(str(corpus), extract_entities=False)
+        log1 = sdk._get_event_log().read_all()
+        rec1 = [e for e in log1 if e.get("type") == "DedupeRecorded"]
+        assert rec1, "first run must record the candidate"
+        sdk.mine_corpus(str(corpus), extract_entities=False)
+        log2 = sdk._get_event_log().read_all()
+        rec2 = [e for e in log2 if e.get("type") == "DedupeRecorded"]
+        assert len(rec2) == len(rec1), f"DedupeRecorded count grew {len(rec1)}→{len(rec2)}"
+        rows = sdk._get_proj().g.query(
+            "MATCH (op:Point {label:'alreadyDecided'}) RETURN count(op)"
+        ).result_set
+        assert rows[0][0] == 0, "no alreadyDecided operator for live priors"

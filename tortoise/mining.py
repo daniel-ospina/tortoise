@@ -239,7 +239,9 @@ class ConversationMiner:
         {entities, objects, dedup_hits, drafts}:
           - entities: number of extracted entity mentions
           - objects:  number of Object nodes reified/wired for those entities
-          - dedup_hits: 0 — the dedup stage is a later issue; key counted only
+          - dedup_hits: number of duplicate decision Points flagged by the
+            two-tier content dedup (W-2, #784); dedup_wired/dedup_deferred
+            break down draft-prior (wired) vs live-prior (deferred) hits
           - drafts:  number of extraction Points created with status 'draft'
 
         Phase-4 (W-3, #990): every extraction Point is stamped with a
@@ -315,12 +317,16 @@ class ConversationMiner:
         # promotion (Variant C). Requires the SDK for operator creation —
         # flag-only when sdk is None.
         dedup_report = None
+        dedup_error = None
         if content_dedup and point_ids and sdk is not None:
             try:
                 dedup_report = sdk._dedup_content_candidates(
                     point_ids, threshold=dedup_threshold, sdk_for_wiring=sdk)
-            except Exception:
+            except Exception as exc:
+                # Surface, don't swallow: a silent no-op made the feature look
+                # like 'no duplicates found' (#784 review).
                 logger.exception("content dedup failed for batch %s", batch_id)
+                dedup_error = f"content dedup failed: {exc}"
 
         batch_status = "not_gated"
         batch_reason = "no projection — W-3 gate skipped (standalone log mode)"
@@ -374,6 +380,7 @@ class ConversationMiner:
             "dedup_hits": (dedup_report or {}).get("hits", dedup_hits),
             "dedup_wired": (dedup_report or {}).get("wired_draft_to_draft", 0),
             "dedup_deferred": (dedup_report or {}).get("deferred_live_prior", 0),
+            "dedup_error": dedup_error,
         }
 
     # ── Phase-2 entity reification (W-1 write phase, DE2E-1) ──────
@@ -752,13 +759,16 @@ def mine_conversation(
     plus Phase-4 {batch_id, batch_status, batch_reason} (W-3 wiring, #990 —
     see ConversationMiner.mine for the exact semantics, incl. the
     "not_gated" standalone-log state).
-    ``content_dedup``/``dedup_threshold`` are accepted for the pinned API
-    surface but the dedup stage itself is a later issue — dedup_hits is
-    always 0 from this entry point (DE2E-3).
+    ``content_dedup`` (default True) enables the two-tier content dedup for
+    decision Points (W-2, #784); ``dedup_threshold`` defaults to the pinned
+    review band 0.60 (θ from the calibration milestone). Pass ``sdk=`` to
+    enable operator wiring (draft-prior alreadyDecided links); without it
+    dedup is skipped entirely (a warning is logged).
     """
-    if content_dedup:
-        logger.info("content dedup stage not yet implemented — "
-                    "dedup_hits always 0 (DE2E-3)")
+    if content_dedup and sdk is None:
+        logger.warning(
+            "content dedup enabled but no sdk passed to mine_conversation — "
+            "dedup is skipped entirely (pass sdk= to enable; #784)")
     miner = ConversationMiner(model)
     return miner.mine(transcript, source_id, api,
                       participants=participants,

@@ -1576,13 +1576,29 @@ class TortoiseSDK:
         # Variant C (#784): a MERGED content-dedup candidate whose prior was
         # LIVE at approve time is wired NOW — the candidate is live, so the
         # "already decided" IMPL becomes a live→live link (exactly one).
+        # The exists-guard is OPERATOR-MEDIATED (create_operator writes
+        # (op)-[:IMPL]->(endpoint) edges — direct-edge counts are always 0,
+        # #784 review) and the prior is validated BEFORE the CAS so a stale
+        # dedup_target_id cannot produce a live point with no event.
         dedup_wired = False
-        if point.get("dedup_reviewed") == "merge" and point.get("dedup_target_id"):
-            prior = point["dedup_target_id"]
+        dedup_target_valid = True
+        prior = point.get("dedup_target_id")
+        if point.get("dedup_reviewed") == "merge" and prior:
+            prow = proj.g.query(
+                "MATCH (n:Point {id:$id}) RETURN n.id",
+                params={"id": prior},
+            ).result_set
+            if not prow:
+                dedup_target_valid = False
+                _logger.warning(
+                    "promote_point: dedup target %s for %s no longer exists — "
+                    "skipping the alreadyDecided wire", prior, point_id)
+        if point.get("dedup_reviewed") == "merge" and prior and dedup_target_valid:
             exists = proj.g.query(
-                "MATCH (:Point {id:$sid})-[r:IMPL]->(:Point {id:$tid}) "
-                "RETURN count(r)",
-                params={"sid": point_id, "tid": prior},
+                "MATCH (op:Point {label:'alreadyDecided'})-[:IMPL]->"
+                "(:Point {id:$cand}), "
+                "(op)-[:IMPL]->(:Point {id:$prior}) RETURN count(op)",
+                params={"cand": point_id, "prior": prior},
             ).result_set
             if not exists or exists[0][0] == 0:
                 self.create_operator(
@@ -1692,6 +1708,7 @@ class TortoiseSDK:
 
         Returns {"hits": n, "wired_draft_to_draft": n, "deferred_live_prior": n}.
         """
+        threshold = self.DEDUP_REVIEW_THRESHOLD if threshold is None else threshold
         proj = self._get_proj()
         rows = proj.g.query(
             "MATCH (n:Point) WHERE n.id IN $ids "
@@ -1707,22 +1724,33 @@ class TortoiseSDK:
             if not content:
                 continue
             # Tier 1: hash vs existing decisions (pointKind-scoped, N11).
-            prior = self._content_exists(content, pointKind="decision")
+            # The candidate itself is excluded — never its own prior (#784
+            # review self-match fix).
+            prior = self._content_exists(content, pointKind="decision",
+                                         exclude_id=pid)
             method = "hash"
             similarity = 1.0
             if prior is None:
-                # Tier 2: embedding similarity vs existing decisions.
+                # Tier 2: embedding similarity vs existing decisions,
+                # excluding the candidate itself (self-cosine 1.0 would
+                # otherwise always win the argmax and garbage-flag every
+                # novel decision — #784 review P1).
                 pairs = self._semantic_dedup(
                     [({"id": pid, "content": content}, "")],
                     threshold=threshold,
                     pointKind="decision",
                     return_pairs=True,
+                    exclude_ids={pid},
                 )
                 if not pairs:
                     continue
                 prior = pairs[0]["existing"]
                 method = "embedding"
                 similarity = pairs[0]["similarity"]
+            if prior == pid:
+                # Belt-and-braces: never self-target.
+                logger.warning("dedup: candidate %s matched itself — skipped", pid)
+                continue
             # Mark the candidate (review-queue state on the Point).
             proj.g.query(
                 "MATCH (n:Point {id:$id}) SET n.dedup_candidate = true, "
@@ -1743,7 +1771,7 @@ class TortoiseSDK:
                     sdk_for_wiring.create_operator(
                         "IMPL", pid, [prior], label="alreadyDecided",
                         direction="unidirectional", promote_source=False)
-                wired += 1
+                    wired += 1
             else:
                 # Live prior: defer to promotion (Variant C).
                 deferred += 1
@@ -1787,6 +1815,9 @@ class TortoiseSDK:
                 "method": props.get("dedup_method"),
                 "similarity": props.get("dedup_similarity"),
                 "target_id": props.get("dedup_target_id"),
+                "existing_id": props.get("dedup_target_id"),  # §6.1 alias
+                "candidate_type": "content",
+                "status": props.get("dedup_reviewed") or "pending",
                 "batch_id": props.get("batch_id"),
             })
         return out
@@ -1829,10 +1860,20 @@ class TortoiseSDK:
             ).result_set
             target_status = (trow[0][0] if trow else None) or "live"
             if target_status == "draft":
-                self.create_operator(
-                    "IMPL", candidate_id, [target_id], label="alreadyDecided",
-                    direction="unidirectional", promote_source=False)
-                wired = True
+                exists = proj.g.query(
+                    "MATCH (op:Point {label:'alreadyDecided'})-[:IMPL]->"
+                    "(:Point {id:$cand}), "
+                    "(op)-[:IMPL]->(:Point {id:$prior}) RETURN count(op)",
+                    params={"cand": candidate_id, "prior": target_id},
+                ).result_set
+                if not exists or exists[0][0] == 0:
+                    self.create_operator(
+                        "IMPL", candidate_id, [target_id],
+                        label="alreadyDecided",
+                        direction="unidirectional", promote_source=False)
+                    wired = True
+                else:
+                    wired = True  # already linked — idempotent approve
             else:
                 deferred = True  # wired at promotion (Variant C)
         if action == "reject":
@@ -4173,23 +4214,28 @@ class TortoiseSDK:
     # ── P0 Group 3: Checkpoint, Diary, Status, Analyze, Ingest ────
 
     def _content_exists(self, content: str,
-                        pointKind: str | None = None) -> str | None:
+                        pointKind: str | None = None,
+                        exclude_id: str | None = None) -> str | None:
         """Return point ID if a point with this content hash exists, else None.
 
         #784: optional pointKind scoping — a duplicate observation must never
-        suppress a decision (DE2E-N11). Default None preserves the legacy
-        any-kind behavior.
+        suppress a decision (DE2E-N11); ``exclude_id`` excludes a specific
+        point (the dedup candidate itself — self-match guard, #784 review).
+        Default None preserves the legacy any-kind behavior.
         """
         ch = _content_hash(content)
         proj = self._get_proj()
         kind_clause = " AND n.pointKind = $kind" if pointKind else ""
+        exclude_clause = " AND n.id <> $exclude" if exclude_id else ""
         params: dict = {"ch": ch}
         if pointKind:
             params["kind"] = pointKind
+        if exclude_id:
+            params["exclude"] = exclude_id
         rows = proj.g.query(
             f"MATCH (n:Point {{content_hash:$ch}}) "
             "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
-            f"{kind_clause} "
+            f"{kind_clause} {exclude_clause} "
             "RETURN n.id",
             params=params,
         ).result_set
@@ -4278,7 +4324,8 @@ class TortoiseSDK:
                         threshold: float,
                         pointKind: str = "checkpoint-item",
                         return_pairs: bool = False,
-                        similarity_out: bool = False
+                        similarity_out: bool = False,
+                        exclude_ids: set[str] | None = None
                         ) -> list[tuple[dict, str]] | list[dict]:
         """Filter candidates by embedding similarity against existing points.
 
@@ -4291,11 +4338,17 @@ class TortoiseSDK:
         """
         import numpy as np
         proj = self._get_proj()
+        exclude = exclude_ids or set()
+        excl_clause = " AND NOT n.id IN $exclude" if exclude else ""
+        params: dict = {"kind": pointKind}
+        if exclude:
+            params["exclude"] = list(exclude)
         rows = proj.g.query(
             "MATCH (n:Point {pointKind:$kind}) "
             "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            f"{excl_clause} "
             "RETURN n.id, n.content",
-            params={"kind": pointKind},
+            params=params,
         ).result_set
         existing = [(r[0], r[1]) for r in rows if r[1]]
         if not existing:
