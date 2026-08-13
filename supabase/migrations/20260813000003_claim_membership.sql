@@ -201,7 +201,15 @@ BEGIN
      LIMIT 1;
 
     IF v_existing_row_id IS NOT NULL THEN
-        DELETE FROM public.team_memberships WHERE id = v_owner_row_id;
+        -- Race guard (#1082 review P1-1, merge path): a concurrent claim
+        -- may have already linked the owner row (user_id set) — the DELETE
+        -- must NOT remove the winner's freshly-claimed row. Same
+        -- user_id IS NULL conjunct + FOUND check as the plain path.
+        DELETE FROM public.team_memberships
+         WHERE id = v_owner_row_id AND user_id IS NULL;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'claim_membership:already_claimed';
+        END IF;
         UPDATE public.team_memberships
            SET role        = 'owner',
                status      = 'active',

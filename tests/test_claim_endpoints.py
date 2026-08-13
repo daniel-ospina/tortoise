@@ -435,22 +435,20 @@ class TestClaimStatusEndpoint:
         assert body["claimable"] is True
         assert body["team_id"] == team_id
 
-    def test_claim_status_header_preferred_over_query(self, client, fake,
-                                                     monkeypatch):
-        """P1-2: when both a query api_key and X-Claim-Key are present, the
-        header wins (the query form is deprecated)."""
+    def test_claim_status_query_form_rejected(self, client, fake,
+                                              monkeypatch):
+        """P1-2: the query-string api_key form is NOT accepted (access-log
+        leak of the graph credential) — header only."""
         key, team_id = _provision_anon(client, fake)
-        other = "tt_" + "0" * 30
         _patch_verify(monkeypatch, _jwt("user-a", email="a@example.com",
                                         providers=["github"]))
         r = client.get(
-            "/v1/claim/status?api_key=" + other,
-            headers={"Authorization": "Bearer abc.def.ghi",
-                     "X-Claim-Key": key},
+            "/v1/claim/status?api_key=" + key,
+            headers={"Authorization": "Bearer abc.def.ghi"},
         )
         assert r.status_code == 200, r.text
-        assert r.json()["claimable"] is True
-        assert r.json()["team_id"] == team_id
+        assert r.json()["claimable"] is False
+        assert r.json().get("need_key") is True
 
     def test_claimed_key_reports_claimed_by_me(self, client, fake,
                                                monkeypatch):
@@ -464,8 +462,9 @@ class TestClaimStatusEndpoint:
         )
         assert r.status_code == 200, r.text
         r2 = client.get(
-            "/v1/claim/status?api_key=" + key,
-            headers={"Authorization": "Bearer abc.def.ghi"},
+            "/v1/claim/status",
+            headers={"Authorization": "Bearer abc.def.ghi",
+                     "X-Claim-Key": key},
         )
         assert r2.status_code == 200, r2.text
         assert r2.json()["claimable"] is False
@@ -475,8 +474,9 @@ class TestClaimStatusEndpoint:
         _patch_verify(monkeypatch, _jwt("user-a", email="a@example.com",
                                         providers=["github"]))
         r = client.get(
-            "/v1/claim/status?api_key=tt_no_such_key_0000000000000000000",
-            headers={"Authorization": "Bearer abc.def.ghi"},
+            "/v1/claim/status",
+            headers={"Authorization": "Bearer abc.def.ghi",
+                     "X-Claim-Key": "tt_no_such_key_0000000000000000000"},
         )
         assert r.status_code == 200, r.text
         assert r.json()["claimable"] is False
@@ -487,8 +487,9 @@ class TestClaimStatusEndpoint:
         _patch_verify(monkeypatch, _jwt("user-a", email="a@example.com",
                                         providers=["github"]))
         r = client.get(
-            "/v1/claim/status?api_key=tt_some_key_0000000000000000000000",
-            headers={"Authorization": "Bearer abc.def.ghi"},
+            "/v1/claim/status",
+            headers={"Authorization": "Bearer abc.def.ghi",
+                     "X-Claim-Key": "tt_some_key_0000000000000000000000"},
         )
         assert r.status_code == 200, r.text
         assert r.json()["claimable"] is False

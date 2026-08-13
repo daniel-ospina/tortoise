@@ -329,8 +329,9 @@ class TestClaimE2E:
         jwt_a = keys.mint(claim_server["mock_url"], "user-claim-a",
                           "claim-a@e2e.premise-labs.dev", ["github"])
         status, probe = _get(
-            base, f"/v1/claim/status?api_key={key}",
-            headers={"Authorization": f"Bearer {jwt_a}"})
+            base, "/v1/claim/status",
+            headers={"Authorization": f"Bearer {jwt_a}",
+                     "X-Claim-Key": key})
         assert status == 200, probe
         assert probe["claimable"] is True
         assert probe["team_id"] == team_id
@@ -368,8 +369,9 @@ class TestClaimE2E:
         # 8. welcome guard probe: claimed-by-me AFTER (no stray mint would be
         #    attempted; the probe reports the team is no longer claimable)
         status, probe2 = _get(
-            base, f"/v1/claim/status?api_key={key}",
-            headers={"Authorization": f"Bearer {jwt_a}"})
+            base, "/v1/claim/status",
+            headers={"Authorization": f"Bearer {jwt_a}",
+                     "X-Claim-Key": key})
         assert status == 200, probe2
         assert probe2["claimable"] is False
         assert probe2["claimed"] is True

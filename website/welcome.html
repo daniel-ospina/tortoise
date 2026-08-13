@@ -746,48 +746,40 @@ you up to 6 yes/no questions and set up your Tortoise memory.
     // GET /v1/claim/status (key via X-Claim-Key header, never query string —
     // P1-2) and route to the dashboard claim card (NEVER welcome.html
     // provisioning — the mint would orphan the claimable team). Returns true
-    // when the guard routed away. FAIL-CLOSED on error: a claimable key in
-    // hand means we must not mint a stray team on a blip (review P3-1).
+    // #1082 (PR1): welcome Phase-2 mint guard — if a claim is IN FLIGHT
+    // (non-secret tt_claim_pending marker cookie set by the dashboard claim
+    // card on app.premiselabs.co — the raw tt_ key never leaves app-origin
+    // sessionStorage, P1-2), route to the dashboard claim card (NEVER
+    // welcome.html provisioning — the mint would orphan the claimable
+    // team). Returns true when the guard routed away. FAIL-CLOSED: a
+    // pending-claim marker means we must not mint a stray team (review
+    // P3-1) — no server call needed; the marker is the routing signal.
     async function claimStatusGuard(session) {
-      const key = readClaimKeyStorage();
-      if (!key || !key.startsWith("tt_")) return false;
-      try {
-        const resp = await fetch(
-          "https://api.premiselabs.co/v1/claim/status",
-          { headers: {
-              "Authorization": "Bearer " + session.access_token,
-              "X-Claim-Key": key,
-          } }
-        );
-        if (!resp.ok) return true; // fail-closed → route away, do NOT mint
-        const body = await resp.json();
-        if (!body || body.claimable !== true) return false;
-        const dashUrl = "https://app.premiselabs.co/?claim=1";
-        showError(
-          "You have an anonymous team waiting to be claimed. " +
-          "Attach your GitHub or Google identity at the dashboard " +
-          "(same key, same graph, memories intact) — " +
-          "no new team will be created here."
-        );
-        const errState = document.getElementById("error-state");
-        if (errState) {
-          const link = document.createElement("a");
-          link.href = dashUrl;
-          link.className = "btn";
-          link.textContent = "Go claim my team →";
-          errState.appendChild(link);
-        }
-        return true;
-      } catch (e) {
-        return true; // fail-closed → route away, do NOT mint on a blip
+      if (!readClaimPendingMarker()) return false;
+      const dashUrl = "https://app.premiselabs.co/?claim=1";
+      showError(
+        "You have an anonymous team waiting to be claimed. " +
+        "Attach your GitHub or Google identity at the dashboard " +
+        "(same key, same graph, memories intact) — " +
+        "no new team will be created here."
+      );
+      const errState = document.getElementById("error-state");
+      if (errState) {
+        const link = document.createElement("a");
+        link.href = dashUrl;
+        link.className = "btn";
+        link.textContent = "Go claim my team →";
+        errState.appendChild(link);
       }
+      return true;
     }
 
-    function readClaimKeyStorage() {
+    function readClaimPendingMarker() {
       try {
-        return sessionStorage.getItem("tt_claim_key") || "";
+        const m = document.cookie.match(/(?:^|; )tt_claim_pending=([^;]*)/);
+        return !!m;
       } catch (e) {
-        return "";
+        return false;
       }
     }
 

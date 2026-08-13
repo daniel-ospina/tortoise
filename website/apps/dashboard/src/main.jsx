@@ -7,13 +7,34 @@ const KEY_STORAGE = 'tortoise_api_key'
 // #1082 (PR1): the pasted claim key must survive the OAuth redirect (same-tab
 // PKCE round-trip). sessionStorage is origin-scoped and same-tab — NEVER put
 // the key in `redirectTo` (GoTrue embeds it in the OAuth state URL → leak).
-// #1082 review P1-2: sessionStorage ONLY — a parent-domain cookie would
-// expose the raw tt_ credential to every .premiselabs.co subdomain for its
-// TTL (any XSS on any subdomain reads document.cookie).
+// #1082 review P1-2: the raw key lives ONLY in app-origin sessionStorage —
+// never a cookie. Cross-origin claim INTENT (welcome/signin/signup on the
+// tortoise origin must know a claim is in flight so they don't mint a stray
+// team) travels as a NON-SECRET marker cookie (tt_claim_pending=1) — it
+// carries no credential, only a routing signal.
 const CLAIM_KEY_STORAGE = 'tt_claim_key'
+const CLAIM_PENDING_COOKIE = 'tt_claim_pending'
 
 function readClaimKeyStorage() {
   try { return sessionStorage.getItem(CLAIM_KEY_STORAGE) || '' } catch { return '' }
+}
+
+// Non-secret claim-intent marker (parent domain): lets the welcome page's
+// Phase-2 mint guard and the signin/signup claim-intent routing on
+// tortoise.premiselabs.co know a claim is in flight from the dashboard
+// (app.premiselabs.co) — without exposing the raw tt_ key (P1-2).
+// Short TTL (1h — the OAuth round-trip is minutes); Secure + SameSite=Lax.
+function setClaimPendingMarker() {
+  try {
+    const expires = new Date(Date.now() + 60 * 60 * 1000).toUTCString()
+    document.cookie = `${CLAIM_PENDING_COOKIE}=1; Domain=.premiselabs.co; Path=/; SameSite=Lax; Secure; Expires=${expires}`
+  } catch { /* best-effort */ }
+}
+
+function clearClaimPendingMarker() {
+  try {
+    document.cookie = `${CLAIM_PENDING_COOKIE}=; Domain=.premiselabs.co; Path=/; SameSite=Lax; Secure; Max-Age=0`
+  } catch { /* best-effort */ }
 }
 const SUPABASE_URL = 'https://ybetwichurajbfswfeqa.supabase.co'
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InliZXR3aWNodXJhamJmc3dmZXFhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODUyNzgzNDYsImV4cCI6MjEwMDg1NDM0Nn0.YHysJAebPualDNDQTU5bnGBUHg5guLe8eBadm0LiEiY'
@@ -319,6 +340,7 @@ function App() {
               const claimRes = await performClaim(session.access_token, claimKeyStored)
               if (claimRes.ok) {
                 try { sessionStorage.removeItem(CLAIM_KEY_STORAGE) } catch { /* best-effort */ }
+                clearClaimPendingMarker()
                 setClaimKey('')
                 // Strip ?claim=1 so a reload doesn't re-claim.
                 window.history.replaceState({}, '', window.location.pathname)
@@ -495,9 +517,11 @@ function App() {
     }
     // Key survives the OAuth redirect via sessionStorage (same-tab PKCE
     // round-trip). NEVER in redirectTo — GoTrue puts it in the OAuth state
-    // URL → leak. sessionStorage only (P1-2): the raw tt_ credential must
-    // not ride a parent-domain cookie.
+    // URL → leak. Raw key = sessionStorage only (P1-2). The non-secret
+    // tt_claim_pending marker (cross-origin intent for welcome/signin/
+    // signup routing) is set alongside — it carries NO credential.
     try { sessionStorage.setItem(CLAIM_KEY_STORAGE, k) } catch { /* best-effort */ }
+    setClaimPendingMarker()
     setClaimBusy(true)
     try {
       const redirectTo = `${window.location.origin}${window.location.pathname}?claim=1`
@@ -552,6 +576,7 @@ function App() {
     setClaimKey('')
     setClaimError('')
     try { sessionStorage.removeItem(CLAIM_KEY_STORAGE) } catch { /* best-effort */ }
+    clearClaimPendingMarker()
     setGraphs([])
     setGraphsLoaded(false) // Round-27: symmetry with switchTeam
     setMembers(null)
