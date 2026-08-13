@@ -45,6 +45,40 @@ STALE_TERMINAL_STATUSES = frozenset(
 INGEST_GRANULARITIES = ("bulk", "granular")
 INGEST_PROMOTION_POLICIES = ("gated", "auto")
 
+
+def _first_non_draft_status(points: list) -> tuple[int, object] | None:
+    """Row-9 guard helper (PR #1073): return (index, effective_status) of the
+    first point item whose EFFECTIVE status is not exactly 'draft'.
+
+    The effective status is the top-level ``status`` key, or the nested
+    ``props={"status": ...}`` value when top-level is absent (create_point
+    flattens nested props via _coerce_props — top-level wins on conflict,
+    mirrored here). Only the exact canonical string "draft" is storable under
+    promotion_policy='gated': case/whitespace variants ("Draft", "draft "),
+    terminal statuses, and non-str values are all rejected (EP _live_only
+    excludes only exact 'draft', so every other value would be EP-live).
+
+    Shared by TortoiseSDK.ingest and tortoise_ingest so the two layers
+    cannot drift. Returns None when every item is draft/absent.
+    """
+    for i, item in enumerate(points or []):
+        if not isinstance(item, dict):
+            continue
+        st = item.get("status")
+        nested = item.get("props")
+        has_status = "status" in item
+        if not has_status and isinstance(nested, dict):
+            st = nested.get("status")
+            has_status = "status" in nested
+        # An explicit status key present with value None is a violation too
+        # (None would otherwise be stored as NULL, which _live_only treats as
+        # LIVE) — uniform row-9 message, not the vocabulary error.
+        if has_status and st is None:
+            return i, None
+        if st is not None and str(st) != "draft":
+            return i, st
+    return None
+
 # #913: whole-graph mode=add cap — pairwise scoring is O(n²) in time AND
 # memory (dense cosine matrix + pair dict); a read-only MCP call must not
 # OOM a hosted server (#329/#579 bounding precedent). The unscoped candidate
@@ -905,6 +939,17 @@ class TortoiseSDK:
             pid = ulid()
         # Points enter as draft, go live when first edge is created (#131)
         status = props.pop("status", "draft")
+        # Fail-closed vocabulary validation (mirrors update_point): a
+        # non-canonical status (case variant, junk, non-str, typo) would
+        # otherwise be stored verbatim and treated as EP-LIVE by _live_only
+        # (which excludes only exact 'draft') — a silent-promotion hole
+        # (PR #1073 review P0/P1). isinstance guard keeps the error a
+        # ValueError for unhashable values (list/dict) too.
+        if not isinstance(status, str) or status not in POINT_STATUS_VALUES:
+            raise ValueError(
+                f"Invalid status {status!r}. Valid statuses: "
+                f"{sorted(POINT_STATUS_VALUES)}"
+            )
 
         # Compute embedding (Phase 1A, #7698) — stored as Point property
         embedding = None
@@ -1240,7 +1285,8 @@ class TortoiseSDK:
             )
 
         # Validate status if present
-        if 'status' in props and props['status'] not in POINT_STATUS_VALUES:
+        if 'status' in props and (not isinstance(props['status'], str)
+                                  or props['status'] not in POINT_STATUS_VALUES):
             raise ValueError(
                 f"Invalid status {props['status']!r}. "
                 f"Must be one of: {', '.join(sorted(POINT_STATUS_VALUES))}"
@@ -2991,13 +3037,14 @@ class TortoiseSDK:
           structural edges MERGE. Document/Event entities are append-only
           occurrence records — re-ingest duplicates them by design.
         - EP-safe: created points default to status='draft' (#131 draft→live
-          lifecycle). Per-item status:'live' is ONLY allowed under
-          promotion_policy='auto' — under gated it is rejected (INGEST
-          CONTRACT §2.1 / row 9: no bypass of the gated contract; the
-          sanctioned route is promotion_policy='auto' or
-          update_point(status='live') after ingest). Connection-driven
-          promotion (source → live on first edge) only happens under
-          promotion_policy='auto', and only for draft/null-status sources
+          lifecycle). Under promotion_policy='gated' ANY effective status other
+          than 'draft' on a point item is rejected (INGEST CONTRACT row 9 —
+          no bypass of the gated contract; the sanctioned routes are
+          promotion_policy='auto' or update_point(status='live') after ingest;
+          case variants, nested props={...}, and canonical terminal statuses
+          are rejected too — EP _live_only excludes only exact 'draft').
+          Connection-driven promotion (source → live on first edge) only
+          happens under promotion_policy='auto', and only for draft/null-status sources
           (retracted/deprecated terminal sources are never resurrected).
           Under auto the operator node is written WITHOUT a status property
           (live by projection — the #780 asymmetry: gated writes explicit
@@ -3020,19 +3067,22 @@ class TortoiseSDK:
                 f"ingest: bundle must be a dict with points/entities/sources/"
                 f"connections sections, got {type(bundle).__name__}"
             )
-        # Row 9 of INGEST_CONTRACT.md: under gated, an explicit status:'live'
-        # on a point item is a violation — the Q2-lock must not be bypassable
-        # via the bundle's own status field (the sanctioned routes are
-        # promotion_policy='auto' or update_point(status='live') after ingest).
+        # Row 9 of INGEST_CONTRACT.md: under gated, points must stay draft —
+        # ANY effective status other than the exact canonical "draft" on a
+        # point item is a violation (no bypass of the gated contract; the
+        # sanctioned routes are promotion_policy='auto' or
+        # update_point(status='live') after ingest). Shared helper keeps the
+        # SDK and MCP layers identical (PR #1073).
         if promotion_policy == "gated":
-            for i, item in enumerate(bundle.get("points") or []):
-                if isinstance(item, dict) and item.get("status") == "live":
-                    raise ValueError(
-                        f"ingest: points[{i}] status:'live' is not allowed under "
-                        f"promotion_policy 'gated' — pass promotion_policy='auto' "
-                        f"for explicit live, or keep draft and promote via "
-                        f"update_point(status='live')"
-                    )
+            bad = _first_non_draft_status(bundle.get("points"))
+            if bad is not None:
+                i, st = bad
+                raise ValueError(
+                    f"ingest: points[{i}] status:{st!r} is not allowed under "
+                    f"promotion_policy 'gated' — under gated points stay "
+                    f"draft; pass promotion_policy='auto' for explicit live, "
+                    f"or keep draft and promote via update_point(status='live')"
+                )
         from .projection.edges import _VALID_EDGE_PREDICATES
 
         proj = self._get_proj()
