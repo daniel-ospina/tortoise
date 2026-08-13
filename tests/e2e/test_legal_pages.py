@@ -150,8 +150,8 @@ PRIVACY_SECTION_TITLES = DRAFTS_DIR / "2026-08-08-657-privacy-section-titles.txt
 TOS_DRAFT = DRAFTS_DIR / "2026-08-08-657-tos-draft.md"
 PRIVACY_DRAFT = DRAFTS_DIR / "2026-08-08-657-privacy-draft.md"
 
-LEGAL_PAGES = ("/privacy", "/tos", "/license", "/dpa")
-FOOTER_LINK_HREFS = ("/privacy", "/tos", "/license", "/dpa")
+LEGAL_PAGES = ("/privacy", "/tos", "/license", "/dpa", "/security")
+FOOTER_LINK_HREFS = ("/privacy", "/tos", "/license", "/dpa", "/security")
 PRODUCT_ROOT_MARKER = "Memory that makes your agents"
 PRODUCT_ROOT_MARKER_LOWER = PRODUCT_ROOT_MARKER.lower()
 FOOTER_SELECTOR = "footer, .legal-footer, .footer"
@@ -163,7 +163,7 @@ PRICING_PAGE_URL = "https://tortoise.premiselabs.co/#pricing-section"
 FOOTER_PAGES = ("/welcome", "/signup", "/signin", "/self-hosted.html")
 CRAWL_PAGES = (
     "/welcome", "/signup", "/signin", "/self-hosted.html", "/docs.html",
-    "/privacy", "/tos", "/license", "/dpa",
+    "/privacy", "/tos", "/license", "/dpa", "/security",
 )
 
 # ── Pinned canonical sentences (T1/T2 Step 2 — the authoritative set; ──────
@@ -388,8 +388,8 @@ def _body_text_clean(page: Page) -> str:
 
 
 def _footer_links_present(content: str) -> None:
-    """Raw-HTML half (tortoise-host / crawl tests, no live page): the four
-    legal hrefs appear in the served document."""
+    """Raw-HTML half (tortoise-host / crawl tests, no live page): the five
+    legal/security hrefs appear in the served document."""
     for href in FOOTER_LINK_HREFS:
         assert href in content, f"footer link {href} missing"
 
@@ -539,12 +539,12 @@ def test_license_and_dpa_serve_200(page: Page) -> None:
 
 
 def test_footer_legal_links_on_all_site_pages(page: Page) -> None:
-    """UNCONDITIONAL half: the four legal links are present in the FOOTER
-    element on product.html, welcome.html, signup.html, signin.html,
-    self-hosted.html (G-gate ⑨ link set: Privacy · Terms · License · DPA —
-    all four ship, no conditional). Scoped to the footer element via a real
-    locator (footer, .legal-footer, .footer) — not page-wide substring checks
-    (reviewer P3-5a)."""
+    """UNCONDITIONAL half: the five legal/security links are present in the
+    FOOTER element on product.html, welcome.html, signup.html, signin.html,
+    self-hosted.html (G-gate ⑨ link set: Privacy · Terms · License · DPA ·
+    Security — all five ship, no conditional). Scoped to the footer element
+    via a real locator (footer, .legal-footer, .footer) — not page-wide
+    substring checks (reviewer P3-5a)."""
     for path in FOOTER_PAGES:
         _goto(page, BASE_URL + path)
         footer = page.locator(FOOTER_SELECTOR).first
@@ -905,7 +905,7 @@ def test_docs_html_contact_is_mailto(page: Page) -> None:
 
 
 @pytest.mark.parametrize(
-    "path", ["/privacy", "/tos", "/welcome", "/signup", "/docs.html"]
+    "path", ["/privacy", "/tos", "/welcome", "/signup", "/docs.html", "/security"]
 )
 def test_mobile_render_no_horizontal_scroll(page: Page, path: str) -> None:
     """At 375px the page must render without horizontal scroll (S8).
@@ -1158,3 +1158,46 @@ def test_draft_to_render_fidelity(page: Page) -> None:
             f"{page_path}: {len(missing)} draft sentence(s) ≥40 chars missing from render "
             f"(of {checked} checked):\n  " + "\n  ".join(m[:160] for m in missing[:10])
         )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# #11 /security SOC 2 roadmap — negation-safe (issue #309)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def test_security_soc2_roadmap_negation_safe(page: Page) -> None:
+    """#309: /security renders the SOC 2 roadmap with negation-safe language
+    — 'not SOC 2 certified' present, and NO overclaim vocabulary. The
+    negation check is strip-then-scan (assert the required phrase, strip it,
+    then assert 'certified' absent in the remainder) — a bare-substring or
+    lookbehind regex on 'certified' is unsatisfiable against the required
+    copy. Also asserts the 5 claim sections, the roadmap milestones, and
+    both credential surfaces (runtime vs dashboard)."""
+    _goto(page, BASE_URL + "/security")
+    body = _body_text_clean(page)
+
+    # 5 claim sections render (scoping-doc section list).
+    for heading in ("tls", "encryption at rest", "api key hashing",
+                    "audit logging", "soc 2 roadmap"):
+        assert heading in body, f"/security missing section heading: {heading}"
+
+    # SOC 2 negation — strip-then-scan (cycle-4 fix; satisfiable by design).
+    assert "not soc 2 certified" in body, \
+        "/security must state 'not SOC 2 certified'"
+    remainder = re.sub("not soc 2 certified", "", body)
+    assert "certified" not in remainder, \
+        "SOC 2 overclaim: 'certified' appears outside the 'not soc 2 certified' negation"
+    for phrase in ("we are soc 2 certified", "soc 2 type i", "soc 2 type ii",
+                   "attestation", "audited"):
+        assert phrase not in body, f"SOC 2 overclaim present on /security: {phrase!r}"
+
+    # Roadmap milestones only — no target date, no auditor name (approved
+    # 2026-08-15 decision).
+    for milestone in ("scoping", "readiness", "audit"):
+        assert milestone in body, f"/security SOC 2 roadmap missing milestone: {milestone}"
+
+    # Credential surfaces attributed per surface (runtime vs dashboard).
+    assert "api keys and oauth tokens" in body, "runtime credential surface missing"
+    assert "no password system" in body, "runtime block must state it has no password system"
+    assert "salted hashing" in body and "supabase" in body, \
+        "dashboard block must attribute salted hashing to Supabase Auth"
