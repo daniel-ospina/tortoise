@@ -5607,7 +5607,7 @@ class OnboardingStatePatchRequest(BaseModel):
     # welcome.html fires this on copy with the displayed key. Enums match
     # #235's artifact_copied schema verbatim (align cycle-3 conformance).
     harness: str | None = None   # "claude"|"codex"|"cursor"|"pi"
-    section: str | None = None   # "config"|"prompt"|"both"
+    section: str | None = None   # "config"|"prompt"|"both"|"setup"
 
 
 @app.get("/v1/onboarding/state", response_model=OnboardingStateResponse)
