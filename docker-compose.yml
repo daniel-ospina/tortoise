@@ -41,7 +41,9 @@ services:
 
   falkordb:
     # server-only image (no browser UI surface); honors REDIS_ARGS env
-    image: falkordb/falkordb-server:latest
+    # Pinned (issue #1146): :latest silently drifts engine versions between
+    # runs — benchmark/performance parity needs a reproducible engine.
+    image: falkordb/falkordb-server:v4.16.7
     ports:
       - "127.0.0.1:6379:6379"   # loopback only — host-side MCP configs reach the sidecar
     environment:
@@ -55,6 +57,13 @@ services:
       timeout: 3s
       retries: 10
     restart: unless-stopped
+    # Resource parity for reproducible benchmark runs (issue #1146): bounds
+    # the sidecar so prod-like runs don't silently get more/fewer resources.
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 2g
 
 volumes:
   falkordb-data:
