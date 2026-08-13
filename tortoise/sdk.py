@@ -1551,14 +1551,37 @@ class TortoiseSDK:
                     "promoted": False, "blocked": True,
                     "reason": "not_draft"}
 
+        # Post-CAS race re-check (#990): the quarantine lock is a
+        # read-then-CAS (two statements — FalkorDBLite has no EXISTS
+        # subqueries), so a quarantine landing between the batch_status read
+        # and the CAS can race a promotion through. Surface the race instead
+        # of hiding it: the point is live, but the batch is quarantined.
+        race_detected = False
+        if batch_id:
+            from .mining import batch_status
+            bs = batch_status(proj, batch_id)
+            if bs is not None and bs["status"] == "quarantined":
+                race_detected = True
+                _logger.warning(
+                    "promote_point: batch %s quarantined concurrently with "
+                    "promotion of %s (TOCTOU race, #990) — point is live but "
+                    "batch is quarantined",
+                    batch_id, point_id,
+                )
+
         # R16 zombie-operator prevention: promote incident draft operators
         # once ALL their endpoint Points are live.
         promoted_ops = self._promote_incident_operators(proj, point_id, now)
 
         self._emit_event("PointPromoted", point=self.get_point(point_id))
-        return {"id": point_id, "status": "live", "promoted": True,
-                "reviewed": True,
-                "operator_nodes_promoted": promoted_ops}
+        result = {"id": point_id, "status": "live", "promoted": True,
+                  "reviewed": True,
+                  "operator_nodes_promoted": promoted_ops}
+        if race_detected:
+            result["race_detected"] = True
+            result["race_warning"] = (
+                "batch quarantined concurrently with promotion — point is live")
+        return result
 
     def _promote_incident_operators(self, proj, point_id: str, now: str) -> list[str]:
         """R16: promote draft operator nodes incident to a freshly-live Point.

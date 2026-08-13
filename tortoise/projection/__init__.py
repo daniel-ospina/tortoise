@@ -723,6 +723,21 @@ class FalkorProjection(
         except Exception:
             pass  # Graph may be corrupt — skip snapshot; JSONL replay is best-effort
 
+        # ── :Batch marker snapshot (#990) ───────────────────────────
+        # Batch lifecycle state (quarantine/commit) lives on :Batch marker
+        # nodes, which are NOT :Point nodes — the #548 snapshot below only
+        # covers Points. Snapshot them here so a rebuild does not silently
+        # evaporate quarantine locks (a quarantined batch must stay
+        # quarantined after rebuild — review #944/#990).
+        batch_snapshot: list[dict] = []
+        try:
+            rows = self.g.query(
+                "MATCH (b:Batch) RETURN properties(b)"
+            ).result_set
+            batch_snapshot = [r[0] for r in rows] if rows else []
+        except Exception:
+            pass  # graph may be corrupt — best-effort, like the #548 snapshot
+
         # ── Wipe + rebuild ──────────────────────────────────────────
         self.g.query("MATCH (n) DETACH DELETE n")
 
@@ -823,6 +838,18 @@ class FalkorProjection(
                 # #330 parity with apply(): SourceCreated was dropped by rebuild.
                 self._upsert_source(ev)
             # ConfidenceChanged: no graph effect (audit-only event)
+
+        # Pass 1b tail: restore :Batch marker nodes from the pre-wipe
+        # snapshot (#990) — quarantine locks survive rebuilds.
+        for props in batch_snapshot:
+            bid = props.get("id")
+            if not bid:
+                continue
+            clean = {k: v for k, v in props.items() if k != "id"}
+            self.g.query(
+                "MERGE (b:Batch {id:$id}) SET b += $props",
+                params={"id": bid, "props": clean},
+            )
 
         # Pass 2: create edges for all operators + provenance/entity wiring
         # (shared _upsert_point_edges — single source of truth with apply, #330).

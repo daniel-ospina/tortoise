@@ -507,3 +507,64 @@ class TestEpSafeCommitReviewFixes:
         res = EpSafeCommit(proj, "g2", grounding_fn=identity).run([p1["id"]])
         assert res["ok"] is False
         assert res["checks"]["grounding"]["status"] == "fail"
+
+
+class TestW3PipelineWiring:
+    """#990 — EpSafeCommit enforcement in the extraction pipeline."""
+
+    def test_mine_stamps_batch_id_and_commits(self, mining_sdk):
+        """mine_conversation stamps batch_id on extraction Points and runs
+        the W-3 gate — a clean batch is committed (additive result keys)."""
+        import tortoise.mining as mining
+        sdk = mining_sdk
+        proj = sdk._get_proj()
+        from tortoise.log import EventLog
+        import tempfile, os
+        log = EventLog(os.path.join(tempfile.mkdtemp(), "e.jsonl"))
+        from tortoise.api import EventAPI
+        api = EventAPI(log, initiated_by="extractor", agent_id="t",
+                       projection=proj)
+        result = mining.mine_conversation(
+            "Alice: We decided to move the FalkorDB default port to 16379.\n"
+            "Bob: I disagree because changing port 16379 breaks the redis config.\n"
+            "Alice: But tortoise#123 tracks the migration work.\n",
+            "session_s990a", api)
+        assert result["batch_id"], "batch_id must be returned"
+        assert result["points"] > 0, "fixture transcript must produce points"
+        assert result["batch_status"] == "committed", result
+        rows = proj.g.query(
+            "MATCH (n:Point) WHERE n.batch_id = $bid RETURN count(n)",
+            params={"bid": result["batch_id"]},
+        ).result_set
+        assert rows[0][0] == result["points"], (
+            "every extraction Point must carry the batch_id"
+        )
+
+    def test_mine_without_projection_not_gated(self, mining_sdk):
+        """Standalone log mode (no projection) skips the gate and says so."""
+        import tortoise.mining as mining
+        from tortoise.log import EventLog
+        import tempfile, os
+        log = EventLog(os.path.join(tempfile.mkdtemp(), "e.jsonl"))
+        from tortoise.api import EventAPI
+        api = EventAPI(log, initiated_by="extractor", agent_id="t")  # no projection
+        result = mining.mine_conversation(
+            "We decided to fix tortoise#123 today.", "session_s990b", api)
+        assert result["batch_status"] == "not_gated"
+        assert "projection" in result["batch_reason"]
+
+    def test_batch_state_survives_rebuild(self, mining_sdk, tmp_path):
+        """#990 durability: a quarantined batch stays quarantined after
+        wipe+rebuild_all (:Batch marker snapshot)."""
+        import tortoise.mining as mining
+        sdk = mining_sdk
+        proj = sdk._get_proj()
+        p = sdk.create_point("decision", "a", status="draft", batch_id="dur1")
+        mining.quarantine_batch(proj, "dur1", reason="EP drift (W-3)")
+        assert mining.batch_status(proj, "dur1")["status"] == "quarantined"
+        rebuilt = proj.rebuild_all(str(tmp_path))
+        assert rebuilt["events"] >= 0
+        bs = mining.batch_status(proj, "dur1")
+        assert bs is not None and bs["status"] == "quarantined", (
+            "quarantine lock must survive rebuild_all"
+        )
