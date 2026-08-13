@@ -483,6 +483,14 @@ def maybe_record_mcp_read(name: str, team_id: str, limits: dict | None) -> None:
         pass
 
 
+def _scrub_error(msg: str) -> str:
+    """#43 sanitize: strip hostnames, ports, passwords from error messages."""
+    import re
+    msg = re.sub(r'://[^@]*@', '://***@', msg)  # password in URI
+    msg = re.sub(r'(host=|at |to )[\w.-]+(:\d+)?', r'\1***', msg)  # host:port
+    return msg
+
+
 def _safe(fn, *args, **kwargs):
     """Call fn; return error dict on exception instead of raising.
 
@@ -526,16 +534,33 @@ def _safe(fn, *args, **kwargs):
         return result
     except Exception as e:
         monitoring.record_error()
+        from tortoise.exceptions import BundleValidationError
         from tortoise.quota import QuotaCheckError, QuotaExceededError
+        if isinstance(e, BundleValidationError):
+            # A2: dedicated branch BEFORE the generic — violations survive
+            # the MCP boundary INTACT (E2E-12.1/E2E-15(c)); the wire shape is
+            # {error: <first message>, code: ERR_BUNDLE_INVALID, violations}.
+            # REVIEW-FIX P2: message content scrubbed (#43) — violation
+            # messages echo client-controlled refs/endpoints that could carry
+            # URIs with credentials; structure (section/index/message keys)
+            # survives intact.
+            scrubbed = [{**v, "message": _scrub_error(v["message"])}
+                        for v in e.violations]
+            return {"error": _scrub_error(str(e)), "code": ERR_BUNDLE_INVALID,
+                    "violations": scrubbed}
         if isinstance(e, QuotaExceededError):
             return {"error": str(e), "code": ERR_QUOTA}
         if isinstance(e, QuotaCheckError):
             return {"error": str(e), "code": ERR_QUOTA_SERVER}
-        msg = str(e)
-        # Sanitize: strip hostnames, ports, passwords from error messages (#43)
-        import re
-        msg = re.sub(r'://[^@]*@', '://***@', msg)  # password in URI
-        msg = re.sub(r'(host=|at |to )[\w.-]+(:\d+)?', r'\1***', msg)  # host:port
+        from tortoise.exceptions import Phase2Error
+        if isinstance(e, Phase2Error):
+            # A2: Phase-2 failure — {error, batch_id} with NO code (distinct
+            # from Phase-1's ERR_BUNDLE_INVALID); the batch_id lets the agent
+            # audit the partial commit before re-sending (cycle-23/24 pin).
+            # REVIEW-FIX P2: message scrubbed (#43).
+            return {"error": _scrub_error(str(e)),
+                    **({"batch_id": e.batch_id} if e.batch_id else {})}
+        msg = _scrub_error(str(e))
         return {"error": msg}
 
 
@@ -559,6 +584,8 @@ def _scrub_analyze_answer(answer: str) -> str:
 # (mcp_auth) — tracked as a follow-up (client cannot distinguish the two).
 ERR_QUOTA = -32006
 ERR_QUOTA_SERVER = -32007
+# A2: Phase-1 bundle validation failure (carries .violations).
+ERR_BUNDLE_INVALID = -32008
 # Application-defined pre-SDK param errors (tool-level validation that never
 # reaches the SDK): invalid granularity / promotion_policy on tortoise_ingest
 # return {error, code: ERR_INVALID} naming the valid values (E2E-8.3 pin).

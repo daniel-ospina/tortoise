@@ -318,6 +318,12 @@ def _mark_embedded_opened(db_path: str) -> None:
         _embedded_busy_known.add(str(db_path))
 
 
+def _now_iso() -> str:
+    """UTC now in ISO format (module-level — shared by write paths)."""
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
+
+
 def _source_merge_lock_for(url: str) -> threading.Lock:
     with _source_merge_lock_guard:
         lock = _source_merge_locks.get(url)
@@ -1555,19 +1561,14 @@ class TortoiseSDK:
         # before validation produced phantoms on corrupt-edge data).
         self._emit_event("PointSuperseded", {"id": old_id, "new_id": new_id}, id=old_id)
 
-        # 1. Mark old superseded + outdated + create CORRECTS edge (same as invalidate)
-        # #432: status='superseded' alongside the legacy outdated=true flag
-        # (back-compat for consumers reading the flag; #690 will consolidate).
-        proj.g.query(
-            "MATCH (n:Point {id:$id}) SET n.status = 'superseded', "
-            "n.outdated = true, n.updatedAt = $now",
-            params={"id": old_id, "now": now},
-        )
-        proj.g.query(
-            "MATCH (a:Point {id:$new_id}), (b:Point {id:$old_id}) "
-            "MERGE (a)-[:CORRECTS]->(b)",
-            params={"new_id": new_id, "old_id": old_id},
-        )
+        # CYCLE-26 REVIEW-FIX P1 (cycle-7 pin): the superseded-status write +
+        # CORRECTS edge MOVE AFTER the transfers (2a / 2a-DIRECT / 2b). The
+        # transfers read old's edges directly and don't depend on the status;
+        # under the pinned order a crash mid-transfer leaves old NOT yet
+        # terminal, and a RE-RUN converges (the terminal guard never fires
+        # on the retry). The old order (status first) left a terminal point
+        # with EP-active incident direct edges and no remediation short of
+        # rebuild_all.
 
         # 2a. Transfer operator edges (IMPL, NAND, hasPart) — preserve provenance
 
@@ -1599,6 +1600,126 @@ class TortoiseSDK:
             )
             transferred += 1
 
+        # 2a-DIRECT (epic #902 §8 / plan §5.3 review fix): transfer
+        # OPERATOR-LESS direct IMPL/NAND edges incident to the superseded
+        # point, BOTH directions:
+        #   (old)-[:IMPL|NAND]->(x)  and  (x)-[:IMPL|NAND]->(old)
+        # Repointed to new_id preserving type/direction/confidence/weight/
+        # label/batch_id (E2E-11.6: zero direct edges remain incident to a
+        # superseded point, live AND post-rebuild). The REPOINT descriptor is
+        # emitted BEFORE the transfer (EMIT-BEFORE-TRANSFER, §4.4) so a
+        # transfer×emission crash cannot leave the stale descriptor in the
+        # JSONL while the live edge moves.
+        for direction in ("out", "in"):
+            if direction == "out":
+                dq = ("MATCH (old:Point {id:$old_id})-[r:IMPL|NAND]->(t) "
+                      "RETURN type(r), r, t.id, ID(r)")
+            else:
+                dq = ("MATCH (t)-[r:IMPL|NAND]->(old:Point {id:$old_id}) "
+                      "RETURN type(r), r, t.id, ID(r)")
+            rows = proj.g.query(dq, params={"old_id": old_id}).result_set
+            # Filter: exclude edges whose OTHER endpoint is an operator Point
+            # (REVIEW-FIX P2 — a mitigation-style (m)-[:IMPL]->(op) edge has
+            # an operator target; 2a owns op->input edges and runs first;
+            # repointing an operator target would create a topology
+            # create_direct_edge itself rejects). Operators carry
+            # is_operator=true.
+            plain = []
+            if rows:
+                other_ids = [row[2] for row in rows]
+                op_rows = proj.g.query(
+                    "MATCH (p:Point) WHERE p.id IN $ids AND "
+                    "coalesce(p.is_operator, false) = true RETURN p.id",
+                    params={"ids": other_ids},
+                ).result_set
+                op_set = {r[0] for r in op_rows}
+                plain = [row for row in rows if row[2] not in op_set]
+            rows = plain
+            for row in rows:
+                rtype, r, tid, rid = row[0], row[1], row[2], row[3]
+                # FalkorDB returns an Edge object — read its properties.
+                rdict = dict(r.properties) if hasattr(r, "properties") else {}
+                if tid == new_id:
+                    # REVIEW-FIX P1 (cycle-26): the edge already terminates at
+                    # the successor — repointing would CREATE A PHANTOM
+                    # SELF-EDGE (new)->(new) (the MERGE runs before the old
+                    # delete, and no existing (new)->(new) edge collapses it).
+                    # The old edge is DELETED and NO repoint descriptor is
+                    # emitted (pass-2b must not recreate the self-edge
+                    # post-rebuild). E2E-11.6: zero direct edges incident to
+                    # a superseded point, live AND post-rebuild.
+                    proj.g.query(
+                        f"MATCH (a)-[r:{rtype}]->(b) WHERE ID(r) = $rid DELETE r",
+                        params={"rid": rid},
+                    )
+                    transferred += 1
+                    continue
+                _attrs = {k: v for k, v in rdict.items()
+                          if k in ("direction", "confidence", "weight",
+                                   "label", "batch_id")}
+                # EMIT-BEFORE-TRANSFER: the REPOINT descriptor (plan §4.4 —
+                # A10's pass-2b repoint apply consumes it post-rebuild).
+                # Flat descriptor shape (REVIEW-FIX P2: match
+                # DirectEdgeCreated's §4.4 canonical flat shape — A10's
+                # pass-2b reads the same fields from both record types).
+                self._emit_event(
+                    "DirectEdgeRepoint",
+                    id=f"{old_id}->{new_id}:{rtype}",
+                    src=(tid if direction == "in" else new_id),
+                    tgt=(new_id if direction == "in" else tid),
+                    edge_type=rtype,
+                    **{k: v for k, v in _attrs.items()},
+                )
+                # MERGE-collapse (count()==1 twin guard): the MERGE matches
+                # the bare pattern; if the target edge already exists it
+                # converges instead of duplicating. rtype is validated
+                # IMPL/NAND (from the query) — interpolated into the MERGE
+                # pattern (FalkorDB requires ONE relationship type per
+                # MERGE pattern).
+                # MERGE (bare) then SET separately — MERGE+SET in ONE
+                # statement matches the full pattern (attrs included) and
+                # creates a PARALLEL edge on attribute change; the two-
+                # statement form collapses to one edge and last-writer-wins
+                # on attrs (the plan's no-parallel-direct-edges contract).
+                # Two-step MERGE (FalkorDB quirk — same as create_direct_edge):
+                # MATCH the existing nodes, then MERGE the edge between them
+                # (never creates duplicate nodes; collapses to one edge).
+                if direction == "out":
+                    mq = (f"MATCH (new:Point {{id:$new_id}}), "
+                          f"(t:Point {{id:$tid}}) "
+                          f"MERGE (new)-[nr:{rtype}]->(t)")
+                else:
+                    mq = (f"MATCH (t:Point {{id:$tid}}), "
+                          f"(new:Point {{id:$new_id}}) "
+                          f"MERGE (t)-[nr:{rtype}]->(new)")
+                proj.g.query(mq, params={"new_id": new_id, "tid": tid})
+                _keep = {k: v for k, v in rdict.items()
+                         if k in ("direction", "confidence", "weight",
+                                  "label", "batch_id")}
+                proj.g.query(
+                    f"MATCH (a:Point {{id:$a}})-[r:{rtype}]->"
+                    f"(b:Point {{id:$b}}) SET r += $attrs",
+                    params={"a": (tid if direction == "in" else new_id),
+                            "b": (new_id if direction == "in" else tid),
+                            "attrs": _keep},
+                )
+                # Delete the OLD edge by its internal id (precision),
+                # constrained to the old point's incident edges (REVIEW-FIX
+                # P2: never graph-wide — internal ids may be reused).
+                if direction == "out":
+                    proj.g.query(
+                        f"MATCH (old:Point {{id:$old_id}})-[r:{rtype}]->() "
+                        f"WHERE ID(r) = $rid DELETE r",
+                        params={"rid": rid, "old_id": old_id},
+                    )
+                else:
+                    proj.g.query(
+                        f"MATCH ()-[r:{rtype}]->(old:Point {{id:$old_id}}) "
+                        f"WHERE ID(r) = $rid DELETE r",
+                        params={"rid": rid, "old_id": old_id},
+                    )
+                transferred += 1
+
         # 2b. Transfer plain structural edges (#122) — about*, extractedFrom, wasDerivedFrom, etc.
         # These edges connect the Point to entities (Subject, Object, Source, etc.)
         structural_rels = [
@@ -1626,6 +1747,23 @@ class TortoiseSDK:
                     params={"old_id": old_id, "tid": target_graph_id},
                 )
                 transferred += 1
+
+        # 1. Mark old superseded + outdated + create CORRECTS edge — AFTER the
+        # transfers (CYCLE-26 REVIEW-FIX P1 / plan §5.3 cycle-7 pin: the crash
+        # window between the status write and the transfers is closed by
+        # re-run convergence; this block is the last mutation before dreaming).
+        # #432: status='superseded' alongside the legacy outdated=true flag
+        # (back-compat for consumers reading the flag; #690 will consolidate).
+        proj.g.query(
+            "MATCH (n:Point {id:$id}) SET n.status = 'superseded', "
+            "n.outdated = true, n.updatedAt = $now",
+            params={"id": old_id, "now": now},
+        )
+        proj.g.query(
+            "MATCH (a:Point {id:$new_id}), (b:Point {id:$old_id}) "
+            "MERGE (a)-[:CORRECTS]->(b)",
+            params={"new_id": new_id, "old_id": old_id},
+        )
 
         # Dreaming (#85): supersede changes the propagation graph around both.
         self._mark_dirty([old_id, new_id])
@@ -3792,7 +3930,11 @@ class TortoiseSDK:
         # ALL violations (.violations, .as_dict()).
         violations = self._validate_bundle(bundle, promotion_policy=promotion_policy)
         if violations:
-            raise ValueError(violations[0]["message"])
+            # A2 failure contract: BundleValidationError carries ALL
+            # violations (str() = first message for back-compat parity);
+            # _safe maps it to {error, code: ERR_BUNDLE_INVALID, violations}.
+            from .exceptions import BundleValidationError
+            raise BundleValidationError(violations)
 
         proj = self._get_proj()
         # §4.2 (A4): deterministic content-derived batch_id over the canonical
@@ -3801,6 +3943,7 @@ class TortoiseSDK:
         # here, stamped on every NEW point the commit creates and applied
         # stamp-when-absent on dedup hits. Clock-independent by construction
         # (no time component — CYCLE-21 pin).
+        from .exceptions import Phase2Error
         batch_id = derive_batch_id(bundle)
         refs: dict[str, str] = {}          # ref → canonical id (or url for sources)
         source_refs: set[str] = set()      # refs that address Source nodes (url-keyed)
@@ -3812,9 +3955,15 @@ class TortoiseSDK:
 
         def _register_ref(ref: str, cid: str, section: str) -> None:
             if ref in refs:
-                raise ValueError(
+                # REVIEW-FIX P2 (cycle-26): the Phase2Error must carry the
+                # computed batch_id (plan §6.4 — the agent audits the partial
+                # commit) AND the message must interpolate it (the literal
+                # "batch_id=batch_id" text was a bug).
+                raise Phase2Error(
                     f"ingest: duplicate bundle ref {ref!r} "
-                    f"({section}) — refs must be unique across the bundle"
+                    f"({section}, batch_id={batch_id}) — refs must be unique "
+                    f"across the bundle",
+                    batch_id=batch_id,
                 )
             refs[ref] = cid
             ids["refs"][ref] = cid
@@ -3826,8 +3975,10 @@ class TortoiseSDK:
             ref = item.get("ref") if isinstance(item, dict) else None
             if ref:
                 if ref in refs:
-                    raise ValueError(
-                        f"ingest: duplicate bundle ref {ref!r} (sources)"
+                    raise Phase2Error(
+                        f"ingest: duplicate bundle ref {ref!r} "
+                        f"(sources, batch_id={batch_id})",
+                        batch_id=batch_id,
                     )
                 refs[ref] = item.get("url", "")
                 ids["refs"][ref] = item.get("url", "")
@@ -3840,7 +3991,7 @@ class TortoiseSDK:
             viols: list[dict] = []
             self._check_item_shape("sources", i, item, viols)
             if viols:
-                raise ValueError(viols[0]["message"])
+                raise Phase2Error(viols[0]["message"], batch_id=batch_id)
             item = dict(item)
             ref = item.pop("ref", None)
             url = item.pop("url", None)
@@ -3872,7 +4023,7 @@ class TortoiseSDK:
             viols = []
             self._check_item_shape("points", i, item, viols)
             if viols:
-                raise ValueError(viols[0]["message"])
+                raise Phase2Error(viols[0]["message"], batch_id=batch_id)
             item = dict(item)
             ref = item.pop("ref", None)
             # CYCLE-25: kind-absent DEFAULTS to 'statement' (v3.8 canonical —
@@ -3881,7 +4032,7 @@ class TortoiseSDK:
             kind = item.pop("kind", None) or "statement"
             self._check_kind(kind, i, viols)
             if viols:
-                raise ValueError(viols[0]["message"])
+                raise Phase2Error(viols[0]["message"], batch_id=batch_id)
             content = item.pop("content", None)
             # extractedFrom may address a bundle source by its local ref
             if isinstance(item.get("extractedFrom"), str) \
@@ -3921,7 +4072,7 @@ class TortoiseSDK:
             viols = []
             self._check_item_shape("entities", i, item, viols)
             if viols:
-                raise ValueError(viols[0]["message"])
+                raise Phase2Error(viols[0]["message"], batch_id=batch_id)
             item = dict(item)
             ref = item.pop("ref", None)
             etype = (item.pop("type", None) or "").strip().lower()
@@ -3958,10 +4109,10 @@ class TortoiseSDK:
                 canonical = node.get("id") or name
                 existed = []  # Document records are append-only — never deduped
             else:
-                raise ValueError(
+                raise Phase2Error(
                     f"ingest: entities[{i}] type must be subject|object|event|"
                     f"document, got {etype!r}"
-                )
+                , batch_id=batch_id)
             if ref:
                 _register_ref(ref, canonical, "entities")
             ids["entities"].append(canonical)
@@ -3985,7 +4136,7 @@ class TortoiseSDK:
             self._check_connection(i, conn, viols)
             self._check_endpoint_race(i, conn, refs, viols)
             if viols:
-                raise ValueError(viols[0]["message"])
+                raise Phase2Error(viols[0]["message"], batch_id=batch_id)
             src = refs.get(conn["from"], conn["from"])
             to_list = conn["to"] if isinstance(conn["to"], list) else [conn["to"]]
             dsts = [refs.get(x, x) for x in to_list]
@@ -4040,10 +4191,10 @@ class TortoiseSDK:
                     ).result_set
                     ok = proj.create_edge(src, dsts[0], rel)
                     if not ok:
-                        raise ValueError(
+                        raise Phase2Error(
                             f"ingest: connections[{i}] could not create "
                             f"{rel!r} edge — endpoints not found"
-                        )
+                        , batch_id=batch_id)
                     if existed and existed[0][0]:
                         deduped["connections"] += 1
                     else:
@@ -4188,6 +4339,161 @@ class TortoiseSDK:
             )
             return False
         return True
+
+    def create_direct_edge(self, op_type: str, source_id: str, target_id: str, *,
+                           direction: str | None = None,
+                           confidence: float | None = None,
+                           weight: float | None = None,
+                           label: str | None = None,
+                           batch_id: str | None = None,
+                           promote_source: bool = True) -> dict:
+        """Create an OPERATOR-LESS direct IMPL/NAND Point→Point edge (plan §5.3).
+
+        Ontology v3.5 §8 / v3.8: plain IMPL/NAND connections are direct edges
+        (edge-carried direction/confidence/weight/label/batch_id; NO operator
+        node). The edge is a BARE-pattern MERGE + attribute SET — exactly one
+        edge per (src,tgt,type), last-writer-wins on attribute change
+        (MERGE-with-attributes would create a parallel edge on attribute
+        change, violating EP's no-parallel-direct-edges contract).
+
+        Guards (shared with #901, E2E-11.7):
+          - endpoints exist AND are plain Points (a Source/Subject/event/
+            operator endpoint is a typed error);
+          - terminal-endpoint guard: `status NOT IN {superseded, retracted}`
+            (a direct edge incident to a terminal point would recreate the
+            terminal-point propagation hazard).
+        op_type ∈ {IMPL, NAND}.
+
+        Promotion (CYCLE-24 promotion-on-created-only pin): `promote_source`
+        fires ONLY when the MERGE CREATED the edge (`created==True`) — a
+        bare-MERGE dedup hit applies NO promotion (dedup never rewrites).
+        CYCLE-25: direction-absent NAND defaults to "unidirectional" on the
+        edge (extraction default — new-claim-attacks-existing); direction-
+        absent IMPL stays "bidirectional".
+
+        Emits the dedicated JSONL edge descriptor for rebuild durability
+        (plan §4.4 — A10's pass-2b consumer) on created==True.
+
+        Returns {"direct_edge": op_type, "from": source_id, "to": target_id,
+                 "created": bool, "deduped": bool}.
+        """
+        if op_type not in ("IMPL", "NAND"):
+            raise ValueError(
+                f"create_direct_edge: op_type must be IMPL or NAND, got {op_type!r}"
+            )
+        if source_id == target_id:
+            raise ValueError("create_direct_edge: source_id and target_id must differ")
+        if confidence is not None and not (0.0 <= float(confidence) <= 1.0):
+            raise ValueError(
+                f"create_direct_edge: confidence must be in [0,1], got {confidence!r}"
+            )
+        # CYCLE-25: NAND extraction default — direction-absent NAND is
+        # "unidirectional" (new-claim-attacks-existing); IMPL stays
+        # bidirectional. An explicit value is preserved verbatim.
+        if direction is None:
+            direction = "unidirectional" if op_type == "NAND" else "bidirectional"
+        if direction not in ("bidirectional", "unidirectional"):
+            raise ValueError(
+                f"create_direct_edge: direction must be 'bidirectional' or "
+                f"'unidirectional', got {direction!r}"
+            )
+
+        proj = self._get_proj()
+        # Endpoint validation: exist, plain Points, non-terminal.
+        rows = proj.g.query(
+            "MATCH (p:Point) WHERE p.id IN $ids "
+            "RETURN p.id, coalesce(p.is_operator, false), p.status",
+            params={"ids": [source_id, target_id]},
+        ).result_set
+        found = {r[0]: (bool(r[1]), r[2]) for r in rows}
+        for pid in (source_id, target_id):
+            if pid not in found:
+                raise ValueError(
+                    f"create_direct_edge: endpoint {pid!r} does not exist or "
+                    f"is not a Point"
+                )
+            is_op, status = found[pid]
+            if is_op:
+                raise ValueError(
+                    f"create_direct_edge: endpoint {pid!r} is an operator — "
+                    f"direct edges connect plain Points only"
+                )
+            if status in ("superseded", "retracted"):
+                raise ValueError(
+                    f"create_direct_edge: endpoint {pid!r} is terminal "
+                    f"({status!r}) — a direct edge incident to a terminal "
+                    f"point is rejected (terminal-point propagation hazard)"
+                )
+
+        # BARE-pattern MERGE + attribute SET (last-writer-wins; exactly one
+        # edge per (src,tgt,type)). `created` is detected by a pre-count
+        # BEFORE the MERGE (the MERGE's stats aren't reliably surfaced, and a
+        # post-MERGE count always sees 1).
+        rel_type = op_type  # IMPL / NAND
+        pre = proj.g.query(
+            f"MATCH (a:Point {{id:$src}})-[r:{rel_type}]->(b:Point {{id:$tgt}}) "
+            f"RETURN count(r)",
+            params={"src": source_id, "tgt": target_id},
+        ).result_set
+        created = (pre[0][0] == 0)
+        # Two-step MERGE (FalkorDB quirk fixed, cycle-26): a MERGE whose node
+        # patterns carry property filters can CREATE DUPLICATE NODES when the
+        # relationship is absent (the node match is ambiguous). MATCH the
+        # existing nodes first, then MERGE the edge BETWEEN them — exactly one
+        # edge per (src,tgt,type), no duplicate nodes.
+        proj.g.query(
+            f"MATCH (a:Point {{id:$src}}), (b:Point {{id:$tgt}}) "
+            f"MERGE (a)-[r:{rel_type}]->(b)",
+            params={"src": source_id, "tgt": target_id},
+        )
+        attrs = {"direction": direction}
+        if confidence is not None:
+            attrs["confidence"] = float(confidence)
+        if weight is not None:
+            attrs["weight"] = float(weight)
+        if label is not None:
+            attrs["label"] = label
+        if batch_id is not None:
+            attrs["batch_id"] = batch_id
+        # SET r += $attrs (additive — never clobbers EP-managed msg_* fields)
+        proj.g.query(
+            f"MATCH (a:Point {{id:$src}})-[r:{rel_type}]->(b:Point {{id:$tgt}}) "
+            f"SET r += $attrs",
+            params={"src": source_id, "tgt": target_id, "attrs": attrs},
+        )
+
+        # Promotion-on-created-only (CYCLE-24 pin): the guarded #131-style SET
+        # fires ONLY when the MERGE created the edge.
+        if created and promote_source:
+            proj.g.query(
+                "MATCH (s:Point {id:$id}) "
+                "WHERE s.status IS NULL OR s.status = 'draft' "
+                "SET s.status = 'live', s.updatedAt = $now",
+                params={"id": source_id,
+                        "now": _now_iso()},
+            )
+
+        # JSONL edge descriptor (plan §4.4) — emitted on EVERY write (the
+        # MERGE-keyed replay is idempotent, so dedup-hit emissions are
+        # harmless, and the crash window closes: a crash between the MERGE
+        # and the emission on attempt 1 is recovered by attempt 2's emission —
+        # a created-only gate would lose the edge from the log forever on
+        # crash-retry). REVIEW-FIX P1 (cycle-26): last-writer-wins attr
+        # updates must replay the FINAL attrs post-rebuild.
+        self._emit_event(
+            "DirectEdgeCreated",
+            id=f"{source_id}->{target_id}:{op_type}",
+            src=source_id, tgt=target_id, edge_type=op_type,
+            direction=direction,
+            **({"confidence": float(confidence)} if confidence is not None else {}),
+            **({"weight": float(weight)} if weight is not None else {}),
+            **({"label": label} if label is not None else {}),
+            **({"batch_id": batch_id} if batch_id is not None else {}),
+        )
+
+        self._mark_dirty([source_id, target_id])
+        return {"direct_edge": op_type, "from": source_id, "to": target_id,
+                "created": created, "deduped": not created}
 
     def _find_operator(self, op_type: str, inputs: list[str],
                        label: str | None = None,
