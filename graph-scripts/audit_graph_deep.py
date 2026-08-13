@@ -71,7 +71,7 @@ def audit_context(context):
     r = q(f"MATCH (n:Point) WHERE {id_filter} RETURN n.is_operator, count(n)")
     op_count = ev_count = 0
     for row in r:
-        if row[0] == 'True':
+        if row[0] is True:
             op_count = row[1]
         else:
             ev_count += row[1]
@@ -109,7 +109,7 @@ def audit_context(context):
     
     # ── CHECK 3: impl_instead_of_nand (HIGH) ──
     # Check IMPL edges where target has contradiction/counter/adversarial in context or content
-    r = q(f"MATCH (n:Point)-[:IMPL]->(m:Point) WHERE {id_filter.replace('n.', 'n.')} AND n.is_operator = 'True' RETURN n.id, n.op_type, m.id, m.content, m.context, n.content LIMIT 200")
+    r = q(f"MATCH (n:Point)-[:IMPL]->(m:Point) WHERE {id_filter.replace('n.', 'n.')} AND n.is_operator = true RETURN n.id, n.op_type, m.id, m.content, m.context, n.content LIMIT 200")
     suspicious = []
     for row in r:
         op_id, op_type, tgt_id, tgt_content, tgt_ctx, op_content = row
@@ -130,7 +130,7 @@ def audit_context(context):
         print(f"  ✅ impl_instead_of_nand: clean")
     
     # ── CHECK 4: missing_sourceKind (MEDIUM) on evidence points ──
-    r = q(f"MATCH (n:Point) WHERE {id_filter} AND (n.is_operator IS NULL OR n.is_operator <> 'True') AND n.sourceKind IS NULL AND n.pointKind IS NOT NULL RETURN n.id, n.pointKind, n.content LIMIT 20")
+    r = q(f"MATCH (n:Point) WHERE {id_filter} AND n.is_operator = false AND n.sourceKind IS NULL AND n.pointKind IS NOT NULL RETURN n.id, n.pointKind, n.content LIMIT 20")
     missing_sk = list(r)
     if missing_sk:
         print(f"\n  🟡 MEDIUM: missing_sourceKind — {len(missing_sk)} evidence points without credibility tier")
@@ -140,7 +140,7 @@ def audit_context(context):
         print(f"  ✅ missing_sourceKind: all evidence points have sourceKind")
     
     # Also check: operators shouldn't need sourceKind, but let's check if any have it (good) or all lack it (expected)
-    r = q(f"MATCH (n:Point) WHERE {id_filter} AND n.is_operator = 'True' AND n.sourceKind IS NOT NULL RETURN count(n)")
+    r = q(f"MATCH (n:Point) WHERE {id_filter} AND n.is_operator = true AND n.sourceKind IS NOT NULL RETURN count(n)")
     ops_with_sk = r[0][0] if r else 0
     if ops_with_sk > 0:
         print(f"  💡 {ops_with_sk} operators have sourceKind set (optional, good for traceability)")
@@ -155,7 +155,7 @@ def audit_context(context):
     
     # ── CHECK 6: mitigation_recommended (MEDIUM) ──
     # Find operators with low confidence that lack mitigation
-    r = q(f"MATCH (n:Point) WHERE {id_filter} AND n.is_operator = 'True' AND n.op_type = 'IMPL' AND (n.confidence IS NULL OR toFloat(n.confidence) < 0.5) RETURN n.id, n.confidence, n.content LIMIT 50")
+    r = q(f"MATCH (n:Point) WHERE {id_filter} AND n.is_operator = true AND n.op_type = 'IMPL' AND (n.confidence IS NULL OR toFloat(n.confidence) < 0.5) RETURN n.id, n.confidence, n.content LIMIT 50")
     low_conf = list(r)
     unmitigated = []
     for lid, conf, content in low_conf:
@@ -189,7 +189,7 @@ def audit_context(context):
             print(f"    {src} -[NAND]-> {tgt}")
     
     # ── CHECK 9: Confidence distribution ──
-    r = q(f"MATCH (n:Point) WHERE {id_filter} AND n.is_operator = 'True' AND n.confidence IS NOT NULL RETURN toFloat(n.confidence) ORDER BY toFloat(n.confidence)")
+    r = q(f"MATCH (n:Point) WHERE {id_filter} AND n.is_operator = true AND n.confidence IS NOT NULL RETURN toFloat(n.confidence) ORDER BY toFloat(n.confidence)")
     confs = [row[0] for row in r]
     if confs:
         print(f"\n  📊 Operator confidence: min={min(confs):.2f}, max={max(confs):.2f}, "
@@ -228,7 +228,7 @@ if __name__ == '__main__':
     with_sd = r[0][0] if r else 0
     r = q("MATCH (n:Point) WHERE n.pointKind IS NOT NULL RETURN count(n)")
     with_pk = r[0][0] if r else 0
-    r = q("MATCH (n:Point) WHERE n.is_operator = 'True' AND n.confidence IS NOT NULL RETURN avg(toFloat(n.confidence)), count(n)")
+    r = q("MATCH (n:Point) WHERE n.is_operator = true AND n.confidence IS NOT NULL RETURN avg(toFloat(n.confidence)), count(n)")
     row = r[0] if r else (None, 0)
     avg_conf = row[0]
     conf_count = row[1]

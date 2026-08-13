@@ -92,7 +92,7 @@ def _run_ep_propagation(proj):
         from tortoise.ep import TortoiseEP
         claim_rows = proj.g.query(
             "MATCH (n:Point) "
-            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "WHERE n.is_operator = false "
             "RETURN n.id, coalesce(n.confidence, 0.5)"
         ).result_set
         evidence = {}
@@ -555,7 +555,7 @@ def main(argv=None):
                         # Build evidence priors from extractor confidence values
                         claim_rows = proj.g.query(
                             "MATCH (n:Point) "
-                            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+                            "WHERE n.is_operator = false "
                             "RETURN n.id, coalesce(n.confidence, 0.5)"
                         ).result_set
                         evidence = {}

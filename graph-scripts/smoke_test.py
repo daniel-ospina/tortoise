@@ -162,7 +162,7 @@ def main() -> int:
         # ── Step 6: Verify confidences ───────────────────────────────
         rows = g.query(
             "MATCH (n:Point) "
-            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "WHERE n.is_operator = false "
             "RETURN n.id, coalesce(n.ep_alpha, 1.0), coalesce(n.ep_beta, 1.0)"
         ).result_set
         assert len(rows) == 2, f"expected 2 statement points, got {len(rows)}"
