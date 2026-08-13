@@ -290,6 +290,14 @@ class TortoiseSDK:
         self._evidence: dict[str, tuple[float, float]] = {}
         self._registry_g = None
         self._audit_logger = None
+        # Issue #1005 (lifecycle): idempotent close + context-manager support
+        # + atexit registration so a NORMAL process exit never orphans the
+        # embedded server (the dominant leak path — sessions ending without
+        # closing). No weakref.finalize: the atexit bound method keeps the
+        # SDK alive until exit, so a GC finalizer could never fire.
+        self._t_closed = False
+        import atexit as _atexit
+        _atexit.register(self._t_close)
         # Dreaming (#85): dirty claim roots awaiting EP stabilization. Write
         # paths mark affected claims dirty; dream()/lazy-read consume them.
         self._dirty_roots: set[str] = set()
@@ -2851,8 +2859,31 @@ class TortoiseSDK:
         """
         return _get_kind_expander().list_relations()
 
+    def _t_close(self) -> None:
+        """Idempotent close; safe from atexit or __exit__ (#1005).
+
+        Does NOT set _t_closed itself — close() owns the flag (setting it
+        here would make close() short-circuit and never run its body).
+        """
+        if getattr(self, "_t_closed", False):
+            return
+        try:
+            self.close()
+        except Exception:
+            self._t_closed = True  # never retry a failing close
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self._t_close()
+        return False
+
     def close(self) -> None:
         """Close the underlying database connection and audit logger."""
+        if getattr(self, "_t_closed", False):
+            return
+        self._t_closed = True
         if self._audit_logger is not None:
             self._audit_logger.close()
             self._audit_logger = None

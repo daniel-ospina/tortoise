@@ -17,29 +17,6 @@ from tortoise.sdk import TortoiseSDK
 from tortoise.pricing import tier_limits
 
 
-@pytest.fixture(scope="session")
-def shared_embedded_db():
-    """One shared embedded FalkorDBLite DB for the whole session (#221 R5).
-
-    R5 mitigation for the redislite process leak (#176): tests that need an
-    embedded (redislite) DB create ONE server per session instead of one per
-    test. Each test wipes the graph on its own (or uses a per-test graph
-    name), so state never leaks across tests while the subprocess count stays
-    at 1.
-
-    Restored 2026-08-08 (#647): the D11 conftest rewrite (#578) dropped this
-    fixture but five test files (test_ep_selector, test_ranking,
-    test_sdk_legacy_coverage, test_search_sessions_temporal,
-    test_session_semantic_search) still depend on it.
-
-    # TODO(#176): stopgap — remove when the redislite root-cause fix lands.
-    """
-    db_path = os.path.join(
-        tempfile.mkdtemp(prefix="tortoise_shared_embedded_"), "shared.db"
-    )
-    yield db_path
-
-
 @pytest.fixture
 def provision_test_user():
     created = []
@@ -136,10 +113,119 @@ def shared_embedded_db():
     fixture at that point; the #647 restoration landed on main afterward).
 
     # TODO(#176): stopgap — remove when the redislite root-cause fix lands.
+    # Issue #1005: superseded by lifecycle finalize (tortoise.FalkorDB /
+    # TortoiseSDK close on GC) + the _redislite_hygiene session sweeps below;
+    # kept because the fixture's shared path is still the cheap way for the
+    # five dependent files to share one server.
     """
     import tempfile as _tf
     db_path = os.path.join(_tf.mkdtemp(prefix="tortoise_shared_embedded_"), "shared.db")
     yield db_path
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _redislite_hygiene():
+    """Bound redislite orphan accumulation (#1005).
+
+    Session start: register this suite in the active-suite registry and run
+    a CONCURRENCY-SAFE sweep (dir-gone/stale records only — never a live
+    server of a concurrently running suite, which may sit at 0 clients
+    between tests). Session end: run a full sweep, but only when no other
+    suite is still active — otherwise defer to the last suite standing.
+
+    Sweeps acquire the reaper singleton lock and are batch-capped so a
+    dirty machine cannot stall suite startup.
+    """
+    import uuid
+
+    from tortoise.embedded_reaper import (
+        ACTIVE_SUITES_DIR,
+        _ReaperLock,
+        _run_sweep,
+        active_suite_tokens,
+    )
+
+    marker_dir = ACTIVE_SUITES_DIR
+    token = f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    marker_path = None
+    try:
+        os.makedirs(marker_dir, exist_ok=True)
+        marker_path = os.path.join(marker_dir, token)
+        with open(marker_path, "w") as fh:
+            fh.write(f"pid={os.getpid()}\n")
+    except OSError:
+        # never fail the suite over hygiene; remove any partial marker so a
+        # poison file cannot degrade every future suite's sweep to only-safe
+        # (the foreign-pytest guard still covers the markerless case)
+        if marker_path:
+            try:
+                os.remove(marker_path)
+            except OSError:
+                pass
+        marker_path = None
+
+    def _sweep(only_safe: bool) -> dict:
+        try:
+            lock = _ReaperLock()
+            if not lock.acquire():
+                return {"skipped": "reaper-lock-held"}
+            try:
+                acted = _run_sweep(
+                    dry_run=False, batch_size=50, only_safe=only_safe,
+                    jobs=8, kill_pacing=0.4)
+                return {"reaped": len(acted)}
+            finally:
+                lock.release()
+        except Exception as exc:  # never fail the suite over hygiene
+            return {"error": str(exc)}
+
+    # Session start: only dir-gone/stale records are safe while other suites
+    # may be mid-run (their per-test servers are 0-client between tests).
+    start_result = _sweep(only_safe=True)
+    print(f"[redislite-hygiene] start sweep: {start_result}")
+
+    yield
+
+    def _foreign_suites_active() -> bool:
+        """True when pytest processes outside this suite's process tree are
+        running. Catches suites running the pre-#1005 conftest, which do not
+        write active-suite markers — without this, our full end-sweep could
+        kill another suite's between-tests idle server (issue #1005 P1).
+        """
+        import subprocess as _sp
+        my_pid = os.getpid()
+        try:
+            out = _sp.run(["pgrep", "-f", "pytest"], capture_output=True,
+                          text=True, timeout=10)
+        except (_sp.TimeoutExpired, OSError):
+            return True  # unknown -> fail closed (defer full sweep)
+        for line in out.stdout.splitlines():
+            pid = line.strip()
+            if not pid.isdigit() or int(pid) == my_pid:
+                continue
+            try:
+                ppid = int(_sp.run(["ps", "-o", "ppid=", "-p", pid],
+                                   capture_output=True, text=True, timeout=5
+                                   ).stdout.strip())
+            except (_sp.TimeoutExpired, OSError, ValueError):
+                return True
+            if ppid != my_pid:
+                return True
+        return False
+
+    # Session end: remove our marker first, then check for other active
+    # suites (markers) AND foreign pytest processes (old-conftest suites).
+    # Full sweep only when we are the last suite standing.
+    if marker_path:
+        try:
+            os.remove(marker_path)
+        except OSError:
+            pass
+    others = [t for t in active_suite_tokens() if t != token]
+    foreign = _foreign_suites_active()
+    end_result = _sweep(only_safe=bool(others) or foreign)
+    print(f"[redislite-hygiene] end sweep (other-suites={len(others)}, "
+          f"foreign-pytest={foreign}): {end_result}")
 
 
 
