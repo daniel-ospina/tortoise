@@ -43,7 +43,7 @@ jobs:
           set -euo pipefail
           start="$(date -u -d '-3 hours' +%Y-%m-%dT%H:%M:%SZ)"
           end="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          sql="select timestamp, event_message from logs where source_name = 'edge_logs' and event_message like '%tenant-provision%' order by timestamp desc limit 500"
+          sql="select timestamp, event_message from logs where source = 'function_logs' and event_message like '%tenant-provision%' order by timestamp desc limit 500"
           out="$(curl -sS -G "https://api.supabase.com/v1/projects/$SUPABASE_PROJECT_REF/analytics/endpoints/logs" \
             -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
             --data-urlencode "sql=$sql" \
