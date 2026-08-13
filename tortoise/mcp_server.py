@@ -1933,6 +1933,97 @@ def tortoise_backfill_v25(dry_run: bool = True) -> dict:
     return _safe(_get_team_sdk().backfill_v25, dry_run=dry_run)
 
 
+# ── Phase-4 mining/promotion/dedup/timeline surface (#787, DE2E-7) ──
+# J-6 error contract: every tool returns the SDK result on success or
+# {"error": message} on failure (via _safe — the repo-wide convention).
+
+
+def tortoise_mine_conversations(transcript: str | None = None,
+                                corpus_dir: str | None = None,
+                                source_id: str | None = None,
+                                extract_entities: bool = True,
+                                content_dedup: bool = True,
+                                session_date: str | None = None,
+                                participants: Any = None) -> dict:
+    """Mine agent conversations into the graph (W-1..W-4, #787).
+
+    Single transcript (transcript= + source_id=) or a batch corpus
+    (corpus_dir= — per-file failures reported non-fatally in 'errors',
+    mined-marker resume, R17 security validation). Returns the mine result
+    incl. batch_id/batch_status (W-3 gate), dedup_* and temporal_* keys.
+    """
+    sdk = _get_team_sdk()
+    if corpus_dir is not None:
+        return _safe(sdk.mine_corpus, corpus_dir,
+                     extract_entities=extract_entities)
+    if not transcript or not source_id:
+        return {"error": "transcript= and source_id= are required "
+                         "(or corpus_dir= for a batch)"}
+    from tortoise.api import EventAPI
+    from tortoise.log import EventLog
+    from tortoise.mining import mine_conversation
+    import tempfile, os
+    log = sdk._get_event_log()
+    if log is None:
+        log = EventLog(os.path.join(
+            tempfile.mkdtemp(prefix="tortoise_mcp_mine_"), "events.jsonl"))
+    api = EventAPI(log, initiated_by="extractor", agent_id="mcp",
+                   projection=sdk._get_proj())
+    return _safe(mine_conversation, transcript, source_id, api,
+                 extract_entities=extract_entities,
+                 content_dedup=content_dedup,
+                 session_date=session_date,
+                 sdk=sdk)
+
+
+def tortoise_list_dedup_candidates(candidate_type: str = "content",
+                                   limit: int = 50) -> dict:
+    """Review queue for dedup/temporal candidates (W-2/W-4, #787).
+
+    candidate_type='content' → content-dedup candidates; 'temporal' →
+    contradictory/replacement decision Points pending promotion wiring;
+    'entity' → [] (entity queue tracked separately). Each entry carries
+    {id, content, pointKind, method/similarity (content) or replacement
+    (temporal), target_id, candidate_type, status}.
+    """
+    return _safe(_get_team_sdk().list_dedup_candidates,
+                 candidate_type=candidate_type, limit=limit)
+
+
+def tortoise_approve_merge(candidate_id: str,
+                           action: str = "merge") -> dict:
+    """Review a dedup/temporal candidate (W-2/W-4, #787).
+
+    action='merge' → content: wire the alreadyDecided IMPL (draft prior) or
+    defer to promotion (live prior); temporal: defer the NAND/supersede to
+    promotion. action='reject' → the candidate stays separate and is no
+    longer surfaced. Idempotent for repeated identical reviews.
+    """
+    return _safe(_get_team_sdk().approve_merge, candidate_id, action=action)
+
+
+def tortoise_promote_point(point_id: str) -> dict:
+    """Reviewer-gated draft→live promotion (Phase-4, #785/#787).
+
+    The ONLY path a draft extraction Point may go live: blocks on
+    quarantined batches {blocked, reason, batch_id}, rejects operator
+    nodes, no-ops on already-live (DE2E-N9), promotes incident draft
+    operators once all endpoints are live (R16), and wires deferred
+    dedup/temporal links (Variant C / W-4).
+    """
+    return _safe(_get_team_sdk().promote_point, point_id)
+
+
+def tortoise_belief_timeline(topic: str, limit: int = 50) -> dict:
+    """Dated, ordered belief chain for a topic (J-4, #786/#787).
+
+    Decision Points aboutObject-connected to the topic entity, validFrom-
+    ordered (superseded priors kept visible via the CORRECTS chain), each
+    with {content, pointKind, validFrom, status, linked_by, related}.
+    """
+    return _safe(_get_team_sdk().belief_timeline, topic, limit=limit)
+
+
 # ── Tool Registry Adapter (#454) ────────────────────────────────
 # Replaces @mcp.tool() decorators with programmatic registration.
 # Function bodies remain module-level callables; the adapter wraps each
