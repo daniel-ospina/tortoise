@@ -189,6 +189,55 @@ TOOL_REGISTRY: list[ToolDefinition] = [
         http_policy=True,
         sdk_method="recall_state",
     ),
+    # ── Phase-4 mining/promotion/dedup/timeline (#787) ────────────
+    ToolDefinition(
+        name="tortoise_mine_conversations",
+        description="Mine agent conversations (single transcript or corpus "
+                    "batch) into the graph — extraction, entity reification, "
+                    "content dedup, temporal wiring, W-3 batch gate. Batch "
+                    "per-file failures reported non-fatally in 'errors'. "
+                    "WRITES to the graph; corpus mode walks the server "
+                    "filesystem — stdio/CLI only (excluded from tenant HTTP).",
+        annotations=_rw(),
+        http_policy=False,
+        sdk_method="mine_corpus",
+    ),
+    ToolDefinition(
+        name="tortoise_list_dedup_candidates",
+        description="Review queue for dedup/temporal candidates "
+                    "(candidate_type=content|temporal|entity).",
+        annotations=_ro(),
+        http_policy=True,
+        sdk_method="list_dedup_candidates",
+    ),
+    ToolDefinition(
+        name="tortoise_approve_merge",
+        description="Review a dedup/temporal candidate — action=merge|reject. "
+                    "Wiring deferred to promotion for live priors. WRITES "
+                    "review flags + wires edges (idempotent for repeats).",
+        annotations=_idem(),
+        http_policy=True,
+        sdk_method="approve_merge",
+    ),
+    ToolDefinition(
+        name="tortoise_promote_point",
+        description="Reviewer-gated draft→live promotion — the only path a "
+                    "draft extraction Point may go live (quarantine lock, "
+                    "R16 operator promotion, deferred dedup/temporal wiring). "
+                    "WRITES status + wires edges.",
+        annotations=_rw(),
+        http_policy=True,
+        sdk_method="promote_point",
+    ),
+    ToolDefinition(
+        name="tortoise_belief_timeline",
+        description="Dated, ordered belief chain for a topic — decision "
+                    "Points with validFrom, NAND/CORRECTS links, superseded "
+                    "priors visible.",
+        annotations=_ro(),
+        http_policy=True,
+        sdk_method="belief_timeline",
+    ),
     # ── EP Belief Propagation (#6908) ─────────────────────────────
     ToolDefinition(
         name="tortoise_compute_confidence",
@@ -898,6 +947,11 @@ GROUP_BY_NAME: dict[str, str] = {
     "tortoise_list_tags": "memory",
     "tortoise_list_pointkinds": "memory", "tortoise_search": "memory",
     "tortoise_recall": "memory",
+    "tortoise_mine_conversations": "mining",
+    "tortoise_list_dedup_candidates": "review",
+    "tortoise_approve_merge": "review",
+    "tortoise_promote_point": "review",
+    "tortoise_belief_timeline": "memory",
     "tortoise_compute_confidence": "memory", "tortoise_get_confidence": "memory",
     "tortoise_set_point_baseline": "memory", "tortoise_calibrate_summary": "memory",
     "tortoise_suggest_entry_points": "memory",
