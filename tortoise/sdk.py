@@ -1337,7 +1337,7 @@ class TortoiseSDK:
         #    a failure leaves the graph untouched.
         edges_result = proj.g.query(
             "MATCH (op:Point {is_operator:true})-[r]->(old:Point {id:$old_id}) "
-            "RETURN op.id, type(r), r.idx",
+            "RETURN op.id, type(r), r.idx, op.label",
             params={"old_id": old_id},
         )
         from .security import validate_rel_type
@@ -1368,6 +1368,17 @@ class TortoiseSDK:
         transferred = 0
         for row in edges_result.result_set:
             op_id, edge_type, idx = row[0], row[1], row[2]
+            op_label = row[3] if len(row) > 3 else None
+            if op_label == "alreadyDecided":
+                # #1080 review: dedup context edges must NOT be re-pointed at
+                # the replacement — an alreadyDecided IMPL on the superseded
+                # prior declares the OLD decision a duplicate, not the new one.
+                _logger.info(
+                    "supersede_point: keeping alreadyDecided operator %s "
+                    "attached to the superseded point %s (dedup context edge)",
+                    op_id, old_id,
+                )
+                continue
             # Create new edge: operator → new point (same idx preserves source/target position)
             proj.g.query(
                 f"MATCH (op:Point {{id:$op_id}}), (new:Point {{id:$new_id}}) "
@@ -1615,26 +1626,64 @@ class TortoiseSDK:
         # Temporal wiring at promotion (W-4, #786): a MERGED temporal
         # candidate whose prior was LIVE at extraction gets its NAND now
         # (live→live), or — for an explicit replacement — the prior is
-        # superseded (CORRECTS + outdated:true).
+        # superseded (CORRECTS + outdated:true). Targets are validated
+        # BEFORE the CAS (mirroring the dedup block) so a stale/terminal
+        # target can never produce a live point with no event (#1080 review).
         temporal_wired = False
         superseded = False
-        temporal_target = point.get("temporal_target_id")
+        temporal_targets = point.get("temporal_target_ids") or []
+        if point.get("temporal_target_id") and point.get("temporal_target_id") not in temporal_targets:
+            temporal_targets.append(point["temporal_target_id"])
+        live_targets: list[str] = []
         if (point.get("temporal_candidate")
-                and point.get("temporal_reviewed") == "merge"
-                and temporal_target):
-            if point.get("temporal_replacement"):
-                self.supersede_point(temporal_target, point_id)
-                superseded = True
-            else:
+                and point.get("temporal_reviewed") == "merge"):
+            for tgt in temporal_targets:
+                trow = proj.g.query(
+                    "MATCH (n:Point {id:$id}) RETURN n.status",
+                    params={"id": tgt},
+                ).result_set
+                tstatus = (trow[0][0] if trow else None) or "live"
+                if tstatus in ("live", None):
+                    live_targets.append(tgt)
+                else:
+                    _logger.warning(
+                        "promote_point: temporal target %s for %s is %s — "
+                        "skipping the wire", tgt, point_id, tstatus)
+        if live_targets and point.get("temporal_replacement"):
+            for tgt in live_targets:
+                try:
+                    self.supersede_point(tgt, point_id)
+                    superseded = True
+                except ValueError as exc:
+                    _logger.warning(
+                        "promote_point: supersede of %s failed for %s: %s",
+                        tgt, point_id, exc)
+        elif live_targets:
+            for tgt in live_targets:
                 exists = proj.g.query(
                     "MATCH (op:Point {is_operator:true})-[:NAND]->"
                     "(:Point {id:$cand}), "
                     "(op)-[:NAND]->(:Point {id:$prior}) RETURN count(op)",
-                    params={"cand": point_id, "prior": temporal_target},
+                    params={"cand": point_id, "prior": tgt},
                 ).result_set
-                if not exists or exists[0][0] == 0:
-                    self.create_operator("NAND", point_id, [temporal_target])
-                    temporal_wired = True
+                if exists and exists[0][0] > 0:
+                    continue
+                # Cross-guard: never NAND a pair already linked by an
+                # alreadyDecided IMPL (dedup+temporal conflict, #1080).
+                dup = proj.g.query(
+                    "MATCH (op:Point {label:'alreadyDecided'})-[:IMPL]->"
+                    "(:Point {id:$cand}), "
+                    "(op)-[:IMPL]->(:Point {id:$prior}) RETURN count(op)",
+                    params={"cand": point_id, "prior": tgt},
+                ).result_set
+                if dup and dup[0][0] > 0:
+                    _logger.warning(
+                        "promote_point: %s already linked to %s by an "
+                        "alreadyDecided IMPL — skipping temporal NAND",
+                        point_id, tgt)
+                    continue
+                self.create_operator("NAND", point_id, [tgt])
+                temporal_wired = True
 
         # R16 zombie-operator prevention: promote incident draft operators
         # once ALL their endpoint Points are live.
@@ -1731,12 +1780,31 @@ class TortoiseSDK:
             "WHERE (p.is_operator IS NULL OR p.is_operator = false) "
             "AND (o.name = $topic OR o.canonical_name = $topic) "
             "RETURN p.id, p.content, p.validFrom, p.status, p.outdated "
-            "ORDER BY p.validFrom",
-            params={"topic": topic, "lim": limit},
+            "ORDER BY p.validFrom LIMIT $limit",
+            params={"topic": topic, "limit": limit},
         ).result_set
+        entries = [list(r) for r in rows]
+        # Superseded priors dropped out of the topic query (supersede_point
+        # transferred their aboutObject edges) — re-attach them via the
+        # CORRECTS chain so the timeline keeps the outdated belief (#1080).
+        if entries:
+            topic_ids = [r[0] for r in entries]
+            old_rows = proj.g.query(
+                "MATCH (cur:Point)-[:CORRECTS]->(old:Point {pointKind:'decision'}) "
+                "WHERE cur.id IN $ids "
+                "RETURN old.id, old.content, old.validFrom, old.status, "
+                "       old.outdated ORDER BY old.validFrom",
+                params={"ids": topic_ids},
+            ).result_set
+            known = {r[0] for r in entries}
+            for r in old_rows:
+                if r[0] not in known:
+                    entries.append(list(r))
+            # Globally ordered by validFrom (superseded priors appended).
+            entries.sort(key=lambda e: (e[2] is None, e[2] or ""))
         out = []
-        ids = [r[0] for r in rows[:limit]]
-        for pid, content, vf, status, outdated in rows[:limit]:
+        ids = [e[0] for e in entries]
+        for pid, content, vf, status, outdated in entries[:limit]:
             # Temporal link to the NEXT point in the chain.
             linked_by = None
             related = []
@@ -1976,6 +2044,15 @@ class TortoiseSDK:
         if is_temporal:
             # Temporal candidates: mark reviewed; the wire/supersede happens
             # at promotion (live-prior rule — never draft→live wiring).
+            # Idempotent: re-approving with the SAME action is a no-op (no
+            # duplicate event — #1080 review).
+            if props.get("temporal_reviewed") == action:
+                return {"candidate_id": candidate_id, "action": action,
+                        "candidate_type": "temporal",
+                        "wired": False,
+                        "deferred_to_promotion": action == "merge",
+                        "target_id": props.get("temporal_target_id"),
+                        "already_reviewed": True}
             proj.g.query(
                 "MATCH (n:Point {id:$id}) SET n.temporal_reviewed = $a, "
                 "n.reviewed = true",

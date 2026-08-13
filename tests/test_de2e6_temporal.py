@@ -171,3 +171,88 @@ class TestDe2e6:
         assert rows and rows[0][0] == "s-p-d2", (
             "temporal candidate must carry the source_session provenance"
         )
+
+
+class TestDe2e6ReviewFixes:
+    """#1080 code-review regressions."""
+
+    def test_replace_wording_is_replacement(self, sdk, tmp_path):
+        """P1: 'replace' wording must be an explicit-replacement candidate
+        (was: treated as a plain contradiction — no supersede)."""
+        r1 = _mine(sdk, D1_TX, "s-f-r1", T1, str(tmp_path))
+        d1 = [p for p in _decision_points(sdk)
+              if p[1].startswith("We decided to use port")][0]
+        sdk.promote_point(d1[0])
+        r3 = _mine(sdk,
+                   "Alice: We decided to replace the port 16379 decision with port 16390.\n",
+                   "s-f-r3", T3, str(tmp_path))
+        assert r3["temporal_replacements"] >= 1, r3
+        cands = sdk.list_dedup_candidates(candidate_type="temporal")
+        assert any(c["replacement"] for c in cands), cands
+
+    def test_no_double_nand_same_session(self, sdk, tmp_path):
+        """P2: both sides of a contradictory pair carrying refute cues →
+        exactly ONE NAND operator (was: wired twice, doubling the EP
+        penalty)."""
+        _mine(sdk,
+              "Alice: We decided to use port 16379.\nBob: We decided to revert to port 16380 because the port 16379 decision was wrong.\n",
+              "s-dbl", T1, str(tmp_path))
+        rows = sdk._get_proj().g.query(
+            "MATCH (op:Point {is_operator:true})-[:NAND]->(:Point) "
+            "RETURN count(DISTINCT op)"
+        ).result_set
+        assert rows[0][0] == 1, f"exactly one NAND operator expected, got {rows}"
+
+    def test_yaml_date_object_no_crash(self, sdk, tmp_path):
+        """P2: unquoted YAML date (datetime.date) must not crash the pass —
+        validFrom normalized to ISO."""
+        from tortoise.sdk import TortoiseSDK
+        d1 = sdk.create_point("decision", "We decided to use port 16379.",
+                              status="live")
+        corpus = tmp_path / "corpus-y"
+        corpus.mkdir()
+        (corpus / "s.md").write_text(
+            "---\nsessionId: s-yaml\n"
+            "date: 2026-07-01\n"  # YAML → datetime.date
+            "---\n\n"
+            "Alice: We decided to revert to port 16380 because the port 16379 decision was wrong.\n")
+        res = sdk.mine_corpus(str(corpus), extract_entities=False)
+        assert res.get("temporal_error") is None, res
+        pts = _decision_points(sdk)
+        d2 = [p for p in pts if p[1].startswith("We decided to revert")]
+        if d2:
+            assert d2[0][2] == "2026-07-01", d2[0][2]
+
+    def test_reapprove_same_action_noop(self, sdk, tmp_path):
+        """P2: re-approving with the same action emits no duplicate event."""
+        import json
+        r1 = _mine(sdk, D1_TX, "s-i-d1", T1, str(tmp_path))
+        d1 = [p for p in _decision_points(sdk)
+              if p[1].startswith("We decided to use port")][0]
+        sdk.promote_point(d1[0])
+        _mine(sdk, D2_TX, "s-i-d2", T2, str(tmp_path))
+        cand = sdk.list_dedup_candidates(candidate_type="temporal")[0]
+        sdk.approve_merge(cand["id"], action="merge")
+        sdk.approve_merge(cand["id"], action="merge")
+        log = sdk._get_event_log().read_all()
+        rec = [e for e in log if e.get("type") == "DedupeRecorded"]
+        assert len(rec) == 1, f"no duplicate events expected, got {len(rec)}"
+
+    def test_timeline_keeps_superseded_prior(self, sdk, tmp_path):
+        """P2: after a replacement supersede, the timeline still shows the
+        outdated prior (CORRECTS chain), with linked_by CORRECTS."""
+        r1 = _mine(sdk, D1_TX, "s-t-d1", T1, str(tmp_path))
+        d1 = [p for p in _decision_points(sdk)
+              if p[1].startswith("We decided to use port")][0]
+        sdk.promote_point(d1[0])
+        r3 = _mine(sdk, D3_TX, "s-t-d3", T3, str(tmp_path))
+        cands = sdk.list_dedup_candidates(candidate_type="temporal")
+        repl = [c for c in cands if c["replacement"]][0]
+        sdk.approve_merge(repl["id"], action="merge")
+        d3 = [p for p in _decision_points(sdk)
+              if p[1].startswith("We decided to supersede")][0]
+        sdk.promote_point(d3[0])
+        timeline = sdk.belief_timeline("port 16379")
+        assert len(timeline) >= 2, f"superseded prior must remain visible: {timeline}"
+        corr = [t for t in timeline if t["linked_by"] == "CORRECTS"]
+        assert corr, f"timeline must show the CORRECTS link: {timeline}"

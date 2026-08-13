@@ -412,7 +412,8 @@ class ConversationMiner:
         "not correct", "mistake", "changed our mind", "supersede",
         "replacement", "replace",
     )
-    _TEMPORAL_REPLACE_CUES = ("supersede", "changed our mind", "replacement")
+    _TEMPORAL_REPLACE_CUES = ("supersede", "changed our mind", "replacement",
+                             "replace")
 
     def _temporal_wire(self, transcript: str, source_id: str, api,
                        point_ids: list[str],
@@ -439,8 +440,19 @@ class ConversationMiner:
         proj = getattr(api, "projection", None)
         if proj is None or not point_ids:
             return {"wired_nand": 0, "candidates": 0, "replacement_candidates": 0}
-        vf = session_date or _now()
+        # Normalize the session date to an ISO-8601 string: YAML frontmatter
+        # can yield datetime.date objects ('date: 2026-07-01') which crash the
+        # SET, and non-ISO strings corrupt ORDER BY chronology (#1080 review).
+        if session_date is None:
+            vf = _now()
+        elif hasattr(session_date, "isoformat"):
+            # YAML frontmatter dates arrive as datetime.date/datetime objects
+            # ('date: 2026-07-01') — normalize to ISO-8601 (#1080 review).
+            vf = session_date.isoformat()
+        else:
+            vf = str(session_date)
         report = {"wired_nand": 0, "candidates": 0, "replacement_candidates": 0}
+        wired_pairs: set[tuple[str, str]] = set()  # (newer, older) — one NAND per pair
         for pid in point_ids:
             rows = proj.g.query(
                 "MATCH (n:Point {id:$id}) RETURN n.content, n.pointKind, n.status",
@@ -474,21 +486,38 @@ class ConversationMiner:
                 continue
             for prior_id, prior_status in priors:
                 if prior_status == "draft":
-                    # Draft-to-draft NAND (operator node draft too).
+                    # Draft-to-draft NAND (operator node draft too) — exactly
+                    # one per pair even when both sides carry refute cues
+                    # (#1080 review: the loop would otherwise wire D2→D1 AND
+                    # D1→D2, doubling the EP penalty).
+                    pair = tuple(sorted((pid, prior_id)))
+                    if pair in wired_pairs:
+                        continue
+                    wired_pairs.add(pair)
                     if sdk is not None:
                         sdk.create_operator("NAND", pid, [prior_id],
                                             promote_source=False)
-                    report["wired_nand"] += 1
+                        report["wired_nand"] += 1
                 else:
                     # Live prior → review-queue candidate, wire at promotion.
+                    # Target list (a single slot would silently drop earlier
+                    # live priors — #1080 review).
+                    current = proj.g.query(
+                        "MATCH (n:Point {id:$id}) RETURN n.temporal_target_ids",
+                        params={"id": pid},
+                    ).result_set
+                    ids = list(current[0][0] or []) if current and current[0][0] else []
+                    if prior_id not in ids:
+                        ids.append(prior_id)
                     proj.g.query(
                         "MATCH (n:Point {id:$id}) "
                         "SET n.temporal_candidate = true, "
+                        "n.temporal_target_ids = $ts, "
                         "n.temporal_target_id = $t, "
                         "n.temporal_replacement = $r, "
                         "n.source_session = $ss",
-                        params={"id": pid, "t": prior_id, "r": replace,
-                                "ss": source_id},
+                        params={"id": pid, "ts": ids, "t": prior_id,
+                                "r": replace, "ss": source_id},
                     )
                     report["candidates"] += 1
                     if replace:
