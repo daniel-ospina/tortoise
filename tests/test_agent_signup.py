@@ -36,6 +36,18 @@ from tortoise.session_auth import get_current_user
 _INTERNAL_KEY = "test-internal-shared-secret-xyz"
 
 
+def _wait_for(predicate, timeout_s: float = 5.0):
+    """Poll for a fire-and-forget side effect (the R8 feed runs via
+    asyncio.to_thread on the TestClient's background loop — the response can
+    beat the thread). Raises AssertionError on timeout."""
+    import time as _time
+    deadline = _time.time() + timeout_s
+    while not predicate():
+        if _time.time() > deadline:
+            return
+        _time.sleep(0.01)
+
+
 @pytest.fixture(scope="module")
 def client():
     with TestClient(app) as c:
@@ -148,6 +160,35 @@ class TestSignupIpRateLimit:
             assert r.status_code == 200, r.text
         r = client.post("/v1/agent/signup", json={"identity": "anon-fresh"})
         assert r.status_code == 429, r.text
+
+    def test_signup_feeds_velocity_tracker(self, client, monkeypatch):
+        """R8 success-path feed: a successful mint records the IP."""
+        calls = []
+        monkeypatch.setattr("tortoise.abuse.record_signup",
+                            lambda ip, team_id=None, now=None: calls.append((ip, team_id)))
+        r = client.post("/v1/agent/signup", json={})
+        assert r.status_code == 200
+        # the feed is fire-and-forget (to_thread) — poll briefly for the call
+        _wait_for(lambda: len(calls) == 1)
+        assert len(calls) == 1
+        assert calls[0][1] == r.json()["team_id"]
+
+    def test_signup_ip_limit_and_velocity_single_notify(self, client, monkeypatch):
+        """P1-FIX-2 integration: 3rd signup 429 AND exactly ONE ops notify —
+        the success feed fires at the allowance boundary (2nd mint); the 429's
+        record_block path is dedup-suppressed (same bare-ip key).
+        """
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+        notified = []
+        monkeypatch.setattr("tortoise.notify.notify_abuse",
+                            lambda kind, team, details: notified.append(kind))
+        for _ in range(2):
+            r = client.post("/v1/agent/signup", json={})
+            assert r.status_code == 200, r.text
+        r = client.post("/v1/agent/signup", json={})
+        assert r.status_code == 429, r.text
+        _wait_for(lambda: notified == ["abuse_signup_velocity"])
+        assert notified == ["abuse_signup_velocity"]  # exactly one, not two
 
 
 class TestProvisionMembershipStatus:

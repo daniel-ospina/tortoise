@@ -4788,7 +4788,24 @@ async def agent_signup(request: Request):
     # control for this mint seam. CAPTCHA itself is intentionally NOT applied
     # here — headless agents cannot solve a challenge; the IP bucket bounds
     # the automated team+key minting vector instead.
-    await _check_signup_ip_rate_limit(request)
+    # #741(a): identity is ALWAYS server-side — client-supplied identity and
+    # x-device-id are ignored (a client-chosen identity trivially bypasses the
+    # per-identity rate limit). The CLI generates its own identity server-side.
+    from tortoise import abuse as _abuse  # R8 signup-velocity feed (#1081)
+    try:
+        await _check_signup_ip_rate_limit(request)
+    except HTTPException as exc:
+        if exc.status_code == 429:
+            # P2-2 (phase-7): same fire-and-forget pattern as the success feed —
+            # the 429 response must NOT absorb ops email latency (up to ~15s
+            # Resend). Retained in _SIGNUP_FEED_TASKS (P2-1: create_task must
+            # hold a reference — asyncio GC).
+            _SIGNUP_FEED_TASKS["block-" + (getattr(request.state, "client_ip", None)
+                or (request.client.host if request.client else None))] = asyncio.create_task(
+                    asyncio.to_thread(_abuse.record_signup_block,
+                        getattr(request.state, "client_ip", None)
+                        or (request.client.host if request.client else None)))
+        raise
 
     # #741(a): identity is ALWAYS server-side — client-supplied identity and
     # x-device-id are ignored (a client-chosen identity trivially bypasses the
@@ -4859,6 +4876,13 @@ async def agent_signup(request: Request):
         except Exception:
             raise HTTPException(status_code=500, detail="Agent signup failed")
         await _async_audit(request, team_id, "agent_signup", resource_type="team", resource_id=team_id)
+        # P3-D/P3-6: notify_abuse is sync httpx — fire-and-forget so ops email
+        # latency never delays the cold-start mint (best-effort telemetry; #310)
+        _SIGNUP_FEED_TASKS["signup-" + (getattr(request.state, "client_ip", None)
+            or (request.client.host if request.client else None))] = asyncio.create_task(
+                asyncio.to_thread(_abuse.record_signup,
+                    getattr(request.state, "client_ip", None)
+                    or (request.client.host if request.client else None), team_id))
         return {"key": api_key, "team_id": team_id, "team_name": team_name, "graph_name": graph_name,
                 "identity": identity, "tier": "free"}
 
@@ -4887,6 +4911,13 @@ async def agent_signup(request: Request):
         sdk._graph_create(team_id, "default", kind="default", namespace=graph_name)
 
         await _async_audit(request, team_id, "agent_signup", resource_type="team", resource_id=team_id)
+        # P3-D/P3-6: fire-and-forget success-path feed (ops email latency
+        # must never delay the mint response)
+        _SIGNUP_FEED_TASKS["signup-" + (getattr(request.state, "client_ip", None)
+            or (request.client.host if request.client else None))] = asyncio.create_task(
+                asyncio.to_thread(_abuse.record_signup,
+                    getattr(request.state, "client_ip", None)
+                    or (request.client.host if request.client else None), team_id))
     except HTTPException:
         raise
     except Exception:
