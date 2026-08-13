@@ -48,6 +48,11 @@ primary_region = "iad"
 [env]
   TORTOISE_DB_URI = ""  # Constructed at runtime by entrypoint.sh from FALKORDB_CLOUD_URI → FalkorDB Cloud
   FASTAPI_INTERNAL_KEY = ""  # Set via fly secrets
+  # #1081: only the Fly-proxied hosted deployment may trust Fly-Client-IP
+  # (the proxy overwrites it from the connection peer). Fail-closed
+  # elsewhere — a non-proxy ingress must never let a client set its own
+  # per-IP limiter key.
+  TORTOISE_TRUST_FLY_CLIENT_IP = "1"
   # Hosted backups (#305) — set via fly secrets (deploy workflow syncs from GitHub)
   TORTOISE_BACKUP_KEY = ""
   R2_ACCOUNT_ID = ""

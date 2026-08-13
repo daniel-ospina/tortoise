@@ -1471,9 +1471,36 @@ _SIGNUP_FEED_TASKS: dict[str, asyncio.Task] = {}
 
 
 def _retain_feed_task(key: str, task: asyncio.Task) -> None:
-    """Retain an R8 feed task with done-callback cleanup (#1081 review P3)."""
+    """Retain an R8 feed task with done-callback cleanup (#1081 review P3).
+
+    Pops only when the entry is STILL this task — a same-key replacement
+    (a second signup/block from one IP within the first task's lifetime)
+    must not have its only strong reference dropped by the FIRST task's
+    done-callback (that would let asyncio GC collect the running
+    replacement mid-execution → lost record_signup/record_signup_block).
+    """
     _SIGNUP_FEED_TASKS[key] = task
-    task.add_done_callback(lambda _t: _SIGNUP_FEED_TASKS.pop(key, None))
+
+    def _cleanup(_t):
+        if _SIGNUP_FEED_TASKS.get(key) is _t:
+            _SIGNUP_FEED_TASKS.pop(key, None)
+
+    task.add_done_callback(_cleanup)
+
+
+def _normalize_mapped_ipv6(ip):
+    """Return the IPv4 address for an IPv4-mapped IPv6 (::ffff:a.b.c.d or
+    ::ffff:7f00:1), else the input unchanged. Prevents a dual-stack client
+    from presenting two bucket keys for one address (#1081 review P4)."""
+    if isinstance(ip, str) and ip.startswith("::ffff:") and len(ip) > 7:
+        try:
+            import ipaddress as _ipa
+            mapped = _ipa.ip_address(ip).ipv4_mapped
+            if mapped is not None:
+                return str(mapped)
+        except ValueError:
+            pass
+    return ip
 
 
 async def _check_ip_bucket_rate_limit(
@@ -1504,13 +1531,7 @@ async def _check_ip_bucket_rate_limit(
     # P2-2 (coherence): normalize IPv4-mapped IPv6 so a dual-stack client
     # cannot present two keys for one address. Handles both dotted-quad
     # (::ffff:1.2.3.4) and hex (::ffff:7f00:1) forms via ipaddress.
-    if isinstance(ip, str) and ip.startswith("::ffff:") and len(ip) > 7:
-        try:
-            import ipaddress as _ipa
-            mapped = _ipa.ip_address(ip).ipv4_mapped
-            ip = str(mapped)
-        except ValueError:
-            pass
+    ip = _normalize_mapped_ipv6(ip)
     now = time.time()
     async with lock:
         bucket = buckets[ip]
@@ -1554,11 +1575,11 @@ async def _check_sensitive_op_rate_limit(request: Request, op: str) -> None:
     # P1-FIX-1: composite (ip, op) key — export and delete keep independent
     # budgets (locked by test_export_rate_limited_independently).
     # P3-3 (phase-7): normalize IPv4-mapped IPv6 HERE (tuple bypasses the
-    # helper's isinstance guard).
+    # helper's isinstance guard) — shared helper handles hex form too
+    # (#1081 review P4).
     _ip = (getattr(request.state, "client_ip", None)
            or (request.client.host if request.client else None))
-    if isinstance(_ip, str) and _ip.startswith("::ffff:") and "." in _ip:
-        _ip = _ip[7:]
+    _ip = _normalize_mapped_ipv6(_ip)
     await _check_ip_bucket_rate_limit(
         request, buckets=_SENSITIVE_BUCKETS, lock=_SENSITIVE_LOCK,
         limit=max_per_hour, window_s=3600,
