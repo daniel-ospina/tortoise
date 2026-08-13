@@ -1000,9 +1000,23 @@ class FalkorProjection(
         (O(1) check), so there is no startup penalty on large graphs.
 
         FTS and vector indexes are gated on FalkorDB >= 4.x.
+
+        Embedded (redislite) note (#522): the is_operator RANGE index is
+        intentionally NOT created on embedded DBs. redislite merges
+        per-property indexes into a composite whose is_operator entries are
+        written with the FIRST process's type encoding; a later process
+        reopening the same DB file inherits a stale composite and
+        `n.is_operator = false` (which the query planner routes through the
+        index) silently matches ZERO rows — verified on the crash-recovery
+        reopen path (test_crash_recovery). The full label scan for
+        `= false` is correct on embedded; docker/server FalkorDB keeps the
+        index for the Node By Index Scan perf win.
         """
         # ── Range indexes (always safe, pre-4.x compatible) ──
-        for prop in ("id", "pointKind", "content_hash", "is_operator"):
+        point_props = ("id", "pointKind", "content_hash")
+        if not getattr(self, "_is_embedded", False):
+            point_props = (*point_props, "is_operator")
+        for prop in point_props:
             try:
                 self.g.query(f"CREATE INDEX FOR (n:Point) ON (n.{prop})")
             except Exception as e:
@@ -1013,6 +1027,44 @@ class FalkorProjection(
                     import logging
                     logging.getLogger(__name__).error(
                         "Failed to create index on n.%s: %s", prop, e)
+
+        # ── Embedded repair: drop stale composite Point indexes (#522) ──
+        # A composite index containing is_operator (created by an older
+        # _ensure_indexes or the pre-#522 build) has entries typed by the
+        # writing process; a later process reopening the same embedded DB
+        # routes `= false` through it and gets ZERO matches (verified on the
+        # crash-recovery path). Drop every Point index that includes
+        # is_operator. redislite's DROP INDEX matches on the CREATE-time
+        # field order and the build creates multiple overlapping composites
+        # (verified: two distinct Point composites on the same DB), so all
+        # permutations containing is_operator are swept. The canonical
+        # per-property indexes are recreated below / on next boot; the
+        # fulltext content index is created later in this function.
+        if getattr(self, "_is_embedded", False):
+            try:
+                _rows = self.g.query("CALL db.indexes()").result_set
+                _needs_repair = any(
+                    _row and _row[0] == "Point"
+                    and "is_operator" in str(_row[1])
+                    for _row in _rows
+                )
+                if _needs_repair:
+                    import itertools as _it
+                    _fields = ("id", "pointKind", "content_hash",
+                               "is_operator", "content")
+                    for _n in range(2, 6):
+                        for _perm in _it.permutations(_fields, _n):
+                            if "is_operator" not in _perm:
+                                continue
+                            try:
+                                self.g.query(
+                                    "DROP INDEX ON :Point("
+                                    + ", ".join(_perm) + ")"
+                                )
+                            except Exception:
+                                pass
+            except Exception:
+                pass
 
         # ── Document range indexes (#125 — structural queries filter by kind) ──
         for prop in ("id", "documentKind"):
