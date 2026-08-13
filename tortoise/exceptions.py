@@ -38,3 +38,37 @@ class EmbeddedStoreBusyError(Exception):
             f"operation from that process, or point TORTOISE_DB_URI at a "
             f"server-mode FalkorDB (bolt://) for concurrent writers."
         )
+
+
+class BundleValidationError(ValueError):
+    """Epic #902 A2 — Phase-1 bundle validation failure (plan §5.2/§6.3).
+
+    Carries ALL violations (not just the first) so agents can fix the whole
+    bundle in one pass. ``.violations`` is the list of
+    ``{"section", "index", "message"}`` dicts; ``.as_dict()`` returns
+    ``{"code": "ERR_BUNDLE_INVALID", "violations": [...]}`` for the MCP wire.
+    Subclasses ValueError so pre-A2 callers catching ValueError keep working.
+    """
+
+    code = "ERR_BUNDLE_INVALID"
+
+    def __init__(self, violations: list[dict]):
+        self.violations = list(violations)
+        # The shipped message contract: the str() carries the FIRST
+        # violation's message (Phase-2 parity); .violations has them all.
+        super().__init__(self.violations[0]["message"] if self.violations else "bundle validation failed")
+
+    def as_dict(self) -> dict:
+        return {"code": self.code, "violations": self.violations}
+
+
+class Phase2Error(ValueError):
+    """Epic #902 A2 — Phase-2 write failure (post-validation, partial state
+    may be committed). Carries the bundle's computed batch_id so the agent
+    can audit what committed before re-sending (plan §6.4 Phase-2 row,
+    cycle-23/24 pin). Surfaces as `{error, batch_id}` with NO code (distinct
+    from Phase-1's ERR_BUNDLE_INVALID and quota codes — E2E-15(h))."""
+
+    def __init__(self, message: str, batch_id: str | None = None):
+        self.batch_id = batch_id
+        super().__init__(message)
