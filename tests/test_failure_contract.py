@@ -115,6 +115,50 @@ class TestPhase2Error:
         assert "violations" not in r
         assert "points[2]" in r["error"]
 
+    def test_phase2_error_through_safe_carries_batch_id(self, sdk):
+        # REVIEW-FIX P2 (cycle-26): drive a REAL Phase2Error raise site through
+        # _safe and assert the wire carries the computed batch_id (the plan's
+        # cycle-24 physical pin — E2E-15(h)). Phase 1 passes; the Phase-2
+        # re-check (per-item in the sources write loop) fails on the 4th
+        # invocation, producing a Phase2Error carrying the computed batch_id.
+        import tortoise.sdk as sdkmod
+        orig = sdkmod.TortoiseSDK._check_item_shape
+        calls = {"n": 0}
+        bundle = {
+            "sources": [
+                {"ref": "s1", "url": "https://x.example/1",
+                 "sourceKind": "document"},
+                {"ref": "s2", "url": "https://x.example/2",
+                 "sourceKind": "document"},
+            ],
+            "points": [{"kind": "statement", "content": "A"}],
+            "connections": [],
+        }
+        expected_bid = sdkmod.derive_batch_id(bundle)
+
+        def flaky(self, section, index, item, violations):
+            calls["n"] += 1
+            if calls["n"] >= 4:  # Phase-2 re-check (Phase-1 pre-scan +
+                                 # Phase-1 bundle = 3 calls for 2 sources + 1 point)
+                violations.append({
+                    "section": section, "index": index,
+                    "message": f"ingest: {section}[{index}] simulated "
+                               f"Phase-2-only violation",
+                })
+                return
+            orig(self, section, index, item, violations)
+
+        sdkmod.TortoiseSDK._check_item_shape = flaky
+        try:
+            r = _transport(lambda: m._safe(sdk.ingest, bundle))
+            assert "code" not in r, "Phase-2 shape has no code"
+            assert r["batch_id"] == expected_bid, \
+                "Phase-2 error carries the computed batch_id"
+            assert "Phase-2-only" in r["error"]
+        finally:
+            sdkmod.TortoiseSDK._check_item_shape = orig
+
+
     def test_ingest_phase2_raises_carry_batch_id(self, sdk):
         # A bundle that passes Phase 1 but whose Phase-2 write path raises a
         # parity violation (race class simulated) — the raised Phase2Error

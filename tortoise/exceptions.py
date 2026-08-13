@@ -59,7 +59,10 @@ class BundleValidationError(ValueError):
         super().__init__(self.violations[0]["message"] if self.violations else "bundle validation failed")
 
     def as_dict(self) -> dict:
-        return {"code": self.code, "violations": self.violations}
+        # Plan §6.3 pins {error, code: "ERR_BUNDLE_INVALID", violations} —
+        # the error key carries the first violation's message (REVIEW-FIX P2).
+        return {"error": str(self), "code": self.code,
+                "violations": self.violations}
 
 
 class Phase2Error(ValueError):
