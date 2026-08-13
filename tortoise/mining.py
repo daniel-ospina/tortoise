@@ -228,6 +228,9 @@ class ConversationMiner:
         extract_entities: bool = True,
         entity_stage=None,
         batch_id: str | None = None,
+        content_dedup: bool = True,
+        dedup_threshold: float = 0.60,
+        sdk=None,
     ) -> dict:
         """Run extraction pipeline on a conversation transcript.
 
@@ -306,6 +309,19 @@ class ConversationMiner:
                 "MATCH (n:Point) WHERE n.id IN $ids SET n.batch_id = $bid",
                 params={"ids": point_ids, "bid": batch_id},
             )
+        # W-2 content dedup (#784): flag duplicate decision Points against
+        # existing decisions (hash + embedding tiers); draft priors get the
+        # "already decided" IMPL wired immediately, live priors defer to
+        # promotion (Variant C). Requires the SDK for operator creation —
+        # flag-only when sdk is None.
+        dedup_report = None
+        if content_dedup and point_ids and sdk is not None:
+            try:
+                dedup_report = sdk._dedup_content_candidates(
+                    point_ids, threshold=dedup_threshold, sdk_for_wiring=sdk)
+            except Exception:
+                logger.exception("content dedup failed for batch %s", batch_id)
+
         batch_status = "not_gated"
         batch_reason = "no projection — W-3 gate skipped (standalone log mode)"
         if api.projection is not None:
@@ -355,6 +371,9 @@ class ConversationMiner:
             "batch_id": batch_id,
             "batch_status": batch_status,
             "batch_reason": batch_reason,
+            "dedup_hits": (dedup_report or {}).get("hits", dedup_hits),
+            "dedup_wired": (dedup_report or {}).get("wired_draft_to_draft", 0),
+            "dedup_deferred": (dedup_report or {}).get("deferred_live_prior", 0),
         }
 
     # ── Phase-2 entity reification (W-1 write phase, DE2E-1) ──────
@@ -724,6 +743,7 @@ def mine_conversation(
     entity_stage=None,
     content_dedup: bool = True,
     dedup_threshold: float | None = None,
+    sdk=None,
 ) -> dict:
     """Convenience: mine a conversation transcript → Events + Points + Objects.
 
@@ -744,7 +764,10 @@ def mine_conversation(
                       participants=participants,
                       extract_entities=extract_entities,
                       entity_stage=entity_stage,
-                      batch_id=None)  # auto-generated per call (#990)
+                      batch_id=None,  # auto-generated per call (#990)
+                      content_dedup=content_dedup,
+                      dedup_threshold=dedup_threshold,
+                      sdk=sdk)
 
 
 def mine_corpus(
@@ -792,6 +815,8 @@ def mine_corpus_with_sdk(
     progress_file: str | None = None,
     model: Any | None = None,
     event_log_path: str | None = None,
+    content_dedup: bool = True,
+    dedup_threshold: float = 0.60,
 ) -> dict:
     """Batch-mine a session corpus (J-1, plan §6.1) through an existing SDK.
 
@@ -969,7 +994,10 @@ def mine_corpus_with_sdk(
         try:
             res = miner.mine(text, f"session_{session_id}", api,
                              extract_entities=extract_entities,
-                             participants=ConversationMiner._extract_participants(text))
+                             participants=ConversationMiner._extract_participants(text),
+                             content_dedup=content_dedup,
+                             dedup_threshold=dedup_threshold,
+                             sdk=sdk)
             entities += res["entities"]
             objects += res["objects"]
             dedup_hits += res["dedup_hits"]
