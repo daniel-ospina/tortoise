@@ -206,6 +206,7 @@ Deno.serve(async (req: Request) => {
         "Access-Control-Allow-Origin": corsOrigin ?? ALLOWED_ORIGINS[0],
         "Access-Control-Allow-Methods": "POST, OPTIONS",
         "Access-Control-Allow-Headers": "authorization, content-type",
+        "Access-Control-Max-Age": "600",
         "Vary": "Origin",
       },
     });

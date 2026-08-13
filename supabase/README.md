@@ -34,6 +34,28 @@ supabase secrets set --project-ref ybetwichurajbfswfeqa \
   AUTH_HOOK_SECRET='v1,whsec_...'   # value from Dashboard → Auth → Hooks
 ```
 
+> **Status (post-#832):** the auth hook is DISABLED and `AUTH_HOOK_SECRET`
+> is not set in production — the JWT path is the only live consumer. The
+> hook path fails CLOSED (401) while the secret is unset, so re-enabling the
+> hook is a dashboard step + `secrets set` away (see #1120).
+
+### tenant-provision required secrets (#1121)
+
+Beyond `AUTH_HOOK_SECRET` (hook path only, currently unset), the success
+(201) path reads these secrets — the deploy workflow
+(`.github/workflows/supabase-deploy.yml`) verifies the three app-managed
+ones exist before shipping (hard fail); `SUPABASE_SERVICE_ROLE_KEY` is a
+platform-reserved secret auto-injected into edge functions (warn-only in
+the check). A missing one surfaces as a 500/502 at signup:
+
+```bash
+supabase secrets set --project-ref ybetwichurajbfswfeqa \
+  FASTAPI_URL='https://...'          # data plane (/internal/demo demo seed)
+  FASTAPI_INTERNAL_KEY='...'         # Bearer for the data-plane call
+  TORTOISE_SECRET_PEPPER='...'       # MUST match tortoise/auth.py (key hashing)
+  # SUPABASE_SERVICE_ROLE_KEY — platform-reserved, auto-injected; no need to set
+```
+
 ### waitlist-subscribe contract
 
 `POST /functions/v1/waitlist-subscribe` with a JSON body:
