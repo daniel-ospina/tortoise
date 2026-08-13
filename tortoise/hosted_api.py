@@ -599,7 +599,7 @@ async def _async_audit(
     actor_user_id records the JWT-session user for session-plane operations
     (owner export/delete, #302; team_claim #1082) — key-plane paths leave it
     None (the key creator is not the caller). ``detail`` is a free-form JSONB
-    payload (audit_events.detail, 20260813000003) — team_claim stores
+    payload (audit_events.detail, 20260813000004) — team_claim stores
     provider/email/user_id.
     """
     # #1081 review P2-1: the durable sweeper queries audit_events by
@@ -5195,7 +5195,7 @@ async def claim_team(request: Request):
         raise HTTPException(status_code=e.status, detail=e.message)
 
     # 7. audit team_claim — provider/email/user_id in detail (0002 has no
-    #    provider/email columns; 20260813000003 added detail JSONB).
+    #    provider/email columns; 20260813000004 added detail JSONB).
     await _async_audit(
         request, team_id, "team_claim",
         resource_type="team", resource_id=team_id,

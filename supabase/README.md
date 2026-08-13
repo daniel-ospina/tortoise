@@ -121,11 +121,20 @@ Migrations + functions deploy via `.github/workflows/supabase-deploy.yml`.
 > ⚠️ **Migrations are MANUAL dispatch since #771 (flip gating).** A push to
 > `main` touching `supabase/**` triggers the workflow but the migration +
 > function steps run ONLY on `workflow_dispatch` — a push is recorded and
-> never deploys. To apply pending migrations + redeploy the edge functions:
-> `gh workflow run supabase-deploy.yml --ref main` (operator-executed).
-> See the workflow header for the full flip sequence. Gated on repo secrets
-> `SUPABASE_ACCESS_TOKEN` (personal access token) + `SUPABASE_DB_URL` (full
-> percent-encoded session-pooler connection string, port 5432).
+> never deploys (it runs the drift check only). To apply pending migrations +
+> redeploy the edge functions: `gh workflow run supabase-deploy.yml --ref main`
+> (operator-executed). Gated on the `SUPABASE_ACCESS_TOKEN` repo secret
+> (token-based push since #883 — the `SUPABASE_DB_URL` secret was removed
+> there; the drift gate and apply both use the token path).
+
+**Migration drift gate (#1095):** `deploy-hosted.yml` runs
+`.github/scripts/check-migration-drift` before shipping app code — a fail-closed
+check that repo migrations are not ahead of the linked project's applied set
+(reads `supabase_migrations.schema_migrations` via the Supabase Management API
+with `SUPABASE_ACCESS_TOKEN`). A deploy with pending table/column/function/
+unique-index migrations is BLOCKED until they are applied; index-only and
+remote-ahead drift warn. Operator sequence: dispatch `supabase-deploy` → apply
+GREEN → then deploy the app.
 
 Manual fallback (equivalent):
 
