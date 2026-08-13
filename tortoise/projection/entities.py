@@ -35,6 +35,15 @@ class _EntityHandlers:
         "aboutEvent",        # handled as aboutEvent edge
         "aboutPoint",        # handled as aboutPoint edge
         "aboutDocument",     # handled as aboutDocument edge
+        # journal meta keys (epic #900 T3, §4.2 cycle-16/17): the SDK's
+        # _emit_event style-3 lines carry event_id/ts/initiated_by (+agent_id
+        # on api._emit) + corrects — structural, never node properties. One
+        # global skip-set keeps live/replay consistent across entity types.
+        "event_id",
+        "ts",
+        "initiated_by",
+        "agent_id",
+        "corrects",
     })
 
     # Keys explicitly handled by each _upsert_* method.
@@ -49,6 +58,12 @@ class _EntityHandlers:
         "topics", "summary", "session_id", "event_id", "doc_status",
         "source_path", "format", "embedding", "updatedAt",
         "about_entities", "objectKind", "status",
+        # epic #900 T3 (§4.1 route pin): the indexer's source_url override
+        # (→ the #205 auto-wire target) and the embedding-suppression flag
+        # ride the journaled DocumentCreated event but must NEVER persist as
+        # node props (_persist_extra_props skip-set membership).
+        "source_url",
+        "suppress_embedding",
     })
     _EVENT_HANDLED: frozenset = frozenset({
         "id", "eventId", "eventKind", "event",
@@ -64,6 +79,12 @@ class _EntityHandlers:
     _SOURCE_HANDLED: frozenset = frozenset({
         "id", "url", "sourceKind", "contentHash",
         "title", "ingestedAt", "version", "externalId", "updatedAt",
+        # epic #900 T3 (§4.1): the ev keys `source_path` (→ s.sourcePath via
+        # the MERGE clause, never persisted verbatim snake_case) and
+        # `_searchText` (set by the write path, coalesce-on-create /
+        # overwrite-on-hash-diff — §4.1 cycle-4 merge semantics).
+        "source_path",
+        "_searchText",
     })
 
     def _persist_extra_props(self, match_clause: str, match_params: dict,
@@ -278,18 +299,25 @@ class _EntityHandlers:
         did = ev.get("id")
         if not did:
             return
-        # Compute embedding from title+content for semantic search (#7845)
+        # Compute embedding from title+content for semantic search (#7845).
+        # Epic #900 T3 cycle-19: the NEW index path carries a suppress flag in
+        # the ev dict (suppress_embedding) — the doc path computes the call
+        # UNCONDITIONALLY today (title is always present on new-path docs), an
+        # undeclared prop + unbounded network call on every new-path write,
+        # repair, and DocumentCreated REPLAY. The legacy branch is unchanged
+        # (flag absent → compute as today, SC4).
         embedding = None
-        doc_content = " ".join(filter(None, [
-            ev.get("title", ""),
-            ev.get("content", ""),
-        ]))
-        if doc_content.strip():
-            try:
-                from tortoise.embeddings import compute_embedding
-                embedding = compute_embedding(doc_content)
-            except Exception:
-                pass
+        if not ev.get("suppress_embedding"):
+            doc_content = " ".join(filter(None, [
+                ev.get("title", ""),
+                ev.get("content", ""),
+            ]))
+            if doc_content.strip():
+                try:
+                    from tortoise.embeddings import compute_embedding
+                    embedding = compute_embedding(doc_content)
+                except Exception:
+                    pass
         # #125 capture fields — use ev.get(field) with NO default so None →
         # Cypher null, letting coalesce fall through to existing on partial
         # updates. CRITICAL: "" is non-null in Cypher — coalesce("", d.f, ...)
@@ -341,9 +369,15 @@ class _EntityHandlers:
             ev, self._DOCUMENT_HANDLED,
         )
         # #205 — wire references edge (Source → Document) for provenance chain.
-        # doc_id IS the source url (file path) in the ingest flow, and the
-        # Document node was just created/updated above. MERGE is idempotent.
-        self.link_source_to_entity(did, did, "Document")
+        # Epic #900 T3 (§4.1 route pin): under OQ-6 doc ids are `doc_<rel-path>`
+        # ≠ the corpus:// Source url, so the hard-coded did==did auto-wire would
+        # MERGE a PHANTOM Source (url=doc_<rel>, empty contentHash). The
+        # optional `source_url` ev-key override (default falls back to did —
+        # legacy ingest flow byte-identical) routes the #205 link onto the real
+        # Source the indexer created first. The override rides the journaled
+        # DocumentCreated event, so replay re-creates the edge onto the real
+        # Source (S13/T12 split: doc-unit references edges SURVIVE rebuild).
+        self.link_source_to_entity(ev.get("source_url") or did, did, "Document")
         # #125 — aboutSubject edges when about_entities present (Task 1
         # self-contained: label-agnostic generalization lives in edges.py)
         about = ev.get("about_entities") or []
@@ -351,7 +385,8 @@ class _EntityHandlers:
             for ent in about:
                 self._create_about_edges(did, ent)
 
-    def _upsert_event(self, event: dict) -> None:
+    def _upsert_event(self, event: dict, *, guard: bool = False,
+                      guard_source_file: str | None = None) -> "tuple[str, bool] | None":
         """MERGE Event node with all ONTOLOGY §3.1 properties.
 
         Handles both nested ({type:EventRecorded, event:{eventId:...}}) and
@@ -363,27 +398,52 @@ class _EntityHandlers:
           - (Event)-[:uses]->(Object) from event.uses (list or single)
           - (Subject)-[:participatesIn]->(Event) from event.participants,
             falling back to event.subject when no explicit participants (#212)
+
+        Epic #900 T3 extension (§4.2 meeting collision rule, cycle-12/13/
+        17/18): when ``guard=True`` (the NEW meeting branch's call), the
+        eventId write implements the dialect-verified THREE-STATEMENT
+        construction — (1) MERGE candidate ON CREATE SET (creates if absent,
+        no-op if present); (2) guarded classification ``MATCH ... WHERE
+        e.eventKind='meeting' AND e.source_file = $sf`` — HIT = the eventId
+        is OURS → in-place update; MISS = taken by a DIFFERENT-source
+        meeting → GUARD-REJECTED → (3) suffix follow-up MERGE on
+        ``<candidate>-<sha256(source_file)[:8]>`` (per-file-deterministic ⇒
+        concurrent writers converge; [:12]/[:16] capped escalation on a
+        suffixed-id collision — never a silent clobber). Returns
+        ``(resolved_event_id, guard_rejected)``; the caller's wiring, journal
+        emission and counter attribution bind to the RESOLVED id.
+
+        Unparameterized calls (legacy ingest_corpus, rebuild replay) execute
+        the plain MERGE path byte-identically (SC4) and return None.
         """
         inner = event.get("event", event)  # unwrap nested format
         eid = inner.get("id") or inner.get("eventId")
         if not eid:
             return
-        # Compute embedding from event content/description (#7845)
-        # Stored vecf32 (#244): vec.euclideanDistance rejects plain-list
-        # vectors — a single List-typed embedding poisons brute-force vector
-        # search for the whole Event label. Align with the Point pattern.
-        embedding = None
-        event_content = " ".join(filter(None, [
-            inner.get("subject", ""),
-            inner.get("eventKind", ""),
-            inner.get("object", ""),
-        ]))
-        if event_content.strip():
-            try:
-                from tortoise.embeddings import compute_embedding
-                embedding = compute_embedding(event_content)
-            except Exception:
-                pass
+        # Embedding: the journaled EventRecorded payload carries the live
+        # value (epic #900 cycle-18/19 — the sanctioned replay carrier for the
+        # session heal); consume inner["embedding"] when present. Otherwise
+        # compute from event content (legacy path, #7845) — EXCEPT meetings
+        # (cycle-16: the meeting branch suppresses the unconditional
+        # computation — no subject/object ⇒ a junk vector + an undeclared
+        # network call on every meeting write/repair/replay; e.embedding stays
+        # NULL).
+        embedding = inner.get("embedding")
+        if embedding is None and inner.get("eventKind") != "meeting":
+            # Stored vecf32 (#244): vec.euclideanDistance rejects plain-list
+            # vectors — a single List-typed embedding poisons brute-force vector
+            # search for the whole Event label. Align with the Point pattern.
+            event_content = " ".join(filter(None, [
+                inner.get("subject", ""),
+                inner.get("eventKind", ""),
+                inner.get("object", ""),
+            ]))
+            if event_content.strip():
+                try:
+                    from tortoise.embeddings import compute_embedding
+                    embedding = compute_embedding(event_content)
+                except Exception:
+                    pass
         props = {
             "id": eid,  # ensure Event node has id for edge matching (#122)
             "eventKind": inner.get("eventKind", ""),
@@ -396,6 +456,16 @@ class _EntityHandlers:
             "classificationLevel": inner.get("classificationLevel", "internal"),
             "format": inner.get("format", "jsonl"),
         }
+        if not guard:
+            # ── PLAIN path — legacy/replay calls, byte-identical (SC4) ──
+            self._event_plain_merge(eid, props, embedding, inner)
+            return None
+        # ── MEETING GUARD path (cycle-12/13/17/18; the ONLY guard consumer) ──
+        return self._event_guarded_merge(inner, eid, props, guard_source_file)
+
+    def _event_plain_merge(self, eid: str, props: dict, embedding,
+                           inner: dict) -> None:
+        """The legacy single-statement Event MERGE (+ edges + extra props)."""
         self.g.query(
             "MERGE (e:Event {eventId: $eid}) "
             "ON CREATE SET e += $props, e.embedding = CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) END "
@@ -509,18 +579,130 @@ class _EntityHandlers:
             inner, self._EVENT_HANDLED,
         )
 
-    def _upsert_source(self, ev: dict) -> None:
+    def _event_guarded_merge(self, inner: dict, candidate: str, props: dict,
+                             sf: str | None) -> "tuple[str, bool]":
+        """The meeting-scoped source_file-aware guard (§4.2 cycle-12/13/17/18).
+
+        THREE-statement construction (dialect-supported — no ``ON MATCH
+        WHERE`` in the FalkorDB dialect): (1) MERGE candidate ON CREATE SET;
+        (2) guarded classification WHERE eventKind='meeting' AND
+        source_file=$sf — HIT ⇒ in-place update, MISS ⇒ guard-rejected;
+        (3) suffix follow-up MERGE on the deterministic suffixed id
+        (``sha256(source_file)[:8]``) with the same classification guard and a
+        capped [:12]/[:16] escalation on suffixed-id collisions (E2E-12 grind).
+
+        Statement 1 carries the FULL prop set — including ``source_file``, the
+        guard's comparison property (cycle-18 threading pin): a concurrent
+        same-file writer must HIT its own classification (source_file present)
+        instead of suffix-forking on a mid-write window.
+        """
+        import hashlib
+        # FULL prop set: the fixed keys + the extras (title/topics/
+        # content_metadata/file_hash/source_file/eventStatus/…) — the same
+        # surface the plain path persists via _persist_extra_props.
+        full = dict(props)
+        skip = self._META_KEYS | self._EVENT_HANDLED
+        for k, v in inner.items():
+            if k not in skip and v is not None and k not in full:
+                full[k] = v
+        # (1) MERGE candidate — creates if absent, no-op if present (ON CREATE
+        # SET is the supported directive; the props NEVER land on a colliding
+        # node).
+        self.g.query(
+            "MERGE (e:Event {eventId: $eid}) ON CREATE SET e += $props",
+            params={"eid": candidate, "props": full},
+        )
+        # (2) guarded classification — is the candidate OURS?
+        hit = self.g.query(
+            "MATCH (e:Event {eventId: $eid}) "
+            "WHERE e.eventKind = 'meeting' AND e.source_file = $sf "
+            "RETURN e.id",
+            params={"eid": candidate, "sf": sf},
+        ).result_set
+        if hit:
+            self.g.query(
+                "MATCH (e:Event {eventId: $eid}) SET e += $props",
+                params={"eid": candidate, "props": full},
+            )
+            return (candidate, False)
+        # (3) GUARD-REJECTED → suffix follow-up (per-file-deterministic ⇒
+        # concurrent writers converge on the same id; first creates, second
+        # no-ops).
+        for width in (8, 12, 16):
+            suffixed = f"{candidate}-{hashlib.sha256((sf or '').encode('utf-8')).hexdigest()[:width]}"
+            held = self.g.query(
+                "MATCH (e:Event {eventId: $eid}) RETURN e.source_file",
+                params={"eid": suffixed},
+            ).result_set
+            if held and held[0][0] != sf:
+                continue  # suffixed id taken by a DIFFERENT source — escalate
+            hit2 = self.g.query(
+                "MATCH (e:Event {eventId: $eid}) "
+                "WHERE e.eventKind = 'meeting' AND e.source_file = $sf "
+                "RETURN e.id",
+                params={"eid": suffixed, "sf": sf},
+            ).result_set
+            if hit2:
+                self.g.query(
+                    "MATCH (e:Event {eventId: $eid}) SET e += $props",
+                    params={"eid": suffixed, "props": full},
+                )
+            else:
+                self.g.query(
+                    "MERGE (e:Event {eventId: $eid}) ON CREATE SET e += $props",
+                    params={"eid": suffixed, "props": full},
+                )
+            # extra-props tail re-targets to the RESOLVED id (never the
+            # candidate when it exists as the colliding file's Event).
+            self._persist_extra_props(
+                "MATCH (n:Event {eventId: $eid})", {"eid": suffixed},
+                inner, self._EVENT_HANDLED,
+            )
+            return (suffixed, True)
+        # [:16] also taken — never a silent clobber; return the candidate with
+        # the rejected flag so the caller records an errors[] warning (the
+        # MERGE above is a no-op and no props were written anywhere).
+        return (candidate, True)
+
+    def _upsert_source(self, ev: dict, *, merge_run_id: str | None = None) -> "QueryResult | None":
         """MERGE Source node for layered provenance (Ontology v2.1).
 
         Source properties: url (permalink), sourceType, contentHash, title,
         ingestedAt, version, externalId. Creates stub if missing.
+
+        Epic #900 T3 extensions (all inside the single statement — pin d,
+        write-path containment):
+          - the ON MATCH version bump is CONDITIONAL on a stored-hash
+            difference (§5.1 pin b — ON MATCH bumps version/updatedAt/
+            contentHash/title/_searchText ONLY when ``s.contentHash`` differs
+            from the incoming ``$hash``; a stub Source with NULL contentHash
+            is completed — the JOINT-E2E sweep's stub-handling);
+          - ``s.sourcePath = coalesce($sp, s.sourcePath)`` (§4.1 — the
+            sanctioned source_path route maps to camelCase on the node);
+          - ``s._searchText`` — coalesce ON CREATE, OVERWRITE on hash-diff
+            MERGE (§4.1 cycle-4 merge semantics; E2E-5 retitle refresh);
+          - ``s.__runId = $rid`` on the ON CREATE branch ONLY when
+            ``merge_run_id`` is given — the creator's per-run token. The
+            embedded FalkorDBLite reports ``Nodes created: 1`` for BOTH of two
+            concurrent same-key MERGEs (server-side parallel-executor quirk),
+            so ``nodes_created`` is NOT a race-safe creator discriminator on
+            the embedded backend: the index path detects the CREATE by
+            re-reading ``__runId`` (== its own token ⇒ IT created) and removes
+            it immediately. Non-index callers (legacy create_source paths)
+            never pass a run id → the clause is omitted entirely (no prop).
+
+        Returns the QueryResult (the caller uses ``nodes_created`` for the
+        counter-authority outcome); ``proj.apply`` threads it for
+        ``create_source``'s index-path consumers.
         """
         sid = ev.get("id")
         url = ev.get("url", "")
         if not sid and not url:
-            return
+            return None
         key = url or sid
-        self.g.query(
+        search_text = ev.get("_searchText") or ev.get("title")
+        run_clause = ", s.__runId = $rid" if merge_run_id is not None else ""
+        r = self.g.query(
             "MERGE (s:Source {url: $url}) "
             "ON CREATE SET s.id = coalesce($id, $url), "
             "              s.sourceKind = $sk, "
@@ -528,11 +710,20 @@ class _EntityHandlers:
             "              s.title = $title, "
             "              s.ingestedAt = $now, "
             "              s.version = 1, "
-            "              s.externalId = $ext "
-            "ON MATCH SET s.contentHash = $hash, "
-            "           s.title = coalesce($title, s.title), "
-            "           s.version = s.version + 1, "
-            "           s.updatedAt = $now",
+            "              s.externalId = $ext, "
+            "              s.sourcePath = coalesce($sp, s.sourcePath), "
+            "              s._searchText = $st" + run_clause + " "
+            "ON MATCH SET s.contentHash = CASE WHEN s.contentHash IS NULL OR s.contentHash <> $hash "
+            "                          THEN $hash ELSE s.contentHash END, "
+            "           s.title = CASE WHEN s.contentHash IS NULL OR s.contentHash <> $hash "
+            "                   THEN coalesce($title, s.title) ELSE s.title END, "
+            "           s.version = CASE WHEN s.contentHash IS NULL OR s.contentHash <> $hash "
+            "                    THEN s.version + 1 ELSE s.version END, "
+            "           s.updatedAt = CASE WHEN s.contentHash IS NULL OR s.contentHash <> $hash "
+            "                     THEN $now ELSE s.updatedAt END, "
+            "           s.sourcePath = coalesce($sp, s.sourcePath), "
+            "           s._searchText = CASE WHEN s.contentHash IS NULL OR s.contentHash <> $hash "
+            "                        THEN $st ELSE s._searchText END",
             params={
                 "url": key, "id": sid or key,
                 "sk": ev.get("sourceKind", "document"),
@@ -540,6 +731,9 @@ class _EntityHandlers:
                 "title": ev.get("title", key),
                 "now": _now_iso(),
                 "ext": ev.get("externalId", ""),
+                "sp": ev.get("source_path"),
+                "st": search_text,
+                **({"rid": merge_run_id} if merge_run_id is not None else {}),
             },
         )
         # #228: persist arbitrary caller-supplied props
@@ -547,3 +741,4 @@ class _EntityHandlers:
             "MATCH (n:Source {url: $url})", {"url": key},
             ev, self._SOURCE_HANDLED,
         )
+        return r
