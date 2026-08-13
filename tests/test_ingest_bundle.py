@@ -362,9 +362,12 @@ class TestPromotionPolicy:
         assert "not allowed under promotion_policy 'gated'" in str(exc.value)
 
     def test_gated_rejects_case_variant_status(self, sdk):
-        # PR #1073 re-review P0: case variants must not bypass the guard —
-        # EP treats every status except exact 'draft' as live.
-        for bad in ("Live", "LIVE", "lIve", " live ", "\tlive\n"):
+        # PR #1073 re-review P0/P2: case/whitespace variants must not bypass
+        # the guard — only the exact canonical "draft" is storable under
+        # gated; every other value gets the uniform row-9 message. EP treats
+        # every status except exact 'draft' as live.
+        for bad in ("Live", "LIVE", "lIve", " live ", "\tlive\n",
+                    "Draft", "draft ", "DRAFT"):
             bundle = {
                 "points": [
                     {"ref": "pA", "kind": "claim", "content": "A",

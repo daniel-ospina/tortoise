@@ -1773,13 +1773,18 @@ def tortoise_ingest(bundle: Any = None, granularity: str = "bulk",
             nested = item.get("props")
             if st is None and isinstance(nested, dict):
                 st = nested.get("status")
-            if st is not None and str(st).strip().lower() != "draft":
-                return {"error": f"points[{i}] status:{st!r} is not allowed under "
-                                  f"promotion_policy 'gated' — under gated points "
-                                  f"stay draft; pass promotion_policy='auto' for "
-                                  f"explicit live, or keep draft and promote via "
-                                  f"update_point(status='live')",
-                        "code": ERR_INVALID}
+            # Only the exact canonical "draft" string passes — case/whitespace
+            # variants and every other value get the uniform row-9 message.
+            if st is not None:
+                s = str(st)
+                if s.strip().lower() != "draft" or s != "draft":
+                    return {"error": f"points[{i}] status:{st!r} is not allowed "
+                                      f"under promotion_policy 'gated' — under "
+                                      f"gated points stay draft; pass "
+                                      f"promotion_policy='auto' for explicit live, "
+                                      f"or keep draft and promote via "
+                                      f"update_point(status='live')",
+                            "code": ERR_INVALID}
     return _safe(_quota_gated(_get_team_sdk().ingest, "points",
                           abuse_weight=lambda r, a, k: int(((r or {}).get("created") or {}).get("points") or 0)),
                  bundle, granularity=granularity, promotion_policy=promotion_policy)

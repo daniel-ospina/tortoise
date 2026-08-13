@@ -2900,13 +2900,21 @@ class TortoiseSDK:
                 nested = item.get("props")
                 if st is None and isinstance(nested, dict):
                     st = nested.get("status")
-                if st is not None and str(st).strip().lower() != "draft":
-                    raise ValueError(
-                        f"ingest: points[{i}] status:{st!r} is not allowed under "
-                        f"promotion_policy 'gated' — under gated points stay "
-                        f"draft; pass promotion_policy='auto' for explicit live, "
-                        f"or keep draft and promote via update_point(status='live')"
-                    )
+                # Only the exact canonical "draft" string is storable under
+                # gated: case/whitespace variants ("Draft", "draft ") and
+                # every other value get the uniform row-9 message (they would
+                # otherwise fall to create_point's vocabulary backstop with a
+                # different error class).
+                if st is not None:
+                    s = str(st)
+                    if s.strip().lower() != "draft" or s != "draft":
+                        raise ValueError(
+                            f"ingest: points[{i}] status:{st!r} is not allowed "
+                            f"under promotion_policy 'gated' — under gated "
+                            f"points stay draft; pass promotion_policy='auto' "
+                            f"for explicit live, or keep draft and promote via "
+                            f"update_point(status='live')"
+                        )
         from .projection.edges import _VALID_EDGE_PREDICATES
 
         proj = self._get_proj()
