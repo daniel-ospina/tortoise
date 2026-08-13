@@ -379,7 +379,7 @@ with the exact retry action:
 | # | Error shape | Meaning | Action |
 |---|---|---|---|
 | 1 | `ERR_BUNDLE_INVALID` `{error, code, violations[]}` | Phase-1 validation failed; zero mutations; deterministic. | **Fix the bundle; never re-send unchanged.** All violations are in the response. |
-| 2 | `ERR_INVALID` `{error, code}` | Pre-SDK param error (bad `granularity` / `promotion_policy`) and the row-9 guard (`status:'live'` on a point item under gated — shipped as this shape until the Phase-1 `ERR_BUNDLE_INVALID`/`BundleValidationError` migration lands). Message names the valid values / the sanctioned routes. | **Fix the param; never re-send.** Deterministic. |
+| 2 | `ERR_INVALID` `{error, code}` | Pre-SDK param error (bad `granularity` / `promotion_policy`) and the row-9 guard (any effective status other than `'draft'` on a point item under gated — shipped as this shape until the Phase-1 `ERR_BUNDLE_INVALID`/`BundleValidationError` migration lands). Message names the valid values / the sanctioned routes. | **Fix the param; never re-send.** Deterministic. |
 | 3 | `ERR_QUOTA` `{error, code}` | Team cap reached. The check is pre-write **count-then-act** — even a fully-deduped (zero-delta) call is rejected at cap. May arrive **after** Phase-2 commit (writes landed; the response carries the already-computed `batch_id` so you can verify what committed). Cap is **cumulative node count, not rate-based**. | **Stop retrying; escalate** ([§9 Quota](#9-quota)). Once headroom is granted, resubmit **once** — an all-`deduped` response confirms presence. |
 | 4 | `ERR_QUOTA_SERVER` `{error, code}` | Transient quota-counting failure (fail-closed). | **Backoff-retry** (transient). |
 | 5 | `ERR_UNAUTHORIZED` `{error, code}` | 401 — missing/invalid `Bearer tt_<key>`. | **Fix credentials; never retry.** |
@@ -456,7 +456,7 @@ The Q2 gated default applies to the `ingest` surface (SDK + MCP `tortoise_ingest
 Direct primitives remain explicit promotion routes and are NOT gated: `tortoise_create_point(
 props={"status":"live"})`, `tortoise_create_operator` (calls `create_operator` with the
 `promote_source=True` default — a silent-promotion surface outside ingest), and the
-decision-commit helpers. Flipping `create_operator`'s default / exposing `promote_source` on
+promotion/commit primitives (`promote_point`, `supersede_point`, `retract_point`). Flipping `create_operator`'s default / exposing `promote_source` on
 the MCP tool is tracked as a follow-up so the system-wide default matches the ingest contract.
 
 **Promotion-EP conditional line (operative — GATE-2 Q6 approved):**

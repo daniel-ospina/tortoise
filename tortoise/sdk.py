@@ -64,8 +64,15 @@ def _first_non_draft_status(points: list) -> tuple[int, object] | None:
             continue
         st = item.get("status")
         nested = item.get("props")
-        if st is None and isinstance(nested, dict):
+        has_status = "status" in item
+        if not has_status and isinstance(nested, dict):
             st = nested.get("status")
+            has_status = "status" in nested
+        # An explicit status key present with value None is a violation too
+        # (None would otherwise be stored as NULL, which _live_only treats as
+        # LIVE) — uniform row-9 message, not the vocabulary error.
+        if has_status and st is None:
+            return i, None
         if st is not None and str(st) != "draft":
             return i, st
     return None
