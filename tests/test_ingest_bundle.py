@@ -379,6 +379,35 @@ class TestPromotionPolicy:
                 sdk.ingest(bundle)
             assert "not allowed under promotion_policy 'gated'" in str(exc.value)
 
+    def test_gated_rejects_explicit_none_status(self, sdk):
+        # An explicit status key present with value None is a row-9 violation
+        # (None would store NULL, which EP _live_only treats as LIVE) — the
+        # uniform row-9 message, not the create_point vocabulary error.
+        for item in (
+            {"ref": "pA", "kind": "claim", "content": "A", "status": None},
+            {"ref": "pA", "kind": "claim", "content": "A",
+             "props": {"status": None}},
+        ):
+            with pytest.raises(ValueError) as exc:
+                sdk.ingest({"points": [item], "connections": []})
+            assert "not allowed under promotion_policy 'gated'" in str(exc.value)
+
+    def test_gated_accepts_items_without_status_key(self, sdk):
+        # Items with NO status key anywhere (top-level or nested props) are
+        # accepted under gated and default to draft — the has_status flag in
+        # the shared helper must not false-reject them.
+        bundle = {
+            "points": [
+                {"ref": "pA", "kind": "claim", "content": "A"},
+                {"ref": "pB", "kind": "claim", "content": "B",
+                 "props": {"note": "no status here"}},
+            ],
+            "connections": [],
+        }
+        res = sdk.ingest(bundle)  # gated default
+        for pid in res["ids"]["points"]:
+            assert sdk.get_point(pid)["status"] == "draft"
+
     def test_gated_rejects_terminal_status(self, sdk):
         # PR #1073 re-review P1: canonical terminal statuses are EP-LIVE under
         # gated ( _live_only excludes only exact 'draft') and no fresh point
