@@ -15,6 +15,12 @@ os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 
 # #1012: session-shared embedded projection fixture (construction centralized
 # in tests/_embedded.py — one redislite server per session, not per test).
+# tests/ is a namespace package (no __init__.py): resolve it via the repo
+# root so conftest loads under `uv run pytest tests/` too (python -m pytest
+# adds cwd, but uv run does not — CI uv-lock-check, issue #1012).
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tests._embedded import shared_proj  # noqa: F401  (fixture re-export)
 
 from tortoise.sdk import TortoiseSDK
