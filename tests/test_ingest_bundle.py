@@ -9,6 +9,7 @@ Runnable with: .venv/bin/python -m pytest tests/test_ingest_bundle.py -v
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -670,3 +671,260 @@ class TestRegression:
         p1 = sdk.create_point("claim", "same", dedup=True)
         p2 = sdk.create_point("claim", "same", dedup=True)
         assert p1["id"] == p2["id"]
+
+# ── batch_id (epic #902 A4, §4.2) ──────────────────────────────────
+
+@pytest.fixture
+def sdk_logged():
+    """SDK with a JSONL event log (for BatchIdStamped record assertions)."""
+    base = tempfile.mkdtemp(prefix="tortoise_ingest_batch_id_test_")
+    log = os.path.join(base, "events.jsonl")
+    sdk = TortoiseSDK(os.path.join(base, "test.db"), event_log_path=log)
+    sdk._log_path = log
+    yield sdk
+    sdk.close()
+
+
+def _batch_records(sdk):
+    """All BatchIdStamped JSONL records appended by *sdk* (in order)."""
+    with open(sdk._log_path, encoding="utf-8") as f:
+        return [
+            json.loads(line)
+            for line in f.read().splitlines()
+            if line.strip()
+        ]
+
+
+def _batch_id_records(sdk):
+    return [e for e in _batch_records(sdk) if e.get("type") == "BatchIdStamped"]
+
+
+class TestBatchId:
+    def test_response_carries_ulid_shaped_batch_id(self, sdk):
+        import re
+        ulid_re = re.compile(r"^[0-7][0-9A-HJKMNP-TV-Z]{25}$", re.IGNORECASE)
+        res = sdk.ingest(_full_bundle())
+        bid = res["batch_id"]
+        assert isinstance(bid, str) and len(bid) == 26
+        assert ulid_re.match(bid), bid
+
+    def test_every_created_point_stamped_plain_and_operator(self, sdk):
+        # E2E-5.1 assertion 2: batch_id present on EVERY bundle-created Point —
+        # plain points AND the operator Point (stamped POST-WRITE keyed on the
+        # returned id — create_operator accepts no props).
+        res = sdk.ingest(_full_bundle())
+        bid = res["batch_id"]
+        stamped = _count(
+            sdk,
+            "MATCH (n:Point {batch_id:$b}) RETURN count(n)",
+            {"b": bid},
+        )
+        # 2 plain points + 1 operator point
+        assert stamped == 3
+        unstamped = _count(
+            sdk, "MATCH (n:Point) WHERE n.batch_id IS NULL RETURN count(n)")
+        assert unstamped == 0
+        op_id = next(i for i in res["ids"]["connections"] if isinstance(i, str))
+        assert sdk.get_point(op_id)["batch_id"] == bid
+
+    def test_batch_id_equal_across_fresh_graphs(self, sdk):
+        # E2E-5.1: same canonical bundle content ⇒ same content-derived key.
+        base = tempfile.mkdtemp(prefix="tortoise_ingest_batch_id_g2_")
+        sdk2 = TortoiseSDK(os.path.join(base, "test.db"))
+        try:
+            b1 = sdk.ingest(_full_bundle())["batch_id"]
+            b2 = sdk2.ingest(_full_bundle())["batch_id"]
+            assert b1 == b2
+        finally:
+            sdk2.close()
+
+    def test_reingest_same_bundle_same_batch_id_no_rewrite(self, sdk):
+        first = sdk.ingest(_full_bundle())
+        second = sdk.ingest(_full_bundle())
+        assert second["batch_id"] == first["batch_id"]
+        # dedup hits keep their stamp — every point still carries ONE batch_id
+        # and no NEW BatchIdStamped record is emitted on a clean re-ingest.
+        assert _count(
+            sdk,
+            "MATCH (n:Point {batch_id:$b}) RETURN count(n)",
+            {"b": first["batch_id"]},
+        ) == 3
+
+    def test_reingest_does_not_duplicate_records(self, sdk_logged):
+        sdk_logged.ingest(_full_bundle())
+        before = len(_batch_id_records(sdk_logged))
+        sdk_logged.ingest(_full_bundle())
+        after = len(_batch_id_records(sdk_logged))
+        assert after == before  # (h)-repair is a no-op when records exist
+
+    def test_dedup_hit_with_different_batch_id_keeps_original(self, sdk):
+        # A point already stamped with ANOTHER bundle's batch_id keeps it —
+        # dedup never rewrites provenance.
+        bundle = _full_bundle()
+        res = sdk.ingest(bundle)
+        bid = res["batch_id"]
+        # simulate a point stamped with a different batch (e.g. a prior import)
+        other_bid = "0AAAAAAAAAAAAAAAAAAAAAAAAA"
+        pid = res["ids"]["points"][0]
+        sdk._get_proj().g.query(
+            "MATCH (n:Point {id:$id}) SET n.batch_id = $bid",
+            params={"id": pid, "bid": other_bid},
+        )
+        res2 = sdk.ingest(bundle)
+        assert res2["batch_id"] == bid
+        assert sdk.get_point(pid)["batch_id"] == other_bid
+
+    def test_row14_pre_existing_batch_less_point_acquires(self, sdk):
+        # E2E-10 row 14: a batch-less pre-existing LIVE point that dedup-hits
+        # ACQUIRES the bundle's batch_id on its first dedup-hit.
+        pid = sdk.create_point("claim", "Rust is memory-safe by default.")["id"]
+        sdk.update_point(pid, status="live")  # months-old LIVE graph shape
+        res = sdk.ingest(_full_bundle())
+        assert res["deduped"]["points"] == 1
+        assert res["batch_id"] is not None
+        assert sdk.get_point(pid)["batch_id"] == res["batch_id"]
+
+    def test_stamp_when_absent_crash_position_f(self, sdk):
+        # Crash position (f): create_point succeeded, the stamp never landed —
+        # the retry's dedup hit applies stamp-when-absent (completing an
+        # interrupted stamp, not rewriting provenance).
+        pid = sdk.create_point("claim", "Rust is memory-safe by default.")["id"]
+        assert "batch_id" not in sdk.get_point(pid)
+        res = sdk.ingest(_full_bundle())
+        assert res["deduped"]["points"] == 1
+        assert sdk.get_point(pid)["batch_id"] == res["batch_id"]
+
+    def test_h_record_repair_reemits_only_missing_record(self, sdk_logged):
+        # Crash sub-position (h): the prop SET landed but the JSONL record did
+        # not → the retry re-emits ONLY the missing record (never duplicates
+        # existing records, never rewrites the prop).
+        res = sdk_logged.ingest(_full_bundle())
+        bid = res["batch_id"]
+        pid = res["ids"]["points"][0]
+        records = _batch_id_records(sdk_logged)
+        assert len(records) == 3
+        # Simulate the (h) crash: drop pid's BatchIdStamped record from the log
+        kept = [e for e in records if not (
+            e.get("type") == "BatchIdStamped" and e.get("id") == pid)]
+        assert len(kept) == 2
+        with open(sdk_logged._log_path, "w", encoding="utf-8") as f:
+            for e in _batch_records(sdk_logged):
+                if not (e.get("type") == "BatchIdStamped"
+                        and e.get("id") == pid):
+                    f.write(json.dumps(e) + "\n")
+        # Prop is PRESENT (the SET survived); the record is missing.
+        assert sdk_logged.get_point(pid)["batch_id"] == bid
+        # Retry → repair: exactly the missing record re-emitted.
+        res2 = sdk_logged.ingest(_full_bundle())
+        assert res2["batch_id"] == bid
+        repaired = _batch_id_records(sdk_logged)
+        assert len(repaired) == 3
+        assert any(
+            e.get("type") == "BatchIdStamped" and e.get("id") == pid
+            for e in repaired
+        )
+        assert sdk_logged.get_point(pid)["batch_id"] == bid  # prop untouched
+
+    def test_operator_dedup_hit_stamp_when_absent(self, sdk):
+        # Crash position (g): an operator Point created but never stamped is
+        # stamped on the retry's _find_operator dedup hit.
+        res = sdk.ingest(_full_bundle())
+        bid = res["batch_id"]
+        op_id = next(i for i in res["ids"]["connections"] if isinstance(i, str))
+        sdk._get_proj().g.query(
+            "MATCH (n:Point {id:$id}) REMOVE n.batch_id",
+            params={"id": op_id},
+        )
+        assert "batch_id" not in sdk.get_point(op_id)
+        res2 = sdk.ingest(_full_bundle())
+        assert res2["deduped"]["connections"] == 3
+        assert sdk.get_point(op_id)["batch_id"] == bid
+
+    def test_jsonl_record_shape_and_content_hash(self, sdk_logged):
+        # §4.2 rebuild-durability record: {id, batch_id, content_hash?} via
+        # the JSONL branch — plain points carry the dedup-key content_hash;
+        # operator Points (not content-hash dedupable) omit it.
+        res = sdk_logged.ingest(_full_bundle())
+        bid = res["batch_id"]
+        records = _batch_id_records(sdk_logged)
+        assert len(records) == 3
+        plain_ids = set(res["ids"]["points"])
+        op_ids = {i for i in res["ids"]["connections"] if isinstance(i, str)}
+        for rec in records:
+            assert rec["type"] == "BatchIdStamped"
+            assert rec["batch_id"] == bid
+            assert rec["id"] in plain_ids | op_ids
+            assert rec.get("projection_version") == 2  # _emit_event JSONL
+        plain_recs = [r for r in records if r["id"] in plain_ids]
+        op_recs = [r for r in records if r["id"] in op_ids]
+        assert len(plain_recs) == 2 and len(op_recs) == 1
+        assert all(r.get("content_hash") for r in plain_recs)
+        assert "content_hash" not in op_recs[0]
+
+    def test_no_graph_event_store_write_for_batch_id_record(self, sdk_logged):
+        # _stamp_batch_id is a single SET + JSONL-ONLY record — NO GraphEvent
+        # store write (BatchIdStamped is not in _GRAPH_EVENT_TYPES).
+        sdk_logged.ingest(_full_bundle())
+        assert _count(
+            sdk_logged,
+            "MATCH (e:GraphEvent {type:'BatchIdStamped'}) RETURN count(e)",
+        ) == 0
+
+    def test_ingest_scoped_guard_rejects_batch_id_in_props(self, sdk):
+        # §5.2 check 8 (INGEST-SCOPED guard): batch_id is server-managed — a
+        # bundle must not forge it. (The GLOBAL _sanitize_props rejection is
+        # deferred until #785 adopts _stamp_batch_id — GATE-2 Q5.)
+        for section, item in (
+            ("points", {"kind": "claim", "content": "x", "batch_id": "FORGED"}),
+            ("entities", {"type": "subject", "name": "x", "batch_id": "FORGED"}),
+            ("sources", {"url": "https://x.example", "sourceKind": "report",
+                         "batch_id": "FORGED"}),
+            ("connections", {"from": "a", "to": "b", "operator": "IMPL",
+                             "batch_id": "FORGED"}),
+        ):
+            with pytest.raises(ValueError, match="batch_id"):
+                sdk.ingest({section: [item]})
+
+    def test_guard_rejects_before_any_mutation(self, sdk):
+        # The ingest-scoped guard fires BEFORE any node is written (Phase 1 —
+        # zero-mutation discipline, J2).
+        with pytest.raises(ValueError, match="batch_id"):
+            sdk.ingest({"points": [{"kind": "claim", "content": "x",
+                                    "batch_id": "FORGED"}]})
+        assert _point_count(sdk) == 0
+
+    def test_e2e56_batch_id_invariance_via_ingest(self, sdk):
+        # E2E-5.6 end-to-end: re-serialized bundles (shuffled keys + reordered
+        # lists + renamed refs) ingest to ONE identical batch_id on fresh
+        # graphs — guards cross-graph equality and crash-retry single id.
+        canonical = _full_bundle()
+        bid = sdk.ingest(canonical)["batch_id"]
+
+        def _shuffle(value):
+            if isinstance(value, dict):
+                return {_shuffle(k): _shuffle(v)
+                        for k, v in reversed(list(value.items()))}
+            if isinstance(value, list):
+                return [_shuffle(v) for v in value]
+            return value
+
+        renamed = {"p1": "alpha", "p2": "beta", "s1": "gamma",
+                   "src1": "delta", "c1": "1", "c2": "2", "c3": "3"}
+
+        def _rename(x):
+            if isinstance(x, dict):
+                return {_rename(k): _rename(v) for k, v in x.items()}
+            if isinstance(x, list):
+                return [_rename(v) for v in x]
+            if isinstance(x, str) and x in renamed:
+                return renamed[x]
+            return x
+
+        variant = _rename(_shuffle(canonical))
+        variant["connections"] = list(reversed(variant["connections"]))
+        base = tempfile.mkdtemp(prefix="tortoise_ingest_batch_id_v_")
+        sdk2 = TortoiseSDK(os.path.join(base, "test.db"))
+        try:
+            assert sdk2.ingest(variant)["batch_id"] == bid
+        finally:
+            sdk2.close()
