@@ -9,6 +9,11 @@ on:
       - 'tortoise/onboarding/AGENT_ONBOARDING.md'
       - 'tortoise/onboarding/variants/**'
       - 'tortoise/onboarding/stage_variants.py'
+      # #1118: workflow changes must self-deploy — the #1113 merge (which
+      # added the dashboard job) did NOT trigger this workflow because the
+      # workflow file wasn't in its own paths filter; it required manual
+      # dispatch.
+      - '.github/workflows/deploy-pages.yml'
   workflow_dispatch:
 
 concurrency:
