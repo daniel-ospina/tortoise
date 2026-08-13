@@ -532,17 +532,19 @@ BEGIN
     p_max_users => 1, p_max_graphs => 1,
     p_ops_allowance => 10000, p_graph_size_cap => 10000);
 
-  -- claim #1 by user-a (wins)
+  -- claim #1 by user-01 (wins; fixture exists in auth.users)
   PERFORM public.claim_membership(
     p_lookup_hash => 'lkp-race-1082',
-    p_user_id => 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'::uuid,
+    p_user_id => 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbb01'::uuid,
     p_email => 'race-a-1082test@example.com');
 
-  -- claim #2 by user-b (must FAIL — user_id IS NULL conjunct gone)
+  -- claim #2 by user-02 (must FAIL — user_id IS NULL conjunct gone;
+  -- fixture exists in auth.users so the FK is satisfied and the RPC's own
+  -- already_claimed guard is what rejects)
   BEGIN
     PERFORM public.claim_membership(
       p_lookup_hash => 'lkp-race-1082',
-      p_user_id => 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbb03'::uuid,
+      p_user_id => 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbb02'::uuid,
       p_email => 'race-b-1082test@example.com');
     RAISE EXCEPTION 'ASSERTION FAILED: concurrent second claim must raise already_claimed';
   EXCEPTION WHEN others THEN
@@ -554,8 +556,8 @@ BEGIN
   PERFORM tests.assert(
     (SELECT user_id FROM public.team_memberships
       WHERE team_id=v_team AND role='owner' AND status='active') =
-      'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'::uuid,
-    'race: first-claim-wins — owner stays user-a');
+      'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbb01'::uuid,
+    'race: first-claim-wins — owner stays user-01');
   PERFORM tests.assert(
     (SELECT email FROM public.teams WHERE id=v_team) = 'race-a-1082test@example.com',
     'race: teams.email stays the winning claimer');

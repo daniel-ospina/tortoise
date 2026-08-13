@@ -741,11 +741,6 @@ you up to 6 yes/no questions and set up your Tortoise memory.
       await provisionViaEdgeFunction(session, userId, activeMembershipQuery);
     }
 
-    // #1082 (PR1): welcome Phase-2 mint guard — if the browser holds a
-    // claimable tt_ key (sessionStorage written by the dashboard claim card),
-    // GET /v1/claim/status (key via X-Claim-Key header, never query string —
-    // P1-2) and route to the dashboard claim card (NEVER welcome.html
-    // provisioning — the mint would orphan the claimable team). Returns true
     // #1082 (PR1): welcome Phase-2 mint guard — if a claim is IN FLIGHT
     // (non-secret tt_claim_pending marker cookie set by the dashboard claim
     // card on app.premiselabs.co — the raw tt_ key never leaves app-origin
