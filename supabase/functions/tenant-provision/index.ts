@@ -299,7 +299,16 @@ Deno.serve(async (req: Request) => {
     // body fields.
     const user_id = caller.id;
     const email = caller.email;
-    const display_name = caller.display_name || body.display_name || undefined;
+    // display_name may arrive type-confused from PROVIDER metadata
+    // (user_metadata.display_name is unvalidated — e.g. a numeric value from
+    // a social provider). Coerce to a string or drop it so the team-name
+    // derivation falls back to the email prefix instead of crashing
+    // rawName.toLowerCase() → 500 (issue #1132). body.display_name is
+    // already string-guarded by the #1111 post-parse type guard.
+    const display_name =
+      (typeof caller.display_name === "string" ? caller.display_name : undefined) ||
+      body.display_name ||
+      undefined;
 
     // Validate user_id is a UUID before provisioning (avoids orphaned
     // FalkorDB namespaces when called manually with a malformed payload).
