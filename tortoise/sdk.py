@@ -18,6 +18,7 @@ from . import monitoring
 from . import file_indexer  # noqa: F401 — import-time sourceKind registration (§4.4)
 from .projection import FalkorProjection
 from .quota import MAX_EXTRACTIONS_PER_TURN, MAX_SESSION_TURNS
+from .canonical import derive_batch_id
 import threading
 
 # P0 Group 3: register custom kinds for diary + checkpoint
@@ -116,6 +117,13 @@ _GRAPH_EVENT_TYPES = frozenset({
     "DedupeRecorded",  # #784: content-dedup candidate recorded/merged
     "DedupeRejected",  # #784: content-dedup candidate rejected
 })
+
+# Epic #902 A4 (§4.2): JSONL-ONLY batch_id record type — deliberately NOT in
+# _GRAPH_EVENT_TYPES, so _stamp_batch_id writes the prop SET + this record and
+# NO GraphEvent-store event (Q4 stays deferred). A10's rebuild pass-2b replays
+# these records to restore batch_id (+ content_hash / mitigates_operator_id /
+# mitigation_strength) after a rebuild.
+_BATCH_ID_RECORD_TYPE = "BatchIdStamped"
 
 
 def _raise_update_point_status_error(proj, id: str) -> None:
@@ -3646,10 +3654,22 @@ class TortoiseSDK:
         # "draft" on a point item is a violation (no bypass; status:'draft'
         # accepted as a no-op). Phase-1/2 parity via the shared helper.
         for i, item in enumerate(bundle.get("points") or []):
-            if isinstance(item, dict) and item.get("status") not in (None, "draft"):
+            if not isinstance(item, dict):
+                continue
+            # top-level status wins on conflict; nested props flattened by
+            # _coerce_props — mirror _first_non_draft_status (PR #1073).
+            st = item.get("status")
+            has_status = "status" in item
+            if not has_status and isinstance(item.get("props"), dict):
+                st = item["props"].get("status")
+                has_status = "status" in item["props"]
+            # An explicit status key with value None is a violation too
+            # (None stores NULL, which _live_only treats as LIVE) — the
+            # explicit-None and non-draft cases both violate row 9.
+            if has_status and (st is None or st != "draft"):
                 violations.append({
                     "section": "points", "index": i,
-                    "message": f"ingest: points[{i}] status:{item.get('status')!r} "
+                    "message": f"ingest: points[{i}] status:{st!r} "
                                f"is not allowed under promotion_policy 'gated' "
                                f"— under gated points stay draft; pass "
                                f"promotion_policy='auto' for explicit live, or "
@@ -3775,6 +3795,13 @@ class TortoiseSDK:
             raise ValueError(violations[0]["message"])
 
         proj = self._get_proj()
+        # §4.2 (A4): deterministic content-derived batch_id over the canonical
+        # serialization of the RESOLVED bundle (refs expanded, NFC-normalized,
+        # int/float-collapsed, item/connection order normalized) — computed ONCE
+        # here, stamped on every NEW point the commit creates and applied
+        # stamp-when-absent on dedup hits. Clock-independent by construction
+        # (no time component — CYCLE-21 pin).
+        batch_id = derive_batch_id(bundle)
         refs: dict[str, str] = {}          # ref → canonical id (or url for sources)
         source_refs: set[str] = set()      # refs that address Source nodes (url-keyed)
         ids = {"points": [], "entities": [], "sources": [],
@@ -3871,6 +3898,15 @@ class TortoiseSDK:
             if ref:
                 _register_ref(ref, pid, "points")
             ids["points"].append(pid)
+            # §4.2 (A4): stamp the bundle's batch_id on EVERY point — created
+            # points get the full stamp; dedup hits get stamp-when-absent
+            # (a batch-less pre-existing point ACQUIRES the bundle's batch_id on
+            # its first dedup-hit — E2E-10 row 14 — and a crash between
+            # create_point and the stamp, position (f), is completed on retry).
+            # _stamp_batch_id itself decides: full stamp vs (h) record-repair
+            # vs no-op (a point already stamped with a DIFFERENT batch_id keeps
+            # it — dedup never rewrites provenance).
+            self._stamp_batch_id(pid, batch_id, content_hash=_content_hash(content))
             if existed:
                 deduped["points"] += 1
             else:
@@ -3970,6 +4006,12 @@ class TortoiseSDK:
                     oid = op["id"]
                     created["connections"] += 1
                     conn_result = {"operator_id": oid, "deduped": False}
+                # §4.2 (A4): operator Points are stamped POST-WRITE keyed on the
+                # returned id (create_operator accepts no props). Stamp-when-
+                # absent covers the operator-path crash boundary too (position
+                # (g)): a retry's _find_operator dedup hit on a batch-less
+                # operator Point acquires the bundle's batch_id.
+                self._stamp_batch_id(oid, batch_id)
                 ids["connections"].append(oid)
             else:
                 rel = conn["relation"]
@@ -4028,6 +4070,7 @@ class TortoiseSDK:
 
         out = {
             "granularity": granularity,
+            "batch_id": batch_id,
             "created": created,
             "deduped": deduped,
             "ids": ids,
@@ -4036,6 +4079,115 @@ class TortoiseSDK:
         if results is not None:
             out["results"] = results
         return out
+
+    # ── batch_id stamping (epic #902 A4, §4.2) ────────────────────────
+
+    def _stamp_batch_id(self, point_id: str, batch_id: str, *,
+                        content_hash: str | None = None,
+                        mitigates_operator_id: str | None = None,
+                        mitigation_strength: float | None = None) -> bool:
+        """Stamp ``batch_id`` onto a Point — single SET + JSONL-only record.
+
+        §4.2 (A4): ``batch_id`` is SERVER-MANAGED. The stamp is two writes:
+        (1) one prop SET (no GraphEvent — ``BatchIdStamped`` is NOT a
+        ``_GRAPH_EVENT_TYPES`` member), (2) a JSONL-only batch_id record
+        ``{id, batch_id, content_hash?, mitigates_operator_id?,
+        mitigation_strength?}`` for rebuild durability — the PointAdded
+        snapshot predates the stamp, so without the record a rebuild loses
+        every bundle-created point's batch_id (A10 pass-2b replays it).
+
+        Stamp-when-absent (cycle-2/3/4 pins):
+        - prop MISSING → full stamp (SET + record) — completes an interrupted
+          create→stamp write (crash positions (f)/(g)) and lets a batch-less
+          pre-existing dedup hit ACQUIRE the bundle's batch_id on its first
+          dedup-hit (E2E-10 row 14 — there is no implementable discriminator
+          between a crash sibling and a pre-#902 point);
+        - prop PRESENT and equal → the JSONL record is checked; a missing
+          record is re-emitted ONLY (crash sub-position (h): the SET landed
+          but the record did not — completing the interrupted record, NOT
+          rewriting provenance);
+        - prop PRESENT and different → no-op (dedup never rewrites
+          provenance — a re-ingest must not reparent an existing point).
+
+        Returns True when the stamp changed state (SET or record emitted),
+        False when it was a no-op.
+        """
+        proj = self._get_proj()
+        rows = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.batch_id",
+            params={"id": point_id},
+        ).result_set
+        if not rows:
+            return False  # point does not exist — nothing to stamp
+        existing = rows[0][0]
+        if existing is not None and existing != batch_id:
+            return False  # dedup hit keeps its original batch_id
+        if existing is None:
+            proj.g.query(
+                "MATCH (n:Point {id:$id}) SET n.batch_id = $bid",
+                params={"id": point_id, "bid": batch_id},
+            )
+            self._emit_batch_id_record(
+                point_id, batch_id,
+                content_hash=content_hash,
+                mitigates_operator_id=mitigates_operator_id,
+                mitigation_strength=mitigation_strength,
+            )
+            return True
+        # prop present and equal — (h) record-repair: re-emit ONLY the record
+        # when it is missing (the SET survived a crash the record did not).
+        if self._batch_id_record_missing(point_id, batch_id):
+            self._emit_batch_id_record(
+                point_id, batch_id,
+                content_hash=content_hash,
+                mitigates_operator_id=mitigates_operator_id,
+                mitigation_strength=mitigation_strength,
+            )
+            return True
+        return False
+
+    def _emit_batch_id_record(self, point_id: str, batch_id: str, *,
+                              content_hash: str | None = None,
+                              mitigates_operator_id: str | None = None,
+                              mitigation_strength: float | None = None) -> None:
+        """Emit the JSONL-only batch_id record via ``_emit_event``'s JSONL branch.
+
+        The record type is NOT in ``_GRAPH_EVENT_TYPES`` — no GraphEvent-store
+        write (Q4 stays deferred). Optional fields are omitted when None so
+        A10's pass-2b can distinguish absent from explicit-null.
+        """
+        extra: dict = {"batch_id": batch_id}
+        if content_hash is not None:
+            extra["content_hash"] = content_hash
+        if mitigates_operator_id is not None:
+            extra["mitigates_operator_id"] = mitigates_operator_id
+        if mitigation_strength is not None:
+            extra["mitigation_strength"] = mitigation_strength
+        self._emit_event(_BATCH_ID_RECORD_TYPE, id=point_id, **extra)
+
+    def _batch_id_record_missing(self, point_id: str, batch_id: str) -> bool:
+        """True when no ``BatchIdStamped`` JSONL record exists for the pair.
+
+        Best-effort — a log-read failure is logged and treated as "not
+        missing" (the graph mutation already succeeded; a log glitch must not
+        crash the stamp or spin the repair).
+        """
+        log = self._get_event_log()
+        if log is None:
+            return False  # no log configured — no record was or will be written
+        try:
+            for event in log.read_all():
+                if (event.get("type") == _BATCH_ID_RECORD_TYPE
+                        and event.get("id") == point_id
+                        and event.get("batch_id") == batch_id):
+                    return False
+        except Exception:  # noqa: BLE001 — best-effort
+            _logger.warning(
+                "batch_id record check failed for %s — treating as present",
+                point_id, exc_info=True,
+            )
+            return False
+        return True
 
     def _find_operator(self, op_type: str, inputs: list[str],
                        label: str | None = None,
