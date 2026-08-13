@@ -177,6 +177,12 @@ jobs:
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
       - name: Warn if live signup smoke is skipping (no-429 monitor off)
         if: always()
+        # The secrets must be passed to THIS step too — without an env block the
+        # vars are always empty and the warning fires even when the live smoke
+        # ran with creds (#1067; verified in run logs 2026-08-13).
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: |
           # ⛔ env-var check, NOT pytest output parsing: `--collect-only` never
           # prints "skipped" (verified empirically) — grep on it can never match.
