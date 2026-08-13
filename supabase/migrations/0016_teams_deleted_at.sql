@@ -1,4 +1,11 @@
--- Migration 0012: team soft-delete columns (issue #302 E2E-6-D)
+-- Migration 0016: team soft-delete columns (issue #302 E2E-6-D)
+--
+-- FIX (#1001): was numbered 0012, colliding with 0012_teams_billing_columns
+-- (Supabase CLI keys migrations by the numeric prefix — duplicate prefixes
+-- make `db push` abort). Renumbered 0012 → 0016 so every migration version
+-- is unique. The DDL itself is unchanged and idempotent (IF NOT EXISTS);
+-- on prod the columns were already present, so applying this as 0016 only
+-- records it in the migration history.
 --
 -- Owner-only team deletion is two-phase: soft delete (teams.deleted_at
 -- stamp + immediate key/membership/invitation revocation) then hard
