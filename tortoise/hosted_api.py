@@ -4799,36 +4799,18 @@ async def agent_signup(request: Request):
     import uuid as _uuid
     identity = f"anon-{_uuid.uuid4().hex[:12]}"
 
-    from datetime import datetime, timezone as _tz, timedelta
+    from datetime import datetime, timezone as _tz
     from tortoise.auth import hash_api_key as _hash, lookup_hash as _lookup_hash
     from tortoise.pricing import tier_limits
     from tortoise.supabase_control import (
-        get_control_plane, is_supabase_enabled, membership_count_since,
+        get_control_plane, is_supabase_enabled,
         provision_team,
     )
 
-    # Per-identity rate limit: max 3 signups per identity per hour. The
-    # server-side identity is fresh per request (#741), so the count is 0 by
-    # construction — the limit is dead by design; the query is kept for
-    # shape parity (Supabase: identity-based count on team_memberships;
-    # registry: Membership node count).
-    cutoff = (datetime.now(_tz.utc) - timedelta(hours=1)).isoformat()
-    if is_supabase_enabled():
-        try:
-            recent = membership_count_since(
-                get_control_plane(), cutoff=cutoff, identity=identity)
-        except Exception:
-            # Fail-closed: a rate-limit read error is a 500, never a pass.
-            raise HTTPException(status_code=500, detail="Agent signup failed")
-    else:
-        sdk = _make_sdk(namespace="registry")
-        reg = sdk._get_registry()
-        recent = reg.query(
-            "MATCH (m:Membership {user_id:$uid}) WHERE m.created_at > $cutoff RETURN count(m)",
-            params={"uid": identity, "cutoff": cutoff},
-        ).result_set[0][0]
-    if recent >= 3:
-        raise HTTPException(status_code=429, detail="Too many signups from this device — try again later")
+    # #1081: the per-identity count was removed — #741 makes it dead by
+    # construction (server-side identity is fresh per request, count always
+    # 0) and it cost a DB round-trip + a fail-closed 500 branch per signup.
+    # The per-IP signup limiter (2/24h) is the compensating control.
 
     team_id = _uuid.uuid4().hex[:26]
     team_name = f"agent-{team_id[:6]}"

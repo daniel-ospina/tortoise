@@ -344,15 +344,18 @@ class TestAgentSignup:
         r = tc.post("/v1/agent/signup", json={})
         assert r.status_code == 500
 
-    def test_rate_limit_query_shape(self, client):
-        """#741: the server-side identity is fresh per request, so the
-        identity-based count is 0 by construction — replaying a client
-        identity never 429s (dead-limit parity with the registry path)."""
+    def test_rate_limit_query_shape(self, client, monkeypatch):
+        """#1081: the old per-identity count was dead (#741 — server-side
+        identity is fresh per request) and has been REMOVED. The per-IP
+        signup limiter (2/24h) is the compensating control; the 3rd mint
+        from one IP 429s in Supabase mode too (mode-independent store)."""
         tc, fake, _ = client
-        ident = "anon-client-chosen"
-        for _ in range(4):
-            r = tc.post("/v1/agent/signup", json={"identity": ident})
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+        for _ in range(2):
+            r = tc.post("/v1/agent/signup", json={"identity": "anon-client-chosen"})
             assert r.status_code == 200, r.text
+        r = tc.post("/v1/agent/signup", json={"identity": "anon-client-chosen"})
+        assert r.status_code == 429, r.text
 
 
 # ── POST /v1/register (email provision via provision_team RPC) ─────────────
