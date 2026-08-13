@@ -312,10 +312,16 @@ class ConversationMiner:
             # reference via module for clarity at the call site.
             from . import mining as _mining
             try:
+                # Grounding drift protects the LIVE graph against batch
+                # side-effects: capture before the batch's writes are visible
+                # to live grounding... extraction writes drafts (excluded
+                # from the live-only mean), so pre and post normally agree —
+                # a mid-batch promotion would move post and trip the gate.
                 pre = grounding_snapshot(api.projection)["mean"]
                 gate = _mining.EpSafeCommit(api.projection, batch_id)
                 res = gate.run(point_ids, grounding_before=pre,
-                               grounding_after=pre)
+                               grounding_after=grounding_snapshot(
+                                   api.projection)["mean"])
                 if res["ok"]:
                     batch_status = "committed"
                     batch_reason = None
