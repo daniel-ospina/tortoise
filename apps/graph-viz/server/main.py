@@ -7,7 +7,8 @@ Available graphs (in Docker / OrbStack):
   - falkordb (127.0.0.1:6379) password=falkordb → graph "tortoise" (test/dev, 481 claims)
 
 To switch graphs, set env vars:
-  FALKORDB_HOST, FALKORDB_PORT, FALKORDB_PASSWORD, FALKORDB_GRAPH
+  FALKORDB_HOST, FALKORDB_PORT, FALKORDB_USERNAME, FALKORDB_PASSWORD,
+  FALKORDB_SSL (1 for rediss-style TLS), FALKORDB_GRAPH
 """
 from __future__ import annotations
 

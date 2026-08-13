@@ -66,9 +66,15 @@ def test_ssl_disabled_by_default(monkeypatch):
 
 
 def test_graph_env(monkeypatch):
-    """FALKORDB_GRAPH is NOT a connection kwarg — it selects the graph."""
+    """FALKORDB_GRAPH selects the graph; connection kwargs stay clean."""
     monkeypatch.setenv("FALKORDB_GRAPH", "mygraph")
     mod = _load_helper()
     kwargs = mod.build_connection_kwargs()
     assert "graph" not in kwargs and "graph_name" not in kwargs
-    assert mod.DEFAULT_GRAPH == "tortoise"  # default unchanged
+    assert mod.graph_name() == "mygraph"
+
+
+def test_graph_default(monkeypatch):
+    """No FALKORDB_GRAPH → default 'tortoise'."""
+    mod = _load_helper()
+    assert mod.graph_name() == "tortoise"
