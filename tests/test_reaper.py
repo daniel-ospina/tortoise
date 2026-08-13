@@ -948,8 +948,12 @@ def test_active_suite_tokens_lists_markers(monkeypatch, tmp_path):
     marker_dir = tmp_path / "active_suites"
     marker_dir.mkdir(parents=True)
     (marker_dir / "1234-abc").write_text(f"pid={os.getpid()}\n")
-    (marker_dir / "999999-dead").write_text("pid=999999\n")  # dead pid
+    (marker_dir / "99999999-dead").write_text("pid=99999999\n")  # dead by
+    # construction on macOS AND Linux (99999999 > pid_max on both)
+    (marker_dir / "poison-empty").write_text("")
+    (marker_dir / "poison-bad").write_text("pid=" + "9" * 100)  # OverflowError
     (marker_dir / ".hidden").write_text("x")
     monkeypatch.setattr("tortoise.embedded_reaper.ACTIVE_SUITES_DIR",
                         str(marker_dir))
+    # malformed/empty/stale markers are skipped; only the live one counts
     assert active_suite_tokens() == ["1234-abc"]

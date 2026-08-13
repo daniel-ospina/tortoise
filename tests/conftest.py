@@ -154,8 +154,14 @@ def _redislite_hygiene():
         with open(marker_path, "w") as fh:
             fh.write(f"pid={os.getpid()}\n")
     except OSError:
-        # never fail the suite over hygiene; the foreign-pytest guard still
-        # covers the markerless case (defense in depth)
+        # never fail the suite over hygiene; remove any partial marker so a
+        # poison file cannot degrade every future suite's sweep to only-safe
+        # (the foreign-pytest guard still covers the markerless case)
+        if marker_path:
+            try:
+                os.remove(marker_path)
+            except OSError:
+                pass
         marker_path = None
 
     def _sweep(only_safe: bool) -> dict:

@@ -108,8 +108,17 @@ def active_suite_tokens() -> list[str]:
             text = Path(ACTIVE_SUITES_DIR, e).read_text()
         except OSError:
             continue
+        if not text.strip():
+            continue  # empty/partial marker (failed write) -> stale
         m = re.search(r"pid=(\d+)", text)
-        if m and not _pid_alive(int(m.group(1))):
+        if not m:
+            continue  # no parsable pid -> stale
+        try:
+            pid = int(m.group(1))
+            alive = _pid_alive(pid)
+        except (ValueError, OverflowError, OSError):
+            continue  # malformed pid -> stale, never fail the sweep
+        if not alive:
             continue  # stale marker from a killed suite
         tokens.append(e)
     return tokens
