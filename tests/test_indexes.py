@@ -17,7 +17,11 @@ import pytest
 from tortoise.projection import FalkorProjection
 
 EXPECTED_RANGE = {
-    "Point": ["id", "pointKind", "content_hash", "is_operator"],
+    # is_operator is intentionally absent on embedded: falkordblite degrades
+    # the bool type table across close/reopen, so the indexed `= false` form
+    # silently returns 0 after restart (label scans coerce correctly). The
+    # index is created on docker FalkorDB only — see _ensure_indexes.
+    "Point": ["id", "pointKind", "content_hash"],
     "Document": ["id", "documentKind"],
     "Subject": ["id", "name"],
     "Object": ["id", "name"],
@@ -309,3 +313,42 @@ def test_resolve_entity_queries_use_index_scans(proj):
     for label, prop in branches:
         plan = str(g.explain(f"MATCH (n:{label}) WHERE n.{prop} = 'pt1' RETURN n"))
         assert "Node By Index Scan" in plan, f"{label}.{prop} not index-backed: {plan}"
+
+
+# ── Task 8: embedded is_operator index regression (#522, PR #1015) ──────
+# falkordblite/redislite degrades the persisted bool type table across
+# close/reopen: indexed `= false` lookups silently return 0 after restart,
+# while label scans coerce correctly (TRUE lookups survive, FALSE do not).
+# The is_operator index is therefore docker-only — see _ensure_indexes.
+
+def test_embedded_reopen_false_equality_correct():
+    """After close/reopen, non-operator lookups must not silently empty."""
+    from tortoise.sdk import TortoiseSDK
+    db_path = f"{tempfile.mkdtemp(prefix='tt_boolidx_')}/t.db"
+    sdk = TortoiseSDK(db_path)
+    a = sdk.create_point("statement", "bool-a")
+    b = sdk.create_point("statement", "bool-b")
+    sdk.create_operator("IMPL", a["id"], [b["id"]], label="op1")
+    sdk.close()
+
+    sdk2 = TortoiseSDK(db_path)
+    proj = sdk2._get_proj()
+    g = proj.g
+    try:
+        # No is_operator index on embedded — dropped on open (best-effort).
+        idx = _range_indexes(proj)
+        assert "RANGE" not in idx.get("Point", {}).get("is_operator", []), \
+            f"embedded must not serve indexed is_operator lookups: {idx}"
+        # The #522 load-bearing form returns the full non-operator set.
+        assert g.query("MATCH (n:Point) WHERE n.is_operator = false "
+                       "RETURN count(n)").result_set[0][0] == 2
+        assert g.query("MATCH (n:Point) WHERE (n.is_operator IS NULL "
+                       "OR n.is_operator = false) "
+                       "RETURN count(n)").result_set[0][0] == 2
+        # Operator lookups unaffected.
+        assert g.query("MATCH (n:Point {is_operator:true}) "
+                       "RETURN count(n)").result_set[0][0] == 1
+        assert g.query("MATCH (n:Point) WHERE n.is_operator = true "
+                       "RETURN count(n)").result_set[0][0] == 1
+    finally:
+        sdk2.close()

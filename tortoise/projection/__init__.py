@@ -1048,7 +1048,19 @@ class FalkorProjection(
         FTS and vector indexes are gated on FalkorDB >= 4.x.
         """
         # ── Range indexes (always safe, pre-4.x compatible) ──
-        for prop in ("id", "pointKind", "content_hash", "is_operator"):
+        # is_operator is deliberately NOT indexed on embedded (falkordblite /
+        # redislite): the persisted bool type table degrades across close/
+        # reopen, so indexed `= false` lookups silently return 0 after a
+        # restart while label scans coerce correctly (verified: unindexed bool
+        # equality, `<> true`, and the IS NULL disjunction all return the full
+        # set; indexed `= false` returns 0 even after a fresh index rebuild).
+        # TRUE lookups survive reopen, FALSE do not — and #522 is precisely
+        # the non-operator (`= false`) sweep, so this is the load-bearing
+        # form. Docker FalkorDB persists bools correctly, so the index (and
+        # the #522 perf win) applies there; embedded graphs are small, so the
+        # label scan is free. See the PR #1015 crash-recovery regression for
+        # the original repro.
+        for prop in ("id", "pointKind", "content_hash"):
             try:
                 self.g.query(f"CREATE INDEX FOR (n:Point) ON (n.{prop})")
             except Exception as e:
@@ -1059,6 +1071,31 @@ class FalkorProjection(
                     import logging
                     logging.getLogger(__name__).error(
                         "Failed to create index on n.%s: %s", prop, e)
+        if self._is_embedded:
+            # Drop a stale is_operator index persisted by a prior embedded
+            # session — it is unusable for bool equality after reopen (see
+            # above). Best-effort: the absent index is the expected state.
+            try:
+                self.g.query("DROP INDEX ON :Point(is_operator)")
+            except Exception as e:
+                msg = str(e).lower()
+                if ("no such index" not in msg
+                        and "does not exist" not in msg
+                        and "not found" not in msg):
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        "Failed to drop stale embedded is_operator index: %s", e)
+        else:
+            try:
+                self.g.query("CREATE INDEX FOR (n:Point) ON (n.is_operator)")
+            except Exception as e:
+                msg = str(e).lower()
+                if "already indexed" in msg or "already exists" in msg:
+                    pass  # expected — index exists from prior startup
+                else:
+                    import logging
+                    logging.getLogger(__name__).error(
+                        "Failed to create index on n.is_operator: %s", e)
 
         # ── Document range indexes (#125 — structural queries filter by kind) ──
         for prop in ("id", "documentKind"):
