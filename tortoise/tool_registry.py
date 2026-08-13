@@ -477,9 +477,14 @@ TOOL_REGISTRY: list[ToolDefinition] = [
                     "bundle items. granularity='bulk' (default) returns aggregated counts; "
                     "granularity='granular' returns per-item results. promotion_policy='gated' "
                     "(default) keeps points draft and never promotes connections (operator "
-                    "path: promote_source=False via #780); promotion_policy='auto' preserves "
-                    "the #131 promote-on-wire lifecycle (source points go live on first edge). "
-                    "Idempotent-ish: "
+                    "path: promote_source=False via #780); under gated ANY effective "
+                    "status other than 'draft' on a point item is REJECTED (INGEST_CONTRACT "
+                    "row 9 — case variants, nested props={...}, and terminal statuses "
+                    "included) — use promotion_policy='auto' or promote after ingest via "
+                    "update_point(status='live'). promotion_policy='auto' preserves the #131 "
+                    "promote-on-wire lifecycle (draft/null-status sources go live on first "
+                    "edge; terminal sources are never resurrected; deduped connections never "
+                    "retro-promote). Idempotent-ish: "
                     "points dedup by content hash + kind, sources by url, operators by "
                     "input set.",
         annotations=_idem(),
