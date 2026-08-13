@@ -11,6 +11,10 @@
 #      Steps 2+3 are the "single deploy": never run step 3 without step 2
 #      (the app would read Supabase before the Edge Function writes it) and
 #      never let step 2 sit alone (new signups' keys would be unreadable).
+#      Since #1095, this workflow also runs a fail-closed migration-drift
+#      gate before deploy — the operator waits for step 2's apply to go
+#      GREEN, then dispatches this workflow; the gate blocks the deploy if
+#      repo migrations are still ahead of prod.
 #   4. Post-flip verification incl. E2E-7 (#766, the next issue).
 #   5. Registry delete (point of no return, owner informed):
 #      TORTOISE_DB_URI=... .github/scripts/delete-registry --confirm
@@ -86,6 +90,13 @@ jobs:
             echo "::error::FASTAPI_INTERNAL_KEY, TORTOISE_SECRET_PEPPER, and FALKORDB_CLOUD_URI must be set in GitHub secrets"
             exit 1
           fi
+          # Supabase migration drift gate (#1095): SUPABASE_ACCESS_TOKEN is
+          # hard-required — the gate is fail-closed, a missing token must fail
+          # the deploy, never silently skip the schema check.
+          if [ -z "${{ secrets.SUPABASE_ACCESS_TOKEN }}" ]; then
+            echo "::error::SUPABASE_ACCESS_TOKEN must be set in GitHub secrets (migration drift gate, #1095)"
+            exit 1
+          fi
           # Stripe billing (#310): the two keys are hard-required so a deploy
           # never ships with billing silently dead. STRIPE_PRICE_IDS / Resend /
           # BILLING_* are warn-only — they degrade lazily at runtime (billing
@@ -109,6 +120,15 @@ jobs:
           if [ -z "${{ secrets.R2_ACCOUNT_ID }}" ] || [ -z "${{ secrets.R2_BUCKET }}" ]; then
             echo "::warning::R2_* secrets not fully set — backup storage disabled until configured"
           fi
+      # Migration drift gate (#1095): fail-closed check that repo migrations
+      # are not ahead of prod before shipping app code. The #1001 P0 (code
+      # reading teams.suspended_at/flagged_at whose migration never reached
+      # prod) recurred 2026-08-13 (claim_membership, 13-17 min window). No
+      # if: guard — a missing token/error must fail the deploy.
+      - name: Check migration drift (fail-closed)
+        run: bash .github/scripts/check-migration-drift
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
       - name: Set all app secrets on Fly.io (keeps in sync with GitHub/Supabase)
         run: |
           ARGS="FASTAPI_INTERNAL_KEY=${{ secrets.FASTAPI_INTERNAL_KEY }} TORTOISE_SECRET_PEPPER=${{ secrets.TORTOISE_SECRET_PEPPER }} FALKORDB_CLOUD_URI=${{ secrets.FALKORDB_CLOUD_URI }}"

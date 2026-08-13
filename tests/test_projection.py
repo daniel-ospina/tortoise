@@ -63,6 +63,28 @@ def _has_falkor() -> bool:
 def _skip_if_no_falkor() -> bool:
     return not _has_falkor()
 
+_SHARED_EMBEDDED_PROJ = None
+
+
+def _shared_proj():
+    """One session-shared embedded projection (#1012).
+
+    Converted uniform tests build on a SINGLE server instead of one fresh
+    embedded server per test (the recurring #1005 leak driver). Wipes all
+    graphs on every call — hermeticity comes from the wipe, not fresh paths.
+    """
+    global _SHARED_EMBEDDED_PROJ
+    if _SHARED_EMBEDDED_PROJ is None:
+        import tempfile as _tf
+        _SHARED_EMBEDDED_PROJ = FalkorProjection(
+            os.path.join(_tf.mkdtemp(prefix="tortoise_shared_embedded_"),
+                         "shared.db"),
+            graph_name="test",
+        )
+    from tests._embedded import wipe as _wipe
+    _wipe(_SHARED_EMBEDDED_PROJ)
+    return _SHARED_EMBEDDED_PROJ
+
 
 def _docker_falkor_reachable() -> bool:
     """Socket probe: is a live Docker FalkorDB reachable?
@@ -309,21 +331,21 @@ def test_inmemory_conformance():
 def test_falkor_apply_point_added():
     if _skip_if_no_falkor():
         return
-    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    proj = _shared_proj()
     try:
         proj.apply({"type": "PointAdded",
                      "point": {"id": "p1", "content": "hello", "context": "ctx"}})
         r = proj.query("MATCH (n:Point {id:'p1'}) RETURN n.content").result_set
         assert r[0][0] == "hello"
     finally:
-        proj.close()
+        pass  # shared session projection — module helper owns close
 
 
 def test_falkor_apply_operator_added():
     if _skip_if_no_falkor():
         return
     """OperatorAdded creates node + edges to its inputs."""
-    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    proj = _shared_proj()
     try:
         # Add inputs first
         proj.apply({"type": "PointAdded",
@@ -350,14 +372,14 @@ def test_falkor_apply_operator_added():
         ).result_set
         assert rev[0][0] == 1
     finally:
-        proj.close()
+        pass  # shared session projection — module helper owns close
 
 
 def test_falkor_apply_operator_added_orphan_stubs():
     if _skip_if_no_falkor():
         return
     """OperatorAdded auto-creates stub nodes for short-ID inputs."""
-    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    proj = _shared_proj()
     try:
         # "42" is short (< 20 chars) → stub auto-created
         proj.apply({"type": "OperatorAdded",
@@ -367,13 +389,13 @@ def test_falkor_apply_operator_added_orphan_stubs():
         assert stub[0][0] == "[missing]"
         assert stub[0][1] is None  # P2 #49: context field removed — stubs carry no context
     finally:
-        proj.close()
+        pass  # shared session projection — module helper owns close
 
 
 def test_falkor_apply_point_revised():
     if _skip_if_no_falkor():
         return
-    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    proj = _shared_proj()
     try:
         proj.apply({"type": "PointAdded",
                      "point": {"id": "p1", "content": "old", "context": "old_ctx"}})
@@ -386,13 +408,13 @@ def test_falkor_apply_point_revised():
         # P2 #49: context revision removed — n.context is None/gone
         assert r[0][1] is None
     finally:
-        proj.close()
+        pass  # shared session projection — module helper owns close
 
 
 def test_falkor_apply_point_retracted():
     if _skip_if_no_falkor():
         return
-    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    proj = _shared_proj()
     try:
         proj.apply({"type": "PointAdded",
                      "point": {"id": "p1", "content": "hello", "context": "ctx"}})
@@ -402,13 +424,13 @@ def test_falkor_apply_point_retracted():
         assert len(r) == 1
         assert r[0][0] == "retracted"
     finally:
-        proj.close()
+        pass  # shared session projection — module helper owns close
 
 
 def test_falkor_apply_points_merged():
     if _skip_if_no_falkor():
         return
-    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    proj = _shared_proj()
     try:
         proj.apply({"type": "PointAdded",
                      "point": {"id": "a", "content": "A", "context": "ctx"}})
@@ -422,7 +444,7 @@ def test_falkor_apply_points_merged():
             "MATCH (n:Point {id:'b'}) RETURN count(n)"
         ).result_set[0][0] == 0
     finally:
-        proj.close()
+        pass  # shared session projection — module helper owns close
 
 
 def test_falkor_apply_points_merged_nested_format():
@@ -432,7 +454,7 @@ def test_falkor_apply_points_merged_nested_format():
     silent no-op (merged points survived)."""
     if _skip_if_no_falkor():
         return
-    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    proj = _shared_proj()
     try:
         proj.apply({"type": "PointAdded",
                      "point": {"id": "a", "content": "A", "context": "ctx"}})
@@ -448,7 +470,7 @@ def test_falkor_apply_points_merged_nested_format():
             "MATCH (n:Point {id:'b'}) RETURN count(n)"
         ).result_set[0][0] == 0, "merged point b must be deleted (nested format)"
     finally:
-        proj.close()
+        pass  # shared session projection — module helper owns close
 
 
 def test_norm_handles_non_dict_point():
@@ -478,14 +500,14 @@ def test_falkor_apply_ignores_non_dict_point():
     (no crash, no partial write)."""
     if _skip_if_no_falkor():
         return
-    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    proj = _shared_proj()
     try:
         proj.apply({"type": "PointAdded", "point": "legacy-id-123"})
         # no Point node created, no exception raised
         n = proj.g.query("MATCH (n:Point) RETURN count(n)").result_set[0][0]
         assert n == 0, f"expected 0 points after malformed PointAdded, got {n}"
     finally:
-        proj.close()
+        pass  # shared session projection — module helper owns close
 
 
 def test_apply_one_non_dict_point_skipped():
@@ -500,7 +522,7 @@ def test_falkor_nand_operator():
     if _skip_if_no_falkor():
         return
     """NAND operator gets :NAND typed edges."""
-    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    proj = _shared_proj()
     try:
         proj.apply({"type": "PointAdded",
                      "point": {"id": "a", "content": "A", "context": "ctx"}})
@@ -514,14 +536,14 @@ def test_falkor_nand_operator():
         ).result_set
         assert len(edges) == 2
     finally:
-        proj.close()
+        pass  # shared session projection — module helper owns close
 
 
 def test_falkor_unknown_operator_type():
     if _skip_if_no_falkor():
         return
     """Unknown operator type defaults to :INPUT edges."""
-    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    proj = _shared_proj()
     try:
         proj.apply({"type": "PointAdded",
                      "point": {"id": "a", "content": "A", "context": "ctx"}})
@@ -533,7 +555,7 @@ def test_falkor_unknown_operator_type():
         ).result_set
         assert edges[0][0] == 1
     finally:
-        proj.close()
+        pass  # shared session projection — module helper owns close
 
 
 # -------------------------------------------------- FalkorProjection.rebuild
@@ -543,13 +565,13 @@ def test_falkor_rebuild_from_log():
         return
     api, log = _api()
     _build(api)
-    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    proj = _shared_proj()
     try:
         proj.rebuild(log)
         n = proj.query("MATCH (n:Point) RETURN count(n)").result_set[0][0]
         assert n == 3  # 2 statements + 1 operator
     finally:
-        proj.close()
+        pass  # shared session projection — module helper owns close
 
 
 def test_falkor_rebuild_then_apply():
@@ -558,7 +580,7 @@ def test_falkor_rebuild_then_apply():
     """Incremental apply after rebuild matches full fold."""
     api, log = _api()
     a, b, op = _build(api)
-    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    proj = _shared_proj()
     try:
         proj.rebuild(log)
         # Apply a new event incrementally
@@ -567,7 +589,7 @@ def test_falkor_rebuild_then_apply():
         n = proj.query("MATCH (n:Point) RETURN count(n)").result_set[0][0]
         assert n == 4
     finally:
-        proj.close()
+        pass  # shared session projection — module helper owns close
 
 
 # ----------------------------------------------- FalkorProjection.edge_stats
@@ -575,7 +597,7 @@ def test_falkor_rebuild_then_apply():
 def test_falkor_edge_stats():
     if _skip_if_no_falkor():
         return
-    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    proj = _shared_proj()
     try:
         proj.apply({"type": "PointAdded",
                      "point": {"id": "a", "content": "A", "context": "ctx"}})
@@ -598,13 +620,13 @@ def test_falkor_edge_stats():
         assert stats["nand_edges"] == 2
         assert stats["input_edges"] == 4
     finally:
-        proj.close()
+        pass  # shared session projection — module helper owns close
 
 
 def test_falkor_edge_stats_empty():
     if _skip_if_no_falkor():
         return
-    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    proj = _shared_proj()
     try:
         stats = proj.edge_stats()
         assert stats["operators"] == 0
@@ -612,7 +634,7 @@ def test_falkor_edge_stats_empty():
         assert stats["nand_edges"] == 0
         assert stats["input_edges"] == 0
     finally:
-        proj.close()
+        pass  # shared session projection — module helper owns close
 
 
 # ------------------------------------------- FalkorProjection._upsert direct
@@ -620,7 +642,7 @@ def test_falkor_edge_stats_empty():
 def test_falkor_upsert_statement():
     if _skip_if_no_falkor():
         return
-    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    proj = _shared_proj()
     try:
         proj._upsert({"id": "s1", "content": "hello", "context": "ctx"})
         r = proj.query(
@@ -630,13 +652,13 @@ def test_falkor_upsert_statement():
         assert r[0][1] is False
         assert r[0][2] is None
     finally:
-        proj.close()
+        pass  # shared session projection — module helper owns close
 
 
 def test_falkor_upsert_operator():
     if _skip_if_no_falkor():
         return
-    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    proj = _shared_proj()
     try:
         proj._upsert({"id": "op1", "content": "IMPL(a,b)", "context": "ctx",
                        "operator": {"op_type": "IMPL", "inputs": ["a", "b"]}})
@@ -646,13 +668,13 @@ def test_falkor_upsert_operator():
         assert r[0][0] is True
         assert r[0][1] == "IMPL"
     finally:
-        proj.close()
+        pass  # shared session projection — module helper owns close
 
 
 def test_falkor_upsert_idempotent():
     if _skip_if_no_falkor():
         return
-    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    proj = _shared_proj()
     try:
         proj._upsert({"id": "s1", "content": "hello", "context": "ctx"})
         proj._upsert({"id": "s1", "content": "updated", "context": "new_ctx"})
@@ -663,7 +685,7 @@ def test_falkor_upsert_idempotent():
         ).result_set
         assert r2[0][0] == "updated"
     finally:
-        proj.close()
+        pass  # shared session projection — module helper owns close
 
 
 # ---------------------------------------------- FalkorProjection._delete
@@ -671,31 +693,31 @@ def test_falkor_upsert_idempotent():
 def test_falkor_delete():
     if _skip_if_no_falkor():
         return
-    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    proj = _shared_proj()
     try:
         proj._upsert({"id": "p1", "content": "hello", "context": "ctx"})
         proj._delete("p1")
         r = proj.query("MATCH (n:Point {id:'p1'}) RETURN count(n)").result_set
         assert r[0][0] == 0
     finally:
-        proj.close()
+        pass  # shared session projection — module helper owns close
 
 
 def test_falkor_delete_missing_noop():
     if _skip_if_no_falkor():
         return
-    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    proj = _shared_proj()
     try:
         proj._delete("nonexistent")  # should not raise
     finally:
-        proj.close()
+        pass  # shared session projection — module helper owns close
 
 
 def test_falkor_delete_cascades_edges():
     if _skip_if_no_falkor():
         return
     """DETACH DELETE should cascade to edges."""
-    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    proj = _shared_proj()
     try:
         proj._upsert({"id": "a", "content": "A", "context": "ctx"})
         proj._upsert({"id": "op1", "content": "IMPL", "context": "ctx",
@@ -709,7 +731,7 @@ def test_falkor_delete_cascades_edges():
         e2 = proj.query("MATCH ()-[r]->() RETURN count(r)").result_set[0][0]
         assert e2 == 0
     finally:
-        proj.close()
+        pass  # shared session projection — module helper owns close
 
 
 # --------------------------------- FalkorProjection._confidence / _neighbors
@@ -717,7 +739,7 @@ def test_falkor_delete_cascades_edges():
 def test_falkor_confidence_default():
     if _skip_if_no_falkor():
         return
-    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    proj = _shared_proj()
     try:
         # Non-existing node returns 0.5
         assert proj._confidence("nonexistent") == 0.5
@@ -725,36 +747,36 @@ def test_falkor_confidence_default():
         proj._upsert({"id": "p1", "content": "hello", "context": "ctx"})
         assert proj._confidence("p1") == 0.5
     finally:
-        proj.close()
+        pass  # shared session projection — module helper owns close
 
 
 def test_falkor_confidence_explicit():
     if _skip_if_no_falkor():
         return
-    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    proj = _shared_proj()
     try:
         proj._upsert({"id": "p1", "content": "hello", "context": "ctx"})
         proj.g.query("MATCH (n:Point {id:'p1'}) SET n.confidence=0.8")
         assert proj._confidence("p1") == 0.8
     finally:
-        proj.close()
+        pass  # shared session projection — module helper owns close
 
 
 def test_falkor_neighbors_empty():
     if _skip_if_no_falkor():
         return
-    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    proj = _shared_proj()
     try:
         proj._upsert({"id": "loner", "content": "solitary", "context": "ctx"})
         assert proj._neighbors("loner") == []
     finally:
-        proj.close()
+        pass  # shared session projection — module helper owns close
 
 
 def test_falkor_neighbors():
     if _skip_if_no_falkor():
         return
-    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    proj = _shared_proj()
     try:
         proj._upsert({"id": "a", "content": "A", "context": "ctx"})
         proj._upsert({"id": "b", "content": "B", "context": "ctx"})
@@ -779,7 +801,7 @@ def test_falkor_neighbors():
         ).result_set
         assert sorted(r[0] for r in nand_rows) == ["a", "c"]
     finally:
-        proj.close()
+        pass  # shared session projection — module helper owns close
 
 
 # ------------------------------------- FalkorProjection._compute_confidence
@@ -787,31 +809,31 @@ def test_falkor_neighbors():
 def test_compute_confidence_no_edges():
     if _skip_if_no_falkor():
         return
-    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    proj = _shared_proj()
     try:
         proj._upsert({"id": "p1", "content": "loner", "context": "ctx"})
         # No edges → 0.5
         assert proj._compute_confidence("p1") == 0.5
     finally:
-        proj.close()
+        pass  # shared session projection — module helper owns close
 
 
 def test_compute_confidence_with_parent():
     if _skip_if_no_falkor():
         return
-    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    proj = _shared_proj()
     try:
         proj._upsert({"id": "p1", "content": "loner", "context": "ctx"})
         # No edges → base=0.5, blended with parent: 0.5*0.5 + 0.8*0.5 = 0.65
         assert proj._compute_confidence("p1", parent_confidence=0.8) == 0.65
     finally:
-        proj.close()
+        pass  # shared session projection — module helper owns close
 
 
 def test_compute_confidence_with_edges():
     if _skip_if_no_falkor():
         return
-    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    proj = _shared_proj()
     try:
         proj._upsert({"id": "a", "content": "A", "context": "ctx"})
         proj._upsert({"id": "b", "content": "B", "context": "ctx"})
@@ -839,7 +861,7 @@ def test_compute_confidence_with_edges():
         expected_base = s / (s + c) if (s + c) else 0.5
         assert proj._compute_confidence("a") == expected_base
     finally:
-        proj.close()
+        pass  # shared session projection — module helper owns close
 
 
 # --------------------------------------------- FalkorProjection.rebuild_all
@@ -958,12 +980,12 @@ def test_falkor_rebuild_all_with_retractions():
 def test_compute_grounding_empty():
     if _skip_if_no_falkor():
         return
-    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    proj = _shared_proj()
     try:
         result = proj.compute_grounding()
         assert result == {}
     finally:
-        proj.close()
+        pass  # shared session projection — module helper owns close
 
 
 def test_compute_grounding_basic():
@@ -976,7 +998,7 @@ def test_compute_grounding_basic():
         print("SKIP test_compute_grounding_basic (scipy not installed)")
         return
 
-    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    proj = _shared_proj()
     try:
         # Add a resolution event (grounding seed)
         proj._upsert({"id": "r1", "content": "resolution", "context": "resolution-event"})
@@ -1000,7 +1022,7 @@ def test_compute_grounding_basic():
         assert g is not None
         assert isinstance(g, (int, float))
     finally:
-        proj.close()
+        pass  # shared session projection — module helper owns close
 
 
 def test_compute_grounding_resolution_vector():
@@ -1013,7 +1035,7 @@ def test_compute_grounding_resolution_vector():
         print("SKIP test_compute_grounding_resolution_vector (scipy not installed)")
         return
 
-    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    proj = _shared_proj()
     try:
         proj._upsert({"id": "rv1", "content": "vector", "context": "resolution-vector"})
         proj._upsert({"id": "s1", "content": "supports", "context": "ctx"})
@@ -1022,7 +1044,7 @@ def test_compute_grounding_resolution_vector():
         result = proj.compute_grounding()
         assert "rv1" in result
     finally:
-        proj.close()
+        pass  # shared session projection — module helper owns close
 
 
 def test_compute_grounding_operator_excluded():
@@ -1035,7 +1057,7 @@ def test_compute_grounding_operator_excluded():
         print("SKIP test_compute_grounding_operator_excluded (scipy not installed)")
         return
 
-    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    proj = _shared_proj()
     try:
         # Operator with resolution-event context — should be excluded
         proj._upsert({"id": "op1", "content": "IMPL", "context": "resolution-event",
@@ -1047,7 +1069,7 @@ def test_compute_grounding_operator_excluded():
         # r1 is a statement → included
         assert result["op1"] >= 0  # grounding computed (via propagation), but not from seed
     finally:
-        proj.close()
+        pass  # shared session projection — module helper owns close
 
 
 # -------------------------------------- FalkorProjection.propagate_shock
@@ -1055,7 +1077,7 @@ def test_compute_grounding_operator_excluded():
 def test_propagate_shock_empty_graph():
     if _skip_if_no_falkor():
         return
-    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    proj = _shared_proj()
     try:
         proj._upsert({"id": "e1", "content": "epicenter", "context": "ctx"})
         changed = proj.propagate_shock("e1")
@@ -1066,13 +1088,13 @@ def test_propagate_shock_empty_graph():
         # returns 0.5 (no edges). So abs(new - old) = 0.0 ≤ threshold(0.05) → no change.
         assert "e1" not in changed
     finally:
-        proj.close()
+        pass  # shared session projection — module helper owns close
 
 
 def test_propagate_shock_with_edges():
     if _skip_if_no_falkor():
         return
-    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    proj = _shared_proj()
     try:
         # Build a small graph
         proj._upsert({"id": "a", "content": "A", "context": "ctx"})
@@ -1094,13 +1116,13 @@ def test_propagate_shock_with_edges():
         assert old_a == 0.3
         assert new_a == 0.5
     finally:
-        proj.close()
+        pass  # shared session projection — module helper owns close
 
 
 def test_propagate_shock_depth_limit():
     if _skip_if_no_falkor():
         return
-    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    proj = _shared_proj()
     try:
         # Chain: a → op1 → b → op2 → c → op3 → d
         for pid in ("a", "b", "c", "d"):
@@ -1124,13 +1146,13 @@ def test_propagate_shock_depth_limit():
         assert "a" in changed
         assert "c" not in changed
     finally:
-        proj.close()
+        pass  # shared session projection — module helper owns close
 
 
 def test_propagate_shock_threshold():
     if _skip_if_no_falkor():
         return
-    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    proj = _shared_proj()
     try:
         proj._upsert({"id": "x", "content": "X", "context": "ctx"})
         # Set confidence to 0.5001 — very close to default
@@ -1143,7 +1165,7 @@ def test_propagate_shock_threshold():
         # abs(0.5 - 0.5001) = 0.0001 < 1.0 → no change
         assert "x" not in changed
     finally:
-        proj.close()
+        pass  # shared session projection — module helper owns close
 
 
 # -------------------------------------------- FalkorProjection.query direct
@@ -1151,7 +1173,7 @@ def test_propagate_shock_threshold():
 def test_falkor_query():
     if _skip_if_no_falkor():
         return
-    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    proj = _shared_proj()
     try:
         proj._upsert({"id": "p1", "content": "hello", "context": "ctx"})
         r = proj.query(
@@ -1160,7 +1182,7 @@ def test_falkor_query():
         )
         assert r.result_set[0][0] == "hello"
     finally:
-        proj.close()
+        pass  # shared session projection — module helper owns close
 
 
 # ------------------------------------------------------ FalkorProjection.close
@@ -1168,6 +1190,8 @@ def test_falkor_query():
 def test_falkor_close():
     if _skip_if_no_falkor():
         return
+    # Close semantics need a per-test projection — closing the shared one
+    # would kill the session server (issue #1012 conversion rule).
     proj = FalkorProjection(_tmp("g.db"), graph_name="test")
     proj._upsert({"id": "p1", "content": "test", "context": "ctx"})
     proj.close()
@@ -1211,7 +1235,7 @@ def test_falkor_upsert_event():
     """_upsert_event creates :Event node with all properties."""
     if _skip_if_no_falkor():
         return
-    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    proj = _shared_proj()
     try:
         event = {
             "eventId": "ev-001",
@@ -1238,14 +1262,14 @@ def test_falkor_upsert_event():
         assert r[0][3] == "internal"
         assert r[0][4] == "jsonl"
     finally:
-        proj.close()
+        pass  # shared session projection — module helper owns close
 
 
 def test_falkor_upsert_event_idempotent():
     """Re-applying same event via MERGE does not create duplicates."""
     if _skip_if_no_falkor():
         return
-    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    proj = _shared_proj()
     try:
         event = {
             "eventId": "ev-001",
@@ -1268,14 +1292,14 @@ def test_falkor_upsert_event_idempotent():
         ).result_set[0][0]
         assert count == 1  # no duplicate
     finally:
-        proj.close()
+        pass  # shared session projection — module helper owns close
 
 
 def test_falkor_upsert_event_on_create_no_overwrite():
     """ON CREATE SET prevents overwriting existing event properties."""
     if _skip_if_no_falkor():
         return
-    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    proj = _shared_proj()
     try:
         event = {
             "eventId": "ev-001",
@@ -1300,7 +1324,7 @@ def test_falkor_upsert_event_on_create_no_overwrite():
         ).result_set[0][0]
         assert r == "other-agent"  # last write wins — ON MATCH SET
     finally:
-        proj.close()
+        pass  # shared session projection — module helper owns close
 
 
 # ---------------------------------------------------- #13 cross-file rebuild
@@ -1590,53 +1614,53 @@ class TestVocabEdgeValidation:
         """create_edge rejects 'instantiates' — Action dissolved in v3.0."""
         if _skip_if_no_falkor():
             return
-        proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+        proj = _shared_proj()
         try:
             proj._upsert({"id": "a", "content": "A", "context": "ctx"})
             proj._upsert({"id": "b", "content": "B", "context": "ctx"})
             with pytest.raises(ValueError, match="Unknown predicate: instantiates"):
                 proj.create_edge("a", "b", "instantiates")
         finally:
-            proj.close()
+            pass  # shared session projection — module helper owns close
 
     def test_dependsOn_accepted_by_create_edge(self):
         """create_edge accepts 'dependsOn' — pack-declared, valid predicate."""
         if _skip_if_no_falkor():
             return
-        proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+        proj = _shared_proj()
         try:
             proj._upsert({"id": "a", "content": "A", "context": "ctx"})
             proj._upsert({"id": "b", "content": "B", "context": "ctx"})
             ok = proj.create_edge("a", "b", "dependsOn")
             assert ok is True
         finally:
-            proj.close()
+            pass  # shared session projection — module helper owns close
 
     def test_reportsTo_accepted_by_create_edge(self):
         """create_edge accepts 'reportsTo' — org hierarchy, valid predicate."""
         if _skip_if_no_falkor():
             return
-        proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+        proj = _shared_proj()
         try:
             proj._upsert({"id": "a", "content": "A", "context": "ctx"})
             proj._upsert({"id": "b", "content": "B", "context": "ctx"})
             ok = proj.create_edge("a", "b", "reportsTo")
             assert ok is True
         finally:
-            proj.close()
+            pass  # shared session projection — module helper owns close
 
     def test_related_accepted_by_create_edge(self):
         """create_edge accepts 'related' — generic catch-all predicate."""
         if _skip_if_no_falkor():
             return
-        proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+        proj = _shared_proj()
         try:
             proj._upsert({"id": "a", "content": "A", "context": "ctx"})
             proj._upsert({"id": "b", "content": "B", "context": "ctx"})
             ok = proj.create_edge("a", "b", "related")
             assert ok is True
         finally:
-            proj.close()
+            pass  # shared session projection — module helper owns close
 
     def test_valid_predicates_no_longer_contains_instantiates(self):
         """#214: validate that valid_predicates set no longer includes instantiates.
@@ -1658,7 +1682,7 @@ class TestCreateEdgeAboutPredicates:
     """#391: about* predicates must be creatable via generic create_edge."""
 
     def _proj(self):
-        proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+        proj = _shared_proj()
         proj._upsert({"id": "p1", "content": "claim", "context": "ctx"})
         proj._upsert({"id": "p2", "content": "other", "context": "ctx"})
         proj._upsert_subject({"id": "s1", "name": "Alice"})
@@ -1694,7 +1718,7 @@ class TestCreateEdgeAboutPredicates:
             ).result_set
             assert [r[0] for r in rows] == ["p2"]
         finally:
-            proj.close()
+            pass  # shared session projection — module helper owns close
 
     def test_about_edges_idempotent_on_recreate(self):
         """Re-creating the same about edge is a no-op (MERGE semantics)."""
@@ -1709,14 +1733,14 @@ class TestCreateEdgeAboutPredicates:
             ).result_set
             assert rows[0][0] == 1
         finally:
-            proj.close()
+            pass  # shared session projection — module helper owns close
 
 
 class TestOwnedByDagGuard:
     """#390: generic create_edge must not bypass the ownedBy circular-DAG guard."""
 
     def _proj(self, ids=("a", "b", "c")):
-        proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+        proj = _shared_proj()
         for pid in ids:
             proj._upsert({"id": pid, "content": pid.upper(), "context": "ctx"})
         return proj
@@ -1736,7 +1760,7 @@ class TestOwnedByDagGuard:
             ).result_set
             assert rows[0][0] == 0
         finally:
-            proj.close()
+            pass  # shared session projection — module helper owns close
 
     def test_transitive_cycle_rejected(self):
         """a→b→c then c→a must raise (2-hop cycle closes)."""
@@ -1749,7 +1773,7 @@ class TestOwnedByDagGuard:
             with pytest.raises(ValueError, match="Circular ownership"):
                 proj.create_edge("c", "a", "ownedBy")
         finally:
-            proj.close()
+            pass  # shared session projection — module helper owns close
 
     def test_acyclic_chain_accepted(self):
         """Valid ownership chains still pass through create_edge."""
@@ -1764,7 +1788,7 @@ class TestOwnedByDagGuard:
             ).result_set
             assert rows[0][0] == 2
         finally:
-            proj.close()
+            pass  # shared session projection — module helper owns close
 
     def test_guard_consistent_with_create_owned_by(self):
         """create_owned_by and create_edge agree on the same cycle either way."""
@@ -1777,7 +1801,7 @@ class TestOwnedByDagGuard:
             with pytest.raises(ValueError, match="Circular ownership"):
                 proj.create_owned_by("b", "a")       # b owned by a → cycle
         finally:
-            proj.close()
+            pass  # shared session projection — module helper owns close
         # edge created via create_owned_by blocks create_edge
         proj = self._proj(ids=("a", "b"))
         try:
@@ -1785,7 +1809,7 @@ class TestOwnedByDagGuard:
             with pytest.raises(ValueError, match="Circular ownership"):
                 proj.create_edge("b", "a", "ownedBy")
         finally:
-            proj.close()
+            pass  # shared session projection — module helper owns close
 
 
 def test_falkor_rebuild_all_parity_with_apply():
@@ -1974,7 +1998,7 @@ def test_falkor_revise_point_wipes_stale_embedding_on_compute_failure():
     so SET overwrites the graph value instead of preserving the old vector."""
     if _skip_if_no_falkor():
         return
-    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    proj = _shared_proj()
     try:
         proj.apply({"type": "PointAdded",
                      "point": {"id": "p1", "content": "old content", "context": "ctx"}})
@@ -1993,7 +2017,7 @@ def test_falkor_revise_point_wipes_stale_embedding_on_compute_failure():
         assert r[0][0] == "new content"
         assert r[0][1] is True, "stale embedding survived a failed recompute (#19)"
     finally:
-        proj.close()
+        pass  # shared session projection — module helper owns close
 
 
 # ── #548: SDK-created points survive rebuild_all ──────────────────────────
@@ -2571,7 +2595,7 @@ def test_falkor_apply_non_dict_operator_no_crash():
     guard in _create_edges — not AttributeError in op.get('op_type')."""
     if _skip_if_no_falkor():
         return
-    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    proj = _shared_proj()
     try:
         proj.apply({"type": "PointAdded",
                     "point": {"id": "p-op-str", "content": "x", "operator": "IMPL"}})
@@ -2582,7 +2606,7 @@ def test_falkor_apply_non_dict_operator_no_crash():
         assert row and row[0][0] is False, \
             "non-dict operator must degrade to is_operator=false"
     finally:
-        proj.close()
+        pass  # shared session projection — module helper owns close
 
 
 def test_fold_missing_type_events_skipped():

@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import base64
 import json
-import os
 import tempfile
 
 import pytest
@@ -21,6 +19,7 @@ from tortoise.backup_sweep import (
     team_graph_name,
 )
 from tortoise.hosted_backup import MemoryStorage
+from tests._embedded import wipe  # noqa: E402
 from tortoise.projection import FalkorProjection
 
 _STREAM_KEY = b"r" * 32  # registry_stream_key (Fly-only, #661)
@@ -42,9 +41,9 @@ def _config(**over) -> BackupConfig:
     return BackupConfig(**base)
 
 
-def _make_env(monkeypatch, tmp) -> FalkorProjection:
-    """A projection on a temp DB with a registry Team node + team graph."""
-    proj = FalkorProjection(os.path.join(tmp, "t.db"))
+def _make_env(monkeypatch, proj) -> FalkorProjection:
+    """Seed the (shared) projection with a registry Team node + team graph."""
+    wipe(proj)
     registry = proj.db.select_graph("registry_control_plane")
     registry.query("CREATE (t:Team {id:'team_x', tier:'pro'})")
     team_g = proj.db.select_graph("team_team_x")
@@ -63,19 +62,25 @@ def _seed_team_graph(proj, team_id: str, n: int = 5) -> None:
         )
 
 
-def test_enumerate_teams_returns_registry_ids():
+def test_enumerate_teams_returns_registry_ids(shared_proj):
     with tempfile.TemporaryDirectory() as tmp:
-        proj = FalkorProjection(os.path.join(tmp, "t.db"))
+        proj = shared_proj
+        if proj is None:
+            return
+        wipe(proj)
         reg = proj.db.select_graph("registry_control_plane")
         reg.query("CREATE (t:Team {id:'a'})")
         reg.query("CREATE (t:Team {id:'b'})")
         assert sorted(enumerate_teams(reg)) == ["a", "b"]
 
 
-def test_enumerate_teams_fail_closed_on_query_error():
+def test_enumerate_teams_fail_closed_on_query_error(shared_proj):
     """Enum-source failure must raise (never be classified as chronic NO_TEAMS)."""
     with tempfile.TemporaryDirectory() as tmp:
-        proj = FalkorProjection(os.path.join(tmp, "t.db"))
+        proj = shared_proj
+        if proj is None:
+            return
+        wipe(proj)
         reg = proj.db.select_graph("registry_control_plane")
 
         def _boom(*a, **k):
@@ -86,9 +91,12 @@ def test_enumerate_teams_fail_closed_on_query_error():
             enumerate_teams(reg)
 
 
-def test_sweep_no_teams_is_signal_not_incident():
+def test_sweep_no_teams_is_signal_not_incident(shared_proj):
     with tempfile.TemporaryDirectory() as tmp:
-        proj = FalkorProjection(os.path.join(tmp, "t.db"))
+        proj = shared_proj
+        if proj is None:
+            return
+        wipe(proj)
         reg = proj.db.select_graph("registry_control_plane")
         store = MemoryStorage()
         res = run_backup_sweep(
@@ -99,10 +107,13 @@ def test_sweep_no_teams_is_signal_not_incident():
         assert read_ops_state(store).get("last_team_count") == 0
 
 
-def test_sweep_enum_delta_fires_incident():
+def test_sweep_enum_delta_fires_incident(shared_proj):
     """A prior team count > 0 → 0 is an incident, not chronic NO_TEAMS."""
     with tempfile.TemporaryDirectory() as tmp:
-        proj = FalkorProjection(os.path.join(tmp, "t.db"))
+        proj = shared_proj
+        if proj is None:
+            return
+        wipe(proj)
         reg = proj.db.select_graph("registry_control_plane")
         store = MemoryStorage()
         store.upload(OPS_STATE_KEY, json.dumps({"last_team_count": 3}).encode())
@@ -114,14 +125,17 @@ def test_sweep_enum_delta_fires_incident():
         assert "ENUM_DELTA" in kinds
 
 
-def test_sweep_enum_delta_suppressed_during_flip_window(monkeypatch):
+def test_sweep_enum_delta_suppressed_during_flip_window(monkeypatch, shared_proj):
     """#669 flip window (P3-4, #771): TORTOISE_SUPPRESS_ENUM_DELTA=1 stops
     the spurious ENUM_DELTA incident when the registry is deleted at the
     flip (team universe legitimately drops to 0 — the pre-deploy gate
     asserts both stores are empty first). The state is still persisted and
     the guard returns as soon as the flag is unset."""
     with tempfile.TemporaryDirectory() as tmp:
-        proj = FalkorProjection(os.path.join(tmp, "t.db"))
+        proj = shared_proj
+        if proj is None:
+            return
+        wipe(proj)
         reg = proj.db.select_graph("registry_control_plane")
         store = MemoryStorage()
         store.upload(OPS_STATE_KEY, json.dumps({"last_team_count": 3}).encode())
@@ -141,9 +155,11 @@ def test_sweep_enum_delta_suppressed_during_flip_window(monkeypatch):
         assert any(i["kind"] == "ENUM_DELTA" for i in res2["incidents"])
 
 
-def test_sweep_backs_up_team_and_writes_state():
+def test_sweep_backs_up_team_and_writes_state(shared_proj):
     with tempfile.TemporaryDirectory() as tmp:
-        proj = _make_env(None, tmp)
+        if shared_proj is None:
+            return
+        proj = _make_env(None, shared_proj)
         reg = proj.db.select_graph("registry_control_plane")
         store = MemoryStorage()
         res = run_backup_sweep(
@@ -165,9 +181,11 @@ def test_sweep_backs_up_team_and_writes_state():
         assert state["node_count"] == 1
 
 
-def test_sweep_size_guard_aborts_before_dump():
+def test_sweep_size_guard_aborts_before_dump(shared_proj):
     with tempfile.TemporaryDirectory() as tmp:
-        proj = _make_env(None, tmp)
+        if shared_proj is None:
+            return
+        proj = _make_env(None, shared_proj)
         reg = proj.db.select_graph("registry_control_plane")
         store = MemoryStorage()
         res = run_backup_sweep(
@@ -180,10 +198,12 @@ def test_sweep_size_guard_aborts_before_dump():
         assert not [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")]
 
 
-def test_sweep_data_loss_candidate_on_transition():
+def test_sweep_data_loss_candidate_on_transition(shared_proj):
     """>0 → 0 nodes fires DATA_LOSS_CANDIDATE; steady-0 never does."""
     with tempfile.TemporaryDirectory() as tmp:
-        proj = _make_env(None, tmp)
+        if shared_proj is None:
+            return
+        proj = _make_env(None, shared_proj)
         reg = proj.db.select_graph("registry_control_plane")
         store = MemoryStorage()
 
@@ -201,10 +221,13 @@ def test_sweep_data_loss_candidate_on_transition():
         assert read_team_state(store, "team_x")["node_count"] == 1
 
 
-def test_sweep_steady_zero_never_fires():
+def test_sweep_steady_zero_never_fires(shared_proj):
     """A chronically-empty team graph is a signal, not an incident."""
     with tempfile.TemporaryDirectory() as tmp:
-        proj = FalkorProjection(os.path.join(tmp, "t.db"))
+        proj = shared_proj
+        if proj is None:
+            return
+        wipe(proj)
         reg = proj.db.select_graph("registry_control_plane")
         reg.query("CREATE (t:Team {id:'team_e', tier:'pro'})")
         proj.db.select_graph("team_team_e")  # exists, empty
@@ -216,10 +239,12 @@ def test_sweep_steady_zero_never_fires():
         assert not any(i["kind"] == "DATA_LOSS_CANDIDATE" for i in res["incidents"])
 
 
-def test_sweep_p0_guard_deletes_wrong_graph_upload():
+def test_sweep_p0_guard_deletes_wrong_graph_upload(shared_proj):
     """A backup whose manifest names the wrong graph is deleted, not kept."""
     with tempfile.TemporaryDirectory() as tmp:
-        proj = _make_env(None, tmp)
+        if shared_proj is None:
+            return
+        proj = _make_env(None, shared_proj)
         reg = proj.db.select_graph("registry_control_plane")
         store = MemoryStorage()
         # Force a wrong graph_name via a stub create_backup path: call the sweep
@@ -249,10 +274,13 @@ def test_sweep_p0_guard_deletes_wrong_graph_upload():
 # ── #655 team-sweep tests ────────────────────────────────────────────────────
 
 
-def test_enumerate_eligible_teams_filters_by_tier_and_backup_enabled():
+def test_enumerate_eligible_teams_filters_by_tier_and_backup_enabled(shared_proj):
     """Only teams with tier != 'free' AND backup_enabled = true are returned."""
     with tempfile.TemporaryDirectory() as tmp:
-        proj = FalkorProjection(os.path.join(tmp, "t.db"))
+        proj = shared_proj
+        if proj is None:
+            return
+        wipe(proj)
         reg = proj.db.select_graph("registry_control_plane")
         # Free team — excluded
         reg.query("CREATE (t:Team {id:'free_a', tier:'free', backup_enabled:false})")
@@ -266,10 +294,13 @@ def test_enumerate_eligible_teams_filters_by_tier_and_backup_enabled():
         assert sorted(result) == ["pro_x", "pro_y"]
 
 
-def test_enumerate_eligible_teams_empty_when_no_pro_teams():
+def test_enumerate_eligible_teams_empty_when_no_pro_teams(shared_proj):
     """Returns [] when every team is free-tier or backup_disabled."""
     with tempfile.TemporaryDirectory() as tmp:
-        proj = FalkorProjection(os.path.join(tmp, "t.db"))
+        proj = shared_proj
+        if proj is None:
+            return
+        wipe(proj)
         reg = proj.db.select_graph("registry_control_plane")
         reg.query("CREATE (t:Team {id:'free_a', tier:'free', backup_enabled:false})")
         reg.query("CREATE (t:Team {id:'free_b', tier:'free', backup_enabled:true})")
@@ -277,10 +308,13 @@ def test_enumerate_eligible_teams_empty_when_no_pro_teams():
         assert enumerate_eligible_teams(reg) == []
 
 
-def test_enumerate_eligible_teams_fail_closed():
+def test_enumerate_eligible_teams_fail_closed(shared_proj):
     """Query failure raises RuntimeError — never silent []."""
     with tempfile.TemporaryDirectory() as tmp:
-        proj = FalkorProjection(os.path.join(tmp, "t.db"))
+        proj = shared_proj
+        if proj is None:
+            return
+        wipe(proj)
         reg = proj.db.select_graph("registry_control_plane")
 
         def _boom(*a, **k):
@@ -291,10 +325,13 @@ def test_enumerate_eligible_teams_fail_closed():
             enumerate_eligible_teams(reg)
 
 
-def test_team_sweep_backs_up_pro_team_and_prunes():
+def test_team_sweep_backs_up_pro_team_and_prunes(shared_proj):
     """(a) With team_sweep_enabled=True and a Pro team → backup + prune runs."""
     with tempfile.TemporaryDirectory() as tmp:
-        proj = FalkorProjection(os.path.join(tmp, "t.db"))
+        proj = shared_proj
+        if proj is None:
+            return
+        wipe(proj)
         reg = proj.db.select_graph("registry_control_plane")
         # Eligible Pro team
         reg.query(
@@ -332,10 +369,13 @@ def test_team_sweep_backs_up_pro_team_and_prunes():
         assert store.list("backups/free_y/") == []
 
 
-def test_team_sweep_no_eligible_teams_fires_alert():
+def test_team_sweep_no_eligible_teams_fires_alert(shared_proj):
     """(b) team_sweep_enabled=True + 0 eligible teams → NO_ELIGIBLE_TEAMS incident."""
     with tempfile.TemporaryDirectory() as tmp:
-        proj = FalkorProjection(os.path.join(tmp, "t.db"))
+        proj = shared_proj
+        if proj is None:
+            return
+        wipe(proj)
         reg = proj.db.select_graph("registry_control_plane")
         # Only free teams — none eligible.
         reg.query(
@@ -369,10 +409,13 @@ def test_team_sweep_no_eligible_teams_fires_alert():
         )
 
 
-def test_team_sweep_flag_off_backs_up_all_teams():
+def test_team_sweep_flag_off_backs_up_all_teams(shared_proj):
     """(c) team_sweep_enabled=False → all teams backed up (existing behavior)."""
     with tempfile.TemporaryDirectory() as tmp:
-        proj = FalkorProjection(os.path.join(tmp, "t.db"))
+        proj = shared_proj
+        if proj is None:
+            return
+        wipe(proj)
         reg = proj.db.select_graph("registry_control_plane")
         reg.query(
             "CREATE (t:Team {id:'free_a', tier:'free', backup_enabled:false})"
@@ -399,10 +442,13 @@ def test_team_sweep_flag_off_backs_up_all_teams():
         assert "NO_ELIGIBLE_TEAMS" not in kinds
 
 
-def test_team_sweep_enum_failure_when_enabled():
+def test_team_sweep_enum_failure_when_enabled(shared_proj):
     """Fail-closed: eligible-team query failure returns enum_failed status."""
     with tempfile.TemporaryDirectory() as tmp:
-        proj = FalkorProjection(os.path.join(tmp, "t.db"))
+        proj = shared_proj
+        if proj is None:
+            return
+        wipe(proj)
         reg = proj.db.select_graph("registry_control_plane")
 
         def _boom(*a, **k):
@@ -420,10 +466,12 @@ def test_team_sweep_enum_failure_when_enabled():
 # ── #661: registry-stream key separation + per-label DATA_LOSS thresholds ───
 
 
-def test_sweep_uses_registry_stream_key_not_backup_key():
+def test_sweep_uses_registry_stream_key_not_backup_key(shared_proj):
     """#661: sweep archives use REGISTRY_STREAM_KEY, not TORTOISE_BACKUP_KEY."""
     with tempfile.TemporaryDirectory() as tmp:
-        proj = _make_env(None, tmp)
+        if shared_proj is None:
+            return
+        proj = _make_env(None, shared_proj)
         reg = proj.db.select_graph("registry_control_plane")
         store = MemoryStorage()
 
@@ -453,10 +501,12 @@ def test_sweep_uses_registry_stream_key_not_backup_key():
         assert captured_key[0] != b"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
 
-def test_sweep_missing_registry_stream_key_fail_closed():
+def test_sweep_missing_registry_stream_key_fail_closed(shared_proj):
     """#661: empty registry_stream_key → fail-closed error."""
     with tempfile.TemporaryDirectory() as tmp:
-        proj = _make_env(None, tmp)
+        if shared_proj is None:
+            return
+        proj = _make_env(None, shared_proj)
         reg = proj.db.select_graph("registry_control_plane")
         store = MemoryStorage()
         res = run_backup_sweep(
@@ -472,12 +522,14 @@ def test_sweep_missing_registry_stream_key_fail_closed():
         ]
 
 
-def test_sweep_per_label_drift_catches_small_label_wipe():
+def test_sweep_per_label_drift_catches_small_label_wipe(shared_proj):
     """#661: a 40% invitation-label wipe fires DATA_LOSS_CANDIDATE while the
     overall node count drops <50% — proving the per-label guard catches what
     the flat ratio misses."""
     with tempfile.TemporaryDirectory() as tmp:
-        proj = _make_env(None, tmp)
+        if shared_proj is None:
+            return
+        proj = _make_env(None, shared_proj)
         reg = proj.db.select_graph("registry_control_plane")
         store = MemoryStorage()
 
@@ -542,10 +594,12 @@ def test_sweep_per_label_drift_catches_small_label_wipe():
         assert state2["node_count"] == 55  # still the first-sweep baseline
 
 
-def test_sweep_per_label_drift_ignores_steady_labels():
+def test_sweep_per_label_drift_ignores_steady_labels(shared_proj):
     """Labels that stay the same or grow are not flagged as breaches."""
     with tempfile.TemporaryDirectory() as tmp:
-        proj = _make_env(None, tmp)
+        if shared_proj is None:
+            return
+        proj = _make_env(None, shared_proj)
         reg = proj.db.select_graph("registry_control_plane")
         store = MemoryStorage()
 
@@ -677,16 +731,19 @@ def test_enumerate_eligible_teams_supabase_fail_closed():
         enumerate_eligible_teams(ErrorControlPlane())
 
 
-def test_team_graph_name_reads_from_teams():
+def test_team_graph_name_reads_from_teams(shared_proj):
     """Sweep reads graph_name from teams (the column is the source of truth)."""
     cp = _fake_teams()
     assert team_graph_name(cp, "team_b") == "team_beta"
     # Registry mode: deterministic team_{id} (no graph_name stored there).
     with tempfile.TemporaryDirectory() as tmp:
-        proj = FalkorProjection(os.path.join(tmp, "t.db"))
+        proj = shared_proj
+        if proj is None:
+            return
+        wipe(proj)
         reg = proj.db.select_graph("registry_control_plane")
         assert team_graph_name(reg, "team_x") == "team_team_x"
-        proj.close()
+        pass  # shared session projection — fixture owns close
 
 
 def test_team_graph_name_supabase_fail_closed():
@@ -700,12 +757,15 @@ def test_team_graph_name_supabase_fail_closed():
         team_graph_name(ErrorControlPlane(), "team_b")
 
 
-def test_sweep_supabase_source_backs_up_teams_graph_name():
+def test_sweep_supabase_source_backs_up_teams_graph_name(shared_proj):
     """Full sweep with a Supabase source: enumerates teams, dumps the graph
     teams.graph_name names (NOT team_{id}), stamps backup_latest_at on the row.
     This is the E2E-4 enumeration+stamp leg against the seam fake."""
     with tempfile.TemporaryDirectory() as tmp:
-        proj = FalkorProjection(os.path.join(tmp, "t.db"))
+        proj = shared_proj
+        if proj is None:
+            return
+        wipe(proj)
         # The team's graph is named per teams.graph_name — not team_{id}.
         g = proj.db.select_graph("team_myapp")
         g.query("CREATE (p:Point {id:'pt-0', content:'c', pointKind:'claim'})")
@@ -740,14 +800,17 @@ def test_sweep_supabase_source_backs_up_teams_graph_name():
         assert res["results"]["team_ghost"]["status"] in ("error", "empty_skipped")
         assert res["teams_backed_up"] == 1
         assert not any(i["kind"] == "ENUM_DELTA" for i in res["incidents"])
-        proj.close()
+        pass  # shared session projection — fixture owns close
 
 
-def test_team_sweep_supabase_eligible_only():
+def test_team_sweep_supabase_eligible_only(shared_proj):
     """team_sweep_enabled=True with a Supabase source: only Pro+backup_enabled
     teams are enumerated (free/disabled teams are skipped)."""
     with tempfile.TemporaryDirectory() as tmp:
-        proj = FalkorProjection(os.path.join(tmp, "t.db"))
+        proj = shared_proj
+        if proj is None:
+            return
+        wipe(proj)
         # team_b's graph is named per teams.graph_name ("team_beta", not
         # "team_team_b"); team_c is eligible but has no graph → empty_skipped.
         g = proj.db.select_graph("team_beta")
@@ -765,13 +828,16 @@ def test_team_sweep_supabase_eligible_only():
         assert "team_a" not in res["results"]
         assert "team_d" not in res["results"]
         assert res["incidents"] == []
-        proj.close()
+        pass  # shared session projection — fixture owns close
 
 
-def test_sweep_supabase_enum_failure_fail_closed():
+def test_sweep_supabase_enum_failure_fail_closed(shared_proj):
     """A Supabase enumeration failure → enum_failed status (never NO_TEAMS)."""
     with tempfile.TemporaryDirectory() as tmp:
-        proj = FalkorProjection(os.path.join(tmp, "t.db"))
+        proj = shared_proj
+        if proj is None:
+            return
+        wipe(proj)
         store = MemoryStorage()
         res = run_backup_sweep(
             db=proj.db, registry=ErrorControlPlane(), storage=store, config=_config(),
@@ -779,15 +845,18 @@ def test_sweep_supabase_enum_failure_fail_closed():
         assert res["status"] == "enum_failed"
         assert "team enumeration failed" in res["error"]
         assert res["teams_backed_up"] == 0
-        proj.close()
+        pass  # shared session projection — fixture owns close
 
 
-def test_sweep_supabase_resolution_flap_fires_incident():
+def test_sweep_supabase_resolution_flap_fires_incident(shared_proj):
     """A control plane that dies between enumeration and the per-team phase
     (every graph_name read fails) must file an incident — never a clean
     no_work that looks healthy to the #596 watcher."""
     with tempfile.TemporaryDirectory() as tmp:
-        proj = FalkorProjection(os.path.join(tmp, "t.db"))
+        proj = shared_proj
+        if proj is None:
+            return
+        wipe(proj)
         proj.db.select_graph("team_myapp")
 
         class ResolutionFlap(FakeControlPlane):
@@ -815,14 +884,17 @@ def test_sweep_supabase_resolution_flap_fires_incident():
         assert inc["detail"]["failed"] == 2
         # Per-team errors are still isolated and surfaced.
         assert all(r["status"] == "error" for r in res["results"].values())
-        proj.close()
+        pass  # shared session projection — fixture owns close
 
 
-def test_sweep_supabase_partial_resolution_failure_is_isolated():
+def test_sweep_supabase_partial_resolution_failure_is_isolated(shared_proj):
     """A partial resolution failure stays per-team: no incident, other teams
     still back up (mirrors data-plane per-team isolation)."""
     with tempfile.TemporaryDirectory() as tmp:
-        proj = FalkorProjection(os.path.join(tmp, "t.db"))
+        proj = shared_proj
+        if proj is None:
+            return
+        wipe(proj)
         g = proj.db.select_graph("team_myapp")
         g.query("CREATE (p:Point {id:'pt-0', content:'c', pointKind:'claim'})")
 
@@ -852,14 +924,17 @@ def test_sweep_supabase_partial_resolution_failure_is_isolated():
         assert not any(
             i["kind"] == "GRAPH_NAME_RESOLUTION_FAIL" for i in res["incidents"]
         )
-        proj.close()
+        pass  # shared session projection — fixture owns close
 
 
-def test_sweep_supabase_stamp_blip_is_best_effort():
+def test_sweep_supabase_stamp_blip_is_best_effort(shared_proj):
     """#669 P3: a Supabase stamp PATCH blip must not fail an otherwise-durable
     backup — the archive stands, the sweep reports backed_up."""
     with tempfile.TemporaryDirectory() as tmp:
-        proj = FalkorProjection(os.path.join(tmp, "t.db"))
+        proj = shared_proj
+        if proj is None:
+            return
+        wipe(proj)
         g = proj.db.select_graph("team_myapp")
         g.query("CREATE (p:Point {id:'pt-0', content:'c', pointKind:'claim'})")
 
@@ -887,4 +962,4 @@ def test_sweep_supabase_stamp_blip_is_best_effort():
         row = cp.query("teams", select=["backup_latest_at"],
                        filters=[("id", "eq", "team_x")])
         assert row[0]["backup_latest_at"] is None
-        proj.close()
+        pass  # shared session projection — fixture owns close
