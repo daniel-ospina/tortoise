@@ -85,9 +85,9 @@ class TestRegistryEquivalence:
         human-approval (#531) + 1 #540 + 2 #432 (events_poll, retract_point)
         + 1 #913 (review_connections) + 8 W1–W4 consolidations (#907/#918
         recall, #922 update/delete/operator_action/create_edge, #927
-        overview/get, #932 ingest)."""
+        overview/get, #932 ingest) + 1 epic #900 T7 (#1043, tortoise_index_files)."""
         from tortoise.tool_registry import TOOL_REGISTRY
-        assert len(TOOL_REGISTRY) == 84, f"Expected 84, got {len(TOOL_REGISTRY)}"
+        assert len(TOOL_REGISTRY) == 85, f"Expected 85, got {len(TOOL_REGISTRY)}"
         names = {t.name for t in TOOL_REGISTRY}
         onboarding = {"tortoise_onboarding_demo_create", "tortoise_onboarding_state",
                       "tortoise_onboarding_session_recording",
@@ -127,7 +127,8 @@ class TestRegistryEquivalence:
         from tortoise.tool_registry import TOOL_REGISTRY
         by_name = {t.name: t for t in TOOL_REGISTRY}
         excluded = {"tortoise_team_create", "tortoise_backfill_v25",
-                     "tortoise_ingest_corpus", "tortoise_index_sessions"}
+                     "tortoise_ingest_corpus", "tortoise_index_sessions",
+                     "tortoise_index_files"}
         for name in excluded:
             assert name in by_name, f"Missing tool: {name}"
             assert by_name[name].http_policy is False, f"{name} should be excluded"

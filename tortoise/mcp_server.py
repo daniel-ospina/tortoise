@@ -346,6 +346,9 @@ _QUOTA_GATED: frozenset[str] = frozenset({
     # #684: node-creating tools that were missed in the original #329 audit
     "tortoise_file_human_approval",  # creates Event + decision Point + IMPL edges
     "tortoise_assess_source",        # creates assessment Point
+    # epic #900 T7 (#1043): the index path creates Sources + Events/Documents
+    # + references edges — node/edge-creating, quota-gated (S8 pin, I25)
+    "tortoise_index_files",
 })
 
 
@@ -1643,6 +1646,28 @@ def tortoise_index_sessions(directory: str, extract_metadata: bool = True, llm_m
     if not os.path.isdir(directory):
         return {"error": f"Directory not found: {directory!r}. Provide a valid path to a directory containing .md session files."}
     return _safe(_get_team_sdk().index_sessions, directory, extract_metadata=extract_metadata, llm_model=llm_model)
+
+def tortoise_index_files(directory: str, corpus_name: str | None = None,
+                        extract_metadata: bool = False) -> dict:
+    """Index a corpus directory of .md files as Sources + Events/Documents
+    (epic #900 — the unified index path). Returns the honest §3.1 summary
+    (file_count, indexed, updated, skipped, failed, aborted, ignored,
+    errors[], by_kind). Idempotent: re-runs converge to skipped. On a shared
+    graph, give each corpus a unique corpus_name (default = directory
+    basename) to avoid cross-corpus url collisions.
+
+    #329: EXCLUDED from tenant HTTP — walks server filesystem with a
+    user-supplied path (path-traversal vector, same as index_sessions /
+    ingest_corpus). Stdio-only. Node/edge-creating → quota-gated.
+    """
+    if _transport_mode.get() == "http":
+        return _http_excluded_error()
+    if not os.path.isdir(directory):
+        return {"error": f"Directory not found: {directory!r}. Provide a valid "
+                         f"path to a directory containing .md files."}
+    return _safe(_quota_gated(_get_team_sdk().index_directory, "points"),
+                 directory, corpus_name=corpus_name,
+                 extract_metadata=extract_metadata)
 
 def tortoise_search_sessions(query: str, agent: str | None = None, topics: Any = None,
                              after: str | None = None, before: str | None = None,

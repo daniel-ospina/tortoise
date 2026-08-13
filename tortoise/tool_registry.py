@@ -460,7 +460,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     # ── Excluded from HTTP ────────────────────────────────────────
     ToolDefinition(
         name="tortoise_ingest_corpus",
-        description="Batch document ingestion — walk directory, parse YAML frontmatter "
+        description="DEPRECATED — use tortoise_index_files. Batch document ingestion — walk directory, parse YAML frontmatter "
                     "from .md files, create/update Document nodes. "
                     "EXCLUDED from tenant HTTP — walks server filesystem with user-supplied path.",
         annotations=_rw(),
@@ -597,11 +597,27 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_index_sessions",
-        description="Index session .md files as AgentSession Events. "
+        description="DEPRECATED — use tortoise_index_files. Index session .md files "
+                    "as AgentSession Events. "
                     "EXCLUDED from tenant HTTP — walks server filesystem with user-supplied path.",
         annotations=_rw(),
         http_policy=False,
         sdk_method="index_sessions",
+    ),
+    ToolDefinition(
+        name="tortoise_index_files",
+        description="Index a corpus directory of .md files as Sources + Events/"
+                    "Documents (the unified index path — replaces "
+                    "tortoise_index_sessions + tortoise_ingest_corpus file semantics "
+                    "for local corpora). Returns the honest summary (file_count, "
+                    "indexed, updated, skipped, failed, aborted, ignored, errors[], "
+                    "by_kind). Idempotent — re-runs converge to skipped. On a shared "
+                    "graph, give each corpus a unique corpus_name (default = directory "
+                    "basename) to avoid cross-corpus url collisions. "
+                    "EXCLUDED from tenant HTTP — walks server filesystem with user-supplied path.",
+        annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True),
+        http_policy=False,
+        sdk_method="index_directory",
     ),
     ToolDefinition(
         name="tortoise_search_sessions",
