@@ -28,13 +28,26 @@ shipped/completed") → **EVENT**; stative/gnomic ("costs $0.60/M", "fails 40% o
 | --- | --- | --- | --- |
 | **Class** | **DECISION** | **EVENT** | **CLAIM** |
 | Test | "we will X / decided X / chose X" | "X happened / was fixed / shipped" | "X is / costs / fails / implies" |
-| Ontology | Point (decision) | Event node | Point (claim) |
+| Write (state-centric, 2026-08-12) | **Event node** (eventKind `decision`, aboutObject → the resolved option) + lifecycle writes on the option objects (promoted/deprecated) | **Event node** (eventKind `occurrence`/`turn`/fitting vocab) | **Point** pointKind `statement` (the logic; aboutObject → the option it argues about) |
+
+> **State-centric alignment (ONTOLOGY v3.7, #1017 — supersedes the Point(decision) row):**
+> Points are the LOGIC layer only — `statement`/`observation`/`hypothesis`. The DECISION
+> class is a timeline record: an Event node (eventKind `decision`) connected to the
+> option(s) it resolved; the resolution itself is expressed as lifecycle writes on the
+> state objects (chosen promoted, alternatives deprecated) and the criteria claims
+> IMPL-ing them. "This state is based on these reasons" — never "this decision was made
+> because of these reasons". The option/criteria structure: decision events carry
+> `about_entities` = the options; criteria are statement Points with aboutObject → the
+> option and IMPL edges among them (the confidence engine). pointKind `event` is removed
+> (issue #1013).
 
 **R1∧R3 conjunction (window-2 finding — the real decision gate):** a commissive alone is
 NOT a decision. "I'll fix both now" (≈15× in the operational session) is a process
 commitment, not a product decision. **DECISION = commissive ∧ product-knowledge-bearing**
 (asserts something durable about the domain: a choice of approach, a ruling, a commitment
-with epistemic weight). Otherwise → event (or R3-routed if process).
+with epistemic weight). Otherwise → event (or R3-routed if process). The decision is
+written as an Event node (eventKind `decision`) with the option/criteria structure —
+never as a decision Point (state-centric, #1017/#1013).
 
 ## 2. Cue tables
 
