@@ -932,7 +932,12 @@ class TestTask8Helpers:
     def test_api_key_by_id(self, fake):
         fake.seed("api_keys", [_key_row()])
         row = api_key_by_id(fake, "key-001")
-        assert row == {"team_id": "team-free-001", "revoked_at": None}
+        # #1148: api_key_by_id now returns created_via + enabled for the
+        # key-toggle guard (bootstrap keys can't be toggled).
+        assert row["team_id"] == "team-free-001"
+        assert row["revoked_at"] is None
+        assert row["created_via"] == "bootstrap"
+        assert row["enabled"] is None
         assert api_key_by_id(fake, "missing") is None
 
     def test_membership_count_since(self, fake):

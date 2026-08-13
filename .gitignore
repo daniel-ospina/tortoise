@@ -1,1 +1,23 @@
+__pycache__/
+*.pyc
+.worktrees/
+__pycache__/
+*.egg-info/
+.wrangler/
+premise-labs/.wrangler/
+:memory:
+# Runtime artifacts
+.coverage
+.cors-tmp-*/
+tortoise.db
+*.db
+backups/
+services/*.plist
+data/migrations/
+
+# Local environment — contains DB credentials, never commit
+.env
+.husky/_/
+
+# #1148: dashboard build artifacts (node_modules is huge; dist/ IS committed)
 website/apps/dashboard/node_modules/

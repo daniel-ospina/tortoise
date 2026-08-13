@@ -115,6 +115,7 @@ function App() {
     const k = await api('/v1/team/keys', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...(activeKey ? { Authorization: `Bearer ${activeKey}` } : {}) },
+      useSession: true,  // #1148: management → session JWT when signed in
       body: '{}',
     })
     return k.api_key || k.key || k
@@ -162,7 +163,10 @@ function App() {
       })
       if (res.ok) {
         const t = await res.json()
-        if (t && t.team_id) setTeam(t)
+        // P2 (review): MERGE, don't replace — the PATCH returns only
+        // {team_id, dashboard_key_login}; a full replace would wipe
+        // tier/points/anon/checkout_price_id until reload.
+        if (t && t.team_id) setTeam((prev) => ({ ...prev, ...t }))
       } else {
         let msg = `Couldn't update (HTTP ${res.status}).`
         try {
@@ -253,9 +257,16 @@ function App() {
   }
 
   async function api(path, opts = {}) {
+    // #1148 review P1-2: management calls pass the SESSION JWT when signed
+    // in (the dashboard-login gate rejects key-auth on those when the flag
+    // is off — a session always passes). opts.useSession forces it.
+    let authHeaders = headers
+    if (opts.useSession && sessionTokenRef.current) {
+      authHeaders = { Authorization: `Bearer ${sessionTokenRef.current}` }
+    }
     const res = await fetch(`${API_BASE}${path}`, {
       ...opts,
-      headers: { ...headers, ...(opts.headers || {}) },
+      headers: { ...authHeaders, ...(opts.headers || {}) },
     })
     if (!res.ok) {
       const body = await res.json().catch(() => ({}))
@@ -281,6 +292,7 @@ function App() {
     setCheckoutPending(true)
     try {
       const { checkout_url } = await api('/v1/billing/checkout', {
+        useSession: true,  // #1148: management → session JWT when signed in
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ price_id: team.checkout_price_id }),
@@ -309,7 +321,7 @@ function App() {
     if (billingPending) return // Round-25: double-click guard — no duplicate portal tabs
     setBillingPending(true)
     try {
-      const { portal_url } = await api('/v1/billing/portal', { method: 'POST' })
+      const { portal_url } = await api('/v1/billing/portal', { method: 'POST', useSession: true })
       // Round-14: mirror upgrade() — async-fetch-then-open is popup-blocked in
       // Firefox/Safari; surface it instead of silently no-opping.
       if (!window.open(portal_url, '_blank')) {
@@ -616,11 +628,30 @@ function App() {
     setError('')
     setAuthBusy(true)
     try {
-      const result = authIsSignup
-        ? await supabaseClient.auth.signUp({ email: authEmail.trim(), password: authPassword })
-        : await supabaseClient.auth.signInWithPassword({ email: authEmail.trim(), password: authPassword })
+      let result
+      if (authIsSignup) {
+        // #1148 review P2: signup goes through the SERVER /v1/signup/email
+        // (#801 admin-create, email_confirm=true — no SMTP bucket, no
+        // confirmation email required), THEN logs in with the credentials.
+        const sres = await fetch(`${API_BASE}/v1/signup/email`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: authEmail.trim(), password: authPassword }),
+        })
+        if (!sres.ok) {
+          let msg = `Signup failed (HTTP ${sres.status}).`
+          try {
+            const b = await sres.json()
+            if (b && b.detail) msg = typeof b.detail === 'string' ? b.detail : JSON.stringify(b.detail)
+          } catch { /* non-JSON */ }
+          setError(msg)
+          return
+        }
+        result = await supabaseClient.auth.signInWithPassword({ email: authEmail.trim(), password: authPassword })
+      } else {
+        result = await supabaseClient.auth.signInWithPassword({ email: authEmail.trim(), password: authPassword })
+      }
       if (result.error) {
-        // Map common Supabase errors to plain copy.
         const m = result.error.message || ''
         if (m.includes('already registered') || m.includes('already been registered')) {
           setError('That email is already registered — log in instead, or continue with GitHub/Google.')
@@ -632,8 +663,9 @@ function App() {
         return
       }
       try { localStorage.setItem(LAST_AUTH_METHOD, 'email'); setLastAuthMethod('email') } catch { /* best-effort */ }
-      // After login/signup, the onAuthStateChange handler picks up the session
-      // and mints the bootstrap key — nothing else to do here.
+      // #1148 review P2: the mount effect bootstraps only on first load —
+      // reload so it picks up the fresh session and mints the bootstrap key.
+      window.location.reload()
     } catch (err) {
       setError((err && err.message) || 'Something went wrong — try again.')
     } finally {
@@ -732,11 +764,22 @@ function App() {
         body: JSON.stringify({ api_key: k, email: claimEmail.trim(), password: claimPassword }),
       })
       if (res.ok) {
-        setClaimShowEmail(false)
-        setClaimEmail('')
-        setClaimPassword('')
-        setClaimError('')
-        // Reload team state — the claim may have flipped anon/claimed.
+        // #1148 review P2: sign in with the just-created credentials so the
+        // user lands in SESSION mode (not stuck on the claimed-team gate).
+        try {
+          if (supabaseClient) {
+            const { error } = await supabaseClient.auth.signInWithPassword({
+              email: claimEmail.trim(), password: claimPassword,
+            })
+            if (!error) {
+              try { localStorage.setItem(LAST_AUTH_METHOD, 'email'); setLastAuthMethod('email') } catch { /* best-effort */ }
+              window.location.reload()
+              return
+            }
+          }
+        } catch { /* fall through to reload */ }
+        // If sign-in failed for any reason, reload — the claim is done, the
+        // user can log in from the auth card.
         window.location.reload()
         return
       }
@@ -1255,9 +1298,10 @@ function App() {
       const updated = await api(`/v1/team/keys/${keyId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
+        useSession: true,  // #1148: management → session JWT when signed in
         body: JSON.stringify({ enabled: next }),
       })
-      if (updated && updated.id) {
+      if (updated && (updated.id || updated.key_id)) {
         setKeys((prev) => prev.map((k) => k.id === keyId ? { ...k, enabled: updated.enabled !== false } : k))
       }
     } catch (e) {
@@ -1275,7 +1319,7 @@ function App() {
     setCapNotice('')
     setError('')
     try {
-      await api(`/v1/team/keys/${keyId}`, { method: 'DELETE' })
+      await api(`/v1/team/keys/${keyId}`, { method: 'DELETE', useSession: true })
       // Round-20: bail after the DELETE — a switch already reloaded the new
       // team's state; skip the stale re-mint + loadAll entirely.
       if (teamIdRef.current !== _teamAtCall) return
@@ -1909,7 +1953,7 @@ function App() {
                     <td><code>{k.key_prefix || k.id?.slice(0, 12)}</code></td>
                     <td>{fmtTime(k.created_at || k.createdAt)}</td>
                     <td>{k.revoked_at ? <span className="revoked">revoked</span> : isSessionKey(k) ? <span className="live">ephemeral · session</span> : <span className="live">active</span>}</td>
-                    <td>{!k.revoked_at && !isSessionKey(k) && (
+                    <td>{!k.revoked_at && !isSessionKey(k) && isOwnerAdmin && (
                       <span className="key-actions">
                         {/* #1148-ux review: on/off toggle (new keys default on) */}
                         <button

@@ -1103,6 +1103,76 @@ async def _get_current_team_supabase(request: Request, token: str) -> dict:
         raise HTTPException(status_code=500, detail="Auth error")
 
 
+async def _session_user_team(request: Request, user: dict) -> dict:
+    """Resolve a team dict for a SESSION-authenticated user (JWT).
+
+    #1148 review P1-2: management endpoints must accept the session JWT, not
+    just the API key — otherwise disabling dashboard-key-login locks out the
+    signed-in owner (their own bootstrap key is a tt_ token the gate 403s).
+    Uses the user's active membership → teams row → the same dict shape
+    get_current_team produces (team_id, tier, caps, dashboard_key_login=True
+    — a session always passes the gate). Multi-team: honors ?team_id=, else
+    the first membership."""
+    from tortoise.supabase_control import (
+        get_control_plane, is_supabase_enabled, user_memberships,
+    )
+    if not is_supabase_enabled():
+        raise HTTPException(status_code=401, detail="Session auth is hosted-mode only")
+    cp = get_control_plane()
+    memberships = user_memberships(cp, user["user_id"])
+    if not memberships:
+        raise HTTPException(status_code=403, detail="No team membership")
+    team_id = request.query_params.get("team_id") or memberships[0]["team_id"]
+    from tortoise.supabase_control import _QUOTA_SELECT
+    rows = cp.query("teams", select=_QUOTA_SELECT, filters=[("id", "eq", team_id)])
+    if not rows:
+        raise HTTPException(status_code=403, detail="Team not found")
+    row = rows[0]
+    from tortoise.pricing import tier_limits
+    lim = tier_limits(row.get("tier") or "free")
+    return {
+        "team_id": team_id, "tier": row.get("tier") or "free",
+        "max_users": row.get("max_users") or lim["max_users_per_team"],
+        "max_graphs": row.get("max_graphs") or lim["max_graphs_per_team"],
+        "max_points": int(row.get("graph_size_cap")) if row.get("graph_size_cap") is not None else lim["max_graph_nodes"],
+        "max_api_keys": lim["max_api_keys"],
+        "max_sessions": DEFAULT_MAX_SESSIONS,
+        "suspended_at": row.get("suspended_at"),
+        "flagged_at": row.get("flagged_at"),
+        "email": row.get("email"),
+        # session always passes the dashboard-login gate
+        "dashboard_key_login": True,
+    }
+
+
+async def get_current_team_session(request: Request) -> dict:
+    """Management-endpoint dependency: accept a session JWT (verified
+    identity) OR an API key. Key-auth goes through get_current_team + the
+    dashboard-login gate; session JWT resolves via _session_user_team and
+    always passes the gate (the flag gates the API-key credential, never the
+    human session). #1148 review P1-2."""
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer ") and not auth[7:].startswith("eyJ"):
+        # API key (tt_) — the gate applies to real key-auth.
+        team = await get_current_team(request)
+        _check_dashboard_key_login(team, request)
+        return team
+    # Test env / non-key call: honor a dependency override of get_current_team
+    # (the hosted_api suite overrides it to bypass auth entirely). FastAPI
+    # overrides apply at DI time, so a DIRECT call to get_current_team would
+    # bypass the override — invoke the override explicitly instead.
+    overrides = request.app.dependency_overrides
+    override = overrides.get(get_current_team)
+    if override is not None:
+        team = override()
+        if hasattr(team, "__await__"):
+            team = await team
+        return team
+    # Session JWT (eyJ...) — verify + resolve the user's team.
+    user = await get_current_user(request)
+    return await _session_user_team(request, user)
+
+
 def _check_team_limit(team: dict, resource: str) -> None:
     """Enforce per-team limits. Raises 402 (payment required) when at capacity.
 
@@ -1990,7 +2060,9 @@ async def team_info(team: dict = Depends(get_current_team)):
         # is_anon_team predicate (Supabase mode only; registry = False).
         anon=_team_is_anon(team["team_id"]),
         # #1148: dashboard key-login acceptance (flag on the teams row).
-        dashboard_key_login=team.get("dashboard_key_login", True),
+        # Coerce None → True (legacy/registry dicts may omit it; a falsy None
+        # would fail the Pydantic bool and 500 every /v1/team call).
+        dashboard_key_login=team.get("dashboard_key_login", True) is not False,
     )
 
 
@@ -2623,8 +2695,7 @@ async def create_demo_graph(request: Request):
     return _seed_demo_graph(team_id)
 
 @app.post("/v1/team/keys", response_model=CreateKeyResponse)
-async def create_api_key(request: Request, response: Response, team: dict = Depends(get_current_team)):
-    _check_dashboard_key_login(team, request)  # #1148: disabled → 403 for key-auth
+async def create_api_key(request: Request, response: Response, team: dict = Depends(get_current_team_session)):
     """Generate a new API key for the team.
 
     #765 (plan Task 8 writer inventory): Supabase mode inserts the api_keys
@@ -2749,6 +2820,8 @@ async def list_api_keys(team: dict = Depends(get_current_team)):
                     "created_at": row.get("created_at"),
                     "last_used_at": row.get("last_used_at"),
                     "revoked_at": row.get("revoked_at"),
+                    # #1148: per-key enabled state (UI toggle)
+                    "enabled": row.get("enabled", True),
                 }
                 for row in keys
             ]
@@ -2782,8 +2855,7 @@ async def list_api_keys(team: dict = Depends(get_current_team)):
 
 
 @app.delete("/v1/team/keys/{key_id}")
-async def revoke_api_key(key_id: str, request: Request, team: dict = Depends(get_current_team)):
-    _check_dashboard_key_login(team, request)  # #1148: disabled → 403 for key-auth
+async def revoke_api_key(key_id: str, request: Request, team: dict = Depends(get_current_team_session)):
     """Revoke an API key (soft delete — sets revoked_at). Team-scoped.
 
     #765 (plan Task 8 writer inventory): Supabase mode PATCHes
@@ -2912,6 +2984,10 @@ async def toggle_api_key_enabled(
         await _require_owner_admin(user["user_id"], team_id)
         if row.get("revoked_at") is not None:
             raise HTTPException(status_code=409, detail="Cannot toggle a revoked key")
+        if row.get("created_via") == "bootstrap":
+            # P3 (review): session/bootstrap keys are ephemeral — disabling
+            # them mid-session breaks the very credential the owner is using.
+            raise HTTPException(status_code=409, detail="Cannot toggle a session key")
         _sb_set_enabled(cp, key_id, body.enabled)
         return {"key_id": key_id, "enabled": body.enabled}
     # Registry mode: no enabled flag — no-op success (selfhost parity).
@@ -5344,7 +5420,12 @@ async def claim_email(request: Request, body: ClaimEmailRequest):
     Distinct from OAuth claim: the email+password user is created here
     (not via a provider), and the "verified" bar is the #801 admin-create
     email_confirm semantics (matching every existing email signup).
+
+    #1148 security review P1: rate-limited (2/24h/IP, same as OAuth claim) —
+    without it, a key-holder could probe registered emails / create users
+    unbounded via the GoTrue admin path.
     """
+    await _check_claim_rate_limit(request)
     from tortoise.auth import lookup_hash as _lookup_hash
     from tortoise.supabase_control import (
         ClaimError, claim_membership, get_control_plane, is_anon_team,
@@ -6498,8 +6579,7 @@ async def backups_create(team: dict = Depends(get_current_team)):
 
 
 @app.post("/backups/restore")
-async def backups_restore(body: BackupRestoreRequest, request: Request, team: dict = Depends(get_current_team)):
-    _check_dashboard_key_login(team, request)  # #1148: disabled → 403 for key-auth
+async def backups_restore(body: BackupRestoreRequest, request: Request, team: dict = Depends(get_current_team_session)):
     """Restore the team graph from a backup (Pro tier; confirm=true required).
 
     Restores into a temp graph, verifies node/edge counts against the payload,
@@ -7036,8 +7116,7 @@ def _billing_checkout_sync(team: dict, price_id: str) -> dict:
 
 
 @app.post("/v1/billing/checkout", response_model=CheckoutResponse)
-async def billing_checkout(body: CheckoutRequest, request: Request, team: dict = Depends(get_current_team)):
-    _check_dashboard_key_login(team, request)  # #1148: disabled → 403 for key-auth
+async def billing_checkout(body: CheckoutRequest, request: Request, team: dict = Depends(get_current_team_session)):
     """Start a Stripe Checkout session for a validated price (team auth)."""
     from tortoise.billing import BillingConfigError, BillingError, PriceCatalog
     try:
@@ -7073,8 +7152,7 @@ def _billing_portal_sync(team: dict) -> dict:
 
 
 @app.post("/v1/billing/portal", response_model=PortalResponse)
-async def billing_portal(request: Request, team: dict = Depends(get_current_team)):
-    _check_dashboard_key_login(team, request)  # #1148: disabled → 403 for key-auth
+async def billing_portal(request: Request, team: dict = Depends(get_current_team_session)):
     """Customer portal for existing subscribers (team auth)."""
     return await asyncio.to_thread(_billing_portal_sync, team)
 

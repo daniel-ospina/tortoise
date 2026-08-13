@@ -186,15 +186,21 @@ class TestDashboardLoginGate:
         assert r2.status_code == 200, r2.text
 
     def test_session_jwt_bypasses_gate_when_disabled(self, client, fake, monkeypatch):
+        # #1148 review P1-2: the gate must NOT lock out the signed-in owner.
+        # get_current_team_session accepts a session JWT (via
+        # _session_user_team) and skips the dashboard-login gate — so a
+        # session user can still mint keys even with dashboard_key_login=false.
         key, team_id = _provision_anon(client, fake)
         user_id = f"user-{uuid.uuid4().hex[:8]}"
         _patch_session_user(monkeypatch, user_id)
-        _seed_owner_membership(fake, team_id, user_id)
+        from tortoise.auth import lookup_hash
+        sc.claim_membership(fake, lookup_hash=lookup_hash(key),
+                            user_id=user_id, email="owner@example.com")
         sc.set_dashboard_key_login(fake, team_id, False)
-        # session-authed (JWT, not tt_) mint passes the gate
+        # session-authed (JWT) mint passes — the gate only rejects tt_ keys
         r = client.post("/v1/team/keys", headers={"Authorization": "Bearer eyJ.sess"}, json={})
-        # may 403 on owner-role elsewhere, but NOT on dashboard_login_disabled
-        assert r.status_code != 403 or "dashboard_login_disabled" not in str(r.json())
+        assert r.status_code == 200, r.text
+        assert "dashboard_login_disabled" not in str(r.json())
 
 
 class TestClaimEmail:

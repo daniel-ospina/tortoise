@@ -1249,7 +1249,7 @@ def api_key_by_id(cp, key_id: str) -> dict | None:
     """One api_keys row by id (revoke lookup — team-scoping + already-revoked)."""
     rows = cp.query(
         "api_keys",
-        select=["team_id", "revoked_at"],
+        select=["team_id", "revoked_at", "created_via", "enabled"],
         filters=[("id", "eq", key_id)],
     )
     return rows[0] if rows else None
