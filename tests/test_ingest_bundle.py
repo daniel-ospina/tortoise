@@ -626,11 +626,22 @@ class TestValidation:
             "refs": {},
         }
 
-    def test_point_item_requires_kind_and_content(self, sdk):
-        with pytest.raises(ValueError, match="kind"):
-            sdk.ingest({"points": [{"content": "no kind"}]})
+    def test_point_item_requires_content(self, sdk):
         with pytest.raises(ValueError, match="content"):
             sdk.ingest({"points": [{"kind": "claim"}]})
+
+    def test_point_item_without_kind_defaults_to_statement(self, sdk):
+        # CYCLE-25 (ontology v3.8): a point item WITHOUT pointKind DEFAULTS
+        # to 'statement' (the extraction write kind) — not a violation.
+        res = sdk.ingest({"points": [{"ref": "p", "content": "no kind"}]})
+        pid = res["ids"]["points"][0]
+        assert sdk.get_point(pid)["pointKind"] == "statement"
+
+    def test_event_point_kind_rejected(self, sdk):
+        # CYCLE-25: pointKind 'event' is REMOVED (#1013) — episodic records
+        # are entity items type:'event' with eventKind.
+        with pytest.raises(ValueError, match="event"):
+            sdk.ingest({"points": [{"kind": "event", "content": "x"}]})
 
     def test_entity_requires_type_and_name(self, sdk):
         with pytest.raises(ValueError, match="type"):
