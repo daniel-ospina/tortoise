@@ -1096,7 +1096,7 @@ def provision_team(cp, **params: object) -> None:
     cp.rpc("provision_team", params)
 
 
-# ── Claim path (#1082, PR1 — 20260813000003) ────────────────────────────────
+# ── Claim path (#1082, PR1 — 20260813000004) ────────────────────────────────
 #
 # claim_membership attaches a provider-verified Supabase user to the team
 # resolved from an api_keys.lookup_hash (authoritative key→team binding,
@@ -1122,7 +1122,7 @@ class ClaimError(Exception):
 
 
 # RPC RAISE messages → (HTTP status, user-facing detail). The RPC codes are
-# stable (SQL test suite 20260813000003 asserts them); PostgREST wraps them
+# stable (SQL test suite 20260813000004 asserts them); PostgREST wraps them
 # in a 400 with the message embedded.
 _CLAIM_ERROR_CODES = {
     "key_required": (400, "api_key is required to claim a team"),
@@ -1136,7 +1136,7 @@ _CLAIM_ERROR_CODES = {
 
 
 def claim_membership(cp, *, lookup_hash: str, user_id: str, email: str) -> dict:
-    """Call the claim_membership SECURITY DEFINER RPC (20260813000003).
+    """Call the claim_membership SECURITY DEFINER RPC (20260813000004).
 
     Attaches the verified Supabase user (user_id) + verified email to the
     team resolved from ``lookup_hash``'s api_keys row (authoritative

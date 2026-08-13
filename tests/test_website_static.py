@@ -33,6 +33,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 PRODUCT_HTML = REPO_ROOT / "website" / "product.html"
 PRICING_JSON = REPO_ROOT / "product" / "pricing.json"
 
+# Internal quota tiers that are NOT public offerings — they must not leak
+# onto the pricing page (anon = unclaimed zero-email teams, raised to free
+# on claim, #1082). Mirror/parity assertions operate on the public set.
+INTERNAL_TIERS = frozenset({"anon"})
+PUBLIC_TIERS = frozenset({"free", "solo", "pro", "team"})
+
 
 # ── JS-object extraction (no JS engine, no network) ─────────────────────────
 
@@ -155,13 +161,17 @@ class TestPricingObjectShape:
     def test_pricing_object_extracts_from_product_html(self):
         pricing = _extract_pricing_object()
         assert set(pricing.keys()) == {"display", "tiers"}
-        assert set(pricing["tiers"].keys()) == {"free", "solo", "pro", "team"}
+        # Only public tiers render on the pricing page; internal quota tiers
+        # (anon — unclaimed zero-email teams, #1082) must not leak.
+        assert set(pricing["tiers"].keys()) == PUBLIC_TIERS
+        assert not (INTERNAL_TIERS & set(pricing["tiers"].keys()))
 
     def test_tier_sets_mirror_bidirectionally(self):
         html_tiers = set(_extract_pricing_object()["tiers"].keys())
         json_tiers = set(json.loads(
             PRICING_JSON.read_text(encoding="utf-8"))["tiers"].keys())
-        assert html_tiers == json_tiers == {"free", "solo", "pro", "team"}
+        assert html_tiers == json_tiers - INTERNAL_TIERS == PUBLIC_TIERS
+        assert not (INTERNAL_TIERS & html_tiers)
 
     def test_every_tier_has_complete_render_inventory(self):
         """A missing key (price/popular/features/excluded) throws mid-map and
@@ -197,6 +207,8 @@ class TestMirrorNumericParity:
     def test_price_mirrors_price_usd_monthly(self):
         html, js = _mirror_data()
         for name, tier in js["tiers"].items():
+            if name in INTERNAL_TIERS:
+                continue  # internal quota tier — not mirrored on the public page
             assert html["tiers"][name]["price"] == tier["price_usd_monthly"], (
                 f"tier {name}: HTML price {html['tiers'][name]['price']} != "
                 f"pricing.json {tier['price_usd_monthly']}")
@@ -213,6 +225,8 @@ class TestMirrorNumericParity:
             "keys": "max_api_keys",
         }
         for name, tier in js["tiers"].items():
+            if name in INTERNAL_TIERS:
+                continue  # internal quota tier — not mirrored on the public page
             for html_key, json_key in field_map.items():
                 expected = tier[json_key]
                 if expected is None:
@@ -224,6 +238,8 @@ class TestMirrorNumericParity:
     def test_overage_flag_mirrors(self):
         html, js = _mirror_data()
         for name, tier in js["tiers"].items():
+            if name in INTERNAL_TIERS:
+                continue  # internal quota tier — not mirrored on the public page
             assert html["tiers"][name]["overage"] is tier["overage"], (
                 f"tier {name}: HTML overage {html['tiers'][name]['overage']} "
                 f"!= pricing.json {tier['overage']}")
@@ -233,6 +249,8 @@ class TestMirrorNumericParity:
         paid overage line."""
         html, js = _mirror_data()
         for name, tier in js["tiers"].items():
+            if name in INTERNAL_TIERS:
+                continue  # internal quota tier — not mirrored on the public page
             excluded = html["tiers"][name]["excluded"]
             if tier["overage"]:
                 assert excluded == [], f"tier {name}: overage tier must not exclude anything"

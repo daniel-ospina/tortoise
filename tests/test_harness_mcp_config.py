@@ -1,15 +1,17 @@
-"""Per-harness MCP config shapes (#529).
+"""Per-harness MCP config shapes (#529/#981).
 
-Verifies each harness's emitted MCP config matches its client's expected
-format — the paste-path surface for hosted (Streamable HTTP) and self-hosted
-(stdio) onboarding:
+Verifies each harness's emitted MCP config matches the welcome page Block A
+contracts (tests/test_onboarding_variants.py T3) — the paste-path surface for
+hosted (HTTP) and self-hosted (stdio) onboarding:
 
-- claude:  .mcp.json, streamable-http with `type` field (hosted) / stdio command (self-hosted)
+- claude:  .mcp.json, `type: "http"` (hosted) / stdio command (self-hosted)
 - codex:   `codex mcp add ...` command — Codex manages its own config
 - cursor:  .mcp.json — url+headers WITHOUT `type` (hosted, per Cursor docs for
            remote servers) but WITH `type: "stdio"` (self-hosted, docs require it)
-- pi:      .mcp.json — streamable-http (hosted) / stdio command (self-hosted);
-           pi's mcp-client extension reads project .mcp.json and keys off url/command
+- pi:      .mcp.json — url+headers without `type` (hosted) / stdio command (self-hosted)
+
+Hosted headers use env expansion (${TORTOISE_API_KEY} / ${env:TORTOISE_API_KEY})
+— no literal key on disk, matching the page's canonical blocks.
 """
 from __future__ import annotations
 
@@ -29,32 +31,32 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 ENDPOINT = "https://api.premiselabs.co/mcp/"
 
 
-class TestHostedStreamableHttpShapes:
-    """`_harness_mcp_config` — hosted onboarding (Streamable HTTP)."""
+class TestHostedHttpShapes:
+    """`_harness_mcp_config` — hosted onboarding (HTTP, page #529 shapes)."""
 
-    def test_claude_streamable_http_with_type(self):
+    def test_claude_http_with_type(self):
         cfg = _harness_mcp_config("claude", "tt_testkey", "https://api.premiselabs.co")
         tortoise = cfg["mcpServers"]["tortoise"]
-        assert tortoise["type"] == "streamable-http"
+        # Page pins type:http — a url entry WITHOUT type is skipped by Claude Code.
+        assert tortoise["type"] == "http"
         assert tortoise["url"] == ENDPOINT
-        assert tortoise["headers"]["Authorization"] == "Bearer tt_testkey"
+        assert tortoise["headers"]["Authorization"] == "Bearer ${TORTOISE_API_KEY}"
 
-    def test_pi_streamable_http_with_type(self):
-        # pi's mcp-client extension reads project .mcp.json and connects via
-        # the `url` field (StreamableHTTPClientTransport) — type is accepted.
+    def test_pi_env_form_no_type(self):
+        # Page's pi canonical block carries url+headers, no `type`.
         cfg = _harness_mcp_config("pi", "tt_testkey", "https://api.premiselabs.co")
         tortoise = cfg["mcpServers"]["tortoise"]
-        assert tortoise["type"] == "streamable-http"
+        assert "type" not in tortoise
         assert tortoise["url"] == ENDPOINT
-        assert tortoise["headers"]["Authorization"] == "Bearer tt_testkey"
+        assert tortoise["headers"]["Authorization"] == "Bearer ${TORTOISE_API_KEY}"
 
-    def test_cursor_remote_has_no_type(self):
+    def test_cursor_env_form_no_type(self):
         # Cursor docs: remote url-based servers take url+headers, no `type`.
         cfg = _harness_mcp_config("cursor", "tt_testkey", "https://api.premiselabs.co")
         tortoise = cfg["mcpServers"]["tortoise"]
         assert "type" not in tortoise
         assert tortoise["url"] == ENDPOINT
-        assert tortoise["headers"]["Authorization"] == "Bearer tt_testkey"
+        assert tortoise["headers"]["Authorization"] == "Bearer ${env:TORTOISE_API_KEY}"
 
     def test_codex_remote_command(self):
         cfg = _harness_mcp_config("codex", "tt_testkey", "https://api.premiselabs.co")
@@ -74,6 +76,83 @@ class TestHostedStreamableHttpShapes:
         for harness in ("claude", "codex", "cursor", "pi"):
             cfg = _harness_mcp_config(harness, "tt_testkey", "https://api.premiselabs.co")
             assert cfg, f"empty config for {harness}"
+
+
+class TestWelcomePageParity:
+    """#981: CLI hosted config must match welcome.html Block A (T3).
+
+    The page is the surface users copy from — the CLI and the page must not
+    be able to drift again (this is the #529-regression that #981 fixes).
+    """
+
+    PAGE = REPO_ROOT / "website" / "welcome.html"
+    PAGE_URL = "https://api.premiselabs.co"
+
+    @staticmethod
+    def _marker_json(html: str, harness: str) -> dict:
+        import re
+        pattern = (r"/\* TORTOISE_CFG_BEGIN:" + harness +
+                   r" \*/(.*?)/\* TORTOISE_CFG_END:" + harness + r" \*/")
+        match = re.search(pattern, html, re.S)
+        assert match, f"TORTOISE_CFG markers missing for {harness}"
+        block = match.group(1).strip()
+        block = re.sub(r"^const\s+\w+\s*=\s*", "", block)
+        return json.loads(block.rstrip().rstrip(";"))
+
+    def test_cursor_and_pi_match_page_env_blocks_exactly(self):
+        html = self.PAGE.read_text(encoding="utf-8")
+        for harness in ("cursor", "pi"):
+            cli = _harness_mcp_config(harness, "tt_any", self.PAGE_URL)
+            page = self._marker_json(html, harness)
+            assert cli == page, (
+                f"CLI {harness} config drifted from welcome.html canonical block:\n"
+                f"  CLI:  {json.dumps(cli)}\n  PAGE: {json.dumps(page)}"
+            )
+
+    def test_claude_matches_page_mcpjson_alternative(self):
+        html = self.PAGE.read_text(encoding="utf-8")
+        i = html.find("claude mcp add")
+        assert i > 0, "claude mcp add one-liner missing from welcome.html"
+        start = html.find("# {", i)
+        assert start > 0, "claude .mcp.json alternative missing from welcome.html"
+        end = html.find("\n", start)
+        raw = html[start:end].lstrip("# ").replace("\\${", "${")
+        raw = raw.replace("${MCP_URL}", f"{self.PAGE_URL}/mcp/")
+        page_cfg = json.loads(raw)
+        cli = _harness_mcp_config("claude", "tt_any", self.PAGE_URL)
+        assert cli == page_cfg, (
+            f"CLI claude config drifted from welcome.html .mcp.json alternative:\n"
+            f"  CLI:  {json.dumps(cli)}\n  PAGE: {json.dumps(page_cfg)}"
+        )
+
+    def test_codex_command_matches_page(self):
+        html = self.PAGE.read_text(encoding="utf-8")
+        i = html.find("codex mcp add tortoise")
+        assert i > 0, "codex mcp add line missing from welcome.html"
+        end = html.find("\n", i)
+        page_cmd = html[i:end].rstrip("`,").strip().replace(
+            "${MCP_URL}", f"{self.PAGE_URL}/mcp/"
+        )
+        cli = _harness_mcp_config("codex", "tt_any", self.PAGE_URL)["command"]
+        assert cli == page_cmd, (
+            f"CLI codex command drifted from welcome.html:\n"
+            f"  CLI:  {cli}\n  PAGE: {page_cmd}"
+        )
+
+    def test_claude_one_liner_printed_by_cli(self):
+        # The page's PRIMARY claude shape is the CLI one-liner — the CLI's
+        # --harness claude output must show it (with the user's literal key).
+        from tortoise.__main__ import _print_mcp_configs
+        buf = io.StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            _print_mcp_configs("tt_key", self.PAGE_URL, "claude")
+        finally:
+            sys.stdout = old
+        out = buf.getvalue()
+        assert "claude mcp add --transport http tortoise https://api.premiselabs.co/mcp/" in out
+        assert '"type": "http"' in out
 
 
 class TestSelfHostedStdioShapes:

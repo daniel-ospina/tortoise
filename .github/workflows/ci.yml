@@ -8,6 +8,32 @@ on:
   pull_request:
 
 jobs:
+  # Migration invariants (#1095) — secret-free, fork-safe:
+  #   migration-unique-prefix  — duplicate version prefixes / non-conforming
+  #                              filenames (the 0012x2/0015x2 class that aborted
+  #                              `db push` entirely, #1001 root cause)
+  #   migration-append-only    — edits/renames/deletions of already-merged
+  #                              migrations are rejected (a change to an applied
+  #                              migration must be a NEW timestamp file)
+  # Both drive the shared .github/scripts/check-migration-append-only script so
+  # tests exercise the shipped logic. fetch-depth: 0 is required for the base
+  # SHA to be available to `git diff` (default checkout is depth 1).
+  migration-unique-prefix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check migration prefix invariants
+        run: bash .github/scripts/check-migration-append-only prefix
+  migration-append-only:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check migrations are append-only
+        run: bash .github/scripts/check-migration-append-only diff
+        env:
+          DRIFT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
   pricing-artifact:
     # #682: canonical pricing must exist on main and stay in sync with the
     # tier_limits() table — a missing/renamed product/pricing.json fails CI.

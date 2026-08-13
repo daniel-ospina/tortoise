@@ -248,7 +248,7 @@ class TestClaimEndpoint:
     def test_audit_team_claim_with_detail(self, client, fake, monkeypatch,
                                           capsys):
         """Indicator 5: audit team_claim fires with provider/email/user_id in
-        detail (audit_events.detail JSONB, 20260813000003)."""
+        detail (audit_events.detail JSONB, 20260813000004)."""
         key, team_id = _provision_anon(client, fake)
         _patch_verify(monkeypatch, _jwt("user-a", email="verified@example.com",
                                         providers=["google"]))

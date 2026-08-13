@@ -93,7 +93,7 @@ class FakeControlPlane:
                              "write_ops": n})
             return None  # PostgREST minimal — no echo
         if fn == "claim_membership":
-            # Emulate migration 20260813000003's SQL semantics over the
+            # Emulate migration 20260813000004's SQL semantics over the
             # in-memory rows (mirrors the real SECURITY DEFINER function):
             #  1. resolve team from api_keys (lookup_hash + revoked_at IS
             #     NULL; REJECT created_via='bootstrap' session keys and
