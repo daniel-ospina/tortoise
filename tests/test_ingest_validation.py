@@ -125,6 +125,23 @@ class TestPhase1Phase2Parity:
         for name, bundle in cases.items():
             self._assert_both_phases(sdk, bundle)
 
+    def test_nonstring_fields_classes(self, sdk):
+        # REVIEW-FIX P1/P2 (cycle-26): non-string fields must be Phase-1
+        # violations (Phase 2 would raise/crash AFTER partial commits).
+        cases = {
+            "non-string entity type": {"entities": [{"type": 5, "name": "x"}]},
+            "non-string point content": {"points": [
+                {"kind": "statement", "content": 5}]},
+            "non-string connection from": _points_pair() | {
+                "connections": [{"from": 5, "to": "pB", "operator": "IMPL"}]},
+            "non-string to item": _points_pair() | {
+                "connections": [{"from": "pA", "to": [5], "operator": "IMPL"}]},
+            "non-string kind": {"points": [
+                {"kind": 5, "content": "x"}]},
+        }
+        for name, bundle in cases.items():
+            self._assert_both_phases(sdk, bundle)
+
     def test_connection_contract_classes(self, sdk):
         cases = {
             "missing from": {"points": [{"ref": "p", "kind": "statement", "content": "a"}],

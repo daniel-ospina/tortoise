@@ -2611,7 +2611,10 @@ class TortoiseSDK:
         if section == "points":
             # kind is OPTIONAL (CYCLE-25: kind-absent defaults to
             # 'statement'); content is required.
-            if item.get("content") is None:
+            if item.get("content") is None or not isinstance(item.get("content"), str):
+                # REVIEW-FIX P1 (cycle-26): non-string content is a Phase-1
+                # violation (Phase 2 would AttributeError at _content_hash
+                # mid-write after earlier sections commit).
                 violations.append({
                     "section": section, "index": index,
                     "message": f"ingest: points[{index}] requires 'content'",
@@ -2644,7 +2647,8 @@ class TortoiseSDK:
                     "message": f"ingest: sources[{index}] requires 'sourceKind'",
                 })
         elif section == "entities":
-            etype = (item.get("type") or "").strip().lower()
+            _etype_v = item.get("type")
+            etype = (_etype_v if isinstance(_etype_v, str) else "").strip().lower()
             if not etype:
                 violations.append({
                     "section": section, "index": index,
@@ -2690,6 +2694,15 @@ class TortoiseSDK:
         applied by the write path, not flagged here.
         """
         if kind is None:
+            return
+        if not isinstance(kind, str):
+            # REVIEW-FIX P2 (cycle-26): a non-string kind must not silently
+            # write pointKind:<int> into the graph — Phase-1 violation.
+            violations.append({
+                "section": "points", "index": index,
+                "message": f"pointKind must be a string, got "
+                           f"{type(kind).__name__}",
+            })
             return
         if kind == "event":
             violations.append({
@@ -2781,12 +2794,32 @@ class TortoiseSDK:
                 "message": f"ingest: connections[{index}] 'to' must be a "
                            f"list or string, got {type(tos).__name__}",
             })
-        elif isinstance(tos, list) and not tos:
+        frm = conn.get("from")
+        if not isinstance(frm, str):
+            # REVIEW-FIX P1 (cycle-26): non-string from is a Phase-1 violation
+            # (Phase 2 would raise 'Points [5] do not exist' AFTER points are
+            # committed — partial mutation, J2/E2E-1 zero-mutation violation).
+            violations.append({
+                "section": "connections", "index": index,
+                "message": f"ingest: connections[{index}] 'from' must be a "
+                           f"string ref, got {type(frm).__name__}",
+            })
+        if isinstance(tos, list) and not tos:
             violations.append({
                 "section": "connections", "index": index,
                 "message": f"ingest: connections[{index}] 'to' cannot be "
                            f"empty — at least one target is required",
             })
+        elif isinstance(tos, list):
+            for t in tos:
+                if not isinstance(t, str):
+                    violations.append({
+                        "section": "connections", "index": index,
+                        "message": f"ingest: connections[{index}] 'to' items "
+                                   f"must be string refs, got "
+                                   f"{type(t).__name__}",
+                    })
+                    break
         has_rel = "relation" in conn
         has_op = "operator" in conn
         if has_rel == has_op:
