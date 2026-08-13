@@ -225,6 +225,7 @@ class TestPromotionPolicy:
         )
         assert sdk.get_point(op_id)["status"] == "draft"
         assert sdk.get_point(pB)["status"] == "draft"
+
     def test_invalid_promotion_policy_raises_naming_valid_values(self, sdk):
         # every invalid value raises ValueError naming the param AND the valid
         # values (cycle-21 message-content pin)
