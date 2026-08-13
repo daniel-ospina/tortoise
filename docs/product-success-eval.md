@@ -1,3 +1,12 @@
+---
+title: "Tortoise — Product-Success Evaluation Spec"
+type: product
+domain: product
+doc_status: draft
+created: 2026-08-13
+ownedBy: epistemic-team
+---
+
 # Tortoise — Product-Success Evaluation Spec
 ## "Did the memory matter?" — measurement framework for the compounding-memory claim
 

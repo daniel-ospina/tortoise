@@ -14,6 +14,7 @@ from typing import Any
 from .domain_loader import known_kinds, register_kind
 from .ids import ulid
 from . import monitoring
+from . import file_indexer  # noqa: F401 — import-time sourceKind registration (§4.4)
 from .projection import FalkorProjection
 from .quota import MAX_EXTRACTIONS_PER_TURN, MAX_SESSION_TURNS
 import threading
@@ -36,6 +37,46 @@ POINT_STATUS_VALUES = frozenset({'draft', 'live', 'retracted', 'superseded', 'ou
 # only statuses a connection to is NOT stale.
 STALE_TERMINAL_STATUSES = frozenset(
     {'retracted', 'superseded', 'outdated', 'archived'})
+
+# Epic #902 W4 A0 — single-source valid-value sets for ingest() (consumed by
+# the SDK validation AND the MCP pre-validation so the two layers cannot
+# drift; INGEST_CONTRACT.md §2/§5 pins the exact values + error shapes).
+INGEST_GRANULARITIES = ("bulk", "granular")
+INGEST_PROMOTION_POLICIES = ("gated", "auto")
+
+
+def _first_non_draft_status(points: list) -> tuple[int, object] | None:
+    """Row-9 guard helper (PR #1073): return (index, effective_status) of the
+    first point item whose EFFECTIVE status is not exactly 'draft'.
+
+    The effective status is the top-level ``status`` key, or the nested
+    ``props={"status": ...}`` value when top-level is absent (create_point
+    flattens nested props via _coerce_props — top-level wins on conflict,
+    mirrored here). Only the exact canonical string "draft" is storable under
+    promotion_policy='gated': case/whitespace variants ("Draft", "draft "),
+    terminal statuses, and non-str values are all rejected (EP _live_only
+    excludes only exact 'draft', so every other value would be EP-live).
+
+    Shared by TortoiseSDK.ingest and tortoise_ingest so the two layers
+    cannot drift. Returns None when every item is draft/absent.
+    """
+    for i, item in enumerate(points or []):
+        if not isinstance(item, dict):
+            continue
+        st = item.get("status")
+        nested = item.get("props")
+        has_status = "status" in item
+        if not has_status and isinstance(nested, dict):
+            st = nested.get("status")
+            has_status = "status" in nested
+        # An explicit status key present with value None is a violation too
+        # (None would otherwise be stored as NULL, which _live_only treats as
+        # LIVE) — uniform row-9 message, not the vocabulary error.
+        if has_status and st is None:
+            return i, None
+        if st is not None and str(st) != "draft":
+            return i, st
+    return None
 
 # #913: whole-graph mode=add cap — pairwise scoring is O(n²) in time AND
 # memory (dense cosine matrix + pair dict); a read-only MCP call must not
@@ -747,6 +788,17 @@ class TortoiseSDK:
             pid = ulid()
         # Points enter as draft, go live when first edge is created (#131)
         status = props.pop("status", "draft")
+        # Fail-closed vocabulary validation (mirrors update_point): a
+        # non-canonical status (case variant, junk, non-str, typo) would
+        # otherwise be stored verbatim and treated as EP-LIVE by _live_only
+        # (which excludes only exact 'draft') — a silent-promotion hole
+        # (PR #1073 review P0/P1). isinstance guard keeps the error a
+        # ValueError for unhashable values (list/dict) too.
+        if not isinstance(status, str) or status not in POINT_STATUS_VALUES:
+            raise ValueError(
+                f"Invalid status {status!r}. Valid statuses: "
+                f"{sorted(POINT_STATUS_VALUES)}"
+            )
 
         # Compute embedding (Phase 1A, #7698) — stored as Point property
         embedding = None
@@ -1082,7 +1134,8 @@ class TortoiseSDK:
             )
 
         # Validate status if present
-        if 'status' in props and props['status'] not in POINT_STATUS_VALUES:
+        if 'status' in props and (not isinstance(props['status'], str)
+                                  or props['status'] not in POINT_STATUS_VALUES):
             raise ValueError(
                 f"Invalid status {props['status']!r}. "
                 f"Must be one of: {', '.join(sorted(POINT_STATUS_VALUES))}"
@@ -1331,7 +1384,7 @@ class TortoiseSDK:
         #    a failure leaves the graph untouched.
         edges_result = proj.g.query(
             "MATCH (op:Point {is_operator:true})-[r]->(old:Point {id:$old_id}) "
-            "RETURN op.id, type(r), r.idx",
+            "RETURN op.id, type(r), r.idx, op.label",
             params={"old_id": old_id},
         )
         from .security import validate_rel_type
@@ -1362,6 +1415,17 @@ class TortoiseSDK:
         transferred = 0
         for row in edges_result.result_set:
             op_id, edge_type, idx = row[0], row[1], row[2]
+            op_label = row[3] if len(row) > 3 else None
+            if op_label == "alreadyDecided":
+                # #1080 review: dedup context edges must NOT be re-pointed at
+                # the replacement — an alreadyDecided IMPL on the superseded
+                # prior declares the OLD decision a duplicate, not the new one.
+                _logger.info(
+                    "supersede_point: keeping alreadyDecided operator %s "
+                    "attached to the superseded point %s (dedup context edge)",
+                    op_id, old_id,
+                )
+                continue
             # Create new edge: operator → new point (same idx preserves source/target position)
             proj.g.query(
                 f"MATCH (op:Point {{id:$op_id}}), (new:Point {{id:$new_id}}) "
@@ -1606,6 +1670,84 @@ class TortoiseSDK:
                     direction="unidirectional")
                 dedup_wired = True
 
+        # Temporal wiring at promotion (W-4, #786): a MERGED temporal
+        # candidate whose prior was LIVE at extraction gets its NAND now
+        # (live→live), or — for an explicit replacement — the prior is
+        # superseded (CORRECTS + outdated:true). Targets are validated
+        # BEFORE the CAS (mirroring the dedup block) so a stale/terminal
+        # target can never produce a live point with no event (#1080 review).
+        temporal_wired = False
+        superseded = False
+        temporal_targets = point.get("temporal_target_ids") or []
+        if point.get("temporal_target_id") and point.get("temporal_target_id") not in temporal_targets:
+            temporal_targets.append(point["temporal_target_id"])
+        live_targets: list[str] = []
+        if (point.get("temporal_candidate")
+                and point.get("temporal_reviewed") == "merge"):
+            for tgt in temporal_targets:
+                trow = proj.g.query(
+                    "MATCH (n:Point {id:$id}) RETURN n.status",
+                    params={"id": tgt},
+                ).result_set
+                if not trow:
+                    # MISSING node (stale target) — distinct from an unset
+                    # status node, which is live by the canonical read model
+                    # (#1080 round-2 review: missing targets crashed the
+                    # NAND create AFTER the CAS).
+                    _logger.warning(
+                        "promote_point: temporal target %s for %s no longer "
+                        "exists — skipping the wire", tgt, point_id)
+                    continue
+                tstatus = trow[0][0] or "live"
+                if tstatus == "live":
+                    live_targets.append(tgt)
+                else:
+                    _logger.warning(
+                        "promote_point: temporal target %s for %s is %s — "
+                        "skipping the wire", tgt, point_id, tstatus)
+        if live_targets and point.get("temporal_replacement"):
+            for tgt in live_targets:
+                try:
+                    self.supersede_point(tgt, point_id)
+                    superseded = True
+                except ValueError as exc:
+                    _logger.warning(
+                        "promote_point: supersede of %s failed for %s: %s",
+                        tgt, point_id, exc)
+        elif live_targets:
+            for tgt in live_targets:
+                exists = proj.g.query(
+                    "MATCH (op:Point {is_operator:true})-[:NAND]->"
+                    "(:Point {id:$cand}), "
+                    "(op)-[:NAND]->(:Point {id:$prior}) RETURN count(op)",
+                    params={"cand": point_id, "prior": tgt},
+                ).result_set
+                if exists and exists[0][0] > 0:
+                    continue
+                # Cross-guard: never NAND a pair already linked by an
+                # alreadyDecided IMPL (dedup+temporal conflict, #1080).
+                dup = proj.g.query(
+                    "MATCH (op:Point {label:'alreadyDecided'})-[:IMPL]->"
+                    "(:Point {id:$cand}), "
+                    "(op)-[:IMPL]->(:Point {id:$prior}) RETURN count(op)",
+                    params={"cand": point_id, "prior": tgt},
+                ).result_set
+                if dup and dup[0][0] > 0:
+                    _logger.warning(
+                        "promote_point: %s already linked to %s by an "
+                        "alreadyDecided IMPL — skipping temporal NAND",
+                        point_id, tgt)
+                    continue
+                try:
+                    self.create_operator("NAND", point_id, [tgt])
+                    temporal_wired = True
+                except ValueError as exc:
+                    # A racing delete between validation and create must
+                    # never leave a live point without its event (#1080).
+                    _logger.warning(
+                        "promote_point: NAND wiring to %s failed for %s: %s",
+                        tgt, point_id, exc)
+
         # R16 zombie-operator prevention: promote incident draft operators
         # once ALL their endpoint Points are live.
         promoted_ops = self._promote_incident_operators(proj, point_id, now)
@@ -1616,6 +1758,10 @@ class TortoiseSDK:
                   "operator_nodes_promoted": promoted_ops}
         if dedup_wired:
             result["dedup_wired"] = True
+        if temporal_wired:
+            result["temporal_wired"] = True
+        if superseded:
+            result["superseded"] = True
         if race_detected:
             result["race_detected"] = True
             result["race_warning"] = (
@@ -1675,6 +1821,90 @@ class TortoiseSDK:
         """
         from .mining import quarantine_batch as _qb
         return _qb(self._get_proj(), batch_id, reason=reason)
+
+    # ── Temporal belief timeline (W-4, #786, DE2E-6) ───────────────
+
+    def belief_timeline(self, topic: str, limit: int = 50) -> list[dict]:
+        """Dated, ordered belief chain for a topic (plan §6.1, J-4, DE2E-6).
+
+        Returns decision Points aboutObject-connected to the topic entity,
+        ordered by validFrom ascending, each shaped as
+        {content, pointKind, validFrom, status, linked_by, related} where
+        linked_by is the temporal edge (NAND via an operator, or CORRECTS via
+        supersede_point) to the NEXT point in the chain, and related holds
+        the linked point ids.
+        """
+        if limit < 1:
+            raise ValueError(f"limit must be >= 1, got {limit}")
+        proj = self._get_proj()
+        rows = proj.g.query(
+            "MATCH (p:Point {pointKind:'decision'})-[:aboutObject]->"
+            "(o:Object) "
+            "WHERE (p.is_operator IS NULL OR p.is_operator = false) "
+            "AND (o.name = $topic OR o.canonical_name = $topic) "
+            "RETURN p.id, p.content, p.validFrom, p.status, p.outdated "
+            "ORDER BY p.validFrom LIMIT $limit",
+            params={"topic": topic, "limit": limit},
+        ).result_set
+        entries = [list(r) for r in rows]
+        # Superseded priors dropped out of the topic query (supersede_point
+        # transferred their aboutObject edges) — re-attach them via the
+        # CORRECTS chain so the timeline keeps the outdated belief (#1080).
+        if entries:
+            topic_ids = [r[0] for r in entries]
+            old_rows = proj.g.query(
+                "MATCH (cur:Point)-[:CORRECTS]->(old:Point {pointKind:'decision'}) "
+                "WHERE cur.id IN $ids "
+                "RETURN old.id, old.content, old.validFrom, old.status, "
+                "       old.outdated ORDER BY old.validFrom",
+                params={"ids": topic_ids},
+            ).result_set
+            known = {r[0] for r in entries}
+            for r in old_rows:
+                if r[0] not in known:
+                    entries.append(list(r))
+            # Globally ordered by validFrom (superseded priors appended).
+            entries.sort(key=lambda e: (e[2] is None, e[2] or ""))
+        out = []
+        ids = [e[0] for e in entries]
+        for pid, content, vf, status, outdated in entries[-limit:]:
+            # Temporal link to the NEXT point in the chain.
+            linked_by = None
+            related = []
+            for other_id in ids:
+                if other_id == pid:
+                    continue
+                nand = proj.g.query(
+                    "MATCH (op:Point {is_operator:true})-[:NAND]->"
+                    "(:Point {id:$a}), "
+                    "(op)-[:NAND]->(:Point {id:$b}) RETURN count(op)",
+                    params={"a": pid, "b": other_id},
+                ).result_set
+                if nand and nand[0][0] > 0:
+                    linked_by = "NAND"
+                    related.append(other_id)
+                    break
+                corr = proj.g.query(
+                    "MATCH (:Point {id:$a})-[:CORRECTS]->(:Point {id:$b}) "
+                    "RETURN count(*)",
+                    params={"a": pid, "b": other_id},
+                ).result_set
+                if corr and corr[0][0] > 0:
+                    linked_by = "CORRECTS"
+                    related.append(other_id)
+                    break
+            entry = {
+                "content": content,
+                "pointKind": "decision",
+                "validFrom": vf,
+                "status": status,
+                "linked_by": linked_by,
+                "related": related,
+            }
+            if outdated:
+                entry["outdated"] = True
+            out.append(entry)
+        return out
 
     # ── Content dedup queue (W-2, #784) ─────────────────────────────
     # Content candidates are DRAFT decision Points flagged by the two-tier
@@ -1795,12 +2025,39 @@ class TortoiseSDK:
         proj = self._get_proj()
         if candidate_type == "entity":
             return []  # #783 partial — entity queue tracked for epic completion
-        if candidate_type != "content":
+        if candidate_type not in ("content", "temporal"):
             raise ValueError(
-                f"candidate_type must be 'content' or 'entity', got {candidate_type!r}")
+                f"candidate_type must be 'content', 'temporal' or 'entity', "
+                f"got {candidate_type!r}")
+        if candidate_type == "content":
+            rows = proj.g.query(
+                "MATCH (n:Point) "
+                "WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL "
+                "AND n.status = 'draft' "
+                "AND (n.is_operator IS NULL OR n.is_operator = false) "
+                "RETURN properties(n) ORDER BY n.createdAt DESC LIMIT $limit",
+                params={"limit": limit},
+            ).result_set
+            out = []
+            for (props,) in rows:
+                out.append({
+                    "id": props.get("id"),
+                    "content": props.get("content"),
+                    "pointKind": props.get("pointKind"),
+                    "method": props.get("dedup_method"),
+                    "similarity": props.get("dedup_similarity"),
+                    "target_id": props.get("dedup_target_id"),
+                    "existing_id": props.get("dedup_target_id"),  # §6.1 alias
+                    "candidate_type": "content",
+                    "status": props.get("dedup_reviewed") or "pending",
+                    "batch_id": props.get("batch_id"),
+                })
+            return out
+        # Temporal candidates (W-4, #786): contradictory/replacement decision
+        # Points whose prior was LIVE at extraction — wire at promotion.
         rows = proj.g.query(
             "MATCH (n:Point) "
-            "WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL "
+            "WHERE n.temporal_candidate = true AND n.temporal_reviewed IS NULL "
             "AND n.status = 'draft' "
             "AND (n.is_operator IS NULL OR n.is_operator = false) "
             "RETURN properties(n) ORDER BY n.createdAt DESC LIMIT $limit",
@@ -1812,12 +2069,11 @@ class TortoiseSDK:
                 "id": props.get("id"),
                 "content": props.get("content"),
                 "pointKind": props.get("pointKind"),
-                "method": props.get("dedup_method"),
-                "similarity": props.get("dedup_similarity"),
-                "target_id": props.get("dedup_target_id"),
-                "existing_id": props.get("dedup_target_id"),  # §6.1 alias
-                "candidate_type": "content",
-                "status": props.get("dedup_reviewed") or "pending",
+                "target_id": props.get("temporal_target_id"),
+                "existing_id": props.get("temporal_target_id"),
+                "replacement": bool(props.get("temporal_replacement")),
+                "candidate_type": "temporal",
+                "status": props.get("temporal_reviewed") or "pending",
                 "batch_id": props.get("batch_id"),
             })
         return out
@@ -1844,8 +2100,38 @@ class TortoiseSDK:
         if not rows:
             raise ValueError(f"No point {candidate_id!r}")
         props = rows[0][0]
-        if not props.get("dedup_candidate"):
-            raise ValueError(f"Point {candidate_id!r} is not a dedup candidate")
+        is_temporal = bool(props.get("temporal_candidate"))
+        if not (props.get("dedup_candidate") or is_temporal):
+            raise ValueError(
+                f"Point {candidate_id!r} is not a dedup/temporal candidate")
+        if is_temporal:
+            # Temporal candidates: mark reviewed; the wire/supersede happens
+            # at promotion (live-prior rule — never draft→live wiring).
+            # Idempotent: re-approving with the SAME action is a no-op (no
+            # duplicate event — #1080 review).
+            if props.get("temporal_reviewed") == action:
+                return {"candidate_id": candidate_id, "action": action,
+                        "candidate_type": "temporal",
+                        "wired": False,
+                        "deferred_to_promotion": action == "merge",
+                        "target_id": props.get("temporal_target_id"),
+                        "already_reviewed": True}
+            proj.g.query(
+                "MATCH (n:Point {id:$id}) SET n.temporal_reviewed = $a, "
+                "n.reviewed = true",
+                params={"id": candidate_id, "a": action},
+            )
+            if action == "reject":
+                self._emit_event("DedupeRejected",
+                                 point=self.get_point(candidate_id))
+            else:
+                self._emit_event("DedupeRecorded",
+                                 point=self.get_point(candidate_id))
+            return {"candidate_id": candidate_id, "action": action,
+                    "candidate_type": "temporal",
+                    "wired": False,
+                    "deferred_to_promotion": action == "merge",
+                    "target_id": props.get("temporal_target_id")}
         target_id = props.get("dedup_target_id")
         proj.g.query(
             "MATCH (n:Point {id:$id}) SET n.dedup_reviewed = $a, n.reviewed = true",
@@ -2555,7 +2841,8 @@ class TortoiseSDK:
         ("IMPL", "NAND", "composedOf", "decomposesInto", "contains", "wraps")
     )
 
-    def ingest(self, bundle: dict, granularity: str = "bulk") -> dict:
+    def ingest(self, bundle: dict, granularity: str = "bulk", *,
+               promotion_policy: str = "gated") -> dict:
         """Heterogeneous bulk write (epic #888 W4, design ref PR #912).
 
         One call writes points + entities + sources + connections coherently:
@@ -2584,28 +2871,67 @@ class TortoiseSDK:
           returns aggregated {created, ids, nudges}. granularity='granular':
           additionally returns per-item ``results`` for agent step-by-step
           control (each item's primitive result + deduped flag).
+        - promotion_policy: "gated" (DEFAULT, Q2) — points stay draft;
+          connections never promote (operator path: promote_source=False via
+          #780 — the operator node is created draft and the source is NOT
+          auto-promoted). "auto" — #131 parity preserved: a source point
+          promotes on wire when its FIRST operator edge is created
+          (CYCLE-26 REVIEW FIX P2: NOT retroactive — re-ingest dedup of an
+          existing operator does not retro-promote a previously-gated
+          source). ORTHOGONAL to granularity: both modes honor the same
+          policy.
         - Idempotent-ish: points dedup by (content_hash, pointKind) via
           create_point(dedup=True); sources merge by url; Subject/Object
           merge by name; operator connections dedup by (op_type, input set);
           structural edges MERGE. Document/Event entities are append-only
           occurrence records — re-ingest duplicates them by design.
         - EP-safe: created points default to status='draft' (#131 draft→live
-          lifecycle) unless the item carries status=... — pass status='live'
-          explicitly to opt into EP propagation.
+          lifecycle). Under promotion_policy='gated' ANY effective status other
+          than 'draft' on a point item is rejected (INGEST CONTRACT row 9 —
+          no bypass of the gated contract; the sanctioned routes are
+          promotion_policy='auto' or update_point(status='live') after ingest;
+          case variants, nested props={...}, and canonical terminal statuses
+          are rejected too — EP _live_only excludes only exact 'draft').
+          Connection-driven promotion (source → live on first edge) only
+          happens under promotion_policy='auto', and only for draft/null-status sources
+          (retracted/deprecated terminal sources are never resurrected).
+          Under auto the operator node is written WITHOUT a status property
+          (live by projection — the #780 asymmetry: gated writes explicit
+          draft on the operator, auto writes none).
 
         Returns {granularity, created: {points, entities, sources, connections},
         deduped: {...}, ids: {points, entities, sources, connections, refs},
         nudges: [...]} (+ results for granularity='granular').
         """
-        if granularity not in ("bulk", "granular"):
+        if granularity not in INGEST_GRANULARITIES:
             raise ValueError(
                 f"ingest: granularity must be 'bulk' or 'granular', got {granularity!r}"
+            )
+        if promotion_policy not in INGEST_PROMOTION_POLICIES:
+            raise ValueError(
+                f"ingest: promotion_policy must be 'gated' or 'auto', got {promotion_policy!r}"
             )
         if not isinstance(bundle, dict):
             raise ValueError(
                 f"ingest: bundle must be a dict with points/entities/sources/"
                 f"connections sections, got {type(bundle).__name__}"
             )
+        # Row 9 of INGEST_CONTRACT.md: under gated, points must stay draft —
+        # ANY effective status other than the exact canonical "draft" on a
+        # point item is a violation (no bypass of the gated contract; the
+        # sanctioned routes are promotion_policy='auto' or
+        # update_point(status='live') after ingest). Shared helper keeps the
+        # SDK and MCP layers identical (PR #1073).
+        if promotion_policy == "gated":
+            bad = _first_non_draft_status(bundle.get("points"))
+            if bad is not None:
+                i, st = bad
+                raise ValueError(
+                    f"ingest: points[{i}] status:{st!r} is not allowed under "
+                    f"promotion_policy 'gated' — under gated points stay "
+                    f"draft; pass promotion_policy='auto' for explicit live, "
+                    f"or keep draft and promote via update_point(status='live')"
+                )
         from .projection.edges import _VALID_EDGE_PREDICATES
 
         proj = self._get_proj()
@@ -2810,7 +3136,8 @@ class TortoiseSDK:
                     conn_result = {"operator_id": oid, "deduped": True}
                 else:
                     op = self.create_operator(op_type, src, dsts,
-                                              label=label, direction=direction)
+                                              label=label, direction=direction,
+                                              promote_source=(promotion_policy == "auto"))
                     oid = op["id"]
                     created["connections"] += 1
                     conn_result = {"operator_id": oid, "deduped": False}
@@ -4488,10 +4815,10 @@ class TortoiseSDK:
                     f"progress_file {progress_file!r} not under TORTOISE_INGEST_BASE_DIR."
                 )
 
-        # Canonical boundary regex lives in session_indexer (#280 review round 6):
+        # Canonical boundary regex lives in file_indexer (#280 review round 6):
         # hoisted so extract/health/ingest can never drift apart again (the round-5
         # bug was exactly two copies diverging → permanent sweep non-convergence).
-        from .session_indexer import _FM_RE
+        from .file_indexer import _FM_RE
         ingested, updated, skipped, failed = 0, 0, 0, 0
         errors: list[dict] = []
         now = datetime.now(timezone.utc).isoformat()
@@ -7119,8 +7446,9 @@ class TortoiseSDK:
         ingest_corpus, never silently re-indexed (#280 review P2).
         """
         from pathlib import Path
+        from .file_indexer import compute_file_hash
         from .session_indexer import (
-            compute_file_hash, extract_session_id, session_corpus_dir,
+            extract_session_id, session_corpus_dir,
         )
 
         dir_path = Path(directory or session_corpus_dir())
