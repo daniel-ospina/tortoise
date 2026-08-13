@@ -245,9 +245,11 @@ class ConversationMiner:
         grounding drift ≤2% via mean_grounding — #779). Additive result keys:
           - batch_id: the batch this call produced
           - batch_status: "committed" (W-3 pass — drafts enter the review
-            queue) or "quarantined" (W-3 fail — promote_point is blocked on
-            the batch's Points until a re-run passes, J-5)
-          - batch_reason: the W-3 failure reason when quarantined
+            queue), "quarantined" (W-3 fail — promote_point is blocked on
+            the batch's Points until a re-run passes, J-5), or "not_gated"
+            (standalone log mode — no projection, gate skipped)
+          - batch_reason: the W-3 failure reason when quarantined, or the
+            skip explanation when not_gated
 
         ``entity_stage`` injects a deterministic mock (EntityStageMock, plan
         §7 preamble) for tests; None → LLM stage (or rule fallback when no
@@ -313,10 +315,13 @@ class ConversationMiner:
             from . import mining as _mining
             try:
                 # Grounding drift protects the LIVE graph against batch
-                # side-effects: capture before the batch's writes are visible
-                # to live grounding... extraction writes drafts (excluded
-                # from the live-only mean), so pre and post normally agree —
-                # a mid-batch promotion would move post and trip the gate.
+                # side-effects. Actual ordering: extraction has already
+                # completed here, and extraction writes only drafts (excluded
+                # from the live-only mean), so pre and post normally agree
+                # (~0 drift) — the check guards against concurrent live
+                # changes landing between the two reads (e.g. a parallel
+                # promote_point on the same graph), which would trip the
+                # ≤2% mean ceiling and quarantine the batch.
                 pre = grounding_snapshot(api.projection)["mean"]
                 gate = _mining.EpSafeCommit(api.projection, batch_id)
                 res = gate.run(point_ids, grounding_before=pre,
@@ -723,7 +728,10 @@ def mine_conversation(
     """Convenience: mine a conversation transcript → Events + Points + Objects.
 
     Returns (plan §6.1, back-compatible): Phase-1 keys {events, points,
-    operators, event_ids} plus Phase-2 {entities, objects, dedup_hits, drafts}.
+    operators, event_ids} plus Phase-2 {entities, objects, dedup_hits, drafts}
+    plus Phase-4 {batch_id, batch_status, batch_reason} (W-3 wiring, #990 —
+    see ConversationMiner.mine for the exact semantics, incl. the
+    "not_gated" standalone-log state).
     ``content_dedup``/``dedup_threshold`` are accepted for the pinned API
     surface but the dedup stage itself is a later issue — dedup_hits is
     always 0 from this entry point (DE2E-3).

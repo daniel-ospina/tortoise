@@ -555,16 +555,43 @@ class TestW3PipelineWiring:
 
     def test_batch_state_survives_rebuild(self, mining_sdk, tmp_path):
         """#990 durability: a quarantined batch stays quarantined after
-        wipe+rebuild_all (:Batch marker snapshot)."""
+        wipe+rebuild_all — BOTH the :Batch marker AND the Point.batch_id
+        enforcement links (the mining path writes batch_id as a raw graph
+        write, not through the event stream — #1025 review P1)."""
         import tortoise.mining as mining
+        from tortoise.log import EventLog
+        from tortoise.api import EventAPI
+        import os
         sdk = mining_sdk
         proj = sdk._get_proj()
-        p = sdk.create_point("decision", "a", status="draft", batch_id="dur1")
-        mining.quarantine_batch(proj, "dur1", reason="EP drift (W-3)")
-        assert mining.batch_status(proj, "dur1")["status"] == "quarantined"
+        log = EventLog(str(tmp_path / "events.jsonl"))
+        api = EventAPI(log, initiated_by="extractor", agent_id="t",
+                       projection=proj)
+        result = mining.mine_conversation(
+            "Alice: We decided to move the FalkorDB default port to 16379.\n"
+            "Bob: I disagree because changing port 16379 breaks the redis config.\n"
+            "Alice: But tortoise#123 tracks the migration work.\n",
+            "session_s990dur", api)
+        assert result["points"] > 0
+        batch_id = result["batch_id"]
+        mining.quarantine_batch(proj, batch_id, reason="EP drift (W-3)")
+        assert mining.batch_status(proj, batch_id)["status"] == "quarantined"
+
+        # Rebuild from the REAL mining event log (points came from PointAdded
+        # events that do NOT carry batch_id — only the snapshot restores it).
         rebuilt = proj.rebuild_all(str(tmp_path))
-        assert rebuilt["events"] >= 0
-        bs = mining.batch_status(proj, "dur1")
+        assert rebuilt["events"] >= 1
+        bs = mining.batch_status(proj, batch_id)
         assert bs is not None and bs["status"] == "quarantined", (
-            "quarantine lock must survive rebuild_all"
+            "quarantine marker must survive rebuild_all"
         )
+        # The ENFORCEMENT link must survive too: promote_point on a mined
+        # point of the quarantined batch is still blocked.
+        rows = proj.g.query(
+            "MATCH (n:Point) WHERE n.batch_id = $bid RETURN n.id LIMIT 1",
+            params={"bid": batch_id},
+        ).result_set
+        assert rows, "Point.batch_id must be restored after rebuild"
+        blocked = sdk.promote_point(rows[0][0])
+        assert blocked["blocked"] is True
+        assert blocked["reason"] == "batch_quarantined", blocked

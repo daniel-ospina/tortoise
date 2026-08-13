@@ -1487,11 +1487,13 @@ class TortoiseSDK:
             Points are live, so a contradiction never stays a dead draft
             operator after its claims go live.
 
-        NOTE (review #944): the quarantine lock is a read-then-CAS — a
-        quarantine landing between the batch_status read and the CAS can race
-        a promotion through (window is milliseconds; the flow is
-        single-operator). Fully atomic batch+point locking is tracked with
-        the W-3 pipeline wiring (#785 follow-up).
+        NOTE (review #944/#990): the quarantine lock is a read-then-CAS —
+        FalkorDBLite has no EXISTS subqueries, so the batch check cannot fold
+        into the CAS. #990 added a post-CAS re-check that SURFACES a lost
+        race instead of hiding it: when a quarantine lands between the read
+        and the CAS, the promotion completes but the response carries
+        ``race_detected: true`` + ``race_warning`` (the point is live while
+        its batch is quarantined — an operator action is required).
 
         Raises ValueError if the Point does not exist.
         """
