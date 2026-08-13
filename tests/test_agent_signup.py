@@ -82,19 +82,6 @@ class TestAgentSignup:
         assert r.status_code == 200
         assert r.json()["identity"].startswith("anon-")
 
-    def test_rate_limit_not_bypassable_via_client_identity(self, client):
-        # #741(a): a client-chosen identity no longer keys the rate limit —
-        # the server-side identity is fresh per request, so replaying one
-        # client identity must NOT 429 (the old per-identity limit was
-        # trivially bypassable and is dead).
-        ident = f"anon-{uuid.uuid4().hex[:12]}"
-        seen = set()
-        for _ in range(4):
-            r = client.post("/v1/agent/signup", json={"identity": ident})
-            assert r.status_code == 200, r.text
-            seen.add(r.json()["identity"])
-        assert len(seen) == 4  # every request minted a distinct server identity
-
     def test_signup_identity_anchors_anon_membership(self, client):
         """#770 identity path: the server-side anon identity returned by signup
         is the anchor for the Supabase team_memberships row (NULL user_id +
@@ -116,6 +103,51 @@ class TestAgentSignup:
         assert rows[0][0] == data["identity"], (
             f"membership anchor {rows[0][0]!r} != signup identity {data['identity']!r}"
         )
+
+
+class TestSignupIpRateLimit:
+    """#1081: agent-signup per-IP limiter (2/24h, env-tunable, OWN store).
+
+    The shared register bucket (3/hr) is untouched (locked by
+    test_shared_ip_bucket_3_per_hour); this store limits the agent path
+    only. All three tests delenv RATE_LIMIT_DISABLED (set at import in
+    test_writer_inventory.py:31 — without the delenv they'd test the mask,
+    not the limiter).
+    """
+
+    def test_signup_ip_limit_2_per_24h(self, client, monkeypatch):
+        # delenv pattern: test_writer_inventory.py:31 sets RATE_LIMIT_DISABLED=1
+        # at import; the signup limiter must actually be ON for this test.
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+        for _ in range(2):
+            r = client.post("/v1/agent/signup", json={})
+            assert r.status_code == 200, r.text
+        r = client.post("/v1/agent/signup", json={})
+        assert r.status_code == 429, r.text
+        # P2-FIX-5: computed Retry-After (sliding window) — integer <= 86400,
+        # NOT flat "86400" (remaining = oldest + window - now, so once >=1s
+        # elapses it is 86399).
+        assert int(r.headers.get("retry-after")) <= 86400
+        assert r.json()["detail"]["error_code"] == "over_signup_ip_rate_limit"
+
+    def test_signup_ip_limit_configurable_via_env(self, client, monkeypatch):
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+        monkeypatch.setenv("TORTOISE_SIGNUP_IP_LIMIT", "1")
+        r = client.post("/v1/agent/signup", json={})
+        assert r.status_code == 200, r.text
+        r = client.post("/v1/agent/signup", json={})
+        assert r.status_code == 429, r.text
+
+    def test_signup_ip_limit_not_bypassable_via_client_identity(self, client, monkeypatch):
+        # REWRITTEN from dead-per-identity semantics (#741): the IP is the key.
+        # Rotating client identities must NOT dodge the per-IP limit.
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+        for _ in range(2):
+            r = client.post("/v1/agent/signup",
+                            json={"identity": f"anon-{uuid.uuid4().hex[:12]}"})
+            assert r.status_code == 200, r.text
+        r = client.post("/v1/agent/signup", json={"identity": "anon-fresh"})
+        assert r.status_code == 429, r.text
 
 
 class TestProvisionMembershipStatus:

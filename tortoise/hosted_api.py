@@ -35,8 +35,10 @@ from tortoise.analytics import (  # #528 server analytics (fail-safe, no-op with
     tenant_provisioned,
 )  # E1–E8 session endpoints (D1)
 import hmac
+from collections.abc import Hashable
 
 from tortoise.sdk import TortoiseSDK, _content_hash
+from tortoise.abuse import _int_env  # #1081 signup limiter env knobs (abuse.py:57)
 from tortoise.mcp_server import create_http_app
 from tortoise.hosted_backup import (
     MemoryStorage,
@@ -1425,78 +1427,138 @@ DEFAULT_ONBOARDING_STATE = {
 }
 
 
-# ── IP-based Rate Limiter for /v1/register (#498) ─────────────────
+# ── IP-based rate limiters (#498, #302, #1081) ────────────────────
+# One parametrized primitive; three bucket stores. #1081: the register and
+# sensitive-op limiters were near-identical copies — a third copy for the
+# agent-signup path would be drift. Register (+signup/email) and sensitive-op
+# semantics are byte-identical to the pre-refactor behavior; the signup
+# limiter is a NEW, separate per-IP store with env-tunable knobs.
 
 _register_buckets: dict[str, list[float]] = defaultdict(list)
 _register_lock = asyncio.Lock()
 _REGISTER_MAX_PER_HOUR = 3
 
-
-async def _check_register_rate_limit(request: Request) -> None:
-    """IP-based rate limit: 3 registrations per hour per IP."""
-    if os.environ.get("RATE_LIMIT_DISABLED") == "1":
-        return
-    if not request.client or not request.client.host:
-        return
-    ip = request.client.host
-    now = time.time()
-    async with _register_lock:
-        bucket = _register_buckets[ip]
-        bucket[:] = [t for t in bucket if now - t < 3600]
-        if len(bucket) >= _REGISTER_MAX_PER_HOUR:
-            raise HTTPException(
-                status_code=429,
-                detail="Too many registration attempts. Please try again later.",
-                headers={"Retry-After": "3600"},
-            )
-        bucket.append(now)
-        # #750.2: bound memory growth — when the dict exceeds 10k IPs, drop
-        # buckets whose entries are all older than the 1h window (dead weight).
-        if len(_register_buckets) > 10_000:
-            stale = [ip for ip, b in _register_buckets.items()
-                     if not any(now - t < 3600 for t in b)]
-            for ip in stale:
-                del _register_buckets[ip]
-
-
-# ── Sensitive-op rate limits (E2E-6-D, #302) ─────────────────────────────
-# Owner-only endpoints (team export / team delete) get their own per-IP
-# hourly budget on top of the global 100/min middleware: export is a heavy
-# read (full graph scan), delete is an irreversible write. Mirrors the
-# register limiter pattern (RATE_LIMIT_DISABLED=1 opts out in tests).
 _SENSITIVE_OP_LIMITS = {"export": 20, "team_delete": 5}  # per hour per IP
 _SENSITIVE_BUCKETS: dict[tuple[str, str], list[float]] = defaultdict(list)
 _SENSITIVE_LOCK = asyncio.Lock()
 
+# Agent-signup limiter: OWN store, NOT shared with /v1/register or
+# /v1/signup/email (locked by test_shared_ip_bucket_3_per_hour). Default
+# 2 signups / 24h per IP — "3rd signup in rolling 24h → 429" (issue decision).
+_SIGNUP_BUCKETS: dict[str, list[float]] = defaultdict(list)
+_SIGNUP_LOCK = asyncio.Lock()
+# P2-1: retained R8 feed tasks (create_task must hold a reference — asyncio GC)
+_SIGNUP_FEED_TASKS: dict[str, asyncio.Task] = {}
 
-async def _check_sensitive_op_rate_limit(request: Request, op: str) -> None:
-    """Per-IP hourly budget for sensitive team ops (export / team_delete)."""
+
+async def _check_ip_bucket_rate_limit(
+    request: Request, *,
+    buckets: dict, lock: asyncio.Lock, limit: int, window_s: int,
+    detail: str | dict, retry_after_s: int | None = None,
+    key: Hashable | None = None, max_entries: int = 10_000,
+) -> None:
+    """Per-IP sliding-window rate limit over a caller-owned bucket store.
+
+    Shared by /v1/register (3/hr), sensitive ops (export/team_delete), and
+    /v1/agent/signup (2/24h). RATE_LIMIT_DISABLED=1 opts out (test env).
+    Raises HTTPException(429) with Retry-After when the window is exhausted.
+    Memory bound: when the store exceeds max_entries, drop buckets whose
+    entries are all older than window_s (dead weight — #750.2 precedent).
+
+    P1-FIX-1: bucket key is the caller-supplied `key` (required at wrappers)
+    — the sensitive-op store is keyed (ip, op) composite; a bare-ip default
+    would silently merge export/delete budgets (locked by
+    test_export_rate_limited_independently). P2-FIX-5: retry_after_s=None
+    computes time-until-oldest-entry-expires (sliding-window precision).
+    """
     if os.environ.get("RATE_LIMIT_DISABLED") == "1":
         return
     if not request.client or not request.client.host:
         return
+    ip = key if key is not None else request.client.host
+    # P2-2 (coherence): normalize IPv4-mapped IPv6 (::ffff:1.2.3.4 == 1.2.3.4)
+    # so a dual-stack client cannot present two keys for the same address.
+    if isinstance(ip, str) and ip.startswith("::ffff:") and "." in ip:
+        ip = ip[7:]
+    now = time.time()
+    async with lock:
+        bucket = buckets[ip]
+        bucket[:] = [t for t in bucket if now - t < window_s]
+        if len(bucket) >= limit:
+            remaining = (int(bucket[0] + window_s - now)
+                         if retry_after_s is None else retry_after_s)
+            raise HTTPException(
+                status_code=429,
+                detail=detail,
+                headers={"Retry-After": str(remaining)},
+            )
+        bucket.append(now)
+        if len(buckets) > max_entries:
+            stale = [ip for ip, b in buckets.items()
+                     if not any(now - t < window_s for t in b)]
+            for ip in stale:
+                del buckets[ip]
+
+
+async def _check_register_rate_limit(request: Request) -> None:
+    """3 registrations per hour per IP — shared by /v1/register +
+    /v1/signup/email (unchanged contract, #498/#863)."""
+    await _check_ip_bucket_rate_limit(
+        request, buckets=_register_buckets, lock=_register_lock,
+        limit=_REGISTER_MAX_PER_HOUR, window_s=3600,
+        key=(getattr(request.state, "client_ip", None)
+             or (request.client.host if request.client else None)),
+        detail="Too many registration attempts. Please try again later.",
+        retry_after_s=3600)
+
+
+async def _check_sensitive_op_rate_limit(request: Request, op: str) -> None:
+    """Per-IP hourly budget for sensitive team ops (export / team_delete)."""
     max_per_hour = _SENSITIVE_OP_LIMITS.get(op)
     if max_per_hour is None:
         return
-    ip = request.client.host
-    now = time.time()
-    key = (ip, op)
-    async with _SENSITIVE_LOCK:
-        bucket = _SENSITIVE_BUCKETS[key]
-        bucket[:] = [t for t in bucket if now - t < 3600]
-        if len(bucket) >= max_per_hour:
-            raise HTTPException(
-                status_code=429,
-                detail=f"Rate limit exceeded for {op}. Please try again later.",
-                headers={"Retry-After": "3600"},
-            )
-        bucket.append(now)
-        # Bound memory growth: drop dead buckets beyond 10k entries.
-        if len(_SENSITIVE_BUCKETS) > 10_000:
-            stale = [k for k, b in _SENSITIVE_BUCKETS.items()
-                     if not any(now - t < 3600 for t in b)]
-            for k in stale:
-                del _SENSITIVE_BUCKETS[k]
+    # P1-FIX-1: composite (ip, op) key — export and delete keep independent
+    # budgets (locked by test_export_rate_limited_independently).
+    # P3-3 (phase-7): normalize IPv4-mapped IPv6 HERE (tuple bypasses the
+    # helper's isinstance guard).
+    _ip = (getattr(request.state, "client_ip", None)
+           or (request.client.host if request.client else None))
+    if isinstance(_ip, str) and _ip.startswith("::ffff:") and "." in _ip:
+        _ip = _ip[7:]
+    await _check_ip_bucket_rate_limit(
+        request, buckets=_SENSITIVE_BUCKETS, lock=_SENSITIVE_LOCK,
+        limit=max_per_hour, window_s=3600,
+        key=(_ip, op),
+        detail=f"Rate limit exceeded for {op}. Please try again later.",
+        retry_after_s=3600)
+
+
+async def _check_signup_ip_rate_limit(request: Request) -> None:
+    """2 anonymous signups / 24h per IP — agent path ONLY.
+
+    Separate bucket store from the register limiter (the shared store is
+    locked by test_shared_ip_bucket_3_per_hour). Env-tunable; read at call
+    time so tests monkeypatch without reload:
+    TORTOISE_SIGNUP_IP_LIMIT (default 2), TORTOISE_SIGNUP_IP_WINDOW_S
+    (default 86400). The 429 detail carries the support pointer (P2 #8) —
+    hard-limit posture with a documented appeal path.
+    """
+    window_s = _int_env("TORTOISE_SIGNUP_IP_WINDOW_S", 86400)
+    await _check_ip_bucket_rate_limit(
+        request, buckets=_SIGNUP_BUCKETS, lock=_SIGNUP_LOCK,
+        limit=_int_env("TORTOISE_SIGNUP_IP_LIMIT", 2),
+        window_s=window_s,
+        key=(getattr(request.state, "client_ip", None)
+             or (request.client.host if request.client else None)),
+        detail={
+            "error_code": "over_signup_ip_rate_limit",
+            "message": ("Too many anonymous signups from this IP (max 2 per 24h). "
+                        "Try again later or contact support@premiselabs.co."),
+            # ISSUE-3 (phase-7): NO retry_after_s body field — Retry-After
+            # header is the RFC 7231 contract (#863 precedent); body/header
+            # duplication would drift (computed remaining vs flat window).
+        },
+        retry_after_s=None)  # computed sliding-window remaining (P2-FIX-5)
 
 
 # ── Endpoints ─────────────────────────────────────────────────────
@@ -4720,13 +4782,13 @@ async def agent_signup(request: Request):
     team_memberships + api_keys land in one transaction and the minted key
     resolves via api_keys.lookup_hash. No registry write, no half-team.
     The registry path stays for selfhost."""
-    # #308 (R6 security-review fix): the per-identity limit below is dead by
+    # #308 (R6 security-review fix): the per-identity limit below was dead by
     # design (#741: identity is server-side and fresh per request), so the
-    # shared per-IP register bucket (3/hour) is the compensating control for
-    # this mint seam. CAPTCHA itself is intentionally NOT applied here —
-    # headless agents cannot solve a challenge; the IP bucket bounds the
-    # automated team+key minting vector instead.
-    await _check_register_rate_limit(request)
+    # per-IP SIGNUP limiter (2/24h, own store, #1081) is the compensating
+    # control for this mint seam. CAPTCHA itself is intentionally NOT applied
+    # here — headless agents cannot solve a challenge; the IP bucket bounds
+    # the automated team+key minting vector instead.
+    await _check_signup_ip_rate_limit(request)
 
     # #741(a): identity is ALWAYS server-side — client-supplied identity and
     # x-device-id are ignored (a client-chosen identity trivially bypasses the
