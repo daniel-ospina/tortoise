@@ -526,11 +526,25 @@ def _safe(fn, *args, **kwargs):
         return result
     except Exception as e:
         monitoring.record_error()
+        from tortoise.exceptions import BundleValidationError
         from tortoise.quota import QuotaCheckError, QuotaExceededError
+        if isinstance(e, BundleValidationError):
+            # A2: dedicated branch BEFORE the generic — violations survive
+            # the MCP boundary INTACT (E2E-12.1/E2E-15(c)); the wire shape is
+            # {error: <first message>, code: ERR_BUNDLE_INVALID, violations}.
+            return {"error": str(e), "code": ERR_BUNDLE_INVALID,
+                    "violations": e.violations}
         if isinstance(e, QuotaExceededError):
             return {"error": str(e), "code": ERR_QUOTA}
         if isinstance(e, QuotaCheckError):
             return {"error": str(e), "code": ERR_QUOTA_SERVER}
+        from tortoise.exceptions import Phase2Error
+        if isinstance(e, Phase2Error):
+            # A2: Phase-2 failure — {error, batch_id} with NO code (distinct
+            # from Phase-1's ERR_BUNDLE_INVALID); the batch_id lets the agent
+            # audit the partial commit before re-sending (cycle-23/24 pin).
+            return {"error": str(e), **({"batch_id": e.batch_id}
+                                        if e.batch_id else {})}
         msg = str(e)
         # Sanitize: strip hostnames, ports, passwords from error messages (#43)
         import re
@@ -559,6 +573,8 @@ def _scrub_analyze_answer(answer: str) -> str:
 # (mcp_auth) — tracked as a follow-up (client cannot distinguish the two).
 ERR_QUOTA = -32006
 ERR_QUOTA_SERVER = -32007
+# A2: Phase-1 bundle validation failure (carries .violations).
+ERR_BUNDLE_INVALID = -32008
 # Application-defined pre-SDK param errors (tool-level validation that never
 # reaches the SDK): invalid granularity / promotion_policy on tortoise_ingest
 # return {error, code: ERR_INVALID} naming the valid values (E2E-8.3 pin).

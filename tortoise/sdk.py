@@ -3792,7 +3792,11 @@ class TortoiseSDK:
         # ALL violations (.violations, .as_dict()).
         violations = self._validate_bundle(bundle, promotion_policy=promotion_policy)
         if violations:
-            raise ValueError(violations[0]["message"])
+            # A2 failure contract: BundleValidationError carries ALL
+            # violations (str() = first message for back-compat parity);
+            # _safe maps it to {error, code: ERR_BUNDLE_INVALID, violations}.
+            from .exceptions import BundleValidationError
+            raise BundleValidationError(violations)
 
         proj = self._get_proj()
         # §4.2 (A4): deterministic content-derived batch_id over the canonical
@@ -3801,6 +3805,7 @@ class TortoiseSDK:
         # here, stamped on every NEW point the commit creates and applied
         # stamp-when-absent on dedup hits. Clock-independent by construction
         # (no time component — CYCLE-21 pin).
+        from .exceptions import Phase2Error
         batch_id = derive_batch_id(bundle)
         refs: dict[str, str] = {}          # ref → canonical id (or url for sources)
         source_refs: set[str] = set()      # refs that address Source nodes (url-keyed)
@@ -3812,9 +3817,9 @@ class TortoiseSDK:
 
         def _register_ref(ref: str, cid: str, section: str) -> None:
             if ref in refs:
-                raise ValueError(
+                raise Phase2Error(
                     f"ingest: duplicate bundle ref {ref!r} "
-                    f"({section}) — refs must be unique across the bundle"
+                    f"({section}, batch_id=batch_id) — refs must be unique across the bundle"
                 )
             refs[ref] = cid
             ids["refs"][ref] = cid
@@ -3826,8 +3831,8 @@ class TortoiseSDK:
             ref = item.get("ref") if isinstance(item, dict) else None
             if ref:
                 if ref in refs:
-                    raise ValueError(
-                        f"ingest: duplicate bundle ref {ref!r} (sources)"
+                    raise Phase2Error(
+                        f"ingest: duplicate bundle ref {ref!r} (sources, batch_id=batch_id)"
                     )
                 refs[ref] = item.get("url", "")
                 ids["refs"][ref] = item.get("url", "")
@@ -3840,7 +3845,7 @@ class TortoiseSDK:
             viols: list[dict] = []
             self._check_item_shape("sources", i, item, viols)
             if viols:
-                raise ValueError(viols[0]["message"])
+                raise Phase2Error(viols[0]["message"], batch_id=batch_id)
             item = dict(item)
             ref = item.pop("ref", None)
             url = item.pop("url", None)
@@ -3872,7 +3877,7 @@ class TortoiseSDK:
             viols = []
             self._check_item_shape("points", i, item, viols)
             if viols:
-                raise ValueError(viols[0]["message"])
+                raise Phase2Error(viols[0]["message"], batch_id=batch_id)
             item = dict(item)
             ref = item.pop("ref", None)
             # CYCLE-25: kind-absent DEFAULTS to 'statement' (v3.8 canonical —
@@ -3881,7 +3886,7 @@ class TortoiseSDK:
             kind = item.pop("kind", None) or "statement"
             self._check_kind(kind, i, viols)
             if viols:
-                raise ValueError(viols[0]["message"])
+                raise Phase2Error(viols[0]["message"], batch_id=batch_id)
             content = item.pop("content", None)
             # extractedFrom may address a bundle source by its local ref
             if isinstance(item.get("extractedFrom"), str) \
@@ -3921,7 +3926,7 @@ class TortoiseSDK:
             viols = []
             self._check_item_shape("entities", i, item, viols)
             if viols:
-                raise ValueError(viols[0]["message"])
+                raise Phase2Error(viols[0]["message"], batch_id=batch_id)
             item = dict(item)
             ref = item.pop("ref", None)
             etype = (item.pop("type", None) or "").strip().lower()
@@ -3958,10 +3963,10 @@ class TortoiseSDK:
                 canonical = node.get("id") or name
                 existed = []  # Document records are append-only — never deduped
             else:
-                raise ValueError(
+                raise Phase2Error(
                     f"ingest: entities[{i}] type must be subject|object|event|"
                     f"document, got {etype!r}"
-                )
+                , batch_id=batch_id)
             if ref:
                 _register_ref(ref, canonical, "entities")
             ids["entities"].append(canonical)
@@ -3985,7 +3990,7 @@ class TortoiseSDK:
             self._check_connection(i, conn, viols)
             self._check_endpoint_race(i, conn, refs, viols)
             if viols:
-                raise ValueError(viols[0]["message"])
+                raise Phase2Error(viols[0]["message"], batch_id=batch_id)
             src = refs.get(conn["from"], conn["from"])
             to_list = conn["to"] if isinstance(conn["to"], list) else [conn["to"]]
             dsts = [refs.get(x, x) for x in to_list]
@@ -4040,10 +4045,10 @@ class TortoiseSDK:
                     ).result_set
                     ok = proj.create_edge(src, dsts[0], rel)
                     if not ok:
-                        raise ValueError(
+                        raise Phase2Error(
                             f"ingest: connections[{i}] could not create "
                             f"{rel!r} edge — endpoints not found"
-                        )
+                        , batch_id=batch_id)
                     if existed and existed[0][0]:
                         deduped["connections"] += 1
                     else:
