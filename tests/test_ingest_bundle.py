@@ -346,6 +346,95 @@ class TestPromotionPolicy:
         pA = res["ids"]["points"][0]
         assert sdk.get_point(pA)["status"] == "live"
 
+    def test_gated_rejects_nested_props_status_live(self, sdk):
+        # PR #1073 re-review P0: the props={"status": "live"} convention is
+        # flattened by create_point (_coerce_props) — the guard must catch
+        # the EFFECTIVE status, not just the top-level key.
+        bundle = {
+            "points": [
+                {"ref": "pA", "kind": "claim", "content": "A",
+                 "props": {"status": "live"}},
+            ],
+            "connections": [],
+        }
+        with pytest.raises(ValueError) as exc:
+            sdk.ingest(bundle)
+        assert "not allowed under promotion_policy 'gated'" in str(exc.value)
+
+    def test_gated_rejects_case_variant_status(self, sdk):
+        # PR #1073 re-review P0/P2: case/whitespace variants must not bypass
+        # the guard — only the exact canonical "draft" is storable under
+        # gated; every other value gets the uniform row-9 message. EP treats
+        # every status except exact 'draft' as live.
+        for bad in ("Live", "LIVE", "lIve", " live ", "\tlive\n",
+                    "Draft", "draft ", "DRAFT"):
+            bundle = {
+                "points": [
+                    {"ref": "pA", "kind": "claim", "content": "A",
+                     "status": bad},
+                ],
+                "connections": [],
+            }
+            with pytest.raises(ValueError) as exc:
+                sdk.ingest(bundle)
+            assert "not allowed under promotion_policy 'gated'" in str(exc.value)
+
+    def test_gated_rejects_explicit_none_status(self, sdk):
+        # An explicit status key present with value None is a row-9 violation
+        # (None would store NULL, which EP _live_only treats as LIVE) — the
+        # uniform row-9 message, not the create_point vocabulary error.
+        for item in (
+            {"ref": "pA", "kind": "claim", "content": "A", "status": None},
+            {"ref": "pA", "kind": "claim", "content": "A",
+             "props": {"status": None}},
+        ):
+            with pytest.raises(ValueError) as exc:
+                sdk.ingest({"points": [item], "connections": []})
+            assert "not allowed under promotion_policy 'gated'" in str(exc.value)
+
+    def test_gated_accepts_items_without_status_key(self, sdk):
+        # Items with NO status key anywhere (top-level or nested props) are
+        # accepted under gated and default to draft — the has_status flag in
+        # the shared helper must not false-reject them.
+        bundle = {
+            "points": [
+                {"ref": "pA", "kind": "claim", "content": "A"},
+                {"ref": "pB", "kind": "claim", "content": "B",
+                 "props": {"note": "no status here"}},
+            ],
+            "connections": [],
+        }
+        res = sdk.ingest(bundle)  # gated default
+        for pid in res["ids"]["points"]:
+            assert sdk.get_point(pid)["status"] == "draft"
+
+    def test_gated_rejects_terminal_status(self, sdk):
+        # PR #1073 re-review P1: canonical terminal statuses are EP-LIVE under
+        # gated ( _live_only excludes only exact 'draft') and no fresh point
+        # can legitimately carry them (terminal states come from retract/-
+        # supersede flows) — fail-closed under gated, top-level and nested.
+        for bad in ("retracted", "superseded", "outdated", "archived"):
+            for item in (
+                {"ref": "pA", "kind": "claim", "content": "A", "status": bad},
+                {"ref": "pA", "kind": "claim", "content": "A",
+                 "props": {"status": bad}},
+            ):
+                bundle = {"points": [item], "connections": []}
+                with pytest.raises(ValueError) as exc:
+                    sdk.ingest(bundle)
+                assert "not allowed under promotion_policy 'gated'" in str(
+                    exc.value)
+
+    def test_create_point_rejects_non_canonical_status(self, sdk):
+        # Fail-closed vocabulary validation on the create path (PR #1073
+        # re-review P0/P1): a non-canonical status must not be storable — it
+        # would otherwise be treated as EP-live by _live_only. Non-str values
+        # (including unhashable list/dict) raise ValueError, not TypeError.
+        for bad in ("Live", "draft ", "live\n", ["live"], {"x": 1}, None):
+            with pytest.raises(ValueError) as exc:
+                sdk.create_point("claim", "junk status", status=bad)
+            assert "Invalid status" in str(exc.value)
+
     def test_auto_not_retroactive_on_dedup(self, sdk):
         # "Promotes when its FIRST edge is created": a re-ingest under auto
         # of an already-deduped operator does NOT retro-promote the source.

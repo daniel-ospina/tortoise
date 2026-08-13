@@ -44,7 +44,7 @@
 ### Existing search infrastructure
 - `tortoise/embeddings.py`: `search_points()` — in-memory TF-IDF/sentence-transformers search over Points dict. Not integrated with FalkorDB. Uses `all-MiniLM-L6-v2` (384-dim).
 - `tortoise/sdk.py`: `search()` — wraps `search_points()`, loads ALL Points into memory via `self.query()`. No FalkorDB FTS/vector utilization.
-- `tortoise/projection/__init__.py`: `_ensure_indexes()` — creates range indexes (id, pointKind, context, content_hash, is_operator) with try/except idempotency. Same pattern extends to FTS/vector.
+- `tortoise/projection/__init__.py`: `_ensure_indexes()` — creates range indexes (id, pointKind, content_hash, is_operator [non-embedded FalkorDB docker/server only — embedded drops it: falkordblite bool type-table degradation across reopen, so an indexed `= false` silently returns 0; see #522/#1069]) with try/except idempotency. Same pattern extends to FTS/vector.
 
 ### Gaps
 - **No FalkorDB index utilization in search**: All search is in-memory Python.
