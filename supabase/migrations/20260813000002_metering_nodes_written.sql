@@ -7,11 +7,31 @@
 -- re-submission bills the single +1 — one logical payload billed exactly
 -- once), while `nodes_written` is the cost-driver counter that prevents the
 -- 25x per-node arbitrage vs create_point (supersede-only deltas are exempt,
--- R-14). The 0015 RPC increments both columns atomically under the same
+-- R-14). The 0017 RPC increments both columns atomically under the same
 -- Postgres row lock (mirrors the 0014 atomicity rationale).
+--
+-- RENAME (issue #1001, 2026-08-13): the original 0015_metering_nodes_written
+-- collided with 0015_abuse_events (Supabase CLI keys migrations by numeric
+-- prefix; duplicate prefixes abort db push). Renamed to this timestamp-style
+-- name via #1074/#1076/#1077 so it applies after all numeric migrations.
+--
+-- FIX (#1001): DROP the 0014-era 3-arg metering_increment overload BEFORE
+-- CREATE OR REPLACE. A CREATE OR REPLACE with a DIFFERENT argument list adds
+-- a second overload (Postgres semantics), which makes the bare
+-- `REVOKE ALL ON FUNCTION ...` below ambiguous ("function is not unique")
+-- and aborts the whole migration on ANY fresh replay. The DROP removes the
+-- 0014 overload so exactly one remains and the REVOKE/GRANT resolve. (Prod
+-- already had the overload removed by the earlier 0017 apply; this guard is
+-- for fresh databases.)
 
 ALTER TABLE public.metering_records
     ADD COLUMN IF NOT EXISTS nodes_written integer NOT NULL DEFAULT 0;
+
+-- Drop the 0014 3-arg overload BEFORE creating the 4-arg version: a
+-- CREATE OR REPLACE with a different arg list ADDS an overload instead of
+-- replacing (see header note) — the bare REVOKE below would then be
+-- ambiguous and abort the migration.
+DROP FUNCTION IF EXISTS public.metering_increment(text, text, integer);
 
 -- Atomic dual-column increment (extend 0014 — same locking model).
 CREATE OR REPLACE FUNCTION public.metering_increment(
